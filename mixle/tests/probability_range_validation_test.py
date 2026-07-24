@@ -42,6 +42,25 @@ anywhere in the codebase passes ``default_value`` outside ``[0, 1]`` (the widest
 ``sparse_mixture_test.py``), so the rejection has no legitimate counterexample to preserve, unlike
 the ``pmap`` sum-to-1 case above. ``IntegerCategoricalDistribution`` has no ``default_value``
 concept at all (no out-of-vocabulary fallback), so it is not affected by this finding.
+
+A third-wave finding reopened ``MixtureDistribution.__init__``'s own weight check
+(``MixtureWeightValidationTestCase`` above already covered negative weights, via PR #433, and the
+length-mismatch guard). Two gaps: (1) the negative-weight check had the exact same blind spot as
+``pmap``/``p_vec`` -- ``np.any(self.w < 0.0)`` lets a NaN entry through silently (``nan < 0.0`` is
+always ``False``), reaching ``log_density()``/sampling as ``nan``, now fixed the same way. (2)
+unlike ``pmap``/``p_vec`` (deliberately "stored as given", per the sum-to-1 discussion above),
+``MixtureDistribution``'s own docstring commits to ``w`` being interpreted as simplex weights that
+"should sum to one" -- and nothing enforced that. A weight vector summing to, say, 0.3 constructed
+silently and produced a mixture whose density integrates to 0.3, not 1: a silently invalid
+probability model, not a deliberately-permissive one. A codebase-wide AST scan of every
+``MixtureDistribution(...)`` call site with a literal weight argument (547 call sites) found none
+relying on a non-1 sum, so -- unlike the ``pmap`` case -- this is enforced as a hard constructor
+rejection. The tolerance (``rtol=1e-5, atol=1e-8``) matches the established simplex-sum-to-one
+convention already used for the same kind of check elsewhere (``SymmetricDirichletDistribution``,
+``DictDirichletDistribution``), not ``dirichlet.py``'s tighter ``1e-10``/``1e-12``: real fitted
+mixture weights are not guaranteed float64 precision end to end (the gradient-fit path's torch
+softmax renormalization was measured landing ~6e-8 from 1.0 under ``precision="float32"``, outside
+a naive ``1e-10``/``1e-12`` bound but comfortably inside this one).
 """
 
 import math
@@ -61,8 +80,42 @@ class MixtureWeightValidationTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 1.0)], [-0.5, 1.5])
 
+    def test_nan_weight_rejected_at_construction(self):
+        # `nan < 0.0` is always False, so a NaN entry alone (no negative entry alongside it) used to
+        # pass the old check straight through and reach log_density()/sampling as nan (matches the
+        # same gap just fixed in CategoricalDistribution.pmap / IntegerCategoricalDistribution.p_vec).
+        with self.assertRaises(ValueError):
+            MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 1.0)], [float("nan"), 0.5])
+
+    def test_infinite_weight_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 1.0)], [float("inf"), 0.5])
+
+    def test_weights_not_summing_to_one_rejected_at_construction(self):
+        # Unlike CategoricalDistribution.pmap / IntegerCategoricalDistribution.p_vec (see this
+        # module's docstring), MixtureDistribution's own docstring commits to `w` summing to one, and
+        # no existing call site relies on it not doing so -- so this is a hard rejection, not a
+        # documented-permissive gap. Regression pin for the actual pre-fix failure mode: weights
+        # summing to 0.3 used to construct without error and the density silently integrated to 0.3
+        # instead of 1.0 (numerically confirmed via seq_log_density over a fine grid during triage);
+        # assertRaisesRegex (not just assertRaises) pins that the message names the real cause.
+        with self.assertRaisesRegex(ValueError, "sum to 1"):
+            MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(5.0, 1.0)], [0.1, 0.2])
+
+    def test_weights_summing_to_over_one_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(5.0, 1.0)], [0.7, 0.7])
+
     def test_valid_weights_still_construct(self):
         m = MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 1.0)], [0.5, 0.5])
+        self.assertTrue(np.isfinite(m.log_density(0.5)))
+
+    def test_weights_summing_to_one_within_float_tolerance_still_construct(self):
+        # 1/3 + 1/3 + 1/3 == 0.9999999999999999 in float64, not exactly 1.0.
+        m = MixtureDistribution(
+            [GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 1.0), GaussianDistribution(2.0, 1.0)],
+            [1 / 3, 1 / 3, 1 / 3],
+        )
         self.assertTrue(np.isfinite(m.log_density(0.5)))
 
 
