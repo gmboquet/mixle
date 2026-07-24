@@ -366,7 +366,12 @@ class QuantizedEnumerationIndexTestCase(unittest.TestCase):
 
         index = dist.quantized_index(max_bits=3.0, bin_width_bits=1.0)
         self.assertEqual(index.counts, {2: 1, 3: 2})
-        self.assertEqual([freeze(v) for v, _ in index.iter_from()], [("a", "x"), ("a", "y"), ("b", "x")])
+        # Compare via freeze() on both sides (matching this file's other assertions) rather than a
+        # hardcoded raw-tuple literal -- freeze()'s own canonical key shape is an implementation
+        # detail (it tags scalars with their type for dedup purposes), not part of this test's intent.
+        self.assertEqual(
+            [freeze(v) for v, _ in index.iter_from()], [freeze(v) for v in [("a", "x"), ("a", "y"), ("b", "x")]]
+        )
         for value, log_prob in index.iter_from():
             self.assertAlmostEqual(log_prob, dist.log_density(value), delta=1.0e-12)
         self.assertEqual(index.get(2)[0], ("b", "x"))

@@ -130,7 +130,14 @@ class ChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
     ) -> None:
         self.parents = [None if u is None else int(u) for u in parents]
         self.marginal_dists = list(marginal_dists)
-        self.conditional_dists = [{} if d is None else {freeze(k): v for k, v in d.items()} for d in conditional_dists]
+        # Per this class's own contract (see the class docstring): conditional_dists[i] is looked up
+        # via freeze(x[parent]), so callers already key it by freeze()'s own output (both internal
+        # ChowLiuTreeEstimator.estimate() and every direct-construction call pass pre-frozen keys).
+        # Re-freezing here would call freeze() on an already-frozen key -- and since a frozen scalar
+        # key is itself a tuple, freeze()'s own list/tuple branch would recurse into it and produce a
+        # double-wrapped, non-matching key instead of leaving an already-canonical key alone. Just
+        # copy the dict instead of aliasing the caller's.
+        self.conditional_dists = [{} if d is None else dict(d) for d in conditional_dists]
         if default_dists is None:
             self.default_dists = [None] * len(self.parents)
         else:
