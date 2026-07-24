@@ -11,7 +11,8 @@ import heapq
 import itertools
 import math
 from collections.abc import Callable, Hashable, Iterator, Sequence
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import numpy as np
 
@@ -579,6 +580,81 @@ def best_first_union_max(
     return _best_first_union(streams, log_offsets, exact_log_density, np.max, tol)
 
 
+def _round_down(x: float) -> float:
+    """Nudge ``x`` toward -inf by one ULP -- a sound (conservative) lower bound on a rounded value."""
+    return math.nextafter(x, -math.inf)
+
+
+def _round_up(x: float) -> float:
+    """Nudge ``x`` toward +inf by one ULP -- a sound (conservative) upper bound on a rounded value."""
+    return math.nextafter(x, math.inf)
+
+
+def _fold_mass_lower_bound(prior_lower: float, prob: float) -> float:
+    """Fold one more probability into a running LOWER bound on the true accumulated mass.
+
+    Ordinary nearest-rounded floating accumulation (``acc += prob``) does not bound the true sum in
+    either direction -- a single addition can round up OR down from the exact mathematical result
+    (e.g. ``nextafter(1.0, inf) + 2**-53`` rounds UP, past the exact sum, via ties-to-even), and nothing
+    stops that error from compounding over many terms. ``sound_top_k``'s certificate needs the OPPOSITE
+    guarantee: the seen-mass accumulator must never OVERSTATE the truth, because an overstated
+    accumulator understates the remaining (unseen) mass bound derived from it, and an understated
+    remaining-mass bound is exactly what could let the certificate fire when it should not (see
+    :func:`sound_top_k`). This pads ``prob`` down by one ULP (covering ``math.exp``'s own rounding --
+    no libm guarantees correctly-rounded ``exp``, but mainstream implementations are within a couple of
+    ULPs) and re-rounds the running sum down again (covering the addition's own rounding step), so the
+    result is provably ``<=`` the true accumulated mass regardless of which way any individual float
+    operation happened to round.
+    """
+    return _round_down(prior_lower + _round_down(prob))
+
+
+@dataclass
+class SoundTopKResult:
+    """Outcome of :func:`sound_top_k`: the found items plus an explicit soundness certificate.
+
+    ``sound_top_k`` is named and documented as SOUND, so callers must be able to tell a
+    mathematically-certified top-k apart from a best-effort guess it gave up on -- unlike a plain
+    list, this always carries the ``status`` that earned ``items``.
+
+    Attributes:
+        items: the ``(value, log_prob)`` pairs ranked ``[start, start+k)``, in descending
+            ``log_prob`` order. Fewer than ``k`` items only when ``status == "exhausted"`` and the
+            distribution's true support genuinely has fewer than ``start + k`` distinct values.
+        status: how ``items`` was established.
+
+            * ``"certified"`` -- the mass certificate proved no unseen value can outrank the worst
+              kept item: the accumulated seen mass leaves less than the worst kept item's own
+              probability unaccounted for. Sound regardless of the count-budget index's internal
+              seek order (deep/nested mixtures and HMMs included).
+            * ``"exhausted"`` -- the count-budget index was NOT truncated, i.e. it covers the
+              distribution's entire true support, so ``items`` is exact by construction: nothing
+              was left unseen for the certificate to reason about.
+            * ``"incomplete"`` -- ``max_budget_bits`` was reached before either certificate above
+              could be established. ``items`` is a best-effort prefix of whatever the search had
+              found -- NOT proven to be the true top-k. Callers that require soundness must treat
+              this as a failure (retry with a larger ``max_budget_bits``, or fall back to exact
+              enumeration) rather than silently trusting ``items``.
+        budget_bits: the final (possibly doubled) count-budget-index budget used to produce
+            ``items``.
+        remaining_mass_bound: a conservative upper bound on the probability mass of every value not
+            in ``items`` -- never smaller than the truth, even accounting for floating-point
+            rounding (see :func:`_fold_mass_lower_bound`). Certifies ``"certified"`` results
+            (strictly less than the worst kept item's probability); left at ``total_mass`` (a
+            trivial but valid bound) when the heap never reached ``start + k`` items.
+    """
+
+    items: list[tuple[Any, float]]
+    status: Literal["certified", "exhausted", "incomplete"]
+    budget_bits: float
+    remaining_mass_bound: float
+
+    @property
+    def sound(self) -> bool:
+        """True when ``items`` is a proven-correct top-k (``status`` is not ``"incomplete"``)."""
+        return self.status != "incomplete"
+
+
 def sound_top_k(
     dist: Any,
     k: int,
@@ -589,21 +665,30 @@ def sound_top_k(
     max_budget_bits: float = 512.0,
     total_mass: float = 1.0,
     tol: float = 1.0e-12,
-) -> list[tuple[Any, float]]:
+) -> SoundTopKResult:
     """Exact true-descending observations ranked ``[start, start+k)`` for ANY normalized model.
 
     Mass-threshold certificate, correct regardless of the seek stream's ordering (so it holds for
     deep/nested mixtures and HMMs where the tropical order is badly displaced): pull distinct
-    ``(value, log_prob)`` from the count-budget index, accumulate exact probability mass, and keep
-    the best ``start+k`` by probability. Since every unpulled item's probability is at most the
-    remaining mass ``total_mass - accumulated``, once ``remaining`` drops below the (start+k)-th best
-    probability the heap is exactly the true top ``start+k``; return ``sorted_desc[start:start+k]``.
+    ``(value, log_prob)`` from the count-budget index, accumulate probability mass with a provable
+    (never-overstated) lower bound, and keep the best ``start+k`` by probability. Since every
+    unpulled item's probability is at most the remaining mass ``total_mass - accumulated``, once a
+    sound upper bound on ``remaining`` drops below the (start+k)-th best probability the heap is
+    exactly the true top ``start+k``; return ``sorted_desc[start:start+k]``.
 
     Running out of the in-budget stream is NOT by itself proof the support is exhausted: only a
-    non-truncated index has genuinely covered the entire support. A TRUNCATED index only proves
-    "nothing more is visible to this bounded build", so running out of one deepens the budget
-    (doubling up to ``max_budget_bits``) instead of returning the partial prefix as the answer.
-    ``total_mass`` (default 1.0) may be a known upper bound for sub-normalized models.
+    non-truncated index has genuinely covered the entire support, so seeing fewer than ``start + k``
+    distinct values THERE means that many is honestly all there is. A TRUNCATED index only proves
+    "nothing more is visible to this bounded build" -- running out of one deepens the budget
+    (doubling up to ``max_budget_bits``) instead of returning the partial prefix as the answer. If
+    even ``max_budget_bits`` cannot certify or exhaust, the call fails closed: the returned
+    ``status`` is ``"incomplete"`` and marked as such rather than silently shaped like a proof (see
+    :class:`SoundTopKResult` -- this is why the return type is a structured result, not a plain list).
+
+    ``total_mass`` (default 1.0) may be a known upper bound for sub-normalized models; it is trusted
+    as a valid bound on the model's TRUE total probability mass (this function cannot re-derive a
+    model's own normalization) but is validated for basic sanity -- finite and positive -- before
+    use, so a NaN/inf/non-positive caller bug cannot silently corrupt the certificate.
 
     Cost is ``O(number pulled)`` -- small for peaked distributions, large for flat ones, so for
     top-k from rank 0 ``dist.enumerator()`` is usually leaner; this adds the soundness certificate
@@ -615,6 +700,8 @@ def sound_top_k(
         raise ValueError("k must be a positive integer.")
     if start < 0:
         raise ValueError("start must be non-negative.")
+    if not math.isfinite(total_mass) or total_mass <= 0.0:
+        raise ValueError(f"total_mass must be a finite, positive probability-mass upper bound, got {total_mass!r}.")
     need = start + k
     budget = float(budget_bits)
     while True:
@@ -627,7 +714,8 @@ def sound_top_k(
         heap: list[tuple[float, int, Any]] = []  # min-heap by log_prob, the best `need` so far
         counter = itertools.count()
         seen: set[Hashable] = set()
-        accumulated = 0.0
+        accumulated_lower = 0.0  # certified LOWER bound on seen mass -- never overstates the truth
+        remaining_bound = total_mass  # certified UPPER bound on unseen mass; refined below
         certified = False
         for i in range(index.total_count):
             value, lp = index.get(i)
@@ -635,32 +723,50 @@ def sound_top_k(
             if key in seen:
                 continue
             seen.add(key)
-            accumulated += math.exp(lp)
+            accumulated_lower = _fold_mass_lower_bound(accumulated_lower, math.exp(lp))
             if len(heap) < need:
                 heapq.heappush(heap, (lp, next(counter), value))
             elif lp > heap[0][0]:
                 heapq.heapreplace(heap, (lp, next(counter), value))
             if len(heap) >= need:
-                remaining = max(0.0, total_mass - accumulated)
-                if remaining < math.exp(heap[0][0]) - tol:
+                # Any unseen value's probability is at most total_mass_true - accumulated_true <=
+                # total_mass - accumulated_lower (accumulated_lower <= accumulated_true always, and
+                # total_mass is trusted as >= total_mass_true). One more outward (up) rounding covers
+                # the subtraction's own rounding step, so remaining_bound is a certified upper bound
+                # on the unseen mass even accounting for every float operation along the way -- never
+                # the ordinary nearest-rounded guess the prior implementation trusted outright.
+                remaining_bound = max(0.0, _round_up(total_mass - accumulated_lower))
+                if remaining_bound < math.exp(heap[0][0]) - tol:
                     certified = True
                     break
         ordered = sorted(heap, key=lambda t: -t[0])
-        # Certified sound; or the whole in-budget index was consumed and it was NOT truncated, so
-        # the full support was seen and the heap is exact (including the case where fewer than
-        # `need` distinct values exist -- that conclusion is only honest when the index that
-        # reported it was itself exhaustive).
-        #
-        # MXR-080-0211: this used to also return early whenever `len(seen) < need`, WITHOUT
-        # checking `index.truncated` first. A TRUNCATED index only proves "nothing more is visible
-        # to this bounded build", not "nothing more exists" -- so a small bounded build of an
-        # infinite-support distribution (e.g. requesting ten values from a geometric with a tiny
-        # initial budget) could see only a couple of distinct values from a truncated index and
-        # silently return that partial prefix as though it were the complete top-k. Exhaustion may
-        # only be inferred from a genuinely non-truncated index; a truncated one just hasn't looked
-        # far enough yet and must fall through to the deepen-or-budget-cap logic below instead.
-        if certified or not index.truncated:
-            return [(v, lp) for lp, _, v in ordered][start:need]
+        items = [(v, lp) for lp, _, v in ordered][start:need]
+        if certified:
+            return SoundTopKResult(
+                items=items, status="certified", budget_bits=budget, remaining_mass_bound=remaining_bound
+            )
+        if not index.truncated:
+            # The index covers the ENTIRE true support, so the heap is exact regardless of
+            # len(seen) vs need: >= need means the heap holds the true top `need`; < need means the
+            # true support genuinely has fewer than `need` distinct values, and returning fewer is
+            # the honest, correct answer here -- not a truncation artifact.
+            #
+            # MXR-080-0211: the prior implementation instead returned early whenever
+            # `len(seen) < need`, WITHOUT checking `index.truncated` first -- so a small bounded
+            # build of an infinite-support distribution (e.g. ten requested from a geometric with a
+            # tiny initial budget) could see only a couple of distinct values from a TRUNCATED index
+            # and conclude "that's all there is", silently returning a truncated prefix as though it
+            # were this exact, complete case. Exhaustion may only be inferred from a genuinely
+            # non-truncated index; a truncated one just hasn't looked far enough yet, so it falls
+            # through to the deepen-or-fail-closed logic below instead.
+            return SoundTopKResult(
+                items=items, status="exhausted", budget_bits=budget, remaining_mass_bound=remaining_bound
+            )
         if budget >= max_budget_bits:
-            return [(v, lp) for lp, _, v in ordered][start:need]  # best effort at the budget cap
+            # MXR-080-0212: fail closed. A function named and documented as sound must never hand
+            # back a budget-capped guess in the same plain shape as a certified result -- the
+            # "incomplete" status makes the gap between "proven" and "gave up" impossible to miss.
+            return SoundTopKResult(
+                items=items, status="incomplete", budget_bits=budget, remaining_mass_bound=remaining_bound
+            )
         budget = min(budget * 2.0, max_budget_bits)

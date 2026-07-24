@@ -12,7 +12,7 @@ import unittest
 
 import numpy as np
 
-from mixle.enumeration.algorithms import freeze, sound_top_k, supports_enumeration
+from mixle.enumeration.algorithms import SoundTopKResult, freeze, sound_top_k, supports_enumeration
 from mixle.stats import *
 from mixle.stats.compute.pdist import EnumerationError
 
@@ -413,8 +413,16 @@ class BruteForceCrossCheckTestCase(unittest.TestCase):
                 out.setdefault(round(lp, 6), set()).add(freeze(v))
             return out
 
-        self.assertEqual(tiers(sound_top_k(mix, 8, budget_bits=30)), tiers(exact[:8]))
-        self.assertEqual(tiers(sound_top_k(mix, 5, start=10, budget_bits=30)), tiers(exact[10:15]))
+        first = sound_top_k(mix, 8, budget_bits=30)
+        second = sound_top_k(mix, 5, start=10, budget_bits=30)
+        # A genuinely-completable query on a well-behaved (finite-mass, fast-concentrating) mixture
+        # must come back certified -- not just correct -- since that is the whole point of the API.
+        self.assertEqual(first.status, "certified")
+        self.assertTrue(first.sound)
+        self.assertEqual(second.status, "certified")
+        self.assertTrue(second.sound)
+        self.assertEqual(tiers(first.items), tiers(exact[:8]))
+        self.assertEqual(tiers(second.items), tiers(exact[10:15]))
 
     def test_mixture_overlapping(self):
         dist = MixtureDistribution(
@@ -456,8 +464,8 @@ class BruteForceCrossCheckTestCase(unittest.TestCase):
 
 
 class SoundTopKCertificateTestCase(unittest.TestCase):
-    """Regression coverage for MXR-080-0211: sound_top_k must never present a truncated prefix
-    as though it were the proven-complete top-k."""
+    """Regression coverage for MXR-080-0211/0212: sound_top_k must never present a truncated,
+    uncertified prefix as though it were the proven-complete top-k."""
 
     def test_geometric_infinite_support_deepens_instead_of_false_exhaustion(self):
         # MXR-080-0211 repro: GeometricDistribution has infinite support, so no finite prefix is
@@ -470,19 +478,93 @@ class SoundTopKCertificateTestCase(unittest.TestCase):
         result = sound_top_k(geo, 10, budget_bits=1.0)
         exact = geo.enumerator().top_k(10)
 
-        self.assertEqual(len(result), 10)
-        self.assertEqual([v for v, _ in result], [v for v, _ in exact])
-        for (_, lp), (_, elp) in zip(result, exact):
+        self.assertIsInstance(result, SoundTopKResult)
+        self.assertNotEqual(result.status, "exhausted")  # infinite support can never be "exhausted"
+        self.assertEqual(result.status, "certified")
+        self.assertTrue(result.sound)
+        self.assertEqual(len(result.items), 10)
+        self.assertEqual([v for v, _ in result.items], [v for v, _ in exact])
+        for (_, lp), (_, elp) in zip(result.items, exact):
             self.assertAlmostEqual(lp, float(elp), places=9)
+        # It had to deepen past the tiny starting budget to reach a certified answer -- the old
+        # code returned on the very first (truncated) pass instead.
+        self.assertGreater(result.budget_bits, 1.0)
 
     def test_finite_support_reports_true_exhaustion_without_overcorrecting(self):
         # Negative control: a distribution with a genuinely small, FINITE support (3 outcomes)
-        # must still promptly return fewer than `k` items when that is the honest answer -- the
-        # fix must not overcorrect into deepening forever regardless.
+        # must still promptly report status="exhausted" with fewer than `k` items when that is the
+        # honest answer -- the fix must not overcorrect into deepening forever regardless.
         cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
         result = sound_top_k(cat, 10, budget_bits=1.0)
-        self.assertEqual(len(result), 3)
-        self.assertEqual({v for v, _ in result}, {"a", "b", "c"})
+        self.assertEqual(result.status, "exhausted")
+        self.assertTrue(result.sound)
+        self.assertEqual(len(result.items), 3)
+        self.assertEqual({v for v, _ in result.items}, {"a", "b", "c"})
+        # Stopped well short of the budget cap -- true exhaustion was detected, not forced by it.
+        self.assertLess(result.budget_bits, 512.0)
+
+    def test_result_is_structured_with_explicit_status_for_certified_and_incomplete(self):
+        # MXR-080-0212: the return type must let a caller distinguish a proof from a budget-cap
+        # guess -- exercise both outcomes explicitly.
+        geo = GeometricDistribution(0.5)
+
+        certified = sound_top_k(geo, 2, budget_bits=10.0)
+        self.assertIsInstance(certified, SoundTopKResult)
+        self.assertEqual(certified.status, "certified")
+        self.assertTrue(certified.sound)
+        self.assertGreaterEqual(certified.remaining_mass_bound, 0.0)
+        self.assertEqual([v for v, _ in certified.items], [1, 2])
+
+        # max_budget_bits == budget_bits forbids any deepening, and two items is not enough for
+        # the mass certificate to fire (accumulated 0.75 leaves exactly the worst kept item's own
+        # 0.25 of probability unaccounted for -- not strictly less), so this must fail closed.
+        incomplete = sound_top_k(geo, 2, budget_bits=1.0, max_budget_bits=1.0)
+        self.assertIsInstance(incomplete, SoundTopKResult)
+        self.assertEqual(incomplete.status, "incomplete")
+        self.assertFalse(incomplete.sound)
+        self.assertGreaterEqual(incomplete.remaining_mass_bound, 0.0)
+        self.assertEqual(len(incomplete.items), 2)  # best-effort prefix, still returned -- just marked unsound
+
+    def test_total_mass_validation_rejects_nonsensical_bounds(self):
+        # MXR-080-0212: the mass proof trusts total_mass as a caller-supplied bound, but must
+        # still reject values that cannot possibly be a valid probability-mass upper bound.
+        geo = GeometricDistribution(0.5)
+        for bad in (0.0, -1.0, -0.5, float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(ValueError):
+                sound_top_k(geo, 3, total_mass=bad)
+
+    def test_mass_lower_bound_never_overstates_the_true_sum(self):
+        # MXR-080-0212: the accumulated-mass bookkeeping must never OVERSTATE the true accumulated
+        # mass (an overstatement would understate the derived remaining-mass bound, which is the
+        # direction that could make the certificate fire when it should not).
+        from fractions import Fraction
+
+        from mixle.enumeration.best_first import _fold_mass_lower_bound
+
+        # Classic ties-to-even construction where plain nearest-rounded addition OVERSTATES the
+        # exact sum: nextafter(1.0, inf) has an odd last mantissa bit and 2**-53 is exactly half a
+        # ULP at that magnitude, so the exact sum sits exactly halfway between two representable
+        # doubles and ties-to-even rounds to the larger (even-mantissa) one, past the true value.
+        a = math.nextafter(1.0, math.inf)
+        b = 2.0**-53
+        naive = a + b
+        exact = Fraction(a) + Fraction(b)
+        self.assertGreater(Fraction(naive), exact, "test construction must itself overstate")
+
+        lower = _fold_mass_lower_bound(_fold_mass_lower_bound(0.0, a), b)
+        self.assertLessEqual(Fraction(lower), exact)
+
+        # Broader property check across random descending-order sequences (sound_top_k always
+        # accumulates largest-probability-first): the fixed accumulator must never exceed the
+        # exact sum, regardless of how any individual naive addition would have rounded.
+        rng = np.random.RandomState(0)
+        for _ in range(200):
+            terms = sorted(rng.uniform(0.0, 1.0, size=int(rng.randint(1, 40))).tolist(), reverse=True)
+            exact_sum = sum(Fraction(t) for t in terms)
+            lower = 0.0
+            for t in terms:
+                lower = _fold_mass_lower_bound(lower, t)
+            self.assertLessEqual(Fraction(lower), exact_sum)
 
 
 class InfiniteSupportMassDominanceTestCase(unittest.TestCase):
