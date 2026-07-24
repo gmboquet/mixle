@@ -277,14 +277,74 @@ class SymbolicEngine(ComputeEngine):
     erf = staticmethod(lambda x: _elementwise_call("erf", x))
 
     @staticmethod
-    def sum(x: Any, axis: Any = None, *args: Any, **kwargs: Any) -> Any:
-        """Return a symbolic sum reduction over ``axis``."""
-        return _reduce_symbolic(x, _sum_values, axis=axis)
+    def sum(
+        x: Any,
+        axis: Any = None,
+        dtype: Any = None,
+        keepdims: bool = False,
+        initial: Any = None,
+        where: Any = None,
+    ) -> Any:
+        """Return a symbolic sum reduction over ``axis``, matching NumPy's ``sum`` contract.
+
+        ``keepdims``, ``initial``, and ``where`` are implemented exactly as ``np.sum`` defines them:
+        reduced axes are kept as size-1 dimensions, ``initial`` seeds each reduction group (the
+        additive identity 0.0 when omitted), and ``where`` excludes masked-out elements by
+        substituting the additive identity in their place before folding. ``dtype`` has no symbolic
+        analogue -- an expression node carries no numeric storage to cast -- so a non-``None`` value
+        is rejected rather than silently ignored (matching the "reject unsupported arguments" half
+        of the declared reduction contract, since honoring it is not meaningful here).
+        """
+        if dtype is not None:
+            raise NotImplementedError(
+                "the symbolic engine does not support dtype casting in reductions (got dtype=%r); "
+                "a symbolic expression carries no numeric dtype to cast into." % (dtype,)
+            )
+        if where is not None:
+            x = _mask_with_identity(_sym_array(x), where, SymbolicExpression.constant(0.0))
+        return _reduce_symbolic(x, lambda values: _sum_values(values, initial=initial), axis=axis, keepdims=keepdims)
 
     @staticmethod
-    def logsumexp(x: Any, axis: Any = None, *args: Any, **kwargs: Any) -> Any:
-        """Return a symbolic log-sum-exp reduction over ``axis``."""
-        return _reduce_symbolic(x, _logsumexp_values, axis=axis)
+    def logsumexp(x: Any, axis: Any = None, keepdims: bool = False) -> Any:
+        """Return a symbolic log-sum-exp reduction over ``axis``, matching SciPy's ``logsumexp``.
+
+        ``keepdims`` is implemented exactly as ``scipy.special.logsumexp`` defines it. SciPy's own
+        ``logsumexp`` (which ``NumpyEngine.logsumexp`` forwards to directly) has no
+        ``dtype``/``initial``/``where`` parameter either, so there is no declared behavior to honor
+        for them here; passing them raises the same ``TypeError`` SciPy's own function would, for the
+        same reason (an unexpected keyword argument). An all-``-inf`` input (every term has zero
+        probability in log-space) correctly evaluates to ``-inf``, not ``NaN`` -- see
+        :func:`_logsumexp_values`. An empty reduction is likewise defined as ``-inf`` (the identity:
+        the log of a sum of zero terms), matching SciPy.
+        """
+        return _reduce_symbolic(x, _logsumexp_values, axis=axis, keepdims=keepdims)
+
+    @staticmethod
+    def max(
+        x: Any,
+        axis: Any = None,
+        keepdims: bool = False,
+        initial: Any = None,
+        where: Any = None,
+    ) -> Any:
+        """Return a symbolic max reduction over ``axis``, matching NumPy's ``max`` contract.
+
+        ``keepdims`` and ``initial`` are implemented exactly as ``np.max`` defines them (``np.max``
+        itself has no ``dtype`` parameter, so none is declared here either). Max has no universal
+        identity element, so -- exactly like ``np.max`` -- passing ``where`` without also passing
+        ``initial`` is rejected rather than silently reducing an under-specified group. An empty
+        reduction with no ``initial`` raises (there is nothing to seed it with), matching ``np.max``;
+        with ``initial`` it returns ``initial``.
+        """
+        arr = _sym_array(x)
+        if where is not None:
+            if initial is None:
+                raise ValueError(
+                    "the symbolic 'max' reduction has no identity element, so using 'where' also "
+                    "requires an explicit 'initial' (matching np.max's own restriction)."
+                )
+            arr = _mask_with_identity(arr, where, _sym(initial))
+        return _reduce_symbolic(arr, lambda values: _max_values(values, initial=initial), axis=axis, keepdims=keepdims)
 
     @staticmethod
     def where(cond: Any, x: Any, y: Any) -> Any:
@@ -348,7 +408,6 @@ class SymbolicEngine(ComputeEngine):
 
     isnan = staticmethod(lambda x: _elementwise_call("isnan", x))
     isinf = staticmethod(lambda x: _elementwise_call("isinf", x))
-    max = staticmethod(lambda x, axis=None, *args, **kwargs: _reduce_symbolic(x, _max_values, axis=axis))
     dot = staticmethod(lambda x, y: np.dot(_sym_array(x), _sym_array(y)))
     matmul = staticmethod(lambda x, y: np.matmul(_sym_array(x), _sym_array(y)))
     cumsum = staticmethod(lambda x, axis=None, *args, **kwargs: np.cumsum(_sym_array(x), axis=axis))
@@ -383,45 +442,125 @@ class SymbolicEngine(ComputeEngine):
         return to_latex(x)
 
 
-def _sum_values(values: Any) -> SymbolicExpression:
+def _sum_values(values: Any, initial: Any = None) -> SymbolicExpression:
+    """Fold ``values`` with ``+``, seeded by ``initial`` (the additive identity 0.0 when omitted).
+
+    Sum always has a well-defined identity, so -- unlike :func:`_max_values` -- an empty ``values``
+    is never an error: it just returns the seed unchanged, exactly as ``np.sum(np.array([]))`` (0.0)
+    or ``np.sum(np.array([]), initial=x)`` (x) does.
+    """
     values = np.asarray(values, dtype=object).reshape(-1)
-    rv = SymbolicExpression.constant(0.0)
+    rv = SymbolicExpression.constant(0.0) if initial is None else _sym(initial)
     for value in values:
         rv = rv + value
     return rv
 
 
-def _max_values(values: Any) -> SymbolicExpression:
+def _max_values(values: Any, initial: Any = None) -> SymbolicExpression:
+    """Fold ``values`` with elementwise ``max``, optionally seeded by ``initial``.
+
+    Max has no universal identity, so an empty ``values`` raises unless ``initial`` was given to
+    seed the fold (matching ``np.max``'s own restriction: ``np.max([])`` raises, ``np.max([],
+    initial=x)`` returns ``x``). When ``initial`` is omitted and ``values`` is non-empty, this is
+    byte-identical to the pre-fix code: seed from the first element, fold over the rest.
+    """
     values = np.asarray(values, dtype=object).reshape(-1)
     if values.size == 0:
-        raise ValueError("cannot reduce an empty symbolic array.")
-    rv = _sym(values[0])
-    for value in values[1:]:
+        if initial is None:
+            raise ValueError("cannot reduce an empty symbolic array.")
+        return _sym(initial)
+    if initial is None:
+        rv, rest = _sym(values[0]), values[1:]
+    else:
+        rv, rest = _sym(initial), values
+    for value in rest:
         rv = SymbolicExpression.call("max", rv, value)
     return rv
 
 
 def _logsumexp_values(values: Any) -> SymbolicExpression:
+    """Return the symbolic max-shifted log-sum-exp of ``values``: ``m + log(sum(exp(x - m)))``.
+
+    The shift keeps the numeric evaluate path stable (a naive ``log(sum(exp(x)))`` overflows, e.g.
+    ``[1000, 1000]``) while staying algebraically equivalent for export. An empty ``values`` is
+    defined as ``-inf`` (the log of a sum of zero terms), matching ``scipy.special.logsumexp``.
+
+    An all-``-inf`` input is the degenerate case where the shift ``m`` ITSELF is ``-inf`` (every
+    term has zero probability in log-space): naively evaluating the shifted formula then computes
+    ``-inf - (-inf)`` for every term, an indeterminate form that is ``NaN`` in IEEE float
+    arithmetic, poisoning the whole reduction to ``NaN`` instead of the correct ``-inf``. Guard
+    this by wrapping the naive formula in a symbolic ``where(m == -inf, -inf, naive)``: evaluate()
+    still computes the naive branch eagerly (it is not short-circuited), so the "poisoned" NaN IS
+    computed in that case, but it is then discarded by the selection rather than propagated,
+    since only the ``-inf`` branch is actually returned. This composes correctly with an outer
+    ``keepdims``/``axis`` reduction (handled entirely in :func:`_reduce_symbolic`, agnostic to what
+    an individual reducer call returns) and leaves the ordinary (finite-shift) case's expression
+    structure -- and therefore its op_counts()/diagnostics()/to_sympy() lowering -- unchanged: the
+    "where"/"eq" wrapper only adds nodes around the untouched naive branch, it does not alter it.
+    """
     values = np.asarray(values, dtype=object).reshape(-1)
-    # Build the max-shifted form ``m + log(sum(exp(x - m)))`` so the numeric
-    # evaluate path is stable (a naive ``log(sum(exp(x)))`` overflows, e.g.
-    # ``[1000, 1000]``) while staying algebraically equivalent for export.
+    neg_inf = SymbolicExpression.call("neg", SymbolicExpression("inf", ()))
+    if values.size == 0:
+        return neg_inf
     shift = _max_values(values)
     terms = [SymbolicExpression.call("exp", _sym(value) - shift) for value in values]
     total = SymbolicExpression.constant(0.0)
     for term in terms:
         total = total + term
-    return shift + SymbolicExpression.call("log", total)
+    naive = shift + SymbolicExpression.call("log", total)
+    shift_is_neg_inf = SymbolicExpression.call("eq", shift, neg_inf)
+    return SymbolicExpression.call("where", shift_is_neg_inf, neg_inf, naive)
 
 
-def _reduce_symbolic(x: Any, reducer: Callable[[Any], SymbolicExpression], axis: Any = None) -> Any:
+def _mask_with_identity(arr: np.ndarray, where: Any, identity: SymbolicExpression) -> np.ndarray:
+    """Return ``arr`` with elements outside ``where`` (broadcast to ``arr``'s shape) replaced by
+    ``identity``, so a masked-out position folds into a reduction without affecting its result."""
+    mask = np.broadcast_to(np.asarray(where, dtype=bool), arr.shape)
+    out = np.empty(arr.shape, dtype=object)
+    for idx in np.ndindex(arr.shape):
+        out[idx] = arr[idx] if mask[idx] else identity
+    return out
+
+
+def _reduce_symbolic(
+    x: Any,
+    reducer: Callable[[Any], SymbolicExpression],
+    axis: Any = None,
+    keepdims: bool = False,
+) -> Any:
+    """Reduce ``x`` with ``reducer`` over ``axis``, matching NumPy's ``axis``/``keepdims`` contract.
+
+    ``reducer`` folds a flat 1-D slice of symbolic values into a single :class:`SymbolicExpression`
+    (see :func:`_sum_values`/:func:`_max_values`/:func:`_logsumexp_values`); this wrapper supplies
+    the NumPy-style axis bookkeeping around it -- including, when ``keepdims`` is requested,
+    reinserting the reduced axes as size-1 dimensions rather than dropping them (the pre-fix
+    behavior, which silently ignored ``keepdims`` entirely and always returned the reduced-rank
+    result).
+    """
     arr = _sym_array(x)
+    result = _reduce_over_axis(arr, reducer, axis=axis)
+    if not keepdims:
+        return result
+    ndim = arr.ndim
+    if axis is None:
+        reduced_axes: tuple[int, ...] = tuple(range(ndim))
+    elif isinstance(axis, tuple):
+        reduced_axes = tuple(sorted((a % ndim) if ndim else 0 for a in axis))
+    else:
+        reduced_axes = ((int(axis) % ndim) if ndim else 0,)
+    out = np.asarray(result, dtype=object)
+    for one_axis in reduced_axes:
+        out = np.expand_dims(out, axis=one_axis)
+    return out
+
+
+def _reduce_over_axis(arr: np.ndarray, reducer: Callable[[Any], SymbolicExpression], axis: Any = None) -> Any:
     if axis is None:
         return reducer(arr.reshape(-1))
     if isinstance(axis, tuple):
         rv = arr
         for one_axis in sorted(axis, reverse=True):
-            rv = _reduce_symbolic(rv, reducer, axis=one_axis)
+            rv = _reduce_over_axis(rv, reducer, axis=one_axis)
         return rv
     return np.apply_along_axis(lambda values: reducer(values), int(axis), arr)
 
