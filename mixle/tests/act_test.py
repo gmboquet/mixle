@@ -199,5 +199,53 @@ class EarlyStopTest(unittest.TestCase):
         self.assertEqual(score_action(a, "what is the tax"), 0.0)
 
 
+class CostValidationTest(unittest.TestCase):
+    """MXR-080-0254: a cost of -5 against a zero budget used to pass the budget check, drag spend to
+    -5, and score a priority near a billion (base_score + overlap divided by a clamped 1e-9); a NaN
+    cost defeated every comparison meant to catch it. Costs are now validated finite and non-negative
+    up front, and zero cost gets explicit (not clamped-division) handling."""
+
+    def test_negative_cost_is_rejected_at_construction(self):
+        with self.assertRaises(ValueError) as cm:
+            Action("neg_cost_action", "compute", run=lambda q: ["x"], cost=-5.0, description="d")
+        msg = str(cm.exception)
+        self.assertIn("-5", msg)
+        self.assertIn("neg_cost_action", msg)
+
+    def test_nan_cost_is_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            Action("a", "compute", run=lambda q: ["x"], cost=float("nan"), description="d")
+
+    def test_infinite_cost_is_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            Action("a", "compute", run=lambda q: ["x"], cost=float("inf"), description="d")
+        with self.assertRaises(ValueError):
+            Action("a", "compute", run=lambda q: ["x"], cost=float("-inf"), description="d")
+
+    def test_investigate_also_rejects_a_cost_mutated_negative_after_construction(self):
+        # defense in depth: Action is a mutable dataclass, so __post_init__ alone can't guarantee a
+        # cost stays valid for the object's lifetime -- investigate() re-validates before any ranking
+        # or accounting runs, so a bypass via direct attribute mutation is still caught.
+        a = Action("a", "compute", run=lambda q: ["x"], cost=1.0, description="d")
+        a.cost = -5.0
+        with self.assertRaises(ValueError):
+            investigate("d", [a], _echo)
+
+    def test_zero_cost_action_is_allowed(self):
+        a = Action("free", "compute", run=lambda q: ["x"], cost=0.0, description="d")
+        self.assertEqual(a.cost, 0.0)
+
+    def test_zero_cost_relevant_action_scores_infinite_and_fires_first(self):
+        free = Action("free", "compute", run=lambda q: ["free hit"], cost=0.0, description="answer the question")
+        priced = Action("priced", "compute", run=lambda q: ["paid hit"], cost=1.0, description="answer the question")
+        self.assertEqual(score_action(free, "answer the question"), float("inf"))
+        inv = investigate("answer the question", [priced, free], _echo)
+        self.assertEqual(inv.steps[0].action, "free")  # free and relevant is maximally preferred, not paid
+
+    def test_zero_cost_irrelevant_action_scores_zero_not_infinite(self):
+        free_but_irrelevant = Action("free", "compute", run=lambda q: ["x"], cost=0.0, description="")
+        self.assertEqual(score_action(free_but_irrelevant, "totally unrelated topic xyz"), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ skills, simulators, and creators into the same action protocol.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -32,6 +33,19 @@ def _tokens(text: str) -> set[str]:
     return {t for t in _WORD.findall(text.lower()) if t not in _STOP}
 
 
+def _validate_cost(action: Action) -> None:
+    """Reject a non-finite or negative cost outright -- before it can ever corrupt budget or priority.
+
+    A cost need not come from a trusted literal (a pricing lookup, a learned/estimated cost, an
+    adversarial or buggy upstream); left unchecked, a negative cost both drags recorded spend below
+    zero (so a "zero budget" stops rejecting nothing) and, once a scorer divides by it, produces a
+    wildly wrong priority. A NaN cost is worse: every comparison involving it (budget checks, ``<=``
+    filters, sort ordering) silently evaluates to False, so it defeats the very checks meant to catch
+    it instead of failing them (MXR-080-0254)."""
+    if not math.isfinite(action.cost) or action.cost < 0:
+        raise ValueError(f"action {action.name!r} has an invalid cost {action.cost!r}: cost must be finite and >= 0")
+
+
 @dataclass
 class Action:
     """One evidence-acquiring move: run it on a question, get back evidence fragments, at a cost."""
@@ -42,6 +56,9 @@ class Action:
     cost: float = 1.0
     description: str = ""
     base_score: float = 0.0  # a floor added before division (RETRIEVE is always weakly informative)
+
+    def __post_init__(self) -> None:
+        _validate_cost(self)
 
 
 @dataclass
@@ -124,10 +141,20 @@ def score_action(action: Action, question: str) -> float:
     expected-information-gain estimate. Retrieval-style actions carry a
     ``base_score`` floor because retrieval is always at least weakly
     informative.
+
+    Zero-cost actions have nothing to divide by: a free, on-topic action has no cost tradeoff to weigh
+    against anything else, so it scores ``+inf`` and sorts first; a free but wholly irrelevant action
+    (zero numerator) scores ``0.0``, same as any other non-informative action, rather than becoming an
+    unbounded favorite. ``Action.__post_init__`` already guarantees ``cost`` is finite and non-negative,
+    so these are the only two cases -- no clamped division ever runs on a negative or non-finite value
+    (MXR-080-0254).
     """
     q = _tokens(question)
     overlap = len(q & _tokens(action.description)) / len(q) if q else 0.0
-    return (action.base_score + overlap) / max(action.cost, 1e-9)
+    numerator = action.base_score + overlap
+    if action.cost == 0:
+        return math.inf if numerator > 0 else 0.0
+    return numerator / action.cost
 
 
 def investigate(
@@ -154,7 +181,13 @@ def investigate(
     when the evidence clears the bar. The returned :class:`Investigation`
     carries the ordered action trace as provenance, and each fired action can
     emit telemetry for later policy learning.
+
+    Every action's cost is validated (finite, non-negative) up front, before any ranking or accounting
+    runs (MXR-080-0254).
     """
+    for action in actions:
+        _validate_cost(action)
+
     score = scorer or score_action
     stop_at = target_confidence if target_confidence is not None else min_confidence
     ranked = sorted(actions, key=lambda a: score(a, question), reverse=True)
