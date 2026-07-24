@@ -224,5 +224,66 @@ class CalibrationValidationTest(unittest.TestCase):
         self.assertEqual(env.total(), 4.0**3)
 
 
+class RankPrecisionTest(unittest.TestCase):
+    """MXR-080-0232: unrank/threshold must keep the caller's exact rank past float64's 2**53
+    exact-integer range, and rank_bracket must reject a sequence that is not the model's complete
+    fixed-length outcome."""
+
+    def _tied_bucket_index(self, V=2, L=60, n_paths=2):
+        # A UNIFORM per-step distribution (unlike _iid_model, whose logits are prefix-independent
+        # but random/non-uniform): every one of the 2**L sequences quantizes into the SAME fine
+        # bucket, and the envelope is exact for an iid-step model (IIDExactnessTest), so this
+        # reproduces the audit's "float64 rounds a huge rank to the wrong neighbor" failure against
+        # a genuinely exact combinatorial count -- the same trick hmm_paths.py's own 2**54
+        # regression test uses (a fully-tied model puts the whole addressing burden on the offset
+        # walk), just for this module's own float64 mean-field carrier.
+        def uniform(prefix):
+            return np.arange(V), np.log(np.full(V, 1.0 / V))
+
+        ar = AutoregressiveEnumerable(uniform, max_len=L)
+        return AREnvelopeIndex(ar, n_paths=n_paths, seed=0, budget_bits=64.0)
+
+    def test_total_and_unrank_agree_past_2_pow_53(self):
+        env = self._tied_bucket_index()
+        self.assertEqual(env.total(), float(2**60))
+        # The audit's exact failure mode: at this magnitude float64 cannot distinguish 2**60 - 1
+        # from 2**60 at all -- a naive float(i) cast on the rank would make the last valid rank
+        # look equal to (and get rejected as "beyond") the total it should be one less than.
+        self.assertEqual(float(2**60 - 1), float(2**60))
+        seq, lp = env.unrank(2**60 - 1)
+        self.assertEqual(len(seq), 60)
+        self.assertTrue(np.isfinite(lp))
+        with self.assertRaises(IndexError):
+            env.unrank(2**60)
+
+    def test_adjacent_deep_ranks_never_alias_to_the_same_sequence(self):
+        env = self._tied_bucket_index()
+        probes = [2**53 - 2, 2**53 - 1, 2**53, 2**53 + 1, 2**59, 2**60 - 3, 2**60 - 2, 2**60 - 1]
+        seqs = [env.unrank(p)[0] for p in probes]
+        self.assertEqual(len(set(seqs)), len(probes), "adjacent deep ranks collapsed onto the same sequence")
+
+    def test_unrank_rejects_non_integer_rank(self):
+        env = AREnvelopeIndex(AutoregressiveEnumerable(_iid_model(4), max_len=2), n_paths=2, seed=0)
+        for bad in (1.5, "5", None):
+            with self.assertRaises(TypeError):
+                env.unrank(bad)
+
+    def test_threshold_rejects_non_integer_rank(self):
+        env = AREnvelopeIndex(AutoregressiveEnumerable(_iid_model(4), max_len=2), n_paths=2, seed=0)
+        with self.assertRaises(TypeError):
+            env.threshold(1.5)
+
+    def test_rank_bracket_rejects_wrong_length_sequence(self):
+        ar = AutoregressiveEnumerable(_iid_model(4), max_len=5)
+        env = AREnvelopeIndex(ar, n_paths=4, seed=0)
+        full_seq, _lp = env.unrank(0)
+        with self.assertRaises(ValueError):
+            env.rank_bracket(full_seq[:2])  # a locally-valid prefix, not a complete outcome
+        with self.assertRaises(ValueError):
+            env.rank_bracket(full_seq + (0,))  # longer than the model's fixed length
+        lo, hi = env.rank_bracket(full_seq)  # negative control: the right length still works
+        self.assertLessEqual(lo, hi)
+
+
 if __name__ == "__main__":
     unittest.main()
