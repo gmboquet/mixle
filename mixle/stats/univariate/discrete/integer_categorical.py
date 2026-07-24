@@ -173,10 +173,11 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             keys: Optional key for merging sufficient statistics.
         """
         p_vec = coalesce_alias("p_vec", p_vec, "prob_vec", prob_vec, default=MISSING)
-        if any(v < 0.0 for v in p_vec):
-            # A negative "probability" silently propagates into density()/log_density() answers,
-            # so reject it at the constructor like the scalar families do.
-            raise ValueError("IntegerCategoricalDistribution requires non-negative probabilities.")
+        if any(not np.isfinite(v) or v < 0.0 for v in p_vec):
+            # A negative or non-finite "probability" silently propagates into density()/log_density()
+            # answers -- `nan < 0.0` is always False, so the old check let NaN straight through -- so
+            # reject both at the constructor like the scalar families do (CategoricalDistribution.pmap).
+            raise ValueError("IntegerCategoricalDistribution requires finite, non-negative probabilities.")
         with np.errstate(divide="ignore"):
             self.p_vec = np.asarray(p_vec, dtype=np.float64)
             self.min_val = min_val
