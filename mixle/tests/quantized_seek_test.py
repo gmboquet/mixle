@@ -25,10 +25,18 @@ MXR-080-0207 (High): the direct constructors of ``QuantizedEnumerationIndex`` an
 ordered/unique bins (duplicate or unsorted bins corrupt the bisect rank table), component arity,
 and per-row score length (``QuantizedCrossIndex`` could otherwise build joint bin-id keys whose
 dimensionality silently differs from ``max_bits``).
+
+MXR-080-0208 (High): ``bin_for_index``/``get``/``slice``/``iter_from`` (on both
+``QuantizedEnumerationIndex`` and ``LazyQuantizedEnumerationIndex``) must reject booleans,
+fractional numbers, and non-finite values via an ``operator.index``-based protocol check
+(:func:`mixle.enumeration.quantization.seek._require_index`) instead of comparing the original
+value and then silently truncating it with ``int()``.
 """
 
 import math
 import unittest
+
+import numpy as np
 
 from mixle.enumeration.quantization.core import Quantizer, build_budget_index
 from mixle.enumeration.quantization.seek import (
@@ -312,6 +320,83 @@ class QuantizedCrossIndexDirectConstructorTestCase(unittest.TestCase):
         )
         self.assertEqual(idx.num_components, 2)
         self.assertTrue(all(len(key) == 2 for key in idx.counts))
+
+
+class QuantizedEnumerationIndexRankValidationTestCase(unittest.TestCase):
+    """MXR-080-0208: get/bin_for_index/slice/iter_from must reject booleans, fractional numbers,
+    and non-finite values via an index-protocol check instead of comparing the original value and
+    then silently truncating it with int()."""
+
+    def setUp(self):
+        self.idx = QuantizedEnumerationIndex.from_items(
+            [("a", math.log(0.5)), ("b", math.log(0.3)), ("c", math.log(0.2))], max_bits=8.0
+        )
+
+    def test_get_rejects_fractional_index(self):
+        with self.assertRaises(TypeError):
+            self.idx.get(0.5)
+        with self.assertRaises(TypeError):
+            self.idx.get(1.0)  # whole-valued float is still not an exact integer
+
+    def test_get_rejects_bool_index(self):
+        with self.assertRaises(TypeError):
+            self.idx.get(True)
+        with self.assertRaises(TypeError):
+            self.idx.get(False)
+
+    def test_get_rejects_non_finite_index(self):
+        with self.assertRaises(TypeError):
+            self.idx.get(float("nan"))
+        with self.assertRaises(TypeError):
+            self.idx.get(float("inf"))
+
+    def test_slice_rejects_fractional_start_and_k(self):
+        with self.assertRaises(TypeError):
+            self.idx.slice(0.5, 2)
+        with self.assertRaises(TypeError):
+            self.idx.slice(0, 1.5)
+
+    def test_iter_from_rejects_fractional_start(self):
+        with self.assertRaises(TypeError):
+            list(self.idx.iter_from(0.5))
+
+    def test_valid_integer_index_still_works(self):
+        # Negative control.
+        self.assertEqual(self.idx.get(0), ("a", math.log(0.5)))
+        self.assertEqual(self.idx.get(np.int64(1)), ("b", math.log(0.3)))
+        self.assertEqual([v for v, _ in self.idx.slice(0, 2)], ["a", "b"])
+        self.assertEqual([v for v, _ in self.idx.iter_from(1)], ["b", "c"])
+
+
+class LazyQuantizedEnumerationIndexRankValidationTestCase(unittest.TestCase):
+    """MXR-080-0208, the lazy subclass's own overrides of bin_for_index/get/iter_from."""
+
+    def setUp(self):
+        self.idx = LazyQuantizedEnumerationIndex(
+            {0: 2, 1: 3}, bin_width_bits=1.0, max_bits=4.0, truncated=False, getter=_labeled_getter()
+        )
+
+    def test_get_rejects_fractional_and_bool_index(self):
+        with self.assertRaises(TypeError):
+            self.idx.get(0.5)
+        with self.assertRaises(TypeError):
+            self.idx.get(True)
+
+    def test_iter_from_rejects_fractional_start(self):
+        with self.assertRaises(TypeError):
+            list(self.idx.iter_from(0.5))
+
+    def test_slice_rejects_fractional_start_and_k(self):
+        # slice() is inherited from the base class, unchanged, but must still apply to the lazy
+        # subclass's own (overridden) iter_from.
+        with self.assertRaises(TypeError):
+            self.idx.slice(0.5, 2)
+
+    def test_valid_integer_index_still_works(self):
+        # Negative control.
+        self.assertEqual(self.idx.get(0), ("v0-0", -0.0))
+        self.assertEqual(self.idx.get(4), ("v1-2", -1.0))
+        self.assertEqual([v for v, _ in self.idx.iter_from(3)], ["v1-1", "v1-2"])
 
 
 if __name__ == "__main__":

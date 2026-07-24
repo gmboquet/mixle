@@ -155,5 +155,63 @@ class StructureEdgeCasesTest(unittest.TestCase):
         self.assertEqual(paths, {(s,) for s in range(4)})
 
 
+class RankValidationTestCase(unittest.TestCase):
+    """MXR-080-0208: unrank/threshold/iter_paths must reject booleans, fractional numbers, and
+    non-finite values instead of comparing the original value and then silently truncating it
+    with int()."""
+
+    def setUp(self):
+        self.log_pi, self.log_A, self.log_b = _model(3, 4, seed=7)
+        self.idx = HMMPathIndex(self.log_pi, self.log_A, self.log_b, oversample=32)
+
+    def test_unrank_rejects_fractional_rank(self):
+        # The audit's exact example: unrank(0.5) must not silently return rank zero (i.e. behave
+        # as though int(0.5) == 0 were a legitimate request for "the item at rank 0").
+        with self.assertRaises(TypeError):
+            self.idx.unrank(0.5)
+        self.idx.unrank(0)  # rank 0 itself is, of course, valid -- proves this is real validation
+
+    def test_unrank_rejects_whole_valued_float_rank(self):
+        with self.assertRaises(TypeError):
+            self.idx.unrank(1.0)
+
+    def test_unrank_rejects_bool_rank(self):
+        with self.assertRaises(TypeError):
+            self.idx.unrank(True)
+        with self.assertRaises(TypeError):
+            self.idx.unrank(False)
+
+    def test_unrank_rejects_non_finite_rank(self):
+        with self.assertRaises(TypeError):
+            self.idx.unrank(float("nan"))
+        with self.assertRaises(TypeError):
+            self.idx.unrank(float("inf"))
+
+    def test_threshold_rejects_fractional_rank(self):
+        with self.assertRaises(TypeError):
+            self.idx.threshold(1.5)
+
+    def test_threshold_rejects_bool_rank(self):
+        with self.assertRaises(TypeError):
+            self.idx.threshold(True)
+
+    def test_iter_paths_rejects_fractional_start(self):
+        with self.assertRaises(TypeError):
+            list(self.idx.iter_paths(0.5))
+
+    def test_iter_paths_rejects_bool_start(self):
+        with self.assertRaises(TypeError):
+            list(self.idx.iter_paths(True))
+
+    def test_valid_integer_ranks_still_work(self):
+        # Negative control: legitimate int and numpy-int ranks are unaffected.
+        p0, lp0 = self.idx.unrank(0)
+        p1, lp1 = self.idx.unrank(np.int64(1))
+        self.assertNotEqual(p0, p1)
+        self.assertAlmostEqual(self.idx.threshold(1), lp0)
+        head = list(self.idx.iter_paths(0))[:2]
+        self.assertEqual([p for p, _ in head], [p0, p1])
+
+
 if __name__ == "__main__":
     unittest.main()

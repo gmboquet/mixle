@@ -32,6 +32,7 @@ import numpy as np
 
 from mixle.enumeration.model_enumeration import best_first
 from mixle.enumeration.quantization.core import _TOL, Quantizer
+from mixle.enumeration.quantization.seek import _require_index
 
 _LOG2 = math.log(2.0)
 
@@ -263,6 +264,7 @@ class HMMPathIndex:
 
         One backward table walk -- ``O(T * K)`` -- regardless of how deep ``i`` is.
         """
+        i = _require_index(i, label="rank")
         if i < 0:
             raise IndexError("rank must be >= 0")
         if i >= self._cum[-1]:
@@ -308,6 +310,7 @@ class HMMPathIndex:
 
     def threshold(self, rank: int) -> float:
         """Exact joint log-probability of the ``rank``-th best (quantized-order) path."""
+        rank = _require_index(rank, label="rank")
         if rank < 1:
             raise ValueError("rank must be >= 1")
         _path, lp = self.unrank(rank - 1)
@@ -315,6 +318,9 @@ class HMMPathIndex:
 
     def iter_paths(self, start: int = 0) -> Iterator[tuple[tuple[int, ...], float]]:
         """Iterate paths from quantized rank ``start`` (sequential unranks over the stored tables)."""
+        start = _require_index(start, label="start")
+        if start < 0:
+            raise IndexError("start must be non-negative")
         n = int(self._cum[-1])
-        for i in range(int(start), n):
+        for i in range(start, n):
             yield self.unrank(i)

@@ -10,6 +10,7 @@ counterpart -- the structural count-budget index -- lives in :mod:`mixle.enumera
 import bisect
 import itertools
 import math
+import operator
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
@@ -65,6 +66,25 @@ def _certified_integer(
     if not allow_negative and value < 0:
         raise ValueError(f"{label} must be non-negative, got {value}")
     return value
+
+
+def _require_index(value: Any, *, label: str) -> int:
+    """Validate ``value`` is a genuine integer rank/position via the ``__index__`` protocol.
+
+    ``bool`` is rejected explicitly despite being an ``int`` subclass (``operator.index(True)``
+    would otherwise silently succeed as ``1``), and ``numpy.bool_`` is excluded the same way for
+    robustness even though it does not currently implement ``__index__``. Ordinary floats
+    (including whole-valued ones like ``2.0``, NaN, and +/-inf) are rejected by
+    ``operator.index`` itself, and this holds for numpy float scalars too (``numpy.float64`` has
+    no ``__index__``) -- so every non-integer numeric type is uniformly rejected here rather than
+    silently truncated with ``int()`` deeper in a rank/slice/iterator call (MXR-080-0208).
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{label} must be an integer, not bool: {value!r}")
+    try:
+        return operator.index(value)
+    except TypeError as e:
+        raise TypeError(f"{label} must be an integer, got {value!r}") from e
 
 
 class QuantizedEnumerationIndex:
@@ -225,6 +245,7 @@ class QuantizedEnumerationIndex:
 
     def bin_for_index(self, index: int) -> tuple[int, int]:
         """Return (bin_id, offset_within_bin) for a bounded quantized rank."""
+        index = _require_index(index, label="index")
         if index < 0:
             raise IndexError("index must be non-negative.")
         if index >= self.total_count:
@@ -239,6 +260,8 @@ class QuantizedEnumerationIndex:
 
     def slice(self, start: int, k: int) -> list[tuple[Any, float]]:
         """Return up to k indexed pairs starting at start."""
+        start = _require_index(start, label="start")
+        k = _require_index(k, label="k")
         if start < 0:
             raise IndexError("start must be non-negative.")
         if k < 0:
@@ -247,6 +270,7 @@ class QuantizedEnumerationIndex:
 
     def iter_from(self, start: int = 0) -> Iterator[tuple[Any, float]]:
         """Iterate indexed pairs from start to the end of the bounded index."""
+        start = _require_index(start, label="start")
         if start < 0:
             raise IndexError("start must be non-negative.")
         if start >= self.total_count:
@@ -344,6 +368,7 @@ class LazyQuantizedEnumerationIndex(QuantizedEnumerationIndex):
 
     def bin_for_index(self, index: int) -> tuple[int, int]:
         """Return (bin_id, offset_within_bin) for a bounded quantized rank."""
+        index = _require_index(index, label="index")
         if index < 0:
             raise IndexError("index must be non-negative.")
         if index >= self.total_count:
@@ -358,6 +383,7 @@ class LazyQuantizedEnumerationIndex(QuantizedEnumerationIndex):
 
     def iter_from(self, start: int = 0) -> Iterator[tuple[Any, float]]:
         """Iterate indexed pairs from start to the end of the bounded index."""
+        start = _require_index(start, label="start")
         if start < 0:
             raise IndexError("start must be non-negative.")
         if start >= self.total_count:

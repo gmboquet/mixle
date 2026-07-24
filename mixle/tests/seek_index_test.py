@@ -183,6 +183,65 @@ class SeekIndexTest(unittest.TestCase):
             self.assertEqual(si.unrank(i), sx.unrank(i))
 
 
+class SeekIndexRankValidationTestCase(unittest.TestCase):
+    """MXR-080-0208: unrank/slice/iter_from/ensure_count must reject booleans, fractional
+    numbers, and non-finite values instead of comparing the original value and then silently
+    truncating it with int()."""
+
+    def setUp(self):
+        self.si = SeekIndex(CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2}))
+        self.si.ensure_bits(8.0)
+
+    def test_unrank_rejects_fractional_rank(self):
+        # The audit's exact example: unrank(0.5) must not silently return rank zero.
+        with self.assertRaises(TypeError):
+            self.si.unrank(0.5)
+
+    def test_unrank_rejects_whole_valued_float_rank(self):
+        # A rank is exactly integral, never merely numerically equal to one.
+        with self.assertRaises(TypeError):
+            self.si.unrank(1.0)
+
+    def test_unrank_rejects_bool_rank(self):
+        with self.assertRaises(TypeError):
+            self.si.unrank(True)
+        with self.assertRaises(TypeError):
+            self.si.unrank(False)
+
+    def test_unrank_rejects_non_finite_rank(self):
+        with self.assertRaises(TypeError):
+            self.si.unrank(float("nan"))
+        with self.assertRaises(TypeError):
+            self.si.unrank(float("inf"))
+
+    def test_slice_rejects_fractional_start_and_k(self):
+        with self.assertRaises(TypeError):
+            self.si.slice(0.5, 2)
+        with self.assertRaises(TypeError):
+            self.si.slice(0, 1.5)
+
+    def test_iter_from_rejects_fractional_start(self):
+        with self.assertRaises(TypeError):
+            list(self.si.iter_from(0.5))
+
+    def test_ensure_count_rejects_fractional_n(self):
+        with self.assertRaises(TypeError):
+            self.si.ensure_count(2.5)
+
+    def test_ensure_count_rejects_bool_n(self):
+        with self.assertRaises(TypeError):
+            self.si.ensure_count(True)
+
+    def test_valid_integer_ranks_still_work(self):
+        # Negative control: legitimate int and numpy-int ranks/starts/counts are unaffected.
+        v0 = self.si.unrank(0)
+        v1 = self.si.unrank(np.int64(1))
+        self.assertNotEqual(v0, v1)
+        self.assertEqual(len(self.si.slice(0, 2)), 2)
+        self.assertEqual(len(list(self.si.iter_from(0))), 3)
+        self.si.ensure_count(3)  # does not raise
+
+
 class AutoregressiveSeekTest(unittest.TestCase):
     """The AR adapter's convenience surface runs on one cached SeekIndex; float64 covers deep budgets."""
 

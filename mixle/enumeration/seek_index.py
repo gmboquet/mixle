@@ -32,6 +32,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from mixle.enumeration.quantization.core import CountIndex, Quantizer, build_budget_index
+from mixle.enumeration.quantization.seek import _require_index
 
 __all__ = ["SeekIndex"]
 
@@ -122,9 +123,10 @@ class SeekIndex:
         O(log) rebuilds total and the final (deepest) build dominates the work -- the amortization a
         persistent index exists for.
         """
+        n = _require_index(n, label="n")
         if self._budget_index is not None and (self._budget_index.total_count >= n or not self._truncated):
             return self
-        depth = max(self.quantizer.bin_width_bits, math.log2(max(int(n), 1) + 1) + 1.0)
+        depth = max(self.quantizer.bin_width_bits, math.log2(max(n, 1) + 1) + 1.0)
         if self._budget_index is not None:
             depth = max(depth, self._built_bits * 2.0)
         while True:
@@ -149,12 +151,13 @@ class SeekIndex:
         by raising ``oversample`` or lowering ``bin_width_bits``). The returned ``log_density`` is always
         exact regardless.
         """
+        i = _require_index(i, label="rank")
         if i < 0:
             raise IndexError("rank must be >= 0")
-        self.ensure_count(int(i) + 1)
+        self.ensure_count(i + 1)
         if i >= self._budget_index.total_count:
             raise IndexError("rank %d beyond the enumerable support (size %d)" % (i, self._budget_index.total_count))
-        return self._budget_index.get(int(i))
+        return self._budget_index.get(i)
 
     def slice(self, start: int, k: int) -> list[tuple[Any, float]]:
         """Up to ``k`` values starting at rank ``start`` (one deepen at most, then table reads).
@@ -168,17 +171,22 @@ class SeekIndex:
         ``log_density`` values, or shrink the ambiguity window by raising ``oversample`` / lowering
         ``bin_width_bits`` on the model/index -- it cannot be eliminated, only made arbitrarily small.
         """
+        start = _require_index(start, label="start")
+        k = _require_index(k, label="k")
         if start < 0:
             raise IndexError("start must be non-negative")
         if k < 0:
             raise ValueError("k must be non-negative")
-        self.ensure_count(int(start) + int(k))
-        return self._budget_index.slice(int(start), int(k))
+        self.ensure_count(start + k)
+        return self._budget_index.slice(start, k)
 
     def iter_from(self, start: int = 0) -> Iterator[tuple[Any, float]]:
         """Iterate values from rank ``start`` through the end of the *built* index (no auto-deepen)."""
-        self.ensure_count(int(start) + 1)
-        return self._budget_index.iter_from(int(start))
+        start = _require_index(start, label="start")
+        if start < 0:
+            raise IndexError("start must be non-negative")
+        self.ensure_count(start + 1)
+        return self._budget_index.iter_from(start)
 
     def count(self, min_log_prob: float) -> int | float:
         """How many values have ``log_density >= min_log_prob`` -- read off the fine histogram.
