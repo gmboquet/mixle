@@ -97,6 +97,81 @@ class PairedValidationTest(unittest.TestCase):
                 fn(np.array([1.0, np.nan, 2.0]), np.array([1.0, 2.0, 3.0]))
 
 
+class DegenerateStandardErrorTest(unittest.TestCase):
+    """Regression: a paired (or pointwise elpd) difference that is EXACTLY constant across every
+    observation has se == 0 by construction -- ddof=1 std of a constant array is 0. Both
+    paired_score_difference and compare_elpd used to divide-by-zero-guard that into t/z = 0.0
+    unconditionally, which silently read a maximally certain nonzero difference as "tie": internally
+    contradictory, since the CI (mean_diff +/- t_crit * se) collapses to a single nonzero point --
+    "certainly not zero" -- while p=1.0/"tie" says "no evidence of any difference". A zero SE with a
+    nonzero constant difference is the STRONGEST evidence a paired test can produce, not the weakest.
+    Mirrors geweke_z's identical denom==0-with-nonzero-diff fix in mixle/inference/diagnostics.py.
+    """
+
+    def test_paired_score_difference_deterministic_difference_is_decisive_not_a_tie(self):
+        # every observation agrees exactly: a=[1,1,1] beats b=[0,0,0] by a constant margin of 1.
+        res = paired_score_difference(np.array([1.0, 1.0, 1.0]), np.array([0.0, 0.0, 0.0]))
+        self.assertEqual(res["se"], 0.0)
+        self.assertEqual(res["ci_low"], 1.0)
+        self.assertEqual(res["ci_high"], 1.0)
+        # ci excludes 0 (certain nonzero difference) -- p_value/favored must agree, not contradict it.
+        self.assertEqual(res["p_value"], 0.0)
+        self.assertEqual(res["t"], float("inf"))
+        self.assertEqual(res["favored"], "B")  # B has the lower (better, lower_is_better=True) scores
+
+    def test_paired_score_difference_deterministic_difference_flips_with_direction(self):
+        res = paired_score_difference(np.array([0.0, 0.0, 0.0]), np.array([1.0, 1.0, 1.0]))
+        self.assertEqual(res["p_value"], 0.0)
+        self.assertEqual(res["t"], float("-inf"))
+        self.assertEqual(res["favored"], "A")
+
+    def test_paired_score_difference_true_tie_stays_a_tie(self):
+        # both samples identical (not just equal in distribution): se == 0 AND mean_diff == 0 -- a
+        # real tie, not a nonzero constant. The fix must not over-correct into always declaring
+        # significance whenever se happens to be (exactly) zero.
+        res = paired_score_difference(np.array([1.0, 1.0, 1.0]), np.array([1.0, 1.0, 1.0]))
+        self.assertEqual(res["se"], 0.0)
+        self.assertEqual(res["t"], 0.0)
+        self.assertEqual(res["p_value"], 1.0)
+        self.assertEqual(res["favored"], "tie")
+
+    def test_compare_elpd_deterministic_difference_is_decisive_not_a_tie(self):
+        res = compare_elpd(np.array([1.0, 1.0, 1.0]), np.array([0.0, 0.0, 0.0]))
+        self.assertEqual(res["se"], 0.0)
+        self.assertEqual(res["elpd_diff"], 3.0)
+        self.assertEqual(res["z"], float("inf"))
+        self.assertEqual(res["favored"], "A")
+
+    def test_compare_elpd_deterministic_difference_flips_with_direction(self):
+        res = compare_elpd(np.array([0.0, 0.0, 0.0]), np.array([1.0, 1.0, 1.0]))
+        self.assertEqual(res["z"], float("-inf"))
+        self.assertEqual(res["favored"], "B")
+
+    def test_compare_elpd_true_tie_stays_a_tie(self):
+        res = compare_elpd(np.array([1.0, 1.0, 1.0]), np.array([1.0, 1.0, 1.0]))
+        self.assertEqual(res["se"], 0.0)
+        self.assertEqual(res["z"], 0.0)
+        self.assertEqual(res["favored"], "tie")
+
+    def test_vuong_and_clarke_deterministic_difference_intentionally_still_tie(self):
+        """Unlike paired_score_difference/compare_elpd above, vuong_test's omega<=1e-12*scale branch
+        is Vuong's own variance pretest: omega^2 == 0 in the population changes the test's asymptotic
+        distribution entirely (the normal-approximation statistic isn't just numerically unstable, it
+        is the wrong reference distribution once the models are observationally indistinguishable), and
+        clarke_test's tie here is an exact sign test's genuine power floor (the minimum two-sided
+        binomial p-value at n=3 is 0.25, however unanimous the sign pattern is). Neither result carries
+        a CI/se field that contradicts its own "tie" the way the other two did -- both are already
+        self-consistent (vuong_test even says so via `indistinguishable: True`) -- so this is documented
+        existing behavior, locked in here so it is not "fixed" to match the other two by mistake."""
+        vuong = vuong_test(np.array([1.0, 1.0, 1.0]), np.array([0.0, 0.0, 0.0]))
+        self.assertEqual(vuong["favored"], "tie")
+        self.assertTrue(vuong["indistinguishable"])
+
+        clarke = clarke_test(np.array([1.0, 1.0, 1.0]), np.array([0.0, 0.0, 0.0]))
+        self.assertEqual(clarke["favored"], "tie")
+        self.assertEqual(clarke["p_value"], 0.25)
+
+
 class CompareElpdTest(unittest.TestCase):
     def test_favors_higher_elpd(self):
         rng = np.random.RandomState(2)
