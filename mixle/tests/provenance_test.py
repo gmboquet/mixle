@@ -2,6 +2,8 @@
 serialization of encoded data."""
 
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -68,6 +70,67 @@ class DatasetHashTest(unittest.TestCase):
         self.assertEqual(dataset_hash([float("nan")]), dataset_hash([float("nan")]))  # normalizes consistently
         self.assertNotEqual(dataset_hash([float("nan")]), dataset_hash([0.0]))
 
+    def test_object_dtype_array_hashes_identically_across_processes(self):
+        # Reviewer finding: dtype=object arrays store PyObject* pointers, not the elements' own bytes.
+        # A naive arr.tobytes() bakes those process-specific addresses into the hash, so the identical
+        # logical array hashes differently from one process to the next. A single-process comparison
+        # can't catch this (nothing forces an object's address to move within one run), so reproduce it
+        # for real across two separate fresh interpreters.
+        script = (
+            "import numpy as np\n"
+            "from mixle.data import dataset_hash\n"
+            "print(dataset_hash([np.array(['a', 'b', 'c'], dtype=object)]))\n"
+        )
+        env = dict(os.environ)
+        hashes = {
+            subprocess.run(
+                [sys.executable, "-c", script], capture_output=True, text=True, check=True, env=env
+            ).stdout.strip()
+            for _ in range(2)
+        }
+        self.assertEqual(len(hashes), 1, f"same logical object array hashed differently across processes: {hashes}")
+
+    def test_object_dtype_array_content_equality_is_independent_of_object_identity(self):
+        # Same check as above without spawning a subprocess: build the "same" logical array through two
+        # different code paths so the underlying PyObject identities (and thus, pre-fix, the hashed
+        # pointer bytes) genuinely differ within a single process, and confirm content -- not identity --
+        # drives the hash.
+        a = np.array(["alpha", "beta", "gamma"], dtype=object)
+        b = np.array(["".join(["al", "pha"]), "".join(["be", "ta"]), "".join(["gam", "ma"])], dtype=object)
+        for x, y in zip(a, b):
+            self.assertIsNot(x, y)  # sanity: genuinely distinct objects, not accidentally interned
+        self.assertEqual(dataset_hash([a]), dataset_hash([b]))
+        c = np.array(["alpha", "beta", "different"], dtype=object)
+        self.assertNotEqual(dataset_hash([a]), dataset_hash([c]))
+
+    def test_object_dtype_array_shape_and_nested_content_still_distinguished(self):
+        # The dtype=object fix must not regress what already worked: shape still matters, and elements
+        # that are themselves containers still canonicalize (recursively) by value.
+        flat = np.array(["a", "b", "c", "d", "e", "f"], dtype=object).reshape(2, 3)
+        other_shape = np.array(["a", "b", "c", "d", "e", "f"], dtype=object).reshape(3, 2)
+        self.assertNotEqual(dataset_hash([flat]), dataset_hash([other_shape]))
+
+        nested_a = np.array([[1, 2], {"x": 1}, None], dtype=object)
+        nested_b = np.array([[1, 2], {"x": 1}, None], dtype=object)
+        nested_c = np.array([[1, 2], {"x": 2}, None], dtype=object)
+        self.assertEqual(dataset_hash([nested_a]), dataset_hash([nested_b]))
+        self.assertNotEqual(dataset_hash([nested_a]), dataset_hash([nested_c]))
+
+    def test_truncated_prefix_never_collides_with_a_genuinely_complete_dataset(self):
+        # Reviewer finding: max_records only mixed in *how many* records were hashed, not *whether*
+        # hashing stopped early -- so a hash truncated to N records was byte-identical to the hash of a
+        # genuinely complete N-record dataset, contradicting the documented contract ("a truncated hash
+        # never collides with a full one").
+        self.assertNotEqual(dataset_hash([1, 2, 3], max_records=2), dataset_hash([1, 2]))
+        self.assertNotEqual(dataset_hash([1, 2, 3], max_records=2, sort=True), dataset_hash([1, 2], sort=True))
+
+    def test_max_records_past_the_end_is_not_truncation(self):
+        # max_records at or beyond the actual record count never cuts anything off, so it must still
+        # match the plain untruncated hash -- pins that the fix above doesn't over-mark truncation.
+        self.assertEqual(dataset_hash([1, 2], max_records=5), dataset_hash([1, 2]))
+        self.assertEqual(dataset_hash([1, 2], max_records=2), dataset_hash([1, 2]))
+        self.assertNotEqual(dataset_hash([1, 2, 3], max_records=0), dataset_hash([]))  # truncated-to-nothing
+
 
 class CanonicalEncodingTest(unittest.TestCase):
     """Unit-level pin on ``_canonical`` itself (imported directly by ``mixle.analysis.emissions`` too),
@@ -87,6 +150,39 @@ class CanonicalEncodingTest(unittest.TestCase):
         self.assertEqual(encoded[:1], b"s")
         self.assertEqual(int.from_bytes(encoded[1:9], "big"), 2)
         self.assertEqual(encoded[9:], b"ab")
+
+    def test_object_dtype_array_payload_is_recursively_canonicalized_elements(self):
+        # Reviewer finding: object arrays store PyObject* pointers, so the array-encoding's payload must
+        # be built from each element's own _canonical(...) bytes (self-delimiting, so this composes with
+        # the same framing as every other container), not from a raw, address-dependent arr.tobytes().
+        encoded = _canonical(np.array(["ab", "cd"], dtype=object))
+        self.assertEqual(encoded[:1], b"a")
+        pos = 1
+        dtype_len = int.from_bytes(encoded[pos : pos + 8], "big")
+        pos += 8 + dtype_len
+        self.assertEqual(encoded[pos - dtype_len : pos], b"object")
+        shape_len = int.from_bytes(encoded[pos : pos + 8], "big")
+        pos += 8 + shape_len
+        payload_len = int.from_bytes(encoded[pos : pos + 8], "big")
+        pos += 8
+        payload = encoded[pos : pos + payload_len]
+        self.assertEqual(pos + payload_len, len(encoded))  # payload length prefix accounts for the whole rest
+        self.assertEqual(payload, _canonical("ab") + _canonical("cd"))
+
+    def test_numeric_dtype_array_payload_is_still_the_raw_tobytes_fast_path(self):
+        # The dtype=object fix must not move fixed-width numeric arrays onto the (slower, recursive)
+        # element-by-element path -- they have no pointers to leak, so the raw-bytes fast path stays.
+        arr = np.array([1.0, 2.0, 3.0])
+        encoded = _canonical(arr)
+        pos = 1
+        dtype_len = int.from_bytes(encoded[pos : pos + 8], "big")
+        pos += 8 + dtype_len
+        shape_len = int.from_bytes(encoded[pos : pos + 8], "big")
+        pos += 8 + shape_len
+        payload_len = int.from_bytes(encoded[pos : pos + 8], "big")
+        pos += 8
+        payload = encoded[pos : pos + payload_len]
+        self.assertEqual(payload, arr.tobytes())
 
 
 class ProvenanceHeaderTest(unittest.TestCase):
