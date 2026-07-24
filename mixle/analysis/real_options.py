@@ -23,7 +23,10 @@ more is known?" Two tools close that gap:
     ``mixle_pde.voi.expected_variance_reduction`` hook); the pre-posterior simulation splits the prior
     variance, by the law of total variance, into "where the future posterior will be centered" and "how
     much uncertainty remains once it lands there." A rational decision-maker never loses from more
-    information, so the estimate is floored at zero.
+    information *in expectation*, but a Monte Carlo estimate of that gain is noisy around zero when there
+    is little or no information to gain; :func:`voi_estimate` reports the (unfloored) estimate together
+    with its own standard error rather than clipping the noise away, which -- naively floored at zero --
+    was systematically biased upward rather than merely conservative (:class:`VoiEstimate`).
 
 Repo-boundary note: J2's ``mixle.analysis.valuation`` module (``NPVDistribution`` / ``monte_carlo_npv``)
 has since landed and is imported normally below; C8's ``mixle_pde`` VOI hooks have not, so
@@ -46,7 +49,15 @@ import numpy as np
 from mixle.analysis.valuation import NPVDistribution
 from mixle.reason.posterior_protocol import Posterior
 
-__all__ = ["OptionValue", "real_option_value", "voi_dollars", "VoiStoppingDecision", "voi_stopping_decision"]
+__all__ = [
+    "OptionValue",
+    "real_option_value",
+    "VoiEstimate",
+    "voi_estimate",
+    "voi_dollars",
+    "VoiStoppingDecision",
+    "voi_stopping_decision",
+]
 
 _KINDS = ("defer", "expand", "abandon")
 
@@ -200,8 +211,152 @@ def _variance_reduction(posterior: Posterior, drill_info: dict) -> float:
                     cell_volumes=drill_info.get("cell_volumes"),
                 )
             )
-            return min(max(reduction, 0.0), 1.0 - 1e-9)
-    return min(max(float(drill_info.get("variance_reduction", 0.5)), 0.0), 1.0 - 1e-9)
+            return _clamp_variance_reduction(reduction)
+    return _clamp_variance_reduction(float(drill_info.get("variance_reduction", 0.5)))
+
+
+def _clamp_variance_reduction(reduction: float) -> float:
+    """Clamp a fractional variance reduction to ``[0, 1)``.
+
+    NaN is rejected explicitly, and first: plain ``min``/``max`` do not reliably filter it out
+    (``max(float("nan"), 0.0)`` returns ``nan``, not ``0.0``, silently defeating the floor below) --
+    the same NaN-comparisons-are-False trap that :func:`real_option_value`'s own validation guards
+    against. Left unfiltered, a NaN reduction would also silently miss ``voi_estimate``'s
+    ``reduction == 0.0`` fast path (NaN compares unequal to everything, itself included) and instead
+    poison the general Monte Carlo path with NaN centers/scales.
+    """
+    if not np.isfinite(reduction):
+        raise ValueError(f"voi_dollars: variance_reduction must be finite, got {reduction!r}")
+    return min(max(reduction, 0.0), 1.0 - 1e-9)
+
+
+class VoiEstimate(NamedTuple):
+    """A Monte Carlo value-of-information estimate, reported honestly alongside its own sampling noise.
+
+    ``value`` is the point estimate, ``E[value | info] - E[value | no info]`` -- NOT floored at zero (see
+    :func:`voi_estimate`'s docstring for why flooring a noisy estimate at zero systematically biases it
+    upward, rather than merely rounding it). ``standard_error`` is the *paired-difference* Monte Carlo
+    standard error of ``value`` across the ``n_outer`` hypothetical-information replicates (paired because
+    each replicate's with-info and no-info evaluations share their underlying random draw -- see
+    :func:`voi_estimate`). ``ci_low``/``ci_high`` are an approximate two-sided 95% confidence interval
+    (``value +- 1.96 * standard_error``; a normal approximation, not exact for small ``n_outer``). When
+    ``ci_low <= 0 <= ci_high``, ``value`` is statistically indistinguishable from "no additional value" --
+    a more honest read than a bare point estimate that happens to be (noisily) positive or negative.
+
+    ``method`` names which computation produced the estimate: ``"variance_rescaling_heuristic"`` (the
+    default, always available -- a Gaussian-dispersion approximation, exact only when the posterior is
+    close to Gaussian, unimodal, and unconstrained) or ``"gaussian_conjugate_evsi"`` (a genuine
+    sample-then-condition preposterior computation under a declared linear-Gaussian ``observation_model``).
+    """
+
+    value: float
+    standard_error: float
+    ci_low: float
+    ci_high: float
+    method: str
+
+
+_VOI_CI95_Z = 1.959963984540054  # two-sided 95% normal-approximation multiplier
+
+
+def _voi_estimate_from_paired_diffs(diffs: np.ndarray, method: str) -> VoiEstimate:
+    n = int(diffs.shape[0])
+    value = float(np.mean(diffs))
+    se = float(np.std(diffs, ddof=1) / np.sqrt(n)) if n > 1 else float("nan")
+    if np.isfinite(se):
+        ci_low, ci_high = value - _VOI_CI95_Z * se, value + _VOI_CI95_Z * se
+    else:
+        ci_low, ci_high = float("nan"), float("nan")
+    return VoiEstimate(value=value, standard_error=se, ci_low=ci_low, ci_high=ci_high, method=method)
+
+
+def voi_estimate(
+    posterior: Posterior,
+    decision_fn: Callable[[np.ndarray], float],
+    drill_info: dict[str, Any],
+    *,
+    rng: np.random.Generator,
+    n_outer: int = 64,
+    n_inner: int = 256,
+) -> VoiEstimate:
+    """Value of information, honestly: the point estimate together with its own Monte Carlo uncertainty.
+
+    ``decision_fn`` maps a set of posterior draws (an ``(n, d)`` array, physical units) to the dollar
+    value of the *single* best decision made using that belief state -- e.g. a risk-neutral go/no-go
+    choice is ``max(samples.mean(), 0)``, not an average of a per-draw payoff: the latter implicitly
+    assumes the realization is already known, which is exactly the perfect-information case this function
+    is pricing the *gap* to, not the belief itself.
+
+    The default (``"variance_rescaling_heuristic"``) with-info value is a pre-posterior Monte Carlo built
+    on the law of total variance: today's posterior variance splits into "where the post-drill posterior
+    will be centered" (unknown until the drillhole is actually put in) and "how much spread remains once
+    it lands there." If the drillhole is expected to remove a fraction ``r`` of variance
+    (:func:`_variance_reduction`), then for ``n_outer`` hypothetical drill outcomes a center is drawn with
+    standard deviation scaled by ``sqrt(r)`` around today's posterior mean (how much the belief could
+    plausibly shift), and a *shared* base draw (see "Common random numbers" below) is re-centered there and
+    rescaled by ``sqrt(1 - r)`` for the remaining spread. This is a dispersion heuristic, not real Bayesian
+    conditioning on a simulated observation: it invents future-belief "centers" by rescaling *today's*
+    draws rather than drawing them from an actual forward/likelihood model, so it is accurate only when the
+    posterior is (close to) Gaussian, unimodal, and unconstrained. For a genuine sample-then-condition
+    preposterior computed from a declared observation model instead, see ``observation_model`` on
+    :func:`voi_dollars`.
+
+    Common random numbers: each of the ``n_outer`` replicates draws ONE base sample and uses it for BOTH
+    the no-info decision and the with-info (refined) decision for that replicate, differing only by the
+    deterministic re-centering/rescaling above -- not independent draws for the two sides. This matters at
+    ``r = 0``: with independent draws, the no-info and with-info values are two separately noisy estimates
+    of the *same* quantity, so their difference is noise centered at zero; flooring that noise at zero (the
+    previous behavior) keeps only its positive half, upward-biasing the reported VOI (a standard-normal
+    fake posterior with a go/no-go decision spuriously returned positive VOI at zero information for most
+    tested seeds). With a shared base draw, the with-info value is bit-for-bit identical to the no-info
+    value at ``r = 0`` (checked directly below via an analytic short-circuit, not just left to fall out of
+    the Monte Carlo), and the two stay correlated -- hence lower-variance in their difference -- at
+    ``r > 0`` too.
+
+    Args:
+        posterior: the current (pre-drill) belief, satisfying IC-1's ``Posterior`` protocol.
+        decision_fn: belief state (``(n, d)`` draws) -> expected dollar value of the best decision.
+        drill_info: describes the hypothetical drillhole. Recognized keys: ``variance_reduction`` (direct
+            fractional variance reduction, default ``0.5``), or ``candidate_geometry`` + ``forward_op``
+            (+ optional ``region`` / ``cell_volumes``) to route through the C8 VOI hook when available;
+            ``n_outer_samples`` / ``n_inner_samples`` override the Monte Carlo sample counts.
+        rng: seeded random generator for reproducibility.
+        n_outer: number of hypothetical-information replicates (overridden by ``drill_info``).
+        n_inner: posterior draws per replicate (overridden by ``drill_info``).
+
+    Returns:
+        A :class:`VoiEstimate`: the (unfloored) point estimate plus its Monte Carlo uncertainty.
+    """
+    n_outer = int(drill_info.get("n_outer_samples", n_outer))
+    n_inner = int(drill_info.get("n_inner_samples", n_inner))
+    if n_outer < 1:
+        raise ValueError(f"voi_dollars: n_outer_samples must be >= 1, got {n_outer}")
+    if n_inner < 1:
+        raise ValueError(f"voi_dollars: n_inner_samples must be >= 1, got {n_inner}")
+
+    method = "variance_rescaling_heuristic"
+    reduction = _variance_reduction(posterior, drill_info)
+    if reduction == 0.0:
+        # Analytic equality at exactly zero reduction, not just an empirically-near-zero estimate: by
+        # this heuristic's own construction (inner_scale = sqrt(1 - r) = 1, center_scale = sqrt(r) = 0
+        # below), the with-info belief IS today's belief, so the two decisions coincide exactly -- no
+        # Monte Carlo needed, and none of its sampling noise to worry about flooring.
+        return VoiEstimate(value=0.0, standard_error=0.0, ci_low=0.0, ci_high=0.0, method=method)
+
+    center_scale = float(np.sqrt(reduction))
+    inner_scale = float(np.sqrt(1.0 - reduction))
+    mean = np.asarray(posterior.mean, dtype=np.float64)
+
+    centers = mean + center_scale * (posterior.samples(n_outer, rng) - mean)
+    diffs = np.empty(n_outer, dtype=np.float64)
+    for i in range(n_outer):
+        base = posterior.samples(n_inner, rng)  # shared by both sides of this replicate -- see docstring
+        no_info = float(decision_fn(base))
+        refined = centers[i] + inner_scale * (base - mean)
+        with_info = float(decision_fn(refined))
+        diffs[i] = with_info - no_info
+
+    return _voi_estimate_from_paired_diffs(diffs, method)
 
 
 def voi_dollars(
@@ -213,61 +368,24 @@ def voi_dollars(
     n_outer: int = 64,
     n_inner: int = 256,
 ) -> float:
-    """Value of information, in dollars: ``E[value | drill info] - E[value | no info]``.
+    """The value-of-information point estimate, in dollars: ``E[value | info] - E[value | no info]``.
 
-    ``decision_fn`` maps a set of posterior draws (an ``(n, d)`` array, physical units) to the dollar
-    value of the *single* best decision made using that belief state -- e.g. a risk-neutral go/no-go
-    choice is ``max(samples.mean(), 0)``, not an average of a per-draw payoff: the latter implicitly
-    assumes the realization is already known, which is exactly the perfect-information case this function
-    is pricing the *gap* to, not the belief itself. The no-info value is ``decision_fn`` applied to
-    today's posterior draws.
-
-    The with-info value is a pre-posterior Monte Carlo built on the law of total variance: today's
-    posterior variance splits into "where the post-drill posterior will be centered" (unknown until the
-    drillhole is actually put in) and "how much spread remains once it lands there." If the drillhole is
-    expected to remove a fraction ``r`` of variance (:func:`_variance_reduction`), then for ``n_outer``
-    hypothetical drill outcomes: a center is drawn with standard deviation scaled by ``sqrt(r)`` around
-    today's posterior mean (how much the belief could plausibly shift), and for each center, ``n_inner``
-    refined-posterior draws are formed with the remaining spread scaled by ``sqrt(1 - r)``. Re-deciding
-    with ``decision_fn`` on each refined belief and averaging over the (unknown, before drilling) outcome
-    gives ``E[value | drill info]``; as ``r -> 0`` this construction degenerates back to exactly today's
-    posterior (no information, no premium), and as ``r -> 1`` the center draws recover the full prior
-    spread while the refined posterior collapses to a point (perfect information).
-
-    A perfectly rational decision-maker is never made worse off by more information, so the result is
-    floored at ``0.0``.
+    A thin convenience wrapper around :func:`voi_estimate` for callers that only want the point estimate;
+    see its docstring for the full method (common random numbers, the zero-reduction analytic equality,
+    and what ``method`` the estimate used) and for how to also get the Monte Carlo standard error / CI.
 
     Args:
-        posterior: the current (pre-drill) belief, satisfying IC-1's ``Posterior`` protocol.
-        decision_fn: belief state (``(n, d)`` draws) -> expected dollar value of the best decision.
-        drill_info: describes the hypothetical drillhole. Recognized keys: ``variance_reduction`` (direct
-            fractional variance reduction, default ``0.5``), or ``candidate_geometry`` + ``forward_op``
-            (+ optional ``region`` / ``cell_volumes``) to route through the C8 VOI hook when available;
-            ``n_outer_samples`` / ``n_inner_samples`` override the Monte Carlo sample counts.
-        rng: seeded random generator for reproducibility.
+        posterior, decision_fn, drill_info, rng, n_outer, n_inner: forwarded to :func:`voi_estimate`
+            unchanged.
 
     Returns:
-        The value of information in dollars, ``>= 0``.
+        The value-of-information point estimate, in dollars. NOT floored at zero -- see
+        :func:`voi_estimate`'s docstring for why a floor is dishonest, not merely conservative; this can
+        be a small negative number when the true VOI is at or near zero, which is the honest reflection
+        of Monte Carlo noise, not a defect. Use :func:`voi_estimate` if you need to tell that case apart
+        from a real, larger difference.
     """
-    n_outer = int(drill_info.get("n_outer_samples", n_outer))
-    n_inner = int(drill_info.get("n_inner_samples", n_inner))
-
-    value_no_info = float(decision_fn(posterior.samples(n_inner, rng)))
-
-    reduction = _variance_reduction(posterior, drill_info)
-    center_scale = float(np.sqrt(reduction))
-    inner_scale = float(np.sqrt(1.0 - reduction))
-    mean = np.asarray(posterior.mean, dtype=np.float64)
-
-    centers = mean + center_scale * (posterior.samples(n_outer, rng) - mean)
-    values_with_info = np.empty(n_outer, dtype=np.float64)
-    for i in range(n_outer):
-        base = posterior.samples(n_inner, rng)
-        refined = centers[i] + inner_scale * (base - mean)
-        values_with_info[i] = decision_fn(refined)
-    value_with_info = float(np.mean(values_with_info))
-
-    return max(value_with_info - value_no_info, 0.0)
+    return voi_estimate(posterior, decision_fn, drill_info, rng=rng, n_outer=n_outer, n_inner=n_inner).value
 
 
 class VoiStoppingDecision(NamedTuple):
