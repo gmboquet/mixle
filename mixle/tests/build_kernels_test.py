@@ -1,12 +1,12 @@
 """Optional kernel build/select/isolate logic (mixle.engines.build_kernels): MXR-080-0155 regressions.
 
-Covers two of the three build_kernels-specific findings from the 0.8.0 exhaustive review: (1) the prior
-"first filename matching a prefix" selection could silently return a stale/wrong-ABI artifact instead of
-the one just built, (2) building inside the installed package directory fails outright on a read-only
-install even though the pure-Python fallback is fine -- plus the multi-user cache-poisoning surface
-introduced by this fix's own isolated cache directory (mirroring the coverage fused_cache_security_test.py
-has for the analogous mixle.stats.compute.fused_codegen cache). The third finding (the non-portable
-``-mcpu=native`` compiler flag) is covered separately.
+Covers the three build_kernels-specific findings from the 0.8.0 exhaustive review: (1) ``-mcpu=native``
+is not even a valid flag on every supported platform and ties a binary to the exact build CPU, (2) the
+prior "first filename matching a prefix" selection could silently return a stale/wrong-ABI artifact
+instead of the one just built, (3) building inside the installed package directory fails outright on a
+read-only install even though the pure-Python fallback is fine -- plus the multi-user cache-poisoning
+surface introduced by this fix's own isolated cache directory (mirroring the coverage
+fused_cache_security_test.py has for the analogous mixle.stats.compute.fused_codegen cache).
 
 Most tests are pure logic or filesystem-permission checks (no compiler needed). The handful that perform
 a real compile are gated on the Cython/numpy/setuptools build tooling actually being importable, matching
@@ -34,6 +34,7 @@ from mixle.engines.build_kernels import (
     _kernel_available,
     _kernel_cache_dir,
     _matches_running_abi,
+    _native_popcount_flags,
     _owned_privately,
     compile_dd_kernels,
     dd_kernels_available,
@@ -203,6 +204,40 @@ class AbiMatchTest(unittest.TestCase):
         # suffix matching must reject it.
         suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
         self.assertFalse(_matches_running_abi("_dd_kernels_OLD_BACKUP" + suffix, "_dd_kernels"))
+
+
+class NativePopcountFlagsTest(unittest.TestCase):
+    """_native_popcount_flags: a portable, per-architecture feature flag -- never -mcpu=native/-march=native."""
+
+    def _flags_for(self, machine):
+        with mock.patch("mixle.engines.build_kernels.platform.machine", return_value=machine):
+            return _native_popcount_flags()
+
+    def test_x86_64_gets_the_narrow_popcnt_feature_flag(self):
+        # Empirically confirmed against this toolchain (clang, cross-targeted at x86_64-unknown-linux-gnu):
+        # -mpopcnt compiles cleanly and lowers __builtin_popcountll to a real `popcnt` instruction, while
+        # -mcpu=native is rejected outright ("unsupported option '-mcpu=' for target").
+        self.assertEqual(self._flags_for("x86_64"), ["-mpopcnt"])
+
+    def test_amd64_spelling_also_gets_it(self):
+        self.assertEqual(self._flags_for("AMD64"), ["-mpopcnt"])
+
+    def test_arm64_gets_no_extra_flag(self):
+        # Hardware popcount is already in AArch64's base ISA (confirmed by inspecting emitted assembly
+        # for __builtin_popcountll under -O3 with no arch flag at all: a plain `cnt` instruction).
+        self.assertEqual(self._flags_for("arm64"), [])
+
+    def test_aarch64_gets_no_extra_flag(self):
+        self.assertEqual(self._flags_for("aarch64"), [])
+
+    def test_unknown_machine_gets_no_isa_specific_flag(self):
+        self.assertEqual(self._flags_for("riscv64"), [])
+
+    def test_never_returns_a_native_flag(self):
+        for machine in ("x86_64", "AMD64", "arm64", "aarch64", "riscv64", ""):
+            flags = self._flags_for(machine)
+            self.assertTrue(all("native" not in f for f in flags), flags)
+            self.assertTrue(all(not f.startswith(("-mcpu=", "-march=")) for f in flags), flags)
 
 
 class KernelAvailableTest(unittest.TestCase):

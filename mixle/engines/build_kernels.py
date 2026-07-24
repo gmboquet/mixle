@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import os
+import platform
 import shutil
 import stat
 import sys
@@ -124,6 +125,31 @@ def _matches_running_abi(filename: str, modname: str) -> bool:
     though a naive ``startswith``/``endswith`` glob would find it (MXR-080-0155).
     """
     return any(filename == modname + suffix for suffix in importlib.machinery.EXTENSION_SUFFIXES)
+
+
+def _native_popcount_flags() -> list[str]:
+    """Extra compiler flags for a hardware population-count instruction, chosen per architecture rather
+    than via ``-mcpu=native``/``-march=native`` (MXR-080-0155).
+
+    That flag is not even portable across this project's own two CI-supported platforms: clang/gcc
+    reject ``-mcpu=`` outright on x86_64 ("unsupported option '-mcpu=' for target"), confirmed directly
+    against this toolchain by cross-targeting ``x86_64-unknown-linux-gnu``. And even where a native flag
+    IS accepted, it ties the resulting binary to whatever instruction-set extensions the BUILD machine
+    happens to have, which can crash with SIGILL if that binary is later run on a different machine
+    (e.g. a cached CI build artifact, or a wheel built on one CPU generation and installed on an older
+    one).
+
+    AArch64 (including Apple Silicon) already has population count in its BASE instruction set, no flag
+    needed -- confirmed by inspecting the assembly emitted for ``__builtin_popcountll`` with no arch flag
+    at all (a plain ``cnt`` instruction). x86_64 needs ``-mpopcnt`` specifically to get the hardware
+    ``popcnt`` instruction instead of a software fallback (also confirmed by inspecting the emitted
+    assembly) -- a single, narrowly-scoped ISA *feature* flag, portable across essentially every x86_64
+    CPU since ~2008 (Nehalem/Barcelona), unlike ``-march=native``'s "whatever this exact chip has."
+    """
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        return ["-mpopcnt"]
+    return []  # arm64/aarch64: hardware popcount is already baseline; anything else: no ISA assumption
 
 
 def _build_kernel_extension(modname: str, pyx_filename: str, extra_compile_args: list[str], force: bool) -> str:
@@ -250,9 +276,11 @@ def dd_kernels_available() -> bool:
 
 def compile_bitpacked_kernels(force: bool = False) -> str:
     """Cythonize + compile ``_bitpacked.pyx`` (popcount binary/ternary GEMM) into the isolated kernel
-    cache; returns its exact path. See the module docstring for the read-only-package rationale.
+    cache; returns its exact path. Uses a portable, per-architecture hardware-popcount flag (see
+    :func:`_native_popcount_flags`) rather than ``-mcpu=native``. See the module docstring for the
+    read-only-package rationale.
     """
-    args = ["-O3", "-mcpu=native"]  # enable the NEON/AVX hardware popcount
+    args = ["-O3", *_native_popcount_flags()]
     return _build_kernel_extension("_bitpacked", "_bitpacked.pyx", args, force)
 
 
@@ -264,8 +292,11 @@ def bitpacked_kernels_available() -> bool:
 def compile_lns_kernel(force: bool = False) -> str:
     """Cythonize + compile ``_lns_kernel.pyx`` (the integer log-sum-exp tree fold) into the isolated
     kernel cache; returns its exact path. See the module docstring for the read-only-package rationale.
+    No architecture-specific flag: the tree fold has no hardware-ISA dependency (unlike
+    ``_bitpacked.pyx``'s popcount), so ``-mcpu=native`` never served a purpose here beyond the same
+    portability bug it has in :func:`compile_bitpacked_kernels`.
     """
-    return _build_kernel_extension("_lns_kernel", "_lns_kernel.pyx", ["-O3", "-mcpu=native"], force)
+    return _build_kernel_extension("_lns_kernel", "_lns_kernel.pyx", ["-O3"], force)
 
 
 def lns_kernel_available() -> bool:
