@@ -292,8 +292,17 @@ def retrieve_beliefs(
 ) -> list[BeliefItem]:
     """Beliefs relevant to ``query``, optionally thresholded on ``min_credence`` and re-ranked by
     ``relevance * credence`` -- so a caller can weight by, or hard-filter on, how much the store
-    actually believes each item (never a "fact" vs "non-fact" partition, only credence)."""
-    hits = sub.search(query, k=max(int(k) * 3, int(k)), kind="record", scope=scope)
+    actually believes each item (never a "fact" vs "non-fact" partition, only credence).
+
+    MXR-080-0245: the belief tag and ``min_credence`` are filtered over the FULL ``"record"``-kind
+    candidate domain, not a fixed-size prefetch -- a store where ordinary (non-belief) records or
+    low-credence beliefs rank higher by raw relevance can no longer crowd out qualifying beliefs that
+    rank lower but still exist. ``sub.search`` still does the actual relevance scoring (this module
+    never touches core.py's ranking); the fix is asking it for every ``"record"``-kind candidate in
+    scope rather than an arbitrary ``3*k`` cut of them.
+    """
+    domain_size = len(sub.all(kind="record", scope=scope))
+    hits = sub.search(query, k=max(domain_size, int(k)), kind="record", scope=scope)
     scored: list[tuple[BeliefItem, float]] = []
     for item, sc in hits:
         if _BELIEF_TAG not in item.tags:

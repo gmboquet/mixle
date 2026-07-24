@@ -4,7 +4,7 @@ import math
 import random
 import unittest
 
-from mixle.substrate import PUBLIC, AccessPolicy, Substrate
+from mixle.substrate import PUBLIC, AccessPolicy, Substrate, SubstrateItem
 from mixle.substrate.belief import (
     MODEL_ASSERTION_CAP,
     Claim,
@@ -13,6 +13,7 @@ from mixle.substrate.belief import (
     credence_from_history,
     harvest_knowledge,
     retract,
+    retrieve_beliefs,
 )
 
 
@@ -508,6 +509,63 @@ class CrossScopeEvidenceLaunderingTest(unittest.TestCase):
             scope="team-b",
         )
         self.assertGreater(team_b_belief.credence, 0.9)
+
+
+class RetrievalCompletenessTest(unittest.TestCase):
+    """MXR-080-0245: retrieve_beliefs must not miss qualifying beliefs crowded behind unrelated (or
+    low-credence) records that rank at least as well but happen to fill up what used to be a
+    fixed-size 3*k prefetch window."""
+
+    def test_qualifying_beliefs_behind_many_non_belief_records_are_still_found(self):
+        sub = Substrate()
+        # 10 non-belief records, inserted first, tied on raw lexical relevance with the beliefs below --
+        # enough to fill the old 3*k=9 (k=3) prefetch on their own, crowding out every belief.
+        for _ in range(10):
+            sub.add(kind="record", text="", payload={"note": "gizmo gizmo gizmo"}, scope="local")
+        ids = []
+        for i in range(3):
+            _register(sub, f"gizmo-receipt-{i}")
+            b = assimilate(
+                sub,
+                Claim(text=f"gizmo claim {i}", produced_by={"model": "m"}),
+                {"source_id": f"gizmo-receipt-{i}", "tier": "real_measurement", "weight": 1.0},
+            )
+            ids.append(b.id)
+        results = retrieve_beliefs(sub, "gizmo", k=3)
+        self.assertEqual({r.id for r in results}, set(ids))
+
+    def test_qualifying_beliefs_behind_many_low_credence_beliefs_are_still_found(self):
+        sub = Substrate()
+        # 10 low-credence belief-tagged records (hand-inserted, empty .text so they don't force the
+        # embedding path) -- they pass the belief-tag filter but must fail min_credence, and must not
+        # crowd out the genuinely qualifying beliefs by sheer prefetch-window position.
+        for i in range(10):
+            sub.put(
+                SubstrateItem(
+                    id=f"low-{i}",
+                    kind="record",
+                    text="",
+                    payload={
+                        "key": f"low credence gizmo {i}",
+                        "claim": {"text": f"low credence gizmo {i}", "produced_by": {}, "quantity": None},
+                        "credence": 0.2,
+                        "evidence_history": [],
+                    },
+                    tags=["belief"],
+                    scope="local",
+                )
+            )
+        ids = []
+        for i in range(3):
+            _register(sub, f"gizmo-receipt-b-{i}")
+            b = assimilate(
+                sub,
+                Claim(text=f"gizmo strong claim {i}", produced_by={"model": "m"}),
+                {"source_id": f"gizmo-receipt-b-{i}", "tier": "real_measurement", "weight": 1.0},
+            )
+            ids.append(b.id)
+        results = retrieve_beliefs(sub, "gizmo", k=3, min_credence=0.6)
+        self.assertEqual({r.id for r in results}, set(ids))
 
 
 if __name__ == "__main__":
