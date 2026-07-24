@@ -57,14 +57,67 @@ def polynomial_features(degree: int = 1, *, bias: bool = True) -> ModelMatrix:
     return f
 
 
+def _validate_info(info: np.ndarray) -> np.ndarray:
+    """Validate ``info`` as a genuine information matrix: finite, symmetric, and PSD.
+
+    A real information matrix is ``M = F.T @ F`` for some real model matrix ``F``, which is always
+    finite, symmetric, and positive-semi-definite (PSD) by construction -- every eigenvalue is
+    ``>= 0``. A *singular* (rank-deficient) ``M`` is still a legitimate, if undesirable, degenerate
+    case -- it passes here, and criteria report ``-inf`` merit for it. A matrix that is not finite,
+    not symmetric, or has a genuinely negative eigenvalue (e.g. ``-I``, which is negative-definite)
+    could never arise from a real ``F.T @ F``, so it is rejected outright rather than silently scored.
+    """
+    info = np.asarray(info, dtype=np.float64)
+    if info.ndim != 2 or info.shape[0] != info.shape[1]:
+        raise ValueError(f"information matrix must be square 2-D; got shape {info.shape}.")
+    if not np.all(np.isfinite(info)):
+        raise ValueError("information matrix must be finite (no NaN/Inf entries).")
+    if not np.allclose(info, info.T, atol=1e-8, rtol=1e-6):
+        raise ValueError("information matrix must be symmetric (M = F.T @ F is always symmetric).")
+    eigvals = np.linalg.eigvalsh(info)
+    scale = max(1.0, float(np.max(np.abs(eigvals))))
+    if float(eigvals[0]) < -1e-8 * scale:
+        raise ValueError(
+            "information matrix must be positive-semi-definite; got a minimum eigenvalue of "
+            f"{float(eigvals[0]):.6g}, which cannot arise from a real F.T @ F."
+        )
+    return info
+
+
+def _validate_ref(ref: np.ndarray, p: int) -> np.ndarray:
+    """Validate a reference model matrix has shape ``(*, p)``, matching the information matrix."""
+    ref = np.asarray(ref, dtype=np.float64)
+    if ref.ndim != 2 or ref.shape[1] != p:
+        raise ValueError(
+            f"reference model matrix must be 2-D with {p} columns to match the information matrix "
+            f"dimension; got shape {ref.shape}."
+        )
+    if not np.all(np.isfinite(ref)):
+        raise ValueError("reference model matrix must be finite (no NaN/Inf entries).")
+    return ref
+
+
 def d_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
-    """D-optimality merit: ``log det M`` (``-inf`` if ``M`` is singular). Higher is better."""
-    sign, logabsdet = np.linalg.slogdet(info)
-    return float(logabsdet) if sign > 0 else -np.inf
+    """D-optimality merit: ``log det M`` (``-inf`` if ``M`` is singular). Higher is better.
+
+    Raises ``ValueError`` if ``info`` is not a finite, symmetric, PSD matrix. ``log det`` is computed
+    via a Cholesky factorization (PSD-aware: it fails cleanly on a singular ``M`` rather than a raw
+    determinant, which would happily return a number for any square matrix regardless of definiteness).
+    """
+    info = _validate_info(info)
+    try:
+        chol = np.linalg.cholesky(info)
+    except np.linalg.LinAlgError:
+        return -np.inf
+    return float(2.0 * np.sum(np.log(np.diag(chol))))
 
 
 def a_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
-    """A-optimality merit: ``-trace(M^{-1})`` (``-inf`` if singular). Higher is better."""
+    """A-optimality merit: ``-trace(M^{-1})`` (``-inf`` if singular). Higher is better.
+
+    Raises ``ValueError`` if ``info`` is not a finite, symmetric, PSD matrix.
+    """
+    info = _validate_info(info)
     try:
         # trace(M^{-1}) via solving M X = I, avoiding an explicit inverse.
         inv = np.linalg.solve(info, np.eye(info.shape[0]))
@@ -79,11 +132,18 @@ def i_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
     The prediction variance at a reference row ``g`` is ``g M^{-1} g``; this returns the negative
     mean over the reference model matrix ``ref`` so larger is better. Falls back to A-optimality when
     no reference set is supplied.
+
+    Raises ``ValueError`` if ``info`` is not a finite, symmetric, PSD matrix, or if ``ref`` is given
+    and its column count does not match ``info``'s dimension.
     """
+    info = _validate_info(info)
+    p = info.shape[0]
+    if ref is not None:
+        ref = _validate_ref(ref, p)
     try:
         if ref is None:
             # Fall back to A-optimality: trace(M^{-1}) via solving M X = I.
-            return float(-np.trace(np.linalg.solve(info, np.eye(info.shape[0]))))
+            return float(-np.trace(np.linalg.solve(info, np.eye(p))))
         # Prediction variance g M^{-1} g per reference row via solving M Y = ref.T.
         sol = np.linalg.solve(info, ref.T)
     except np.linalg.LinAlgError:
@@ -99,10 +159,17 @@ def g_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
     *worst case* over the reference region, so the fitted surface has a bounded error everywhere.
     Returns the negative maximum of ``g M^{-1} g`` over the reference rows (falls back to the largest
     coefficient variance ``max diag(M^{-1})`` when no reference set is given).
+
+    Raises ``ValueError`` if ``info`` is not a finite, symmetric, PSD matrix, or if ``ref`` is given
+    and its column count does not match ``info``'s dimension.
     """
+    info = _validate_info(info)
+    p = info.shape[0]
+    if ref is not None:
+        ref = _validate_ref(ref, p)
     try:
         if ref is None:
-            return float(-np.max(np.diag(np.linalg.solve(info, np.eye(info.shape[0])))))
+            return float(-np.max(np.diag(np.linalg.solve(info, np.eye(p)))))
         sol = np.linalg.solve(info, ref.T)
     except np.linalg.LinAlgError:
         return -np.inf
@@ -115,7 +182,10 @@ def e_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
     Maximizing the minimum eigenvalue of the information matrix shrinks the variance along the
     *worst-determined* parameter contrast, so no direction in coefficient space is left poorly
     estimated. ``0`` for a singular (rank-deficient) design.
+
+    Raises ``ValueError`` if ``info`` is not a finite, symmetric, PSD matrix.
     """
+    info = _validate_info(info)
     return float(np.linalg.eigvalsh(info)[0])  # eigvalsh is ascending -> [0] is the smallest
 
 
@@ -125,10 +195,21 @@ def c_criterion(c: np.ndarray) -> Criterion:
     c-optimality minimizes the variance of a *specific* quantity of interest ``c'.beta`` (e.g. a
     contrast or a prediction at one point). The returned criterion has merit ``-c' M^{-1} c`` (``-inf``
     if singular), so it plugs straight into :func:`optimal_design` or :func:`register_criterion`.
+
+    Raises ``ValueError`` (eagerly, at construction) if ``c`` is not 1-D, and (per call) if ``info``
+    is not a finite, symmetric, PSD matrix or if ``c``'s length does not match ``info``'s dimension.
     """
     cvec = np.asarray(c, dtype=np.float64)
+    if cvec.ndim != 1:
+        raise ValueError(f"contrast vector c must be 1-D; got shape {cvec.shape}.")
 
     def criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
+        info = _validate_info(info)
+        if cvec.shape[0] != info.shape[0]:
+            raise ValueError(
+                f"contrast vector c has length {cvec.shape[0]}, expected {info.shape[0]} to match "
+                "the information matrix dimension."
+            )
         try:
             return float(-cvec @ np.linalg.solve(info, cvec))
         except np.linalg.LinAlgError:
