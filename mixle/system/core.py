@@ -123,7 +123,9 @@ class System:
         self._harvest: dict[tuple[str, str, str], str] = {}
         self._captured: dict[tuple[str, str, str], str] = {}
 
-    def answer(self, query: Query, *, budget: int | None = None) -> tuple[str | None, dict[str, Any]]:
+    def answer(
+        self, query: Query, *, budget: int | None = None, read_only: bool = False
+    ) -> tuple[str | None, dict[str, Any]]:
         """Thin shell: route straight to the teacher, wrap the reply in a minimal H-style receipt.
 
         Checks the captured cache first (see :meth:`improve`): an exact repeat of a query (same text,
@@ -141,6 +143,16 @@ class System:
         relevant, flagging ``degraded_mode="teacher_down"`` on the receipt; if there is no store (or
         nothing relevant in it), the failure is reported explicitly (``status="failed"``), never masked as a
         normal answer.
+
+        ``read_only=True`` runs the identical routing/answering logic but takes a genuine snapshot: the
+        call is guaranteed not to promote into :attr:`_harvest` (so a later :meth:`improve` can never
+        capture it) and not to accumulate into :attr:`total_spend` -- no trace of the call is left for
+        the system's future behavior to depend on. This is what
+        :func:`~mixle.system.scorecard.evaluate` uses so that scoring a system against a held-out
+        question set can never itself teach the system the held-out answers: an evaluation call must
+        never be able to change what a later call to this same method returns. Every other observable
+        (the reply, the receipt fields a scorer reads, whether the call degraded) is identical to a
+        normal call, since a snapshot must still faithfully measure the real answering path.
         """
         cache_key = (query.text, query.task, query.scope)
         if cache_key in self._captured:
@@ -154,6 +166,7 @@ class System:
                 "task": query.task,
                 "degraded_mode": None,
                 "degraded_reason": None,
+                "read_only": read_only,
             }
 
         requested = self.config.default_budget if budget is None else int(budget)
@@ -169,6 +182,7 @@ class System:
                 "total_spend": self.total_spend.to_dict(),
                 "captured": False,
                 "task": query.task,
+                "read_only": read_only,
             }
 
         def _call_teacher() -> str:
@@ -196,11 +210,17 @@ class System:
                 "total_spend": self.total_spend.to_dict(),
                 "captured": False,
                 "task": query.task,
+                "read_only": read_only,
             }
         actual_cost = Spend() if result.degraded else cost
-        self.total_spend = self.total_spend + actual_cost
-        if not result.degraded:
-            self._harvest[cache_key] = result.value
+        if not read_only:
+            # the only two places this method mutates persistent state -- guarded together so a
+            # read_only call is a genuine snapshot: it cannot grow total_spend, and (this being the
+            # important half) it cannot land in _harvest, so a later improve() can never promote
+            # something this call answered.
+            self.total_spend = self.total_spend + actual_cost
+            if not result.degraded:
+                self._harvest[cache_key] = result.value
         receipt = {
             "produced_by": "store" if result.degraded else "teacher",
             "status": "answered",
@@ -209,6 +229,7 @@ class System:
             "budget": requested,
             "captured": False,  # no local model has captured this capability yet
             "task": query.task,
+            "read_only": read_only,
             **result.to_receipt_fields(),
         }
         return result.value, receipt

@@ -50,6 +50,14 @@ def evaluate(
     * ``realized_cost`` -- total spend units (:meth:`~mixle.spend.Spend.total_units`) across the set.
     * ``calibration`` -- a coarse proxy (currently equal to ``quality``) until ``answer`` carries a real
       per-answer confidence to calibrate against; extend THIS function, not call sites, once that lands.
+
+    This is a genuinely read-only pass: every call goes through :meth:`~mixle.system.core.System.answer`
+    with ``read_only=True``, so evaluating a held-out ``question_set`` can never itself teach ``system``
+    the held-out answers (no promotion into the harvest a later ``improve()`` could capture, no change to
+    ``system.total_spend``). Without that, a held-out set would stop being held-out the moment it was
+    first evaluated: a later ``improve()`` could promote its answers into the captured cache, and
+    re-evaluating the "held-out" set afterward would be trivially free and perfect. Never call
+    ``system.answer`` without ``read_only=True`` from this function.
     """
     n = len(question_set)
     if n == 0:
@@ -59,7 +67,7 @@ def evaluate(
     grounded = 0
     cost = 0.0
     for query, expected in question_set:
-        reply, receipt = system.answer(query)
+        reply, receipt = system.answer(query, read_only=True)
         if scorer(reply, expected):
             correct += 1
         if receipt.get("status") == "answered" and receipt.get("degraded_mode") is None:

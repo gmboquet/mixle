@@ -69,6 +69,68 @@ class SystemAnswerTest(unittest.TestCase):
         self.assertEqual(receipt["budget"], 5)
 
 
+class SystemReadOnlyAnswerTest(unittest.TestCase):
+    """CRITICAL: answer(..., read_only=True) is the snapshot path evaluate() relies on -- it must be
+    impossible for a read-only call to leave any trace a later improve() (or total_spend) could act on.
+    This is what keeps a held-out scorecard from training on its own held-out set (see
+    scorecard_test.py's EvaluateDoesNotLeakIntoTrainingTest)."""
+
+    def test_read_only_answer_does_not_populate_the_harvest(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        reply, _ = system.answer(Query("secret-test-question"), read_only=True)
+        self.assertEqual(reply, "answer to: secret-test-question")
+        self.assertEqual(system._harvest, {})
+
+    def test_read_only_answer_does_not_move_total_spend(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        system.answer(Query("x"), read_only=True)
+        self.assertEqual(system.total_spend.to_dict()["frontier_calls"], 0)
+
+    def test_read_only_answer_still_reports_its_hypothetical_spend_on_the_receipt(self):
+        # the receipt must still show what the call WOULD have cost (evaluate()'s realized_cost sums
+        # this) even though it is not accumulated into total_spend
+        system = System(SystemConfig(teacher=_fake_teacher))
+        _, receipt = system.answer(Query("x"), read_only=True)
+        self.assertEqual(receipt["spend"]["frontier_calls"], 1)
+        self.assertEqual(receipt["total_spend"]["frontier_calls"], 0)
+        self.assertTrue(receipt["read_only"])
+
+    def test_a_read_only_answer_cannot_be_promoted_by_a_later_improve(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        system.answer(Query("secret-test-question"), read_only=True)
+        report = system.improve(1000)
+        self.assertEqual(report["status"], "nothing_to_improve")
+        self.assertEqual(system._captured, {})
+
+    def test_a_read_only_answer_leaves_no_trace_for_a_later_real_answer(self):
+        # a read-only pass must not even leave a trace that changes a later NORMAL call's behavior
+        calls = {"n": 0}
+
+        def counting_teacher(prompt):
+            calls["n"] += 1
+            return f"answer to: {prompt}"
+
+        system = System(SystemConfig(teacher=counting_teacher))
+        system.answer(Query("q"), read_only=True)
+        system.answer(Query("q"), read_only=True)
+        self.assertEqual(calls["n"], 2)  # no caching kicked in from the read-only calls
+
+        reply, receipt = system.answer(Query("q"))  # first REAL call
+        self.assertEqual(calls["n"], 3)
+        self.assertFalse(receipt["captured"])
+
+    # negative control: a NORMAL (non-read_only) call must still harvest and be promotable -- read_only
+    # must only suppress learning for calls that explicitly opt in, not disable capture altogether
+    def test_normal_answer_still_harvests_and_is_later_promotable(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        system.answer(Query("public-question"))
+        self.assertIn(("public-question", "", "local"), system._harvest)
+
+        report = system.improve(10)
+        self.assertEqual(report["status"], "captured")
+        self.assertIn(("public-question", "", "local"), system._captured)
+
+
 class SystemSpendLedgerTest(unittest.TestCase):
     """CARD SPEND-a: budget is a hard ceiling; every call's cost accumulates into System.total_spend."""
 
