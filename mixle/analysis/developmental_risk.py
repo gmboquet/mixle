@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from mixle.reason.posterior_protocol import DerivedQuantity, Posterior
 
 _MODELS = ("loglogistic", "hill")
+_N_PARAMS = 2  # both loglogistic and hill are fit with a 2-element coefficient vector (b, c)
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,64 @@ def _solve_bmd(model: str, coef: np.ndarray, background: float, bmr: float, risk
     return float(optimize.brentq(f, lo, hi))
 
 
+def _validate_cohort(
+    dose: np.ndarray, n_affected: np.ndarray, n_total: np.ndarray, n_params: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Reject a cohort that cannot support a likelihood evaluation, before any is attempted.
+
+    ``n_total`` may be given per dose group (matching ``dose``'s length), or as a scalar / a
+    length-1 array meaning "the same total applies to every dose group" -- an explicit, documented
+    broadcast, not an accidental one from letting arithmetic silently broadcast mismatched shapes.
+    Any other length is rejected. Returns the validated ``(dose, n_affected, n_total)`` with
+    ``n_total`` already broadcast to match ``dose``.
+    """
+    dose = np.asarray(dose, dtype=float)
+    if dose.ndim != 1 or dose.size == 0:
+        raise ValueError(f"dose must be a non-empty 1-D array, got shape {dose.shape}")
+    if not np.all(np.isfinite(dose)):
+        raise ValueError("dose must be finite")
+    if np.any(dose < 0):
+        raise ValueError("dose must be nonnegative")
+
+    n_affected = np.asarray(n_affected, dtype=float)
+    if n_affected.ndim != 1 or n_affected.shape[0] != dose.shape[0]:
+        raise ValueError(
+            f"n_affected must be a 1-D array matching dose's length ({dose.shape[0]}), got shape {n_affected.shape}"
+        )
+
+    n_total = np.asarray(n_total, dtype=float)
+    if n_total.ndim == 0 or (n_total.ndim == 1 and n_total.shape[0] == 1):
+        # Explicit broadcast: one shared total for every dose group (e.g. a balanced design).
+        n_total = np.full(dose.shape[0], float(n_total.reshape(-1)[0]))
+    elif n_total.ndim != 1 or n_total.shape[0] != dose.shape[0]:
+        raise ValueError(
+            f"n_total must be a scalar, a length-1 array (broadcast to every dose group), or a "
+            f"1-D array matching dose's length ({dose.shape[0]}); got shape {n_total.shape}"
+        )
+
+    for name, arr in (("n_affected", n_affected), ("n_total", n_total)):
+        if not np.all(np.isfinite(arr)):
+            raise ValueError(f"{name} must be finite")
+        if np.any(arr < 0):
+            raise ValueError(f"{name} must be nonnegative")
+        if not np.all(arr == np.round(arr)):
+            raise ValueError(f"{name} must contain integer subject counts")
+
+    if np.any(n_total < 1):
+        raise ValueError("n_total must be at least 1 for every dose group")
+    if np.any(n_affected > n_total):
+        raise ValueError("n_affected must not exceed n_total in any dose group")
+
+    n_distinct = int(np.unique(dose).size)
+    if n_distinct < n_params:
+        raise ValueError(
+            f"need at least {n_params} distinct dose groups to identify a {n_params}-parameter "
+            f"curve; got {n_distinct} distinct dose(s) across {dose.shape[0]} group(s)"
+        )
+
+    return dose, n_affected, n_total
+
+
 def benchmark_dose(
     dose: np.ndarray,
     n_affected: np.ndarray,
@@ -112,9 +171,11 @@ def benchmark_dose(
     """
     if model not in _MODELS:
         raise ValueError(f"unknown model {model!r}; expected one of {_MODELS}")
-    dose = np.asarray(dose, dtype=float)
-    n_affected = np.asarray(n_affected, dtype=float)
-    n_total = np.asarray(n_total, dtype=float)
+    if not (0.0 < bmr < 1.0):
+        raise ValueError(f"bmr must be in (0, 1), got {bmr!r}")
+    if not (0.5 < ci_level < 1.0):
+        raise ValueError(f"ci_level must be in (0.5, 1), got {ci_level!r}")
+    dose, n_affected, n_total = _validate_cohort(dose, n_affected, n_total, _N_PARAMS)
 
     init = np.array([-1.0, 1.0])
     result = optimize.minimize(
