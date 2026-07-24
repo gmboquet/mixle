@@ -16,9 +16,10 @@ nothing to capture, and this function stops with an explicit reason rather than 
 
 The student captured from round 1 is a low-cost regression surrogate of the oracle's score landscape, fit
 only from round 1's oracle-verified ``(x, score)`` pairs. It never grades a candidate itself; it only
-proposes where round 2 should spend its matched oracle-call budget. ``student(x)`` is a plain
-``candidate -> predicted_score`` callable, the same shape any other teacher/task-model in this codebase
-is called with. Every accepted score in round 2
+proposes where round 2 should spend its matched oracle-call budget -- against a FRESH candidate pool that
+excludes round 1's own points, so round 2 cannot pad its score by re-verifying already-known winners (see
+``amplify_and_capture``). ``student(x)`` is a plain ``candidate -> predicted_score`` callable, the same
+shape any other teacher/task-model in this codebase is called with. Every accepted score in round 2
 still comes from the oracle. No student or LLM self-grade enters ``DesignRun.history``.
 
 :func:`mixle.task.collapse.collapse_monitor` checks the two-round trajectory for
@@ -106,8 +107,12 @@ class AmplifyReport:
     either side spent is accounted for in its own receipted :class:`AmplificationRound`.
     ``baseline_p_value`` is the one-sided permutation-test p-value for "round 1's best score exceeds the
     baseline's best score by more than chance", tested against the prespecified ``significance`` level to
-    produce ``beats_baseline``. ``round2`` is present only when round 1 clears that gate, and a captured
-    student is used to propose the matched-budget follow-up batch. ``collapse`` records the
+    produce ``beats_baseline``. ``round2`` is present only when round 1 clears that gate, and a captured student
+    is used to propose the matched-budget follow-up batch from a FRESH candidate pool (round 1's own
+    points are never re-offered to round 2, so ``round2_beats_round1`` measures generalization to unseen
+    candidates, not re-verification of already-known ones). ``incumbent_best_score`` is bookkeeping only
+    -- the best score retained across whichever rounds ran -- and, unlike round 1's era of this report,
+    plays no part in computing ``round2_beats_round1`` or ``collapse``. ``collapse`` records the
     trajectory-level collapse verdict when both rounds run.
     """
 
@@ -118,6 +123,7 @@ class AmplifyReport:
     significance: float
     beats_baseline: bool
     round2_beats_round1: bool
+    incumbent_best_score: float
     collapse: CollapseVerdict | None
     student: StudentTeacher | None
     stopped_early: bool
@@ -150,8 +156,9 @@ def amplify_and_capture(
     distilled.
 
     Otherwise: fit :class:`StudentTeacher` from round 1's history; round 2 uses the student to rank a
-    large candidate pool efficiently and spends the same oracle-call budget verifying only the top-ranked
-    candidates -- student-guided, not blind, but every accepted score is still oracle-verified. Runs
+    large, FRESH candidate pool (never round 1's own points -- see the round 2 comment below) and spends
+    the same oracle-call budget verifying only the top-ranked fresh candidates -- student-guided, not
+    blind, but every accepted score is still oracle-verified. Runs
     :func:`mixle.task.collapse.collapse_monitor` over the two rounds.
     """
     run1 = optimize_under_oracle(oracle, bounds, n_init=n_init, n_iter=n_iter, seed=seed)
@@ -202,6 +209,7 @@ def amplify_and_capture(
             significance=significance,
             beats_baseline=False,
             round2_beats_round1=False,
+            incumbent_best_score=round1.best_score,
             collapse=None,
             student=None,
             stopped_early=True,
@@ -214,25 +222,29 @@ def amplify_and_capture(
 
     student = fit_student(run1, degree=degree)
 
+    # MXR-080-0162 fix: the round 2 pool is FRESH candidates only -- round 1's own points are never
+    # unioned in. Including them (the earlier code did) spends round 2's budget re-verifying points
+    # already scored in round 1 and, since the student is fit on exactly those points and the oracle is
+    # re-queried at the same x, tautologically floors round2.best_score at round1.best_score: that is a
+    # retained incumbent smuggled into the evaluation budget, not evidence round 2 proposed anything
+    # better. `round1`'s best point is still available -- see `incumbent_best_score` below -- just kept
+    # separate from the budget spent testing the student on candidates it has not seen.
     fresh_pool = random_design(bounds, int(candidate_pool_size), seed=None if seed is None else seed + 1)
-    # warm-start the candidate pool with round 1's own verified points -- standard practice for an
-    # amplification round building on prior verified data. It makes "round 2 at matched budget beats or
-    # matches round 1" a property of the construction rather than a fresh random-pool comparison: the
-    # student is fit on these exact points and should rank round 1's best point among the top candidates,
-    # and whatever gets selected is re-verified by the oracle.
-    pool = np.concatenate([np.stack(round1.xs), fresh_pool], axis=0)
-    predicted = np.asarray([student(x) for x in pool])
+    predicted = np.asarray([student(x) for x in fresh_pool])
     top_idx = np.argsort(-predicted)[:budget]
 
     run2 = DesignRun(oracle_name=oracle.name, oracle_tier=oracle.tier, oracle_fidelity=oracle.fidelity)
     for idx in top_idx:
-        x = pool[idx]
+        x = fresh_pool[idx]
         result = oracle(x)  # the oracle supplies the accepted score; the student only proposes where to look
         run2.history.append(DesignCandidate(x=x, result=result))
     round2 = AmplificationRound(run=run2, best_score=float(run2.best.result.score), xs=[c.x for c in run2.history])
 
     from mixle.task.collapse import collapse_monitor
 
+    # Both scores below come from fresh-candidate rounds now (round 1 from its own search, round 2 from
+    # the student's ranking of candidates round 1 never saw), so this is a genuine generalization
+    # trajectory, not one propped up by a retained incumbent re-appearing in round 2's pool.
     collapse = collapse_monitor(
         [
             {"score": round1.best_score, "candidates": round1.xs},
@@ -248,6 +260,7 @@ def amplify_and_capture(
         significance=significance,
         beats_baseline=True,
         round2_beats_round1=round2.best_score >= round1.best_score,
+        incumbent_best_score=max(round1.best_score, round2.best_score),
         collapse=collapse,
         student=student,
         stopped_early=False,
