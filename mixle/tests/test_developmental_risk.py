@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from mixle.analysis.developmental_risk import benchmark_dose, rfd_exceedance
 
@@ -43,6 +44,87 @@ def test_bmdl_matches_reference():
         if 0.0 <= p_exceed <= 1.0:
             covered += 1
     assert covered / trials >= 0.88
+
+
+# MXR-080-0081: benchmark_dose must reject impossible cohorts before any likelihood evaluation.
+
+
+def test_rejects_affected_exceeding_total():
+    # The audit's own repro: 2 subjects "affected" out of a total of 1 is impossible.
+    with pytest.raises(ValueError, match="n_affected must not exceed n_total"):
+        benchmark_dose(
+            dose=np.array([1.0, 2.0]),
+            n_affected=np.array([2.0, 3.0]),
+            n_total=np.array([1.0, 5.0]),
+            bmr=0.10,
+        )
+
+
+def test_rejects_mismatched_n_total_length():
+    # 2 dose groups, n_total of length 3: not a scalar/length-1 broadcast and not a per-group
+    # match either -- must be rejected outright, not silently misaligned by numpy broadcasting.
+    with pytest.raises(ValueError, match="n_total must be"):
+        benchmark_dose(
+            dose=np.array([1.0, 2.0]),
+            n_affected=np.array([5.0, 10.0]),
+            n_total=np.array([50.0, 60.0, 70.0]),
+            bmr=0.10,
+        )
+
+
+def test_length_one_n_total_is_an_explicit_documented_broadcast():
+    # A length-1 n_total broadcasting across every dose group is a real, intentional feature
+    # (shared total per group, e.g. a balanced design) -- it must behave IDENTICALLY to writing
+    # the same total out per group explicitly, not just "happen to not crash".
+    dose = np.array([1.0, 2.0, 4.0])
+    n_affected = np.array([5.0, 12.0, 30.0])
+    r_broadcast = benchmark_dose(dose, n_affected, np.array([50.0]), bmr=0.10)
+    r_explicit = benchmark_dose(dose, n_affected, np.array([50.0, 50.0, 50.0]), bmr=0.10)
+    assert r_broadcast.bmd == r_explicit.bmd
+    assert r_broadcast.bmdl == r_explicit.bmdl
+
+
+def test_rejects_single_dose_group():
+    # A 2-parameter curve cannot be identified from a single dose group.
+    with pytest.raises(ValueError, match="distinct dose"):
+        benchmark_dose(dose=np.array([1.0]), n_affected=np.array([5.0]), n_total=np.array([50.0]))
+
+
+def test_rejects_all_identical_doses():
+    # 2 dose groups, but both at the same dose value -- still only 1 distinct design point.
+    with pytest.raises(ValueError, match="distinct dose"):
+        benchmark_dose(
+            dose=np.array([1.0, 1.0]),
+            n_affected=np.array([5.0, 6.0]),
+            n_total=np.array([50.0, 50.0]),
+        )
+
+
+def test_rejects_non_integer_and_negative_counts():
+    with pytest.raises(ValueError, match="integer subject counts"):
+        benchmark_dose(np.array([1.0, 2.0]), np.array([5.5, 10.0]), np.array([50.0, 50.0]))
+    with pytest.raises(ValueError, match="nonnegative"):
+        benchmark_dose(np.array([1.0, 2.0]), np.array([-1.0, 10.0]), np.array([50.0, 50.0]))
+
+
+def test_rejects_bad_bmr_and_ci_level():
+    dose = np.array([0.5, 1.0, 2.0, 4.0, 8.0])
+    n_total = np.full(5, 100.0)
+    n_affected = np.array([5.0, 10.0, 25.0, 60.0, 90.0])
+    with pytest.raises(ValueError, match="bmr"):
+        benchmark_dose(dose, n_affected, n_total, bmr=0.0)
+    with pytest.raises(ValueError, match="ci_level"):
+        benchmark_dose(dose, n_affected, n_total, ci_level=0.4)
+
+
+def test_valid_multidose_cohort_still_fits():
+    # Negative control: a well-formed, genuinely dose-responsive cohort must still fit cleanly.
+    dose = np.array([0.5, 1.0, 2.0, 4.0, 8.0])
+    n_total = np.full(5, 100.0)
+    n_affected = np.array([5.0, 10.0, 25.0, 60.0, 90.0])
+    result = benchmark_dose(dose, n_affected, n_total, bmr=0.10)
+    assert np.isfinite(result.bmd) and result.bmd > 0
+    assert np.isfinite(result.bmdl) and 0 <= result.bmdl <= result.bmd
 
 
 def test_rfd_exceedance_monotone_in_uf():
