@@ -10,7 +10,7 @@ from mixle.doe import (
     polynomial_features,
     register_criterion,
 )
-from mixle.doe.optimal import _get_criterion, a_criterion, d_criterion, i_criterion
+from mixle.doe.optimal import _get_criterion, a_criterion, c_criterion, d_criterion, g_criterion, i_criterion
 
 
 class PolynomialFeaturesTest(unittest.TestCase):
@@ -61,6 +61,78 @@ class CriterionRegistryTest(unittest.TestCase):
     def test_non_callable_rejected(self):
         with self.assertRaises(TypeError):
             register_criterion("bad", object())
+
+
+class InformationMatrixValidationTest(unittest.TestCase):
+    """MXR-080-0185: criteria must reject an information matrix that could never be F.T @ F."""
+
+    def test_negative_definite_information_rejected_by_d_and_a(self):
+        # -I_2: previously d_criterion returned 0 and a_criterion returned positive merit 2 --
+        # a mathematically impossible information matrix silently outscored valid ones.
+        neg_identity = -np.eye(2)
+        with self.assertRaises(ValueError):
+            d_criterion(neg_identity)
+        with self.assertRaises(ValueError):
+            a_criterion(neg_identity)
+
+    def test_asymmetric_information_rejected(self):
+        asym = np.array([[1.0, 2.0], [0.0, 1.0]])
+        with self.assertRaises(ValueError):
+            d_criterion(asym)
+        with self.assertRaises(ValueError):
+            a_criterion(asym)
+
+    def test_non_finite_information_rejected(self):
+        nan_info = np.array([[np.nan, 0.0], [0.0, 1.0]])
+        with self.assertRaises(ValueError):
+            d_criterion(nan_info)
+        inf_info = np.array([[np.inf, 0.0], [0.0, 1.0]])
+        with self.assertRaises(ValueError):
+            a_criterion(inf_info)
+
+    def test_non_square_information_rejected(self):
+        bad = np.ones((2, 3))
+        with self.assertRaises(ValueError):
+            d_criterion(bad)
+
+    def test_valid_psd_matrix_still_scores_correctly(self):
+        # Negative control: a genuine, hand-computable PSD information matrix must not be
+        # rejected and must score exactly as before -- diag([4, 4]) has det=16, trace(inv)=0.5.
+        info = np.diag([4.0, 4.0])
+        self.assertAlmostEqual(d_criterion(info), float(np.log(16.0)))
+        self.assertAlmostEqual(a_criterion(info), -0.5)
+
+    def test_singular_psd_matrix_is_still_minus_inf_not_rejected(self):
+        # A singular-but-PSD matrix (e.g. all zeros) is a legitimate degenerate design, not an
+        # invalid one -- it must still return -inf rather than raise.
+        singular = np.zeros((3, 3))
+        self.assertEqual(d_criterion(singular), -np.inf)
+        self.assertEqual(a_criterion(singular), -np.inf)
+
+    def test_reference_dimension_mismatch_rejected_by_i_and_g(self):
+        info = np.diag([1.0, 1.0])
+        bad_ref = np.ones((3, 5))  # 5 columns != info's 2x2 dimension
+        with self.assertRaises(ValueError):
+            i_criterion(info, ref=bad_ref)
+        with self.assertRaises(ValueError):
+            g_criterion(info, ref=bad_ref)
+
+    def test_reference_matching_dimension_is_accepted(self):
+        info = np.diag([1.0, 1.0])
+        good_ref = np.ones((3, 2))  # 2 columns matches info's 2x2 dimension
+        self.assertNotEqual(i_criterion(info, ref=good_ref), -np.inf)
+        self.assertNotEqual(g_criterion(info, ref=good_ref), -np.inf)
+
+    def test_contrast_dimension_mismatch_rejected(self):
+        crit = c_criterion([1.0, 0.0, 0.0])  # length-3 contrast
+        info = np.diag([1.0, 1.0])  # 2x2 info
+        with self.assertRaises(ValueError):
+            crit(info)
+
+    def test_contrast_matching_dimension_is_accepted(self):
+        crit = c_criterion([1.0, 0.0])
+        info = np.diag([1.0, 1.0])
+        self.assertAlmostEqual(crit(info), -1.0)  # -c' M^-1 c = -(1*1*1 + 0) = -1
 
 
 class OptimalDesignTest(unittest.TestCase):
