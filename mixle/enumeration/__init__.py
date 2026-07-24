@@ -52,7 +52,7 @@ from mixle.enumeration.density_rank import DensityRankResult, density_rank
 from mixle.enumeration.envelope import AREnvelopeIndex, LatticeEnvelopeIndex
 
 # --- HMM state paths: exact A* enumeration + the quantized random-access path index ---
-from mixle.enumeration.hmm_paths import HMMPathIndex, hmm_best_paths
+from mixle.enumeration.hmm_paths import CertifiedCount, CertifiedMassBound, HMMPathIndex, hmm_best_paths
 from mixle.enumeration.model_enumeration import (
     beam_search,
     best_first_decode,
@@ -122,4 +122,6 @@ __all__ = [
     # HMM path enumeration (non-decomposable family): exact A* head + quantized random-access index
     "hmm_best_paths",
     "HMMPathIndex",
+    "CertifiedCount",
+    "CertifiedMassBound",
 ]
