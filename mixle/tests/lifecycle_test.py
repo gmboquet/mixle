@@ -315,5 +315,121 @@ class AutoRestartTest(unittest.TestCase):
         self.assertLess(mus[0], -2.5)
 
 
+class CalibrateRestartLeakTest(unittest.TestCase):
+    """fit(calibrate=...) reserves a holdout slice; a restart (explicit restarts=N, or an automatic
+    saddle-triggered one) must train on the SAME reduced partition the initial fit used -- never claw
+    the calibration rows back into training just because a restart fires."""
+
+    def test_explicit_restart_never_retrains_on_calibration_holdout(self):
+        # THE known repro: an 8-row fit with restarts=1, calibrate=.25 used to pass fit()'s ORIGINAL
+        # full `data` (not the already-computed training-only `fit_data`) into _refit_symmetry_broken,
+        # so the restart silently retrained on the very rows calibration had just reserved as holdout:
+        #   initial fit rows: [1, 7, 3, 0, 5, 4]
+        #   restart rows:     [0, 1, 2, 3, 4, 5, 6, 7]   <- includes calibration rows 6, 2
+        #   calibration rows: [6, 2]
+        from unittest import mock
+
+        import mixle
+        from mixle.lifecycle import Model
+        from mixle.stats import GaussianEstimator
+
+        data = [float(100 + i) for i in range(8)]  # row identity encoded in the value (100 + index)
+
+        def as_idx(values):
+            return {int(v) - 100 for v in values}
+
+        from mixle.inference import optimize as real_optimize
+
+        captured_initial: dict = {}
+
+        def optimize_spy(data_arg, spec, **kw):
+            captured_initial.setdefault("rows", as_idx(list(data_arg)))
+            return real_optimize(data_arg, spec, **kw)
+
+        real_refit = Model._refit_symmetry_broken
+        seen: dict = {}
+
+        def refit_spy(self, data_arg, trials, optimize_kw):
+            seen["rows"] = as_idx(list(data_arg))
+            return real_refit(self, data_arg, trials, optimize_kw)
+
+        with (
+            mock.patch("mixle.inference.optimize", side_effect=optimize_spy),
+            mock.patch.object(Model, "_refit_symmetry_broken", refit_spy),
+        ):
+            m = mixle.Model(GaussianEstimator())
+            m.fit(data, restarts=1, calibrate=0.25, rng=np.random.RandomState(0))
+
+        self.assertIn("rows", captured_initial)  # the initial fit must actually have run
+        self.assertIn("rows", seen)  # the restart must actually have fired
+
+        self.assertEqual(captured_initial["rows"], {1, 7, 3, 0, 5, 4})  # pins the audit's exact repro
+        cal_rows = set(range(8)) - captured_initial["rows"]
+        self.assertEqual(cal_rows, {6, 2})
+
+        self.assertEqual(seen["rows"], captured_initial["rows"])  # restart trained on the SAME partition
+        self.assertTrue(
+            seen["rows"].isdisjoint(cal_rows), f"restart retrained on calibration rows {seen['rows'] & cal_rows}"
+        )
+        self.assertIsNotNone(m.calibration)  # calibration was in fact evaluated (not silently skipped)
+
+    def test_automatic_saddle_restart_never_retrains_on_calibration_holdout(self):
+        # Same leak, via restarts="auto"'s own saddle-triggered path instead of an explicit request.
+        # Reuses AutoRestartTest's known Gamma-mixture symmetric-saddle repro; calibrate=.25 shrinks the
+        # training set, which shifts which seeds saddle, so this searches for one rather than assuming
+        # AutoRestartTest's own seeds still apply.
+        from unittest import mock
+
+        import mixle
+        from mixle.lifecycle import Model, saddle_suspect
+        from mixle.stats import GammaDistribution, GammaEstimator, MixtureEstimator
+
+        data = np.concatenate(
+            [GammaDistribution(2.0, 0.5).sampler(1).sample(400), GammaDistribution(20.0, 1.0).sampler(2).sample(400)]
+        ).tolist()
+        est = MixtureEstimator([GammaEstimator(), GammaEstimator()])
+
+        seed = None
+        for candidate in range(30):
+            raw = mixle.Model(est).fit(
+                data, restarts=None, calibrate=0.25, rng=np.random.RandomState(candidate), max_its=40
+            )
+            if saddle_suspect(raw.fitted, data):
+                seed = candidate
+                break
+        self.assertIsNotNone(seed, "no seed reproduced the saddle within 30 tries -- repro drifted")
+
+        from mixle.inference import optimize as real_optimize
+
+        captured_initial: dict = {}
+
+        def optimize_spy(data_arg, spec, **kw):
+            captured_initial.setdefault("rows", frozenset(data_arg))
+            return real_optimize(data_arg, spec, **kw)
+
+        real_refit = Model._refit_symmetry_broken
+        seen: dict = {}
+
+        def refit_spy(self, data_arg, trials, optimize_kw):
+            seen["rows"] = frozenset(data_arg)
+            return real_refit(self, data_arg, trials, optimize_kw)
+
+        with (
+            mock.patch("mixle.inference.optimize", side_effect=optimize_spy),
+            mock.patch.object(Model, "_refit_symmetry_broken", refit_spy),
+        ):
+            m = mixle.Model(est)
+            m.fit(data, restarts="auto", calibrate=0.25, rng=np.random.RandomState(seed), max_its=40)
+
+        self.assertIn("rows", captured_initial)
+        self.assertIn("rows", seen)  # the automatic restart must actually have fired
+
+        cal_rows = frozenset(data) - captured_initial["rows"]
+        self.assertTrue(cal_rows)  # calibrate=.25 on 800 rows must have actually reserved a holdout
+        self.assertEqual(seen["rows"], captured_initial["rows"])  # restart trained on the SAME partition
+        self.assertTrue(seen["rows"].isdisjoint(cal_rows), "automatic restart retrained on calibration rows")
+        self.assertIsNotNone(m.calibration)
+
+
 if __name__ == "__main__":
     unittest.main()
