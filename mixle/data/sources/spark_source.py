@@ -20,12 +20,24 @@ from mixle.engines.arithmetic import maxrandint
 
 
 def take_sample(rdd: Any, with_replacement: bool, n: int, seed: int | None = None):
-    """Take a deterministic-order random sample from a Spark RDD."""
+    """Take a deterministic-order random sample from a Spark RDD.
+
+    Raises ``ValueError`` if ``with_replacement`` is ``False`` and ``rdd`` has fewer than ``n``
+    elements: Spark's own ``RDD.takeSample(False, n, ...)`` silently caps the result at the RDD's true
+    cardinality in that case (returning every element instead of the requested count) rather than
+    raising, so this checks the returned length itself and fails loudly with the shortfall instead of
+    silently handing the caller fewer records than they asked for (MXR-080-0066). ``with_replacement``
+    sampling always returns exactly ``n`` elements and is unaffected.
+    """
     rng = RandomState(seed)
     sample = rdd.zipWithUniqueId().takeSample(with_replacement, n, rng.randint(0, maxrandint))
     sidx = np.argsort([u[1] for u in sample])
     sample = [sample[i][0] for i in sidx]
-    sidx = np.argsort(rng.uniform(size=n))
+    if not with_replacement and len(sample) < n:
+        raise ValueError("requested %d without replacement, only %d available" % (n, len(sample)))
+    # Shuffle by the ACTUAL returned cardinality, not the requested `n` -- indexing a length-`n`
+    # permutation into a shorter list is exactly the IndexError MXR-080-0066 reported.
+    sidx = np.argsort(rng.uniform(size=len(sample)))
     return [sample[i] for i in sidx]
 
 
