@@ -155,12 +155,40 @@ def _child_values(x: Any) -> Iterable[Any]:
     return ()
 
 
+def _engines_compatible(a: ComputeEngine, b: ComputeEngine) -> bool:
+    """Whether two engines are interchangeable for dispatch purposes.
+
+    Two engines must agree on backend (Python class), device placement, and
+    mesh/distributed placement to be considered the same execution context --
+    comparing the Python class alone lets, e.g., a ``cuda:0`` Torch tensor and
+    a ``cuda:1`` Torch tensor pass as "homogeneous". Dtype/precision policy is
+    compared too, but only when BOTH engines carry an explicit, caller-chosen
+    policy (``dtype_explicit``, currently set by :class:`TorchEngine`): an
+    engine discovered from a non-floating leaf (an integer index or Boolean
+    mask tensor, say) has no real precision opinion of its own and must not
+    conflict with a genuinely floating sibling leaf purely because of its
+    filled-in default dtype. Engines that don't declare ``dtype_explicit``
+    (NumPy, symbolic, JAX) default to "always opinionated", preserving a
+    strict dtype comparison for them.
+    """
+    if type(a) is not type(b):
+        return False
+    if str(getattr(a, "device", None)) != str(getattr(b, "device", None)):
+        return False
+    if getattr(a, "mesh", None) != getattr(b, "mesh", None):
+        return False
+    if not getattr(a, "dtype_explicit", True) or not getattr(b, "dtype_explicit", True):
+        return True
+    return getattr(a, "dtype", None) == getattr(b, "dtype", None)
+
+
 def engine_of(x: Any, default: ComputeEngine = NUMPY_ENGINE) -> ComputeEngine:
     """Return the ComputeEngine associated with an array or encoded payload.
 
-    Nested encodings are scanned recursively.  Mixing arrays owned by different
-    engine classes is an error because silent host/device mixing is almost
-    always a performance or correctness bug.
+    Nested encodings are scanned recursively. Mixing arrays whose engines
+    disagree on backend, device, mesh/placement, or an explicitly-chosen dtype
+    policy is an error, because silent host/device/precision mixing is almost
+    always a performance or correctness bug (see :func:`_engines_compatible`).
     """
     direct = _direct_engine(x)
     if direct is not None:
@@ -173,8 +201,10 @@ def engine_of(x: Any, default: ComputeEngine = NUMPY_ENGINE) -> ComputeEngine:
             continue
         if found is None:
             found = child_engine
-        elif type(found) is not type(child_engine):
+        elif not _engines_compatible(found, child_engine):
             raise TypeError("mixed compute engines in encoded payload: %s and %s" % (found.name, child_engine.name))
+        elif not getattr(found, "dtype_explicit", True) and getattr(child_engine, "dtype_explicit", True):
+            found = child_engine  # prefer the more-opinionated (explicit-precision) engine
     return default if found is None else found
 
 
