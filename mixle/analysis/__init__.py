@@ -25,7 +25,7 @@ from mixle.analysis.carcinogenic_risk import (
     excess_lifetime_cancer_risk,
     radon_wlm_risk,
 )
-from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator
+from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator, LedoitWolfInsufficientData
 from mixle.analysis.coverage import (
     ace,
     chao1,
@@ -57,6 +57,7 @@ from mixle.analysis.extreme import (
     record_times,
     return_level,
 )
+from mixle.analysis.habitat_constraints import apply_habitat_constraints, critical_habitat_exclusion
 from mixle.analysis.health_risk import (
     DOSE_RESPONSE_MODELS,
     DoseResponse,
@@ -171,6 +172,7 @@ __all__ = [
     "SmithMaxStableSampler",
     "fit_smith_maxstable",
     "LedoitWolfEstimator",
+    "LedoitWolfInsufficientData",
     # mine economics: cost curves, capex/opex roll-up, and Monte-Carlo DCF valuation
     "cost_curve",
     "capex_opex",
@@ -197,6 +199,9 @@ __all__ = [
     "SpeciesObservation",
     "HabitatModel",
     "fit_sdm",
+    # critical-habitat & listed-species network exclusion constraints (N2; IC-9, IC-12, IC-1)
+    "critical_habitat_exclusion",
+    "apply_habitat_constraints",
     # economic objective integration (J6): priced liabilities + hard constraints for
     # mixle.stochastic_opt.risk_adjusted_plan
     "priced_liabilities",
