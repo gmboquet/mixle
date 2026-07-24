@@ -32,7 +32,9 @@ Two related pieces share this module because they share the same underlying obje
   ``habitat_offset_liability``/``no_net_loss_constraint`` work off the same "lost habitat-hectare-
   equivalents" quantity: the fitted suitability field (``HabitatModel.mean``, i.e. ``lambda_c``) times
   per-cell area, summed over whatever footprint of cells a candidate disturbance plan (a mine plan, in
-  this module's worked instantiation) disturbs.
+  this module's worked instantiation) disturbs. Suitability, area, and every economic rate/cost feeding
+  these two functions are validated finite and sign-correct before they reach a solver or accounting
+  payload (MXR-080-0073) -- see :func:`_lost_equivalents` and the ``_require_*`` helpers below.
 
 Every function here reads only duck-typed attributes off ``habitat`` (``.mean``, optionally
 ``.cell_area``) or takes plain arrays, so anything satisfying the IC-1 ``Posterior`` surface over a
@@ -100,11 +102,35 @@ def _edge_cost(flat_resistance: np.ndarray, i: int, j: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Input validation (MXR-080-0072): resistance and terminal-index validation for the connectivity
-# functions below, so a NaN/negative/zero resistance or an out-of-bounds/overlapping source or sink
-# raises clearly instead of silently producing a wrong (or, pre-fix, arbitrarily-capped) connectivity
-# value.
+# Input validation (MXR-080-0072 / MXR-080-0073). Every public entry point below validates its numeric
+# inputs' finiteness and physical sign before it reaches a linear solve or an accounting payload, rather
+# than silently clamping (the old `resistance_raster`) or propagating NaN/negative values into a
+# supposedly hard constraint.
 # ---------------------------------------------------------------------------
+def _require_finite(value: np.ndarray | float, name: str) -> np.ndarray:
+    """Raise unless every entry of ``value`` is finite (no NaN/+-inf)."""
+    arr = np.asarray(value, dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    return arr
+
+
+def _require_finite_nonnegative(value: np.ndarray | float, name: str) -> np.ndarray:
+    """Raise unless every entry of ``value`` is finite and ``>= 0``."""
+    arr = _require_finite(value, name)
+    if np.any(arr < 0.0):
+        raise ValueError(f"{name} must be non-negative, got {value!r}")
+    return arr
+
+
+def _require_finite_positive(value: np.ndarray | float, name: str) -> np.ndarray:
+    """Raise unless every entry of ``value`` is finite and strictly ``> 0``."""
+    arr = _require_finite(value, name)
+    if np.any(arr <= 0.0):
+        raise ValueError(f"{name} must be strictly positive, got {value!r}")
+    return arr
+
+
 def _require_valid_resistance(resistance: np.ndarray) -> np.ndarray:
     """Raise unless every cell of a resistance raster is finite-and-positive, or the ``+inf`` sentinel.
 
@@ -157,9 +183,17 @@ def resistance_raster(habitat: HabitatModel, *, floor: float = 1e-3) -> np.ndarr
     suitability cells at a large-but-finite cost (near-impermeable) rather than blowing up to ``inf``, so
     the resulting raster is always safe to feed straight into :func:`least_cost_corridor` /
     :func:`habitat_connectivity` without any further cleanup.
+
+    Raises:
+        ValueError: if ``floor`` is not finite and strictly positive, or if ``habitat.mean`` contains a
+            NaN/Inf/negative entry. An earlier revision silently clamped negative suitability into the
+            same near-impermeable cost as zero suitability (MXR-080-0073), hiding invalid upstream model
+            output; a negative suitability now always raises instead of being clamped. Zero suitability
+            remains a legitimate input (clamped to ``floor``, as documented above).
     """
-    suitability = np.asarray(habitat.mean, dtype=np.float64)
-    return 1.0 / np.maximum(suitability, float(floor))
+    floor = float(_require_finite_positive(floor, "floor"))
+    suitability = _require_finite_nonnegative(np.asarray(habitat.mean, dtype=np.float64), "habitat.mean")
+    return 1.0 / np.maximum(suitability, floor)
 
 
 def least_cost_corridor(resistance: np.ndarray, patch_a: int, patch_b: int) -> tuple[float, list[int]]:
@@ -464,14 +498,22 @@ def _lost_equivalents(plan_footprint: Any, habitat: HabitatModel) -> tuple[np.nd
 
     ``per_cell_c = footprint_c * suitability_c * area_c``; the total is its sum. ``area`` falls back to
     all-ones (unit cells) when ``habitat`` carries no ``cell_area`` attribute.
+
+    Raises:
+        ValueError: if ``habitat.mean`` or ``habitat.cell_area`` contains a NaN/Inf/negative entry, or if
+            ``plan_footprint``/``habitat.cell_area`` do not match ``habitat.mean``'s shape. A NaN or
+            negative habitat field used to propagate silently into the no-net-loss accounting below
+            (MXR-080-0073); it is now rejected here, at the one place both public functions read it from.
     """
     footprint = np.asarray(plan_footprint, dtype=bool)
-    suitability = np.asarray(habitat.mean, dtype=np.float64)
+    suitability = _require_finite_nonnegative(np.asarray(habitat.mean, dtype=np.float64), "habitat.mean")
     if footprint.shape != suitability.shape:
         raise ValueError(
             f"plan_footprint shape {footprint.shape} does not match habitat.mean shape {suitability.shape}"
         )
-    area = np.asarray(getattr(habitat, "cell_area", np.ones_like(suitability)), dtype=np.float64)
+    area = _require_finite_positive(
+        np.asarray(getattr(habitat, "cell_area", np.ones_like(suitability)), dtype=np.float64), "habitat.cell_area"
+    )
     if area.shape != suitability.shape:
         raise ValueError(f"habitat.cell_area shape {area.shape} does not match habitat.mean shape {suitability.shape}")
     per_cell = footprint.astype(np.float64) * suitability * area
@@ -491,15 +533,22 @@ def habitat_offset_liability(
     ``HabitatModel.mean``); the liability is ``offset_ratio * lost_equivalents * unit_offset_cost`` -- an
     additive dollar term the same shape J6's ``priced_liabilities`` already sums for carbon/health/
     remediation (workstream-J.md J6). ``offset_ratio=0`` or ``unit_offset_cost=0`` reduces this to zero,
-    i.e. no biodiversity-offset requirement.
+    i.e. no biodiversity-offset requirement -- both remain valid, meaningful inputs and are not rejected.
 
     Because ``lost_equivalents`` is linear in the boolean footprint, the *per-cell rate*
     ``offset_ratio * unit_offset_cost * suitability_c * area_c`` is itself a valid per-block deduction a
     MILP-based optimizer (H4/J6's ``risk_adjusted_plan``) can net directly out of expected per-block
     profit -- this function is the scalar evaluator for a given (candidate or solved) footprint.
+
+    Raises:
+        ValueError: if ``offset_ratio``/``unit_offset_cost`` is negative or non-finite, or if
+            ``_lost_equivalents`` rejects ``plan_footprint``/``habitat``. A negative ratio or cost used to
+            silently turn habitat damage into a "profit" (MXR-080-0073); both are now rejected.
     """
+    offset_ratio = float(_require_finite_nonnegative(offset_ratio, "offset_ratio"))
+    unit_offset_cost = float(_require_finite_nonnegative(unit_offset_cost, "unit_offset_cost"))
     _, lost = _lost_equivalents(plan_footprint, habitat)
-    return float(offset_ratio) * lost * float(unit_offset_cost)
+    return offset_ratio * lost * unit_offset_cost
 
 
 def no_net_loss_constraint(
@@ -517,9 +566,17 @@ def no_net_loss_constraint(
     ``-offsets_created <= -required_offset``, i.e. ``offsets_created >= required_offset``. Placing that row
     (and the ``offsets_created`` column it references) into the wider extraction/offset-purchase decision
     space is H4/J6's job -- this module never edits their MILP variable indexing, only hands them the row.
+
+    Raises:
+        ValueError: if ``offset_ratio`` is negative or non-finite, or if ``_lost_equivalents`` rejects
+            ``plan_footprint``/``habitat`` (NaN/negative suitability or area). A NaN or negative
+            ``lost_equivalents`` used to be able to propagate into ``required_offset``, silently weakening
+            or inverting a constraint that is supposed to be a hard floor (MXR-080-0073); both inputs are
+            now validated before this payload is built.
     """
+    offset_ratio = float(_require_finite_nonnegative(offset_ratio, "offset_ratio"))
     per_cell, lost = _lost_equivalents(plan_footprint, habitat)
-    required = float(offset_ratio) * lost
+    required = offset_ratio * lost
     return {
         "lost_equivalents": lost,
         "per_cell_lost_equivalents": per_cell,

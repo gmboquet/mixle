@@ -286,3 +286,20 @@ def test_effective_conductance_dedupes_repeated_terminal_indices_without_error()
     # double-count that node's current.
     resistance = np.ones((2, 2))
     assert effective_conductance(resistance, sources=[0, 0], sinks=[3]) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("bad_floor", [0.0, -1e-3, float("nan"), float("inf")])
+def test_resistance_raster_rejects_invalid_floor(bad_floor):
+    habitat = _FakeHabitat(np.array([0.5, 0.8]))
+    with pytest.raises(ValueError):
+        resistance_raster(habitat, floor=bad_floor)
+
+
+def test_resistance_raster_rejects_negative_suitability_instead_of_silently_clamping_it():
+    # MXR-080-0073: negative suitability used to be clamped to the same near-impermeable cost as zero
+    # suitability via `np.maximum(suitability, floor)`, hiding invalid upstream model output. It must now
+    # raise instead. Zero suitability remains legitimate (see
+    # test_resistance_raster_inverts_suitability_with_a_floor above) and must NOT raise.
+    habitat = _FakeHabitat(np.array([0.5, -0.3, 0.9]))
+    with pytest.raises(ValueError):
+        resistance_raster(habitat, floor=1e-3)
