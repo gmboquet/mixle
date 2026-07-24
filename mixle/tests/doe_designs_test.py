@@ -1,6 +1,8 @@
 """Tests for the DoE space-filling / classical design generators (WS-E)."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 from scipy.stats import qmc
@@ -14,7 +16,7 @@ from mixle.doe import (
     random_design,
     sobol_design,
 )
-from mixle.doe.designs import _maxpro_criterion
+from mixle.doe.designs import _as_bounds, _as_rng, _maxpro_criterion, _maxpro_swap, _scale_unit
 
 
 def _within_bounds(x, bounds):
@@ -218,6 +220,88 @@ class BoundsAndCountValidationTest(unittest.TestCase):
         self.assertEqual(z.shape, (6, 2))
         mm = maximin_latin_hypercube(bounds, 6, seed=1, trials=5)
         self.assertEqual(mm.shape, (6, 3))
+
+
+class MaxProValidationAndFallbackTest(unittest.TestCase):
+    """MXR-080-0175: maxpro_design's restart/swap/iteration/n controls and its optimizer-failure fallback."""
+
+    bounds = [(0.0, 1.0), (0.0, 1.0)]
+
+    def test_rejects_invalid_n_restart_swap_iteration_controls(self):
+        with self.assertRaises(ValueError):
+            maxpro_design(self.bounds, 0)
+        with self.assertRaises(ValueError):
+            maxpro_design(self.bounds, -2)
+        with self.assertRaises(ValueError):
+            maxpro_design(self.bounds, 3.5)
+        with self.assertRaises(ValueError):
+            maxpro_design(self.bounds, 6, restarts=0)
+        with self.assertRaises(ValueError):
+            maxpro_design(self.bounds, 6, restarts=-1)
+        with self.assertRaises(ValueError):
+            maxpro_design(self.bounds, 6, restarts=1.5)
+        with self.assertRaises(ValueError):
+            maxpro_design(self.bounds, 6, swaps=-1)
+        with self.assertRaises(ValueError):
+            maxpro_design(self.bounds, 6, swaps=2.5)
+        with self.assertRaises(ValueError):
+            maxpro_design(self.bounds, 6, maxiter=-1)
+        with self.assertRaises(ValueError):
+            maxpro_design(self.bounds, 6, maxiter=3.5)
+
+    def test_zero_swaps_or_maxiter_are_legitimate_not_errors(self):
+        # swaps=0 skips the discrete coordinate-exchange phase; maxiter=0 skips continuous refinement.
+        # Neither is "restarts" (which must be >= 1 -- zero restarts would produce no design at all).
+        self.assertEqual(maxpro_design(self.bounds, 6, swaps=0).shape, (6, 2))
+        self.assertEqual(maxpro_design(self.bounds, 6, maxiter=0).shape, (6, 2))
+
+    def test_falls_back_to_last_verified_design_when_optimizer_reports_failure(self):
+        """A failed (success=False) optimizer result must never be clipped/compared as if it were a
+        legitimate refinement -- the restart should fall back to its swap-refined discrete design."""
+        n, d = 6, 2
+        failed = SimpleNamespace(success=False, fun=float("nan"), x=np.full(n * d, np.nan), jac=np.full(n * d, np.nan))
+        with patch("scipy.optimize.minimize", return_value=failed):
+            got = maxpro_design(self.bounds, n, seed=0, restarts=1, swaps=20, maxiter=50)
+
+        self.assertTrue(np.all(np.isfinite(got)))
+        self.assertTrue(_within_bounds(got, self.bounds))
+
+        # Reconstruct exactly what the swap-only stage produces from the same seed, to confirm the
+        # fallback is the genuine verified discrete design, not merely "some finite" placeholder.
+        b = _as_bounds(self.bounds)
+        rng = _as_rng(0)
+        start = np.empty((n, d), dtype=np.float64)
+        for j in range(d):
+            start[:, j] = (rng.permutation(n) + rng.random_sample(n)) / n
+        start = _maxpro_swap(start, rng, 20)
+        expected = _scale_unit(start, b)
+        np.testing.assert_array_equal(got, expected)
+
+    def test_falls_back_when_optimizer_reports_success_but_non_finite(self):
+        """success=True alone is not enough -- a non-finite fun/x/jac must also fall back."""
+        n, d = 6, 2
+        ok_x, ok_jac = np.full(n * d, 0.5), np.zeros(n * d)
+        nan_x = np.concatenate([np.full(n * d - 1, 0.5), [np.nan]])
+        inf_jac = np.concatenate([np.zeros(n * d - 1), [np.inf]])
+        bad_results = {
+            "non_finite_fun": SimpleNamespace(success=True, fun=float("inf"), x=ok_x, jac=ok_jac),
+            "non_finite_x": SimpleNamespace(success=True, fun=0.1, x=nan_x, jac=ok_jac),
+            "non_finite_jac": SimpleNamespace(success=True, fun=0.1, x=ok_x, jac=inf_jac),
+        }
+        for name, result in bad_results.items():
+            with self.subTest(name), patch("scipy.optimize.minimize", return_value=result):
+                got = maxpro_design(self.bounds, n, seed=0, restarts=1, swaps=20, maxiter=50)
+            self.assertTrue(np.all(np.isfinite(got)), name)
+            self.assertTrue(_within_bounds(got, self.bounds), name)
+
+    def test_successful_refinement_still_improves_on_swap_only_baseline(self):
+        """Negative control: a normal (unmocked) run's continuous stage still genuinely refines --
+        the docstring's claim that it "cuts the criterion by far more than the swap phase alone"."""
+        bounds = [(0.0, 1.0)] * 4
+        n = 20
+        refined = maxpro_design(bounds, n, seed=0, restarts=1)
+        swap_only = maxpro_design(bounds, n, seed=0, restarts=1, maxiter=0)
+        self.assertLess(_maxpro_criterion(refined), _maxpro_criterion(swap_only))
 
 
 if __name__ == "__main__":
