@@ -568,6 +568,74 @@ class AutoregressiveEnumerableTest(unittest.TestCase):
             self.assertEqual(len(out), _LEN)
             self.assertTrue(ar._in_declared_support(out))
 
+    # -- MXR-080-0223: prefetch/harvest paired requested prefixes/positions with callback results via a bare
+    # zip() or a blind slice, with no check that the counts actually matched -- a short result silently left
+    # entries missing (uncached, or to a slower lazy path) and a long one was silently ignored. The single-
+    # sequence batch-scorer shortcuts had the same gap (.reshape(-1)[0] never checks the size is 1). --------
+
+    def test_prefetch_rejects_short_batch_next_logprobs_result(self):
+        # A batch callback that drops the last prefix of every chunk -- zip() used to silently leave those
+        # prefixes for the slower one-at-a-time lazy path, with no signal anything was wrong.
+        def short_batch(prefixes):
+            results = [self.next_logprobs(p) for p in prefixes]
+            return results[:-1] if len(results) > 1 else results
+
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, batch_next_logprobs=short_batch, batch_size=8)
+        with self.assertRaises(ValueError):
+            ar._prefetch(ar._quantizer(), max_fine_bucket=10**6)
+
+    def test_prefetch_rejects_long_batch_next_logprobs_result(self):
+        # A batch callback that returns one extra (bogus) result -- zip() used to silently ignore it.
+        def long_batch(prefixes):
+            return [self.next_logprobs(p) for p in prefixes] + [self.next_logprobs(())]
+
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, batch_next_logprobs=long_batch, batch_size=8)
+        with self.assertRaises(ValueError):
+            ar._prefetch(ar._quantizer(), max_fine_bucket=10**6)
+
+    def test_harvest_rejects_short_all_position_logprobs_result_without_partial_caching(self):
+        # Reproduce the audit's exact concern: a short per-position result used to be silently accepted
+        # (results[:len(seq)]), leaving the uncovered tail uncached with no signal of incomplete coverage.
+        # The fix must validate BEFORE writing anything, so a rejected call leaves the cache untouched.
+        def short_all_positions(seq):
+            return [self.next_logprobs(seq[:d]) for d in range(len(seq) - 1)]  # one short
+
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, all_position_logprobs=short_all_positions)
+        with self.assertRaises(ValueError):
+            ar.harvest(self.brute[0][0])
+        self.assertEqual(len(ar._cache), 0)  # nothing partially written before the raise
+
+    def test_harvest_rejects_long_all_position_logprobs_result(self):
+        def long_all_positions(seq):
+            return [self.next_logprobs(seq[:d]) for d in range(len(seq))] + [self.next_logprobs(())]
+
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, all_position_logprobs=long_all_positions)
+        with self.assertRaises(ValueError):
+            ar.harvest(self.brute[0][0])
+
+    def test_log_density_batch_scorer_shortcut_rejects_wrong_cardinality(self):
+        # Reproduce the audit's exact bug: a scorer returning a WRONG-SIZE array for one sequence used to
+        # be silently accepted via .reshape(-1)[0] -- taking the first element with no validation at all.
+        def wrong_size_scorer(seqs):
+            return np.array([-1.0, -2.0, -3.0])  # always 3 values, regardless of input size
+
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, batch_score_sequences=wrong_size_scorer)
+        with self.assertRaises(ValueError):
+            ar.log_density(self.brute[0][0])
+
+    def test_score_sequences_rejects_wrong_cardinality_from_batch_scorer(self):
+        # A bare `.reshape(len(idx))` alone happens to ALSO raise on this particular mismatch (numpy's
+        # reshape validates total element count), so asserting just "raises ValueError" would not actually
+        # discriminate the fix from the pre-fix code. Assert the message identifies the real cause (a
+        # batch_score_sequences cardinality mismatch), which the old bare reshape's generic numpy message
+        # never did -- this is the same clear-error contract as every other MXR-080-0223 call site.
+        def wrong_size_scorer(seqs):
+            return np.array([-1.0, -2.0, -3.0])
+
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, batch_score_sequences=wrong_size_scorer)
+        with self.assertRaisesRegex(ValueError, "batch_score_sequences"):
+            ar.score_sequences([self.brute[0][0], self.brute[1][0]])
+
 
 if __name__ == "__main__":
     unittest.main()
