@@ -1515,6 +1515,26 @@ def analyze_structure(
                 "modality fingerprint: image (shape=%s) would route to a hybrid neural density, but torch "
                 "is not installed -- fell back to the per-row sequence model" % (mat_shape,)
             )
+    elif vec_dim is None:
+        # A fixed-length all-numeric vector is otherwise the one shape the automatic pipeline builds a
+        # dependency-capturing joint estimator for (MultivariateGaussianEstimator); missing/non-finite
+        # entries disqualify it (the multivariate-Gaussian distribution requires a fully-observed
+        # vector -- there is no per-dimension optional/missing-value wrapping for it, unlike scalar
+        # fields). Without this note the frontier just quietly has one fewer candidate: this makes the
+        # skip explicit instead of silent, the same convention used for the embedding/image routes above.
+        missing_vec_dim = root._fixed_numeric_vector_dim(allow_missing=True)
+        if missing_vec_dim is not None:
+            affected = sum(
+                1
+                for child in root.children
+                if child.none_count > 0 or child.nan_count > 0 or child.pos_inf_count > 0 or child.neg_inf_count > 0
+            )
+            warnings.append(
+                "modality fingerprint: %d of %d numeric vector field(s) have missing/non-finite values -> "
+                "the multivariate-Gaussian joint/dependency route needs a fully-observed vector, so an "
+                "independent per-field composite was used instead (missing-data-aware joint/dependency "
+                "modeling is not implemented yet)" % (affected, missing_vec_dim)
+            )
     observed_rows = [u for u in rows if u is not None]
     if use_bstats and observed_rows and all(isinstance(u, dict) for u in observed_rows):
         warnings.append(
@@ -2010,7 +2030,16 @@ class DatumNode:
 
         return rv
 
-    def _fixed_numeric_vector_dim(self):
+    def _fixed_numeric_vector_dim(self, *, allow_missing: bool = False):
+        """Dimension of a fixed-length all-numeric vector field, or ``None`` if this field does not
+        qualify for the multivariate-Gaussian joint/dependency route.
+
+        ``allow_missing=True`` skips only the missing/non-finite check, leaving every other
+        eligibility rule intact -- used by :func:`analyze_structure` to tell whether missing data is
+        specifically what disqualified an otherwise-eligible vector (see the "modality fingerprint:
+        missing values" warning), as opposed to the field never having qualified at all (a tuple, a
+        mixed-type row, etc.).
+        """
         if (
             self.tuple_count > 0
             or self.seq_count == 0
@@ -2025,7 +2054,9 @@ class DatumNode:
         for child in self.children:
             if child.count != self.seq_count:
                 return None
-            if child.none_count > 0 or child.nan_count > 0 or child.pos_inf_count > 0 or child.neg_inf_count > 0:
+            if not allow_missing and (
+                child.none_count > 0 or child.nan_count > 0 or child.pos_inf_count > 0 or child.neg_inf_count > 0
+            ):
                 return None
             if child.str_count > 0 or child.bool_count > 0 or child.obj_count > 0:
                 return None

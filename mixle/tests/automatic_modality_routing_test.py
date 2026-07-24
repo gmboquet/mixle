@@ -114,5 +114,80 @@ class HybridRoutingTest(unittest.TestCase):
         self.assertTrue(any("modality fingerprint" in line for line in rec.explain()))
 
 
+def _missing_value_note(warnings):
+    return [w for w in warnings if "modality fingerprint" in w and "missing" in w]
+
+
+class MissingDataFallbackTest(unittest.TestCase):
+    """Missing/non-finite entries in an otherwise-eligible numeric-vector field disqualify the
+    multivariate-Gaussian joint/dependency route (the distribution requires a fully-observed vector; no
+    missing-data-aware joint model exists yet), so the automatic pipeline falls back to the independent
+    per-field composite. The fallback must be RECORDED, the same "modality fingerprint" convention used
+    for the embedding/image routes above -- not just a silently smaller/different candidate."""
+
+    def test_complete_vector_still_recommends_mvn_with_no_missing_value_note(self):
+        # baseline: unaffected when nothing is missing (mirrors LowDimUnchangedTest).
+        est = get_estimator(_vectors(4, n=60))
+        self.assertIsInstance(est, MultivariateGaussianEstimator)
+        profile = analyze_structure(_vectors(4, n=60), pairwise=False, validate_marginals=False)
+        self.assertEqual(_missing_value_note(profile.warnings), [])
+
+    def test_missing_values_fall_back_to_independent_composite(self):
+        data = _vectors(4, n=60)
+        data[0][0] = float("nan")
+        est = get_estimator(data)
+        self.assertEqual(type(est).__name__, "CompositeEstimator")
+
+    def test_missing_value_fallback_is_recorded(self):
+        data = _vectors(4, n=60)
+        data[0][0] = float("nan")
+        profile = analyze_structure(data, pairwise=False, validate_marginals=False)
+        notes = _missing_value_note(profile.warnings)
+        self.assertEqual(len(notes), 1, f"expected exactly one missing-value modality note, got: {profile.warnings}")
+        self.assertIn("1 of 4", notes[0])  # names how many of the fields carried the missing/non-finite values
+
+    def test_none_entries_also_count_as_missing(self):
+        data = _vectors(4, n=60)
+        data[0][0] = None
+        profile = analyze_structure(data, pairwise=False, validate_marginals=False)
+        self.assertEqual(len(_missing_value_note(profile.warnings)), 1)
+
+    def test_tuple_rows_are_unaffected_by_the_new_note(self):
+        # Tuple-typed rows already route to Composite regardless of missing values -- a separate,
+        # pre-existing "fixed-arity tuples are records" rule (see get_estimator's first structured
+        # branch). Missing data is never what decided the route here, so the note must not fire.
+        rows = [tuple(row) for row in _vectors(4, n=60)]
+        rows[0] = (float("nan"),) + rows[0][1:]
+        profile = analyze_structure(rows, pairwise=False, validate_marginals=False)
+        self.assertEqual(type(profile.estimator).__name__, "CompositeEstimator")
+        self.assertEqual(_missing_value_note(profile.warnings), [])
+
+    def test_single_field_vector_is_unaffected_by_the_new_note(self):
+        # dim<=1 never qualified for the joint/dependency route in the first place (nothing to lose) --
+        # the note is specifically about a *joint* route becoming unavailable, so it must not fire.
+        data = [[x] for x in np.random.RandomState(0).normal(size=60)]
+        data[0][0] = float("nan")
+        profile = analyze_structure(data, pairwise=False, validate_marginals=False)
+        self.assertEqual(_missing_value_note(profile.warnings), [])
+
+    def test_propose_surfaces_the_fallback_reason_in_notes(self):
+        # The end-to-end entry point an external caller actually sees: mixle.propose(data). The
+        # frontier legitimately collapses to one candidate (recommended == independent baseline, per
+        # test_propose_skips_independent_baseline_when_structurally_identical in lifecycle_test.py) --
+        # but that collapse must be explained, not silent.
+        import mixle
+
+        data = _vectors(4, n=200)
+        for i in range(0, len(data), 10):
+            data[i][0] = float("nan")
+        m = mixle.propose(data, fit=True)
+        names = [f["name"] for f in m.frontier]
+        self.assertEqual(names.count("independent"), 0)
+        self.assertTrue(
+            any("missing" in n and "composite" in n for n in m.notes),
+            f"no explanation of the missing-value dependency-route fallback in notes: {m.notes}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
