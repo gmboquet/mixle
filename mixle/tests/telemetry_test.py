@@ -92,6 +92,45 @@ class RecorderTest(unittest.TestCase):
         c = t.record("fit", choice="z", when=1000.0)
         self.assertEqual(c.ts, 1000.0)  # explicit time honored
 
+    def test_explicit_when_does_not_leave_clock_behind(self):
+        # An explicitly-supplied `when=` must fold into the fallback clock's high-water mark,
+        # not just override the one Event's `.ts`. Otherwise the clock stays wherever the
+        # auto-increment counter left it, and the very next default-timestamped record() could
+        # hand out a ts smaller than the one the caller just set explicitly -- the same class of
+        # ordering corruption as the reload bug covered below, triggered without ever touching
+        # disk.
+        t = Telemetry()
+        explicit = t.record("fit", choice="x", when=1000.0)
+        self.assertEqual(explicit.ts, 1000.0)
+        auto = t.record("fit", choice="y")
+        self.assertGreater(auto.ts, explicit.ts)
+
+    def test_reload_advances_clock_past_loaded_timestamps(self):
+        # Reproduces the reported bug: a log containing an event at ts=100.0 (auto-assigned by
+        # a recorder whose fallback clock had already advanced that far) is reopened in a fresh
+        # Telemetry instance, which triggers _load(). Before the fix, _load() restored the
+        # buffered events but never advanced the new instance's own _clock past what it just
+        # read, so the freshly-loaded process's clock started over from 0.0 -- the very next
+        # default-timestamped record() got ts=1.0, and the on-disk event order became
+        # [100.0, 1.0]: a later real-world event with a *smaller* logical timestamp than an
+        # earlier one, corrupting any ordering/causality assumption downstream code makes about
+        # this log. _load() now scans the loaded events for the max timestamp and advances
+        # _clock to at least that value.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "events.jsonl")
+            t1 = Telemetry(path)
+            t1._clock = 99.0  # simulate a recorder that already auto-assigned up through ts=99.0
+            first = t1.record("fit", choice="closed_form")
+            self.assertEqual(first.ts, 100.0)
+
+            t2 = Telemetry(path)  # reopen -- triggers _load()
+            second = t2.record("fit", choice="em")
+
+            self.assertGreater(second.ts, first.ts)  # monotone, not the broken [100.0, 1.0]
+
+            reloaded = [ev.ts for ev in Telemetry(path).events()]
+            self.assertEqual(reloaded, sorted(reloaded))
+
 
 class GlobalRecorderTest(unittest.TestCase):
     def setUp(self):
