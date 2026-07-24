@@ -2,13 +2,17 @@
 
 Nonparametric estimates of *where the mass is* without assuming a parametric family:
 
-  * :class:`KDE` / :func:`kde` -- kernel density estimation in 1-D (and product-kernel in higher
-    dimensions), with automatic bandwidth (Silverman / Scott), **boundary correction** by reflection
-    for densities on a half-line or interval (a plain KDE leaks mass across a hard boundary and biases
-    the edge down), and **adaptive** (variable) bandwidths that widen in the sparse tails (Abramson).
-  * :func:`kde_mode` -- the location of the density's peak ("where is the mode, and how sure am I?")
+  * :class:`KDE` / :func:`kde` -- kernel density estimation for a 1-D ``(n,)`` sample or, via an
+    axis-aligned Gaussian **product kernel** with a per-dimension bandwidth, a genuinely multivariate
+    ``(n, d)`` sample (rows are observations; row-pairing is preserved, never flattened). Automatic
+    bandwidth selection (Silverman / Scott) chooses each dimension's bandwidth from that dimension's own
+    marginal spread, using the joint-dimension ``n^{-1/(d+4)}`` rate. **Adaptive** (variable) bandwidths
+    that widen in the sparse tails (Abramson) work in any dimension; **boundary correction** by
+    reflection (``bounds``, for densities on a half-line or interval -- a plain KDE leaks mass across a
+    hard boundary and biases the edge down) is supported for 1-D data only.
+  * :func:`kde_mode` -- the location of a 1-D density's peak ("where is the mode, and how sure am I?")
     with a bootstrap confidence interval.
-  * :func:`intensity` -- the intensity ``lambda(t)`` of an inhomogeneous Poisson / point process by
+  * :func:`intensity` -- the intensity ``lambda(t)`` of a 1-D inhomogeneous Poisson / point process by
     kernel smoothing of event locations, with optional edge correction (ties to the Cox-process
     machinery elsewhere in the library).
 
@@ -22,6 +26,35 @@ from numpy.random import RandomState
 from scipy import stats
 
 _BANDWIDTH_METHODS = ("silverman", "scott")
+
+
+def _as_observations(data: np.ndarray) -> np.ndarray:
+    """Interpret ``data`` as ``(n, d)`` observations, preserving row-pairing (MXR-080-0099).
+
+    A 1-D ``(n,)`` input is ``n`` scalar observations of 1 variable, shape ``(n, 1)``. A 2-D ``(n, d)``
+    input is ``n`` observations of ``d`` variables, one observation per *row* -- returned unchanged, so
+    which values came from the same observation (row) and which axis is which variable are both
+    preserved exactly as given. This never reshapes across rows: unlike ``.ravel()`` on an ``(n, d)``
+    array (the previous behavior, which turned ``n`` paired ``d``-dimensional observations into ``n*d``
+    unrelated scalars, destroying both the sample pairing and which axis was which variable), a genuine
+    2-D input is used as-is.
+
+    Note this differs from (and fixes) the disambiguation ``scott_bandwidth`` used to use internally
+    (``np.atleast_2d`` then transpose iff ``shape[0] == 1``): that heuristic guessed "the caller must
+    have meant a 1-D sample" from the *shape* alone, which is wrong for a genuine single ``d``-variable
+    observation of shape ``(1, d)``. Here the caller's intent is read from ``ndim``, which is
+    unambiguous: pass a 2-D ``(1, d)`` array (e.g. ``[[1.0, 2.0, 3.0]]``) for one ``d``-dimensional
+    observation, never a bare 1-D array of length ``d``.
+
+    Raises:
+        ValueError: ``data`` has more than 2 dimensions.
+    """
+    x = np.asarray(data, dtype=float)
+    if x.ndim == 1:
+        return x[:, None]
+    if x.ndim == 2:
+        return x
+    raise ValueError(f"expected a 1-D (n,) or 2-D (n, d) array, got shape {x.shape}")
 
 
 def _require_variation(x: np.ndarray, method: str) -> None:
@@ -56,8 +89,14 @@ def _require_variation(x: np.ndarray, method: str) -> None:
         )
 
 
-def silverman_bandwidth(data: np.ndarray) -> float:
-    """Silverman's rule-of-thumb bandwidth ``0.9 min(sd, IQR/1.34) n^{-1/5}`` (1-D).
+def silverman_bandwidth(data: np.ndarray, *, d: int = 1) -> float:
+    """Silverman's rule-of-thumb bandwidth ``0.9 min(sd, IQR/1.34) n^{-1/(d+4)}`` for a 1-D sample.
+
+    ``data`` is always treated as one 1-D sample (e.g. a single column of a multivariate dataset).
+    ``d`` only sets the exponent: it is the dimensionality of the *joint* sample this bandwidth will be
+    used in a product kernel for -- pass it explicitly when selecting one dimension's bandwidth for a
+    multivariate :class:`KDE`, so the ``n^{-1/(d+4)}`` rate reflects the true joint dimension rather than
+    the univariate default ``d=1`` (``n^{-1/5}``) rate (MXR-080-0099).
 
     Raises:
         ValueError: ``data`` has fewer than 2 observations, non-finite entries, or zero variation (see
@@ -69,36 +108,67 @@ def silverman_bandwidth(data: np.ndarray) -> float:
     sd = np.std(x, ddof=1)
     iqr = np.subtract(*np.percentile(x, [75, 25]))
     spread = min(sd, iqr / 1.349) if iqr > 0 else sd
-    return float(0.9 * spread * n ** (-1.0 / 5.0))
+    return float(0.9 * spread * n ** (-1.0 / (d + 4.0)))
 
 
-def scott_bandwidth(data: np.ndarray) -> float:
-    """Scott's rule-of-thumb bandwidth ``sd * n^{-1/(d+4)}``.
+def scott_bandwidth(data: np.ndarray, *, d: int = 1) -> float:
+    """Scott's rule-of-thumb bandwidth ``sd * n^{-1/(d+4)}`` for a 1-D sample.
+
+    ``data`` is always treated as one 1-D sample; ``d`` only sets the exponent -- see
+    :func:`silverman_bandwidth` (whose ``d`` parameter has exactly the same meaning here).
 
     Raises:
-        ValueError: ``data`` has fewer than 2 observations, non-finite entries, or zero variation in
-            every marginal (MXR-080-0100).
+        ValueError: ``data`` has fewer than 2 observations, non-finite entries, or zero variation (see
+            :func:`_require_variation`; MXR-080-0100).
     """
-    x = np.atleast_2d(np.asarray(data, dtype=float))
-    if x.shape[0] == 1:
-        x = x.T
-    n, d = x.shape
-    if n < 2:
+    x = np.asarray(data, dtype=float).ravel()
+    _require_variation(x, "scott_bandwidth")
+    n = x.shape[0]
+    return float(np.std(x, ddof=1) * n ** (-1.0 / (d + 4.0)))
+
+
+def _resolve_bandwidth_vector(x: np.ndarray, bandwidth, d: int) -> np.ndarray:
+    """Resolve a bandwidth spec against ``(n, d)`` observations ``x`` into a length-``d`` vector of
+    strictly positive, finite per-dimension bandwidths for the axis-aligned Gaussian product kernel
+    (MXR-080-0099).
+
+    ``bandwidth`` may be:
+      * ``"silverman"`` / ``"scott"`` -- each dimension gets its own automatic bandwidth from that
+        dimension's own marginal spread (column ``j`` of ``x``), using the joint-dimension
+        ``n^{-1/(d+4)}`` rate (not the univariate ``n^{-1/5}`` rate) -- see :func:`silverman_bandwidth`.
+      * a single positive finite number -- used as the bandwidth in every dimension.
+      * a length-``d`` sequence of positive finite numbers -- one bandwidth per dimension.
+
+    Raises:
+        ValueError: ``bandwidth`` is an unrecognized method name; a numeric spec that is not a scalar or
+            length-``d``, or is not strictly positive and finite in every dimension; or (string methods
+            only) some dimension has fewer than 2 observations or zero variation, named by index.
+    """
+    if isinstance(bandwidth, str):
+        if bandwidth not in _BANDWIDTH_METHODS:
+            raise ValueError(
+                f"unsupported bandwidth method {bandwidth!r}; expected one of {_BANDWIDTH_METHODS}, a "
+                f"positive finite number, or a length-{d} sequence of positive finite numbers"
+            )
+        selector = silverman_bandwidth if bandwidth == "silverman" else scott_bandwidth
+        bw = np.empty(d)
+        for j in range(d):
+            try:
+                bw[j] = selector(x[:, j], d=d)
+            except ValueError as exc:
+                raise ValueError(f"dimension {j}: {exc}") from exc
+        return bw
+    arr = np.atleast_1d(np.asarray(bandwidth, dtype=float))
+    if arr.shape == (1,) and d > 1:
+        arr = np.full(d, arr[0])
+    if arr.shape != (d,):
         raise ValueError(
-            "scott_bandwidth needs at least 2 observations to estimate a spread for an automatic "
-            f"bandwidth, got {n}. Pass an explicit positive numeric `bandwidth` instead."
+            f"numeric bandwidth must be a positive finite number or a length-{d} vector (one per "
+            f"dimension), got shape {arr.shape}"
         )
-    if not np.all(np.isfinite(x)):
-        n_bad = int(np.sum(~np.isfinite(x)))
-        raise ValueError(f"scott_bandwidth requires finite data, got {n_bad} of {x.size} non-finite entries")
-    sd = np.std(x, axis=0, ddof=1)
-    if not np.all(sd > 0):
-        raise ValueError(
-            "scott_bandwidth needs nonzero variation in every dimension to estimate a spread for an "
-            "automatic bandwidth, got a constant sample. Pass an explicit positive numeric `bandwidth` "
-            "instead."
-        )
-    return float(np.mean(sd) * n ** (-1.0 / (d + 4)))
+    if not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
+        raise ValueError(f"bandwidth must be strictly positive and finite in every dimension, got {arr.tolist()}")
+    return arr
 
 
 def _resolve_bw(data: np.ndarray, bandwidth) -> float:
@@ -152,10 +222,19 @@ def _validate_bounds(
 
 
 class KDE:
-    """A fitted kernel density estimate.
+    """A fitted kernel density estimate, 1-D or multivariate.
 
     Use :func:`kde` to construct. Evaluate with :meth:`evaluate` (or call the instance). Supports a
-    Gaussian kernel, reflection boundary correction (``bounds``), and adaptive bandwidths.
+    Gaussian kernel -- an axis-aligned **product kernel** with a per-dimension bandwidth for
+    multivariate ``(n, d)`` data, rows treated as observations and never reshaped -- adaptive bandwidths
+    (any dimension), and, for 1-D data only, reflection boundary correction (``bounds``; MXR-080-0099).
+
+    Attributes:
+        data: the fitted sample as ``(n, d)`` observations (``d == 1`` for a 1-D sample).
+        n: number of observations.
+        d: dimensionality (``1`` for a 1-D sample).
+        bandwidth: the resolved bandwidth -- a scalar ``float`` when ``d == 1``, else a length-``d``
+            :class:`numpy.ndarray` (one bandwidth per dimension).
     """
 
     def __init__(
@@ -166,44 +245,70 @@ class KDE:
         bounds: tuple[float | None, float | None] | None = None,
         adaptive: bool = False,
     ) -> None:
-        x = np.asarray(data, dtype=float).ravel()
-        if x.shape[0] == 0:
+        x = _as_observations(data)
+        n, d = x.shape
+        if n == 0:
             raise ValueError("KDE requires at least one observation, got an empty sample")
         if not np.all(np.isfinite(x)):
             n_bad = int(np.sum(~np.isfinite(x)))
-            raise ValueError(f"KDE data must be finite, got {n_bad} of {x.shape[0]} non-finite entries")
+            raise ValueError(f"KDE data must be finite, got {n_bad} of {x.size} non-finite entries")
         self.data = x
-        self.n = self.data.shape[0]
-        self.bandwidth = _resolve_bw(self.data, bandwidth)
-        self.bounds = _validate_bounds(bounds)
+        self.n = n
+        self.d = d
+        bw_vec = _resolve_bandwidth_vector(x, bandwidth, d)
+        self.bandwidth = float(bw_vec[0]) if d == 1 else bw_vec
+        if bounds is not None and d > 1:
+            raise ValueError(
+                "bounds (reflection boundary correction) is only supported for 1-D KDE, got a "
+                f"{d}-dimensional sample; construct separate per-dimension KDEs if you need per-axis "
+                "boundary correction"
+            )
+        self.bounds = _validate_bounds(bounds) if d == 1 else None
         self.adaptive = adaptive
-        self._local_bw = np.full(self.n, self.bandwidth)
+        self._local_bw = np.tile(bw_vec, (n, 1))
         if adaptive:
-            pilot = self._raw_density(self.data, np.full(self.n, self.bandwidth))
+            pilot = self._raw_density(self.data, self._local_bw)
             g = np.exp(np.mean(np.log(np.clip(pilot, 1e-300, None))))
-            self._local_bw = self.bandwidth * np.sqrt(g / np.clip(pilot, 1e-300, None))
+            scale = np.sqrt(g / np.clip(pilot, 1e-300, None))
+            self._local_bw = bw_vec[None, :] * scale[:, None]
 
     def _raw_density(self, x: np.ndarray, local_bw: np.ndarray) -> np.ndarray:
-        """Plain (no boundary) Gaussian KDE at points ``x`` using per-data-point bandwidths."""
-        x = np.atleast_1d(x)
-        u = (x[:, None] - self.data[None, :]) / local_bw[None, :]
-        return np.mean(stats.norm.pdf(u) / local_bw[None, :], axis=1)
+        """Plain (no boundary) Gaussian product-kernel KDE at ``(m, d)`` points ``x`` using
+        per-data-point, per-dimension bandwidths ``local_bw`` (``(n, d)``)."""
+        u = (x[:, None, :] - self.data[None, :, :]) / local_bw[None, :, :]
+        kernel = stats.norm.pdf(u) / local_bw[None, :, :]  # (m, n, d)
+        return np.mean(np.prod(kernel, axis=2), axis=1)  # (m,)
+
+    def _prepare_eval_points(self, x: np.ndarray) -> np.ndarray:
+        xo = _as_observations(x)
+        if xo.shape[1] != self.d:
+            raise ValueError(
+                f"evaluate() expects points of dimension {self.d} (this KDE was fit on {self.d}-D "
+                f"data), got dimension {xo.shape[1]}"
+            )
+        return xo
 
     def evaluate(self, x: np.ndarray) -> np.ndarray:
-        """Density at points ``x`` (with reflection boundary correction if ``bounds`` was set)."""
-        x = np.atleast_1d(np.asarray(x, dtype=float))
-        dens = self._raw_density(x, self._local_bw)
+        """Density at points ``x`` -- ``(m,)`` for 1-D, ``(m, d)`` for multivariate -- with reflection
+        boundary correction if ``bounds`` was set (1-D only). Always returns a length-``m`` array."""
+        xo = self._prepare_eval_points(x)
+        dens = self._raw_density(xo, self._local_bw)
         if self.bounds is not None:
             lo, hi = self.bounds
+            x1 = xo[:, 0]
             if lo is not None:
-                dens = dens + self._raw_density(2.0 * lo - x, self._local_bw)
+                refl = xo.copy()
+                refl[:, 0] = 2.0 * lo - x1
+                dens = dens + self._raw_density(refl, self._local_bw)
             if hi is not None:
-                dens = dens + self._raw_density(2.0 * hi - x, self._local_bw)
-            mask = np.ones_like(x, dtype=bool)
+                refl = xo.copy()
+                refl[:, 0] = 2.0 * hi - x1
+                dens = dens + self._raw_density(refl, self._local_bw)
+            mask = np.ones(xo.shape[0], dtype=bool)
             if lo is not None:
-                mask &= x >= lo
+                mask &= x1 >= lo
             if hi is not None:
-                mask &= x <= hi
+                mask &= x1 <= hi
             dens = np.where(mask, dens, 0.0)
         return dens
 
@@ -211,23 +316,30 @@ class KDE:
 
 
 def kde(data: np.ndarray, *, bandwidth="silverman", bounds=None, adaptive: bool = False) -> KDE:
-    """Construct a kernel density estimate (Gaussian kernel).
+    """Construct a kernel density estimate (Gaussian kernel; product kernel for multivariate data).
 
     Args:
-        data: ``(n,)`` sample.
-        bandwidth: ``"silverman"``, ``"scott"``, or a positive float.
+        data: ``(n,)`` sample, or ``(n, d)`` for a ``d``-dimensional sample -- rows are observations and
+            must stay paired (never flatten an ``(n, d)`` array before calling this; MXR-080-0099).
+        bandwidth: ``"silverman"``, ``"scott"``, a single positive finite number (used in every
+            dimension), or -- for ``(n, d)`` data -- a length-``d`` sequence of positive finite numbers
+            (one bandwidth per dimension). Automatic selection needs >= 2 observations with nonzero
+            variation in every dimension.
         bounds: ``(lo, hi)`` support limits for reflection boundary correction; either may be ``None``
-            for an unbounded side (e.g. ``(0.0, None)`` for a positive variable).
-        adaptive: use Abramson variable bandwidths (wider where the pilot density is low).
+            for an unbounded side (e.g. ``(0.0, None)`` for a positive variable). Only supported for
+            1-D (``d == 1``) data.
+        adaptive: use Abramson variable bandwidths (wider where the pilot density is low); supported for
+            any dimension.
 
     Returns:
         A :class:`KDE`.
 
     Raises:
-        ValueError: ``data`` is empty or non-finite; ``bandwidth`` is an unrecognized method name or a
-            non-positive/non-finite number; automatic bandwidth selection (``"silverman"``/``"scott"``)
-            is requested on fewer than 2 observations or a constant sample; or ``bounds`` is out of
-            order or non-finite (MXR-080-0100).
+        ValueError: ``data`` is empty, non-finite, or more than 2-D; ``bandwidth`` is an unrecognized
+            method name, the wrong length, or not strictly positive and finite; automatic bandwidth
+            selection is requested on fewer than 2 observations or a constant sample in some dimension
+            (MXR-080-0100); or ``bounds`` is given together with ``d > 1``, out of order, or non-finite
+            (MXR-080-0099 / MXR-080-0100).
     """
     return KDE(data, bandwidth=bandwidth, bounds=bounds, adaptive=adaptive)
 
@@ -243,7 +355,12 @@ def kde_mode(
     ci_level: float = 0.95,
     seed: int | RandomState | None = 0,
 ) -> float | dict:
-    """Estimate the mode (peak location) of a density, optionally with a bootstrap CI.
+    """Estimate the mode (peak location) of a 1-D density, optionally with a bootstrap CI.
+
+    Univariate only: a dense grid search over ``d`` dimensions is exponential in ``d`` and is not
+    implemented here (unlike :class:`KDE`, this never accepted multivariate data as a documented
+    feature, so an ``(n, d)`` input is now rejected explicitly instead of being silently flattened with
+    ``.ravel()`` -- the same silent-flattening defect :class:`KDE` itself had; MXR-080-0099).
 
     Args:
         data: ``(n,)`` sample.
@@ -256,12 +373,18 @@ def kde_mode(
         The mode (float), or ``{'mode', 'ci_low', 'ci_high'}`` when ``ci`` is True.
 
     Raises:
-        ValueError: ``data`` is empty; or, when ``ci`` is True, ``n_boot`` is not a positive integer or
-            ``ci_level`` is not in the open interval ``(0, 1)`` (MXR-080-0100). Also propagates any
-            :class:`KDE` construction error from :func:`kde` (e.g. automatic bandwidth selection on a
-            constant sample).
+        ValueError: ``data`` is empty or not 1-D; or, when ``ci`` is True, ``n_boot`` is not a positive
+            integer or ``ci_level`` is not in the open interval ``(0, 1)`` (MXR-080-0100). Also
+            propagates any :class:`KDE` construction error from :func:`kde` (e.g. automatic bandwidth
+            selection on a constant sample).
     """
-    x = np.asarray(data, dtype=float).ravel()
+    x = np.asarray(data, dtype=float)
+    if x.ndim > 1:
+        raise ValueError(
+            f"kde_mode is univariate: expected a 1-D (n,) sample, got shape {x.shape}. Multivariate "
+            "mode-finding (a grid search over d dimensions) is not supported."
+        )
+    x = x.ravel()
     if x.shape[0] == 0:
         raise ValueError("kde_mode requires at least one observation, got an empty sample")
     if ci:
@@ -293,11 +416,15 @@ def intensity(
     domain: tuple[float, float] | None = None,
     edge_correct: bool = True,
 ) -> np.ndarray:
-    """Kernel intensity ``lambda(t)`` of an inhomogeneous Poisson / point process.
+    """Kernel intensity ``lambda(t)`` of a 1-D inhomogeneous Poisson / point process.
 
     Unlike a density (which integrates to 1), the intensity integrates to the *expected number of
     events*: ``lambda_hat(t) = sum_i K_h(t - t_i)``. With ``edge_correct`` the estimate is divided by
     the fraction of the kernel falling inside ``domain``, removing the downward bias near the boundary.
+
+    Univariate only: like :func:`kde_mode`, this never accepted multivariate data as a documented
+    feature, so an ``(m, d)`` input is now rejected explicitly instead of being silently flattened with
+    ``.ravel()`` (MXR-080-0099).
 
     Args:
         events: ``(m,)`` event locations.
@@ -310,14 +437,17 @@ def intensity(
         The intensity evaluated on ``grid``.
 
     Raises:
-        ValueError: ``events`` is empty or non-finite; ``bandwidth`` is an unrecognized method name or a
-            non-positive/non-finite number; automatic bandwidth selection is requested on fewer than 2
-            events or constant events; or (when ``edge_correct`` is True) the effective ``domain`` --
-            explicitly passed, or defaulted to the event range -- is non-finite or has ``lo >= hi``
-            (MXR-080-0100; a collapsed-to-a-point domain, e.g. from constant events with an explicit
-            numeric bandwidth, previously produced a silent divide-by-near-zero blowup).
+        ValueError: ``events`` is empty, non-finite, or not 1-D; ``bandwidth`` is an unrecognized method
+            name or a non-positive/non-finite number; automatic bandwidth selection is requested on
+            fewer than 2 events or constant events; or (when ``edge_correct`` is True) the effective
+            ``domain`` -- explicitly passed, or defaulted to the event range -- is non-finite or has
+            ``lo >= hi`` (MXR-080-0100; a collapsed-to-a-point domain, e.g. from constant events with an
+            explicit numeric bandwidth, previously produced a silent divide-by-near-zero blowup).
     """
-    e = np.asarray(events, dtype=float).ravel()
+    e = np.asarray(events, dtype=float)
+    if e.ndim > 1:
+        raise ValueError(f"intensity is univariate: expected a 1-D (m,) array of event locations, got shape {e.shape}")
+    e = e.ravel()
     if e.shape[0] == 0:
         raise ValueError("intensity requires at least one event, got an empty sample")
     if not np.all(np.isfinite(e)):
