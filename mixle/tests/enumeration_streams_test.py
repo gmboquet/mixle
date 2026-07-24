@@ -10,7 +10,7 @@ import unittest
 
 import numpy as np
 
-from mixle.enumeration.streams import freeze
+from mixle.enumeration.streams import BufferedStream, freeze
 
 
 class FreezeDedupKeyTestCase(unittest.TestCase):
@@ -87,6 +87,71 @@ class FreezeDedupKeyTestCase(unittest.TestCase):
     def test_unhashable_value_raises_type_error(self):
         with self.assertRaises(TypeError):
             freeze(bytearray(b"abc"))
+
+
+class BufferedStreamRankValidationTestCase(unittest.TestCase):
+    """MXR-080-0199: BufferedStream.get() must reject negative/non-integer ranks
+    uniformly, regardless of how much of the stream has already been buffered."""
+
+    @staticmethod
+    def _stream():
+        return iter([("a", -0.1), ("b", -0.5), ("c", -1.0)])
+
+    def test_negative_rank_rejected_with_empty_buffer(self):
+        buf = BufferedStream(self._stream())
+        with self.assertRaises(ValueError):
+            buf.get(-1)
+
+    def test_negative_rank_rejected_after_buffering(self):
+        # Pre-fix, get(-1) after at least one item is buffered returns that buffered
+        # item via ordinary Python negative indexing instead of raising -- this is
+        # exactly the history-dependent behavior the fix closes off. Proving both this
+        # case and the empty-buffer case above raise the same way is the key regression
+        # coverage: rank validation must not depend on prior access history.
+        buf = BufferedStream(self._stream())
+        self.assertEqual(buf.get(0), ("a", -0.1))
+        with self.assertRaises(ValueError):
+            buf.get(-1)
+
+    def test_negative_rank_rejected_consistently_at_various_buffer_depths(self):
+        for depth in range(4):
+            buf = BufferedStream(self._stream())
+            for r in range(depth):
+                buf.get(r)
+            with self.assertRaises(ValueError):
+                buf.get(-1)
+            with self.assertRaises(ValueError):
+                buf.get(-2)
+
+    def test_non_integer_rank_rejected(self):
+        buf = BufferedStream(self._stream())
+        with self.assertRaises(TypeError):
+            buf.get(2.5)
+        with self.assertRaises(TypeError):
+            buf.get(2.0)  # whole-valued float is still not an exact integer
+        with self.assertRaises(TypeError):
+            buf.get("0")
+        with self.assertRaises(TypeError):
+            buf.get(None)
+
+    def test_bool_rank_rejected_despite_being_an_int_subclass(self):
+        buf = BufferedStream(self._stream())
+        with self.assertRaises(TypeError):
+            buf.get(True)
+        with self.assertRaises(TypeError):
+            buf.get(False)
+
+    def test_valid_nonnegative_integer_ranks_still_retrieve_correctly(self):
+        # Negative control: legitimate ranks are unaffected by the validation.
+        buf = BufferedStream(self._stream())
+        self.assertEqual(buf.get(0), ("a", -0.1))
+        self.assertEqual(buf.get(2), ("c", -1.0))
+        self.assertEqual(buf.get(1), ("b", -0.5))  # already buffered by the get(2) above
+        self.assertIsNone(buf.get(3))  # past the end of a length-3 stream
+
+    def test_numpy_integer_rank_accepted(self):
+        buf = BufferedStream(self._stream())
+        self.assertEqual(buf.get(np.int64(1)), ("b", -0.5))
 
 
 if __name__ == "__main__":

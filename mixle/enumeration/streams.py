@@ -92,7 +92,23 @@ class BufferedStream:
         self._done = False
 
     def get(self, i: int) -> tuple[Any, float] | None:
-        """Return buffered item ``i``, pulling from the stream if needed."""
+        """Return buffered item ``i``, pulling from the stream if needed.
+
+        ``i`` is an absolute, 0-based rank -- not a Python sequence index -- so it must
+        be an exact, non-negative integer. This is checked before the buffer is touched
+        at all, regardless of how much has been buffered so far: without this check,
+        ``get(-1)`` would return the last *currently buffered* item via ordinary Python
+        negative indexing once anything has been pulled, but raise an incidental
+        ``IndexError`` from indexing an empty list otherwise -- making a negative rank's
+        observable behavior depend on prior access history instead of always meaning
+        "invalid." ``bool`` is rejected too despite being an ``int`` subclass, and a
+        whole-valued ``float`` such as ``2.0`` is rejected as well: a rank is always
+        exactly integral, never merely numerically equal to one.
+        """
+        if isinstance(i, bool) or not isinstance(i, (int, np.integer)):
+            raise TypeError("rank must be an int, got %s: %r" % (type(i).__name__, i))
+        if i < 0:
+            raise ValueError("rank must be non-negative, got %r" % (i,))
         buf = self._buf
         # Fast path: already buffered (the common case -- coordinates are re-read every pop).
         if i < len(buf):
