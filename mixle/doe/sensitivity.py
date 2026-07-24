@@ -135,8 +135,10 @@ def sobol_indices(
     ya = _eval_model(func, _scale(a, bounds), label="sobol_indices's func")
     yb = _eval_model(func, _scale(b, bounds), label="sobol_indices's func")
     var = np.var(np.concatenate([ya, yb]))
-    if var <= 0:  # constant output: every index is exactly (not just clipped-to-) zero, with no
-        zero = np.zeros(d)  # sampling uncertainty to quantify -- there is nothing left to estimate.
+    if var <= 0:
+        # Constant output: every index is exactly (not just clipped-to-) zero, with no sampling
+        # uncertainty to quantify -- there is nothing left to estimate.
+        zero = np.zeros(d)
         return {
             "S1": zero,
             "ST": zero.copy(),
@@ -210,34 +212,64 @@ def morris_screening(
 ) -> dict[str, Any]:
     """Morris elementary-effects screening -- a low-cost first factor ranking.
 
-    Walks ``trajectories`` one-factor-at-a-time paths on a ``levels``-grid; the mean absolute elementary
+    Walks ``trajectories`` randomized-direction one-factor-at-a-time paths on a ``levels``-point grid
+    per dimension (Morris 1991; Campolongo, Cariboni & Saltelli 2007); the mean absolute elementary
     effect ``mu_star[i]`` ranks influence and the spread ``sigma[i]`` flags nonlinearity/interactions.
     Cost: ``trajectories * (d + 1)`` evaluations -- far fewer than Sobol, for an initial screen.
+
+    Each trajectory walks the grid ``{0, 1/(p-1), 2/(p-1), ..., 1}`` (``p = levels``) and takes ``d``
+    one-at-a-time steps, one per input in a random order, each changing exactly one coordinate by the
+    fixed step ``delta = p / (2*(p-1)) = (p/2) / (p-1)`` -- i.e. exactly ``p/2`` grid points, chosen (the
+    standard choice) so the step always lands exactly on another grid point. Both the visit *order* and
+    each dimension's step *direction* (up by ``delta`` or down by ``delta``) are independently
+    randomized per trajectory. The starting coordinate for a dimension stepping up is drawn only from
+    the grid's lower half (indices ``0..p/2-1``, which by construction have room for a ``+delta`` move
+    without leaving ``[0, 1]``); for a dimension stepping down, only from the upper half (indices
+    ``p/2..p-1``, symmetric room for ``-delta``). Every step therefore lands on the grid and inside
+    bounds *by construction* -- never clipped or silently shrunk to a smaller step -- and, because the
+    two halves are equal-sized and a dimension's pre-step value is confined to its assigned half while
+    its post-step value always lands in the other, every grid level is visited with equal (1/p)
+    probability, marginally, by any one coordinate at any position along a trajectory: the design is
+    unbiased across the input box, not concentrated away from either boundary.
+
+    ``levels`` must be even, so the grid-index step ``levels // 2`` is exact (an odd level count has no
+    step that both equals the standard ``delta`` formula and lands on a grid point).
     """
     bounds = _as_bounds(bounds)
     d = bounds.shape[0]
     trajectories = _require_exact_positive_int(trajectories, "trajectories")
     levels = _require_exact_positive_int(levels, "levels", minimum=2)
+    if levels % 2 != 0:
+        raise ValueError(
+            f"morris_screening requires an even number of levels, so the standard step "
+            f"delta = levels / (2*(levels-1)) lands exactly on a grid point; got levels={levels}."
+        )
     names_out = _validate_names(names, d)
     rng = np.random.RandomState(seed)
-    delta = levels / (2.0 * (levels - 1))  # the standard Morris step on the unit grid
     grid = np.linspace(0.0, 1.0, levels)
-    effects = [[] for _ in range(d)]
+    idx_step = levels // 2  # grid-index step: an UP move adds this, a DOWN move subtracts it
+    low_idx = np.arange(0, idx_step)  # starting indices with guaranteed room for an UP step
+    high_idx = np.arange(idx_step, levels)  # ... and for a DOWN step, the symmetric other half
+    effects: list[list[float]] = [[] for _ in range(d)]
     for _ in range(trajectories):
-        base = rng.choice(grid[: levels // 2 + 1] if levels > 1 else grid, size=d)  # room to step up by delta
         order = rng.permutation(d)
-        x = base.copy()
+        up = rng.randint(0, 2, size=d).astype(bool)  # this trajectory's per-dimension step direction
+        n_up = int(np.count_nonzero(up))
+        idx = np.empty(d, dtype=int)
+        idx[up] = rng.choice(low_idx, size=n_up)
+        idx[~up] = rng.choice(high_idx, size=d - n_up)
+        x = grid[idx]
         y_prev = _eval_model(func, _scale(x[None, :], bounds), label="morris_screening's func")[0]
         for i in order:
-            x_next = x.copy()
-            x_next[i] = min(x_next[i] + delta, 1.0)
+            idx_next = idx.copy()
+            idx_next[i] += idx_step if up[i] else -idx_step  # in [0, levels-1] by construction above
+            x_next = grid[idx_next]
             y_next = _eval_model(func, _scale(x_next[None, :], bounds), label="morris_screening's func")[0]
-            step = x_next[i] - x[i]
-            if step != 0:
-                effects[i].append((y_next - y_prev) / step)
-            x, y_prev = x_next, y_next
-    mu_star = np.array([np.mean(np.abs(e)) if e else 0.0 for e in effects])
-    sigma = np.array([np.std(e) if e else 0.0 for e in effects])
+            step = x_next[i] - x[i]  # exactly +delta or -delta -- never shrunk, never zero
+            effects[i].append((y_next - y_prev) / step)
+            idx, x, y_prev = idx_next, x_next, y_next
+    mu_star = np.array([np.mean(np.abs(e)) for e in effects])
+    sigma = np.array([np.std(e) for e in effects])
     return {
         "mu_star": mu_star,
         "sigma": sigma,
