@@ -18,13 +18,29 @@ import numpy as np
 class FactorialEffects:
     """Estimated effects from a two-level factorial / fractional-factorial / Plackett-Burman design.
 
+    Only *estimable* quantities are reported as effects. When the design cannot separate two or more
+    terms -- classical aliasing/confounding, including a factor that never varies -- those individual
+    terms have no unique estimate: their entries in ``coef`` / ``effects`` are ``nan``. ``aliases``
+    says which terms are aliased with which; ``estimable_contrasts`` gives the one well-defined
+    *combined* quantity the data actually supports for each such group.
+
     Attributes:
         terms: term names (``"intercept"``, ``"x0"``, ``"x0:x1"``, ...).
-        coef: least-squares regression coefficients in coded ``+/-1`` units.
+        coef: least-squares regression coefficients in coded ``+/-1`` units (``nan`` for a term that is
+            aliased with another and so has no individual estimate).
         effects: the classical *effect* per term -- the change in mean response as a factor moves from
             its low to its high level, i.e. ``2 * coef`` (the intercept entry is just the grand mean).
-        intercept: the grand mean of the response.
+        intercept: the grand mean of the response (``nan`` if the intercept itself is aliased, e.g. with
+            a factor that never varies).
         residual_std: residual standard deviation when the design has spare runs (else ``None``).
+        se: standard error of each entry of ``effects``. ``None`` throughout when the design has no
+            spare degrees of freedom to estimate a residual variance (e.g. a saturated design);
+            individual entries are ``nan`` wherever ``effects`` is (aliased terms).
+        aliases: for each term, the *other* term names it is aliased with (empty list if the term is
+            uniquely estimable).
+        estimable_contrasts: for each alias group of two or more terms, keyed by its member term names
+            joined with ``"+"`` (in term order), the ``(effect, se)`` of the one combined quantity that
+            *is* estimable -- empty when the design has no aliasing.
     """
 
     terms: list[str]
@@ -32,9 +48,12 @@ class FactorialEffects:
     effects: np.ndarray
     intercept: float
     residual_std: float | None
+    se: np.ndarray | None
+    aliases: dict[str, list[str]]
+    estimable_contrasts: dict[str, tuple[float, float | None]]
 
     def as_dict(self) -> dict[str, float]:
-        """Map each non-intercept term to its effect."""
+        """Map each non-intercept term to its effect (``nan`` where aliased -- see ``estimable_contrasts``)."""
         return {t: float(e) for t, e in zip(self.terms, self.effects) if t != "intercept"}
 
 
@@ -53,20 +72,89 @@ def _code_two_level(x: np.ndarray) -> np.ndarray:
     return coded
 
 
+def _alias_groups(f: np.ndarray, tol: float = 1e-9) -> list[list[int]]:
+    """Partition model-matrix column indices into alias sets.
+
+    Every column of a two-level model matrix is built from ``+/-1`` entries, so two columns are either
+    identical, exact opposites, or not perfectly correlated -- there is no in-between. "Column ``i`` is
+    proportional to column ``j``" is therefore a genuine equivalence relation here: it is transitive, so
+    it correctly follows a multi-term classical alias chain (e.g. the defining relation ``I = ABC``
+    aliases ``A`` with ``BC``, ``B`` with ``AC``, *and* ``C`` with ``AB``). Columns in the same group
+    carry exactly the same information and cannot be told apart by the data. A column of all zeros (a
+    factor that never varies, from :func:`_code_two_level`'s single-level convention) is left in its own
+    singleton group -- it is not proportional to anything, it is simply uninformative.
+    """
+    p = f.shape[1]
+    norms = np.linalg.norm(f, axis=0)
+    parent = list(range(p))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(p):
+        if norms[i] < tol:
+            continue
+        for j in range(i + 1, p):
+            if norms[j] < tol:
+                continue
+            cos = (f[:, i] @ f[:, j]) / (norms[i] * norms[j])
+            if abs(abs(cos) - 1.0) < tol:
+                union(i, j)
+    groups: dict[int, list[int]] = {}
+    for i in range(p):
+        groups.setdefault(find(i), []).append(i)
+    return list(groups.values())
+
+
 def factorial_effects(design, y, *, interactions: bool = True, coded: bool = False) -> FactorialEffects:
     """Estimate main effects and two-factor interactions from a two-level design.
 
     Fits the linear model ``y ~ 1 + x_i (+ x_i x_j)`` in coded ``+/-1`` units by least squares; the
     coefficients are half the classical effects. ``design`` is the ``(n, d)`` run matrix (the real
-    factor levels, coded to ``+/-1`` automatically -- or pass ``coded=True`` if it is already ``+/-1``),
-    ``y`` the measured responses. Set ``interactions=False`` for a main-effects-only (e.g. screening)
-    fit.
+    factor levels, coded to ``+/-1`` automatically -- or pass ``coded=True`` if it is already coded, in
+    which case every entry must be exactly ``-1.0`` or ``1.0``), ``y`` the measured responses. Set
+    ``interactions=False`` for a main-effects-only (e.g. screening) fit.
+
+    Rejects designs that cannot support the requested model outright: non-finite values, fewer runs
+    than model parameters, and (for ``coded=True``) levels other than ``+/-1``. A design that has
+    *enough* runs but still cannot separate every term -- aliasing, including a factor that never
+    varies -- is not rejected: the aliased terms come back as ``nan`` in ``coef`` / ``effects``, with
+    the one combined quantity the data does support reported in ``estimable_contrasts`` (see
+    :class:`FactorialEffects`). That automatic resolution only covers the classical case where the
+    aliasing is exact term-for-term confounding, as in any standard fractional-factorial /
+    Plackett-Burman alias structure; a design that is rank-deficient for some other reason (e.g. too few
+    runs and not a clean fractional design) raises instead of guessing which contrasts might be
+    estimable.
     """
     x = np.asarray(design, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64).ravel()
     if x.ndim != 2 or x.shape[0] != y.shape[0]:
         raise ValueError("design must be (n, d) with one response per row.")
-    xc = x if coded else _code_two_level(x)
+    if not np.all(np.isfinite(x)):
+        raise ValueError("design contains non-finite values.")
+    if not np.all(np.isfinite(y)):
+        raise ValueError("y contains non-finite values.")
+    if coded:
+        for j in range(x.shape[1]):
+            col = x[:, j]
+            bad = col[(col != -1.0) & (col != 1.0)]
+            if bad.size:
+                levels = sorted(set(bad.tolist()))
+                raise ValueError(
+                    f"factor {j} has non-coded level(s) {levels}; coded=True requires every factor to "
+                    "already be at exactly -1.0/+1.0 (pass coded=False to auto-code raw factor levels)."
+                )
+        xc = x
+    else:
+        xc = _code_two_level(x)
     n, d = xc.shape
     cols = [np.ones(n)]
     names = ["intercept"]
@@ -78,12 +166,74 @@ def factorial_effects(design, y, *, interactions: bool = True, coded: bool = Fal
             cols.append(xc[:, i] * xc[:, j])
             names.append(f"x{i}:x{j}")
     f = np.column_stack(cols)
-    coef, residual, *_ = np.linalg.lstsq(f, y, rcond=None)
-    dof = n - f.shape[1]
+    p = f.shape[1]
+    # Deliberately no separate "n < p" gate: a classical fractional-factorial or Plackett-Burman
+    # design routinely has fewer runs than the full requested model has parameters, and that is fine
+    # as long as the aliasing is exactly resolvable (see the reduced-rank check below, which is what
+    # actually distinguishes a legitimate fractional design from a genuinely undersized one).
+    rank = int(np.linalg.matrix_rank(f))
+    aliases: dict[str, list[str]] = {name: [] for name in names}
+    estimable_contrasts: dict[str, tuple[float, float | None]] = {}
+    if rank == p:
+        groups = [[k] for k in range(p)]
+        fit_cols = f
+    else:
+        groups = _alias_groups(f)
+        fit_cols = np.column_stack([f[:, g[0]] for g in groups])
+        if int(np.linalg.matrix_rank(fit_cols)) < fit_cols.shape[1]:
+            zero_cols = [names[k] for k in range(p) if np.linalg.norm(f[:, k]) < 1e-9]
+            hint = f" (factor column(s) that never vary: {zero_cols})" if zero_cols else ""
+            raise ValueError(
+                f"design is rank-deficient (rank {rank} of {p} parameters) beyond simple term "
+                f"aliasing{hint}; cannot resolve a unique set of estimable contrasts. Reduce the "
+                "requested model (e.g. interactions=False) or add runs."
+            )
+        for g in groups:
+            if len(g) > 1:
+                for k in g:
+                    aliases[names[k]] = [names[m] for m in g if m != k]
+
+    coef_fit, residual, *_ = np.linalg.lstsq(fit_cols, y, rcond=None)
+    dof = n - fit_cols.shape[1]
     rstd = float(np.sqrt(residual[0] / dof)) if residual.size and dof > 0 else None
+    se_fit = None
+    if dof > 0 and residual.size:
+        sigma2 = residual[0] / dof
+        cov_fit = sigma2 * np.linalg.inv(fit_cols.T @ fit_cols)
+        se_fit = np.sqrt(np.clip(np.diag(cov_fit), 0.0, None))
+
+    coef = np.full(p, np.nan)
+    se = np.full(p, np.nan) if se_fit is not None else None
+    for gi, g in enumerate(groups):
+        if len(g) == 1:
+            coef[g[0]] = coef_fit[gi]
+            if se is not None:
+                se[g[0]] = se_fit[gi]
+            continue
+        base = g[0]
+        value = float(coef_fit[gi])
+        se_value = float(se_fit[gi]) if se_fit is not None else None
+        eff_value = value if base == 0 else 2.0 * value
+        eff_se = None if se_value is None else (se_value if base == 0 else 2.0 * se_value)
+        estimable_contrasts["+".join(names[k] for k in g)] = (eff_value, eff_se)
+
     effects = 2.0 * coef.copy()
     effects[0] = coef[0]  # the intercept is the grand mean, not an effect
-    return FactorialEffects(names, coef, effects, float(coef[0]), rstd)
+    se_effects = None
+    if se is not None:
+        se_effects = 2.0 * se.copy()
+        se_effects[0] = se[0]
+
+    return FactorialEffects(
+        terms=names,
+        coef=coef,
+        effects=effects,
+        intercept=float(coef[0]),
+        residual_std=rstd,
+        se=se_effects,
+        aliases=aliases,
+        estimable_contrasts=estimable_contrasts,
+    )
 
 
 @dataclass
