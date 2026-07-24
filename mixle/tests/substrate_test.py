@@ -53,6 +53,100 @@ class SubstrateCrudTest(unittest.TestCase):
         self.assertEqual(hits[0][0].text, "the quick brown fox")  # lexical overlap wins
 
 
+class ImmutabilityContractTest(unittest.TestCase):
+    """MXR-080-0234: put()/get()/all() must not let a caller's live reference reach (or leak from) the
+    store, and update() is the only supported way to make a change land."""
+
+    def test_get_returns_a_copy_not_the_stored_object(self):
+        s = Substrate()
+        item = SubstrateItem(kind="text", text="hi")
+        iid = s.put(item)
+        self.assertIsNot(s.get(iid), item)  # put() didn't alias the caller's object either
+        self.assertIsNot(s.get(iid), s.get(iid))  # two get() calls never share one mutable object
+
+    def test_mutating_a_get_result_does_not_touch_the_store(self):
+        s = Substrate()
+        iid = s.add("text", "original", scope="team-a", tags=["orig"])
+
+        handle = s.get(iid)
+        handle.text = "corrupted"
+        handle.scope = "team-b"
+        handle.tags.append("mutated-in-place")
+        handle.payload["injected"] = True
+
+        stored = s.get(iid)
+        self.assertEqual(stored.text, "original")
+        self.assertEqual(stored.scope, "team-a")
+        self.assertEqual(stored.tags, ["orig"])
+        self.assertEqual(stored.payload, {})
+
+    def test_mutating_an_all_result_does_not_touch_the_store(self):
+        s = Substrate()
+        iid = s.add("text", "original", tags=["orig"])
+        s.all()[0].tags.append("mutated-in-place")
+        self.assertEqual(s.get(iid).tags, ["orig"])
+
+    def test_put_does_not_alias_the_callers_object(self):
+        s = Substrate()
+        item = SubstrateItem(kind="text", text="original")
+        iid = s.put(item)
+        item.text = "mutated after put()"  # the caller keeps mutating their own local object
+        self.assertEqual(s.get(iid).text, "original")
+
+    def test_mutation_cannot_walk_an_item_across_the_scope_boundary(self):
+        """The concrete MXR-080-0234 repro: get() a team-a item, rewrite .scope on the handle, and
+        confirm the store's own scope-filtered view never moves it -- a scope change must go through
+        update()/put(), which is the store's only re-validated write path."""
+        s = Substrate()
+        iid = s.add("text", "secret", scope="team-a")
+        s.get(iid).scope = "team-b"
+        self.assertEqual([i.id for i in s.all(scope="team-a")], [iid])
+        self.assertEqual([i.id for i in s.all(scope="team-b")], [])
+
+    def test_update_changes_the_stored_item(self):
+        s = Substrate()
+        iid = s.add("text", "original", tags=["v1"])
+        updated = s.update(iid, text="revised", tags=["v2"])
+        self.assertEqual(updated.text, "revised")
+        self.assertEqual(s.get(iid).text, "revised")
+        self.assertEqual(s.get(iid).tags, ["v2"])
+
+    def test_update_returns_a_copy_too(self):
+        s = Substrate()
+        iid = s.add("text", "original")
+        updated = s.update(iid, text="revised")
+        updated.text = "mutated after update() returned"
+        self.assertEqual(s.get(iid).text, "revised")
+
+    def test_update_revalidates_kind(self):
+        s = Substrate()
+        iid = s.add("text", "original")
+        with self.assertRaises(ValueError):
+            s.update(iid, kind="hologram")
+        self.assertEqual(s.get(iid).kind, "text")  # the invalid update never landed
+
+    def test_update_missing_id_raises_keyerror(self):
+        s = Substrate()
+        with self.assertRaises(KeyError):
+            s.update("no-such-id", text="x")
+
+    def test_update_cannot_change_id(self):
+        s = Substrate()
+        iid = s.add("text", "original")
+        with self.assertRaises(ValueError):
+            s.update(iid, id="a-different-id")
+        self.assertIsNotNone(s.get(iid))  # the original id is still the one stored
+
+    def test_update_marks_the_index_dirty_like_put_does(self):
+        s = Substrate()
+        iid = s.add("text", "original searchable content")
+        s.search("original", k=1)  # force a reindex; _dirty is now False
+        self.assertFalse(s._dirty)
+
+        s.update(iid, text="")  # clearing text shrinks the indexed corpus, same as put() would
+        self.assertTrue(s._dirty)
+
+
 class IndexDirtyTrackingTest(unittest.TestCase):
     """put()'s dirty-tracking condition must match _text_items()'s real embedding-index inclusion
     rule -- ANY kind with a truthy .text, not a narrower kind whitelist -- on both halves: text

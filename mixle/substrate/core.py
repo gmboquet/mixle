@@ -13,10 +13,11 @@ single local store.
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,14 @@ class Substrate:
     relevant items for a query, filtered by kind and scope, ranking text items semantically (a learned
     embedding over the current text corpus) and everything else lexically. ``save`` / ``load`` persist
     the shard as one ``items.jsonl`` under ``root``.
+
+    Immutability contract: every item that crosses the store boundary is a defensive copy. ``put``
+    copies the object you hand it before storing it; ``get`` / ``all`` (and therefore ``search``)
+    return copies of what is stored. Mutating an object you obtained from -- or are about to pass to --
+    this store never affects it: the store's own state, and everything derived from it (the semantic
+    index), is independent of what any caller does with its own reference afterward. The only way to
+    change a stored item is :meth:`put` (replace wholesale) or :meth:`update` (change named fields);
+    both revalidate the result and correctly invalidate the semantic index, exactly like a fresh write.
     """
 
     def __init__(self, root: str | None = None) -> None:
@@ -90,26 +99,34 @@ class Substrate:
     def put(self, item: SubstrateItem) -> str:
         """Add or replace an item; returns its id and schedules semantic-index rebuilds for text items.
 
-        Dirty whenever this put could change what :meth:`_text_items` (the embedding index's real
-        inclusion rule -- ANY kind with a truthy ``.text``, not just a fixed subset) would return:
+        Stores a defensive copy of ``item`` (see the class docstring's immutability contract) -- the
+        caller's own object is never aliased into the store, so mutating it after this call has no
+        effect. Dirty whenever this put could change what :meth:`_text_items` (the embedding index's
+        real inclusion rule -- ANY kind with a truthy ``.text``, not just a fixed subset) would return:
         the new item itself carries text, OR it replaces an item that used to. That second half
         matters as much as the first -- clearing an existing item's text (or replacing it with a
         no-text item) shrinks the indexed corpus exactly as much as adding text grows it, and without
         it the stale embedding for the old text would keep matching queries after the text is gone.
         """
         previous = self._items.get(item.id)
-        self._items[item.id] = item
-        if item.text or (previous is not None and previous.text):
+        stored = copy.deepcopy(item)
+        self._items[stored.id] = stored
+        if stored.text or (previous is not None and previous.text):
             self._dirty = True
-        return item.id
+        return stored.id
 
     def add(self, kind: str, text: str = "", **kw: Any) -> str:
         """Convenience: build a :class:`SubstrateItem` and :meth:`put` it."""
         return self.put(SubstrateItem(kind=kind, text=text, **kw))
 
     def get(self, item_id: str) -> SubstrateItem | None:
-        """Return an item by id, or ``None`` when it is absent."""
-        return self._items.get(item_id)
+        """Return a defensive copy of the item stored as ``item_id``, or ``None`` when it is absent.
+
+        Mutating the returned object does not change what is stored -- call :meth:`update` (or
+        :meth:`put` a full replacement) to make a change land, so index invalidation stays correct.
+        """
+        stored = self._items.get(item_id)
+        return copy.deepcopy(stored) if stored is not None else None
 
     def remove(self, item_id: str) -> bool:
         """Remove an item by id and return whether anything was deleted."""
@@ -119,13 +136,48 @@ class Substrate:
         return existed
 
     def all(self, *, kind: str | None = None, scope: str | None = None) -> list[SubstrateItem]:
-        """Return stored items, optionally filtered by kind and scope."""
+        """Return defensive copies of stored items, optionally filtered by kind and scope.
+
+        As with :meth:`get`, mutating a returned item never affects the store; use :meth:`update`.
+        """
         out = list(self._items.values())
         if kind is not None:
             out = [i for i in out if i.kind == kind]
         if scope is not None:
             out = [i for i in out if i.scope == scope]
-        return out
+        return [copy.deepcopy(i) for i in out]
+
+    def update(self, item_id: str, **fields: Any) -> SubstrateItem:
+        """Change named fields on the stored item ``item_id``, the supported way to edit in place.
+
+        Mutating an object returned by :meth:`get`/:meth:`all` never reaches the store -- both return
+        defensive copies, so the store's own state (and anything derived from it, like the semantic
+        index) is untouched by that. ``update`` is how a change actually lands: it rebuilds the stored
+        item with ``fields`` applied, re-runs :class:`SubstrateItem`'s own validation
+        (``__post_init__``, e.g. rejecting an unknown ``kind``) via :func:`dataclasses.replace`, and
+        routes the result back through :meth:`put` so the same dirty/index-invalidation bookkeeping
+        fires as it would for any other write -- a change that affects what :meth:`_text_items` covers
+        (new text, cleared text, a different scope for a text item) correctly schedules a reindex
+        instead of leaving the semantic index silently stale.
+
+        Returns a defensive copy of the updated item (consistent with :meth:`get`/:meth:`all`).
+
+        Raises:
+            KeyError: ``item_id`` is not stored.
+            ValueError: ``fields`` tries to change ``id`` -- update changes an item's content, not its
+                identity; ``put`` a new item and ``remove`` the old one for that.
+        """
+        current = self._items.get(item_id)
+        if current is None:
+            raise KeyError(f"Substrate.update: no item with id {item_id!r}")
+        if "id" in fields and fields["id"] != item_id:
+            raise ValueError(
+                f"Substrate.update cannot change id ({item_id!r} -> {fields['id']!r}); "
+                "put() a new item and remove() the old one instead"
+            )
+        updated = replace(current, **fields)
+        self.put(updated)
+        return copy.deepcopy(updated)
 
     def __len__(self) -> int:
         return len(self._items)
