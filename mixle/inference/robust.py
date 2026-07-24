@@ -114,14 +114,26 @@ def ols_robust_covariance(x: np.ndarray, residuals: np.ndarray, *, hc: str = "hc
     hc = hc.lower()
     if hc in ("hc2", "hc3"):
         h = np.einsum("ij,jk,ik->i", X, xtx_inv, X)  # leverage diag(H)
+        # A saturated design (n == p) or a perfect-leverage row (e.g. a dummy column that is 1 for
+        # exactly one observation) drives h_ii to exactly 1, so 1 - h_ii == 0. Match
+        # sandwich_covariance's / newey_west_covariance's precedent of falling back to no correction
+        # at that boundary rather than dividing by zero -- applied per-observation here since, unlike
+        # their single scalar df-correction, hc2/hc3's correction is already a per-observation weight
+        # by construction, so there is no single scalar to gate.
+        denom = 1.0 - h
+        degenerate = denom <= 1e-10
+        safe_denom = np.where(degenerate, 1.0, denom)
         if hc == "hc2":
-            w = e**2 / (1.0 - h)
+            w = np.where(degenerate, e**2, e**2 / safe_denom)
         else:
-            w = e**2 / (1.0 - h) ** 2
+            w = np.where(degenerate, e**2, e**2 / safe_denom**2)
     elif hc == "hc0":
         w = e**2
     elif hc == "hc1":
-        w = e**2 * (n / (n - p))
+        # Same precedent applied to hc1's single scalar df-correction: fall back to no correction
+        # (the hc0-equivalent weight) at a saturated (n == p) or underdetermined (n < p) design
+        # instead of dividing by zero.
+        w = e**2 * (n / (n - p)) if n > p else e**2
     else:
         raise ValueError("hc must be 'hc0', 'hc1', 'hc2', or 'hc3'.")
     meat = (X * w[:, None]).T @ X

@@ -58,6 +58,58 @@ class HCTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ols_robust_covariance(self.X, np.zeros(self.n), hc="hc9")
 
+    def test_saturated_design_falls_back_to_no_correction_instead_of_nan(self):
+        # n == p (as many parameters as observations, the exact-fit case): OLS residuals are exactly
+        # 0 and every leverage h_ii is exactly 1, so hc1's n/(n-p) and hc2/hc3's 1/(1-h_ii) would
+        # otherwise divide by zero. Every hc variant should match sandwich_covariance's /
+        # newey_west_covariance's precedent of falling back to no correction (equal to the all-zero
+        # hc0-equivalent matrix here, since the residuals are 0) rather than raising or returning
+        # NaN/Inf.
+        X = np.eye(3)
+        residuals = np.zeros(3)
+        for hc in ("hc0", "hc1", "hc2", "hc3"):
+            cov = ols_robust_covariance(X, residuals, hc=hc)
+            self.assertTrue(np.all(np.isfinite(cov)), msg=f"{hc} produced non-finite entries: {cov}")
+            np.testing.assert_allclose(cov, np.zeros((3, 3)))
+
+    def test_saturated_design_with_nonzero_residuals_falls_back_per_observation(self):
+        # Same saturated (n == p) design, but with residuals that are not an actual OLS fit (the
+        # function does not itself verify that (X, residuals) are consistent). Every hc variant should
+        # agree with hc0's e_i^2 weight -- the no-correction fallback -- rather than producing NaN/Inf.
+        X = np.eye(3)
+        residuals = np.array([1.0, 2.0, 3.0])
+        expected = np.diag(residuals**2)  # xtx_inv == I here, so hc0's meat is just diag(e_i^2)
+        for hc in ("hc0", "hc1", "hc2", "hc3"):
+            cov = ols_robust_covariance(X, residuals, hc=hc)
+            self.assertTrue(np.all(np.isfinite(cov)), msg=f"{hc} produced non-finite entries: {cov}")
+            np.testing.assert_allclose(cov, expected)
+
+    def test_non_saturated_case_correction_unchanged(self):
+        # Regression guard for the degenerate-design fallback added to hc1/hc2/hc3: away from n == p /
+        # h_ii == 1, every variant must still match its documented closed-form weight exactly (i.e.
+        # the new guard must not widen to cover the ordinary n > p case).
+        rng = np.random.RandomState(7)
+        n = 50
+        X = np.column_stack([np.ones(n), rng.normal(0, 1, n), rng.normal(0, 1, n)])
+        beta = np.array([1.0, 2.0, -1.0])
+        y = X @ beta + rng.normal(0, 1, n)
+        _, e = _ols(X, y)
+        xtx_inv = np.linalg.inv(X.T @ X)
+        h = np.einsum("ij,jk,ik->i", X, xtx_inv, X)
+        p = X.shape[1]
+
+        expected_weights = {
+            "hc0": e**2,
+            "hc1": e**2 * (n / (n - p)),
+            "hc2": e**2 / (1.0 - h),
+            "hc3": e**2 / (1.0 - h) ** 2,
+        }
+        for hc, w in expected_weights.items():
+            meat = (X * w[:, None]).T @ X
+            expected_cov = xtx_inv @ meat @ xtx_inv
+            cov = ols_robust_covariance(X, e, hc=hc)
+            np.testing.assert_allclose(cov, expected_cov)
+
 
 class ClusterTest(unittest.TestCase):
     def test_singleton_clusters_match_hc0(self):
