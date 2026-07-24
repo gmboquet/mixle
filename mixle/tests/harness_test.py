@@ -59,12 +59,81 @@ class GatesTest(unittest.TestCase):
         self.assertEqual(r.answer, "ticket-1")  # the handler's ticket comes back
         self.assertEqual(tickets, ["what is the meaning of life"])
 
+    def test_escalation_receives_the_redacted_request_not_the_raw_secret(self):
+        # MXR-080-0271 bug 3: on abstention, the escalation callback used to receive the ORIGINAL,
+        # secret-bearing request instead of the guardrail-redacted one.
+        h, tickets = self._harness()
+        r = h.handle("my key is sk-abcdefghij1234567890XYZ, what is the meaning of life")
+        self.assertEqual(r.status, "escalated")
+        self.assertEqual(len(tickets), 1)
+        self.assertNotIn("sk-abcdefghij1234567890XYZ", tickets[0])
+        self.assertIn("[REDACTED", tickets[0])
+
+    def test_escalation_receives_a_redacted_investigation(self):
+        # the callback's second argument (the Investigation) must be redacted too, not just the
+        # request string -- partial evidence gathered before abstaining can itself carry a secret.
+        seen_invs = []
+
+        def escalate(req, inv):
+            seen_invs.append(inv)
+            return "ticket-1"
+
+        reasoner = Reasoner(_answerer)
+        reasoner.add_action(
+            Action(
+                "probe",
+                "compute",
+                run=lambda q: ["partial trace token sk-abcdefghij1234567890XYZ"],
+                description="",
+                base_score=0.05,
+            )
+        )
+        h = Harness(reasoner, name="t", escalate=escalate, min_confidence=0.5)
+        r = h.handle("totally unrelated question")
+        self.assertEqual(r.status, "escalated")
+        self.assertEqual(len(seen_invs), 1)
+        self.assertTrue(all("sk-abcdefghij1234567890XYZ" not in f for f in seen_invs[0].evidence))
+
     def test_whitelist_strips_disallowed_actions(self):
-        # triage is retrieve-only: a compute action attached to the reasoner is structurally removed
+        # triage is retrieve-only: a compute action attached to the reasoner is excluded from this
+        # harness's own immutable action view (MXR-080-0271: the harness must not mutate the shared
+        # reasoner to enforce this -- see the isolation/bypass tests below).
         reasoner = Reasoner(_answerer, substrate=_kb(), retrieve_min_score=0.2)
         reasoner.add_action(Action("c", "compute", run=lambda q: ["x"], description="compute stuff"))
         h = Harness(reasoner, name="t", allowed_kinds=("retrieve",))
-        self.assertEqual({a.kind for a in h.reasoner.actions}, {"retrieve"})
+        self.assertEqual({a.kind for a in h.actions}, {"retrieve"})
+        # the shared reasoner itself is untouched: any other harness/caller still sees both actions
+        self.assertEqual({a.kind for a in reasoner.actions}, {"retrieve", "compute"})
+
+    def test_two_harnesses_sharing_a_reasoner_have_independent_whitelists(self):
+        # MXR-080-0271 bug 1: the old code enforced the whitelist by mutating `reasoner._actions` in
+        # __init__, so constructing a second harness over the same reasoner silently rewrote the
+        # first harness's effective action space. A harness's `.actions` view must be immutable once
+        # built, independent of any other harness sharing its reasoner.
+        reasoner = Reasoner(_answerer, substrate=_kb(), retrieve_min_score=0.2)
+        reasoner.add_action(Action("c", "compute", run=lambda q: ["x"], description="compute stuff"))
+        h1 = Harness(reasoner, name="h1", allowed_kinds=("retrieve", "compute"))
+        self.assertEqual({a.kind for a in h1.actions}, {"retrieve", "compute"})
+        Harness(reasoner, name="h2", allowed_kinds=("compute",))  # built for its side effect only
+        self.assertEqual({a.kind for a in h1.actions}, {"retrieve", "compute"})  # h1 unaffected by h2
+        self.assertEqual({a.kind for a in reasoner.actions}, {"retrieve", "compute"})  # reasoner untouched
+
+    def test_add_action_after_construction_cannot_bypass_an_existing_harnesss_whitelist(self):
+        # MXR-080-0271 bug 2: add_action() on the shared reasoner, called AFTER a harness is built,
+        # must not appear in that harness's whitelist view, and must never be reachable via handle().
+        reasoner = Reasoner(_answerer, substrate=_kb(), retrieve_min_score=0.2)
+        h = Harness(reasoner, name="t", allowed_kinds=("retrieve",))
+        fired = []
+
+        def leaky_run(q):
+            fired.append(q)
+            return ["leaked-action-executed"]
+
+        reasoner.add_action(Action("leak", "delegate", run=leaky_run, description="refunds delegate leak"))
+        self.assertEqual({a.kind for a in h.actions}, {"retrieve"})  # structurally still absent
+        r = h.handle("refunds delegate leak")
+        self.assertEqual(fired, [])  # never executed through this harness
+        self.assertNotIn("leaked-action-executed", r.answer or "")
 
     def test_output_guardrail_redacts_answers(self):
         # a stored secret must not leave through the answer
@@ -74,6 +143,29 @@ class GatesTest(unittest.TestCase):
         r = h.handle("refunds api token")
         self.assertEqual(r.status, "answered")
         self.assertNotIn("sk-abcdefghij1234567890XYZ", r.answer)
+
+    def test_retained_investigation_is_redacted_even_when_evidence_bypasses_the_substrate(self):
+        # MXR-080-0271 bug 4: the returned Investigation used to retain the RAW answer/evidence even
+        # when the top-level answer was masked. Substrate.put() now redacts at the store boundary, so
+        # this uses a compute action whose evidence never touches a substrate at all -- the harness
+        # itself, not the store, must be the thing that redacts it.
+        reasoner = Reasoner(_answerer)
+        reasoner.add_action(
+            Action(
+                "diag",
+                "compute",
+                run=lambda q: ["live diagnostic dump: internal token sk-abcdefghij1234567890XYZ still valid"],
+                description="diagnostic dump token",
+            )
+        )
+        h = Harness(reasoner, name="t")
+        r = h.handle("diagnostic dump token")
+        self.assertEqual(r.status, "answered")
+        self.assertNotIn("sk-abcdefghij1234567890XYZ", r.answer)
+        # the retained trace must match what the top-level answer shows -- not the raw evidence beneath it
+        self.assertIsNotNone(r.investigation.answer)
+        self.assertNotIn("sk-abcdefghij1234567890XYZ", r.investigation.answer)
+        self.assertTrue(all("sk-abcdefghij1234567890XYZ" not in f for f in r.investigation.evidence))
 
     def test_ui_hook_sees_every_result_and_cannot_break_the_path(self):
         seen = []
@@ -94,9 +186,11 @@ class TemplatesAndRegistryTest(unittest.TestCase):
         reasoner.add_action(Action("c", "compute", run=lambda q: ["x"], description="check"))
         reasoner.add_action(Action("d", "delegate", run=lambda q: ["y"], description="remote"))
         h = monitoring_harness(reasoner)
-        kinds = {a.kind for a in h.reasoner.actions}
+        kinds = {a.kind for a in h.actions}
         self.assertIn("compute", kinds)
         self.assertNotIn("delegate", kinds)  # no delegation out of a monitoring shell
+        # the shared reasoner itself is untouched -- delegate is still there for any other caller
+        self.assertIn("delegate", {a.kind for a in reasoner.actions})
 
     def test_register_and_find_on_the_substrate(self):
         s = _kb()
