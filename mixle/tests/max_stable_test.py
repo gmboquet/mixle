@@ -1,10 +1,12 @@
 """Smith max-stable process for spatial extremes: extremal coefficient, margins, dependence (Phase 6).
 
-Also covers MXR-080-0105 (missing domain/identifiability validation, including a crash on a
-single-location fit).
+Also covers MXR-080-0104 (sampling truncation was silently invalid at n_storms=0 and otherwise
+unbounded-approximate) and MXR-080-0105 (missing domain/identifiability validation, including a crash
+on a single-location fit).
 """
 
 import unittest
+import warnings
 
 import numpy as np
 from scipy.stats import norm, spearmanr
@@ -34,15 +36,24 @@ class SmithMaxStableTest(unittest.TestCase):
         # 20 seeds the worst-case median deviation observed was ~0.135 (a ~1.5x margin), with mean
         # deviation ~0.064 -- 0/20 failures. n_storms (the Schlather-algorithm storm count, which
         # controls approximation fidelity rather than Monte Carlo replication count) is left
-        # unchanged since it governs bias, not just variance.
-        s = self.ms.sampler(np.array([[0, 0], [1, 0]]), seed=0).sample(1500, n_storms=150)
+        # unchanged since it governs bias, not just variance. n_storms=150 is well below what the
+        # default tol=1e-3 needs for this box (~17k storms; see MXR-080-0104), so the storm-count
+        # safety-cap warning is expected here and suppressed -- this test intentionally trades
+        # tol's guarantee for speed, exactly as it traded exactness for speed before that guarantee
+        # existed.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            s = self.ms.sampler(np.array([[0, 0], [1, 0]]), seed=0).sample(1500, n_storms=150)
         np.testing.assert_allclose(np.median(s, axis=0), 1.0 / np.log(2), atol=0.2)  # unit-Frechet median
 
     def test_short_range_extremes_are_more_dependent(self):
         # n=1000 (down from 3000) still leaves a wide margin on the near>far comparison: across 10
         # seeds the smallest observed gap (near - far Spearman correlation) was ~0.90, far above 0.
+        # See test_sampler_has_unit_frechet_margins for why the safety-cap warning is suppressed.
         loc = np.array([[0, 0], [0.5, 0], [8, 0]])
-        s = self.ms.sampler(loc, seed=0).sample(1000, n_storms=150)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            s = self.ms.sampler(loc, seed=0).sample(1000, n_storms=150)
         near = spearmanr(s[:, 0], s[:, 1]).correlation
         far = spearmanr(s[:, 0], s[:, 2]).correlation
         self.assertGreater(near, far)
@@ -52,7 +63,9 @@ class SmithMaxStableTest(unittest.TestCase):
         # plenty of replicates) still identifies the dependence scale correctly and reports status="ok".
         true = SmithMaxStable(2.0**2 * np.eye(2))
         locs = np.random.RandomState(1).uniform(0, 12, (10, 2))
-        fields = true.sampler(locs, seed=2).sample(500, n_storms=120)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)  # see test_sampler_has_unit_frechet_margins
+            fields = true.sampler(locs, seed=2).sample(500, n_storms=120)
         fit = fit_smith_maxstable(locs, fields)
         self.assertEqual(fit.status, "ok")
         self.assertTrue(fit.converged)
@@ -202,6 +215,93 @@ class FitSmithMaxStableValidationTest(unittest.TestCase):
         self.assertEqual(fit.n_pairs, 3)  # 3 choose 2
         self.assertGreaterEqual(fit.residual, 0.0)
         self.assertIsInstance(fit.model, SmithMaxStable)
+
+
+class SmithMaxStableSamplingTruncationTest(unittest.TestCase):
+    """MXR-080-0104: sampling truncation must be validated/controlled, not silently invalid or
+    unboundedly approximate."""
+
+    def setUp(self):
+        self.ms = SmithMaxStable(sigma=2.0 * np.eye(2))
+
+    def test_n_storms_zero_is_rejected(self):
+        # audit's own repro: n_storms=0 previously returned an all-zero field -- 0 is outside
+        # unit-Frechet's (0, inf) support, so that was never a valid draw.
+        samp = self.ms.sampler(np.array([[0, 0], [1, 0]]), seed=0)
+        with self.assertRaises(ValueError):
+            samp.sample(n_storms=0)
+
+    def test_n_storms_negative_or_non_integer_is_rejected(self):
+        samp = self.ms.sampler(np.array([[0, 0]]), seed=0)
+        for bad in (-1, -5, 2.5):
+            with self.assertRaises(ValueError):
+                samp.sample(n_storms=bad)
+
+    def test_tol_domain(self):
+        samp = self.ms.sampler(np.array([[0, 0]]), seed=0)
+        for bad_tol in (0.0, -1.0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                samp.sample(tol=bad_tol)
+
+    def test_box_sigma_domain(self):
+        samp = self.ms.sampler(np.array([[0, 0]]), seed=0)
+        for bad_box in (0.0, -2.0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                samp.sample(box_sigma=bad_box)
+
+    def test_at_least_one_storm_always_contributes(self):
+        # Even under an extremely loose tol -- which makes the stopping check satisfied by the very
+        # first storm -- the field must never be exactly 0: 0 is just as far outside unit-Frechet's
+        # (0, inf) support as the old n_storms=0 bug's all-zero field was, regardless of which knob
+        # produced it.
+        samp = self.ms.sampler(np.array([[0, 0], [1, 0]]), seed=0)
+        z = samp.sample(500, n_storms=5, tol=1e6)
+        self.assertTrue(np.all(z > 0.0))
+        self.assertTrue(np.all(np.isfinite(z)))
+
+    def test_default_sample_is_a_sensible_positive_finite_field(self):
+        # negative control: normal positive n_storms/tol (here: the defaults) still produce a valid,
+        # well-formed draw.
+        samp = self.ms.sampler(np.array([[0, 0], [1, 0]]), seed=3)
+        z = samp.sample(5)
+        self.assertEqual(z.shape, (5, 2))
+        self.assertTrue(np.all(np.isfinite(z)))
+        self.assertTrue(np.all(z > 0.0))
+
+    def test_unmet_tolerance_warns(self):
+        # honesty check: a storm budget too small to reach tol must say so, not silently understate
+        # its own error.
+        samp = self.ms.sampler(np.array([[0, 0], [1, 0]]), seed=0)
+        with self.assertWarns(UserWarning):
+            samp.sample(5, n_storms=10, tol=1e-6)
+
+    def test_tightening_tol_converges_toward_unit_frechet(self):
+        # QQ-style numerical convergence check (not just an API check): the empirical CDF of
+        # simulated draws, evaluated at the true unit-Frechet quantile for p, should move toward p as
+        # tol shrinks (box_sigma held fixed and generous, isolating the storm-count truncation that
+        # tol rigorously controls per MXR-080-0104's stopping rule).
+        ms1d = SmithMaxStable(sigma=1.0 * np.eye(1))
+        samp = ms1d.sampler(np.array([[0.0]]), seed=42)
+        loose = samp.approximation_diagnostic(n=1200, n_storms=5000, tol=2.0, box_sigma=6.0)
+        tight = samp.approximation_diagnostic(n=1200, n_storms=5000, tol=0.02, box_sigma=6.0)
+        self.assertLess(tight.mean_abs_error, loose.mean_abs_error)
+
+    def test_approximation_diagnostic_shape_and_a_tighter_config_measures_better(self):
+        samp = self.ms.sampler(np.array([[0, 0], [1, 0]]), seed=1)
+        loose = samp.approximation_diagnostic(n=400, n_storms=30, tol=5.0, box_sigma=1.0)
+        tight = samp.approximation_diagnostic(n=400, n_storms=2000, tol=0.1, box_sigma=3.0)
+        self.assertEqual(loose.probability_levels, (0.25, 0.5, 0.75, 0.9))
+        self.assertEqual(loose.n_replicates, 400)
+        self.assertEqual(loose.per_site_max_abs_error.shape, (2,))
+        self.assertLess(tight.max_abs_error, loose.max_abs_error)
+
+    def test_replicates_alone_do_not_fix_a_truncation_bias(self):
+        # A loose tol/box gives a real, persistent bias -- more replicates should shrink the noise in
+        # *measuring* that bias, not the bias itself.
+        ms1d = SmithMaxStable(sigma=1.0 * np.eye(1))
+        samp = ms1d.sampler(np.array([[0.0]]), seed=7)
+        large_n = samp.approximation_diagnostic(n=3000, n_storms=20, tol=5.0, box_sigma=1.0)
+        self.assertGreater(large_n.max_abs_error, 0.05)  # still a real bias despite 3000 replicates
 
 
 if __name__ == "__main__":
