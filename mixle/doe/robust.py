@@ -20,7 +20,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.doe.bayesopt import BayesOptResult, minimize
+from mixle.doe.bayesopt import BayesOptResult, _select_index, _validate_observations, _validate_prediction, minimize
 
 Bounds = Any
 
@@ -35,6 +35,7 @@ class IncumbentResult:
 
 
 def _fit_gp(x: np.ndarray, y: np.ndarray, gp: Any, fit_kwargs: dict[str, Any] | None) -> Any:
+    _validate_observations(x, y, context="posterior_incumbent")
     if gp is None:
         from mixle.models.gaussian_process import GaussianProcessRegressor
 
@@ -58,6 +59,11 @@ def posterior_incumbent(
     denoised mean at every evaluated point, so the reported optimum reflects the model's belief, not a
     single lucky noisy observation. For a deterministic objective the posterior mean at the observed
     points is ~the observations, so this reduces to the ordinary argmin/argmax.
+
+    Raises ``ValueError`` if ``x`` contains non-finite values, or if the surrogate's predicted mean
+    doesn't match the candidate contract (wrong length, non-finite, or entirely non-finite -- see
+    :func:`mixle.doe.bayesopt._validate_prediction` / ``_select_index``), the same shared surrogate
+    boundary the sequential/batch/knowledge-gradient proposal paths use (MXR-080-0170).
     """
     x = np.atleast_2d(np.asarray(x, dtype=np.float64))
     y = np.asarray(y, dtype=np.float64).reshape(-1)
@@ -66,8 +72,10 @@ def posterior_incumbent(
     if x.shape[0] == 0:
         raise ValueError("need at least one evaluated point.")
     fitted = _fit_gp(x, y, gp, fit_kwargs)
-    mean = np.asarray(fitted.predict(x, y, x, return_cov=False), dtype=np.float64).reshape(-1)
-    idx = int(np.argmax(mean)) if maximize else int(np.argmin(mean))
+    mean, _ = _validate_prediction(
+        fitted.predict(x, y, x, return_cov=False), None, x.shape[0], context="posterior_incumbent"
+    )
+    idx = _select_index(mean, x.shape[0], largest=maximize, context="posterior_incumbent")
     return IncumbentResult(best_x=x[idx].copy(), best_mean=float(mean[idx]), best_index=idx)
 
 

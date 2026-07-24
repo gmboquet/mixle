@@ -17,6 +17,7 @@ from mixle.doe import (
     minimize,
     probability_of_improvement,
     propose_batch,
+    propose_knowledge_gradient,
     propose_next,
     register_acquisition,
     thompson_sampling,
@@ -25,6 +26,23 @@ from mixle.doe import (
 from mixle.doe.bayesopt import _get_acquisition
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
+
+
+class _MockSurrogate:
+    """A minimal duck-typed :class:`~mixle.doe._contracts.Surrogate` returning caller-controlled,
+    possibly-broken predictions -- lets the MXR-080-0170 surrogate-boundary validation be tested
+    without depending on torch or the real GP.
+    """
+
+    def __init__(self, mean, cov=None):
+        self._mean = mean
+        self._cov = cov
+
+    def fit(self, x, y, **kwargs):
+        return self
+
+    def predict(self, x_train, y_train, x_new, return_cov=False):
+        return (self._mean, self._cov) if return_cov else self._mean
 
 
 class ExpectedImprovementTest(unittest.TestCase):
@@ -367,6 +385,116 @@ class BayesOptLoopTest(unittest.TestCase):
     def test_propose_batch_rejects_nonpositive_q(self):
         with self.assertRaises(ValueError):
             propose_batch(np.zeros((3, 2)), np.zeros(3), [(0.0, 1.0), (0.0, 1.0)], q=0)
+
+    def test_propose_batch_all_nonfinite_merit_raises_clearly(self):
+        # MXR-080-0170, the batch path: propose_batch always fits its own (real) surrogate -- no gp=
+        # override -- so this exercises the shared _propose_one merit-selection boundary through the
+        # real GP rather than a mock, via a pathological acquisition that returns an all-NaN merit.
+        bounds = [(-2.0, 2.0), (0.0, 5.0)]
+        rng = np.random.RandomState(0)
+        x = rng.uniform([-2.0, 0.0], [2.0, 5.0], size=(6, 2))
+        y = np.sum((x - np.array([0.5, 2.0])) ** 2, axis=1)
+
+        def nan_acquisition(mean, std, best, *, maximize=False, **_):
+            return np.full(mean.shape, np.nan)
+
+        with self.assertRaises(ValueError):
+            propose_batch(x, y, bounds, q=2, n_candidates=16, seed=1, acq=nan_acquisition, fit_kwargs={"max_its": 20})
+
+
+class SurrogateBoundaryTest(unittest.TestCase):
+    """MXR-080-0170: the proposal machinery validates the surrogate's predicted mean/covariance and the
+    acquisition merit derived from them, instead of letting a broken ``gp=`` (wrong shape, non-finite,
+    asymmetric covariance) or an all-non-finite merit reach ``argmax``/``argmin`` unchecked. Uses
+    ``_MockSurrogate`` so these run without torch, covering the sequential (``propose_next``) and
+    knowledge-gradient (``propose_knowledge_gradient``) proposal paths -- both accept a ``gp=``
+    override. ``propose_batch`` shares the exact same validated boundary (via ``_propose_one``, the
+    same helper ``propose_next`` uses) but always fits its own surrogate internally with no ``gp=``
+    override, so its coverage of this same boundary lives with the other torch-dependent tests in
+    :class:`BayesOptLoopTest` below.
+    """
+
+    def setUp(self):
+        self.rng = np.random.RandomState(0)
+        self.x = self.rng.uniform(-2.0, 2.0, size=(4, 2))
+        self.y = np.sum(self.x**2, axis=1)
+        self.bounds = [(-2.0, 2.0), (-2.0, 2.0)]
+        self.n_candidates = 5
+
+    def test_propose_next_rejects_wrong_length_mean(self):
+        gp = _MockSurrogate(mean=np.zeros(3), cov=np.eye(3))  # 3 != n_candidates (5)
+        with self.assertRaises(ValueError):
+            propose_next(self.x, self.y, self.bounds, n_candidates=self.n_candidates, seed=1, gp=gp)
+
+    def test_propose_next_rejects_nonfinite_mean(self):
+        gp = _MockSurrogate(mean=np.full(self.n_candidates, np.nan), cov=np.eye(self.n_candidates))
+        with self.assertRaises(ValueError):
+            propose_next(self.x, self.y, self.bounds, n_candidates=self.n_candidates, seed=1, gp=gp)
+
+    def test_propose_next_rejects_wrong_shape_covariance(self):
+        gp = _MockSurrogate(mean=np.zeros(self.n_candidates), cov=np.eye(self.n_candidates + 1))
+        with self.assertRaises(ValueError):
+            propose_next(self.x, self.y, self.bounds, n_candidates=self.n_candidates, seed=1, gp=gp)
+
+    def test_propose_next_rejects_asymmetric_covariance(self):
+        cov = np.eye(self.n_candidates)
+        cov[0, 1] = 5.0  # break symmetry
+        gp = _MockSurrogate(mean=np.zeros(self.n_candidates), cov=cov)
+        with self.assertRaises(ValueError):
+            propose_next(self.x, self.y, self.bounds, n_candidates=self.n_candidates, seed=1, gp=gp)
+
+    def test_propose_next_rejects_nonfinite_observations_before_fitting(self):
+        # Non-finite y never reaches the (mock) surrogate at all -- _fit_surrogate's own boundary
+        # check fires first, regardless of what the surrogate would have done with it.
+        bad_y = np.array([1.0, np.nan, 2.0, 3.0])
+        gp = _MockSurrogate(mean=np.zeros(self.n_candidates), cov=np.eye(self.n_candidates))
+        with self.assertRaises(ValueError):
+            propose_next(self.x, bad_y, self.bounds, n_candidates=self.n_candidates, seed=1, gp=gp)
+
+    def test_propose_next_all_nonfinite_merit_raises_clearly(self):
+        # A pathological/custom acquisition that returns an all-NaN merit must not let np.argmax
+        # silently pick an arbitrary (NaN) index.
+        def nan_acquisition(mean, std, best, *, maximize=False, **_):
+            return np.full(mean.shape, np.nan)
+
+        gp = _MockSurrogate(mean=np.zeros(self.n_candidates), cov=np.eye(self.n_candidates) * 0.01)
+        with self.assertRaises(ValueError):
+            propose_next(
+                self.x, self.y, self.bounds, n_candidates=self.n_candidates, seed=1, gp=gp, acq=nan_acquisition
+            )
+
+    def test_propose_next_negative_control_selects_the_obviously_best_candidate(self):
+        # One candidate's predicted mean is far better (lower) than the rest with tight uncertainty;
+        # a well-posed surrogate must still let propose_next select a sensible, high-merit candidate.
+        mean = np.array([0.0, 0.0, -100.0, 0.0, 0.0])
+        cov = np.eye(self.n_candidates) * 0.01
+        gp = _MockSurrogate(mean=mean, cov=cov)
+        _, merit = propose_next(
+            self.x, self.y, self.bounds, n_candidates=self.n_candidates, seed=1, gp=gp, return_acquisition=True
+        )
+        # EI at the -100 candidate is roughly (best - (-100)); every other candidate's EI is tiny by
+        # comparison (best is a small value from x**2 over [-2, 2]^2).
+        self.assertGreater(merit, 50.0)
+
+    def test_propose_knowledge_gradient_rejects_wrong_length_mean(self):
+        gp = _MockSurrogate(mean=np.zeros(3), cov=np.eye(3))
+        with self.assertRaises(ValueError):
+            propose_knowledge_gradient(self.x, self.y, self.bounds, n_candidates=self.n_candidates, gp=gp)
+
+    def test_propose_knowledge_gradient_rejects_asymmetric_covariance(self):
+        cov = np.eye(self.n_candidates)
+        cov[0, 1] = 5.0
+        gp = _MockSurrogate(mean=np.zeros(self.n_candidates), cov=cov)
+        with self.assertRaises(ValueError):
+            propose_knowledge_gradient(self.x, self.y, self.bounds, n_candidates=self.n_candidates, gp=gp)
+
+    def test_propose_knowledge_gradient_negative_control_selects_a_candidate_in_bounds(self):
+        mean = np.array([0.0, 0.0, 5.0, 0.0, 0.0])
+        cov = np.eye(self.n_candidates) * 0.01
+        gp = _MockSurrogate(mean=mean, cov=cov)
+        point = propose_knowledge_gradient(self.x, self.y, self.bounds, n_candidates=self.n_candidates, gp=gp)
+        self.assertEqual(point.shape, (2,))
+        self.assertTrue(np.all(point >= [-2.0, -2.0]) and np.all(point <= [2.0, 2.0]))
 
 
 if __name__ == "__main__":

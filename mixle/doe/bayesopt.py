@@ -290,7 +290,69 @@ class BayesOptResult(OptimizationResult):
     best_y: float
 
 
+def _validate_observations(x: np.ndarray, y: np.ndarray, *, context: str) -> None:
+    """Require every entry of the training observations ``x``/``y`` to be finite before fitting.
+
+    A non-finite entry (a NaN/Inf leaking into ``y`` from a bad objective evaluation, or from a
+    fantasized kriging-believer value computed from a broken surrogate prediction) would otherwise
+    propagate silently into the surrogate's fit and every downstream posterior mean/covariance --
+    named here, at the fit boundary shared by every proposal path, instead of surfacing as an opaque
+    numerical failure deep inside the GP (MXR-080-0170).
+    """
+    if not np.all(np.isfinite(x)):
+        raise ValueError(f"{context}: x contains non-finite values (NaN/Inf); cannot fit the surrogate.")
+    if not np.all(np.isfinite(y)):
+        raise ValueError(f"{context}: y contains non-finite values (NaN/Inf); cannot fit the surrogate.")
+
+
+def _validate_prediction(mean: Any, cov: Any, n: int, *, context: str) -> tuple[np.ndarray, np.ndarray | None]:
+    """Validate a surrogate's posterior prediction against the candidate contract.
+
+    ``mean`` must be a finite, length-``n`` vector -- one prediction per point queried. A duck-typed
+    ``gp=`` surrogate that silently returns the wrong length, or whose fit diverged to NaN, is caught
+    here instead of corrupting the acquisition merit / argmax that follows. When ``cov`` is not
+    ``None`` it must additionally be a finite, symmetric ``(n, n)`` matrix (MXR-080-0170). Returns the
+    validated ``(mean, cov)`` as float64 arrays (``cov`` is ``None`` through unchanged).
+    """
+    mean = np.asarray(mean, dtype=np.float64).reshape(-1)
+    if mean.shape != (n,):
+        raise ValueError(f"{context}: surrogate predicted mean has shape {mean.shape}, expected ({n},).")
+    if not np.all(np.isfinite(mean)):
+        raise ValueError(f"{context}: surrogate predicted mean contains non-finite values (NaN/Inf).")
+    if cov is None:
+        return mean, None
+    cov = np.atleast_2d(np.asarray(cov, dtype=np.float64))
+    if cov.shape != (n, n):
+        raise ValueError(f"{context}: surrogate covariance has shape {cov.shape}, expected ({n}, {n}).")
+    if not np.all(np.isfinite(cov)):
+        raise ValueError(f"{context}: surrogate covariance contains non-finite values (NaN/Inf).")
+    if not np.allclose(cov, cov.T, atol=1.0e-8, rtol=1.0e-5):
+        raise ValueError(f"{context}: surrogate covariance is not symmetric.")
+    return mean, cov
+
+
+def _select_index(values: Any, n: int, *, largest: bool, context: str) -> int:
+    """Validate a per-candidate score array and return its arg-best (largest or smallest) index.
+
+    ``values`` must have length ``n`` and at least one finite entry. Neither ``np.argmax`` nor
+    ``np.argmin`` skips NaN -- an array containing one can make either return that NaN's index rather
+    than the true best-scoring candidate's -- so non-finite entries are masked out before selecting,
+    and a ``values`` that is entirely non-finite raises a clear error instead of returning an
+    arbitrary index (MXR-080-0170).
+    """
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    if values.shape != (n,):
+        raise ValueError(f"{context}: expected {n} scores, got shape {values.shape}.")
+    finite = np.isfinite(values)
+    if not np.any(finite):
+        raise ValueError(f"{context}: no candidate has a finite score (all {n} are NaN/Inf).")
+    fill = -np.inf if largest else np.inf
+    masked = np.where(finite, values, fill)
+    return int(np.argmax(masked) if largest else np.argmin(masked))
+
+
 def _fit_surrogate(x: np.ndarray, y: np.ndarray, gp: Surrogate | None, fit_kwargs: dict[str, Any] | None) -> Surrogate:
+    _validate_observations(x, y, context="_fit_surrogate")
     if gp is None:
         from mixle.models.gaussian_process import GaussianProcessRegressor
 
@@ -319,7 +381,12 @@ def _propose_one(
     gp: Surrogate | None,
     fit_kwargs: dict[str, Any] | None,
 ) -> tuple[np.ndarray, float, Surrogate]:
-    """Fit the surrogate, score Latin-hypercube candidates, return (best point, its merit, fitted gp)."""
+    """Fit the surrogate, score Latin-hypercube candidates, return (best point, its merit, fitted gp).
+
+    Raises ``ValueError`` if the surrogate's predicted mean/covariance don't match the candidate
+    contract (wrong shape, non-finite, asymmetric covariance) or if every candidate's acquisition
+    merit is non-finite (see :func:`_validate_prediction` / :func:`_select_index`).
+    """
     if int(n_candidates) <= 0:
         raise ValueError("n_candidates must be positive.")
     if y.size == 0:
@@ -330,13 +397,13 @@ def _propose_one(
         raise ValueError("cannot propose an acquisition-based point with zero observations; call tell() first.")
     gp = _fit_surrogate(x, y, gp, fit_kwargs)
     candidates = latin_hypercube(b, n_candidates, rng)
+    n_cand = candidates.shape[0]
     mean, cov = gp.predict(x, y, candidates, return_cov=True)
-    std = np.sqrt(np.clip(np.diag(np.asarray(cov, dtype=np.float64)), 0.0, None))
+    mean, cov = _validate_prediction(mean, cov, n_cand, context="_propose_one")
+    std = np.sqrt(np.clip(np.diag(cov), 0.0, None))
     best = float(np.max(y)) if maximize else float(np.min(y))
-    merit = np.asarray(
-        acq_fn(np.asarray(mean, dtype=np.float64), std, best, maximize=maximize, **acq_kwargs), dtype=np.float64
-    )
-    idx = int(np.argmax(merit))
+    merit = np.asarray(acq_fn(mean, std, best, maximize=maximize, **acq_kwargs), dtype=np.float64)
+    idx = _select_index(merit, n_cand, largest=True, context="_propose_one acquisition merit")
     return candidates[idx], float(merit[idx]), gp
 
 
@@ -407,6 +474,10 @@ def propose_knowledge_gradient(
     joint posterior, and returns the candidate with the largest :func:`knowledge_gradient` -- the
     look-ahead Bayesian-optimization proposal. ``maximize`` selects the objective sense (the mean is
     negated for minimization).
+
+    Raises ``ValueError`` if the surrogate's predicted mean/covariance don't match the candidate
+    contract (wrong shape, non-finite, asymmetric covariance) or if every candidate's knowledge-gradient
+    value is non-finite (see :func:`_validate_prediction` / :func:`_select_index`).
     """
     if int(n_candidates) <= 0:
         raise ValueError("n_candidates must be positive.")
@@ -415,11 +486,13 @@ def propose_knowledge_gradient(
     rng = _as_rng(seed)
     gp = _fit_surrogate(x, y, gp, fit_kwargs)
     candidates = latin_hypercube(b, n_candidates, rng)
+    n_cand = candidates.shape[0]
     mean, cov = gp.predict(x, y, candidates, return_cov=True)
-    mean = np.asarray(mean, dtype=np.float64)
+    mean, cov = _validate_prediction(mean, cov, n_cand, context="propose_knowledge_gradient")
     signed_mean = mean if maximize else -mean  # KG is defined for maximization
-    kg = knowledge_gradient(signed_mean, np.asarray(cov, dtype=np.float64), noise)
-    return candidates[int(np.argmax(kg))]
+    kg = knowledge_gradient(signed_mean, cov, noise)
+    idx = _select_index(kg, n_cand, largest=True, context="propose_knowledge_gradient")
+    return candidates[idx]
 
 
 def _validate_xy(x: Any, y: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -451,6 +524,10 @@ def propose_next(
     (``"ei"`` / ``"pi"`` / ``"ucb"`` or any registered name / callable), and returns the best candidate
     (a ``(d,)`` array), optionally with its merit. ``xi`` is forwarded to acquisitions that use it
     (EI, PI); per-acquisition parameters such as ``kappa`` go in ``acq_kwargs``.
+
+    Raises ``ValueError`` if the surrogate's predicted mean/covariance don't match the candidate
+    contract (wrong shape, non-finite, asymmetric covariance) or if every candidate's acquisition
+    merit is non-finite (validated at the shared surrogate boundary, see :func:`_propose_one`).
     """
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
@@ -494,6 +571,10 @@ def propose_batch(
     as a fantasized observation and the surrogate refit, so the next pick is steered away from it.
     Returns a ``(q, d)`` array. This needs no true objective evaluations between picks, so it suits
     parallel/asynchronous experiment campaigns.
+
+    Raises ``ValueError`` if the surrogate's predicted mean/covariance or fantasized single-point
+    prediction don't match the candidate contract, or if every candidate's acquisition merit is
+    non-finite at some step (see :func:`_validate_prediction` / :func:`_select_index`).
     """
     if int(q) <= 0:
         raise ValueError("q must be positive.")
@@ -517,9 +598,15 @@ def propose_batch(
             fit_kwargs=fit_kwargs,
         )
         picks.append(point)
-        fantasy = np.asarray(gp.predict(xs, ys, point[None, :], return_cov=False), dtype=np.float64).reshape(-1)[0]
+        # kriging-believer fantasy: a single-point prediction that becomes a real observation for the
+        # NEXT iteration's fit -- validate it here too, since it bypasses _validate_xy (called once,
+        # up front, not on each iteration's grown xs/ys).
+        fantasy_pred = gp.predict(xs, ys, point[None, :], return_cov=False)
+        fantasy_mean, _ = _validate_prediction(
+            fantasy_pred, None, 1, context="propose_batch (kriging-believer fantasy)"
+        )
         xs = np.vstack([xs, point[None, :]])
-        ys = np.append(ys, float(fantasy))
+        ys = np.append(ys, float(fantasy_mean[0]))
     return np.asarray(picks, dtype=np.float64)
 
 
@@ -543,6 +630,10 @@ def minimize(
     steps using ``acq`` (``"ei"`` by default; also ``"pi"`` / ``"ucb"`` or any registered acquisition).
     Minimizes by default; set ``maximize=True`` to maximize. ``objective`` takes a ``(d,)`` point and
     returns a float.
+
+    Raises ``ValueError`` if every evaluated ``y`` is non-finite at the end of the run (see
+    :func:`_select_index`) -- e.g. ``objective`` itself returned NaN/Inf on its very last call, too
+    late for the next :func:`propose_next` call to catch via its own observation validation.
     """
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
@@ -569,7 +660,7 @@ def minimize(
         x = np.vstack([x, nxt[None, :]])
         y = np.append(y, float(objective(nxt)))
 
-    best_idx = int(np.argmax(y)) if maximize else int(np.argmin(y))
+    best_idx = _select_index(y, len(y), largest=maximize, context="minimize")
     return BayesOptResult(best_x=x[best_idx], best_y=float(y[best_idx]), x=x, y=y)
 
 
