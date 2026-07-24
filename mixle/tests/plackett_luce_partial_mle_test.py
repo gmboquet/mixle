@@ -52,6 +52,41 @@ class PlackettLucePartialMleTest(unittest.TestCase):
         fit = optimize(partial, PlackettLucePartialEstimator(dim=k), max_its=40, rng=RandomState(0), out=None)
         self.assertAlmostEqual(float(np.sum(np.exp(fit.log_w))), 1.0, places=6)
 
+    def test_partial_fit_encoder_scores_its_own_training_data(self):
+        # A distribution fitted via PlackettLucePartialEstimator must remain usable through the
+        # standard fitted.dist_to_encoder().seq_encode(data) / seq_log_density(...) pattern used
+        # everywhere else in this codebase (e.g. optimize()'s scoring loop) -- dist_to_encoder()
+        # must not unconditionally hand back the full-ranking-only encoder regardless of what the
+        # distribution was actually fit on, since that encoder can't build a dense array from
+        # ragged/partial rows and previously raised a numpy shape error on this exact call.
+        data = [[0, 2], [1, 0], [2, 1, 0]]  # ragged partial rankings, dim=3
+        est = PlackettLucePartialEstimator(dim=3)
+        acc = est.accumulator_factory().make()
+        for row in data:
+            acc.update(row, 1.0, None)
+        fitted = est.estimate(len(data), acc.value())
+
+        encoded = fitted.dist_to_encoder().seq_encode(data)
+        seq_ll = fitted.seq_log_density(encoded)
+        # log_density is the ground truth for partial-ranking scoring (it already includes the
+        # unranked-item denominator term); seq_log_density on the batch encoding must agree.
+        scalar_ll = np.array([fitted.log_density(row) for row in data])
+        np.testing.assert_allclose(seq_ll, scalar_ll, rtol=1e-12, atol=1e-12)
+
+    def test_partial_estimator_optimize_warm_start_scores_correctly(self):
+        # optimize()'s prev_estimate warm-start path derives its data encoder from
+        # prev_estimate.dist_to_encoder() rather than the estimator's own accumulator factory --
+        # the other call site (besides direct accumulator use) where a full-ranking-only encoder
+        # would have broken on ragged partial data.
+        k = 4
+        true = PlackettLuceDistribution(np.log([0.4, 0.3, 0.2, 0.1]))
+        partial = [list(o[:2]) for o in true.sampler(3).sample(500)]
+        proto = PlackettLuceDistribution(np.log(np.full(k, 1.0 / k)))
+        fit = optimize(
+            partial, PlackettLucePartialEstimator(dim=k), prev_estimate=proto, max_its=10, rng=RandomState(0), out=None
+        )
+        self.assertAlmostEqual(float(np.sum(np.exp(fit.log_w))), 1.0, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
