@@ -34,11 +34,6 @@ class FactualityTest(unittest.TestCase):
         self.assertEqual(rec.grounded_fraction, 0.5)
         self.assertEqual(len(rec.unsupported()), 1)
 
-    def test_empty_answer_is_vacuously_grounded(self):
-        rec = check_factuality(_kb(), "")
-        self.assertEqual(rec.grounded_fraction, 1.0)
-        self.assertEqual(rec.verdicts, [])
-
     def test_min_score_guards_against_noise(self):
         # a high floor rejects weak matches, so a loosely-related claim goes unsupported
         rec = check_factuality(_kb(), "Support exists.", min_score=0.9)
@@ -49,6 +44,23 @@ class FactualityTest(unittest.TestCase):
         d = rec.as_dict()
         self.assertIn("grounded_fraction", d)
         self.assertEqual(d["n_claims"], 1)
+
+    # -- MXR-080-0259 (Critical): an empty verdict list used to report grounded_fraction == 1.0 and
+    # is_grounded() == True -- a perfect factuality result for an answer with nothing assessed. --------
+    def test_mxr_080_0259_empty_answer_is_unknown_not_grounded(self):
+        rec = check_factuality(_kb(), "")
+        self.assertIsNone(rec.grounded_fraction)  # unknown, not a vacuous 1.0
+        self.assertEqual(rec.verdicts, [])
+        self.assertFalse(rec.is_grounded())  # fails closed: nothing was verified
+
+    def test_mxr_080_0259_evasive_answer_with_no_assessable_claims_fails_closed(self):
+        # No fragment has >= 2 words, so sentence_claims extracts nothing -- an evasive non-answer,
+        # not literally empty, must be treated the same as one: unknown, never "fully grounded".
+        rec = check_factuality(_kb(), "Hm. Well.")
+        self.assertEqual(rec.verdicts, [])
+        self.assertIsNone(rec.grounded_fraction)
+        self.assertFalse(rec.is_grounded())
+        self.assertFalse(rec.is_grounded(threshold=0.0))  # fails closed no matter how low the bar is
 
 
 if __name__ == "__main__":

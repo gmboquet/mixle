@@ -439,7 +439,7 @@ class Scientist:
         # verify=True runs check_factuality; an answer whose claims the substrate cannot ground is
         # withdrawn -- the local model's fluency never substitutes for provenance.
         inv = reasoner.ask(question, verify=True)
-        if not inv.abstained and inv.factuality is not None and inv.factuality.grounded_fraction < 0.5:
+        if not inv.abstained and inv.factuality is not None and not inv.factuality.is_grounded(threshold=0.5):
             inv.answer = None
             inv.abstained = True
             inv.note = "answer could not be grounded in the retrieved evidence"
