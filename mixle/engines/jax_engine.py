@@ -1,7 +1,7 @@
 """JAX implementation of the ComputeEngine protocol -- XLA arrays, functional autograd, GPU/TPU.
 
 JAX's ``jax.numpy`` mirrors the NumPy API, so most ops alias straight through (no ``axis``->``dim``
-translation as Torch needs). Two JAX-isms are handled here:
+translation as Torch needs). Three JAX-isms are handled here:
 
 * **float64 is opt-in, and it is the caller's global setting, not this module's.** JAX defaults to
   float32 and treats ``jax_enable_x64`` as a process-wide flag that JAX itself only documents as
@@ -14,6 +14,12 @@ translation as Torch needs). Two JAX-isms are handled here:
   before; when it is off, both fall back to float32 -- the precision JAX would silently truncate a
   float64 request to anyway -- so the engine never claims a precision the runtime cannot deliver.
   Pass ``dtype=`` explicitly to override either way.
+* **device placement is explicit and validated.** ``device`` resolves to a concrete ``jax.Device`` at
+  construction time (default ``"cpu"``; also accepts ``"gpu"``, ``"tpu"``, or ``"platform:index"``).
+  A platform or index that does not exist in the current JAX runtime raises ``ValueError``
+  immediately. Every allocation/conversion method places its result on that resolved device via
+  ``jax.device_put``, so a requested device is never just a label JAX's own runtime default silently
+  overrides.
 * **arrays are immutable.** ``index_add`` uses the functional ``arr.at[idx].add(...)`` update and returns
   the new array (return-value-only, like the Torch engine).
 
@@ -47,6 +53,43 @@ except ImportError:  # pragma: no cover - exercised when optional extra is absen
     jsp = None
 
 
+def _resolve_jax_device(device: Any) -> Any:
+    """Resolve ``device`` to a concrete, validated ``jax.Device`` (MXR-080-0146).
+
+    ``device`` may be ``None`` (defaults to ``"cpu"``), a platform name (``"cpu"``, ``"gpu"``,
+    ``"tpu"``), a ``"platform:index"`` string selecting a specific device of that platform, or an
+    already-concrete device object (returned unchanged -- e.g. re-threaded from
+    :meth:`JaxEngine.with_precision`). A platform with no devices in the current JAX runtime, or an
+    out-of-range index, raises ``ValueError`` immediately instead of silently falling back to
+    whatever device JAX would otherwise pick as its own runtime default.
+    """
+    if device is not None and not isinstance(device, str):
+        return device
+    spec = device or "cpu"
+    platform, sep, index = spec.partition(":")
+    try:
+        available = jax.devices(platform)
+    except RuntimeError as exc:
+        present = sorted({d.platform for d in jax.devices()})
+        raise ValueError(
+            "JaxEngine device %r requests platform %r, which has no devices in this JAX runtime "
+            "(platforms present: %s). Install the matching JAX plugin (e.g. jax[cuda]) or request a "
+            "platform that is actually present." % (spec, platform, present)
+        ) from exc
+    idx = 0
+    if sep:
+        try:
+            idx = int(index)
+        except ValueError:
+            raise ValueError("JaxEngine device %r has a non-integer index %r." % (spec, index)) from None
+    if not 0 <= idx < len(available):
+        raise ValueError(
+            "JaxEngine device %r requests index %d on platform %r, but only %d device(s) are "
+            "available there." % (spec, idx, platform, len(available))
+        )
+    return available[idx]
+
+
 class JaxEngine(ComputeEngine):
     """JAX array engine: XLA-compiled ops, float64, optional ``jax.jit`` compilation, GPU/TPU via JAX."""
 
@@ -54,9 +97,17 @@ class JaxEngine(ComputeEngine):
     supports_autograd = True
 
     def __init__(self, device: str | None = None, dtype: Any = None, compile: bool = False) -> None:
+        """Construct a JAX engine bound to a concrete, validated device.
+
+        ``device`` defaults to ``"cpu"`` (matching :class:`~mixle.engines.torch_engine.TorchEngine`'s
+        default) and accepts a platform name, a ``"platform:index"`` string, or an already-resolved
+        ``jax.Device`` (see :func:`_resolve_jax_device`). ``dtype`` defaults to float64 only when the
+        ambient ``jax.config.jax_enable_x64`` is already enabled by the caller; otherwise it falls
+        back to float32, since JAX would silently truncate an unenabled float64 request anyway.
+        """
         if jnp is None:
             require("jax", "jax")
-        self.device = device or "cpu"
+        self.device = _resolve_jax_device(device)
         # jax_enable_x64 is process-wide and caller-owned (see module docstring): float64 is only
         # actually available when the caller enabled it themselves, so an unenabled runtime demotes
         # the engine's default dtype and accumulator to float32 -- the same precision JAX would
@@ -84,8 +135,9 @@ class JaxEngine(ComputeEngine):
         return JaxEngine(device=self.device, dtype=precision, compile=self.compile_enabled)
 
     def asarray(self, x: Any, dtype: Any = None) -> Any:
-        """Convert ``x`` to a JAX array. Float inputs are force-cast to the engine dtype (float64 by
-        default) unless ``dtype`` is given -- matching the Torch engine's contract, not NumPy's."""
+        """Convert ``x`` to a JAX array on this engine's device. Float inputs are force-cast to the
+        engine dtype (float64 by default) unless ``dtype`` is given -- matching the Torch engine's
+        contract, not NumPy's."""
         if jnp is None:
             require("jax", "jax")
         a = x if isinstance(x, jax.Array) else np.asarray(x)
@@ -97,29 +149,31 @@ class JaxEngine(ComputeEngine):
             dt = jnp.bool_
         else:
             dt = jnp.int64
-        return jnp.asarray(a, dtype=dt)
+        return jax.device_put(jnp.asarray(a, dtype=dt), self.device)
 
     def zeros(self, shape: Any, dtype: Any = None) -> Any:
-        """Allocate a zero array with this engine's dtype."""
-        return jnp.zeros(shape, dtype=dtype or self.dtype)
+        """Allocate a zero array with this engine's dtype, placed on this engine's device."""
+        return jax.device_put(jnp.zeros(shape, dtype=dtype or self.dtype), self.device)
 
     def empty(self, shape: Any, dtype: Any = None) -> Any:
-        """Allocate an array (JAX has no uninitialized ``empty``; zeros is the safe equivalent)."""
-        return jnp.zeros(shape, dtype=dtype or self.dtype)
+        """Allocate an array on this engine's device (JAX has no uninitialized ``empty``; zeros is
+        the safe equivalent)."""
+        return jax.device_put(jnp.zeros(shape, dtype=dtype or self.dtype), self.device)
 
     def arange(self, *args: Any, **kwargs: Any) -> Any:
-        """Return ``jnp.arange``; float arguments select the engine float dtype."""
+        """Return ``jnp.arange`` placed on this engine's device; float arguments select the engine
+        float dtype."""
         if "dtype" not in kwargs and any(isinstance(v, (float, np.floating)) for v in args):
             kwargs["dtype"] = self.dtype
-        return jnp.arange(*args, **kwargs)
+        return jax.device_put(jnp.arange(*args, **kwargs), self.device)
 
     def to_numpy(self, x: Any) -> np.ndarray:
         """Move a JAX array back to a host NumPy array."""
         return np.asarray(x)
 
     def stack(self, arrays: Any, axis: int = 0) -> Any:
-        """Stack arrays with ``jnp.stack``."""
-        return jnp.stack(tuple(arrays), axis=axis)
+        """Stack arrays with ``jnp.stack``, placed on this engine's device."""
+        return jax.device_put(jnp.stack(tuple(arrays), axis=axis), self.device)
 
     def requires_grad(self, x: Any) -> bool:
         """Always False: JAX autograd is functional (``jax.grad``), not tensor-tagged."""
@@ -163,9 +217,10 @@ class JaxEngine(ComputeEngine):
     i0e = staticmethod(lambda x: jsp.i0e(x))
 
     def index_add(self, out: Any, index: Any, values: Any) -> Any:
-        """Add ``values`` into ``out`` along axis 0 via the functional ``.at[idx].add`` update.
+        """Add ``values`` into ``out`` along axis 0 via the functional ``.at[idx].add`` update,
+        placed on this engine's device.
 
         Contract: return-value-only -- JAX arrays are immutable, so this returns a new array; callers
         must use the return value (the same contract the Torch engine documents)."""
         idx = index if isinstance(index, jax.Array) else jnp.asarray(index, dtype=jnp.int64)
-        return out.at[idx].add(values)
+        return jax.device_put(out.at[idx].add(values), self.device)

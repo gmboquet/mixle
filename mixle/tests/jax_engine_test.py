@@ -204,6 +204,83 @@ class JaxEngineX64ConfigTest(unittest.TestCase):
         self.assertEqual(np.asarray(eng.asarray([1.0])).dtype, np.float32)
 
 
+def _array_devices(arr):
+    """Return the set of ``jax.Device`` objects ``arr`` currently lives on -- robust to the
+    ``jax.Array`` API's ``device()`` (singular, older) -> ``devices()`` (plural, current) rename."""
+    devices_fn = getattr(arr, "devices", None)
+    if callable(devices_fn):
+        return set(devices_fn())
+    return {arr.device()}
+
+
+@unittest.skipUnless(_HAS_JAX, "jax is not installed")
+class JaxEngineDeviceTest(unittest.TestCase):
+    """MXR-080-0146: a requested device must be resolved, validated, and actually honored by every
+    allocation/conversion method -- not stored as an inert label while arrays keep landing on
+    whatever device JAX's own runtime picks by itself."""
+
+    def test_default_device_is_a_concrete_cpu_device_not_a_string(self):
+        import jax
+
+        eng = JaxEngine()
+        self.assertNotIsInstance(eng.device, str)
+        self.assertIn(eng.device, jax.devices("cpu"))
+
+    def test_default_unspecified_device_places_allocations_on_cpu(self):
+        # Negative control: a plain JaxEngine() with no device argument still lands on CPU, exactly as
+        # its self.device label already claimed before this fix -- the fix makes the label true (by
+        # actually calling device_put), it does not change what the documented default is.
+        import jax
+
+        eng = JaxEngine()
+        cpu0 = jax.devices("cpu")[0]
+        self.assertIn(cpu0, _array_devices(eng.zeros(3)))
+
+    def test_explicit_cpu_device_places_every_allocation_conversion_method_there(self):
+        import jax
+
+        eng = JaxEngine(device="cpu")
+        cpu0 = jax.devices("cpu")[0]
+        allocated = [
+            eng.zeros(3),
+            eng.empty((2, 2)),
+            eng.asarray([1.0, 2.0, 3.0]),
+            eng.arange(5),
+            eng.stack([eng.asarray([1.0]), eng.asarray([2.0])]),
+        ]
+        for arr in allocated:
+            self.assertIn(cpu0, _array_devices(arr), f"{arr!r} was not placed on the requested device")
+
+    def test_index_add_result_stays_on_the_requested_device(self):
+        eng = JaxEngine(device="cpu")
+        out = eng.zeros(3)
+        out = eng.index_add(out, eng.asarray([0, 0, 2]), eng.asarray([1.0, 2.0, 5.0]))
+        self.assertIn(eng.device, _array_devices(out))
+
+    def test_unavailable_platform_raises_instead_of_silently_falling_back(self):
+        # A platform name that can never be real under any JAX build/runtime -- unlike "gpu"/"tpu",
+        # which might genuinely be present on some CI runner, this must always be absent.
+        with self.assertRaises(ValueError):
+            JaxEngine(device="totally-bogus-platform-xyz")
+
+    def test_out_of_range_device_index_raises(self):
+        import jax
+
+        n_cpu = len(jax.devices("cpu"))
+        with self.assertRaises(ValueError):
+            JaxEngine(device="cpu:%d" % (n_cpu + 10))
+
+    def test_non_integer_device_index_raises(self):
+        with self.assertRaises(ValueError):
+            JaxEngine(device="cpu:not-a-number")
+
+    def test_with_precision_keeps_the_same_resolved_device(self):
+        eng = JaxEngine(device="cpu")
+        eng2 = eng.with_precision("float32")
+        self.assertEqual(eng.device, eng2.device)
+        self.assertIn(eng2.device, _array_devices(eng2.zeros(3)))
+
+
 @unittest.skipUnless(_HAS_JAX, "jax not installed")
 class JaxLeafFittingParityTest(unittest.TestCase):
     """The leaf families that declare jax (engine_ready=(...,'jax')) fit on JaxEngine with a result
