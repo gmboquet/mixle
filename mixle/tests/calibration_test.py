@@ -1,6 +1,7 @@
 """Kennedy-O'Hagan calibration: recover simulator parameters despite model discrepancy (Phase 4)."""
 
 import unittest
+import unittest.mock
 
 import numpy as np
 
@@ -91,6 +92,114 @@ class NoiseLikelihoodConsistencyTest(unittest.TestCase):
         x, y = _fit(lambda x: np.zeros_like(x), noise=1e-6)
         ko = calibrate(_sim, x, y, theta0=[0.0, 0.0], discrepancy=False)
         self.assertLess(ko.noise, 1e-3)  # correctly tiny, not inflated by the fix
+
+
+class CalibrationValidationTest(unittest.TestCase):
+    """MXR-080-0172: calibrate() must validate its data/model contract, require real optimizer
+    convergence, actually consume ``seed``, and expose the point estimate's asymptotic uncertainty."""
+
+    def setUp(self):
+        self.x, self.y = _fit(lambda x: np.zeros_like(x), noise=0.05)
+
+    def test_rejects_x_y_length_mismatch(self):
+        with self.assertRaises(ValueError):
+            calibrate(_sim, self.x, self.y[:15], theta0=[0.0, 0.0])
+
+    def test_rejects_simulator_output_shape_mismatch(self):
+        def bad_shape_sim(x, theta):
+            return np.array([theta[0]])  # wrong output shape regardless of x
+
+        with self.assertRaises(ValueError):
+            calibrate(bad_shape_sim, self.x, self.y, theta0=[0.0, 0.0])
+
+    def test_rejects_non_finite_y(self):
+        y_nan = self.y.copy()
+        y_nan[3] = np.nan
+        with self.assertRaises(ValueError):
+            calibrate(_sim, self.x, y_nan, theta0=[0.0, 0.0])
+
+    def test_rejects_non_finite_x(self):
+        x_inf = self.x.copy()
+        x_inf[3] = np.inf
+        with self.assertRaises(ValueError):
+            calibrate(_sim, x_inf, self.y, theta0=[0.0, 0.0])
+
+    def test_rejects_non_finite_theta0(self):
+        with self.assertRaises(ValueError):
+            calibrate(_sim, self.x, self.y, theta0=[0.0, np.nan])
+
+    def test_zero_lengthscale_is_rejected_not_silently_defaulted(self):
+        # Before the fix: `discrepancy_lengthscale=0.0` is falsy, so `0` silently fell through to the
+        # same default as `None` -- indistinguishable from "use the default" instead of caller error.
+        # (The 0.0 case is rejected before optimization even starts, so a tiny max_iter is fine there;
+        # the None case needs a real iteration budget to converge, so it uses the default.)
+        with self.assertRaises(ValueError):
+            calibrate(_sim, self.x, self.y, theta0=[0.0, 0.0], discrepancy_lengthscale=0.0, max_iter=5)
+        ko_default = calibrate(_sim, self.x, self.y, theta0=[0.0, 0.0], discrepancy_lengthscale=None)
+        self.assertTrue(np.isfinite(ko_default.lengthscale))  # None still means "use the default"
+
+    def test_rejects_negative_lengthscale(self):
+        with self.assertRaises(ValueError):
+            calibrate(_sim, self.x, self.y, theta0=[0.0, 0.0], discrepancy_lengthscale=-1.0, max_iter=5)
+
+    def test_rejects_non_positive_max_iter(self):
+        for bad in [0, -5]:
+            with self.assertRaises(ValueError):
+                calibrate(_sim, self.x, self.y, theta0=[0.0, 0.0], max_iter=bad)
+
+    def test_rejects_fractional_max_iter(self):
+        with self.assertRaises(ValueError):
+            calibrate(_sim, self.x, self.y, theta0=[0.0, 0.0], max_iter=5.5)
+
+    def test_rejects_underidentified_theta(self):
+        # 3 free theta parameters, 2 data points: theta cannot be identified regardless of fit quality.
+        with self.assertRaises(ValueError):
+            calibrate(_sim, np.array([0.0, 1.0]), np.array([1.0, 2.0]), theta0=[0.0, 0.0, 0.0])
+
+    def test_rejects_non_convergent_optimization(self):
+        # An absurd starting point with essentially no iteration budget cannot converge from any of
+        # the multi-start candidates; before the fix this silently returned the unconverged garbage.
+        with self.assertRaises(ValueError):
+            calibrate(_sim, self.x, self.y, theta0=[1e6, 1e6], max_iter=1)
+
+    def test_seed_reproducibility(self):
+        ko_a = calibrate(_sim, self.x, self.y, theta0=[0.0, 0.0], seed=7)
+        ko_b = calibrate(_sim, self.x, self.y, theta0=[0.0, 0.0], seed=7)
+        np.testing.assert_array_equal(ko_a.theta, ko_b.theta)
+        self.assertEqual(ko_a.noise, ko_b.noise)
+
+    def test_seed_is_actually_consumed(self):
+        # Before the fix, `seed` was accepted but never read anywhere in the function body, so
+        # identical/different seeds were indistinguishable; np.random.default_rng was never called.
+        with unittest.mock.patch("numpy.random.default_rng", wraps=np.random.default_rng) as spy:
+            calibrate(_sim, self.x, self.y, theta0=[0.0, 0.0], seed=4321, discrepancy=False)
+        seeds_used = [c.args[0] for c in spy.call_args_list]
+        self.assertIn(4321, seeds_used)
+
+    def test_theta_uncertainty_is_present_and_reasonable(self):
+        ko = calibrate(_sim, self.x, self.y, theta0=[0.0, 0.0], discrepancy=False)
+        self.assertTrue(np.all(np.isfinite(ko.theta_standard_error)))
+        self.assertTrue(np.all(ko.theta_standard_error > 0))
+        self.assertTrue(np.all(ko.theta_ci_low <= ko.theta) and np.all(ko.theta <= ko.theta_ci_high))
+
+    def test_theta_confidence_intervals_are_calibrated(self):
+        # The asymptotic 95% CI should cover the true theta in most (not necessarily all) independent
+        # fits -- a coverage check, not just "the field exists". Loose floor keeps this non-flaky.
+        covered = 0
+        trials = 10
+        for seed in range(trials):
+            x = np.linspace(0, 4, 50)
+            y = _sim(x, TRUE) + np.random.RandomState(seed + 100).randn(50) * 0.1
+            ko = calibrate(_sim, x, y, theta0=[0.0, 0.0], discrepancy=False, seed=seed)
+            if np.all(ko.theta_ci_low <= TRUE) and np.all(TRUE <= ko.theta_ci_high):
+                covered += 1
+        self.assertGreaterEqual(covered, 7)  # ~95% nominal; loose floor keeps this non-flaky
+
+    def test_well_posed_calibration_still_returns_correct_point_estimate(self):
+        # Negative control: all the new validation/convergence strictness must not break a normal fit.
+        x, y = _fit(lambda x: 0.6 * np.exp(-((x - 3) ** 2) / 0.3), noise=0.05)
+        ko = calibrate(_sim, x, y, theta0=[0.0, 0.0])
+        np.testing.assert_allclose(ko.theta, TRUE, atol=0.25)
 
 
 if __name__ == "__main__":
