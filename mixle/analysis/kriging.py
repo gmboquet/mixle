@@ -94,11 +94,22 @@ def _transform(coords: np.ndarray, anisotropy: tuple[float, float] | None) -> np
 
 def empirical_variogram(
     coords: np.ndarray, values: np.ndarray, *, n_bins: int = 15, max_dist: float | None = None
-) -> dict[str, np.ndarray]:
+) -> dict[str, np.ndarray | bool | str]:
     """Binned empirical (semi-)variogram: mean ``0.5 (z_i - z_j)^2`` by separation distance.
 
+    ``max_dist`` defaults to half the largest pairwise distance. Bins are ``n_bins`` equal-width
+    intervals, left-closed and right-open (``[edges[b], edges[b+1])``) except the last, which is
+    closed on both ends -- so a pair separated by exactly ``max_dist`` (routine, not an edge case:
+    e.g. the endpoints of an evenly spaced line always sit exactly on the default cutoff) lands in
+    the last bin instead of being classified as "beyond the last bin" and silently dropped.
+
     Returns:
-        ``{'lag', 'semivariance', 'count'}`` for each non-empty distance bin.
+        ``{'lag', 'semivariance', 'count', 'insufficient_evidence', 'reason'}`` -- ``lag`` /
+        ``semivariance`` / ``count`` cover each non-empty distance bin. ``insufficient_evidence`` is
+        ``True`` (with ``reason`` set and the other fields empty) only when no pair falls within
+        ``[0, max_dist]`` at all -- e.g. a single input point, or a ``max_dist`` narrower than every
+        pairwise distance -- so no bin is identifiable; it is ``False`` (with ``reason`` empty)
+        whenever at least one bin is populated.
     """
     coords = np.atleast_2d(np.asarray(coords, dtype=float))
     z = np.asarray(values, dtype=float).ravel()
@@ -107,9 +118,14 @@ def empirical_variogram(
     dist = d[iu]
     sv = 0.5 * (z[iu[0]] - z[iu[1]]) ** 2
     if max_dist is None:
-        max_dist = dist.max() / 2.0
+        max_dist = dist.max() / 2.0 if dist.size else 0.0
     edges = np.linspace(0, max_dist, n_bins + 1)
     idx = np.digitize(dist, edges) - 1
+    # np.digitize is half-open on the right, so a pair sitting exactly on the outer edge digitizes to
+    # n_bins ("beyond the last bin") and would otherwise be dropped. Fold that boundary case into the
+    # last bin; pairs genuinely beyond max_dist also digitize to n_bins but fail `dist <= max_dist`,
+    # so they correctly stay excluded by the `range(n_bins)` loop below.
+    idx = np.where((idx == n_bins) & (dist <= max_dist), n_bins - 1, idx)
     lag, semi, cnt = [], [], []
     for b in range(n_bins):
         m = idx == b
@@ -117,7 +133,30 @@ def empirical_variogram(
             lag.append(0.5 * (edges[b] + edges[b + 1]))
             semi.append(float(sv[m].mean()))
             cnt.append(int(m.sum()))
-    return {"lag": np.asarray(lag), "semivariance": np.asarray(semi), "count": np.asarray(cnt, dtype=int)}
+    if not cnt:
+        return {
+            "lag": np.array([]),
+            "semivariance": np.array([]),
+            "count": np.array([], dtype=int),
+            "insufficient_evidence": True,
+            "reason": (
+                "no point pair falls within [0, max_dist]: the empirical variogram is not "
+                "identifiable from this coordinate/distance configuration."
+            ),
+        }
+    return {
+        "lag": np.asarray(lag),
+        "semivariance": np.asarray(semi),
+        "count": np.asarray(cnt, dtype=int),
+        "insufficient_evidence": False,
+        "reason": "",
+    }
+
+
+# nugget, partial sill, and range are 3 free parameters; fewer populated lag bins leaves the
+# least-squares fit underdetermined (mirrors the >= 2 frequency classes good_turing needs to fit its
+# own 2-parameter log-linear smoother).
+_MIN_POPULATED_BINS_FOR_FIT = 3
 
 
 def fit_variogram(
@@ -127,9 +166,22 @@ def fit_variogram(
 
     Returns:
         A fitted :class:`Variogram` (nugget, partial sill, range).
+
+    Raises:
+        ValueError: if the empirical variogram has fewer than :data:`_MIN_POPULATED_BINS_FOR_FIT`
+            populated bins, so nugget/partial sill/range are not identifiable from the data (see
+            :func:`empirical_variogram`).
     """
     ev = empirical_variogram(coords, values, n_bins=n_bins)
+    if ev["insufficient_evidence"]:
+        raise ValueError(f"cannot fit a variogram: {ev['reason']}")
     lag, semi, cnt = ev["lag"], ev["semivariance"], ev["count"]
+    if len(cnt) < _MIN_POPULATED_BINS_FOR_FIT:
+        raise ValueError(
+            f"cannot fit a variogram: only {len(cnt)} populated lag bin(s), but nugget/partial "
+            f"sill/range (3 free parameters) need at least {_MIN_POPULATED_BINS_FOR_FIT} to be "
+            "identifiable. Provide more points, a larger max_dist, or fewer n_bins."
+        )
     var = float(np.var(np.asarray(values, dtype=float)))
     max_lag = float(lag.max())
     # weight bins by the square root of their pair count (more-populated lags are more reliable)
