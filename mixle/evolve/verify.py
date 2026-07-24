@@ -27,7 +27,19 @@ the calibration no-regression rule, multiplicity) and never edits the underlying
    challengers at once (e.g. one population generation) must pool the RAW p-values from every comparison
    and adjust them together, ONCE, via :func:`mixle.inference.multiple_testing.adjust_pvalues`, then
    compare each candidate's own adjusted p-value to ``alpha`` itself -- see
-   :meth:`mixle.evolve.population.Population.step`, which does exactly this.
+   :meth:`mixle.evolve.population.Population.step`, which does exactly this. That pool must first drop
+   any :attr:`Verdict.p_value` that is ``nan`` -- see the scalar-only note below --
+   :func:`~mixle.inference.multiple_testing.adjust_pvalues` rejects non-finite input outright rather
+   than silently mishandling it, so an un-filtered pool crashes instead of under-correcting.
+8. **Scalar-only objectives** -- an objective whose ``pointwise`` returns ``None`` (e.g.
+   :func:`~mixle.evolve.objective.calibration_objective`,
+   :func:`~mixle.evolve.objective.decision_regret_objective`) has no per-observation vector to pair, so
+   no paired test can run: the verdict is decided from a bare scalar-delta-vs-``min_effect`` comparison
+   instead, and :attr:`Verdict.p_value`/``ci`` are set to ``nan`` as an explicit "not applicable"
+   sentinel (there being no null hypothesis test to report a p-value or CI *for*) -- not a failure to
+   compute one. Downstream code that pools p-values across many verdicts (point 7 above) must treat
+   this ``nan`` as "exclude from the pool", not "coerce to 0 (very significant)" or "coerce to 1 (never
+   significant)": both would misrepresent a comparison that was never run as one that was.
 """
 
 from __future__ import annotations
@@ -52,8 +64,8 @@ class Verdict:
 
     favored: str  # 'challenger' | 'champion' | 'tie'
     delta: float  # objective improvement, champion_scalar - challenger_scalar (>0 == challenger better)
-    p_value: float
-    ci: tuple[float, float]
+    p_value: float  # nan for a scalar-only objective (no paired test exists) -- see module docstring point 8
+    ci: tuple[float, float]  # (nan, nan) alongside a nan p_value, for the same reason
     calibration_status: str  # 'passed' | 'failed' | 'unavailable' -- see _calibration_no_regression
     evidence: dict = field(default_factory=dict)
 

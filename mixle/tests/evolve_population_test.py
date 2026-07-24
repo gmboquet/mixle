@@ -9,6 +9,8 @@ and corrects them together, ONCE, before finalizing any promotion -- see the mul
 Population.step and the loud-failure guard on challenger_beats_champion (evolve_verify_test.py).
 """
 
+import math
+
 import numpy as np
 
 from mixle.evolve.operators import Candidate
@@ -156,3 +158,88 @@ def test_bh_correction_of_the_same_family_is_reproducible_and_matches_module_hel
     np.testing.assert_array_equal(first, second)
     # a genuine pooled correction can only ever raise (or keep) each raw p-value, never lower it.
     assert np.all(np.asarray(first) >= raw_pvals - 1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Regression: a scalar-only objective's nan p-value must not poison pass 2's pool
+# ---------------------------------------------------------------------------
+class _ScalarOnlyModel:
+    """A bare placeholder 'fitted model' carrying just a scalar score -- stands in for a real model
+    scored by a scalar-only objective (mixle.evolve.objective.calibration_objective /
+    decision_regret_objective in production)."""
+
+    def __init__(self, score):
+        self.score = score
+
+
+class _ScalarOnlyObjective:
+    """Mimics calibration_objective / decision_regret_objective's shape: pointwise() always returns
+    None (there is no per-observation vector, only a scalar), so every comparison goes through
+    challenger_beats_champion's scalar-only branch, whose Verdict.p_value is nan by design -- see
+    verify.py's module docstring point 8. This is what Population.step()'s pass 2 (pooling every
+    compared candidate's raw p-value into one array before calling adjust_pvalues) must not choke on."""
+
+    name = "scalar_only_null"
+    lower_is_better = True
+
+    def pointwise(self, model, data):
+        return None
+
+    def scalar(self, model, data):
+        return model.score
+
+
+class _ScalarOnlyOp:
+    def __init__(self, name, score):
+        self.name = name
+        self.cost_hint = 1.0
+        self.score = score
+
+    def applicable(self, model, data, *, ctx):
+        return True
+
+    def propose(self, model, data, *, ctx):
+        return Candidate(_ScalarOnlyModel(self.score), self.name)
+
+
+def test_population_step_with_scalar_only_objective_does_not_crash_on_nan_pvalue_pool():
+    # Bug regression: a scalar-only objective (no paired vector -- calibration_objective and
+    # decision_regret_objective in mixle.evolve.objective are exactly this shape) makes every
+    # compared candidate's Verdict.p_value nan (challenger_beats_champion's scalar-only branch has no
+    # paired test to report a p-value for). Population.step()'s pass 2 pools every compared
+    # candidate's raw p-value and hands the pool straight to adjust_pvalues, which rejects any
+    # non-finite entry outright (mixle.inference.multiple_testing._prep) -- so a scalar-only objective
+    # used to crash step() unconditionally, on every single generation, taking down promotion for the
+    # whole generation rather than just leaving the scalar-only candidates uncorrected.
+    obj = _ScalarOnlyObjective()
+    champion_score = 1.0
+    seed_model = _ScalarOnlyModel(champion_score)
+    ops = [
+        _ScalarOnlyOp("better", score=0.5),  # lower is better -> genuine improvement, should promote
+        _ScalarOnlyOp("worse", score=1.5),  # genuine regression, must not promote
+        _ScalarOnlyOp("tie", score=1.0),  # no change at all, must not promote
+    ]
+    pop = Population([seed_model], objective=obj, operators=ops, size=8, diversity_quota=0, seed=0)
+
+    report = pop.step([0.0])  # this objective never touches `data`; a placeholder is enough
+
+    assert report.proposals == 3
+    # not just "didn't crash": the scalar-only verdict's OWN (unadjusted, there being no p-value for a
+    # population-wide correction to act on) promotion decision must stand -- exactly the genuinely
+    # better candidate promotes, not the tied or regressed ones.
+    assert report.verified == 1
+    assert report.rewards == [0.5, 0.0, 0.0]
+
+
+def test_scalar_only_verdict_carries_nan_p_value_contract():
+    # Pins the exact contract test_population_step_with_scalar_only_objective_does_not_crash_on_nan_
+    # pvalue_pool depends on: challenger_beats_champion's scalar-only branch returns p_value=nan (not,
+    # say, 1.0 or 0.0), so a pooling caller must treat it as "exclude", never as a real, poolable value.
+    obj = _ScalarOnlyObjective()
+    verdict = challenger_beats_champion(
+        _ScalarOnlyModel(1.0), _ScalarOnlyModel(0.5), [0.0], objective=obj, require_calibration=False
+    )
+    assert math.isnan(verdict.p_value)
+    assert all(math.isnan(c) for c in verdict.ci)
+    assert verdict.favored == "challenger"
+    assert verdict.promote is True

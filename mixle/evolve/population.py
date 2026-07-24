@@ -325,6 +325,14 @@ class Population:
         candidate's single p-value in isolation -- family size 1 -- is the identity transform for every
         method in :mod:`~mixle.inference.multiple_testing`, which is why
         :func:`~mixle.evolve.verify.challenger_beats_champion` refuses to do that itself.
+
+        A scalar-only ``self.objective`` (:func:`~mixle.evolve.objective.calibration_objective`,
+        :func:`~mixle.evolve.objective.decision_regret_objective`) has no paired test to run at all --
+        every candidate's :class:`~mixle.evolve.verify.Verdict` then carries ``p_value = nan`` by
+        design (see that function's scalar-only branch) -- so pass 2 excludes non-finite p-values from
+        the pooled family entirely rather than handing them to ``adjust_pvalues`` (which rejects
+        non-finite input outright); such a candidate's own unadjusted ``verdict.promote`` stands as its
+        final promotion decision, since there is no p-value for a population-wide correction to act on.
         """
         verify = data if verify_data is None else verify_data
         self._ensure_initialized(verify)
@@ -366,24 +374,33 @@ class Population:
             )
 
         # -- pass 2: pool this generation's raw p-values and correct them ONCE, together ---------------
+        # exclude non-finite p-values (scalar-only objectives' verdicts -- see the docstring above):
+        # adjust_pvalues' _prep step rejects any non-finite entry outright, so pooling even one of
+        # these in unfiltered used to crash pass 2 and, with it, promotion for the WHOLE generation --
+        # scalar-only candidates and ordinary paired ones alike, since this loop has not run yet.
         compared = [s for s in slots if s.verdict is not None]
-        if compared:
-            raw_pvals = np.asarray([s.verdict.p_value for s in compared], dtype=float)
-            p_adjusted = iter(adjust_pvalues(raw_pvals, method="bh", alpha=alpha)["pvals_adjusted"])
+        pvalued = [s for s in compared if math.isfinite(s.verdict.p_value)]
+        if pvalued:
+            raw_pvals = np.asarray([s.verdict.p_value for s in pvalued], dtype=float)
+            adjusted = adjust_pvalues(raw_pvals, method="bh", alpha=alpha)["pvals_adjusted"]
+            adjusted_by_slot = {id(s): p for s, p in zip(pvalued, adjusted)}
         else:
-            p_adjusted = iter(())
+            adjusted_by_slot = {}
 
         # -- pass 3: reward the bandit (in the SAME slot order the parents/operators were drawn in),
         #    finalizing each compared candidate's promotion against its adjusted p-value. Adjustment
         #    only ever raises a p-value, never lowers it, so this can only REVOKE a raw "challenger"
-        #    verdict -- it can never promote a candidate the raw, uncorrected test itself refused.
+        #    verdict -- it can never promote a candidate the raw, uncorrected test itself refused. A
+        #    slot excluded from the pool above (no finite p-value to adjust) keeps its raw, unadjusted
+        #    verdict.promote as-is instead.
         new_members: list[_Member] = []
         for slot in slots:
             if slot.verdict is None:
                 self.bandit.reward(slot.op.name, 0.0, slot.cost)
                 report.rewards.append(0.0)
                 continue
-            promote = slot.verdict.promote and bool(next(p_adjusted) < alpha)
+            adj_p = adjusted_by_slot.get(id(slot))
+            promote = slot.verdict.promote if adj_p is None else (slot.verdict.promote and bool(adj_p < alpha))
             delta = slot.verdict.delta if promote else 0.0
             self.bandit.reward(slot.op.name, delta, slot.cost)
             report.rewards.append(delta)
