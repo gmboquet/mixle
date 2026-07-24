@@ -70,6 +70,19 @@ class MultivariateHawkesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             MultivariateHawkesProcessDistribution([0.5, 0.3], [[0.4, 0.1, 0.0], [0.2, 0.5, 0.0]], 1.5, 20.0)
 
+    def test_fractional_mark_rejected(self):
+        # marks index the process dimension in {0, ..., D-1}; a fractional mark like 0.9 must not be
+        # silently truncated to 0 by the int cast in _split before any validation ever sees it.
+        with self.assertRaises(ValueError):
+            _split([(1.0, 0.9), (2.0, 1)])
+        with self.assertRaises(ValueError):
+            self.d.log_density([(1.0, 0.9), (2.0, 1)])
+        with self.assertRaises(ValueError):
+            self.d.dist_to_encoder().seq_encode([[(1.0, 0.9), (2.0, 1)]])
+        # integer-valued floats (e.g. 1.0) are legitimate marks and must still work
+        times, marks = _split([(1.0, 1.0), (2.0, 0.0)])
+        np.testing.assert_array_equal(marks, [1, 0])
+
 
 if __name__ == "__main__":
     unittest.main()

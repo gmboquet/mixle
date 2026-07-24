@@ -38,11 +38,20 @@ _MIN = 1.0e-12
 
 
 def _split(events: Any) -> tuple[np.ndarray, np.ndarray]:
-    """Split a realization (sequence of ``(time, mark)``) into sorted time and mark arrays."""
+    """Split a realization (sequence of ``(time, mark)``) into sorted time and mark arrays.
+
+    Raises:
+        ValueError: If any mark is not integer-valued. Marks index the process dimension in
+            ``{0, ..., D-1}``, so a fractional mark like ``0.9`` would otherwise be silently
+            truncated to ``0`` by the int cast before any downstream range check ever saw it.
+    """
     if len(events) == 0:
         return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.int64)
     arr = np.asarray(events, dtype=np.float64)
-    return arr[:, 0].astype(np.float64), arr[:, 1].astype(np.int64)
+    marks = arr[:, 1]
+    if not np.array_equal(marks, np.round(marks)):
+        raise ValueError("event marks must be integer-valued (they index the process dimension).")
+    return arr[:, 0].astype(np.float64), marks.astype(np.int64)
 
 
 class MultivariateHawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
