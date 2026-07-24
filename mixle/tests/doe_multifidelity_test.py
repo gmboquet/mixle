@@ -3,6 +3,7 @@
 import importlib.util
 import unittest
 import warnings
+from unittest import mock
 
 import numpy as np
 
@@ -41,6 +42,12 @@ class MultiFidelityTest(unittest.TestCase):
         # allowance for the old "spend, then discover the overshoot" bug).
         self.assertLessEqual(res["cost"], 80.0)
         self.assertTrue(res["target_evaluated"])  # a genuine target-fidelity result, not a fallback
+        # MXR-080-0183: a normal run reports an explicit, honest completion status -- the negative
+        # control for both "surrogate failures are reported, not silently swallowed" (there was no
+        # failure here, so no error) and "the loop's normal termination is distinguishable" (it is: this
+        # optimizer's only stopping criterion is the budget, so a clean run is always "budget_exhausted").
+        self.assertEqual(res["stopped_reason"], "budget_exhausted")
+        self.assertIsNone(res["error"])
 
 
 # --------------------------------------------------------------------------- MXR-080-0181
@@ -111,6 +118,7 @@ class TargetNeverAffordableTest(unittest.TestCase):
         self.assertIsNone(res["x"])
         self.assertIsNone(res["y"])
         self.assertNotIn(5.0, res["X"][:, -1].tolist())
+        self.assertEqual(res["stopped_reason"], "budget_exhausted")
 
 
 # --------------------------------------------------------------------------- MXR-080-0182
@@ -177,6 +185,42 @@ class BudgetEnforcementTest(unittest.TestCase):
             multi_fidelity_minimize(
                 self._obj, [(0.0, 1.0)], fidelities=(0.5, 1.0), costs=(1.0, 2.0, 3.0), n_init=1, max_cost=5.0
             )
+
+
+# --------------------------------------------------------------------------- MXR-080-0183
+# Every exception from surrogate fitting was caught by a bare `except Exception` and turned into a
+# silent early loop exit: the returned dict carried no termination status, failure receipt, or
+# unmet-budget marker, so a genuine numerical failure (e.g. a singular covariance) was indistinguishable
+# from a completed run -- and a totally unrelated bug (e.g. a stray TypeError) was swallowed exactly the
+# same way instead of propagating. Only well-defined numerical failure types are caught now, and the
+# result always carries an explicit `stopped_reason` (+ `error` when it failed).
+class SurrogateFitFailureStatusTest(unittest.TestCase):
+    def _obj(self, x, s):
+        return float(np.sum(x))
+
+    def test_a_genuine_numerical_failure_reports_explicit_failure_status(self):
+        from mixle.doe import multi_fidelity_minimize
+        from mixle.doe import multifidelity as mf_module
+
+        with mock.patch.object(
+            mf_module, "_fit_surrogate", side_effect=np.linalg.LinAlgError("simulated singular covariance")
+        ):
+            res = multi_fidelity_minimize(
+                self._obj, [(0.0, 1.0)], fidelities=(0.5, 1.0), n_init=1, max_cost=5.0, n_candidates=8, seed=0
+            )
+        self.assertEqual(res["stopped_reason"], "surrogate_fit_failed")
+        self.assertIsNotNone(res["error"])
+        self.assertIn("LinAlgError", res["error"])
+
+    def test_an_unrelated_bug_propagates_instead_of_being_swallowed(self):
+        from mixle.doe import multi_fidelity_minimize
+        from mixle.doe import multifidelity as mf_module
+
+        with mock.patch.object(mf_module, "_fit_surrogate", side_effect=TypeError("simulated unrelated coding bug")):
+            with self.assertRaises(TypeError):
+                multi_fidelity_minimize(
+                    self._obj, [(0.0, 1.0)], fidelities=(0.5, 1.0), n_init=1, max_cost=5.0, n_candidates=8, seed=0
+                )
 
 
 if __name__ == "__main__":
