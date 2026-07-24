@@ -25,7 +25,7 @@ from mixle.analysis.carcinogenic_risk import (
     excess_lifetime_cancer_risk,
     radon_wlm_risk,
 )
-from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator, LedoitWolfInsufficientData
+from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator
 from mixle.analysis.coverage import (
     ace,
     chao1,
@@ -171,7 +171,6 @@ __all__ = [
     "SmithMaxStableSampler",
     "fit_smith_maxstable",
     "LedoitWolfEstimator",
-    "LedoitWolfInsufficientData",
     # mine economics: cost curves, capex/opex roll-up, and Monte-Carlo DCF valuation
     "cost_curve",
     "capex_opex",
