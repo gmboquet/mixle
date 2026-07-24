@@ -376,6 +376,13 @@ def propose(
 ) -> Model:
     """Propose a model for ``data`` from a *verified frontier* of candidates and return the winner.
 
+    ``max_candidates=0`` or ``timeout=0.0`` is the one exception to "verified": every candidate is then
+    skipped rather than fitted/scored, and the returned winner falls back to the raw, unverified heuristic
+    recommendation -- honestly disclosed (never silently), via a ``"search budget: skipped ..."`` line in
+    ``Model.notes`` and a ``"skipped": "search budget reached (...)"`` entry per candidate in
+    ``Model.frontier``, both readable through ``explain()``. Any other ``max_candidates``/``timeout`` still
+    verifies every candidate it has budget for before choosing a winner.
+
     Candidates come from every proposer the library has — the heuristic recommendation
     (:func:`mixle.task.recommend.recommend_model`, dependency-aware in the narrow sense of a joint
     multivariate-Gaussian candidate for fully-observed numeric vector rows), a structured-search candidate
