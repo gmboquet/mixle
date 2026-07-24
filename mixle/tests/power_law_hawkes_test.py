@@ -119,6 +119,123 @@ class PowerLawHawkesTest(unittest.TestCase):
         self.assertEqual(len(snapshot[0]), 1, "value() snapshot mutated by a later update()")
         self.assertEqual(len(acc.value()[0]), 2)
 
+    def test_accumulator_update_uses_weight(self):
+        # update() previously stored every realization identically regardless of its weight.
+        est = self.d.estimator()
+        ts, ms = self.d.sampler(seed=3).sample()
+        acc_low = est.accumulator_factory().make()
+        acc_low.update((ts, ms), 0.1, None)
+        acc_high = est.accumulator_factory().make()
+        acc_high.update((ts, ms), 100.0, None)
+        self.assertEqual(acc_low.value()[0][0][1], 0.1)
+        self.assertEqual(acc_high.value()[0][0][1], 100.0)
+
+    def test_accumulator_seq_update_uses_weights(self):
+        est = self.d.estimator()
+        ts, ms = self.d.sampler(seed=3).sample()
+        acc = est.accumulator_factory().make()
+        acc.seq_update([(ts, ms), (ts, ms)], [0.25, 4.0], None)
+        weights = [w for _, w in acc.value()[0]]
+        self.assertEqual(weights, [0.25, 4.0])
+
+    def test_accumulator_seq_update_weights_default_to_one_when_none(self):
+        # test_mle_recovers_parameters calls seq_update(..., None, ...); confirm that path treats a
+        # missing weight vector as uniform weight 1.0 rather than raising or silently dropping data.
+        est = self.d.estimator()
+        ts, ms = self.d.sampler(seed=3).sample()
+        acc = est.accumulator_factory().make()
+        acc.seq_update([(ts, ms), (ts, ms)], None, None)
+        weights = [w for _, w in acc.value()[0]]
+        self.assertEqual(weights, [1.0, 1.0])
+
+    def test_scale_multiplies_stored_weights(self):
+        # scale() previously was a documented no-op; it must now multiply every stored weight by c,
+        # matching the sibling Hawkes accumulators' scale() contract (e.g. HawkesProcessAccumulator).
+        est = self.d.estimator()
+        ts, ms = self.d.sampler(seed=3).sample()
+        acc = est.accumulator_factory().make()
+        acc.update((ts, ms), 1.0, None)
+        acc.update((ts, ms), 3.0, None)
+        acc.scale(2.0)
+        weights = [w for _, w in acc.value()[0]]
+        self.assertEqual(weights, [2.0, 6.0])
+
+    def test_scale_does_not_alter_realization_data(self):
+        # scale() must only touch the linear weight, never the raw event catalogue, window, or the
+        # shared alpha constraint -- those are data/config, not weighted sufficient statistics.
+        est = self.d.estimator()
+        ts, ms = self.d.sampler(seed=3).sample()
+        acc = est.accumulator_factory().make()
+        acc.update((ts, ms), 1.0, None)
+        before = acc.value()
+        before_times, before_marks = before[0][0][0]
+        acc.scale(5.0)
+        after = acc.value()
+        after_times, after_marks = after[0][0][0]
+        np.testing.assert_array_equal(before_times, after_times)
+        np.testing.assert_array_equal(before_marks, after_marks)
+        self.assertEqual(before[1], after[1])  # window
+        self.assertEqual(before[2], after[2])  # alpha_fixed
+
+    def test_scale_by_one_is_identity(self):
+        # Negative control for the scale fix: scaling by 1.0 must leave the weight unchanged.
+        est = self.d.estimator()
+        ts, ms = self.d.sampler(seed=7).sample()
+        acc = est.accumulator_factory().make()
+        acc.update((ts, ms), 2.5, None)
+        before = acc.value()[0][0][1]
+        acc.scale(1.0)
+        after = acc.value()[0][0][1]
+        self.assertEqual(before, after)
+
+    def test_zero_weight_realization_does_not_affect_estimate(self):
+        # End-to-end: a weight-0 realization must be equivalent to not having observed it at all.
+        # Both accumulators produce mathematically identical weighted-MLE objectives (0 * finite log
+        # density contributes exactly 0.0), so the fitted parameters must match tightly.
+        ts1, ms1 = self.d.sampler(seed=5).sample()
+        ts2, ms2 = self.d.sampler(seed=6).sample()
+        est = self.d.estimator()
+
+        acc_with_noise = est.accumulator_factory().make()
+        acc_with_noise.update((ts1, ms1), 1.0, None)
+        acc_with_noise.update((ts2, ms2), 0.0, None)  # should contribute nothing
+
+        acc_without_noise = est.accumulator_factory().make()
+        acc_without_noise.update((ts1, ms1), 1.0, None)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fit_with = est.estimate(None, acc_with_noise.value())
+            fit_without = est.estimate(None, acc_without_noise.value())
+
+        self.assertAlmostEqual(fit_with.mu, fit_without.mu, places=6)
+        self.assertAlmostEqual(fit_with.A, fit_without.A, places=6)
+        self.assertAlmostEqual(fit_with.c, fit_without.c, places=6)
+        self.assertAlmostEqual(fit_with.p, fit_without.p, places=6)
+
+    def test_weighted_estimate_matches_replicated_unweighted_estimate(self):
+        # Resampling-equivalence guarantee: weighting one realization by 3.0 must fit the same as
+        # observing it three separate times with weight 1.0 each.
+        ts, ms = self.d.sampler(seed=4).sample()
+        est = self.d.estimator()
+
+        acc_weighted = est.accumulator_factory().make()
+        acc_weighted.update((ts, ms), 3.0, None)
+
+        acc_replicated = est.accumulator_factory().make()
+        for _ in range(3):
+            acc_replicated.update((ts, ms), 1.0, None)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fit_weighted = est.estimate(None, acc_weighted.value())
+            fit_replicated = est.estimate(None, acc_replicated.value())
+
+        self.assertAlmostEqual(fit_weighted.mu, fit_replicated.mu, places=6)
+        self.assertAlmostEqual(fit_weighted.A, fit_replicated.A, places=6)
+        self.assertAlmostEqual(fit_weighted.c, fit_replicated.c, places=6)
+        self.assertAlmostEqual(fit_weighted.p, fit_replicated.p, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
