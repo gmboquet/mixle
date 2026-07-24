@@ -126,9 +126,10 @@ Continuous-Time Markov Chains
 -----------------------------
 
 ``ContinuousTimeMarkovChainDistribution`` models fully observed trajectories
-with an initial state and a sequence of ``(dwell_time, next_state)`` jumps.
-The generator matrix has off-diagonal rates ``q_ij`` and diagonal entries
-derived from total exit rates.
+with an initial state, an observation horizon, and a sequence of
+``(dwell_time, next_state)`` jumps up to that horizon. The generator matrix
+has off-diagonal rates ``q_ij`` and diagonal entries derived from total exit
+rates.
 
 .. code-block:: python
 
@@ -136,8 +137,8 @@ derived from total exit rates.
    from mixle.stats.processes.ctmc import ContinuousTimeMarkovChainEstimator
 
    trajectories = [
-       (0, [(0.8, 1), (1.2, 0), (0.5, 2)]),
-       (1, [(1.0, 0), (0.7, 2)]),
+       (0, 3.0, [(0.8, 1), (1.2, 0), (0.5, 2)]),
+       (1, 2.0, [(1.0, 0), (0.7, 2)]),
    ]
 
    est = ContinuousTimeMarkovChainEstimator(num_states=3)
@@ -146,8 +147,14 @@ derived from total exit rates.
 
 For fully observed trajectories, the MLE is closed form:
 ``q_ij = n_ij / T_i``, where ``n_ij`` is the observed transition count and
-``T_i`` is total dwell time in state ``i``. ``mixle.inference.certify`` reports
-this family as ``GLOBAL_UNIQUE``.
+``T_i`` is total dwell time in state ``i`` -- including the final,
+right-censored interval from the last jump (or from time 0, if a trajectory
+never jumps) out to that trajectory's own horizon. Each trajectory carries its
+own horizon rather than sharing one from the distribution, so a dataset's
+trajectories are free to have been observed for different lengths of time (the
+same convention ``BirthDeathSamplingDistribution`` uses for its ``(n0, T,
+events)`` data). ``mixle.inference.certify`` reports this family as
+``GLOBAL_UNIQUE``.
 
 That certificate depends on the fully observed trajectory assumption. If jumps,
 dwell times, or state labels are censored or inferred upstream, record that
