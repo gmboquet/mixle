@@ -210,20 +210,31 @@ class BatchDriverInputValidationTest(unittest.TestCase):
     # -- all-NaN merit --------------------------------------------------------------------------------
 
     def test_propose_qei_batch_all_nan_merit_raises_instead_of_leaving_best_c_none(self):
-        # a NaN observation makes the incumbent (ys.min()/ys.max()) NaN, so every candidate's q-EI is
-        # NaN even though the stub surrogate itself is perfectly well-formed. The old code left
-        # best_c=None, which np.asarray(None, dtype=float64) turns into a 0-d NaN array that corrupts the
-        # next batch step's np.vstack with an opaque shape-mismatch crash.
-        y_nan = self.y.copy()
-        y_nan[0] = np.nan
-        with self.assertRaisesRegex(ValueError, "no candidate produced a finite"):
-            propose_qei_batch(self.x, y_nan, self.bounds, q=2, n_candidates=10, mc_samples=32, gp=_StubSurrogate())
+        # MXR-080-0170's shared _fit_surrogate (bayesopt._validate_observations) now rejects a NaN
+        # observation before either driver ever reaches its own merit loop, so a NaN in y no longer
+        # reaches this check -- that path is covered instead by bayesopt's own validation tests. To
+        # still exercise a NaN surrogate prediction specifically, use a well-formed y and make the
+        # *surrogate's prediction* uniformly NaN instead (x/y stay perfectly finite).
+        #
+        # That NaN is now caught even earlier than this function's own "no candidate produced a finite"
+        # loop guard (lines below): monte_carlo_qei itself validates its mean argument is finite and
+        # raises immediately (MXR-080-0167), before ever returning a value the per-candidate comparison
+        # loop could see. So the original best_c=None scenario this test targeted is no longer reachable
+        # via a NaN-surrogate route -- monte_carlo_qei's own guard fires first, on the very first
+        # candidate, which is a strictly earlier and equally-safe outcome (never a silent best_c=None).
+        # The loop-level "no candidate produced a finite" guard remains as defense in depth for any other
+        # future path that might return -- rather than raise on -- a non-finite merit.
+        all_nan_gp = _StubSurrogate(nan_where=lambda pts: np.ones(len(pts), dtype=bool))
+        with self.assertRaisesRegex(ValueError, "mean contains non-finite values"):
+            propose_qei_batch(self.x, self.y, self.bounds, q=2, n_candidates=10, mc_samples=32, gp=all_nan_gp)
 
     def test_propose_local_penalization_all_nan_merit_raises_instead_of_arbitrary_pick(self):
-        y_nan = self.y.copy()
-        y_nan[0] = np.nan
+        # See the twin qei test above: a NaN in y is now caught earlier by bayesopt._fit_surrogate's
+        # shared observation validation (MXR-080-0170), so this drives the surrogate's own prediction to
+        # all-NaN instead, keeping x/y finite, to exercise this function's own merit-level guard.
+        all_nan_gp = _StubSurrogate(nan_where=lambda pts: np.ones(len(pts), dtype=bool))
         with self.assertRaisesRegex(ValueError, "no candidate produced a finite"):
-            propose_local_penalization(self.x, y_nan, self.bounds, q=2, n_candidates=10, gp=_StubSurrogate())
+            propose_local_penalization(self.x, self.y, self.bounds, q=2, n_candidates=10, gp=all_nan_gp)
 
     def test_propose_local_penalization_never_selects_a_nan_merit_candidate_over_a_finite_one(self):
         # the more precise failure np.argmax([1, nan, 5]) == 1 (NOT 2) causes: with SOME but not all
