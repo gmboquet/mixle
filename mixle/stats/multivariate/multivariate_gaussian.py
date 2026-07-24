@@ -32,6 +32,16 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias
 
+_MAX_HEAL_EIGENVALUE_RATIO = 1e-4
+"""Relative-tolerance bound on how negative ``_robust_cho_factor``'s worst eigenvalue may be before
+healing is refused. Same kind of check as ``mixle.inference.belief.GaussianBelief``'s PSD gate
+(``evals.min() < -1e-9 * np.abs(evals).max()``), but calibrated to this float32/GPU EM use case rather
+than reusing that constant verbatim: an instrumented run of the float32/MPS EM fit this healing exists
+for (dim=64, k=8, n=20000, matching mvn_robust_cholesky_test.py's test_mvn_mixture_fit_survives_float32)
+only ever produced eigenvalue ratios down to ~-5e-8, so 1e-4 leaves ~1000x headroom above observed
+real-world float32 noise while still rejecting a severely invalid input (e.g. covar=-I, ratio -1.0) by
+four orders of magnitude."""
+
 
 def _robust_cho_factor(covar: np.ndarray) -> tuple[tuple[np.ndarray, bool], np.ndarray]:
     """Cholesky-factor a covariance, self-healing a covariance that lost positive-definiteness.
@@ -49,13 +59,35 @@ def _robust_cho_factor(covar: np.ndarray) -> tuple[tuple[np.ndarray, bool], np.n
     and returns that exact matrix alongside the factor. Callers must store/propagate the returned
     covariance, not the original ``covar``, as the distribution's effective covariance.
 
+    Healing is refused -- raising ``ValueError`` instead of jittering -- when the symmetrized matrix's
+    worst eigenvalue is negative by more than ``_MAX_HEAL_EIGENVALUE_RATIO`` of its own scale (see that
+    constant's docstring). Without this bound, the escalating jitter loop below has no limit on how
+    invalid an input it will "heal": e.g. covar=-I is not close to PD noise (every eigenvalue is -1,
+    the matrix's own scale), yet the unbounded loop silently manufactured an arbitrary PD substitute --
+    a fixed 9*I, from the jitter escalation happening to land on jitter=10 at the final of 12 attempts,
+    unrelated to any input dimension or magnitude -- rather than surfacing that the input was invalid.
+    This bound preserves healing for the near-PSD float noise it was built for while refusing to
+    silently paper over a substantively, unambiguously invalid covariance.
+
     Returns:
         Tuple of (``scipy.linalg.cho_factor`` output, the covariance matrix that factor corresponds to).
+
+    Raises:
+        ValueError: If ``covar`` (once symmetrized) is not PD and its worst eigenvalue is too negative,
+            relative to its own scale, to attribute to float noise (see
+            ``_MAX_HEAL_EIGENVALUE_RATIO``).
     """
     sym = 0.5 * (covar + covar.T)
     try:
         return scipy.linalg.cho_factor(sym), sym
     except (scipy.linalg.LinAlgError, np.linalg.LinAlgError):
+        evals = np.linalg.eigvalsh(sym)
+        if evals.min() < -_MAX_HEAL_EIGENVALUE_RATIO * np.abs(evals).max():
+            raise ValueError(
+                "covar is not positive semi-definite within tolerance (worst eigenvalue "
+                f"{evals.min():.6g} vs scale {np.abs(evals).max():.6g}); refusing to self-heal an "
+                "input this far from positive-definite."
+            ) from None
         scale = float(np.trace(sym)) / max(sym.shape[0], 1)
         scale = scale if np.isfinite(scale) and scale > 0 else 1.0
         eye = np.eye(sym.shape[0])
@@ -221,7 +253,10 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         Args:
             mu: Mean vector.
             covar: Positive-definite covariance matrix. ``covariance`` is
-                accepted as an alias.
+                accepted as an alias. A covariance that is asymmetric, or that is not positive-definite
+                only because of small float noise (e.g. float32/GPU EM accumulation error), is silently
+                symmetrized and/or jitter-healed -- see ``_robust_cho_factor``. Raises ``ValueError`` if
+                ``covar`` is substantively (not just numerically-noisy) non-positive-definite.
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate parameter prior over (mu, Lambda=covar^-1). A

@@ -49,6 +49,15 @@ def _safe_inverse_and_logdet(shape: np.ndarray) -> tuple[np.ndarray, float]:
     (e.g. -I in an even dimension has determinant +1 while every eigenvalue is negative), so
     ``np.linalg.slogdet``'s sign is not a valid substitute. Raises if Sigma is still not
     positive-definite after the ridge retry, rather than silently returning a bogus log|Sigma|.
+
+    ``MultivariateStudentTDistribution.__init__`` now rejects a non-positive-definite ``shape`` up
+    front (see its own ``cholesky_logdet`` check), so for that call site ``mat`` here has already been
+    proven PD and the ridge-retry branch below is unreachable in practice. It is kept -- rather than
+    removed -- as a defensive fallback for any other caller of this function, and because the ridge
+    retry alone cannot safely distinguish "PD in exact arithmetic, singular only from float rounding"
+    from "exactly, structurally singular": both look identical in their eigenvalues, which is exactly
+    why the up-front check in ``__init__`` treats any Cholesky failure on the raw ``shape`` as fatal
+    rather than something to try to ridge through.
     """
     mat = np.asarray(shape, dtype=float)
     log_det = cholesky_logdet(mat)
@@ -149,6 +158,18 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
             raise ValueError("MultivariateStudentTDistribution shape must be a (p, p) matrix matching loc.")
         if not np.allclose(shape, shape.T):
             raise ValueError("MultivariateStudentTDistribution shape must be symmetric.")
+        # Positive-DEFINITE, not just semi-definite: unlike e.g. a Gaussian covariance, a singular
+        # shape (a genuine zero eigenvalue, not merely a negative one) makes log|Sigma| = -inf and
+        # Sigma^{-1} undefined, so the density is not well-defined. Checked directly on the raw shape
+        # here -- not left to _safe_inverse_and_logdet below -- because that helper's tiny ridge retry
+        # is meant only to absorb float rounding on a matrix that is PD in exact arithmetic (e.g. the
+        # EM estimator's own reweighted scatter matrix, which is PSD by construction and pre-ridged by
+        # the estimator itself before it ever reaches this constructor); it cannot distinguish that
+        # from a shape that is exactly, structurally singular by construction (eigenvalues are
+        # identical either way), so it previously let a singular shape build a distribution that
+        # scored a finite density while its own sampler raised LinAlgError from cholesky.
+        if cholesky_logdet(shape) is None:
+            raise ValueError("MultivariateStudentTDistribution requires a positive-definite scale matrix.")
 
         self.dof = float(dof)
         self.mu = mu

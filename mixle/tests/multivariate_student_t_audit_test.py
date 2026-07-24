@@ -17,6 +17,18 @@ positive-definiteness via ``mixle.utils.vector.cholesky_logdet`` (Cholesky-based
 sign), matching the sibling idiom already used by ``StudentTCopulaDistribution``,
 ``GaussianCopulaDistribution``, and ``NormalWishartDistribution`` -- so an invalid scale matrix now
 raises ``ValueError`` before a distribution object (and therefore a sampler) can ever exist.
+
+Follow-up fix: that first pass rejected negative and indefinite matrices, but not an EXACTLY
+SINGULAR one (a genuine zero eigenvalue, positive *semi*-definite but not positive *definite*).
+``_safe_inverse_and_logdet``'s one-retry tiny-ridge fallback (meant to absorb float rounding on a
+matrix that is PD in exact arithmetic, e.g. the EM estimator's own scatter matrix) cannot tell that
+case apart from a shape that is genuinely, structurally singular -- their eigenvalues are identical
+either way -- so it silently ridge-healed a singular ``shape`` enough to produce a finite
+``inv_shape``/``log_det`` (and therefore a finite scored density), while ``self.shape`` itself (what
+``sampler()`` runs ``np.linalg.cholesky`` on directly) was left untouched and still exactly singular,
+so sampling raised ``LinAlgError``. ``__init__`` now checks ``cholesky_logdet(shape)`` directly on
+the raw shape -- before ``_safe_inverse_and_logdet`` ever gets a chance to ridge through it -- so a
+singular shape is rejected the same way a negative-definite one already was.
 """
 
 import numpy as np
@@ -51,6 +63,40 @@ def test_rejects_asymmetric_shape():
         MultivariateStudentTDistribution(dof=5.0, loc=[0.0, 0.0], shape=bad)
 
 
+def test_rejects_exactly_singular_shape():
+    # Positive SEMI-definite but not positive DEFINITE: eigenvalues [1, 0], rank-deficient by
+    # construction (not a float-rounding artifact -- 0.0 and 1.0 are both exactly representable).
+    # A determinant-sign OR a naive "eigenvalue < -tol" check both wave this through (det == 0 is
+    # not "negative", and the offending eigenvalue is 0, not negative), which is exactly why this
+    # slipped past the first validation pass despite it having (re)used a correct Cholesky-based PD
+    # test: the gap was _safe_inverse_and_logdet's ridge retry silently healing this specific case,
+    # not the PD test itself.
+    bad = np.diag([1.0, 0.0])
+    assert np.linalg.det(bad) == 0.0
+    assert np.linalg.matrix_rank(bad) == 1
+    with pytest.raises(ValueError):
+        MultivariateStudentTDistribution(dof=5.0, loc=[0.0, 0.0], shape=bad)
+
+
+def test_singular_shape_previously_scored_finite_while_its_sampler_would_crash():
+    """Documents the exact pre-fix failure mode for the singular case: this reconstructs, standalone,
+    what ``_safe_inverse_and_logdet`` (imported directly, bypassing ``__init__``'s now-fixed gate)
+    actually computed for a singular shape -- a FINITE log-determinant, because its ridge retry
+    can't distinguish "singular by float rounding" from "genuinely, structurally singular" -- while
+    a direct, unhealed Cholesky factorization of that same raw shape (what the sampler ran on
+    ``self.shape`` before the fix) genuinely raises. That gap between "scores fine" and "sampling
+    raises" on the SAME raw shape is the bug; ``__init__`` closing it is what the tests above check.
+    """
+    from mixle.stats.multivariate.multivariate_student_t import _safe_inverse_and_logdet
+
+    bad = np.diag([1.0, 0.0])
+    _, log_det = _safe_inverse_and_logdet(bad)  # the ridge retry heals this silently
+    assert np.isfinite(log_det)
+
+    with pytest.raises(np.linalg.LinAlgError):
+        np.linalg.cholesky(bad)  # what the (pre-fix) sampler ran directly on the raw, unhealed shape
+
+
 def test_invalid_shape_never_yields_finite_density_or_sampler_disagreement():
     """End-to-end guard against the exact reported asymmetry: for a battery of invalid scale
     matrices, construction must fail up front so neither ``density`` nor ``sampler`` can ever run
@@ -61,6 +107,9 @@ def test_invalid_shape_never_yields_finite_density_or_sampler_disagreement():
         -np.eye(2),  # negative definite, positive determinant
         np.array([[2.0, 1.0], [0.0, 1.0]]),  # asymmetric
         np.array([[1.0, 2.0], [2.0, 1.0]]),  # symmetric, det=-3 < 0
+        np.diag([1.0, 0.0]),  # exactly singular: positive semi-definite, not positive definite
+        np.zeros((2, 2)),  # exactly singular, degenerate case: both eigenvalues 0
+        np.array([[1.0, 1.0], [1.0, 1.0]]),  # rank-1, singular via a non-diagonal matrix
     ]
     for bad in invalid_shapes:
         with pytest.raises(ValueError):
