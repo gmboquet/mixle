@@ -145,6 +145,22 @@ except ImportError:  # pragma: no cover - package works fine without the compile
     HAS_DD_KERNELS = False
 
 
+def _require_equal_length(a: np.ndarray, b: np.ndarray) -> None:
+    """Raise if raveled ``a`` and ``b`` don't have the same flattened length.
+
+    A dot product between mismatched-length vectors is mathematically undefined. Left unchecked, numpy's
+    elementwise ops broadcast the length-1 side instead -- a *different*, unrequested operation that still
+    returns some number, silently. :func:`dd_dot` calls this once, before choosing an implementation, so
+    the compiled kernel and the pure-numpy fallback can never independently drift on this check.
+    """
+    if a.size != b.size:
+        raise ValueError(
+            "dd_dot requires vectors of equal length, got sizes %d and %d (shapes %s and %s); a dot "
+            "product between mismatched lengths is undefined -- it is not the same operation as "
+            "elementwise broadcasting." % (a.size, b.size, a.shape, b.shape)
+        )
+
+
 def dd_dot(a: Any, b: Any) -> DoubleDouble:
     """Accurate dot product ``sum(a_i * b_i)`` in double-double precision.
 
@@ -152,10 +168,15 @@ def dd_dot(a: Any, b: Any) -> DoubleDouble:
     pure-numpy Veltkamp-split path and bit-for-bit identical); otherwise each product is split error-free
     by :func:`two_prod` and the products + errors are summed by :func:`dd_sum`. Defeats the cancellation
     that wrecks a naive ``float64`` dot.
+
+    Raises ``ValueError`` if ``a`` and ``b`` don't have the same flattened length (see
+    :func:`_require_equal_length`) -- checked once up front so it applies identically regardless of which
+    implementation ends up running.
     """
     a = np.ascontiguousarray(np.asarray(a, dtype=np.float64).ravel())
     b = np.ascontiguousarray(np.asarray(b, dtype=np.float64).ravel())
-    if HAS_DD_KERNELS and a.size == b.size:
+    _require_equal_length(a, b)
+    if HAS_DD_KERNELS:
         hi, lo = _dd_dot_c(a, b)
         return DoubleDouble(np.float64(hi), np.float64(lo))
     p, e = two_prod(a, b)
