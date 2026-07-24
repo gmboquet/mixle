@@ -58,6 +58,54 @@ class _LognormalGradePosterior:
         raise NotImplementedError("unused by this test")
 
 
+class _SingleRowGradePosterior:
+    """A misbehaving IC-1 `Posterior` stub that always returns exactly ONE draw, no matter what ``n``
+    is requested -- the MXR-080-0118 'one-row posterior' repro."""
+
+    def samples(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        return np.array([[GRADE_MU + 1.0]])
+
+    @property
+    def mean(self) -> np.ndarray:
+        return np.array([GRADE_MU + 1.0])
+
+    @property
+    def cov(self) -> np.ndarray:
+        return np.array([[1.0]])
+
+    def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
+        return np.array([GRADE_MU]), np.array([GRADE_MU + 2.0])
+
+    def derived_quantity(self, fn, n, rng):
+        raise NotImplementedError("unused by this test")
+
+
+class _ConstantGradePosterior:
+    """An IC-1 `Posterior` stub that returns exactly ``n`` draws (a well-behaved draw COUNT), all equal
+    to a fixed ``value`` -- lets tests pin the grade VALUE (e.g. negative, non-finite) independently of
+    the draw-count contract."""
+
+    def __init__(self, value: float) -> None:
+        self._value = value
+
+    def samples(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        return np.full((n, 1), self._value)
+
+    @property
+    def mean(self) -> np.ndarray:
+        return np.array([self._value])
+
+    @property
+    def cov(self) -> np.ndarray:
+        return np.array([[0.0]])
+
+    def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
+        return np.array([self._value]), np.array([self._value])
+
+    def derived_quantity(self, fn, n, rng):
+        raise NotImplementedError("unused by this test")
+
+
 def _cost_model(t: int, tonnage_t: float) -> float:
     assert t == 0
     return OPEX_PER_TONNE * tonnage_t
@@ -248,3 +296,171 @@ def test_monte_carlo_npv_accepts_price_forecast_paths_directly():
         rng=np.random.default_rng(3),
     )
     np.testing.assert_array_equal(result.samples, result_pretransposed.samples)
+
+
+# --- MXR-080-0118: Monte Carlo NPV does not enforce its sample/economic contract -------------------
+#
+# `n` used to not be checked as an exact integer, the posterior's returned draw count was never
+# checked against the request (so a one-row posterior would silently numpy-broadcast across every
+# price scenario, fabricating repeated draws), non-finite/negative grade/price/tonnage/capex/opex
+# propagated straight through to the DCF, and `discount_rate <= -1` produced a division by zero or an
+# alternating-sign discount factor. The tests below pin the fix.
+
+
+def test_monte_carlo_npv_rejects_non_integer_n():
+    posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
+    price_paths = np.random.default_rng(0).normal(PRICE_MEAN, PRICE_STD, size=(10, 1))
+    with pytest.raises(ValueError):
+        monte_carlo_npv(
+            posterior,
+            price_paths,
+            _cost_model,
+            {"tonnage": np.array([TONNAGE])},
+            discount_rate=DISCOUNT_RATE,
+            n=10.5,  # not an int, even though it is a positive, integer-valued float
+            rng=np.random.default_rng(0),
+        )
+
+
+def test_monte_carlo_npv_rejects_non_positive_n():
+    posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
+    price_paths = np.random.default_rng(0).normal(PRICE_MEAN, PRICE_STD, size=(10, 1))
+    for bad_n in (0, -5):
+        with pytest.raises(ValueError):
+            monte_carlo_npv(
+                posterior,
+                price_paths,
+                _cost_model,
+                {"tonnage": np.array([TONNAGE])},
+                discount_rate=DISCOUNT_RATE,
+                n=bad_n,
+                rng=np.random.default_rng(0),
+            )
+
+
+def test_monte_carlo_npv_rejects_posterior_that_returns_fewer_draws_than_requested():
+    # The exact MXR-080-0118 repro: a posterior that always returns exactly one row used to silently
+    # numpy-broadcast that single grade draw against all `n` requested price scenarios, fabricating `n`
+    # "independent" NPV samples that in fact all shared the one real grade draw.
+    posterior = _SingleRowGradePosterior()
+    n_req = 500
+    price_paths = np.random.default_rng(4).normal(PRICE_MEAN, PRICE_STD, size=(n_req, 1))
+    with pytest.raises(ValueError, match="returned 1 draw"):
+        monte_carlo_npv(
+            posterior,
+            price_paths,
+            _cost_model,
+            _schedule(),
+            discount_rate=DISCOUNT_RATE,
+            n=n_req,
+            rng=np.random.default_rng(4),
+        )
+
+
+def test_monte_carlo_npv_rejects_non_finite_or_negative_grade_draws():
+    price_paths = np.random.default_rng(0).normal(PRICE_MEAN, PRICE_STD, size=(10, 1))
+    for bad_value in (-1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            monte_carlo_npv(
+                _ConstantGradePosterior(bad_value),
+                price_paths,
+                _cost_model,
+                {"tonnage": np.array([TONNAGE])},
+                discount_rate=DISCOUNT_RATE,
+                n=10,
+                rng=np.random.default_rng(0),
+            )
+
+
+def test_monte_carlo_npv_rejects_non_finite_or_negative_price_paths():
+    posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
+    for bad_value in (-50.0, float("nan"), float("inf")):
+        price_paths = np.full((10, 1), bad_value)
+        with pytest.raises(ValueError):
+            monte_carlo_npv(
+                posterior,
+                price_paths,
+                _cost_model,
+                {"tonnage": np.array([TONNAGE])},
+                discount_rate=DISCOUNT_RATE,
+                n=10,
+                rng=np.random.default_rng(0),
+            )
+
+
+def test_monte_carlo_npv_rejects_non_finite_or_negative_schedule_quantities():
+    posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
+    price_paths = np.random.default_rng(0).normal(PRICE_MEAN, PRICE_STD, size=(10, 1))
+    for bad_schedule in (
+        {"tonnage": np.array([-TONNAGE])},
+        {"tonnage": np.array([float("nan")])},
+        {"tonnage": np.array([TONNAGE]), "capex": np.array([-CAPEX])},
+        {"tonnage": np.array([TONNAGE]), "capex": np.array([float("inf")])},
+    ):
+        with pytest.raises(ValueError):
+            monte_carlo_npv(
+                posterior,
+                price_paths,
+                _cost_model,
+                bad_schedule,
+                discount_rate=DISCOUNT_RATE,
+                n=10,
+                rng=np.random.default_rng(0),
+            )
+
+
+def test_monte_carlo_npv_rejects_negative_or_non_finite_opex_from_cost_model():
+    posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
+    price_paths = np.random.default_rng(0).normal(PRICE_MEAN, PRICE_STD, size=(10, 1))
+    for bad_opex in (-1.0, float("nan"), float("inf")):
+
+        def bad_cost_model(t: int, tonnage_t: float, _bad_opex=bad_opex) -> float:
+            return _bad_opex
+
+        with pytest.raises(ValueError):
+            monte_carlo_npv(
+                posterior,
+                price_paths,
+                bad_cost_model,
+                {"tonnage": np.array([TONNAGE])},
+                discount_rate=DISCOUNT_RATE,
+                n=10,
+                rng=np.random.default_rng(0),
+            )
+
+
+def test_monte_carlo_npv_rejects_discount_rate_at_or_below_negative_one():
+    posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
+    price_paths = np.random.default_rng(0).normal(PRICE_MEAN, PRICE_STD, size=(10, 2))
+    for bad_rate in (-1.0, -1.5, -2.0, float("-inf"), float("nan")):
+        with pytest.raises(ValueError):
+            monte_carlo_npv(
+                posterior,
+                price_paths,
+                _cost_model,
+                {"tonnage": np.array([TONNAGE, TONNAGE])},
+                discount_rate=bad_rate,
+                n=10,
+                rng=np.random.default_rng(0),
+            )
+
+
+def test_monte_carlo_npv_negative_control_normal_call_still_works():
+    # Negative control: a normal, well-shaped Monte Carlo NPV calculation (positive integer n, a
+    # conforming posterior, finite non-negative economics, a sane discount rate) is unaffected by the
+    # MXR-080-0118 validation and still produces a finite, sensible distribution.
+    posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
+    price_paths = np.random.default_rng(0).normal(PRICE_MEAN, PRICE_STD, size=(N, 1))
+
+    result = monte_carlo_npv(
+        posterior,
+        price_paths,
+        _cost_model,
+        _schedule(),
+        discount_rate=DISCOUNT_RATE,
+        n=N,
+        rng=np.random.default_rng(0),
+    )
+    assert result.samples.shape == (N,)
+    assert np.all(np.isfinite(result.samples))
+    assert result.p10 < result.p50 < result.p90
