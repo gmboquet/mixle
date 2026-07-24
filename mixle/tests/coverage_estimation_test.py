@@ -230,5 +230,40 @@ class GoodTuringSmallSupportTest(unittest.TestCase):
         self.assertAlmostEqual(gt["p0"] + gt["proba"].sum(), 1.0, places=6)
 
 
+class IncidenceValidationTest(unittest.TestCase):
+    """MXR-080-0079: chao2/ice used to threshold every positive value to presence (1) and every
+    negative/NaN value to absence (0) via a bare ``> 0`` comparison, so a matrix of continuous or
+    malformed measurements (``0.2``, ``-1``, ``3``, ``NaN``) was silently accepted as a valid
+    presence/absence design. Incidence input must now be genuinely binary and finite, with at least
+    one site."""
+
+    def test_non_binary_matrix_rejected(self):
+        bad = np.array([[0.2, -1.0, 3.0, float("nan")], [1.0, 0.0, 1.0, 0.0]])
+        for fn in (chao2, ice):
+            with self.subTest(fn=fn.__name__):
+                with self.assertRaises(ValueError):
+                    fn(bad)
+
+    def test_matrix_with_no_sites_rejected(self):
+        empty = np.empty((3, 0))
+        for fn in (chao2, ice):
+            with self.subTest(fn=fn.__name__):
+                with self.assertRaises(ValueError):
+                    fn(empty)
+
+    def test_valid_binary_matrix_still_works(self):
+        # negative control: a real 0/1 incidence matrix still returns a richness estimate.
+        inc = np.array([[1, 1, 1, 0], [1, 0, 0, 0], [0, 1, 0, 0], [1, 1, 1, 1]])
+        self.assertAlmostEqual(chao2(inc)["estimate"], 4.0 + 0.75 * 2 * 1 / (2 * 1))
+        r = ice(inc, rare_threshold=10)
+        self.assertGreaterEqual(r["estimate"], r["observed"])
+
+    def test_boolean_dtype_matrix_accepted(self):
+        # negative control: a bool ndarray (True/False presence/absence) is a legitimate binary matrix.
+        inc = np.array([[True, False, True], [False, True, True]])
+        r = chao2(inc)
+        self.assertEqual(r["observed"], 2.0)
+
+
 if __name__ == "__main__":
     unittest.main()
