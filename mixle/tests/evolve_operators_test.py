@@ -17,6 +17,7 @@ from mixle.evolve import (
     unregister_operator,
 )
 from mixle.evolve.objective import pointwise_log_density
+from mixle.ops import mixture
 from mixle.stats import GaussianDistribution
 
 
@@ -131,6 +132,79 @@ class RecalibratedEncodedScoringTest(unittest.TestCase):
         enc = recal.dist_to_encoder().seq_encode(probe)
         encoded = np.asarray(recal.seq_log_density(enc), dtype=float)
         np.testing.assert_allclose(encoded, scalars, rtol=1e-9, atol=1e-9)
+
+
+class MutateShrinkWeightsTest(unittest.TestCase):
+    """The ``shrink`` move drops one mixture component but must renormalize the SURVIVING
+    components' weights to a simplex before handing them to ``mixture(...)`` -- passing the original
+    (now sub-1) weights straight through trips MixtureDistribution's own simplex validation."""
+
+    # A fresh RandomState(3)'s first draw is `randint(3) == 2`, i.e. index 2 of
+    # `["grow", "perturb", "shrink"]` -- pinning this seed makes every test below deterministically
+    # exercise the shrink branch on the first call instead of searching across seeds.
+    SHRINK_SEED = 3
+
+    def test_seed_pin_selects_shrink_first_try(self):
+        self.assertEqual(int(np.random.RandomState(self.SHRINK_SEED).randint(3)), 2)
+
+    def test_shrink_on_two_component_mixture_no_longer_raises(self):
+        # Confirmed pre-fix repro: dropping either member of a [0.5, 0.5] mixture leaves weights
+        # [0.5] for the sole survivor, which MixtureDistribution's constructor rejects outright
+        # (sum=0.5 != 1.0).
+        m = mixture([GaussianDistribution(0.0, 1.0), GaussianDistribution(5.0, 1.0)], [0.5, 0.5])
+        data = list(np.random.RandomState(0).normal(0.0, 1.0, 50))
+        cand = Mutate().propose(m, data, ctx={"seed": self.SHRINK_SEED})
+        self.assertEqual(cand.meta["move"], "shrink")
+        w = np.asarray(cand.model.w, dtype=float)
+        self.assertAlmostEqual(float(w.sum()), 1.0, places=8)
+        self.assertTrue(bool(np.all(w >= 0.0)))
+
+    def test_shrink_renormalizes_a_three_component_mixture(self):
+        m = mixture(
+            [GaussianDistribution(0.0, 1.0), GaussianDistribution(5.0, 1.0), GaussianDistribution(10.0, 1.0)],
+            [0.2, 0.3, 0.5],
+        )
+        data = list(np.random.RandomState(0).normal(0.0, 1.0, 60))
+        cand = Mutate().propose(m, data, ctx={"seed": self.SHRINK_SEED})
+        self.assertEqual(cand.meta["move"], "shrink")
+        w = np.asarray(cand.model.w, dtype=float)
+        self.assertAlmostEqual(float(w.sum()), 1.0, places=8)
+
+    def test_shrink_rejects_zero_residual_mass_instead_of_dividing_by_zero(self):
+        # Mutate only requires `.components` / `.w` / `.estimator()` on `model` (duck typing, not a
+        # validated MixtureDistribution), so an all-zero weight vector -- unreachable from a
+        # legitimately-constructed MixtureDistribution, but not excluded by this operator's own
+        # duck typing -- must be rejected with a clear error instead of silently computing 0/0 == nan.
+        class FakeMixtureModel:
+            def __init__(self, components, w):
+                self.components = components
+                self.w = w
+
+            def estimator(self):
+                raise AssertionError("estimator() must not be reached: the guard should raise first")
+
+        components = [GaussianDistribution(0.0, 1.0), GaussianDistribution(5.0, 1.0), GaussianDistribution(10.0, 1.0)]
+        fake = FakeMixtureModel(components, np.array([0.0, 0.0, 0.0]))
+        data = list(np.random.RandomState(0).normal(0.0, 1.0, 60))
+        with self.assertRaisesRegex(ValueError, "residual mass"):
+            Mutate().propose(fake, data, ctx={"seed": self.SHRINK_SEED})
+
+    def test_shrink_rejects_non_finite_residual_mass(self):
+        class FakeMixtureModel:
+            def __init__(self, components, w):
+                self.components = components
+                self.w = w
+
+            def estimator(self):
+                raise AssertionError("estimator() must not be reached: the guard should raise first")
+
+        components = [GaussianDistribution(0.0, 1.0), GaussianDistribution(5.0, 1.0), GaussianDistribution(10.0, 1.0)]
+        # np.argmin sends the FIRST NaN's index to `drop`; the SECOND NaN survives into `keep`, so
+        # this exercises the non-finite branch specifically (as opposed to the zero-sum branch above).
+        fake = FakeMixtureModel(components, np.array([float("nan"), float("nan"), 1.0]))
+        data = list(np.random.RandomState(0).normal(0.0, 1.0, 60))
+        with self.assertRaisesRegex(ValueError, "residual mass"):
+            Mutate().propose(fake, data, ctx={"seed": self.SHRINK_SEED})
 
 
 class OperatorGeneratorDataTest(unittest.TestCase):
