@@ -289,13 +289,18 @@ class Registry:
             version = "latest"
         return self.get(name, version, trust_code=trust_code)
 
-    def verify_chain(self, name: str) -> bool:
+    def verify_chain(self, name: str, *, trust_code: bool = False) -> bool:
         """Verify the persisted checkpoint lineage for ``name`` (see :meth:`checkpointer`).
 
         For each version carrying a ``model_hash``, checks that its ``parent_hash`` matches the previous
         such version's hash *and* that re-hashing the loaded model reproduces the stored hash (catching
         corruption or tampering). Returns True when every link holds, or vacuously when no version carries
-        lineage metadata."""
+        lineage metadata.
+
+        See :meth:`get` -- ``trust_code`` is required in the same way and for the same reason: a chain
+        that contains a NeuralLeaf-family checkpoint must be loaded to be re-hashed, so verifying it is
+        subject to the same code-execution trust gate as loading it directly.
+        """
         from mixle.data.hashing import model_hash
 
         prev: str | None = None
@@ -305,7 +310,7 @@ class Registry:
                 continue
             if self.metadata(name, ver).get("parent_hash") != prev:
                 return False
-            model, _ = self.get(name, ver)
+            model, _ = self.get(name, ver, trust_code=trust_code)
             if model_hash(model) != stored:
                 return False
             prev = stored

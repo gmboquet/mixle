@@ -12,6 +12,13 @@ from mixle.inference import optimize
 from mixle.inference.production import Registry, fit_with_provenance, verify_lineage
 from mixle.stats import GaussianDistribution, GaussianEstimator, MixtureEstimator
 
+try:
+    import torch  # noqa: F401
+
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
+
 
 def _data():
     rng = np.random.RandomState(0)
@@ -94,6 +101,48 @@ class CheckpointChainTest(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f)
             self.assertFalse(reg.verify_chain("run"))
+
+    @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+    def test_verify_chain_with_trust_code_true_verifies_a_neural_checkpoint(self):
+        # A checkpoint whose model is a NeuralLeaf-family distribution embeds a pickle-backed torch
+        # module (see mixle.models._neural_serial); verify_chain must load every hashed checkpoint to
+        # re-hash it, so it needs the same trust_code opt-in as get()/current() to reconstruct one.
+        from mixle.models.neural import make_mlp
+        from mixle.models.neural_leaf import NeuralGaussian
+
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            stat_model = GaussianDistribution(0.0, 1.0)
+            h1 = model_hash(stat_model)
+            reg.register(stat_model, "chain", metadata={"model_hash": h1, "parent_hash": None})
+
+            neural_model = NeuralGaussian(make_mlp(input_dim=1, hidden_dims=[4], output_dim=1))
+            h2 = model_hash(neural_model)  # encoding only -- no trust gate needed to hash
+            reg.register(neural_model, "chain", metadata={"model_hash": h2, "parent_hash": h1})
+
+            self.assertTrue(reg.verify_chain("chain", trust_code=True))
+
+    @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+    def test_verify_chain_without_trust_code_refuses_a_neural_checkpoint(self):
+        # Same chain as above, but without the opt-in: verify_chain must not silently report True/False
+        # over a checkpoint it never actually loaded -- it should surface get()'s own refusal, matching
+        # get()/current()'s default-closed security posture.
+        from mixle.models.neural import make_mlp
+        from mixle.models.neural_leaf import NeuralGaussian
+        from mixle.utils.serialization import SerializationError
+
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            stat_model = GaussianDistribution(0.0, 1.0)
+            h1 = model_hash(stat_model)
+            reg.register(stat_model, "chain", metadata={"model_hash": h1, "parent_hash": None})
+
+            neural_model = NeuralGaussian(make_mlp(input_dim=1, hidden_dims=[4], output_dim=1))
+            h2 = model_hash(neural_model)
+            reg.register(neural_model, "chain", metadata={"model_hash": h2, "parent_hash": h1})
+
+            with self.assertRaises(SerializationError):
+                reg.verify_chain("chain")
 
 
 if __name__ == "__main__":
