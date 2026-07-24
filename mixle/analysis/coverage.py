@@ -74,7 +74,7 @@ def turing_coverage(counts: np.ndarray) -> dict[str, float]:
     return {"coverage": 1.0 - unseen, "unseen_mass": unseen, "n": n, "f1": f1}
 
 
-def good_turing(counts: np.ndarray) -> dict[str, np.ndarray | float]:
+def good_turing(counts: np.ndarray) -> dict[str, np.ndarray | float | bool | str]:
     """Simple Good--Turing smoothed probabilities (Gale & Sampson 1995).
 
     Reallocates probability from seen to unseen items using the frequencies of frequencies. Empirical
@@ -82,52 +82,88 @@ def good_turing(counts: np.ndarray) -> dict[str, np.ndarray | float]:
     ``S(r)`` takes over once the two diverge (the Gale switch), giving stable discounts in the sparse
     tail.
 
+    The log-linear fit needs at least two distinct abundance classes to be identifiable. With exactly
+    one -- e.g. an all-singleton sample like ``[1, 1, 1]``, a canonical Good--Turing input, not a
+    malformed one -- there is nothing to fit a slope against, so smoothing is skipped and the seen mass
+    is reallocated by raw frequency instead (the Simple Good--Turing small-support fallback; previously
+    this raised a ``LinAlgError`` out of ``np.polyfit``). With no observed counts at all, coverage is
+    not identifiable from the data at all, so a typed insufficient-evidence result is returned instead
+    of a fabricated number (previously an empty sample raised a ``TypeError`` out of ``np.polyfit``)
+    (MXR-080-0078).
+
     Args:
         counts: per-species abundances (zeros ignored).
 
     Returns:
-        ``{'p0', 'proba', 'r_star', 'r'}`` -- ``p0`` is the total probability assigned to unseen
-        species; ``proba`` are the smoothed probabilities of the *input* species (aligned to the
-        positive entries of ``counts``, summing to ``1 - p0``); ``r_star`` / ``r`` are the discounted
-        and raw frequencies for the distinct abundance classes.
+        ``{'p0', 'proba', 'r_star', 'r', 'insufficient_evidence', 'reason'}`` -- ``p0`` is the total
+        probability assigned to unseen species; ``proba`` are the smoothed probabilities of the
+        *input* species (aligned to the positive entries of ``counts``, summing to ``1 - p0``);
+        ``r_star`` / ``r`` are the discounted and raw frequencies for the distinct abundance classes.
+        ``insufficient_evidence`` is ``True`` (with ``reason`` set and the other fields empty/NaN) only
+        when the sample has no observed counts at all; it is ``False`` (with ``reason`` empty)
+        whenever an estimate -- smoothed or small-support fallback -- was produced.
     """
     c = _abund(counts)
+    if c.size == 0:
+        return {
+            "p0": float("nan"),
+            "proba": np.array([]),
+            "r_star": np.array([]),
+            "r": np.array([]),
+            "insufficient_evidence": True,
+            "reason": "no observed counts: Good-Turing discounting is not identifiable from an empty sample.",
+        }
     n = float(c.sum())
     fof = _freq_of_freq(c)
     r = np.array(sorted(fof), dtype=float)
     nr = np.array([fof[int(ri)] for ri in r], dtype=float)
+    p0 = fof.get(1, 0) / n
 
-    # Z_r: N_r divided by the half-width to the neighbouring nonzero frequencies (Gale & Sampson).
-    z = np.empty_like(r)
-    for i in range(len(r)):
-        q = 0.0 if i == 0 else r[i - 1]
-        t = 2.0 * r[i] - q if i == len(r) - 1 else r[i + 1]
-        z[i] = nr[i] / (0.5 * (t - q))
-    # log-linear smoothing  log Z = a + b log r
-    b, a = np.polyfit(np.log(r), np.log(z), 1)
-    s = lambda x: np.exp(a + b * np.log(x))  # noqa: E731
+    if len(r) < 2:
+        # Simple Good-Turing small-support fallback (Gale & Sampson 1995): the log-linear regression
+        # log Z = a + b log r needs >= 2 distinct (r, Z_r) points to determine a slope -- a single
+        # point (e.g. every observed species a singleton) is a well-posed ecological sample but an
+        # underdetermined regression. With nothing to smooth against, skip smoothing and reallocate
+        # the seen mass by raw frequency (r* = r), equivalent to the ordinary renormalized MLE over
+        # the seen species.
+        r_star = r.copy()
+    else:
+        # Z_r: N_r divided by the half-width to the neighbouring nonzero frequencies (Gale & Sampson).
+        z = np.empty_like(r)
+        for i in range(len(r)):
+            q = 0.0 if i == 0 else r[i - 1]
+            t = 2.0 * r[i] - q if i == len(r) - 1 else r[i + 1]
+            z[i] = nr[i] / (0.5 * (t - q))
+        # log-linear smoothing  log Z = a + b log r
+        b, a = np.polyfit(np.log(r), np.log(z), 1)
+        s = lambda x: np.exp(a + b * np.log(x))  # noqa: E731
 
-    p0 = (fof.get(1, 0) / n) if n > 0 else 0.0
-
-    r_star = np.empty_like(r)
-    use_lgt = False
-    for i, ri in enumerate(r):
-        lgt = (ri + 1.0) * s(ri + 1.0) / s(ri)
-        next_nr = fof.get(int(ri) + 1)
-        if not use_lgt and next_nr is not None:
-            turing = (ri + 1.0) * next_nr / nr[i]
-            se = np.sqrt((ri + 1.0) ** 2 * (next_nr / nr[i] ** 2) * (1.0 + next_nr / nr[i]))
-            if abs(turing - lgt) <= 1.65 * se:
+        r_star = np.empty_like(r)
+        use_lgt = False
+        for i, ri in enumerate(r):
+            lgt = (ri + 1.0) * s(ri + 1.0) / s(ri)
+            next_nr = fof.get(int(ri) + 1)
+            if not use_lgt and next_nr is not None:
+                turing = (ri + 1.0) * next_nr / nr[i]
+                se = np.sqrt((ri + 1.0) ** 2 * (next_nr / nr[i] ** 2) * (1.0 + next_nr / nr[i]))
+                if abs(turing - lgt) <= 1.65 * se:
+                    use_lgt = True
+                r_star[i] = lgt if use_lgt else turing
+            else:
                 use_lgt = True
-            r_star[i] = lgt if use_lgt else turing
-        else:
-            use_lgt = True
-            r_star[i] = lgt
+                r_star[i] = lgt
 
     norm = float(np.sum(nr * r_star))
     rstar_of = {int(r[i]): r_star[i] for i in range(len(r))}
     proba = np.array([(1.0 - p0) * rstar_of[int(ci)] / norm for ci in c])
-    return {"p0": float(p0), "proba": proba, "r_star": r_star, "r": r}
+    return {
+        "p0": float(p0),
+        "proba": proba,
+        "r_star": r_star,
+        "r": r,
+        "insufficient_evidence": False,
+        "reason": "",
+    }
 
 
 def chao1(counts: np.ndarray, *, ci_level: float = 0.95) -> dict[str, float]:
