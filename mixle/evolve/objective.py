@@ -10,11 +10,16 @@ bootstrapped scalar.
 Every builder here is a thin adapter over an existing, verified scorer:
 
 * ``nll_objective``        -> per-obs ``-log p(y_i)`` from ``model.seq_log_density``.
-* ``log_score_objective``  -> :func:`mixle.inference.scoring.log_score` on the predictive densities.
+* ``log_score_objective``  -> per-obs ``-log p(y_i)`` computed directly from the log-density (the same
+  quantity as ``nll_objective``, kept as a separate name for the decision-theoretic framing). Computed
+  straight from the log-density, never via ``exp`` then re-``log`` through
+  :func:`mixle.inference.scoring.log_score` -- that round trip underflows to ``0.0`` for any log-density
+  past about ``-745``, after which the clip-and-relog step can no longer tell two bad fits apart.
 * ``crps_objective``       -> :func:`mixle.inference.scoring.crps_ensemble` on a sampled ensemble.
 * ``interval_objective``   -> :func:`mixle.inference.scoring.interval_score` (Winkler) on ensemble quantiles.
 * ``calibration_objective``-> PIT-based calibration error (:func:`mixle.inference.calibration`), scalar-only.
-* ``decision_regret_objective`` -> realized regret of :func:`mixle.inference.decision.bayes_action`.
+* ``decision_regret_objective`` -> :func:`mixle.inference.decision.bayes_action`'s chosen action, scored
+  by realized loss against the actual ``data`` -- not the model's own posterior draws.
 
 The model-to-array bridges (encoding, per-obs log density, ensemble sampling) live in this module so
 the scorers stay pure array functions and the objectives stay five-line adapters.
@@ -113,11 +118,19 @@ def nll_objective() -> Objective:
 
 
 def log_score_objective() -> Objective:
-    """Logarithmic score (log loss) of the predictive density at the realised outcomes."""
+    """Logarithmic score (log loss) of the predictive density at the realised outcomes.
+
+    Computed directly from the log-density (``-log p(y_i)``), never by exponentiating the log-density to
+    a plain probability and then re-deriving a log-scale score from it. That round trip is destructive:
+    ``exp(x)`` underflows to exactly ``0.0`` for any ``x`` below about ``-745`` (the float64 underflow
+    boundary), so every log-density past that point becomes the identical clipped probability and hence
+    the identical score, even though the underlying fits are genuinely -- and very differently -- bad.
+    Working from the log-density keeps that information: float64 has ample range in log-space, just not
+    in probability-space.
+    """
 
     def pw(model: Any, data: Any) -> np.ndarray:
-        prob = np.exp(pointwise_log_density(model, data))
-        return np.asarray(_scoring.log_score(prob, mean=False), dtype=float)
+        return -pointwise_log_density(model, data)
 
     return _ScalarObjective("log_score", True, pw)
 
@@ -186,6 +199,24 @@ def calibration_objective(*, ensemble: int = 256, seed: int = 0, bins: int = 10)
     return _ScalarObjective("calibration", True, pw, sc)
 
 
+def _realized_loss(loss: Callable[[Any, Any], float], action: Any, data: Any) -> float:
+    """Mean loss of a fixed ``action`` against the actual observed ``data`` (vectorized-or-loop).
+
+    Mirrors the vectorized-fast-path-with-loop-fallback of
+    :func:`mixle.inference.decision._loss_samples`, but reduces over real outcomes rather than
+    posterior draws -- this is what makes :func:`decision_regret_objective` check a chosen action
+    against reality instead of against the same model's own beliefs.
+    """
+    y = _as_array(data)
+    try:
+        vals = np.asarray(loss(action, y), dtype=float).reshape(-1)
+        if vals.size == y.size:
+            return float(vals.mean())
+    except Exception:  # noqa: BLE001
+        pass
+    return float(np.mean([float(loss(action, d)) for d in y]))
+
+
 def decision_regret_objective(
     loss: Callable[[Any, Any], float],
     actions: Sequence[Any],
@@ -193,19 +224,25 @@ def decision_regret_objective(
     n: int = 2000,
     seed: int = 0,
 ) -> Objective:
-    """Realized decision regret under a fitted predictive posterior (scalar-only, lower is better).
+    """Realized decision regret of a model's chosen action against actual ``data`` (scalar-only, lower
+    is better).
 
-    For the chosen Bayes action ``a* = bayes_action(posterior(model), loss, actions)`` this reports the
-    expected loss ``E_draw[ loss(a*, draw) ]`` -- the realized cost of acting optimally under the
-    model's own belief. A better-calibrated model yields a lower expected loss for the same loss and
-    action set, so it is a first-class promotion metric. Scalar-only (the regret is an expectation over
-    posterior draws, not a per-observation quantity), so ``pointwise`` returns ``None``.
+    For the chosen Bayes action ``a* = bayes_action(posterior(model), loss, actions)`` -- optimal under
+    the model's OWN predictive belief -- this reports the realized loss ``mean(loss(a*, y_i) for y_i in
+    data)`` against the actual ``data``, not draws from that same model's own posterior. Scoring against
+    self-generated draws would let a confidently wrong model look flawless: its chosen action and its
+    "outcomes" both come from the same wrong belief, so they always agree with each other regardless of
+    how far that belief is from reality. Checking the chosen action against real, shared ``data`` is what
+    makes this a genuine promotion metric rather than a self-consistency check. Scalar-only (this is a
+    single realized-loss number per model, not a per-observation quantity), so ``pointwise`` returns
+    ``None``.
 
     Args:
         loss: ``loss(action, draw) -> float`` (or a numpy-vectorized ``loss(action, draws) -> array``).
         actions: the finite candidate-action set.
-        n: posterior draws for the Monte-Carlo expectation.
-        seed: RNG seed.
+        n: posterior draws used only to pick the Bayes-optimal action under the model's own predictive
+            belief; the reported score is the realized loss of that action on ``data``.
+        seed: RNG seed for the action-selection draws.
     """
     from mixle.inference.posterior import posterior as _posterior
 
@@ -214,8 +251,8 @@ def decision_regret_objective(
 
     def sc(model: Any, data: Any) -> float:
         post = _posterior(model, over="predictive")
-        result = bayes_action(post, loss, list(actions), n=n, seed=seed)
-        return float(result["expected_loss"])
+        chosen = bayes_action(post, loss, list(actions), n=n, seed=seed)["action"]
+        return _realized_loss(loss, chosen, data)
 
     return _ScalarObjective("decision_regret", True, pw, sc)
 
