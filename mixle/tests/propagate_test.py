@@ -145,5 +145,104 @@ class UnscentedCovarianceValidationTest(unittest.TestCase):
             unscented_transform(lambda x: x.sum(axis=1), np.array([0.0, 0.0]), np.array([[1.0, 0.0], [0.0, np.nan]]))
 
 
+class PropagateContractValidationTest(unittest.TestCase):
+    """MXR-080-0191: ``propagate``/``unscented_transform`` left mean/covariance dimension consistency,
+    sample-count and quantile-range validity, model-output finiteness, and model-output SHAPE (reshaped
+    solely by total element count, so a wrong-shaped-but-same-size result could be silently scrambled
+    into a plausible-looking wrong answer) unchecked. NaN transform parameters (alpha/beta/kappa) also
+    silently propagated through to a NaN result instead of being rejected.
+    """
+
+    def setUp(self):
+        self.f = lambda x: x.sum(axis=1)
+
+    # -- mean/covariance shape ------------------------------------------------------------------------
+
+    def test_mean_cov_shape_mismatch_rejected_unscented(self):
+        with self.assertRaisesRegex(ValueError, "shape"):
+            unscented_transform(self.f, np.array([0.0, 0.0, 0.0]), np.eye(2))
+
+    def test_mean_cov_shape_mismatch_rejected_montecarlo(self):
+        with self.assertRaisesRegex(ValueError, "shape"):
+            propagate(self.f, np.array([0.0, 0.0, 0.0]), np.eye(2), method="montecarlo", n=10)
+
+    def test_non_finite_mean_rejected(self):
+        with self.assertRaisesRegex(ValueError, "not finite"):
+            unscented_transform(self.f, np.array([np.nan, 0.0]), np.eye(2))
+
+    # -- sample count -----------------------------------------------------------------------------------
+
+    def test_nonpositive_or_fractional_n_rejected(self):
+        for bad_n in (0, -5, 10.5):
+            with self.assertRaisesRegex(ValueError, "n must be a positive integer"):
+                propagate(self.f, np.array([0.0]), np.eye(1), method="montecarlo", n=bad_n)
+
+    # -- quantile range ---------------------------------------------------------------------------------
+
+    def test_quantile_out_of_range_rejected(self):
+        for bad_q in (1.5, -0.1):
+            with self.assertRaisesRegex(ValueError, "quantiles"):
+                propagate(self.f, np.array([0.0]), np.eye(1), method="montecarlo", n=100, quantiles=(bad_q,))
+
+    def test_non_finite_quantile_rejected(self):
+        with self.assertRaisesRegex(ValueError, "quantiles"):
+            propagate(self.f, np.array([0.0]), np.eye(1), method="montecarlo", n=100, quantiles=(float("nan"),))
+
+    # -- transform parameters -----------------------------------------------------------------------------
+
+    def test_non_finite_transform_parameters_rejected(self):
+        for kwargs in ({"alpha": float("nan")}, {"beta": float("nan")}, {"kappa": float("nan")}):
+            with self.assertRaisesRegex(ValueError, "finite"):
+                unscented_transform(self.f, np.array([0.0, 0.0]), np.eye(2), **kwargs)
+
+    # -- model output shape -------------------------------------------------------------------------------
+
+    def test_model_output_wrong_shape_is_rejected_not_silently_reshaped(self):
+        # d=1 -> 3 sigma points, each should map to a 2-vector: correct shape (3, 2). A transposed bug
+        # returns (2, 3) instead -- same total size (6), so the OLD `.reshape(3, -1)` would silently
+        # accept it and scramble which value belongs to which sigma point / output component.
+        def transposed(sigma):
+            base = sigma[:, 0]
+            return np.stack([base, base * 2.0], axis=0)  # shape (2, 3), not (3, 2)
+
+        with self.assertRaisesRegex(ValueError, "leading dimension"):
+            unscented_transform(transposed, np.array([0.0]), np.eye(1))
+
+    def test_model_output_wrong_leading_dim_rejected_montecarlo(self):
+        def half_length(x):
+            return np.arange(float(x.shape[0] // 2))  # deliberately the wrong leading dimension
+
+        with self.assertRaisesRegex(ValueError, "leading dimension"):
+            propagate(half_length, np.array([0.0, 0.0]), np.eye(2), method="montecarlo", n=100)
+
+    def test_non_finite_model_output_rejected_unscented(self):
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            unscented_transform(lambda x: np.full(x.shape[0], np.nan), np.array([0.0, 0.0]), np.eye(2))
+
+    def test_non_finite_model_output_rejected_montecarlo(self):
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            propagate(
+                lambda x: np.full(x.shape[0], np.nan), np.array([0.0, 0.0]), np.eye(2), method="montecarlo", n=100
+            )
+
+    # -- negative control ---------------------------------------------------------------------------------
+
+    def test_a_well_posed_call_is_unaffected(self):
+        a = np.array([1.0, -2.0, 0.5])
+        mu = np.array([1.0, 2.0, 3.0])
+        rng = np.random.RandomState(0)
+        chol = rng.randn(3, 3)
+        cov = chol @ chol.T + np.eye(3)
+        f = lambda x: x @ a  # noqa: E731
+
+        out_u = propagate(f, mu, cov, method="unscented")
+        self.assertAlmostEqual(out_u["mean"], a @ mu, places=8)
+        self.assertAlmostEqual(out_u["std"] ** 2, a @ cov @ a, places=6)
+
+        out_mc = propagate(f, mu, cov, n=200000, method="montecarlo", seed=1, quantiles=(0.05, 0.5, 0.95))
+        self.assertAlmostEqual(out_mc["mean"], a @ mu, delta=0.05)
+        self.assertAlmostEqual(out_mc["std"], np.sqrt(a @ cov @ a), delta=0.05)
+
+
 if __name__ == "__main__":
     unittest.main()
