@@ -18,6 +18,7 @@ tolerances (not mathematical constants), so they stay engine-independent.
 from __future__ import annotations
 
 import builtins
+import contextvars
 from contextlib import contextmanager
 from numbers import Number
 from typing import Any
@@ -81,7 +82,18 @@ _ENGINE_CONSTANTS = frozenset({"pi", "e", "euler_gamma", "one", "zero", "two", "
 
 _NAMED_ENGINES = {"numpy": NUMPY_ENGINE, "symbolic": SYMBOLIC_ENGINE}
 
-_default_engine: ComputeEngine = NUMPY_ENGINE
+# The engine that supplies scalar constants and the operation-dispatch default. A ContextVar, not a
+# plain module global: a bare global is shared process-wide with no isolation between concurrent
+# asyncio tasks or threads, so two overlapping `using_engine(...)` blocks (e.g. one task entering
+# "symbolic" while another enters "numpy") stomp on each other's value -- the same race
+# ``mixle.engines.base._ACTIVE`` documents and fixes for the estimation engine context. ContextVar is
+# copied into each Task's context at creation and is independently isolated per OS thread, so this
+# closes both races at no extra cost to the synchronous call path most callers use today. The
+# ContextVar's own ``default=`` is the process-level fallback ("no override active anywhere"); it is a
+# separate concept from the scoped override that ``using_engine``/``set_default_engine`` layer on top.
+_DEFAULT_ENGINE: contextvars.ContextVar[ComputeEngine] = contextvars.ContextVar(
+    "mixle_arithmetic_default_engine", default=NUMPY_ENGINE
+)
 
 
 def _resolve_engine(engine: ComputeEngine | str) -> ComputeEngine:
@@ -97,35 +109,41 @@ def _resolve_engine(engine: ComputeEngine | str) -> ComputeEngine:
 
 def get_default_engine() -> ComputeEngine:
     """Return the engine that supplies scalar constants and the operation-dispatch default."""
-    return _default_engine
+    return _DEFAULT_ENGINE.get()
 
 
 def set_default_engine(engine: ComputeEngine | str) -> ComputeEngine:
-    """Set the active engine (a :class:`ComputeEngine` or ``"numpy"``/``"symbolic"``); return the previous one."""
-    global _default_engine
-    prev = _default_engine
-    _default_engine = _resolve_engine(engine)
+    """Set the active engine (a :class:`ComputeEngine` or ``"numpy"``/``"symbolic"``); return the previous one.
+
+    This is a direct, unscoped assignment: like ``using_engine``, it lives in a ``ContextVar`` so it is
+    isolated per thread/task, but there is no token to auto-restore -- the caller (or a test's isolation
+    fixture) is responsible for putting the previous engine back. Prefer ``using_engine`` for a scoped
+    override that always restores itself, including when the block raises.
+    """
+    resolved = _resolve_engine(engine)  # validate before mutating, so an unknown name leaves state untouched
+    prev = _DEFAULT_ENGINE.get()
+    _DEFAULT_ENGINE.set(resolved)
     return prev
 
 
 @contextmanager
 def using_engine(engine: ComputeEngine | str):
     """Context manager that makes ``engine`` the active engine for its block, then restores the previous one."""
-    prev = set_default_engine(engine)
+    token = _DEFAULT_ENGINE.set(_resolve_engine(engine))
     try:
-        yield _default_engine
+        yield _DEFAULT_ENGINE.get()
     finally:
-        set_default_engine(prev)
+        _DEFAULT_ENGINE.reset(token)
 
 
 def constant(value: Any) -> Any:
     """Wrap ``value`` in the active engine's scalar representation (identity for numeric engines)."""
-    return _default_engine.constant(value)
+    return _DEFAULT_ENGINE.get().constant(value)
 
 
 def _dispatch(name):
     def fn(*args, **kwargs):
-        engine = engine_of(args, default=_default_engine)
+        engine = engine_of(args, default=_DEFAULT_ENGINE.get())
         return getattr(engine, name)(*args, **kwargs)
 
     fn.__name__ = name
@@ -156,7 +174,7 @@ def max(*args, **kwargs):
     """Return Python scalar ``max`` or dispatch array reductions to the active engine."""
     if len(args) > 1 and not kwargs and all(isinstance(arg, Number) for arg in args):
         return builtins.max(*args)
-    engine = engine_of(args, default=_default_engine)
+    engine = engine_of(args, default=_DEFAULT_ENGINE.get())
     return engine.max(*args, **kwargs)
 
 
@@ -187,5 +205,5 @@ def __getattr__(name: str) -> Any:
     # Mathematical constants resolve from the active engine (PEP 562); everything else is a real
     # module global handled before this hook fires.
     if name in _ENGINE_CONSTANTS:
-        return getattr(_default_engine, name)
+        return getattr(_DEFAULT_ENGINE.get(), name)
     raise AttributeError("module %r has no attribute %r" % (__name__, name))
