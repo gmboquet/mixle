@@ -24,16 +24,30 @@ class QuantizedFunction:
     """A scalar function tabulated over quantized inputs; ``f(x) ≈ table[round(x/step)]`` with linear tails."""
 
     def __init__(self, func: Callable[[np.ndarray], np.ndarray], step: float, lo: float, hi: float) -> None:
-        if step <= 0 or hi <= lo:
-            raise ValueError("need step > 0 and hi > lo")
+        if not np.isfinite(step) or step <= 0:
+            raise ValueError(f"step must be finite and positive, got {step}")
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            raise ValueError(f"lo/hi must be finite, got lo={lo}, hi={hi}")
+        if hi <= lo:
+            raise ValueError(f"need hi > lo, got lo={lo}, hi={hi}")
         self.func = func
         self.step = float(step)
         self.lo_code = int(round(lo / step))
         self.hi_code = int(round(hi / step))
+        if self.hi_code - self.lo_code < 1:
+            # lo/hi are valid floats but round to the SAME code at this step -- the grid degenerates to
+            # one entry, and the boundary-slope construction below needs a second one to exist.
+            raise ValueError(
+                f"step={step} is too coarse for span [{lo}, {hi}]: rounds to a single code "
+                "(need at least two grid entries)"
+            )
         self.lo = self.lo_code * self.step
         self.hi = self.hi_code * self.step
         codes = np.arange(self.lo_code, self.hi_code + 1, dtype=np.int64)
-        self.table = np.ascontiguousarray(func(codes * self.step), dtype=np.float64)
+        table = np.ascontiguousarray(func(codes * self.step), dtype=np.float64)
+        if not np.isfinite(table).all():
+            raise ValueError("func produced non-finite values over the tabulated range")
+        self.table = table
         # boundary slopes for linear extrapolation of unbounded functions outside the table
         self.slope_lo = float((self.table[1] - self.table[0]) / self.step)
         self.slope_hi = float((self.table[-1] - self.table[-2]) / self.step)
@@ -124,8 +138,8 @@ def quantized_logsumexp(scores: Any, *, bits: int = 12, span: float = 24.0, weig
     """
     if bits < 1 or bits > 24:
         raise ValueError(f"need 1 <= bits <= 24, got {bits}")
-    if span <= 0:
-        raise ValueError(f"span must be positive, got {span}")
+    if not np.isfinite(span) or span <= 0:
+        raise ValueError(f"span must be finite and positive, got {span}")
     scores = np.asarray(scores, dtype=np.float64).ravel()
     if scores.size == 0:
         raise ValueError("scores must be non-empty")
@@ -137,6 +151,8 @@ def quantized_logsumexp(scores: Any, *, bits: int = 12, span: float = 24.0, weig
         w = np.asarray(weights, dtype=np.float64).ravel()
         if w.shape != scores.shape:
             raise ValueError(f"weights shape {w.shape} != scores shape {scores.shape}")
+        if not np.isfinite(w).all():
+            raise ValueError("weights must be finite")
         if (w < 0).any():
             raise ValueError("weights must be nonnegative")
     keep = ~np.isneginf(scores)
@@ -162,6 +178,10 @@ def lse_error_bound(bits: int, span: float) -> float:
 
 def error_bound(sup_abs_derivative: float, step: float) -> float:
     """The nearest-code lookup error bound ``(step/2) * sup|f'|`` (e.g. sigmoid sup|f'|=0.25)."""
+    if not np.isfinite(sup_abs_derivative) or sup_abs_derivative <= 0:
+        raise ValueError(f"sup_abs_derivative must be finite and positive, got {sup_abs_derivative}")
+    if not np.isfinite(step) or step <= 0:
+        raise ValueError(f"step must be finite and positive, got {step}")
     return 0.5 * step * sup_abs_derivative
 
 
@@ -172,6 +192,8 @@ def table_bytes(step: float, lo: float, hi: float, itemsize: int = 8) -> int:
 
 def step_for_tolerance(tol: float, sup_abs_derivative: float) -> float:
     """Largest ``step`` with ``error_bound(sup|f'|, step) <= tol`` -- spend the fewest table entries."""
-    if tol <= 0:
-        raise ValueError("tol must be positive")
+    if not np.isfinite(tol) or tol <= 0:
+        raise ValueError(f"tol must be finite and positive, got {tol}")
+    if not np.isfinite(sup_abs_derivative) or sup_abs_derivative <= 0:
+        raise ValueError(f"sup_abs_derivative must be finite and positive, got {sup_abs_derivative}")
     return 2.0 * tol / sup_abs_derivative
