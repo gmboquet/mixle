@@ -74,5 +74,108 @@ class ArithmeticConstantsTest(unittest.TestCase):
             self.assertEqual(to_sympy(expr), 2 * sympy.pi)
 
 
+class DefaultEngineConcurrencyTest(unittest.TestCase):
+    """Regression (MXR-080-0124): ``using_engine`` used to back its state with a bare module-global
+    (``_default_engine``), which -- unlike the estimation engine context in ``mixle.engines.base``
+    (``_ACTIVE`` / ``using_active_engine``) -- has no isolation between concurrent asyncio tasks or
+    threads: two overlapping ``using_engine(...)`` blocks would stomp on each other's active engine, so
+    a symbolic task could observe "numpy" while its own symbolic scope was still notionally active.
+    Fixed by switching to ``contextvars.ContextVar`` with token-based restoration, mirroring ``_ACTIVE``.
+    """
+
+    def tearDown(self):
+        arith.set_default_engine(NUMPY_ENGINE)  # never leak the active engine across tests
+
+    def test_concurrent_asyncio_tasks_do_not_see_each_others_engine(self):
+        import asyncio
+
+        seen = {}
+
+        async def worker(name, engine, delay1, delay2):
+            with arith.using_engine(engine):
+                await asyncio.sleep(delay1)
+                # symbolic_task sleeps first (yielding control) so numpy_task can enter and stomp the
+                # old bare global before symbolic_task resumes and samples it mid-block.
+                seen[name] = arith.get_default_engine()
+                await asyncio.sleep(delay2)
+
+        async def main():
+            await asyncio.gather(
+                worker("symbolic_task", "symbolic", 0.03, 0.03),
+                worker("numpy_task", "numpy", 0.0, 0.06),
+            )
+
+        asyncio.run(main())
+        self.assertIs(seen["symbolic_task"], SYMBOLIC_ENGINE)
+        self.assertIs(seen["numpy_task"], NUMPY_ENGINE)
+        self.assertIs(arith.get_default_engine(), NUMPY_ENGINE)  # cleared outside every block
+
+    def test_concurrent_threads_do_not_see_each_others_engine(self):
+        import threading
+
+        # Fixed sleep delays are not a reliable way to force the overlap for OS threads (scheduling
+        # isn't deterministic the way asyncio's cooperative await points are -- a naive sleep-timed
+        # version of this test can pass "by accident" even against the buggy bare-global code, because
+        # thread B's restore-on-exit happens to land back on the value thread A expects). Synchronize
+        # explicitly instead, so thread A samples the shared default WHILE thread B's
+        # using_engine("numpy") block is still open -- the actual "observed mid-block" scenario.
+        seen = {}
+        a_ready = threading.Event()
+        b_entered = threading.Event()
+        a_sampled = threading.Event()
+
+        def worker_a():
+            with arith.using_engine("symbolic"):
+                a_ready.set()
+                b_entered.wait()
+                seen["A"] = arith.get_default_engine()
+                a_sampled.set()
+
+        def worker_b():
+            a_ready.wait()
+            with arith.using_engine("numpy"):
+                b_entered.set()
+                a_sampled.wait()  # keep this scope open until A has sampled mid-block
+
+        t1 = threading.Thread(target=worker_a)
+        t2 = threading.Thread(target=worker_b)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        self.assertIs(seen["A"], SYMBOLIC_ENGINE)
+        self.assertIs(arith.get_default_engine(), NUMPY_ENGINE)  # cleared outside every block
+
+    def test_nested_scopes_restore_correctly(self):
+        self.assertIs(arith.get_default_engine(), NUMPY_ENGINE)
+        with arith.using_engine("symbolic"):
+            self.assertIs(arith.get_default_engine(), SYMBOLIC_ENGINE)
+            with arith.using_engine(NUMPY_ENGINE):
+                self.assertIs(arith.get_default_engine(), NUMPY_ENGINE)
+            # restored to the outer scope's engine, not some stale process-global value
+            self.assertIs(arith.get_default_engine(), SYMBOLIC_ENGINE)
+        self.assertIs(arith.get_default_engine(), NUMPY_ENGINE)
+
+    def test_exception_inside_the_block_still_restores_the_previous_engine(self):
+        with arith.using_engine("symbolic"):
+            with self.assertRaises(ValueError):
+                with arith.using_engine(NUMPY_ENGINE):
+                    raise ValueError("boom")
+            self.assertIs(arith.get_default_engine(), SYMBOLIC_ENGINE)
+        self.assertIs(arith.get_default_engine(), NUMPY_ENGINE)
+
+    def test_single_threaded_non_nested_usage_is_unchanged(self):
+        # Negative control: ordinary sequential, single-scope usage -- no concurrency, no nesting --
+        # must behave exactly as it did before the ContextVar fix.
+        self.assertIs(arith.get_default_engine(), NUMPY_ENGINE)
+        self.assertEqual(arith.pi, math.pi)
+        with arith.using_engine("symbolic"):
+            self.assertIs(arith.get_default_engine(), SYMBOLIC_ENGINE)
+            self.assertIsInstance(arith.pi, SymbolicExpression)
+        self.assertIs(arith.get_default_engine(), NUMPY_ENGINE)
+        self.assertEqual(arith.pi, math.pi)
+
+
 if __name__ == "__main__":
     unittest.main()
