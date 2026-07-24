@@ -58,9 +58,18 @@ caller-owned data is not rewritten in place to hide missing or non-finite values
 Dependence between fields
 -------------------------
 
-The default record model is **independent** per field (a ``Composite``). ``optimize(data)`` will upgrade to a
-dependence model — a learned Bayesian network or a copula — **only when it beats the independent baseline by
-BIC on the same data**; otherwise it keeps independence. It does not assume dependencies it cannot evidence.
+The default record model is **independent** per field (a ``Composite``). ``optimize(data)`` and ``fit(data)``
+— called with **no estimator already supplied** (``estimator=None``, the default, with automatic
+``structure="auto"`` search) — will upgrade to a dependence model for tuple-typed rows: a learned Bayesian
+network, or (for all-continuous rows) a copula, **only when it beats the independent baseline by BIC on the
+same data**; otherwise it keeps independence. It does not assume dependencies it cannot evidence.
+
+This upgrade is reached only through that no-estimator auto-structure-search path. ``get_estimator(data)``,
+``mixle.task.recommend.recommend_model(data)``, and ``propose(data)`` (below) each already build a concrete
+estimator before any fitting happens, so none of them reach it: their only dependence-capturing route today
+is a joint multivariate-Gaussian estimator, and only for fixed-length, fully-observed, purely-numeric vector
+rows (never tuples) — narrower than the BN/copula upgrade described above. Call ``optimize(data)`` or
+``fit(data)`` directly, with no estimator, when a copula/Bayesian-network dependence structure is the goal.
 
 Selection and validation
 ------------------------
@@ -69,7 +78,8 @@ Selection and validation
 * ``propose(data)`` builds a **verified frontier**: it fits each candidate on a train split and scores it on
   a held-out split (``holdout=0.25`` by default), ranking by held-out mean log-density — the ranking is
   out-of-sample, not a guess. The frontier search is bounded by ``max_candidates`` / ``timeout`` (worklist
-  I6.5).
+  I6.5). Its candidates do not include the copula/Bayesian-network dependence upgrade described above (see
+  "Dependence between fields") — call ``optimize(data)`` directly for that.
 
 What it will *not* do
 ---------------------

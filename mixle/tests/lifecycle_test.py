@@ -86,6 +86,41 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(names.count("independent"), 0)
         self.assertEqual(names.count("recommended"), 1)
 
+    def test_propose_frontier_does_not_reach_the_copula_dependence_upgrade(self):
+        # propose()'s candidates (the heuristic recommendation, the independence baseline, and an
+        # optional LLM design) each build a concrete estimator before fitting -- none of them go
+        # through optimize()'s own no-estimator auto-structure-search path, so none reach its
+        # copula/Bayesian-network upgrade (see docs/automatic-modeling-contract.rst's "Dependence
+        # between fields"). Pin that asymmetry directly: the SAME strongly-dependent, heterogeneous
+        # data that optimize() correctly upgrades to a CopulaDistribution never produces one via
+        # propose(), so a future change wiring the two together (a real, larger feature, not
+        # something to happen by accident) shows up here rather than silently drifting the docs stale.
+        import mixle
+        from mixle.inference import optimize
+        from mixle.stats.combinator.copula import CopulaDistribution
+
+        rng = np.random.RandomState(0)
+        z = rng.multivariate_normal([0.0, 0.0], [[1.0, 0.85], [0.85, 1.0]], size=1500)
+        try:
+            from scipy.stats import gamma as spgamma
+            from scipy.stats import norm
+        except ImportError:
+            self.skipTest("scipy required for this copula-dependence fixture")
+        u = norm.cdf(z)
+        x0 = spgamma.ppf(u[:, 0], a=2.0, scale=2.0)
+        x1 = norm.ppf(u[:, 1], loc=5.0, scale=2.0)
+        data = [(float(a), float(b)) for a, b in zip(x0, x1)]
+
+        direct = optimize(data, out=None)
+        self.assertIsInstance(direct, CopulaDistribution)  # optimize() alone correctly detects the dependence
+
+        m = mixle.propose(data, fit=True)
+        estimator_types = {type(f["estimator"]).__name__ for f in m.frontier if "estimator" in f}
+        # An exact-set check, not just "no copula" -- so a future change adding ANY dependence-capturing
+        # candidate here (copula-shaped or otherwise) fails this test and forces a conscious update,
+        # rather than silently drifting the docs claim stale under a differently-named addition.
+        self.assertEqual(estimator_types, {"CompositeEstimator"})
+
     def test_fit_with_explicit_spec_and_enumerate(self):
         import mixle
         from mixle.stats import CategoricalEstimator
