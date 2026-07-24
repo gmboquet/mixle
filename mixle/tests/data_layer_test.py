@@ -17,7 +17,7 @@ from mixle.data import (
     Vector,
     partially_exchangeable,
 )
-from mixle.data.partition import partition_records
+from mixle.data.partition import num_chunks_for, partition_records
 from mixle.stats import seq_encode
 
 
@@ -54,6 +54,45 @@ class DataLayerTest(unittest.TestCase):
         for part in parts:
             self.assertLessEqual(len({r["g"] for r in part}), 1)  # at most one group per partition here
         self.assertEqual(sum(len(p) for p in parts), 24)  # nothing lost
+
+    def test_partition_controls_reject_invalid_values(self):
+        # MXR-080-0067: chunk_size=0 used to raise a bare ZeroDivisionError; negative chunk_size and
+        # nonpositive num_chunks silently collapsed to a single chunk/partition instead of failing; and
+        # fractional values (chunk_size or num_chunks) were silently truncated. All of these must now
+        # fail clearly, as a ValueError naming the bad control, before any partitioning arithmetic runs.
+        for kwargs in (
+            {"chunk_size": 0},  # used to raise a bare ZeroDivisionError
+            {"chunk_size": -5},  # used to silently collapse to one chunk
+            {"chunk_size": 2.5},  # fractional -- used to be silently accepted
+            {"num_chunks": 0},  # used to silently collapse to one chunk
+            {"num_chunks": -3},  # used to silently collapse to one chunk
+            {"num_chunks": 2.5},  # fractional -- used to be silently truncated to 2
+            {"num_chunks": True},  # bool is not an acceptable count, even though bool is an int subclass
+        ):
+            with self.subTest(**kwargs):
+                with self.assertRaises(ValueError):
+                    num_chunks_for(100, **kwargs)
+
+        for n in (0, -2, 2.5, False):
+            with self.subTest(n=n):
+                with self.assertRaises(ValueError):
+                    partition_records(list(range(10)), EXCHANGEABLE, n)
+
+    def test_num_chunks_and_chunk_size_together_is_a_conflict(self):
+        # A non-default num_chunks supplied alongside chunk_size used to be silently discarded --
+        # chunk_size always won. That silent precedence is now a rejected conflicting request instead.
+        with self.assertRaises(ValueError):
+            num_chunks_for(100, num_chunks=5, chunk_size=10)
+
+    def test_partition_controls_negative_control(self):
+        # Negative control: legitimate positive-integer controls must still work exactly as before,
+        # including num_chunks left at its default (1) alongside an explicit chunk_size.
+        self.assertEqual(num_chunks_for(100, chunk_size=10), 10)
+        self.assertEqual(num_chunks_for(100, num_chunks=4), 4)
+        self.assertEqual(num_chunks_for(100), 1)
+        self.assertEqual(num_chunks_for(100, num_chunks=1, chunk_size=10), 10)  # 1 is the default, not a conflict
+        recs = list(range(10))
+        self.assertEqual(partition_records(recs, EXCHANGEABLE, 4), [recs[k::4] for k in range(4)])
 
     def test_schema_coercion_and_validation(self):
         sch = Schema((Field("c", Categorical(("a", "b"))), Field("x", Real()), Field("v", Vector(2))))
