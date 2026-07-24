@@ -120,6 +120,96 @@ class QuantizedLogsumexpTest(unittest.TestCase):
         self.assertAlmostEqual(quantized_logsumexp([2.0], weights=[3.0]), float(np.log(3.0)) + 2.0, places=12)
 
 
+class LseErrorBoundTailTest(unittest.TestCase):
+    """MXR-080-0143: the grid-only bound omits clipped mass elevated to the bottom bin, which is not
+    generally negligible -- a clipped score paired with a large weight can dominate the sum. Passing
+    the same ``scores``/``weights`` to :func:`lse_error_bound` closes that gap with a derived,
+    data-dependent tail term.
+    """
+
+    ADVERSARIAL_SCORES = [0.0, -25.0]
+    ADVERSARIAL_WEIGHTS = [1.0, 1e12]
+    BITS, SPAN = 12, 24.0
+
+    def test_grid_only_bound_understates_the_adversarial_case_by_orders_of_magnitude(self):
+        # the audit's exact scenario: score -25 sits just outside span=24 (relative to the max at 0),
+        # so it gets clipped UP to the bottom bin instead of contributing its true, tiny mass -- but its
+        # weight is 1e12, so the elevation error is enormous relative to the total sum
+        exact = float(np.log(np.sum(np.asarray(self.ADVERSARIAL_WEIGHTS) * np.exp(self.ADVERSARIAL_SCORES))))
+        got = quantized_logsumexp(
+            self.ADVERSARIAL_SCORES, bits=self.BITS, span=self.SPAN, weights=self.ADVERSARIAL_WEIGHTS
+        )
+        actual_error = abs(got - exact)
+        grid_only = lse_error_bound(self.BITS, self.SPAN)  # old call convention: bits/span only, no data
+        # pin down the concrete figures from the audit so this test fails loudly if the mechanism drifts
+        self.assertAlmostEqual(actual_error, 0.9623, places=3)
+        self.assertAlmostEqual(grid_only, 0.00293, places=5)
+        self.assertGreater(actual_error, 300 * grid_only, "the grid-only bound must be shown understating by >300x")
+
+    def test_tail_aware_bound_covers_the_adversarial_case(self):
+        exact = float(np.log(np.sum(np.asarray(self.ADVERSARIAL_WEIGHTS) * np.exp(self.ADVERSARIAL_SCORES))))
+        got = quantized_logsumexp(
+            self.ADVERSARIAL_SCORES, bits=self.BITS, span=self.SPAN, weights=self.ADVERSARIAL_WEIGHTS
+        )
+        actual_error = abs(got - exact)
+        bound = lse_error_bound(self.BITS, self.SPAN, scores=self.ADVERSARIAL_SCORES, weights=self.ADVERSARIAL_WEIGHTS)
+        self.assertGreaterEqual(bound, actual_error, "tail-aware bound must actually cover the measured error")
+
+    def test_tail_aware_bound_matches_grid_only_when_nothing_clips(self):
+        # negative control: well within span with unit weights -- the tail term must stay negligible,
+        # i.e. the fix must not regress the pre-existing, already-correct grid-only behavior
+        rng = np.random.RandomState(3)
+        scores = rng.normal(0, 3, 200000)
+        exact = float(np.log(np.sum(np.exp(scores - scores.max()))) + scores.max())
+        got = quantized_logsumexp(scores, bits=self.BITS, span=self.SPAN)
+        actual_error = abs(got - exact)
+        grid_only = lse_error_bound(self.BITS, self.SPAN)
+        tail_aware = lse_error_bound(self.BITS, self.SPAN, scores=scores)
+        self.assertGreaterEqual(tail_aware, actual_error)
+        self.assertLess(tail_aware - grid_only, 1e-6, "no meaningful clipping: tail term must be ~0")
+
+    def test_tail_aware_bound_holds_across_randomized_adversarial_weights(self):
+        # fuzz sweep: huge-dynamic-range weights on scores that may or may not clip, various bits/spans
+        rng = np.random.RandomState(42)
+        checked = 0
+        for _ in range(200):
+            n = rng.randint(2, 6)
+            scores = rng.uniform(-2000, 5, size=n)
+            scores[0] = 0.0
+            weights = np.exp(rng.uniform(0, 30, size=n))
+            bits = int(rng.choice([8, 10, 12]))
+            span = float(rng.choice([8.0, 16.0, 24.0]))
+            exact = float(np.log(np.sum(weights * np.exp(scores - scores.max()))) + scores.max())
+            if not np.isfinite(exact):
+                continue
+            got = quantized_logsumexp(scores, bits=bits, span=span, weights=weights)
+            bound = lse_error_bound(bits, span, scores=scores, weights=weights)
+            self.assertGreaterEqual(
+                bound, abs(got - exact) - 1e-9, f"bits={bits} span={span} scores={scores} weights={weights}"
+            )
+            checked += 1
+        self.assertGreater(checked, 100, "the fuzz sweep must actually exercise a meaningful number of trials")
+
+    def test_weights_without_scores_is_rejected(self):
+        with self.assertRaises(ValueError):
+            lse_error_bound(self.BITS, self.SPAN, weights=[1.0, 2.0])
+
+    def test_lse_error_bound_validates_bits_and_span(self):
+        with self.assertRaises(ValueError):
+            lse_error_bound(0, self.SPAN)
+        with self.assertRaises(ValueError):
+            lse_error_bound(self.BITS, -1.0)
+        with self.assertRaises(ValueError):
+            lse_error_bound(self.BITS, np.nan)
+        with self.assertRaises(ValueError):
+            lse_error_bound(self.BITS, np.inf)
+
+    def test_all_masked_or_zero_weight_gives_zero_bound(self):
+        # matches quantized_logsumexp's -inf result for the same inputs: no rounding occurs
+        self.assertEqual(lse_error_bound(self.BITS, self.SPAN, scores=[-np.inf, -np.inf]), 0.0)
+        self.assertEqual(lse_error_bound(self.BITS, self.SPAN, scores=[1.0, 2.0], weights=[0.0, 0.0]), 0.0)
+
+
 class HelpersTest(unittest.TestCase):
     def test_step_for_tolerance_meets_bound(self):
         s = step_for_tolerance(1e-3, 0.25)  # sigmoid
