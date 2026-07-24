@@ -197,7 +197,20 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 dominate every in-pmap probability by construction. Pass a normalized map when
                 you need ``density()`` to be meaningful.
             default_value: Probability assigned to labels outside ``pmap``. Must be finite and
-                within ``[0, 1]``.
+                within ``[0, 1]``. When ``default_value > 0`` and ``pmap`` does not cover the
+                full label space, ``density()``/``log_density()`` become a smoothed *scoring*
+                function rather than a normalized probability measure: every distinct label
+                outside ``pmap`` receives the same flat fallback mass, so querying several
+                distinct out-of-vocabulary labels can each score positive density, and those
+                densities can sum to more than 1 over the true (potentially unbounded) label
+                space. This is inherent to using a single fallback constant for "everything
+                else" -- the same tradeoff a Laplace/Kneser-Ney-smoothed language model makes --
+                since the true unknown-label cardinality is unknowable in general, so there is
+                no way to normalize it properly, and this class makes no attempt to.
+                :class:`CategoricalSampler` reflects the same boundary from the sampling side:
+                it can only draw labels registered in ``pmap``, never a synthesized
+                "default"/unknown label, since there is no way to generatively sample from an
+                unspecified label space.
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
             prob_map: Alias for ``pmap``.
@@ -358,6 +371,10 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
         p_mat(x) = p_i, if x in pmap.keys(), else p_mat(x) = default_value.
 
+        With ``default_value > 0`` and a ``pmap`` that does not cover the full label space, this
+        is a smoothed scoring function, not a normalized probability measure -- see the
+        ``default_value`` note on :meth:`__init__`.
+
         Args:
             x (Any): Evaluate CategoricalDistribution density value at x.
 
@@ -371,6 +388,10 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         """Log-Density evaluation of CategoricalDistribution.
 
         log(p_mat(x)) = log(p_i), if x in pmap.keys(), else log(p_mat(x)) = log(default_value).
+
+        With ``default_value > 0`` and a ``pmap`` that does not cover the full label space, this
+        is a smoothed scoring function, not a normalized probability measure -- see the
+        ``default_value`` note on :meth:`__init__`.
 
         Args:
             x (Any): Evaluate CategoricalDistribution density value at x.
@@ -586,14 +607,38 @@ class CategoricalSampler(DistributionSampler):
         Attributes:
             rng: Random state used for sampling.
             levels: Category labels.
-            probs: Category probabilities in ``levels`` order.
+            probs: Category probabilities in ``levels`` order, normalized to sum to 1.
             num_levels: Number of categories.
+
+        Raises:
+            ValueError: If ``dist.pmap`` is empty or every one of its values is 0.0, since
+                there is then no relative proportion of registered labels to sample from.
 
         """
         self.rng = RandomState(seed)
         temp = list(dist.pmap.items())
         self.levels = [u[0] for u in temp]
-        self.probs = [u[1] for u in temp]
+        raw_probs = np.asarray([u[1] for u in temp], dtype=np.float64)
+        total = raw_probs.sum()
+        if total <= 0.0:
+            # dist.pmap values are already guaranteed finite and non-negative by
+            # CategoricalDistribution.__init__, so total <= 0.0 here only happens when pmap is
+            # empty or every entry is exactly 0.0 -- there is no relative proportion left to
+            # sample from, and np.random.RandomState.choice cannot sample from an all-zero-weight
+            # distribution either. Fail clearly here, at sampler construction, instead of letting
+            # a 0/0 division or an opaque numpy error surface later out of sample().
+            raise ValueError(
+                "CategoricalSampler requires pmap to contain at least one category with positive probability."
+            )
+        # CategoricalDistribution.pmap is deliberately allowed to not sum to 1 (see its
+        # __init__ docstring; density()/log_density() already tolerate this by dividing by
+        # (1 + default_value)), but np.random.RandomState.choice requires p to sum to exactly 1.
+        # Normalizing by pmap's own sum makes sampling work from the relative proportions of
+        # pmap's registered labels regardless, so a construction-time-legal, non-1-summing pmap
+        # no longer crashes here. This does not change what can be sampled -- draws are still
+        # only ever one of pmap's registered labels, never a synthesized "default"/unknown label
+        # (there is no way to generatively sample from an unspecified label space).
+        self.probs = (raw_probs / total).tolist()
         self.num_levels = len(self.levels)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any | list[Any]:

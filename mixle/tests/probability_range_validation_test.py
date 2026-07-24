@@ -61,6 +61,22 @@ convention already used for the same kind of check elsewhere (``SymmetricDirichl
 mixture weights are not guaranteed float64 precision end to end (the gradient-fit path's torch
 softmax renormalization was measured landing ~6e-8 from 1.0 under ``precision="float32"``, outside
 a naive ``1e-10``/``1e-12`` bound but comfortably inside this one).
+
+A fourth-wave finding: the pmap-need-not-sum-to-1 permissiveness described two paragraphs above
+has a downstream inconsistency in ``CategoricalSampler``, which turns ``pmap`` into parallel
+``levels``/``probs`` arrays and used to pass ``probs`` straight into ``RandomState.choice(...,
+p=probs)`` -- a numpy API that requires ``p`` to sum to exactly 1 and raises ``ValueError:
+probabilities do not sum to 1`` otherwise. So a pmap that legitimately doesn't sum to 1
+(deliberately supported, per above -- e.g. ``sparse_mixture_test.py``'s
+``default_value``-dominant construction) constructed without error but crashed the first time
+anyone actually sampled from it. ``density()``/``log_density()`` already tolerate a
+non-1-summing ``pmap`` by dividing by ``(1 + default_value)``; ``CategoricalSampler`` now
+matches by normalizing ``probs`` by their own sum before sampling, so it draws from the relative
+proportions of ``pmap``'s registered labels regardless of whether they happen to sum to 1.
+``CategoricalSamplerValidationTestCase`` covers this, plus the sampler's own new rejection of an
+all-zero-weight (or empty) ``pmap`` at construction time, since there is then no relative
+proportion left to sample from and ``RandomState.choice`` cannot sample from an all-zero-weight
+distribution either.
 """
 
 import math
@@ -180,6 +196,55 @@ class CategoricalValidationTestCase(unittest.TestCase):
         d = CategoricalDistribution({"a": 0.005, "b": 0.005}, default_value=0.99)
         outside = d.density("not_in_pmap")
         self.assertAlmostEqual(math.log(outside), d.log_density("not_in_pmap"), places=12)
+
+
+class CategoricalSamplerValidationTestCase(unittest.TestCase):
+    def test_sampler_from_non_normalized_pmap_does_not_crash(self):
+        # Regression for the fourth-wave finding in this module's docstring: a pmap that
+        # legitimately doesn't sum to 1 (test_probabilities_not_summing_to_one_construct_by_design
+        # above pins that this constructs fine) used to crash at RandomState.choice(p=...) time
+        # instead, since CategoricalSampler passed pmap's raw values through unnormalized.
+        d = CategoricalDistribution({"a": 0.1, "x": 0.1}, default_value=0.3)  # pmap sums to 0.2
+        samples = d.sampler(seed=0).sample(2000)
+        self.assertEqual(len(samples), 2000)
+        # Sampling can only ever draw pmap's registered levels, never a synthesized "default" label
+        # (the sampler has no way to generatively produce an out-of-vocabulary label).
+        self.assertTrue(set(samples) <= {"a", "x"})
+
+    def test_sampler_from_non_normalized_pmap_preserves_relative_proportions(self):
+        # "b" is 3x as likely as "a" (relative proportion 0.3:0.1) even though pmap sums to 0.4,
+        # not 1 -- normalizing must preserve relative proportions, not just avoid crashing.
+        d = CategoricalDistribution({"a": 0.1, "b": 0.3})
+        samples = d.sampler(seed=0).sample(20000)
+        ratio = samples.count("b") / samples.count("a")
+        self.assertAlmostEqual(ratio, 3.0, delta=0.3)  # loose tolerance: large-sample frequency check
+
+    def test_sampler_from_default_value_dominant_pmap_does_not_crash(self):
+        # The exact construction sparse_mixture_test.py relies on for a different reason (making
+        # default_value dominate every in-pmap probability): pmap sums to 0.01, far from 1.
+        d = CategoricalDistribution({"a": 0.005, "b": 0.005}, default_value=0.99)
+        samples = d.sampler(seed=0).sample(1000)
+        self.assertTrue(set(samples) <= {"a", "b"})
+
+    def test_sampler_from_normalized_pmap_still_matches_relative_proportions(self):
+        # Sanity check that normalizing by pmap's own sum leaves the common already-normalized
+        # case (pmap sums to 1) numerically unaffected.
+        d = CategoricalDistribution({"a": 0.25, "b": 0.75})
+        samples = d.sampler(seed=0).sample(20000)
+        freq_b = samples.count("b") / len(samples)
+        self.assertAlmostEqual(freq_b, 0.75, delta=0.02)
+
+    def test_sampler_rejects_all_zero_weight_pmap(self):
+        # np.random.RandomState.choice cannot sample from an all-zero-weight distribution either;
+        # this must fail clearly at sampler construction, not as a confusing 0/0 or numpy error.
+        d = CategoricalDistribution({"a": 0.0, "b": 0.0})
+        with self.assertRaisesRegex(ValueError, "positive probability"):
+            d.sampler(seed=0)
+
+    def test_sampler_rejects_empty_pmap(self):
+        d = CategoricalDistribution({})
+        with self.assertRaisesRegex(ValueError, "positive probability"):
+            d.sampler(seed=0)
 
 
 class IntegerCategoricalValidationTestCase(unittest.TestCase):
