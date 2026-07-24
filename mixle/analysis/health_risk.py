@@ -330,17 +330,29 @@ def cumulative_exposure(series: np.ndarray, dt: float, *, decay: float = 0.0) ->
     would -- so a spike long ago contributes less to the current cumulative body burden than an
     equally large spike near the end of the series. Feeds a chronic dose-response evaluation (e.g.
     via :meth:`DoseResponse.probability`).
+
+    ``series`` must be finite, ``dt`` finite and positive (MXR-080-0098: a zero or negative timestep
+    makes the integral either trivially zero or sign-flipped, silently), and ``decay`` finite and
+    non-negative (a negative "decay" would amplify, not discount, older readings without bound).
     """
     x = np.asarray(series, dtype=float).ravel()
+    if not np.isfinite(x).all():
+        raise ValueError("series must be finite (no NaN/Inf)")
+    dt = float(dt)
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError(f"dt must be finite and positive, got {dt!r}")
+    decay = float(decay)
+    if not np.isfinite(decay) or decay < 0.0:
+        raise ValueError(f"decay must be finite and non-negative, got {decay!r}")
     if x.size == 0:
         return 0.0
     if x.size == 1:
         return float(x[0] * dt)
     if decay <= 0.0:
-        return float(np.trapz(x, dx=dt))
+        return float(np.trapezoid(x, dx=dt))
     times = np.arange(x.size) * dt
     decayed = x * np.exp(-decay * (times[-1] - times))
-    return float(np.trapz(decayed, dx=dt))
+    return float(np.trapezoid(decayed, dx=dt))
 
 
 def population_risk(
@@ -377,9 +389,23 @@ def health_liability(risk: DerivedQuantity, *, cost_per_case: float, discount: f
     `prior_dominated` flag unchanged, so a liability that is prior-dominated upstream is still
     honestly flagged as such downstream. Handed to J6's ``priced_liabilities``/``risk_adjusted_plan``
     (``analysis/valuation.py``) as the ``health_cost`` callable's output.
+
+    ``cost_per_case`` must be finite and non-negative (a dollar price cannot be negative), and
+    ``discount`` finite and strictly greater than ``-1.0`` (MXR-080-0098: the ``1 / (1 + discount)``
+    present-value factor is only well-defined for a denominator that is positive; ``discount == -1``
+    divides by zero, and anything below it silently flips the liability's sign).
     """
+    cost_per_case = float(cost_per_case)
+    if not np.isfinite(cost_per_case) or cost_per_case < 0.0:
+        raise ValueError(f"cost_per_case must be finite and non-negative, got {cost_per_case!r}")
+    discount = float(discount)
+    if not np.isfinite(discount) or discount <= -1.0:
+        raise ValueError(
+            f"discount must be finite and > -1.0 (the 1/(1+discount) present-value factor requires a "
+            f"positive denominator), got {discount!r}"
+        )
     samples = np.asarray(risk.samples, dtype=float)
-    factor = float(cost_per_case) / (1.0 + float(discount))
+    factor = cost_per_case / (1.0 + discount)
     prior_dominated = bool(getattr(risk, "prior_dominated", False))
     return _SampleDerivedQuantity(samples=samples * factor, prior_dominated=prior_dominated)
 
@@ -538,26 +564,43 @@ def safety_risk_surface(
         the posterior's Monte-Carlo replicates (or a single deterministic replicate for an `ndarray`
         input), flattened in the grid's row-major (C) order, together with a credible interval and the
         `prior_dominated` flag. The per-cell risk probability is `samples.mean(axis=0)`.
+
+    ``gradient_limit`` must be finite and non-negative (a tilt *magnitude* threshold cannot itself be
+    negative), and ``slope``/an ``ndarray`` ``deformation`` must be finite (MXR-080-0098): a NaN either
+    way would otherwise compare False against ``> gradient_limit`` and silently mark an unevaluable
+    cell as "not exceeding" instead of raising.
     """
     from mixle.reason.posterior_protocol import Posterior
 
+    gradient_limit = float(gradient_limit)
+    if not np.isfinite(gradient_limit) or gradient_limit < 0.0:
+        raise ValueError(
+            f"gradient_limit must be finite and non-negative (a tilt-magnitude threshold), got {gradient_limit!r}"
+        )
+    slope_arr_raw = None
+    if slope is not None:
+        slope_arr_raw = np.asarray(slope, dtype=float)
+        if not np.isfinite(slope_arr_raw).all():
+            raise ValueError("slope must be finite (no NaN/Inf)")
+
     if isinstance(deformation, np.ndarray):
         grid = np.asarray(deformation, dtype=float)
+        if not np.isfinite(grid).all():
+            raise ValueError("deformation ndarray must be finite (no NaN/Inf)")
         grid_shape = grid.shape
         tilt = _gradient_magnitude(grid[np.newaxis, ...])[0]
-        if slope is not None:
-            slope_arr = np.asarray(slope, dtype=float)
-            if slope_arr.shape != grid_shape:
-                raise ValueError(f"slope shape {slope_arr.shape} does not match deformation shape {grid_shape}")
-            tilt = tilt + slope_arr
+        if slope_arr_raw is not None:
+            if slope_arr_raw.shape != grid_shape:
+                raise ValueError(f"slope shape {slope_arr_raw.shape} does not match deformation shape {grid_shape}")
+            tilt = tilt + slope_arr_raw
         exceed = (tilt > gradient_limit).astype(float).reshape(1, -1)
         return _DeterministicRisk(samples=exceed, grid_shape=grid_shape)
 
     if not isinstance(deformation, Posterior):
         raise TypeError("deformation must be an IC-1 Posterior or an np.ndarray field")
 
-    grid_shape = _grid_shape_for(deformation, slope)
-    slope_arr = None if slope is None else np.asarray(slope, dtype=float).reshape(grid_shape)
+    grid_shape = _grid_shape_for(deformation, slope_arr_raw)
+    slope_arr = None if slope_arr_raw is None else slope_arr_raw.reshape(grid_shape)
 
     def _pushforward(draws: np.ndarray) -> np.ndarray:
         n = draws.shape[0]
@@ -595,11 +638,28 @@ def incident_probability(
 
     Returns:
         Per-cell incident probability, same shape as `hazard`, values in `[0, 1]`.
+
+    ``hazard`` outside ``[0, 1]`` is REJECTED, not clipped into a falsely-confident boundary
+    probability (MXR-080-0098): the pre-fix ``"logit"`` path clipped any hazard value -- 5.0, -3.0,
+    whatever -- straight into ``[eps, 1 - eps]`` before ever checking it was a valid probability to
+    begin with. The narrow ``eps``-clip that remains below is purely for the logit transform's own
+    numerical stability at the exact 0/1 boundary of an ALREADY-valid probability, not a substitute
+    for validating the input range.
     """
     hazard_arr = np.asarray(hazard, dtype=float)
     exposure_arr = np.asarray(exposure_map, dtype=float)
     if hazard_arr.shape != exposure_arr.shape:
         raise ValueError(f"hazard shape {hazard_arr.shape} does not match exposure_map shape {exposure_arr.shape}")
+    if not np.isfinite(hazard_arr).all():
+        raise ValueError("hazard must be finite (no NaN/Inf)")
+    if np.any(hazard_arr < 0.0) or np.any(hazard_arr > 1.0):
+        raise ValueError(
+            f"hazard must be a probability in [0, 1]; got range [{float(hazard_arr.min())!r}, "
+            f"{float(hazard_arr.max())!r}]. incident_probability does not accept out-of-range hazard "
+            "evidence -- fix the upstream hazard source rather than relying on boundary clipping."
+        )
+    if not np.isfinite(exposure_arr).all():
+        raise ValueError("exposure_map must be finite (no NaN/Inf)")
     if np.any(exposure_arr < 0):
         raise ValueError("exposure_map must be non-negative (a people-density/occupancy weight)")
 

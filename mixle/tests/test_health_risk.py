@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from mixle.analysis.health_risk import DoseResponse
+from mixle.analysis.health_risk import DoseResponse, cumulative_exposure
 from mixle.reason.posterior_protocol import Posterior
 
 
@@ -134,3 +134,34 @@ def test_dose_response_output_gate_rejects_non_finite_dose():
     dr = DoseResponse(model="loglinear", params={"beta": 0.05})
     with pytest.raises(ValueError):
         dr.probability(np.array([1.0, float("nan"), 3.0]), n=3, rng=np.random.default_rng(0))
+
+
+def test_cumulative_exposure_rejects_invalid_time_step_decay_and_series():
+    """MXR-080-0098: dt must be finite and positive, decay finite and non-negative, series finite."""
+    series = np.array([1.0, 2.0, 3.0, 4.0])
+    for bad_dt in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            cumulative_exposure(series, bad_dt)
+    for bad_decay in (-0.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            cumulative_exposure(series, 1.0, decay=bad_decay)
+    with pytest.raises(ValueError):
+        cumulative_exposure(np.array([1.0, float("nan"), 3.0]), 1.0)
+    with pytest.raises(ValueError):
+        cumulative_exposure(np.array([1.0, float("inf"), 3.0]), 1.0)
+
+
+def test_cumulative_exposure_valid_inputs_unchanged():
+    """Negative control for MXR-080-0098: legitimate dt/decay/series combinations still integrate
+    correctly (also exercises the multi-element trapezoidal path end to end)."""
+    series = np.array([1.0, 2.0, 3.0, 4.0])
+    assert cumulative_exposure(series, 1.0) == pytest.approx(7.5)  # plain trapezoidal area
+    assert cumulative_exposure(series, 1.0, decay=0.0) == pytest.approx(7.5)
+    decayed = cumulative_exposure(series, 1.0, decay=0.5)
+    assert np.isfinite(decayed)
+    # decay discounts everything except the final timestep, so the decayed integral is strictly less
+    # than the undiscounted one for a series that isn't degenerate.
+    assert 0.0 < decayed < 7.5
+    # boundary/degenerate sizes still work
+    assert cumulative_exposure(np.array([]), 1.0) == 0.0
+    assert cumulative_exposure(np.array([5.0]), 2.0) == pytest.approx(10.0)
