@@ -146,10 +146,10 @@ class System:
         :attr:`total_spend`, which every receipt also carries as ``total_spend``.
 
         If the teacher call itself raises, this falls back to ``teacher_down`` degraded mode: answer from
-        the store alone (a plain retrieval over ``config.store``) when one is configured and has anything
-        relevant, flagging ``degraded_mode="teacher_down"`` on the receipt; if there is no store (or
-        nothing relevant in it), the failure is reported explicitly (``status="failed"``), never masked as a
-        normal answer.
+        the store alone (a plain retrieval over ``config.store``, scoped to the QUERY's own ``scope`` --
+        never ``config.scope``) when one is configured and has anything relevant, flagging
+        ``degraded_mode="teacher_down"`` on the receipt; if there is no store (or nothing relevant in
+        it), the failure is reported explicitly (``status="failed"``), never masked as a normal answer.
 
         ``read_only=True`` runs the identical routing/answering logic but takes a genuine snapshot: the
         call is guaranteed not to promote into :attr:`_harvest` (so a later :meth:`improve` can never
@@ -199,7 +199,10 @@ class System:
             if self.config.store is not None:
                 from mixle.substrate.retrieve import retrieve
 
-                hits = retrieve(self.config.store, query.text, k=3, scope=self.config.scope)
+                # the query's OWN scope, never config.scope: a degraded fallback must stay inside the
+                # same tenant/evidence boundary the query itself declared, not silently widen to the
+                # system-wide default (see Query.scope's docstring -- scope is a query-level boundary).
+                hits = retrieve(self.config.store, query.text, k=3, scope=query.scope)
                 texts = [it.text for it in hits.items if it.text]
                 if texts:
                     return "[degraded: store-only] " + " ".join(texts)
