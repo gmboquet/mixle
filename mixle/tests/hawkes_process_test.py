@@ -48,6 +48,22 @@ class HawkesLikelihoodTest(unittest.TestCase):
         self.assertEqual(self.dist.log_density([10.0, 60.0]), -np.inf)  # 60 > window
         self.assertEqual(self.dist.log_density([5.0, 3.0]), -np.inf)  # not sorted
 
+    def test_tied_timestamps_rejected(self):
+        # The conditional intensity is defined over the strict history t_j < t (see class docstring), so
+        # a tied timestamp pair is not a valid t_1 < ... < t_n realization. Before the fix, the O(n)
+        # recursion silently treated a zero-width gap the same as any other gap, letting the second of two
+        # simultaneous events be excited by the first (t_j <= t in effect, not t_j < t): log_density([10.0,
+        # 10.0]) returned a finite value equal to log_density([10.0, 10.0 + 1e-9]) instead of being
+        # rejected like any other malformed ordering.
+        self.assertEqual(self.dist.log_density([10.0, 10.0]), -np.inf)
+        # a genuinely tied pair should score strictly worse than an arbitrarily-close-but-valid ordering,
+        # since the tied realization is now rejected outright rather than silently scored
+        self.assertNotEqual(self.dist.log_density([10.0, 10.0]), self.dist.log_density([10.0, 10.0 + 1e-9]))
+        with self.assertRaises(ValueError):
+            self.dist.dist_to_encoder().seq_encode([[10.0, 10.0]])
+        # three events with a tie among the last two
+        self.assertEqual(self.dist.log_density([1.0, 10.0, 10.0]), -np.inf)
+
     def test_invalid_params_raise(self):
         with self.assertRaises(ValueError):
             HawkesProcessDistribution(mu=-1.0, alpha=0.5, beta=1.0, window=10.0)
