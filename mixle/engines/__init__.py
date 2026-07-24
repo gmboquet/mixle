@@ -102,25 +102,49 @@ def register_array_type(array_type: type[Any], engine: ComputeEngine) -> None:
     _ARRAY_ENGINE_REGISTRY[array_type] = engine
 
 
+def _resolve_registered_type(x: Any) -> tuple[type[Any], ComputeEngine] | None:
+    """Return the ``(type, engine)`` registry entry for the most specific registered
+    ancestor of ``type(x)``.
+
+    Walks ``type(x).__mro__`` (most-derived class first) instead of scanning
+    ``_ARRAY_ENGINE_REGISTRY`` in insertion order, so a more specific subclass
+    registration always wins over a more generic ancestor's -- e.g. an
+    ``np.ndarray`` subclass registered to a different engine than plain
+    ``np.ndarray`` resolves to its own registration even when the generic
+    ``np.ndarray`` entry was registered first.
+    """
+    for cls in type(x).__mro__:
+        engine = _ARRAY_ENGINE_REGISTRY.get(cls)
+        if engine is not None:
+            return cls, engine
+    return None
+
+
 def _direct_engine(x: Any) -> ComputeEngine | None:
     explicit = getattr(x, "__pysp_engine__", None)
     if explicit is not None:
+        if not isinstance(explicit, ComputeEngine):
+            raise TypeError(
+                "__pysp_engine__ must be a ComputeEngine instance, got %r of type %s."
+                % (explicit, type(explicit).__name__)
+            )
         return explicit
     # object arrays of symbolic nodes are ndarrays, so they must be routed to
     # the symbolic engine before the np.ndarray -> NumpyEngine registry rule
     if is_symbolic_payload(x):
         return SYMBOLIC_ENGINE
-    for cls, engine in _ARRAY_ENGINE_REGISTRY.items():
-        if isinstance(x, cls):
-            if torch is not None and cls is torch.Tensor and isinstance(engine, TorchEngine):
-                return TorchEngine(device=str(x.device), dtype=x.dtype)
-            if DTensor is not None and cls is DTensor and isinstance(engine, TorchEngine):
-                local = x.to_local()
-                return TorchEngine(device=str(local.device), dtype=x.dtype, mesh=x.device_mesh)
-            if _jax is not None and cls is _jax.Array and isinstance(engine, JaxEngine):
-                return JaxEngine(dtype=x.dtype)
-            return engine
-    return None
+    resolved = _resolve_registered_type(x)
+    if resolved is None:
+        return None
+    cls, engine = resolved
+    if torch is not None and cls is torch.Tensor and isinstance(engine, TorchEngine):
+        return TorchEngine(device=str(x.device), dtype=x.dtype)
+    if DTensor is not None and cls is DTensor and isinstance(engine, TorchEngine):
+        local = x.to_local()
+        return TorchEngine(device=str(local.device), dtype=x.dtype, mesh=x.device_mesh)
+    if _jax is not None and cls is _jax.Array and isinstance(engine, JaxEngine):
+        return JaxEngine(dtype=x.dtype)
+    return engine
 
 
 def _child_values(x: Any) -> Iterable[Any]:

@@ -155,6 +155,44 @@ class EngineTestCase(unittest.TestCase):
         self.assertIsInstance(expr, SymbolicExpression)
         self.assertAlmostEqual(float(SYMBOLIC_ENGINE.evaluate(expr, {"x": 0.0})), np.log(2.0))
 
+    def test_direct_engine_rejects_invalid_pysp_engine_tag(self):
+        # Regression (MXR-080-0120): __pysp_engine__ used to be trusted at face value, so an
+        # object tagging itself with a plain string (or any non-ComputeEngine value) made
+        # engine_of silently return that string as if it were a legitimate engine.
+        class Junk:
+            __pysp_engine__ = "junk"
+
+        with self.assertRaises(TypeError):
+            engine_of(Junk())
+
+    def test_direct_engine_accepts_a_real_computeengine_tag(self):
+        # Positive control for the above: a genuine ComputeEngine tag is still trusted -- this
+        # is the exact mechanism SymbolicExpression relies on to route to SYMBOLIC_ENGINE.
+        class Tagged:
+            __pysp_engine__ = NUMPY_ENGINE
+
+        self.assertIs(engine_of(Tagged()), NUMPY_ENGINE)
+
+    def test_engine_of_resolves_most_specific_registered_subclass(self):
+        # Regression (MXR-080-0120): registry lookup used to scan _ARRAY_ENGINE_REGISTRY in
+        # insertion order and return the first isinstance match, so an np.ndarray SUBCLASS
+        # registered to a different engine was still shadowed by the earlier generic
+        # np.ndarray -> NumpyEngine rule. Resolution must walk the MRO and prefer the most
+        # specific registered ancestor, regardless of registration order.
+        import mixle.engines as engines_module
+        from mixle.engines import SYMBOLIC_ENGINE, register_array_type
+
+        class MyArraySubclass(np.ndarray):
+            pass
+
+        register_array_type(MyArraySubclass, SYMBOLIC_ENGINE)
+        self.addCleanup(engines_module._ARRAY_ENGINE_REGISTRY.pop, MyArraySubclass, None)
+
+        x = np.asarray([1.0, 2.0]).view(MyArraySubclass)
+        self.assertIs(engine_of(x), SYMBOLIC_ENGINE)
+        # the generic rule is unaffected for plain (non-subclassed) ndarrays
+        self.assertIsInstance(engine_of(np.asarray([1.0, 2.0])), NumpyEngine)
+
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_torch_engine_recovery_and_arithmetic(self):
         x = torch.tensor([1.0, 4.0, 9.0], dtype=torch.float64)
