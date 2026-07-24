@@ -374,5 +374,86 @@ class TokenValidationTestCase(unittest.TestCase):
         np.testing.assert_array_equal(tgt, tgt_before)  # unaffected by mutating ctx in place
 
 
+class ControlValidationTestCase(unittest.TestCase):
+    """MXR-080-0063: block/batch_size/rank/world_size/num_documents/seed/epoch are validated eagerly --
+    at the point they are supplied -- rather than cast/truncated silently or left to fail lazily once
+    packing/iteration is already underway."""
+
+    def test_zero_and_negative_block_rejected_by_pack_documents(self):
+        doc = np.array([1, 2, 3])
+        for bad_block in (0, -1):
+            with self.assertRaises(ValueError):
+                pack_documents([doc], [0], block=bad_block)
+
+    def test_fractional_block_rejected_by_pack_documents(self):
+        doc = np.array([1, 2, 3])
+        with self.assertRaises(ValueError):
+            pack_documents([doc], [0], block=3.5)
+
+    def test_streaming_corpus_validates_rank_world_size_at_construction(self):
+        docs = [np.arange(5)]
+        with self.assertRaises(ValueError):
+            StreamingCorpus(docs, rank=2, world_size=2, block=4, batch_size=2, seed=0)  # rank == world_size
+        with self.assertRaises(ValueError):
+            StreamingCorpus(docs, rank=-1, world_size=2, block=4, batch_size=2, seed=0)
+        with self.assertRaises(ValueError):
+            StreamingCorpus(docs, rank=0, world_size=0, block=4, batch_size=2, seed=0)
+
+    def test_streaming_corpus_validates_block_and_batch_size_at_construction(self):
+        docs = [np.arange(5)]
+        for bad in (0, -1):
+            with self.assertRaises(ValueError):
+                StreamingCorpus(docs, rank=0, world_size=1, block=bad, batch_size=2, seed=0)
+            with self.assertRaises(ValueError):
+                StreamingCorpus(docs, rank=0, world_size=1, block=4, batch_size=bad, seed=0)
+
+    def test_streaming_corpus_rejects_negative_batch_size_at_construction(self):
+        # Previously: batch_size=-3 constructed fine and silently yielded ZERO batches forever (no error at
+        # all) once iterated. Must now raise eagerly, at construction, before any iteration is possible.
+        docs = [np.arange(5)]
+        with self.assertRaises(ValueError):
+            StreamingCorpus(docs, rank=0, world_size=1, block=4, batch_size=-3, seed=0)
+
+    def test_negative_epoch_argument_to_epoch_batches_rejected(self):
+        docs = [np.arange(5), np.arange(7)]
+        corpus = StreamingCorpus(docs, rank=0, world_size=1, block=4, batch_size=2, seed=0)
+        with self.assertRaises(ValueError):
+            list(corpus.epoch_batches(epoch=-1))
+
+    def test_negative_num_documents_rejected(self):
+        # RandomState.permutation(-3) silently behaves like permutation(0) (empty, no error) -- must raise
+        # instead of masking what is almost certainly a caller bug.
+        with self.assertRaises(ValueError):
+            global_document_order(-3, seed=0, epoch=0)
+
+    def test_fractional_num_documents_rejected_not_silently_truncated(self):
+        with self.assertRaises(ValueError):
+            global_document_order(5.7, seed=0, epoch=0)
+
+    def test_zero_num_documents_is_a_clean_empty_order_not_an_error(self):
+        order = global_document_order(0, seed=0, epoch=0)
+        self.assertEqual(len(order), 0)
+
+    def test_streaming_corpus_with_empty_document_list_is_a_clean_no_op(self):
+        corpus = StreamingCorpus([], rank=0, world_size=1, block=4, batch_size=2, seed=0)
+        self.assertEqual(list(corpus.epoch_batches(epoch=0)), [])
+
+    def test_negative_seed_and_epoch_rejected(self):
+        with self.assertRaises(ValueError):
+            global_document_order(5, seed=-1, epoch=0)
+        with self.assertRaises(ValueError):
+            global_document_order(5, seed=0, epoch=-1)
+
+    def test_fractional_seed_not_silently_truncated(self):
+        # seed=1.9 must not silently behave like seed=1 (previously int(1.9) == 1, no error).
+        with self.assertRaises(ValueError):
+            global_document_order(5, seed=1.9, epoch=0)
+
+    def test_shard_documents_for_rank_rejects_fractional_world_size(self):
+        order = np.arange(10)
+        with self.assertRaises((TypeError, ValueError)):
+            shard_documents_for_rank(order, rank=1.0, world_size=3.5)
+
+
 if __name__ == "__main__":
     unittest.main()

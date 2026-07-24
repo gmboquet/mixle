@@ -112,5 +112,60 @@ class TokenValidationTestCase(unittest.TestCase):
         self.assertEqual(ctx.dtype, np.int64)
 
 
+class ControlValidationTestCase(unittest.TestCase):
+    """MXR-080-0063: block/batch_size/epochs/seed are validated eagerly -- when stream_token_source is
+    CALLED, before the returned iterator yields anything -- rather than lazily on first iteration, and are
+    never silently cast/truncated or silently turned into a zero-batch no-op (``epochs=0`` is the one
+    legitimate, explicit zero-work case)."""
+
+    def test_zero_batch_size_raises_eagerly_at_call_time_not_on_first_iteration(self):
+        # Previously this reached a bare `range(..., step=0)` deep inside the (lazy) generator body, so the
+        # call itself succeeded and only the FIRST next() raised a cryptic ValueError. The call itself must
+        # now raise immediately -- note there is no list()/next() here, just the call.
+        with self.assertRaises(ValueError):
+            stream_token_source(np.arange(20), block=2, batch_size=0, epochs=1)
+
+    def test_negative_batch_size_rejected_not_silently_empty(self):
+        # Previously batch_size=-3 constructed a working generator that silently yielded ZERO batches
+        # forever (range(0, n, -3) never advances past a positive n) -- no error at all.
+        with self.assertRaises(ValueError):
+            stream_token_source(np.arange(20), block=2, batch_size=-3, epochs=1)
+
+    def test_negative_epochs_rejected_not_silently_empty(self):
+        with self.assertRaises(ValueError):
+            stream_token_source(np.arange(20), block=2, batch_size=4, epochs=-2)
+
+    def test_zero_epochs_is_a_clean_no_op_not_an_error(self):
+        out = list(stream_token_source(np.arange(20), block=2, batch_size=4, epochs=0))
+        self.assertEqual(out, [])
+
+    def test_zero_and_negative_block_rejected(self):
+        for bad_block in (0, -1):
+            with self.assertRaises(ValueError):
+                stream_token_source(np.arange(20), block=bad_block, batch_size=4, epochs=1)
+
+    def test_fractional_block_rejected_not_silently_truncated(self):
+        # Previously int(2.7) == 2 silently drove a block=2 sliding window with no error at all.
+        with self.assertRaises(ValueError):
+            stream_token_source(np.arange(20), block=2.7, batch_size=4, epochs=1)
+
+    def test_fractional_batch_size_rejected(self):
+        with self.assertRaises(ValueError):
+            stream_token_source(np.arange(20), block=2, batch_size=3.5, epochs=1)
+
+    def test_fractional_epochs_rejected(self):
+        with self.assertRaises(ValueError):
+            stream_token_source(np.arange(20), block=2, batch_size=4, epochs=1.5)
+
+    def test_invalid_seed_rejected_eagerly(self):
+        with self.assertRaises((ValueError, TypeError)):
+            stream_token_source(np.arange(20), block=2, batch_size=4, epochs=1, seed=-1)
+
+    def test_bool_block_rejected(self):
+        # bool is an int subclass in Python -- block=True must not silently behave like block=1.
+        with self.assertRaises(TypeError):
+            stream_token_source(np.arange(20), block=True, batch_size=4, epochs=1)
+
+
 if __name__ == "__main__":
     unittest.main()

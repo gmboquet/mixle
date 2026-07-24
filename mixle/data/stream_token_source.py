@@ -13,11 +13,13 @@ The same generator SHAPE extends to a true out-of-core corpus -- reading windows
 token file, where a checkpoint would be just the cursor position -- but that out-of-core / resumable-cursor
 version is not implemented here.
 
-Token ids are validated (finite, exact-integer, in a lossless ``int64`` range) and stay ``int64`` all the way
-through to the yielded batches -- context windows are never downcast to ``float32`` internally, since that
-silently loses integer identity above ``2**24`` (MXR-080-0062). A model boundary that genuinely wants a float
-context (e.g. to ride a shared float input path) casts explicitly on its own side; that is a downstream,
-deliberate choice, not something this data layer should do silently on a caller's behalf.
+Token ids are validated once at call entry (finite, exact-integer, in a lossless ``int64`` range) and stay
+``int64`` all the way through to the yielded batches -- context windows are never downcast to ``float32``
+internally, since that silently loses integer identity above ``2**24`` (MXR-080-0062). A model boundary that
+genuinely wants a float context (e.g. to ride a shared float input path) casts explicitly on its own side; that
+is a downstream, deliberate choice, not something this data layer should do silently on a caller's behalf.
+``block``/``batch_size``/``epochs``/``seed`` are likewise validated eagerly, at call time -- before any batch is
+produced -- rather than failing lazily (or silently emitting zero batches) once iteration begins (MXR-080-0063).
 """
 
 from __future__ import annotations
@@ -29,6 +31,41 @@ import numpy as np
 
 _INT64_MIN = int(np.iinfo(np.int64).min)
 _INT64_MAX = int(np.iinfo(np.int64).max)
+
+
+def _require_exact_int(value: Any, name: str) -> int:
+    """Coerce ``value`` to a plain ``int``, rejecting bools, non-numeric types, non-finite floats, and any
+    value with a fractional part.
+
+    A blind ``int(value)`` truncation (e.g. ``block=3.7`` -> ``3``) silently changes iteration behavior
+    instead of failing loudly, which is exactly the MXR-080-0063 failure mode this guards against.
+    """
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an int, got bool {value!r}")
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite, got {value!r}")
+        truncated = int(value)
+        if value != truncated:
+            raise ValueError(f"{name} must be an exact integer, got {value!r}")
+        return truncated
+    raise TypeError(f"{name} must be an int, got {value!r} ({type(value).__name__})")
+
+
+def _require_positive_int(value: Any, name: str) -> int:
+    v = _require_exact_int(value, name)
+    if v <= 0:
+        raise ValueError(f"{name} must be positive, got {v}")
+    return v
+
+
+def _require_nonnegative_int(value: Any, name: str) -> int:
+    v = _require_exact_int(value, name)
+    if v < 0:
+        raise ValueError(f"{name} must be nonnegative, got {v}")
+    return v
 
 
 def _validate_token_ids(token_ids: Any, name: str = "token_ids") -> np.ndarray:
@@ -71,20 +108,43 @@ def stream_token_source(
     The token array -- and, with ``shuffle=True``, one ``O(len(token_ids))`` permutation for the epoch order --
     is the only resident data; each micro-batch's windows are built on the fly and discarded.
 
-    ``token_ids`` is validated (finite, exact-integer, lossless ``int64`` range) and stays ``int64`` through
-    every yielded batch -- it is never downcast to ``float32`` here, since that silently loses integer
-    identity for ids at or above ``2**24`` (MXR-080-0062); a consumer that wants float input casts
-    explicitly on its own side.
+    ``token_ids`` is validated once up front (finite, exact-integer, lossless ``int64`` range) and stays
+    ``int64`` through every yielded batch -- it is never downcast to ``float32`` here, since that silently
+    loses integer identity for ids at or above ``2**24`` (MXR-080-0062); a consumer that wants float input
+    casts explicitly on its own side.
+
+    ``block``, ``batch_size``, ``epochs``, and ``seed`` are all validated eagerly, when this function is
+    CALLED -- before the returned iterator yields anything -- rather than lazily on first iteration.
+    ``block``/``batch_size`` have no meaningful "zero work" case and must be positive (a zero ``batch_size``
+    previously reached a bare ``range(..., step=0)``, and a negative one silently produced zero batches
+    forever). ``epochs=0`` IS a legitimate, explicit no-op (yields nothing, no error) -- only a NEGATIVE
+    epoch count is rejected, since that has no sensible meaning and previously also silently did nothing.
     """
     ids = _validate_token_ids(token_ids)
-    n = len(ids) - int(block)
+    block = _require_positive_int(block, "block")
+    batch_size = _require_positive_int(batch_size, "batch_size")
+    epochs = _require_nonnegative_int(epochs, "epochs")
+    rng = np.random.RandomState(seed)  # validates seed eagerly too (rejects non-int / out-of-range here)
+    return _stream_token_source(ids, block, batch_size, epochs, bool(shuffle), rng)
+
+
+def _stream_token_source(
+    ids: np.ndarray,
+    block: int,
+    batch_size: int,
+    epochs: int,
+    shuffle: bool,
+    rng: np.random.RandomState,
+) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """The actual lazy generator, split out from :func:`stream_token_source` so every control is already
+    validated by the time this runs -- this function trusts its inputs completely."""
+    n = len(ids) - block
     if n <= 0:
         return
-    rng = np.random.RandomState(seed)
-    for _ in range(int(epochs)):
+    for _ in range(epochs):
         order = rng.permutation(n) if shuffle else np.arange(n)
-        for k in range(0, n, int(batch_size)):
-            idx = order[k : k + int(batch_size)]
-            ctx = np.stack([ids[i : i + int(block)] for i in idx])  # int64, matches ids -- built, then discarded
-            nxt = ids[idx + int(block)]
+        for k in range(0, n, batch_size):
+            idx = order[k : k + batch_size]
+            ctx = np.stack([ids[i : i + block] for i in idx])  # int64, matches ids -- built fresh, then discarded
+            nxt = ids[idx + block]
             yield (ctx, nxt)

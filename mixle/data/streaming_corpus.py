@@ -28,10 +28,10 @@ Composes with existing machinery rather than duplicating it:
   :meth:`StreamingCorpus.epoch_batches` threads it through every micro-batch. Callers MUST apply that mask
   (or otherwise exclude its ``False`` positions) before averaging next-token loss -- otherwise the
   fabricated pad targets are silently trained on as if they were real observed labels.
-- Document tokens are validated before packing -- finite, exact-integer values in a lossless ``int64``
-  range -- and stay ``int64`` throughout: :func:`pack_documents`/:meth:`StreamingCorpus.epoch_batches`
-  never downcast context to ``float32``, which would silently lose integer identity for ids at or above
-  ``2**24``.
+- Token ids and every iteration control (``block``, ``batch_size``, ``rank``/``world_size``, ...) are
+  validated eagerly wherever they enter this module -- at a function call or at :class:`StreamingCorpus`
+  construction -- rather than being cast/truncated silently or left to fail lazily once packing/iteration
+  is already underway.
 """
 
 from __future__ import annotations
@@ -55,12 +55,18 @@ _INT64_MIN = int(np.iinfo(np.int64).min)
 _INT64_MAX = int(np.iinfo(np.int64).max)
 
 
+# ---------------------------------------------------------------------------
+# Shared validation helpers (MXR-080-0062 / MXR-080-0063): every scalar control and every token array
+# entering this module is validated exactly once, at the point it arrives, before any work begins.
+# ---------------------------------------------------------------------------
+
+
 def _require_exact_int(value: Any, name: str) -> int:
     """Coerce ``value`` to a plain ``int``, rejecting bools, non-numeric types, non-finite floats, and any
     value with a fractional part.
 
-    A blind ``int(value)`` truncation (e.g. ``pad_id=0.5`` -> ``0``) silently changes behavior instead of
-    failing loudly, which is exactly the MXR-080-0062/MXR-080-0063 failure mode this guards against.
+    A blind ``int(value)`` truncation (e.g. ``block=3.7`` -> ``3``) silently changes behavior instead of
+    failing loudly, which is exactly the MXR-080-0063 failure mode this guards against.
     """
     if isinstance(value, bool):
         raise TypeError(f"{name} must be an int, got bool {value!r}")
@@ -74,6 +80,34 @@ def _require_exact_int(value: Any, name: str) -> int:
             raise ValueError(f"{name} must be an exact integer, got {value!r}")
         return truncated
     raise TypeError(f"{name} must be an int, got {value!r} ({type(value).__name__})")
+
+
+def _require_positive_int(value: Any, name: str) -> int:
+    v = _require_exact_int(value, name)
+    if v <= 0:
+        raise ValueError(f"{name} must be positive, got {v}")
+    return v
+
+
+def _require_nonnegative_int(value: Any, name: str) -> int:
+    v = _require_exact_int(value, name)
+    if v < 0:
+        raise ValueError(f"{name} must be nonnegative, got {v}")
+    return v
+
+
+def _validate_rank_world_size(rank: Any, world_size: Any) -> tuple[int, int]:
+    """Validate ``(rank, world_size)`` together: ``world_size`` positive, ``rank`` an exact integer in
+    ``[0, world_size)``. Shared by :func:`shard_documents_for_rank` and :class:`StreamingCorpus` so both
+    enforce the identical residency contract, and so :class:`StreamingCorpus` rejects a bad ``rank``/
+    ``world_size`` at CONSTRUCTION rather than only once a later ``epoch_batches``/``rank_document_indices``
+    call happens to shard against it.
+    """
+    world_size = _require_positive_int(world_size, "world_size")
+    rank = _require_nonnegative_int(rank, "rank")
+    if rank >= world_size:
+        raise ValueError(f"rank must satisfy 0 <= rank < world_size, got rank={rank!r} world_size={world_size!r}")
+    return rank, world_size
 
 
 def _validate_document_tokens(doc: Any, *, doc_index: Any = None) -> np.ndarray:
@@ -113,7 +147,8 @@ def _validate_document_tokens(doc: Any, *, doc_index: Any = None) -> np.ndarray:
 def _epoch_seed(seed: int, epoch: int) -> int:
     """Fold ``(seed, epoch)`` into one 32-bit seed via ``SeedSequence`` -- independent, reproducible streams
     per epoch from a single user-facing ``seed`` (the standard "reshuffle differently each epoch, but
-    deterministically" pattern)."""
+    deterministically" pattern). Callers validate ``seed``/``epoch`` (see :func:`_require_nonnegative_int`)
+    before reaching here; the ``int(...)`` coercion below is defense-in-depth for direct callers."""
     return int(np.random.SeedSequence([int(seed), int(epoch)]).generate_state(1)[0])
 
 
@@ -130,16 +165,25 @@ def global_document_order(
     ``RandomState`` seeded deterministically). Different ``epoch`` with the same ``seed`` -> a different,
     still fully deterministic order.
 
+    ``num_documents``, ``seed``, and ``epoch`` are validated as nonnegative exact integers at entry --
+    ``num_documents=0`` is a legitimate empty-corpus case (returns an empty order); a NEGATIVE or fractional
+    value for any of the three previously either raised deep inside ``RandomState``/``SeedSequence`` with a
+    misleading message, or (for ``num_documents`` specifically) was silently accepted by
+    ``RandomState.permutation`` as an empty order regardless of magnitude (e.g. ``-3`` behaved like ``0``).
+
     ``sequence_selector`` is the curriculum hook for E7 ("a bandit over length buckets" rationing
     ultra-long examples, per the roadmap): an optional ``(order, seed, epoch) -> order`` callback that may
     reorder, filter, or otherwise transform the base permutation before it is handed out to ranks. Left
     ``None``, the base shuffle passes through unchanged. This module does not implement any curriculum
     policy itself -- only the extension point.
     """
+    num_documents = _require_nonnegative_int(num_documents, "num_documents")
+    seed = _require_nonnegative_int(seed, "seed")
+    epoch = _require_nonnegative_int(epoch, "epoch")
     rng = np.random.RandomState(_epoch_seed(seed, epoch))
-    order = rng.permutation(int(num_documents))
+    order = rng.permutation(num_documents)
     if sequence_selector is not None:
-        order = np.asarray(sequence_selector(order, int(seed), int(epoch)))
+        order = np.asarray(sequence_selector(order, seed, epoch))
     return order
 
 
@@ -150,10 +194,7 @@ def shard_documents_for_rank(order: np.ndarray, rank: int, world_size: int) -> n
     round-robin residency contract :class:`~mixle.utils.parallel.multiprocessing.MPEncodedData` already
     uses for its worker shards, so the two compose: disjoint across ranks, complete coverage of ``order``.
     """
-    if world_size <= 0:
-        raise ValueError("world_size must be positive")
-    if not (0 <= rank < world_size):
-        raise ValueError("rank must satisfy 0 <= rank < world_size, got rank=%r world_size=%r" % (rank, world_size))
+    rank, world_size = _validate_rank_world_size(rank, world_size)
     return np.asarray(order)[rank::world_size]
 
 
@@ -194,6 +235,11 @@ def pack_documents(
     to ``block``. ``boundary_id`` (e.g. an EOS id), if given, is inserted between consecutive documents so
     the model can see document edges within a packed row; it counts as a real (non-pad) token.
 
+    Every document's tokens are validated before packing -- finite, exact-integer values in a lossless
+    ``int64`` range; fractional, non-finite, or out-of-range ids raise rather than being silently cast
+    (MXR-080-0062). ``block``, ``pad_id``, and ``boundary_id`` are validated the same way at entry; ``block``
+    must additionally be positive (MXR-080-0063) -- there is no meaningful zero-or-negative-block packing.
+
     Returns a :class:`PackedCorpus` whose ``loss_mask`` (shape ``(n_rows, block)``, boolean) marks which
     TARGET positions (``row[1:]``) are real observed next-token labels vs. fabricated padding. Boundary
     policy, decided explicitly here: padding never appears anywhere but the tail of the FINAL row (see
@@ -204,19 +250,13 @@ def pack_documents(
     this target a fabricated pad position." Callers MUST apply this mask (or otherwise exclude its
     ``False`` positions) before averaging next-token loss, or the fabricated pad targets are silently
     trained on as if they were real labels (MXR-080-0061).
-
-    Every document's tokens are validated before packing -- finite, exact-integer values in a lossless
-    ``int64`` range; fractional, non-finite, or out-of-range ids raise rather than being silently cast
-    (MXR-080-0062). ``pad_id`` and ``boundary_id`` are validated the same way, since both become real
-    token-stream values.
     """
-    if block <= 0:
-        raise ValueError("block must be positive")
+    block = _require_positive_int(block, "block")
     pad_id = _require_exact_int(pad_id, "pad_id")
     if boundary_id is not None:
         boundary_id = _require_exact_int(boundary_id, "boundary_id")
 
-    unit = int(block) + 1
+    unit = block + 1
     pieces: list[np.ndarray] = []
     for idx in indices:
         doc = _validate_document_tokens(documents[idx], doc_index=idx)
@@ -225,7 +265,7 @@ def pack_documents(
         if boundary_id is not None:
             pieces.append(np.asarray([boundary_id], dtype=np.int64))
     if not pieces:
-        empty_mask = np.ones((0, unit - 1), dtype=bool)
+        empty_mask = np.ones((0, block), dtype=bool)
         return PackedCorpus(np.zeros((0, unit), dtype=np.int64), real_tokens=0, total_tokens=0, loss_mask=empty_mask)
 
     flat = np.concatenate(pieces)  # every piece already validated int64 -- no blind whole-corpus cast needed
@@ -252,7 +292,7 @@ def pack_documents(
     # real target run has length `remainder - 1` (a remainder of exactly 1 real token in the row means ZERO
     # real targets: the sole real token has no successor to predict, so its own target position is pad).
     n_rows = rows.shape[0]
-    loss_mask = np.ones((n_rows, unit - 1), dtype=bool)
+    loss_mask = np.ones((n_rows, block), dtype=bool)
     if remainder > 0:
         valid_targets = max(remainder - 1, 0)
         loss_mask[-1, valid_targets:] = False
@@ -268,6 +308,12 @@ class StreamingCorpus:
     batched -- no gather, no materializing another rank's tokens). For a real out-of-core corpus,
     ``documents`` is a lazy/mmap-backed sequence of per-shard-file document lists; the contract here is
     unchanged since sharding and packing only ever index it, never buffer the whole thing.
+
+    Every constructor argument is validated eagerly, here, at construction -- ``rank``/``world_size``
+    cross-checked together (``0 <= rank < world_size``), ``block``/``batch_size`` required positive,
+    ``seed`` required a nonnegative exact integer, ``pad_id``/``boundary_id`` required exact integers.
+    Previously an invalid ``rank``/``world_size``/``block``/``batch_size`` was stored unchecked and only
+    surfaced (if at all) on the first ``epoch_batches``/``rank_document_indices`` call (MXR-080-0063).
     """
 
     def __init__(
@@ -283,13 +329,21 @@ class StreamingCorpus:
         boundary_id: int | None = None,
         sequence_selector: SequenceSelector | None = None,
     ) -> None:
+        rank, world_size = _validate_rank_world_size(rank, world_size)
+        block = _require_positive_int(block, "block")
+        batch_size = _require_positive_int(batch_size, "batch_size")
+        seed = _require_nonnegative_int(seed, "seed")
+        pad_id = _require_exact_int(pad_id, "pad_id")
+        if boundary_id is not None:
+            boundary_id = _require_exact_int(boundary_id, "boundary_id")
+
         self.documents = documents
-        self.rank = int(rank)
-        self.world_size = int(world_size)
-        self.block = int(block)
-        self.batch_size = int(batch_size)
-        self.seed = int(seed)
-        self.pad_id = int(pad_id)
+        self.rank = rank
+        self.world_size = world_size
+        self.block = block
+        self.batch_size = batch_size
+        self.seed = seed
+        self.pad_id = pad_id
         self.boundary_id = boundary_id
         self.sequence_selector = sequence_selector
         self.last_packing_efficiency: float | None = None
