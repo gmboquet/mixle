@@ -91,6 +91,31 @@ class DistributionSerializationTestCase(unittest.TestCase):
         self.assertEqual(loaded.transform.loc, 2.0)
         self.assertEqual(loaded.transform.scale, 3.0)
 
+    def test_categorical_json_round_trip_preserves_seeded_sample_sequence(self):
+        """A JSON round trip must not silently reorder ``pmap``, or a fixed seed draws a different
+        sequence of category OUTCOMES before vs. after save/load (regression: the generic dict encoder
+        canonicalizes -- i.e. sorts -- key order, and CategoricalSampler turns ``pmap`` iteration order
+        into a positional index array, so a reordered ``pmap`` silently changes what a given seed draws
+        even though the seed and the per-category probabilities are unchanged).
+        """
+        # Non-alphabetical construction order: alphabetical would coincidentally "pass" even with the
+        # bug present, since sorting a dict that is already sorted is a no-op.
+        dist = stats.CategoricalDistribution({"banana": 0.5, "apple": 0.3, "cherry": 0.2})
+        original_order = list(dist.pmap.items())
+        self.assertEqual(original_order, [("banana", 0.5), ("apple", 0.3), ("cherry", 0.2)])
+
+        loaded = stats.CategoricalDistribution.from_json(dist.to_json())
+
+        # Not just equal probabilities-per-category (dict ``==`` is order-insensitive) -- the actual
+        # iteration order that CategoricalSampler consumes must be unchanged.
+        self.assertEqual(list(loaded.pmap.items()), original_order)
+        self.assertEqual(loaded.pmap, dist.pmap)
+
+        seed = 20260724
+        before = dist.sampler(seed=seed).sample(size=200)
+        after = loaded.sampler(seed=seed).sample(size=200)
+        self.assertEqual(after, before, "seeded sample sequence changed across a JSON save/load round trip")
+
     def test_stats_json_round_trip_cached_structures(self):
         markov = stats.MarkovChainDistribution(
             {"a": 1.0},

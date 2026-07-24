@@ -221,6 +221,37 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         self.log1p_default_value = float(math.log1p(default_value))
         self.set_prior(prior)
 
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Return JSON-serializable state with ``pmap`` as an order-preserving list of pairs.
+
+        ``pmap``'s insertion order is load-bearing: :class:`CategoricalSampler` turns it into
+        parallel ``levels``/``probs`` arrays and draws a positional index from them, so a fixed
+        seed maps to a specific *sequence position*, not a category label. mixle's generic dict
+        encoding (:func:`mixle.utils.serialization._encode_dict`) canonicalizes key order for
+        diffable JSON output, which would silently reorder ``pmap`` on decode and change which
+        category a fixed-seed sampler draws -- same seed, same per-category probabilities, but a
+        different sampled sequence after a save/load round trip. Encoding ``pmap`` as a plain list
+        of ``(key, value)`` pairs instead of a dict routes it through the list/tuple encoders,
+        which never reorder, so category order survives regardless of any dict-key-sorting
+        elsewhere in the serialization path.
+        """
+        state = dict(self.__dict__)
+        state["pmap"] = list(self.pmap.items())
+        return state
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Restore state, rebuilding ``pmap`` from its order-preserving pair list.
+
+        Accepts a plain dict for ``pmap`` too, so pre-fix artifacts (serialized before this
+        method existed, with ``pmap`` as a generic -- and therefore key-sorted -- dict) still
+        decode without error; their original category order was already lost at write time and
+        cannot be recovered, but new writes now round-trip order-faithfully.
+        """
+        state = dict(state)
+        pmap = state["pmap"]
+        state["pmap"] = pmap if isinstance(pmap, dict) else dict(pmap)
+        self.__dict__.update(state)
+
     def __str__(self) -> str:
         """Return a readable distribution summary."""
         s1 = ", ".join(["%s: %s" % (repr(k), repr(v)) for k, v in sorted(self.pmap.items(), key=lambda u: u[0])])
