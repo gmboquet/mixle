@@ -136,6 +136,62 @@ def _activity_content_hash(activity: dict[str, float]) -> str:
     return hashlib.sha256(_canonical(dict(activity))).hexdigest()
 
 
+def _validate_unique_scopes(scopes: tuple[int, ...]) -> None:
+    """Reject a ``scopes`` tuple that names the same GHG-Protocol scope more than once.
+
+    A duplicate scope is a caller error, not a legitimate "sum it twice" input -- Scope 1/2/3 are
+    fixed accounting categories, so the same scope appearing twice can only arise by mistake (e.g.
+    programmatically concatenating two scope lists). Rejecting outright, rather than silently
+    deduping, matters because the point-total path and the Monte-Carlo path below disagree on what a
+    duplicate would mean if let through: the dict-keyed point total collapses it (counted once)
+    while a loop over the raw tuple counts it once per occurrence, so a silent dedupe in one path and
+    not the other is exactly how the reported point total and the reported credible interval used to
+    end up describing two different footprints.
+    """
+    seen: set[int] = set()
+    duplicates: set[int] = set()
+    for s in scopes:
+        if s in seen:
+            duplicates.add(s)
+        seen.add(s)
+    if duplicates:
+        raise ValueError(
+            f"scopes must not contain duplicate entries, got {scopes!r} (duplicated: {sorted(duplicates)})"
+        )
+
+
+def _validate_activity_values(activity: dict[str, float]) -> None:
+    """Every activity quantity must be a finite, nonnegative physical amount (litres, kWh, kg, t*km, ...)."""
+    for key, value in activity.items():
+        v = float(value)
+        if not np.isfinite(v):
+            raise ValueError(f"activity[{key!r}] must be finite, got {value!r}")
+        if v < 0.0:
+            raise ValueError(f"activity[{key!r}] must be nonnegative, got {value!r}")
+
+
+def _validate_factor_values(factors: EmissionFactors) -> None:
+    """Emission factors must be finite (sign is not constrained -- a documented carbon-negative
+    feedstock factor is a legitimate finite negative number). ``sigma`` entries are standard
+    deviations of a factor and must additionally be finite and nonnegative: a negative sigma is not
+    a smaller uncertainty, it is a physically meaningless input that must be rejected rather than
+    silently treated as exact (``std <= 0`` in the Monte-Carlo sampler below already means "no
+    resampling", so a negative sigma was silently collapsing to a fixed, zero-uncertainty factor).
+    """
+    for label, scope_dict in (("scope1", factors.scope1), ("scope2", factors.scope2), ("scope3", factors.scope3)):
+        for key, value in scope_dict.items():
+            v = float(value)
+            if not np.isfinite(v):
+                raise ValueError(f"factors.{label}[{key!r}] must be finite, got {value!r}")
+    if factors.sigma:
+        for key, value in factors.sigma.items():
+            v = float(value)
+            if not np.isfinite(v):
+                raise ValueError(f"factors.sigma[{key!r}] must be finite, got {value!r}")
+            if v < 0.0:
+                raise ValueError(f"factors.sigma[{key!r}] must be nonnegative, got {value!r}")
+
+
 def emissions_footprint(
     activity: dict[str, float],
     factors: EmissionFactors,
@@ -162,10 +218,22 @@ def emissions_footprint(
     ``provenance`` always carries ``activity_content_hash`` (a 64-hex sha256 fingerprint of the
     activity dict, IC-2's hashing convention) so a downstream carbon-cost or transition-risk term
     (L3/L6) can always be traced back to the exact activity schedule it was computed from.
+
+    ``scopes`` must not contain duplicate entries (each GHG-Protocol scope may appear at most once) --
+    a duplicate raises rather than being silently summed once on the point-total path and once per
+    occurrence on the Monte-Carlo path, which previously left the point estimate and the credible
+    interval describing two different footprints. ``activity`` values must be finite and nonnegative;
+    ``factors`` (``scope1``/``scope2``/``scope3``) values must be finite; ``factors.sigma`` values,
+    when supplied, must be finite and nonnegative -- a negative sigma is rejected rather than silently
+    treated as an exactly-known (zero-uncertainty) factor. All of this is validated before either the
+    point-total or the Monte-Carlo path runs.
     """
     for s in scopes:
         if s not in _VALID_SCOPES:
             raise ValueError(f"scopes must be a subset of {_VALID_SCOPES}, got {scopes!r}")
+    _validate_unique_scopes(scopes)
+    _validate_activity_values(activity)
+    _validate_factor_values(factors)
 
     scope_values = {s: (_scope_total(activity, _scope_dict(factors, s)) if s in scopes else 0.0) for s in _VALID_SCOPES}
     total = float(sum(scope_values.values()))
