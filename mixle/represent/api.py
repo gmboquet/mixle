@@ -104,8 +104,25 @@ class Embedder:
         return str(out)
 
     @classmethod
-    def load(cls, path: str) -> Embedder:
-        """Load an embedder previously saved with :meth:`save`."""
+    def load(cls, path: str, *, trust_code: bool = False) -> Embedder:
+        """Load an embedder previously saved with :meth:`save`.
+
+        The saved artifact is a pickle of the fitted state, and ``result`` can embed a live torch
+        module (see :class:`~mixle.represent.generative.AutoencoderResult`) -- unpickling it executes
+        arbitrary code from the file, exactly like ``pickle.load`` on an untrusted source. Refuses by
+        default; pass ``trust_code=True`` for a path whose source you trust (or call from inside
+        :func:`mixle.utils.serialization.trusted_deserialization`), matching
+        :meth:`mixle.inference.production.registry.Registry.get`.
+        """
+        from mixle.utils.serialization import SerializationError, deserialization_is_trusted
+
+        if not (trust_code or deserialization_is_trusted()):
+            raise SerializationError(
+                "refusing to unpickle an Embedder artifact: this executes arbitrary code from the "
+                "file, the same as pickle.load on an untrusted source. Only load a path whose source "
+                "you trust, and pass trust_code=True (or call inside "
+                "mixle.utils.serialization.trusted_deserialization())."
+            )
         with open(Path(path) / "embedder.pkl", "rb") as f:
             d = pickle.load(f)
         return cls(d["featurizer"], d["result"], d["kind"], d["corpus_vectors"])

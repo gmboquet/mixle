@@ -47,7 +47,7 @@ class EmbedderTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             path = emb.save(d + "/emb")
-            back = Embedder.load(path)
+            back = Embedder.load(path, trust_code=True)
             np.testing.assert_allclose(back.transform(q), emb.transform(q), atol=1e-6)
             self.assertEqual(back.retrieve(q, k=1)[0][0], hits[0][0])
 
@@ -59,6 +59,44 @@ class EmbedderTest(unittest.TestCase):
         self.assertEqual(emb.kind, "text")
         hits = emb.retrieve("refund request number 3", k=2)
         self.assertLess(hits[0][0], 20)  # retrieves from the refund half
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class EmbedderLoadTrustGateTest(unittest.TestCase):
+    """Embedder.load unpickles a live torch module -- it must refuse without explicit trust."""
+
+    def _saved_path(self, d):
+        from mixle.represent import fit_embedder
+
+        emb = fit_embedder(_records(20), dim=4, epochs=5, seed=0)
+        return emb.save(d + "/emb")
+
+    def test_load_refuses_without_trust_code(self):
+        from mixle.represent import Embedder
+        from mixle.utils.serialization import SerializationError
+
+        with tempfile.TemporaryDirectory() as d:
+            path = self._saved_path(d)
+            with self.assertRaises(SerializationError):
+                Embedder.load(path)  # gate closed by default: no trust given
+
+    def test_load_succeeds_with_trust_code_true(self):
+        from mixle.represent import Embedder
+
+        with tempfile.TemporaryDirectory() as d:
+            path = self._saved_path(d)
+            back = Embedder.load(path, trust_code=True)
+            self.assertIsInstance(back, Embedder)
+
+    def test_load_succeeds_inside_trusted_deserialization(self):
+        from mixle.represent import Embedder
+        from mixle.utils.serialization import trusted_deserialization
+
+        with tempfile.TemporaryDirectory() as d:
+            path = self._saved_path(d)
+            with trusted_deserialization():
+                back = Embedder.load(path)
+            self.assertIsInstance(back, Embedder)
 
 
 if __name__ == "__main__":
