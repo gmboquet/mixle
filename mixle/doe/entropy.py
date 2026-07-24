@@ -26,6 +26,49 @@ from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
 _C25, _C50, _C75 = float(np.log(-np.log(0.25))), float(np.log(-np.log(0.5))), float(np.log(-np.log(0.75)))
 
 
+def _require_positive_int(value: Any, name: str) -> int:
+    """Validate ``value`` is an exact, finite, positive integer count.
+
+    A bare ``int(value)`` truncates fractional counts and accepts non-positive ones silently -- e.g. a
+    nonpositive ``n_samples`` would otherwise draw a silent empty ``y*`` sample with no error
+    (MXR-080-0178). This names both as invalid instead.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+    if not np.isfinite(value):
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+    ivalue = int(value)
+    if ivalue <= 0 or ivalue != value:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+    return ivalue
+
+
+def _validate_moments(mean: Any, std: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Validate and return posterior ``(mean, std)`` as matching, non-empty, finite 1-D arrays.
+
+    MXR-080-0178: an empty ``mean``/``std`` previously reached the Gumbel fit's ``.min()``/``.max()``
+    calls and crashed with an opaque "zero-size array" error; non-finite moments silently propagated to
+    NaN acquisition values; and a negative ``std`` (never legitimate -- a standard deviation cannot be
+    negative, so this means corrupted upstream input, not a numerical-precision edge case) was floored
+    to the same ``1e-9`` epsilon used for a legitimately tiny-but-valid std instead of being rejected.
+    This rejects all of those up front and floors only genuinely nonnegative std, for numerical
+    stability in the divisions/logs that follow.
+    """
+    mu = np.asarray(mean, dtype=np.float64).ravel()
+    sd = np.asarray(std, dtype=np.float64).ravel()
+    if mu.size == 0:
+        raise ValueError("mean must have at least one candidate (got an empty array).")
+    if sd.shape != mu.shape:
+        raise ValueError(f"std must have the same shape as mean {mu.shape}; got {sd.shape}.")
+    if not np.all(np.isfinite(mu)):
+        raise ValueError("mean contains non-finite values (NaN/Inf).")
+    if not np.all(np.isfinite(sd)):
+        raise ValueError("std contains non-finite values (NaN/Inf).")
+    if np.any(sd < 0.0):
+        raise ValueError("std must be nonnegative (a standard deviation cannot be negative).")
+    return mu, np.maximum(sd, 1e-9)
+
+
 def _gumbel_quantile(loc: float, scale: float, r: Any) -> np.ndarray:
     """Quantile function of a Gumbel(``loc``, ``scale``): ``y_r = loc - scale * log(-log(r))``.
 
@@ -66,9 +109,13 @@ def sample_max_values(mean: Any, std: Any, n_samples: int = 64, *, seed: int | R
     The CDF of the maximum over the candidate cloud is ``P(max <= y) = prod_i Phi((y - mu_i)/sd_i)``; a
     Gumbel is fit to its 25/50/75 percentiles (found by bisection) and sampled. Returns an
     ``(n_samples,)`` array of ``y*`` draws (never below the best posterior mean).
+
+    Raises:
+        ValueError: if ``mean``/``std`` are empty, mismatched in shape, non-finite, or ``std`` is
+            negative; or if ``n_samples`` is not a positive integer.
     """
-    mu = np.asarray(mean, dtype=np.float64).ravel()
-    sd = np.maximum(np.asarray(std, dtype=np.float64).ravel(), 1e-9)
+    mu, sd = _validate_moments(mean, std)
+    n = _require_positive_int(n_samples, "n_samples")
     rng = seed if isinstance(seed, RandomState) else RandomState(seed)
 
     def cdf_max(y: float) -> float:
@@ -89,7 +136,7 @@ def sample_max_values(mean: Any, std: Any, n_samples: int = 64, *, seed: int | R
 
     y25, y50, y75 = quantile(0.25), quantile(0.5), quantile(0.75)
     loc, scale = _fit_gumbel(y25, y50, y75)
-    u = rng.uniform(1e-6, 1.0 - 1e-6, int(n_samples))
+    u = rng.uniform(1e-6, 1.0 - 1e-6, n)
     ystar = _gumbel_quantile(loc, scale, u)
     return np.maximum(ystar, mu.max())
 
@@ -101,17 +148,30 @@ def max_value_entropy_search(mean: Any, std: Any, max_samples: Any, *, maximize:
     information ``I(y; y*) = (1/M) sum_m [ gamma_m phi(gamma_m)/(2 Phi(gamma_m)) - log Phi(gamma_m) ]``
     with ``gamma_m = (y*_m - mu)/sd`` (maximization; for minimization the sense is flipped by the
     caller). Higher is better -- it favors uncertain candidates near the believed optimum.
+
+    Raises:
+        ValueError: if ``mean``/``std`` are empty, mismatched in shape, non-finite, or ``std`` is
+            negative; if ``max_samples`` is empty or non-finite; or if the resulting per-candidate
+            information is non-finite (e.g. an extreme-but-individually-finite ``mean``/``std``/
+            ``max_samples`` combination can overflow ``gamma = (y* - mu)/sd`` to +/-inf, and
+            ``inf * 0`` in the ``gamma * pdf`` term then silently yields NaN).
     """
-    mu = np.asarray(mean, dtype=np.float64).ravel()
-    sd = np.maximum(np.asarray(std, dtype=np.float64).ravel(), 1e-9)
+    mu, sd = _validate_moments(mean, std)
     ystar = np.asarray(max_samples, dtype=np.float64).ravel()
+    if ystar.size == 0:
+        raise ValueError("max_samples must contain at least one optimum-value sample (got an empty array).")
+    if not np.all(np.isfinite(ystar)):
+        raise ValueError("max_samples contains non-finite values (NaN/Inf).")
     if not maximize:
         mu, ystar = -mu, -ystar
     gamma = (ystar[None, :] - mu[:, None]) / sd[:, None]  # (n_candidates, M)
     cdf = np.clip(norm.cdf(gamma), 1e-12, 1.0)
     pdf = norm.pdf(gamma)
     info = gamma * pdf / (2.0 * cdf) - np.log(cdf)
-    return np.asarray(info.mean(axis=1))
+    result = np.asarray(info.mean(axis=1))
+    if not np.all(np.isfinite(result)):
+        raise ValueError("max_value_entropy_search produced non-finite information for at least one candidate.")
+    return result
 
 
 def propose_mes(

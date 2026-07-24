@@ -69,6 +69,99 @@ class GumbelFitTest(unittest.TestCase):
         self.assertAlmostEqual(float(np.median(ystar)), 0.0, delta=0.05)
 
 
+class MesValidationTest(unittest.TestCase):
+    """MXR-080-0178: MES silently accepted empty/mismatched/non-finite moments and optimum samples,
+    silently floored a negative std to the same epsilon used for a legitimately tiny one, and could
+    silently produce NaN information instead of raising.
+    """
+
+    # -- sample_max_values: posterior moments --
+
+    def test_sample_max_values_rejects_empty_moments(self):
+        with self.assertRaises(ValueError):
+            sample_max_values(np.array([]), np.array([]), 10, seed=0)
+
+    def test_sample_max_values_rejects_mismatched_moments(self):
+        with self.assertRaises(ValueError):
+            sample_max_values(np.array([0.0, 1.0, 2.0]), np.array([1.0, 1.0]), 10, seed=0)
+
+    def test_sample_max_values_rejects_non_finite_mean(self):
+        with self.assertRaises(ValueError):
+            sample_max_values(np.array([0.0, np.nan]), np.array([1.0, 1.0]), 10, seed=0)
+
+    def test_sample_max_values_rejects_non_finite_std(self):
+        with self.assertRaises(ValueError):
+            sample_max_values(np.array([0.0, 1.0]), np.array([1.0, np.inf]), 10, seed=0)
+
+    def test_sample_max_values_rejects_negative_std(self):
+        # Distinct from the legitimate-tiny-std case below: a negative std is never valid (a standard
+        # deviation cannot be negative), so it must be rejected outright, not silently floored to the
+        # same epsilon used for a genuinely tiny-but-valid std.
+        with self.assertRaises(ValueError):
+            sample_max_values(np.array([0.0]), np.array([-5.0]), 10, seed=0)
+
+    def test_sample_max_values_still_floors_legitimate_tiny_std(self):
+        # Zero (and near-zero) std IS legitimate -- a candidate with no predictive uncertainty -- and
+        # must still be floored for numerical stability rather than rejected.
+        ystar = sample_max_values(np.array([0.0, 1.0]), np.array([0.0, 1e-15]), 200, seed=0)
+        self.assertTrue(np.all(np.isfinite(ystar)))
+
+    def test_sample_max_values_rejects_nonpositive_n_samples(self):
+        for bad in (0, -3, 2.5):
+            with self.subTest(n_samples=bad):
+                with self.assertRaises(ValueError):
+                    sample_max_values(np.array([0.0]), np.array([1.0]), bad, seed=0)
+
+    # -- max_value_entropy_search: posterior moments and optimum samples --
+
+    def test_mes_rejects_empty_moments(self):
+        with self.assertRaises(ValueError):
+            max_value_entropy_search(np.array([]), np.array([]), np.array([1.0]))
+
+    def test_mes_rejects_mismatched_moments(self):
+        with self.assertRaises(ValueError):
+            max_value_entropy_search(np.array([0.0, 1.0]), np.array([1.0]), np.array([1.0]))
+
+    def test_mes_rejects_non_finite_mean(self):
+        with self.assertRaises(ValueError):
+            max_value_entropy_search(np.array([0.0, np.nan]), np.array([1.0, 1.0]), np.array([1.0]))
+
+    def test_mes_rejects_negative_std(self):
+        with self.assertRaises(ValueError):
+            max_value_entropy_search(np.array([0.0]), np.array([-1.0]), np.array([1.0]))
+
+    def test_mes_still_floors_legitimate_tiny_std(self):
+        mes = max_value_entropy_search(np.array([0.0, 1.0]), np.array([0.0, 1e-15]), np.array([1.0, 2.0, 3.0]))
+        self.assertTrue(np.all(np.isfinite(mes)))
+
+    def test_mes_rejects_empty_max_samples(self):
+        with self.assertRaises(ValueError):
+            max_value_entropy_search(np.array([0.0, 1.0]), np.array([1.0, 1.0]), np.array([]))
+
+    def test_mes_rejects_non_finite_max_samples(self):
+        with self.assertRaises(ValueError):
+            max_value_entropy_search(np.array([0.0, 1.0]), np.array([1.0, 1.0]), np.array([1.0, np.nan]))
+
+    def test_mes_rejects_non_finite_information_from_extreme_but_finite_inputs(self):
+        # mean, std, and max_samples are all individually finite, but gamma = (y* - mu)/sd overflows to
+        # +/-inf, and inf * 0 in the gamma*pdf term silently produces NaN -- this must be rejected, not
+        # returned to the caller (who would otherwise feed NaN into an argmax over candidates).
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # the gamma overflow is EXPECTED here; that's the bug being fixed
+            with self.assertRaises(ValueError):
+                max_value_entropy_search(np.array([1e300]), np.array([1e-9]), np.array([-1e300]), maximize=True)
+
+    def test_mes_well_posed_call_is_sensible_and_finite(self):
+        # Negative control: a normal, well-posed computation with legitimate posterior moments still
+        # produces sensible, finite entropy/information values for every candidate.
+        mu = np.array([0.0, 0.5, 0.9, 1.0])
+        sd = np.array([0.5, 0.5, 0.5, 0.01])
+        ystar = sample_max_values(mu, sd, 500, seed=0)
+        mes = max_value_entropy_search(mu, sd, ystar, maximize=True)
+        self.assertTrue(np.all(np.isfinite(mes)))
+        self.assertTrue(np.all(mes >= -1e-9))
+
+
 @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")
 class MesDriverTest(unittest.TestCase):
     def test_bo_loop_converges(self):
