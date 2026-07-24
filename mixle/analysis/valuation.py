@@ -264,6 +264,9 @@ def _unpack_schedule(schedule: Any) -> tuple[np.ndarray, np.ndarray]:
     period; defaults to zero). A bare array-like is accepted too and treated as ``tonnage`` with no
     capex, so a plain per-period tonnage vector is enough for a project with all cost carried in
     ``cost_model``.
+
+    ``tonnage`` must have at least one period and, together with ``capex``, must be finite and
+    non-negative (MXR-080-0118/0119 economic-domain contract). Raises ``ValueError`` if violated.
     """
     if isinstance(schedule, dict):
         tonnage = np.asarray(schedule["tonnage"], dtype=np.float64)
@@ -278,9 +281,20 @@ def _unpack_schedule(schedule: Any) -> tuple[np.ndarray, np.ndarray]:
             capex = None
 
     tonnage = np.atleast_1d(tonnage)
+    if tonnage.shape[0] == 0:
+        raise ValueError("monte_carlo_npv: schedule 'tonnage' must have at least one period")
+    if not np.all(np.isfinite(tonnage)):
+        raise ValueError("monte_carlo_npv: schedule 'tonnage' must be finite")
+    if np.any(tonnage < 0.0):
+        raise ValueError("monte_carlo_npv: schedule 'tonnage' must be non-negative")
+
     capex_arr = np.zeros_like(tonnage) if capex is None else np.atleast_1d(np.asarray(capex, dtype=np.float64))
     if capex_arr.shape != tonnage.shape:
         raise ValueError("monte_carlo_npv: schedule 'capex' must have the same shape as 'tonnage' (per period)")
+    if not np.all(np.isfinite(capex_arr)):
+        raise ValueError("monte_carlo_npv: schedule 'capex' must be finite")
+    if np.any(capex_arr < 0.0):
+        raise ValueError("monte_carlo_npv: schedule 'capex' must be non-negative")
     return tonnage, capex_arr
 
 
@@ -313,22 +327,46 @@ def _grade_per_period(grade: np.ndarray, n_periods: int, *, what: str) -> np.nda
     )
 
 
-def _align_price_paths(price_paths: Any, n: int, n_periods: int, rng: np.random.Generator) -> np.ndarray:
-    """Coerce ``price_paths`` to exactly ``(n, n_periods)`` -- accepting EITHER orientation of a J1
-    :class:`~mixle.inference.price_forecast.PriceForecast`.
+def _draw_grade_per_period(
+    posterior: Posterior, n: int, n_periods: int, rng: np.random.Generator, *, what: str = "posterior.samples(n, rng)"
+) -> np.ndarray:
+    """Draw exactly ``n`` grade realizations off ``posterior``, validate them, and broadcast per period.
 
-    A scenario-major ``(m, n_periods)`` matrix (one row per price path, one column per period) is used
-    as-is; ``mixle.inference.price_forecast.PriceForecast.paths`` is documented and produced as
-    ``(n_periods, m)`` (time-major, mirroring how ``forecast_price`` builds it one horizon step at a
-    time) -- passing ``pf.paths`` straight in used to raise, or (worse) silently score the wrong axis
-    as "period" whenever ``m`` happened to equal ``n_periods``. Detected here from ``n_periods``
-    (known independently, from ``schedule``) and transposed automatically; only genuinely ambiguous
-    when ``m == n_periods`` too, where a square matrix is accepted as scenario-major -- its existing,
-    tested behavior -- since no shape-only check can disambiguate a square matrix.
+    IC-1 promises ``posterior.samples(n, rng)`` returns exactly ``n`` draws, shape ``(n, d)``. That
+    count was never actually checked: a posterior that returns fewer rows (most dangerously exactly
+    one) than requested used to pass straight through to :func:`_npv_samples`, where a ``(1, n_periods)``
+    grade array silently numpy-broadcasts against the ``(n, n_periods)`` price array -- fabricating ``n``
+    "independent" NPV draws that all in fact share the single real grade draw (MXR-080-0118). Checking
+    ``.shape[0] == n`` up front, before any broadcasting can hide the shortfall, closes that off.
+    """
+    grade_draws = np.asarray(posterior.samples(n, rng), dtype=np.float64)
+    if grade_draws.ndim == 0 or grade_draws.shape[0] != n:
+        got = grade_draws.shape[0] if grade_draws.ndim > 0 else 1
+        raise ValueError(f"monte_carlo_npv: {what} returned {got} draw(s), expected exactly n={n}")
+    if grade_draws.ndim == 1:
+        # A conforming posterior that squeezes a d == 1 draw matrix down to (n,) is unambiguous here
+        # (we just confirmed exactly n draws), unlike the mean/param case elsewhere in this module.
+        grade_draws = grade_draws.reshape(n, 1)
+    if not np.all(np.isfinite(grade_draws)):
+        raise ValueError(f"monte_carlo_npv: {what} must be finite")
+    if np.any(grade_draws < 0.0):
+        raise ValueError(f"monte_carlo_npv: {what} (grade) must be non-negative")
+    return _grade_per_period(grade_draws, n_periods, what=what)
 
-    Resamples with replacement to ``n`` rows when ``m != n`` (the "align" step of DR-ALG J2); a
-    ``(m,)`` vector is treated as ``m`` single-period draws when ``n_periods == 1``, or as one
-    deterministic ``n_periods``-long path shared by every draw otherwise.
+
+def _coerce_price_scenario_pool(price_paths: Any, n_periods: int) -> np.ndarray:
+    """Coerce ``price_paths`` to a validated ``(m, n_periods)`` scenario pool -- shape/orientation and
+    economic-domain checks only, no resampling; see :func:`_align_price_paths`.
+
+    Accepts EITHER orientation of a J1 :class:`~mixle.inference.price_forecast.PriceForecast`: a
+    scenario-major ``(m, n_periods)`` matrix (one row per price path, one column per period) is used
+    as-is; ``PriceForecast.paths`` is documented and produced as ``(n_periods, m)`` (time-major,
+    mirroring how ``forecast_price`` builds it one horizon step at a time) -- passing ``pf.paths``
+    straight in used to raise, or (worse) silently score the wrong axis as "period" whenever ``m``
+    happened to equal ``n_periods``. Detected here from ``n_periods`` (known independently, from
+    ``schedule``) and transposed automatically; only genuinely ambiguous when ``m == n_periods`` too,
+    where a square matrix is accepted as scenario-major -- its existing, tested behavior -- since no
+    shape-only check can disambiguate a square matrix.
     """
     prices = np.asarray(price_paths, dtype=np.float64)
     if prices.ndim == 1:
@@ -340,6 +378,22 @@ def _align_price_paths(price_paths: Any, n: int, n_periods: int, rng: np.random.
             f"monte_carlo_npv: price_paths must be shaped (m, {n_periods}) (one row per scenario, one "
             f"column per period) or its transpose ({n_periods}, m) (PriceForecast.paths); got {prices.shape}"
         )
+    if prices.shape[0] == 0:
+        raise ValueError("monte_carlo_npv: price_paths must contain at least one scenario")
+    if not np.all(np.isfinite(prices)):
+        raise ValueError("monte_carlo_npv: price_paths must be finite")
+    if np.any(prices < 0.0):
+        raise ValueError("monte_carlo_npv: price_paths must be non-negative")
+    return prices
+
+
+def _align_price_paths(price_paths: Any, n: int, n_periods: int, rng: np.random.Generator) -> np.ndarray:
+    """Coerce ``price_paths`` to exactly ``(n, n_periods)``: :func:`_coerce_price_scenario_pool` plus
+    resampling with replacement to ``n`` rows when ``m != n`` (the "align" step of DR-ALG J2); a
+    ``(m,)`` vector is treated as ``m`` single-period draws when ``n_periods == 1``, or as one
+    deterministic ``n_periods``-long path shared by every draw otherwise.
+    """
+    prices = _coerce_price_scenario_pool(price_paths, n_periods)
     m = prices.shape[0]
     if m == n:
         return prices
@@ -414,8 +468,19 @@ def monte_carlo_npv(
       ``cost_model(t)``) to get that period's deterministic ``opex_t``.
     - ``schedule``: per-period ``tonnage`` (required) and ``capex`` (optional, default zero); see
       :func:`_unpack_schedule`. ``len(schedule)``'s tonnage vector fixes ``n_periods``.
-    - ``discount_rate``: the DCF discount rate per period.
-    - ``n`` / ``rng``: Monte-Carlo draw count and the shared `numpy.random.Generator`.
+    - ``discount_rate``: the DCF discount rate per period. Must be finite and strictly greater than
+      ``-1`` -- ``discount_rate <= -1`` makes the per-period discount factor
+      ``1 / (1 + discount_rate) ** t`` divide by zero (at exactly ``-1``) or alternate sign every other
+      period (below ``-1``), neither of which is a coherent discount rate.
+    - ``n`` / ``rng``: Monte-Carlo draw count and the shared `numpy.random.Generator`. ``n`` must be a
+      positive ``int`` (not merely a positive-valued float); ``posterior.samples(n, rng)`` is required
+      to return exactly ``n`` draws, checked explicitly rather than trusted -- a posterior that returns
+      fewer (e.g. a single row) used to silently numpy-broadcast across every price scenario, fabricating
+      ``n`` "independent" draws that all shared one real grade sample (MXR-080-0118).
+
+    Every numeric input -- the grade draws, ``price_paths``, ``schedule``'s ``tonnage``/``capex``, and
+    ``cost_model``'s returned ``opex`` -- must be finite and non-negative; raises ``ValueError`` if any
+    of these, ``n``, or ``discount_rate`` are violated, before any DCF arithmetic runs.
 
     Returns an `NPVDistribution` with the raw ``samples``, ``mean``/``p10``/``p50``/``p90``, and a
     ``sensitivity`` dict decomposing NPV variance into grade vs. price contributions: each factor's
@@ -423,18 +488,20 @@ def monte_carlo_npv(
     mean price path for price) — not a full ANOVA decomposition, but the frozen-factor sensitivity the
     task's Algorithm calls for.
     """
-    if n <= 0:
-        raise ValueError("monte_carlo_npv: n must be a positive integer")
+    if not isinstance(n, (int, np.integer)) or isinstance(n, bool) or n <= 0:
+        raise ValueError(f"monte_carlo_npv: n must be a positive integer, got {n!r}")
+    if not np.isfinite(discount_rate):
+        raise ValueError(f"monte_carlo_npv: discount_rate must be finite, got {discount_rate!r}")
+    if discount_rate <= -1.0:
+        raise ValueError(
+            f"monte_carlo_npv: discount_rate must be > -1, got {discount_rate!r} -- at or below -1 the "
+            "per-period discount factor 1 / (1 + discount_rate) ** t divides by zero or alternates sign"
+        )
 
     tonnage, capex = _unpack_schedule(schedule)
     n_periods = tonnage.shape[0]
 
-    grade_draws = np.asarray(posterior.samples(n, rng), dtype=np.float64)
-    if grade_draws.ndim == 1:
-        # IC-1 promises shape (n, d); a conforming posterior that squeezes a d == 1 draw matrix down to
-        # (n,) is unambiguous here (we requested exactly n draws), unlike the mean/param case below.
-        grade_draws = grade_draws.reshape(n, 1)
-    grade_per_period = _grade_per_period(grade_draws, n_periods, what="posterior.samples(n, rng)")
+    grade_per_period = _draw_grade_per_period(posterior, n, n_periods, rng)
 
     price_per_period = _align_price_paths(price_paths, n, n_periods, rng)
 
@@ -442,6 +509,10 @@ def monte_carlo_npv(
     opex = np.array(
         [_call_cost_model(cost_model, t, float(tonnage[t]), accepts_tonnage=accepts_tonnage) for t in range(n_periods)]
     )
+    if not np.all(np.isfinite(opex)):
+        raise ValueError("monte_carlo_npv: cost_model must return finite opex")
+    if np.any(opex < 0.0):
+        raise ValueError("monte_carlo_npv: cost_model must return non-negative opex")
     discount = 1.0 / (1.0 + float(discount_rate)) ** np.arange(n_periods, dtype=np.float64)
 
     npv = _npv_samples(grade_per_period, price_per_period, tonnage, opex, capex, discount)
