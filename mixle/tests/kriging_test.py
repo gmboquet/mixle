@@ -13,6 +13,7 @@ from mixle.analysis import (
     ordinary_kriging,
     universal_kriging,
 )
+from mixle.analysis.kriging import _clip_variance, _krige_solve
 
 
 class VariogramTest(unittest.TestCase):
@@ -117,6 +118,67 @@ class VariogramTest(unittest.TestCase):
         np.testing.assert_allclose(pa, pb)
 
 
+class VariogramValidationTest(unittest.TestCase):
+    """MXR-080-0102: Variogram construction must validate model/nugget/psill/rng/nu/anisotropy."""
+
+    def test_rejects_unknown_model(self):
+        with self.assertRaisesRegex(ValueError, "model must be one of"):
+            Variogram("bogus", nugget=0.1, psill=1.0, rng=3.0)
+
+    def test_rejects_negative_nugget(self):
+        with self.assertRaisesRegex(ValueError, "nugget"):
+            Variogram("exponential", nugget=-0.1, psill=1.0, rng=3.0)
+
+    def test_rejects_non_finite_nugget(self):
+        for bad in (float("nan"), float("inf")):
+            with self.assertRaisesRegex(ValueError, "nugget"):
+                Variogram("exponential", nugget=bad, psill=1.0, rng=3.0)
+
+    def test_rejects_negative_psill(self):
+        with self.assertRaisesRegex(ValueError, "psill"):
+            Variogram("exponential", nugget=0.1, psill=-1.0, rng=3.0)
+
+    def test_rejects_non_positive_range(self):
+        for bad_rng in (0.0, -3.0):
+            with self.assertRaisesRegex(ValueError, "rng"):
+                Variogram("exponential", nugget=0.1, psill=1.0, rng=bad_rng)
+
+    def test_rejects_non_finite_range(self):
+        with self.assertRaisesRegex(ValueError, "rng"):
+            Variogram("exponential", nugget=0.1, psill=1.0, rng=float("inf"))
+
+    def test_rejects_non_positive_matern_smoothness(self):
+        for bad_nu in (0.0, -1.0):
+            with self.assertRaisesRegex(ValueError, "nu"):
+                Variogram("matern", nugget=0.1, psill=1.0, rng=3.0, nu=bad_nu)
+
+    def test_rejects_zero_anisotropy_ratio(self):
+        # MXR-080-0102 exact repro: a zero anisotropy ratio divides coordinates by zero inside
+        # _transform, producing NaN coordinates that previously propagated all the way through to
+        # NaN kriging predictions and variances instead of being rejected here at construction.
+        with self.assertRaisesRegex(ValueError, "anisotropy ratio"):
+            Variogram("exponential", nugget=0.0, psill=1.0, rng=3.0, anisotropy=(0.0, 0.0))
+
+    def test_rejects_negative_anisotropy_ratio(self):
+        with self.assertRaisesRegex(ValueError, "anisotropy ratio"):
+            Variogram("exponential", nugget=0.0, psill=1.0, rng=3.0, anisotropy=(0.0, -2.0))
+
+    def test_rejects_non_finite_anisotropy_angle(self):
+        with self.assertRaisesRegex(ValueError, "anisotropy angle"):
+            Variogram("exponential", nugget=0.0, psill=1.0, rng=3.0, anisotropy=(float("nan"), 2.0))
+
+    def test_rejects_malformed_anisotropy_tuple(self):
+        with self.assertRaisesRegex(ValueError, "anisotropy"):
+            Variogram("exponential", nugget=0.0, psill=1.0, rng=3.0, anisotropy=(1.0, 2.0, 3.0))
+
+    def test_valid_parameters_still_construct(self):
+        # Negative control: legitimate parameters across every model name, including anisotropy,
+        # still construct without error.
+        for model in ("spherical", "exponential", "gaussian", "squared_exponential", "rbf", "matern"):
+            vg = Variogram(model=model, nugget=0.1, psill=1.0, rng=3.0, nu=1.5, anisotropy=(0.3, 2.0))
+            self.assertEqual(vg.model, model)
+
+
 class KrigingTest(unittest.TestCase):
     def setUp(self):
         rng = np.random.RandomState(0)
@@ -163,6 +225,121 @@ class KrigingTest(unittest.TestCase):
         p_iso = ordinary_kriging(self.coords, self.z, iso, q)["prediction"][0]
         p_an = ordinary_kriging(self.coords, self.z, aniso, q)["prediction"][0]
         self.assertNotAlmostEqual(p_iso, p_an, places=4)
+
+
+class KrigingValidationTest(unittest.TestCase):
+    """MXR-080-0102: coords/values/query/drift/noise must be validated before the solve."""
+
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        self.coords = rng.uniform(0, 10, (40, 2))
+        self.z = np.sin(self.coords[:, 0]) + np.cos(self.coords[:, 1])
+        self.vg = Variogram("exponential", nugget=0.1, psill=1.0, rng=3.0)
+
+    def test_rejects_empty_coords(self):
+        with self.assertRaisesRegex(ValueError, "coords"):
+            ordinary_kriging(np.empty((0, 2)), np.empty((0,)), self.vg, self.coords[:1])
+
+    def test_rejects_mismatched_values_length(self):
+        with self.assertRaisesRegex(ValueError, "values"):
+            ordinary_kriging(self.coords, self.z[:5], self.vg, self.coords[:1])
+
+    def test_rejects_non_finite_coords(self):
+        bad_coords = self.coords.copy()
+        bad_coords[0, 0] = np.nan
+        with self.assertRaisesRegex(ValueError, "coords"):
+            ordinary_kriging(bad_coords, self.z, self.vg, self.coords[:1])
+
+    def test_rejects_non_finite_values(self):
+        bad_z = self.z.copy()
+        bad_z[0] = np.inf
+        with self.assertRaisesRegex(ValueError, "values"):
+            ordinary_kriging(self.coords, bad_z, self.vg, self.coords[:1])
+
+    def test_rejects_query_dimension_mismatch(self):
+        with self.assertRaisesRegex(ValueError, "query"):
+            ordinary_kriging(self.coords, self.z, self.vg, np.array([[1.0, 2.0, 3.0]]))
+
+    def test_rejects_empty_query(self):
+        with self.assertRaisesRegex(ValueError, "query"):
+            ordinary_kriging(self.coords, self.z, self.vg, np.empty((0, 2)))
+
+    def test_rejects_non_finite_query(self):
+        with self.assertRaisesRegex(ValueError, "query"):
+            ordinary_kriging(self.coords, self.z, self.vg, np.array([[np.nan, 1.0]]))
+
+    def test_universal_kriging_rejects_query_dimension_mismatch(self):
+        # A query with the wrong dimensionality would otherwise build a drift0 basis with a
+        # different column count than drift and fail deep inside the linear solve with a confusing
+        # shape error; caught explicitly, before _poly_basis is even called.
+        with self.assertRaisesRegex(ValueError, "query"):
+            universal_kriging(self.coords, self.z, self.vg, np.array([[1.0, 2.0, 3.0]]))
+
+    def test_krige_solve_rejects_mismatched_drift0_shape(self):
+        drift = np.ones((40, 3))
+        drift0 = np.ones((1, 2))  # wrong column count relative to drift
+        with self.assertRaisesRegex(ValueError, "drift0"):
+            _krige_solve(self.coords, self.z, self.vg, np.array([[5.0, 5.0]]), drift=drift, drift0=drift0, noise=None)
+
+    def test_rejects_negative_noise(self):
+        with self.assertRaisesRegex(ValueError, "noise"):
+            ordinary_kriging(self.coords, self.z, self.vg, self.coords[:1], noise=-np.ones(40))
+
+    def test_rejects_mismatched_noise_shape(self):
+        with self.assertRaisesRegex(ValueError, "noise"):
+            ordinary_kriging(self.coords, self.z, self.vg, self.coords[:1], noise=np.ones(5))
+
+    def test_rejects_non_finite_noise(self):
+        with self.assertRaisesRegex(ValueError, "noise"):
+            ordinary_kriging(self.coords, self.z, self.vg, self.coords[:1], noise=np.full(40, np.nan))
+
+    def test_valid_geometry_still_krige_correctly(self):
+        # Negative control: legitimate, well-posed inputs (including heteroscedastic noise and a
+        # quadratic drift) are unaffected by the new validation.
+        q = np.array([[5.0, 5.0], [2.0, 8.0]])
+        ok = ordinary_kriging(self.coords, self.z, self.vg, q, noise=np.full(40, 0.05))
+        self.assertTrue(np.all(np.isfinite(ok["prediction"])))
+        self.assertTrue(np.all(np.isfinite(ok["variance"])))
+        self.assertTrue(np.all(ok["variance"] >= 0))
+        uk = universal_kriging(self.coords, self.z, self.vg, q, degree=2)
+        self.assertTrue(np.all(np.isfinite(uk["prediction"])))
+        self.assertTrue(np.all(uk["variance"] >= 0))
+
+
+class VarianceClipTest(unittest.TestCase):
+    """MXR-080-0102: distinguish small numerical roundoff from a materially negative variance."""
+
+    def test_tiny_roundoff_clips_to_zero(self):
+        # -1e-15 relative to scale=1.0 is many orders of magnitude below the tolerance -- ordinary
+        # floating-point roundoff, not a sign of an invalid solve -- and should clip cleanly.
+        out = _clip_variance(np.array([-1e-15, 0.0, 0.2, 1.0]), scale=1.0)
+        np.testing.assert_allclose(out, [0.0, 0.0, 0.2, 1.0])
+
+    def test_materially_negative_variance_raises(self):
+        with self.assertRaisesRegex(ValueError, "materially negative"):
+            _clip_variance(np.array([-0.5, 0.2]), scale=1.0)
+
+    def test_tolerance_scales_with_problem_magnitude_not_an_absolute_constant(self):
+        # The same absolute -1e-4 is roundoff-scale noise against a covariance scale of 1e6 but a
+        # material failure against a scale of 1.0 -- the tolerance must be relative to the problem's
+        # own scale, not a fixed absolute constant.
+        out = _clip_variance(np.array([-1e-4]), scale=1e6)
+        np.testing.assert_allclose(out, [0.0])
+        with self.assertRaisesRegex(ValueError, "materially negative"):
+            _clip_variance(np.array([-1e-4]), scale=1.0)
+
+    def test_realistic_roundoff_at_exact_data_points_clips_cleanly(self):
+        # Integration-level check, not synthetic: predicting AT the data locations with no nugget is
+        # where roundoff bites hardest (the true variance is exactly 0). The real ordinary_kriging
+        # call must not raise, confirming the tolerance comfortably covers real floating-point
+        # roundoff rather than just the hand-picked value above.
+        rng = np.random.RandomState(3)
+        coords = rng.uniform(0, 10, (300, 2))
+        z = np.sin(coords[:, 0]) + np.cos(coords[:, 1])
+        vg = Variogram("exponential", nugget=0.0, psill=1.0, rng=3.0)
+        out = ordinary_kriging(coords, z, vg, coords[:30])
+        self.assertTrue(np.all(np.isfinite(out["variance"])))
+        np.testing.assert_allclose(out["variance"], 0.0, atol=1e-9)
 
 
 class CalibrationTest(unittest.TestCase):
