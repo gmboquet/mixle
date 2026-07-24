@@ -24,8 +24,26 @@ def binary_gemm(uint64_t[:, ::1] a, uint64_t[:, ::1] b, int dim):
     is the true bit length. Returns int32 (N, M) with ``out[n,m] = dim - 2*hamming(a[n], b[m])``.
     """
     cdef Py_ssize_t n = a.shape[0], m = b.shape[0], words = a.shape[1]
-    cdef Py_ssize_t i, j, k
+    cdef Py_ssize_t i, j, k, expected_words
     cdef int ham
+    # Defense in depth (MXR-080-0131): mixle.engines.bitpacked.binary_gemm already validates shapes
+    # before calling in, but this compiled entry point is also reachable directly (bypassing that Python
+    # wrapper). `words` below is read from `a` alone; boundscheck is disabled file-wide for speed, so
+    # without this check a shorter `b` would be read past the end of its buffer inside the nogil loop
+    # instead of raising. These checks run while still holding the GIL, before the unsafe fast path.
+    if dim < 0:
+        raise ValueError("binary_gemm: dim must be nonnegative, got %d" % dim)
+    if b.shape[1] != words:
+        raise ValueError(
+            "binary_gemm: a has %d packed word(s) per row but b has %d; shapes are inconsistent"
+            % (words, b.shape[1])
+        )
+    expected_words = (dim + 63) // 64
+    if words != expected_words:
+        raise ValueError(
+            "binary_gemm: dim=%d implies %d packed word(s) per row, but arrays have %d"
+            % (dim, expected_words, words)
+        )
     out_np = np.empty((n, m), dtype=np.int32)
     cdef int32_t[:, ::1] out = out_np
     with nogil:
@@ -51,6 +69,23 @@ def ternary_gemm(
     cdef Py_ssize_t i, j, k
     cdef int acc
     cdef uint64_t active, diff
+    # Defense in depth (MXR-080-0131): mixle.engines.bitpacked.ternary_gemm already validates shapes
+    # before calling in, but this compiled entry point is also reachable directly. `words` below is read
+    # from `a_sign` alone and used to index all three other planes; boundscheck is disabled file-wide, so
+    # a shorter a_nz/b_sign/b_nz would be read past the end of its buffer inside the nogil loop instead of
+    # raising. These checks run while still holding the GIL, before the unsafe fast path.
+    if a_nz.shape[0] != n or a_nz.shape[1] != words:
+        raise ValueError(
+            "ternary_gemm: a_sign is (%d, %d) but a_nz is (%d, %d)" % (n, words, a_nz.shape[0], a_nz.shape[1])
+        )
+    if b_sign.shape[1] != words:
+        raise ValueError(
+            "ternary_gemm: a_sign has %d packed word(s) per row but b_sign has %d" % (words, b_sign.shape[1])
+        )
+    if b_nz.shape[0] != m or b_nz.shape[1] != words:
+        raise ValueError(
+            "ternary_gemm: b_sign is (%d, %d) but b_nz is (%d, %d)" % (m, words, b_nz.shape[0], b_nz.shape[1])
+        )
     out_np = np.empty((n, m), dtype=np.int32)
     cdef int32_t[:, ::1] out = out_np
     with nogil:
