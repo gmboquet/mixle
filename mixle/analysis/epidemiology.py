@@ -24,7 +24,10 @@ point estimate:
     "the exposure cannot have caused an event that happened before the biological lag had elapsed."
 
 Every number in the returned :class:`CohortAttribution` traces back to one ``cox_ph`` fit (plus, when
-``competing``, one ``aalen_johansen`` run) and one seeded RNG -- both recorded in ``provenance``.
+``competing``, one ``aalen_johansen`` run) and one RNG's full reproducible state -- both recorded in
+``provenance``. ``provenance["rng_state"]`` is the bit-generator state (not just its construction seed):
+a seed alone cannot replay the draws of a generator the caller had already advanced before passing it in,
+and is unavailable at all for a bit generator built without a ``SeedSequence``.
 """
 
 from __future__ import annotations
@@ -46,18 +49,69 @@ class _AFDistribution:
     Frequentist bootstrap over cohort resamples -- there is no prior/regulariser in a Cox partial-
     likelihood fit, so ``prior_dominated`` is always ``False``; the honesty flag is carried for
     interface uniformity with the rest of the decision-quantity surface (IC-8), not because it can ever
-    trip here.
+    trip here. ``samples`` holds only draws that actually converged: failed resamples are dropped by the
+    caller before construction (MXR-080-0089), never carried through as ``NaN``, so ``credible_interval``
+    below can use a plain quantile instead of silently NaN-skipping values whose count it never checked.
     """
 
     def __init__(self, samples: np.ndarray):
+        samples = np.asarray(samples, dtype=float)
+        if samples.size == 0:
+            raise ValueError("_AFDistribution.samples must be non-empty.")
+        if not np.all(np.isfinite(samples)):
+            raise ValueError(
+                "_AFDistribution.samples must be finite; failed bootstrap draws must be filtered out "
+                "before construction, not carried through as NaN."
+            )
         self.samples = samples
         self.prior_dominated = False
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         a = (1.0 - level) / 2.0
-        lo = np.nanquantile(self.samples, a)
-        hi = np.nanquantile(self.samples, 1.0 - a)
+        lo = np.quantile(self.samples, a)
+        hi = np.quantile(self.samples, 1.0 - a)
         return lo, hi
+
+
+_MIN_BOOTSTRAP_DRAWS = 40
+"""Absolute floor on valid bootstrap draws before :func:`cohort_attribution` will report an
+attributable-fraction interval.
+
+``af_ci`` and :class:`_AFDistribution` report the 2.5th/97.5th percentile of the bootstrap draws (a 95%
+interval). With fewer than 40 draws, the 2.5th-percentile order statistic has less than one *expected*
+draw beyond it (``40 * 0.025 = 1``): below this floor the tail quantile is extrapolated past the data
+rather than interpolated within it, at any draw count -- not a reliability threshold that gets looser for
+a smaller ``n_boot`` request.
+"""
+
+_MIN_BOOTSTRAP_FRACTION = 0.5
+"""Minimum fraction of the *requested* ``n_boot`` draws that must converge, on top of
+:data:`_MIN_BOOTSTRAP_DRAWS`.
+
+Catches what the absolute floor alone cannot: e.g. ``n_boot=10_000`` with only 60 converged fits clears
+the floor of 40, but a 99.4% per-draw failure rate is evidence about the cohort (near-complete separation
+on the exposure column, most likely) -- not sampling noise a bigger draw count would average away.
+"""
+
+
+@dataclass
+class _InsufficientBootstrapEvidence:
+    """Typed placeholder for ``provenance["af_distribution"]`` when too few bootstrap draws converged to
+    support an attributable-fraction interval (below :data:`_MIN_BOOTSTRAP_DRAWS` /
+    :data:`_MIN_BOOTSTRAP_FRACTION`; MXR-080-0089) -- returned instead of an :class:`_AFDistribution`
+    built from a handful of lucky draws, since a few successful draws carry no real information about
+    sampling variability.
+
+    Deliberately does *not* satisfy IC-1's ``DerivedQuantity`` protocol (no ``credible_interval`` method,
+    no ``prior_dominated`` flag): a caller that treats ``af_distribution`` as a ``DerivedQuantity``
+    without checking fails loudly (``AttributeError``, or a failed ``isinstance`` check) instead of
+    silently plotting or quoting an interval that looks precise but rests on almost no evidence.
+    """
+
+    reason: str
+    n_boot: int
+    n_boot_valid: int
+    samples: np.ndarray  # the few draws that did converge, kept for diagnostics only -- not an interval
 
 
 @dataclass
@@ -72,7 +126,10 @@ class CohortAttribution:
         af_ci: bootstrap ``(lo, hi)`` confidence interval on ``attributable_fraction``.
         cif: cause-specific Aalen-Johansen cumulative incidence, ``{cause: array}`` (empty unless
             ``competing=True``).
-        provenance: fit diagnostics, the RNG seed, and a bootstrap ``DerivedQuantity``-shaped AF summary.
+        provenance: fit diagnostics, the RNG's full reproducible state (``rng_state``), and
+            ``af_distribution`` -- an :class:`_AFDistribution` (IC-1 ``DerivedQuantity``-shaped) when the
+            bootstrap produced adequate evidence, or an :class:`_InsufficientBootstrapEvidence` when it
+            did not (see :data:`_MIN_BOOTSTRAP_DRAWS`).
     """
 
     hazard_ratio: float
@@ -213,7 +270,11 @@ def cohort_attribution(
         competing: if True, also run `aalen_johansen` for cause-specific cumulative incidence.
         latency: exposure-to-effect lag (left-truncation, via `cox_ph`'s `start`); ``0`` disables it.
             Must be non-negative -- negative latency is rejected, not silently treated as ``0``.
-        n_boot: cohort-resample bootstrap draws for the attributable-fraction interval.
+        n_boot: cohort-resample bootstrap draws for the attributable-fraction interval. If fewer than
+            :data:`_MIN_BOOTSTRAP_DRAWS` converge (or too small a fraction of ``n_boot``, see
+            :data:`_MIN_BOOTSTRAP_FRACTION`), ``af_ci`` is ``(nan, nan)`` and
+            ``provenance["af_distribution"]`` is an :class:`_InsufficientBootstrapEvidence` rather than a
+            real interval.
         rng: seed, `numpy.random.Generator`, or None.
 
     Returns:
@@ -232,6 +293,14 @@ def cohort_attribution(
     e_raw = e_float.astype(np.int64)
     n = x.shape[0]
     rng = np.random.default_rng(rng)
+    # Captured *before* any draw below: replaying this bit-generator state reproduces the exact bootstrap
+    # resamples this call makes, regardless of whether `rng` arrived as an int seed, None, or an
+    # already-advanced `Generator` the caller had used elsewhere first (MXR-080-0089). This replaces
+    # `bit_generator.seed_seq.entropy`, which only ever reflects the generator's ORIGINAL construction
+    # seed: `None` for a bit generator built without a `SeedSequence` (e.g. `Philox(key=...)`), and
+    # silently the WRONG sequence to replay for a generator that had already been advanced before arriving
+    # here -- entropy alone cannot tell the difference between "fresh" and "already consumed."
+    rng_state = rng.bit_generator.state
 
     # Cause-specific event indicator for the hazard-ratio fit: only cause 1 counts as an event; true
     # censoring (0) AND competing causes (>=2) are both censored here, per the cause-specific-hazard
@@ -254,25 +323,46 @@ def cohort_attribution(
         float(exposure_prevalence * (hazard_ratio - 1.0) / denom) if denom != 0 else float("nan")
     )
 
-    boot_af = np.full(n_boot, np.nan)
-    for b in range(n_boot):
+    boot_af_valid: list[float] = []
+    for _b in range(n_boot):
         idx = rng.integers(0, n, size=n)
         try:
             fit_b, _ = _fit_lagged(x[idx], t[idx], cox_event[idx], latency)
             hr_b = float(np.exp(fit_b.coef[exposure_col]))
             if hr_b > 0:
-                boot_af[b] = (hr_b - 1.0) / hr_b
+                af_b = (hr_b - 1.0) / hr_b
+                if np.isfinite(af_b):
+                    boot_af_valid.append(af_b)
         except (np.linalg.LinAlgError, ValueError, FloatingPointError):
             continue  # a degenerate resample (e.g. no variation in the exposure column); skip it
 
-    n_boot_valid = int(np.sum(np.isfinite(boot_af)))
-    if n_boot_valid > 0:
+    # Only draws that actually converged reach `boot_af` -- a failed draw is dropped outright, never
+    # carried through as a NaN placeholder (MXR-080-0089): `_AFDistribution.samples` (below) must never
+    # be NaN-contaminated, and `n_boot_valid` must count exactly what it says.
+    boot_af = np.array(boot_af_valid, dtype=float)
+    n_boot_valid = boot_af.shape[0]
+    bootstrap_min_required = max(_MIN_BOOTSTRAP_DRAWS, int(np.ceil(_MIN_BOOTSTRAP_FRACTION * n_boot)))
+    af_distribution: _AFDistribution | _InsufficientBootstrapEvidence
+    if n_boot_valid >= bootstrap_min_required:
         af_ci = (
-            float(np.nanquantile(boot_af, 0.025)),
-            float(np.nanquantile(boot_af, 0.975)),
+            float(np.quantile(boot_af, 0.025)),
+            float(np.quantile(boot_af, 0.975)),
         )
+        af_distribution = _AFDistribution(boot_af)
     else:
+        # One (or a handful of) successful draws carries no information about sampling variability --
+        # report this as a typed non-interval instead of a spuriously precise `af_ci` (MXR-080-0089).
         af_ci = (float("nan"), float("nan"))
+        af_distribution = _InsufficientBootstrapEvidence(
+            reason=(
+                f"only {n_boot_valid} of {n_boot} bootstrap draws converged, below the "
+                f"{bootstrap_min_required} required (max of {_MIN_BOOTSTRAP_DRAWS} absolute or "
+                f"{_MIN_BOOTSTRAP_FRACTION:.0%} of n_boot) for a reliable attributable-fraction interval"
+            ),
+            n_boot=n_boot,
+            n_boot_valid=n_boot_valid,
+            samples=boot_af,
+        )
 
     cif: dict[int, np.ndarray] = {}
     aj: dict[str, Any] | None = None
@@ -280,8 +370,6 @@ def cohort_attribution(
         aj = aalen_johansen(t, e_raw)
         cif = aj["cif"]
 
-    af_distribution = _AFDistribution(boot_af)
-    seed_entropy = getattr(getattr(rng.bit_generator, "seed_seq", None), "entropy", None)
     provenance: dict[str, Any] = {
         "algorithm": "cox_ph+aalen_johansen" if competing else "cox_ph",
         "ties": "efron",
@@ -294,7 +382,7 @@ def cohort_attribution(
         "latency": latency,
         "n_boot": n_boot,
         "n_boot_valid": n_boot_valid,
-        "seed": seed_entropy,
+        "rng_state": rng_state,
         "coef": fit.coef.tolist(),
         "se": fit.se.tolist(),
         "concordance": fit.concordance,
