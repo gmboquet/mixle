@@ -116,6 +116,61 @@ class DistributionSerializationTestCase(unittest.TestCase):
         after = loaded.sampler(seed=seed).sample(size=200)
         self.assertEqual(after, before, "seeded sample sequence changed across a JSON save/load round trip")
 
+    def test_markov_chain_json_round_trip_preserves_seeded_sample_sequence(self):
+        """A JSON round trip must not silently reorder ``init_prob_map``/``transition_map``, or a fixed
+        seed draws a different sequence of STATES before vs. after save/load (regression: the generic
+        dict encoder canonicalizes -- i.e. sorts -- key order, and MarkovChainSampler turns each map's
+        iteration order into positional keys/probs arrays that ``rng.choice``/cumulative-sum sampling
+        resolves against, so a reordered map silently changes what a given seed draws even though the
+        seed and the per-state/per-transition probabilities are unchanged). Same bug class as
+        test_categorical_json_round_trip_preserves_seeded_sample_sequence above.
+        """
+        # Non-alphabetical construction order for both the initial-state map and a multi-entry row of
+        # the transition map -- alphabetical order would coincidentally "pass" even with the bug
+        # present, since sorting an already-sorted dict is a no-op.
+        init_prob_map = {"banana": 0.5, "apple": 0.3, "cherry": 0.2}
+        transition_map = {
+            "banana": {"cherry": 0.6, "apple": 0.4},
+            "apple": {"banana": 0.7, "cherry": 0.3},
+            "cherry": {"apple": 1.0},
+        }
+        dist = stats.MarkovChainDistribution(
+            init_prob_map, transition_map, len_dist=stats.CategoricalDistribution({3: 1.0})
+        )
+        original_init_order = list(dist.init_prob_map.items())
+        original_row_order = list(dist.transition_map["banana"].items())
+        self.assertEqual(original_init_order, [("banana", 0.5), ("apple", 0.3), ("cherry", 0.2)])
+        self.assertEqual(original_row_order, [("cherry", 0.6), ("apple", 0.4)])
+
+        loaded = stats.MarkovChainDistribution.from_json(dist.to_json())
+
+        # Not just equal probabilities-per-state (dict ``==`` is order-insensitive) -- the actual
+        # iteration order that MarkovChainSampler consumes must be unchanged.
+        self.assertEqual(list(loaded.init_prob_map.items()), original_init_order)
+        self.assertEqual(list(loaded.transition_map["banana"].items()), original_row_order)
+        self.assertEqual(loaded.init_prob_map, dist.init_prob_map)
+        self.assertEqual(loaded.transition_map, dist.transition_map)
+
+        seed = 20260724
+        before = dist.sampler(seed=seed).sample(size=200)
+        after = loaded.sampler(seed=seed).sample(size=200)
+        self.assertEqual(after, before, "seeded sample sequence changed across a JSON save/load round trip")
+
+        # The legacy (non-batched) per-step sampling path is separately order-sensitive; cover it too.
+        before_legacy = dist.sampler(seed=seed).sample(size=200, batched=False)
+        after_legacy = loaded.sampler(seed=seed).sample(size=200, batched=False)
+        self.assertEqual(
+            after_legacy,
+            before_legacy,
+            "seeded batched=False sample sequence changed across a JSON save/load round trip",
+        )
+
+        # Scoring is unaffected (keyed lookups, plus a vectorized path already re-sorted from a set
+        # independent of map insertion order) -- assert it explicitly so a future regression that DOES
+        # break scoring is caught here too.
+        for probe in ([], ["banana"], ["banana", "cherry", "apple"], ["apple", "banana", "cherry"]):
+            self.assertEqual(loaded.log_density(probe), dist.log_density(probe))
+
     def test_stats_json_round_trip_cached_structures(self):
         markov = stats.MarkovChainDistribution(
             {"a": 1.0},

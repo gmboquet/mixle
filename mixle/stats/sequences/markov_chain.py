@@ -228,6 +228,58 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
         self.set_prior(prior)
 
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Return JSON-serializable state with ``init_prob_map``/``transition_map`` as order-preserving pairs.
+
+        Both maps' insertion order is load-bearing: :class:`MarkovChainSampler` turns
+        ``init_prob_map.items()`` (and, per source state, ``transition_map[state].items()``) into
+        parallel keys/probs arrays and draws a positional index from them (via ``rng.choice`` or a
+        cumulative-sum search), so a fixed seed maps to a specific *sequence position*, not a state
+        label -- for both the batched (default) and legacy per-step sampling paths. mixle's generic
+        dict encoding (:func:`mixle.utils.serialization._encode_dict`) canonicalizes key order for
+        diffable JSON output, which would silently reorder these maps on decode and change what a
+        fixed-seed sampler draws -- same seed, same per-state/per-transition probabilities, but a
+        different sampled sequence after a save/load round trip. Encoding each map as a plain list of
+        ``(key, value)`` pairs instead of a dict -- nesting a second such list for each transition row,
+        so both the outer (source-state) and inner (destination-state) order survive -- routes them
+        through the list/tuple encoders, which never reorder, so state order survives regardless of any
+        dict-key-sorting elsewhere in the serialization path.
+
+        ``log_density``/``seq_log_density`` need no such treatment: they read ``loginit_prob_map``/
+        ``log_transition_map`` only via keyed ``.get()`` lookups, and the vectorized path's
+        ``key_map``/``inv_key_map``/``init_log_pvec``/``trans_log_pvec`` are already rebuilt from
+        ``all_vals`` (a set) in a canonical sorted order at construction time, independent of
+        ``init_prob_map``/``transition_map``'s insertion order -- so scoring is unaffected by this
+        reordering and only the two raw constructor maps need order-preserving encoding.
+        """
+        state = dict(self.__dict__)
+        state["init_prob_map"] = list(self.init_prob_map.items())
+        state["transition_map"] = [(key, list(row.items())) for key, row in self.transition_map.items()]
+        return state
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Restore state, rebuilding ``init_prob_map``/``transition_map`` from their pair-list form.
+
+        Accepts a plain dict for either map too, so pre-fix artifacts (serialized before this method
+        existed, with both maps as generic -- and therefore key-sorted -- dicts) still decode without
+        error; their original state order was already lost at write time and cannot be recovered, but
+        new writes now round-trip order-faithfully.
+        """
+        state = dict(state)
+
+        init_prob_map = state["init_prob_map"]
+        state["init_prob_map"] = init_prob_map if isinstance(init_prob_map, dict) else dict(init_prob_map)
+
+        transition_map = state["transition_map"]
+        if isinstance(transition_map, dict):
+            state["transition_map"] = transition_map
+        else:
+            state["transition_map"] = {
+                key: (row if isinstance(row, dict) else dict(row)) for key, row in transition_map
+            }
+
+        self.__dict__.update(state)
+
     def get_prior(self):
         """Returns the conjugate prior in ``(states, init_prior, row_priors)`` form (or None)."""
         if not self.has_conj_prior:
