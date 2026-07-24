@@ -172,10 +172,17 @@ def _maxpro_obj_grad(flat: np.ndarray, n: int, d: int) -> tuple[float, np.ndarra
 
 
 def _maxpro_swap(unit: np.ndarray, rng: RandomState, iterations: int) -> np.ndarray:
-    """MaxProLHD coordinate exchange: accept-if-better within-column swaps preserving the LHS structure."""
+    """MaxProLHD coordinate exchange: accept-if-better within-column swaps preserving the LHS structure.
+
+    Every swap is accepted only if it does not increase the criterion (see the ``else: ... revert``
+    below), so the returned design is always at least as good as ``unit`` was on entry -- unlike the
+    continuous refinement in :func:`maxpro_design`, this discrete phase cannot fail or diverge, which is
+    exactly why it is used there as the verified fallback when the continuous stage does (MXR-080-0175).
+    ``iterations`` is assumed already validated by the caller (an exact non-negative int).
+    """
     best = _maxpro_criterion(unit)
     n, d = unit.shape
-    for _ in range(int(iterations)):
+    for _ in range(iterations):
         col = int(rng.randint(d))
         i, j = rng.choice(n, size=2, replace=False)
         unit[[i, j], col] = unit[[j, i], col]
@@ -208,42 +215,62 @@ def maxpro_design(
     the LHS structure, then (2) continuous L-BFGS-B optimization (analytic gradient, ``maxiter`` steps)
     moves the points off the grid to the true MaxPro optimum -- the refinement that cuts the criterion
     by far more than the swap phase alone. The best design over restarts is returned as an ``(n, d)`` array.
-    """
-    if n <= 0:
-        raise ValueError("n must be positive.")
-    from scipy.optimize import minimize
 
+    Each restart's continuous refinement is only kept if the optimizer reports success and returns a
+    finite objective/gradient/point; otherwise that restart falls back to its swap-refined discrete
+    design instead, which is always a legitimate (if less-refined) MaxPro candidate -- see
+    :func:`_maxpro_swap`. A restart can therefore never contribute an unverified, possibly-divergent
+    optimizer iterate to the result (MXR-080-0175).
+    """
+    n = _require_exact_positive_int(n, "n")
+    restarts = _require_exact_positive_int(restarts, "restarts", minimum=1)
+    swaps = _require_exact_positive_int(swaps, "swaps", minimum=0)
+    maxiter = _require_exact_positive_int(maxiter, "maxiter", minimum=0)
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     d = b.shape[0]
-    n = int(n)
     if n < 2 or d == 0:
         unit = np.empty((n, d), dtype=np.float64)
         for j in range(d):
             unit[:, j] = (rng.permutation(n) + rng.random_sample(n)) / n
         return _scale_unit(unit, b)
 
+    from scipy.optimize import minimize
+
     box = [(_MAXPRO_TINY, 1.0 - _MAXPRO_TINY)] * (n * d)
     best_unit: np.ndarray | None = None
     best_crit = np.inf
-    for _ in range(max(1, int(restarts))):
+    for _ in range(restarts):
         start = np.empty((n, d), dtype=np.float64)
         for j in range(d):
             start[:, j] = (rng.permutation(n) + rng.random_sample(n)) / n
         start = _maxpro_swap(start, rng, swaps)  # stage 1: coordinate exchange (LHD basin)
-        res = minimize(  # stage 2: continuous refinement off the grid
-            _maxpro_obj_grad,
-            start.ravel(),
-            args=(n, d),
-            method="L-BFGS-B",
-            jac=True,
-            bounds=box,
-            options={"maxiter": int(maxiter)},
-        )
-        cand = np.clip(res.x.reshape(n, d), 0.0, 1.0)
-        crit = _maxpro_criterion(cand)
-        if crit < best_crit:
-            best_crit, best_unit = crit, cand
+        # `start` is already a verified candidate for this restart (see _maxpro_swap); the continuous
+        # stage below only replaces it if it succeeds AND is strictly better, never unconditionally.
+        verified, verified_crit = start, _maxpro_criterion(start)
+        if maxiter > 0:
+            res = minimize(  # stage 2: continuous refinement off the grid
+                _maxpro_obj_grad,
+                start.ravel(),
+                args=(n, d),
+                method="L-BFGS-B",
+                jac=True,
+                bounds=box,
+                options={"maxiter": maxiter},
+            )
+            converged = (
+                res.success
+                and np.isfinite(res.fun)
+                and np.all(np.isfinite(res.x))
+                and (res.jac is None or np.all(np.isfinite(res.jac)))
+            )
+            if converged:
+                cand = np.clip(res.x.reshape(n, d), 0.0, 1.0)
+                crit = _maxpro_criterion(cand)
+                if np.isfinite(crit) and crit < verified_crit:
+                    verified, verified_crit = cand, crit
+        if verified_crit < best_crit:
+            best_crit, best_unit = verified_crit, verified
     assert best_unit is not None
     return _scale_unit(best_unit, b)
 
