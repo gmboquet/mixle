@@ -128,11 +128,13 @@ def excess_lifetime_cancer_risk(
         exposure: the lifetime-average dose/concentration. An IC-1 ``Posterior`` (its
             ``derived_quantity`` pushforward is used, so ``prior_dominated`` propagates from the
             exposure posterior), a plain array of exposure samples (already representing exposure
-            uncertainty), or a single deterministic scalar. A scalar or array ``exposure`` must be
-            finite and non-negative (exposure cannot be negative); a ``Posterior``'s own draws are
-            NOT validated here (the posterior's support is the caller's modeling choice), so a
-            mis-specified exposure posterior with mass below zero can still yield a negative risk
-            sample from the linear branch of :func:`_lnt_risk`.
+            uncertainty), or a single deterministic scalar. Every exposure draw must reduce to a
+            single value per sample -- one route/chemical/time-point/receptor already selected or
+            aggregated by the caller -- and must be finite and non-negative; this is enforced
+            uniformly for all three forms, including a ``Posterior``'s own draws (there is no honest
+            way to guess, on the caller's behalf, which route/chemical/time point/receptor a
+            genuinely multi-dimensional draw was meant to represent, so that case is rejected with a
+            clear error rather than silently collapsed to its first column).
         sf: the chemical's :class:`SlopeFactor`. Its potency coefficient for ``route`` must be finite
             and non-negative.
         route: ``"oral"`` or ``"inhalation"``.
@@ -149,14 +151,36 @@ def excess_lifetime_cancer_risk(
     if csf is None:
         raise ValueError(f"SlopeFactor has no {route} potency coefficient set.")
     _require_finite_nonnegative(csf, f"SlopeFactor.{'oral_csf' if route == 'oral' else 'inhalation_iur'}")
-    if not isinstance(exposure, Posterior):
-        _require_finite_nonnegative(exposure, "exposure")
     rng = rng if rng is not None else np.random.default_rng()
 
     def _apply(draws: np.ndarray) -> np.ndarray:
+        # Validation lives here -- not in a separate top-level check on the raw `exposure` -- so it
+        # runs identically for all three exposure forms: a bare array/scalar (wrapped and passed
+        # straight to `_apply` below) AND a `Posterior`'s own draws (this function is exactly the
+        # pushforward handed to `Posterior.derived_quantity`). Previously only the first two were
+        # checked; a mis-specified exposure posterior could emit negative/non-finite draws that flowed
+        # straight through to a "risk" sample with no validation at all.
         dose = np.atleast_1d(np.asarray(draws, dtype=float))
         if dose.ndim > 1:
-            dose = dose.reshape(dose.shape[0], -1)[:, 0]
+            # The IC-1 `Posterior.samples` contract is always `(n, d)`; `d == 1` is the legitimate
+            # single-quantity-per-sample case (this function models one route/chemical at a time) and
+            # squeezes losslessly to the same value `[:, 0]` used to extract. `d > 1` means the caller
+            # (or posterior) is handing over more than one value per sample -- multiple routes,
+            # chemicals, time points, or receptors -- which this function has no honest way to reduce
+            # on the caller's behalf, so it is rejected outright rather than silently truncated to
+            # column 0 (which previously discarded every other route/chemical/time point/receptor).
+            if dose.ndim == 2 and dose.shape[1] == 1:
+                dose = dose[:, 0]
+            else:
+                raise ValueError(
+                    "exposure must reduce to a single value per sample (one route/chemical/time "
+                    f"point/receptor already selected or aggregated by the caller); got shape "
+                    f"{dose.shape}, i.e. {int(np.prod(dose.shape[1:]))} value(s) per sample. "
+                    "Aggregate to a single exposure value per sample before calling "
+                    "excess_lifetime_cancer_risk (e.g. select the intended route/chemical/time "
+                    "point, or sum over receptors)."
+                )
+        _require_finite_nonnegative(dose, "exposure")
         if sf.sigma_log > 0:
             slope = csf * rng.lognormal(mean=0.0, sigma=sf.sigma_log, size=dose.shape)
         else:
