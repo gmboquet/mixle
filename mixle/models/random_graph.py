@@ -64,6 +64,7 @@ class ErdosRenyiGraphModel:
     def log_likelihood(self, adjacency: Any) -> float:
         """Return the Bernoulli graph log likelihood."""
         adj = _as_adjacency(adjacency)
+        _validate_adjacency_structure(adj, directed=self.directed, self_loops=self.self_loops)
         values = _edge_values(adj, directed=self.directed, self_loops=self.self_loops)
         return _bernoulli_log_likelihood(values, self.p)
 
@@ -156,6 +157,7 @@ class StochasticBlockGraphModel:
         adj = _as_adjacency(adjacency)
         if adj.shape[0] != self.block_assignments.shape[0]:
             raise ValueError("adjacency size must match block assignments.")
+        _validate_adjacency_structure(adj, directed=self.directed, self_loops=self.self_loops)
         ll = 0.0
         for i, j in _edge_indices(adj.shape[0], self.directed, self.self_loops):
             p = self.block_probs[self.block_assignments[i], self.block_assignments[j]]
@@ -308,6 +310,20 @@ def _as_adjacency(adjacency: Any) -> np.ndarray:
     if np.any((adj != 0.0) & (adj != 1.0)):
         raise ValueError("adjacency must contain binary values 0/1.")
     return adj
+
+
+def _validate_adjacency_structure(adj: np.ndarray, directed: bool, self_loops: bool) -> None:
+    """Reject adjacency matrices that violate the model's directed/self-loop assumptions.
+
+    ``_edge_indices`` only ever iterates the index pairs implied by ``directed``/``self_loops``;
+    it never inspects the matrix itself, so an asymmetric matrix scored by an undirected model
+    (or a nonzero diagonal scored by a self_loops=False model) would otherwise be read only on
+    the subset of entries the iteration happens to visit, silently ignoring the rest.
+    """
+    if not directed and not np.array_equal(adj, adj.T):
+        raise ValueError("undirected models require a symmetric adjacency matrix.")
+    if not self_loops and np.any(np.diagonal(adj) != 0.0):
+        raise ValueError("self_loops=False models require an all-zero diagonal (no self-loops).")
 
 
 def _edge_indices(n: int, directed: bool, self_loops: bool):
