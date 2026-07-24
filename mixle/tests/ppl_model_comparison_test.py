@@ -10,7 +10,7 @@ import numpy as np
 from scipy.stats import norm
 
 from mixle.ppl import Normal, compare
-from mixle.ppl.diagnostics import psis_loo, waic
+from mixle.ppl.diagnostics import loo, psis_loo, waic
 
 
 def _loglik(mu, y, sd=1.0):
@@ -51,6 +51,56 @@ class DiagnosticsMathTestCase(unittest.TestCase):
         self.assertTrue(np.isfinite(waic(single)["waic"]))
         self.assertEqual(waic(single)["p_waic"], 0.0)
         self.assertTrue(np.isfinite(psis_loo(single)["loo"]))
+
+    def test_waic_rejects_empty_loglik(self):
+        # An empty matrix used to sum to 0.0 and return elpd_waic=0.0/waic=0.0 -- indistinguishable
+        # from "a model with a perfect fit" instead of "no data was given". Every axis-degenerate
+        # shape (fully empty, zero draws, zero observations) must now raise instead.
+        for shape in ((0, 0), (5, 0), (0, 5)):
+            with self.assertRaises(ValueError):
+                waic(np.empty(shape))
+        with self.assertRaises(ValueError):
+            waic(np.array([]))
+
+    def test_psis_loo_rejects_empty_loglik(self):
+        # Mirrors test_waic_rejects_empty_loglik: an empty matrix silently returned elpd_loo=0.0, and
+        # a zero-draws matrix (s == 0) crashed with an opaque IndexError from `loglik[0]` deep inside
+        # the s < 2 branch instead of a clear, up-front ValueError.
+        for shape in ((0, 0), (5, 0), (0, 5)):
+            with self.assertRaises(ValueError):
+                psis_loo(np.empty(shape))
+        with self.assertRaises(ValueError):
+            psis_loo(np.array([]))
+
+    def test_waic_rejects_nonfinite_loglik(self):
+        nan_ll = self.good.copy()
+        nan_ll[0, 0] = np.nan
+        with self.assertRaises(ValueError):
+            waic(nan_ll)
+        inf_ll = self.good.copy()
+        inf_ll[0, 0] = np.inf
+        with self.assertRaises(ValueError):
+            waic(inf_ll)
+
+    def test_psis_loo_rejects_nonfinite_loglik(self):
+        nan_ll = self.good.copy()
+        nan_ll[0, 0] = np.nan
+        with self.assertRaises(ValueError):
+            psis_loo(nan_ll)
+        inf_ll = self.good.copy()
+        inf_ll[0, 0] = -np.inf
+        with self.assertRaises(ValueError):
+            psis_loo(inf_ll)
+
+    def test_loo_alias_rejects_empty_and_nonfinite(self):
+        # `loo` is psis_loo's conventional short name (a thin wrapper) -- confirm the guard is visible
+        # through the alias too, not just the underlying function.
+        with self.assertRaises(ValueError):
+            loo(np.empty((0, 0)))
+        nan_ll = self.good.copy()
+        nan_ll[0, 0] = np.nan
+        with self.assertRaises(ValueError):
+            loo(nan_ll)
 
 
 class RandomVariableComparisonTestCase(unittest.TestCase):
@@ -96,6 +146,16 @@ class RandomVariableComparisonTestCase(unittest.TestCase):
         w = m.waic(self.data)
         self.assertEqual(w["n_draws"], 1)
         self.assertTrue(np.isfinite(w["waic"]))
+
+    def test_waic_and_loo_on_empty_data_raise(self):
+        # RandomVariable.waic/.loo route through pointwise_log_likelihood into waic()/psis_loo(); an
+        # empty `data` produces a (n_draws, 0) matrix that used to silently score as a "perfect fit"
+        # (elpd_waic == 0.0 / elpd_loo == 0.0) instead of surfacing that no data was evaluated.
+        m = self._fit(1.0, 2)
+        with self.assertRaises(ValueError):
+            m.waic([])
+        with self.assertRaises(ValueError):
+            m.loo([])
 
 
 class SummaryTestCase(unittest.TestCase):

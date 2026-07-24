@@ -39,6 +39,38 @@ class LooStackingTest(unittest.TestCase):
     def test_single_model_weight_is_one(self):
         self.assertTrue(np.allclose(loo_stacking_weights(np.zeros((10, 1))), [1.0]))
 
+    def test_zero_iters_raises(self):
+        # w starts at the uniform simplex point np.full(k, 1/k) and is only updated inside the
+        # `for _ in range(int(iters))` loop -- iters=0 used to fall through as a no-op and return that
+        # untouched uniform guess as though it were the fitted stacking solution, indistinguishable
+        # from a real (if coincidentally uniform) answer. Matches optimize(max_its < 1)'s rejection.
+        rng = np.random.RandomState(0)
+        lpd = rng.normal(0.0, 1.0, size=(200, 3))
+        with self.assertRaises(ValueError):
+            loo_stacking_weights(lpd, iters=0)
+
+    def test_negative_iters_raises(self):
+        rng = np.random.RandomState(0)
+        lpd = rng.normal(0.0, 1.0, size=(200, 3))
+        with self.assertRaises(ValueError):
+            loo_stacking_weights(lpd, iters=-5)
+
+    def test_nan_iters_raises(self):
+        # `iters >= 1` is False for NaN too (a NaN comparison is always False), so `not (iters >= 1)`
+        # catches it -- unlike a plain `iters < 1` check, which would miss it.
+        rng = np.random.RandomState(0)
+        lpd = rng.normal(0.0, 1.0, size=(200, 3))
+        with self.assertRaises(ValueError):
+            loo_stacking_weights(lpd, iters=float("nan"))
+
+    def test_one_iter_still_moves_off_uniform(self):
+        # Sanity check that a positive iters count still performs real optimization (as opposed to
+        # the guard becoming so strict it breaks legitimate small-but-positive values).
+        base = np.random.RandomState(2).normal(-1.0, 0.5, size=200)
+        lpd = np.column_stack([base + 2.0, base, base - 1.0])
+        w = loo_stacking_weights(lpd, iters=1)
+        self.assertFalse(np.allclose(w, 1.0 / 3.0))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -128,9 +128,29 @@ def convergence_diagnostics(draws: np.ndarray) -> dict:
     return {"split_rhat": split_rhat(draws), "bulk_ess": bulk_ess(draws), "tail_ess": tail_ess(draws)}
 
 
+def _validate_loglik(loglik: np.ndarray, fn_name: str) -> np.ndarray:
+    """Coerce ``loglik`` to a 2-D array and reject degenerate input.
+
+    An empty matrix (zero draws and/or zero observations) sums to ``0.0`` in both ``waic`` and
+    ``psis_loo`` below -- indistinguishable from "a model with a perfect, trivial fit" rather than
+    "no data was actually provided" -- and a NaN/Inf entry propagates silently into the returned
+    dict (a NaN comparison is always False, so a downstream ``compare()`` ranking would silently
+    misorder models instead of erroring). Both are rejected here, at the shared entry point, rather
+    than letting either function return a plausible-looking placeholder.
+    """
+    ll = np.atleast_2d(np.asarray(loglik, dtype=float))
+    if ll.size == 0:
+        raise ValueError(
+            f"{fn_name}(): loglik must be a non-empty (n_draws, n_obs) log-likelihood matrix, got shape {ll.shape}."
+        )
+    if not np.isfinite(ll).all():
+        raise ValueError(f"{fn_name}(): loglik must be finite (no NaN or Inf).")
+    return ll
+
+
 def waic(loglik: np.ndarray) -> dict:
     """Return the WAIC of a ``(n_draws, n_obs)`` pointwise log-likelihood matrix."""
-    loglik = np.atleast_2d(np.asarray(loglik, dtype=float))
+    loglik = _validate_loglik(loglik, "waic")
     s, n = loglik.shape
     lppd_i = _lppd_pointwise(loglik)
     p_waic_i = np.var(loglik, axis=0, ddof=1) if s > 1 else np.zeros(n)
@@ -201,7 +221,7 @@ def _psis_smooth(log_weights: np.ndarray) -> tuple[np.ndarray, float]:
 
 def psis_loo(loglik: np.ndarray) -> dict:
     """Return PSIS-LOO of a ``(n_draws, n_obs)`` pointwise log-likelihood matrix."""
-    loglik = np.atleast_2d(np.asarray(loglik, dtype=float))
+    loglik = _validate_loglik(loglik, "psis_loo")
     s, n = loglik.shape
     if s < 2:
         elpd_i = loglik[0].copy()
@@ -251,6 +271,13 @@ def loo_stacking_weights(pointwise_lpd: np.ndarray, iters: int = 2000, tol: floa
     ``sum_i log(sum_k w_k * exp(lpd_ik))``. This is concave in ``w`` and solved here by the standard
     mixture-weight EM update (no external optimizer), which respects the simplex by construction.
     """
+    if not (iters >= 1):
+        # w is initialized to the uniform simplex point np.full(k, 1/k) below and only updated inside
+        # this loop, so iters=0 (or a negative/NaN value -- `not (iters >= 1)` rejects NaN too, since
+        # a NaN comparison is always False) used to fall through range(int(iters)) as a no-op and
+        # return that untouched uniform initial guess as though it were the fitted stacking solution,
+        # with no indication no optimization actually ran. Matches optimize(max_its < 1)'s rejection.
+        raise ValueError(f"loo_stacking_weights(): iters must be a positive integer, got {iters!r}")
     lpd = np.atleast_2d(np.asarray(pointwise_lpd, dtype=float))
     n, k = lpd.shape
     if k == 1:
