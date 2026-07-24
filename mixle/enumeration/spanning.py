@@ -81,8 +81,22 @@ def k_best_spanning_trees(cost: np.ndarray, k: int | None = None) -> Iterator[tu
 
     Yields:
         ``(total_cost, edges)`` in nondecreasing total cost.
+
+    Raises:
+        ValueError: if ``cost`` is not a 2-D square matrix, or is not symmetric. The graph is undirected, so a
+            non-square shape (a smaller dimension would otherwise silently drop the extra rows/columns) and an
+            asymmetric matrix (which would otherwise be solved using only its upper triangle, silently
+            discarding the lower triangle) are both rejected rather than resolved implicitly. Symmetrize
+            explicitly first -- e.g. ``(cost + cost.T) / 2`` -- if that matches the intended edge weights.
     """
     cost = np.asarray(cost, dtype=float)
+    if cost.ndim != 2 or cost.shape[0] != cost.shape[1]:
+        raise ValueError(f"cost must be a square 2-D adjacency matrix, got shape {cost.shape}")
+    if not np.allclose(cost, cost.T, equal_nan=True):
+        raise ValueError(
+            "cost must be symmetric (undirected graph); symmetrize explicitly first, e.g. (cost + cost.T) / 2, "
+            "if that matches the intended edge weights"
+        )
     n = cost.shape[0]
     sorted_edges = sorted(
         (float(cost[i, j]), i, j) for i in range(n) for j in range(i + 1, n) if np.isfinite(cost[i, j])
