@@ -10,7 +10,7 @@ import unittest
 import numpy as np
 import pytest
 
-from mixle.engines.lns import LogNumberSystem
+from mixle.engines.lns import LOG_ZERO_CODE, LogNumberSystem
 from mixle.engines.lns_nn import SumProductCircuit, cross_entropy, log_softmax, softmax
 
 sp = pytest.importorskip("scipy.special")
@@ -190,6 +190,142 @@ class SumProductCircuitTest(unittest.TestCase):
         got = circuit.evaluate_lns(lns, leaves)
         expect = lns.dequantize(lns.quantize(leaves[0]) + lns.quantize(leaves[1]))
         self.assertTrue(np.array_equal(got, expect))
+
+
+class SumProductCircuitValidationTest(unittest.TestCase):
+    """MXR-080-0142: every structural-validity violation must be rejected at construction, not deferred
+    to (possibly silently-wrong, per test_forward_reference_is_rejected below) evaluation.
+    """
+
+    def test_empty_circuit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SumProductCircuit([])
+
+    def test_empty_product_node_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("leaf", 0), ("product", [])])
+
+    def test_empty_sum_node_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("leaf", 0), ("sum", [], [])])
+
+    def test_forward_reference_is_rejected(self):
+        # pre-fix, this was worse than "fails to error": node 0 ("product", [1]) reads vals[1] while
+        # it's still None (nodes are evaluated in list order) and silently produces a wrong answer built
+        # from the leaf alone, with no exception at all -- exactly the "accepted until ... arithmetic
+        # fails" (or, here, doesn't even fail) hazard the finding describes.
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("product", [1]), ("leaf", 0)])
+
+    def test_self_reference_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("leaf", 0), ("product", [1])])
+
+    def test_out_of_range_child_reference_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("leaf", 0), ("product", [5])])
+
+    def test_negative_child_reference_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("leaf", 0), ("leaf", 1), ("product", [-1, 1])])
+
+    def test_cardinality_mismatch_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("leaf", 0), ("leaf", 1), ("sum", [0, 1], [0.0])])
+
+    def test_weights_not_summing_to_one_are_rejected(self):
+        # pre-fix this did not even fail at evaluation -- it silently returned a wrong (non-probability)
+        # answer, since exp(0) + exp(0) = 2 is a perfectly well-defined (if invalid) logsumexp input.
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("leaf", 0), ("leaf", 1), ("sum", [0, 1], [0.0, 0.0])])
+
+    def test_non_finite_weight_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("leaf", 0), ("leaf", 1), ("sum", [0, 1], [0.0, float("nan")])])
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("leaf", 0), ("leaf", 1), ("sum", [0, 1], [0.0, float("inf")])])
+
+    def test_unrecognized_node_kind_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("bogus", 0)])
+
+    def test_missing_leaf_value_is_rejected_at_evaluation(self):
+        # the set of expected leaf ids is fixed at construction; whether leaf_values actually supplies
+        # them can only be checked once leaf_values is provided, at evaluation.
+        lns = LogNumberSystem(step=0.01)
+        circuit = SumProductCircuit([("leaf", 0), ("leaf", 1), ("product", [0, 1])])
+        with self.assertRaises(ValueError):
+            circuit.evaluate_lns(lns, {0: np.array([1.0])})  # leaf 1 missing
+        with self.assertRaises(ValueError):
+            circuit.evaluate_float({0: np.array([1.0])})
+
+    def test_negative_control_well_formed_circuit_still_works(self):
+        ln = math.log
+        circuit = SumProductCircuit(
+            [
+                ("leaf", 0),
+                ("leaf", 1),
+                ("leaf", 2),
+                ("leaf", 3),
+                ("sum", [0, 1], [ln(0.6), ln(0.4)]),
+                ("sum", [2, 3], [ln(0.3), ln(0.7)]),
+                ("product", [4, 5]),
+                ("sum", [6, 0], [ln(0.8), ln(0.2)]),
+            ]
+        )
+        self.assertEqual(circuit.leaf_ids, {0, 1, 2, 3})
+        lns = LogNumberSystem(step=0.002)
+        leaves = {i: np.random.RandomState(7).randn(200) * 6 for i in range(4)}
+        ref = circuit.evaluate_float(leaves)
+        got = circuit.evaluate_lns(lns, leaves)
+        self.assertLessEqual(float(np.max(np.abs(got - ref))), 4 * lns.max_logsumexp_error(2))
+
+
+class SumProductCircuitSafeMultiplyTest(unittest.TestCase):
+    """MXR-080-0142's multiply()-not-raw-`+` gap flagged alongside the lns.py LOG_ZERO_CODE fix: a
+    product (or a sum node's weighted-child term, which is the same "LNS multiply" operation) that
+    combines a LOG_ZERO_CODE-valued child with an ordinary code must not silently overflow int64.
+    """
+
+    def test_raw_int64_add_of_log_zero_code_silently_overflows(self):
+        # establishes WHY this matters: confirms the hazard the fix avoids is real, not hypothetical.
+        # LOG_ZERO_CODE (== INT64_MIN) plus any negative code underflows int64, and numpy performs no
+        # overflow check on integer arithmetic by default -- it wraps silently rather than raising.
+        raw = np.array([LOG_ZERO_CODE], dtype=np.int64) + np.array([-50], dtype=np.int64)
+        self.assertNotEqual(int(raw[0]), LOG_ZERO_CODE - 50)  # the "true" (unrepresentable) value
+        self.assertGreater(int(raw[0]), 0)  # wrapped around to a spurious huge positive code
+
+    def test_product_node_with_log_zero_leaf_uses_multiply_not_raw_add(self):
+        lns = LogNumberSystem(step=0.01)
+        circuit = SumProductCircuit([("leaf", 0), ("leaf", 1), ("product", [0, 1])])
+        # lane 0: ordinary product (exact integer add). lane 1: leaf 1 is a true zero (-inf log-value),
+        # quantizing to LOG_ZERO_CODE -- raw `+` against that sentinel would silently wrap (as proven
+        # above); lns.multiply() must instead propagate the absorbing zero exactly.
+        leaves = {0: np.array([-2.0, -3.0]), 1: np.array([-1.0, -np.inf])}
+        got = circuit.evaluate_lns(lns, leaves)
+        self.assertAlmostEqual(float(got[0]), -3.0, places=6)
+        self.assertEqual(float(got[1]), -np.inf)
+        # cross-check directly against lns.multiply() as the independent reference for lane 1
+        k0 = lns.quantize(leaves[0])
+        k1 = lns.quantize(leaves[1])
+        self.assertEqual(int(k1[1]), LOG_ZERO_CODE)
+        expect = lns.multiply(k0, k1)
+        self.assertTrue(np.array_equal(lns.quantize(got), expect))
+
+    def test_sum_node_weighted_child_with_log_zero_uses_multiply_not_raw_add(self):
+        # the "sum" node's per-child term is log(child_prob * weight) = child_code (LNS-multiply)
+        # weight_code -- the same hazard as the product-node case, for a weight applied to a
+        # LOG_ZERO_CODE-valued child.
+        lns = LogNumberSystem(step=0.01)
+        ln = math.log
+        circuit = SumProductCircuit([("leaf", 0), ("leaf", 1), ("sum", [0, 1], [ln(0.5), ln(0.5)])])
+        leaves = {0: np.array([-np.inf]), 1: np.array([-1.0])}  # child 0 is a true zero
+        got = circuit.evaluate_lns(lns, leaves)
+        # a 50/50 mixture of (probability 0) and (probability exp(-1)) is just 0.5 * exp(-1); must be
+        # finite and close to the float64 reference, not a spuriously huge/corrupted value.
+        ref = circuit.evaluate_float(leaves)
+        self.assertTrue(np.isfinite(got[0]))
+        self.assertLessEqual(abs(float(got[0]) - float(ref[0])), 4 * lns.max_logsumexp_error(2))
 
 
 if __name__ == "__main__":

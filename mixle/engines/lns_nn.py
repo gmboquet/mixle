@@ -24,6 +24,13 @@ import numpy as np
 
 from mixle.engines.lns import LOG_ZERO_CODE, LogNumberSystem
 
+# MXR-080-0142: tolerance for a SumProductCircuit sum-node's (exponentiated) weights summing to 1 --
+# same values as mixle.stats.latent.mixture.MixtureDistribution's own simplex-weight check, for the same
+# reason (a fitted/user-supplied weight vector is not guaranteed float64-exact-sums-to-1, but should be
+# close; not re-imported from mixture.py since the two modules are otherwise independent).
+_SUM_NODE_WEIGHT_RTOL = 1.0e-5
+_SUM_NODE_WEIGHT_ATOL = 1.0e-8
+
 
 def _lse_keepdims(lns: LogNumberSystem, k: np.ndarray, axis: int) -> np.ndarray:
     lse = lns.logsumexp(k, axis=axis)
@@ -130,6 +137,48 @@ def cross_entropy(logits: Any, targets: Any, lns: LogNumberSystem, axis: int = -
     return float(np.mean((lse_k - target_codes).astype(np.float64) * lns.step))
 
 
+def _validate_circuit_children(i: int, children: Any) -> None:
+    """MXR-080-0142: every product/sum node must have >=1 child, each an earlier, in-range node index.
+
+    Requiring ``0 <= child < i`` (strictly earlier than the referencing node's own index) in one
+    comparison rules out forward references, self-references, and out-of-range indices together -- and
+    since a child index can then never be >= its parent's, no chain of child references can ever loop
+    back on itself, making a cycle structurally impossible without a separate graph search.
+    """
+    if not isinstance(children, (list, tuple, np.ndarray)):
+        raise ValueError(f"SumProductCircuit: node {i} children must be a list/tuple of indices, got {children!r}")
+    if len(children) == 0:
+        raise ValueError(f"SumProductCircuit: node {i} has no children (empty product/sum node)")
+    for c in children:
+        if not isinstance(c, (int, np.integer)):
+            raise ValueError(f"SumProductCircuit: node {i} has a non-integer child reference {c!r}")
+        if c < 0 or c >= i:
+            raise ValueError(
+                f"SumProductCircuit: node {i} references child {c}, which must be an earlier node "
+                f"(0 <= child < {i}); forward, self, and out-of-range references are not a valid DAG"
+            )
+
+
+def _validate_circuit_sum_weights(i: int, children: Any, log_weights: Any) -> None:
+    """MXR-080-0142: a sum node's weight count must match its child count, and the (exponentiated)
+    weights must be finite and sum to ~1 -- a genuine probability simplex, the same contract
+    :class:`mixle.stats.latent.mixture.MixtureDistribution` enforces on its own component weights.
+    """
+    if len(log_weights) != len(children):
+        raise ValueError(
+            f"SumProductCircuit: sum node {i} has {len(children)} children but {len(log_weights)} "
+            "weights; these must match"
+        )
+    w = np.exp(np.asarray(log_weights, dtype=np.float64))
+    if not np.isfinite(w).all():
+        raise ValueError(f"SumProductCircuit: sum node {i} has non-finite weight(s): {list(log_weights)!r}")
+    total = float(w.sum())
+    if not np.isclose(total, 1.0, rtol=_SUM_NODE_WEIGHT_RTOL, atol=_SUM_NODE_WEIGHT_ATOL):
+        raise ValueError(
+            f"SumProductCircuit: sum node {i} weights must sum to 1.0 (simplex weights), got sum={total!r}"
+        )
+
+
 class SumProductCircuit:
     """A probabilistic circuit evaluated entirely in integer log-space (product=add, sum=logadd).
 
@@ -142,10 +191,55 @@ class SumProductCircuit:
     """
 
     def __init__(self, nodes: list[tuple]) -> None:
+        """Validate the complete typed DAG at construction (MXR-080-0142) instead of deferring to
+        evaluation: nonempty circuit; every node a recognized ``leaf``/``product``/``sum`` tuple of the
+        right arity; every product/sum node has >=1 child, each an earlier in-range node (see
+        :func:`_validate_circuit_children` for why this also rules out cycles); every sum node's weight
+        count matches its child count and its (exponentiated) weights are finite and sum to ~1. The leaf
+        ids declared by ``leaf`` nodes are recorded so :meth:`evaluate_lns`/:meth:`evaluate_float` can
+        validate the ``leaf_values`` contract up front too -- the actual values aren't known until then,
+        only which ids the circuit is entitled to expect.
+        """
+        if len(nodes) == 0:
+            raise ValueError("SumProductCircuit requires at least one node; got an empty circuit")
+        leaf_ids: set = set()
+        for i, node in enumerate(nodes):
+            if not isinstance(node, (tuple, list)) or len(node) == 0:
+                raise ValueError(f"SumProductCircuit: node {i} must be a nonempty (kind, ...) tuple, got {node!r}")
+            kind = node[0]
+            if kind == "leaf":
+                if len(node) != 2:
+                    raise ValueError(f"SumProductCircuit: leaf node {i} must be ('leaf', leaf_id), got {node!r}")
+                try:
+                    leaf_ids.add(node[1])
+                except TypeError:
+                    raise ValueError(
+                        f"SumProductCircuit: leaf node {i} has an unhashable leaf id {node[1]!r}"
+                    ) from None
+            elif kind == "product":
+                if len(node) != 2:
+                    raise ValueError(f"SumProductCircuit: product node {i} must be ('product', children), got {node!r}")
+                _validate_circuit_children(i, node[1])
+            elif kind == "sum":
+                if len(node) != 3:
+                    raise ValueError(
+                        f"SumProductCircuit: sum node {i} must be ('sum', children, log_weights), got {node!r}"
+                    )
+                _validate_circuit_children(i, node[1])
+                _validate_circuit_sum_weights(i, node[1], node[2])
+            else:
+                raise ValueError(f"SumProductCircuit: node {i} has an unrecognized kind {kind!r}")
         self.nodes = nodes
+        self.leaf_ids = leaf_ids
+
+    def _check_leaf_values(self, method: str, leaf_values: dict[Any, Any]) -> None:
+        missing = self.leaf_ids - leaf_values.keys()
+        if missing:
+            raise ValueError(f"SumProductCircuit.{method}: leaf_values is missing id(s) {sorted(map(repr, missing))}")
 
     def evaluate_lns(self, lns: LogNumberSystem, leaf_values: dict[Any, Any]) -> np.ndarray:
         """Evaluate the circuit with log-number-system arithmetic."""
+        self._check_leaf_values("evaluate_lns", leaf_values)
         vals: list[Any] = [None] * len(self.nodes)
         for i, node in enumerate(self.nodes):
             if node[0] == "leaf":
@@ -153,19 +247,25 @@ class SumProductCircuit:
             elif node[0] == "product":
                 acc = vals[node[1][0]]
                 for c in node[1][1:]:
-                    acc = acc + vals[c]  # log-product = integer add
+                    acc = lns.multiply(acc, vals[c])  # MXR-080-0142: safe LNS product (was raw `+`)
                 vals[i] = acc
             elif node[0] == "sum":
                 children, log_w = node[1], np.asarray(node[2], dtype=np.float64)
                 wk = lns.quantize(log_w)
-                terms = np.stack([np.add(vals[c], wk[j]) for j, c in enumerate(children)], axis=0)
+                # each term is log(child_prob * weight) = child_code (+) weight_code -- an LNS product,
+                # so it must go through the same overflow-safe multiply() (MXR-080-0142), not raw `+`:
+                # a child that quantized to LOG_ZERO_CODE (a legitimate zero-probability value) combined
+                # with an ordinary weight code would otherwise overflow int64 exactly like the product
+                # node case above.
+                terms = np.stack([lns.multiply(vals[c], wk[j]) for j, c in enumerate(children)], axis=0)
                 vals[i] = lns.logsumexp(terms, axis=0)
-            else:  # pragma: no cover
+            else:  # pragma: no cover - unreachable: __init__ already rejects any other node kind
                 raise ValueError("unknown node %r" % (node[0],))
         return lns.dequantize(vals[-1])
 
     def evaluate_float(self, leaf_values: dict[Any, Any]) -> np.ndarray:
         """Evaluate the circuit with float64 reference arithmetic."""
+        self._check_leaf_values("evaluate_float", leaf_values)
         vals: list[Any] = [None] * len(self.nodes)
         for i, node in enumerate(self.nodes):
             if node[0] == "leaf":
@@ -179,6 +279,6 @@ class SumProductCircuit:
                 children, log_w = node[1], np.asarray(node[2], dtype=np.float64)
                 terms = np.stack([vals[c] + log_w[j] for j, c in enumerate(children)], axis=0)
                 vals[i] = np.logaddexp.reduce(terms, axis=0)
-            else:  # pragma: no cover
+            else:  # pragma: no cover - unreachable: __init__ already rejects any other node kind
                 raise ValueError("unknown node %r" % (node[0],))
         return np.asarray(vals[-1], dtype=np.float64)
