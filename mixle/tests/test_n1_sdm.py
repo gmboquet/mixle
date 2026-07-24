@@ -9,6 +9,8 @@ from mixle.analysis.sdm import (
     HabitatModel,
     SpeciesObservation,
     _bin_cell_counts,
+    _nll_and_grad,
+    _penalized_hessian,
     _validate_locations,
     fit_sdm,
 )
@@ -247,3 +249,82 @@ def test_fit_sdm_still_fits_with_legitimate_in_domain_locations():
 
     assert model.mean.shape == (num_cells,)
     assert np.all(np.isfinite(model.mean))
+
+
+# -- MXR-080-0112: the Laplace covariance's Hessian must use the exact penalized second derivative --
+
+
+def _make_glm_fixture(rng: np.random.Generator, num_cells: int = 30, p: int = 4):
+    design = np.column_stack([np.ones(num_cells), rng.uniform(-1.0, 1.0, size=(num_cells, p - 1))])
+    counts = rng.poisson(3.0, size=num_cells).astype(np.float64)
+    log_offset = np.log(rng.uniform(0.5, 2.0, size=num_cells))
+    edges = np.arange(num_cells + 1, dtype=np.float64)
+    return design, counts, log_offset, edges
+
+
+def test_penalized_hessian_matches_numerical_differentiation_of_gradient():
+    """MXR-080-0112: the WHOLE analytic Hessian (data term + ridge term) must equal the central-difference
+    Jacobian of `_nll_and_grad`'s own gradient output -- not just "look about right" for the ridge part,
+    and not just cross-checked against an independently rederived formula."""
+    rng = np.random.default_rng(42)
+    design, counts, log_offset, edges = _make_glm_fixture(rng)
+    p = design.shape[1]
+    ridge = 0.37
+    beta = rng.normal(scale=0.3, size=p)
+
+    def grad_at(b: np.ndarray) -> np.ndarray:
+        _, g = _nll_and_grad(b, design, counts, log_offset, ridge, edges)
+        return g
+
+    analytic_hessian = _penalized_hessian(beta, design, log_offset, ridge)
+
+    eps = 1e-6
+    numerical_hessian = np.zeros((p, p))
+    for j in range(p):
+        bp, bm = beta.copy(), beta.copy()
+        bp[j] += eps
+        bm[j] -= eps
+        numerical_hessian[:, j] = (grad_at(bp) - grad_at(bm)) / (2.0 * eps)
+
+    assert np.allclose(analytic_hessian, numerical_hessian, atol=1e-3, rtol=1e-4)
+    assert np.allclose(analytic_hessian, analytic_hessian.T, atol=1e-8)  # a Hessian must be symmetric
+
+
+def test_penalized_hessian_ridge_contribution_is_exactly_two_ridge_identity():
+    """MXR-080-0112 exact regression: holding beta fixed (so the data term is identical), the Hessian's
+    ridge-only contribution (Hessian(ridge) - Hessian(0)) must be precisely 2*ridge*I, not ridge*I."""
+    rng = np.random.default_rng(7)
+    design, counts, log_offset, edges = _make_glm_fixture(rng, num_cells=25, p=3)
+    p = design.shape[1]
+    beta = rng.normal(scale=0.2, size=p)
+    ridge = 1.25
+
+    hessian_ridge = _penalized_hessian(beta, design, log_offset, ridge)
+    hessian_zero = _penalized_hessian(beta, design, log_offset, 0.0)
+
+    assert np.allclose(hessian_ridge - hessian_zero, 2.0 * ridge * np.eye(p), atol=1e-10)
+
+
+def test_nll_and_grad_data_term_matches_numerical_differentiation():
+    """Independent, one-derivative-order-lower cross-check: the unregularized (ridge=0) gradient must
+    equal the central-difference of the NLL value itself."""
+    rng = np.random.default_rng(13)
+    design, counts, log_offset, edges = _make_glm_fixture(rng, num_cells=40, p=3)
+    p = design.shape[1]
+    beta = rng.normal(scale=0.2, size=p)
+
+    def nll_at(b: np.ndarray) -> float:
+        val, _ = _nll_and_grad(b, design, counts, log_offset, 0.0, edges)
+        return val
+
+    _, analytic_grad = _nll_and_grad(beta, design, counts, log_offset, 0.0, edges)
+
+    eps = 1e-6
+    numerical_grad = np.zeros(p)
+    for j in range(p):
+        bp, bm = beta.copy(), beta.copy()
+        bp[j] += eps
+        bm[j] -= eps
+        numerical_grad[j] = (nll_at(bp) - nll_at(bm)) / (2.0 * eps)
+
+    assert np.allclose(analytic_grad, numerical_grad, atol=1e-3, rtol=1e-4)
