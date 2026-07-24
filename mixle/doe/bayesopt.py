@@ -28,6 +28,73 @@ from mixle.doe._contracts import Acquisition, Surrogate
 from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
 
 
+def _require_finite_scalar(value: Any, name: str) -> float:
+    """Coerce ``value`` to a Python ``float`` and require it to be finite; raise ``ValueError`` if not.
+
+    Catches both non-finite scalars (NaN/Inf) and non-scalars (arrays of length != 1, strings, ``None``,
+    ...) that ``float()`` itself rejects with a bare ``TypeError``/``ValueError`` -- renamed here to a
+    message that identifies which argument (``name``) and what was actually passed.
+    """
+    try:
+        as_float = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite scalar, got {value!r}.") from exc
+    if not np.isfinite(as_float):
+        raise ValueError(f"{name} must be finite, got {value!r}.")
+    return as_float
+
+
+def _validate_acquisition_inputs(
+    mean: Any,
+    std: Any,
+    best: float,
+    *,
+    xi: float | None = None,
+    kappa: float | None = None,
+    rng: Any = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate the common posterior-moment / acquisition-parameter contract; return float64 ``(mean, std)``.
+
+    Every built-in acquisition (EI, log-EI, PI, UCB, Thompson) calls this first, so a malformed input is
+    rejected with a clear message instead of silently accepted or broadcast (MXR-080-0169):
+
+    * ``mean``/``std`` convert to float64 arrays that must have the SAME shape -- no silent broadcasting
+      of a mismatched pair.
+    * Every ``mean``/``std`` entry must be finite (no NaN/Inf).
+    * ``std`` must be non-negative. A negative std is an invalid upstream input, not a legitimate
+      deterministic (``std == 0``) one -- :func:`probability_of_improvement` used to test ``std <=
+      threshold`` and so silently treated negative std as deterministic; this closes that off for every
+      acquisition, not just PI.
+    * ``best`` must be a finite scalar.
+    * ``xi`` / ``kappa`` (only checked when the caller passes one -- not every acquisition takes both)
+      must be a finite, non-negative scalar: both are exploration/exploitation margins, never
+      meaningfully negative.
+    * ``rng`` (only checked when the caller passes one) must be a genuine ``numpy.random`` generator
+      (``RandomState`` or ``Generator``) when given, not an arbitrary object.
+    """
+    mean = np.asarray(mean, dtype=np.float64)
+    std = np.asarray(std, dtype=np.float64)
+    if mean.shape != std.shape:
+        raise ValueError(f"mean and std must have the same shape; got {mean.shape} and {std.shape}.")
+    if not np.all(np.isfinite(mean)):
+        raise ValueError("mean must be finite (no NaN/Inf).")
+    if not np.all(np.isfinite(std)):
+        raise ValueError("std must be finite (no NaN/Inf).")
+    if np.any(std < 0.0):
+        raise ValueError(
+            "std must be non-negative; a negative predictive std is an invalid input, not a "
+            "deterministic (std == 0) one."
+        )
+    _require_finite_scalar(best, "best")
+    if xi is not None and _require_finite_scalar(xi, "xi") < 0.0:
+        raise ValueError(f"xi must be non-negative, got {xi!r}.")
+    if kappa is not None and _require_finite_scalar(kappa, "kappa") < 0.0:
+        raise ValueError(f"kappa must be non-negative, got {kappa!r}.")
+    if rng is not None and not isinstance(rng, (np.random.RandomState, np.random.Generator)):
+        raise ValueError(f"rng must be a numpy RandomState or Generator instance, got {type(rng).__name__!r}.")
+    return mean, std
+
+
 def expected_improvement(
     mean: Any, std: Any, best: float, xi: float = 0.0, *, maximize: bool = False, **_: Any
 ) -> np.ndarray:
@@ -38,9 +105,11 @@ def expected_improvement(
     Points with (near-)zero predictive ``std`` get the DETERMINISTIC LIMIT ``max(improve, 0)`` -- a
     point-mass posterior has no uncertainty to average over, so the "expected" improvement is exactly
     the guaranteed one, not 0. Higher is better (maximized over candidates).
+
+    Raises ``ValueError`` if ``std`` is negative/non-finite, ``mean``/``std`` shapes disagree,
+    ``mean``/``best`` are non-finite, or ``xi`` is negative/non-finite.
     """
-    mean = np.asarray(mean, dtype=np.float64)
-    std = np.asarray(std, dtype=np.float64)
+    mean, std = _validate_acquisition_inputs(mean, std, best, xi=xi)
     improve = (mean - best - xi) if maximize else (best - mean - xi)
     ei = np.zeros_like(std)
     pos = std > 1.0e-12
@@ -69,9 +138,11 @@ def log_expected_improvement(
     it does (see :func:`expected_improvement`). Higher is better. The ``z >= 0`` branch is the direct
     well-conditioned form; the ``z < 0`` tail uses the scaled complementary error function ``erfcx``
     (``Phi(z)/phi(z) = sqrt(pi/2) erfcx(-z/sqrt2)``), which is bounded there and so never under/overflows.
+
+    Raises ``ValueError`` if ``std`` is negative/non-finite, ``mean``/``std`` shapes disagree,
+    ``mean``/``best`` are non-finite, or ``xi`` is negative/non-finite.
     """
-    mean = np.asarray(mean, dtype=np.float64)
-    std = np.asarray(std, dtype=np.float64)
+    mean, std = _validate_acquisition_inputs(mean, std, best, xi=xi)
     improve = (mean - best - xi) if maximize else (best - mean - xi)
     out = np.full(std.shape, -np.inf, dtype=np.float64)
     pos = std > 1.0e-300
@@ -101,11 +172,15 @@ def probability_of_improvement(
 
     The probability that a candidate improves on the incumbent ``best`` by at least ``xi``:
     ``P(f < best - xi)`` for minimization, ``P(f > best + xi)`` for maximization. Where the
-    predictive ``std`` is zero the improvement is deterministic (1.0 if it improves, else 0.0).
+    predictive ``std`` is zero the improvement is deterministic (1.0 if it improves, else 0.0). A
+    NEGATIVE ``std`` is rejected outright (see :func:`_validate_acquisition_inputs`) rather than
+    treated as this same deterministic case -- it is an invalid input, not a zero-variance one.
     Higher is better.
+
+    Raises ``ValueError`` if ``std`` is negative/non-finite, ``mean``/``std`` shapes disagree,
+    ``mean``/``best`` are non-finite, or ``xi`` is negative/non-finite.
     """
-    mean = np.asarray(mean, dtype=np.float64)
-    std = np.asarray(std, dtype=np.float64)
+    mean, std = _validate_acquisition_inputs(mean, std, best, xi=xi)
     improve = (mean - best - xi) if maximize else (best - mean - xi)
     pi = np.zeros_like(std)
     pos = std > 1.0e-12
@@ -123,9 +198,11 @@ def upper_confidence_bound(
     when maximizing, and ``kappa * std - mean`` when minimizing (so picking the largest merit
     selects the most promising low-objective point). ``kappa >= 0`` trades exploration for
     exploitation; ``best`` is ignored. Higher is better.
+
+    Raises ``ValueError`` if ``std`` is negative/non-finite, ``mean``/``std`` shapes disagree,
+    ``mean``/``best`` are non-finite, or ``kappa`` is negative/non-finite.
     """
-    mean = np.asarray(mean, dtype=np.float64)
-    std = np.asarray(std, dtype=np.float64)
+    mean, std = _validate_acquisition_inputs(mean, std, best, kappa=kappa)
     return (mean + kappa * std) if maximize else (kappa * std - mean)
 
 
@@ -140,10 +217,13 @@ def thompson_sampling(
     proportion to posterior probability, with no exploration knob to tune. This is the low-cost *marginal*
     variant (independent per-candidate draws, ignoring the GP's cross-candidate correlation); pass an
     ``rng`` (via ``acq_kwargs``) for reproducible proposals. ``best`` is ignored.
+
+    Raises ``ValueError`` if ``std`` is negative/non-finite, ``mean``/``std`` shapes disagree,
+    ``mean``/``best`` are non-finite, or ``rng`` is neither ``None`` nor a ``numpy.random``
+    ``RandomState``/``Generator``.
     """
+    mean, std = _validate_acquisition_inputs(mean, std, best, rng=rng)
     rng = rng if rng is not None else np.random.RandomState()
-    mean = np.asarray(mean, dtype=np.float64)
-    std = np.asarray(std, dtype=np.float64)
     draw = mean + std * rng.standard_normal(mean.shape)
     return draw if maximize else -draw
 
