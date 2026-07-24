@@ -24,6 +24,8 @@ problems the serial path is used automatically to avoid pickling overhead.
 import os
 from typing import Any
 
+import numpy as np
+
 from mixle.utils.parallel.planner import _split_range
 
 
@@ -43,10 +45,51 @@ def _mp_context():
         return mp.get_context()
 
 
+def _require_exact_positive_int(value: Any, name: str, *, minimum: int = 1) -> int:
+    """Validate ``value`` is an exact integer ``>= minimum``; raise instead of truncating/coercing.
+
+    Local copy of the ``mixle.doe.designs._require_exact_positive_int`` convention -- not imported
+    directly, since this is a distribution-kernel module and a two-line validator does not justify a
+    new ``mixle.enumeration -> mixle.doe`` package dependency. Every worker/rank/count control in this
+    module previously either clamped a non-positive value up to 1 (``max(1, ...)``) or truncated a
+    fractional one (``int(...)``), silently changing a caller's request instead of rejecting it -- a
+    caller passing ``workers=-5`` or ``start=2.5`` almost certainly has a bug, and clamping/truncating
+    hides that bug rather than surfacing it (MXR-080-0209). Accepts a genuine Python/numpy integer, or
+    a float/numpy float that is finite and has no fractional part (``5.0`` is fine, ``5.5`` is not);
+    rejects ``bool`` (never a meaningful count) and non-numeric types.
+    """
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer, got bool.")
+    if isinstance(value, (int, np.integer)):
+        ivalue = int(value)
+    elif isinstance(value, (float, np.floating)):
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite, got {value!r}.")
+        if float(value) != int(value):
+            raise ValueError(f"{name} must be an exact integer, got {value!r}.")
+        ivalue = int(value)
+    else:
+        raise TypeError(f"{name} must be an integer, got {type(value).__name__}.")
+    if ivalue < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {ivalue}.")
+    return ivalue
+
+
+# Closed set of recognized `backend` spellings for `distributed_unrank`. A caller's selection must be
+# honored or rejected outright, never silently reinterpreted -- see `distributed_unrank` (MXR-080-0209).
+_VALID_BACKENDS = ("local", "spark")
+
+
 def resolve_workers(num_workers: int | None = None) -> int:
-    """Resolve a worker count from an explicit request, Resources, or the CPU count."""
+    """Resolve a worker count from an explicit request, Resources, or the CPU count.
+
+    An explicit ``num_workers`` must be an exact positive integer: non-positive or fractional values
+    are rejected rather than silently clamped to 1 or truncated (MXR-080-0209). ``None`` defers to
+    auto-detection from ``Resources`` or the CPU count, which are not caller-supplied values and so
+    are still floored at 1 the way they always were (a sandboxed ``os.cpu_count()`` can return 0/None).
+    """
     if num_workers is not None:
-        return max(1, int(num_workers))
+        return _require_exact_positive_int(num_workers, "num_workers")
     try:
         from mixle.utils.parallel.planner import Resources
 
@@ -89,7 +132,7 @@ class ConvolutionExecutor:
 
     def __init__(self, num_workers: int | None = None, min_parallel_width: int = 2048) -> None:
         self.num_workers = resolve_workers(num_workers)
-        self.min_parallel_width = int(min_parallel_width)
+        self.min_parallel_width = _require_exact_positive_int(min_parallel_width, "min_parallel_width", minimum=0)
         self._pool = None
 
     def __enter__(self) -> "ConvolutionExecutor":
@@ -157,10 +200,20 @@ def distributed_unrank(
     """Unrank the rank range [start, start+count) in parallel, returning items in rank order.
 
     Each worker rebuilds the index from ``dist`` (picklable) and unranks its assigned sub-range.
-    ``count=None`` unranks to the end of the index. ``backend`` is ``'local'`` (process pool) or
-    ``'spark'`` (requires ``spark_context``). The result equals the serial enumeration order.
+    ``count=None`` unranks to the end of the index. ``backend`` must be exactly ``'local'`` (process
+    pool) or ``'spark'`` (requires ``spark_context``); any other spelling -- including a near-miss
+    typo like ``'Spark'``, ``'spark '``, or ``'pyspark'`` -- is rejected rather than silently falling
+    back to local execution, which could otherwise run cluster-sized work on the caller's own machine
+    with no indication the requested backend was ignored (MXR-080-0209). ``start`` and an explicit
+    ``count`` must be exact non-negative integers, validated before they reach the range splitter.
+    The result equals the serial enumeration order.
     """
+    if backend not in _VALID_BACKENDS:
+        raise ValueError(f"backend must be one of {_VALID_BACKENDS!r}, got {backend!r}.")
     workers = resolve_workers(num_workers)
+    start = _require_exact_positive_int(start, "start", minimum=0)
+    if count is not None:
+        count = _require_exact_positive_int(count, "count", minimum=0)
     if count is None:
         # Build once to learn the size (the workers rebuild independently).
         index = dist.count_budget_index(budget_bits, bin_width_bits=bin_width_bits, oversample=oversample)
@@ -176,6 +229,7 @@ def distributed_unrank(
         pairs = rdd.flatMap(lambda r: _unrank_chunk(dist, bb, bw, ov, r[0], r[1])).collect()
         return pairs
 
+    # backend == "local": the only other member of _VALID_BACKENDS, guaranteed by the check above.
     if workers <= 1 or len(ranges) <= 1:
         out: list[tuple[Any, float]] = []
         for lo, hi in ranges:
