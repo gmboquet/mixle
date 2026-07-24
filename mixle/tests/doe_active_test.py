@@ -7,11 +7,13 @@ import warnings
 import numpy as np
 
 from mixle.doe.active import (
+    ExpectedInformationGainEstimate,
     active_learning_design,
     alc_scores,
     alm_scores,
     expected_information_gain_linear,
     expected_information_gain_nmc,
+    expected_information_gain_nmc_estimate,
     propose_active_learning,
 )
 
@@ -172,6 +174,152 @@ class LinearEigValidationTest(unittest.TestCase):
         m_pxp = np.eye(p) + (prior_cov @ (f.T @ f)) / (noise**2)
         _, logdet_pxp = np.linalg.slogdet(m_pxp)
         self.assertAlmostEqual(value, 0.5 * logdet_pxp, places=8)
+
+
+class NmcEigValidationTest(unittest.TestCase):
+    """MXR-080-0160: draw-contract validation for the nested-Monte-Carlo EIG estimator."""
+
+    def _loglik(self, thetas, y):
+        thetas = np.atleast_2d(thetas)
+        return -0.5 * np.sum((thetas - y) ** 2, axis=-1)
+
+    def _simulate(self, theta, rng):
+        return theta + rng.normal(scale=0.1, size=np.shape(theta))
+
+    def _good_sampler(self, rng, n):
+        return rng.normal(size=(n, 1))
+
+    def test_rejects_outer_sampler_shortfall(self):
+        def short_sampler(rng, n):
+            return rng.normal(size=(max(n - 2, 1), 1))
+
+        with self.assertRaises(ValueError):
+            expected_information_gain_nmc(short_sampler, self._loglik, self._simulate, n_outer=8, n_inner=6, seed=0)
+
+    def test_rejects_inner_sampler_shortfall(self):
+        calls = {"n": 0}
+
+        def short_inner_sampler(rng, n):
+            calls["n"] += 1
+            if calls["n"] == 1:  # the one outer-draw call: exact
+                return rng.normal(size=(n, 1))
+            return rng.normal(size=(max(n - 1, 0), 1))  # every inner-draw call: short by 1
+
+        with self.assertRaises(ValueError):
+            expected_information_gain_nmc(
+                short_inner_sampler, self._loglik, self._simulate, n_outer=4, n_inner=6, seed=0
+            )
+
+    def test_rejects_empty_inner_sample_with_a_clear_error_not_an_opaque_crash(self):
+        calls = {"n": 0}
+
+        def empty_inner_sampler(rng, n):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return rng.normal(size=(n, 1))
+            return np.empty((0, 1))
+
+        with self.assertRaises(ValueError) as ctx:
+            expected_information_gain_nmc(
+                empty_inner_sampler, self._loglik, self._simulate, n_outer=3, n_inner=5, seed=0
+            )
+        # a clear validation error naming the oracle/shape mismatch -- not a bare numpy internal error
+        # surfacing deep inside logaddexp.reduce (or a silent NaN, on numpy versions where
+        # logaddexp.reduce([]) returns its -inf identity instead of raising).
+        self.assertIn("prior_sampler", str(ctx.exception))
+
+    def test_rejects_non_2d_outer_draws(self):
+        def flat_sampler(rng, n):
+            return rng.normal(size=n)  # 1-D, not the documented (n, k)
+
+        with self.assertRaises(ValueError):
+            expected_information_gain_nmc(flat_sampler, self._loglik, self._simulate, n_outer=5, n_inner=6, seed=0)
+
+    def test_rejects_non_finite_outer_draws(self):
+        def nan_sampler(rng, n):
+            draws = rng.normal(size=(n, 1))
+            draws[0, 0] = np.nan
+            return draws
+
+        with self.assertRaises(ValueError):
+            expected_information_gain_nmc(nan_sampler, self._loglik, self._simulate, n_outer=3, n_inner=6, seed=0)
+
+    def test_rejects_wrong_cardinality_likelihood(self):
+        def bad_loglik(thetas, y):
+            thetas = np.atleast_2d(thetas)
+            vals = -0.5 * np.sum((thetas - y) ** 2, axis=-1)
+            return vals[:-1] if vals.size > 1 else vals  # drop one row's log-density (inner calls only)
+
+        with self.assertRaises(ValueError):
+            expected_information_gain_nmc(self._good_sampler, bad_loglik, self._simulate, n_outer=3, n_inner=6, seed=0)
+
+    def test_rejects_non_finite_true_log_density(self):
+        def nan_loglik(thetas, y):
+            thetas = np.atleast_2d(thetas)
+            out = np.asarray(-0.5 * np.sum((thetas - y) ** 2, axis=-1), dtype=np.float64)
+            out[0] = np.nan
+            return out
+
+        with self.assertRaises(ValueError):
+            expected_information_gain_nmc(self._good_sampler, nan_loglik, self._simulate, n_outer=3, n_inner=6, seed=0)
+
+    def test_rejects_non_finite_inner_log_density(self):
+        calls = {"n": 0}
+
+        def nan_inner_loglik(thetas, y):
+            calls["n"] += 1
+            thetas = np.atleast_2d(thetas)
+            out = np.asarray(-0.5 * np.sum((thetas - y) ** 2, axis=-1), dtype=np.float64)
+            if calls["n"] > 1 and out.size:  # first call is the true log-density; corrupt inner calls only
+                out[0] = np.nan
+            return out
+
+        with self.assertRaises(ValueError):
+            expected_information_gain_nmc(
+                self._good_sampler, nan_inner_loglik, self._simulate, n_outer=3, n_inner=6, seed=0
+            )
+
+    def test_rejects_non_finite_simulated_observation(self):
+        def bad_simulate(theta, rng):
+            return np.array([np.inf])
+
+        with self.assertRaises(ValueError):
+            expected_information_gain_nmc(self._good_sampler, self._loglik, bad_simulate, n_outer=3, n_inner=6, seed=0)
+
+    def test_negative_control_well_behaved_estimate_matches_closed_form_with_reported_uncertainty(self):
+        f, sigma = 1.5, 0.7
+        analytic = 0.5 * np.log(1 + f**2 / sigma**2)
+
+        def prior(rng, n):
+            return rng.standard_normal((n, 1))
+
+        def loglik(thetas, y):
+            return -0.5 * ((y - thetas[:, 0] * f) / sigma) ** 2 - np.log(sigma * np.sqrt(2 * np.pi))
+
+        def sim(theta, rng):
+            return np.array([theta[0] * f + sigma * rng.standard_normal()])
+
+        est = expected_information_gain_nmc_estimate(prior, loglik, sim, n_outer=4000, n_inner=4000, seed=0)
+        self.assertIsInstance(est, ExpectedInformationGainEstimate)
+        self.assertAlmostEqual(est.value, analytic, delta=0.05)
+        self.assertTrue(np.isfinite(est.standard_error))
+        self.assertGreater(est.standard_error, 0.0)
+        self.assertLess(est.ci_low, est.value)
+        self.assertLess(est.value, est.ci_high)
+        self.assertEqual(est.n_outer, 4000)
+        self.assertEqual(est.n_inner, 4000)
+        # the thin float-returning wrapper must return exactly the point estimate's value
+        point = expected_information_gain_nmc(prior, loglik, sim, n_outer=4000, n_inner=4000, seed=0)
+        self.assertEqual(point, est.value)
+
+    def test_single_outer_replicate_reports_nan_standard_error_not_a_crash(self):
+        est = expected_information_gain_nmc_estimate(
+            self._good_sampler, self._loglik, self._simulate, n_outer=1, n_inner=4, seed=0
+        )
+        self.assertTrue(np.isfinite(est.value))
+        self.assertTrue(np.isnan(est.standard_error))
+        self.assertTrue(np.isnan(est.ci_low))
+        self.assertTrue(np.isnan(est.ci_high))
 
 
 @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")

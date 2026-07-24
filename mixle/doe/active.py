@@ -14,7 +14,8 @@ Bayesian optimal design (parametric model):
 * :func:`expected_information_gain_linear` -- the exact EIG of a linear-Gaussian model (= Bayesian
   D-optimality), in closed form.
 * :func:`expected_information_gain_nmc` -- the nested-Monte-Carlo EIG for a general nonlinear simulator,
-  from a prior sampler and a log-likelihood.
+  from a prior sampler and a log-likelihood; :func:`expected_information_gain_nmc_estimate` returns the
+  same point value together with its Monte Carlo standard error and confidence interval.
 
 The GP-based functions fit the torch surrogate; the EIG functions are pure NumPy.
 """
@@ -22,7 +23,7 @@ The GP-based functions fit the torch surrogate; the EIG functions are pure NumPy
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from numpy.random import RandomState
@@ -35,7 +36,7 @@ def _positive_int(name: str, value: Any) -> int:
     """Validate that ``value`` is an exact, finite, positive integer count and return it as ``int``.
 
     Rejects ``bool``, non-numeric types, non-finite values, fractional values, and non-positive values
-    -- MXR-080-0158 found budget/draw counts silently truncated (a fractional count via a bare
+    -- MXR-080-0158/0160 found budget/draw counts silently truncated (a fractional count via a bare
     ``int()`` cast) or silently substituted (a zero count replaced by a default) instead of rejected.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
@@ -259,6 +260,123 @@ def expected_information_gain_linear(
     return 0.5 * logdet
 
 
+class ExpectedInformationGainEstimate(NamedTuple):
+    """A nested-Monte-Carlo EIG estimate, reported with its own Monte Carlo uncertainty (MXR-080-0160).
+
+    ``value`` is the point estimate: the mean, over ``n_outer`` independent outer replicates, of
+    ``log p(y_i|theta_i) - log E_theta'[p(y_i|theta')]`` (Ryan 2003). ``standard_error`` is the Monte
+    Carlo standard error of that mean (the outer replicates' sample standard deviation / ``sqrt(n_outer)``;
+    ``nan`` when ``n_outer == 1``, since a single replicate carries no information about its own spread).
+    ``ci_low``/``ci_high`` are an approximate two-sided 95% confidence interval (``value +- 1.96 *
+    standard_error``) -- a normal approximation to the outer average that does not capture the *inner*
+    estimate's own (asymptotically vanishing, but nonzero at finite ``n_inner``) bias; increase
+    ``n_inner`` to shrink that separate source of error. ``n_outer``/``n_inner`` record the actual
+    (validated) draw counts used.
+    """
+
+    value: float
+    standard_error: float
+    ci_low: float
+    ci_high: float
+    n_outer: int
+    n_inner: int
+
+
+_EIG_CI95_Z = 1.959963984540054  # two-sided 95% normal-approximation multiplier
+
+
+def expected_information_gain_nmc_estimate(
+    prior_sampler: Callable[[RandomState, int], np.ndarray],
+    log_likelihood: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    simulate: Callable[[np.ndarray, RandomState], np.ndarray],
+    *,
+    n_outer: int = 256,
+    n_inner: int = 256,
+    seed: int | RandomState | None = None,
+) -> ExpectedInformationGainEstimate:
+    """Nested-Monte-Carlo expected information gain, with its Monte Carlo standard error (MXR-080-0160).
+
+    Estimates ``EIG = E_{theta, y}[ log p(y|theta) - log E_{theta'}[p(y|theta')] ]`` (Ryan 2003): draw
+    outer ``theta_i ~ prior`` and ``y_i ~ p(y|theta_i)`` via ``simulate``; the inner expectation is a
+    mean over ``n_inner`` prior draws of ``exp(log_likelihood(theta', y_i))``. ``prior_sampler(rng, n)``
+    returns ``(n, k)`` parameter draws; ``log_likelihood(thetas, y)`` returns a log-density per row of
+    ``thetas`` at the single observation ``y``; ``simulate(theta, rng)`` draws one ``y`` given ``theta``.
+
+    ``n_outer``/``n_inner`` must be exact positive integers. Every oracle call is validated against its
+    contract before use: ``prior_sampler`` must return exactly the requested number of draws, at *every*
+    call (outer and inner alike) -- a sampler that silently under-delivers used to shrink the estimate's
+    effective sample size without changing its reported one, and an empty inner sample used to fail deep
+    inside ``logaddexp.reduce`` instead of at the point the malformed draw actually appeared;
+    ``log_likelihood`` must return exactly one log-density per row it was given; and every draw and
+    log-density must be finite, checked at each oracle boundary so a non-finite value cannot silently
+    propagate into the final average.
+    """
+    n_outer = _positive_int("n_outer", n_outer)
+    n_inner = _positive_int("n_inner", n_inner)
+    rng = seed if isinstance(seed, RandomState) else RandomState(seed)
+
+    thetas_outer = np.asarray(prior_sampler(rng, n_outer), dtype=np.float64)
+    if thetas_outer.ndim != 2 or thetas_outer.shape[0] != n_outer:
+        raise ValueError(
+            f"prior_sampler(rng, {n_outer}) must return an (n, k) array of exactly {n_outer} outer "
+            f"draws, got shape {thetas_outer.shape}."
+        )
+    if not np.all(np.isfinite(thetas_outer)):
+        raise ValueError("prior_sampler returned non-finite outer draws.")
+
+    terms = np.empty(n_outer, dtype=np.float64)
+    for i, theta_i in enumerate(thetas_outer):
+        y_i = np.asarray(simulate(theta_i, rng), dtype=np.float64)
+        if not np.all(np.isfinite(y_i)):
+            raise ValueError(f"simulate returned a non-finite observation at outer draw {i}.")
+
+        ll_true_arr = np.atleast_1d(np.asarray(log_likelihood(theta_i[None, :], y_i), dtype=np.float64))
+        if ll_true_arr.size != 1:
+            raise ValueError(
+                "log_likelihood(theta[None, :], y) must return exactly 1 log-density, got "
+                f"{ll_true_arr.size} (outer draw {i})."
+            )
+        ll_true = float(ll_true_arr[0])
+        if not np.isfinite(ll_true):
+            raise ValueError(f"log_likelihood returned a non-finite log-density at outer draw {i}.")
+
+        thetas_inner = np.asarray(prior_sampler(rng, n_inner), dtype=np.float64)
+        if thetas_inner.ndim != 2 or thetas_inner.shape[0] != n_inner:
+            raise ValueError(
+                f"prior_sampler(rng, {n_inner}) must return an (n, k) array of exactly {n_inner} inner "
+                f"draws, got shape {thetas_inner.shape} (outer draw {i})."
+            )
+        if not np.all(np.isfinite(thetas_inner)):
+            raise ValueError(f"prior_sampler returned non-finite inner draws at outer draw {i}.")
+
+        ll_inner = np.asarray(log_likelihood(thetas_inner, y_i), dtype=np.float64).ravel()
+        if ll_inner.size != n_inner:
+            raise ValueError(
+                f"log_likelihood(thetas, y) must return exactly {n_inner} log-densities (one per inner "
+                f"draw), got {ll_inner.size} (outer draw {i})."
+            )
+        if not np.all(np.isfinite(ll_inner)):
+            raise ValueError(f"log_likelihood returned non-finite log-densities at outer draw {i}.")
+
+        log_evidence = float(np.logaddexp.reduce(ll_inner) - np.log(n_inner))
+        terms[i] = ll_true - log_evidence
+
+    value = float(np.sum(terms) / n_outer)
+    standard_error = float(np.std(terms, ddof=1) / np.sqrt(n_outer)) if n_outer > 1 else float("nan")
+    if np.isfinite(standard_error):
+        ci_low, ci_high = value - _EIG_CI95_Z * standard_error, value + _EIG_CI95_Z * standard_error
+    else:
+        ci_low, ci_high = float("nan"), float("nan")
+    return ExpectedInformationGainEstimate(
+        value=value,
+        standard_error=standard_error,
+        ci_low=ci_low,
+        ci_high=ci_high,
+        n_outer=n_outer,
+        n_inner=n_inner,
+    )
+
+
 def expected_information_gain_nmc(
     prior_sampler: Callable[[RandomState, int], np.ndarray],
     log_likelihood: Callable[[np.ndarray, np.ndarray], np.ndarray],
@@ -268,27 +386,15 @@ def expected_information_gain_nmc(
     n_inner: int = 256,
     seed: int | RandomState | None = None,
 ) -> float:
-    """Nested-Monte-Carlo expected information gain for a general (nonlinear) design.
+    """The nested-Monte-Carlo EIG point estimate.
 
-    Estimates ``EIG = E_{theta, y}[ log p(y|theta) - log E_{theta'}[p(y|theta')] ]`` (Ryan 2003): draw
-    outer ``theta_i ~ prior`` and ``y_i ~ p(y|theta_i)`` via ``simulate``; the inner expectation is a
-    mean over ``n_inner`` prior draws of ``exp(log_likelihood(theta', y_i))``. ``prior_sampler(rng, n)``
-    returns ``(n, k)`` parameter draws; ``log_likelihood(thetas, y)`` returns a log-density per row of
-    ``thetas`` at the single observation ``y``; ``simulate(theta, rng)`` draws one ``y`` given ``theta``.
+    A thin wrapper around :func:`expected_information_gain_nmc_estimate` for callers that only want the
+    point value; see its docstring for the full draw-contract validation (MXR-080-0160) and for how to
+    also get the Monte Carlo standard error / confidence interval.
     """
-    if int(n_outer) <= 0 or int(n_inner) <= 0:
-        raise ValueError("expected_information_gain_nmc requires n_outer > 0 and n_inner > 0.")
-    rng = seed if isinstance(seed, RandomState) else RandomState(seed)
-    thetas_outer = np.asarray(prior_sampler(rng, int(n_outer)), dtype=np.float64)
-    total = 0.0
-    for theta_i in thetas_outer:
-        y_i = np.asarray(simulate(theta_i, rng), dtype=np.float64)
-        ll_true = float(np.atleast_1d(log_likelihood(theta_i[None, :], y_i))[0])
-        thetas_inner = np.asarray(prior_sampler(rng, int(n_inner)), dtype=np.float64)
-        ll_inner = np.asarray(log_likelihood(thetas_inner, y_i), dtype=np.float64).ravel()
-        log_evidence = float(np.logaddexp.reduce(ll_inner) - np.log(ll_inner.size))
-        total += ll_true - log_evidence
-    return float(total / thetas_outer.shape[0])
+    return expected_information_gain_nmc_estimate(
+        prior_sampler, log_likelihood, simulate, n_outer=n_outer, n_inner=n_inner, seed=seed
+    ).value
 
 
 __all__ = [
@@ -297,5 +403,7 @@ __all__ = [
     "propose_active_learning",
     "active_learning_design",
     "expected_information_gain_linear",
+    "ExpectedInformationGainEstimate",
+    "expected_information_gain_nmc_estimate",
     "expected_information_gain_nmc",
 ]
