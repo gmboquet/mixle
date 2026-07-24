@@ -213,31 +213,34 @@ def _sage_ops(sage) -> dict[str, Callable[..., Any]]:
 
 def _sage_where(sage, cond, a, b):
     # Match the sympy lowering ``Piecewise((a, cond), (b, True))``: return ``a``
-    # where ``cond`` holds, else ``b``.  ``sage.SR(<relation>)`` is the relation
-    # itself, not a 0/1 indicator, so ``a*SR(cond) + b*(1-SR(cond))`` is wrong.
-    # Build a genuine 0/1 indicator from the relation via Heaviside of its
-    # residual ``lhs - rhs`` (relations carry ``.lhs()``/``.rhs()`` and an
-    # ``.operator()``); fall back to ``cases`` for non-inequality relations.
-    indicator = _sage_indicator(sage, cond)
-    return a * indicator + b * (1 - indicator)
-
-
-def _sage_indicator(sage, cond):
-    """Return a symbolic 0/1 indicator for the relation ``cond`` (1 when true)."""
-    import operator
-
-    op = getattr(cond, "operator", lambda: None)()
-    if op in (operator.lt, operator.le, operator.gt, operator.ge):
-        residual = cond.lhs() - cond.rhs()
-        # heaviside(0) == 1/2 in sage, so build a strict/non-strict step that
-        # is exactly 1 on the satisfied side and 0 otherwise.
-        if op in (operator.gt, operator.ge):
-            return sage.heaviside(residual) if op is operator.ge else 1 - sage.heaviside(-residual)
-        # lt / le: indicator on residual < 0.
-        return sage.heaviside(-residual) if op is operator.le else 1 - sage.heaviside(residual)
-    # Equality / inequality relations: encode via the symbolic ``cases`` form,
-    # which evaluates the boolean relation to a genuine 1/0 branch.
-    return sage.function("cases")(cond, sage.SR(1), sage.SR(0))
+    # where ``cond`` holds, else ``b`` -- for every input, including ties at a
+    # comparison boundary, exactly one branch (never a blend of both).
+    #
+    # A previous version built an arithmetic 0/1 "indicator" out of
+    # ``sage.heaviside(lhs - rhs)`` and blended ``a*indicator + b*(1-indicator)``.
+    # That is wrong at ``cond``'s own boundary (``lhs == rhs``) for every one of
+    # ``<``, ``<=``, ``>``, ``>=``: sage defines ``heaviside(0) == 1/2`` (the
+    # documented convention at the step's jump), so the blend evaluated to
+    # ``0.5*a + 0.5*b`` right at equality regardless of whether the comparison
+    # was strict or non-strict -- while ``where`` (matching ``numpy.where``)
+    # must still select exactly one branch there. No single continuous/
+    # algebraic formula built from one jump function can fix this: the
+    # indicator has to come from the relation's actual boolean truth value,
+    # not an arithmetic blend that is necessarily ambiguous at its own
+    # discontinuity.
+    #
+    # ``cases`` does exactly that: it evaluates ``cond`` itself (the genuine
+    # sage relation, e.g. ``x < y`` or ``x <= y``, built earlier by the
+    # ``lt``/``le``/``gt``/``ge`` handlers via Python's own comparison
+    # operators) to a definite True/False -- including exactly at the
+    # comparison boundary, where strict and non-strict relations already
+    # disagree by construction -- and selects the matching branch. ``True`` is
+    # the catch-all default, mirroring sympy's own ``Piecewise``'s
+    # ``(b, True)`` fallback pair. This also covers compound ``and``/``or``
+    # conditions and equality/inequality relations uniformly, since ``cases``
+    # evaluates any boolean-valued sage expression, not just simple order
+    # relations.
+    return sage.cases([(cond, a), (True, b)])
 
 
 def _sage_clip(sage, x, a_min, a_max):

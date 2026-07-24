@@ -199,6 +199,78 @@ class SymbolicSageExportTestCase(unittest.TestCase):
             expr = ar.two * ar.pi
             self.assertTrue(bool(to_sage(expr) == 2 * sage.pi))
 
+    # MXR-080-0153 regression: the sage `where` lowering used to build an
+    # arithmetic 0/1 "indicator" out of `heaviside(lhs - rhs)` and blend
+    # `a*indicator + b*(1-indicator)`. Since sage defines `heaviside(0) ==
+    # 1/2`, every one of `<`, `<=`, `>`, `>=` evaluated to `0.5*a + 0.5*b`
+    # exactly at the comparison boundary (`lhs == rhs`) instead of selecting
+    # a single branch -- regardless of whether the comparison was strict or
+    # non-strict. `where` must match `numpy.where` and pick exactly one
+    # branch for every input, including ties. The fix routes through sage's
+    # `cases`, which evaluates the relation's actual boolean truth value.
+
+    def test_where_boundary_selects_exact_branch(self):
+        sage = importlib.import_module(_SAGE_MODULE)
+        x = SYMBOLIC_ENGINE.symbol("x")
+        xs = sage.var("x")
+        a_val, b_val = 10.0, 20.0
+        blended = 0.5 * (a_val + b_val)  # the give-away value from the old bug
+        # (comparison at x == 5.0, expected single branch at that exact tie)
+        boundary_cases = [
+            ("<", x < 5.0, b_val),  # strict: boundary is FALSE -> else-branch
+            ("<=", x <= 5.0, a_val),  # non-strict: boundary is TRUE -> then-branch
+            (">", x > 5.0, b_val),  # strict: boundary is FALSE -> else-branch
+            (">=", x >= 5.0, a_val),  # non-strict: boundary is TRUE -> then-branch
+        ]
+        for name, cond, expected in boundary_cases:
+            with self.subTest(op=name):
+                expr = SYMBOLIC_ENGINE.where(cond, a_val, b_val)
+                # sanity: the native (non-sage) reference agrees on the expected branch
+                self.assertEqual(float(expr.evaluate({"x": 5.0})), expected)
+                sym = to_sage(expr)
+                via_sage = float(sym.subs({xs: 5.0}))
+                self.assertEqual(via_sage, expected)
+                self.assertNotAlmostEqual(via_sage, blended)
+
+    def test_where_selects_correct_branch_away_from_boundary(self):
+        sage = importlib.import_module(_SAGE_MODULE)
+        x = SYMBOLIC_ENGINE.symbol("x")
+        xs = sage.var("x")
+        a_val, b_val = 10.0, 20.0
+        comparators = {"<": x < 5.0, "<=": x <= 5.0, ">": x > 5.0, ">=": x >= 5.0}
+        for name, cond in comparators.items():
+            expr = SYMBOLIC_ENGINE.where(cond, a_val, b_val)
+            sym = to_sage(expr)
+            for xv in (4.0, 6.0):  # strictly below / strictly above the boundary
+                with self.subTest(op=name, x=xv):
+                    expected = float(expr.evaluate({"x": xv}))
+                    via_sage = float(sym.subs({xs: xv}))
+                    self.assertEqual(via_sage, expected)
+
+    def test_where_sage_export_has_no_raw_heaviside(self):
+        # Symbolic-form check: the exported expression must be a genuine
+        # piecewise/indicator (sage's `cases`), never a raw `heaviside` call
+        # left over from the old blended-arithmetic lowering.
+        x = SYMBOLIC_ENGINE.symbol("x")
+        expr = SYMBOLIC_ENGINE.where(x >= 0.0, x + 1.0, x - 1.0)
+        text = str(to_sage(expr))
+        self.assertNotIn("heaviside", text)
+        self.assertIn("cases", text)
+
+    def test_non_conditional_export_unaffected_by_where_fix(self):
+        # Negative control: a plain arithmetic expression with no `where` or
+        # comparison anywhere in the tree must export exactly as before --
+        # this change only touches the `where` lowering.
+        sage = importlib.import_module(_SAGE_MODULE)
+        x = SYMBOLIC_ENGINE.symbol("x")
+        xs = sage.var("x")
+        expr = ar.log(ar.exp(x) + 1.0)
+        sym = to_sage(expr)
+        for xv in (-2.0, 0.0, 3.5):
+            native = float(expr.evaluate({"x": xv}))
+            via_sage = float(sym.subs({xs: xv}))
+            self.assertAlmostEqual(native, via_sage, places=10)
+
 
 if __name__ == "__main__":
     unittest.main()
