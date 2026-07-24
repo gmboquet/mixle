@@ -223,6 +223,51 @@ class SystemFaultModesTest(unittest.TestCase):
         self.assertIn("store unreachable", report["degraded_reason"])
 
 
+class SystemFallbackScopeTest(unittest.TestCase):
+    """HIGH: the teacher_down fallback must retrieve using the QUERY's own scope, never
+    SystemConfig.scope -- a degraded answer must not silently cross a tenant/evidence scope boundary
+    the query itself did not declare, exactly on the path a caller is least likely to double check."""
+
+    def _broken_teacher(self, prompt: str) -> str:
+        raise ConnectionError("teacher endpoint unreachable")
+
+    def test_fallback_retrieves_from_the_querys_scope_not_the_configs_default(self):
+        store = Substrate()
+        store.put(SubstrateItem(kind="text", text="query-scope-secret-material", scope="query-scope"))
+        store.put(SubstrateItem(kind="text", text="config-scope-public-material", scope="config-scope"))
+        system = System(SystemConfig(teacher=self._broken_teacher, store=store, scope="config-scope"))
+
+        reply, receipt = system.answer(Query("status", scope="query-scope"))
+
+        self.assertIn("query-scope-secret-material", reply)
+        self.assertNotIn("config-scope-public-material", reply)
+        self.assertEqual(receipt["degraded_mode"], "teacher_down")
+
+    def test_fallback_never_crosses_into_the_configs_scope_even_when_only_it_has_content(self):
+        # the sharpest version of the bug: nothing lives in the query's own scope, so the OLD code would
+        # silently succeed by reading config-scope material instead; the fixed code must fail honestly
+        store = Substrate()
+        store.put(SubstrateItem(kind="text", text="config-scope-only-material", scope="config-scope"))
+        system = System(SystemConfig(teacher=self._broken_teacher, store=store, scope="config-scope"))
+
+        reply, receipt = system.answer(Query("status", scope="query-scope"))
+
+        self.assertIsNone(reply)
+        self.assertEqual(receipt["status"], "failed")
+
+    # negative control: when query.scope == config.scope (the common/default case, also exercised by
+    # SystemFaultModesTest above) the fallback must still retrieve normally -- the fix must not simply
+    # break retrieval across the board
+    def test_fallback_still_retrieves_when_query_and_config_scope_coincide(self):
+        store = Substrate()
+        store.put(SubstrateItem(kind="text", text="the rollout finished on schedule", scope="team-x"))
+        system = System(SystemConfig(teacher=self._broken_teacher, store=store, scope="team-x"))
+
+        reply, receipt = system.answer(Query("rollout status", scope="team-x"))
+        self.assertIn("rollout finished on schedule", reply)
+        self.assertEqual(receipt["degraded_mode"], "teacher_down")
+
+
 class SystemIngestTest(unittest.TestCase):
     def test_ingest_with_no_store_is_an_honest_noop(self):
         system = System(SystemConfig(teacher=_fake_teacher))
