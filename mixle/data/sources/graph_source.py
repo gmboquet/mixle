@@ -97,6 +97,51 @@ def _networkx_like_to_adjacency(graph: Any) -> tuple[np.ndarray, np.ndarray | No
     return adj, None
 
 
+def _require_exact_int(value: Any, label: str) -> int:
+    """Return ``value`` as a Python ``int``, raising unless it is an exact integer.
+
+    Checked on the ORIGINAL value before any cast: bare ``int(0.9)`` silently discards the
+    fractional part rather than rejecting it, which is how a fractional edge endpoint used to
+    silently change graph topology (the edge ``(0.9, 1.9)`` becoming the integer edge ``(0, 1)``).
+    ``int()`` on a non-finite Python/NumPy float already raises (``ValueError`` for NaN,
+    ``OverflowError`` for +/-inf), but the check is made explicit here so the message is specific
+    to the field involved and consistent with :func:`_require_exact_int_array`, which -- for
+    array-shaped input -- cannot rely on that same implicit behavior; see its docstring.
+    """
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    f = float(value)
+    if not np.isfinite(f):
+        raise ValueError("%s must be finite (got %r)." % (label, value))
+    if f != math.trunc(f):
+        raise ValueError("%s must be an exact integer (got %r)." % (label, value))
+    return int(f)
+
+
+def _require_exact_int_array(values: Any, label: str) -> np.ndarray:
+    """Return ``values`` as an ``int64`` array, raising unless every entry is an exact integer.
+
+    Mirrors :func:`_require_exact_int` for array-shaped input (block assignments). Checked on the
+    ORIGINAL values before any cast: a plain ``dtype=np.int64`` cast silently truncates fractional
+    entries (``[0.9, 1.9]`` becoming ``[0, 1]``), and -- when ``values`` is already a NumPy float
+    array rather than a Python list, e.g. a caller passing back an assignments array it holds --
+    silently maps non-finite entries to an unspecified, platform-dependent integer instead of
+    raising (``nan`` -> ``0``, ``inf`` -> ``np.iinfo(np.int64).max``, observed via ``.astype``);
+    that path is otherwise never checked because ``np.asarray(python_list, dtype=np.int64)`` and
+    ``existing_float_array.astype(np.int64)`` disagree on NaN/inf handling even though they use
+    the same target dtype.
+    """
+    arr = np.asarray(values)
+    if np.issubdtype(arr.dtype, np.integer) or arr.dtype == np.bool_:
+        return arr.astype(np.int64)
+    farr = arr.astype(np.float64)
+    if farr.size and not np.all(np.isfinite(farr)):
+        raise ValueError("%s must be finite." % label)
+    if farr.size and not np.array_equal(farr, np.trunc(farr)):
+        raise ValueError("%s must be exact integers." % label)
+    return farr.astype(np.int64)
+
+
 def _edge_list_to_adjacency(edges: Sequence[Any], num_nodes: int, directed: bool) -> np.ndarray:
     n = int(num_nodes)
     if n < 0:
@@ -105,8 +150,8 @@ def _edge_list_to_adjacency(edges: Sequence[Any], num_nodes: int, directed: bool
     for edge in edges:
         if len(edge) < 2:
             raise ValueError("edge entries must contain at least two node indices.")
-        i = int(edge[0])
-        j = int(edge[1])
+        i = _require_exact_int(edge[0], "edge node index")
+        j = _require_exact_int(edge[1], "edge node index")
         if i < 0 or i >= n or j < 0 or j >= n:
             raise ValueError("edge node indices must be in [0, num_nodes).")
         weight = float(edge[2]) if len(edge) >= 3 else 1.0
@@ -135,7 +180,7 @@ def _as_adjacency(adjacency: Any) -> np.ndarray:
 def _as_assignments(assignments: Any | None, n: int) -> np.ndarray | None:
     if assignments is None:
         return None
-    rv = np.asarray(assignments, dtype=np.int64)
+    rv = _require_exact_int_array(assignments, "block assignments")
     if rv.ndim != 1 or rv.shape[0] != n:
         raise ValueError("block assignments must be a length-%d one-dimensional sequence." % n)
     if rv.size and rv.min() < 0:
@@ -297,7 +342,10 @@ class GraphDataEncoder(DataSequenceEncoder):
         self.fallback_assignments = (
             None
             if fallback_assignments is None
-            else tuple(int(u) for u in np.asarray(fallback_assignments, dtype=np.int64))
+            # Same truncation hazard as _as_assignments (MXR-080-0060): validate exact integrality
+            # on the original values before casting, rather than a bare `dtype=np.int64` cast that
+            # silently truncates fractional entries or maps non-finite ones to an unspecified int.
+            else tuple(int(u) for u in _require_exact_int_array(fallback_assignments, "fallback_assignments"))
         )
 
     def __str__(self) -> str:
