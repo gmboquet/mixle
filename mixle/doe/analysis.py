@@ -384,19 +384,58 @@ def design_diagnostics(design, model, *, ref=None) -> dict:
 
     ``model`` is a model-matrix function such as :func:`mixle.doe.optimal.polynomial_features`. Use it on
     the *coded* design for meaningful efficiencies.
+
+    ``ref`` -- when given -- is a *reference design*: raw candidate points in the same ``(m, d)``
+    raw-factor-column form as ``design`` (e.g. a finer grid over the same region, or a wider region to
+    probe extrapolation risk), not a pre-built model matrix. It is passed through the same ``model``
+    used to build the design's own model matrix before its prediction variance is computed, so
+    ``g_efficiency`` compares like with like; a ``ref`` whose raw column count does not match
+    ``design``'s raises. ``g_efficiency`` is guaranteed to fall on the documented ``(0, 1]`` scale only
+    for the self-referential case (``ref=None``, or ``ref`` equal to ``design`` itself) -- a reference
+    set concentrated in a lower-variance region than the design's own points (e.g. just its centre) can
+    legitimately score above ``1.0``.
     """
     f = np.asarray(model(design), dtype=np.float64)
     n, p = f.shape
     m = f.T @ f
     sign, logdet = np.linalg.slogdet(m)
     d_eff = float(np.exp(logdet / p) / n) if sign > 0 else 0.0
+
+    if ref is None:
+        pts = f
+    else:
+        # `ref` is documented as a reference *design* -- raw points, symmetric with `design` -- not an
+        # already-expanded model matrix, so it must go through the same `model` transform `design`
+        # did. Using it directly here previously fed e.g. a single raw feature column straight into a
+        # two-column quadratic form below; numpy's einsum broadcasts a size-1 axis instead of raising a
+        # shape error, so the result was silently wrong (and unboundedly so), not a crash.
+        pts = np.asarray(model(ref), dtype=np.float64)
+        if pts.ndim != 2 or pts.shape[1] != p:
+            width = pts.shape[1] if pts.ndim == 2 else f"{pts.ndim}-d"
+            raise ValueError(
+                f"ref, once passed through `model`, has {width} feature column(s); expected {p} to "
+                "match the design's own model matrix. `ref` must be raw reference-design points (the "
+                "same kind of input as `design`), not a pre-built model matrix."
+            )
+
     try:
         inv = np.linalg.inv(m)
         a_eff = float(p / (n * np.trace(inv)))
         cond = float(np.linalg.cond(m))
-        pts = np.asarray(ref, dtype=np.float64) if ref is not None else f
-        pred_var = np.einsum("ij,jk,ik->i", pts, inv, pts)
-        g_eff = float(p / (n * np.max(pred_var)))
+        pred_var = np.clip(np.einsum("ij,jk,ik->i", pts, inv, pts), 0.0, None)
+        max_var = float(np.max(pred_var))
+        if max_var <= 0.0:
+            raise ValueError("prediction variance is exactly zero at every reference point; g_efficiency is undefined.")
+        g_eff = float(p / (n * max_var))
+        if ref is None and g_eff > 1.0 + 1e-6:
+            # Guaranteed by the hat-matrix identity trace(H) = p when the reference points ARE the
+            # design's own points (their leverages sum to p, so the max is always >= the average p/n).
+            # A violation here means the computation above regressed, not that this is a legitimate
+            # diagnostic to report.
+            raise RuntimeError(
+                f"g_efficiency {g_eff!r} exceeds its theoretical <=1 ceiling for a design compared "
+                "against its own points; this indicates a numerical bug, not a valid design."
+            )
     except np.linalg.LinAlgError:
         a_eff = g_eff = 0.0
         cond = float("inf")
