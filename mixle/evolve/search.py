@@ -58,8 +58,11 @@ def auto_select(
         criterion: ``'bic'`` (delegate to the automatic in-sample pick) or a proper-score
             :class:`~mixle.evolve.objective.Objective` (add the held-out verify gate on top of BIC).
         verify: when ``criterion`` is an :class:`Objective`, whether to run the held-out gate (the BIC
-            pick fitted on the train split is the *champion*; the BIC pick refitted on all data is the
-            *challenger*, promoted only if it wins out of sample).
+            pick fitted on the train split is the *champion*; the *challenger* is the same automatic
+            family refit on that SAME train split, so the comparison on the held-out data is genuinely
+            held out. Promotion deploys a fresh refit of the verified winner on all the data -- never
+            the object that was itself scored -- so a promoted model still benefits from the held-out
+            split's extra evidence).
         holdout: held-out fraction for the proper-score gate.
         seed: RNG seed for the split and sampled objectives.
         max_its: EM iterations for the fits.
@@ -67,8 +70,8 @@ def auto_select(
     Returns:
         An :class:`~mixle.evolve.improve.ImprovementResult`. For ``criterion='bic'`` it carries the
         fitted automatic model with ``verified=False`` (no out-of-sample test was requested). For an
-        :class:`Objective` criterion with ``verify=True`` it carries the gate verdict and
-        ``verified`` reflects whether the full-data model beats the train-only model out of sample.
+        :class:`Objective` criterion with ``verify=True`` it carries the gate verdict and ``verified``
+        reflects whether the train-only challenger beat the train-only champion out of sample.
     """
     if space is not None:
         raise NotImplementedError("auto_select: a typed search 'space' is a Phase-2 feature; pass space=None.")
@@ -108,8 +111,10 @@ def auto_select(
 
     train, val = _split(rows, holdout, seed)
     champion = _fit_auto(train, max_its=max_its)
-    # the challenger is the same automatic family warm-fitted on the full data (more data, same shape).
-    challenger = Refit(max_its=max_its).propose(champion, rows, ctx={"parent_hash": None}).model
+    # the challenger for the held-out comparison must be fit on the SAME split as the champion (train
+    # only): refitting on data that also contains `val` would let the challenger see the very
+    # observations it is later "tested" against, which is not a held-out comparison at all.
+    challenger = Refit(max_its=max_its).propose(champion, train, ctx={"parent_hash": None}).model
 
     verdict = challenger_beats_champion(
         champion,
@@ -119,17 +124,21 @@ def auto_select(
         seed=seed,
     )
     if verdict.promote:
+        # the held-out decision is now settled on a fair, train-only comparison. Only NOW is it safe
+        # to fold `val`'s extra evidence into the model actually deployed: a fresh refit of the
+        # VERIFIED winner on all the data, never the object that was itself scored as "held out".
+        deployed = Refit(max_its=max_its).propose(challenger, rows, ctx={"parent_hash": None}).model
         return ImprovementResult(
-            challenger,
+            deployed,
             True,
             "auto_select[%s]" % objective.name,
             verdict.delta,
             verdict,
-            {"criterion": objective.name, "family": type(challenger).__name__},
+            {"criterion": objective.name, "family": type(deployed).__name__},
             None,
         )
-    # the full-data fit did not beat the train-only fit out of sample -> keep the more-evidenced full fit
-    # but report it as unverified (no out-of-sample improvement over the train-only model).
+    # the train-only challenger did not beat the train-only champion out of sample -> keep the
+    # more-evidenced full fit but report it as unverified (no out-of-sample improvement was shown).
     full = _fit_auto(rows, max_its=max_its)
     return ImprovementResult(
         full,
