@@ -994,16 +994,75 @@ def _mass_histogram(dist, quantizer, max_fine_bucket):
     return hist
 
 
-def cumulative_probability(dist, value, oversample: int = 64, bin_width_bits: float = 1.0, smear: int | None = None):
-    """Exact cumulative probability ``G(x) = sum_{y: p(y) >= p(x)} p(y)`` for decomposable families.
+@dataclass
+class CumulativeProbabilityResult:
+    """Outcome of :func:`cumulative_probability`: G(x) plus what is, and isn't, certified about it.
+
+    Attributes:
+        probability: ``G(x) = sum_{y: p(y) >= p(x)} p(y)``, from the exact bulk mass-histogram prefix
+            plus the item-resolved tie band (see :func:`cumulative_probability`'s docstring). Clamped
+            into ``[0, 1]`` only when the raw bulk+band sum landed outside that range by no more than
+            this module's ``_ROUNDOFF_TOL`` roundoff budget -- see ``sum_defect``; a larger excursion
+            raises instead of being silently clamped (a real defect, not roundoff).
+        exact: True when nothing this function can detect compromises ``probability``: the count index
+            behind the tie band carries no approximation-search drop (``dropped_upper == 0.0``, true
+            for every exact-count family -- Composite/Sequence/Record/MarkovChain/leaf/Mixture/HMM --
+            and false only for an approximate-search index, e.g. an autoregressive ``branch_cap``
+            build). False means ``probability`` is a best-effort figure that may UNDERSTATE the truth
+            -- see ``dropped_upper``.
+        dropped_upper: a proven upper bound on the COUNT of in-band items an approximate-search
+            family's count index may have pruned before ever reaching this function -- 0.0 for every
+            exact-count family. Nonzero means ``probability`` may understate the true ``G(x)`` by up to
+            that many items' worth of (each individually small) probability.
+        index_truncated: the count index build's own ``truncated`` flag (True when the distribution's
+            support extends beyond the query's tie band -- the common case for any non-trivial query).
+            Exposed for transparency, but on its own it does NOT compromise ``probability``: the tie
+            band only touches buckets within the requested depth, which the count-DP contract
+            guarantees are correctly represented regardless of what lies beyond it. ``exact``/
+            ``dropped_upper`` are the actual soundness signals; this one is diagnostic only.
+        sum_defect: how far the raw bulk+band sum landed outside ``[0, 1]`` before any clamping -- 0.0
+            when the sum was already a valid probability, otherwise a value ``<= _ROUNDOFF_TOL``
+            (anything larger raises instead of reaching this result).
+    """
+
+    probability: float
+    exact: bool
+    dropped_upper: float
+    index_truncated: bool
+    sum_defect: float
+
+
+def cumulative_probability(
+    dist,
+    value,
+    oversample: int = 64,
+    bin_width_bits: float = 1.0,
+    smear: int | None = None,
+    tol: float = _EXACT_TIE_TOL,
+) -> CumulativeProbabilityResult:
+    """Cumulative probability ``G(x) = sum_{y: p(y) >= p(x)} p(y)`` for decomposable families.
 
     Structural and at arbitrary depth (no enumeration, no sampling): the bulk mass of all buckets
     strictly below the query's smear band comes from the exact :func:`_mass_histogram` prefix, and the
     band itself is resolved item-by-item (true ``log_density``) via the count index. Because each
     bucket's mass is the EXACT sum of its items' probabilities and the band absorbs the floored-bucket
-    smear (within ``#factors`` buckets), the result is exact up to floating-point roundoff -- verified
-    to 1e-16 on a 12-factor product, where the count-times-representative-probability shortcut returns
-    G > 1. Deterministic, so it complements :func:`density_rank` (whose deep path is Monte-Carlo).
+    smear (within ``#factors`` buckets), the result is exact up to floating-point roundoff for every
+    exact-count family -- verified to 1e-16 on a 12-factor product, where the count-times-
+    representative-probability shortcut returns G > 1. Deterministic, so it complements
+    :func:`density_rank` (whose deep path is Monte-Carlo).
+
+    Returns a :class:`CumulativeProbabilityResult`, not a bare float: an approximate-search family's
+    count index (e.g. an autoregressive ``branch_cap`` build) can silently prune in-band items WITHOUT
+    tripping the index's own ``truncated`` flag (that flag means something different and, for this
+    function, largely benign -- see the result's ``index_truncated`` doc), so the honest completeness
+    signal is the index's ``dropped_upper``, surfaced via ``result.exact``/``result.dropped_upper``
+    rather than folded into a single number the caller has no way to audit.
+
+    Args:
+        tol: Log-probability tie tolerance for the band's ``>=`` comparison. Defaults to this module's
+            ``1e-12`` "true rank" convention (see :func:`density_rank`'s ``tol``) -- NOT the previous
+            hardcoded ``1e-9``, which is 1000x looser and can pull in values that are genuinely, if only
+            slightly, less probable than ``value``.
     """
     from mixle.enumeration.quantization.core import Quantizer
 
@@ -1013,14 +1072,37 @@ def cumulative_probability(dist, value, oversample: int = 64, bin_width_bits: fl
     smear = oversample if smear is None else int(smear)
     mass = _mass_histogram(dist, q, bx + smear)
     bulk = sum(m for b, m in mass.items() if b < bx - smear)
-    index, _truncated = dist.quantized_count_index(q, max_fine_bucket=bx + smear)
+    index, truncated = dist.quantized_count_index(q, max_fine_bucket=bx + smear)
     band = 0.0
     for b in range(bx - smear, bx + smear + 1):
         for off in range(index.hist.count_at(b)):
             _v, lp = index.get_in_bucket(b, off)
-            if float(lp) >= t - 1.0e-9:
+            if float(lp) >= t - tol:
                 band += math.exp(float(lp))
-    return min(1.0, bulk + band)
+
+    raw = bulk + band
+    # A cumulative probability must lie in [0, 1]; clamping unconditionally would silently paper over
+    # a broken _mass_histogram/count-index pairing (duplicate counting, mismatched bucketing between
+    # the two independent structural computations, an unaccounted truncation) and still call the
+    # (wrong) result exact. Only a roundoff-scale excursion is clamped-and-blessed -- the same
+    # roundoff-vs-defect distinction density_rank's analytic-CDF path uses, sharing its _ROUNDOFF_TOL
+    # budget; anything larger is a real defect and is surfaced via `sum_defect` rather than hidden.
+    sum_defect = max(0.0, -raw, raw - 1.0)
+    if sum_defect > _ROUNDOFF_TOL:
+        raise ValueError(
+            "cumulative_probability's bulk+band sum is %.17g, outside [0, 1] by %.3e -- more than the "
+            "%.1e roundoff budget, so this is a defect (duplicate counting / a normalization bug / a "
+            "bucketing mismatch), not floating-point roundoff, and is not silently clamped"
+            % (raw, sum_defect, _ROUNDOFF_TOL)
+        )
+    dropped_upper = float(getattr(index, "dropped_upper", 0.0))
+    return CumulativeProbabilityResult(
+        probability=min(1.0, max(0.0, raw)),
+        exact=(dropped_upper == 0.0),
+        dropped_upper=dropped_upper,
+        index_truncated=truncated,
+        sum_defect=sum_defect,
+    )
 
 
 def count_dp_top_p(
