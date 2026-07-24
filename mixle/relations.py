@@ -349,6 +349,123 @@ class Design(NamedTuple):
     flow: np.ndarray
 
 
+def _find_negative_cycle(
+    big_cap: np.ndarray, big_cost: np.ndarray, flow: np.ndarray, m: int
+) -> list[tuple[int, int, bool]] | None:
+    """Bellman-Ford search for a negative-cost cycle in the residual graph implied by ``flow``.
+
+    Seeds every node's distance at 0, as if a virtual zero-cost source fed every node directly, so a
+    cycle is found wherever it sits in the graph rather than only along paths from one specific node.
+    Relaxes for ``m`` rounds; if a round still improves some node's distance, a negative cycle is
+    reachable from it (the standard "one round past convergence" test), and walking ``pred`` pointers
+    back ``m`` times from that node is guaranteed to land on the cycle itself -- only ``m`` distinct
+    nodes exist, so ``m`` hops must re-enter it. Uses ``big_cost`` (true arc costs) throughout, never
+    the main solve's Johnson's-algorithm reduced costs -- those are only kept non-negative along a
+    shortest-path tree from a single source and do not reliably preserve a cycle's sign in general.
+
+    Each ordered pair ``(u, v)`` can offer *two* distinct residual edges, and they must be costed
+    separately here rather than folded into one ``residual[u, v]`` capacity the way the main SSP solve
+    does: genuine unused capacity on a real arc ``u -> v`` costs ``big_cost[u, v]``, while "undo credit"
+    against flow already pushed the other way (``flow[v, u] > 0``) costs ``-big_cost[v, u]`` -- the
+    negation of what *that* arc charges, not whatever ``big_cost[u, v]`` happens to hold. Collapsing both
+    into a single scalar is harmless for Dijkstra/SSP, which only ever consumes capacity forward, but it
+    breaks cycle-canceling on a genuine antiparallel arc pair (``cap[u, v]`` and ``cap[v, u]`` both
+    positive): once both directions are pushed to their joint optimum, the *combined* residual capacity
+    in each direction (``cap[u, v] - flow[u, v] + flow[v, u]``) is exactly what it was before either was
+    pushed, so a detector reading a single ``big_cost[u, v]`` for that capacity keeps "seeing" the same
+    negative cycle forever and oscillates instead of converging (verified empirically while building
+    this: the naive single-cost version cancels the cycle, then un-cancels it, forever).
+
+    Returns the cycle as a list of ``(u, v, is_undo)`` edges in traversal order (``is_undo`` True means
+    the edge spends undo-credit against ``flow[v, u]``, False means it spends genuine forward capacity),
+    or ``None`` if no negative cycle is reachable via positive capacity anywhere in the graph.
+    """
+    dist = np.zeros(m)
+    pred = np.full(m, -1, dtype=int)
+    pred_is_undo = np.zeros(m, dtype=bool)
+    last_relaxed = -1
+    for _ in range(m):
+        last_relaxed = -1
+        for u in range(m):
+            du = dist[u]
+            for v in range(m):
+                if u == v:
+                    continue
+                fwd_cap = big_cap[u, v] - flow[u, v]
+                if fwd_cap > 1.0e-12:
+                    nd = du + big_cost[u, v]
+                    if nd < dist[v] - 1.0e-9:
+                        dist[v], pred[v], pred_is_undo[v] = nd, u, False
+                        last_relaxed = v
+                undo_cap = flow[v, u]
+                if undo_cap > 1.0e-12:
+                    nd = du - big_cost[v, u]
+                    if nd < dist[v] - 1.0e-9:
+                        dist[v], pred[v], pred_is_undo[v] = nd, u, True
+                        last_relaxed = v
+        if last_relaxed == -1:
+            return None  # converged before the m-th sweep: no negative cycle reachable
+
+    # The m-th sweep still relaxed something -> a negative cycle is reachable from `last_relaxed`.
+    x = last_relaxed
+    for _ in range(m):
+        x = pred[x]
+    cycle_nodes = [x]
+    v = pred[x]
+    while v != x:
+        cycle_nodes.append(v)
+        v = pred[v]
+    cycle_nodes.reverse()
+    k = len(cycle_nodes)
+    return [(cycle_nodes[i], cycle_nodes[(i + 1) % k], bool(pred_is_undo[cycle_nodes[(i + 1) % k]])) for i in range(k)]
+
+
+def _cancel_negative_cycles(
+    big_cap: np.ndarray, big_cost: np.ndarray, residual: np.ndarray, flow: np.ndarray, m: int
+) -> None:
+    """Post-process an already-feasible flow to true minimality by canceling residual negative cycles.
+
+    Successive-shortest-path (:func:`min_cost_flow`'s main loop) finds a min-cost flow among
+    source-to-sink augmenting paths, but stops the instant supply is fully routed -- it never checks
+    whether the residual graph *at that final flow* still has a negative-cost cycle disjoint from the
+    super-source/super-sink. If one exists, pushing flow around it (up to its bottleneck residual
+    capacity) strictly lowers total cost while leaving every node's supply/demand balance untouched (a
+    cycle has zero net flow at every node it passes through, by definition), so canceling can only ever
+    improve an already-feasible flow and is safe to run once feasibility is reached, with no need to
+    re-check feasibility afterward.
+
+    Mutates ``residual`` and ``flow`` in place. Raises :class:`ValueError` if a reachable negative cycle
+    has unbounded (infinite) capacity -- cost is then unbounded below, so no finite minimum exists -- or
+    if cancellation fails to converge within a generous, graph-size-scaled iteration budget (an
+    internal-consistency guard against float-precision pathologies; a well-posed instance should never
+    come close to it).
+    """
+    max_iterations = max(1000, 100 * m * m)
+    iterations = 0
+    while True:
+        cycle = _find_negative_cycle(big_cap, big_cost, flow, m)
+        if cycle is None:
+            return
+        bottleneck = min((flow[v, u] if is_undo else big_cap[u, v] - flow[u, v]) for u, v, is_undo in cycle)
+        if not np.isfinite(bottleneck):
+            raise ValueError(
+                "min_cost_flow: cost structure admits an unbounded negative cycle, no finite minimum exists"
+            )
+        for u, v, is_undo in cycle:
+            if is_undo:
+                flow[v, u] -= bottleneck
+            else:
+                flow[u, v] += bottleneck
+            residual[u, v] -= bottleneck
+            residual[v, u] += bottleneck
+        iterations += 1
+        if iterations > max_iterations:
+            raise ValueError(
+                f"min_cost_flow: negative-cycle canceling failed to converge after {max_iterations} "
+                "iterations (internal consistency error)"
+            )
+
+
 def min_cost_flow(cap: Any, cost: Any, supply: Any) -> Flow:
     """Min-cost feasible flow meeting node ``supply`` (positive = source) under arc ``cap``/``cost``.
 
@@ -357,10 +474,21 @@ def min_cost_flow(cap: Any, cost: Any, supply: Any) -> Flow:
     super-source -> super-sink path of least *reduced* cost is repeatedly augmented (Dijkstra, since the
     potentials keep every reduced cost non-negative) until the super-sink is unreachable. Potentials are
     seeded with a Bellman-Ford pass so arbitrary-sign ``cost`` entries are handled, then updated by the
-    per-round Dijkstra distances (the standard Johnson's-algorithm maintenance). ``cap``/``cost`` are
-    ``n x n`` arc matrices; ``supply`` is length ``n`` and must sum to (approximately) zero. Returns
-    `Flow(value=total cost, flow=(n, n) arc flows)`; raises :class:`ValueError` if the supply cannot be
-    fully routed under the given capacities.
+    per-round Dijkstra distances (the standard Johnson's-algorithm maintenance).
+
+    Successive-shortest-path alone only guarantees minimality *among source-to-sink augmenting paths* --
+    it says nothing about a profitable cycle that never touches the super-source/super-sink at all. Once
+    feasibility is reached, :func:`_cancel_negative_cycles` runs a Bellman-Ford negative-cycle-canceling
+    pass over the resulting residual graph and pushes flow around any negative-cost cycle it finds (up to
+    its bottleneck capacity) -- which strictly lowers cost without disturbing any node's supply/demand
+    balance, since a cycle has zero net flow at every node it passes through. This is what makes the
+    returned flow truly minimum rather than merely feasible.
+
+    ``cap``/``cost`` are ``n x n`` arc matrices; ``supply`` is length ``n`` and must sum to
+    (approximately) zero. Returns `Flow(value=total cost, flow=(n, n) arc flows)`; raises
+    :class:`ValueError` if the supply cannot be fully routed under the given capacities, or if the cost
+    structure admits an unbounded negative cycle (infinite capacity available to an improving cycle, so
+    no finite minimum cost exists).
     """
     cap = np.asarray(cap, dtype=np.float64)
     cost = np.asarray(cost, dtype=np.float64)
@@ -449,6 +577,10 @@ def min_cost_flow(cap: Any, cost: Any, supply: Any) -> Flow:
 
     if routed < total_supply - 1.0e-6:
         raise ValueError("min_cost_flow: infeasible -- supply cannot be fully routed under the given capacities")
+
+    # SSP alone is only minimal among source-to-sink augmenting paths; cancel any profitable cycle left
+    # in the residual graph (see _cancel_negative_cycles) so the returned flow is truly minimum-cost.
+    _cancel_negative_cycles(big_cap, big_cost, residual, flow, m)
 
     value = float((flow[:n, :n] * cost).sum())
     return Flow(value=value, flow=flow[:n, :n])
