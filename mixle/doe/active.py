@@ -48,6 +48,16 @@ def _positive_int(name: str, value: Any) -> int:
     return ivalue
 
 
+def _reject_if_not_psd(eigvals: np.ndarray, p: int) -> None:
+    """Raise unless the ascending eigenvalues ``eigvals`` of a claimed ``(p, p)`` covariance are all
+    non-negative, up to a floating-point tolerance at the zero boundary (a genuinely singular but
+    positive-*semi*definite covariance -- e.g. a hard zero-variance prior direction -- must not be
+    rejected merely for being singular; MXR-080-0159)."""
+    tol = max(float(eigvals[-1]), 1.0) * p * np.finfo(np.float64).eps
+    if eigvals[0] < -tol:
+        raise ValueError(f"prior_cov must be positive-semidefinite; smallest eigenvalue is {eigvals[0]:.6g}.")
+
+
 def alm_scores(gp: Any, x: np.ndarray, y: np.ndarray, candidates: np.ndarray) -> np.ndarray:
     """Active Learning MacKay scores: the GP posterior predictive variance at each candidate."""
     candidates = np.asarray(candidates)
@@ -186,16 +196,67 @@ def expected_information_gain_linear(
     reliably ill-conditioned for ``slogdet`` -- verified to throw spurious divide-by-zero/overflow
     ``RuntimeWarning``s on a real ``p=720`` case that the ``(n, n)`` formulation computes cleanly
     (identical value, to float64 precision, with zero warnings).
+
+    ``noise`` must be finite and strictly positive, and ``prior_cov`` (when given) must be a finite,
+    symmetric, positive-semidefinite ``(p, p)`` matrix -- a real covariance, not merely a matrix that
+    happens to make a determinant come out positive (MXR-080-0159: invalid inputs used to reach
+    ``slogdet`` unchecked and could return ``-inf`` or a plausible-looking scalar for a model that is
+    not actually a probability distribution). Given valid inputs, the information matrix is guaranteed
+    symmetric positive-definite by construction (an identity plus a PSD term), so its log-determinant
+    is computed from a Cholesky factorization -- ``2 * sum(log(diag(L)))`` -- rather than ``slogdet``:
+    more numerically stable, and it doubles as a final validity check. ``F Sigma0 F^T`` (the ``n <= p``
+    fast path) is symmetric for *any* symmetric ``Sigma0``, since it is sandwiched by ``F``/``F^T``, but
+    ``Sigma0 F^T F`` (the other order, needed when ``p < n``) is generally not, even though both factors
+    are -- the product of two symmetric matrices need not commute -- so that branch instead sandwiches
+    ``F^T F`` between a symmetric square root of ``Sigma0``, which keeps the determinant exactly
+    (Sylvester's identity again) while keeping the matrix handed to Cholesky genuinely symmetric.
     """
     f = np.asarray(model_matrix, dtype=np.float64)
+    if f.ndim != 2:
+        raise ValueError(f"model_matrix must be a 2-D (n, p) array, got shape {f.shape}.")
     n, p = f.shape
-    sigma0 = np.eye(p) if prior_cov is None else np.asarray(prior_cov, dtype=np.float64)
-    if n <= p:
-        m = np.eye(n) + (f @ sigma0 @ f.T) / (float(noise) ** 2)
+    noise = float(noise)
+    if not np.isfinite(noise) or noise <= 0.0:
+        raise ValueError(f"noise must be finite and strictly positive, got {noise!r}.")
+    if prior_cov is None:
+        sigma0 = np.eye(p)
     else:
-        m = np.eye(p) + (sigma0 @ (f.T @ f)) / (float(noise) ** 2)
-    sign, logdet = np.linalg.slogdet(m)
-    return float(0.5 * logdet) if sign > 0 else -np.inf
+        sigma0 = np.asarray(prior_cov, dtype=np.float64)
+        if sigma0.shape != (p, p):
+            raise ValueError(
+                f"prior_cov must have shape ({p}, {p}) to match model_matrix's {p} columns, got {sigma0.shape}."
+            )
+        if not np.all(np.isfinite(sigma0)):
+            raise ValueError("prior_cov must be finite.")
+        if not np.allclose(sigma0, sigma0.T):
+            raise ValueError("prior_cov must be symmetric (it is a covariance matrix).")
+
+    if n <= p:
+        # F Sigma0 F^T is symmetric regardless of Sigma0's own factorization, so only Sigma0's
+        # eigenvalues are needed here -- never its eigenvectors, which matters because this is exactly
+        # the large-p regime this branch exists to avoid p-scale work in.
+        if p > 0:
+            _reject_if_not_psd(np.linalg.eigvalsh(sigma0), p)
+        m = np.eye(n) + (f @ sigma0 @ f.T) / (noise**2)
+    else:
+        if p > 0:
+            eigvals, eigvecs = np.linalg.eigh(sigma0)
+            _reject_if_not_psd(eigvals, p)
+            sigma0_half = (eigvecs * np.sqrt(np.clip(eigvals, 0.0, None))) @ eigvecs.T
+        else:
+            sigma0_half = sigma0
+        m = np.eye(p) + (sigma0_half @ (f.T @ f) @ sigma0_half) / (noise**2)
+
+    try:
+        chol = np.linalg.cholesky(m)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(
+            "Failed to Cholesky-factor the information matrix; it should be positive-definite whenever "
+            "noise > 0 and prior_cov is positive-semidefinite -- check model_matrix for non-finite or "
+            "extreme entries."
+        ) from exc
+    logdet = 2.0 * float(np.sum(np.log(np.diag(chol))))
+    return 0.5 * logdet
 
 
 def expected_information_gain_nmc(
