@@ -163,6 +163,123 @@ class MorrisTest(unittest.TestCase):
         self.assertTrue(np.all(m["mu_star"] > 0))  # all three move the output (x3 via interaction)
 
 
+class _PointRecorder:
+    """Records every point morris_screening evaluates its model at, for direct trajectory inspection."""
+
+    def __init__(self):
+        self.points: list[np.ndarray] = []
+
+    def __call__(self, x):
+        self.points.append(x.copy())
+        return np.sum(x, axis=1)
+
+
+class MorrisTrajectoryTest(unittest.TestCase):
+    """MXR-080-0194: Morris trajectories must be genuine randomized-direction paths on the
+    prescribed grid -- every step exactly ``delta``, direction randomized per dimension, no
+    systematic boundary bias, and a positive trajectory budget enforced.
+
+    ``setUpClass`` records one large batch of real trajectories once; the individual tests below
+    each inspect a different property of that same recorded data.
+    """
+
+    LEVELS = 4
+    D = 4
+    N_TRAJECTORIES = 400
+
+    @classmethod
+    def setUpClass(cls):
+        cls.grid = np.linspace(0.0, 1.0, cls.LEVELS)
+        cls.delta = cls.LEVELS / (2.0 * (cls.LEVELS - 1))  # = 2/3 for LEVELS=4, the audit's own case
+        recorder = _PointRecorder()
+        morris_screening(recorder, [(0.0, 1.0)] * cls.D, trajectories=cls.N_TRAJECTORIES, levels=cls.LEVELS, seed=3)
+        cls.all_points = np.concatenate(recorder.points, axis=0)  # (N_TRAJECTORIES * (D+1), D)
+        cls.pts_per_traj = cls.D + 1
+        # (dimension touched, its value before the step, the signed step) for every one-at-a-time
+        # move across every recorded trajectory.
+        cls.steps: list[tuple[int, float, float]] = []
+        for t in range(cls.N_TRAJECTORIES):
+            traj = cls.all_points[t * cls.pts_per_traj : (t + 1) * cls.pts_per_traj]
+            for k in range(1, cls.pts_per_traj):
+                diff = traj[k] - traj[k - 1]
+                touched = np.flatnonzero(np.abs(diff) > 1e-12)
+                assert len(touched) == 1, f"expected exactly one coordinate to change, got {diff}"
+                j = int(touched[0])
+                cls.steps.append((j, traj[k - 1, j], diff[j]))
+
+    def test_exactly_one_coordinate_changes_per_step(self):
+        # every trajectory must contribute exactly D one-at-a-time steps (setUpClass already asserts
+        # "exactly one coordinate changed" per step; this asserts none were silently dropped).
+        self.assertEqual(len(self.steps), self.N_TRAJECTORIES * self.D)
+
+    def test_four_level_start_at_two_thirds_takes_a_genuine_two_thirds_step(self):
+        # The audit's own example: for levels=4, grid={0, 1/3, 2/3, 1}, delta=2/3. A step taken from
+        # a dimension currently at 2/3 must never be silently shrunk to 1/3.
+        two_thirds_steps = [abs(step) for _, before, step in self.steps if np.isclose(before, 2.0 / 3.0)]
+        self.assertTrue(two_thirds_steps, "fixture should exercise the audit's 2/3-start case")
+        for step_mag in two_thirds_steps:
+            self.assertAlmostEqual(step_mag, self.delta, places=9)  # never shrunk to 1/3
+
+    def test_every_step_is_exactly_delta_in_magnitude(self):
+        for _, _before, step in self.steps:
+            self.assertAlmostEqual(abs(step), self.delta, places=9)
+
+    def test_every_point_stays_in_bounds_without_clipping(self):
+        self.assertGreaterEqual(float(self.all_points.min()), 0.0)
+        self.assertLessEqual(float(self.all_points.max()), 1.0)
+
+    def test_step_direction_is_randomized_both_ways(self):
+        signs = np.array([np.sign(step) for _, _before, step in self.steps])
+        self.assertIn(1.0, signs)
+        self.assertIn(-1.0, signs)
+        up_frac = float(np.mean(signs > 0))
+        self.assertTrue(0.35 < up_frac < 0.65, f"up/down should be roughly balanced, got {up_frac}")
+
+    def test_visitation_is_approximately_uniform_no_boundary_bias(self):
+        # Marginal visitation of each of the `levels` grid points, per dimension, across the whole
+        # recorded trajectory set should be close to uniform (1/levels each) -- per this module's own
+        # derivation (see morris_screening's docstring) of why the design is unbiased.
+        idxs = np.argmin(np.abs(self.all_points[:, :, None] - self.grid[None, None, :]), axis=2)
+        for j in range(self.D):
+            with self.subTest(dim=j):
+                counts = np.bincount(idxs[:, j], minlength=self.LEVELS)
+                frac = counts / counts.sum()
+                np.testing.assert_allclose(frac, 1.0 / self.LEVELS, atol=0.05)
+
+    def test_zero_trajectories_is_rejected_not_fabricated_zero_importance(self):
+        with self.assertRaises(ValueError):
+            morris_screening(_linear, [(0, 1), (0, 1)], trajectories=0)
+
+    def test_odd_levels_are_rejected(self):
+        # levels=5 has no integer grid-index step matching delta = levels/(2*(levels-1)) exactly.
+        with self.assertRaises(ValueError):
+            morris_screening(_linear, [(0, 1), (0, 1)], levels=5, trajectories=3)
+
+    def test_exact_elementary_effect_for_an_additive_linear_model(self):
+        # Known-exact validation case: a purely additive linear model has no interactions and no
+        # nonlinearity, so every one-at-a-time elementary effect for input i is *exactly* its
+        # coefficient, regardless of starting point or step direction -- mu_star must equal the
+        # coefficients exactly and sigma must be exactly 0 (to floating-point precision), for any
+        # trajectory count / levels / seed.
+        def linear3(x):
+            return 2.0 * x[:, 0] + 5.0 * x[:, 1] - 3.0 * x[:, 2]
+
+        for levels in (2, 4, 6, 8):
+            with self.subTest(levels=levels):
+                res = morris_screening(linear3, [(0.0, 1.0)] * 3, trajectories=15, levels=levels, seed=levels)
+                np.testing.assert_allclose(res["mu_star"], [2.0, 5.0, 3.0], atol=1e-9)
+                np.testing.assert_allclose(res["sigma"], [0.0, 0.0, 0.0], atol=1e-9)
+
+    def test_well_configured_run_still_produces_sensible_importance(self):
+        # Negative control: a normal Morris run on Ishigami still ranks all three inputs as
+        # influential (no fabricated all-zero result, no crash) -- same case as MorrisTest above,
+        # re-checked alongside the new algorithmic guarantees.
+        m = morris_screening(ishigami, BOUNDS, trajectories=200, levels=4, seed=1, names=["x1", "x2", "x3"])
+        self.assertEqual(m["mu_star"].shape, (3,))
+        self.assertTrue(np.all(m["mu_star"] > 0))
+        self.assertTrue(np.all(np.isfinite(m["sigma"])))
+
+
 def _linear(x):
     return x[:, 0] + x[:, 1]
 
