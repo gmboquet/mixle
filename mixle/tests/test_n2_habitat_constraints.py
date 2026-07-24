@@ -18,7 +18,13 @@ ListedSpecies = knowledge_contracts.ListedSpecies
 SourceRef = knowledge_contracts.SourceRef
 SpatialBounds = knowledge_contracts.SpatialBounds
 
-from mixle.analysis.habitat_constraints import apply_habitat_constraints, critical_habitat_exclusion
+# Imported from the top-level package, not the submodule: MXR-080-0093 found that
+# critical_habitat_exclusion/apply_habitat_constraints were fully implemented but unreachable via
+# `mixle.analysis`, exactly because nothing exercised that import path. Importing from `mixle.analysis`
+# here, matching covariance_shrinkage_test.py/coverage_estimation_test.py/extreme_value_test.py/
+# kde_test.py/kriging_test.py/rank_aggregation_test.py's convention, means a future regression on either
+# name's export breaks collection of this whole file instead of silently going unnoticed again.
+from mixle.analysis import apply_habitat_constraints, critical_habitat_exclusion
 from mixle.analysis.sdm import HabitatModel
 from mixle.relations import min_cost_flow
 
