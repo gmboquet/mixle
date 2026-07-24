@@ -66,6 +66,8 @@ class GMMTest(unittest.TestCase):
             dist.log_density([0, 1])  # wrong length
         with self.assertRaises(ValueError):
             dist.log_density([-1, 1, 2])  # negative index would otherwise alias a valid rank
+        with self.assertRaises(ValueError):
+            dist.log_density([0.5, 1.0, 2.0])  # fractional entry would otherwise truncate to 0
 
     def test_density_and_seq_log_density_reject_non_permutations(self):
         dist = GeneralizedMallowsModelDistribution([0, 1, 2], [1.0, 1.0])
@@ -73,6 +75,19 @@ class GMMTest(unittest.TestCase):
             dist.density([0, 0, 1])
         with self.assertRaises(ValueError):
             dist.seq_log_density(np.array([[0, 0, 1]]))
+        with self.assertRaises(ValueError):
+            # log_density forwards x as float (not int64) precisely so this fractional check
+            # inside seq_log_density can see it; exercise seq_log_density directly too.
+            dist.seq_log_density(np.array([[0.5, 1.0, 2.0]]))
+
+    def test_encoder_rejects_non_permutations(self):
+        dist = GeneralizedMallowsModelDistribution([0, 1, 2], [1.0, 1.0])
+        with self.assertRaises(ValueError):
+            dist.dist_to_encoder().seq_encode([[0, 1, 1]])
+        with self.assertRaises(ValueError):
+            # A fractional entry must not be silently truncated to an in-range integer by the
+            # encoder's int cast before the permutation check ever sees it.
+            dist.dist_to_encoder().seq_encode([[0.5, 1.0, 2.0]])
 
 
 if __name__ == "__main__":

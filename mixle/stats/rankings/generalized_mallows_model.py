@@ -129,27 +129,38 @@ class GeneralizedMallowsModelDistribution(SequenceEncodableProbabilityDistributi
 
     def log_density(self, x: Sequence[int]) -> float:
         """Return the log-probability of one ordering."""
-        return float(self.seq_log_density(np.asarray(x, dtype=np.int64)[None, :])[0])
+        # Forward as float, not int64: seq_log_density's own validation below must see any
+        # fractional entries as-is (an int64 cast here would silently truncate 0.5 -> 0 before
+        # that check ever ran, the same premature-truncation bug fixed in seq_log_density).
+        return float(self.seq_log_density(np.asarray(x, dtype=float)[None, :])[0])
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-probabilities for encoded orderings.
 
         Raises:
             ValueError: If any row of x is not a permutation of 0,...,n-1 (wrong length, a
-                repeated element, or an element outside that range). A malformed row is not
-                merely an unlikely ordering -- it isn't an ordering at all, so it is rejected
-                here rather than silently scored (e.g. a repeated index would otherwise still
-                produce a finite, meaningless log-density, and an out-of-range or negative index
-                reaches the numba RIM kernel below, which has no bounds checking of its own and
-                does not raise -- it silently scores too, rather than failing loudly).
+                repeated element, a non-integer entry, or an element outside that range). A
+                malformed row is not merely an unlikely ordering -- it isn't an ordering at all,
+                so it is rejected here rather than silently scored (e.g. a repeated index would
+                otherwise still produce a finite, meaningless log-density, an out-of-range or
+                negative index reaches the numba RIM kernel below, which has no bounds checking
+                of its own and does not raise -- it silently scores too, rather than failing
+                loudly -- and a fractional entry like 0.5 would otherwise be silently truncated
+                to 0 by the int cast before this check ever saw it).
 
         """
-        xa = np.asarray(x, dtype=np.int64)
+        xa = np.asarray(x, dtype=float)
         expected = np.arange(self.dim)
-        if xa.ndim != 2 or xa.shape[1] != self.dim or not all(np.array_equal(np.sort(row), expected) for row in xa):
+        if (
+            xa.ndim != 2
+            or xa.shape[1] != self.dim
+            or not np.array_equal(xa, np.round(xa))
+            or not all(np.array_equal(np.sort(row), expected) for row in xa)
+        ):
             raise ValueError(
                 "GeneralizedMallowsModelDistribution requires each row of x to be a permutation of 0,...,n-1."
             )
+        xa = xa.astype(np.int64)
         j = seq_rim_code(xa, self.sigma0)  # (N, n-1)
         return -(j @ self.theta) - self.log_z
 
@@ -316,14 +327,14 @@ class GeneralizedMallowsModelDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray:
         """Validate and encode full orderings as a dense integer matrix."""
-        rv = np.asarray([list(row) for row in x], dtype=np.int64)
+        rv = np.asarray([list(row) for row in x], dtype=float)
         if rv.ndim != 2 or rv.shape[0] == 0:
             raise ValueError("GeneralizedMallowsModelDistribution requires a non-empty sequence of orderings.")
         expected = np.arange(rv.shape[1])
         for row in rv:
-            if not np.array_equal(np.sort(row), expected):
+            if not np.array_equal(row, np.round(row)) or not np.array_equal(np.sort(row), expected):
                 raise ValueError("orderings must be permutations of 0,...,n-1.")
-        return rv
+        return rv.astype(np.int64)
 
 
 __all__ = [
