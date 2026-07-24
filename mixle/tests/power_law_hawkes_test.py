@@ -5,7 +5,7 @@ import warnings
 
 import numpy as np
 
-from mixle.stats import ExponentialDistribution
+from mixle.stats import ExponentialDistribution, GaussianDistribution
 from mixle.stats.processes.power_law_hawkes import PowerLawHawkesDistribution as PLH
 
 
@@ -54,6 +54,44 @@ class PowerLawHawkesTest(unittest.TestCase):
         self.assertTrue(np.all(ms == 0.0))
         self.assertTrue(np.isfinite(du.log_density((ts, ms))))
 
+    def test_marked_log_density_includes_mark_law(self):
+        # log_density previously scored only the temporal (excitation-kernel) term and silently
+        # dropped the mark law entirely, so two realizations differing only in one mark value scored
+        # identically. Reviewer's exact repro: under a standard Gaussian mark model, changing one
+        # mark from 0 to 100 must change the score by log N(0;0,1) - log N(100;0,1) = 100^2/2 = 5000.
+        d = PLH(mu=0.5, A=1.0, c=0.1, p=1.5, window=100.0, alpha=0.0, mark_dist=GaussianDistribution(0.0, 1.0))
+        times = [10.0, 20.0, 30.0]
+        ll_low = d.log_density((times, [0.0, 0.0, 0.0]))
+        ll_high = d.log_density((times, [0.0, 0.0, 100.0]))
+        self.assertAlmostEqual(ll_low - ll_high, 5000.0, delta=1.0)
+
+    def test_seq_log_density_includes_mark_law(self):
+        # seq_log_density delegates to log_density per realization, so the fix must show up there too.
+        d = PLH(mu=0.5, A=1.0, c=0.1, p=1.5, window=100.0, alpha=0.0, mark_dist=GaussianDistribution(0.0, 1.0))
+        times = [10.0, 20.0, 30.0]
+        lls = d.seq_log_density([(times, [0.0, 0.0, 0.0]), (times, [0.0, 0.0, 100.0])])
+        self.assertAlmostEqual(lls[0] - lls[1], 5000.0, delta=1.0)
+
+    def test_unmarked_process_scores_ignore_mark_values(self):
+        # Negative control for the mark-log-density fix: with no mark_dist and alpha=0.0 there is no
+        # mark law and no excitation sensitivity, so log_density must stay independent of the marks.
+        du = PLH(mu=0.5, A=2.0, c=0.05, p=1.4, window=1500.0)  # no mark_dist -> marks are 0
+        times = [10.0, 20.0, 30.0]
+        ll_a = du.log_density((times, [0.0, 0.0, 0.0]))
+        ll_b = du.log_density((times, [3.0, -7.0, 42.0]))
+        self.assertAlmostEqual(ll_a, ll_b, places=9)
+
+    def test_mismatched_mark_length_raises(self):
+        # A mark array shorter than the times array previously either raised an opaque numpy
+        # broadcasting error or -- when the mark count happened to be 1 and broadcast cleanly --
+        # silently returned a finite score computed from misaligned data.
+        with self.assertRaises(ValueError):
+            self.d.log_density(([10.0, 20.0, 30.0], [0.0, 0.0]))  # 2 marks, 3 times
+        with self.assertRaises(ValueError):
+            self.d.log_density(([10.0, 20.0, 30.0], [0.0]))  # single mark silently broadcast before the fix
+        with self.assertRaises(ValueError):
+            self.d.log_density(([10.0, 20.0, 30.0], [0.0, 0.0, 0.0, 0.0]))  # 4 marks, 3 times
+
     def test_invalid_parameters_raise(self):
         with self.assertRaises(ValueError):
             PLH(mu=0.2, A=1.0, c=0.1, p=0.5, window=100.0)  # p must exceed 1
@@ -70,7 +108,7 @@ class PowerLawHawkesTest(unittest.TestCase):
     def test_accumulator_value_is_not_aliased_to_later_updates(self):
         # value() previously returned self.realizations directly, so a value() taken before a later
         # update()/seq_update()/combine() on the SAME accumulator would silently grow too (the exact
-        # aliasing hazard from_value's own copy-on-restore already guards against, on the other side).
+        # aliasing hazard from_value's own copy-on-restore comment guards against, on the other side).
         est = self.d.estimator()
         acc = est.accumulator_factory().make()
         ts, ms = self.d.sampler(seed=2).sample()

@@ -99,8 +99,17 @@ class PowerLawHawkesDistribution(SequenceEncodableProbabilityDistribution):
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x) -> float:
-        """Exact log-likelihood of one realization on ``[0, window]``."""
+        """Exact log-likelihood of one realization on ``[0, window]``.
+
+        For a marked process (``mark_dist is not None``) this is the temporal Hawkes
+        log-likelihood plus ``sum_i log mark_dist.density(m_i)``: marks are modeled as iid draws
+        given their event times, so their log-densities simply add on to the point-process term.
+        """
         t, m = self._unpack(x)
+        if t.size != m.size:
+            raise ValueError(
+                "PowerLawHawkesDistribution.log_density: %d marks does not match %d event times." % (m.size, t.size)
+            )
         if t.size and (np.any(~np.isfinite(t)) or t[0] < 0 or t[-1] > self.window or np.any(np.diff(t) < 0)):
             return -np.inf
         prod = self.A * np.exp(self.alpha * m)
@@ -110,10 +119,11 @@ class PowerLawHawkesDistribution(SequenceEncodableProbabilityDistribution):
         integral = self.mu * self.window + np.sum(
             prod * self.c / (self.p - 1.0) * (1.0 - (1.0 + (self.window - t) / self.c) ** (1.0 - self.p))
         )
-        return float(np.sum(np.log(lam)) - integral)
+        mark_ll = sum(self.mark_dist.log_density(float(mi)) for mi in m) if self.mark_dist is not None else 0.0
+        return float(np.sum(np.log(lam)) - integral + mark_ll)
 
     def seq_log_density(self, x) -> np.ndarray:
-        """Return log-likelihoods for a batch of point-process realizations."""
+        """Return log-likelihoods for a batch of point-process realizations (mark term included; see log_density)."""
         return np.array([self.log_density(r) for r in x])
 
     def sampler(self, seed: int | None = None) -> PowerLawHawkesSampler:
