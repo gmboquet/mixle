@@ -108,6 +108,16 @@ class GPDTest(unittest.TestCase):
         self.assertEqual(fit_pwm.n_dropped_nonpositive, 0)
         self.assertGreater(fit_pwm.scale, 0)
 
+    # -- MXR-080-0091: return_level's return-period domain. --
+
+    def test_return_level_rejects_nonpositive_period(self):
+        rng = np.random.RandomState(5)
+        fit = gpd_fit(_rgpd(rng, 4000, 0.2, 1.0), method="mle")
+        with self.assertRaises(ValueError):
+            return_level(fit, 0)
+        with self.assertRaises(ValueError):
+            return_level(fit, -100)
+
 
 class TailIndexTest(unittest.TestCase):
     def test_hill_recovers_pareto_index(self):
@@ -125,6 +135,29 @@ class TailIndexTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             hill_estimator(np.arange(1, 11.0), 0)
 
+    # -- MXR-080-0091: moment_estimator's minimum-k and finiteness domain. --
+
+    def test_moment_estimator_rejects_k_one(self):
+        # k=1 leaves a single log-spacing, so the second log-moment is identically the square of the
+        # first (zero variance) -- the estimator's denominator is always zero, not just on bad luck.
+        x = np.sort(np.random.RandomState(6).rand(20) + 1.0)
+        with self.assertRaises(ValueError):
+            moment_estimator(x, 1)
+
+    def test_moment_estimator_k_two_works(self):
+        x = np.sort(np.random.RandomState(6).rand(200) + 1.0)
+        moment_estimator(x, 2)  # should not raise
+
+    def test_hill_and_moment_reject_nonfinite_order_stats(self):
+        # numpy sorts NaN to the very end regardless of magnitude, so it lands inside the "top k"
+        # order statistics no matter how small k is; both estimators must reject it explicitly rather
+        # than silently propagating log(nan).
+        x = np.array([1.0, 2.0, 3.0, 4.0, np.nan])
+        with self.assertRaises(ValueError):
+            hill_estimator(x, 1)
+        with self.assertRaises(ValueError):
+            moment_estimator(x, 2)
+
 
 class EndpointTest(unittest.TestCase):
     def test_bounded_endpoint_exceeds_max(self):
@@ -140,6 +173,22 @@ class EndpointTest(unittest.TestCase):
         x = (1 - rng.rand(8000)) ** (-1 / 2.0)  # heavy tail, xi>0
         self.assertEqual(endpoint_estimator(x, 800), float("inf"))
 
+    def test_rejects_unsupported_method(self):
+        rng = np.random.RandomState(7)
+        z = _rgpd(rng, 2000, -0.2, 1.0)
+        with self.assertRaises(ValueError):
+            endpoint_estimator(z, 200, method="hall")
+
+    def test_default_method_still_works(self):
+        rng = np.random.RandomState(7)
+        z = _rgpd(rng, 2000, -0.2, 1.0)
+        self.assertTrue(np.isfinite(endpoint_estimator(z, 200, method="gpd")))
+
+    def test_rejects_nonfinite_order_stats(self):
+        x = np.array([1.0, 2.0, 3.0, 4.0, np.nan])
+        with self.assertRaises(ValueError):
+            endpoint_estimator(x, 2)
+
 
 class MeanResidualLifeTest(unittest.TestCase):
     def test_increasing_for_heavy_tail(self):
@@ -154,6 +203,11 @@ class RecordsTest(unittest.TestCase):
     def test_record_times(self):
         x = np.array([3, 1, 4, 1, 5, 9, 2, 6])
         np.testing.assert_array_equal(record_times(x), [0, 2, 4, 5])
+
+    def test_record_times_empty_input(self):
+        rt = record_times(np.array([]))
+        self.assertEqual(rt.shape, (0,))
+        self.assertEqual(n_records(np.array([])), 0)
 
     def test_expected_count_near_harmonic(self):
         rng = np.random.RandomState(0)
