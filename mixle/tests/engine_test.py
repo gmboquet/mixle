@@ -285,15 +285,48 @@ class EngineTestCase(unittest.TestCase):
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_mps_engine_falls_back_to_float32(self):
-        # MPS has no float64; the engine must downgrade so torch-ready families run on Apple-silicon GPUs.
+        # MPS has no float64; an UNSET/default dtype must still downgrade silently so torch-ready
+        # families run on Apple-silicon GPUs without every caller having to opt in explicitly -- this
+        # is the low-stakes "no opinion was expressed" case, not the MXR-080-0149 bug (see below).
         # torch.device("mps") is constructible regardless of whether MPS is actually available, so this
         # exercises the policy on any host (incl. CPU-only CI).
         mps = TorchEngine(device="mps")
         self.assertEqual(mps.dtype, torch.float32)
         self.assertEqual(mps.accumulator_dtype, torch.float32)
-        self.assertEqual(TorchEngine(device="mps", dtype="float64").dtype, torch.float32)  # explicit f64 downgraded
+        self.assertFalse(mps.dtype_explicit)
         # CPU/CUDA keep full precision
         self.assertEqual(TorchEngine(device="cpu").accumulator_dtype, torch.float64)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_mps_engine_rejects_explicit_float64(self):
+        # Regression (MXR-080-0149): an EXPLICIT float64 request on MPS used to be silently replaced
+        # with float32 (same code path exercised via TorchEngine(device="mps", dtype="float64") in the
+        # old version of test_mps_engine_falls_back_to_float32 above), so a caller relying on float64 for
+        # precision allocation or a scientific tolerance could receive a policy that cannot meet it with
+        # no infeasibility signal at all. It must now fail closed instead. torch.device("mps") is
+        # constructible on any host, so this needs no real MPS hardware.
+        with self.assertRaises(ValueError):
+            TorchEngine(device="mps", dtype="float64")
+        with self.assertRaises(ValueError):
+            TorchEngine(device="mps", dtype=torch.float64)
+        with self.assertRaises(ValueError):
+            TorchEngine(device="mps").with_precision("float64")
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_mps_engine_accepts_explicit_float32(self):
+        # Negative control: an explicit request for a precision MPS DOES support must keep working --
+        # only the unmeetable explicit float64 request is rejected.
+        engine = TorchEngine(device="mps", dtype="float32")
+        self.assertEqual(engine.dtype, torch.float32)
+        self.assertTrue(engine.dtype_explicit)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_explicit_float64_still_works_on_float64_capable_device(self):
+        # Negative control: explicit float64 on a device that DOES support it (e.g. CPU) is unaffected.
+        engine = TorchEngine(device="cpu", dtype="float64")
+        self.assertEqual(engine.dtype, torch.float64)
+        self.assertTrue(engine.dtype_explicit)
+        self.assertEqual(engine.with_precision("float64").dtype, torch.float64)
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_sum_promotes_float32_input_to_accumulator_dtype(self):
