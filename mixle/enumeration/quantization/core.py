@@ -794,7 +794,11 @@ def build_budget_index(
     and reports the exact log density (recomputed via ``exact_log_density`` when supplied,
     otherwise the structurally accumulated log probability).
     """
-    from mixle.enumeration.quantization.seek import LazyQuantizedEnumerationIndex
+    from mixle.enumeration.quantization.seek import (
+        AmbiguousCountError,
+        LazyQuantizedEnumerationIndex,
+        _certified_integer,
+    )
 
     R = quantizer.oversample
     bw = quantizer.bin_width_bits
@@ -828,6 +832,16 @@ def build_budget_index(
             running = 0
             bin_total = 0
             for fb, c in by_coarse[cb]:
+                # Certify each fine-bucket count is an exact non-negative integer before it
+                # feeds the coarse cumulative offsets: a float-count-mode (or otherwise
+                # approximate) entry that is not EXACTLY integral cannot be trusted as one
+                # exact structural offset -- truncating it with int() would shift every later
+                # cumulative boundary, silently omitting, duplicating, or misrouting unranked
+                # values through the wrong bucket (MXR-080-0206). Certifying at this, the
+                # finest available granularity, also means `running`/`bin_total`/`cumulative`
+                # and the `coarse_counts` handed to LazyQuantizedEnumerationIndex below are
+                # already clean Python ints, never residual floats.
+                c = _certified_integer(c, label="fine bucket %d count" % fb, error_cls=AmbiguousCountError)
                 fine_buckets.append(fb)
                 fine_counts.append(c)
                 starts.append(running)
