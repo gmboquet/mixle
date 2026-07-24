@@ -60,7 +60,23 @@ def _as_rng(rng: Any) -> RandomState:
 
 
 def _entropy_last(p: np.ndarray) -> np.ndarray:
-    """Shannon entropy (nats) over the last axis, with the ``0 log 0 = 0`` guard."""
+    """Shannon entropy (nats) over the last axis, with the ``0 log 0 = 0`` guard.
+
+    ``p`` need not sum to 1 along the last axis (a sub-normalized or all-zero row is fine, and is
+    exactly what callers here can produce), but every entry must be a valid probability mass.
+    That is required for the result to be a true Shannon entropy: entropy is only guaranteed
+    ``>= 0`` when every ``p_i`` lies in ``[0, 1]`` -- e.g. an entry ``> 1`` makes its ``p * log(p)``
+    term positive, which can drive the (negated) sum below zero.
+
+    Raises:
+        ValueError: if any entry of ``p`` is non-finite (NaN/inf) or falls outside ``[0, 1]``
+            (with a small floating-point tolerance).
+    """
+    if not np.all(np.isfinite(p)):
+        raise ValueError("probabilities must be finite (no NaN/inf)")
+    tol = 1e-9
+    if np.any(p < -tol) or np.any(p > 1.0 + tol):
+        raise ValueError("probabilities must lie in [0, 1]")
     with np.errstate(divide="ignore", invalid="ignore"):
         return -np.sum(np.where(p > 0.0, p * np.log(p), 0.0), axis=-1)
 

@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from mixle.inference.uncertainty import (
+    _entropy_last,
     decompose_entropy,
     decompose_uncertainty,
     decompose_variance,
@@ -65,6 +66,31 @@ class EntropySplitTest(unittest.TestCase):
     def test_requires_two_members(self):
         with self.assertRaises(ValueError):
             decompose_entropy(np.array([[0.5, 0.5]]))
+
+    def test_entropy_helper_rejects_out_of_range_probabilities(self):
+        # unguarded, _entropy_last([1.2, -0.2]) used to give -0.219 nats -- Shannon entropy is
+        # mathematically guaranteed >= 0, so a negative value means invalid input (an entry outside
+        # [0, 1]) slipped through silently instead of being rejected.
+        with self.assertRaises(ValueError):
+            _entropy_last(np.array([1.2, -0.2]))
+        # entries > 1 alone are enough to break the guarantee, no negative entry required: p*log(p)
+        # is positive whenever p > 1, which can still drive the negated sum below zero.
+        with self.assertRaises(ValueError):
+            _entropy_last(np.array([1.5, 0.5]))
+        # non-finite entries are rejected rather than silently treated as zero-probability.
+        with self.assertRaises(ValueError):
+            _entropy_last(np.array([np.nan, 0.5]))
+        with self.assertRaises(ValueError):
+            _entropy_last(np.array([np.inf, 0.5]))
+
+    def test_invalid_member_probs_raise_instead_of_a_negative_total(self):
+        # A member row whose entries are individually out of [0, 1] but happen to sum to ~1 (here
+        # 1.2 + -0.2 == 1.0) defeats decompose_entropy's renormalize-by-row-sum step -- dividing by
+        # ~1 is a no-op, so the invalid values used to reach the entropy computation unguarded and
+        # surface as a negative total/aleatoric on the public UncertaintyDecomposition, impossible
+        # for real entropy.
+        with self.assertRaises(ValueError):
+            decompose_entropy(np.array([[1.2, -0.2], [1.2, -0.2]]))
 
 
 class VarianceSplitTest(unittest.TestCase):
