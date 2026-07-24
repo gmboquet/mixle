@@ -7,11 +7,12 @@ float64 on cancellation while running far faster than mpmath at the same precisi
 
 import time
 import unittest
+from unittest import mock
 
 import numpy as np
 import pytest
 
-from mixle.engines.extended import DoubleDouble, dd_dot, dd_sum, two_prod, two_sum
+from mixle.engines.extended import HAS_DD_KERNELS, DoubleDouble, dd_dot, dd_sum, two_prod, two_sum
 
 mpmath = pytest.importorskip("mpmath")
 
@@ -109,6 +110,64 @@ class AccurateReductionTest(unittest.TestCase):
         dd = float(dd_dot(a, b).to_float())
         f64 = float(a @ b)
         self.assertLessEqual(abs(dd - float(true)), abs(f64 - float(true)) + 1e-9)
+
+
+class DdDotValidationTest(unittest.TestCase):
+    """MXR-080-0132: dd_dot must reject mismatched-length vectors on every dispatch path.
+
+    The compiled kernel is only ever reached when sizes already match, but the pure-numpy fallback used
+    to skip straight to ``two_prod``/``dd_sum`` with no length check at all -- numpy's elementwise ops
+    then broadcast the length-1 side, silently computing a *different* operation (not a dot product) and
+    returning a plausible-looking number instead of raising.
+    """
+
+    def test_mismatched_length_raises_on_fallback_path(self):
+        # Force the pure-numpy fallback regardless of what happens to be built in this environment.
+        with mock.patch("mixle.engines.extended.HAS_DD_KERNELS", False):
+            with self.assertRaises(ValueError):
+                # Audit's exact repro: a 1-element vector dotted with a 3-element one used to broadcast
+                # and silently return 24.0 (4 * (1+2+3)) instead of rejecting the mismatched shapes.
+                dd_dot(np.array([4.0]), np.array([1.0, 2.0, 3.0]))
+
+    def test_mismatched_length_raises_before_reaching_compiled_kernel(self):
+        # Force the "compiled available" branch with a stand-in kernel that fails the test if it is ever
+        # actually called -- proves the length check runs once, before dispatch, not separately inside
+        # each arm (so the two paths can never diverge on it again).
+        def _boom(a, b):
+            raise AssertionError("compiled kernel must not be reached for mismatched-length inputs")
+
+        with mock.patch("mixle.engines.extended.HAS_DD_KERNELS", True):
+            with mock.patch("mixle.engines.extended._dd_dot_c", _boom, create=True):
+                with self.assertRaises(ValueError):
+                    dd_dot(np.array([4.0]), np.array([1.0, 2.0, 3.0]))
+
+    @unittest.skipUnless(
+        HAS_DD_KERNELS, "compiled _dd_kernels not built (run mixle.engines.build_kernels.compile_dd_kernels)"
+    )
+    def test_mismatched_length_raises_with_the_real_compiled_kernel(self):
+        # Belt-and-suspenders: when the accelerator is actually built in this environment, the real
+        # dispatch must reject too, not just the monkeypatched stand-in above.
+        with self.assertRaises(ValueError):
+            dd_dot(np.array([4.0]), np.array([1.0, 2.0, 3.0]))
+
+    def test_equal_length_still_dot_products_correctly_on_fallback_path(self):
+        # Negative control: the new check must not disturb a legitimate equal-length dot. Hand-verifiable
+        # exact value (no rounding at these magnitudes): 1*4 + 2*5 + 3*6 = 32.
+        with mock.patch("mixle.engines.extended.HAS_DD_KERNELS", False):
+            r = dd_dot(np.array([1.0, 2.0, 3.0]), np.array([4.0, 5.0, 6.0]))
+        self.assertEqual(float(r.to_float()), 32.0)
+        self.assertEqual(float(r.hi), 32.0)
+        self.assertEqual(float(r.lo), 0.0)
+
+    def test_equal_length_dispatches_to_the_compiled_kernel_when_available(self):
+        # Wiring check, not a numerics check (the real kernel's accuracy is dd_kernels_test.py's job):
+        # confirm dd_dot both calls the compiled kernel and correctly plumbs its (hi, lo) back out.
+        stub = mock.Mock(return_value=(32.0, 0.0))
+        with mock.patch("mixle.engines.extended.HAS_DD_KERNELS", True):
+            with mock.patch("mixle.engines.extended._dd_dot_c", stub, create=True):
+                r = dd_dot(np.array([1.0, 2.0, 3.0]), np.array([4.0, 5.0, 6.0]))
+        stub.assert_called_once()
+        self.assertEqual(float(r.to_float()), 32.0)
 
 
 class SpeedVsOracleTest(unittest.TestCase):
