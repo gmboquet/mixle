@@ -140,6 +140,70 @@ class EngineTestCase(unittest.TestCase):
             np.asarray(engine.evaluate(arr_expr, {"x": 1.5, "y": 3.0}), dtype=float), np.asarray([1.5, 0.0])
         )
 
+    def test_symbolic_evaluate_and_or_not_where_are_elementwise_for_vector_bindings(self):
+        # Regression (MXR-080-0152), exact audit repro: a SINGLE expression tree evaluated with
+        # an array-BOUND symbol used to convert "and"/"or"/"where" conditions with Python's
+        # bool(), which raises numpy's "truth value of an array with more than one element is
+        # ambiguous" for any >1-element array -- so a vector-valued expression could not use
+        # these logical ops at all, despite the engine's promised elementwise semantics. This is
+        # distinct from test_symbolic_engine_traces_comparison_masks's array case above: that
+        # test evaluates an ARRAY OF SEPARATE per-element expressions (each bound to its own
+        # scalar); this evaluates ONE expression tree whose symbol is bound to array-valued data.
+        engine = SymbolicEngine()
+        x = engine.symbol("x")
+        y = engine.symbol("y")
+        mask = (x >= 0.0) & (y < 2.0)
+        expr = engine.where(mask, x + y, x - y)
+
+        # four rows, cross-checked against an independent raw-numpy computation of the identical
+        # mask-and-select formula, so this verifies genuine per-element correctness (not just
+        # "the call doesn't crash") without relying on hand-computed expected literals
+        xv = np.array([1.0, -1.0, 5.0, -5.0])
+        yv = np.array([1.5, 1.5, 5.0, 0.5])
+        mask_np = (xv >= 0.0) & (yv < 2.0)
+        # confirm the mask genuinely varies across the array -- not a degenerate all-one-value case
+        self.assertIn(True, mask_np.tolist())
+        self.assertIn(False, mask_np.tolist())
+        result = np.asarray(engine.evaluate(expr, {"x": xv, "y": yv}), dtype=float)
+        np.testing.assert_allclose(result, np.where(mask_np, xv + yv, xv - yv))
+
+        and_expr = engine.logical_and(x, y)
+        np.testing.assert_array_equal(
+            engine.evaluate(and_expr, {"x": np.array([True, False, True]), "y": np.array([True, True, False])}),
+            [True, False, False],
+        )
+        or_expr = engine.logical_or(x, y)
+        np.testing.assert_array_equal(
+            engine.evaluate(or_expr, {"x": np.array([True, False, True]), "y": np.array([True, True, False])}),
+            [True, True, True],
+        )
+        not_expr = engine.logical_not(x)
+        np.testing.assert_array_equal(
+            engine.evaluate(not_expr, {"x": np.array([True, False, True])}), [False, True, False]
+        )
+
+    def test_symbolic_evaluate_and_or_not_where_scalar_case_is_unaffected(self):
+        # Negative control for MXR-080-0152: the scalar/0-d condition path must behave EXACTLY
+        # as before the fix -- same values AND the same plain Python types, not just "close
+        # enough" (the fix branches on ndim>0 specifically so this path is untouched code).
+        engine = SymbolicEngine()
+        x = engine.symbol("x")
+        y = engine.symbol("y")
+        mask = (x >= 0.0) & (y < 2.0)
+        expr = engine.where(mask, x + y, x - y)
+
+        result = expr.evaluate({"x": 1.0, "y": 1.5})
+        self.assertEqual(result, 2.5)
+        self.assertIs(type(result), float)
+
+        self.assertIs(engine.logical_and(x, y).evaluate({"x": True, "y": False}), False)
+        self.assertIs(engine.logical_or(x, y).evaluate({"x": False, "y": True}), True)
+        self.assertIs(engine.logical_not(x).evaluate({"x": True}), False)
+
+        # a 0-d array (ndim == 0, as opposed to ndim > 0) is scalar-like and must not raise either
+        result_0d = expr.evaluate({"x": np.array(1.0), "y": np.array(1.5)})
+        self.assertAlmostEqual(float(result_0d), 2.5)
+
     def test_symbolic_payloads_dispatch_through_arithmetic(self):
         from mixle.engines import SYMBOLIC_ENGINE
 
