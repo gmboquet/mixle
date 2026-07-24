@@ -2,12 +2,16 @@
 
 One loop -- **discrepancy -> propose -> verify -> adopt -> remember** -- run over the library of
 *families* rather than over any one model's parameters. When several tasks recur with a residual
-pattern no family in the starting library explains well, this module fits a genuinely new family to
-that pattern, gates it as a challenger against the status quo, and -- only if it survives the gate --
-admits it to a small, inspectable, reversible registry (:class:`ConceptLibrary`). A future task whose
-signature matches records where the concept won (:mod:`mixle.task.design_prior`), so the search reaches
-for it directly instead of re-discovering it from scratch. Today's systematic error becomes tomorrow's
-primitive.
+pattern no family in the starting library explains well, this module selects the best-matching family
+for that pattern from a small set of REGISTERED, already-implemented families, fits it, gates it as a
+challenger against the status quo, and -- only if it survives the gate -- admits it to a small,
+inspectable, reversible registry (:class:`ConceptLibrary`). "New" here means newly admitted to the
+library for this task signature -- selection, not synthesis: the candidate is always one of a small,
+closed set of known families (four built in, plus any added via :func:`register_family`), never a
+likelihood, support, sufficient statistic, or inference procedure invented from scratch. A future task
+whose signature matches records where the concept won (:mod:`mixle.task.design_prior`), so the search
+reaches for it directly instead of re-discovering it from scratch. Today's systematic error becomes
+tomorrow's primitive.
 
 This module adds no new modeling capability -- it is pure wiring over five existing subsystems, each
 already carrying its own contract:
@@ -16,8 +20,9 @@ already carrying its own contract:
   champion's predictive distribution is from held-out data; tracked across tasks, a sustained gap is
   the "recurring unmodeled residual" signal that triggers a proposal.
 * **propose** -- :func:`mixle.utils.automatic.profiling._profile_series` (the automatic profiler that
-  landed this session's six new univariate detectors) is asked which family it would recommend for the
-  data; that recommendation is the candidate new family.
+  landed this session's six new univariate detectors) is asked which registered family it would
+  recommend for the data; that recommendation is the candidate family -- selected from the registry,
+  not synthesized.
 * **verify / adopt** -- :func:`mixle.evolve.verify.challenger_beats_champion` is the single gate: the
   proposed family is only admitted if it significantly, non-regressively beats the current champion on
   held-out data.
@@ -60,7 +65,9 @@ _FAMILY_CONSTRUCTORS: dict[str, Callable[[], Any]] = {
 
 
 def register_family(name: str, constructor: Callable[[], Any]) -> None:
-    """Extend the set of families the loop can propose/reuse (beyond the built-in three)."""
+    """Register an already-implemented family's constructor so the loop can select/reuse it (beyond
+    the four built in). This does not define a new family: ``constructor`` must build a working,
+    already-implemented distribution -- registration only makes an existing family selectable here."""
     _FAMILY_CONSTRUCTORS[name] = constructor
 
 
@@ -206,6 +213,8 @@ def run_concept_discovery_loop(
     champion_family: str = "gaussian",
     objective: Objective | None = None,
     train_frac: float = 0.6,
+    min_train: int = 8,
+    min_holdout: int = 8,
     recurrence_window: int = 2,
     discrepancy_threshold: float = 0.003,
     min_effect: float = 0.01,
@@ -218,11 +227,27 @@ def run_concept_discovery_loop(
     an admitted concept recommended for this task's signature (:meth:`ConceptLibrary.query`), that
     concept is tried directly -- no re-search. Otherwise, once high discrepancy has recurred for
     ``recurrence_window`` consecutive tasks sharing a signature with no admitted concept yet, the
-    automatic profiler proposes a new family; it is gated via
-    :func:`mixle.evolve.verify.challenger_beats_champion` and, only if it passes, admitted.
+    automatic profiler proposes a candidate family from its registered set (selection, not synthesis);
+    it is gated via :func:`mixle.evolve.verify.challenger_beats_champion` and, only if it passes,
+    admitted.
+
+    Each task's data is split ``train, held_out = data[:n_train], data[n_train:]`` with ``n_train``
+    derived from ``train_frac`` but clamped so both sides meet an explicit floor: ``min_train`` rows to
+    fit the champion/challenger on, ``min_holdout`` rows so discrepancy and the verify gate never run
+    on empty (or near-empty) evidence. ``train_frac`` must lie in the open interval ``(0, 1)``; a task
+    with fewer than ``min_train + min_holdout`` rows raises ``ValueError`` rather than silently
+    starving the train or held-out side of the split.
 
     Returns the (possibly newly-created) :class:`ConceptLibrary` and one :class:`TaskResult` per task.
     """
+    if not (0.0 < train_frac < 1.0):
+        raise ValueError(f"train_frac must be in the open interval (0, 1), got {train_frac!r}.")
+    if min_train < 1:
+        raise ValueError(f"min_train must be a positive integer, got {min_train!r}.")
+    if min_holdout < 1:
+        raise ValueError(f"min_holdout must be a positive integer, got {min_holdout!r}.")
+    min_required = min_train + min_holdout
+
     library = library if library is not None else ConceptLibrary(base_families=(champion_family,))
     objective = objective if objective is not None else nll_objective()
 
@@ -232,7 +257,14 @@ def run_concept_discovery_loop(
 
     for task_index, data in enumerate(tasks):
         arr = np.asarray(data, dtype=float).reshape(-1)
-        n_train = max(8, int(len(arr) * train_frac))
+        if len(arr) < min_required:
+            raise ValueError(
+                f"task {task_index} has only {len(arr)} row(s); train_frac={train_frac!r} needs at "
+                f"least {min_required} (min_train={min_train} + min_holdout={min_holdout}) to produce "
+                "a non-trivial train split AND a non-empty held-out split."
+            )
+        n_train = max(min_train, int(len(arr) * train_frac))
+        n_train = min(n_train, len(arr) - min_holdout)
         train, held_out = arr[:n_train], arr[n_train:]
         sig = task_signature(train)
 

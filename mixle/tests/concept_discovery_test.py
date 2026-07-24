@@ -163,5 +163,103 @@ class TaskSignatureTest(unittest.TestCase):
         self.assertNotEqual(task_signature(symmetric), task_signature(skewed))
 
 
+class TrainFracValidationTest(unittest.TestCase):
+    """``train_frac`` outside ``(0, 1)`` must be rejected up front, not silently misapplied -- the old
+    ``max(8, int(len(data) * train_frac))`` split absorbed an out-of-range fraction into a floor value
+    with no relationship to what was requested (e.g. ``train_frac=-0.5`` silently ran as if 8 rows had
+    been asked for)."""
+
+    def setUp(self):
+        self.rng = np.random.RandomState(42)
+
+    def test_negative_train_frac_raises(self):
+        tasks = [self.rng.normal(0.0, 1.0, 100)]
+        with self.assertRaisesRegex(ValueError, "train_frac must be"):
+            run_concept_discovery_loop(tasks, train_frac=-0.5)
+
+    def test_train_frac_above_one_raises(self):
+        tasks = [self.rng.normal(0.0, 1.0, 100)]
+        with self.assertRaisesRegex(ValueError, "train_frac must be"):
+            run_concept_discovery_loop(tasks, train_frac=1.5)
+
+    def test_train_frac_zero_raises(self):
+        # The interval is open: train_frac=0.0 would request an empty train split.
+        tasks = [self.rng.normal(0.0, 1.0, 100)]
+        with self.assertRaisesRegex(ValueError, "train_frac must be"):
+            run_concept_discovery_loop(tasks, train_frac=0.0)
+
+    def test_train_frac_one_raises(self):
+        # The interval is open: train_frac=1.0 would request an empty held-out split.
+        tasks = [self.rng.normal(0.0, 1.0, 100)]
+        with self.assertRaisesRegex(ValueError, "train_frac must be"):
+            run_concept_discovery_loop(tasks, train_frac=1.0)
+
+
+class HoldoutSplitSizeTest(unittest.TestCase):
+    """A task too small to yield a non-empty held-out split must raise a clear, actionable error
+    instead of silently starving the holdout -- pre-fix, ``max(8, int(len(data) * train_frac))`` always
+    claimed all 8-or-fewer rows for training, and the empty held-out set then blew up deep inside
+    ``mmd()`` with an error that gives no hint the real problem is task size vs. train_frac."""
+
+    def setUp(self):
+        self.rng = np.random.RandomState(7)
+
+    def test_eight_row_task_raises_instead_of_emptying_holdout(self):
+        tasks = [self.rng.normal(0.0, 1.0, 8)]
+        with self.assertRaisesRegex(ValueError, "min_train"):
+            run_concept_discovery_loop(tasks)
+
+    def test_five_row_task_raises_instead_of_emptying_holdout(self):
+        tasks = [self.rng.normal(0.0, 1.0, 5)]
+        with self.assertRaisesRegex(ValueError, "min_train"):
+            run_concept_discovery_loop(tasks)
+
+    def test_one_row_short_of_the_minimum_raises(self):
+        tasks = [self.rng.normal(0.0, 1.0, 15)]  # default min_train(8) + min_holdout(8) - 1
+        with self.assertRaisesRegex(ValueError, "min_train"):
+            run_concept_discovery_loop(tasks)
+
+    def test_exactly_at_the_minimum_succeeds_with_a_nonempty_holdout(self):
+        tasks = [self.rng.normal(0.0, 1.0, 16)]  # default min_train(8) + min_holdout(8), exactly
+        library, results = run_concept_discovery_loop(tasks)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(np.isfinite(results[0].discrepancy))
+
+    def test_custom_min_train_and_min_holdout_are_enforced(self):
+        tasks = [self.rng.normal(0.0, 1.0, 30)]
+        with self.assertRaisesRegex(ValueError, "min_train"):
+            run_concept_discovery_loop(tasks, min_train=20, min_holdout=20)  # needs 40, only has 30
+
+    def test_custom_min_train_and_min_holdout_allow_a_smaller_dataset(self):
+        tasks = [self.rng.normal(0.0, 1.0, 30)]
+        library, results = run_concept_discovery_loop(tasks, min_train=10, min_holdout=10)  # needs 20
+        self.assertEqual(len(results), 1)
+
+    def test_normal_sized_dataset_is_unaffected(self):
+        # Negative control: a comfortably-sized task must keep working exactly as before the fix.
+        tasks = [self.rng.normal(0.0, 1.0, 1000)]
+        library, results = run_concept_discovery_loop(tasks)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(np.isfinite(results[0].discrepancy))
+
+
+class ModuleCapabilityClaimTest(unittest.TestCase):
+    """Doc/naming fix: the module must describe itself as selecting a REGISTERED family, not
+    synthesizing a mathematically novel one -- the docstring used to claim it "fits a genuinely new
+    family" while the actual mechanism only ever picks among a small hard-coded/registered set."""
+
+    def test_module_docstring_does_not_claim_novel_family_synthesis(self):
+        import mixle.evolve.concept_discovery as concept_discovery_module
+
+        doc = concept_discovery_module.__doc__ or ""
+        self.assertNotIn("genuinely new family", doc)
+
+    def test_register_family_docstring_count_matches_the_actual_registry(self):
+        from mixle.evolve.concept_discovery import known_families, register_family
+
+        self.assertEqual(len(known_families()), 4)
+        self.assertIn("four", register_family.__doc__)
+
+
 if __name__ == "__main__":
     unittest.main()
