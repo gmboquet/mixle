@@ -1,4 +1,4 @@
-"""Team-scoped substrate views with explicit publishing and centralized access control.
+"""Team-scoped substrate views with explicit publishing, centralized access control, and immutable history.
 
 The substrate tags every item with an access ``scope`` ("local", a team id, or a shared scope like
 "public"), but the raw store filters on one scope at a time. A team's real visibility is a *union*: its
@@ -17,18 +17,37 @@ scope. A principal always has full access to its own home scope (the scope shari
 :data:`PUBLIC`, the explicit sharing commons; every OTHER scope, in particular another team's private
 scope, is denied unless :meth:`AccessPolicy.grant` says otherwise. :class:`Space` validates ``shared``
 against the policy at construction (and again, live, on every read, so a later revocation takes effect
-immediately); :func:`publish` checks both the item's actual stored scope and the target. Neither trusts
-a caller-supplied scope parameter as if it were already a validated permission.
+immediately); :func:`publish` checks both the item's actual stored scope and the target; and
+:func:`merge_versions` requires the merging principal to hold write access to both sides. None of these
+trust a caller-supplied scope parameter as if it were already a validated permission.
+
+Every publish and merge also persists an immutable, content-addressed snapshot of the state it is about
+to overwrite or delete (MXR-080-0265/0266). ``version_history`` entries reference those snapshots by
+digest; :func:`revision` recovers the complete prior item -- text, payload, provenance, tags, links,
+scope, timestamp -- from one, so "the prior state is recoverable" is an actual, checkable property, not
+just an audit label. :func:`merge_versions` additionally requires a typed :class:`MergeStrategy` and
+authorized common lineage, and only performs its destructive step (deleting the merged-away item, whose
+full state remains recoverable via its snapshot) when the caller explicitly passes ``confirm=True``.
 """
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 from mixle.substrate.core import Substrate, SubstrateItem
 
 PUBLIC = "public"
+
+# Reserved internal scope for immutable revision snapshots (MXR-080-0265). Never a legitimate team or
+# shared scope: AccessPolicy refuses to grant it to anyone (see AccessPolicy.can_read/can_write), so no
+# caller can join it via `shared=`/a grant and read every prior revision of every item in the store. The
+# double-underscore wrapping mirrors Python's own "internal" dunder convention.
+_REVISIONS_SCOPE = "__substrate_revisions__"
 
 
 class AccessDeniedError(PermissionError):
@@ -45,11 +64,11 @@ class AccessPolicy:
     its home scope) and to :data:`PUBLIC`, the explicit sharing commons -- this module's whole design
     is that nothing else crosses a boundary until someone deliberately publishes into a common scope.
     Every OTHER scope, in particular another team's private scope, is denied until explicitly granted
-    with :meth:`grant_read` / :meth:`grant_write` / :meth:`grant`. :class:`Space` and :func:`publish`
-    both consult an ``AccessPolicy`` instead of trusting caller-supplied scope parameters (``shared=``,
-    ``to=``, ``from_scope=``) as though they were already-validated permissions -- closing the concrete
-    leak where a team-A space configured with ``shared=("team-b",)`` simply read team-B's private items
-    with no check at all.
+    with :meth:`grant_read` / :meth:`grant_write` / :meth:`grant`. :class:`Space`, :func:`publish`, and
+    :func:`merge_versions` all consult an ``AccessPolicy`` instead of trusting caller-supplied scope
+    parameters (``shared=``, ``to=``, ``from_scope=``) as though they were already-validated
+    permissions -- closing the concrete leak where a team-A space configured with
+    ``shared=("team-b",)`` simply read team-B's private items with no check at all.
     """
 
     _read: dict[str, set[str]] = field(default_factory=dict)
@@ -80,13 +99,13 @@ class AccessPolicy:
 
     def can_read(self, principal: str, scope: str) -> bool:
         """Whether ``principal`` may read items in ``scope``."""
-        if not principal:
+        if not principal or scope == _REVISIONS_SCOPE:
             return False
         return scope == principal or scope == PUBLIC or scope in self._read.get(principal, ())
 
     def can_write(self, principal: str, scope: str) -> bool:
         """Whether ``principal`` may write (add or publish) items into ``scope``."""
-        if not principal:
+        if not principal or scope == _REVISIONS_SCOPE:
             return False
         return scope == principal or scope == PUBLIC or scope in self._write.get(principal, ())
 
@@ -107,6 +126,73 @@ def visible_scopes(team: str, *, shared: tuple[str, ...] = (PUBLIC,)) -> set[str
     A pure helper -- it does not itself enforce anything. :class:`Space` is the enforcement point: it
     validates ``shared`` against an :class:`AccessPolicy` before this ever runs."""
     return {team, *shared}
+
+
+def _canonical_json(obj: Any) -> str:
+    """A stable JSON encoding (sorted keys, no incidental whitespace), matching the canonicalization
+    :mod:`mixle.substrate.context` uses for its IC-13 content hashes, so equal content hashes equal."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _item_digest(item: SubstrateItem) -> str:
+    """Content-address ``item``'s full current state: sha256 hex over its kind, text, payload,
+    provenance, tags, links, scope, and timestamp (MXR-080-0265) -- identical content always hashes
+    identically, so re-snapshotting unchanged content is idempotent."""
+    envelope = {
+        "id": item.id,
+        "kind": item.kind,
+        "text": item.text,
+        "payload": item.payload,
+        "provenance": item.provenance,
+        "tags": item.tags,
+        "links": item.links,
+        "scope": item.scope,
+        "created_at": item.created_at,
+    }
+    return hashlib.sha256(_canonical_json(envelope).encode("utf-8")).hexdigest()
+
+
+def _snapshot(substrate: Substrate, item: SubstrateItem) -> str:
+    """Persist an immutable, content-addressed copy of ``item``'s CURRENT state and return its digest
+    (MXR-080-0265/0266): the prior state that :func:`publish` and :func:`merge_versions` are about to
+    overwrite or delete, preserved in full -- not just who/from/to bookkeeping.
+
+    Snapshots live in a reserved internal scope that no :class:`AccessPolicy` can ever grant (see
+    :data:`_REVISIONS_SCOPE`), with no text of their own, so they never surface in a team's
+    :class:`Space` view, in retrieval, or in the text-embedding corpus. Content-addressed by
+    :func:`_item_digest`, so writing the same content twice is a no-op past the first time -- a
+    revision, once persisted, is never overwritten.
+    """
+    digest = _item_digest(item)
+    revision_id = f"revision:{digest}"
+    if substrate.get(revision_id) is None:
+        substrate.put(
+            SubstrateItem(
+                id=revision_id,
+                kind=item.kind,
+                text="",  # never indexed or retrieved -- recovery only, never search
+                payload={"snapshot": item.to_json()},
+                provenance={"digest": digest, "snapshot_of": item.id},
+                tags=[],
+                links=[],
+                scope=_REVISIONS_SCOPE,
+                created_at=item.created_at,
+            )
+        )
+    return digest
+
+
+def revision(substrate: Substrate, digest: str) -> dict[str, Any] | None:
+    """The complete immutable snapshot recorded under content hash ``digest`` (MXR-080-0265), or
+    ``None`` if no such revision was ever persisted. Returns the full prior ``SubstrateItem`` state as
+    a JSON-compatible dict (kind, text, payload, provenance, tags, links, scope, created_at) -- not
+    just the who/from/to bookkeeping ``version_history`` alone would give you. The returned dict is
+    independent of the stored snapshot (a deep copy), so a caller mutating it can never corrupt the
+    persisted revision."""
+    rev = substrate.get(f"revision:{digest}")
+    if rev is None:
+        return None
+    return copy.deepcopy(rev.payload["snapshot"])
 
 
 def publish(
@@ -131,6 +217,11 @@ def publish(
     per item. That second check is what closes the hole ``from_scope`` alone never did: it fires even
     when ``from_scope`` is omitted entirely, so a known item id from a scope ``by`` cannot read is never
     movable just by leaving the filter off.
+
+    Every published item's pre-publish state is persisted as an immutable, content-addressed revision
+    (MXR-080-0265) before it is overwritten; ``version_history`` entries carry that revision's digest,
+    recoverable with :func:`revision` -- so "a re-published item never silently overwrites its
+    predecessor, the prior state is always recoverable" is an enforced property, not just a claim.
     """
     if not by:
         raise AccessDeniedError("publish requires an authenticated principal (by=...)")
@@ -146,12 +237,22 @@ def publish(
             continue
         if not policy.can_read(by, item.scope):
             continue
+        digest = _snapshot(substrate, item)
         prov = dict(item.provenance)
         # versioned + audited: every share bumps the version and appends to the history, so a re-published
-        # item never silently overwrites its predecessor -- the prior state is always recoverable (P2).
+        # item never silently overwrites its predecessor -- the prior state is always recoverable (P2),
+        # now backed by an actual immutable snapshot (MXR-080-0265), not just this bookkeeping.
         version = int(prov.get("version", 0)) + 1
         history = list(prov.get("version_history", []))
-        history.append({"version": version, "published_by": by, "published_from": item.scope, "to": to})
+        history.append(
+            {
+                "version": version,
+                "published_by": by,
+                "published_from": item.scope,
+                "to": to,
+                "revision": digest,
+            }
+        )
         prov["version"] = version
         prov["version_history"] = history
         prov["published_by"] = by
@@ -180,31 +281,92 @@ def version_of(item: Any) -> int:
 
 
 def history(substrate: Substrate, item_id: str) -> list[dict[str, Any]]:
-    """The full publish history of an item: every version with who shared it, from where, to where."""
+    """The full publish/merge history of an item: every version with who changed it, from where, and
+    to where, plus (MXR-080-0265/0266) a ``"revision"`` (publish entries) or ``parents[]["revision"]``
+    (merge entries) content-hash digest that :func:`revision` resolves to the complete immutable prior
+    item state -- not just this bookkeeping."""
     item = substrate.get(item_id)
     if item is None:
         return []
     return list(item.provenance.get("version_history", []))
 
 
+class MergeStrategy(StrEnum):
+    """Which side's text/payload survives a merge -- a closed, validated vocabulary (MXR-080-0266): an
+    unrecognized strategy now raises instead of silently behaving like :attr:`KEEP`."""
+
+    LATEST = "latest"
+    KEEP = "keep"
+
+
 def merge_versions(
-    substrate: Substrate, keep_id: str, other_id: str, *, by: str | None = None, prefer: str = "latest"
+    substrate: Substrate,
+    keep_id: str,
+    other_id: str,
+    *,
+    by: str | None = None,
+    prefer: MergeStrategy | str = MergeStrategy.LATEST,
+    policy: AccessPolicy | None = None,
+    confirm: bool = False,
 ) -> str | None:
     """Reconcile two versions of the same knowledge into one, keeping full lineage (no silent loss, P2).
 
-    Merges ``other_id`` into ``keep_id``: unions tags and links, keeps the text/payload of whichever has
-    the higher version (``prefer="latest"``) or of ``keep`` (``prefer="keep"``), bumps the surviving
-    item's version, records BOTH parents in the history, and removes the merged-away item. Returns the
-    surviving id, or None if either is missing. Two teams that independently edited a shared item can be
-    reconciled without either edit vanishing unrecorded."""
+    Merges ``other_id`` into ``keep_id``: unions tags and links, keeps the text/payload of whichever
+    ``prefer`` (a :class:`MergeStrategy`) selects, bumps the surviving item's version, records BOTH
+    parents in the history, and removes the merged-away item. Returns the surviving id, or ``None`` if
+    either id is missing (checked first, before any authorization -- a merge naming a nonexistent id is
+    a no-op, not a permission question).
+
+    Authorized common lineage, required (MXR-080-0266): ``by`` must be a non-empty, authenticated
+    principal, and ``policy`` (an :class:`AccessPolicy`; a fresh, all-deny-but-home-scope-and-PUBLIC one
+    when omitted) must authorize it to WRITE both ``keep``'s and ``other``'s current scopes -- a caller
+    can no longer reconcile, and thereby delete, another principal's item merely by knowing its id.
+    ``keep`` and ``other`` must also share the same ``kind``: merging e.g. a ``text`` item into an
+    ``image`` item is never a legitimate reconciliation of the same knowledge, so this is a hard reject
+    with no override. This is deliberately not a full lineage-graph check (no ``links``/common-ancestor
+    requirement): P1's own cross-team-fork use case reconciles items that were never formally linked to
+    each other; kind agreement plus dual-scope write authorization is the minimum coherent gate that
+    rejects genuinely unrelated items (different kind, unauthorized principal) without breaking that
+    legitimate use case.
+
+    ``prefer`` (unrecognized values now raise :class:`ValueError` instead of silently behaving like
+    ``"keep"``) and both items' pre-merge states are persisted as immutable, content-addressed revisions
+    (MXR-080-0265) before ``keep`` is overwritten and ``other`` is deleted -- recoverable with
+    :func:`revision` even though ``other`` no longer exists as a live item. The delete is real and
+    permanent as a LIVE item, so it requires an explicit ``confirm=True`` acknowledgment; without it
+    this raises :class:`ValueError` rather than silently performing the destructive step.
+    """
     keep = substrate.get(keep_id)
     other = substrate.get(other_id)
     if keep is None or other is None:
         return None
 
-    take_other = prefer == "latest" and version_of(other) > version_of(keep)
+    if not by:
+        raise AccessDeniedError("merge_versions requires an authenticated principal (by=...)")
+    policy = policy if policy is not None else AccessPolicy()
+    policy.require_write(by, keep.scope)
+    policy.require_write(by, other.scope)
+    if keep.kind != other.kind:
+        raise ValueError(
+            f"cannot merge items of different kind ({keep.kind!r} vs {other.kind!r}) -- merge_versions "
+            "reconciles independent edits of the SAME knowledge, not unrelated items"
+        )
+    strategy = MergeStrategy(prefer)  # raises ValueError on an unrecognized strategy
+    if not confirm:
+        raise ValueError(
+            "merge_versions deletes the merged-away item; pass confirm=True to acknowledge the "
+            "destructive step (its full state remains recoverable afterward via the immutable revision "
+            "captured just before the merge -- see spaces.revision())"
+        )
+
+    take_other = strategy is MergeStrategy.LATEST and version_of(other) > version_of(keep)
     winner_text = other.text if take_other else keep.text
     winner_payload = other.payload if take_other else keep.payload
+
+    # MXR-080-0265/0266: snapshot BOTH parents' full pre-merge state before either is touched, so the
+    # merged-away item's content is never lost even though it is about to be deleted for real.
+    keep_digest = _snapshot(substrate, keep)
+    other_digest = _snapshot(substrate, other)
 
     prov = dict(keep.provenance)
     version = max(version_of(keep), version_of(other)) + 1
@@ -215,8 +377,8 @@ def merge_versions(
             "merged_by": by,
             "merged_from": other_id,
             "parents": [
-                {"id": keep_id, "version": version_of(keep)},
-                {"id": other_id, "version": version_of(other)},
+                {"id": keep_id, "version": version_of(keep), "revision": keep_digest},
+                {"id": other_id, "version": version_of(other), "revision": other_digest},
             ],
         }
     )
