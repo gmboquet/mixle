@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from mixle.analysis.sdm import HabitatModel, SpeciesObservation, fit_sdm
+from mixle.analysis.sdm import (
+    HabitatModel,
+    SpeciesObservation,
+    _bin_cell_counts,
+    _validate_locations,
+    fit_sdm,
+)
 from mixle.process import InhomogeneousPoissonProcessDistribution
 from mixle.reason.posterior_protocol import Posterior
 
@@ -150,3 +157,93 @@ def test_fit_sdm_beta_recovers_sign_of_covariate_effect():
     # beta = [intercept, slope]; the fitted slope must recover the strong positive true effect (b=2.0)
     assert model.beta.shape == (2,)
     assert model.beta[1] > 0.5
+
+
+# -- MXR-080-0111: histogram binning must not silently drop or misbin invalid cell indices --
+
+
+def test_bin_cell_counts_excludes_negative_toolarge_and_nan_indices():
+    """The low-level binning helper stays correct in isolation: out-of-range/NaN input contributes
+    zero counts rather than being silently absorbed into some bin (validation/reporting of *why* an
+    observation was rejected is `_validate_locations`'s job, one layer up -- see the fit_sdm-level
+    tests below)."""
+    counts = _bin_cell_counts([-1.0, 99.0, float("nan")], num_cells=50)
+    assert counts.sum() == 0.0
+    assert counts.shape == (50,)
+
+
+def test_bin_cell_counts_excludes_right_endpoint_k():
+    """The nominally out-of-domain right endpoint K (domain is the half-open [0, K)) must not be
+    folded into the last cell [K-1, K)."""
+    counts = _bin_cell_counts([9.5, 10.0], num_cells=10)
+    assert counts[9] == 1.0  # 9.5 is legitimately inside [9, 10)
+    assert counts.sum() == 1.0  # 10.0 must NOT also land in cell 9
+
+
+def test_bin_cell_counts_bins_in_domain_values_correctly():
+    """Negative control: ordinary in-range floats still land in the correct cells."""
+    counts = _bin_cell_counts([0.5, 1.1, 1.9, 5.0, 9.999], num_cells=10)
+    expected = np.zeros(10)
+    expected[0] = 1.0
+    expected[1] = 2.0
+    expected[5] = 1.0
+    expected[9] = 1.0
+    assert np.array_equal(counts, expected)
+
+
+def test_validate_locations_reports_counts_by_failure_mode():
+    """`_validate_locations` must receipt *why* observations were rejected, not just that some were."""
+    with pytest.raises(ValueError) as exc_info:
+        _validate_locations([-1.0, 99.0, float("nan"), 5.0], num_cells=50, kind="presence")
+    msg = str(exc_info.value)
+    assert "rejected 3 of 4" in msg
+    assert "1 non-finite" in msg
+    assert "2 outside" in msg
+
+
+def test_fit_sdm_rejects_out_of_domain_presence_locations():
+    """MXR-080-0111 exact audit repro: an SDM fit using ONLY locations -1 and 99 (both outside [0, 50))
+    must be rejected outright, not silently completed as if there were zero detections."""
+    num_cells = 50
+    env = np.zeros(num_cells)
+    area = np.ones(num_cells)
+    occurrences = [
+        SpeciesObservation(species_id="lynx_rufus", detection=True, location=np.array([-1.0])),
+        SpeciesObservation(species_id="lynx_rufus", detection=True, location=np.array([99.0])),
+    ]
+    with pytest.raises(ValueError, match=r"presence locations"):
+        fit_sdm(occurrences, env.reshape(-1, 1), area)
+
+
+def test_fit_sdm_rejects_nan_presence_location():
+    num_cells = 20
+    env = np.zeros(num_cells)
+    area = np.ones(num_cells)
+    occurrences = [SpeciesObservation(species_id="x", detection=True, location=np.array([float("nan")]))]
+    with pytest.raises(ValueError, match=r"non-finite"):
+        fit_sdm(occurrences, env.reshape(-1, 1), area)
+
+
+def test_fit_sdm_rejects_out_of_domain_background_locations():
+    num_cells = 20
+    env = np.zeros(num_cells)
+    area = np.ones(num_cells)
+    occurrences = [SpeciesObservation(species_id="x", detection=True, location=np.array([2.0]))]
+    with pytest.raises(ValueError, match=r"background locations"):
+        fit_sdm(occurrences, env.reshape(-1, 1), area, background=np.array([-1.0, 21.0]))
+
+
+def test_fit_sdm_still_fits_with_legitimate_in_domain_locations():
+    """Negative control: a normal in-domain presence/background mix still fits fine after the 0111 fix."""
+    rng = np.random.default_rng(99)
+    num_cells = 40
+    env = rng.uniform(-1.0, 1.0, size=num_cells)
+    area = np.ones(num_cells)
+    lambda_true = np.exp(0.1 + 0.5 * env)
+    occurrences, _ = _synthetic_presences(lambda_true, area, rng)
+    background = rng.uniform(0.0, num_cells, size=100)
+
+    model = fit_sdm(occurrences, env.reshape(-1, 1), area, background=background, ridge=1e-2)
+
+    assert model.mean.shape == (num_cells,)
+    assert np.all(np.isfinite(model.mean))

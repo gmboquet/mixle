@@ -152,19 +152,60 @@ class HabitatModel:
         return self.mean >= float(threshold)
 
 
+def _validate_locations(raw: Sequence[float] | np.ndarray, num_cells: int, *, kind: str) -> np.ndarray:
+    """Validate that every ``kind`` location is a finite cell index in the half-open domain ``[0, num_cells)``.
+
+    ``_bin_cell_counts`` (like the ``np.histogram``-based binning it mirrors) silently ignores any value
+    outside its bin edges rather than raising -- so an un-validated out-of-domain or NaN location does not
+    error, it just vanishes from the fit as if the detection never happened (MXR-080-0111: a fit using only
+    the locations ``-1`` and ``99`` completed normally, reporting zero detections everywhere). Locations
+    reaching this point are expected to already be resolved onto the study-area grid (see
+    :class:`SpeciesObservation`'s docstring), so a value outside ``[0, num_cells)`` reflects an upstream
+    data/ingest bug, not a legitimate observation -- it is rejected outright rather than silently dropped,
+    matching this module's existing convention of raising on invalid input.
+
+    Raises:
+        ValueError: any location is non-finite or outside ``[0, num_cells)``; the message reports how many
+            failed each way (non-finite vs. out-of-domain) out of the total, plus a preview of the offending
+            values, so the rejection is fully receipted rather than a bare "invalid input" refusal.
+    """
+    v = np.asarray(raw, dtype=np.float64).reshape(-1)
+    if v.size == 0:
+        return v
+    non_finite = ~np.isfinite(v)
+    out_of_domain = ~non_finite & ((v < 0.0) | (v >= float(num_cells)))
+    invalid = non_finite | out_of_domain
+    if np.any(invalid):
+        bad = v[invalid]
+        preview = np.array2string(bad[: min(10, bad.size)], precision=3, separator=", ")
+        raise ValueError(
+            f"{kind} locations must be finite cell indices in [0, {num_cells}); rejected "
+            f"{int(invalid.sum())} of {v.size} ({int(non_finite.sum())} non-finite, "
+            f"{int(out_of_domain.sum())} outside [0, {num_cells})): {preview}"
+            f"{' ...' if bad.size > 10 else ''}"
+        )
+    return v
+
+
 def _bin_cell_counts(cell_indices: Sequence[float] | np.ndarray, num_cells: int) -> np.ndarray:
     """Per-cell counts via the exact IPP count-encoding: ``np.histogram`` over integer bin edges.
 
     Mirrors ``InhomogeneousPoissonProcessAccumulator``/``...DataEncoder``'s
     ``np.histogram(events, bins=edges)`` binning (inhomogeneous_poisson.py), treating each cell index
-    ``[c, c+1)`` as one bin so the same frozen scorer can be reused unmodified.
+    ``[c, c+1)`` as one bin so the same frozen scorer can be reused unmodified. Callers are expected to
+    have already rejected out-of-domain indices via :func:`_validate_locations`; this function stays
+    correct in isolation too (MXR-080-0111): a phantom bin edge one past ``num_cells`` makes the true
+    last cell ``[num_cells - 1, num_cells)`` left-closed/right-open like every other cell, instead of
+    ``np.histogram``'s default closed-both-ends last bin, which would otherwise fold an index of exactly
+    ``num_cells`` (nominally out-of-domain -- the domain is the half-open ``[0, num_cells)``) into cell
+    ``num_cells - 1``.
     """
-    edges = np.arange(num_cells + 1, dtype=np.float64)
-    idx = np.asarray(list(cell_indices), dtype=np.float64) if len(cell_indices) else np.empty(0)
+    idx = np.asarray(cell_indices, dtype=np.float64).reshape(-1)
     if idx.size == 0:
         return np.zeros(num_cells, dtype=np.float64)
+    edges = np.arange(num_cells + 2, dtype=np.float64)  # one phantom edge beyond num_cells; see docstring
     counts, _ = np.histogram(idx, bins=edges)
-    return counts.astype(np.float64)
+    return counts[:num_cells].astype(np.float64)
 
 
 def _fit_beta(
@@ -242,12 +283,16 @@ def fit_sdm(
     design = np.column_stack([np.ones(num_cells), cov])
     p = design.shape[1]
 
-    presence_idx = [float(np.asarray(o.location).reshape(-1)[0]) for o in occurrences if o.detection]
+    presence_idx = _validate_locations(
+        [float(np.asarray(o.location).reshape(-1)[0]) for o in occurrences if o.detection],
+        num_cells,
+        kind="presence",
+    )
     counts = _bin_cell_counts(presence_idx, num_cells)
 
     if background is not None:
-        bg = np.asarray(background, dtype=np.float64).reshape(-1)
-        bg_counts = _bin_cell_counts(bg.tolist(), num_cells)
+        bg = _validate_locations(background, num_cells, kind="background")
+        bg_counts = _bin_cell_counts(bg, num_cells)
         # Convert background/quadrature point density into an area-equivalent unit: each background
         # point stands in for `mean(area) / len(background)` of extra survey opportunity, so cells with
         # heavier background sampling need proportionally more detections to imply the same intensity.
