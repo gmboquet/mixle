@@ -75,6 +75,17 @@ class PlackettLuceTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             PlackettLuceDistribution([0.0, 0.0, 0.0]).dist_to_encoder().seq_encode([[0, 1, 1]])
 
+    def test_log_density_rejects_non_permutations(self):
+        # log_density already validates this (partial rankings are legitimate -- an ordering
+        # shorter than dim is fine -- but a repeated or out-of-range item is not a ranking at
+        # all); plackett_luce_partial_test.py exercises the same guard, this pins it in the
+        # primary full-ranking test file for the class too.
+        dist = PlackettLuceDistribution([1.5, 0.2, -0.8])
+        with self.assertRaises(ValueError):
+            dist.log_density([0, 0, 1])  # repeated item
+        with self.assertRaises(ValueError):
+            dist.log_density([0, 1, 5])  # out of range
+
     def test_invalid_parameters_raise(self):
         with self.assertRaises(ValueError):
             PlackettLuceDistribution([1.0])
