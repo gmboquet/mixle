@@ -45,7 +45,9 @@ class CompiledLnsKernelTest(unittest.TestCase):
         X = rng.randn(500, 1000) * 20
         got = lns.dequantize(lns.logsumexp(lns.quantize(X), axis=1))  # uses the compiled kernel
         ref = sp.logsumexp(X, axis=1)
-        self.assertLessEqual(float(np.max(np.abs(got - ref))), 8 * lns.max_logsumexp_error)
+        # reducing 1000 terms is a depth-10 pairwise tree (MXR-080-0139: the certificate scales with
+        # depth, not a flat per-call constant)
+        self.assertLessEqual(float(np.max(np.abs(got - ref))), lns.max_logsumexp_error(1000))
 
     def test_fused_cross_entropy_matches_float64(self):
         lns = LogNumberSystem(step=0.005)
@@ -54,7 +56,7 @@ class CompiledLnsKernelTest(unittest.TestCase):
         targets = rng.randint(0, 4000, 1024)
         ref = float(np.mean(sp.logsumexp(logits, axis=1) - logits[np.arange(1024), targets]))
         got = cross_entropy(logits, targets, lns, axis=1)  # uses cross_entropy_rows
-        self.assertLessEqual(abs(got - ref), 8 * lns.max_logsumexp_error)
+        self.assertLessEqual(abs(got - ref), lns.max_logsumexp_error(4000))  # 4000-class log-partition
 
     def test_cross_entropy_rows_direct(self):
         lns = LogNumberSystem(step=0.01)

@@ -23,7 +23,8 @@ class SoftmaxCrossEntropyTest(unittest.TestCase):
         logits = rng.randn(256, 1000) * 5  # (tokens, vocab)
         ref = sp.log_softmax(logits, axis=1)
         got = log_softmax(logits, lns, axis=1)
-        self.assertLessEqual(float(np.max(np.abs(got - ref))), 8 * lns.max_logsumexp_error)
+        # 1000-way vocab log-partition: depth-10 pairwise tree (MXR-080-0139)
+        self.assertLessEqual(float(np.max(np.abs(got - ref))), lns.max_logsumexp_error(1000))
 
     def test_softmax_is_a_distribution(self):
         lns = LogNumberSystem(step=0.005)
@@ -38,7 +39,7 @@ class SoftmaxCrossEntropyTest(unittest.TestCase):
         targets = rng.randint(0, 800, size=2000)
         ref = float(np.mean(sp.logsumexp(logits, axis=1) - logits[np.arange(2000), targets]))
         got = cross_entropy(logits, targets, lns, axis=1)
-        self.assertLessEqual(abs(got - ref), 4 * lns.max_logsumexp_error)
+        self.assertLessEqual(abs(got - ref), lns.max_logsumexp_error(800))  # 800-class log-partition
 
 
 class SumProductCircuitTest(unittest.TestCase):
@@ -64,7 +65,12 @@ class SumProductCircuitTest(unittest.TestCase):
         circuit = self._circuit()
         ref = circuit.evaluate_float(leaves)
         got = circuit.evaluate_lns(lns, leaves)
-        self.assertLessEqual(float(np.max(np.abs(got - ref))), 12 * lns.max_logsumexp_error)
+        # Each individual "sum" node here is a 2-way logadd (max_logsumexp_error(2)), but the root's
+        # error compounds through THREE dependent sum nodes plus a product (MXR-080-0139's bound
+        # covers a single flat n-way reduction, not a general sum/product DAG -- lns_nn.py's circuit
+        # evaluator has its own, broader error-composition question, tracked separately), so keep a
+        # multiplier on top of the single-node certificate rather than treating it as one.
+        self.assertLessEqual(float(np.max(np.abs(got - ref))), 4 * lns.max_logsumexp_error(2))
 
     def test_product_node_is_exact_integer_add(self):
         # a pure product of leaves is exact integer addition of the quantized leaf log-values
