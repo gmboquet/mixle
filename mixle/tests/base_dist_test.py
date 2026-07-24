@@ -240,7 +240,8 @@ def _build_dists():
     #                             GaussianDistribution(2.0, 1.0)))
     # dist = SemiSupervisedMixtureDistribution([c1, c2, c3], [0.6, 0.3, 0.1], name='a')
     #
-    dists.append(VonMisesFisherDistribution([1.1, 2.1, 3.1, 4.1, 5.1], 2.0, name="a"))
+    _vmf_mu = np.array([1.1, 2.1, 3.1, 4.1, 5.1])
+    dists.append(VonMisesFisherDistribution(_vmf_mu / np.linalg.norm(_vmf_mu), 2.0, name="a"))
     dists.append(IntegerUniformSpikeDistribution(k=3, min_val=0, num_vals=10, p=0.6, name="a"))
     dists.append(NegativeBinomialDistribution(r=3, p=0.45, name="a"))
 
