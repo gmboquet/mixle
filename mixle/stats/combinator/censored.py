@@ -6,7 +6,9 @@ observation contributes its interval probability mass
 
     P(a <= X <= b) = F(b) - F(a)
 
-to the likelihood, where ``F`` is the base distribution's CDF.  This is distinct from truncation:
+to the likelihood, where ``F`` is the base distribution's CDF (for a discrete base, whose CDF has a
+jump at ``a``, the point mass ``P(X = a)`` is added back in -- see ``Data type`` below).  This is
+distinct from truncation:
 truncation *renormalizes* the density over a restricted support (the observation is exact but the
 support is limited), whereas censoring keeps the original distribution and only coarsens what was
 observed.  Survival-analysis right/left/interval censoring (and Tobit-style bounds) are all this
@@ -15,8 +17,12 @@ combinator.
 Data type: each observation is one of
 
     * a scalar ``x``                  -- an exact (uncensored) observation, scored by the base density;
-    * a pair ``(a, b)``               -- interval-censored, scored by ``log(F(b) - F(a))``;
-                                         use ``a = -inf`` for left censoring, ``b = +inf`` for right.
+    * a pair ``(a, b)``               -- interval-censored over the *closed* interval ``[a, b]``,
+                                         scored by ``log P(a <= X <= b)``; use ``a = -inf`` for left
+                                         censoring, ``b = +inf`` for right. For a continuous base this
+                                         is ``log(F(b) - F(a))`` (a single point has zero measure); a
+                                         discrete base's point mass at ``a`` is added back in, since
+                                         ``F(a)`` already nets it out of ``F(b) - F(a)``.
 
 The base distribution must expose ``cdf``.  Estimation of the base parameters under censoring has no
 generic closed form (the censored MLE couples the bounds with the base parameters), so the supplied
@@ -35,6 +41,7 @@ from mixle.stats.combinator._base import MaskedBaseEncoder, SingleChildAccumulat
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
+    EnumerationError,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
@@ -50,6 +57,27 @@ _LOG_MASS_FLOOR = math.log(np.finfo(np.float64).tiny)
 def _is_interval(x: Any) -> bool:
     """An observation is a censoring interval if it is a length-2 sequence of bounds."""
     return isinstance(x, (tuple, list)) and len(x) == 2
+
+
+def _is_discrete_base(base: Any) -> bool:
+    """Return whether ``base`` has enumerable (discrete/atomic) support.
+
+    Probes :meth:`~mixle.stats.compute.pdist.SequenceEncodableProbabilityDistribution.enumerator`
+    the same way combinator enumerators already do (e.g. ``TruncatedEnumerator``): a distribution
+    with atomic support implements it, while a continuous one raises :class:`EnumerationError`. A
+    ``base`` that does not even expose ``enumerator`` (e.g. a minimal duck-typed stub that only
+    implements the handful of methods a particular caller needs) is likewise treated as continuous,
+    matching the base class's own default. This is how closed-interval scoring tells apart a
+    ``base.log_density(v)`` that is itself a probability (an atom, for a discrete base) from one
+    that is a density (zero-measure at any single point, for a continuous base).
+    """
+    if not hasattr(base, "enumerator"):
+        return False
+    try:
+        base.enumerator()
+    except EnumerationError:
+        return False
+    return True
 
 
 class CensoredDistribution(SequenceEncodableProbabilityDistribution):
@@ -72,25 +100,54 @@ class CensoredDistribution(SequenceEncodableProbabilityDistribution):
         self.base = base
         self.name = name
         self.keys = keys
+        # Cached once (not re-probed per observation): whether a single point of `base` carries a
+        # true point-mass probability (discrete/atomic support) rather than a zero-measure density
+        # value (continuous support). See `_is_discrete_base`.
+        self._discrete_base = _is_discrete_base(base)
 
     def __str__(self) -> str:
         return "CensoredDistribution(%s, name=%s, keys=%s)" % (str(self.base), repr(self.name), repr(self.keys))
 
     def _interval_log_mass(self, a: float, b: float) -> float:
-        """Return ``log(F(b) - F(a))`` for a censoring interval ``[a, b]``, computed in log space.
+        """Return the log-mass of the *closed* censoring interval ``[a, b]``, in log space.
 
-        Tail censoring is the normal use case, so ``F(b) - F(a)`` routinely underflows to ``0`` in
-        probability space (``log(0) = -inf``) even when the true interval log-mass is a perfectly
+        For a continuous base a single point has zero measure, so this is just
+        ``log(F(b) - F(a))``. For a discrete base the closed interval also includes the point mass
+        at ``a`` itself -- ``F(a) = P(X <= a)`` already nets ``a`` out of ``F(b) - F(a)``, which is
+        really ``P(a < X <= b)`` -- so that open-lower mass has ``P(X = a)`` added back on. See
+        :meth:`_open_lower_log_mass` and :func:`_is_discrete_base`.
+
+        Tail censoring is the normal use case, so the open-lower mass routinely underflows to ``0``
+        in probability space (``log(0) = -inf``) even when the true interval log-mass is a perfectly
         finite large-negative number. When the base distribution exposes ``logcdf``/``logsf`` the mass
-        is formed by a stable :func:`mixle.utils.special.logsubexp`; otherwise the linear ``F(b) - F(a)`` is used but the
-        underflow is guarded so a real far-tail interval is not silently zeroed.
+        is formed by a stable :func:`mixle.utils.special.logsubexp`; otherwise the linear
+        ``F(b) - F(a)`` is used but the underflow is guarded (for a continuous base only) so a real
+        far-tail interval is not silently zeroed.
         """
         if b < a:
             a, b = b, a
+        discrete = self._discrete_base
         if a == b:
+            if discrete:
+                # A closed single-point interval on a discrete base is exactly that outcome's mass
+                # (itself ``-inf`` if ``a`` is not in the support).
+                return float(self.base.log_density(a))
             # A degenerate (zero-width) interval has genuinely zero mass under a continuous base; this
             # is a true ``-inf``, not an underflow, so return it before any underflow floor kicks in.
             return -math.inf
+        log_mass = self._open_lower_log_mass(a, b)
+        if discrete and a != -math.inf:
+            # Closed-below: add back X == a, which the open-lower F(b) - F(a) formula nets out.
+            log_pa = float(self.base.log_density(a))
+            if log_pa > -math.inf:
+                log_mass = float(np.logaddexp(log_mass, log_pa))
+        return log_mass
+
+    def _open_lower_log_mass(self, a: float, b: float) -> float:
+        """Return ``log P(a < X <= b)``, the open-lower/closed-upper mass that
+        :meth:`_interval_log_mass` builds on (closedness at ``a`` for a discrete base is layered on
+        by the caller).
+        """
         has_logsf = hasattr(self.base, "logsf")
         has_logcdf = hasattr(self.base, "logcdf")
         if has_logsf or has_logcdf:
@@ -108,9 +165,22 @@ class CensoredDistribution(SequenceEncodableProbabilityDistribution):
         mass = fb - fa
         if mass > 0.0:
             return math.log(mass)
+        if self._discrete_base:
+            # An exact discrete CDF difference has no float-cancellation underflow the way a
+            # continuous tail integral does (its operands are exact sums of atomic masses, not an
+            # asymptotically-saturating tail integral); `mass <= 0` here means no atom lies in (a, b].
+            return -math.inf
         # The interval mass underflowed to 0 in probability space (both CDFs rounded to the same
-        # value). Clamp to a tiny finite floor so a real far-tail interval is not silently zeroed
-        # (-inf) -- the only way to do better is a base that exposes logcdf/logsf (handled above).
+        # value). This is a genuine zero -- not an underflow -- when the base has no density at
+        # either endpoint either: a real far-tail interval still has a representable (if tiny) density
+        # at its boundary even after its CDF has saturated to 0/1 in float64 (the only way to do
+        # better here is a base that exposes logcdf/logsf, handled above). Clamp to a tiny finite
+        # floor in that case so a real far-tail interval is not silently zeroed; otherwise -- e.g. an
+        # interval entirely outside a bounded base's support -- report the true, exact zero.
+        da = 0.0 if math.isinf(a) else float(self.base.density(a))
+        db = 0.0 if math.isinf(b) else float(self.base.density(b))
+        if da == 0.0 and db == 0.0:
+            return -math.inf
         return _LOG_MASS_FLOOR
 
     def density(self, x: Any) -> float:
@@ -120,7 +190,8 @@ class CensoredDistribution(SequenceEncodableProbabilityDistribution):
     def log_density(self, x: Any) -> float:
         """Log-likelihood contribution of ``x``.
 
-        Exact observation ``x`` -> ``log p_base(x)``; interval ``(a, b)`` -> ``log(F(b) - F(a))``.
+        Exact observation ``x`` -> ``log p_base(x)``; interval ``(a, b)`` -> ``log P(a <= X <= b)``
+        (see :meth:`_interval_log_mass`).
         """
         if _is_interval(x):
             return self._interval_log_mass(float(x[0]), float(x[1]))
