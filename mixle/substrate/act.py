@@ -56,6 +56,13 @@ class Action:
     cost: float = 1.0
     description: str = ""
     base_score: float = 0.0  # a floor added before division (RETRIEVE is always weakly informative)
+    # optional: the ACTUAL relevance earned by the most recently completed `run()` call (e.g. a
+    # retrieval's own calibrated top score), in [0, 1]. When set, this -- not the lexical
+    # relevance_of() floor -- becomes the fired Step's relevance, and therefore feeds confidence: a
+    # routing prior that says "this action is always worth trying" must never double as proof that
+    # what it returned was any good (MXR-080-0255). None (default) keeps the lexical fallback, which
+    # is all most action kinds (compute/simulate/create/delegate) have.
+    earned_relevance: Callable[[], float] | None = None
 
     def __post_init__(self) -> None:
         _validate_cost(self)
@@ -128,10 +135,33 @@ def _confidence(steps: list[Step], min_evidence: int) -> float:
 
 
 def relevance_of(action: Action, question: str) -> float:
-    """How on-topic an action is for a question (lexical overlap + its base floor), ignoring cost."""
+    """How on-topic an action is for a question (lexical overlap + its base floor), ignoring cost.
+
+    This is a PROSPECTIVE estimate -- "how promising does this mounted capability look" -- used both as
+    ``score_action``'s routing prior and, elsewhere, to rank untried acquisition strategies (see
+    :meth:`mixle.scientist.Scientist.propose`). It is deliberately NOT what confidence is earned from
+    once an action has actually run; see :func:`_relevance_for`."""
     q = _tokens(question)
     overlap = len(q & _tokens(action.description)) / len(q) if q else 0.0
     return action.base_score + overlap
+
+
+def _relevance_for(action: Action, question: str) -> float:
+    """The relevance recorded on a fired Step: the action's own earned signal when it has one, else
+    the lexical routing prior.
+
+    ``action.earned_relevance`` (set by e.g. :func:`retrieve_action`) reports what was ACTUALLY found by
+    the most recently completed ``run()`` -- a calibrated score, not a per-action-type floor -- so
+    confidence reflects real support instead of borrowing the routing prior as if it were evidence
+    (MXR-080-0255). Most action kinds have no better per-call signal than "did it run and produce
+    something", so they leave the hook unset and get the lexical prior, same as before. A broken hook
+    must not crash the investigation, so it falls back the same way."""
+    if action.earned_relevance is not None:
+        try:
+            return max(0.0, min(1.0, float(action.earned_relevance())))
+        except Exception:  # noqa: BLE001 - a broken earned-relevance hook must not crash the investigation
+            pass
+    return relevance_of(action, question)
 
 
 def score_action(action: Action, question: str) -> float:
@@ -214,7 +244,7 @@ def investigate(
                 fragments=fragments,
                 cost=action.cost,
                 score=sc,
-                relevance=relevance_of(action, question),
+                relevance=_relevance_for(action, question),
             )
         )
         _emit_route(telemetry, question, action, fragments)
@@ -268,16 +298,34 @@ def retrieve_action(
     """A retrieve action over a :class:`~mixle.substrate.Substrate` (the always-available floor action).
 
     ``min_score`` filters out weak matches: a small embedder returns a result for every query, so a
-    positive floor keeps genuinely-irrelevant items from becoming false evidence. It defaults to 0.0
-    (keep everything) but a small positive value makes retrieval conservative on a noisy index."""
+    positive floor keeps genuinely-irrelevant items from becoming false evidence. It defaults to 0.0,
+    but the comparison is a strict ``>`` regardless of the floor chosen: an exact-zero score means no
+    overlap at all, which is never usable evidence, so it is always excluded -- not admitted just
+    because the caller left the default floor at its lowest setting (MXR-080-0255). A small positive
+    ``min_score`` makes retrieval conservative still, on a noisy index where near-zero (but not exactly
+    zero) scores are also unreliable.
+
+    Confidence is earned separately from ordering: ``base_score`` gives retrieval a routing prior for
+    :func:`score_action` ("always at least weakly worth trying"), but the fired Step's confidence-bearing
+    relevance is the TRUE top calibrated score among the results that survived the floor (0.0 when
+    nothing did) -- never the fixed routing prior. A store with nothing relevant now reports low or zero
+    confidence instead of borrowing retrieval's routing floor as if it were support (MXR-080-0255)."""
+    last_top_score = [0.0]  # the most recently completed run()'s top kept score; read by `_earned` right after
 
     def _run(question: str) -> list[str]:
         from mixle.substrate.retrieve import retrieve
 
         r = retrieve(substrate, question, k=k, scope=scope)
-        return [it.text for it, sc in zip(r.items, r.scores) if it.text and sc >= min_score]
+        kept = [(it.text, sc) for it, sc in zip(r.items, r.scores) if it.text and sc > min_score]
+        last_top_score[0] = max((sc for _, sc in kept), default=0.0)
+        return [text for text, _sc in kept]
 
-    return Action(name=name, kind="retrieve", run=_run, cost=cost, description="", base_score=0.35)
+    def _earned() -> float:
+        return last_top_score[0]
+
+    return Action(
+        name=name, kind="retrieve", run=_run, cost=cost, description="", base_score=0.35, earned_relevance=_earned
+    )
 
 
 def compute_action(skill: Any, *, name: str | None = None, cost: float = 1.0, description: str | None = None) -> Action:

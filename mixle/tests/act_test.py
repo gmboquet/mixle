@@ -247,5 +247,65 @@ class CostValidationTest(unittest.TestCase):
         self.assertEqual(score_action(free_but_irrelevant, "totally unrelated topic xyz"), 0.0)
 
 
+class EarnedConfidenceTest(unittest.TestCase):
+    """MXR-080-0255: retrieve's fixed 0.35 relevance floor, combined with the default min_score=0
+    admitting exact-zero-score hits, let a store with nothing relevant answer confidently anyway.
+    Confidence must be earned from what was actually retrieved, not the action type's routing prior."""
+
+    def test_quantum_chromodynamics_in_a_cat_store_abstains(self):
+        # the audit's own reproduction: a store containing only unrelated content must not produce a
+        # confident, non-abstaining answer just because retrieve() always fires.
+        s = Substrate()
+        s.add(kind="text", text="cats sleep on mats")
+        act = retrieve_action(s)  # default min_score=0.0
+        inv = investigate("quantum chromodynamics lagrangian", [act], _echo)
+        self.assertTrue(inv.abstained)
+        self.assertIsNone(inv.answer)
+        self.assertEqual(inv.confidence, 0.0)
+
+    def test_zero_score_retrieval_is_not_returned_as_a_fragment(self):
+        s = Substrate()
+        s.add(kind="text", text="cats sleep on mats")
+        act = retrieve_action(s)  # default min_score=0.0: must still exclude an exact-zero score
+        self.assertEqual(act.run("quantum chromodynamics lagrangian"), [])
+
+    def test_genuine_match_still_answers_with_earned_confidence(self):
+        # control: a real match must still clear the bar, and now earns confidence from its actual
+        # score rather than being capped at the old fixed 0.35 floor.
+        s = Substrate()
+        s.add(kind="text", text="refunds are processed within 30 days of a written request")
+        act = retrieve_action(s)
+        inv = investigate("when are refunds processed", [act], _echo)
+        self.assertFalse(inv.abstained)
+        self.assertIn("refunds", " ".join(inv.evidence))
+        self.assertGreater(inv.confidence, 0.35)  # a real, strong match earns MORE than the old fixed floor
+
+    def test_confidence_reflects_earned_relevance_not_a_fixed_floor(self):
+        # a direct unit test of the earned_relevance wiring, independent of the substrate's own scorer.
+        def _make(rel):
+            return Action(
+                "r",
+                "retrieve",
+                run=lambda q: ["some fragment"],
+                cost=1.0,
+                description="",
+                base_score=0.35,
+                earned_relevance=lambda: rel,
+            )
+
+        high = investigate("q", [_make(0.9)], _echo, min_confidence=0.0)
+        low = investigate("q", [_make(0.05)], _echo, min_confidence=0.0)
+        self.assertGreater(high.confidence, low.confidence)
+        self.assertAlmostEqual(high.confidence, 0.9, places=2)
+        self.assertAlmostEqual(low.confidence, 0.05, places=2)
+        self.assertNotEqual(low.confidence, 0.35)  # never the old fixed routing-prior floor
+
+    def test_retrieve_still_carries_a_routing_prior_for_ordering(self):
+        # base_score keeps retrieval "always at least weakly worth trying" for ORDERING (score_action);
+        # only the CONFIDENCE-bearing relevance changed. See ScoreTest.test_retrieve_has_a_base_floor.
+        r = retrieve_action(Substrate())
+        self.assertGreater(score_action(r, "anything at all"), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
