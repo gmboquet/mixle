@@ -24,6 +24,26 @@ from mixle.doe.bayesopt import _fit_surrogate
 from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
 
 
+def _surrogate_fit_error_types() -> tuple[type[BaseException], ...]:
+    """The well-defined numerical failure types a GP surrogate fit can raise -- never a bare ``Exception``.
+
+    A singular/indefinite covariance during fitting raises ``numpy.linalg.LinAlgError`` (a numpy-backed
+    surrogate) or ``torch.linalg.LinAlgError`` (the default torch-backed one, out of
+    ``torch.linalg.cholesky`` inside ``GaussianProcessRegressor.log_marginal_likelihood``/``predict``) --
+    both a genuine "this data is ill-conditioned" failure, not a programming error. Anything else (a bad
+    ``fit_kwargs`` optimizer name, a missing torch install, an unrelated bug) must propagate instead of
+    being swallowed. Torch is imported lazily here, matching
+    :func:`mixle.doe.bayesopt._fit_surrogate`'s own lazy import, so merely importing this module never
+    requires torch -- the tuple just narrows to numpy alone when torch is not installed.
+    """
+    errors: tuple[type[BaseException], ...] = (np.linalg.LinAlgError,)
+    try:
+        import torch
+    except ImportError:
+        return errors
+    return (*errors, torch.linalg.LinAlgError)
+
+
 def multi_fidelity_minimize(
     objective: Callable[[np.ndarray, float], float],
     bounds: Bounds,
@@ -51,11 +71,18 @@ def multi_fidelity_minimize(
     alike -- reserves its cost against ``max_cost`` before calling ``objective``, so cumulative cost never
     overshoots ``max_cost``; a ``max_cost`` too small to afford even one evaluation is rejected up front.
 
-    Returns ``{'x', 'y', 'X', 'Y', 'cost', 'target_evaluated'}`` -- ``X``/``Y`` are the full augmented
-    history and ``x``/``y`` the best *target-fidelity* point and response, but only when
+    Returns ``{'x', 'y', 'X', 'Y', 'cost', 'target_evaluated', 'stopped_reason', 'error'}``. ``X``/``Y``
+    are the full augmented evaluation history (fidelity in the last column of ``X``) and ``cost`` the
+    total spent. ``x``/``y`` are the best *target-fidelity* point and response, but only when
     ``target_evaluated`` is true: if the budget ran out before any target-fidelity evaluation was
     affordable, ``x``/``y`` are ``None`` rather than silently standing in a lower-fidelity result for the
-    target-fidelity answer the caller asked for.
+    target-fidelity answer the caller asked for. ``stopped_reason`` is ``"budget_exhausted"`` (the loop
+    ran until no further evaluation fit in ``max_cost`` -- the normal, successful termination for this
+    optimizer, which has no other stopping criterion) or ``"surrogate_fit_failed"`` (a well-defined
+    numerical failure -- e.g. ``numpy``/``torch`` ``linalg.LinAlgError`` from a singular covariance --
+    aborted the loop early; ``error`` then holds a diagnostic string, else ``None``). Any other exception
+    out of surrogate fitting (a bad ``fit_kwargs`` optimizer name, a missing torch install, ...)
+    propagates rather than being reported as a quiet early stop.
     """
     if int(n_candidates) <= 0:
         raise ValueError("n_candidates must be positive.")
@@ -132,10 +159,15 @@ def multi_fidelity_minimize(
     x_aug = np.asarray(rows)
     y_arr = np.asarray(y, dtype=np.float64)
 
+    stopped_reason = "budget_exhausted"
+    error: str | None = None
+    fit_error_types = _surrogate_fit_error_types()
     while spent < max_cost:
         try:
             gp = _fit_surrogate(x_aug, y_arr, None, fit_kwargs)
-        except Exception:  # noqa: BLE001 -- GP fit can fail on ill-conditioned data; stop gracefully
+        except fit_error_types as exc:
+            stopped_reason = "surrogate_fit_failed"
+            error = f"{type(exc).__name__}: {exc}"
             break
         cand = latin_hypercube(b, int(n_candidates), rng)
         cand_t = np.column_stack([cand, np.full(cand.shape[0], target)])
@@ -164,7 +196,7 @@ def multi_fidelity_minimize(
             if score > best_score:
                 best_score, best_s = score, float(s)
         if best_s is None:
-            break  # nothing affordable in the remaining budget
+            break  # nothing affordable in the remaining budget; stopped_reason stays "budget_exhausted"
 
         yn = sign * float(objective(np.asarray(xstar, dtype=np.float64), best_s))
         x_aug = np.vstack([x_aug, np.append(xstar, best_s)])
@@ -178,11 +210,11 @@ def multi_fidelity_minimize(
         best_x: np.ndarray | None = x_aug[idx, :d]
         best_y: float | None = sign * float(y_arr[idx])
     else:
-        # The budget ran out before any target-fidelity evaluation was affordable. Returning the best
-        # lower-fidelity observation here as `x`/`y` would silently mislabel it as the answer to the
-        # target-fidelity question (MXR-080-0181); report honestly that no target-fidelity result was
-        # obtained instead. `X`/`Y` still hold the full history for a caller who wants to inspect what
-        # lower-fidelity information was gathered regardless.
+        # The budget ran out (or the surrogate broke) before any target-fidelity evaluation was
+        # affordable. Returning the best lower-fidelity observation here as `x`/`y` would silently
+        # mislabel it as the answer to the target-fidelity question (MXR-080-0181); report honestly that
+        # no target-fidelity result was obtained instead. `X`/`Y` still hold the full history for a
+        # caller who wants to inspect what lower-fidelity information was gathered regardless.
         best_x, best_y = None, None
     return {
         "x": best_x,
@@ -191,6 +223,8 @@ def multi_fidelity_minimize(
         "Y": sign * y_arr,
         "cost": spent,
         "target_evaluated": target_evaluated,
+        "stopped_reason": stopped_reason,
+        "error": error,
     }
 
 
