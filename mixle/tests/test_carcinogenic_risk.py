@@ -258,3 +258,97 @@ def test_posterior_with_legitimate_single_column_draws_still_works():
     result = excess_lifetime_cancer_risk(_RawDrawPosterior(draws), sf, route="oral", n=6)
     assert isinstance(result, RiskQuantity)
     assert result.mean == pytest.approx(1e-4 * 1.5, rel=1e-9)
+
+
+def test_slope_factor_rejects_negative_sigma_log():
+    """MXR-080-0075: a negative ``sigma_log`` has no valid meaning as a standard deviation. It
+    previously failed the ``> 0`` branch in ``_apply`` and was silently treated as zero (fixed)
+    uncertainty; it must now raise at construction instead."""
+    with pytest.raises(ValueError):
+        SlopeFactor(oral_csf=1.5, sigma_log=-0.3)
+
+
+def test_slope_factor_rejects_nan_sigma_log():
+    """MXR-080-0075: NaN fails the old ``> 0`` check the same way a negative value does (any
+    comparison with NaN is False), so it was silently treated as zero uncertainty too; must now raise
+    at construction."""
+    with pytest.raises(ValueError):
+        SlopeFactor(oral_csf=1.5, sigma_log=float("nan"))
+
+
+def test_slope_factor_sigma_log_mutation_after_construction_caught_at_call_entry():
+    """Defense-in-depth: ``SlopeFactor`` is not frozen, so ``sigma_log`` can be mutated to an invalid
+    value after construction, bypassing ``__post_init__``. ``excess_lifetime_cancer_risk``
+    re-validates ``sf.sigma_log`` at call entry, so this is still caught."""
+    sf = SlopeFactor(oral_csf=1.5, sigma_log=0.1)
+    sf.sigma_log = -0.3
+    with pytest.raises(ValueError):
+        excess_lifetime_cancer_risk(1e-4, sf, route="oral")
+
+
+def test_excess_lifetime_cancer_risk_rejects_non_positive_n():
+    """MXR-080-0075: ``n=0`` previously produced an empty risk-sample array whose ``mean``/credible
+    interval are invalid (NaN with a RuntimeWarning, or an outright crash on an empty quantile);
+    ``n<0`` is equally nonsensical as a draw count. Both must now raise clearly, regardless of whether
+    ``sf.sigma_log`` would have made ``n`` actually matter downstream."""
+    sf_fixed = SlopeFactor(oral_csf=1.5)  # sigma_log=0.0: n was previously silently ignored here too
+    sf_uncertain = SlopeFactor(oral_csf=1.5, sigma_log=0.2)
+    for sf in (sf_fixed, sf_uncertain):
+        with pytest.raises(ValueError):
+            excess_lifetime_cancer_risk(1e-4, sf, route="oral", n=0)
+        with pytest.raises(ValueError):
+            excess_lifetime_cancer_risk(1e-4, sf, route="oral", n=-5)
+
+
+def test_excess_lifetime_cancer_risk_rejects_fractional_n():
+    """MXR-080-0075: ``n`` must be an exact integer draw count."""
+    sf = SlopeFactor(oral_csf=1.5, sigma_log=0.2)
+    with pytest.raises(ValueError):
+        excess_lifetime_cancer_risk(1e-4, sf, route="oral", n=2.5)
+
+
+def test_risk_quantity_rejects_empty_samples():
+    """MXR-080-0075: ``RiskQuantity`` must reject an empty sample array at construction -- defense in
+    depth so invalid state can never flow downstream even if an upstream call site's own validation
+    is skipped or buggy."""
+    with pytest.raises(ValueError):
+        RiskQuantity(samples=np.array([]))
+
+
+def test_risk_quantity_rejects_non_finite_samples():
+    """MXR-080-0075: NaN/inf samples must be rejected at construction."""
+    with pytest.raises(ValueError):
+        RiskQuantity(samples=np.array([0.1, np.nan, 0.2]))
+    with pytest.raises(ValueError):
+        RiskQuantity(samples=np.array([0.1, np.inf, 0.2]))
+
+
+def test_risk_quantity_rejects_out_of_range_samples():
+    """MXR-080-0075: a risk quantity is probability-like -- samples must be in [0, 1]."""
+    with pytest.raises(ValueError):
+        RiskQuantity(samples=np.array([0.1, -0.5, 0.2]))
+    with pytest.raises(ValueError):
+        RiskQuantity(samples=np.array([0.1, 1.5, 0.2]))
+
+
+def test_risk_quantity_accepts_valid_samples():
+    """Negative control for MXR-080-0075: a legitimate, in-range sample array (including the boundary
+    values 0.0 and 1.0) still constructs a working RiskQuantity."""
+    rq = RiskQuantity(samples=np.array([0.0, 0.25, 0.5, 1.0]))
+    assert rq.mean == pytest.approx(0.4375)
+    lo, hi = rq.credible_interval(0.9)
+    assert 0.0 <= lo <= hi <= 1.0
+
+
+def test_excess_lifetime_cancer_risk_valid_sigma_log_and_n_produce_sensible_riskquantity():
+    """Negative control for MXR-080-0075: legitimate scalar exposure with a valid (positive, finite)
+    ``sigma_log`` and a valid positive-integer ``n`` still produce a well-formed ``RiskQuantity``
+    end-to-end."""
+    sf = SlopeFactor(oral_csf=1.5, sigma_log=0.2)
+    result = excess_lifetime_cancer_risk(1e-4, sf, route="oral", n=500, rng=np.random.default_rng(7))
+    assert isinstance(result, RiskQuantity)
+    assert result.samples.shape == (500,)
+    assert np.all(np.isfinite(result.samples))
+    assert np.all((result.samples >= 0) & (result.samples <= 1))
+    lo, hi = result.credible_interval(0.9)
+    assert 0.0 <= lo <= hi <= 1.0
