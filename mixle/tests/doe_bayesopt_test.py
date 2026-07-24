@@ -8,10 +8,12 @@ import importlib.util
 import unittest
 
 import numpy as np
+from scipy.stats import norm
 
 from mixle.doe import (
     available_acquisitions,
     expected_improvement,
+    log_expected_improvement,
     minimize,
     probability_of_improvement,
     propose_batch,
@@ -25,9 +27,12 @@ HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 class ExpectedImprovementTest(unittest.TestCase):
-    def test_zero_std_gives_zero_ei(self):
+    def test_zero_std_gives_deterministic_limit(self):
+        # A point-mass posterior (std=0) has no uncertainty to average over: EI is the GUARANTEED
+        # improvement max(best - mean, 0), not 0 (MXR-080-0168). mean=0 improves on best=0.5 by 0.5;
+        # mean=1.0 does not improve at all, so it stays at the 0 floor.
         ei = expected_improvement(mean=np.array([0.0, 1.0]), std=np.array([0.0, 0.0]), best=0.5)
-        np.testing.assert_array_equal(ei, np.zeros(2))
+        np.testing.assert_array_equal(ei, np.array([0.5, 0.0]))
 
     def test_minimize_rewards_lower_mean(self):
         # Equal std: a smaller predicted mean is more improving under minimization.
@@ -48,6 +53,88 @@ class ExpectedImprovementTest(unittest.TestCase):
         high = expected_improvement(mean=np.array([0.0]), std=np.array([1.5]), best=0.0)
         self.assertTrue(np.all(low >= 0.0) and np.all(high >= 0.0))
         self.assertGreater(high[0], low[0])
+
+
+class LogExpectedImprovementTest(unittest.TestCase):
+    def test_zero_std_gives_deterministic_limit(self):
+        # log(EI) at the deterministic limit is log(max(best - mean, 0)): finite (log 0.5) where the
+        # point-mass outcome improves, -inf where it does not (MXR-080-0168; mirrors EI's fix).
+        log_ei = log_expected_improvement(mean=np.array([0.0, 1.0]), std=np.array([0.0, 0.0]), best=0.5)
+        np.testing.assert_allclose(log_ei, np.array([np.log(0.5), -np.inf]))
+
+    def test_minimize_rewards_lower_mean(self):
+        log_ei = log_expected_improvement(mean=np.array([-1.0, 0.0, 1.0]), std=np.array([1.0, 1.0, 1.0]), best=0.0)
+        self.assertGreater(log_ei[0], log_ei[1])
+        self.assertGreater(log_ei[1], log_ei[2])
+
+    def test_maximize_rewards_higher_mean(self):
+        log_ei = log_expected_improvement(
+            mean=np.array([-1.0, 0.0, 1.0]), std=np.array([1.0, 1.0, 1.0]), best=0.0, maximize=True
+        )
+        self.assertGreater(log_ei[2], log_ei[1])
+        self.assertGreater(log_ei[1], log_ei[0])
+
+    def test_matches_log_of_ei_away_from_the_underflow_tail(self):
+        # Where EI itself is far from underflowing, log(EI) and log_expected_improvement must agree.
+        mean, std, best = np.array([-1.0, 0.0, 1.0]), np.array([1.0, 1.0, 1.0]), 0.0
+        ei = expected_improvement(mean=mean, std=std, best=best)
+        log_ei = log_expected_improvement(mean=mean, std=std, best=best)
+        np.testing.assert_allclose(log_ei, np.log(ei), atol=1e-10)
+
+
+class DeterministicCandidateEiTest(unittest.TestCase):
+    """MXR-080-0168: EI/log-EI at (near-)zero predictive variance must equal the deterministic limit
+    max(improve, 0), continuously as std -> 0, without disturbing the ordinary nonzero-variance formula.
+    """
+
+    def test_audit_case_deterministic_candidate_has_guaranteed_improvement(self):
+        # The audit's exact repro: a deterministic candidate (std=0) predicted to land exactly at 0,
+        # against a minimizing incumbent of 2 -- a GUARANTEED improvement of 2, not 0.
+        ei = expected_improvement(mean=np.array([0.0]), std=np.array([0.0]), best=2.0)
+        self.assertEqual(ei[0], 2.0)
+        log_ei = log_expected_improvement(mean=np.array([0.0]), std=np.array([0.0]), best=2.0)
+        self.assertAlmostEqual(log_ei[0], np.log(2.0), places=12)
+
+    def test_continuity_as_variance_shrinks_to_zero(self):
+        # No discontinuous jump: EI/log-EI must smoothly approach the deterministic limit as std -> 0,
+        # not just be correct in isolation at the exact std=0 point.
+        stds = [1.0e-3, 1.0e-6, 1.0e-9, 0.0]
+        ei_values = [expected_improvement(mean=np.array([0.0]), std=np.array([s]), best=2.0)[0] for s in stds]
+        for value in ei_values:
+            self.assertAlmostEqual(value, 2.0, places=8)
+
+        log_ei_values = [log_expected_improvement(mean=np.array([0.0]), std=np.array([s]), best=2.0)[0] for s in stds]
+        for value in log_ei_values:
+            self.assertAlmostEqual(value, np.log(2.0), places=8)
+
+    def test_deterministic_candidate_with_no_improvement_stays_at_the_floor(self):
+        # The other side of the limit: a deterministic candidate that does NOT improve on the incumbent
+        # gets EI=0 / log-EI=-inf, exactly as before -- the fix only changes the improving case.
+        worse = expected_improvement(mean=np.array([3.0]), std=np.array([0.0]), best=2.0)
+        tied = expected_improvement(mean=np.array([2.0]), std=np.array([0.0]), best=2.0)
+        np.testing.assert_array_equal(worse, np.array([0.0]))
+        np.testing.assert_array_equal(tied, np.array([0.0]))
+        log_worse = log_expected_improvement(mean=np.array([3.0]), std=np.array([0.0]), best=2.0)
+        log_tied = log_expected_improvement(mean=np.array([2.0]), std=np.array([0.0]), best=2.0)
+        np.testing.assert_array_equal(log_worse, np.array([-np.inf]))
+        np.testing.assert_array_equal(log_tied, np.array([-np.inf]))
+
+    def test_maximize_convention_deterministic_limit(self):
+        # maximize=True: improve = mean - best - xi; a deterministic mean=5 against incumbent best=2
+        # guarantees an improvement of 3.
+        ei = expected_improvement(mean=np.array([5.0]), std=np.array([0.0]), best=2.0, maximize=True)
+        self.assertEqual(ei[0], 3.0)
+
+    def test_negative_control_nonzero_variance_matches_standard_closed_form(self):
+        # The fix must not perturb the ordinary (nonzero-std) formula: compare against an independent
+        # scipy.stats.norm implementation of the textbook closed form.
+        mean_, std_, best_ = 0.3, 1.4, 1.0
+        z = (best_ - mean_) / std_
+        expected_ei = std_ * (z * norm.cdf(z) + norm.pdf(z))
+        got_ei = expected_improvement(mean=np.array([mean_]), std=np.array([std_]), best=best_)[0]
+        self.assertAlmostEqual(got_ei, expected_ei, places=12)
+        got_log_ei = log_expected_improvement(mean=np.array([mean_]), std=np.array([std_]), best=best_)[0]
+        self.assertAlmostEqual(got_log_ei, np.log(expected_ei), places=10)
 
 
 class ProbabilityOfImprovementTest(unittest.TestCase):
