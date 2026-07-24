@@ -88,6 +88,24 @@ def test_value_at_risk_rejects_invalid_alpha():
         value_at_risk(FIXED_SAMPLES, alpha=0.0)
 
 
+def test_value_at_risk_rejects_non_finite_samples():
+    # A NaN would otherwise propagate silently (np.quantile of a NaN-containing array is NaN with no
+    # error); an Inf is worse -- it can produce a finite-looking but wrong answer instead of NaN.
+    with pytest.raises(ValueError):
+        value_at_risk(np.array([1.0, 2.0, 3.0, np.nan, 5.0]))
+    with pytest.raises(ValueError):
+        value_at_risk(np.array([1.0, 2.0, np.inf, 4.0, 5.0]))
+    with pytest.raises(ValueError):
+        value_at_risk(np.array([1.0, 2.0, -np.inf, 4.0, 5.0]))
+
+
+def test_conditional_value_at_risk_rejects_non_finite_samples():
+    with pytest.raises(ValueError):
+        conditional_value_at_risk(np.array([1.0, 2.0, 3.0, np.nan, 5.0]))
+    with pytest.raises(ValueError):
+        conditional_value_at_risk(np.array([1.0, 2.0, np.inf, 4.0, 5.0]))
+
+
 def test_stress_rank_orders_worst_scenario_first():
     scenarios = {
         "baseline": 100.0,
@@ -119,3 +137,10 @@ def test_stress_rank_accepts_sample_arrays_per_scenario():
 def test_stress_rank_rejects_empty_scenarios():
     with pytest.raises(ValueError):
         stress_rank({})
+
+
+def test_stress_rank_rejects_non_finite_scenario_values():
+    with pytest.raises(ValueError):
+        stress_rank({"baseline": 100.0, "bad": float("nan")})
+    with pytest.raises(ValueError):
+        stress_rank({"baseline": np.array([100.0, 110.0]), "bad": np.array([1.0, np.inf])})
