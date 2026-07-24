@@ -24,9 +24,15 @@ from scipy.optimize import linear_sum_assignment
 
 
 def best_assignment(cost: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
-    """Return the minimum-cost assignment as ``(total_cost, row_ind, col_ind)`` (scipy Hungarian)."""
+    """Return the minimum-cost assignment as ``(total_cost, row_ind, col_ind)`` (scipy Hungarian).
+
+    Non-finite entries (``inf``, ``-inf``, ``nan``) are forbidden edges, matching the module's k-best
+    convention. They are normalized to ``+inf`` before the solve: scipy accepts ``+inf`` as "forbidden"
+    natively, but raises on raw ``-inf``/``nan`` regardless of whether a valid finite assignment exists.
+    """
     cost = np.asarray(cost, dtype=float)
-    rows, cols = linear_sum_assignment(cost)
+    work = cost if np.isfinite(cost).all() else np.where(np.isfinite(cost), cost, np.inf)
+    rows, cols = linear_sum_assignment(work)
     return float(cost[rows, cols].sum()), rows, cols
 
 
@@ -77,7 +83,16 @@ def k_best_assignments(
     cost = np.asarray(cost, dtype=float)
     if cost.ndim != 2:
         raise ValueError("cost must be a 2-D matrix")
+    # Non-finite entries in the *original* cost are forbidden regardless of min/max sense. Normalize them to
+    # the internal forbidden sentinel (+inf, the same value _solve_constrained uses for forced-out edges)
+    # before any sign flip: scipy's Hungarian solve accepts +inf directly, but raises on raw -inf/nan -- and a
+    # maximize sign flip would otherwise turn a caller's +inf (forbidden) into -inf, hitting that same failure.
+    # Left unnormalized, that raise is caught below and misreported as infeasibility even when a finite-cost
+    # assignment exists using only the non-forbidden edges.
+    forbidden = ~np.isfinite(cost)
     work_cost = -cost if maximize else cost
+    if forbidden.any():
+        work_cost = np.where(forbidden, np.inf, work_cost)
 
     root = _solve_constrained(work_cost, (), frozenset())
     if root is None:
