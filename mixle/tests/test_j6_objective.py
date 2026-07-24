@@ -202,3 +202,114 @@ def test_exposure_cap_constrains_selection():
 def test_hard_constraints_rejects_bad_cap_sense():
     with pytest.raises(ValueError):
         hard_constraints(caps=[{"coeffs": np.ones(N_BLOCKS), "bound": 1.0, "sense": "=="}])
+
+
+# ---------------------------------------------------------------------------
+# MXR-080-0106 -- liability assembly must validate economic sign/finiteness and reject malformed
+# (non-boolean, non-finite, non-1-D) mask/constraint data instead of silently converting and trusting it.
+# ---------------------------------------------------------------------------
+
+
+def test_priced_liabilities_rejects_negative_carbon_price():
+    """A negative carbon "price" would net a negative liability -- subtracted from revenue, that reads
+    as a profit *increase*, not a cost."""
+    with pytest.raises(ValueError):
+        priced_liabilities(_plan(EMISSIONS), carbon_price=-5.0, health_cost=_no_cost, remediation_cost=_no_cost)
+
+
+def test_priced_liabilities_rejects_negative_remediation_cost_output():
+    with pytest.raises(ValueError):
+        priced_liabilities(
+            _plan(EMISSIONS),
+            carbon_price=0.0,
+            health_cost=_no_cost,
+            remediation_cost=lambda grade: -np.ones_like(grade),
+        )
+
+
+def test_priced_liabilities_rejects_negative_health_cost_output():
+    with pytest.raises(ValueError):
+        priced_liabilities(
+            _plan(EMISSIONS),
+            carbon_price=0.0,
+            health_cost=lambda exposure: -np.ones_like(exposure),
+            remediation_cost=_no_cost,
+        )
+
+
+def test_priced_liabilities_rejects_nan_emissions():
+    """A NaN block emission must not be allowed to enter the objective unguarded."""
+    bad_emissions = EMISSIONS.copy()
+    bad_emissions[0] = np.nan
+    with pytest.raises(ValueError):
+        priced_liabilities(_plan(bad_emissions), carbon_price=1.0, health_cost=_no_cost, remediation_cost=_no_cost)
+
+
+def test_priced_liabilities_rejects_nan_cost_model_output():
+    """A NaN produced by a caller-supplied cost callable (not just a NaN input) must also be caught."""
+    with pytest.raises(ValueError):
+        priced_liabilities(
+            _plan(EMISSIONS),
+            carbon_price=0.0,
+            health_cost=_no_cost,
+            remediation_cost=lambda grade: np.full_like(grade, np.nan),
+        )
+
+
+def test_hard_constraints_rejects_nan_mask_entry():
+    """`np.asarray(mask, dtype=bool)` would silently coerce a NaN entry to a hard ``True`` exclusion
+    (``bool(float('nan'))`` is ``True``); malformed non-boolean mask data must be rejected instead."""
+    mask = np.zeros(N_BLOCKS)
+    mask[1] = np.nan
+    with pytest.raises(ValueError):
+        hard_constraints(no_mine_mask=mask)
+
+
+def test_hard_constraints_rejects_fractional_mask():
+    """A fractional mask (e.g. a confidence score) is not a hard exclusion and must not be silently
+    coerced into one via nonzero-ness."""
+    with pytest.raises(ValueError):
+        hard_constraints(no_mine_mask=np.array([0.0, 0.5, 1.0]))
+
+
+def test_hard_constraints_rejects_non_boolean_dtype_mask():
+    """An integer 0/1 array is truthy-coercible to bool but is not the documented boolean contract."""
+    with pytest.raises(ValueError):
+        hard_constraints(no_mine_mask=np.array([0, 1, 0]))
+
+
+def test_hard_constraints_rejects_non_finite_cap_coeffs():
+    with pytest.raises(ValueError):
+        hard_constraints(caps=[{"coeffs": np.array([1.0, np.nan]), "bound": 1.0}])
+
+
+def test_hard_constraints_rejects_non_finite_cap_bound():
+    with pytest.raises(ValueError):
+        hard_constraints(caps=[{"coeffs": np.ones(N_BLOCKS), "bound": float("inf")}])
+
+
+def test_hard_constraints_rejects_non_1d_cap_coeffs():
+    with pytest.raises(ValueError):
+        hard_constraints(caps=[{"coeffs": np.ones((N_BLOCKS, 2)), "bound": 1.0}])
+
+
+def test_priced_liabilities_and_hard_constraints_accept_legitimate_inputs():
+    """Negative control: legitimate nonnegative finite inputs with a real boolean mask must still
+    assemble a sensible objective -- the new validation must not reject valid data."""
+    liabilities = priced_liabilities(
+        _plan(EMISSIONS),
+        carbon_price=3.0,
+        health_cost=lambda exposure: np.full_like(exposure, 0.5),
+        remediation_cost=lambda grade: np.full_like(grade, 1.5),
+    )
+    expected_total = 1.5 + 0.5 + 3.0 * EMISSIONS
+    assert np.allclose(liabilities["total"], expected_total)
+    assert liabilities["grand_total"] == pytest.approx(float(expected_total.sum()))
+
+    mask = np.zeros(N_BLOCKS, dtype=bool)
+    mask[NO_MINE_IDX] = True
+    constraints = hard_constraints(no_mine_mask=mask, caps=[{"coeffs": np.ones(N_BLOCKS), "bound": 3.0}])
+    assert constraints["no_mine_mask"].dtype == np.bool_
+    assert np.array_equal(constraints["no_mine_mask"], mask)
+    assert np.allclose(constraints["caps"][0]["coeffs"], np.ones(N_BLOCKS))
+    assert constraints["caps"][0]["bound"] == 3.0
