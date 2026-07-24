@@ -53,6 +53,36 @@ class AutoPrecisionTestCase(unittest.TestCase):
         data = well_conditioned + extreme_tail
         self.assertEqual(auto_precision(data, engine=_FakeGPUEngine()), "float64")
 
+    def test_gpu_nan_in_data_falls_back_to_float64(self):
+        # Regression (MXR-080-0145): NaN in the sample makes np.max/np.std return NaN, and IEEE-754
+        # defines every comparison against NaN as False -- so `amax >= 1.0e4` and `spread > 0.0` were
+        # BOTH False, and the risk checks fell through to the OPTIMISTIC float32 branch instead of the
+        # safe fallback. A single NaN amid otherwise well-conditioned data must still route to
+        # float64, not float32.
+        data = list(np.random.RandomState(6).randn(2000) * 2.0 + 1.0)
+        data[500] = float("nan")
+        self.assertEqual(auto_precision(data, engine=_FakeGPUEngine()), "float64")
+
+    def test_gpu_all_nan_data_falls_back_to_float64(self):
+        self.assertEqual(auto_precision([float("nan")] * 50, engine=_FakeGPUEngine()), "float64")
+
+    def test_gpu_inf_in_data_falls_back_to_float64(self):
+        # Analogous to the NaN case above. +inf/-inf happen to already be caught by the `amax`
+        # magnitude check (abs(inf) >= 1.0e4 is True), but the guard must be explicit rather than
+        # relying on that incidental comparison behavior.
+        pos_inf = list(np.random.RandomState(7).randn(2000) * 2.0 + 1.0)
+        pos_inf[500] = float("inf")
+        self.assertEqual(auto_precision(pos_inf, engine=_FakeGPUEngine()), "float64")
+
+        neg_inf = list(np.random.RandomState(8).randn(2000) * 2.0 + 1.0)
+        neg_inf[500] = float("-inf")
+        self.assertEqual(auto_precision(neg_inf, engine=_FakeGPUEngine()), "float64")
+
+    def test_gpu_finite_well_conditioned_data_unaffected_by_nonfinite_guard(self):
+        # Negative control for the NaN/Inf guard: finite, well-conditioned data must be unaffected.
+        data = list(np.random.RandomState(9).randn(2000) * 2.0 + 1.0)
+        self.assertEqual(auto_precision(data, engine=_FakeGPUEngine()), "float32")
+
     def test_optimize_precision_auto_matches_default_on_cpu(self):
         # 'auto' on CPU resolves to float64 (keeps the default host path) -> identical fit.
         import io

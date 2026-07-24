@@ -184,7 +184,8 @@ def auto_precision(data: Any = None, *, engine: Any = None, sample_size: int = 5
     only when the data is well conditioned for single precision. Sufficient-statistic *accumulation*
     is already float64-safe (see ``ComputeEngine.accumulator_dtype``), so this guards the remaining
     risk -- the ~7 significant digits of float32 *scoring* -- by inspecting the data's magnitude and
-    dynamic range. Returns ``'float64'`` whenever a numeric sample is unavailable or looks risky.
+    dynamic range. Returns ``'float64'`` whenever a numeric sample is unavailable, non-finite, or
+    looks risky.
 
     Args:
         data: A representative sample of the raw observations (or an iterable of them).
@@ -198,6 +199,13 @@ def auto_precision(data: Any = None, *, engine: Any = None, sample_size: int = 5
         return "float64"
     sample = _numeric_data_sample(data, sample_size)
     if sample is None or sample.size == 0:
+        return "float64"
+    if not np.all(np.isfinite(sample)):
+        # NaN/Inf anywhere in the sample must route to the safe fallback EXPLICITLY. Relying on the
+        # magnitude/spread comparisons below to "catch" this does not work: IEEE-754 defines every
+        # comparison against NaN as False, so with a NaN sample both `amax >= 1.0e4` and
+        # `spread > 0.0` are False, and the risk checks below would fall through to the OPTIMISTIC
+        # float32 branch -- the opposite of what "risk could not be computed" should mean.
         return "float64"
     amax = float(np.max(np.abs(sample)))
     spread = float(np.std(sample))
