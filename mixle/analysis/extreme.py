@@ -35,6 +35,10 @@ class GPDFit:
         threshold: the threshold ``u`` the exceedances were measured over.
         n_exceedances / n_total: exceedance and full-sample sizes (for return levels).
         method: ``"mle"`` or ``"pwm"``.
+        n_dropped_nonpositive: count of finite, non-positive (``<= 0``) input values excluded because
+            they are not actually above the threshold (a receipt for :func:`gpd_fit`'s filtering; NaN
+            and non-finite input are rejected outright rather than silently dropped, so they never
+            contribute to this count).
     """
 
     shape: float
@@ -43,6 +47,7 @@ class GPDFit:
     n_exceedances: int
     n_total: int
     method: str
+    n_dropped_nonpositive: int = 0
 
     @property
     def endpoint(self) -> float:
@@ -62,41 +67,93 @@ def _gpd_nll(params: np.ndarray, z: np.ndarray) -> float:
     return float(z.shape[0] * np.log(beta) + (1.0 + 1.0 / xi) * np.sum(np.log(t)))
 
 
+def _validate_gpd_params(shape: float, scale: float, z: np.ndarray, method: str) -> None:
+    """Enforce that ``(shape, scale)`` is a legitimate GPD fit for the exceedances ``z``.
+
+    Checks finiteness, ``scale > 0``, and the GPD support constraint ``1 + shape*z/scale > 0`` against
+    every exceedance actually used to fit it. PWM (probability-weighted moments) has no built-in
+    safeguard against this: it is a closed-form moment match, not a constrained optimization, so on
+    some samples it returns a ``(shape, scale)`` whose implied endpoint is below the sample's own
+    maximum -- a self-contradictory fit asserting its own fitting data was impossible.
+    """
+    if not (np.isfinite(shape) and np.isfinite(scale)):
+        raise ValueError(f"{method} fit produced a non-finite parameter (shape={shape}, scale={scale}).")
+    if scale <= 0:
+        raise ValueError(f"{method} fit produced a non-positive scale ({scale}); not a valid GPD.")
+    if np.any(1.0 + shape * z / scale <= 0):
+        raise ValueError(
+            f"{method} fit violates the GPD support constraint (1 + shape*z/scale > 0) for some "
+            "exceedances; degenerate data for this method."
+        )
+
+
 def gpd_fit(
     exceedances: np.ndarray, *, threshold: float = 0.0, method: str = "mle", n_total: int | None = None
 ) -> GPDFit:
     """Fit a Generalized Pareto Distribution to threshold exceedances.
 
     Args:
-        exceedances: the *excesses* ``x - u`` for observations above the threshold (all positive). If you
-            have raw data, use :func:`peaks_over_threshold` instead.
+        exceedances: the *excesses* ``x - u`` for observations above the threshold (all positive).
+            NaN or non-finite entries are invalid data, not sub-threshold observations, and raise.
+            Finite entries ``<= 0`` are legitimately not above the threshold, so they are dropped and
+            the count is receipted on the returned :class:`GPDFit` (``n_dropped_nonpositive``) rather
+            than silently vanishing. If you have raw data, use :func:`peaks_over_threshold` instead.
         threshold: the threshold ``u`` (stored for return-level computation).
-        method: ``"mle"`` (Newton/Nelder-Mead on the GPD likelihood) or ``"pwm"`` (probability-weighted
+        method: ``"mle"`` (Nelder-Mead on the GPD likelihood) or ``"pwm"`` (probability-weighted
             moments, closed form, robust for ``xi < 0.5``).
-        n_total: full sample size before thresholding (defaults to the number of exceedances).
+        n_total: full sample size before thresholding (defaults to the number of valid, positive
+            exceedances; if given explicitly it must be at least that many).
 
     Returns:
         A :class:`GPDFit`.
+
+    Raises:
+        ValueError: ``exceedances`` contains NaN/non-finite values; fewer than two positive
+            exceedances remain after filtering; ``n_total`` is smaller than the exceedance count;
+            ``method`` is not ``"mle"``/``"pwm"``; the MLE optimizer fails to converge; or the fitted
+            ``(shape, scale)`` is not a valid GPD (see :func:`_validate_gpd_params`).
     """
-    z = np.asarray(exceedances, dtype=float).ravel()
-    z = z[z > 0]
+    z_raw = np.asarray(exceedances, dtype=float).ravel()
+    if not np.all(np.isfinite(z_raw)):
+        raise ValueError("exceedances must be finite; NaN/inf are invalid data, not sub-threshold observations.")
+    z = z_raw[z_raw > 0]
     n = z.shape[0]
+    n_dropped_nonpositive = z_raw.shape[0] - n
     if n < 2:
-        raise ValueError("need at least two positive exceedances.")
+        raise ValueError(
+            f"need at least two positive exceedances (got {n} after dropping {n_dropped_nonpositive} "
+            f"non-positive of {z_raw.shape[0]} total)."
+        )
+    if n_total is not None and n_total < n:
+        raise ValueError(f"n_total ({n_total}) cannot be smaller than the number of exceedances ({n}).")
     if method == "pwm":
         zs = np.sort(z)
-        b0 = zs.mean()
+        b0 = float(zs.mean())
         p = (np.arange(1, n + 1) - 0.35) / n
         b1 = float(np.mean((1.0 - p) * zs))
-        scale = 2.0 * b0 * b1 / (b0 - 2.0 * b1)
-        shape = 2.0 - b0 / (b0 - 2.0 * b1)
+        denom = b0 - 2.0 * b1
+        if denom == 0.0:
+            raise ValueError("PWM fit is degenerate for this sample (b0 == 2*b1); cannot estimate GPD parameters.")
+        scale = 2.0 * b0 * b1 / denom
+        shape = 2.0 - b0 / denom
     elif method == "mle":
         beta0 = z.mean()
         res = optimize.minimize(_gpd_nll, np.array([0.1, beta0]), args=(z,), method="Nelder-Mead")
+        if not res.success:
+            raise ValueError(f"GPD MLE fit did not converge: {res.message}")
         shape, scale = float(res.x[0]), float(res.x[1])
     else:
         raise ValueError("method must be 'mle' or 'pwm'.")
-    return GPDFit(shape, scale, threshold, n, n_total or n, method)
+    _validate_gpd_params(shape, scale, z, method)
+    return GPDFit(
+        shape=shape,
+        scale=scale,
+        threshold=threshold,
+        n_exceedances=n,
+        n_total=n_total if n_total is not None else n,
+        method=method,
+        n_dropped_nonpositive=n_dropped_nonpositive,
+    )
 
 
 def peaks_over_threshold(data: np.ndarray, threshold: float, *, method: str = "mle") -> GPDFit:
