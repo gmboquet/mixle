@@ -383,19 +383,64 @@ class Quantizer:
         return self.oversample / self.bin_width_bits
 
 
+def _validate_count_entry(x: Any, exact: bool) -> int | float:
+    """Validate one CountHistogram entry, returning its normalized (int or float) value.
+
+    A count -- exact or approximate -- can never be negative, NaN, or infinite in either carrier
+    mode, so those are rejected unconditionally. ``exact=True`` additionally requires the entry to
+    be an exact integer (no silent truncation of a fractional value); ``exact=False`` allows a
+    finite fractional value through for the explicitly-approximate carrier (e.g. the float64
+    envelope/mean-field histograms built outside this module).
+
+    Python ``int`` is arbitrary-precision and this module routinely carries counts past 2**128, so
+    integer entries are validated by plain integer comparison rather than a ``float()`` round-trip,
+    which would raise OverflowError (or silently lose precision) on a huge but perfectly valid count.
+    """
+    if isinstance(x, (int, np.integer)):
+        xi = int(x)
+        if xi < 0:
+            raise ValueError(f"CountHistogram entries must be non-negative counts, got {xi!r}")
+        return xi
+    if isinstance(x, (float, np.floating)):
+        xf = float(x)
+        if math.isnan(xf):
+            raise ValueError("CountHistogram entries must not be NaN.")
+        if math.isinf(xf):
+            raise ValueError("CountHistogram entries must be finite, got an infinite entry.")
+        if xf < 0:
+            raise ValueError(f"CountHistogram entries must be non-negative, got {xf!r}")
+        if exact and not xf.is_integer():
+            raise ValueError(f"CountHistogram entries must be exact integers in exact mode, got fractional {xf!r}")
+        return int(xf) if exact else xf
+    raise TypeError(f"CountHistogram entries must be int or float counts, got {type(x).__name__}")
+
+
 class CountHistogram:
     """Counts of support values indexed by fine bucket of accumulated bits.
 
-    ``data[i]`` is the (exact, possibly huge) number of values whose fine bucket is
-    ``base + i``. The histogram is dense over ``[base, base + len(data))`` with implicit
-    zeros outside. This is the value type of the count semiring.
+    ``data[i]`` is the number of values whose fine bucket is ``base + i``. The histogram is dense
+    over ``[base, base + len(data))`` with implicit zeros outside. This is the value type of the
+    count semiring.
+
+    Two carrier modes, validated at construction (every entry, always -- never negative, NaN, or
+    infinite regardless of mode) and preserved through ``shift``/``truncate``/``add``/``convolve``:
+
+    - ``exact=True``: counts are exact Python integers (may exceed 2**128) -- the structural-count
+      contract used by this module's own exact pipeline (:func:`leaf_count_index`, the delta/add/
+      convolve identity and combinators) and the basis for rank certificates. Fractional entries are
+      rejected outright rather than silently truncated.
+    - ``exact=False`` (the default): counts may be non-negative finite floats -- the carrier used by
+      the approximate float64 paths (:meth:`convolve_float`, and mean-field/envelope callers outside
+      this module). The permissive default keeps those existing callers working unmodified; pass
+      ``exact=True`` explicitly wherever the values are known to be genuine structural counts.
     """
 
-    __slots__ = ("base", "data")
+    __slots__ = ("base", "data", "exact")
 
-    def __init__(self, base: int, data: list[int]) -> None:
+    def __init__(self, base: int, data: list[int], *, exact: bool = False) -> None:
         self.base = int(base)
-        self.data = list(data)
+        self.exact = bool(exact)
+        self.data = [_validate_count_entry(x, self.exact) for x in data]
         self._normalize()
 
     def _normalize(self) -> None:
@@ -418,13 +463,17 @@ class CountHistogram:
 
     @classmethod
     def empty(cls) -> "CountHistogram":
-        """Return an empty histogram."""
-        return cls(0, [])
+        """Return an empty histogram (vacuously exact)."""
+        return cls(0, [], exact=True)
 
     @classmethod
     def delta(cls, fine_bucket: int, count: int = 1) -> "CountHistogram":
-        """A single bucket with the given count (the multiplicative identity when count=1, bucket=0)."""
-        return cls(fine_bucket, [int(count)])
+        """A single bucket with the given count (the multiplicative identity when count=1, bucket=0).
+
+        ``count`` is validated as an exact non-negative integer (see :class:`CountHistogram`'s
+        ``exact`` contract) rather than silently truncated through ``int()``.
+        """
+        return cls(fine_bucket, [count], exact=True)
 
     def is_empty(self) -> bool:
         """Return whether the histogram has no stored counts."""
@@ -447,7 +496,8 @@ class CountHistogram:
         """Return a copy with every bucket moved by k (adds a constant log-prob term)."""
         if not self.data:
             return CountHistogram.empty()
-        return CountHistogram(self.base + int(k), list(self.data))
+        # self.data is already-validated; re-validating against the SAME mode is cheap and safe.
+        return CountHistogram(self.base + int(k), list(self.data), exact=self.exact)
 
     def truncate(self, max_fine_bucket: int) -> "CountHistogram":
         """Drop buckets strictly beyond ``max_fine_bucket`` (depth bound)."""
@@ -457,15 +507,15 @@ class CountHistogram:
         if hi <= 0:
             return CountHistogram.empty()
         if hi >= len(self.data):
-            return CountHistogram(self.base, list(self.data))
-        return CountHistogram(self.base, self.data[:hi])
+            return CountHistogram(self.base, list(self.data), exact=self.exact)
+        return CountHistogram(self.base, self.data[:hi], exact=self.exact)
 
     def add(self, other: "CountHistogram") -> "CountHistogram":
         """Pointwise sum (pool of mutually exclusive alternatives, e.g. different lengths)."""
         if not self.data:
-            return CountHistogram(other.base, list(other.data))
+            return CountHistogram(other.base, list(other.data), exact=other.exact)
         if not other.data:
-            return CountHistogram(self.base, list(self.data))
+            return CountHistogram(self.base, list(self.data), exact=self.exact)
         base = min(self.base, other.base)
         end = max(self.base + len(self.data), other.base + len(other.data))
         out = [0] * (end - base)
@@ -475,7 +525,7 @@ class CountHistogram:
         for i, c in enumerate(other.data):
             if c:
                 out[other.base + i - base] += c
-        return CountHistogram(base, out)
+        return CountHistogram(base, out, exact=self.exact and other.exact)
 
     def convolve(
         self, other: "CountHistogram", max_fine_bucket: int | None = None, bucket_delta_bits: float | None = None
@@ -533,7 +583,7 @@ class CountHistogram:
                     bj = b[j]
                     if bj:
                         out[i + j] += ai * bj
-        return CountHistogram(base, out)
+        return CountHistogram(base, out, exact=self.exact and other.exact)
 
     def convolve_float(self, other: "CountHistogram", max_fine_bucket: int | None = None) -> "CountHistogram":
         """Approximate convolution carrying counts as float64 -- the quantized-counting fast path.
@@ -561,7 +611,7 @@ class CountHistogram:
         out = np.convolve(fa, fb)[:width]
         if not np.isfinite(out).all():
             return self.convolve(other, max_fine_bucket=max_fine_bucket)
-        return CountHistogram(base, out.tolist())
+        return CountHistogram(base, out.tolist(), exact=False)
 
 
 class CountIndex:
