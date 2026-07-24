@@ -14,7 +14,7 @@ class GovernanceSurvivesTransferTest(unittest.TestCase):
     def test_approved_promotion_provenance_and_new_scope_both_survive_into_the_packet(self):
         s = Substrate()
         item_id = s.add(kind="artifact", text="the refund policy covers 30 days", scope="teamA")
-        gov = Governance().grant("orgadmin", "org")
+        gov = Governance().grant("orgadmin", "org", by="root")
 
         propose(s, [item_id], to="org", by="alice")
         self.assertTrue(approve(s, item_id, by="orgadmin", governance=gov))
@@ -44,8 +44,9 @@ class GovernanceSurvivesTransferTest(unittest.TestCase):
     def test_rejected_promotion_leaves_the_item_in_its_origin_scope_with_the_refusal_recorded(self):
         s = Substrate()
         item_id = s.add(kind="artifact", text="a dubious refund shortcut", scope="teamA")
+        gov = Governance().grant("orgadmin", "org", by="root")
         propose(s, [item_id], to="org", by="alice")
-        self.assertTrue(reject(s, item_id, by="orgadmin", reason="unverified"))
+        self.assertTrue(reject(s, item_id, by="orgadmin", governance=gov, reason="unverified"))
 
         org_packet = assemble_context(s, "refund shortcut", budget=ContextBudget(max_items=5), scope="org")
         self.assertEqual(org_packet.items, [])  # rejection never shares it into org
@@ -62,7 +63,7 @@ class GovernanceSurvivesTransferTest(unittest.TestCase):
         does not launder or drop it on a second hop."""
         s = Substrate()
         item_id = s.add(kind="artifact", text="the refund policy covers 30 days", scope="teamA")
-        gov = Governance().grant("orgadmin", "org")
+        gov = Governance().grant("orgadmin", "org", by="root")
         propose(s, [item_id], to="org", by="alice")
         approve(s, item_id, by="orgadmin", governance=gov)
 

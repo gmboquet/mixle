@@ -106,7 +106,7 @@ class CapabilityLifecycleContractTest(unittest.TestCase):
 
         substrate = Substrate()
         item = substrate.add(kind="artifact", text="candidate", scope="team")
-        governance = Governance().grant("reviewer", "org")
+        governance = Governance().grant("reviewer", "org", by="root")
         self.assertEqual(propose(substrate, [item], to="org", by="author"), [item])
         self.assertTrue(approve(substrate, item, by="reviewer", governance=governance))
         decision = authorization_decision(
