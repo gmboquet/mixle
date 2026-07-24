@@ -146,5 +146,79 @@ class QuasiRandomDesignsTest(unittest.TestCase):
             halton_design([(1.0, 0.0)], 8)
 
 
+class BoundsAndCountValidationTest(unittest.TestCase):
+    """MXR-080-0174: every generator here shares _as_bounds (finite, low<high) and
+    _require_exact_positive_int (exact integer, no silent truncation) for its count controls."""
+
+    def test_infinite_and_nan_bounds_rejected_by_every_generator(self):
+        bad_bounds_cases = (
+            [(0.0, np.inf)],
+            [(-np.inf, 1.0)],
+            [(np.nan, 1.0)],
+            [(0.0, 1.0), (0.0, np.inf)],  # only one dimension unbounded
+        )
+        for bad_bounds in bad_bounds_cases:
+            for fn in (latin_hypercube, random_design, sobol_design, halton_design, maxpro_design):
+                with self.subTest(bounds=bad_bounds, fn=fn.__name__):
+                    with self.assertRaises(ValueError):
+                        fn(bad_bounds, 4)
+            with self.subTest(bounds=bad_bounds, fn="maximin_latin_hypercube"):
+                with self.assertRaises(ValueError):
+                    maximin_latin_hypercube(bad_bounds, 4)
+            with self.subTest(bounds=bad_bounds, fn="full_factorial"):
+                with self.assertRaises(ValueError):
+                    full_factorial(bad_bounds, levels=2)
+
+    def test_fractional_and_negative_counts_rejected_instead_of_truncated(self):
+        # Before: `if n <= 0: raise` let a fractional n (e.g. 3.7) straight through to int(n) == 3,
+        # silently truncated. Now every count control rejects a non-integer value up front.
+        # (maxpro_design's own restart/swap/iteration/n controls are covered separately, alongside its
+        # optimizer-failure fallback, in MaxProValidationAndFallbackTest.)
+        bounds = [(0.0, 1.0), (-2.0, 2.0)]
+        with self.assertRaises(ValueError):
+            latin_hypercube(bounds, 3.5)
+        with self.assertRaises(ValueError):
+            random_design(bounds, 3.5)
+        with self.assertRaises(ValueError):
+            sobol_design(bounds, 3.5)
+        with self.assertRaises(ValueError):
+            halton_design(bounds, 3.5)
+        with self.assertRaises(ValueError):
+            maximin_latin_hypercube(bounds, 5, trials=2.5)
+        with self.assertRaises(ValueError):
+            full_factorial(bounds, levels=[2.5, 2])
+        # Negative and non-finite counts are equally rejected, not just fractional ones.
+        with self.assertRaises(ValueError):
+            latin_hypercube(bounds, -3)
+        with self.assertRaises(ValueError):
+            maximin_latin_hypercube(bounds, 5, trials=-1)
+        with self.assertRaises(ValueError):
+            full_factorial(bounds, levels=[-1, 2])
+        with self.assertRaises(ValueError):
+            full_factorial(bounds, levels=[0, 2])  # docstring requires each level >= 1
+        with self.assertRaises(ValueError):
+            latin_hypercube(bounds, float("nan"))
+        with self.assertRaises(ValueError):
+            latin_hypercube(bounds, float("inf"))
+        # A bare non-integer scalar for `levels` used to crash inside np.linspace with a confusing
+        # TypeError instead of failing validation cleanly.
+        with self.assertRaises(ValueError):
+            full_factorial(bounds, levels=2.5)
+
+    def test_valid_finite_bounds_and_integer_counts_still_generate_correct_designs(self):
+        """Negative control: legitimate input is unaffected by the new validation."""
+        bounds = [(0.0, 1.0), (-2.0, 2.0), (10.0, 20.0)]
+        x = latin_hypercube(bounds, 12, seed=0)
+        self.assertEqual(x.shape, (12, 3))
+        self.assertTrue(_within_bounds(x, bounds))
+        # An exact-integer float (5.0) is accepted like the int 5 -- only fractional values are rejected.
+        y = latin_hypercube(bounds, 5.0, seed=0)
+        self.assertEqual(y.shape, (5, 3))
+        z = full_factorial([(0.0, 1.0), (0.0, 10.0)], levels=[3, 2])
+        self.assertEqual(z.shape, (6, 2))
+        mm = maximin_latin_hypercube(bounds, 6, seed=1, trials=5)
+        self.assertEqual(mm.shape, (6, 3))
+
+
 if __name__ == "__main__":
     unittest.main()

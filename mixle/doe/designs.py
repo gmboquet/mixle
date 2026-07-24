@@ -18,12 +18,21 @@ Bounds = Sequence[tuple[float, float]]
 
 
 def _as_bounds(bounds: Bounds) -> np.ndarray:
-    """Validate and return bounds as a ``(d, 2)`` float array with ``low < high`` per row."""
+    """Validate and return bounds as a ``(d, 2)`` float array, finite with ``low < high`` per row.
+
+    Every generator in this module and in :mod:`mixle.doe.factorial` scales a unit-cube or coded
+    ``+/-1`` design into ``bounds``, so a non-finite entry (``inf``/``nan``) would make that scaling
+    undefined -- e.g. an unbounded range has no well-defined uniform or space-filling sample, and a
+    coded ``-1``/``+1`` mapped through ``inf - inf`` yields ``nan`` design points (MXR-080-0174).
+    Rejected here, once, for every caller instead of surfacing later as a silent non-finite design.
+    """
     arr = np.asarray(bounds, dtype=np.float64)
     if arr.ndim != 2 or arr.shape[1] != 2:
         raise ValueError("bounds must be a sequence of (low, high) pairs.")
     if arr.shape[0] == 0:
         raise ValueError("bounds must have at least one dimension.")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("each bound must be finite (no inf or nan).")
     if not np.all(arr[:, 0] < arr[:, 1]):
         raise ValueError("each bound must satisfy low < high.")
     return arr
@@ -36,6 +45,34 @@ def _as_rng(seed: int | RandomState | None) -> RandomState:
     return RandomState(seed)
 
 
+def _require_exact_positive_int(value: Any, name: str, *, minimum: int = 1) -> int:
+    """Validate ``value`` is an exact integer ``>= minimum``; raise instead of truncating/coercing.
+
+    Every count-like control across this module and :mod:`mixle.doe.factorial` (sample/trial/restart/
+    swap/iteration/level/centre counts) routes through this one check, so the same bad input is
+    rejected the same way everywhere -- previously some of these silently truncated a fractional value
+    (``int(3.7) == 3``) while others passed it through untouched to fail later, deeper in the call
+    stack, on the original float (MXR-080-0174). Accepts a genuine Python/numpy integer, or a float/
+    numpy float that is finite and has no fractional part (``5.0`` is fine, ``5.5`` is not); rejects
+    ``bool`` (never a meaningful count) and non-numeric types.
+    """
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer, got bool.")
+    if isinstance(value, (int, np.integer)):
+        ivalue = int(value)
+    elif isinstance(value, (float, np.floating)):
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite, got {value!r}.")
+        if float(value) != int(value):
+            raise ValueError(f"{name} must be an exact integer, got {value!r}.")
+        ivalue = int(value)
+    else:
+        raise TypeError(f"{name} must be an integer, got {type(value).__name__}.")
+    if ivalue < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {ivalue}.")
+    return ivalue
+
+
 def _scale_unit(unit: np.ndarray, bounds: np.ndarray) -> np.ndarray:
     """Scale points from the unit cube ``[0, 1]^d`` into ``bounds``."""
     low = bounds[:, 0]
@@ -45,11 +82,10 @@ def _scale_unit(unit: np.ndarray, bounds: np.ndarray) -> np.ndarray:
 
 def random_design(bounds: Bounds, n: int, seed: int | RandomState | None = None) -> np.ndarray:
     """Return ``n`` iid uniform points over ``bounds`` as an ``(n, d)`` array."""
-    if n <= 0:
-        raise ValueError("n must be positive.")
+    n = _require_exact_positive_int(n, "n")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
-    unit = rng.random_sample((int(n), b.shape[0]))
+    unit = rng.random_sample((n, b.shape[0]))
     return _scale_unit(unit, b)
 
 
@@ -63,12 +99,10 @@ def latin_hypercube(
     permuted. With ``center=True`` each sample sits at its stratum midpoint; otherwise it is drawn
     uniformly within the stratum.
     """
-    if n <= 0:
-        raise ValueError("n must be positive.")
+    n = _require_exact_positive_int(n, "n")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     d = b.shape[0]
-    n = int(n)
     unit = np.empty((n, d), dtype=np.float64)
     for j in range(d):
         perm = rng.permutation(n)
@@ -85,14 +119,14 @@ def maximin_latin_hypercube(
     Generates ``trials`` independent LHS designs and keeps the one whose minimum pairwise
     (Euclidean, bound-normalized) distance is largest, a simple way to improve space-fillingness.
     """
-    if trials <= 0:
-        raise ValueError("trials must be positive.")
+    n = _require_exact_positive_int(n, "n")
+    trials = _require_exact_positive_int(trials, "trials")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     span = b[:, 1] - b[:, 0]
     best_design: np.ndarray | None = None
     best_score = -np.inf
-    for _ in range(int(trials)):
+    for _ in range(trials):
         design = latin_hypercube(b, n, rng)
         if n < 2:
             return design
@@ -237,11 +271,10 @@ def sobol_design(bounds: Bounds, n: int, seed: int | RandomState | None = None, 
     ``seed`` while preserving the low-discrepancy structure; ``scramble=False`` returns the raw
     deterministic sequence. Balance properties are best when ``n`` is a power of two.
     """
-    if n <= 0:
-        raise ValueError("n must be positive.")
+    n = _require_exact_positive_int(n, "n")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
-    unit = _qmc_unit(qmc.Sobol, b.shape[0], int(n), scramble, rng)
+    unit = _qmc_unit(qmc.Sobol, b.shape[0], n, scramble, rng)
     return _scale_unit(unit, b)
 
 
@@ -254,11 +287,10 @@ def halton_design(
     fills space more evenly than iid uniform sampling and works for any ``n`` (no power-of-two
     preference). ``scramble=True`` randomizes it reproducibly from ``seed``.
     """
-    if n <= 0:
-        raise ValueError("n must be positive.")
+    n = _require_exact_positive_int(n, "n")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
-    unit = _qmc_unit(qmc.Halton, b.shape[0], int(n), scramble, rng)
+    unit = _qmc_unit(qmc.Halton, b.shape[0], n, scramble, rng)
     return _scale_unit(unit, b)
 
 
@@ -271,14 +303,17 @@ def full_factorial(bounds: Bounds, levels: int | Sequence[int]) -> np.ndarray:
     """
     b = _as_bounds(bounds)
     d = b.shape[0]
-    if isinstance(levels, int):
-        level_list = [levels] * d
+    if isinstance(levels, (int, np.integer, float, np.floating)):
+        level_list: list[Any] = [levels] * d
     else:
         level_list = list(levels)
     if len(level_list) != d:
         raise ValueError("levels must be a scalar or have one entry per dimension.")
-    if any(k < 1 for k in level_list):
-        raise ValueError("each level count must be >= 1.")
+    # Every entry is an exact-integer count (MXR-080-0174): previously a fractional level count (e.g.
+    # 2.5) passed the old `k < 1` check unchanged and only failed later, inside np.linspace, on the
+    # untouched float -- and a non-int, non-sequence scalar (a bare float) wasn't even accepted as the
+    # "applied to every dimension" shorthand the docstring promises.
+    level_list = [_require_exact_positive_int(k, f"levels[{j}]") for j, k in enumerate(level_list)]
 
     axes = []
     for j, k in enumerate(level_list):
