@@ -109,6 +109,167 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(diagnostics["op_counts"]["exp"], 4)
         self.assertGreaterEqual(diagnostics["max_depth"], 4)
 
+    def _eval_all(self, engine, expr):
+        """Evaluate every element of a (possibly array-shaped) symbolic result against {}."""
+        return np.vectorize(lambda v: v.evaluate({}))(np.asarray(expr, dtype=object))
+
+    def test_symbolic_sum_keepdims_retains_reduced_axes_as_size_one(self):
+        # Regression (MXR-080-0150), exact audit repro: a symbolic sum requested with
+        # keepdims=True used to return a scalar (the reduced axis silently dropped, since
+        # keepdims was accepted into **kwargs and then never read) instead of an array with the
+        # reduced axis kept as a size-1 dimension, unlike NumPy/Torch.
+        engine = SymbolicEngine()
+        arr2d = engine.asarray([[1.0, 2.0], [3.0, 4.0]])
+
+        by_axis = engine.sum(arr2d, axis=1, keepdims=True)
+        self.assertEqual(np.asarray(by_axis).shape, (2, 1))
+        np.testing.assert_allclose(self._eval_all(engine, by_axis), [[3.0], [7.0]])
+
+        by_none = engine.sum(arr2d, axis=None, keepdims=True)
+        self.assertEqual(np.asarray(by_none).shape, (1, 1))
+        np.testing.assert_allclose(self._eval_all(engine, by_none), [[10.0]])
+
+        arr3d = engine.asarray(np.arange(24, dtype=float).reshape(2, 3, 4))
+        by_tuple = engine.sum(arr3d, axis=(0, 2), keepdims=True)
+        self.assertEqual(np.asarray(by_tuple).shape, (1, 3, 1))
+        np.testing.assert_allclose(
+            self._eval_all(engine, by_tuple),
+            np.sum(np.arange(24, dtype=float).reshape(2, 3, 4), axis=(0, 2), keepdims=True),
+        )
+
+    def test_symbolic_max_and_logsumexp_keepdims_retains_reduced_axes(self):
+        # Regression (MXR-080-0150): keepdims was silently ignored identically for max and
+        # logsumexp, not just sum.
+        engine = SymbolicEngine()
+        arr2d = engine.asarray([[1.0, 2.0], [3.0, 4.0]])
+
+        max_kept = engine.max(arr2d, axis=1, keepdims=True)
+        self.assertEqual(np.asarray(max_kept).shape, (2, 1))
+        np.testing.assert_allclose(self._eval_all(engine, max_kept), [[2.0], [4.0]])
+
+        lse_kept = engine.logsumexp(arr2d, axis=1, keepdims=True)
+        self.assertEqual(np.asarray(lse_kept).shape, (2, 1))
+        np.testing.assert_allclose(
+            self._eval_all(engine, lse_kept),
+            np.log(np.exp(np.asarray([[1.0, 2.0], [3.0, 4.0]])).sum(axis=1, keepdims=True)),
+        )
+
+    def test_symbolic_sum_and_max_initial_seeds_each_reduction_group(self):
+        # Regression (MXR-080-0150): initial was silently ignored -- a symbolic sum/max with an
+        # explicit initial seed returned the same result as without one, unlike NumPy, which
+        # seeds EACH reduction group with it (not just a single global add).
+        engine = SymbolicEngine()
+        arr1d = engine.asarray([1.0, 2.0, 3.0])
+        self.assertEqual(float(engine.sum(arr1d, initial=100.0).evaluate({})), 106.0)
+        self.assertEqual(float(engine.max(arr1d, initial=100.0).evaluate({})), 100.0)
+        # an initial below every element must not change the max
+        self.assertEqual(float(engine.max(arr1d, initial=-100.0).evaluate({})), 3.0)
+
+        arr2d = engine.asarray([[1.0, 2.0], [3.0, 4.0]])
+        per_row = self._eval_all(engine, engine.sum(arr2d, axis=1, initial=10.0))
+        np.testing.assert_allclose(per_row, [13.0, 17.0])  # 10 added to EACH row, not once globally
+
+    def test_symbolic_max_where_requires_initial_like_numpy(self):
+        # Regression (MXR-080-0150): where was silently ignored entirely. Max has no universal
+        # identity, so -- matching np.max's own restriction -- using where without initial must
+        # raise rather than silently reduce an under-specified group.
+        engine = SymbolicEngine()
+        arr1d = engine.asarray([1.0, 2.0, 3.0])
+        mask = np.array([True, False, True])
+        with self.assertRaises(ValueError):
+            engine.max(arr1d, where=mask)
+        masked = engine.max(arr1d, where=mask, initial=-1.0e18)
+        self.assertEqual(float(masked.evaluate({})), 3.0)  # only elements 0 and 2 (1.0, 3.0) considered
+
+    def test_symbolic_sum_where_excludes_masked_elements_without_requiring_initial(self):
+        # Sum's additive identity (0.0) always exists, so -- unlike max -- where alone (no
+        # initial) is well-defined and must exclude masked-out elements from the total.
+        engine = SymbolicEngine()
+        arr1d = engine.asarray([1.0, 2.0, 3.0])
+        mask = np.array([True, False, True])
+        masked = engine.sum(arr1d, where=mask)
+        self.assertEqual(float(masked.evaluate({})), 4.0)  # 1.0 + 3.0, excluding 2.0
+
+    def test_symbolic_sum_rejects_explicit_dtype_but_accepts_the_default(self):
+        # Regression (MXR-080-0150): dtype was silently ignored -- a symbolic sum with an
+        # explicit dtype= behaved identically to one without, even though a real cast is not
+        # meaningful for an exact expression tree with no numeric storage. It must now be
+        # rejected explicitly (the "reject unsupported arguments" half of the audit's fix menu)
+        # rather than silently accepted and ignored.
+        engine = SymbolicEngine()
+        arr1d = engine.asarray([1.0, 2.0, 3.0])
+        with self.assertRaises(NotImplementedError):
+            engine.sum(arr1d, dtype=np.float32)
+        # the default (unset) dtype is a no-op, exactly like NumPy's own dtype=None default
+        self.assertEqual(float(engine.sum(arr1d, dtype=None).evaluate({})), 6.0)
+
+    def test_symbolic_max_and_logsumexp_reject_unsupported_reduction_kwargs(self):
+        # Regression (MXR-080-0150): max and logsumexp caught the SAME **kwargs catch-all as sum,
+        # so every unsupported argument was silently swallowed for them too. np.max itself has no
+        # dtype parameter at all, and scipy.special.logsumexp (which NumpyEngine.logsumexp
+        # forwards to directly) has none of dtype/initial/where -- so the symbolic engine
+        # declares the identical, narrower parameter set and lets an unsupported keyword raise
+        # Python's own TypeError, exactly as calling the real NumPy/SciPy function would.
+        engine = SymbolicEngine()
+        arr1d = engine.asarray([1.0, 2.0, 3.0])
+        with self.assertRaises(TypeError):
+            engine.max(arr1d, dtype=np.float32)
+        for kwargs in ({"dtype": np.float32}, {"initial": 1.0}, {"where": np.array([True])}):
+            with self.assertRaises(TypeError):
+                engine.logsumexp(arr1d, **kwargs)
+
+    def test_symbolic_logsumexp_all_negative_infinity_is_negative_infinity_not_nan(self):
+        # Regression (MXR-080-0150), exact audit repro: the stable max-shifted LSE computes
+        # m + log(sum(exp(x - m))) with m = max(x). When every input is -inf, m is ALSO -inf, so
+        # every shifted term computes -inf - (-inf) = NaN (the classic inf-inf indeterminate
+        # form), poisoning the whole reduction to NaN instead of the mathematically correct -inf
+        # (every term has probability exactly zero in log-space, so the total probability is
+        # zero and its log is -inf).
+        engine = SymbolicEngine()
+        neg_inf = engine.asarray([float("-inf"), float("-inf")])
+        result = engine.logsumexp(neg_inf)
+        self.assertEqual(float(result.evaluate({})), float("-inf"))
+        self.assertFalse(np.isnan(float(result.evaluate({}))))
+
+        # a MIXED input (not all -inf) must still work exactly as before -- only the genuinely
+        # degenerate all-(-inf) case changes
+        mixed = engine.asarray([float("-inf"), 2.0, 3.0])
+        expected = float(np.logaddexp(np.logaddexp(-np.inf, 2.0), 3.0))
+        self.assertAlmostEqual(float(engine.logsumexp(mixed).evaluate({})), expected, places=10)
+
+    def test_symbolic_sum_max_logsumexp_empty_reduction_identities(self):
+        # Regression (MXR-080-0150): the audit asked for the empty/all-impossible identities to
+        # be defined explicitly, matching NumPy/SciPy: sum([]) is the additive identity 0.0;
+        # max([]) has no identity and raises unless initial is given (in which case it returns
+        # initial, unchanged from the pre-fix behavior for the no-initial case -- max([]) already
+        # raised before this fix); logsumexp([]) is -inf (the log of a sum of zero terms).
+        engine = SymbolicEngine()
+        empty = engine.asarray(np.array([], dtype=object))
+        self.assertEqual(float(engine.sum(empty).evaluate({})), 0.0)
+        with self.assertRaises(ValueError):
+            engine.max(empty)
+        self.assertEqual(float(engine.max(empty, initial=-5.0).evaluate({})), -5.0)
+        self.assertEqual(float(engine.logsumexp(empty).evaluate({})), float("-inf"))
+
+    def test_symbolic_reductions_without_special_arguments_are_unaffected(self):
+        # Negative control for MXR-080-0150: ordinary axis-only reductions (the overwhelmingly
+        # common case, and the only case exercised before this fix) must return exactly the same
+        # shapes and values as before -- keepdims/dtype/initial/where must be strictly additive.
+        engine = SymbolicEngine()
+        arr2d = engine.asarray([[1.0, 2.0], [3.0, 4.0]])
+
+        plain_sum = engine.sum(arr2d, axis=1)
+        self.assertEqual(np.asarray(plain_sum).shape, (2,))
+        np.testing.assert_allclose(self._eval_all(engine, plain_sum), [3.0, 7.0])
+
+        plain_max = engine.max(arr2d, axis=0)
+        self.assertEqual(np.asarray(plain_max).shape, (2,))
+        np.testing.assert_allclose(self._eval_all(engine, plain_max), [3.0, 4.0])
+
+        # the pre-existing overflow-safety case (E3) must still be exact
+        plain_lse = engine.logsumexp(engine.asarray([1000.0, 1000.0]))
+        self.assertAlmostEqual(float(plain_lse.evaluate({})), 1000.0 + np.log(2.0))
+
     def test_symbolic_engine_traces_comparison_masks(self):
         engine = SymbolicEngine()
         x = engine.symbol("x")
