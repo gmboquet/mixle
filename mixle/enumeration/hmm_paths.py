@@ -35,6 +35,104 @@ from mixle.enumeration.quantization.core import _TOL, Quantizer
 from mixle.enumeration.quantization.seek import _require_index
 
 _LOG2 = math.log(2.0)
+_NORM_TOL = 1.0e-6  # absolute tolerance on logsumexp(log_pi | a log_A row) deviating from 0 (normalized)
+
+
+def _logsumexp_1d(scores: np.ndarray) -> float:
+    """``log(sum(exp(scores)))``, robust to -inf entries (an all-impossible slice is exactly -inf)."""
+    m = float(np.max(scores)) if scores.size else -math.inf
+    if not math.isfinite(m):
+        return m  # all -inf (or empty): the sum is 0, so the log is exactly -inf (NaN/+inf rejected earlier)
+    return m + math.log(float(np.sum(np.exp(scores - m))))
+
+
+def _check_finite_or_impossible(name: str, arr: np.ndarray) -> None:
+    """Reject NaN and +inf; -inf is the valid "impossible" sentinel (MXR-080-0228).
+
+    Every score in this module is either a genuine, finite log-probability/log-likelihood or the
+    explicit -inf marker for "cannot happen". NaN is neither -- silently treating it as -inf, as a
+    bare ``np.isfinite`` filter would, launders a caller's corrupted/garbage input into a confident
+    "impossible" claim instead of surfacing the bug. +inf is not a valid log-anything (it would
+    assert infinite likelihood).
+    """
+    if np.isnan(arr).any():
+        raise ValueError(f"{name} must not contain NaN.")
+    if np.isposinf(arr).any():
+        raise ValueError(f"{name} must be finite or -inf (impossible), never +inf.")
+
+
+def _check_log_probabilities(name: str, arr: np.ndarray) -> None:
+    """Reject entries > 0: a log-probability's exponential is a probability, which cannot exceed 1."""
+    if (arr > 0.0).any():
+        raise ValueError(f"{name} entries must be <= 0 (a probability cannot exceed 1); found a positive entry.")
+
+
+def _check_not_superstochastic(name: str, log_probs: np.ndarray) -> None:
+    """Reject a categorical row that describes MORE than one unit of total probability.
+
+    ``log_probs`` is one distribution's worth of log-probabilities (``log_pi`` itself, or one row of
+    ``log_A``). Summing to more than 1 (``logsumexp > 0``) is a genuine impossibility -- exactly like
+    a single entry > 0 (:func:`_check_log_probabilities`) -- and always rejected.
+
+    Summing to LESS than 1 is deliberately allowed: this package already relies on sub-stochastic
+    rows as the supported way to forbid individual transitions without renormalizing the rest of the
+    row (set one entry to -inf and leave the others as they were -- see e.g. the impossible-transition
+    tests, which remove a substantial, non-numerical-noise fraction of a row's mass this way). A row
+    that is entirely -inf is simply the zero-probability extreme of that same allowed range -- an
+    explicit "empty support"/"dead end" marker (MXR-080-0228; see :class:`HMMPathIndex`'s
+    ``empty_support``), not a case requiring its own branch: ``_logsumexp_1d`` returns exactly -inf
+    for it, which is <= the tolerance below like any other sub-stochastic row.
+    """
+    lse = _logsumexp_1d(log_probs)
+    if lse > _NORM_TOL:
+        raise ValueError(
+            f"{name} must not describe more than one unit of total probability (logsumexp <= 0); "
+            f"got logsumexp={lse!r} (total probability {math.exp(lse)!r})."
+        )
+
+
+def _validate_hmm_model(log_pi: np.ndarray, log_A: np.ndarray, log_b: np.ndarray) -> None:
+    """Validate ``log_pi``/``log_A``/``log_b`` form a coherent, well-posed HMM (MXR-080-0228).
+
+    Shape: ``log_pi`` is ``(K,)``, ``log_A`` is square ``(K, K)``, ``log_b`` is ``(T, K)``, all
+    sharing the same ``K`` -- checked explicitly and reported with the actual shapes on mismatch,
+    instead of deferring to whatever opaque numpy broadcast error (or, worse, a silently
+    broadcast-compatible-but-wrong result) a mismatched combination happens to trigger deeper in the
+    pipeline.
+
+    Numeric contract: ``log_pi`` and ``log_A`` are genuine categorical log-probabilities over
+    discrete latent states -- every entry <= 0, never NaN/+inf, and describing at most one unit of
+    total probability (via :func:`_check_not_superstochastic`: sub-stochastic rows, including an
+    all-impossible row/vector, are allowed -- see that function's docstring for why). ``log_b`` is an
+    emission LOG-LIKELIHOOD, not a probability: the class docstring and :func:`hmm_best_paths` are
+    explicit that emission densities may be positive (unnormalized/continuous densities > 1 are
+    legitimate), so ``log_b`` is only required to be finite-or-impossible (never NaN, never +inf)
+    with no <= 0 or normalization requirement.
+    """
+    if log_pi.ndim != 1:
+        raise ValueError(f"log_pi must be 1-D (K,), got shape {log_pi.shape}.")
+    if log_A.ndim != 2 or log_A.shape[0] != log_A.shape[1]:
+        raise ValueError(f"log_A must be square 2-D (K, K), got shape {log_A.shape}.")
+    if log_b.ndim != 2:
+        raise ValueError(f"log_b must be 2-D (T, K), got shape {log_b.shape}.")
+    k_pi, k_a, k_b = log_pi.shape[0], log_A.shape[0], log_b.shape[1]
+    if not (k_pi == k_a == k_b):
+        raise ValueError(
+            "log_pi, log_A, and log_b disagree on the number of states K: "
+            f"log_pi is {log_pi.shape} (K={k_pi}), log_A is {log_A.shape} (K={k_a}), "
+            f"log_b is {log_b.shape} (T, K={k_b}); all three must share the same K."
+        )
+    if k_pi == 0:
+        raise ValueError("log_pi/log_A/log_b must have at least one state (K >= 1).")
+
+    _check_finite_or_impossible("log_pi", log_pi)
+    _check_finite_or_impossible("log_A", log_A)
+    _check_finite_or_impossible("log_b", log_b)
+    _check_log_probabilities("log_pi", log_pi)
+    _check_log_probabilities("log_A", log_A)
+    _check_not_superstochastic("log_pi", log_pi)
+    for s in range(k_a):
+        _check_not_superstochastic(f"log_A row {s}", log_A[s])
 
 
 def _backward_viterbi(log_pi: np.ndarray, log_A: np.ndarray, log_b: np.ndarray) -> np.ndarray:
@@ -73,6 +171,7 @@ def hmm_best_paths(
     log_pi = np.asarray(log_pi, dtype=float)
     log_A = np.asarray(log_A, dtype=float)
     log_b = np.asarray(log_b, dtype=float)
+    _validate_hmm_model(log_pi, log_A, log_b)
     t_len, n_states = log_b.shape
     if t_len == 0:
         return
@@ -116,6 +215,15 @@ def hmm_best_paths(
 class HMMPathIndex:
     """Quantized random-access index over an HMM's state paths for one observation sequence.
 
+    ``log_pi``/``log_A``/``log_b`` are validated at construction (MXR-080-0228): shapes must be
+    ``(K,)``/``(K, K)``/``(T, K)`` with a consistent ``K``, every score must be finite-or-impossible
+    (``-inf``, never NaN or ``+inf``), and ``log_pi``/``log_A`` must describe at most one unit of
+    total probability each (sub-stochastic rows -- e.g. from forbidding individual transitions
+    without renormalizing -- are allowed; ``log_b`` is an emission LOG-LIKELIHOOD and may be
+    positive/unnormalized -- see :func:`hmm_best_paths`). An all-impossible initial vector or a
+    position with no finite score at all is not an error: it is represented explicitly via
+    ``empty_support`` (and ``total()`` reporting zero), rather than crashing.
+
     **Precompute** (once, ``O(T * K^2 * W)``): quantize every step score -- ``log_pi[s] + log_b[0, s]``
     and ``log_A[s, s'] + log_b[t, s']``, one floor per step so the accumulated smear is at most ``T``
     fine buckets -- and run a forward count DP: ``C_t[s']`` is the histogram, over integer total-score
@@ -148,6 +256,7 @@ class HMMPathIndex:
         self.log_pi = np.asarray(log_pi, dtype=float)
         self.log_A = np.asarray(log_A, dtype=float)
         self.log_b = np.asarray(log_b, dtype=float)
+        _validate_hmm_model(self.log_pi, self.log_A, self.log_b)
         self.T, self.K = self.log_b.shape
         if self.T == 0:
             raise ValueError("log_b must cover at least one position")
@@ -157,13 +266,30 @@ class HMMPathIndex:
         # bounded by 0. Shift each position's step scores by that position's best (max) score: shifted
         # scores are <= 0, buckets measure "bits behind the per-step optimum", and ordering is unchanged
         # (the same constant shifts every path). ``total_offset`` converts bucket <-> true joint score.
+        #
+        # A position can have NO finite score at all -- e.g. log_b[t] is -inf for every state the
+        # model could plausibly occupy there -- which makes every path through this index have
+        # probability exactly zero (MXR-080-0228). np.max has no identity for an empty array and
+        # would crash; guard it explicitly and record ``empty_support`` instead, leaving that
+        # position's offset at its zero-initialized default (harmless: the unshifted scores are
+        # already all -inf, and -inf - 0.0 stays -inf, so _fine() below still correctly marks every
+        # move through this position "impossible", which is exactly what propagates to total()==0).
         init_scores = self.log_pi + self.log_b[0]
         self._off = np.zeros(self.T, dtype=float)
-        self._off[0] = float(np.max(init_scores[np.isfinite(init_scores)]))
+        self.empty_support = False
+        init_finite = np.isfinite(init_scores)
+        if init_finite.any():
+            self._off[0] = float(np.max(init_scores[init_finite]))
+        else:
+            self.empty_support = True
         step_scores = []
         for t in range(1, self.T):
             sc = self.log_A + self.log_b[t][None, :]
-            self._off[t] = float(np.max(sc[np.isfinite(sc)]))
+            finite = np.isfinite(sc)
+            if finite.any():
+                self._off[t] = float(np.max(sc[finite]))
+            else:
+                self.empty_support = True
             step_scores.append(sc - self._off[t])
         self.total_offset = float(self._off.sum())
         self._init_shifted = init_scores - self._off[0]

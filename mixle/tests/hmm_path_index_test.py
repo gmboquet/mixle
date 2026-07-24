@@ -213,5 +213,146 @@ class RankValidationTestCase(unittest.TestCase):
         self.assertEqual([p for p, _ in head], [p0, p1])
 
 
+class ModelValidationTest(unittest.TestCase):
+    """MXR-080-0228: hmm_best_paths/HMMPathIndex must validate a coherent model -- shapes, the
+    finite-or-impossible score contract, and the normalized-probability contract -- before running
+    any dynamic program, instead of failing with an opaque broadcast error (mismatched shapes) or
+    crashing on a zero-size numpy reduction (an all-impossible initial state)."""
+
+    def setUp(self):
+        self.K, self.T = 2, 3
+        self.log_pi = np.log(np.array([0.5, 0.5]))
+        self.log_A = np.log(np.array([[0.5, 0.5], [0.5, 0.5]]))
+        self.log_b = np.zeros((self.T, self.K))
+
+    # -- shape mismatches: the audit's "opaque broadcast error" --------------------------------------
+
+    def test_hmm_path_index_rejects_mismatched_log_pi_length(self):
+        # numpy's own broadcast error is ALSO a ValueError, so pin the message too: this must be
+        # MY clean "shapes disagree" validation, not an opaque broadcast failure deeper in the
+        # pipeline (the audit's literal complaint).
+        bad_log_pi = np.zeros(self.K + 1)
+        with self.assertRaises(ValueError) as cm:
+            HMMPathIndex(bad_log_pi, self.log_A, self.log_b)
+        self.assertIn("disagree", str(cm.exception))
+        self.assertNotIn("broadcast", str(cm.exception))
+
+    def test_hmm_best_paths_rejects_mismatched_log_pi_length(self):
+        bad_log_pi = np.zeros(self.K + 1)
+        with self.assertRaises(ValueError):
+            list(hmm_best_paths(bad_log_pi, self.log_A, self.log_b))
+
+    def test_hmm_best_paths_rejects_oversized_log_pi_not_just_undersized(self):
+        # A log_pi LONGER than K must be rejected outright, not silently accepted while the extra
+        # state is ignored (the pre-fix behavior for this specific direction of mismatch: n_states
+        # came from log_b's shape, so successors() indexed only the first K entries of log_pi).
+        bad_log_pi = np.concatenate([self.log_pi, [-np.inf]])
+        with self.assertRaises(ValueError):
+            list(hmm_best_paths(bad_log_pi, self.log_A, self.log_b))
+
+    def test_hmm_path_index_rejects_non_square_log_A(self):
+        bad_log_A = np.zeros((self.K, self.K + 1))
+        with self.assertRaises(ValueError) as cm:
+            HMMPathIndex(self.log_pi, bad_log_A, self.log_b)
+        self.assertIn("square", str(cm.exception))
+        self.assertNotIn("broadcast", str(cm.exception))
+
+    def test_hmm_path_index_rejects_log_A_wrong_K(self):
+        bad_log_A = _norm_rows(np.random.RandomState(9).randn(self.K + 1, self.K + 1))
+        with self.assertRaises(ValueError) as cm:
+            HMMPathIndex(self.log_pi, bad_log_A, self.log_b)
+        self.assertIn("disagree", str(cm.exception))
+        self.assertNotIn("broadcast", str(cm.exception))
+
+    def test_hmm_path_index_rejects_wrong_log_b_ndim(self):
+        with self.assertRaises(ValueError) as cm:
+            HMMPathIndex(self.log_pi, self.log_A, self.log_b.ravel())
+        self.assertIn("2-D", str(cm.exception))
+        self.assertNotIn("unpack", str(cm.exception))
+
+    def test_shape_validation_does_not_depend_on_multi_position_loops_running(self):
+        # T=1 bypasses _backward_viterbi's loop entirely (range(t_len - 2, -1, -1) is empty), so the
+        # shape check must not be smuggled in only via code that a single-position model skips.
+        bad_log_pi = np.zeros(self.K + 2)
+        log_b_1 = np.zeros((1, self.K))
+        with self.assertRaises(ValueError):
+            HMMPathIndex(bad_log_pi, self.log_A, log_b_1)
+        with self.assertRaises(ValueError):
+            list(hmm_best_paths(bad_log_pi, self.log_A, log_b_1))
+
+    # -- finite-or-impossible numeric contract --------------------------------------------------------
+
+    def test_rejects_nan_in_log_pi(self):
+        bad = self.log_pi.copy()
+        bad[0] = np.nan
+        with self.assertRaises(ValueError):
+            HMMPathIndex(bad, self.log_A, self.log_b)
+
+    def test_rejects_nan_in_log_A(self):
+        bad = self.log_A.copy()
+        bad[0, 0] = np.nan
+        with self.assertRaises(ValueError):
+            HMMPathIndex(self.log_pi, bad, self.log_b)
+
+    def test_rejects_nan_in_log_b(self):
+        bad = self.log_b.copy()
+        bad[0, 0] = np.nan
+        with self.assertRaises(ValueError):
+            HMMPathIndex(self.log_pi, self.log_A, bad)
+
+    def test_rejects_positive_infinity_in_log_b(self):
+        # +inf is not finite-or-impossible even though log_b may otherwise be positive (a density).
+        bad = self.log_b.copy()
+        bad[0, 0] = np.inf
+        with self.assertRaises(ValueError):
+            HMMPathIndex(self.log_pi, self.log_A, bad)
+
+    def test_rejects_positive_log_pi_entry(self):
+        bad = np.array([0.5, -1.0])  # exp(0.5) > 1: not a valid probability
+        with self.assertRaises(ValueError):
+            HMMPathIndex(bad, self.log_A, self.log_b)
+
+    def test_rejects_super_stochastic_log_A_row(self):
+        bad = np.zeros((self.K, self.K))  # every row sums to K units of probability, not <= 1
+        with self.assertRaises(ValueError):
+            HMMPathIndex(self.log_pi, bad, self.log_b)
+
+    def test_positive_log_b_entry_is_allowed(self):
+        # log_b is an emission LOG-LIKELIHOOD (may be an unnormalized/continuous density > 1) --
+        # this must NOT be rejected the way a positive log_pi/log_A entry is.
+        ok = self.log_b.copy()
+        ok[0, 0] = 3.0
+        HMMPathIndex(self.log_pi, self.log_A, ok)  # must not raise
+
+    def test_sub_stochastic_log_A_row_is_allowed(self):
+        # The established "forbid one transition without renormalizing the row" pattern (see
+        # StructureEdgeCasesTest.test_impossible_transitions_are_excluded) must keep working: a row
+        # summing to LESS than 1 is not the same violation as summing to MORE than 1.
+        ok = self.log_A.copy()
+        ok[0, 1] = -np.inf
+        HMMPathIndex(self.log_pi, ok, self.log_b)  # must not raise
+
+    # -- empty support: represented explicitly, never crashed ------------------------------------------
+
+    def test_all_impossible_initial_state_is_represented_not_crashed(self):
+        bad_log_pi = np.array([-np.inf, -np.inf])
+        idx = HMMPathIndex(bad_log_pi, self.log_A, self.log_b)  # must not raise/crash
+        self.assertTrue(idx.empty_support)
+        with self.assertRaises(IndexError):
+            idx.unrank(0)
+
+    def test_all_impossible_position_mid_sequence_is_represented_not_crashed(self):
+        # Not just the INITIAL position: any position with no finite score at all (every state's
+        # emission likelihood is -inf there) makes the whole model empty-support the same way.
+        bad_log_b = self.log_b.copy()
+        bad_log_b[1] = -np.inf
+        idx = HMMPathIndex(self.log_pi, self.log_A, bad_log_b)  # must not raise/crash
+        self.assertTrue(idx.empty_support)
+
+    def test_normal_model_has_no_empty_support(self):
+        idx = HMMPathIndex(self.log_pi, self.log_A, self.log_b)
+        self.assertFalse(idx.empty_support)
+
+
 if __name__ == "__main__":
     unittest.main()
