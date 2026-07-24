@@ -1,12 +1,19 @@
 """The sequential-design loop primitive: a real Bayesian sequential design (uncertainty genuinely
 shrinks as data accumulates), every stop path exercised, and -- the payoff -- a test proving the loop
 composes with the real voi_stopping_decision rule from mixle.analysis.real_options, i.e. the
-session's decision machinery snaps together instead of being hand-wired per demo."""
+session's decision machinery snaps together instead of being hand-wired per demo.
+
+Also covers the audit trail's integrity guarantees: stored summary/decision records survive later
+mutation of the object a callback returned (copy at storage time) and survive a callback reaching into
+its `history` argument and trying to rewrite a past round (copy-safe view at callback time); and every
+fit/propose/acquire/combine failure mode records an explicit failed round rather than aborting silently,
+under both the default fail-fast `on_error="raise"` policy and the `on_error="record_and_stop"` policy.
+"""
 
 import numpy as np
 import pytest
 
-from mixle.doe.sequential import DesignRound, sequential_design
+from mixle.doe.sequential import DesignRound, SequentialDesignError, sequential_design
 
 # --- a genuinely Bayesian toy: estimate a scalar theta from noisy iid measurements ---
 _THETA_TRUE = 2.0
@@ -182,3 +189,291 @@ def test_composes_with_the_real_voi_stopping_decision_rule():
     assert result.stopped_reason in ("controller_stop", "budget_exhausted")
     assert result.n_rounds >= 1
     assert all("voi" in r.decision for r in result.rounds)
+
+
+# --- audit-trail integrity: negative control + copy-safety + callback-mutation resistance ---
+
+
+def test_normal_run_marks_no_round_as_failed():
+    """Negative control: a fully successful multi-round run leaves the failure-tracking fields alone
+    and produces a correct, complete audit trail (the existing stop-path tests above already check the
+    per-round summaries/decisions themselves)."""
+    result = sequential_design(
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
+        should_continue=_threshold_controller(0.15),
+        propose=_propose_next_measurement,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=50,
+    )
+    assert result.stopped_reason == "controller_stop"
+    assert result.n_rounds > 1
+    assert all(r.failed is False and r.failed_step is None and r.error is None for r in result.rounds)
+
+
+def test_mutating_a_returned_summary_after_the_fact_does_not_corrupt_the_stored_round():
+    """summarize() returns a dict; mutating that SAME object after the round has completed must not
+    retroactively change the stored audit-trail entry -- the round must store a copy, not the live
+    reference summarize() handed back."""
+    captured = {}
+
+    def summarize_and_capture(state, i):
+        d = {"round": i, "n": state.n, "post_sd": state.post_sd}
+        captured[i] = d
+        return d
+
+    result = sequential_design(
+        _initial(),
+        fit=_fit,
+        summarize=summarize_and_capture,
+        should_continue=_threshold_controller(0.15),
+        propose=_propose_next_measurement,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=50,
+    )
+    before = dict(result.rounds[0].summary)
+    captured[0]["post_sd"] = -999.0  # tamper with the object summarize() originally returned
+    captured[0]["n"] = -999
+    assert result.rounds[0].summary == before
+
+
+def test_should_continue_cannot_mutate_the_live_history_it_is_given():
+    """should_continue is handed a copy-safe view of the audit trail: writing into a past round's
+    summary/decision through that view must not change what sequential_design actually stored."""
+
+    def tampering_should_continue(history):
+        if len(history) >= 2:
+            history[0].summary["post_sd"] = -999.0  # try to rewrite a PAST round
+            history[0].decision["reason"] = "tampered"
+        sd = history[-1].summary["post_sd"]
+        return {"keep_going": sd > 0.15, "reason": "ok"}
+
+    result = sequential_design(
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
+        should_continue=tampering_should_continue,
+        propose=_propose_next_measurement,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=50,
+    )
+    assert result.rounds[0].summary["post_sd"] > 0  # never tampered to -999
+    assert result.rounds[0].decision.get("reason") != "tampered"
+
+
+def test_propose_cannot_mutate_the_live_history_it_is_given():
+    """Same aliasing guarantee, exercised through propose's `history` argument instead."""
+
+    def tampering_propose(state, history):
+        history[0].summary["n"] = -1
+        return len(history)
+
+    result = sequential_design(
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
+        should_continue=_threshold_controller(0.15),
+        propose=tampering_propose,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=50,
+    )
+    assert result.rounds[0].summary["n"] >= 0  # never tampered to -1
+
+
+# --- explicit failure-state rounds: one test per fit/propose/acquire/combine callback ---
+
+
+def test_fit_failure_is_recorded_as_an_explicit_failed_round():
+    calls = {"n": 0}
+
+    def flaky_fit(data):
+        calls["n"] += 1
+        if calls["n"] == 2:  # fail on round 1's fit, after round 0 completed cleanly
+            raise RuntimeError("fit blew up")
+        return _fit(data)
+
+    result = sequential_design(
+        _initial(),
+        fit=flaky_fit,
+        summarize=_summarize,
+        should_continue=lambda h: {"keep_going": True, "reason": "go"},
+        propose=_propose_next_measurement,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=5,
+        on_error="record_and_stop",
+    )
+    assert result.stopped_reason == "callback_error"
+    assert result.n_rounds == 2  # round 0 (clean) + round 1 (the new failure round)
+    failed = result.rounds[-1]
+    assert failed.index == 1
+    assert failed.failed is True
+    assert failed.failed_step == "fit"
+    assert "fit blew up" in failed.error
+    assert failed.state is None  # fit never returned a state
+    assert result.rounds[0].failed is False  # round 0's record is untouched
+
+
+def test_propose_failure_is_recorded_on_the_round_that_attempted_it():
+    def boom_propose(state, history):
+        raise ValueError("propose blew up")
+
+    result = sequential_design(
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
+        should_continue=lambda h: {"keep_going": True, "reason": "go"},
+        propose=boom_propose,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=5,
+        on_error="record_and_stop",
+    )
+    assert result.stopped_reason == "callback_error"
+    assert result.n_rounds == 1  # round 0's own record is marked failed, not duplicated
+    failed = result.rounds[-1]
+    assert failed.index == 0
+    assert failed.failed_step == "propose"
+    assert "propose blew up" in failed.error
+    assert failed.summary  # fit/summarize/decision for round 0 completed before propose ran
+    assert failed.proposed_action is None  # propose never returned one
+
+
+def test_acquire_failure_is_recorded_with_the_proposal_still_on_record():
+    def boom_acquire(action):
+        raise ValueError("acquire blew up")
+
+    result = sequential_design(
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
+        should_continue=lambda h: {"keep_going": True, "reason": "go"},
+        propose=_propose_next_measurement,
+        acquire=boom_acquire,
+        combine=_combine,
+        max_rounds=5,
+        on_error="record_and_stop",
+    )
+    assert result.stopped_reason == "callback_error"
+    failed = result.rounds[-1]
+    assert failed.failed_step == "acquire"
+    assert failed.proposed_action is not None  # propose succeeded before acquire failed
+    assert "acquire blew up" in failed.error
+
+
+def test_combine_failure_is_recorded_after_a_successful_acquire():
+    def boom_combine(data, new):
+        raise ValueError("combine blew up")
+
+    result = sequential_design(
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
+        should_continue=lambda h: {"keep_going": True, "reason": "go"},
+        propose=_propose_next_measurement,
+        acquire=_acquire,
+        combine=boom_combine,
+        max_rounds=5,
+        on_error="record_and_stop",
+    )
+    assert result.stopped_reason == "callback_error"
+    failed = result.rounds[-1]
+    assert failed.failed_step == "combine"
+    assert failed.proposed_action is not None  # propose and acquire both succeeded
+    assert "combine blew up" in failed.error
+
+
+# --- caller-selected rethrow policy ---
+
+
+def test_on_error_raise_is_the_default_and_attaches_the_partial_result_to_the_exception():
+    def boom_acquire(action):
+        raise KeyError("acquire blew up")
+
+    with pytest.raises(SequentialDesignError) as excinfo:
+        sequential_design(
+            _initial(),
+            fit=_fit,
+            summarize=_summarize,
+            should_continue=lambda h: {"keep_going": True, "reason": "go"},
+            propose=_propose_next_measurement,
+            acquire=boom_acquire,
+            combine=_combine,
+            max_rounds=5,
+            # on_error left at its default -- "raise"
+        )
+    err = excinfo.value
+    assert isinstance(err.__cause__, KeyError)  # original exception chained, not swallowed
+    assert err.result.stopped_reason == "callback_error"
+    assert err.result.rounds[-1].failed_step == "acquire"
+    assert "acquire blew up" in err.result.rounds[-1].error
+
+
+def test_on_error_record_and_stop_returns_a_partial_result_instead_of_raising():
+    def boom_acquire(action):
+        raise KeyError("acquire blew up")
+
+    result = sequential_design(
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
+        should_continue=lambda h: {"keep_going": True, "reason": "go"},
+        propose=_propose_next_measurement,
+        acquire=boom_acquire,
+        combine=_combine,
+        max_rounds=5,
+        on_error="record_and_stop",
+    )
+    assert result.stopped_reason == "callback_error"
+    assert result.rounds[-1].failed_step == "acquire"
+
+
+def test_on_error_rejects_an_unknown_policy():
+    with pytest.raises(ValueError, match="on_error"):
+        sequential_design(
+            _initial(),
+            fit=_fit,
+            summarize=_summarize,
+            should_continue=_threshold_controller(0.15),
+            propose=_propose_next_measurement,
+            acquire=_acquire,
+            combine=_combine,
+            max_rounds=5,
+            on_error="retry_forever",
+        )
+
+
+# --- summary/decision well-formedness validation ---
+
+
+def test_non_dict_summary_is_rejected():
+    with pytest.raises(TypeError, match="summarize"):
+        sequential_design(
+            _initial(),
+            fit=_fit,
+            summarize=lambda state, i: "not a dict",
+            should_continue=_threshold_controller(0.15),
+            propose=_propose_next_measurement,
+            acquire=_acquire,
+            combine=_combine,
+            max_rounds=5,
+        )
+
+
+def test_non_dict_decision_is_rejected():
+    with pytest.raises(TypeError, match="should_continue"):
+        sequential_design(
+            _initial(),
+            fit=_fit,
+            summarize=_summarize,
+            should_continue=lambda h: None,
+            propose=_propose_next_measurement,
+            acquire=_acquire,
+            combine=_combine,
+            max_rounds=5,
+        )
