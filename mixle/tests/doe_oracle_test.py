@@ -20,6 +20,7 @@ except ImportError:
 from mixle.doe.oracle import (
     DesignCandidate,
     DesignRun,
+    LateOracleResult,
     OracleResult,
     VerifiableOracle,
     optimize_under_oracle,
@@ -507,6 +508,152 @@ class DesignRunAbstentionBookkeepingTest(unittest.TestCase):
         full, unfiltered receipted record, unlike best()/genuine_history."""
         run = self._run([(0.0, 1.0, False), (1.0, None, True)])
         self.assertEqual(run.scores().tolist(), [1.0, float("-inf")])
+
+
+class TimeoutAbstentionReceiptTest(unittest.TestCase):
+    """MXR-080-0189: the abstention receipt documents whether cancellation was requested and whether
+    this particular score_fn even has a chance of honoring it -- explicit, not silently unaccounted."""
+
+    def test_abstention_receipt_documents_cancellation_and_lack_of_cooperative_support(self):
+        hang_forever = threading.Event()
+
+        def hangs(_c):
+            hang_forever.wait()
+            return OracleResult(score=1.0)  # unreachable
+
+        oracle = VerifiableOracle(name="hangs", tier="executable", score_fn=hangs, timeout=0.05)
+        result = oracle(np.array([1.0]))
+
+        self.assertTrue(result.abstained)
+        self.assertIs(result.receipt["cancel_requested"], True)
+        self.assertIs(result.receipt["cooperative_cancel_supported"], False)  # `hangs` takes 1 arg
+
+    def test_abstention_receipt_reports_cooperative_support_when_score_fn_accepts_cancel_event(self):
+        hang_forever = threading.Event()
+
+        def cooperative(_c, cancel_event=None):
+            hang_forever.wait()
+            return OracleResult(score=1.0)  # unreachable
+
+        oracle = VerifiableOracle(name="cooperative", tier="executable", score_fn=cooperative, timeout=0.05)
+        result = oracle(np.array([1.0]))
+
+        self.assertIs(result.receipt["cooperative_cancel_supported"], True)
+
+
+class CooperativeCancellationTest(unittest.TestCase):
+    """MXR-080-0189's cancellable-execution-boundary requirement: a score_fn that opts in by accepting
+    cancel_event observes it get set once the caller times out (best-effort, cooperative -- Python
+    cannot forcibly kill the underlying thread, see VerifiableOracle's docstring)."""
+
+    def test_cancel_event_is_set_on_timeout_and_observed_by_a_cooperative_score_fn(self):
+        observed = threading.Event()  # set by the worker once IT sees cancel_event get set
+
+        def cooperative(_candidate, cancel_event):
+            self.assertFalse(cancel_event.is_set())  # not set yet -- score_fn is still within budget
+            if cancel_event.wait(timeout=2.0):  # blocks until the caller times out and cancels
+                observed.set()
+            return OracleResult(score=1.0)
+
+        oracle = VerifiableOracle(name="cooperative", tier="executable", score_fn=cooperative, timeout=0.05)
+        self.assertTrue(oracle._accepts_cancel_event)
+
+        result = oracle(np.array([1.0]))
+
+        self.assertTrue(result.abstained)  # the caller still abstains promptly regardless
+        self.assertTrue(observed.wait(timeout=2.0), "the cooperative score_fn never observed cancel_event get set")
+
+    def test_a_score_fn_that_does_not_accept_cancel_event_is_unaffected(self):
+        """Every pre-existing caller's score_fn shape (single positional arg) must keep working
+        unchanged -- cancel_event is strictly opt-in, detected via introspection, never forced."""
+        hang_forever = threading.Event()
+
+        def plain(_candidate):
+            hang_forever.wait()
+            return OracleResult(score=1.0)  # unreachable
+
+        oracle = VerifiableOracle(name="plain", tier="executable", score_fn=plain, timeout=0.05)
+        self.assertFalse(oracle._accepts_cancel_event)
+        result = oracle(np.array([1.0]))
+        self.assertTrue(result.abstained)
+
+    def test_cancel_event_via_kwargs_is_also_detected(self):
+        def cooperative_kwargs(_candidate, **kwargs):
+            kwargs["cancel_event"].wait(timeout=2.0)
+            return OracleResult(score=1.0)  # unreachable
+
+        oracle = VerifiableOracle(name="kwargs", tier="executable", score_fn=cooperative_kwargs, timeout=0.05)
+        self.assertTrue(oracle._accepts_cancel_event)
+
+
+class LateResultAccountingTest(unittest.TestCase):
+    """MXR-080-0189: an abandoned oracle call's eventual outcome is captured in late_results rather
+    than silently lost, even though Python cannot forcibly cancel the underlying thread."""
+
+    @staticmethod
+    def _wait_until(predicate, timeout=3.0, interval=0.02):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(interval)
+        return predicate()
+
+    def test_a_call_that_finishes_on_time_never_appears_in_late_results(self):
+        oracle = VerifiableOracle(
+            name="fast", tier="executable", score_fn=lambda x: OracleResult(score=1.0), timeout=5.0
+        )
+        oracle(np.array([1.0]))
+        time.sleep(0.1)
+        self.assertEqual(oracle.late_results, [])
+
+    def test_a_late_success_is_recorded_with_its_real_cost(self):
+        def finishes_late(_candidate):
+            time.sleep(0.2)  # comfortably past the oracle's 0.05s timeout
+            return OracleResult(score=42.0, receipt={"late": True}, cost=7.5)
+
+        oracle = VerifiableOracle(name="late", tier="executable", score_fn=finishes_late, timeout=0.05)
+        candidate = np.array([3.0])
+        result = oracle(candidate)
+        self.assertTrue(result.abstained)  # the caller still gets a prompt abstention
+
+        self.assertTrue(self._wait_until(lambda: len(oracle.late_results) == 1))
+        late = oracle.late_results[0]
+        self.assertIsInstance(late, LateOracleResult)
+        self.assertTrue(late.ok)
+        self.assertIsNone(late.error)
+        self.assertEqual(late.result.score, 42.0)
+        self.assertEqual(late.result.cost, 7.5)
+        self.assertEqual(late.result.receipt, {"late": True})
+        np.testing.assert_array_equal(late.candidate, candidate)
+
+    def test_a_late_exception_is_recorded_not_raised_into_the_void(self):
+        def fails_late(_candidate):
+            time.sleep(0.2)
+            raise RuntimeError("late external failure")
+
+        oracle = VerifiableOracle(name="late_fail", tier="executable", score_fn=fails_late, timeout=0.05)
+        oracle(np.array([1.0]))
+
+        self.assertTrue(self._wait_until(lambda: len(oracle.late_results) == 1))
+        late = oracle.late_results[0]
+        self.assertFalse(late.ok)
+        self.assertIsNone(late.result)
+        self.assertIsInstance(late.error, RuntimeError)
+        self.assertIn("late external failure", str(late.error))
+
+    def test_a_late_malformed_return_is_recorded_as_a_validation_error(self):
+        def returns_garbage_late(_candidate):
+            time.sleep(0.2)
+            return "not an OracleResult"
+
+        oracle = VerifiableOracle(name="late_bad", tier="executable", score_fn=returns_garbage_late, timeout=0.05)
+        oracle(np.array([1.0]))
+
+        self.assertTrue(self._wait_until(lambda: len(oracle.late_results) == 1))
+        late = oracle.late_results[0]
+        self.assertFalse(late.ok)
+        self.assertIsInstance(late.error, TypeError)
 
 
 if __name__ == "__main__":
