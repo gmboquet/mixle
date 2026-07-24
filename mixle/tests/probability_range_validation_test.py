@@ -134,8 +134,20 @@ class IntegerCategoricalValidationTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             IntegerCategoricalDistribution(min_val=0, p_vec=[-0.5, 1.5])
 
+    def test_nan_probability_rejected_at_construction(self):
+        # `nan < 0.0` is always False, so a NaN entry alone (no negative entry alongside it) used to
+        # pass the old check straight through and reach log_density() as nan.
+        with self.assertRaises(ValueError):
+            IntegerCategoricalDistribution(min_val=0, p_vec=[float("nan"), 0.5])
+
     def test_valid_probabilities_still_construct(self):
         d = IntegerCategoricalDistribution(min_val=0, p_vec=[0.3, 0.7])
+        self.assertTrue(np.isfinite(d.log_density(0)))
+
+    def test_unnormalized_weights_over_one_still_construct(self):
+        # matches CategoricalDistribution.pmap: entries need not sum to 1, and an individual entry may
+        # exceed 1.0 (an unnormalized weight vector), so only finiteness and non-negativity are rejected.
+        d = IntegerCategoricalDistribution(min_val=0, p_vec=[1.5, 2.0])
         self.assertTrue(np.isfinite(d.log_density(0)))
 
 
