@@ -47,7 +47,17 @@ def _log_survival(base: Any, t: float) -> float:
     right tail (``log1p(-1) = -inf``) even when the true log-survival is finite and large-negative.
     Routes through the base's ``logsf`` when available; otherwise forms ``1 - F(t)`` via the shared
     :func:`mixle.utils.special.log1mexp` and guards a fully-saturated ``F(t) = 1`` with a tiny finite
-    floor rather than silently zeroing the survival contribution.
+    floor -- but only when that saturation is a genuine float64 underflow of a real (if tiny) tail,
+    not when ``t`` lies entirely beyond the base's support (e.g. ``t = 2`` for ``Uniform(0, 1)``),
+    where ``F(t) = 1`` is exact, not rounded, and the true survival is exactly zero.
+
+    The two are told apart via ``log_density(t)`` rather than the linear-space density: a base with
+    nothing beyond ``t`` reports it as structurally ``-inf`` (by construction, e.g.
+    ``UniformDistribution`` returns ``-inf`` outside ``[low, high]``), while a genuinely deep-but-in-
+    support tail point keeps a finite ``log_density`` even once the linear density -- and the cdf --
+    has saturated (a standard Gaussian at ``t = 40`` has ``cdf(t) == 1.0`` and ``density(t) == 0.0``
+    in float64, both saturated, yet ``log_density(t) == -800.9``, a perfectly ordinary finite float).
+    Checking the linear density instead of the log-density would misfire on exactly this case.
     """
     if hasattr(base, "logsf"):
         return float(base.logsf(t))
@@ -55,6 +65,9 @@ def _log_survival(base: Any, t: float) -> float:
     if cdf < 1.0:
         # log(1 - F(t)) = log(1 - exp(log F(t))); log1mexp(-inf) correctly yields 0 when F(t) = 0.
         return log1mexp(math.log(cdf)) if cdf > 0.0 else 0.0
+    if float(base.log_density(t)) == -math.inf:
+        # No density at or beyond t: the cdf saturation above is exact, not an underflow.
+        return -math.inf
     return _LOG_SURVIVAL_FLOOR
 
 
