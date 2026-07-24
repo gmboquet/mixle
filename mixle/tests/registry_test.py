@@ -3,15 +3,26 @@
 Card REG-a (workstream J2): register writes a real task-artifact directory + a JSON index entry; find_for and
 tier_stack read the index back, including in a fresh Registry instance pointed at the same dir.
 
-Also regression-tests a review finding fixed in this file: an unvalidated ``entry_id`` (``"../escaped"``, an
-absolute path, a value containing separators, ...) joined onto the registry ``dir`` could write a task artifact
-OUTSIDE the registry root. Fixed with ``_safe_entry_id`` (single-path-component validation) plus a resolved-path
-containment check.
+Also regression-tests two review findings fixed in this file:
+
+1. Path traversal: an unvalidated ``entry_id`` (``"../escaped"``, an absolute path, a value containing
+   separators, ...) joined onto the registry ``dir`` could write a task artifact OUTSIDE the registry
+   root. Fixed with ``_safe_entry_id`` (single-path-component validation) plus a resolved-path
+   containment check.
+2. Concurrent overwrite: two ``Registry`` instances (or two threads/processes sharing one) opened on the
+   same ``dir`` each cache ``self._entries`` once at construction and never otherwise refresh it, so one
+   instance's ``register`` could silently overwrite another's already-persisted index row -- even with
+   zero entry_id collisions. Fixed with an ``fcntl.flock``-serialized read-modify-write (re-reading the
+   on-disk index fresh under the lock) plus an independent claim-file conflict guard.
 """
 
+import multiprocessing as mp
 import os
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -49,6 +60,30 @@ def _json_task_model():
         adapter=StructuredClassifierIO(field_keys=None, label_index=0, labels=["x", "y"]),
         payload="json",
     )
+
+
+class _DelayedWriteRegistry(Registry):
+    """``Registry`` whose ``_write_index`` pauses briefly before persisting.
+
+    Widens the window between "re-read the index under the lock" and "write it back" inside
+    ``register()``, so the concurrency tests below deterministically exercise overlapping critical
+    sections (real threads actually interleaved while each holds/awaits the lock) instead of depending
+    on scheduler timing luck to hit it in a single trial -- mirrors
+    ``registry_versioning_test.py``'s ``_DelayedVersionsRegistry``. Module-level (not a local class) so a
+    spawned worker process inherits it cleanly too.
+    """
+
+    def _write_index(self) -> None:
+        time.sleep(0.05)
+        super()._write_index()
+
+
+def _mp_register_worker(root: str, i: int, barrier, queue) -> None:
+    """Module-level (picklable) worker process target for the cross-process race test."""
+    reg = _DelayedWriteRegistry(root)
+    barrier.wait()
+    entry = reg.register(_json_task_model(), capabilities=["cap"], cost=0.01, entry_id=f"writer_{i}")
+    queue.put(entry.entry_id)
 
 
 class RegistryTest(unittest.TestCase):
@@ -179,6 +214,129 @@ class RegistryTest(unittest.TestCase):
             real_entry = os.path.realpath(entry.path)
             self.assertTrue(real_entry == real_root or real_entry.startswith(real_root + os.sep))
             self.assertEqual([e.entry_id for e in reg.find_for("cap")], ["safe_id"])
+
+    # ----------------------------------------------------------------------------------------------
+    # Finding (b): concurrent Registry instances silently overwriting each other's index entries
+    # ----------------------------------------------------------------------------------------------
+
+    def test_concurrent_register_with_distinct_ids_does_not_drop_index_entries(self):
+        """Isolates the pure index-level race described by finding (b): every writer uses an explicit,
+        pairwise-distinct entry_id (no artifact-path or id collision is even possible), yet -- before
+        the fix -- index rows still went missing, because register() never re-read the on-disk index
+        before its own full-overwrite _write_index() call. Each of N SEPARATE Registry instances (not
+        threads sharing one instance) races register() against the same dir, matching finding (b)'s
+        "two ordinary Registry instances" framing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "root")
+            n_writers = 6
+            # pre-construct every instance BEFORE any register() call, so all instances share the same
+            # stale initial view of the (empty) index -- the exact scenario finding (b) describes.
+            instances = [_DelayedWriteRegistry(root) for _ in range(n_writers)]
+            barrier = threading.Barrier(n_writers)
+
+            def writer(i):
+                barrier.wait()  # line every writer up so they all enter register() together
+                return (
+                    instances[i]
+                    .register(_json_task_model(), capabilities=["cap"], cost=0.01, entry_id=f"writer_{i}")
+                    .entry_id
+                )
+
+            with ThreadPoolExecutor(max_workers=n_writers) as pool:
+                results = [f.result(timeout=10) for f in [pool.submit(writer, i) for i in range(n_writers)]]
+
+            self.assertEqual(sorted(results), [f"writer_{i}" for i in range(n_writers)])
+
+            reopened = Registry(root)
+            indexed_ids = {e.entry_id for e in reopened.find_for("cap")}
+            self.assertEqual(
+                indexed_ids,
+                {f"writer_{i}" for i in range(n_writers)},
+                "one or more concurrently-registered index rows were silently dropped",
+            )
+            for i in range(n_writers):
+                reopened.load(f"writer_{i}")  # every artifact is present AND indexed, not orphaned
+
+    def test_concurrent_register_with_auto_ids_does_not_collide(self):
+        """Same race, but with auto-generated ids (the common, no-entry_id-argument call pattern):
+        confirms id allocation itself is also race-free under the lock, in addition to the index write."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "root")
+            n_writers = 6
+            instances = [_DelayedWriteRegistry(root) for _ in range(n_writers)]
+            barrier = threading.Barrier(n_writers)
+
+            def writer(i):
+                barrier.wait()
+                return instances[i].register(_json_task_model(), capabilities=["cap"], cost=0.01).entry_id
+
+            with ThreadPoolExecutor(max_workers=n_writers) as pool:
+                results = [f.result(timeout=10) for f in [pool.submit(writer, i) for i in range(n_writers)]]
+
+            self.assertEqual(len(set(results)), n_writers, f"expected {n_writers} distinct auto ids, got {results}")
+
+            reopened = Registry(root)
+            indexed_ids = {e.entry_id for e in reopened.find_for("cap")}
+            self.assertEqual(indexed_ids, set(results))
+            for entry_id in results:
+                reopened.load(entry_id)
+
+    def test_register_raises_a_conflict_error_when_the_claim_marker_is_already_staked(self):
+        """Belt-and-suspenders guard, tested independently of the lock: pre-stake a claim marker for an
+        entry_id that is in neither the index nor on disk as an artifact yet (as if another writer's
+        register() were mid-flight -- past the claim step but not yet done saving), and confirm
+        register() raises a clear, typed conflict error instead of proceeding to share or overwrite that
+        writer's in-progress artifact."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "root")
+            reg = Registry(root)
+            os.makedirs(root, exist_ok=True)
+            claim_path = os.path.join(root, ".e1.claim")
+            fd = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.close(fd)
+
+            with self.assertRaises(RuntimeError):
+                reg.register(_json_task_model(), capabilities=["cap"], cost=0.01, entry_id="e1")
+
+            self.assertFalse(os.path.exists(os.path.join(root, "e1")))
+            self.assertEqual(reg.find_for("cap"), [])
+
+    @pytest.mark.slow
+    def test_concurrent_register_across_processes_does_not_drop_index_entries(self):
+        """Same race as the threading tests above, but with real separate OS processes -- the realistic
+        "two ordinary Registry instances" scenario for a filesystem-backed local registry (e.g. two
+        independent capture/accumulation workflows registering into the same dir at once).
+        ``fcntl.flock`` is a cross-process lock; a fix that only serialized threads (e.g. a bare
+        ``threading.Lock``) would pass the threading tests above but not this one.
+
+        Uses the ``spawn`` start method (the platform default, and the only one guaranteed safe with
+        threads already running in this process). Each spawned child pays the full cost of importing
+        mixle's scientific stack cold in a fresh interpreter (tens of seconds), which is why this one
+        test is marked ``slow`` rather than living in the default fast gate (mirrors
+        ``registry_versioning_test.py``'s analogous cross-process test for the sibling registry).
+        """
+        ctx = mp.get_context("spawn")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "root")
+            os.makedirs(root, exist_ok=True)
+            n_writers = 4
+            barrier = ctx.Barrier(n_writers)
+            queue = ctx.Queue()
+            procs = [ctx.Process(target=_mp_register_worker, args=(root, i, barrier, queue)) for i in range(n_writers)]
+            for p in procs:
+                p.start()
+            for p in procs:
+                p.join(timeout=180)
+                self.assertEqual(p.exitcode, 0, f"writer process pid={p.pid} failed or hung (exitcode={p.exitcode})")
+
+            results = [queue.get(timeout=5) for _ in range(n_writers)]
+            self.assertEqual(sorted(results), [f"writer_{i}" for i in range(n_writers)])
+
+            reg = Registry(root)
+            indexed_ids = {e.entry_id for e in reg.find_for("cap")}
+            self.assertEqual(indexed_ids, {f"writer_{i}" for i in range(n_writers)})
+            for i in range(n_writers):
+                reg.load(f"writer_{i}")
 
 
 if __name__ == "__main__":

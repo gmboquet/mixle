@@ -15,8 +15,10 @@ directly (``Router(tiers=stack)``), with the frontier appended last as the route
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,6 +29,7 @@ from mixle.task.calibrate import CalibratedTaskModel
 from mixle.task.model import TaskModel
 
 _INDEX_NAME = "index.json"
+_LOCK_NAME = ".registry.lock"
 
 
 def _safe_entry_id(entry_id: str) -> str:
@@ -159,8 +162,28 @@ class Registry:
             return [RegistryEntry.from_dict(d) for d in json.load(f)]
 
     def _write_index(self) -> None:
-        with open(self._index_path(), "w") as f:
-            json.dump([e.to_dict() for e in self._entries], f, indent=2, sort_keys=True)
+        """Persist ``self._entries`` to the index file, atomically (temp file + ``os.replace``).
+
+        A plain ``open(path, "w")`` truncates the index before the new content is written, so a crash
+        (or a concurrent reader constructing a fresh ``Registry`` against this same ``dir``) mid-write
+        could observe a truncated, unparseable ``index.json`` instead of the old or the new content.
+        Mirrors :func:`mixle.task.artifact._atomic_json_dump`'s temp-file-plus-``os.replace`` pattern: the
+        write is all-or-nothing, so a reader always sees either the pre- or the post-write index, never a
+        torn one.
+        """
+        fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".tmp-index-", suffix=".json")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump([e.to_dict() for e in self._entries], f, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._index_path())
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def register(
         self,
@@ -186,6 +209,18 @@ class Registry:
 
         ``entry_id`` must be a single safe path component (:func:`_safe_entry_id`): an unvalidated value
         such as ``"../escaped"`` would otherwise write the artifact outside ``dir`` instead of inside it.
+
+        Allocating an id and persisting the index is a read-modify-write over the on-disk index: two
+        ``Registry`` instances opened on the same ``dir`` (or two threads/processes sharing one) each
+        cache their own ``self._entries`` snapshot from construction time and otherwise never refresh it,
+        so one instance's ``register`` can silently overwrite another's already-persisted index row when
+        it writes back its own stale-plus-one view -- even when the two calls pick different,
+        non-colliding entry ids. Fixed by serializing id-allocation-through-index-write with an
+        ``fcntl.flock`` on a lock file at the registry root, re-reading the on-disk index fresh under the
+        lock rather than trusting the cached snapshot. An independent claim-file guard
+        (``O_CREAT | O_EXCL``) additionally protects the artifact write itself, belt-and-suspenders
+        alongside the lock, mirroring
+        :meth:`mixle.inference.production.registry.Registry.register`'s fix for the same class of bug.
         """
         if isinstance(model, CalibratedTaskModel):
             kind = "calibrated"
@@ -199,37 +234,77 @@ class Registry:
             )
         if entry_id is not None:
             _safe_entry_id(entry_id)
-        taken = {e.entry_id for e in self._entries}
-        if entry_id is not None:
-            if entry_id in taken or os.path.exists(os.path.join(self.dir, entry_id)):
-                raise ValueError(f"registry already has an entry {entry_id!r}; entry ids must be unique")
-        else:
-            # a len()-based id collides after manual index edits, explicit ids, or another writer's
-            # artifacts -- scan forward until the id is free in BOTH the index and the directory
-            i = len(self._entries)
-            while f"entry_{i:04d}" in taken or os.path.exists(os.path.join(self.dir, f"entry_{i:04d}")):
-                i += 1
-            entry_id = f"entry_{i:04d}"
-        path = os.path.join(self.dir, entry_id)
-        root_real = os.path.realpath(self.dir)
-        path_real = os.path.realpath(path)
-        if path_real != root_real and not path_real.startswith(root_real + os.sep):
-            raise ValueError(f"unsafe entry_id {entry_id!r}: resolves outside the registry root")
-        if kind == "field_posterior":
-            _save_field_posterior(model, path)
-        else:
-            model.save(path)
-        entry = RegistryEntry(
-            entry_id=entry_id,
-            path=path,
-            kind=kind,
-            capabilities=list(capabilities),
-            fingerprint=list(fingerprint) if fingerprint is not None else None,
-            profile=dict(profile or {}),
-            cost=float(cost),
-        )
-        self._entries.append(entry)
-        self._write_index()
+
+        lock_path = os.path.join(self.dir, _LOCK_NAME)
+        with open(lock_path, "w") as lock_f:
+            fcntl.flock(lock_f, fcntl.LOCK_EX)
+            try:
+                # a concurrent writer (another Registry instance, or another thread/process sharing this
+                # one) may have persisted entries since this instance last read the index -- re-read it
+                # fresh under the lock rather than trusting self._entries, which is otherwise populated
+                # once at __init__ and never refreshed.
+                self._entries = self._read_index()
+                taken = {e.entry_id for e in self._entries}
+                if entry_id is not None:
+                    if entry_id in taken or os.path.exists(os.path.join(self.dir, entry_id)):
+                        raise ValueError(f"registry already has an entry {entry_id!r}; entry ids must be unique")
+                else:
+                    # a len()-based id collides after manual index edits, explicit ids, or another
+                    # writer's artifacts -- scan forward until the id is free in BOTH the index and the
+                    # directory
+                    i = len(self._entries)
+                    while f"entry_{i:04d}" in taken or os.path.exists(os.path.join(self.dir, f"entry_{i:04d}")):
+                        i += 1
+                    entry_id = f"entry_{i:04d}"
+                path = os.path.join(self.dir, entry_id)
+                root_real = os.path.realpath(self.dir)
+                path_real = os.path.realpath(path)
+                if path_real != root_real and not path_real.startswith(root_real + os.sep):
+                    raise ValueError(f"unsafe entry_id {entry_id!r}: resolves outside the registry root")
+                # independent conflict-detection guard, belt-and-suspenders alongside the lock: claim
+                # entry_id with an atomically-created marker before writing its artifact, so even a stale
+                # read that somehow slips past the lock (e.g. a filesystem where flock does not actually
+                # exclude) raises instead of silently sharing or overwriting another writer's artifact. A
+                # dedicated marker rather than O_CREAT | O_EXCL directly on `path` itself, because `path`
+                # is a directory for "task"/"calibrated" kinds but a bare file-prefix
+                # (``path + ".npz"``/``path + ".json"``) for "field_posterior" -- the marker is the one
+                # thing every kind can claim identically.
+                claim_path = os.path.join(self.dir, f".{entry_id}.claim")
+                try:
+                    claim_fd = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                except FileExistsError:
+                    raise RuntimeError(
+                        f"registry conflict: entry {entry_id!r} already exists -- another writer claimed "
+                        "it concurrently; retry register()"
+                    ) from None
+                os.close(claim_fd)
+                try:
+                    if kind == "field_posterior":
+                        _save_field_posterior(model, path)
+                    else:
+                        model.save(path)
+                except BaseException:
+                    # the claim succeeded but the artifact write did not -- drop the claim so a retry
+                    # with the same entry_id is not spuriously rejected as "already claimed" by a failed
+                    # attempt's leftover marker.
+                    try:
+                        os.unlink(claim_path)
+                    except OSError:
+                        pass
+                    raise
+                entry = RegistryEntry(
+                    entry_id=entry_id,
+                    path=path,
+                    kind=kind,
+                    capabilities=list(capabilities),
+                    fingerprint=list(fingerprint) if fingerprint is not None else None,
+                    profile=dict(profile or {}),
+                    cost=float(cost),
+                )
+                self._entries.append(entry)
+                self._write_index()
+            finally:
+                fcntl.flock(lock_f, fcntl.LOCK_UN)
         return entry
 
     def load(self, entry_id: str) -> TaskModel | CalibratedTaskModel | Any:
