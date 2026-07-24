@@ -612,5 +612,122 @@ class QuantizerConstructionValidationTestCase(unittest.TestCase):
         self.assertIsInstance(q.fine_bucket(-2.0), int)  # still works for valid input
 
 
+class CountHistogramValidationTestCase(unittest.TestCase):
+    """MXR-080-0204 (Critical): CountHistogram must validate entries at construction.
+
+    ``exact=True`` is the structural-count carrier (this module's own pipeline; the basis for
+    rank certificates) and requires exact non-negative integers. ``exact=False`` (the default,
+    preserving the historical permissive constructor for approximate/mean-field float callers
+    outside this module) still rejects negative/NaN/infinite entries unconditionally, but allows
+    finite fractional values.
+    """
+
+    def test_exact_mode_rejects_negative_entry(self):
+        with self.assertRaises(ValueError):
+            CountHistogram(0, [1, -5, 3], exact=True)
+
+    def test_exact_mode_rejects_fractional_entry(self):
+        with self.assertRaises(ValueError):
+            CountHistogram(0, [1, 2.5, 3], exact=True)
+
+    def test_exact_mode_rejects_nan_entry(self):
+        with self.assertRaises(ValueError):
+            CountHistogram(0, [1, float("nan"), 3], exact=True)
+
+    def test_exact_mode_rejects_infinite_entry(self):
+        with self.assertRaises(ValueError):
+            CountHistogram(0, [1, float("inf"), 3], exact=True)
+
+    def test_approx_mode_still_rejects_negative_nan_infinite(self):
+        # The permissive default relaxes integrality, never validity: a "count" can never be
+        # negative, NaN, or infinite in EITHER carrier mode.
+        with self.assertRaises(ValueError):
+            CountHistogram(0, [1, -5, 3])
+        with self.assertRaises(ValueError):
+            CountHistogram(0, [1, float("nan"), 3])
+        with self.assertRaises(ValueError):
+            CountHistogram(0, [1, float("inf"), 3])
+
+    def test_approx_mode_allows_fractional_entry(self):
+        # Negative control: the explicitly-approximate carrier (e.g. envelope.py's float64
+        # mean-field histograms) legitimately carries fractional, non-negative, finite counts.
+        h = CountHistogram(0, [1.5, 2.25, 0.0])
+        self.assertFalse(h.exact)
+        self.assertAlmostEqual(h.total(), 3.75)
+
+    def test_exact_mode_accepts_valid_integers(self):
+        # Negative control, including a count far beyond float64 precision (this module routinely
+        # carries counts past 2**128; validation must not round-trip through float()).
+        huge = 2**200
+        h = CountHistogram(0, [1, 2, huge], exact=True)
+        self.assertTrue(h.exact)
+        self.assertEqual(h.total(), 3 + huge)
+        self.assertIsInstance(h.total(), int)
+
+    def test_delta_rejects_fractional_count(self):
+        with self.assertRaises(ValueError):
+            CountHistogram.delta(0, 2.5)
+
+    def test_delta_rejects_negative_count(self):
+        with self.assertRaises(ValueError):
+            CountHistogram.delta(0, -1)
+
+    def test_malformed_histogram_rejected_instead_of_corrupting_rank_certificate(self):
+        """End-to-end: a malformed direct histogram must be rejected at construction, not flow
+        into totals/convolution/cumulative-offsets and silently corrupt a rank certificate.
+
+        Pre-fix, ``CountHistogram(base, [3, -1, 5], exact=True)`` would have constructed
+        successfully with total() == 7 (a negative-entry-corrupted support count), then convolved
+        with another histogram to produce further-corrupted totals -- exactly the "structural
+        support count negative or non-integral while still being treated as the basis for rank
+        certificates" failure mode the finding describes.
+        """
+        other = CountHistogram(0, [2, 4], exact=True)
+        with self.assertRaises(ValueError):
+            corrupted = CountHistogram(0, [3, -1, 5], exact=True)
+            corrupted.convolve(other)  # would never be reached; construction already raised
+
+    def test_valid_histogram_supports_all_operations(self):
+        """Negative control: a genuinely valid histogram still supports the full operation set
+        that rank certificates depend on -- totals, convolution, add, shift, truncate, and
+        (via leaf_count_index/convolve_indices) unranking."""
+        a = CountHistogram(2, [1, 3, 0, 5], exact=True)
+        b = CountHistogram(-1, [2, 0, 4], exact=True)
+        self.assertEqual(a.total(), 9)
+        self.assertEqual(b.total(), 6)
+
+        conv = a.convolve(b)
+        self.assertTrue(conv.exact)
+        self.assertEqual(conv.total(), a.total() * b.total())
+        self.assertTrue(all(isinstance(c, int) and c >= 0 for c in conv.data))
+
+        pooled = a.add(b)
+        self.assertTrue(pooled.exact)
+        self.assertEqual(pooled.total(), a.total() + b.total())
+
+        shifted = a.shift(3)
+        self.assertTrue(shifted.exact)
+        self.assertEqual(shifted.base, a.base + 3)
+
+        truncated = a.truncate(a.base + 1)
+        self.assertTrue(truncated.exact)
+        self.assertLessEqual(truncated.max_bucket(), a.base + 1)
+
+        # Cumulative offsets / unranking basis, via the real leaf/convolve-indices pipeline.
+        q = Quantizer(bin_width_bits=1.0, oversample=8)
+        d1 = [("a", math.log(0.5)), ("b", math.log(0.3)), ("c", math.log(0.2))]
+        d2 = [(0, math.log(0.6)), (1, math.log(0.4))]
+        i1, _ = leaf_count_index(iter(d1), q, 10**6)
+        i2, _ = leaf_count_index(iter(d2), q, 10**6)
+        joint = convolve_indices([i1, i2], q, 10**6)
+        got = []
+        h = joint.hist
+        for i, c in enumerate(h.data):
+            for off in range(c):
+                got.append(joint.get_in_bucket(h.base + i, off))
+        truth = [((v1, v2), lp1 + lp2) for v1, lp1 in d1 for v2, lp2 in d2]
+        self.assertEqual(_norm(got), _norm(truth))
+
+
 if __name__ == "__main__":
     unittest.main()
