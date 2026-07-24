@@ -96,6 +96,27 @@ class ValidationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             GeneralizedMallowsDistribution([0, 1, 2], -1.0, "kendall")  # theta < 0
 
+    def test_log_density_rejects_non_permutations(self):
+        # A malformed x isn't just an unlikely ordering, it isn't an ordering at all: log_density
+        # (and density/distance, which it's built on) must reject it rather than silently
+        # returning a finite score, matching the encoder's validation above.
+        dist = GeneralizedMallowsDistribution([0, 1, 2], 1.0, "kendall")
+        with self.assertRaises(ValueError):
+            dist.log_density([0, 0, 1])  # repeated item
+        with self.assertRaises(ValueError):
+            dist.log_density([0, 1, 5])  # out of range
+        with self.assertRaises(ValueError):
+            dist.log_density([0, 1])  # wrong length
+        with self.assertRaises(ValueError):
+            dist.log_density([-1, 1, 2])  # negative index would otherwise alias a valid rank
+
+    def test_density_and_distance_reject_non_permutations(self):
+        dist = GeneralizedMallowsDistribution([0, 1, 2], 1.0, "kendall")
+        with self.assertRaises(ValueError):
+            dist.density([0, 0, 1])
+        with self.assertRaises(ValueError):
+            dist.distance([0, 0, 1])
+
 
 if __name__ == "__main__":
     unittest.main()
