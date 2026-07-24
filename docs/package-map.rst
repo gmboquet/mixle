@@ -47,9 +47,11 @@ Important top-level exports include:
     artifact handling, and explanation. See :doc:`lifecycle`.
 
 ``mixle.propose``
-    Builds a verified candidate frontier from automatic recommendation, an
-    independence baseline, and optionally an LLM-designed model. Treat it as an
-    exploratory helper and validate the result on held-out data.
+    Builds a verified candidate frontier from automatic recommendation, a
+    structured-search candidate (dependency structure via a copula or learned
+    Bayesian network on tuple-typed rows), an independence baseline, and
+    optionally an LLM-designed model. Treat it as an exploratory helper and
+    validate the result on held-out data.
 
 ``mixle.describe`` / ``mixle.capabilities`` / ``mixle.supports``
     Capability inspection. Use these before assuming that a model can enumerate,

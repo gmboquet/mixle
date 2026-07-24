@@ -82,7 +82,12 @@ Proposal Frontier
 The frontier can include:
 
 * ``recommend_model`` from ``mixle.task`` for dependency-aware structural
-  recommendation;
+  recommendation (a joint multivariate-Gaussian candidate, for fully-observed
+  numeric vector rows);
+* a structured-search candidate — ``optimize()`` called with no pre-built
+  estimator, its own no-estimator auto-structure-search, which can upgrade to a
+  copula or learned Bayesian network on tuple-typed rows (see
+  :doc:`automatic-modeling-contract`'s "Dependence between fields");
 * the plain automatic estimator from ``mixle.utils.automatic.get_estimator`` as
   an independence baseline;
 * an LLM-designed model from ``mixle.task.design_model`` when an LLM handle is
