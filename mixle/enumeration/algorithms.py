@@ -15,6 +15,7 @@ New code can import from the modules above directly. See
 from mixle.enumeration.best_first import (
     LengthFrontierMerge,
     ProductEnumerator,
+    SoundTopKResult,
     best_first_union,
     best_first_union_max,
     bounded_best_first_union_index,
@@ -46,6 +47,7 @@ __all__ = [
     "best_first_union_max",
     "bounded_best_first_union_index",
     "sound_top_k",
+    "SoundTopKResult",
     "QuantizedEnumerationIndex",
     "LazyQuantizedEnumerationIndex",
     "QuantizedCrossIndex",
