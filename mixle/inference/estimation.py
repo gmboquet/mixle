@@ -996,6 +996,13 @@ def optimize(
 
     """
     rng = _resolve_rng_arg(rng, seed)
+    if not (max_its >= 1):
+        # range(int(max_its)) is empty for any max_its < 1 (including NaN, since a NaN comparison is
+        # always False -- `not (x >= 1)` catches that case too, unlike `x < 1` alone), and every EM
+        # loop variant below sets its pre-loop `best_model = model` and returns that unchanged when the
+        # loop never runs -- the caller gets back the unfitted initial estimate, indistinguishable from
+        # a converged fit.
+        raise ValueError(f"optimize(): max_its must be a positive integer, got {max_its!r}")
     if fused_options is not None:
         unknown = set(fused_options) - {"parallel", "lse_bits", "lse_span"}
         if unknown:

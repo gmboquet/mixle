@@ -208,5 +208,39 @@ class MutableModeContractTest(unittest.TestCase):
             GradLeaf(self.DiagGauss(), lr_decay=0.75, optimizer=lambda params: None)
 
 
+class MaxItsContractTest(unittest.TestCase):
+    """max_its < 1 used to fall through range(int(max_its)) as an empty loop, silently returning the
+    untouched initial estimate (prev_estimate/init) as though it had been fitted to the data."""
+
+    def _proto(self):
+        return GaussianDistribution(0.0, 1.0)
+
+    def test_zero_max_its_raises(self):
+        data = [0.0, 1.0, 2.0, 3.0, 4.0]
+        proto = self._proto()
+        with self.assertRaises(ValueError):
+            optimize(data, proto.estimator(), prev_estimate=proto, max_its=0)
+
+    def test_negative_max_its_raises(self):
+        data = [0.0, 1.0, 2.0, 3.0, 4.0]
+        proto = self._proto()
+        with self.assertRaises(ValueError):
+            optimize(data, proto.estimator(), prev_estimate=proto, max_its=-1)
+
+    def test_nan_max_its_raises(self):
+        # `max_its < 1` alone would miss this (a NaN comparison is always False); the guard uses
+        # `not (max_its >= 1)` specifically so NaN is also rejected.
+        data = [0.0, 1.0, 2.0, 3.0, 4.0]
+        proto = self._proto()
+        with self.assertRaises(ValueError):
+            optimize(data, proto.estimator(), prev_estimate=proto, max_its=float("nan"))
+
+    def test_positive_max_its_still_fits(self):
+        data = [0.0, 1.0, 2.0, 3.0, 4.0]
+        proto = self._proto()
+        fitted = optimize(data, proto.estimator(), prev_estimate=proto, max_its=5)
+        self.assertAlmostEqual(fitted.mu, 2.0, delta=0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
