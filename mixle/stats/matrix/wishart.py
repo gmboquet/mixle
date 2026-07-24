@@ -73,12 +73,22 @@ class WishartDistribution(SequenceEncodableProbabilityDistribution):
         return math.exp(self.log_density(x))
 
     def log_density(self, x: np.ndarray) -> float:
-        """Return the log-density at a single ``(p, p)`` SPD matrix (``-inf`` if not positive definite)."""
+        """Return the log-density at a single ``(p, p)`` SPD matrix (``-inf`` if not positive definite).
+
+        Mirrors :meth:`seq_log_density`'s routines exactly rather than merely approximately: uses
+        :func:`batched_pd_logdet` (the same eigenvalue-based check) instead of :func:`cholesky_logdet`
+        for positive-definiteness/log-determinant, and the same ``einsum`` trace contraction instead of
+        ``trace(A @ B)``. Near the positive-definiteness boundary a Cholesky factorization and an
+        eigendecomposition can round differently and even disagree on whether a matrix is PD at all, and
+        a full matrix product summed via ``trace`` accumulates in a different order than the direct
+        ``einsum`` contraction -- both previously made this scalar path and the vectorized path diverge
+        (in value, and occasionally in support) on the same input.
+        """
         xx = np.asarray(x, dtype=np.float64)
-        logdet = cholesky_logdet(xx)
-        if logdet is None:
+        is_pd, logdet = batched_pd_logdet(xx)
+        if not is_pd:
             return -np.inf
-        tr = np.trace(self._scale_inv @ xx)
+        tr = np.einsum("ab,ba->", self._scale_inv, xx, optimize=True)
         return float(self._log_norm + (self.df - self.dim - 1.0) / 2.0 * logdet - 0.5 * tr)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
