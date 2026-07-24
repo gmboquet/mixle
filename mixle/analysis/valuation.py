@@ -242,10 +242,12 @@ class NPVDistribution(NamedTuple):
     ``samples`` is the length-``n`` array of per-draw NPVs (real dollars, one entry per Monte-Carlo
     trial) that :func:`value_at_risk` / :func:`conditional_value_at_risk` (J5) consume directly.
     ``mean``/``p10``/``p50``/``p90`` are the usual project-finance summary of that distribution.
-    ``sensitivity`` decomposes the NPV variance into the grade- and price-uncertainty contributions
-    (each factor's share of variance when the *other* factor is frozen at its mean; see
-    :func:`monte_carlo_npv`), keyed ``"grade"`` / ``"price"`` (fraction of total variance, in
-    ``[0, 1]``) plus the raw ``"grade_variance"`` / ``"price_variance"`` / ``"total_variance"``.
+    ``sensitivity`` decomposes the NPV variance into the grade- and price-uncertainty contributions, as
+    Sobol first-order variance-based sensitivity indices (see :func:`monte_carlo_npv` and
+    :func:`_sobol_first_order_share`): keyed ``"grade"`` / ``"price"`` (each factor's fraction of total
+    variance explained *on its own*, mathematically in ``[0, 1]`` and not required to sum to ``1`` --
+    NPV is multiplicative in grade and price, so some variance is a grade/price interaction effect
+    attributed to neither) plus the raw ``"grade_variance"`` / ``"price_variance"`` / ``"total_variance"``.
     """
 
     samples: np.ndarray
@@ -439,6 +441,43 @@ def _npv_samples(
     return cashflow @ discount
 
 
+def _sobol_first_order_share(
+    y_a: np.ndarray, y_b: np.ndarray, y_ab_i: np.ndarray, total_variance: float
+) -> tuple[float, float]:
+    """Jansen (1999) / Saltelli (2010) first-order Sobol sensitivity index estimator for one factor.
+
+    ``y_a = f(A)`` and ``y_b = f(B)`` are model outputs on two INDEPENDENT full joint samples (every
+    factor independently drawn in both); ``y_ab_i = f(A_B^(i))`` is the output on the hybrid sample
+    that takes factor ``i`` from ``B`` and every other factor from ``A``. Returns
+    ``(variance_i, share_i)``:
+
+    - ``variance_i = mean(y_b * (y_ab_i - y_a))``, a consistent estimator of ``Var(E[Y | X_i])`` (the
+      part of ``Y``'s variance explained by ``X_i`` alone, averaged over the other factors). ``y_b``
+      and ``y_ab_i`` share ONLY factor ``i`` (both take it from ``B``); every other factor is an
+      independent draw between them (one keeps ``A``'s realization, the other keeps ``B``'s) -- that
+      shared-``X_i``-independent-elsewhere construction is exactly what isolates factor ``i``'s own
+      contribution, regardless of how ``A``'s columns happen to be paired internally.
+    - ``share_i = variance_i / total_variance`` (0 if ``total_variance`` is 0): the first-order Sobol
+      index proper, ``Var(E[Y | X_i]) / Var(Y)``. For independent inputs this is mathematically
+      guaranteed in ``[0, 1]`` (a variance decomposition can only explain a fraction of the total). The
+      finite-``n`` Monte Carlo ESTIMATE of it can stray slightly outside that range from ordinary
+      sampling noise (well documented for Sobol estimators generally, and unavoidable at small ``n``);
+      both outputs are clipped to their population-guaranteed range (``variance_i >= 0``, ``share_i in
+      [0, 1]``) to absorb exactly that noise.
+
+    This replaces a previous "freeze the other factor at its mean, compare that variance to the actual
+    paired joint sample's variance" ratio, which had NO such guarantee: an adversarially (or merely
+    negatively) paired joint sample can have its variance driven arbitrarily close to zero by
+    cancellation while each frozen-factor variance stays large, sending the ratio to the millions
+    (MXR-080-0117). The clip here guards against small-``n`` estimator noise around a bound that
+    provably holds in the population; it is not concealing an unbounded failure mode the way clipping
+    the old ratio would have been.
+    """
+    variance_i = max(float(np.mean(y_b * (y_ab_i - y_a))), 0.0)
+    share_i = min(variance_i / total_variance, 1.0) if total_variance > 0.0 else 0.0
+    return variance_i, share_i
+
+
 def monte_carlo_npv(
     posterior: Posterior,
     price_paths: Any,
@@ -483,10 +522,15 @@ def monte_carlo_npv(
     of these, ``n``, or ``discount_rate`` are violated, before any DCF arithmetic runs.
 
     Returns an `NPVDistribution` with the raw ``samples``, ``mean``/``p10``/``p50``/``p90``, and a
-    ``sensitivity`` dict decomposing NPV variance into grade vs. price contributions: each factor's
-    share of variance with the *other* factor frozen at its mean (posterior mean for grade, per-period
-    mean price path for price) — not a full ANOVA decomposition, but the frozen-factor sensitivity the
-    task's Algorithm calls for.
+    ``sensitivity`` dict decomposing NPV variance into grade vs. price contributions as Sobol
+    first-order variance-based sensitivity indices (Saltelli/Jansen two-independent-sample estimator;
+    see :func:`_sobol_first_order_share`) -- each factor's own share of the total NPV variance,
+    estimated from a SECOND joint sample independent of the one ``samples``/``mean``/``p10``/``p50``/
+    ``p90`` are built from, so the indices stay meaningful (population-bounded in ``[0, 1]``) even when
+    a caller's ``price_paths`` happen to be paired against the posterior's draws in a way that makes
+    the actual joint sample's own variance small (MXR-080-0117). Not a full ANOVA decomposition (grade
+    and price's interaction/second-order effect, if any, is not itself reported), but each reported
+    share is individually a real, correctly-estimated first-order Sobol index.
     """
     if not isinstance(n, (int, np.integer)) or isinstance(n, bool) or n <= 0:
         raise ValueError(f"monte_carlo_npv: n must be a positive integer, got {n!r}")
@@ -520,21 +564,31 @@ def monte_carlo_npv(
     mean = float(np.mean(npv))
     p10, p50, p90 = (float(q) for q in np.quantile(npv, [0.1, 0.5, 0.9]))
 
-    # Sensitivity: freeze one factor at its mean, vary the other, compare the resulting variance to the
-    # joint distribution's total variance.
-    mean_price_per_period = np.broadcast_to(price_per_period.mean(axis=0), (n, n_periods))
-    npv_grade_only = _npv_samples(grade_per_period, mean_price_per_period, tonnage, opex, capex, discount)
+    # Sensitivity: Sobol first-order variance-based indices for grade and price, via the standard
+    # Saltelli/Jansen two-independent-sample estimator (see _sobol_first_order_share). Draw a SECOND,
+    # fully independent joint sample B (independent grade AND independent price -- regardless of how
+    # A's own grade_per_period/price_per_period happen to be paired), plus the two single-factor swaps.
+    grade_b_per_period = _draw_grade_per_period(
+        posterior, n, n_periods, rng, what="posterior.samples(n, rng) (sensitivity resample)"
+    )
+    price_pool = _coerce_price_scenario_pool(price_paths, n_periods)
+    price_b_per_period = price_pool[rng.integers(0, price_pool.shape[0], size=n)]
 
-    mean_grade_per_period = _grade_per_period(np.atleast_1d(posterior.mean), n_periods, what="posterior.mean")
-    mean_grade_broadcast = np.broadcast_to(mean_grade_per_period, (n, n_periods))
-    npv_price_only = _npv_samples(mean_grade_broadcast, price_per_period, tonnage, opex, capex, discount)
+    y_a = npv  # f(A): the actual paired joint sample, already computed above
+    y_b = _npv_samples(grade_b_per_period, price_b_per_period, tonnage, opex, capex, discount)  # f(B)
+    y_ab_grade = _npv_samples(
+        grade_b_per_period, price_per_period, tonnage, opex, capex, discount
+    )  # grade from B, price from A
+    y_ab_price = _npv_samples(
+        grade_per_period, price_b_per_period, tonnage, opex, capex, discount
+    )  # price from B, grade from A
 
-    total_variance = float(np.var(npv))
-    grade_variance = float(np.var(npv_grade_only))
-    price_variance = float(np.var(npv_price_only))
+    total_variance = float(np.var(y_a))
+    grade_variance, grade_share = _sobol_first_order_share(y_a, y_b, y_ab_grade, total_variance)
+    price_variance, price_share = _sobol_first_order_share(y_a, y_b, y_ab_price, total_variance)
     sensitivity = {
-        "grade": grade_variance / total_variance if total_variance > 0.0 else 0.0,
-        "price": price_variance / total_variance if total_variance > 0.0 else 0.0,
+        "grade": grade_share,
+        "price": price_share,
         "grade_variance": grade_variance,
         "price_variance": price_variance,
         "total_variance": total_variance,
