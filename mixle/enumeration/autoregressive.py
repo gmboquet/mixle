@@ -70,6 +70,15 @@ _NEG_INF = -math.inf
 # bits is <= 2**B (their probabilities sum to <= 1), so the fast path is exact while the requested budget stays
 # below this; deeper budgets fall back to the arbitrary-precision Python recursion (identical results).
 _INT64_SAFE_BITS = 60.0
+# Float-roundoff slack for validating a step's raw scores at the model boundary (MXR-080-0221): a
+# log-probability must be <= 0 (_SIGN_TOL) and the kept per-step probabilities must sum to ~1 (_NORM_TOL) --
+# both generous enough for float32-derived log_softmax output, tight enough to catch a genuinely broken model.
+_SIGN_TOL = 1.0e-9
+_NORM_TOL = 1.0e-4
+# Bounded restarts before a terminating model's ancestral sampler gives up (MXR-080-0222): each restart is a
+# fresh, independent ancestral draw (proper rejection sampling for "terminates within max_depth"), so this
+# only matters for a model/max_depth combination where termination in-cap is itself rare.
+_MAX_RESAMPLE_ATTEMPTS = 1000
 
 
 def _raise_index(fb: int, off: int) -> tuple[Any, float]:
@@ -275,31 +284,52 @@ def _ar_count_index_fast(
 
 
 class _ARSampler:
-    """Ancestral sampler over the model -- token by token from ``next_logprobs`` (for the rank tail fallback)."""
+    """Ancestral sampler over the model -- token by token from ``next_logprobs`` (for the rank tail fallback).
+
+    For a terminating model, one ancestral draw can exhaust the ``max_depth`` safety cap without ever
+    emitting ``eos``. That truncated prefix is NOT in the model's declared support -- see
+    :meth:`AutoregressiveEnumerable._in_declared_support`, the identical contract :meth:`~
+    AutoregressiveEnumerable.log_density` and the count index enforce -- so it is never handed back as a
+    sample (MXR-080-0222). Instead the draw is restarted from scratch: since a restart is a fresh,
+    independent ancestral draw from the SAME generative process, accepting only eos-terminated attempts is
+    proper rejection sampling for "terminates within max_depth", not an ad hoc patch. Restarts are bounded
+    by :data:`_MAX_RESAMPLE_ATTEMPTS`; if every attempt is exhausted without termination, :meth:`sample`
+    raises rather than ever returning a sample the scorer/index would declare impossible.
+    """
 
     def __init__(self, model: AutoregressiveEnumerable, seed: int | None) -> None:
-        import numpy as np
-
         self._model = model
         self._rng = np.random.RandomState(seed)
 
-    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
-        import numpy as np
+    def _draw_once(self) -> tuple:
+        prefix: tuple = ()
+        for _ in range(self._model._depth):
+            items = self._model._steps(prefix)
+            toks = [t for t, _ in items]
+            lps = np.array([lp for _, lp in items], dtype=float)
+            p = np.exp(lps - np.max(lps))
+            p /= p.sum()
+            j = int(self._rng.choice(len(toks), p=p))
+            prefix = prefix + (toks[j],)
+            if self._model.eos is not None and toks[j] == self._model.eos:
+                break
+        return prefix
 
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         n = 1 if size is None else int(size)
         out = []
         for _ in range(n):
-            prefix: tuple = ()
-            for _ in range(self._model._depth):
-                items = self._model._steps(prefix)
-                toks = [t for t, _ in items]
-                lps = np.array([lp for _, lp in items], dtype=float)
-                p = np.exp(lps - np.max(lps))
-                p /= p.sum()
-                j = int(self._rng.choice(len(toks), p=p))
-                prefix = prefix + (toks[j],)
-                if self._model.eos is not None and toks[j] == self._model.eos:
-                    break
+            prefix = self._draw_once()
+            attempts = 1
+            while self._model.terminating and not self._model._in_declared_support(prefix):
+                if attempts >= _MAX_RESAMPLE_ATTEMPTS:
+                    raise RuntimeError(
+                        "ancestral sampling could not draw an eos-terminated sequence within max_depth=%d "
+                        "after %d attempts -- the model's termination probability is too low for this depth "
+                        "cap (raise max_depth, or check the model's eos mass)." % (self._model._depth, attempts)
+                    )
+                prefix = self._draw_once()
+                attempts += 1
             out.append(prefix)
         return out[0] if size is None else out
 
@@ -406,16 +436,67 @@ class AutoregressiveEnumerable:
 
     # -- the model oracle, descending by log-prob and memoized (one forward per prefix) -------------------
     def _parse_steps(self, raw: Any) -> tuple[np.ndarray, np.ndarray]:
+        """Parse one step's raw ``next_logprobs`` output into ``(tokens, log_probs)``, descending by log-prob.
+
+        THE model boundary: every step -- fetched on demand, prefetched in a batch, or harvested from an
+        all-position forward -- is parsed here exactly once before entering the shared cache, so this is
+        where a malformed step table is caught once and for all (MXR-080-0221): mismatched ``(tokens,
+        log_probs)`` array lengths, a NaN score, a score ``> 0`` (an impossible log-probability -- this also
+        catches ``+inf``), or a duplicate token are all REJECTED outright rather than silently laundered.
+        A duplicate token is particularly dangerous silently: the tree-recursive count index and the
+        ancestral sampler would count/sample it as two distinct branches, while :meth:`log_density`'s
+        ``dict(steps)`` walk would keep only the last -- the same nominal sequence scored differently
+        depending on which code path touched it. ``-inf`` remains the one legitimate non-finite score (an
+        explicit "this token has zero probability") and is dropped, not rejected, exactly as before. Once
+        cleaned, the kept probabilities must sum to ~1 -- this is meant to be an actual categorical
+        distribution over the next token (e.g. a ``log_softmax``), not an arbitrary/truncated subset.
+        """
         # Accept the fast ``(tokens, log_probs)`` numpy form or a ``[(token, log_prob), ...]`` list.
         if isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[0], np.ndarray):
             tokens, lps = np.asarray(raw[0]), np.asarray(raw[1], dtype=float)
+            if tokens.shape != lps.shape:
+                raise ValueError(
+                    "next_logprobs returned mismatched (tokens, log_probs) arrays: shapes %r vs %r."
+                    % (tokens.shape, lps.shape)
+                )
         else:
-            items = [(t, lp) for t, lp in raw if lp != _NEG_INF]
+            items = list(raw)
             tokens = np.array([t for t, _ in items])
             lps = np.array([float(lp) for _, lp in items], dtype=float)
+
+        if np.isnan(lps).any():
+            raise ValueError("next_logprobs returned a NaN log-probability score; the model output is malformed.")
+        over_zero = lps > _SIGN_TOL
+        if over_zero.any():
+            raise ValueError(
+                "next_logprobs returned invalid log-probability score(s) > 0 (%r) -- log-probabilities must "
+                "be <= 0 (this also catches +inf)." % (lps[over_zero][:5].tolist(),)
+            )
+        tok_list = tokens.tolist()
+        if len(set(tok_list)) != len(tok_list):
+            counts: dict[Any, int] = {}
+            for t in tok_list:
+                counts[t] = counts.get(t, 0) + 1
+            dupes = sorted(t for t, c in counts.items() if c > 1)
+            raise ValueError(
+                "next_logprobs returned duplicate token(s) %r in one step's table -- each token must appear "
+                "at most once." % (dupes,)
+            )
+
+        # -inf is the one legitimate non-finite score (an explicit "this token has zero probability"); drop
+        # it here, same as before -- unlike NaN/positive scores above, it is not a sign of a broken model.
         finite = np.isfinite(lps)
         if not finite.all():
             tokens, lps = tokens[finite], lps[finite]
+
+        if lps.size:
+            total = float(np.sum(np.exp(lps)))
+            if abs(total - 1.0) > _NORM_TOL:
+                raise ValueError(
+                    "next_logprobs returned a non-normalized distribution (kept probabilities sum to %.6g, "
+                    "expected ~1.0) -- check the model's log_softmax / normalization." % total
+                )
+
         order = np.argsort(-lps, kind="stable")  # descending by log-prob
         return tokens[order], lps[order]
 
