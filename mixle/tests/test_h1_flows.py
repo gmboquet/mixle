@@ -253,3 +253,71 @@ def test_network_design_infeasible_raises():
         raise AssertionError("expected ValueError for an infeasible instance")
     except ValueError:
         pass
+
+
+def test_network_design_duplicate_candidate_arcs_accumulate_flow():
+    # Two candidate arcs for the SAME (0, 1) node pair -- a legitimate use case (e.g. comparing a cheap
+    # vs. premium design for one physical link), each getting its own opening-cost/open-decision
+    # variable. The optimizer correctly opens only the cheaper candidate (cost 1, not cost 2) and
+    # reports the correct total cost, but the returned flow matrix used to be built by *assigning* each
+    # candidate's flow into flow_matrix[u, v] rather than accumulating it -- so the second (closed,
+    # zero-flow) candidate silently overwrote the first candidate's real flow with 0, and the matrix's
+    # own row/column balance stopped matching the requested demand entirely (flow was all zeros).
+    nodes = [0, 1]
+    arcs = [(0, 1), (0, 1)]
+    fixed_costs = np.array([1.0, 2.0])
+    demands = np.array([1.0, -1.0])
+
+    result = network_design(nodes, arcs, fixed_costs, demands)
+
+    assert abs(result.cost - 1.0) < 1.0e-6
+    assert bool(result.open[0]) is True  # cheaper candidate opened
+    assert bool(result.open[1]) is False  # pricier duplicate stays closed
+    assert abs(result.flow[0, 1] - 1.0) < 1.0e-6
+
+    # the returned matrix must actually reflect what the solver found, not just the objective/open mask
+    net = result.flow.sum(axis=1) - result.flow.sum(axis=0)
+    assert np.allclose(net, demands, atol=1.0e-6)
+
+
+def test_network_design_three_duplicate_candidate_arcs_accumulate_flow():
+    # Same idea with three candidates for one node pair, and -- deliberately -- the cheapest (the one
+    # that opens and carries flow) is the MIDDLE entry, not the last. A last-write-wins bug would zero
+    # the cell out because the last candidate (cost 3) stays closed; a fix that only accumulates
+    # correctly for exactly two duplicates (e.g. an off-by-one special case) would also fail here. Guards
+    # that accumulation sums over an arbitrary number of duplicates, not just a hardcoded pair.
+    nodes = [0, 1]
+    arcs = [(0, 1), (0, 1), (0, 1)]
+    fixed_costs = np.array([2.0, 1.0, 3.0])
+    demands = np.array([1.0, -1.0])
+
+    result = network_design(nodes, arcs, fixed_costs, demands)
+
+    assert abs(result.cost - 1.0) < 1.0e-6
+    assert [bool(o) for o in result.open] == [False, True, False]
+    assert abs(result.flow[0, 1] - 1.0) < 1.0e-6
+
+    net = result.flow.sum(axis=1) - result.flow.sum(axis=0)
+    assert np.allclose(net, demands, atol=1.0e-6)
+
+
+def test_network_design_non_duplicate_arcs_still_balance_correctly():
+    # Regression guard: two independent components, each with exactly one (non-duplicate) candidate
+    # arc. Switching flow_matrix[u, v] from assignment to accumulation must be a no-op for the normal
+    # case -- a zero-initialized matrix plus a single += is identical to a single "=" -- so both cells
+    # must still land exactly on their own component's demand, with no cross-contamination between them.
+    nodes = [0, 1, 2, 3]
+    arcs = [(0, 1), (2, 3)]
+    fixed_costs = np.array([1.0, 1.0])
+    demands = np.array([5.0, -5.0, 3.0, -3.0])
+
+    result = network_design(nodes, arcs, fixed_costs, demands)
+
+    assert abs(result.cost - 2.0) < 1.0e-6
+    assert bool(result.open[0]) is True
+    assert bool(result.open[1]) is True
+    assert abs(result.flow[0, 1] - 5.0) < 1.0e-6
+    assert abs(result.flow[2, 3] - 3.0) < 1.0e-6
+
+    net = result.flow.sum(axis=1) - result.flow.sum(axis=0)
+    assert np.allclose(net, demands, atol=1.0e-6)
