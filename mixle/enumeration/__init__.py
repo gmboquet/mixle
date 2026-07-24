@@ -69,7 +69,7 @@ from mixle.enumeration.model_enumeration import (
 # --- the count-budget seek / unrank index + the count semiring (rank-by-index machinery) ---
 from mixle.enumeration.quantization.core import count_budget_index, logit_error_bucket_slack
 from mixle.enumeration.quantization.semiring import CountSemiring, DecomposableSemiring, TropicalSemiring
-from mixle.enumeration.rescore import RescoredIndex
+from mixle.enumeration.rescore import RescoredIndex, RescoreResult
 from mixle.enumeration.seek_index import SeekIndex
 
 # --- the contract (implemented by distributions AND relations) ---
@@ -119,6 +119,7 @@ __all__ = [
     "AREnvelopeIndex",
     "LatticeEnvelopeIndex",
     "RescoredIndex",
+    "RescoreResult",
     # HMM path enumeration (non-decomposable family): exact A* head + quantized random-access index
     "hmm_best_paths",
     "HMMPathIndex",
