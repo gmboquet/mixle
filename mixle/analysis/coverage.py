@@ -17,8 +17,9 @@ missing.
   * :func:`rarefaction_curve` -- expected richness as a function of sample size (Hurlbert
     interpolation), the basis for coverage-standardised comparison.
 
-Counts are non-negative integer abundances per species; incidence inputs are a ``(species, sites)``
-0/1 matrix.
+Counts must be finite non-negative integer abundances per species (validated by :func:`_abund`, which
+raises rather than silently coercing fractional/negative/non-finite input); incidence inputs are a
+``(species, sites)`` 0/1 matrix.
 """
 
 from __future__ import annotations
@@ -28,16 +29,30 @@ from scipy.special import gammaln
 
 
 def _abund(counts: np.ndarray) -> np.ndarray:
-    """Coerce to a 1-D array of strictly-positive integer abundances (drop unobserved zeros)."""
+    """Validate and coerce to a 1-D array of non-negative integer abundances (drop unobserved zeros).
+
+    Every abundance-based estimator in this module routes its counts through here, so "abundance" has
+    exactly one meaning throughout: a finite, non-negative, exact integer per species. Fractional,
+    negative, and non-finite counts are all rejected with a clear error instead of being silently
+    reinterpreted -- fractional counts used to be summed as continuous totals by some estimators
+    (``turing_coverage``) and truncated to integer abundance *classes* by others (``good_turing`` via
+    ``_freq_of_freq``), two incompatible readings of the same input such as ``[1.5, 2.5]``. NaN used to
+    be dropped indirectly by comparisons that NaN always fails (``NaN > 0`` is ``False``), silently
+    shrinking the effective sample with no signal (MXR-080-0077).
+    """
     c = np.asarray(counts, dtype=float).ravel()
+    if c.size and not np.all(np.isfinite(c)):
+        raise ValueError("counts must be finite (no NaN or Inf).")
     if np.any(c < 0):
         raise ValueError("counts must be non-negative.")
-    return c[c > 0]
+    if np.any(c != np.trunc(c)):
+        raise ValueError("counts must be exact integers (fractional abundances are not supported).")
+    return c[c > 0].astype(np.int64)
 
 
 def _freq_of_freq(counts: np.ndarray) -> dict[int, int]:
     """Map abundance ``r`` to the number of species observed exactly ``r`` times."""
-    c = _abund(counts).astype(int)
+    c = _abund(counts)
     vals, cnts = np.unique(c, return_counts=True)
     return {int(v): int(n) for v, n in zip(vals, cnts)}
 

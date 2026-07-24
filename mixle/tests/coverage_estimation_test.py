@@ -141,5 +141,46 @@ class ACEICETest(unittest.TestCase):
         self.assertGreaterEqual(r["estimate"], r["observed"])
 
 
+class AbundanceValidationTest(unittest.TestCase):
+    """MXR-080-0077: ``_abund`` used to accept fractional and non-finite counts. Different estimators
+    then interpreted the same invalid input two incompatible ways -- ``turing_coverage`` summed
+    ``[1.5, 2.5]`` as a continuous total (4), while ``good_turing`` (via ``_freq_of_freq``) truncated
+    it to abundance *classes* 1 and 2 -- and NaN was dropped indirectly by comparisons that NaN always
+    fails (``NaN > 0`` is ``False``), silently shrinking the sample with no error. Every
+    abundance-consuming estimator must now reject fractional, negative, and non-finite counts."""
+
+    def test_fractional_counts_rejected_by_every_abundance_estimator(self):
+        bad = np.array([1.5, 2.5])
+        for fn in (turing_coverage, good_turing, chao1, ace, hill_numbers, rarefaction_curve):
+            with self.subTest(fn=fn.__name__):
+                with self.assertRaises(ValueError):
+                    fn(bad)
+
+    def test_nan_is_rejected_not_silently_dropped(self):
+        # NaN used to fail both the `< 0` and `> 0` comparisons in _abund and vanish from the sample
+        # (a 3-item sample silently became a 2-item sample) instead of raising.
+        with self.assertRaises(ValueError):
+            turing_coverage(np.array([5.0, float("nan"), 3.0]))
+
+    def test_infinite_counts_rejected(self):
+        with self.assertRaises(ValueError):
+            turing_coverage(np.array([5.0, float("inf")]))
+
+    def test_negative_counts_rejected(self):
+        with self.assertRaises(ValueError):
+            turing_coverage(np.array([-1.0, 2.0]))
+
+    def test_valid_integer_abundances_still_work(self):
+        # negative control: a real integer abundance vector produces a sensible estimate everywhere
+        # (exact-valued floats, e.g. 100.0, are legitimate integers and must still be accepted).
+        c = np.array([100.0, 10.0, 1.0, 1.0, 1.0])
+        self.assertEqual(turing_coverage(c)["f1"], 3.0)
+        self.assertAlmostEqual(chao1(c)["estimate"], 8.0)
+        ace_r = ace(c)
+        self.assertGreaterEqual(ace_r["estimate"], ace_r["observed"])
+        np.testing.assert_allclose(hill_numbers(np.array([7, 7, 7, 7, 7]), [0.0]), [5.0])
+        self.assertEqual(rarefaction_curve(c)["expected_richness"].shape, (int(c.sum()),))
+
+
 if __name__ == "__main__":
     unittest.main()
