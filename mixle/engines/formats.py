@@ -128,13 +128,24 @@ class FixedPointFormat(NumericFormat):
     """Fixed-point: store ``round(x * 2**frac_bits)`` as an integer; real compression + a hard error bound.
 
     ``int_bits`` sets the representable magnitude ``[-2**int_bits, 2**int_bits)``; out-of-range clamps.
-    ``max_abs_error == 2**-(frac_bits+1)`` (round-to-nearest), independent of ``x``.
+    ``max_abs_error == 2**-(frac_bits+1)`` (round-to-nearest), independent of ``x``. Storage is a plain
+    ``int32``/``int64`` -- there is no arbitrary-width packed storage -- so the declared total width
+    ``1 + int_bits + frac_bits`` cannot exceed 64 bits; wider requests raise at construction instead of
+    silently overflowing the int64 cast (and falsifying ``max_abs_error``).
     """
+
+    _MAX_TOTAL_BITS = 64  # storage ceiling: this codec only ever picks int32 or int64, nothing wider
 
     def __init__(self, frac_bits: int, int_bits: int = 31) -> None:
         self.frac_bits = int(frac_bits)
         self.int_bits = int(int_bits)
         total = 1 + self.int_bits + self.frac_bits
+        if total > self._MAX_TOTAL_BITS:
+            raise ValueError(
+                "fixed(i%d.f%d) declares %d bits, but FixedPointFormat only supports up to %d bits "
+                "(int64 storage; no arbitrary-width packed storage is implemented) -- construct a "
+                "narrower format" % (self.int_bits, self.frac_bits, total, self._MAX_TOTAL_BITS)
+            )
         self.name = "fixed(i%d.f%d)" % (self.int_bits, self.frac_bits)
         self.bits_per_value = float(total)
         self._scale = float(2**self.frac_bits)

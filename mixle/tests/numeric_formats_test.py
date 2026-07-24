@@ -114,6 +114,34 @@ class FixedPointFormatTest(unittest.TestCase):
         rt = fmt.round_trip(np.array([1000.0, -1000.0]))
         self.assertTrue(np.all(np.abs(rt) <= 8.0))
 
+    # -- MXR-080-0127: every format wider than 32 bits used int64 storage regardless of the DECLARED
+    # width, so a 65-bit fixed(i32.f32) silently overflowed the int64 cast during quantize and decoded
+    # near 2.147e9 (~2**31) instead of its documented ~4.295e9 (~2**32) upper range -- falsifying
+    # max_abs_error by billions. Fixed by rejecting widths that exceed int64 storage at construction
+    # (arbitrary-width packed storage was judged disproportionate: this codec's quantize/dequantize are
+    # vectorized numpy int32/int64 ops with no wider native dtype to fall back to).
+    def test_wide_format_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            FixedPointFormat(frac_bits=32, int_bits=32)  # exactly the audit's fixed(i32.f32): 65 bits
+
+    def test_boundary_64_bit_format_still_works_and_decodes_correctly(self):
+        # Negative control: the widest format that DOES fit (total == 64 bits, exactly int64's range)
+        # must still construct and decode correctly near its documented upper range.
+        fmt = FixedPointFormat(frac_bits=32, int_bits=31)  # 1 + 31 + 32 = 64 bits -> exactly int64
+        self.assertEqual(fmt.bits_per_value, 64.0)
+        near_max = 2.0**31 - 1.0  # just under the documented int_bits=31 upper range
+        rt = fmt.round_trip(np.array([near_max]))
+        self.assertLessEqual(abs(float(rt[0]) - near_max), fmt.max_abs_error * 1.01)
+
+    def test_widths_up_to_64_bits_are_not_rejected(self):
+        # Only widths that exceed int64 storage should raise; ordinary widths -- including <=32-bit
+        # int32-backed and 33..64-bit int64-backed formats -- must keep working.
+        for frac_bits, int_bits in [(4, 3), (12, 10), (20, 20), (31, 32)]:  # totals: 8, 23, 41, 64
+            fmt = FixedPointFormat(frac_bits=frac_bits, int_bits=int_bits)
+            self.assertLessEqual(fmt.bits_per_value, 64.0)
+            rt = fmt.round_trip(np.array([0.0, 1.5, -1.5]))
+            self.assertTrue(np.all(np.isfinite(rt)))
+
 
 class CodebookFormatTest(unittest.TestCase):
     def test_fit_round_trip_error_shrinks_with_more_codes(self):
