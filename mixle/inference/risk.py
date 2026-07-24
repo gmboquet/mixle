@@ -27,6 +27,8 @@ def _as_samples(samples: Any) -> np.ndarray:
     x = np.asarray(samples, dtype=float).ravel()
     if x.size == 0:
         raise ValueError("samples must be non-empty.")
+    if not np.all(np.isfinite(x)):
+        raise ValueError("samples must be finite (no NaN or Inf).")
     return x
 
 
@@ -111,6 +113,8 @@ def stress_rank(scenarios: dict[str, Any]) -> list[tuple[str, float]]:
     """
     if not scenarios:
         raise ValueError("scenarios must be non-empty.")
-    ranked = [(name, float(-np.asarray(value, dtype=float).ravel().mean())) for name, value in scenarios.items()]
+    # Route through _as_samples (rather than a bare np.asarray) so a NaN/Inf entry in any scenario's
+    # outcome(s) raises here instead of silently producing a NaN loss that sorts unpredictably.
+    ranked = [(name, float(-_as_samples(value).mean())) for name, value in scenarios.items()]
     ranked.sort(key=lambda item: item[1], reverse=True)
     return ranked
