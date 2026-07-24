@@ -532,19 +532,19 @@ def voi_estimate(
       the same warning.
 
     Common random numbers (MXR-080-0108): each of the ``n_outer`` replicates draws ONE base/innovation
-    sample and uses it for BOTH the no-info decision and the with-info (refined) decision for that replicate, differing only
-    by a deterministic transform (the heuristic's re-centering/rescaling, or the conjugate update's affine
-    map) -- not independent draws for the two sides. This matters when there is truly no information to
-    gain (``r = 0`` for the heuristic; ``obs_matrix = 0`` or ``obs_cov`` arbitrarily large for the
-    declared-likelihood path): with independent draws, the no-info and with-info values would be two
-    separately noisy estimates of the *same* quantity, so their difference would be noise centered at
-    zero; flooring that noise at zero (the previous behavior) kept only its positive half, upward-biasing
-    the reported VOI (a standard-normal fake posterior with a go/no-go decision spuriously returned
-    positive VOI at zero information for most tested seeds). With a shared draw, the with-info value is
-    bit-for-bit identical to the no-info value whenever there is truly no information (checked directly for
-    the heuristic via an analytic short-circuit below, not just left to fall out of the Monte Carlo -- and
-    provably exact by construction for the declared-likelihood path too), and the two stay correlated --
-    hence lower-variance in their difference -- away from that boundary as well.
+    sample and uses it for BOTH the no-info decision and the with-info (refined) decision for that
+    replicate, differing only by a deterministic transform (the heuristic's re-centering/rescaling, or the
+    conjugate update's affine map) -- not independent draws for the two sides. This matters when there is
+    truly no information to gain (``r = 0`` for the heuristic; ``obs_matrix = 0`` or ``obs_cov``
+    arbitrarily large for the declared-likelihood path): with independent draws, the no-info and with-info
+    values would be two separately noisy estimates of the *same* quantity, so their difference would be
+    noise centered at zero; flooring that noise at zero (the previous behavior) kept only its positive
+    half, upward-biasing the reported VOI (a standard-normal fake posterior with a go/no-go decision
+    spuriously returned positive VOI at zero information for most tested seeds). With a shared draw, the
+    with-info value is bit-for-bit identical to the no-info value whenever there is truly no information
+    (checked directly for the heuristic via an analytic short-circuit below, not just left to fall out of
+    the Monte Carlo -- and provably exact by construction for the declared-likelihood path too), and the
+    two stay correlated -- hence lower-variance in their difference -- away from that boundary as well.
 
     Args:
         posterior: the current (pre-drill) belief, satisfying IC-1's ``Posterior`` protocol.
