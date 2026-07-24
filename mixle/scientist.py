@@ -149,12 +149,29 @@ def study(
     seed: int = 0,
 ) -> StudiedModel:
     """Fit a CERTIFIED classifier over encoder latents: closed-form Gaussian class-conditionals + a
-    split-conformal abstention rail. No gradient descent anywhere -- the certificate proves it."""
-    import mixle.stats as st
-    from mixle.inference import EstimationCertificate, certify, optimize
+    split-conformal abstention rail. No gradient descent anywhere -- the certificate proves it.
 
+    ``alpha`` (the split-conformal miscoverage level) must be in ``[0.0, 1.0]`` -- the same inclusive
+    domain as :func:`~mixle.inference.conformal.conformal_label_threshold`, which computes ``qhat``
+    below (``0.0`` and ``1.0`` are valid boundaries, not just interior values). ``cal_frac`` must be in
+    ``(0.0, 1.0)`` exclusive so both the calibration and fit splits stay non-empty. ``latents`` must be
+    two-dimensional ``(n, d)`` and ``labels`` must align with it one-to-one.
+    """
+    import mixle.stats as st
+    from mixle.inference import EstimationCertificate, certify, conformal_label_threshold, optimize
+
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"alpha must be in [0.0, 1.0], got {alpha!r}.")
+    if not 0.0 < cal_frac < 1.0:
+        raise ValueError(f"cal_frac must be in (0.0, 1.0), got {cal_frac!r}.")
     z = np.asarray(latents, dtype=np.float64)
+    if z.ndim != 2:
+        raise ValueError(f"latents must be two-dimensional (n, d), got shape {z.shape}.")
+    if z.shape[0] == 0:
+        raise ValueError("latents must be non-empty.")
     y = np.asarray(list(labels))
+    if y.shape[0] != z.shape[0]:
+        raise ValueError(f"labels must be aligned with latents: got {y.shape[0]} labels for {z.shape[0]} latents.")
     t0 = time.time()
     rng = np.random.RandomState(seed)
     order = rng.permutation(len(z))
@@ -198,15 +215,16 @@ def study(
         class_priors=priors,
         train_seconds=0.0,
     )
-    # split-conformal calibration of the abstention rail: nonconformity = 1 - p(true class)
+    # split-conformal calibration of the abstention rail: nonconformity = 1 - p(true class). Routed
+    # through conformal_label_threshold (rather than re-deriving the ceil((n_cal+1)(1-alpha)) index
+    # here) so this inherits its already-corrected finite-sample boundary handling -- alpha == 1.0
+    # returns the MINIMUM calibration score, not the maximum via Python's negative-index wraparound --
+    # and its +inf fallback when n_cal cannot support the requested level (n_cal is surfaced in
+    # provenance so that regime stays visible).
     p_cal = model.predict_proba(z[cal_idx])
     idx = {c: j for j, c in enumerate(classes)}
-    scores = 1.0 - p_cal[np.arange(len(cal_idx)), [idx[c] for c in y[cal_idx]]]
-    k = int(np.ceil((len(scores) + 1) * (1 - alpha))) - 1
-    # finite-sample split conformal: when ceil((n_cal+1)(1-alpha)) exceeds n_cal, NO calibration score
-    # certifies the level -- the threshold is +inf (every prediction set is all labels / abstain), not
-    # the max score. n_cal is surfaced in provenance so the regime is visible.
-    model.qhat = float(np.sort(scores)[k]) if k < len(scores) else float("inf")
+    p_true = p_cal[np.arange(len(cal_idx)), [idx[c] for c in y[cal_idx]]]
+    model.qhat = conformal_label_threshold(p_true, alpha=alpha)
     model.train_seconds = time.time() - t0
     model.provenance = {"n_fit": len(fit_idx), "n_cal": len(cal_idx), "alpha": alpha, "seed": seed}
     return model
@@ -261,18 +279,39 @@ def distill_to_edge(
     learns them from the RAW inputs under a device byte budget, so the deployed artifact needs neither
     torch nor the foundation model. The receipt measures what survives: student accuracy vs the teacher's,
     and their agreement. Boundary: this works only when the student's own features carry the
-    signal (text n-grams do; raw pooled pixels do NOT recover a vision foundation model)."""
+    signal (text n-grams do; raw pooled pixels do NOT recover a vision foundation model).
+
+    ``train_inputs``/``val_inputs``/``val_truth`` may be any iterable (including a one-shot generator):
+    each is materialized to a list exactly once, at entry, and that list is what every subsequent pass
+    (teacher labeling, student training, validation metrics, provenance counts) reuses."""
     from mixle.task.edge import DeviceSpec, distill_for_edge
 
-    truth = np.asarray(list(val_truth))
+    # materialize every input exactly once: teacher labeling below is the FIRST pass over train_inputs/
+    # val_inputs, and distill_for_edge (student training) and the student-metrics loop are the second and
+    # third. A one-shot iterable (a generator, a file-backed reader) silently yields nothing on its
+    # second pass -- lists/tuples only look re-iterable by accident. Rebinding the parameter names keeps
+    # every later reference to them (including provenance's len(train_inputs)) pointed at the same list.
+    train_inputs = list(train_inputs)
+    val_inputs = list(val_inputs)
+    val_truth = list(val_truth)
+    if not train_inputs:
+        raise ValueError("distill_to_edge requires at least one training input, got 0.")
+    if not val_inputs:
+        raise ValueError("distill_to_edge requires at least one validation input, got 0.")
+    if len(val_inputs) != len(val_truth):
+        raise ValueError(
+            f"val_inputs and val_truth must have matching length, got {len(val_inputs)} and {len(val_truth)}."
+        )
+
+    truth = np.asarray(val_truth)
     train_labels = [teacher_predict(x) for x in train_inputs]
     val_labels = [teacher_predict(x) for x in val_inputs]
     teacher_acc = float((np.asarray(val_labels) == truth).mean())
 
     res = distill_for_edge(
         None,
-        list(train_inputs),
-        list(val_inputs),
+        train_inputs,
+        val_inputs,
         DeviceSpec(torch_free=torch_free, max_bytes=max_bytes),
         train_labels=train_labels,
         val_labels=val_labels,
