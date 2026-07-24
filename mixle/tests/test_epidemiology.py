@@ -134,3 +134,103 @@ def test_latency_left_truncates_the_risk_set():
     # left-truncation drops subjects who never survive past the latency window
     assert result.provenance["n_fit_rows"] <= covariates.shape[0]
     assert np.any(time <= 0.1), "test setup should include some subjects truncated before latency"
+
+
+# --------------------------------------------------------------------------- MXR-080-0088: cohort validation
+# No cross-array shape, finiteness, time, event-code, latency, or exposure-column validation ran before
+# fitting/bootstrapping. `_validate_cohort` now runs once, before any of that, and rejects each of these
+# outright instead of silently corrupting a fit or crashing deep inside `cox_ph`.
+
+
+def test_fractional_event_code_is_rejected():
+    # 1.5 would truncate to 1 (the event of interest) under the old `.astype(int)` cast -- silently
+    # recording a fractional/unknown code as a real outcome.
+    covariates, time, event = _simulate_cohort(seed=4, n=50)
+    event = event.copy()
+    event[0] = 1.5
+    with pytest.raises(ValueError, match="exact integer"):
+        cohort_attribution(covariates, time, event, n_boot=10, rng=4)
+
+
+def test_fractional_event_code_toward_competing_cause_is_rejected():
+    # 2.5 would truncate to 2 (a competing cause) under the old cast -- a *different* silent mislabel
+    # than the 1.5 case above: exactly the "fractional causes can become censoring or another cause"
+    # failure mode the finding describes.
+    covariates, time, event = _simulate_cohort(seed=4, n=50)
+    event = event.copy()
+    event[0] = 2.5
+    with pytest.raises(ValueError, match="exact integer"):
+        cohort_attribution(covariates, time, event, competing=True, n_boot=10, rng=4)
+
+
+def test_negative_latency_is_rejected():
+    # Previously: `_fit_lagged`'s `latency > 0` check is also False for negative latency, so it silently
+    # fell through to the "no latency" branch instead of being rejected.
+    covariates, time, event = _simulate_cohort(seed=5, n=50)
+    with pytest.raises(ValueError, match="non-negative"):
+        cohort_attribution(covariates, time, event, latency=-0.5, n_boot=10, rng=5)
+
+
+def test_mismatched_array_lengths_are_rejected():
+    covariates, time, event = _simulate_cohort(seed=6, n=50)
+    with pytest.raises(ValueError, match="shape"):
+        cohort_attribution(covariates, time[:-5], event, n_boot=10, rng=6)
+
+
+def test_non_finite_covariates_are_rejected():
+    covariates, time, event = _simulate_cohort(seed=7, n=50)
+    covariates = covariates.copy()
+    covariates[3, 0] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        cohort_attribution(covariates, time, event, n_boot=10, rng=7)
+
+
+def test_non_finite_time_is_rejected():
+    covariates, time, event = _simulate_cohort(seed=8, n=50)
+    time = time.copy()
+    time[0] = np.inf
+    with pytest.raises(ValueError, match="finite"):
+        cohort_attribution(covariates, time, event, n_boot=10, rng=8)
+
+
+def test_negative_time_is_rejected():
+    covariates, time, event = _simulate_cohort(seed=9, n=50)
+    time = time.copy()
+    time[0] = -1.0
+    with pytest.raises(ValueError, match="non-negative"):
+        cohort_attribution(covariates, time, event, n_boot=10, rng=9)
+
+
+def test_out_of_vocabulary_event_code_without_competing_is_rejected():
+    # 2 is a legitimate competing-risk code, but competing=False declares the binary {0, 1} contract; it
+    # must not be silently accepted (or silently cause-1-censored).
+    covariates, time, event = _simulate_cohort(seed=10, n=50)
+    event = event.copy()
+    event[0] = 2.0
+    with pytest.raises(ValueError, match="binary"):
+        cohort_attribution(covariates, time, event, competing=False, n_boot=10, rng=10)
+
+
+def test_exposure_col_out_of_bounds_is_rejected():
+    covariates, time, event = _simulate_cohort(seed=11, n=50)
+    with pytest.raises(ValueError, match="exposure_col"):
+        cohort_attribution(covariates, time, event, exposure_col=5, n_boot=10, rng=11)
+
+
+def test_covariates_with_too_many_dimensions_are_rejected():
+    covariates, time, event = _simulate_cohort(seed=13, n=20)
+    covariates_3d = covariates.reshape(20, 1, 1)
+    with pytest.raises(ValueError, match="2-D"):
+        cohort_attribution(covariates_3d, time, event, n_boot=10, rng=13)
+
+
+def test_well_formed_cohort_still_fits_normally_after_validation():
+    # Negative control: boundary-legal values (time == 0, latency == 0, event in {0, 1}) must NOT be
+    # rejected by the new validation -- it should reject exactly the malformed cases above, nothing more.
+    covariates, time, event = _simulate_cohort(seed=12, n=200)
+    time = time.copy()
+    time[0] = 0.0
+    result = cohort_attribution(covariates, time, event, latency=0.0, n_boot=50, rng=12)
+    assert isinstance(result, CohortAttribution)
+    assert np.isfinite(result.hazard_ratio)
+    assert np.isfinite(result.attributable_fraction)
