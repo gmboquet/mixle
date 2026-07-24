@@ -38,13 +38,37 @@ class MultiObjectiveResult(OptimizationResult):
     pareto_y: np.ndarray
 
 
+def _validate_objective_matrix(y: Any, *, n_objectives: int | None = None) -> np.ndarray:
+    """Coerce ``y`` to a float64 ``(N, M)`` array, rejecting input unfit for dominance or scalarization.
+
+    Requires a non-empty 2-D array of finite values; when ``n_objectives`` is given, also requires
+    exactly that many columns. A NaN/Inf objective is an invalid or failed evaluation -- there is no
+    principled way to rank a candidate whose objective couldn't be computed, so such rows are rejected
+    outright rather than compared or scalarized. Without this guard, a NaN row can never be shown to
+    dominate or be dominated (NaN comparisons are always false), so it would otherwise be vacuously kept
+    as "Pareto-optimal" regardless of how bad its other objectives are.
+    """
+    arr = np.atleast_2d(np.asarray(y, dtype=np.float64))
+    if arr.ndim != 2:
+        raise ValueError(f"objective matrix must be 2-D, got shape {arr.shape}.")
+    if arr.size == 0:
+        raise ValueError("objective matrix must be non-empty.")
+    if n_objectives is not None and arr.shape[1] != n_objectives:
+        raise ValueError(f"objective matrix must have {n_objectives} columns (one per objective), got {arr.shape[1]}.")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("objective matrix must be finite; got a NaN or Inf objective value.")
+    return arr
+
+
 def pareto_mask(y: Any) -> np.ndarray:
     """Return a boolean mask of the non-dominated rows of ``y`` (an ``(N, M)`` minimization objective).
 
     Row ``i`` is dominated when some other row is ``<=`` it on every objective and strictly ``<`` on at
     least one; the mask is ``True`` for the rows that survive (the Pareto-optimal set).
+
+    Raises ``ValueError`` if ``y`` is empty, wrong-width, or contains a non-finite (NaN/Inf) value.
     """
-    y = np.atleast_2d(np.asarray(y, dtype=np.float64))
+    y = _validate_objective_matrix(y)
     n = y.shape[0]
     keep = np.ones(n, dtype=bool)
     for i in range(n):
@@ -58,7 +82,12 @@ def pareto_mask(y: Any) -> np.ndarray:
 
 
 def _scalarize(y: np.ndarray, weights: np.ndarray, rho: float) -> np.ndarray:
-    """Augmented Tchebycheff scalarization of min-max normalized objective vectors."""
+    """Augmented Tchebycheff scalarization of min-max normalized objective vectors.
+
+    Raises ``ValueError`` if ``y`` is empty, does not have one column per weight, or contains a
+    non-finite (NaN/Inf) value -- see :func:`_validate_objective_matrix`.
+    """
+    y = _validate_objective_matrix(y, n_objectives=weights.shape[0])
     lo = y.min(axis=0)
     span = np.where(y.max(axis=0) - lo > 1.0e-12, y.max(axis=0) - lo, 1.0)
     yhat = (y - lo) / span
