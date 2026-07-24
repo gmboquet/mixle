@@ -43,6 +43,13 @@ class WishartDistribution(SequenceEncodableProbabilityDistribution):
         v = np.asarray(scale, dtype=np.float64)
         if v.ndim != 2 or v.shape[0] != v.shape[1]:
             raise ValueError("scale must be a square matrix")
+        if not np.allclose(v, v.T):
+            # cholesky_logdet (like np.linalg.cholesky) factors from one triangle only and never
+            # inspects the other, so an asymmetric matrix with a positive-definite-looking triangle
+            # would otherwise pass straight through -- checked before that call, matching the
+            # symmetry validation already established for NormalWishartDistribution's own scale
+            # matrix.
+            raise ValueError("scale must be symmetric")
         self.dim = v.shape[0]
         if df < self.dim or not np.isfinite(df):
             raise ValueError("df must be a finite value >= the matrix dimension p")
