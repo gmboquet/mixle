@@ -113,7 +113,14 @@ class BayesianOptimizer:
         # supports (ask() called several times before any tell()) -- gating on n_observations let a
         # later ask() re-enter this branch and re-dispense (via _init_used % n_init) an already-issued
         # init point as a duplicate, silently corrupting the space-filling design.
-        while len(points) < q and (self._init_used + len(points)) < self.n_init:
+        #
+        # Gate solely on self._init_used, not `self._init_used + len(points)`: _next_init_point()
+        # already increments self._init_used as its own side effect, so adding len(points) on top
+        # double-counted every point dispensed by *this* loop -- once via _init_used's own
+        # increment, once via points growing -- making the loop believe it had dispensed twice as
+        # many init points as it actually had. ask(5) with n_init=5 stopped after 3 points and fell
+        # through to GP batch acquisition with zero observations, which fails (MXR-080-0187).
+        while len(points) < q and self._init_used < self.n_init:
             points.append(self._next_init_point())
         remaining = q - len(points)
         if remaining == 1:
