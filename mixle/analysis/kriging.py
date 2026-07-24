@@ -26,6 +26,9 @@ import numpy as np
 from scipy import optimize, special
 from scipy.spatial.distance import cdist
 
+# Covariance models implemented by `_shape`; the Gaussian model is reachable under three aliases.
+_MODELS = ("spherical", "exponential", "gaussian", "squared_exponential", "squared-exponential", "rbf", "matern")
+
 
 def _shape(model: str, h: np.ndarray, rng: float, nu: float = 1.5) -> np.ndarray:
     """Correlation-decay shape in [0, 1]: 0 at h=0, ->1 as h->inf (the standardised variogram)."""
@@ -44,9 +47,7 @@ def _shape(model: str, h: np.ndarray, rng: float, nu: float = 1.5) -> np.ndarray
         corr = (2.0 ** (1.0 - nu) / special.gamma(nu)) * (sqrt2nu**nu) * special.kv(nu, sqrt2nu)
         s = 1.0 - np.where(h == 0, 1.0, corr)
     else:
-        raise ValueError(
-            "model must be 'spherical', 'exponential', 'gaussian' (aka 'squared_exponential' / 'rbf'), or 'matern'."
-        )
+        raise ValueError(f"model must be one of {_MODELS}, got {model!r}.")
     return np.clip(s, 0.0, 1.0)
 
 
@@ -63,6 +64,13 @@ class Variogram:
         nu: Matern smoothness (ignored by other models).
         anisotropy: optional ``(angle_rad, ratio)`` geometric anisotropy -- coordinates are rotated by
             ``angle`` and the minor axis scaled by ``1/ratio`` before distances are taken.
+
+    Raises:
+        ValueError: if ``model`` is not implemented; ``nugget``/``psill`` are not finite and ``>= 0``;
+            ``rng``/``nu`` are not finite and ``> 0``; or ``anisotropy`` is set with a non-finite angle
+            or a ratio that is not finite and ``> 0`` (a zero or negative ratio collapses or flips the
+            minor axis, which previously produced NaN predictions and variances downstream instead of
+            an error).
     """
 
     model: str
@@ -71,6 +79,29 @@ class Variogram:
     rng: float
     nu: float = 1.5
     anisotropy: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.model not in _MODELS:
+            raise ValueError(f"model must be one of {_MODELS}, got {self.model!r}.")
+        if not (np.isfinite(self.nugget) and self.nugget >= 0):
+            raise ValueError(f"nugget must be finite and >= 0, got {self.nugget!r}.")
+        if not (np.isfinite(self.psill) and self.psill >= 0):
+            raise ValueError(f"psill must be finite and >= 0, got {self.psill!r}.")
+        if not (np.isfinite(self.rng) and self.rng > 0):
+            raise ValueError(f"rng must be finite and > 0, got {self.rng!r}.")
+        if not (np.isfinite(self.nu) and self.nu > 0):
+            raise ValueError(f"nu (Matern smoothness) must be finite and > 0, got {self.nu!r}.")
+        if self.anisotropy is not None:
+            if len(self.anisotropy) != 2:
+                raise ValueError(f"anisotropy must be an (angle, ratio) pair, got {self.anisotropy!r}.")
+            angle, ratio = self.anisotropy
+            if not np.isfinite(angle):
+                raise ValueError(f"anisotropy angle must be finite, got {angle!r}.")
+            if not (np.isfinite(ratio) and ratio > 0):
+                raise ValueError(
+                    f"anisotropy ratio must be finite and > 0, got {ratio!r} "
+                    "(a zero or negative ratio collapses or flips the minor axis)."
+                )
 
     def gamma(self, h: np.ndarray) -> np.ndarray:
         """Evaluate the semivariogram at lag distances."""
@@ -199,6 +230,50 @@ def fit_variogram(
     return Variogram(model, float(nugget), float(psill), float(rng), nu)
 
 
+def _validate_krige_geometry(coords: np.ndarray, z: np.ndarray, query: np.ndarray) -> None:
+    """Shape/finiteness validation shared by :func:`ordinary_kriging` and :func:`universal_kriging`."""
+    if coords.ndim != 2 or coords.shape[0] == 0:
+        raise ValueError(f"coords must be a nonempty (n, d) array, got shape {coords.shape}.")
+    if not np.all(np.isfinite(coords)):
+        raise ValueError("coords must contain only finite values.")
+    n, d = coords.shape
+    if z.shape != (n,):
+        raise ValueError(f"values must have shape ({n},) to match coords, got {z.shape}.")
+    if not np.all(np.isfinite(z)):
+        raise ValueError("values must contain only finite values.")
+    if query.ndim != 2 or query.shape[0] == 0:
+        raise ValueError(f"query must be a nonempty (q, d) array, got shape {query.shape}.")
+    if query.shape[1] != d:
+        raise ValueError(f"query must have {d} column(s) to match coords, got shape {query.shape}.")
+    if not np.all(np.isfinite(query)):
+        raise ValueError("query must contain only finite values.")
+
+
+def _clip_variance(var: np.ndarray, scale: float) -> np.ndarray:
+    """Clip kriging variance to ``>= 0``, but only across a small numerical-roundoff tolerance.
+
+    A well-posed covariance solve should never produce a negative predictive variance; a tiny
+    negative value is ordinary floating-point roundoff from the linear solve (empirically, up to
+    ~1e-14 relative to the covariance scale even on moderately ill-conditioned systems) and is safe
+    to zero out. A materially negative value instead indicates the covariance solve itself is invalid
+    or too ill-conditioned to trust (e.g. an inconsistent variogram fit or near-duplicate points), and
+    should be surfaced rather than silently hidden by an unconditional clip.
+
+    The tolerance mirrors ``numpy.allclose``'s ``atol + rtol * scale`` convention: an absolute floor
+    for when the problem's own scale is ~0, plus a relative term several orders of magnitude above
+    the roundoff actually observed, so it stays generous without masking a real solve failure.
+    """
+    tol = 1e-10 + 1e-8 * scale
+    if np.any(var < -tol):
+        raise ValueError(
+            f"kriging variance is materially negative (worst value {float(np.min(var)):.6g}, "
+            f"roundoff tolerance -{tol:.3g}); this indicates an invalid or ill-conditioned covariance "
+            "solve rather than floating-point roundoff -- check the variogram parameters and point "
+            "configuration (e.g. near-duplicate points or a range/nugget mismatch)."
+        )
+    return np.clip(var, 0.0, None)
+
+
 def _krige_solve(
     coords: np.ndarray,
     z: np.ndarray,
@@ -209,12 +284,30 @@ def _krige_solve(
     drift0: np.ndarray | None,
     noise: np.ndarray | None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    n = coords.shape[0]
+    if noise is not None:
+        noise = np.asarray(noise, dtype=float)
+        if noise.shape != (n,):
+            raise ValueError(f"noise must have shape ({n},) to match coords, got {noise.shape}.")
+        if not np.all(np.isfinite(noise)):
+            raise ValueError("noise must contain only finite values.")
+        if np.any(noise < 0):
+            raise ValueError("noise must be >= 0 (it represents a measurement variance).")
+    if drift is not None:
+        if drift.ndim != 2 or drift.shape[0] != n:
+            raise ValueError(f"drift must have {n} row(s) to match coords, got shape {drift.shape}.")
+        q_expected, p = query.shape[0], drift.shape[1]
+        if drift0 is None or drift0.shape != (q_expected, p):
+            got = None if drift0 is None else drift0.shape
+            raise ValueError(f"drift0 must have shape ({q_expected}, {p}) to match query and drift, got {got}.")
+        if not np.all(np.isfinite(drift)) or not np.all(np.isfinite(drift0)):
+            raise ValueError("drift and drift0 must contain only finite values.")
+
     coords = _transform(np.atleast_2d(coords), variogram.anisotropy)
     query = _transform(np.atleast_2d(query), variogram.anisotropy)
-    n = coords.shape[0]
     dd = cdist(coords, coords)
     K = variogram.cov_field(dd)
-    nug = variogram.nugget if noise is None else np.asarray(noise, dtype=float)
+    nug = variogram.nugget if noise is None else noise
     K[np.diag_indices(n)] = variogram.psill + nug  # field variance + measurement error
     k0 = variogram.cov_field(cdist(coords, query))  # (n, q)
 
@@ -245,7 +338,8 @@ def _krige_solve(
         lam = sol[n:]
         pred = w.T @ z
         var = variogram.psill - np.sum(w * k0, axis=0) - np.sum(lam * drift0.T, axis=0)
-    return pred, np.clip(var, 0.0, None)
+    diag_scale = float(np.max(np.abs(np.atleast_1d(variogram.psill + nug))))
+    return pred, _clip_variance(var, diag_scale)
 
 
 def ordinary_kriging(
@@ -268,10 +362,16 @@ def ordinary_kriging(
 
     Returns:
         ``{'prediction', 'variance'}`` arrays of length ``q``.
+
+    Raises:
+        ValueError: if ``coords``/``values``/``query`` are empty, mismatched in shape, or contain
+            non-finite values, or if ``noise`` is provided and is mismatched in shape, non-finite, or
+            negative.
     """
     coords = np.atleast_2d(np.asarray(coords, dtype=float))
     z = np.asarray(values, dtype=float).ravel()
     query = np.atleast_2d(np.asarray(query, dtype=float))
+    _validate_krige_geometry(coords, z, query)
     pred, var = _krige_solve(coords, z, variogram, query, drift=None, drift0=None, noise=noise)
     return {"prediction": pred, "variance": var}
 
@@ -304,10 +404,16 @@ def universal_kriging(
 
     Returns:
         ``{'prediction', 'variance'}``.
+
+    Raises:
+        ValueError: if ``coords``/``values``/``query`` are empty, mismatched in shape, or contain
+            non-finite values, or if ``noise`` is provided and is mismatched in shape, non-finite, or
+            negative.
     """
     coords = np.atleast_2d(np.asarray(coords, dtype=float))
     z = np.asarray(values, dtype=float).ravel()
     query = np.atleast_2d(np.asarray(query, dtype=float))
+    _validate_krige_geometry(coords, z, query)
     drift = _poly_basis(coords, degree)
     drift0 = _poly_basis(query, degree)
     pred, var = _krige_solve(coords, z, variogram, query, drift=drift, drift0=drift0, noise=noise)
