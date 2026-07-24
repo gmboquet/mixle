@@ -134,3 +134,39 @@ class WishartValidationTest(unittest.TestCase):
     def test_df_neg_inf_raises(self):
         with self.assertRaises(ValueError):
             WishartDistribution(-np.inf, self.V)
+
+
+class WishartScalarVectorizedAgreementTest(unittest.TestCase):
+    """External review: log_density (scalar) and seq_log_density (vectorized) must agree on every
+    input, not just well-conditioned ones. Before the fix, log_density checked positive-definiteness
+    and its log-determinant via cholesky_logdet (Cholesky factorization) while seq_log_density used
+    batched_pd_logdet (eigendecomposition), and the two trace computations (``trace(A @ B)`` vs an
+    ``einsum`` contraction) also accumulated in different orders. Near the positive-definiteness
+    boundary a Cholesky factor and an eigendecomposition round differently and can even disagree on
+    whether a matrix is PD at all, so log_density and seq_log_density could return substantially
+    different values -- or one -inf and the other finite -- for the identical input matrix.
+    """
+
+    def test_agreement_near_positive_definiteness_boundary(self):
+        # Deliberately construct matrices with one eigenvalue right at the edge of positive
+        # definiteness -- this is exactly where Cholesky and eigh used to disagree.
+        p = 8
+        rng = np.random.RandomState(0)
+        q, _ = np.linalg.qr(rng.randn(p, p))
+        d = WishartDistribution(p + 3, np.eye(p))
+        for tiny in (1e-10, 1e-12, 1e-14, 1e-16, 0.0, -1e-14):
+            eigs = np.concatenate([[tiny], np.linspace(1.0, 10.0, p - 1)])
+            m = (q * eigs) @ q.T
+            m = 0.5 * (m + m.T)
+            scalar = d.log_density(m)
+            vec = float(d.seq_log_density(m[None, ...])[0])
+            self.assertEqual(scalar, vec, msg=f"tiny_eig={tiny}: scalar={scalar!r} vec={vec!r}")
+
+    def test_agreement_on_sampled_batch(self):
+        v = np.array([[2.0, 0.3], [0.3, 1.0]])
+        d = WishartDistribution(6, v)
+        data = list(d.sampler(seed=7).sample(200))
+        enc = d.dist_to_encoder().seq_encode(data)
+        seq = np.asarray(d.seq_log_density(enc), dtype=float)
+        scalar = np.array([float(d.log_density(x)) for x in data])
+        np.testing.assert_allclose(seq, scalar, atol=1e-8, err_msg="scalar != vectorized")
