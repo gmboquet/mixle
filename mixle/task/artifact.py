@@ -23,13 +23,18 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 SCHEMA_VERSION = "1"
+SUPPORTED_SCHEMA_VERSIONS = (SCHEMA_VERSION,)  # every schema_version this code currently knows how to read
+ARTIFACT_TYPE = "mixle.task"
+KNOWN_PAYLOADS = ("torch", "json", "arrays")
 MANIFEST_NAME = "manifest.json"
 WEIGHTS_NAME = "weights.safetensors"
 JSON_MODEL_NAME = "model.json"
@@ -59,6 +64,52 @@ def _atomic_json_dump(dst: str, obj: Any, **dump_kwargs: Any) -> None:
         except OSError:
             pass
         raise
+
+
+def _atomic_artifact_write(path: str, write_fn: Callable[[str], None]) -> None:
+    """Publish a full artifact generation (payload file(s) + manifest) to ``path`` as a single atomic step.
+
+    ``save_module``/``save_json``/``save_arrays`` each write more than one file that must move together as a
+    set -- a payload (weights/model/arrays) plus the manifest describing it. Writing them as separate in-place
+    steps -- payload first, then manifest -- means a crash or exception between the two leaves ``path`` holding
+    a NEW payload paired with the OLD manifest: a mismatched pairing that a subsequent ``load_*`` cannot detect
+    as corrupt when the builder/config didn't change -- it silently loads the new weights next to stale
+    provenance (task/io/meta) describing the run that produced the *previous* weights.
+
+    ``write_fn(staging_dir)`` must write every file the new generation needs into a fresh sibling staging
+    directory that nothing else can see; ``path`` itself is never touched while it runs, so a failure anywhere
+    inside ``write_fn`` (including ``_atomic_json_dump`` itself failing) leaves whatever was already at
+    ``path`` -- the previous, still-consistent artifact, or nothing at all on a first save -- completely
+    untouched. Once staging holds a complete new generation, publishing it is two directory renames, each
+    atomic on a POSIX filesystem (same directory, so same filesystem): the existing ``path`` (if any) is moved
+    aside to a backup name, then staging is moved into ``path``. A crash between those two renames leaves
+    ``path`` momentarily absent -- never a mix of old and new files -- with the old generation fully
+    recoverable from its backup suffix; if the second rename itself fails, the backup is moved straight back
+    so ``path`` is never left missing. The backup is removed only once the new generation is already live.
+    """
+    parent = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(parent, exist_ok=True)
+    staging = tempfile.mkdtemp(dir=parent, prefix=".tmp-artifact-")
+    os.chmod(staging, 0o755)  # mkdtemp defaults to 0o700; match the world-readable dirs os.makedirs would make
+    published = False
+    try:
+        write_fn(staging)  # if this raises, `path` has not been touched at all
+        if os.path.lexists(path):
+            backup = os.path.join(parent, f".{os.path.basename(path)}.prev-{uuid.uuid4().hex}")
+            os.replace(path, backup)  # atomic: `path` momentarily absent, old generation intact under `backup`
+            try:
+                os.replace(staging, path)  # atomic: `path` now IS the new generation
+            except BaseException:
+                os.replace(backup, path)  # restore -- `path` must never end up missing
+                raise
+            published = True
+            shutil.rmtree(backup, ignore_errors=True)  # best-effort: new generation is already live either way
+        else:
+            os.replace(staging, path)
+            published = True
+    finally:
+        if not published:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 # --- builder registry: name -> (**config) -> nn.Module ------------------------------------------------------
@@ -122,7 +173,7 @@ class TaskManifest:
     def to_dict(self) -> dict[str, Any]:
         """Return the strict-JSON manifest representation written to ``manifest.json``."""
         d = {
-            "artifact_type": "mixle.task",
+            "artifact_type": ARTIFACT_TYPE,
             "schema_version": self.schema_version,
             "created_at": self.created_at or datetime.now(UTC).isoformat(),
             "payload": self.payload,
@@ -137,15 +188,59 @@ class TaskManifest:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TaskManifest:
-        """Parse a manifest dictionary into a :class:`TaskManifest`."""
+        """Parse a manifest dictionary into a :class:`TaskManifest`, rejecting anything this code can't safely read.
+
+        A ``manifest.json`` is data a fresh process trusts blindly to decide how to rebuild and load a model, so
+        this validates it before trusting any field: ``artifact_type`` must mark it as a mixle task artifact
+        (not some other format that happens to share a directory layout), ``schema_version`` must be one this
+        code was actually written against -- an unrecognized version (e.g. from a newer or older mixle) is
+        rejected outright rather than silently misread as today's schema, ``payload`` must be a payload kind
+        this module knows how to load, and a payload that needs a builder (``torch``/``arrays``) must name one.
+        """
+        if not isinstance(d, dict):
+            raise ValueError(f"task-artifact manifest must be a JSON object, got {type(d).__name__}")
+
+        artifact_type = d.get("artifact_type")
+        if artifact_type != ARTIFACT_TYPE:
+            raise ValueError(
+                f"not a mixle task-artifact manifest: artifact_type={artifact_type!r}, expected {ARTIFACT_TYPE!r}"
+            )
+
+        schema_version = d.get("schema_version", SCHEMA_VERSION)
+        if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+            raise ValueError(
+                f"unsupported task-artifact schema_version {schema_version!r}; this code only understands "
+                f"{SUPPORTED_SCHEMA_VERSIONS!r} -- likely written by an incompatible (newer or older) mixle"
+            )
+
+        if "payload" not in d:
+            raise ValueError("task-artifact manifest is missing required field 'payload'")
+        payload = d["payload"]
+        if payload not in KNOWN_PAYLOADS:
+            raise ValueError(f"unknown task-artifact payload {payload!r}; expected one of {KNOWN_PAYLOADS}")
+
+        builder = d.get("builder")
+        if payload in ("torch", "arrays") and (not isinstance(builder, str) or not builder):
+            raise ValueError(f"{payload!r} payload requires a non-empty string 'builder', got {builder!r}")
+
+        config = d.get("config", {})
+        if not isinstance(config, dict):
+            raise ValueError(f"manifest 'config' must be an object, got {type(config).__name__}")
+        io = d.get("io", {})
+        if not isinstance(io, dict):
+            raise ValueError(f"manifest 'io' must be an object, got {type(io).__name__}")
+        meta = d.get("meta", {})
+        if not isinstance(meta, dict):
+            raise ValueError(f"manifest 'meta' must be an object, got {type(meta).__name__}")
+
         return cls(
-            payload=d["payload"],
-            builder=d.get("builder"),
-            config=d.get("config", {}),
+            payload=payload,
+            builder=builder,
+            config=config,
             task=d.get("task", ""),
-            io=d.get("io", {}),
-            meta=d.get("meta", {}),
-            schema_version=d.get("schema_version", SCHEMA_VERSION),
+            io=io,
+            meta=meta,
+            schema_version=schema_version,
             created_at=d.get("created_at", ""),
         )
 
@@ -177,16 +272,26 @@ def save_module(
 
     ``builder``/``config`` must reconstruct an architecturally identical module (``get_builder(builder)(**config)``);
     weights go through ``safetensors.torch.save_model`` so tied parameters (e.g. the LM's tied head) round-trip.
+
+    Weights and manifest are staged together and published to ``path`` in one atomic step (see
+    ``_atomic_artifact_write``): calling this on an existing artifact -- an update -- either fully replaces it
+    or, on any failure, leaves the previous model/manifest/provenance fully intact. It never leaves new weights
+    paired with the old manifest, or the reverse.
     """
     from safetensors.torch import save_model
 
-    os.makedirs(path, exist_ok=True)
     get_builder(builder)  # fail fast if the builder is unknown -- before writing anything
-    save_model(module, os.path.join(path, WEIGHTS_NAME))
-    _write_manifest(
-        path,
-        TaskManifest(payload="torch", builder=builder, config=dict(config), task=task, io=io or {}, meta=meta or {}),
-    )
+
+    def _write(staging: str) -> None:
+        save_model(module, os.path.join(staging, WEIGHTS_NAME))
+        _write_manifest(
+            staging,
+            TaskManifest(
+                payload="torch", builder=builder, config=dict(config), task=task, io=io or {}, meta=meta or {}
+            ),
+        )
+
+    _atomic_artifact_write(path, _write)
     return path
 
 
@@ -213,13 +318,21 @@ def save_json(
     io: dict[str, Any] | None = None,
     meta: dict[str, Any] | None = None,
 ) -> str:
-    """Persist a pure (torch-free) mixle distribution via the safe serialization registry; return ``path``."""
+    """Persist a pure (torch-free) mixle distribution via the safe serialization registry; return ``path``.
+
+    ``model.json`` and the manifest are staged together and published to ``path`` in one atomic step (see
+    ``_atomic_artifact_write``), so an update that fails partway -- e.g. a non-serializable replacement model --
+    never leaves ``path`` with a new model paired with the old manifest, or a truncated file of either kind.
+    """
     from mixle.utils.serialization import ensure_pysp_serialization_registry, to_serializable
 
     ensure_pysp_serialization_registry()
-    os.makedirs(path, exist_ok=True)
-    _atomic_json_dump(os.path.join(path, JSON_MODEL_NAME), to_serializable(model))
-    _write_manifest(path, TaskManifest(payload="json", task=task, io=io or {}, meta=meta or {}))
+
+    def _write(staging: str) -> None:
+        _atomic_json_dump(os.path.join(staging, JSON_MODEL_NAME), to_serializable(model))
+        _write_manifest(staging, TaskManifest(payload="json", task=task, io=io or {}, meta=meta or {}))
+
+    _atomic_artifact_write(path, _write)
     return path
 
 
@@ -273,18 +386,25 @@ def save_arrays(
     io: dict[str, Any] | None = None,
     meta: dict[str, Any] | None = None,
 ) -> str:
-    """Persist a dict of numpy arrays as an artifact directory (``arrays.npz``); return ``path``."""
+    """Persist a dict of numpy arrays as an artifact directory (``arrays.npz``); return ``path``.
+
+    Arrays and manifest are staged together and published to ``path`` in one atomic step (see
+    ``_atomic_artifact_write``), so a failed update never leaves new arrays paired with the old manifest.
+    """
     import numpy as np
 
     get_arrays_builder(builder)  # fail fast before writing anything
-    os.makedirs(path, exist_ok=True)
-    np.savez(os.path.join(path, ARRAYS_NAME), **arrays)
-    _write_manifest(
-        path,
-        TaskManifest(
-            payload="arrays", builder=builder, config=dict(config or {}), task=task, io=io or {}, meta=meta or {}
-        ),
-    )
+
+    def _write(staging: str) -> None:
+        np.savez(os.path.join(staging, ARRAYS_NAME), **arrays)
+        _write_manifest(
+            staging,
+            TaskManifest(
+                payload="arrays", builder=builder, config=dict(config or {}), task=task, io=io or {}, meta=meta or {}
+            ),
+        )
+
+    _atomic_artifact_write(path, _write)
     return path
 
 
