@@ -326,9 +326,10 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Any, weight: float, estimate: ErdosRenyiGraphDistribution | None) -> None:
         """Accumulate weighted edge opportunities and successes from one graph."""
-        from mixle.data.sources.graph_source import _edge_counts, _extract_observation
+        from mixle.data.sources.graph_source import _edge_counts, _extract_observation, _validate_graph_constraints
 
         obs = _extract_observation(x, directed=self.directed)
+        _validate_graph_constraints(obs.adjacency, self.directed, self.self_loops)
         total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
         self.edge_opportunities += float(weight) * total
         self.edge_count += float(weight) * successes
@@ -341,9 +342,10 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self, x: Sequence[GraphObservation], weights: np.ndarray, estimate: ErdosRenyiGraphDistribution | None
     ) -> None:
         """Accumulate weighted edge counts from a batch of graphs."""
-        from mixle.data.sources.graph_source import _edge_counts
+        from mixle.data.sources.graph_source import _edge_counts, _validate_graph_constraints
 
         for obs, weight in zip(x, weights):
+            _validate_graph_constraints(obs.adjacency, self.directed, self.self_loops)
             total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
             self.edge_opportunities += float(weight) * total
             self.edge_count += float(weight) * successes

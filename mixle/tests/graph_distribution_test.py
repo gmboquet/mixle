@@ -293,6 +293,114 @@ class GraphDistributionTestCase(unittest.TestCase):
         )
         self.assertTrue(np.isfinite(self_loop_dist.log_density(looped)))
 
+    def test_erdos_renyi_accumulator_rejects_asymmetric_adjacency_when_undirected(self):
+        # Same class of gap as test_erdos_renyi_rejects_asymmetric_adjacency_when_undirected, but on the
+        # fitting path: update/seq_update read edge counts through _edge_counts without checking the
+        # adjacency was consistent with the declared directed/self_loops flags, so an asymmetric
+        # observation was silently folded into the sufficient statistics instead of rejected.
+        dist = stats.ErdosRenyiGraphDistribution(0.3, directed=False, self_loops=False)
+        asym = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]])
+
+        acc = dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.update(asym, 1.0, None)
+        self.assertEqual(acc.value(), (0.0, 0.0))  # rejected before any sufficient-statistic mutation
+
+        acc = dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.initialize(asym, 1.0, None)
+        self.assertEqual(acc.value(), (0.0, 0.0))
+
+        enc = dist.dist_to_encoder().seq_encode([asym])
+        acc = dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.seq_update(enc, np.array([1.0]), None)
+        self.assertEqual(acc.value(), (0.0, 0.0))
+
+        acc = dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.seq_initialize(enc, np.array([1.0]), None)
+        self.assertEqual(acc.value(), (0.0, 0.0))
+
+    def test_erdos_renyi_accumulator_rejects_self_loop_when_disallowed(self):
+        # Same gap, other flag: self_loops=False declares a zero diagonal, but _edge_counts never read
+        # the diagonal, so a nonzero entry there was silently ignored instead of rejected.
+        dist = stats.ErdosRenyiGraphDistribution(0.3, directed=False, self_loops=False)
+        looped = np.array([[1, 1, 0], [1, 0, 1], [0, 1, 0]])
+
+        acc = dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.update(looped, 1.0, None)
+        self.assertEqual(acc.value(), (0.0, 0.0))
+
+        enc = dist.dist_to_encoder().seq_encode([looped])
+        acc = dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.seq_update(enc, np.array([1.0]), None)
+        self.assertEqual(acc.value(), (0.0, 0.0))
+
+    def test_erdos_renyi_accumulator_still_accumulates_graphs_consistent_with_directed_and_self_loops(self):
+        # Sanity check alongside the two rejection tests above: graphs that ARE consistent with the
+        # declared directed/self_loops flags must keep accumulating normally (not over-reject).
+        asym = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]])
+        directed_dist = stats.ErdosRenyiGraphDistribution(0.3, directed=True, self_loops=False)
+        acc = directed_dist.estimator().accumulator_factory().make()
+        acc.update(asym, 1.0, None)
+        self.assertEqual(acc.value(), (6.0, 2.0))
+
+        looped = np.array([[1, 1, 0], [1, 0, 1], [0, 1, 1]])
+        self_loop_dist = stats.ErdosRenyiGraphDistribution(0.3, directed=False, self_loops=True)
+        acc = self_loop_dist.estimator().accumulator_factory().make()
+        acc.update(looped, 1.0, None)
+        self.assertEqual(acc.value(), (6.0, 4.0))
+
+    def test_stochastic_block_accumulator_rejects_asymmetric_adjacency_and_self_loop_when_disallowed(self):
+        # Same class of gap as
+        # test_stochastic_block_rejects_asymmetric_adjacency_and_self_loop_when_disallowed, but on the
+        # fitting path: update reads edges through _edge_indices without checking the adjacency was
+        # consistent with the declared directed/self_loops flags.
+        bp = np.array([[0.7, 0.2], [0.2, 0.5]])
+        dist = stats.StochasticBlockGraphDistribution(bp, block_assignments=[0, 0, 1], directed=False, self_loops=False)
+        asym = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]])
+        looped = np.array([[1, 1, 0], [1, 0, 1], [0, 1, 0]])
+
+        acc = dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.update(asym, 1.0, None)
+        self.assertEqual(acc.num_graphs, 0.0)  # rejected before any sufficient-statistic mutation
+        self.assertEqual(acc.total_nodes, 0.0)
+
+        acc = dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.update(looped, 1.0, None)
+        self.assertEqual(acc.num_graphs, 0.0)
+        self.assertEqual(acc.total_nodes, 0.0)
+
+        enc = dist.dist_to_encoder().seq_encode([asym])
+        acc = dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.seq_update(enc, np.array([1.0]), None)
+        self.assertEqual(acc.num_graphs, 0.0)
+        self.assertEqual(acc.total_nodes, 0.0)
+
+    def test_stochastic_block_accumulator_still_accumulates_graphs_consistent_with_directed_and_self_loops(self):
+        bp = np.array([[0.7, 0.2], [0.2, 0.5]])
+        asym = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]])
+        directed_dist = stats.StochasticBlockGraphDistribution(
+            bp, block_assignments=[0, 0, 1], directed=True, self_loops=False
+        )
+        acc = directed_dist.estimator().accumulator_factory().make()
+        acc.update(asym, 1.0, None)
+        self.assertEqual(acc.num_graphs, 1.0)
+
+        looped = np.array([[1, 1, 0], [1, 0, 1], [0, 1, 1]])
+        self_loop_dist = stats.StochasticBlockGraphDistribution(
+            bp, block_assignments=[0, 0, 1], directed=False, self_loops=True
+        )
+        acc = self_loop_dist.estimator().accumulator_factory().make()
+        acc.update(looped, 1.0, None)
+        self.assertEqual(acc.num_graphs, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

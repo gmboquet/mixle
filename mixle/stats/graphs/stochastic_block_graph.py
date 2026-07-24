@@ -468,7 +468,7 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Any, weight: float, estimate: StochasticBlockGraphDistribution | None) -> None:
         """Accumulate weighted block-pair edge counts from one graph."""
-        from mixle.data.sources.graph_source import _edge_indices, _extract_observation
+        from mixle.data.sources.graph_source import _edge_indices, _extract_observation, _validate_graph_constraints
 
         fallback = self.block_assignments
         if fallback is None and estimate is not None:
@@ -476,6 +476,12 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
         obs = _extract_observation(x, directed=self.directed, fallback_assignments=fallback)
         if obs.block_assignments is None:
             raise ValueError("block assignments are required for SBM accumulation.")
+        # Mirrors StochasticBlockGraphDistribution._obs_with_assignments: _edge_indices only ever reads
+        # the edge positions implied by (self.directed, self.self_loops), so a self-loop or asymmetric
+        # entry outside that read set would otherwise be silently folded into (or excluded from) the
+        # sufficient statistics instead of being rejected. Validated before any state mutation below so
+        # a rejected graph leaves the accumulator untouched.
+        _validate_graph_constraints(obs.adjacency, self.directed, self.self_loops)
         assignments = obs.block_assignments
         needed = int(assignments.max()) + 1 if assignments.size else 0
         self._ensure_capacity(max(needed, 0 if self.num_blocks is None else self.num_blocks))
