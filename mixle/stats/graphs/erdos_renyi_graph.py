@@ -4,22 +4,15 @@ Data type: a binary graph observation represented as a square adjacency matrix,
 a NetworkX-like graph, or a mapping accepted by ``GraphDataEncoder``.
 """
 
+from __future__ import annotations
+
 import math
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.random import RandomState
 
-from mixle.data.sources.graph_source import (
-    GraphDataEncoder,
-    GraphObservation,
-    _bernoulli_log_likelihood,
-    _clip_prob,
-    _edge_counts,
-    _edge_indices,
-    _extract_observation,
-)
 from mixle.enumeration.algorithms import BufferedStream, ProductEnumerator
 from mixle.stats.compute.pdist import (
     DistributionEnumerator,
@@ -30,6 +23,21 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+
+if TYPE_CHECKING:
+    from mixle.data.sources.graph_source import GraphDataEncoder, GraphObservation
+
+# mixle.data.sources.graph_source's own top-level import of mixle.stats.compute.pdist.DataSequenceEncoder
+# forces mixle.stats's package __init__ to run first, which eagerly imports this very module -- so a
+# module-level `from mixle.data.sources.graph_source import ...` here is circular whenever
+# mixle.data.sources.graph_source is the entry point (e.g. `import mixle.data.sources.graph_source`
+# directly, before mixle.stats has been warmed by any other path): graph_source would still be
+# mid-import (paused inside its own DataSequenceEncoder import, above this module in the same chain),
+# so none of GraphDataEncoder/GraphObservation/the coercion helpers would exist as attributes yet.
+# Every usage below is either purely a type annotation (deferred to a string by the `from __future__
+# import annotations` above) or a call inside a function/method body, so the imports are deferred to
+# call time, once every module in the cycle has finished loading normally -- mirroring the
+# pilot_ladder.py / mixture.py fixes for the same shape of cycle.
 
 
 class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
@@ -72,6 +80,8 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
+        from mixle.data.sources.graph_source import _clip_prob
+
         self.p = _clip_prob(p)
         self.log_p = math.log(self.p)
         self.log_1p = math.log1p(-self.p)
@@ -94,7 +104,7 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     @classmethod
-    def from_model(cls, model: Any) -> "ErdosRenyiGraphDistribution":
+    def from_model(cls, model: Any) -> ErdosRenyiGraphDistribution:
         """Create a distribution wrapper from an Erdos-Renyi model."""
         return cls(model.p, directed=model.directed, self_loops=model.self_loops, name=getattr(model, "name", None))
 
@@ -110,6 +120,8 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: Any) -> float:
         """Return the Bernoulli edge log probability of one graph."""
+        from mixle.data.sources.graph_source import _bernoulli_log_likelihood, _edge_counts, _extract_observation
+
         obs = _extract_observation(x, directed=self.directed)
         total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
         return _bernoulli_log_likelihood(successes, total, self.p)
@@ -119,6 +131,8 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         # Extract (opportunities, successes) per graph once (ragged adjacency forces the per-graph
         # extraction), then score the whole batch with one vectorized Bernoulli log-likelihood instead
         # of a Python log_density call per graph.
+        from mixle.data.sources.graph_source import _edge_counts, _extract_observation
+
         if len(x) == 0:
             return np.zeros(0, dtype=np.float64)
         counts = np.asarray(
@@ -138,6 +152,8 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         object data), but the Bernoulli reduction runs on the active engine, so the model's scoring
         math is engine-native (and differentiable in ``p`` on torch).
         """
+        from mixle.data.sources.graph_source import _clip_prob, _edge_counts, _extract_observation
+
         p = _clip_prob(self.p)
         counts = np.asarray(
             [
@@ -166,12 +182,14 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
 
     def posterior(self, x: Any) -> dict[str, float]:
         """Return edge opportunities, observed edge count, and fitted probability for ``x``."""
+        from mixle.data.sources.graph_source import _edge_counts, _extract_observation
+
         total, successes = _edge_counts(
             _extract_observation(x, directed=self.directed).adjacency, self.directed, self.self_loops
         )
         return {"edge_opportunities": total, "edge_count": successes, "p": self.p}
 
-    def sampler(self, seed: int | None = None) -> "ErdosRenyiGraphSampler":
+    def sampler(self, seed: int | None = None) -> ErdosRenyiGraphSampler:
         """Return a sampler for Erdos-Renyi graph observations."""
         return ErdosRenyiGraphSampler(self, seed)
 
@@ -188,7 +206,7 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
             raise EnumerationError(self, reason="num_nodes must be set to enumerate graphs")
         return ErdosRenyiGraphEnumerator(self)
 
-    def estimator(self, pseudo_count: float | None = None) -> "ErdosRenyiGraphEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> ErdosRenyiGraphEstimator:
         """Return the edge-count estimator for this graph family."""
         return ErdosRenyiGraphEstimator(
             directed=self.directed,
@@ -202,6 +220,8 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> GraphDataEncoder:
         """Return the graph encoder used by vectorized scoring and fitting."""
+        from mixle.data.sources.graph_source import GraphDataEncoder
+
         return GraphDataEncoder(directed=self.directed)
 
 
@@ -215,6 +235,8 @@ class ErdosRenyiGraphEnumerator(DistributionEnumerator):
             dist (ErdosRenyiGraphDistribution): Distribution whose graphs are enumerated (its
                 ``num_nodes`` must be set).
         """
+        from mixle.data.sources.graph_source import _edge_indices
+
         super().__init__(dist)
         n = dist.num_nodes
         edges = list(_edge_indices(n, dist.directed, dist.self_loops))
@@ -295,6 +317,8 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Any, weight: float, estimate: ErdosRenyiGraphDistribution | None) -> None:
         """Accumulate weighted edge opportunities and successes from one graph."""
+        from mixle.data.sources.graph_source import _edge_counts, _extract_observation
+
         obs = _extract_observation(x, directed=self.directed)
         total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
         self.edge_opportunities += float(weight) * total
@@ -308,6 +332,8 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self, x: Sequence[GraphObservation], weights: np.ndarray, estimate: ErdosRenyiGraphDistribution | None
     ) -> None:
         """Accumulate weighted edge counts from a batch of graphs."""
+        from mixle.data.sources.graph_source import _edge_counts
+
         for obs, weight in zip(x, weights):
             total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
             self.edge_opportunities += float(weight) * total
@@ -317,7 +343,7 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize sufficient statistics from a weighted graph batch."""
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: tuple[float, float]) -> "ErdosRenyiGraphAccumulator":
+    def combine(self, suff_stat: tuple[float, float]) -> ErdosRenyiGraphAccumulator:
         """Merge serialized edge-count sufficient statistics."""
         self.edge_opportunities += suff_stat[0]
         self.edge_count += suff_stat[1]
@@ -327,7 +353,7 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
         """Return serialized edge-count sufficient statistics."""
         return self.edge_opportunities, self.edge_count
 
-    def from_value(self, x: tuple[float, float]) -> "ErdosRenyiGraphAccumulator":
+    def from_value(self, x: tuple[float, float]) -> ErdosRenyiGraphAccumulator:
         """Restore accumulator state from serialized edge counts."""
         self.edge_opportunities = float(x[0])
         self.edge_count = float(x[1])
@@ -335,6 +361,8 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
 
     def acc_to_encoder(self) -> GraphDataEncoder:
         """Return the encoder associated with this accumulator."""
+        from mixle.data.sources.graph_source import GraphDataEncoder
+
         return GraphDataEncoder(directed=self.directed)
 
 
