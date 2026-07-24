@@ -42,6 +42,59 @@ class PosteriorIncumbentTest(unittest.TestCase):
             posterior_incumbent(np.zeros((0, 2)), np.zeros(0))
 
 
+class _MockSurrogate:
+    """A minimal duck-typed Surrogate returning a caller-controlled, possibly-broken posterior mean --
+    lets the MXR-080-0170 surrogate-boundary validation in ``posterior_incumbent`` be tested against
+    specific broken shapes/values without depending on the real GP's actual fit behavior.
+    """
+
+    def __init__(self, mean):
+        self._mean = mean
+
+    def fit(self, x, y, **kwargs):
+        return self
+
+    def predict(self, x_train, y_train, x_new, return_cov=False):
+        return self._mean
+
+
+class PosteriorIncumbentSurrogateBoundaryTest(unittest.TestCase):
+    """MXR-080-0170: posterior_incumbent routes through the same validated surrogate boundary
+    (``_validate_observations`` / ``_validate_prediction`` / ``_select_index``) as the sequential,
+    batch, and knowledge-gradient BO proposal paths in ``mixle.doe.bayesopt``.
+    """
+
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        self.x = rng.uniform(-3.0, 3.0, size=(4, 2))
+        self.y = np.sum((self.x - _TARGET) ** 2, axis=1)
+
+    def test_rejects_wrong_length_predicted_mean(self):
+        with self.assertRaises(ValueError):
+            posterior_incumbent(self.x, self.y, gp=_MockSurrogate(mean=np.zeros(3)))  # 3 != 4 rows
+
+    def test_rejects_nonfinite_predicted_mean(self):
+        with self.assertRaises(ValueError):
+            posterior_incumbent(self.x, self.y, gp=_MockSurrogate(mean=np.array([1.0, np.nan, 2.0, 3.0])))
+
+    def test_rejects_nonfinite_observations_before_fitting(self):
+        bad_y = np.array([1.0, np.nan, 2.0, 3.0])
+        with self.assertRaises(ValueError):
+            posterior_incumbent(self.x, bad_y, gp=_MockSurrogate(mean=np.zeros(4)))
+
+    def test_negative_control_selects_the_lowest_posterior_mean(self):
+        mean = np.array([5.0, -3.0, 2.0, 1.0])
+        inc = posterior_incumbent(self.x, self.y, gp=_MockSurrogate(mean=mean), maximize=False)
+        self.assertEqual(inc.best_index, 1)
+        self.assertEqual(inc.best_mean, -3.0)
+
+    def test_negative_control_maximize_selects_the_highest_posterior_mean(self):
+        mean = np.array([5.0, -3.0, 2.0, 1.0])
+        inc = posterior_incumbent(self.x, self.y, gp=_MockSurrogate(mean=mean), maximize=True)
+        self.assertEqual(inc.best_index, 0)
+        self.assertEqual(inc.best_mean, 5.0)
+
+
 class NoisyIncumbentBeatsArgminTest(unittest.TestCase):
     def test_posterior_incumbent_is_closer_to_the_true_optimum_under_noise(self):
         seeds = range(6)
