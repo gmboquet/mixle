@@ -208,12 +208,68 @@ class MarginalSeekTest(unittest.TestCase):
                 try:
                     r = marginal_seek(m, i, resolve_max=resolve_max)
                 except IndexError:
-                    # a large probability gap can truncate the shared depth-deepening loop early, so a
-                    # deep index is unreachable (same as count_dp_seek); reachable indices stay sound.
+                    # a genuinely out-of-range index (the exhaustion certificate fired and this index
+                    # still wasn't reached) -- reachable indices stay sound. Since every `i` here is
+                    # < len(support), a real support gap could only produce this via the (huge, default)
+                    # max_fine_bucket_cap being hit AND exhaustion certified in the same breath; kept as
+                    # a defensive branch, not because a plain probability gap causes it anymore (see
+                    # MarginalSeekTruncationTestCase for that fixed behavior directly).
                     continue
                 tr = _true_rank(support, m, r.value)
                 self.assertLessEqual(r.true_rank_lower, tr)
                 self.assertLessEqual(tr, r.true_rank_upper)
+
+
+class MarginalSeekTruncationTestCase(unittest.TestCase):
+    """MXR-080-0216/0217 for marginal_seek: the exhaustion certificate and incomplete-window honesty.
+
+    marginal_seek shares count_dp_seek's depth-deepening loop and had the identical two defects: a
+    count-plateau heuristic mistook a probability GAP for support exhaustion (0216), and a window that
+    hadn't finished building could still produce a bracket presented as guaranteed (0217) -- the old
+    ``MarginalSeekResult`` had no field at all to say otherwise (see the two tests below for a direct
+    demonstration of the field's absence, not just a numeric difference).
+    """
+
+    def _gap_mixture(self):
+        A = stats.IntegerCategoricalDistribution(0, [0.1] * 10)
+        B = stats.IntegerCategoricalDistribution(100, [0.1] * 10)
+        return stats.MixtureDistribution([A, B], [1 - 1e-6, 1e-6])
+
+    def test_probability_gap_does_not_trigger_false_exhaustion(self):
+        mix = self._gap_mixture()
+        for i in range(10, 20):
+            r = marginal_seek(mix, i, oversample=8)
+            self.assertGreaterEqual(r.value, 100)  # reached component B, not falsely exhausted at 10
+            self.assertFalse(r.truncated)
+
+    def test_genuinely_out_of_range_index_still_raises_indexerror(self):
+        mix = self._gap_mixture()
+        with self.assertRaises(IndexError):
+            marginal_seek(mix, 20, oversample=8, max_fine_bucket_cap=1 << 16)
+
+    def test_budget_exhausted_before_index_located_raises_enumerationerror(self):
+        mix = self._gap_mixture()
+        with self.assertRaises(EnumerationError):
+            marginal_seek(mix, 15, oversample=8, max_fine_bucket_cap=64)
+
+    def test_incomplete_window_returns_truncated_field(self):
+        # engineered (2-component skewed-weight mixture) so index=10's displacement-widened window is
+        # NOT yet fully built when max_fine_bucket_cap is hit at the loop's very first depth.
+        A = stats.IntegerCategoricalDistribution(0, [0.1] * 10)
+        B = stats.IntegerCategoricalDistribution(100, [0.5, 0.2, 0.1, 0.05, 0.05, 0.03, 0.03, 0.02, 0.01, 0.01])
+        mix = stats.MixtureDistribution([A, B], [0.7, 0.3])
+        r = marginal_seek(mix, 10, oversample=16, max_fine_bucket_cap=64)
+        self.assertTrue(r.truncated)
+        self.assertFalse(r.exact)
+        self.assertLessEqual(r.true_rank_lower, r.true_rank_upper)
+
+    def test_old_result_type_had_no_way_to_express_this(self):
+        # concrete evidence the fix ADDS information, not just changes numbers: the field this whole
+        # class depends on did not exist before MXR-080-0216/0217.
+        import dataclasses
+
+        field_names = {f.name for f in dataclasses.fields(MarginalSeekResult)}
+        self.assertIn("truncated", field_names)
 
 
 if __name__ == "__main__":

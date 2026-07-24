@@ -899,6 +899,16 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
                 comp, "MixtureDistribution.components[%d]" % k, quantizer, max_fine_bucket
             )
             truncated = truncated or child_truncated
+            # A component individually fitting under max_fine_bucket does NOT imply its WEIGHTED
+            # (shifted) contribution does: the true pre-shift top is child_index.hist.max_bucket()
+            # (exact -- the deepest histogram entry is always nonzero post-normalize), so the exact
+            # pre-cap top after the weight shift is that plus the weight term's own bucket. `sr.scale`
+            # truncates its own output at max_fine_bucket without reporting whether it had to, so it
+            # must be checked here instead (mirrors CompositeDistribution.quantized_count_index's
+            # identical check for its convolution step).
+            comp_top = child_index.hist.max_bucket()
+            if comp_top is not None and comp_top + quantizer.fine_bucket(float(self.log_w[k])) > max_fine_bucket:
+                truncated = True
             scaled = sr.scale(child_index, float(self.log_w[k]), quantizer, max_fine_bucket)
             total = scaled if not built else sr.plus(total, scaled)
             built = True
