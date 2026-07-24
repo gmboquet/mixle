@@ -33,6 +33,89 @@ class PackBitsTest(unittest.TestCase):
             pack_bits([0, 16], 4)  # 16 does not fit in 4 bits
 
 
+class PackBitsCorruptionRegressionTest(unittest.TestCase):
+    """MXR-080-0129: codes were cast to uint64 (and count sliced) before validation, so a fractional code
+    silently truncated, a negative code silently wrapped, and a negative/oversized unpack count silently
+    fell through to ordinary Python slicing instead of raising."""
+
+    def test_fractional_code_rejected(self):
+        # The audit's own repro: 1.9 used to silently pack as code one.
+        with self.assertRaises(ValueError):
+            pack_bits([1.9], 4)
+
+    def test_fractional_code_rejected_in_larger_batch(self):
+        with self.assertRaises(ValueError):
+            pack_bits([1, 2, 3.5, 4], 4)
+
+    def test_negative_code_rejected(self):
+        with self.assertRaises(ValueError):
+            pack_bits([-1], 4)
+
+    def test_nan_code_rejected(self):
+        with self.assertRaises(ValueError):
+            pack_bits([float("nan")], 4)
+
+    def test_nan_in_existing_float_array_rejected(self):
+        # A NaN in a *fresh Python list* happens to already trip numpy's own uint64 cast (ValueError:
+        # cannot convert float NaN to integer). But an EXISTING float64 ndarray takes a different numpy
+        # cast path that does NOT raise -- it silently produces a garbage value with only a RuntimeWarning
+        # (the same input-shape-dependent gap the MXR-080-0060 graph_source.py fix hit). Both input shapes
+        # must be rejected explicitly rather than relying on whichever behavior numpy's cast happens to have.
+        arr = np.array([1.0, float("nan"), 3.0], dtype=np.float64)
+        with self.assertRaises(ValueError):
+            pack_bits(arr, 4)
+
+    def test_inf_code_rejected(self):
+        with self.assertRaises(ValueError):
+            pack_bits([float("inf")], 4)
+
+    def test_negative_unpack_count_rejected(self):
+        # Previously fell through to Python's negative-slice semantics (arr[:-3]) instead of raising.
+        packed = pack_bits(np.arange(10, dtype=np.uint64) % 4, 2)
+        with self.assertRaises(ValueError):
+            unpack_bits(packed, 2, -3)
+
+    def test_fractional_unpack_count_rejected(self):
+        packed = pack_bits(np.arange(10, dtype=np.uint64) % 4, 2)
+        with self.assertRaises(ValueError):
+            unpack_bits(packed, 2, 1.5)
+
+    def test_oversized_unpack_count_rejected(self):
+        # Previously silently returned fewer values than requested instead of raising.
+        codes = np.arange(10, dtype=np.uint64) % 4
+        packed = pack_bits(codes, 2)
+        with self.assertRaises(ValueError):
+            unpack_bits(packed, 2, 10_000)
+
+    def test_unpack_count_at_exact_capacity_is_not_an_error(self):
+        # Boundary negative control: count == capacity (not > capacity) must still succeed.
+        codes = np.arange(10, dtype=np.uint64) % 4
+        packed = pack_bits(codes, 2)
+        capacity = packed.size * (8 // 2)
+        out = unpack_bits(packed, 2, capacity)
+        self.assertEqual(len(out), capacity)
+
+    def test_packed_nbytes_negative_count_rejected(self):
+        with self.assertRaises(ValueError):
+            packed_nbytes(-1, 4)
+
+    def test_packed_nbytes_fractional_count_rejected(self):
+        with self.assertRaises(ValueError):
+            packed_nbytes(2.5, 4)
+
+    def test_legitimate_exact_codes_and_counts_still_round_trip(self):
+        # Negative control: whole-number floats and ordinary nonnegative int codes/counts are unaffected.
+        rng = np.random.RandomState(3)
+        codes = rng.randint(0, 16, size=50).astype(np.uint64)
+        packed = pack_bits(codes, 4)
+        self.assertTrue(np.array_equal(unpack_bits(packed, 4, 50), codes))
+        # whole-number floats (e.g. 2.0) are exact integers and must still be accepted
+        float_codes = [0.0, 15.0, 7.0, 1.0]
+        packed_f = pack_bits(float_codes, 4)
+        self.assertEqual(unpack_bits(packed_f, 4, 4).tolist(), [0, 15, 7, 1])
+        self.assertEqual(packed_nbytes(50, 4), 25)
+
+
 class CodebookCompressionTest(unittest.TestCase):
     def test_compress_round_trips_and_shrinks_bytes(self):
         rng = np.random.RandomState(1)
