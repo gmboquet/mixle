@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import unittest
 
 import numpy as np
@@ -170,6 +171,61 @@ class GenealogyReconstructionTest(unittest.TestCase):
     def test_unrecorded_model_has_no_lineage(self):
         ledger = GenealogyLedger()
         self.assertEqual(ledger.lineage(object()), [])
+
+    def test_lineage_matches_a_content_identical_reloaded_object(self):
+        """Regression coverage (audit MXR-080-0047): identity must be durable/content-addressed, not
+        the live object's ``id()`` (a CPython memory address) -- a DISTINCT object with the exact same
+        serialized content as a recorded champion (standing in for "the same model, deserialized from
+        disk in a later process") must resolve to the SAME lineage as the original, not an empty one."""
+        rng = np.random.RandomState(6)
+        objective = accuracy_objective()
+        champion = _fit_categorical(_gen_batch([0.7, 0.2, 0.1], 300, rng))
+        loop = ClosedLoopSelfEvolution(champion, objective=objective, seed=6, acquire_k=40)
+
+        phases = [[0.7, 0.2, 0.1], [0.2, 0.7, 0.1], [0.1, 0.2, 0.7]]
+        for probs in phases:
+            stream = [_gen_batch(probs, 60, rng) for _ in range(12)]
+            loop.run(stream)
+        self.assertTrue(any(r.promoted for r in loop.history), "need at least one adoption to test lineage")
+
+        final_champion = loop.champion
+        original_chain = loop.genealogy.lineage(final_champion)
+        self.assertGreaterEqual(len(original_chain), 1)
+
+        # a DISTINCT python object with identical content -- deepcopy stands in for "deserialized from
+        # disk in a fresh process": never itself passed to record_adoption, and NOT the same id() as
+        # final_champion, yet it is the same model.
+        reloaded = copy.deepcopy(final_champion)
+        self.assertIsNot(reloaded, final_champion)
+        self.assertNotEqual(id(reloaded), id(final_champion))
+
+        reloaded_chain = loop.genealogy.lineage(reloaded)
+        self.assertEqual(
+            reloaded_chain,
+            original_chain,
+            "a content-identical reloaded model must resolve to the exact same lineage as the original",
+        )
+        # the durable id itself is content-derived, not object-identity-derived.
+        self.assertEqual(loop.genealogy._id_for(reloaded), loop.genealogy._id_for(final_champion))
+
+    def test_lineage_does_not_alias_an_unrelated_model(self):
+        """Negative control for the test above: a genuinely DIFFERENT model (never recorded, unrelated
+        content) must still resolve to no lineage -- content-addressing must not produce false-positive
+        matches against whatever else happens to be in the ledger."""
+        rng = np.random.RandomState(7)
+        objective = accuracy_objective()
+        champion = _fit_categorical(_gen_batch([0.7, 0.2, 0.1], 300, rng))
+        loop = ClosedLoopSelfEvolution(champion, objective=objective, seed=7, acquire_k=40)
+
+        phases = [[0.7, 0.2, 0.1], [0.2, 0.7, 0.1], [0.1, 0.2, 0.7]]
+        for probs in phases:
+            stream = [_gen_batch(probs, 60, rng) for _ in range(12)]
+            loop.run(stream)
+        self.assertTrue(any(r.promoted for r in loop.history), "need at least one adoption to test lineage")
+
+        unrelated = _fit_categorical(_gen_batch([0.05, 0.05, 0.9], 300, np.random.RandomState(999)))
+        self.assertNotEqual(loop.genealogy._id_for(unrelated), loop.genealogy._id_for(loop.champion))
+        self.assertEqual(loop.genealogy.lineage(unrelated), [])
 
 
 if __name__ == "__main__":

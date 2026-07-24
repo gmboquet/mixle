@@ -53,6 +53,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.data.hashing import model_hash
 from mixle.evolve.ledger import EvolutionLedger
 from mixle.evolve.objective import Objective, _ScalarObjective
 from mixle.evolve.operators import AutoSelect, ImprovementOperator, Mutate, Refit
@@ -247,21 +248,24 @@ class GenealogyLedger:
     :class:`~mixle.evolve.ledger.EvolutionLedger` (never storing model objects in the ledger rows
     themselves -- only their operator, measured gap, and a stable id -- exactly the ledger's own
     JSON-serializability discipline).
+
+    A model's id is DURABLE and content-addressed (:func:`mixle.data.hashing.model_hash`, a hex SHA-256
+    over its serialized parameters) -- never the model object's ``id()`` (a CPython memory address).
+    That makes ids stable across processes (a model reloaded from disk hashes to the exact same id it
+    had when first recorded, so :meth:`lineage` finds it) and immune to ``id()``-reuse aliasing (once a
+    model is garbage-collected, an unrelated new object reallocated at the same address can never be
+    mistaken for it, because the id no longer depends on the address at all). Combined with the ledger
+    rows' existing JSON-serializability, the lineage this class records is genuinely replayable: every
+    id in a persisted ledger can be recomputed independently from any model, in any later process.
     """
 
     ledger: EvolutionLedger = field(default_factory=EvolutionLedger)
-    _model_ids: dict[int, str] = field(default_factory=dict)
-    _counter: int = 0
 
     def _id_for(self, model: Any) -> str:
-        key = id(model)
-        existing = self._model_ids.get(key)
-        if existing is not None:
-            return existing
-        self._counter += 1
-        new_id = f"m{self._counter}"
-        self._model_ids[key] = new_id
-        return new_id
+        """``model``'s durable id (see class docstring). Pure and process-independent: unlike the
+        ``id()``-keyed scheme this replaces, it needs no cache and cannot be invalidated by garbage
+        collection reusing a memory address."""
+        return model_hash(model)
 
     def record_adoption(
         self,
@@ -290,10 +294,16 @@ class GenealogyLedger:
     def lineage(self, model: Any) -> list[dict[str, Any]]:
         """Reconstruct ``model``'s full lineage: the ordered (root-first) chain of adoption receipts
         ``{operator, delta (the measured gap), parent_hash, meta: {child_hash, context, ...}}`` back to
-        the first recorded ancestor. Returns ``[]`` if ``model`` was never recorded as an adoption.
+        the first recorded ancestor. Returns ``[]`` if ``model`` was never recorded as an adoption --
+        including if ``model`` can't be hashed at all (e.g. it isn't a fitted mixle model), which is just
+        another way of never having been recorded. Because the id is content-addressed (see class
+        docstring), this works for ANY object whose serialized content matches a previously-recorded
+        one -- not only the exact live Python instance :meth:`record_adoption` was originally called
+        with -- e.g. the same model reloaded from disk in a fresh process.
         """
-        target_id = self._model_ids.get(id(model))
-        if target_id is None:
+        try:
+            target_id = self._id_for(model)
+        except Exception:  # noqa: BLE001 -- un-hashable / not a recorded model: no lineage, not an error
             return []
         by_child = {row["meta"]["child_hash"]: row for row in self.ledger.rows if "child_hash" in row.get("meta", {})}
         chain: list[dict[str, Any]] = []
