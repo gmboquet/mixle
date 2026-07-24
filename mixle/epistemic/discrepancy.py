@@ -99,25 +99,46 @@ def js_divergence(p: Any, q: Any, *, n: int = 10_000, seed: int | np.random.Rand
     return float(0.5 * _half_kl_to_mixture(p) + 0.5 * _half_kl_to_mixture(q))
 
 
+def _as_1d_samples(samples: np.ndarray) -> np.ndarray:
+    """Squeeze a per-draw sample array down to plain 1D, rejecting genuinely multivariate input.
+
+    A distribution's ``.sample(n)`` can return either a flat ``(n,)`` array or a column-shaped
+    ``(n, 1)`` array (one row per draw). The two must be treated identically here, but ``np.sort``
+    defaults to sorting along the *last* axis -- for ``(n, 1)`` that axis has exactly one element, so
+    sorting it in place is a silent no-op: each row keeps its original draw order, and only *looks*
+    sorted once raveled afterwards. Squeezing to 1D here, before the caller sorts, avoids that trap.
+    A genuinely multi-column array (more than one value per draw) is rejected outright rather than
+    silently flattened -- that is not 1D sample data, and there is no correct way to guess what the
+    caller meant by it.
+    """
+    arr = np.asarray(samples, dtype=np.float64)
+    per_draw = arr.reshape(arr.shape[0], -1)
+    if per_draw.shape[1] > 1:
+        raise NotImplementedError(
+            "wasserstein_distance only supports 1D distributions; no cheap exact multivariate "
+            "estimator is implemented here (a wrong coordinate-wise number would be worse than refusing)."
+        )
+    return per_draw.reshape(-1)
+
+
 def wasserstein_distance(p: Any, q: Any, *, n: int = 10_000, seed: int | np.random.RandomState | None = None) -> float:
     """1-Wasserstein (earth-mover) distance between two 1D distributions, via sorted sample matching.
 
     Draws ``n`` samples from each side; the empirical 1D optimal transport cost is the mean absolute
     difference between the two sorted sample sequences (exact for the empirical distributions, a
-    consistent estimator of the true distance as ``n`` grows). Raises :class:`NotImplementedError` for
+    consistent estimator of the true distance as ``n`` grows). Samples are squeezed to plain 1D
+    *before* sorting (:func:`_as_1d_samples`) rather than sorted-then-raveled -- sorting a ``(n, 1)``
+    column vector in its original shape is a silent no-op (see that function's docstring), which would
+    silently return the mean absolute difference between the two *unsorted* sample sequences instead
+    of the true empirical Wasserstein distance. Raises :class:`NotImplementedError` for genuinely
     multivariate input rather than silently computing a coordinate-wise number that isn't the true
     multivariate Wasserstein distance -- there is no cheap exact estimator for that case, and returning
     a wrong-but-plausible-looking number would be worse than refusing.
     """
     rng = _rng(seed)
-    xs = np.sort(_sample(p, n, rng))
-    ys = np.sort(_sample(q, n, rng))
-    if xs.ndim > 1 and xs.shape[-1] > 1:
-        raise NotImplementedError(
-            "wasserstein_distance only supports 1D distributions; no cheap exact multivariate "
-            "estimator is implemented here (a wrong coordinate-wise number would be worse than refusing)."
-        )
-    return float(np.mean(np.abs(xs.ravel() - ys.ravel())))
+    xs = _as_1d_samples(_sample(p, n, rng))
+    ys = _as_1d_samples(_sample(q, n, rng))
+    return float(np.mean(np.abs(np.sort(xs) - np.sort(ys))))
 
 
 def mmd(samples_p: np.ndarray, samples_q: np.ndarray, *, kernel: str = "rbf", bandwidth: float | None = None) -> float:
