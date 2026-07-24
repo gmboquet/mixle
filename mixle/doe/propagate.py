@@ -23,6 +23,25 @@ worst eigenvalue may be -- relative to its own eigenvalue scale -- before it is 
 a valid covariance at all, rather than treated as merely numerically singular."""
 
 
+def _require_positive_int(value: Any, name: str) -> int:
+    """Validate ``value`` is an exact positive integer, rejecting nonpositive and fractional counts.
+
+    Mirrors ``mixle.doe.batch._require_positive_int``: ``int(value)`` alone silently truncates
+    (``10.5`` becomes ``10``, no error) and an invalid size otherwise fails deep inside numpy with an
+    unrelated-looking error (a fractional Monte Carlo sample count raises ``TypeError: 'float' object
+    is unsliceable``; zero raises ``IndexError: index -1 is out of bounds for axis 0 with size 0``) --
+    neither names the actual problem.
+    """
+    try:
+        as_float = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.") from exc
+    as_int = int(as_float)
+    if as_int <= 0 or as_float != as_int:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+    return as_int
+
+
 def _validate_covariance(cov: np.ndarray) -> tuple[np.ndarray, float]:
     """Reject a non-finite or non-PSD covariance; return ``(symmetrized_cov, eigenvalue_scale)``.
 
@@ -148,11 +167,26 @@ def propagate(
 
     Returns:
         ``{'mean', 'std', 'quantiles' (mc only), 'samples' (mc only)}``.
+
+    Raises:
+        ValueError: if ``mean`` is non-finite, ``cov``'s shape doesn't match ``mean``, ``cov`` is not a
+            valid (finite, PSD-within-tolerance) covariance, ``n`` is not a positive integer, any
+            ``quantiles`` entry is outside ``[0, 1]``, or ``method`` is not registered.
     """
     mean = np.atleast_1d(np.asarray(mean, dtype=float))
     d = len(mean)
     cov = np.eye(d) if cov is None else np.atleast_2d(np.asarray(cov, dtype=float))
-    _validate_covariance(cov)  # raises on non-finite/non-PSD covariance -- see _safe_cholesky (MXR-080-0190)
+    if not np.all(np.isfinite(mean)):
+        raise ValueError("mean is not finite (contains NaN/Inf).")
+    if cov.shape != (d, d):
+        raise ValueError(f"covariance shape {cov.shape} is incompatible with mean of length {d}; expected ({d}, {d}).")
+    _validate_covariance(cov)  # raises on non-finite/non-PSD; see _safe_cholesky for the unscented path
+    n = _require_positive_int(n, "n")
+    quantiles = tuple(quantiles)
+    if quantiles:
+        q_arr = np.asarray(quantiles, dtype=float)
+        if not np.all(np.isfinite(q_arr)) or np.any(q_arr < 0.0) or np.any(q_arr > 1.0):
+            raise ValueError(f"quantiles must be finite values in [0, 1]; got {quantiles!r}.")
     try:
         propagator = _PROPAGATORS[method]
     except KeyError:
@@ -191,6 +225,14 @@ def _propagate_montecarlo(
     rng = np.random.RandomState(seed)
     x = rng.multivariate_normal(mean, cov, size=n)
     y = np.asarray(func(x), dtype=float)
+    if y.ndim not in (1, 2) or y.shape[0] != n:
+        raise ValueError(
+            f"model function must return an array whose leading dimension matches the {n} input "
+            f"samples (shape ({n},) or ({n}, k)); got shape {y.shape}. Refusing to use a result whose "
+            "shape doesn't match what was sampled."
+        )
+    if not np.all(np.isfinite(y)):
+        raise ValueError("model function returned non-finite (NaN/Inf) output.")
     return {
         "mean": y.mean(axis=0),
         "std": y.std(axis=0),
@@ -212,12 +254,29 @@ def unscented_transform(
 
     Returns the output ``(mean, covariance)``. Exact for an affine ``func``; for a nonlinear one it
     captures the mean and covariance to second order with only ``2d+1`` evaluations.
+
+    Raises:
+        ValueError: if ``mean`` is non-finite, ``cov``'s shape doesn't match ``mean``, ``cov`` is not a
+            valid covariance (see :func:`_safe_cholesky`), ``alpha``/``beta``/``kappa`` are not finite,
+            ``d + lambda <= 0``, ``func``'s return doesn't have a leading dimension of ``2d+1`` (rejected
+            explicitly, not silently reinterpreted via a total-size-only reshape), or ``func``'s return
+            is non-finite.
     """
     mean = np.atleast_1d(np.asarray(mean, dtype=float))
     cov = np.atleast_2d(np.asarray(cov, dtype=float))
     d = len(mean)
+    if not np.all(np.isfinite(mean)):
+        raise ValueError("mean is not finite (contains NaN/Inf).")
+    if cov.shape != (d, d):
+        raise ValueError(f"covariance shape {cov.shape} is incompatible with mean of length {d}; expected ({d}, {d}).")
+    if not (np.isfinite(alpha) and np.isfinite(beta) and np.isfinite(kappa)):
+        raise ValueError(
+            f"unscented transform parameters must be finite; got alpha={alpha!r}, beta={beta!r}, kappa={kappa!r}."
+        )
     lam = alpha**2 * (d + kappa) - d
-    if d + lam <= 0:
+    if not (d + lam > 0):  # `> 0` (not `<= 0`) so a NaN lambda -- e.g. from a NaN alpha/kappa slipping
+        # past the finite check above -- is caught too: NaN comparisons are always False, so `<= 0` would
+        # silently let it through where `> 0` correctly does not.
         raise ValueError(
             f"unscented_transform requires d + lambda > 0, got {d + lam:.6g}; "
             f"choose kappa > -d (here d={d}) so the sigma-point spread is positive."
@@ -228,7 +287,30 @@ def unscented_transform(
     wc = wm.copy()
     wm[0] = lam / (d + lam)
     wc[0] = lam / (d + lam) + (1.0 - alpha**2 + beta)
-    y = np.atleast_2d(np.asarray(func(sigma), dtype=float).reshape(2 * d + 1, -1))
+    expected_leading = 2 * d + 1
+    y_raw = np.asarray(func(sigma), dtype=float)
+    if y_raw.ndim == 1:
+        if y_raw.shape[0] != expected_leading:
+            raise ValueError(
+                f"model function must return an array whose leading dimension is {expected_leading} "
+                f"(one row per sigma point, shape ({expected_leading},) or ({expected_leading}, k)); "
+                f"got shape {y_raw.shape}. Refusing to silently reinterpret a wrong-shaped result via a "
+                "total-size-only reshape."
+            )
+        y = y_raw.reshape(expected_leading, 1)
+    elif y_raw.ndim == 2:
+        if y_raw.shape[0] != expected_leading:
+            raise ValueError(
+                f"model function must return an array whose leading dimension is {expected_leading} "
+                f"(one row per sigma point, shape ({expected_leading},) or ({expected_leading}, k)); "
+                f"got shape {y_raw.shape}. Refusing to silently reinterpret a wrong-shaped result via a "
+                "total-size-only reshape."
+            )
+        y = y_raw
+    else:
+        raise ValueError(f"model function must return a 1-D or 2-D array; got shape {y_raw.shape} (ndim={y_raw.ndim}).")
+    if not np.all(np.isfinite(y)):
+        raise ValueError("model function returned non-finite (NaN/Inf) output.")
     y_mean = wm @ y
     dy = y - y_mean
     y_cov = (wc[:, None] * dy).T @ dy
