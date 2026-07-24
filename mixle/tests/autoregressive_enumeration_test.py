@@ -442,6 +442,132 @@ class AutoregressiveEnumerableTest(unittest.TestCase):
         self.assertEqual(ar.log_density(()), float("-inf"))
         self.assertEqual(ar.log_density((0, 1)), float("-inf"))  # unterminated, must not count toward mass
 
+    # -- MXR-080-0221: next_logprobs step tables were parsed with no validation -- NaN/+inf silently dropped
+    # (same as a legitimate -inf), array lengths never checked, and duplicate tokens handled DIFFERENTLY by
+    # every call site (log_density's dict(steps) kept only the LAST duplicate's score; the count index and
+    # the sampler counted/sampled the SAME token as two distinct branches). --------------------------------
+
+    def test_duplicate_token_rejected_consistently_across_all_call_sites(self):
+        # The audit's exact one-token reproduction: the SAME token declared twice, at different scores, and
+        # "the scorer returned only the second score." Before the fix each of these four call sites (the
+        # ones that actually walk next_logprobs's own step tables) handled it differently; now every path
+        # shares the _parse_steps boundary and rejects it alike.
+        def dup_nlp(prefix):
+            return [(0, math.log(0.9)), (0, math.log(0.1))]
+
+        with self.assertRaises(ValueError):  # enumeration
+            next(AutoregressiveEnumerable(dup_nlp, max_len=1).enumerator())
+        with self.assertRaises(ValueError):  # counting
+            AutoregressiveEnumerable(dup_nlp, max_len=1).quantized_count_index(Quantizer(oversample=8), 10**6)
+        with self.assertRaises(ValueError):  # scoring
+            AutoregressiveEnumerable(dup_nlp, max_len=1).log_density((0,))
+        with self.assertRaises(ValueError):  # sampling
+            AutoregressiveEnumerable(dup_nlp, max_len=1).sampler(seed=0).sample()
+
+    def test_parse_steps_rejects_nan_score(self):
+        def nan_nlp(prefix):
+            return [(0, math.log(0.5)), (1, math.log(0.5)), (2, float("nan"))]
+
+        ar = AutoregressiveEnumerable(nan_nlp, max_len=1)
+        with self.assertRaises(ValueError):
+            ar._steps(())
+
+    def test_parse_steps_rejects_positive_score(self):
+        # A log-probability must be <= 0; a positive score -- including +inf, "both infinities" per the
+        # audit -- is rejected rather than silently treated the same as a legitimate -inf ("zero
+        # probability", dropped, not an error -- see the negative control below).
+        def inf_nlp(prefix):
+            return [(0, math.log(0.5)), (1, math.log(0.5)), (2, float("inf"))]
+
+        def small_positive_nlp(prefix):
+            return [(0, math.log(0.5)), (1, math.log(0.5) - 0.01), (2, 0.05)]
+
+        for nlp in (inf_nlp, small_positive_nlp):
+            ar = AutoregressiveEnumerable(nlp, max_len=1)
+            with self.assertRaises(ValueError):
+                ar._steps(())
+
+    def test_parse_steps_drops_negative_infinity_without_rejecting(self):
+        # Negative control: -inf is a LEGITIMATE "this token has zero probability" signal, not a defect --
+        # it must still be silently dropped (unlike NaN/positive scores above), exactly as before the fix.
+        def neg_inf_nlp(prefix):
+            return [(0, math.log(0.5)), (1, math.log(0.5)), (2, float("-inf"))]
+
+        ar = AutoregressiveEnumerable(neg_inf_nlp, max_len=1)
+        steps = ar._steps(())
+        self.assertEqual([t for t, _ in steps], [0, 1])  # token 2 dropped; nothing else disturbed
+
+    def test_parse_steps_rejects_non_normalized_table(self):
+        # No length/sign/NaN defect, but the probabilities don't sum to ~1 -- previously unchecked entirely.
+        def bad_norm_nlp(prefix):
+            return [(0, math.log(0.01)), (1, math.log(0.01))]  # sums to 0.02, not ~1.0
+
+        ar = AutoregressiveEnumerable(bad_norm_nlp, max_len=1)
+        with self.assertRaises(ValueError):
+            ar._steps(())
+
+    def test_parse_steps_rejects_mismatched_array_lengths(self):
+        # The fast numpy (tokens, log_probs) form, with two arrays of different lengths.
+        def mismatched_nlp(prefix):
+            return (np.array([0, 1, 2]), np.array([-0.1, -0.2]))
+
+        ar = AutoregressiveEnumerable(mismatched_nlp, max_len=1)
+        with self.assertRaises(ValueError):
+            ar._steps(())
+
+    def test_parse_steps_accepts_well_formed_table_unchanged(self):
+        # Negative control: a clean, unique-token, normalized, all <= 0 table is completely unaffected.
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN)
+        got = ar._steps(())
+        expected = sorted(self.next_logprobs(()), key=lambda u: -u[1])
+        self.assertEqual([t for t, _ in got], [t for t, _ in expected])
+        for (_t, lp), (_et, elp) in zip(got, expected):
+            self.assertAlmostEqual(lp, elp, places=12)
+
+    # -- MXR-080-0222: the terminating sampler could exhaust max_depth without ever drawing eos and still
+    # return that truncated prefix -- a sequence the model's own declared support (_in_declared_support,
+    # MXR-080-0220) and log_density both say is IMPOSSIBLE. -------------------------------------------------
+
+    def test_sampler_never_returns_a_sequence_outside_declared_support(self):
+        # Reproduce the audit's exact setup: a 50/50 continue-or-eos chain with max_depth=2. Direct
+        # reproduction against the pre-fix code found seed=2 returns the unterminated truncation (0, 0),
+        # which _in_declared_support correctly says is NOT in this terminating model's support. After the
+        # fix every seed's sample is either a genuine (eos-terminated, in-cap) sequence, or the call raises
+        # -- it is NEVER that impossible truncation.
+        eos = 2
+
+        def nlp(prefix):
+            return [(0, math.log(0.5)), (eos, math.log(0.5))]
+
+        ar = AutoregressiveEnumerable(nlp, eos=eos, max_depth=2)
+        for seed in range(50):
+            out = ar.sampler(seed=seed).sample()
+            self.assertTrue(ar._in_declared_support(out), msg=f"seed={seed} produced {out!r}")
+            self.assertTrue(math.isfinite(ar.log_density(out)))
+
+    def test_sampler_raises_when_termination_is_unreachable(self):
+        # eos is assigned probability exactly 0 (dropped by _parse_steps as a -inf score, same as a real
+        # provider that never assigns eos any mass) -- termination within max_depth is impossible by
+        # construction, so the sampler must fail loudly rather than ever return the (equally impossible,
+        # per _in_declared_support) truncated prefix.
+        eos = 2
+
+        def never_eos_nlp(prefix):
+            return [(0, math.log(0.5)), (1, math.log(0.5)), (eos, float("-inf"))]
+
+        ar = AutoregressiveEnumerable(never_eos_nlp, eos=eos, max_depth=3)
+        with self.assertRaises(RuntimeError):
+            ar.sampler(seed=0).sample()
+
+    def test_sampler_unaffected_for_fixed_length_models(self):
+        # Negative control: a fixed-length (non-terminating) model never needs a retry -- every draw is
+        # exactly self._depth tokens by construction, always in support, exactly as before the fix.
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN)
+        for seed in range(10):
+            out = ar.sampler(seed=seed).sample()
+            self.assertEqual(len(out), _LEN)
+            self.assertTrue(ar._in_declared_support(out))
+
 
 if __name__ == "__main__":
     unittest.main()
