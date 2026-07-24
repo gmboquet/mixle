@@ -1,16 +1,32 @@
 """Continuous-time Markov chain (CTMC) over fully observed trajectories.
 
 A CTMC on ``K`` states is governed by a generator matrix ``Q``: off-diagonal ``q_ij >= 0`` is the rate
-of jumping ``i -> j``, and ``q_ii = -sum_{j!=i} q_ij``. A fully-observed trajectory is the initial state
-plus the sequence of ``(dwell_time, next_state)`` jumps; its log-likelihood is
+of jumping ``i -> j``, and ``q_ii = -sum_{j!=i} q_ij``. A fully-observed trajectory is the initial state,
+the total observation horizon, and the sequence of ``(dwell_time, next_state)`` jumps up to that
+horizon; its log-likelihood is
 
     log L = sum_{i!=j} n_ij * log q_ij  -  sum_i q_i * T_i,      q_i = -q_ii = sum_{j!=i} q_ij,
 
-where ``n_ij`` is the number of observed ``i->j`` transitions and ``T_i`` the total time spent in ``i``.
-This is a collection of independent Poisson-rate likelihoods, so the MLE is closed form and
-unique: ``q_ij = n_ij / T_i``. The estimator therefore certifies ``GLOBAL_UNIQUE`` (see
-:func:`mixle.inference.certify`, which classifies this family). Data type: ``(s0, [(dt, s1), (dt, s2),
-...])`` -- the initial state and the observed jumps.
+where ``n_ij`` is the number of observed ``i->j`` transitions and ``T_i`` the total time spent in ``i``
+*including the final, right-censored dwell* -- from the last jump (or from time 0, if there were no
+jumps at all) out to the observation horizon. That final interval is real exposure with no observed
+exit, exactly like the tail of a birth-death or renewal-process trajectory censored at its own window
+(see ``mixle.stats.processes.birth_death``): a chain that dwells in a state for the whole horizon without
+jumping still contributes ``-q_i * horizon`` to the log-likelihood, it just contributes no transition
+count. Omitting it (as an earlier version of this module did) understates every ``T_i`` by the length of
+each trajectory's final interval and biases the closed-form rate MLE upward.
+
+This is a collection of independent Poisson-rate likelihoods, so the MLE is closed form and unique:
+``q_ij = n_ij / T_i``. The estimator therefore certifies ``GLOBAL_UNIQUE`` (see
+:func:`mixle.inference.certify`, which classifies this family). Data type: ``(s0, horizon, [(dt, s1),
+(dt, s2), ...])`` -- the initial state, the total observation window length, and the observed jumps
+(each ``dt >= 0``, and the jumps' dwell times may not sum to more than ``horizon``). The horizon travels
+with each trajectory rather than living only on the distribution, matching ``BirthDeathSamplingDistribution``'s
+``(n0, T, events)`` convention: different trajectories in one dataset are free to have been observed for
+different lengths of time. The distribution's own ``initial_state``/``horizon`` constructor parameters
+are sampling-time defaults (where ``sample()`` starts a fresh chain, and for how long) and are round-
+tripped through ``.estimator()``; they are not constraints on what a trajectory being *scored* is allowed
+to contain -- ``log_density`` scores whatever ``s0`` and ``horizon`` the trajectory itself declares.
 
 The family follows the standard Mixle distribution contract (Distribution / Sampler / Accumulator / Factory /
 Estimator / DataEncoder) so it composes with ``optimize`` / ``seq_log_density`` / the PPL surface like
@@ -39,15 +55,44 @@ _MIN_TIME = 1e-12
 
 
 def _trajectory_stats(traj: Any, k: int) -> tuple[np.ndarray, np.ndarray]:
-    """(n_ij transition-count matrix, T_i dwell-time vector) for one ``(s0, [(dt, s1), ...])`` trajectory."""
+    """(n_ij transition-count matrix, T_i dwell-time vector) for one ``(s0, horizon, [(dt, s1), ...])``
+    trajectory, including the final right-censored dwell from the last jump (or from time 0, if there
+    are no jumps) out to ``horizon``. Raises ``ValueError`` on a malformed trajectory: wrong shape, a
+    non-finite/negative horizon, a non-finite/negative dwell time, dwell times summing past the horizon,
+    or a state index outside ``[0, k)``.
+    """
+    if len(traj) != 3:
+        raise ValueError(
+            "CTMC trajectory must be (initial_state, horizon, jumps); got a "
+            f"{len(traj)}-element sequence. The 2-element (s0, jumps) format is no longer accepted: it "
+            "has no field for the trajectory's observation horizon, so the final censored dwell time "
+            "(the exposure between the last jump and when observation stopped) cannot be recovered."
+        )
+    s0, horizon, jumps = traj[0], traj[1], traj[2]
+    horizon = float(horizon)
+    if not np.isfinite(horizon) or horizon < 0.0:
+        raise ValueError(f"CTMC trajectory horizon must be finite and >= 0, got {horizon!r}.")
+    cur = int(s0)
+    if not (0 <= cur < k):
+        raise ValueError(f"CTMC trajectory initial state {cur} is out of range for {k} states.")
+
     counts = np.zeros((k, k), dtype=np.float64)
     dwell = np.zeros(k, dtype=np.float64)
-    s0, jumps = traj[0], traj[1]
-    cur = int(s0)
+    t = 0.0
     for dt, s_next in jumps:
-        dwell[cur] += float(dt)
-        counts[cur, int(s_next)] += 1.0
-        cur = int(s_next)
+        dt = float(dt)
+        if not np.isfinite(dt) or dt < 0.0:
+            raise ValueError(f"CTMC trajectory dwell times must be finite and >= 0, got {dt!r}.")
+        t += dt
+        if t > horizon:
+            raise ValueError(f"CTMC trajectory dwell times sum to {t!r}, which exceeds its horizon {horizon!r}.")
+        s_next = int(s_next)
+        if not (0 <= s_next < k):
+            raise ValueError(f"CTMC trajectory jump target {s_next} is out of range for {k} states.")
+        dwell[cur] += dt
+        counts[cur, s_next] += 1.0
+        cur = s_next
+    dwell[cur] += horizon - t  # final censored dwell: last jump (or t=0) out to the observation horizon
     return counts, dwell
 
 
@@ -138,7 +183,7 @@ class ContinuousTimeMarkovChainSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def _sample_one(self) -> tuple[int, list[tuple[float, int]]]:
+    def _sample_one(self) -> tuple[int, float, list[tuple[float, int]]]:
         d = self.dist
         cur = d.initial_state
         t = 0.0
@@ -155,10 +200,11 @@ class ContinuousTimeMarkovChainSampler(DistributionSampler):
             jumps.append((float(dt), nxt))
             t += dt
             cur = nxt
-        return d.initial_state, jumps
+        return d.initial_state, d.horizon, jumps
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
-        """Draw one trajectory or a list of trajectories over the configured horizon."""
+        """Draw one ``(s0, horizon, jumps)`` trajectory or a list of ``size`` trajectories, all observed
+        over the distribution's configured ``horizon``."""
         if size is None:
             return self._sample_one()
         return [self._sample_one() for _ in range(size)]
@@ -277,7 +323,8 @@ class ContinuousTimeMarkovChainEstimator(ParameterEstimator):
 
 
 class ContinuousTimeMarkovChainDataEncoder(DataSequenceEncoder):
-    """Encode ``(s0, jumps)`` trajectories into per-trajectory ``(counts, dwell)`` sufficient statistics."""
+    """Encode ``(s0, horizon, jumps)`` trajectories into per-trajectory ``(counts, dwell)`` sufficient
+    statistics, ``dwell`` including each trajectory's final right-censored interval out to its horizon."""
 
     def __init__(self, num_states: int) -> None:
         self.num_states = int(num_states)
