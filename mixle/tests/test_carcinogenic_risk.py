@@ -58,6 +58,36 @@ class _ExposurePosterior:
         return _ExposureDerivedQuantity(fn(self.samples(n, rng)), self._prior_dominated)
 
 
+class _RawDrawPosterior:
+    """A minimal IC-1 ``Posterior`` whose ``samples()`` returns caller-supplied draws verbatim.
+
+    Used to check that ``excess_lifetime_cancer_risk``'s pushforward validates a ``Posterior``'s own
+    draws exactly like a plain array (MXR-080-0074), by handing it draws a real posterior should
+    never produce: more than one value per sample, or negative/non-finite values.
+    """
+
+    def __init__(self, draws: np.ndarray):
+        self._draws = np.asarray(draws, dtype=float)
+
+    def samples(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        return self._draws
+
+    @property
+    def mean(self) -> np.ndarray:
+        return np.mean(self._draws, axis=0)
+
+    @property
+    def cov(self) -> np.ndarray:
+        return np.atleast_2d(np.cov(self._draws, rowvar=False))
+
+    def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
+        alpha = (1.0 - level) / 2.0
+        return np.quantile(self._draws, alpha, axis=0), np.quantile(self._draws, 1.0 - alpha, axis=0)
+
+    def derived_quantity(self, fn, n: int, rng: np.random.Generator) -> _ExposureDerivedQuantity:
+        return _ExposureDerivedQuantity(fn(self.samples(n, rng)), False)
+
+
 def test_arsenic_matches_epa_iris():
     ladd = 1e-4  # mg/kg-day, benchmark arsenic lifetime average daily dose
     sf = SlopeFactor(oral_csf=1.5, source="EPA-IRIS")  # (mg/kg-day)^-1, EPA IRIS arsenic oral CSF
@@ -179,3 +209,52 @@ def test_excess_lifetime_cancer_risk_rejects_negative_or_non_finite_inputs():
         excess_lifetime_cancer_risk(1e-4, SlopeFactor(oral_csf=-1.5), route="oral")
     with pytest.raises(ValueError):
         excess_lifetime_cancer_risk(float("nan"), sf, route="oral")
+
+
+def test_multidimensional_exposure_array_rejected_not_truncated():
+    """MXR-080-0074: a multi-dimensional exposure draw must be rejected, not silently truncated to
+    column 0 (which previously discarded every other route/chemical/time point/receptor).
+
+    Column 0 is a tiny dose; columns 1/2 are huge. Under the old column-0-only truncation this call
+    would have silently succeeded with the tiny-dose answer, hiding the huge exposure entirely.
+    """
+    sf = SlopeFactor(oral_csf=1.5)
+    multidim = np.tile([1e-4, 10.0, 10.0], (5, 1))
+    assert multidim.shape == (5, 3)
+    with pytest.raises(ValueError, match=r"single value per sample"):
+        excess_lifetime_cancer_risk(multidim, sf, route="oral")
+
+
+def test_posterior_multidimensional_draws_rejected():
+    """MXR-080-0074: a ``Posterior`` handing back more than one value per draw is rejected the same
+    way a plain multi-dimensional array is -- not silently truncated to its first column."""
+    sf = SlopeFactor(oral_csf=1.5)
+    draws = np.tile([1e-4, 10.0, 10.0], (9, 1))
+    with pytest.raises(ValueError, match=r"single value per sample"):
+        excess_lifetime_cancer_risk(_RawDrawPosterior(draws), sf, route="oral", n=9)
+
+
+def test_posterior_draws_validated_same_as_plain_array():
+    """MXR-080-0074: a ``Posterior``'s own draws are now validated exactly like a plain array's --
+    previously they were explicitly exempted from the finite/non-negative check, so a mis-specified
+    exposure posterior with mass below zero (or a NaN draw) could silently yield an invalid "risk"
+    sample. Both must now raise."""
+    sf = SlopeFactor(oral_csf=1.5)
+    negative_draws = np.array([[-5.0], [1e-4], [2e-4]])
+    with pytest.raises(ValueError, match=r"exposure"):
+        excess_lifetime_cancer_risk(_RawDrawPosterior(negative_draws), sf, route="oral", n=3)
+
+    nan_draws = np.array([[np.nan], [1e-4], [2e-4]])
+    with pytest.raises(ValueError, match=r"exposure"):
+        excess_lifetime_cancer_risk(_RawDrawPosterior(nan_draws), sf, route="oral", n=3)
+
+
+def test_posterior_with_legitimate_single_column_draws_still_works():
+    """Negative control for MXR-080-0074: the IC-1 ``Posterior.samples`` contract is always shape
+    ``(n, d)``; ``d == 1`` (a single quantity per sample, wrapped per-protocol) is legitimate and must
+    keep working -- not be caught by the new multi-dimensional rejection."""
+    sf = SlopeFactor(oral_csf=1.5)
+    draws = np.full((6, 1), 1e-4)
+    result = excess_lifetime_cancer_risk(_RawDrawPosterior(draws), sf, route="oral", n=6)
+    assert isinstance(result, RiskQuantity)
+    assert result.mean == pytest.approx(1e-4 * 1.5, rel=1e-9)
