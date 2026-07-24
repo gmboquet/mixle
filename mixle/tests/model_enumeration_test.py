@@ -7,6 +7,7 @@ an admissible heuristic does not change the exact ordering.
 """
 
 import math
+import threading
 import unittest
 
 import numpy as np
@@ -311,6 +312,95 @@ class PruningContractValidationTestCase(unittest.TestCase):
         mine = list(
             quantized_best_first_decode(
                 _next_logprobs, eos=_EOS, max_len=max_len, top_k=3, top_p=1.0, bucket_bits=20, batch_size=1
+            )
+        )
+        self.assertEqual(len(mine), len(brute))
+        np.testing.assert_allclose(sorted(lp for _, lp in mine), sorted(lp for _, lp in brute), atol=1e-9)
+
+
+class QuantizedDecodeControlValidationTestCase(unittest.TestCase):
+    """MXR-080-0227: quantized_best_first_decode's controls must be validated before the search runs.
+
+    A negative batch_size previously took an empty slice of a non-empty live bucket without consuming
+    it, so the frontier never shrank and the search never terminated. A batched callback that returned
+    fewer step tables than prefixes requested was paired up with zip(), which silently stops at the
+    shorter list -- the reproduced case (one live prefix, an under-returning callback) came back as an
+    empty enumeration with no error at all, even though a real prefix was live and dropped.
+    """
+
+    def test_negative_batch_size_is_rejected_not_hung(self):
+        # Regression watchdog, mirroring quantization_test.py's
+        # test_pool_starts_cleanly_under_background_thread_lock_contention: a daemon-thread join
+        # timeout turns a REINTRODUCED hang into an ordinary, fast test failure instead of blocking the
+        # whole suite forever. With the fix in place this raises immediately (control validation runs
+        # before the search loop even starts), so the thread should finish almost instantly.
+        outcome = {}
+
+        def _run():
+            try:
+                next(iter(quantized_best_first_decode(_next_logprobs, eos=_EOS, max_len=5, batch_size=-1)))
+            except BaseException as exc:  # noqa: BLE001 -- captured across a thread boundary, re-raised below
+                outcome["error"] = exc
+
+        runner = threading.Thread(target=_run, daemon=True)
+        runner.start()
+        runner.join(timeout=5)
+        self.assertFalse(runner.is_alive(), "negative batch_size hung instead of being rejected (MXR-080-0227)")
+        self.assertIsInstance(outcome.get("error"), ValueError)
+        self.assertIn("batch_size", str(outcome["error"]))
+
+    def test_zero_and_noninteger_batch_size_are_rejected(self):
+        for bad in (0, -5, 2.5, float("nan")):
+            with self.assertRaises(ValueError):
+                next(iter(quantized_best_first_decode(_next_logprobs, eos=_EOS, max_len=5, batch_size=bad)))
+
+    def test_batched_callback_under_return_raises_instead_of_dropping_the_frontier(self):
+        # Reproduces the audit's exact case: a single live prefix (the empty start prefix), a batched
+        # callback that returns fewer step tables than requested (zero, for the one asked for).
+        def under_returning(prefixes):
+            return []
+
+        with self.assertRaises(ValueError) as ctx:
+            list(quantized_best_first_decode(batch_next_logprobs=under_returning, eos=_EOS, max_len=3))
+        self.assertIn("expected 1, got 0", str(ctx.exception))
+
+    def test_batched_callback_over_return_also_raises(self):
+        def over_returning(prefixes):
+            return [list(_next_logprobs(pf)) for pf in prefixes] + [[]]
+
+        with self.assertRaises(ValueError) as ctx:
+            list(quantized_best_first_decode(batch_next_logprobs=over_returning, eos=_EOS, max_len=3))
+        self.assertIn("expected 1, got 2", str(ctx.exception))
+
+    def test_bucket_bits_out_of_range_is_rejected(self):
+        for bad in (-1, 1024, 2.5, float("nan")):
+            with self.assertRaises(ValueError):
+                next(iter(quantized_best_first_decode(_next_logprobs, eos=_EOS, max_len=3, bucket_bits=bad)))
+
+    def test_max_results_is_validated(self):
+        for bad in (0, -1, 2.5):
+            with self.assertRaises(ValueError):
+                next(iter(quantized_best_first_decode(_next_logprobs, eos=_EOS, max_len=3, max_results=bad)))
+
+    def test_min_mass_is_validated(self):
+        for bad in (-0.1, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                next(iter(quantized_best_first_decode(_next_logprobs, eos=_EOS, max_len=3, min_mass=bad)))
+
+    def test_valid_batch_size_and_well_behaved_callback_process_full_frontier(self):
+        # Negative control: a normal, well-formed run (valid positive batch_size forcing several
+        # take/commit iterations, a callback that returns exactly one step table per requested prefix)
+        # still processes the WHOLE frontier correctly and matches brute force exactly -- the fix does
+        # not regress the ordinary case.
+        max_len = 5
+        brute = _brute_force(max_len)
+
+        def batch_next_logprobs(prefixes):
+            return [list(_next_logprobs(pf)) for pf in prefixes]
+
+        mine = list(
+            quantized_best_first_decode(
+                batch_next_logprobs=batch_next_logprobs, eos=_EOS, max_len=max_len, batch_size=2, bucket_bits=20
             )
         )
         self.assertEqual(len(mine), len(brute))
