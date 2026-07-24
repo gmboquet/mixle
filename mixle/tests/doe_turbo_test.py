@@ -179,6 +179,89 @@ class TurboMinimizeValidationTest(unittest.TestCase):
         self.assertGreaterEqual(res["n_restarts"], 0)
 
 
+# --------------------------------------------------------------------------- MXR-080-0197
+# turbo_minimize's search loop caught every exception from GP fitting/posterior sampling with a bare
+# `except Exception`, treating a genuine numerical failure and a totally unrelated bug (a configuration
+# mistake, a programming error) identically: silently swallowed, counted as "the model failed", and used
+# to shrink the trust region and retry. The function could spend its entire budget on random restarts,
+# with the GP-guided (Bayesian) path never once succeeding, and still return a normal-looking result --
+# no exception, no indication anything was wrong. The catch is now narrowed to well-defined numerical
+# failure types (numpy/torch LinAlgError) and the result always carries honest fit-failure/restart
+# diagnostics and a termination status.
+class TurboExceptionHandlingTest(unittest.TestCase):
+    def _obj(self, x):
+        return float(np.sum(x**2))
+
+    def test_an_unrelated_bug_propagates_instead_of_being_swallowed(self):
+        # Mirrors doe_multifidelity_test.py's SurrogateFitFailureStatusTest (MXR-080-0183): a TypeError
+        # standing in for an unrelated coding/configuration bug must come straight out of
+        # turbo_minimize, not be caught and relabeled "model failure".
+        with mock.patch.object(tr_module, "_fit_surrogate", side_effect=TypeError("simulated unrelated coding bug")):
+            with self.assertRaises(TypeError):
+                turbo_minimize(self._obj, [(-1.0, 1.0)] * 2, n_init=4, max_evals=10, batch_size=1, seed=0)
+
+    def test_a_genuine_numerical_failure_is_caught_with_honest_diagnostics(self):
+        # Every GP fit fails numerically (a singular covariance) -- the run must still complete
+        # (fall back to Latin-hypercube restarts) but now HONESTLY report that the Bayesian path never
+        # once worked, instead of returning a result indistinguishable from a real optimization run.
+        with mock.patch.object(
+            tr_module, "_fit_surrogate", side_effect=np.linalg.LinAlgError("simulated singular covariance")
+        ):
+            res = turbo_minimize(self._obj, [(-1.0, 1.0)] * 2, n_init=4, max_evals=16, batch_size=1, seed=0)
+        self.assertEqual(res["n_bayes_batches"], 0)
+        self.assertGreater(res["n_fit_failures"], 0)
+        self.assertIsNotNone(res["last_fit_error"])
+        self.assertIn("LinAlgError", res["last_fit_error"])
+        self.assertTrue(res["degraded_to_random_search"])
+        self.assertEqual(res["stopped_reason"], "budget_exhausted")
+
+    def test_a_non_finite_posterior_covariance_is_also_caught_the_same_way(self):
+        # The numerical-failure family isn't just _fit_surrogate: _thompson_batch's posterior sampling
+        # (via _safe_cholesky) can fail too, and must be caught by the SAME narrowed handler, not treated
+        # differently just because it surfaces from a different call inside the try block.
+        class _BadCovGP:
+            def predict(self, xn, yn, cand, return_cov=True):
+                n = cand.shape[0]
+                return np.zeros(n), np.full((n, n), np.nan)
+
+        with mock.patch.object(tr_module, "_fit_surrogate", side_effect=lambda x, y, gp, fk: _BadCovGP()):
+            res = turbo_minimize(self._obj, [(-1.0, 1.0)] * 2, n_init=4, max_evals=16, batch_size=1, seed=0)
+        self.assertEqual(res["n_bayes_batches"], 0)
+        self.assertGreater(res["n_fit_failures"], 0)
+        self.assertIn("LinAlgError", res["last_fit_error"])
+        self.assertTrue(res["degraded_to_random_search"])
+
+    def test_thompson_batch_reraises_safe_cholesky_failure_as_linalgerror_not_valueerror(self):
+        # Direct unit test of the re-tagging at its source: a bare ValueError here would be
+        # indistinguishable from _thompson_batch's own q <= cand.shape[0] contract check (also a
+        # ValueError) once caught by turbo_minimize's loop -- re-tagging as LinAlgError is what makes
+        # the two distinguishable.
+        from mixle.doe.trust_region import _thompson_batch
+
+        class _BadCovGP:
+            def predict(self, xn, yn, cand, return_cov=True):
+                n = cand.shape[0]
+                return np.zeros(n), np.full((n, n), np.nan)
+
+        rng = np.random.RandomState(0)
+        cand = rng.uniform(0, 1, size=(5, 2))
+        with self.assertRaises(np.linalg.LinAlgError):
+            _thompson_batch(_BadCovGP(), rng.uniform(0, 1, size=(3, 2)), rng.normal(size=3), cand, q=2, rng=rng)
+
+    def test_a_normal_run_with_a_working_surrogate_reports_accurate_success_diagnostics(self):
+        # Negative control (GP stubbed so this runs without torch; TurboOptimizeTest below repeats it
+        # against the real surrogate): when the Bayesian path genuinely works, the diagnostics say so.
+        with mock.patch.object(tr_module, "_fit_surrogate", side_effect=_fake_fit_surrogate_ok):
+            res = turbo_minimize(
+                self._obj, [(-1.0, 1.0)] * 2, n_init=4, max_evals=16, batch_size=2, n_candidates=50, seed=0
+            )
+        self.assertGreater(res["n_bayes_batches"], 0)
+        self.assertEqual(res["n_fit_failures"], 0)
+        self.assertIsNone(res["last_fit_error"])
+        self.assertFalse(res["degraded_to_random_search"])
+        self.assertEqual(res["stopped_reason"], "budget_exhausted")
+
+
 @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")
 class TurboOptimizeTest(unittest.TestCase):
     def test_finds_quadratic_optimum(self):
@@ -203,6 +286,15 @@ class TurboOptimizeTest(unittest.TestCase):
             )
         self.assertLess(np.linalg.norm(res["x"] - opt), 0.5)
         self.assertEqual(res["X"].shape[1], 6)
+        # MXR-080-0197: a real run against the actual GP surrogate reports honest, healthy diagnostics --
+        # the negative control for "a working Bayesian path is reported as working", not just the mocked
+        # scenarios above. Not asserting n_fit_failures == 0 / last_fit_error is None here: those are
+        # stochastic (a real numerical hiccup is legitimately possible over ~50 batches) and asserting
+        # them would make the test flaky over unrelated seeds; what must always hold is that the
+        # Bayesian path ran for real and the run completed normally.
+        self.assertGreater(res["n_bayes_batches"], 0)
+        self.assertFalse(res["degraded_to_random_search"])
+        self.assertEqual(res["stopped_reason"], "budget_exhausted")
 
     def test_beats_random_search_in_high_dim(self):
         from mixle.doe import turbo_minimize

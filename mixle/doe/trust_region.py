@@ -121,7 +121,18 @@ def _thompson_batch(gp: Any, xn: np.ndarray, yn: np.ndarray, cand: np.ndarray, q
         raise ValueError(f"_thompson_batch requires q <= cand.shape[0] (q={q}, candidates={cand.shape[0]}).")
     mean, cov = gp.predict(xn, yn, cand, return_cov=True)
     mean = np.asarray(mean, dtype=np.float64).ravel()
-    chol = _safe_cholesky(np.atleast_2d(np.asarray(cov, dtype=np.float64)))
+    try:
+        chol = _safe_cholesky(np.atleast_2d(np.asarray(cov, dtype=np.float64)))
+    except ValueError as exc:
+        # _safe_cholesky raises plain ValueError for every one of its own failure modes (non-finite
+        # covariance, not positive-semidefinite within tolerance, or PSD but still unfactorable after its
+        # full jitter budget) -- each one IS a genuine numerical GP-posterior failure, the same family
+        # turbo_minimize's loop already treats as "shrink the region and retry" (MXR-080-0197). Re-tag it
+        # as LinAlgError here, at the one call site that KNOWS this particular ValueError means that, so
+        # the loop's narrowed handler can catch it without also risking catching an unrelated ValueError
+        # from somewhere else (e.g. this function's own q <= cand.shape[0] contract check above, which
+        # must propagate as the programming-error signal it is, not be silently relabeled "model failure").
+        raise np.linalg.LinAlgError(str(exc)) from exc
     picks: list[np.ndarray] = []
     chosen: set[int] = set()
     for _ in range(q):
@@ -132,6 +143,30 @@ def _thompson_batch(gp: Any, xn: np.ndarray, yn: np.ndarray, cand: np.ndarray, q
                 picks.append(cand[int(idx)])
                 break
     return np.asarray(picks)
+
+
+def _numerical_fit_error_types() -> tuple[type[BaseException], ...]:
+    """The well-defined numerical failure types the TuRBO loop's GP fit/posterior step can raise.
+
+    Mirrors :func:`mixle.doe.multifidelity._surrogate_fit_error_types` (MXR-080-0183) but covers this
+    loop's full numerical surface: a singular or indefinite covariance during GP hyperparameter fitting
+    (:func:`mixle.doe.bayesopt._fit_surrogate`) or posterior sampling (:func:`_thompson_batch`, which
+    re-raises :func:`mixle.doe.batch._safe_cholesky`'s ``ValueError`` as ``np.linalg.LinAlgError`` at its
+    call site specifically so it funnels through this same tuple) surfaces as ``numpy.linalg.LinAlgError``
+    (a numpy-backed surrogate) or ``torch.linalg.LinAlgError`` (the default torch-backed one, out of
+    ``torch.linalg.cholesky`` inside ``GaussianProcessRegressor.log_marginal_likelihood``/``predict``) --
+    both a genuine "this data/posterior is ill-conditioned" failure, never a configuration or programming
+    error. Anything else (a bad ``fit_kwargs`` optimizer name, a missing torch install, an unrelated bug)
+    must propagate instead of being caught here and silently relabeled "model failure" (MXR-080-0197).
+    Torch is imported lazily, matching the rest of this module's lazy torch usage, so merely importing
+    this module never requires torch -- the tuple just narrows to numpy alone when torch is not installed.
+    """
+    errors: tuple[type[BaseException], ...] = (np.linalg.LinAlgError,)
+    try:
+        import torch
+    except ImportError:
+        return errors
+    return (*errors, torch.linalg.LinAlgError)
 
 
 def turbo_minimize(
@@ -160,7 +195,21 @@ def turbo_minimize(
     second because a batch can never select more distinct candidates than the trust region generates for
     it, no matter how many times it retries (MXR-080-0196).
 
-    Returns ``{'x', 'y', 'X', 'Y', 'n_restarts'}`` with the best point/value and the full history.
+    A well-defined numerical failure while fitting the local GP or sampling its joint posterior (a
+    singular or indefinite covariance -- ``numpy``/``torch`` ``linalg.LinAlgError``) shrinks the trust
+    region and retries next iteration, the same policy as an ordinary non-improving batch. Anything else
+    (a configuration or programming bug -- a bad ``fit_kwargs`` optimizer name, a missing torch install,
+    ...) propagates instead of being silently caught and relabeled "model failure" (MXR-080-0197).
+
+    Returns ``{'x', 'y', 'X', 'Y', 'n_restarts', 'n_bayes_batches', 'n_fit_failures', 'last_fit_error',
+    'degraded_to_random_search', 'stopped_reason'}``: the best point/value and the full evaluation
+    history; how many trust-region collapses restarted from a fresh Latin-hypercube design
+    (``n_restarts``); how many batches were genuine GP-guided Thompson proposals (``n_bayes_batches``)
+    versus caught numerical failures (``n_fit_failures``, with the most recent one's diagnostic string in
+    ``last_fit_error``, else ``None``); ``degraded_to_random_search`` is True iff *every* batch attempt
+    failed numerically, meaning the entire result came from Latin-hypercube restarts and the GP-guided
+    search never once ran; and ``stopped_reason`` is always ``"budget_exhausted"`` (this loop's only
+    normal termination) for any call that returns rather than raises.
     """
     b = _as_bounds(bounds)
     d = b.shape[0]
@@ -206,6 +255,10 @@ def turbo_minimize(
     tr = TrustRegion(dim=d)
     best = float(y_all.min())
     restarts = 0
+    n_bayes_batches = 0
+    n_fit_failures = 0
+    last_fit_error: str | None = None
+    fit_error_types = _numerical_fit_error_types()
 
     while y_all.shape[0] < max_evals:
         if tr.collapsed:
@@ -241,9 +294,16 @@ def turbo_minimize(
         try:
             gp = _fit_surrogate(xu, yz, None, fit_kwargs)
             picks_u = _thompson_batch(gp, xu, yz, cand, q, rng)
-        except Exception:  # GP/Cholesky failure -> shrink the region and retry next iteration  # noqa: BLE001
+        except fit_error_types as exc:
+            # A well-defined numerical failure (singular/indefinite GP covariance) -- shrink the region
+            # and retry next iteration, the same policy as an ordinary non-improving batch. Anything
+            # else (a configuration or programming bug) is NOT in fit_error_types and propagates instead
+            # of being silently caught and relabeled "model failure" (MXR-080-0197).
+            n_fit_failures += 1
+            last_fit_error = f"{type(exc).__name__}: {exc}"
             tr.update(False)
             continue
+        n_bayes_batches += 1
         improved = False
         for pu in picks_u:
             xn = b[:, 0] + pu * span
@@ -262,6 +322,11 @@ def turbo_minimize(
         "X": x_all,
         "Y": sign * y_all,
         "n_restarts": restarts,
+        "n_bayes_batches": n_bayes_batches,
+        "n_fit_failures": n_fit_failures,
+        "last_fit_error": last_fit_error,
+        "degraded_to_random_search": n_bayes_batches == 0,
+        "stopped_reason": "budget_exhausted",
     }
 
 

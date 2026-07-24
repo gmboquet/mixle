@@ -49,6 +49,13 @@ class TurboBudgetOvershootTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             turbo_minimize(lambda x: float(np.sum(x**2)), [(0.0, 1.0)] * 3, n_init=8, max_evals=3)
 
+    # MXR-080-0197: turbo_minimize's search loop used to catch every exception from GP fitting --
+    # including ImportError from a missing torch install -- and silently treat it as "the model failed",
+    # shrink the trust region, and retry; the run would complete via Latin-hypercube restarts alone with
+    # no torch ever required, which is how these two happened to pass in a torch-free environment before.
+    # Now only well-defined numerical failures (LinAlgError) are caught, so a real run genuinely needs
+    # the GP surrogate, same as every other real-fit test in this file.
+    @unittest.skipUnless(HAS_TORCH, "torch not installed")
     def test_a_collapse_near_the_budget_does_not_overshoot_max_evals(self):
         # a deliberately tiny max_evals relative to n_init forces the restart branch to fire near
         # the end of the run; the total evaluation count must never exceed max_evals.
@@ -57,6 +64,7 @@ class TurboBudgetOvershootTest(unittest.TestCase):
         )
         self.assertLessEqual(result["Y"].shape[0], 6)
 
+    @unittest.skipUnless(HAS_TORCH, "torch not installed")
     def test_a_normal_run_still_converges_reasonably(self):
         result = turbo_minimize(lambda x: float(np.sum(x**2)), [(-2.0, 2.0)] * 2, n_init=6, max_evals=30, seed=0)
         self.assertLess(result["y"], 1.0)
