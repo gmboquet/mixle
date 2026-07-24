@@ -25,6 +25,8 @@ Reference: Ledoit & Wolf, 'A well-conditioned estimator for large-dimensional co
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from numpy.random import RandomState
 
@@ -38,7 +40,7 @@ from mixle.stats.multivariate.multivariate_gaussian import (
     MultivariateGaussianDistribution,
 )
 
-__all__ = ["LedoitWolfEstimator"]
+__all__ = ["LedoitWolfEstimator", "LedoitWolfInsufficientData"]
 
 
 def _shrink(s1: np.ndarray, s2: np.ndarray, s3: np.ndarray, s4: float, n: float):
@@ -60,12 +62,46 @@ def _shrink(s1: np.ndarray, s2: np.ndarray, s3: np.ndarray, s4: float, n: float)
     return mean, cov, shrunk, delta
 
 
+_MIN_EFFECTIVE_COUNT = 2.0
+"""Minimum accumulated observation weight :meth:`LedoitWolfEstimator.estimate` requires before it will
+compute a shrinkage estimate.
+
+Below 2, the raw (unshrunk) sample covariance ``S = E[xx^T] - mean*mean^T`` is not merely noisy but
+*identically zero*: mean-centering a single effective observation always cancels exactly, in exact
+arithmetic, whatever the data is, so there is no variance information to shrink at any dimension --
+dividing through anyway is what previously produced NaN/Inf sufficient statistics (zero weight) or a
+covariance that is purely a numerical-healing artifact rather than an estimate (one observation's
+exactly-zero sample covariance, silently jittered into a tiny-but-"valid" positive-definite matrix by
+:class:`~mixle.stats.multivariate.multivariate_gaussian.MultivariateGaussianDistribution`'s own
+construction healing). This is deliberately a much weaker floor than the classical "n > dim" rule of
+thumb for the plain sample covariance: Ledoit-Wolf's entire purpose is a well-conditioned estimate
+precisely when n is small relative to dim (see module docstring), so gating on n > dim here would
+defeat the reason this estimator exists.
+"""
+
+
+@dataclass
+class LedoitWolfInsufficientData:
+    """Typed placeholder :meth:`LedoitWolfEstimator.estimate` returns instead of a fabricated Gaussian
+    when the accumulated sufficient statistics do not support a well-posed covariance estimate (see
+    :data:`_MIN_EFFECTIVE_COUNT`).
+
+    ``effective_count`` and ``dim`` let a caller decide whether to accumulate more data and retry.
+    """
+
+    reason: str
+    effective_count: float
+    dim: int | None
+
+
 class LedoitWolfEstimator(ParameterEstimator):
     """Estimate a multivariate Gaussian with a Ledoit-Wolf-shrunk covariance.
 
     Returns a :class:`MultivariateGaussianDistribution` whose mean is the sample mean and whose covariance
     is shrunk toward a scaled identity by the data-driven Ledoit-Wolf intensity. The chosen intensity is
-    exposed on the returned distribution as ``dist.shrinkage`` for inspection.
+    exposed on the returned distribution as ``dist.shrinkage`` for inspection. When the accumulated
+    sufficient statistics carry too little effective weight to support any covariance estimate (see
+    :data:`_MIN_EFFECTIVE_COUNT`), returns a :class:`LedoitWolfInsufficientData` instead.
     """
 
     def __init__(self, dim: int | None = None, name: str | None = None, keys: str | None = None):
@@ -77,10 +113,38 @@ class LedoitWolfEstimator(ParameterEstimator):
         """Return an accumulator factory for streaming Ledoit-Wolf sufficient statistics."""
         return LedoitWolfAccumulatorFactory(self.dim, self.keys, self.name)
 
-    def estimate(self, nobs, suff_stat) -> MultivariateGaussianDistribution:
-        """Estimate a Gaussian distribution from accumulated Ledoit-Wolf sufficient statistics."""
+    def estimate(self, nobs, suff_stat) -> MultivariateGaussianDistribution | LedoitWolfInsufficientData:
+        """Estimate a Gaussian distribution from accumulated Ledoit-Wolf sufficient statistics.
+
+        Returns a :class:`LedoitWolfInsufficientData` -- never a distribution built from NaN/Inf or from
+        a numerically-healed-but-meaningless covariance -- when the accumulated weight is below
+        :data:`_MIN_EFFECTIVE_COUNT`.
+
+        Raises:
+            ValueError: If the shrinkage computation itself produces a non-finite mean or covariance
+                despite adequate, already-validated sufficient statistics (a numerical-overflow defect,
+                not an insufficient-data condition). A substantively non-positive-semidefinite result is
+                rejected by :class:`MultivariateGaussianDistribution`'s own construction, which this
+                relies on as the final PSD gate.
+        """
         s1, s2, s3, s4, n = suff_stat
-        mean, _cov, shrunk, delta = _shrink(np.asarray(s1), np.asarray(s2), np.asarray(s3), float(s4), float(n))
+        n = float(n) if n is not None else 0.0
+        if s1 is None or not np.isfinite(n) or n < _MIN_EFFECTIVE_COUNT:
+            return LedoitWolfInsufficientData(
+                reason=(
+                    f"need at least {_MIN_EFFECTIVE_COUNT:g} of accumulated observation weight to "
+                    f"estimate a covariance, got {n:g}"
+                ),
+                effective_count=n,
+                dim=None if s1 is None else len(np.asarray(s1)),
+            )
+        mean, _cov, shrunk, delta = _shrink(np.asarray(s1), np.asarray(s2), np.asarray(s3), float(s4), n)
+        if not (np.all(np.isfinite(mean)) and np.all(np.isfinite(shrunk))):
+            raise ValueError(
+                "Ledoit-Wolf shrinkage produced a non-finite mean or covariance from finite, "
+                f"adequately-weighted sufficient statistics (effective count {n:g}); this indicates a "
+                "numerical overflow in the shrinkage computation, not insufficient data."
+            )
         dist = MultivariateGaussianDistribution(mean, shrunk, name=self.name)
         dist.shrinkage = delta
         return dist
@@ -110,8 +174,21 @@ class LedoitWolfAccumulator(SequenceEncodableStatisticAccumulator):
             self.s3 = np.zeros(dim)
 
     def update(self, x: np.ndarray, weight: float, estimate=None) -> None:
-        """Add one weighted observation to the streaming covariance-shrinkage statistics."""
+        """Add one weighted observation to the streaming covariance-shrinkage statistics.
+
+        Raises:
+            ValueError: If ``weight`` is negative or non-finite, ``x`` contains a non-finite entry, or
+                ``x``'s dimension does not match every previously accumulated observation's.
+        """
+        weight = float(weight)
+        if not np.isfinite(weight) or weight < 0.0:
+            raise ValueError(f"observation weight must be finite and nonnegative, got {weight!r}")
         x = np.asarray(x, dtype=float)
+        if not np.all(np.isfinite(x)):
+            n_bad = int(np.sum(~np.isfinite(x)))
+            raise ValueError(f"observation must be finite, got {n_bad} of {len(x)} non-finite entries")
+        if self.dim is not None and len(x) != self.dim:
+            raise ValueError(f"expected an observation of dimension {self.dim}, got dimension {len(x)}")
         self._ensure(len(x))
         sq = float(x @ x)
         self.s1 += weight * x
@@ -125,8 +202,22 @@ class LedoitWolfAccumulator(SequenceEncodableStatisticAccumulator):
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate=None) -> None:
-        """Add a batch of weighted observations to the streaming sufficient statistics."""
+        """Add a batch of weighted observations to the streaming sufficient statistics.
+
+        Raises:
+            ValueError: If any weight is negative or non-finite, any observation contains a non-finite
+                entry, or the batch's dimension does not match every previously accumulated
+                observation's.
+        """
         x = np.asarray(x, dtype=float)
+        weights = np.asarray(weights, dtype=float)
+        if not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
+            raise ValueError("observation weights must be finite and nonnegative")
+        if not np.all(np.isfinite(x)):
+            n_bad = int(np.sum(~np.isfinite(x)))
+            raise ValueError(f"observations must be finite, got {n_bad} non-finite entries across the batch")
+        if self.dim is not None and x.shape[1] != self.dim:
+            raise ValueError(f"expected observations of dimension {self.dim}, got dimension {x.shape[1]}")
         self._ensure(x.shape[1])
         sq = np.einsum("ij,ij->i", x, x)  # ||x_t||^2 per row
         xw = x.T * weights
@@ -141,7 +232,11 @@ class LedoitWolfAccumulator(SequenceEncodableStatisticAccumulator):
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat) -> LedoitWolfAccumulator:
-        """Merge sufficient statistics from another Ledoit-Wolf accumulator."""
+        """Merge sufficient statistics from another Ledoit-Wolf accumulator.
+
+        Raises:
+            ValueError: If the incoming statistics' dimension does not match this accumulator's.
+        """
         s1, s2, s3, s4, count = suff_stat
         if s1 is None:
             return self
@@ -149,6 +244,10 @@ class LedoitWolfAccumulator(SequenceEncodableStatisticAccumulator):
             self.dim = len(s1)
             self.s1, self.s2, self.s3, self.s4, self.count = (np.array(s1), np.array(s2), np.array(s3), s4, count)
         else:
+            if len(s1) != self.dim:
+                raise ValueError(
+                    f"cannot combine accumulators of mismatched dimension: expected {self.dim}, got {len(s1)}"
+                )
             self.s1 += s1
             self.s2 += s2
             self.s3 += s3
