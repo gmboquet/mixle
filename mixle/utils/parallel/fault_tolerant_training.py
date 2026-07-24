@@ -373,6 +373,15 @@ class ElasticTrainingJob:
     ``run_step`` call as ``restart=True`` when it feeds :attr:`health`, so ``health.report()["restarts"]``
     always carries a real per-restart continuity verdict, not something the caller has to remember to ask
     for.
+
+    **Single-driver only.** :meth:`run_step`, :meth:`checkpoint`, and :meth:`respawn_rank` share mutable
+    state (:attr:`canonical_model`, :attr:`canonical_optimizer`, :attr:`loader_states`) with no internal
+    locking, and are meant to be called from the one thread that constructed this job -- calling any of
+    them from a second thread while another is in flight is a misuse this class detects and rejects
+    (:class:`RuntimeError`) rather than silently letting it race: ``run_step`` advances the canonical
+    weights before it advances :attr:`loader_states`, so a concurrent :meth:`checkpoint` can capture a
+    model state newer than the loader state written alongside it. Periodic/background checkpointing must
+    be driven from the same thread as ``run_step`` (e.g. called between steps), not a separate one.
     """
 
     def __init__(
@@ -406,17 +415,29 @@ class ElasticTrainingJob:
         self.pending_restart = False  # True right after a resume -- consumed by the next observed step
         self.last_checkpoint_handle: AsyncCheckpointHandle | None = None
         self.history: list[dict[str, Any]] = []
+        self._owner_thread_id = threading.get_ident()
 
     def _spawn_rank(self, rank_id: int) -> None:
         self.ranks[rank_id] = SimulatedRank(
             rank_id, self.model_factory, lambda r=rank_id: self.batch_fn_for_rank(r, self.loader_states[r])
         )
 
+    def _check_single_driver(self, method_name: str) -> None:
+        current = threading.get_ident()
+        if current != self._owner_thread_id:
+            raise RuntimeError(
+                f"ElasticTrainingJob.{method_name}() called from thread {current}, but this job was "
+                f"constructed on thread {self._owner_thread_id}. run_step()/checkpoint()/respawn_rank() "
+                "share mutable state with no internal locking and must be driven from a single thread "
+                '-- see the class docstring\'s "Single-driver only" note.'
+            )
+
     def run_step(self, step: int, kill_ranks: frozenset[int] = frozenset()) -> dict[str, Any]:
         """Run one data-parallel step. ``kill_ranks`` simulates a mid-step death for those ranks: they
         reach the post-backward rendezvous (so their compute genuinely happened) but are never released,
         so their gradient is excluded from this step's average -- the job continues with fewer ranks
         rather than raising."""
+        self._check_single_driver("run_step")
         canonical_sd = {k: v.detach().clone() for k, v in self.canonical_model.state_dict().items()}
         live = [r for r in self.ranks if r not in self.dead_ranks]
         if not live:
@@ -474,6 +495,7 @@ class ElasticTrainingJob:
 
     def checkpoint(self, path: str | None = None) -> AsyncCheckpointHandle:
         """Async-snapshot the canonical model/optimizer plus every rank's loader state."""
+        self._check_single_driver("checkpoint")
         path = path or self.checkpoint_dir
         rank0_state = self.loader_states[0]
         extra = {"loader_states": {r: s.to_dict() for r, s in self.loader_states.items()}}
@@ -486,7 +508,14 @@ class ElasticTrainingJob:
         rank's loader state -- instead of restarting the whole job from scratch. Mirrors
         ``resilient_em``'s ``_respawn_worker``: same rank id, resumed data position, job otherwise
         untouched. Marks the next ``run_step`` as a restart so F4's continuity check evaluates it."""
+        self._check_single_driver("respawn_rank")
         path = checkpoint_path or self.checkpoint_dir
+        # A checkpoint write in flight to this same path must finish before it's read back, or this can
+        # load a partially-written / stale directory -- wait rather than trust the caller to have done so.
+        # Existing callers (e.g. the respawn test in mixle/tests/fault_tolerant_training_test.py) already
+        # wait manually before respawning; this turns that into a guarantee instead of a convention.
+        if self.last_checkpoint_handle is not None and self.last_checkpoint_handle.path == path:
+            self.last_checkpoint_handle.wait()
         load_checkpoint(self.canonical_model, self.canonical_optimizer, path)
         extra = load_checkpoint_extra(path)
         loader_states = extra.get("loader_states")
