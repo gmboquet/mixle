@@ -48,6 +48,7 @@ __all__ = [
     "auto_precision",
     "engine_of",
     "engine_with_precision",
+    "is_symbolic_payload",
     "normalize_numpy_dtype",
     "normalize_torch_dtype",
     "precision_name",
@@ -130,7 +131,10 @@ def _direct_engine(x: Any) -> ComputeEngine | None:
             )
         return explicit
     # object arrays of symbolic nodes are ndarrays, so they must be routed to
-    # the symbolic engine before the np.ndarray -> NumpyEngine registry rule
+    # the symbolic engine before the np.ndarray -> NumpyEngine registry rule.
+    # is_symbolic_payload validates EVERY element's ownership (MXR-080-0151), so a
+    # mixed-ownership object array raises TypeError here rather than resolving to
+    # whichever engine the registry check below would have guessed.
     if is_symbolic_payload(x):
         return SYMBOLIC_ENGINE
     resolved = _resolve_registered_type(x)

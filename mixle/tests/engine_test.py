@@ -156,6 +156,60 @@ class EngineTestCase(unittest.TestCase):
         self.assertIsInstance(expr, SymbolicExpression)
         self.assertAlmostEqual(float(SYMBOLIC_ENGINE.evaluate(expr, {"x": 0.0})), np.log(2.0))
 
+    def test_is_symbolic_payload_rejects_mixed_ownership_numeric_first(self):
+        # Regression (MXR-080-0151), exact audit repro: an object array used to be classified
+        # by x.flat[0] alone, so a mixed-ownership array's routing depended entirely on which
+        # kind happened to sit at index 0. An array whose first element is NOT symbolic used to
+        # silently route its embedded symbolic element through NumPy (which was never built to
+        # handle SymbolicExpression objects).
+        from mixle.engines import is_symbolic_payload
+
+        class Unrelated:
+            pass
+
+        mixed = np.empty(2, dtype=object)
+        mixed[0] = Unrelated()
+        mixed[1] = SymbolicExpression.symbol("x")
+        with self.assertRaises(TypeError):
+            is_symbolic_payload(mixed)
+        with self.assertRaises(TypeError):
+            engine_of(mixed)  # end-to-end through mixle.engines' own dispatch
+
+    def test_is_symbolic_payload_rejects_mixed_ownership_symbolic_first(self):
+        # Regression (MXR-080-0151), the reverse ordering: an array whose first element IS
+        # symbolic used to silently route its unrelated element through the symbolic engine.
+        # Both orderings must be caught -- not just whichever one was "lucky" before.
+        from mixle.engines import is_symbolic_payload
+
+        class Unrelated:
+            pass
+
+        mixed = np.empty(2, dtype=object)
+        mixed[0] = SymbolicExpression.symbol("x")
+        mixed[1] = Unrelated()
+        with self.assertRaises(TypeError):
+            is_symbolic_payload(mixed)
+        with self.assertRaises(TypeError):
+            engine_of(mixed)
+
+    def test_is_symbolic_payload_uniform_arrays_are_unaffected(self):
+        # Negative control: a genuinely uniform object array -- all-symbolic or all-other --
+        # must still classify exactly as before. Only genuinely mixed ownership is new.
+        from mixle.engines import SYMBOLIC_ENGINE, is_symbolic_payload
+
+        class Unrelated:
+            pass
+
+        all_symbolic = np.array([SymbolicExpression.symbol("x"), SymbolicExpression.symbol("y")], dtype=object)
+        self.assertTrue(is_symbolic_payload(all_symbolic))
+        self.assertIs(engine_of(all_symbolic), SYMBOLIC_ENGINE)
+
+        all_other = np.array([Unrelated(), Unrelated()], dtype=object)
+        self.assertFalse(is_symbolic_payload(all_other))
+
+        # an empty object array has no elements to disagree, so it is not a symbolic payload
+        self.assertFalse(is_symbolic_payload(np.array([], dtype=object)))
+
     def test_direct_engine_rejects_invalid_pysp_engine_tag(self):
         # Regression (MXR-080-0120): __pysp_engine__ used to be trusted at face value, so an
         # object tagging itself with a plain string (or any non-ComputeEngine value) made
