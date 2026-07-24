@@ -70,9 +70,22 @@ class Reasoner:
         self.scorer = scorer
         return self
 
-    def ask(self, question: str, *, verify: bool = False, **overrides: Any) -> Investigation:
+    def ask(
+        self,
+        question: str,
+        *,
+        verify: bool = False,
+        actions: list[Action] | tuple[Action, ...] | None = None,
+        **overrides: Any,
+    ) -> Investigation:
         """Answer ``question`` over the configured action space, or abstain. ``overrides`` pass through to
         :func:`investigate` (e.g. ``budget_cost``, ``min_confidence``, ``target_confidence``, ``max_actions``).
+
+        ``actions``, when given, is used for THIS call only, instead of ``self._actions`` -- e.g. a
+        caller-owned immutable view such as :class:`~mixle.substrate.harness.Harness`'s per-request
+        whitelist snapshot. It never reads or mutates ``self._actions``, so passing it cannot corrupt
+        the reasoner's own configured action list (or any other in-flight call). Default ``None`` keeps
+        prior behavior: the reasoner's own action list.
 
         With ``verify=True`` and a substrate configured, the (non-abstained) answer is run back through
         :func:`~mixle.substrate.factuality.check_factuality` and the :class:`FactualityReceipt` is attached
@@ -85,7 +98,8 @@ class Reasoner:
             "telemetry": self.telemetry,
         }
         kw.update(overrides)
-        inv = investigate(question, self._actions, self.answerer, **kw)
+        action_space = list(actions) if actions is not None else self._actions
+        inv = investigate(question, action_space, self.answerer, **kw)
         if verify and inv.answer is not None and self.substrate is not None:
             from mixle.substrate.factuality import check_factuality
 
