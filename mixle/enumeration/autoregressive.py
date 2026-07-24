@@ -508,13 +508,38 @@ class AutoregressiveEnumerable:
             self._steps, (), self._depth, quantizer, max_fine_bucket, self.eos, self.branch_cap
         )
 
+    def _in_declared_support(self, seq: tuple) -> bool:
+        """Whether ``seq`` satisfies this model's DECLARED STRUCTURAL support -- independent of whether each
+        token is actually locally available given its prefix (that per-step check still runs separately, in
+        :meth:`log_density`'s walk). This centralizes exactly what :func:`autoregressive_count_index`'s
+        recursion already enforces structurally (a terminating branch that hits the depth bound without
+        emitting ``eos`` contributes zero mass, not partial credit; an ``eos``-terminated branch stops right
+        there, so nothing can follow it) -- so a candidate sequence handed directly to :meth:`log_density` /
+        :meth:`score_sequences` is held to exactly the same contract as the count index built from the same
+        model, instead of only the weaker per-step check.
+
+        Fixed-length (``eos`` is None): exactly ``self._depth`` (== ``max_len``) tokens.
+        Terminating (``eos`` set): non-empty, ends in ``eos``, with ``eos`` nowhere before the last position
+        (so nothing -- including a repeated ``eos`` -- follows the first one), and total length not
+        exceeding ``self._depth`` (== ``max_len`` when given as a hard cap, else the ``max_depth`` bound).
+        """
+        if not self.terminating:
+            return len(seq) == self._depth
+        if not seq or seq[-1] != self.eos or self.eos in seq[:-1]:
+            return False
+        return len(seq) <= self._depth
+
     def log_density(self, sequence: Iterable[Any]) -> float:
-        """Exact total log-probability of a sequence (``-inf`` if any token is off-support given its prefix).
+        """Exact total log-probability of a sequence -- ``-inf`` if it is off the model's DECLARED support
+        (wrong length, missing/misplaced ``eos``, or past the depth cap; see :meth:`_in_declared_support`)
+        or if any token along the way is locally unavailable given its prefix.
 
         When a ``batch_score_sequences`` scorer is configured and any of the sequence's prefixes is not
         already cached, the score comes from ONE teacher-forcing forward instead of one forward per token.
         """
         seq = tuple(sequence)
+        if not self._in_declared_support(seq):
+            return _NEG_INF
         if self.batch_score_sequences is not None and any(seq[:d] not in self._cache for d in range(len(seq))):
             return float(np.asarray(self.batch_score_sequences([seq]), dtype=float).reshape(-1)[0])
         lp = 0.0
@@ -530,15 +555,22 @@ class AutoregressiveEnumerable:
     def score_sequences(self, sequences: list[Any]) -> np.ndarray:
         """Exact total log-probabilities of many sequences -- batched teacher forcing when available.
 
-        With ``batch_score_sequences`` this is one call (one forward per sequence, all positions in
-        parallel); otherwise it falls back to per-sequence :meth:`log_density` over the cached walk. The
-        rescoring primitive for draft-based (speculative) enumeration.
+        With ``batch_score_sequences`` this is one call scoring every structurally in-support sequence (one
+        forward per sequence, all positions in parallel); a sequence off the declared support (see
+        :meth:`_in_declared_support`) scores ``-inf`` directly, without ever reaching the external scorer.
+        Otherwise falls back to per-sequence :meth:`log_density` over the cached walk, which applies the
+        identical structural check. The rescoring primitive for draft-based (speculative) enumeration.
         """
         seqs = [tuple(s) for s in sequences]
         if not seqs:
             return np.zeros(0, dtype=float)
         if self.batch_score_sequences is not None:
-            return np.asarray(self.batch_score_sequences(seqs), dtype=float).reshape(len(seqs))
+            out = np.full(len(seqs), _NEG_INF, dtype=float)
+            idx = [i for i, s in enumerate(seqs) if self._in_declared_support(s)]
+            if idx:
+                scored = self.batch_score_sequences([seqs[i] for i in idx])
+                out[idx] = np.asarray(scored, dtype=float).reshape(len(idx))
+            return out
         return np.array([self.log_density(s) for s in seqs], dtype=float)
 
     def harvest(self, sequence: Iterable[Any]) -> None:

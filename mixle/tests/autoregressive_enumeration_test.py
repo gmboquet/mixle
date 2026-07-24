@@ -51,6 +51,37 @@ def _brute(next_logprobs, L):
 
 _VOCAB, _LEN = 4, 3
 
+_EOS = 2
+_TERM_P = {None: [0.4, 0.3, 0.3], 0: [0.3, 0.3, 0.4], 1: [0.4, 0.2, 0.4], 2: [0.0, 0.0, 1.0]}
+
+
+def _terminating_model():
+    """3-symbol chain (0, 1, eos=_EOS); same shape as the P/nlp used inline by the existing terminating
+    tests below. Eos is absorbing but -- like a real softmax -- assigns a nonzero (tiny, smoothed)
+    probability to "continuing" past it, so a naive per-step-only check would find a token placed after
+    eos locally available. Every state has a strictly positive direct transition to eos, so termination
+    happens with probability 1 -- the total mass over all eos-terminated sequences is exactly 1.
+    """
+    logt = {k: np.log(np.array(v) + 1e-30) for k, v in _TERM_P.items()}
+
+    def nlp(prefix):
+        last = prefix[-1] if prefix else None
+        return [(t, float(lp)) for t, lp in enumerate(logt[last])]
+
+    return nlp
+
+
+def _walk_lp(next_logprobs, seq):
+    """Independent reference log-density: sum the per-step log-probs by directly walking ``next_logprobs``,
+    the same accumulation :func:`_brute` uses -- so comparisons against it don't just check ``log_density``
+    against itself.
+    """
+    lp, prefix = 0.0, ()
+    for t in seq:
+        lp += dict(next_logprobs(prefix))[t]
+        prefix += (t,)
+    return lp
+
 
 class AutoregressiveEnumerableTest(unittest.TestCase):
     def setUp(self):
@@ -294,6 +325,122 @@ class AutoregressiveEnumerableTest(unittest.TestCase):
         )
         self.assertEqual([plain.unrank(i) for i in range(self.N)], [batched.unrank(i) for i in range(self.N)])
         self.assertEqual(len(plain._cache), len(batched._cache))
+
+    # -- MXR-080-0220: log_density/score_sequences used to check only per-step local availability, never
+    # the sequence's GLOBAL structure -- so sequences outside the declared support scored as finite. -----
+
+    def test_log_density_rejects_wrong_length_for_fixed_model(self):
+        # Reproduce the audit's exact fixed-length case: a length-2 model used to score (), (0,), and
+        # (0, 0, 0) all as finite. max_len=2 is deliberately shorter than self.next_logprobs's own depth
+        # capacity (built for _LEN=3), so the old code could walk right past the declared length without
+        # erroring -- exactly the shape that let the bug hide.
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=2)
+        self.assertEqual(ar.log_density(()), float("-inf"))
+        self.assertEqual(ar.log_density((0,)), float("-inf"))
+        self.assertEqual(ar.log_density((0, 0, 0)), float("-inf"))
+        # Negative control: a genuine length-2 sequence is unaffected -- same finite value as a direct walk.
+        valid = (1, 2)
+        expected = _walk_lp(self.next_logprobs, valid)
+        self.assertTrue(math.isfinite(expected))
+        self.assertAlmostEqual(ar.log_density(valid), expected, places=12)
+
+    def test_log_density_rejects_unterminated_and_misplaced_eos(self):
+        # Reproduce the audit's exact terminating case: the empty sequence, an unterminated prefix, and a
+        # real token placed AFTER eos all used to score as finite.
+        nlp = _terminating_model()
+        ar = AutoregressiveEnumerable(nlp, eos=_EOS, max_depth=40)
+        self.assertEqual(ar.log_density(()), float("-inf"))  # never reaches eos at all
+        self.assertEqual(ar.log_density((0, 1, 0)), float("-inf"))  # unterminated prefix
+        self.assertEqual(ar.log_density((_EOS, 0)), float("-inf"))  # a real token after eos
+        # Negative control: a genuine eos-terminated sequence is unaffected.
+        valid = (0, 1, _EOS)
+        expected = _walk_lp(nlp, valid)
+        self.assertTrue(math.isfinite(expected))
+        self.assertAlmostEqual(ar.log_density(valid), expected, places=12)
+
+    def test_log_density_rejects_tokens_after_eos_even_when_locally_available(self):
+        # "No tokens after eos" must hold structurally, not just per-step: this fixture's eos state
+        # assigns a tiny but nonzero (smoothed) probability to 0/1 "continuing" past it (see
+        # _terminating_model's docstring), so the OLD per-step-only check would find such a continuation
+        # locally available and happily sum it into a finite score.
+        nlp = _terminating_model()
+        ar = AutoregressiveEnumerable(nlp, eos=_EOS, max_depth=40)
+        self.assertEqual(ar.log_density((0, _EOS, 0)), float("-inf"))  # eos mid-sequence, real token after
+        self.assertEqual(ar.log_density((_EOS, _EOS)), float("-inf"))  # eos immediately repeated
+        self.assertEqual(ar.log_density((0, 1, _EOS, 1)), float("-inf"))  # longer prefix before misplaced eos
+
+    def test_log_density_enforces_terminating_depth_cap(self):
+        # eos + an explicit max_len is a terminating model with a HARD depth cap ("the model doesn't
+        # define further generation" beyond it, per the class docstring) -- a correctly eos-terminated
+        # sequence that exceeds the cap must still score -inf, even though it is otherwise well-formed.
+        nlp = _terminating_model()
+        ar = AutoregressiveEnumerable(nlp, eos=_EOS, max_len=2)
+        too_long = (0, 1, _EOS)  # properly terminated, but length 3 > cap 2
+        self.assertEqual(ar.log_density(too_long), float("-inf"))
+        # Negative control: within the cap, genuine sequences are unaffected.
+        valid = (0, _EOS)
+        self.assertAlmostEqual(ar.log_density(valid), _walk_lp(nlp, valid), places=12)
+        immediate = (_EOS,)
+        self.assertAlmostEqual(ar.log_density(immediate), _walk_lp(nlp, immediate), places=12)
+
+    def test_score_sequences_batch_scorer_rejects_invalid_before_calling_scorer(self):
+        # Batch scoring used to bypass validation entirely, trusting the external scorer with anything.
+        # Structurally invalid sequences must now score -inf WITHOUT ever reaching that scorer.
+        calls = []
+
+        def scorer(seqs):
+            calls.append([tuple(s) for s in seqs])
+            return np.full(len(seqs), -777.0)  # a fake sentinel: proves whether it round-tripped or not
+
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, batch_score_sequences=scorer)
+        valid = self.brute[0][0]
+        invalid_short = valid[:-1]
+        invalid_long = valid + (0,)
+        out = ar.score_sequences([invalid_short, valid, invalid_long])
+        self.assertEqual(out[0], float("-inf"))
+        self.assertEqual(out[1], -777.0)
+        self.assertEqual(out[2], float("-inf"))
+        self.assertEqual(calls, [[valid]])  # the scorer only ever saw the structurally valid entry
+
+    def test_log_density_batch_scorer_shortcut_rejects_invalid_before_calling_scorer(self):
+        # log_density has its OWN batch_score_sequences shortcut (for uncached prefixes) that used to
+        # bypass validation the same way -- check it directly, not just through score_sequences.
+        calls = []
+
+        def scorer(seqs):
+            calls.append([tuple(s) for s in seqs])
+            return np.full(len(seqs), -777.0)
+
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, batch_score_sequences=scorer)
+        # No prefixes are cached yet, so the un-fixed code would have taken the batch-scorer shortcut.
+        self.assertEqual(ar.log_density((0, 0)), float("-inf"))  # wrong length: short-circuits first
+        self.assertEqual(calls, [])  # the external scorer was never reached
+
+    def test_total_probability_mass_sums_to_one_fixed_length(self):
+        # The ultimate soundness check: log_density integrates to (approximately) 1 over the TRUE support,
+        # and structurally-invalid (wrong-length) sequences contribute exactly zero -- no leaked mass.
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN)
+        valid_mass = sum(math.exp(ar.log_density(s)) for s, _ in self.brute)
+        self.assertAlmostEqual(valid_mass, 1.0, places=6)
+        garbage = [(), (0,), (0, 0), (0, 0, 0, 0), (1, 2, 3, 0)]
+        for seq in garbage:
+            self.assertEqual(ar.log_density(seq), float("-inf"))
+        leaked = sum(math.exp(ar.log_density(s)) for s in garbage)
+        self.assertEqual(leaked, 0.0)
+
+    def test_total_probability_mass_sums_to_one_terminating(self):
+        # Same soundness check for a terminating model: eos is absorbing and reached with probability 1
+        # from every state, so summing exp(log_density) over the (deep-enough) enumerated support
+        # approaches 1 from below -- a partial sum over a subset of the support can only fall short (the
+        # unenumerated deep tail), never exceed the true total.
+        nlp = _terminating_model()
+        ar = AutoregressiveEnumerable(nlp, eos=_EOS, max_depth=40)
+        sequences = [body + (_EOS,) for body_len in range(15) for body in itertools.product((0, 1), repeat=body_len)]
+        total = sum(math.exp(ar.log_density(s)) for s in sequences)
+        self.assertLessEqual(total, 1.0 + 1e-9)
+        self.assertGreaterEqual(total, 1.0 - 0.01)
+        self.assertEqual(ar.log_density(()), float("-inf"))
+        self.assertEqual(ar.log_density((0, 1)), float("-inf"))  # unterminated, must not count toward mass
 
 
 if __name__ == "__main__":
