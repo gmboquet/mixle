@@ -10,6 +10,7 @@ import unittest
 import numpy as np
 
 from mixle.data import check_dataset, dataset_hash, load_encoded, save_encoded
+from mixle.data.encoded_io import _envelope_digest
 from mixle.data.hashing import _canonical
 from mixle.inference.production import Header, fit_with_provenance
 from mixle.stats import CategoricalDistribution, CompositeDistribution, GaussianDistribution
@@ -334,7 +335,7 @@ class EncodedIoTest(unittest.TestCase):
             with open(path, "rb") as f:
                 magic = f.read(8)
                 header_line = f.readline()
-            self.assertEqual(magic, b"PSPENC1\n")
+            self.assertEqual(magic, b"PSPENC2\n")
             meta = json.loads(header_line)  # raises if this were pickle bytes, not JSON
             self.assertEqual(len(meta["digest"]), 64)
             self.assertIn("Gaussian", meta["encoder"])
@@ -354,6 +355,67 @@ class EncodedIoTest(unittest.TestCase):
                 f.write(tampered)
             with self.assertRaises(ValueError):
                 load_encoded(path)
+
+    def test_header_tampering_detected(self):
+        # MXR-080-0052: the digest previously covered only the pickle body, so the header's
+        # "encoder" field could be edited on disk -- leaving the body and the stored digest
+        # completely untouched -- and load_encoded would still accept the payload under the
+        # forged identity. This is the audit's exact repro: replace the recorded encoder identity
+        # without changing the body or digest, then load under the now-forged identity.
+        import json
+
+        enc_2d = DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0]).dist_to_encoder()
+        enc_3d = DiagonalGaussianDistribution([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]).dist_to_encoder()
+        self.assertNotEqual(str(enc_2d), str(enc_3d))
+
+        data = enc_2d.seq_encode([[1.0, 2.0], [3.0, 4.0]])
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "enc.pspenc")
+            save_encoded(data, path, encoder=enc_2d)
+            with open(path, "rb") as f:
+                raw = f.read()
+            magic, rest = raw[:8], raw[8:]
+            nl = rest.index(b"\n")
+            header_line, body = rest[:nl], rest[nl + 1 :]
+            meta = json.loads(header_line)
+
+            # Forge only the "encoder" field; the stored digest and the body bytes are untouched --
+            # exactly the audit's repro (swap "Encoder-A" for "Encoder-B" without touching the rest).
+            forged = dict(meta)
+            forged["encoder"] = str(enc_3d)
+            self.assertEqual(forged["digest"], meta["digest"])  # digest itself was NOT re-derived
+            tampered = magic + json.dumps(forged).encode("utf-8") + b"\n" + body
+            tampered_path = os.path.join(d, "tampered.pspenc")
+            with open(tampered_path, "wb") as f:
+                f.write(tampered)
+
+            # A load requesting the forged identity must be rejected -- previously this succeeded
+            # and silently returned 2D data mislabeled as 3D.
+            with self.assertRaises(ValueError):
+                load_encoded(tampered_path, encoder=enc_3d)
+
+    def test_envelope_digest_covers_header_fields_not_just_body(self):
+        # Direct confirmation of the mechanism behind the regression test above: two different
+        # header-field dicts over the *same* body must produce different digests. Before
+        # MXR-080-0052's fix, the digest was a pure function of the body, so it was invariant to
+        # the header entirely -- this would fail against the pre-fix computation.
+        body = b"identical-body-bytes"
+        digest_a = _envelope_digest({"encoder": "Encoder-A"}, body)
+        digest_b = _envelope_digest({"encoder": "Encoder-B"}, body)
+        self.assertNotEqual(digest_a, digest_b)
+
+    def test_envelope_digest_is_canonical_regardless_of_header_key_order(self):
+        # The digest must depend on header *content*, not on incidental serialization details like
+        # dict/JSON key insertion order -- otherwise a legitimately-written file could fail its own
+        # integrity check purely from key ordering, a false "corrupt" signal.
+        body = b"identical-body-bytes"
+        fields_one_order = {"encoder": "Encoder-A", "extra": "value"}
+        fields_other_order = {"extra": "value", "encoder": "Encoder-A"}
+        self.assertNotEqual(list(fields_one_order.items()), list(fields_other_order.items()))
+        self.assertEqual(
+            _envelope_digest(fields_one_order, body),
+            _envelope_digest(fields_other_order, body),
+        )
 
     def test_composite_field_count_mismatch_rejected(self):
         # Regression: a dataset encoded with a one-field CompositeDataEncoder must not be accepted
