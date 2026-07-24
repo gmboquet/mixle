@@ -38,14 +38,32 @@ class _SampleDerivedQuantity:
 
 @dataclass
 class BMDResult:
-    """A fitted benchmark-dose analysis: the BMD, its lower confidence bound (BMDL), and fit metadata."""
+    """A fitted benchmark-dose analysis: the BMD, its lower confidence bound (BMDL), and fit metadata.
+
+    ``status`` is one of:
+
+    * ``"ok"``: the curve fit converged, the BMD was found and bracketed, and the BMDL lower
+      bound was established. ``bmd`` and ``bmdl`` are real doses.
+    * ``"unidentifiable"``: the curve fit itself did not converge, or the fitted curve never
+      reaches the benchmark target within a bounded search (flat, wrong-signed, or requiring an
+      implausibly large dose). ``bmd`` and ``bmdl`` are ``nan`` -- never a search boundary or
+      other placeholder dressed up as a real dose.
+    * ``"bmdl_unavailable"``: the BMD itself was identified (``bmd`` is real), but the BMDL
+      computation did not converge to a valid bound. ``bmdl`` is ``nan``.
+    """
 
     bmd: float
     bmdl: float
     bmr: float
     model: str
     dof: int
+    status: str = "ok"
     _coef: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(2))
+
+    @property
+    def converged(self) -> bool:
+        """``True`` only when both the BMD and the BMDL were genuinely established."""
+        return self.status == "ok"
 
 
 def _quantal_p(model: str, dose: np.ndarray, coef: np.ndarray) -> np.ndarray:
@@ -69,7 +87,24 @@ def _neg_log_likelihood(
     return -float(np.sum(ll))
 
 
-def _solve_bmd(model: str, coef: np.ndarray, background: float, bmr: float, risk: str, dose_hi: float) -> float:
+_MAX_DOSE_SEARCH_MULTIPLE = 1e4  # bounded upper-bracket expansion; see _solve_bmd
+
+
+def _solve_bmd(
+    model: str, coef: np.ndarray, background: float, bmr: float, risk: str, dose_hi: float
+) -> tuple[float, bool]:
+    """Solve for the dose at which the fitted curve reaches the benchmark target.
+
+    Returns ``(dose, converged)``. ``converged`` is ``False`` -- and ``dose`` is ``nan`` -- unless
+    the target is actually bracketed (a genuine sign change is found) within a bounded search AND
+    the root-finder itself reports convergence. The search upper bound is expanded geometrically
+    but capped at ``dose_hi * _MAX_DOSE_SEARCH_MULTIPLE`` (already generous: ``dose_hi`` is
+    ``10x`` the highest tested dose, so the cap sits four orders of magnitude beyond that) --
+    a bounded, explicit, reviewable limit, not an iteration count that happens to produce some
+    large-but-finite number. When no bracket exists anywhere in that range (a flat, wrong-signed,
+    or too-shallow curve), or brentq itself does not converge, this returns an explicit failure
+    rather than the exhausted search boundary.
+    """
     if risk == "extra":
         target = background + bmr * (1.0 - background)
     elif risk == "added":
@@ -82,15 +117,35 @@ def _solve_bmd(model: str, coef: np.ndarray, background: float, bmr: float, risk
         return _quantal_p(model, np.array([d]), coef)[0] - target
 
     lo, hi = 1e-9, dose_hi
-    f_lo, f_hi = f(lo), f(hi)
-    tries = 0
-    while f_lo * f_hi > 0 and tries < 40:
-        hi *= 2.0
-        f_hi = f(hi)
-        tries += 1
+    try:
+        f_lo, f_hi = f(lo), f(hi)
+    except (FloatingPointError, OverflowError):
+        return float("nan"), False
+    if not (np.isfinite(f_lo) and np.isfinite(f_hi)):
+        return float("nan"), False
+
+    hi_cap = dose_hi * _MAX_DOSE_SEARCH_MULTIPLE
+    while f_lo * f_hi > 0 and hi < hi_cap:
+        hi = min(hi * 2.0, hi_cap)
+        try:
+            f_hi = f(hi)
+        except (FloatingPointError, OverflowError):
+            return float("nan"), False
+        if not np.isfinite(f_hi):
+            return float("nan"), False
+
     if f_lo * f_hi > 0:
-        return float(hi)
-    return float(optimize.brentq(f, lo, hi))
+        # Never bracketed anywhere in [1e-9, hi_cap]: no root exists in any dose range we are
+        # willing to extrapolate into. Report that honestly instead of returning `hi`.
+        return float("nan"), False
+
+    try:
+        root, info = optimize.brentq(f, lo, hi, xtol=1e-10, full_output=True)
+    except (FloatingPointError, OverflowError, RuntimeError, ValueError):
+        return float("nan"), False
+    if not info.converged:
+        return float("nan"), False
+    return float(root), True
 
 
 def _validate_cohort(
@@ -186,9 +241,23 @@ def benchmark_dose(
         options={"xatol": 1e-8, "fatol": 1e-10, "maxiter": 5000},
     )
     coef = result.x
+    dof = int(len(dose) - len(coef))
+
+    if not result.success:
+        # The curve fit itself never converged -- nothing computed from `coef` downstream
+        # (the BMD, let alone its confidence bound) can be trusted.
+        return BMDResult(
+            bmd=float("nan"), bmdl=float("nan"), bmr=bmr, model=model, dof=dof, status="unidentifiable", _coef=coef
+        )
+
     background = float(_quantal_p(model, np.array([dose.min() if dose.min() > 0 else 1e-9]), coef)[0])
     dose_hi = float(dose.max()) * 10.0
-    bmd = _solve_bmd(model, coef, background, bmr, risk, dose_hi)
+    bmd, bmd_converged = _solve_bmd(model, coef, background, bmr, risk, dose_hi)
+
+    if not bmd_converged:
+        return BMDResult(
+            bmd=float("nan"), bmdl=float("nan"), bmr=bmr, model=model, dof=dof, status="unidentifiable", _coef=coef
+        )
 
     nll_min = float(result.fun)
     chi2_1 = stats.chi2.ppf(2 * ci_level - 1, df=1)
@@ -196,9 +265,8 @@ def benchmark_dose(
     def nll_at_bmd(d: float) -> float:
         def obj(free_coef: np.ndarray) -> float:
             b_bg = float(_quantal_p(model, np.array([dose.min() if dose.min() > 0 else 1e-9]), free_coef)[0])
-            try:
-                implied = _solve_bmd(model, free_coef, b_bg, bmr, risk, dose_hi)
-            except (FloatingPointError, OverflowError, RuntimeError, ValueError):
+            implied, ok = _solve_bmd(model, free_coef, b_bg, bmr, risk, dose_hi)
+            if not ok:
                 return 1e12
             penalty = 1e6 * (implied - d) ** 2
             return _neg_log_likelihood(free_coef, model, dose, n_affected, n_total) + penalty
@@ -215,13 +283,16 @@ def benchmark_dose(
         bmdl = float(optimize.brentq(lambda d: nll_at_bmd(d) - chi2_1 / 2.0, lo_search, hi_search, xtol=1e-6))
     except (FloatingPointError, OverflowError, RuntimeError, ValueError):
         eps = max(bmd * 1e-3, 1e-9)
-        se_proxy = abs(_solve_bmd(model, coef, background, bmr + eps, risk, dose_hi) - bmd) / eps
-        z = stats.norm.ppf(ci_level)
-        bmdl = max(bmd - z * se_proxy * bmd, bmd * 0.01)
+        implied, ok = _solve_bmd(model, coef, background, bmr + eps, risk, dose_hi)
+        if ok:
+            se_proxy = abs(implied - bmd) / eps
+            z = stats.norm.ppf(ci_level)
+            bmdl = max(bmd - z * se_proxy * bmd, bmd * 0.01)
+        else:
+            bmdl = bmd * 0.01
 
     bmdl = min(bmdl, bmd)
-    dof = int(len(dose) - len(coef))
-    return BMDResult(bmd=bmd, bmdl=bmdl, bmr=bmr, model=model, dof=dof, _coef=coef)
+    return BMDResult(bmd=bmd, bmdl=bmdl, bmr=bmr, model=model, dof=dof, status="ok", _coef=coef)
 
 
 def _as_dose_samples(exposure: Any, n: int, rng: np.random.Generator) -> np.ndarray:

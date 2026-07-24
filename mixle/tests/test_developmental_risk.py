@@ -123,8 +123,57 @@ def test_valid_multidose_cohort_still_fits():
     n_total = np.full(5, 100.0)
     n_affected = np.array([5.0, 10.0, 25.0, 60.0, 90.0])
     result = benchmark_dose(dose, n_affected, n_total, bmr=0.10)
+    assert result.status == "ok"
+    assert result.converged is True
     assert np.isfinite(result.bmd) and result.bmd > 0
     assert np.isfinite(result.bmdl) and 0 <= result.bmdl <= result.bmd
+
+
+# MXR-080-0082: a curve that never reaches the benchmark target must report an explicit
+# unidentifiable result, never a fabricated dose from an exhausted search loop.
+
+
+def test_flat_curve_is_unidentifiable_not_fabricated():
+    # The audit's own repro: a flat (no dose-response) cohort must not return an astronomical
+    # "BMD" (the pre-fix behaviour returned dose_hi * 2**40 here).
+    doses = np.array([1.0, 2.0, 4.0, 8.0])
+    n_total = np.full(4, 100.0)
+    n_affected = np.array([10.0, 11.0, 9.0, 10.0])  # ~10% at every dose: no trend
+    result = benchmark_dose(doses, n_affected, n_total, bmr=0.10, model="loglogistic")
+    assert result.status == "unidentifiable"
+    assert result.converged is False
+    assert np.isnan(result.bmd)
+    assert np.isnan(result.bmdl)
+    # In particular, never anything resembling the old exhausted-search boundary.
+    assert not (np.isfinite(result.bmd) and result.bmd > 1e6)
+
+
+def test_solve_bmd_never_returns_exhausted_search_boundary():
+    from mixle.analysis.developmental_risk import _solve_bmd
+
+    coef_flat = np.array([-2.0, 0.0])  # c == 0: p(dose) is constant, target is never reached
+    background = 1.0 / (1.0 + np.exp(2.0))
+    dose, converged = _solve_bmd("loglogistic", coef_flat, background, bmr=0.10, risk="extra", dose_hi=1.0)
+    assert converged is False
+    assert np.isnan(dose)
+
+
+def test_dose_responsive_curve_still_finds_a_real_bmd():
+    # Negative control for 0082: a genuinely dose-responsive curve must still converge normally.
+    doses = np.array([0.001, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0])
+    n_total = np.full(doses.shape, 200.0)
+    rng = np.random.default_rng(7)
+    b_true, c_true = -3.0, 1.2
+
+    def p_true(d):
+        return 1.0 / (1.0 + np.exp(-(b_true + c_true * np.log(np.clip(d, 1e-9, None)))))
+
+    n_affected = rng.binomial(200, p_true(doses)).astype(float)
+    result = benchmark_dose(doses, n_affected, n_total, bmr=0.10, model="loglogistic")
+    assert result.status == "ok"
+    assert result.converged is True
+    assert 0 < result.bmd < 100  # comfortably within the tested dose range, not a search artifact
+    assert 0 <= result.bmdl <= result.bmd
 
 
 def test_rfd_exceedance_monotone_in_uf():
