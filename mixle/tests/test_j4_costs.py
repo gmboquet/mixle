@@ -133,3 +133,116 @@ def test_cost_curve_output_is_acceptable_block_cost_for_stochastic_opt():
 
     assert isinstance(plan, StochasticPlan)
     assert plan.extract.shape == (n_blocks,)
+
+
+# --- MXR-080-0119: cost roll-up accepts impossible mine plans -------------------------------------
+#
+# Negative/non-finite depth, tonnage, capex, coefficients, and costs used to be accepted outright; a
+# negative tonnage or cost could turn spending into revenue with no error, and a per-period array
+# merely numpy-broadcast-compatible (but not shape-identical) with `tonnage` could silently multiply
+# cost across periods instead of pairing each period with its own. The tests below pin the fix: every
+# physical/cost quantity is required finite and correctly signed, and depth/grade/throughput must each
+# be a scalar or match `tonnage`'s exact per-period shape.
+
+
+def test_cost_curve_rejects_non_finite_depth():
+    for bad_depth in (np.inf, -np.inf, np.nan):
+        with pytest.raises(ValueError):
+            cost_curve(bad_depth, 2.0, 1000.0, params=PARAMS)
+
+
+def test_cost_curve_rejects_negative_depth():
+    with pytest.raises(ValueError):
+        cost_curve(-1.0, 2.0, 1000.0, params=PARAMS)
+
+
+def test_cost_curve_rejects_non_finite_grade_or_throughput():
+    with pytest.raises(ValueError):
+        cost_curve(100.0, np.nan, 1000.0, params=PARAMS)
+    with pytest.raises(ValueError):
+        cost_curve(100.0, 2.0, np.inf, params=PARAMS)
+
+
+def test_cost_curve_rejects_non_finite_or_negative_cost_coefficients():
+    for key in ("base_cost", "haul_cost_per_m", "grade_complexity_coef", "throughput_scale_coef"):
+        with pytest.raises(ValueError):
+            cost_curve(100.0, 2.0, 1000.0, params={**PARAMS, key: -1.0})
+        with pytest.raises(ValueError):
+            cost_curve(100.0, 2.0, 1000.0, params={**PARAMS, key: np.nan})
+
+
+def test_capex_opex_rejects_negative_or_non_finite_tonnage():
+    plan_base = {"tonnage": None, "depth": 100.0, "grade": 2.0, "throughput": 1000.0}
+    with pytest.raises(ValueError):
+        capex_opex({**plan_base, "tonnage": [-100.0]}, params=PARAMS)
+    with pytest.raises(ValueError):
+        capex_opex({**plan_base, "tonnage": [np.inf]}, params=PARAMS)
+
+
+def test_capex_opex_rejects_empty_tonnage():
+    with pytest.raises(ValueError):
+        capex_opex({"tonnage": [], "depth": 100.0, "grade": 2.0, "throughput": 1000.0}, params=PARAMS)
+
+
+def test_capex_opex_rejects_negative_or_non_finite_capex_schedule():
+    plan_base = {"tonnage": [100.0], "depth": 100.0, "grade": 2.0, "throughput": 1000.0}
+    with pytest.raises(ValueError):
+        capex_opex({**plan_base, "capex_schedule": [-1_000_000.0]}, params=PARAMS)
+    with pytest.raises(ValueError):
+        capex_opex({**plan_base, "capex_schedule": [np.nan]}, params=PARAMS)
+
+
+def test_capex_opex_rejects_negative_capex_coefficients():
+    plan = {"tonnage": [100.0], "depth": 100.0, "grade": 2.0, "throughput": 1000.0}
+    with pytest.raises(ValueError):
+        capex_opex(plan, params={**PARAMS, "capex_fixed": -1.0})
+    with pytest.raises(ValueError):
+        capex_opex(plan, params={**PARAMS, "capex_per_tonne": -1.0})
+
+
+def test_capex_opex_negative_tonnage_no_longer_turns_spending_into_revenue():
+    # The exact MXR-080-0119 repro: a negative tonnage used to flip opex's sign (spending -> revenue)
+    # instead of raising.
+    plan = {"tonnage": [-100.0], "depth": 100.0, "grade": 2.0, "throughput": 1000.0}
+    with pytest.raises(ValueError):
+        capex_opex(plan, params=PARAMS)
+
+
+def test_capex_opex_rejects_broadcast_compatible_but_mismatched_period_shape():
+    # depth shaped (3, 1) is numpy-broadcast-compatible with a length-3 tonnage but is NOT the same
+    # shape -- feeding it straight to cost_curve used to silently balloon into a (3, 3) cross-product
+    # cost matrix, multiplying each period's tonnage against every other period's cost too.
+    plan = {
+        "tonnage": np.array([100.0, 200.0, 150.0]),
+        "depth": np.array([[100.0], [200.0], [300.0]]),
+        "grade": np.array([2.0, 2.0, 2.0]),
+        "throughput": np.array([1000.0, 1000.0, 1000.0]),
+    }
+    with pytest.raises(ValueError):
+        capex_opex(plan, params=PARAMS)
+
+
+def test_capex_opex_accepts_scalar_depth_grade_throughput_broadcast_against_tonnage():
+    # A true scalar (not merely broadcast-compatible-but-mismatched) is still fine: it broadcasts
+    # against every period, as documented.
+    plan = {"tonnage": [100.0, 200.0, 150.0], "depth": 100.0, "grade": 2.0, "throughput": 1000.0}
+    capex, opex = capex_opex(plan, params=PARAMS)
+    expected_cost = PARAMS["base_cost"] + PARAMS["haul_cost_per_m"] * 100.0 + PARAMS["grade_complexity_coef"] / 2.0
+    assert opex == pytest.approx((100.0 + 200.0 + 150.0) * expected_cost, abs=1e-9)
+    assert capex == pytest.approx(0.0, abs=1e-9)  # no capex_fixed/capex_per_tonne/capex_schedule in PARAMS
+
+
+def test_capex_opex_correctly_shaped_plan_still_rolls_up_normally():
+    # Negative control: a normal, correctly-shaped mine plan (one entry per period, matching tonnage)
+    # rolls up exactly as before -- same numbers as test_capex_opex_matches_hand_computed_totals.
+    plan = {
+        "tonnage": [100.0, 200.0, 150.0],
+        "depth": [100.0, 200.0, 300.0],
+        "grade": [2.0, 2.0, 2.0],
+        "throughput": [1000.0, 1000.0, 1000.0],
+        "capex_schedule": [500_000.0, 0.0, 0.0],
+    }
+    params = {**PARAMS, "capex_fixed": 1_000_000.0, "capex_per_tonne": 10.0}
+    capex, opex = capex_opex(plan, params=params)
+    assert opex == pytest.approx(4825.0, abs=1e-9)
+    assert capex == pytest.approx(1_504_500.0, abs=1e-9)

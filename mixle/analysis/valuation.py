@@ -63,8 +63,30 @@ _DEFAULTS: dict[str, float] = {
 }
 
 
-def _param(params: dict, key: str) -> float:
-    return float(params[key]) if key in params else _DEFAULTS[key]
+# Coefficient/capital params that are $/t or $ scales of an additive cost or capital term: negative
+# here lets one term of the cost curve (or the capex roll-up) go negative and, added into an otherwise
+# non-negative total, silently turn part of the modeled spend into modeled income with no error
+# (MXR-080-0119). `design_capacity` is deliberately excluded -- it is a physical throughput scale, not
+# a cost coefficient, and is already required strictly positive (a divisor) below.
+_NONNEGATIVE_PARAMS = frozenset(
+    {
+        "base_cost",
+        "haul_cost_per_m",
+        "grade_complexity_coef",
+        "throughput_scale_coef",
+        "capex_fixed",
+        "capex_per_tonne",
+    }
+)
+
+
+def _param(params: dict, key: str, *, context: str = "cost_curve") -> float:
+    value = float(params[key]) if key in params else _DEFAULTS[key]
+    if not np.isfinite(value):
+        raise ValueError(f"{context}: params[{key!r}] must be finite, got {value!r}")
+    if key in _NONNEGATIVE_PARAMS and value < 0.0:
+        raise ValueError(f"{context}: params[{key!r}] must be non-negative, got {value!r}")
+    return value
 
 
 def cost_curve(depth: Any, grade: Any, throughput: Any, *, params: dict) -> np.ndarray:
@@ -86,14 +108,31 @@ def cost_curve(depth: Any, grade: Any, throughput: Any, *, params: dict) -> np.n
       under-utilized fixed-cost drag below ``Q*`` and overtime/expediting/accelerated-wear cost above
       it (the classic "decreasing then rising past design capacity" U-shaped average-cost curve).
 
+    ``depth`` must be finite and non-negative (metres below surface/datum; there is no such thing as
+    negative haul depth); ``grade`` and ``throughput`` must be finite and strictly positive (both are
+    also divisors elsewhere in the mine-planning stack, and a zero or negative ore grade or throughput
+    is not a physical plan). Every numeric ``params`` entry must be finite, and the cost-coefficient
+    entries (``base_cost``, ``haul_cost_per_m``, ``grade_complexity_coef``, ``throughput_scale_coef``)
+    must be non-negative -- a negative coefficient would let one additive term of the curve go negative
+    and silently discount an otherwise non-negative total cost into a subsidy (MXR-080-0119). Raises
+    ``ValueError`` if any of these are violated.
+
     Returns the elementwise `$/t` cost, broadcast to the common shape of the three inputs.
     """
     d = np.asarray(depth, dtype=np.float64)
     g = np.asarray(grade, dtype=np.float64)
     q = np.asarray(throughput, dtype=np.float64)
 
+    if not np.all(np.isfinite(d)):
+        raise ValueError("cost_curve: depth must be finite")
+    if np.any(d < 0.0):
+        raise ValueError("cost_curve: depth must be non-negative")
+    if not np.all(np.isfinite(g)):
+        raise ValueError("cost_curve: grade must be finite")
     if np.any(g <= 0.0):
         raise ValueError("cost_curve: grade must be strictly positive (used as a 1/grade complexity term)")
+    if not np.all(np.isfinite(q)):
+        raise ValueError("cost_curve: throughput must be finite")
     q_star = _param(params, "design_capacity")
     if q_star <= 0.0:
         raise ValueError("cost_curve: params['design_capacity'] must be strictly positive")
@@ -115,6 +154,32 @@ def _plan_get(plan: Any, key: str, default: Any = None) -> Any:
     return getattr(plan, key, default)
 
 
+def _require_scalar_or_period_shape(value: Any, period_shape: tuple[int, ...], name: str) -> np.ndarray:
+    """Coerce ``value`` to a float array that is either a true scalar (0-d; broadcasts against any
+    period shape) or has EXACTLY ``period_shape`` (the plan's ``tonnage`` shape).
+
+    :func:`cost_curve` broadcasts its three inputs against each other, which is the right behavior when
+    it is called standalone -- but inside :func:`capex_opex`'s roll-up, a value that is merely
+    numpy-broadcast-*compatible* with ``tonnage`` without sharing its shape (e.g. ``depth`` shaped
+    ``(n_periods, 1)`` instead of ``(n_periods,)``) silently balloons ``cost_curve``'s output into an
+    ``(n_periods, n_periods)`` cross-product matrix instead of raising -- summed against ``tonnage``,
+    that multiplies each period's tonnage against every *other* period's cost too, not just its own
+    (MXR-080-0119). Requiring an exact shape match (or a genuine scalar) closes that off; see
+    ``test_capex_opex_rejects_broadcast_compatible_but_mismatched_period_shape``.
+    """
+    if value is None:
+        raise ValueError(f"capex_opex: plan is missing required field {name!r}")
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.shape != () and arr.shape != period_shape:
+        raise ValueError(
+            f"capex_opex: plan {name!r} has shape {arr.shape}, but 'tonnage' has shape {period_shape}; "
+            f"{name!r} must be a scalar or match 'tonnage' exactly, one entry per period (a shape that "
+            "is merely numpy-broadcast-compatible but not identical is rejected -- it can silently "
+            "multiply cost across periods instead of pairing each period with its own cost)"
+        )
+    return arr
+
+
 def capex_opex(plan: Any, *, params: dict) -> tuple[float, float]:
     """Roll a mine plan's tonnage/depth/grade/throughput profile up into (total capex, total opex).
 
@@ -134,20 +199,39 @@ def capex_opex(plan: Any, *, params: dict) -> tuple[float, float]:
     ``capex_fixed + capex_per_tonne * sum(tonnage) + sum(capex_schedule)``. Returns ``(capex, opex)``,
     both plain floats -- the totals :func:`monte_carlo_npv` (J2) discounts into a DCF, and the same
     `$/t` curve this function calls is what feeds `block_cost` for H's optimizers.
+
+    ``tonnage`` must be finite and non-negative and have at least one period; ``depth``/``grade``/
+    ``throughput`` must each be a scalar or share ``tonnage``'s exact shape (see
+    :func:`_require_scalar_or_period_shape`); ``capex_schedule``, if given, must be finite and
+    non-negative. A negative tonnage or a negative cost/capital term would otherwise turn modeled
+    spending into modeled revenue with no error (MXR-080-0119); raises ``ValueError`` if violated.
     """
-    tonnage = np.asarray(_plan_get(plan, "tonnage"), dtype=np.float64)
-    depth = _plan_get(plan, "depth")
-    grade = _plan_get(plan, "grade")
-    throughput = _plan_get(plan, "throughput")
+    tonnage = np.atleast_1d(np.asarray(_plan_get(plan, "tonnage"), dtype=np.float64))
+    if tonnage.shape[0] == 0:
+        raise ValueError("capex_opex: plan 'tonnage' must have at least one period")
+    if not np.all(np.isfinite(tonnage)):
+        raise ValueError("capex_opex: plan 'tonnage' must be finite")
+    if np.any(tonnage < 0.0):
+        raise ValueError("capex_opex: plan 'tonnage' must be non-negative")
+
+    depth = _require_scalar_or_period_shape(_plan_get(plan, "depth"), tonnage.shape, "depth")
+    grade = _require_scalar_or_period_shape(_plan_get(plan, "grade"), tonnage.shape, "grade")
+    throughput = _require_scalar_or_period_shape(_plan_get(plan, "throughput"), tonnage.shape, "throughput")
 
     per_period_cost = cost_curve(depth, grade, throughput, params=params)
     opex_total = float(np.sum(tonnage * per_period_cost))
 
     total_tonnage = float(np.sum(tonnage))
-    capex_total = _param(params, "capex_fixed") + _param(params, "capex_per_tonne") * total_tonnage
+    capex_total = _param(params, "capex_fixed", context="capex_opex")
+    capex_total += _param(params, "capex_per_tonne", context="capex_opex") * total_tonnage
     capex_schedule = _plan_get(plan, "capex_schedule", None)
     if capex_schedule is not None:
-        capex_total += float(np.sum(np.asarray(capex_schedule, dtype=np.float64)))
+        capex_arr = np.asarray(capex_schedule, dtype=np.float64)
+        if not np.all(np.isfinite(capex_arr)):
+            raise ValueError("capex_opex: plan 'capex_schedule' must be finite")
+        if np.any(capex_arr < 0.0):
+            raise ValueError("capex_opex: plan 'capex_schedule' must be non-negative")
+        capex_total += float(np.sum(capex_arr))
 
     return capex_total, opex_total
 
