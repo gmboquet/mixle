@@ -432,12 +432,22 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
                 squared observations).
 
         Returns:
-            Numpy array containing the log-density of each encoded observation.
+            Numpy array containing the log-density of each encoded observation. Rows that are not on
+            the simplex (a negative or non-finite entry, or a row that doesn't sum to one) score
+            ``-inf``, mirroring ``log_density`` -- the encoder's clipped log representation alone
+            can't distinguish a genuine near-zero coordinate from a negative one, so validation reads
+            the accompanying raw observations instead.
 
         """
         rv = np.dot(x[0], self.alpha - 1.0)
         rv -= self.log_const
-        return rv
+        raw_x = np.asarray(x[1], dtype=float)
+        good = (
+            np.all(np.isfinite(raw_x), axis=1)
+            & np.all(raw_x >= 0.0, axis=1)
+            & np.isclose(raw_x.sum(axis=1), 1.0, rtol=1.0e-10, atol=1.0e-12)
+        )
+        return np.where(good, rv, -np.inf)
 
     @staticmethod
     def backend_log_density_from_params(log_x: Any, alpha: Any, log_const: Any, engine: Any) -> Any:

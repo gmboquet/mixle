@@ -42,6 +42,18 @@ class BetaBinomialTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             BetaBinomialDistribution(10, 0.0, 1.0)
 
+    def test_fractional_count_scores_neg_inf(self):
+        # A fractional count is not a valid beta-binomial outcome: the pmf is a ratio of Gamma/Beta
+        # functions that -- unless explicitly guarded -- happily evaluates at any real-valued "count"
+        # via the smooth continuation of gammaln/betaln, silently returning finite mass for k=2.5.
+        self.assertEqual(self.d.log_density(2.5), -np.inf)
+        self.assertEqual(self.d.density(2.5), 0.0)
+        seq = self.d.seq_log_density(np.array([2.5, 2.0, 3.5, 7.0]))
+        np.testing.assert_array_equal(seq, [-np.inf, self.d.log_density(2), -np.inf, self.d.log_density(7)])
+        # NaN/inf counts are likewise rejected rather than propagating through gammaln.
+        self.assertEqual(self.d.log_density(float("nan")), -np.inf)
+        self.assertEqual(self.d.log_density(float("inf")), -np.inf)
+
     def test_pseudo_count_smooths_toward_prior(self):
         # estimator(pseudo_count=...) previously ignored pseudo_count entirely -- a silent no-op.
         est = self.d.estimator(pseudo_count=1.0e6)

@@ -42,6 +42,19 @@ class DirichletMultinomialTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             DirichletMultinomialDistribution([1.0, 0.0, 1.0], 8)
 
+    def test_fractional_counts_score_neg_inf(self):
+        # A per-category fractional count is not a valid Dirichlet-multinomial outcome even when the
+        # (real-valued) total happens to equal n -- e.g. [1.5, 2.5, 4.0] sums to 8 -- so the sum-to-n
+        # check alone is not sufficient; each entry must individually be an integer.
+        d2 = DirichletMultinomialDistribution(np.array([2.0, 3.0]), 4)
+        self.assertEqual(d2.log_density(np.array([1.5, 2.5])), -np.inf)
+        self.assertEqual(d2.density(np.array([1.5, 2.5])), 0.0)
+        seq = d2.seq_log_density(np.array([[1.5, 2.5], [2.0, 2.0], [0.5, 3.5]]))
+        np.testing.assert_array_equal(seq, [-np.inf, d2.log_density(np.array([2, 2])), -np.inf])
+        # NaN/inf entries are likewise rejected.
+        self.assertEqual(d2.log_density(np.array([float("nan"), 4.0])), -np.inf)
+        self.assertEqual(d2.log_density(np.array([float("inf"), 4.0])), -np.inf)
+
     def test_pseudo_count_raises_rather_than_silently_ignored(self):
         # The Minka fixed-point MLE operates on a cumulative-count recurrence statistic, not a
         # simple additive raw moment, so pseudo_count cannot be cleanly blended in the way the

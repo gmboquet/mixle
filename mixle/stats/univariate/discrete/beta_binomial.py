@@ -33,9 +33,20 @@ class BetaBinomialDistribution(SequenceEncodableProbabilityDistribution):
     """Beta-binomial distribution over ``{0, ..., n}`` with shape parameters ``a, b > 0``."""
 
     def __init__(self, n: int, a: float, b: float, name: str | None = None, keys: str | None = None) -> None:
-        if int(n) < 0 or a <= 0.0 or b <= 0.0 or not (np.isfinite(a) and np.isfinite(b)):
-            raise ValueError("BetaBinomialDistribution requires n >= 0 and a, b > 0.")
-        self.n = int(n)
+        # n must land exactly on a non-negative integer -- checked on the float value before any
+        # int() cast, since int(10.5) truncates to 10 and int(nan)/int(inf) raise the wrong
+        # exception type (ValueError/OverflowError instead of this constructor's own ValueError).
+        n_val = float(n)
+        if (
+            not np.isfinite(n_val)
+            or n_val != math.floor(n_val)
+            or n_val < 0
+            or a <= 0.0
+            or b <= 0.0
+            or not (np.isfinite(a) and np.isfinite(b))
+        ):
+            raise ValueError("BetaBinomialDistribution requires n to be a non-negative integer and a, b > 0.")
+        self.n = int(n_val)
         self.a = float(a)
         self.b = float(b)
         self.name = name
@@ -56,19 +67,26 @@ class BetaBinomialDistribution(SequenceEncodableProbabilityDistribution):
         return math.exp(self.log_density(x))
 
     def log_density(self, x: int) -> float:
-        """Return the log probability mass at ``x`` (``-inf`` outside ``{0, ..., n}``)."""
-        k = int(x)
-        if k < 0 or k > self.n:
+        """Return the log probability mass at ``x`` (``-inf`` outside ``{0, ..., n}`` or non-integer --
+        a fractional count is not a valid beta-binomial outcome)."""
+        try:
+            xx = float(x)
+        except Exception:  # noqa: BLE001
             return -np.inf
+        if not np.isfinite(xx) or np.floor(xx) != xx or xx < 0 or xx > self.n:
+            return -np.inf
+        k = int(xx)
         log_choose = gammaln(self.n + 1) - gammaln(k + 1) - gammaln(self.n - k + 1)
         return float(log_choose + betaln(k + self.a, self.n - k + self.b) - self._log_beta_ab)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
-        """Return vectorized log-mass for an array of counts."""
+        """Return vectorized log-mass for an array of counts (``-inf`` outside ``{0, ..., n}`` or
+        non-integer -- a fractional count is not a valid beta-binomial outcome)."""
         k = np.asarray(x, dtype=np.float64)
+        good = np.isfinite(k) & (np.floor(k) == k) & (k >= 0) & (k <= self.n)
         log_choose = gammaln(self.n + 1) - gammaln(k + 1) - gammaln(self.n - k + 1)
         rv = log_choose + betaln(k + self.a, self.n - k + self.b) - self._log_beta_ab
-        return np.where((k < 0) | (k > self.n), -np.inf, rv)
+        return np.where(good, rv, -np.inf)
 
     def support_size(self) -> int:
         """``n + 1`` outcomes ``{0, ..., n}``."""
@@ -241,7 +259,13 @@ class BetaBinomialEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.n = int(n)
+        # Mirrors BetaBinomialDistribution's own n validation: previously this cast bare int(n),
+        # which silently truncates a fractional n (10.5 -> 10) instead of rejecting it, and the
+        # bad n would only surface later -- if at all -- once estimate() built a distribution from it.
+        n_val = float(n)
+        if not np.isfinite(n_val) or n_val != math.floor(n_val) or n_val < 0:
+            raise ValueError("BetaBinomialEstimator requires n to be a non-negative integer.")
+        self.n = int(n_val)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.min_conc = min_conc

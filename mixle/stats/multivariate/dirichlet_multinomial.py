@@ -39,11 +39,16 @@ class DirichletMultinomialDistribution(SequenceEncodableProbabilityDistribution)
         a = np.asarray(alpha, dtype=np.float64)
         if a.ndim != 1 or np.any(a <= 0.0) or not np.all(np.isfinite(a)):
             raise ValueError("alpha must be a 1-D vector of positive concentrations")
-        if int(n) < 0:
-            raise ValueError("n (number of trials) must be non-negative")
+        # n must land exactly on a non-negative integer -- checked on the float value before any
+        # int() cast, since int(10.5) truncates to 10 (silently accepting a fractional trial count)
+        # and int(nan)/int(inf) raise the wrong exception type instead of this constructor's own
+        # ValueError.
+        n_val = float(n)
+        if not np.isfinite(n_val) or n_val != math.floor(n_val) or n_val < 0:
+            raise ValueError("n (number of trials) must be a non-negative integer")
         self.alpha = a
         self.dim = a.shape[0]
-        self.n = int(n)
+        self.n = int(n_val)
         self.name = name
         self.keys = keys
         self._sum_alpha = float(a.sum())
@@ -63,19 +68,33 @@ class DirichletMultinomialDistribution(SequenceEncodableProbabilityDistribution)
         return math.exp(self.log_density(x))
 
     def log_density(self, x: np.ndarray) -> float:
-        """Return the log-mass at ``x`` (``-inf`` if any count is negative or the total is not ``n``)."""
+        """Return the log-mass at ``x`` (``-inf`` if any count is negative, non-integer, or the total
+        is not ``n`` -- a fractional category count is not a valid Dirichlet-multinomial outcome even
+        when the (real-valued) total happens to sum to ``n``)."""
         xx = np.asarray(x, dtype=np.float64)
-        if xx.shape != (self.dim,) or np.any(xx < 0) or xx.sum() != self.n:
+        if (
+            xx.shape != (self.dim,)
+            or not np.all(np.isfinite(xx))
+            or np.any(xx < 0)
+            or np.any(np.floor(xx) != xx)
+            or xx.sum() != self.n
+        ):
             return -np.inf
         term = gammaln(xx + self.alpha) - self._gammaln_alpha - gammaln(xx + 1.0)
         return float(self._log_const + term.sum())
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
-        """Vectorized log-mass for a stack of count vectors, shape ``(N, K)``."""
+        """Vectorized log-mass for a stack of count vectors, shape ``(N, K)`` (``-inf`` rows where any
+        count is negative, non-integer, or the row total is not ``n``)."""
         xx = np.asarray(x, dtype=np.float64)
         term = gammaln(xx + self.alpha) - self._gammaln_alpha - gammaln(xx + 1.0)
         rv = self._log_const + term.sum(axis=1)
-        bad = (xx < 0).any(axis=1) | (xx.sum(axis=1) != self.n)
+        bad = (
+            ~np.all(np.isfinite(xx), axis=1)
+            | (xx < 0).any(axis=1)
+            | (np.floor(xx) != xx).any(axis=1)
+            | (xx.sum(axis=1) != self.n)
+        )
         return np.where(bad, -np.inf, rv)
 
     def sampler(self, seed: int | None = None) -> "DirichletMultinomialSampler":
@@ -265,8 +284,16 @@ class DirichletMultinomialEstimator(ParameterEstimator):
                 "additive moment, so there is no small, safe way to blend a prior pseudo-sample "
                 "into it. Pass pseudo_count=None (the default)."
             )
+        # Mirrors DirichletMultinomialDistribution's own n validation. Previously n was stored
+        # completely unchecked and un-cast (not even int(n)): a fractional n silently sat in
+        # self.n as a float until accumulator_factory().make() built np.zeros((dim, max(n, 1))),
+        # which raises an opaque "'float' object cannot be interpreted as an integer" far from the
+        # actual mistake instead of a clear error at construction time.
+        n_val = float(n)
+        if not np.isfinite(n_val) or n_val != math.floor(n_val) or n_val < 0:
+            raise ValueError("DirichletMultinomialEstimator requires n to be a non-negative integer.")
         self.dim = dim
-        self.n = n
+        self.n = int(n_val)
         self.max_iter = int(max_iter)
         self.tol = float(tol)
         self.name = name
