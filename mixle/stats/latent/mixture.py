@@ -191,6 +191,19 @@ def _dirichlet_expectations(prior: Any, num_components: int) -> tuple[np.ndarray
     return None, None
 
 
+# Tolerance for the "does w sum to one" simplex check below -- numpy's own np.isclose default
+# (rtol=1e-05, atol=1e-08), matching the established convention for this same kind of check
+# elsewhere (SymmetricDirichletDistribution, DictDirichletDistribution), not a bespoke bound and
+# not dirichlet.py's tighter 1e-10/1e-12. A mixture's fitted weights are not guaranteed float64
+# precision end to end: MixtureGradientFitState.build's torch softmax renormalization (the
+# gradient-fit path, e.g. mixle.inference.gradient_fit.fit_mle with precision="float32") was
+# measured landing ~6e-8 from 1.0 -- comfortably inside this tolerance but outside a naive
+# 1e-10/1e-12 bound, which would reject a legitimately fitted float32 mixture as off-simplex.
+# Plain float64 EM MLE fits (counts / counts.sum()) measured at ~2e-16, also well inside.
+_SIMPLEX_SUM_RTOL = 1.0e-5
+_SIMPLEX_SUM_ATOL = 1.0e-8
+
+
 class MixtureDistribution(SequenceEncodableProbabilityDistribution):
     """Finite mixture over homogeneous component distributions.
 
@@ -244,10 +257,27 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             # sampler dies later, far from the mistake), so fail at the constructor like the
             # scalar families do.
             raise ValueError("MixtureDistribution requires len(components) == len(w).")
-        if np.any(self.w < 0.0):
-            # A negative weight silently propagates into log_density() as nan (only a RuntimeWarning),
-            # so reject it at the constructor like the scalar families do.
-            raise ValueError("MixtureDistribution requires non-negative weights.")
+        if not np.isfinite(self.w).all() or np.any(self.w < 0.0):
+            # A negative or non-finite weight silently propagates into log_density() as nan (only a
+            # RuntimeWarning) -- `nan < 0.0` is always False, so the old check let a NaN weight straight
+            # through, and it later surfaces again, far from the mistake, as an opaque error out of the
+            # sampler's RandomState.choice ("probabilities contain NaN"). Reject both at the constructor
+            # like the scalar families do (CategoricalDistribution.pmap / IntegerCategoricalDistribution.
+            # p_vec).
+            raise ValueError("MixtureDistribution requires finite, non-negative weights.")
+        if not np.isclose(float(self.w.sum()), 1.0, rtol=_SIMPLEX_SUM_RTOL, atol=_SIMPLEX_SUM_ATOL):
+            # Unlike CategoricalDistribution.pmap / IntegerCategoricalDistribution.p_vec (both
+            # deliberately "stored as given": several existing call sites construct a partial or
+            # intentionally-unnormalized vector on purpose, so those two classes only reject
+            # non-finite/negative entries), this class's own docstring commits to `w` being simplex
+            # weights that "should sum to one". A mixture whose weights don't sum to ~1 doesn't
+            # integrate to 1 and silently produces an invalid probability model with no error --
+            # log_density()/density() and sampling all still "work", just wrongly. A codebase-wide
+            # scan found no existing call site relying on a non-normalized `w`, so there is no
+            # legitimate case to preserve here.
+            raise ValueError(
+                "MixtureDistribution requires w to sum to 1.0 (simplex weights), got sum=%r." % float(self.w.sum())
+            )
 
         self.zw = self.w == 0.0
         self.log_w = np.log(w + self.zw)
