@@ -18,28 +18,79 @@ are exposed directly. Orderings are passed as sequences of item ids, best first 
 from __future__ import annotations
 
 from itertools import permutations
+from typing import Any
 
 import numpy as np
 
 
+def _validate_permutation(ordering: Any, *, m: int | None = None) -> np.ndarray:
+    """Validate that ``ordering`` is an exact integer permutation of ``0..n-1`` and return it as a
+    length-``n`` int array (``n == m`` if ``m`` is given).
+
+    Every public entry point in this module funnels through here before any distance or aggregation
+    runs (MXR-080-0107), so a malformed ranking is always rejected with a clear error rather than
+    silently mishandled:
+
+    - Fractional/non-finite entries are rejected *before* any cast to int -- a truncating int cast must
+      never be allowed to manufacture a spurious permutation (``[0.9, 1.1]`` truncates to the
+      superficially-valid ``[0, 1]`` if cast first, validated second).
+    - Duplicate or out-of-range item ids are rejected outright, instead of silently scattering into
+      uninitialized memory (a duplicate id) or crashing with a raw ``IndexError`` (an out-of-range id)
+      the way unchecked fancy indexing (``pos[ordering] = ...``) does downstream.
+    - When ``m`` is given (comparing/aggregating against another ranking of that size), a length
+      mismatch is rejected explicitly instead of silently truncating the comparison to the shorter
+      ranking's length -- which could otherwise report a meaningless zero distance between two rankings
+      of different sizes.
+    """
+    raw = np.asarray(ordering)
+    if raw.ndim != 1:
+        raise ValueError(f"ranking must be a 1-D sequence of item ids (best first); got shape {raw.shape}")
+    if not np.issubdtype(raw.dtype, np.integer):
+        as_float = raw.astype(np.float64)
+        if not np.all(np.isfinite(as_float)) or not np.all(as_float == np.round(as_float)):
+            raise ValueError(
+                f"ranking must contain only finite integer item ids, got {raw.tolist()} -- "
+                "a fractional or non-finite id is never a valid permutation entry, even if truncating "
+                "it to int would happen to land in range."
+            )
+    arr = np.round(raw).astype(int)
+    n = arr.shape[0]
+    if m is not None and n != m:
+        raise ValueError(f"rankings must be permutations of the same {m} items; got a length-{n} ranking")
+    if sorted(arr.tolist()) != list(range(n)):
+        raise ValueError(
+            f"ranking must be a permutation of 0..{n - 1} (item ids, best first, no duplicates/gaps); "
+            f"got {arr.tolist()}"
+        )
+    return arr
+
+
 def _as_rankings(rankings: np.ndarray) -> np.ndarray:
-    r = np.atleast_2d(np.asarray(rankings, dtype=int))
-    m = r.shape[1]
-    for row in r:
-        if sorted(row.tolist()) != list(range(m)):
-            raise ValueError("each ranking must be a permutation of 0..m-1 (item ids, best first).")
-    return r
+    raw = np.atleast_2d(np.asarray(rankings))
+    m = raw.shape[1]
+    return np.stack([_validate_permutation(row, m=m) for row in raw])
 
 
 def _positions(ordering: np.ndarray) -> np.ndarray:
     """Map an ordering (item ids best-first) to position-of-each-item."""
-    pos = np.empty(len(ordering), dtype=int)
-    pos[np.asarray(ordering, dtype=int)] = np.arange(len(ordering))
+    arr = _validate_permutation(ordering)
+    pos = np.empty(len(arr), dtype=int)
+    pos[arr] = np.arange(len(arr))
     return pos
+
+
+def _validate_pair(a: Any, b: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Validate ``a`` and ``b`` are each a permutation, and permutations of the *same* domain size --
+    two rankings of different lengths are incomparable and must be rejected, not silently truncated to
+    the shorter one's length (which could otherwise report a meaningless zero distance)."""
+    va = _validate_permutation(a)
+    vb = _validate_permutation(b, m=len(va))
+    return va, vb
 
 
 def kendall_distance(a: np.ndarray, b: np.ndarray) -> int:
     """Kendall-tau distance: the number of item pairs ordered oppositely by ``a`` and ``b``."""
+    a, b = _validate_pair(a, b)
     pa, pb = _positions(a), _positions(b)
     m = len(pa)
     d = 0
@@ -52,11 +103,13 @@ def kendall_distance(a: np.ndarray, b: np.ndarray) -> int:
 
 def spearman_footrule(a: np.ndarray, b: np.ndarray) -> int:
     """Spearman footrule distance: the sum of absolute position differences across items."""
+    a, b = _validate_pair(a, b)
     return int(np.sum(np.abs(_positions(a) - _positions(b))))
 
 
 def cayley_distance(a: np.ndarray, b: np.ndarray) -> int:
     """Cayley distance: the minimum number of transpositions turning ``a`` into ``b`` (m - #cycles)."""
+    a, b = _validate_pair(a, b)
     pa, pb = _positions(a), _positions(b)
     # permutation taking a's order to b's order
     perm = pb[np.argsort(pa)]

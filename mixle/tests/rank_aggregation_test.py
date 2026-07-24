@@ -113,5 +113,76 @@ class MallowsTest(unittest.TestCase):
             borda_count(np.array([[0, 0, 1]]))
 
 
+class PermutationValidationTest(unittest.TestCase):
+    """MXR-080-0107 -- every distance/aggregation entry point must validate its ranking(s) as exact
+    permutations before computing anything, instead of casting-then-checking (fractional rankings) or
+    not checking at all (the public distance functions)."""
+
+    def test_fractional_ranking_rejected_before_truncation(self):
+        # the audit's own repro: casting [0.9, 1.1] to int *first* silently yields the "valid"
+        # permutation [0, 1]; validation must happen before any int cast.
+        with self.assertRaises(ValueError):
+            borda_count(np.array([[0.9, 1.1]]))
+
+    def test_duplicate_entries_rejected_by_distance_functions(self):
+        a_dup = np.array([0, 0, 1])
+        b = np.array([0, 1, 2])
+        with self.assertRaises(ValueError):
+            kendall_distance(a_dup, b)
+        with self.assertRaises(ValueError):
+            spearman_footrule(a_dup, b)
+        with self.assertRaises(ValueError):
+            cayley_distance(a_dup, b)
+
+    def test_out_of_range_ids_rejected_not_crashed(self):
+        # previously an uncaught IndexError from fancy-index assignment; must now be a clean ValueError.
+        a_oor = np.array([0, 1, 5])
+        b = np.array([0, 1, 2])
+        with self.assertRaises(ValueError):
+            kendall_distance(a_oor, b)
+        with self.assertRaises(ValueError):
+            spearman_footrule(a_oor, b)
+        with self.assertRaises(ValueError):
+            cayley_distance(a_oor, b)
+
+    def test_mismatched_length_rankings_rejected_not_zero(self):
+        # previously kendall_distance silently truncated to the shorter ranking's length and could
+        # return 0 for two rankings of genuinely different sizes.
+        a = np.array([0, 1, 2])
+        b = np.array([0, 1, 2, 3, 4])
+        with self.assertRaises(ValueError):
+            kendall_distance(a, b)
+        with self.assertRaises(ValueError):
+            spearman_footrule(a, b)
+        with self.assertRaises(ValueError):
+            cayley_distance(a, b)
+
+    def test_aggregation_functions_reject_invalid_permutations_too(self):
+        with self.assertRaises(ValueError):
+            copeland(np.array([[0, 1, 5]]))
+        with self.assertRaises(ValueError):
+            kemeny_consensus(np.array([[0.9, 1.1], [0.0, 1.0]]))
+        with self.assertRaises(ValueError):
+            mallows_fit(np.array([[0, 0, 1]]))
+
+    def test_negative_control_identical_permutations_give_zero(self):
+        a = np.array([2, 0, 3, 1])
+        self.assertEqual(kendall_distance(a, a), 0)
+        self.assertEqual(spearman_footrule(a, a), 0)
+        self.assertEqual(cayley_distance(a, a), 0)
+
+    def test_negative_control_known_swap_gives_known_distance(self):
+        a = np.array([0, 1, 2, 3])
+        b = np.array([1, 0, 2, 3])  # a single adjacent transposition of items 0 and 1
+        self.assertEqual(kendall_distance(a, b), 1)
+        self.assertEqual(spearman_footrule(a, b), 2)
+        self.assertEqual(cayley_distance(a, b), 1)
+
+    def test_negative_control_legitimate_matching_size_rankings_still_aggregate(self):
+        R = np.array([[0, 1, 2, 3]] * 4)
+        out = borda_count(R)
+        self.assertTrue(np.array_equal(out["consensus"], [0, 1, 2, 3]))
+
+
 if __name__ == "__main__":
     unittest.main()
