@@ -29,6 +29,10 @@ def _answer_from_context(question: str, context: list[str]) -> str:
 
 
 def _assimilate_strong_batch(sub: Substrate) -> list[str]:
+    # MXR-080-0243: a held_out_truth claim only earns its strength once source_id resolves to a real
+    # substrate item (a receipt) -- register the gazetteer once, before the first claim cites it.
+    if sub.get("gazetteer-2026") is None:
+        sub.add(kind="text", text="gazetteer-2026: authoritative capitals reference", id="gazetteer-2026")
     ids = []
     for claim_text, _answer in _FACTS.values():
         belief = assimilate(
