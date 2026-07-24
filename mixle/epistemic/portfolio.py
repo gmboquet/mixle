@@ -55,15 +55,25 @@ class HypothesisPortfolio:
             # letting it corrupt lookups downstream.
             dupes = sorted({i for i in ids if ids.count(i) > 1})
             raise ValueError(f"hypothesis ids must be unique, got duplicate(s): {dupes!r}")
-        if self.w_open < -1e-9 or self.w_open > 1 + 1e-9:
-            raise ValueError(f"w_open must be in [0, 1], got {self.w_open}")
+        if not np.isfinite(self.w_open) or self.w_open < -1e-9 or self.w_open > 1 + 1e-9:
+            # `nan < -1e-9` and `nan > 1 + 1e-9` are both always False, so a NaN w_open used to sail
+            # through this range check untouched and propagate into reweight()/resample()/
+            # surprise_score() as silently corrupted state.
+            raise ValueError(f"w_open must be a finite value in [0, 1], got {self.w_open}")
         for h, w in zip(self.hypotheses, self.weights):
+            if not np.isfinite(w) or w < -1e-9:
+                # `nan < -1e-9` is always False, so a NaN weight used to sail through this check
+                # untouched -- same blind spot as w_open above.
+                raise ValueError(f"hypothesis {h.id!r} has a non-finite or negative weight: {w}")
             if not h.active and w != 0.0:
                 raise ValueError(f"inactive hypothesis {h.id!r} must carry weight 0.0, got {w}")
-            if w < -1e-9:
-                raise ValueError(f"hypothesis {h.id!r} has negative weight {w}")
         total = float(self.weights.sum()) + self.w_open
-        if abs(total - 1.0) > 1e-6:
+        if not np.isfinite(total) or abs(total - 1.0) > 1e-6:
+            # Belt-and-suspenders alongside the finiteness checks above: weights/w_open are already
+            # validated finite by this point, so this can only trip on overflow to +-inf from summing
+            # extreme-but-individually-finite weights -- which `abs(total - 1.0) > 1e-6` already catches
+            # correctly (unlike NaN, inf compares fine) -- but spelling out finiteness keeps the
+            # invariant self-documenting rather than an emergent property of float overflow semantics.
             raise ValueError(f"sum(weights) + w_open must equal 1.0, got {total}")
 
     def __len__(self) -> int:
