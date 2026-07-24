@@ -41,11 +41,17 @@ def multi_fidelity_minimize(
     """Cost-aware multi-fidelity Bayesian optimization of ``objective(x, s)``.
 
     ``objective(x, s)`` returns the response at input ``x`` and fidelity ``s`` (one of ``fidelities``);
-    the largest fidelity (or ``target``) is the true objective. ``costs`` is the per-fidelity evaluation
-    cost (default: the fidelity value itself). The loop fits a GP over ``[x, s]``, proposes ``x`` by
-    Expected Improvement at the target fidelity, then evaluates at the fidelity maximizing target-variance
-    reduction per unit cost, until the cumulative cost reaches ``max_cost``. Returns
-    ``{'x', 'y', 'X', 'Y', 'cost'}`` -- the best *target-fidelity* point and the full augmented history.
+    the largest fidelity (or ``target``) is the true objective. ``target``, if given, must itself be one
+    of ``fidelities``: this function never evaluates a fidelity outside that set, so an out-of-set target
+    could otherwise only ever be "satisfied" by silently substituting a lower-fidelity response for it.
+    ``costs`` is the per-fidelity evaluation cost (default: the fidelity value itself). The loop fits a GP
+    over ``[x, s]``, proposes ``x`` by Expected Improvement at the target fidelity, then evaluates at the
+    fidelity maximizing target-variance reduction per unit cost, until the cumulative cost reaches
+    ``max_cost``. Returns ``{'x', 'y', 'X', 'Y', 'cost', 'target_evaluated'}`` -- ``X``/``Y`` are the full
+    augmented history and ``x``/``y`` the best *target-fidelity* point and response, but only when
+    ``target_evaluated`` is true: if the budget ran out before any target-fidelity evaluation was
+    affordable, ``x``/``y`` are ``None`` rather than silently standing in a lower-fidelity result for the
+    target-fidelity answer the caller asked for.
     """
     if int(n_candidates) <= 0:
         raise ValueError("n_candidates must be positive.")
@@ -54,6 +60,12 @@ def multi_fidelity_minimize(
     rng = _as_rng(seed)
     fids = np.asarray(fidelities, dtype=np.float64).ravel()
     target = float(fids.max()) if target is None else float(target)
+    if not np.any(fids == target):
+        # Without this, a target outside `fidelities` is never evaluated: the fidelity-selection loop
+        # below only ever picks from `fids`, so `at_target` stays all-False and the final fallback used
+        # to silently return the best observation at ANY fidelity, mislabeled as the target-fidelity
+        # result (MXR-080-0181). Reject it here instead of ever manufacturing that false answer.
+        raise ValueError(f"target fidelity {target} must be one of fidelities {tuple(fids.tolist())}.")
     cost_arr = fids if costs is None else np.asarray(costs, dtype=np.float64).ravel()
     cost_map = {float(s): float(c) for s, c in zip(fids, cost_arr)}
     if any(c <= 0.0 for c in cost_map.values()):
@@ -110,16 +122,25 @@ def multi_fidelity_minimize(
         spent += cost_map[best_s]
 
     at_target = x_aug[:, -1] == target
-    if at_target.any():
+    target_evaluated = bool(at_target.any())
+    if target_evaluated:
         idx = int(np.where(at_target)[0][int(np.argmin(y_arr[at_target]))])
+        best_x: np.ndarray | None = x_aug[idx, :d]
+        best_y: float | None = sign * float(y_arr[idx])
     else:
-        idx = int(np.argmin(y_arr))
+        # The budget ran out before any target-fidelity evaluation was affordable. Returning the best
+        # lower-fidelity observation here as `x`/`y` would silently mislabel it as the answer to the
+        # target-fidelity question (MXR-080-0181); report honestly that no target-fidelity result was
+        # obtained instead. `X`/`Y` still hold the full history for a caller who wants to inspect what
+        # lower-fidelity information was gathered regardless.
+        best_x, best_y = None, None
     return {
-        "x": x_aug[idx, :d],
-        "y": sign * float(y_arr[idx]),
+        "x": best_x,
+        "y": best_y,
         "X": x_aug,
         "Y": sign * y_arr,
         "cost": spent,
+        "target_evaluated": target_evaluated,
     }
 
 
