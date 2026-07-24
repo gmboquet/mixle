@@ -166,5 +166,63 @@ class ContractTest(unittest.TestCase):
         self.assertIsInstance(env, AREnvelopeIndex)
 
 
+class CalibrationValidationTest(unittest.TestCase):
+    """MXR-080-0231: calibration must reject impossible sampling configurations up front instead of
+    silently producing an empty envelope (n_paths<=0) or crashing deep inside _calibrate with an
+    error that names neither the parameter nor the actual bad value."""
+
+    def _ar(self, V=4, L=3):
+        return AutoregressiveEnumerable(_iid_model(V), max_len=L)
+
+    def test_zero_n_paths_rejected_not_a_silent_empty_envelope(self):
+        with self.assertRaises(ValueError):
+            AREnvelopeIndex(self._ar(), n_paths=0, seed=0)
+
+    def test_negative_n_paths_rejected(self):
+        with self.assertRaises(ValueError):
+            AREnvelopeIndex(self._ar(), n_paths=-3, seed=0)
+
+    def test_fractional_n_paths_rejected_not_silently_truncated(self):
+        with self.assertRaises(ValueError):
+            AREnvelopeIndex(self._ar(), n_paths=2.9, seed=0)
+
+    def test_integer_valued_float_n_paths_accepted(self):
+        # Negative control: an exactly-integral float is a legitimate spelling, not an error.
+        env = AREnvelopeIndex(self._ar(), n_paths=4.0, seed=0)
+        self.assertEqual(env.n_paths, 4)
+        self.assertIsInstance(env.n_paths, int)
+
+    def test_non_finite_budget_bits_rejected(self):
+        with self.assertRaises(ValueError):
+            AREnvelopeIndex(self._ar(), n_paths=4, seed=0, budget_bits=float("inf"))
+        with self.assertRaises(ValueError):
+            AREnvelopeIndex(self._ar(), n_paths=4, seed=0, budget_bits=float("nan"))
+
+    def test_non_finite_depth_bits_rejected_by_ensure_bits(self):
+        env = AREnvelopeIndex(self._ar(), n_paths=4, seed=0)
+        with self.assertRaises(ValueError):
+            env.ensure_bits(float("inf"))
+        with self.assertRaises(ValueError):
+            env.ensure_bits(float("nan"))
+
+    def test_empty_step_distribution_raises_clear_error_not_a_numpy_internal(self):
+        # A prefix ending in token 1 has no valid next tokens; some ancestrally-sampled path is
+        # overwhelmingly likely to reach it across 8 paths x 2 extension steps at this seed.
+        def empty_branch_model(prefix):
+            if len(prefix) > 0 and prefix[-1] == 1:
+                return np.array([], dtype=np.int64), np.array([], dtype=np.float64)
+            return np.array([0, 1]), np.log(np.array([0.5, 0.5]))
+
+        ar = AutoregressiveEnumerable(empty_branch_model, max_len=3)
+        with self.assertRaises(ValueError) as ctx:
+            AREnvelopeIndex(ar, n_paths=8, seed=0)
+        self.assertIn("non-empty step distribution", str(ctx.exception))
+
+    def test_well_formed_construction_still_works(self):
+        # Negative control: valid n_paths/budget_bits still build a working, exact-for-iid index.
+        env = AREnvelopeIndex(self._ar(), n_paths=4, seed=0)
+        self.assertEqual(env.total(), 4.0**3)
+
+
 if __name__ == "__main__":
     unittest.main()
