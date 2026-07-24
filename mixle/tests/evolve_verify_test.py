@@ -86,6 +86,18 @@ class VerifyGateTest(unittest.TestCase):
         )
         self.assertEqual(verdict.favored, "challenger")
 
+    def test_multiplicity_on_a_single_pair_raises_instead_of_silently_no_opping(self):
+        # a single champion/challenger comparison produces exactly one p-value; every method in
+        # mixle.inference.multiple_testing is the identity transform at family size 1 (bonferroni
+        # multiplies alpha by 1; BH ranks the lone value against itself), so "correcting" it here would
+        # silently do nothing while looking like a real correction -- the exact bug this guards against
+        # (see mixle.evolve.population.Population.step, which pools a whole generation's raw p-values
+        # and corrects them together ONCE instead of per-candidate). Refuse outright rather than no-op.
+        champion = _fit(self.data, 3.0, 2.0)
+        challenger = _fit(self.data, 3.0, 2.0)
+        with self.assertRaises(ValueError):
+            challenger_beats_champion(champion, challenger, self.data, objective=nll_objective(), multiplicity="bh")
+
 
 class _DelegatingWrapper:
     """Delegates every attribute to a real model except the ones explicitly overridden -- lets a

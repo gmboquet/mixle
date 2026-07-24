@@ -25,9 +25,10 @@ import numpy as np
 
 from mixle.capability import capabilities
 from mixle.evolve.objective import Objective
-from mixle.evolve.operators import ImprovementOperator, default_operators
+from mixle.evolve.operators import Candidate, ImprovementOperator, default_operators
 from mixle.evolve.structure import structural_distance
-from mixle.evolve.verify import challenger_beats_champion
+from mixle.evolve.verify import Verdict, challenger_beats_champion
+from mixle.inference.multiple_testing import adjust_pvalues
 
 
 # ---------------------------------------------------------------------------
@@ -185,14 +186,33 @@ class _Member:
 # ``caps`` fingerprint is kept as low-cost cached metadata.
 
 
+@dataclass
+class _GenerationSlot:
+    """One parent/operator pairing drawn for a generation, tracked from proposal through to reward.
+
+    ``candidate``/``verdict`` stay ``None`` when the operator was inapplicable or ``propose`` raised --
+    that slot never got a comparison, and is rewarded 0.0 without further ado. A slot that WAS compared
+    holds its RAW (uncorrected) :class:`~mixle.evolve.verify.Verdict`; :meth:`Population.step` finalizes
+    its promotion only after every slot's raw p-value has been pooled and corrected together (see the
+    multiplicity note there) -- kept as its own list, walked twice, so the bandit is still rewarded in
+    the same slot order the parents/operators were drawn in.
+    """
+
+    op: ImprovementOperator
+    cost: float
+    candidate: Candidate | None = None
+    verdict: Verdict | None = None
+
+
 class Population:
     """A diversity-preserving population of model structures, evolved by the :class:`OperatorBandit`.
 
     ``seeds`` are fitted models (the starting structures). Each :meth:`step` selects operators via the
     bandit, applies them to parents chosen by fitness, gates the challengers with the Phase-1
-    champion/challenger rule (Benjamini-Hochberg multiplicity, since a generation produces many
-    challengers at once), rewards the bandit with the verified deltas, and keeps the verified-best plus a
-    coarse capability-diversity quota. :meth:`step` / :meth:`run` take an optional ``verify_data`` so
+    champion/challenger rule -- pooling the whole generation's p-values for a single Benjamini-Hochberg
+    correction before the per-candidate gate, since a generation produces many challengers at once --
+    rewards the bandit with the verified deltas, and keeps the verified-best plus a coarse
+    capability-diversity quota. :meth:`step` / :meth:`run` take an optional ``verify_data`` so
     challengers are fit on one split and gated + scored on a disjoint held-out split, matching the
     ``bo`` / ``evolutionary`` search backends.
 
@@ -296,49 +316,80 @@ class Population:
                 relied on -- but scoring a candidate on the same data it was just fit on is a
                 near-tautological test, so a caller that wants a genuine held-out gate (e.g.
                 :func:`~mixle.evolve.search.search`) must pass a disjoint split here.
+
+        A generation proposes many challengers at once, so the gate applies a genuine population-wide
+        Benjamini-Hochberg correction: every candidate is first compared on its own RAW p-value (pass 1
+        below), the whole generation's raw p-values are then pooled and corrected together in ONE
+        :func:`~mixle.inference.multiple_testing.adjust_pvalues` call (pass 2), and only then is each
+        candidate's promotion finalized against its adjusted p-value (pass 3). Correcting each
+        candidate's single p-value in isolation -- family size 1 -- is the identity transform for every
+        method in :mod:`~mixle.inference.multiple_testing`, which is why
+        :func:`~mixle.evolve.verify.challenger_beats_champion` refuses to do that itself.
         """
         verify = data if verify_data is None else verify_data
         self._ensure_initialized(verify)
         report = GenerationReport(best_score=self._champion_score)
         ctx = {"parent_hash": None, "seed": self.seed + self._gen, "objective": self.objective}
+        alpha = 0.05  # must match challenger_beats_champion's own default: the per-candidate gate and
+        # the population-wide correction below have to agree on one significance level.
 
         # one operator per parent; how many parents to spawn this generation.
         n_offspring = max(1, self.size // 2)
         parents = self._select_parents(n_offspring)
         ops = self.bandit.select(k=n_offspring)
 
-        new_members: list[_Member] = []
+        # -- pass 1: propose + compare every candidate on its own RAW (uncorrected) p-value -----------
+        slots: list[_GenerationSlot] = []
         for parent, op in zip(parents, ops):
             report.operators_used.append(op.name)
             cost = float(getattr(op, "cost_hint", 1.0))
+            slot = _GenerationSlot(op=op, cost=cost)
+            slots.append(slot)
             try:
                 if not op.applicable(parent.model, data, ctx=ctx):
-                    self.bandit.reward(op.name, 0.0, cost)
-                    report.rewards.append(0.0)
                     continue
                 candidate = op.propose(parent.model, data, ctx=ctx)
             except Exception:  # noqa: BLE001
-                self.bandit.reward(op.name, 0.0, cost)
-                report.rewards.append(0.0)
                 continue
             report.proposals += 1
 
             nonnested = type(candidate.model).__name__ != type(parent.model).__name__
-            verdict = challenger_beats_champion(
+            slot.candidate = candidate
+            slot.verdict = challenger_beats_champion(
                 parent.model,
                 candidate.model,
                 verify,
                 objective=self.objective,
-                multiplicity="bh",  # many simultaneous challengers per generation
+                alpha=alpha,
                 nonnested=nonnested,
                 seed=self.seed + self._gen,
             )
-            delta = verdict.delta if verdict.promote else 0.0
-            self.bandit.reward(op.name, delta, cost)
+
+        # -- pass 2: pool this generation's raw p-values and correct them ONCE, together ---------------
+        compared = [s for s in slots if s.verdict is not None]
+        if compared:
+            raw_pvals = np.asarray([s.verdict.p_value for s in compared], dtype=float)
+            p_adjusted = iter(adjust_pvalues(raw_pvals, method="bh", alpha=alpha)["pvals_adjusted"])
+        else:
+            p_adjusted = iter(())
+
+        # -- pass 3: reward the bandit (in the SAME slot order the parents/operators were drawn in),
+        #    finalizing each compared candidate's promotion against its adjusted p-value. Adjustment
+        #    only ever raises a p-value, never lowers it, so this can only REVOKE a raw "challenger"
+        #    verdict -- it can never promote a candidate the raw, uncorrected test itself refused.
+        new_members: list[_Member] = []
+        for slot in slots:
+            if slot.verdict is None:
+                self.bandit.reward(slot.op.name, 0.0, slot.cost)
+                report.rewards.append(0.0)
+                continue
+            promote = slot.verdict.promote and bool(next(p_adjusted) < alpha)
+            delta = slot.verdict.delta if promote else 0.0
+            self.bandit.reward(slot.op.name, delta, slot.cost)
             report.rewards.append(delta)
-            if verdict.promote:
+            if promote:
                 report.verified += 1
-                new_members.append(self._member(candidate.model, verify))
+                new_members.append(self._member(slot.candidate.model, verify))
 
         # fold survivors + new verified offspring back into the population.
         self._members = self._survivors_with(new_members)
