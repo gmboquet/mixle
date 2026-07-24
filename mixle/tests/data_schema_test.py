@@ -18,14 +18,28 @@
    one field's whole value -- see ForModelContainerValueTest below. A schema built by hand (as
    ConformRecordLengthTest does) still defaults container_value=False and keeps the stricter
    raise-on-ambiguity behavior.
+4. _type_for checked the broad Discrete capability (finite-or-enumerable support) before ever
+   considering a categorical class fallback, and Discrete is true for a CategoricalDistribution too
+   (it has finite support) -- so EVERY discrete model, categorical or not, got Count. A
+   CategoricalDistribution({"red": .5, "blue": .5}) therefore got a Count schema field, and schema
+   conformance tried int("red"), rejecting the model's own valid support. _type_for now inspects a
+   Discrete distribution's own declared support values (via its enumerator) and classifies them by
+   what they actually are -- see CategoricalSchemaTypeTest below.
+5. Count.coerce was bare int(value): it silently truncated fractional values (1.9 -> 1), silently
+   accepted True/False as 1/0 (bool is an int subclass), and silently accepted negative values --
+   turning a data problem into a wrong-but-plausible observation instead of an error. Count.coerce now
+   validates exact integrality, sign, and finiteness before converting -- see CountCoerceTest below.
 """
 
 import unittest
 
 import numpy as np
 
-from mixle.data.schema import Boolean, Field, Nested, Real, Schema, Vector
+from mixle.data.schema import Boolean, Categorical, Count, Field, Nested, Real, Schema, Vector
 from mixle.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
+from mixle.stats.univariate.discrete.bernoulli import BernoulliDistribution
+from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
+from mixle.stats.univariate.discrete.poisson import PoissonDistribution
 
 
 class BooleanCoerceTest(unittest.TestCase):
@@ -140,6 +154,75 @@ class ForModelContainerValueTest(unittest.TestCase):
         s_default = Schema((Field("n", Nested(inner)),))  # container_value defaults False
         with self.assertRaises(ValueError):
             s_default.conform_record([1.0, 2.0])
+
+
+class CategoricalSchemaTypeTest(unittest.TestCase):
+    """Bug-4 (MXR-080-0054) regression: a categorical model's derived schema field must be Categorical,
+    never Count, and its own valid support must round-trip through conform_record."""
+
+    def test_categorical_distribution_gets_a_categorical_field_not_count(self):
+        dist = CategoricalDistribution({"red": 0.5, "blue": 0.5})
+        schema = Schema.for_model(dist)
+        self.assertIsInstance(schema.fields[0].type, Categorical)
+        self.assertNotIsInstance(schema.fields[0].type, Count)
+
+    def test_categorical_labels_round_trip_through_conform_record(self):
+        dist = CategoricalDistribution({"red": 0.5, "blue": 0.5})
+        schema = Schema.for_model(dist)
+        self.assertEqual(schema.conform_record("red"), "red")
+        self.assertEqual(schema.conform_record("blue"), "blue")
+
+    def test_poisson_a_genuine_count_model_still_gets_count(self):
+        # the fix must not turn EVERY discrete model into Categorical -- a distribution whose declared
+        # support values are actually integers must still resolve to Count.
+        schema = Schema.for_model(PoissonDistribution(2.0))
+        self.assertIsInstance(schema.fields[0].type, Count)
+        self.assertEqual(schema.conform_record(3), 3)
+
+    def test_bernoulli_a_binary_model_gets_boolean_not_count(self):
+        # declared support {False, True} is neither a categorical label set nor an integer count.
+        schema = Schema.for_model(BernoulliDistribution(0.5))
+        self.assertIsInstance(schema.fields[0].type, Boolean)
+
+
+class CountCoerceTest(unittest.TestCase):
+    """Bug-5 (MXR-080-0055) regression: Count.coerce must validate exact integrality, sign, and
+    finiteness instead of silently truncating/accepting via bare int(value)."""
+
+    def test_fractional_values_are_rejected_not_truncated(self):
+        with self.assertRaises(ValueError):
+            Count().coerce(1.9)
+
+    def test_bool_is_rejected_not_treated_as_zero_or_one(self):
+        with self.assertRaises(ValueError):
+            Count().coerce(True)
+        with self.assertRaises(ValueError):
+            Count().coerce(False)
+
+    def test_negative_values_are_rejected(self):
+        with self.assertRaises(ValueError):
+            Count().coerce(-2)
+
+    def test_nan_and_inf_are_rejected(self):
+        with self.assertRaises(ValueError):
+            Count().coerce(float("nan"))
+        with self.assertRaises(ValueError):
+            Count().coerce(float("inf"))
+        with self.assertRaises(ValueError):
+            Count().coerce(float("-inf"))
+
+    def test_legitimate_counts_still_work(self):
+        self.assertEqual(Count().coerce(42), 42)
+        self.assertEqual(Count().coerce(0), 0)
+        self.assertEqual(Count().coerce(5.0), 5)  # a whole-number float is still an exact count
+
+    def test_numeric_strings_are_still_accepted(self):
+        # connector input (CSV/SQL text columns) legitimately arrives as numeric strings.
+        self.assertEqual(Count().coerce("42"), 42)
+
+    def test_non_integral_numeric_strings_are_rejected(self):
+        with self.assertRaises(ValueError):
+            Count().coerce("1.9")
 
 
 if __name__ == "__main__":
