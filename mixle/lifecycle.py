@@ -377,13 +377,17 @@ def propose(
     """Propose a model for ``data`` from a *verified frontier* of candidates and return the winner.
 
     Candidates come from every proposer the library has — the heuristic recommendation
-    (:func:`mixle.task.recommend.recommend_model`, dependency-aware), the plain independence baseline
-    (:func:`mixle.utils.automatic.get_estimator`), and, when an ``llm`` handle is given, an LLM-designed
-    structure (:func:`mixle.task.design.design_model`, allowlisted-spec, fit-validated). Each candidate is
-    **fitted on a train split and scored on held-out data**, so the ranking is out-of-sample, not a guess.
-    The winner becomes the returned :class:`Model`; the full ranking lands in ``Model.frontier`` and the
-    per-field confidence / dependency / candidate notes in ``Model.notes`` (shown by ``explain()``).
-    Pass ``fit=True`` to also fit the winner to all of ``data`` before returning.
+    (:func:`mixle.task.recommend.recommend_model`, dependency-aware only in the narrow sense of a joint
+    multivariate-Gaussian candidate for fully-observed numeric vector rows, not the fuller copula/learned
+    Bayesian-network structure search :func:`mixle.inference.optimize` reaches when called directly with
+    no pre-built estimator — see :doc:`/automatic-modeling-contract`'s "Dependence between fields"), the
+    plain independence baseline (:func:`mixle.utils.automatic.get_estimator`), and, when an ``llm`` handle
+    is given, an LLM-designed structure (:func:`mixle.task.design.design_model`, allowlisted-spec,
+    fit-validated). Each candidate is **fitted on a train split and scored on held-out data**, so the
+    ranking is out-of-sample, not a guess. The winner becomes the returned :class:`Model`; the full ranking
+    lands in ``Model.frontier`` and the per-field confidence / dependency / candidate notes in
+    ``Model.notes`` (shown by ``explain()``). Pass ``fit=True`` to also fit the winner to all of ``data``
+    before returning.
 
     The frontier search is bounded by ``max_candidates`` (evaluate at most this many candidates, in
     proposer order — the heuristic recommendation is always first) and ``timeout`` (stop starting new
