@@ -31,10 +31,33 @@ from mixle.doe.bayesopt import _fit_surrogate, _validate_xy
 from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
 
 
+def _positive_int(name: str, value: Any) -> int:
+    """Validate that ``value`` is an exact, finite, positive integer count and return it as ``int``.
+
+    Rejects ``bool``, non-numeric types, non-finite values, fractional values, and non-positive values
+    -- MXR-080-0158 found budget/draw counts silently truncated (a fractional count via a bare
+    ``int()`` cast) or silently substituted (a zero count replaced by a default) instead of rejected.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+    if not np.isfinite(value):
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+    ivalue = int(value)
+    if ivalue != value or ivalue <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+    return ivalue
+
+
 def alm_scores(gp: Any, x: np.ndarray, y: np.ndarray, candidates: np.ndarray) -> np.ndarray:
     """Active Learning MacKay scores: the GP posterior predictive variance at each candidate."""
+    candidates = np.asarray(candidates)
+    if candidates.shape[0] == 0:
+        raise ValueError("alm_scores requires a nonempty candidates set.")
     _, cov = gp.predict(x, y, candidates, return_cov=True)
-    return np.clip(np.diag(np.atleast_2d(np.asarray(cov, dtype=np.float64))), 0.0, None)
+    scores = np.clip(np.diag(np.atleast_2d(np.asarray(cov, dtype=np.float64))), 0.0, None)
+    if not np.all(np.isfinite(scores)):
+        raise ValueError("alm_scores produced non-finite merits; check the surrogate's covariance prediction.")
+    return scores
 
 
 def alc_scores(gp: Any, x: np.ndarray, y: np.ndarray, candidates: np.ndarray, reference: np.ndarray) -> np.ndarray:
@@ -44,13 +67,26 @@ def alc_scores(gp: Any, x: np.ndarray, y: np.ndarray, candidates: np.ndarray, re
     ``cov_post(r, c)^2 / var_post(c)``; this returns the sum over the reference set (the negative change
     in integrated MSE), so the maximizer is the most globally informative next point.
     """
+    candidates = np.asarray(candidates)
+    reference = np.asarray(reference)
+    if reference.shape[0] == 0:
+        raise ValueError(
+            "alc_scores requires a nonempty reference set (an empty reference collapses every merit to "
+            "zero -- an integral over nothing -- making the subsequent argmax pick an arbitrary "
+            "candidate instead of an informative one)."
+        )
+    if candidates.shape[0] == 0:
+        raise ValueError("alc_scores requires a nonempty candidates set.")
     pts = np.vstack([reference, candidates])
     nr = reference.shape[0]
     _, cov = gp.predict(x, y, pts, return_cov=True)
     cov = np.atleast_2d(np.asarray(cov, dtype=np.float64))
     cov_rc = cov[:nr, nr:]  # (n_ref, n_cand) posterior cov between reference and candidates
     var_c = np.clip(np.diag(cov)[nr:], 1e-12, None)
-    return np.asarray((cov_rc**2).sum(axis=0) / var_c)
+    scores = np.asarray((cov_rc**2).sum(axis=0) / var_c)
+    if not np.all(np.isfinite(scores)):
+        raise ValueError("alc_scores produced non-finite merits; check the surrogate's covariance prediction.")
+    return scores
 
 
 def propose_active_learning(
@@ -65,18 +101,24 @@ def propose_active_learning(
     gp: Any = None,
     fit_kwargs: dict[str, Any] | None = None,
 ) -> np.ndarray:
-    """Propose the next active-learning point (``method='alc'`` IMSE, or ``'alm'`` max variance)."""
-    if int(n_candidates) <= 0:
-        raise ValueError("n_candidates must be positive.")
+    """Propose the next active-learning point (``method='alc'`` IMSE, or ``'alm'`` max variance).
+
+    ``n_candidates`` (and ``n_reference``, for ``method='alc'``) must be exact positive integers
+    (MXR-080-0158): a fractional count used to be silently truncated by a bare ``int()`` cast, and an
+    ``n_reference=0`` reduced ALC to an empty reference set (all-zero merits, an arbitrary argmax).
+    """
+    n_candidates = _positive_int("n_candidates", n_candidates)
+    if method == "alc":
+        n_reference = _positive_int("n_reference", n_reference)
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     xs, ys = _validate_xy(x, y)
     gp = _fit_surrogate(xs, ys, gp, fit_kwargs)
-    cand = latin_hypercube(b, int(n_candidates), rng)
+    cand = latin_hypercube(b, n_candidates, rng)
     if method == "alm":
         scores = alm_scores(gp, xs, ys, cand)
     elif method == "alc":
-        scores = alc_scores(gp, xs, ys, cand, latin_hypercube(b, int(n_reference), rng))
+        scores = alc_scores(gp, xs, ys, cand, latin_hypercube(b, n_reference, rng))
     else:
         raise ValueError("method must be 'alc' or 'alm'.")
     return cand[int(np.argmax(scores))]
@@ -97,11 +139,24 @@ def active_learning_design(
     Starts from a Latin-hypercube design, then repeatedly fits the GP and adds the most informative
     point (by ``method``) until ``max_evals`` evaluations. Returns ``{'X', 'Y'}`` -- a design tailored to
     learn ``objective`` well everywhere, not just near an optimum.
+
+    ``n_init`` (default ``2 * len(bounds)``) and ``max_evals`` must both be exact positive integers with
+    ``1 <= n_init <= max_evals`` (MXR-080-0158): an initial design bigger than the whole budget used to
+    be evaluated in full and returned over budget instead of rejected, a fractional count was silently
+    truncated, and an explicit ``n_init=0`` was silently replaced by the default rather than treated as
+    the caller error it almost certainly is.
     """
     b = _as_bounds(bounds)
     d = b.shape[0]
     rng = _as_rng(seed)
-    n_init = int(n_init) if n_init else 2 * d
+    max_evals = _positive_int("max_evals", max_evals)
+    n_init = 2 * d if n_init is None else _positive_int("n_init", n_init)
+    if n_init > max_evals:
+        raise ValueError(
+            f"n_init={n_init} exceeds max_evals={max_evals}: the initial design alone would already "
+            "evaluate over budget. Pass an explicit n_init <= max_evals (n_init defaults to "
+            "2 * len(bounds) when omitted, which must also fit within max_evals)."
+        )
     x_all = latin_hypercube(b, n_init, rng)
     y_all = np.array([float(objective(np.asarray(p, dtype=np.float64))) for p in x_all], dtype=np.float64)
     while y_all.shape[0] < max_evals:
