@@ -28,6 +28,47 @@ class RandomGraphModelsTestCase(unittest.TestCase):
         self.assertTrue(np.all(sample == sample.T))
         self.assertTrue(np.all(np.diag(sample) == 0))
 
+    def test_erdos_renyi_log_likelihood_rejects_asymmetric_adjacency_when_undirected(self):
+        adj = np.asarray(
+            [
+                [0, 1, 0, 1],
+                [0, 0, 1, 0],
+                [0, 1, 0, 0],
+                [1, 0, 0, 0],
+            ]
+        )
+        model = ErdosRenyiGraphModel(0.3, directed=False, self_loops=False)
+
+        with self.assertRaises(ValueError):
+            model.log_likelihood(adj)
+
+    def test_erdos_renyi_log_likelihood_rejects_self_loop_when_disallowed(self):
+        adj = np.asarray(
+            [
+                [1, 1, 0, 1],
+                [1, 0, 1, 0],
+                [0, 1, 0, 0],
+                [1, 0, 0, 0],
+            ]
+        )
+        model = ErdosRenyiGraphModel(0.3, directed=False, self_loops=False)
+
+        with self.assertRaises(ValueError):
+            model.log_likelihood(adj)
+
+    def test_erdos_renyi_log_likelihood_allows_asymmetric_adjacency_when_directed(self):
+        adj = np.asarray(
+            [
+                [0, 1, 0, 1],
+                [0, 0, 1, 0],
+                [0, 1, 0, 0],
+                [1, 0, 0, 0],
+            ]
+        )
+        model = ErdosRenyiGraphModel(0.3, directed=True, self_loops=False)
+
+        self.assertTrue(np.isfinite(model.log_likelihood(adj)))
+
     def test_stochastic_block_mle_recovers_block_edge_frequencies(self):
         assignments = [0, 0, 1, 1]
         adj = np.asarray(
@@ -53,6 +94,47 @@ class RandomGraphModelsTestCase(unittest.TestCase):
         self.assertTrue(np.all(sample == sample.T))
         self.assertTrue(np.all(np.diag(sample) == 0))
         self.assertTrue(np.isfinite(model.bic(sample)))
+
+    def test_stochastic_block_log_likelihood_rejects_asymmetric_adjacency_when_undirected(self):
+        adj = np.asarray(
+            [
+                [0, 1, 0, 1],
+                [0, 0, 1, 0],
+                [0, 1, 0, 0],
+                [1, 0, 0, 0],
+            ]
+        )
+        model = StochasticBlockGraphModel([[0.3, 0.3], [0.3, 0.3]], [0, 0, 1, 1])
+
+        with self.assertRaises(ValueError):
+            model.log_likelihood(adj)
+
+    def test_stochastic_block_log_likelihood_rejects_self_loop_when_disallowed(self):
+        adj = np.asarray(
+            [
+                [1, 1, 0, 1],
+                [1, 0, 1, 0],
+                [0, 1, 0, 0],
+                [1, 0, 0, 0],
+            ]
+        )
+        model = StochasticBlockGraphModel([[0.3, 0.3], [0.3, 0.3]], [0, 0, 1, 1])
+
+        with self.assertRaises(ValueError):
+            model.log_likelihood(adj)
+
+    def test_stochastic_block_log_likelihood_allows_self_loop_when_enabled(self):
+        adj = np.asarray(
+            [
+                [1, 1, 0, 1],
+                [1, 0, 1, 0],
+                [0, 1, 1, 0],
+                [1, 0, 0, 0],
+            ]
+        )
+        model = StochasticBlockGraphModel([[0.3, 0.3], [0.3, 0.3]], [0, 0, 1, 1], self_loops=True)
+
+        self.assertTrue(np.isfinite(model.log_likelihood(adj)))
 
     def test_hard_em_sbm_returns_valid_monotone_history(self):
         truth = StochasticBlockGraphModel(
