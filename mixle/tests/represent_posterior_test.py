@@ -84,3 +84,43 @@ def test_requires_a_mixture():
 
     with pytest.raises(TypeError):
         PosteriorRetriever(GaussianDistribution(0.0, 1.0), [(1,), (2,)])
+
+
+def test_retrieve_rejects_negative_k():
+    # Python's [:k] slicing treats a negative k as "all but the last |k| items", not
+    # empty/error -- a negative retrieval count has no sensible meaning, so both the
+    # single-query and batch entry points must reject it instead of silently returning
+    # the wrong-sized result.
+    from mixle.represent import PosteriorRetriever
+
+    rows = _records(30)
+    r = PosteriorRetriever(_fit(rows), rows)
+    with pytest.raises(ValueError):
+        r.retrieve(rows[0], k=-1)
+    with pytest.raises(ValueError):
+        r.retrieve_batch([rows[0], rows[1]], k=-1)
+
+
+def test_retrieve_rejects_non_integer_k():
+    # A fractional k (e.g. 2.7) must not be silently truncated by an int() cast --
+    # it must be rejected as a caller error, same as a negative k.
+    from mixle.represent import PosteriorRetriever
+
+    rows = _records(30)
+    r = PosteriorRetriever(_fit(rows), rows)
+    with pytest.raises(ValueError):
+        r.retrieve(rows[0], k=2.7)
+    with pytest.raises(ValueError):
+        r.retrieve_batch([rows[0], rows[1]], k=2.7)
+
+
+def test_retrieve_k_edge_cases_still_work():
+    from mixle.represent import PosteriorRetriever
+
+    rows = _records(30)
+    r = PosteriorRetriever(_fit(rows), rows)
+    assert r.retrieve(rows[0], k=0) == []  # k=0 means "return nothing", not an error
+    hits = r.retrieve(rows[0], k=10_000)  # k beyond the corpus just returns everything
+    assert len(hits) == len(rows)
+    hits3 = r.retrieve(rows[0], k=3.0)  # a float k with an exact integer value is fine
+    assert len(hits3) == 3
