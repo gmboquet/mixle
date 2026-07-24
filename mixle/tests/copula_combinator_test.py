@@ -31,6 +31,20 @@ def _proto():
     )
 
 
+class _BadCdfMarginal:
+    """A stand-in marginal whose cdf() always returns a fixed, possibly-invalid value -- simulates a
+    broken marginal CDF implementation (or a caller feeding a value outside the marginal's support)."""
+
+    def __init__(self, bad_value):
+        self.bad_value = bad_value
+
+    def cdf(self, x):
+        return self.bad_value
+
+    def log_density(self, x):
+        return 0.0
+
+
 class CopulaDistributionTest(unittest.TestCase):
     def test_ifm_recovers_the_correlation_and_the_marginals(self):
         data = _correlated_heterogeneous(0, r=0.7)
@@ -82,6 +96,39 @@ class CopulaDistributionTest(unittest.TestCase):
     def test_requires_at_least_two_marginals(self):
         with self.assertRaises(ValueError):
             CopulaDistribution([st.GaussianDistribution(0.0, 1.0)], GaussianCopulaDistribution(np.eye(1)))
+
+    def test_scalar_pit_rejects_a_marginal_cdf_outside_the_unit_interval(self):
+        # a broken marginal.cdf() (bug, or a value outside the marginal's support) used to be silently
+        # np.clip-ed onto the (0,1) boundary and scored as though it were a legitimate PIT observation,
+        # instead of raising -- the same bug class already fixed in the copula cores themselves.
+        cop = CopulaDistribution(
+            [_BadCdfMarginal(1.5), st.GaussianDistribution(0.0, 1.0)], GaussianCopulaDistribution(np.eye(2))
+        )
+        with self.assertRaises(ValueError):
+            cop.log_density((0.0, 0.0))
+
+    def test_scalar_pit_rejects_a_nan_marginal_cdf(self):
+        cop = CopulaDistribution(
+            [_BadCdfMarginal(float("nan")), st.GaussianDistribution(0.0, 1.0)], GaussianCopulaDistribution(np.eye(2))
+        )
+        with self.assertRaises(ValueError):
+            cop.log_density((0.0, 0.0))
+
+    def test_batched_pit_rejects_a_marginal_cdf_outside_the_unit_interval(self):
+        # _pit_columns (used by seq_log_density) has its own clip call, independent of the scalar
+        # path's _pit_row -- both needed the same guard, so both get their own regression test.
+        cop = CopulaDistribution(
+            [_BadCdfMarginal(-0.2), st.GaussianDistribution(0.0, 1.0)], GaussianCopulaDistribution(np.eye(2))
+        )
+        with self.assertRaises(ValueError):
+            cop._pit_columns(np.zeros((3, 2)))
+
+    def test_batched_pit_rejects_a_nan_marginal_cdf(self):
+        cop = CopulaDistribution(
+            [_BadCdfMarginal(float("nan")), st.GaussianDistribution(0.0, 1.0)], GaussianCopulaDistribution(np.eye(2))
+        )
+        with self.assertRaises(ValueError):
+            cop._pit_columns(np.zeros((3, 2)))
 
     def test_composes_inside_a_mixture(self):
         # two dependence regimes: a positively- and a negatively-correlated cluster, same marginals
