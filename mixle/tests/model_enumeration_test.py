@@ -12,6 +12,7 @@ import unittest
 import numpy as np
 
 from mixle.enumeration.model_enumeration import (
+    _prune_step,
     beam_search,
     best_first,
     best_first_decode,
@@ -195,6 +196,125 @@ class QuantizedDecodeTestCase(unittest.TestCase):
         self.assertGreaterEqual(sum(math.exp(lp) for _, lp in got), 0.5)
         # stopped early: covered ~0.5, not the whole (near-1) support
         self.assertLess(sum(math.exp(lp) for _, lp in got), 0.95)
+
+
+class ScoreContractValidationTestCase(unittest.TestCase):
+    """MXR-080-0226: best_first_decode's exactness proof holds only because every continuation's
+    log-probability is <= 0 (so a prefix's score never increases as it is extended -- the property that
+    makes "already popped" provably outrank "not yet generated"). A positive or NaN score from a
+    caller's next_logprobs silently breaks that proof while the API keeps calling its output exact, so
+    both must be rejected loudly instead of propagated into the search.
+    """
+
+    def test_positive_continuation_score_is_rejected(self):
+        def bad_next_logprobs(prefix):
+            if not prefix:
+                return [(0, -0.1), (1, 0.2)]  # token 1's log-prob is invalid: a probability > 1
+            return [(2, 0.0)]
+
+        with self.assertRaises(ValueError):
+            list(best_first_decode(bad_next_logprobs, eos=2, max_len=4))
+
+    def test_nan_continuation_score_is_rejected(self):
+        def bad_next_logprobs(prefix):
+            if not prefix:
+                return [(0, -0.1), (1, float("nan"))]
+            return [(2, 0.0)]
+
+        with self.assertRaises(ValueError):
+            list(best_first_decode(bad_next_logprobs, eos=2, max_len=4))
+
+    def test_negative_infinity_continuation_score_is_accepted(self):
+        # -inf is the standard "impossible token" sentinel used elsewhere in this codebase (e.g.
+        # quantization.core.Quantizer.bits) and cannot break best-first's monotonicity -- it must NOT be
+        # rejected the way NaN/positive scores are.
+        def next_logprobs(prefix):
+            if not prefix:
+                return [(0, math.log(0.5)), (1, -math.inf), (2, math.log(0.5))]
+            return [(2, 0.0)]
+
+        results = list(best_first_decode(next_logprobs, eos=2, max_len=4))
+        self.assertIn((2,), [seq for seq, _ in results])
+
+    def test_valid_finite_nonpositive_scores_are_unaffected(self):
+        # Negative control: the existing hand-verified fixture (all step log-probs <= 0) is unaffected
+        # by score validation -- still the exact descending-probability enumeration.
+        max_len = 3
+        brute = _brute_force(max_len)
+        mine = list(best_first_decode(_next_logprobs, eos=_EOS, max_len=max_len))
+        self.assertEqual(len(mine), len(brute))
+        np.testing.assert_allclose([lp for _, lp in mine], [lp for _, lp in brute], atol=1e-9)
+
+    def test_top_k_scored_rejects_invalid_k(self):
+        labels = list(range(5))
+        for bad_k in (0, -1, -5):
+            with self.assertRaises(ValueError):
+                top_k_scored(labels, score=lambda c: float(c), k=bad_k)
+
+    def test_top_k_scored_valid_k_is_unaffected(self):
+        rng = np.random.RandomState(2)
+        logits = rng.randn(10)
+        labels = list(range(10))
+        got = top_k_scored(labels, score=lambda c: logits[c], k=3)
+        want = sorted(labels, key=lambda c: -logits[c])[:3]
+        self.assertEqual([c for c, _ in got], want)
+
+
+class PruningContractValidationTestCase(unittest.TestCase):
+    """MXR-080-0226: quantized_best_first_decode's top-k / top-p (nucleus) pruning (_prune_step) must
+    reject invalid k/p bounds and malformed probability mass instead of silently mis-pruning a step --
+    a NaN log-prob compares False against everything, so an unvalidated nucleus loop would never stop
+    early and just keep whatever is left, and an unvalidated positive log-prob breaks the same
+    monotonicity best_first_decode relies on, since pruned values are exactly what gets pushed back onto
+    the quantized frontier.
+    """
+
+    def test_prune_step_rejects_invalid_top_k(self):
+        items = [(0, math.log(0.5)), (1, math.log(0.5))]
+        for bad_k in (0, -1, -100):
+            with self.assertRaises(ValueError):
+                _prune_step(items, top_k=bad_k, top_p=None)
+
+    def test_prune_step_rejects_invalid_top_p(self):
+        items = [(0, math.log(0.5)), (1, math.log(0.5))]
+        for bad_p in (0.0, -0.1, 1.1, float("nan"), float("inf"), -float("inf")):
+            with self.assertRaises(ValueError):
+                _prune_step(items, top_k=None, top_p=bad_p)
+
+    def test_prune_step_rejects_nan_probability_mass(self):
+        items = [(0, math.log(0.5)), (1, float("nan"))]
+        with self.assertRaises(ValueError):
+            _prune_step(items, top_k=None, top_p=0.9)
+
+    def test_prune_step_rejects_positive_probability_mass(self):
+        items = [(0, math.log(0.5)), (1, 0.3)]  # 0.3 is an invalid log-prob (implies probability > 1)
+        with self.assertRaises(ValueError):
+            _prune_step(items, top_k=None, top_p=0.9)
+
+    def test_prune_step_valid_bounds_prune_correctly(self):
+        # Negative control, hand-computable: three tokens with probabilities 0.5, 0.3, 0.2.
+        items = [(0, math.log(0.5)), (1, math.log(0.3)), (2, math.log(0.2))]
+        top2 = _prune_step(items, top_k=2, top_p=None)
+        self.assertEqual([t for t, _ in top2], [0, 1])
+        # top_p=0.7: the smallest prefix mass reaching >= 0.7 is 0.5+0.3=0.8 (0.5 alone falls short).
+        nucleus = _prune_step(items, top_k=None, top_p=0.7)
+        self.assertEqual([t for t, _ in nucleus], [0, 1])
+        # top_p=1.0 is a valid, non-restrictive bound: everything is kept.
+        everything = _prune_step(items, top_k=None, top_p=1.0)
+        self.assertEqual([t for t, _ in everything], [0, 1, 2])
+
+    def test_quantized_decode_with_valid_bounds_matches_brute_force(self):
+        # Negative control, end-to-end through the public entry point: non-restrictive but VALID top_k /
+        # top_p bounds must not change the exact result on the existing hand-verified fixture.
+        max_len = 3
+        brute = _brute_force(max_len)
+        mine = list(
+            quantized_best_first_decode(
+                _next_logprobs, eos=_EOS, max_len=max_len, top_k=3, top_p=1.0, bucket_bits=20, batch_size=1
+            )
+        )
+        self.assertEqual(len(mine), len(brute))
+        np.testing.assert_allclose(sorted(lp for _, lp in mine), sorted(lp for _, lp in brute), atol=1e-9)
 
 
 if __name__ == "__main__":
