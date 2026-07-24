@@ -1235,14 +1235,8 @@ class IntegerMarkovChainEstimator(ParameterEstimator):
         if self.pseudo_count is not None:
             from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 
-            # SymmetricDirichletDistribution.log_density takes the raw probability row (it applies
-            # np.log itself); seq_log_density instead expects the PRE-LOGGED array its own
-            # SymmetricDirichletDataEncoder produces -- passing cond_dist's raw rows to
-            # seq_log_density directly would silently score log(row).sum() instead of the true
-            # Dirichlet log-density, which is identically 1.0 for every valid probability row and
-            # so cannot discriminate one fitted matrix from another. The scalar path per row is the
-            # correct, unambiguous one here (cond_dist has at most num_values**lag rows -- never a
-            # hot loop).
+            # log_density takes each row directly (cond_dist has at most num_values**lag rows -- never
+            # a hot loop, so the scalar path per row needs no vectorization here).
             prior = SymmetricDirichletDistribution(self.pseudo_count + 1.0)
             rv += float(sum(prior.log_density(row) for row in model.cond_dist))
         if self.init_dist is None:  # init_dist was fit by init_estimator, not a fixed caller-supplied one

@@ -210,6 +210,101 @@ class StatsDirichletPriorFamilyTestCase(unittest.TestCase):
         self.assertTrue(np.allclose(seq, [d.log_density(r) for r in xs], atol=1e-12))
 
 
+class DirichletFamilySimplexValidationTestCase(unittest.TestCase):
+    """Every Dirichlet-family distribution over the simplex must (1) reject a non-positive/non-finite
+    concentration at construction and (2) score an observation that is not on the simplex (a negative
+    entry, or a vector that doesn't sum to one) as -inf/0.0, on both the scalar and vectorized paths.
+    """
+
+    def test_dirichlet_rejects_invalid_alpha(self):
+        for bad_alpha in ([0.0, 1.0], [-1.0, 1.0], [float("nan"), 1.0], [float("inf"), 1.0]):
+            with self.assertRaises(ValueError):
+                DirichletDistribution(bad_alpha)
+
+    def test_dirichlet_seq_log_density_rejects_off_simplex(self):
+        # log_density (the scalar path) already validated the simplex; seq_log_density did not -- it
+        # computed straight from the encoder's clipped log representation, silently returning a finite
+        # (and, for a negative entry, wildly wrong) value instead of -inf.
+        d = DirichletDistribution([2.0, 3.0])
+        rows = [[2.0, 3.0], [-0.5, 1.5], [0.5, 0.6], [0.4, 0.6]]  # last row is the only valid one
+        enc = d.dist_to_encoder().seq_encode(rows)
+        seq = d.seq_log_density(enc)
+        scalar = np.array([d.log_density(np.array(r)) for r in rows])
+        np.testing.assert_array_equal(seq[:3], [-np.inf, -np.inf, -np.inf])
+        np.testing.assert_allclose(seq, scalar, atol=1e-12)
+        self.assertTrue(np.isfinite(seq[3]))
+
+    def test_symmetric_dirichlet_rejects_invalid_alpha(self):
+        for bad_alpha in (0.0, -1.0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                SymmetricDirichletDistribution(bad_alpha)
+            d = SymmetricDirichletDistribution(2.0)
+            with self.assertRaises(ValueError):
+                d.set_parameters(bad_alpha)
+
+    def test_symmetric_dirichlet_rejects_off_simplex(self):
+        d = SymmetricDirichletDistribution(2.0)
+        for bad_x in ([2.0, 3.0], [-0.5, 1.5], [0.5, 0.6], [float("nan"), 0.5]):
+            self.assertEqual(d.log_density(np.array(bad_x)), -np.inf, msg=bad_x)
+        rows = [[2.0, 3.0], [-0.5, 1.5], [0.3, 0.7]]  # last row is the only valid one
+        seq = d.seq_log_density(d.dist_to_encoder().seq_encode(rows))
+        np.testing.assert_array_equal(seq[:2], [-np.inf, -np.inf])
+        self.assertTrue(np.isfinite(seq[2]))
+        self.assertAlmostEqual(seq[2], d.log_density(np.array(rows[2])), places=12)
+
+    def test_symmetric_dirichlet_alpha_one_still_rejects_off_simplex(self):
+        # alpha == 1 short-circuits to the (constant) normalizer -nc; that short-circuit must not
+        # bypass the simplex check, or ANY input would score as the uniform density.
+        d = SymmetricDirichletDistribution(1.0)
+        self.assertEqual(d.log_density(np.array([5.0, 10.0])), -np.inf)
+        self.assertTrue(np.isfinite(d.log_density(np.array([0.3, 0.7]))))
+
+    def test_dict_dirichlet_rejects_invalid_alpha(self):
+        for bad_scalar in (0.0, -1.0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                DictDirichletDistribution(bad_scalar)
+        for bad_dict in ({"a": 0.0, "b": 1.0}, {"a": -1.0, "b": 1.0}, {"a": float("nan"), "b": 1.0}):
+            with self.assertRaises(ValueError):
+                DictDirichletDistribution(bad_dict)
+
+    def test_dict_dirichlet_rejects_off_simplex(self):
+        d = DictDirichletDistribution({"a": 2.0, "b": 3.0})
+        self.assertEqual(d.log_density({"a": 2.0, "b": 3.0}), -np.inf)  # positive but doesn't sum to 1
+        self.assertEqual(d.log_density({"a": 0.5, "b": 0.6}), -np.inf)  # sums to 1.1
+        self.assertTrue(np.isfinite(d.log_density({"a": 0.4, "b": 0.6})))
+        # negative entries were already rejected pre-fix; keep covering it for regression parity.
+        self.assertEqual(d.log_density({"a": -0.5, "b": 1.5}), -np.inf)
+
+    def test_dict_dirichlet_alpha_one_still_rejects_off_simplex(self):
+        # The scalar (is_unbounded) alpha == 1 short-circuit had the same bypass as SymmetricDirichlet.
+        d = DictDirichletDistribution(1.0)
+        self.assertEqual(d.log_density({"a": 5.0, "b": 10.0}), -np.inf)
+        self.assertTrue(np.isfinite(d.log_density({"a": 0.3, "b": 0.7})))
+
+    def test_dict_dirichlet_accepts_float32_precision_simplex_row(self):
+        # A row that sums to 1 only up to float32 precision (~3e-8 off here) is a legitimate simplex
+        # point, not a genuinely invalid input -- e.g. a gradient-fit categorical pmap routed through a
+        # lower-precision torch dtype before reaching this prior. A naive float64-tuned 1e-10/1e-12
+        # bound would reject it.
+        vals = np.array([0.3, 0.3, 0.4], dtype=np.float32)
+        pmap = {"a": float(vals[0]), "b": float(vals[1]), "c": float(vals[2])}
+        self.assertGreater(abs(sum(pmap.values()) - 1.0), 1e-10)  # confirms this is genuinely off float64-exact
+        d = DictDirichletDistribution({"a": 2.0, "b": 2.0, "c": 2.0})
+        self.assertTrue(np.isfinite(d.log_density(pmap)))
+        du = DictDirichletDistribution(2.0)
+        self.assertTrue(np.isfinite(du.log_density(pmap)))
+
+    def test_symmetric_dirichlet_accepts_float32_precision_simplex_row(self):
+        # Same float32-precision case as dict_dirichlet above, for its sibling prior -- this is the
+        # exact shape of row IntegerMarkovChainDistribution's float32 cond_dist produces.
+        row = np.array([0.3, 0.3, 0.4], dtype=np.float32).astype(float)
+        self.assertGreater(abs(float(row.sum()) - 1.0), 1e-10)
+        d = SymmetricDirichletDistribution(2.0)
+        self.assertTrue(np.isfinite(d.log_density(row)))
+        seq = d.seq_log_density(d.dist_to_encoder().seq_encode([row]))
+        self.assertTrue(np.isfinite(seq[0]))
+
+
 class DirichletAccumulatorUpdateTestCase(unittest.TestCase):
     """DirichletAccumulator.update's zero-mask branch (some x_i == 0) previously indexed/multiplied
     the raw `x` argument instead of the converted `xx = np.asarray(x)`, so a plain Python list

@@ -26,6 +26,19 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.utils.special import digamma, gammaln
 
+# Tolerance for the "do these probabilities sum to one" simplex check -- numpy's own np.isclose
+# default (rtol=1e-05, atol=1e-08), not a bespoke float64-tuned bound copied from a different
+# module. This is CategoricalDistribution's conjugate prior (see its ``prior=`` argument), and a
+# fitted pmap reaching it is not guaranteed to be float64 precision (e.g. a gradient-fit categorical
+# routed through a lower-precision torch dtype); a naive 1e-10/1e-12 bound would reject a
+# legitimately fitted, merely float32-precision map as off-simplex (confirmed by the identical
+# failure mode against SymmetricDirichletDistribution's own row prior in
+# integer_markov_chain_prior_test.py, whose float32 cond_dist rows are exactly this case), while
+# this tolerance is still four-plus orders of magnitude tighter than any sum that would indicate a
+# genuinely invalid input.
+_SIMPLEX_SUM_RTOL = 1.0e-5
+_SIMPLEX_SUM_ATOL = 1.0e-8
+
 
 class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
     """Dirichlet distribution over probability maps keyed by arbitrary values; a scalar alpha denotes
@@ -59,9 +72,17 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if isinstance(params, (float, int)) and not isinstance(params, bool):
-            self.alpha = float(params)
+            a = float(params)
+            if not np.isfinite(a) or a <= 0.0:
+                raise ValueError("DictDirichletDistribution requires a positive finite concentration alpha.")
+            self.alpha = a
             self.is_unbounded = True
         else:
+            vals = np.asarray(list(params.values()), dtype=float)
+            if vals.size == 0 or not np.all(np.isfinite(vals)) or not np.all(vals > 0.0):
+                raise ValueError(
+                    "DictDirichletDistribution requires a non-empty dict of positive finite concentration values."
+                )
             self.alpha = params
             self.is_unbounded = False
 
@@ -79,19 +100,34 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
         # density +inf when its alpha < 1 (integrable singularity) and 0 (log -inf) when alpha > 1; an
         # alpha == 1 coordinate contributes nothing there. +inf takes precedence over -inf. Without this,
         # ``log(0) * (alpha - 1)`` silently produced +inf and, with mixed boundaries, +inf + -inf = NaN.
+        #
+        # A probability map that isn't on the simplex (a negative entry, a non-finite entry, or values
+        # that don't sum to one) is validated up front and rejected as -inf -- checked before the
+        # alpha == 1 short-circuit below, since a uniform-over-the-simplex density is still only
+        # defined ON the simplex, not for an arbitrary input map.
         if self.is_unbounded:
             a = self.alpha
             n = len(x)
+            if n == 0:
+                return float(-np.inf)
+            vals = np.asarray(list(x.values()), dtype=float)
+            if not np.all(np.isfinite(vals)) or np.any(vals < 0.0):
+                return float(-np.inf)
+            if not np.isclose(float(vals.sum()), 1.0, rtol=_SIMPLEX_SUM_RTOL, atol=_SIMPLEX_SUM_ATOL):
+                return float(-np.inf)
             c = gammaln(a) * n - gammaln(a * n)
             if a == 1:
                 return float(-c)
-            vals = np.asarray(list(x.values()), dtype=float)
-            if np.any(vals < 0.0):
-                return float(-np.inf)
             if np.any(vals == 0.0):
                 return float(np.inf if a < 1.0 else -np.inf)
             return float(np.sum(np.log(vals)) * (a - 1) - c)
         else:
+            vals = np.asarray(list(x.values()), dtype=float)
+            if vals.size == 0 or not np.all(np.isfinite(vals)) or np.any(vals < 0.0):
+                return float(-np.inf)
+            if not np.isclose(float(vals.sum()), 1.0, rtol=_SIMPLEX_SUM_RTOL, atol=_SIMPLEX_SUM_ATOL):
+                return float(-np.inf)
+
             rv = 0.0
             asum = 0.0
             saw_pos_inf = False
@@ -99,8 +135,6 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
             for k, v in x.items():
                 a = self.alpha[k]
                 asum += a
-                if v < 0.0:
-                    return float(-np.inf)
                 if v == 0.0:
                     if a < 1.0:
                         saw_pos_inf = True
