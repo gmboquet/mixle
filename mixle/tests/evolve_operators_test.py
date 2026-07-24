@@ -6,8 +6,10 @@ import numpy as np
 
 from mixle.evolve import (
     AutoSelect,
+    Mutate,
     OnlineUpdate,
     Recalibrate,
+    Recompose,
     Refit,
     nll_objective,
     register_operator,
@@ -129,6 +131,58 @@ class RecalibratedEncodedScoringTest(unittest.TestCase):
         enc = recal.dist_to_encoder().seq_encode(probe)
         encoded = np.asarray(recal.seq_log_density(enc), dtype=float)
         np.testing.assert_allclose(encoded, scalars, rtol=1e-9, atol=1e-9)
+
+
+class OperatorGeneratorDataTest(unittest.TestCase):
+    """Every built-in ``applicable`` measures ``len(list(data))`` (or otherwise iterates ``data``) --
+    on a one-shot iterable (a generator, a DB cursor, ...) that fully consumes it, so a naive
+    ``propose`` called right after used to receive an exhausted, empty iterable instead of the batch
+    ``applicable`` had just approved."""
+
+    def setUp(self):
+        self.rows = list(np.random.RandomState(0).normal(3.0, 2.0, 400))
+        self.champion = GaussianDistribution(0.0, 1.0)  # deliberately wrong, as in OperatorTest above
+        self.nll = nll_objective()
+        self.champion_nll = self.nll.scalar(self.champion, self.rows)
+
+    def _generator(self):
+        yield from self.rows
+
+    def _assert_really_used_the_data(self, model):
+        # An empty-batch fit/update is not always a loud failure (Refit/AutoSelect/Recompose/Mutate
+        # raise "optimize() received empty data", but OnlineUpdate/Recalibrate degrade SILENTLY: an
+        # empty streaming update or an empty PIT calibration search just leaves the champion
+        # unchanged, or worse -- so "scores finite" alone is too weak a check here. A genuine fit/
+        # update on these 400 informative rows must strictly improve on the deliberately-wrong
+        # champion's NLL; an exhausted-generator no-op cannot (confirmed pre-fix: online_update's
+        # empty update produced a wildly WORSE NLL, and recalibrate's empty search left the NLL
+        # exactly equal to the champion's -- neither is an improvement).
+        ld = pointwise_log_density(model, self.rows)
+        self.assertEqual(ld.shape[0], len(self.rows))
+        self.assertTrue(np.all(np.isfinite(ld)))
+        self.assertLess(self.nll.scalar(model, self.rows), self.champion_nll)
+
+    def test_applicable_then_propose_on_a_generator_still_sees_the_data(self):
+        ops = [Refit(), OnlineUpdate(mode="streaming"), AutoSelect(), Recalibrate(), Recompose(), Mutate()]
+        for op in ops:
+            with self.subTest(op=op.name):
+                gen = self._generator()
+                ctx = {"parent_hash": None, "seed": 0}
+                self.assertTrue(op.applicable(self.champion, gen, ctx=ctx))
+                cand = op.propose(self.champion, gen, ctx=ctx)
+                self._assert_really_used_the_data(cand.model)
+
+    def test_shared_ctx_across_multiple_operators_on_one_generator(self):
+        # mirrors mixle.evolve.population.Population.step()'s per-generation loop: ONE `data`
+        # argument (here, a one-shot generator) and ONE `ctx` dict threaded through applicable+propose
+        # for EVERY operator considered in the loop, not just a single applicable/propose pair.
+        gen = self._generator()
+        ctx = {"parent_hash": None, "seed": 0}
+        for op in [Refit(), OnlineUpdate(mode="streaming"), AutoSelect(), Recalibrate()]:
+            with self.subTest(op=op.name):
+                self.assertTrue(op.applicable(self.champion, gen, ctx=ctx))
+                cand = op.propose(self.champion, gen, ctx=ctx)
+                self._assert_really_used_the_data(cand.model)
 
 
 if __name__ == "__main__":

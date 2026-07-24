@@ -85,6 +85,34 @@ def _quiet(kwargs: dict) -> dict:
     return out
 
 
+# Every driver in this codebase (closed_loop.py's step(), improve.py's improve(), population.py's
+# Population.step()) calls `applicable(model, data, ctx=ctx)` immediately followed by
+# `propose(model, data, ctx=ctx)` on the SAME `data` argument and the SAME `ctx` dict -- and the
+# population.py / improve.py per-generation loops thread that SAME `data` (and `ctx`) through EVERY
+# operator considered in the loop, not just one. A list/tuple is safely reiterable, but a generator (or
+# any other one-shot iterable) is not: `applicable`'s own non-empty check used to fully consume it via
+# `len(list(data))`, so `propose`'s later `list(data)` (or the NEXT operator sharing the same generator)
+# silently got nothing back. `_materialize` fixes this by caching the first materialization on `ctx`
+# (keyed by `data`'s identity), so every later touch -- this operator's own `propose`, or a different
+# operator later in the same driver loop -- reuses the already-materialized rows instead of re-iterating
+# a spent iterator into an empty list.
+_MATERIALIZED_DATA_KEY = "__evolve_operators_materialized_data__"
+
+
+def _materialize(data: Any, ctx: dict) -> list:
+    """Return ``data`` as a fresh list, consuming a one-shot iterable (e.g. a generator) at most once.
+
+    See the comment above :data:`_MATERIALIZED_DATA_KEY` for why this has to cache through ``ctx``
+    rather than just returning ``list(data)`` freshly on every call.
+    """
+    cached = ctx.get(_MATERIALIZED_DATA_KEY)
+    if cached is not None and cached[0] is data:
+        return list(cached[1])
+    rows = list(data)
+    ctx[_MATERIALIZED_DATA_KEY] = (data, rows)
+    return list(rows)
+
+
 # ---------------------------------------------------------------------------
 # Refit -- warm-start resume from the champion
 # ---------------------------------------------------------------------------
@@ -98,11 +126,11 @@ class Refit:
 
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
         """Return whether ``model`` can be re-fit on a non-empty batch."""
-        return callable(getattr(model, "estimator", None)) and bool(len(list(data)))
+        return callable(getattr(model, "estimator", None)) and bool(len(_materialize(data, ctx)))
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
         """Fit the model family on ``data`` using ``model`` as the warm start."""
-        rows = list(data)
+        rows = _materialize(data, ctx)
         estimator = model.estimator()
         fitted = optimize(rows, estimator, max_its=self.max_its, prev_estimate=model, out=None)
         return Candidate(fitted, self.name, ctx.get("parent_hash"), {"warm_start": True, "max_its": self.max_its})
@@ -133,7 +161,7 @@ class OnlineUpdate:
 
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
         """Return whether the selected update mode is legal for ``model`` and ``data``."""
-        if not (callable(getattr(model, "estimator", None)) and len(list(data))):
+        if not (callable(getattr(model, "estimator", None)) and len(_materialize(data, ctx))):
             return False
         if self.mode in ("posterior_carry", "forgetting"):
             # Bayesian carry/forgetting paths need a conjugate family.
@@ -144,7 +172,7 @@ class OnlineUpdate:
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
         """Apply the selected streaming update and return the updated challenger."""
-        rows = list(data)
+        rows = _materialize(data, ctx)
         estimator = model.estimator()
         if self.mode == "streaming":
             driver = StreamingEstimator(estimator, model=model)
@@ -173,13 +201,13 @@ class AutoSelect:
 
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
         """Return whether there is data available for automatic family selection."""
-        return bool(len(list(data)))
+        return bool(len(_materialize(data, ctx)))
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
         """Infer an estimator from ``data``, fit it, and return the fitted challenger."""
         from mixle.utils.automatic import get_estimator
 
-        rows = list(data)
+        rows = _materialize(data, ctx)
         estimator = get_estimator(rows)
         fitted = optimize(rows, estimator, max_its=self.max_its, out=None)
         return Candidate(
@@ -332,13 +360,13 @@ class Recalibrate:
         """Return whether ``model`` can be sampled and the batch is non-empty."""
         if isinstance(model, _RecalibratedModel):
             return False  # don't stack recalibrations
-        return callable(getattr(model, "sampler", None)) and bool(len(list(data)))
+        return callable(getattr(model, "sampler", None)) and bool(len(_materialize(data, ctx)))
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
         """Search the temperature grid and wrap ``model`` in the best calibration transform."""
         from mixle.inference.calibration import pit_calibration_error, pit_ensemble
 
-        rows = np.asarray(list(data), dtype=float).reshape(-1)
+        rows = np.asarray(_materialize(data, ctx), dtype=float).reshape(-1)
         sampler = model.sampler(self.seed)
         ref = np.asarray(sampler.sample(self.ensemble), dtype=float).reshape(-1)
         center = float(np.mean(ref))
@@ -378,7 +406,7 @@ class Recompose:
 
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
         """Return whether the model can be re-estimated on enough rows for a split."""
-        return callable(getattr(model, "estimator", None)) and len(list(data)) >= 8
+        return callable(getattr(model, "estimator", None)) and len(_materialize(data, ctx)) >= 8
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
         """Fit a two-component mixture challenger initialized from data splits."""
@@ -386,7 +414,7 @@ class Recompose:
 
         from mixle.ops import mixture
 
-        rows = list(data)
+        rows = _materialize(data, ctx)
         rng = np.random.RandomState(int(ctx.get("seed", 0)))
         perm = rng.permutation(len(rows))
         half = max(1, len(rows) // 2)
@@ -419,7 +447,7 @@ class Mutate:
 
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
         """Return whether the model can be structurally mutated and re-fit."""
-        return callable(getattr(model, "estimator", None)) and len(list(data)) >= 8
+        return callable(getattr(model, "estimator", None)) and len(_materialize(data, ctx)) >= 8
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
         """Sample one structural move, refit it, and return the resulting challenger."""
@@ -428,7 +456,7 @@ class Mutate:
         from mixle.ops import mixture
 
         rng = np.random.RandomState(int(ctx.get("seed", 0)))
-        rows = list(data)
+        rows = _materialize(data, ctx)
         components = getattr(model, "components", None)
         is_mixture = isinstance(components, (list, tuple)) and len(components) >= 1
 
