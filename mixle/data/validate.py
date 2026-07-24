@@ -41,7 +41,15 @@ def check_dataset(
 
     Records both type-coercion failures (wrong shape/dtype for a field) and, when ``check_support`` is
     True, support violations (a value the model assigns probability 0 -> ``-inf`` log-density). With
-    ``raise_on_error`` the first batch of issues is raised as a ``ValueError``."""
+    ``raise_on_error`` the first batch of issues is raised as a ``ValueError``.
+
+    ``sample`` must be a positive integer. A ``DataReport`` is meant to certify that the sampled
+    records were actually inspected, so ``sample=0`` used to check nothing and still return
+    ``DataReport(ok=True, n_checked=0)`` -- a clean bill of health for data nobody looked at -- and a
+    negative ``sample`` used to fail deep inside ``itertools.islice`` with an error that never mentions
+    ``sample`` at all. Both are now rejected clearly, immediately, before any work starts."""
+    if isinstance(sample, bool) or not isinstance(sample, int) or sample <= 0:
+        raise ValueError(f"check_dataset(): sample must be a positive integer, got {sample!r}")
     from mixle.data.schema import Schema
 
     schema = Schema.for_model(model)
