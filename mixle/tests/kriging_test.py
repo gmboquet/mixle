@@ -363,5 +363,78 @@ class CalibrationTest(unittest.TestCase):
         self.assertAlmostEqual(cov, 0.9, delta=0.03)
 
 
+class CalibrationValidationTest(unittest.TestCase):
+    """MXR-080-0103: calibrate_variance must reject impossible targets and invalid samples."""
+
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        self.pv = rng.uniform(0.5, 2.0, 1000)
+        self.resid = rng.normal(0, 1, 1000) * np.sqrt(self.pv)
+
+    def test_rejects_target_below_zero(self):
+        # MXR-080-0103 exact repro: previously converged silently to the lower boundary scale
+        # factor (1e-6) instead of raising.
+        with self.assertRaisesRegex(ValueError, r"target must be finite and strictly in \(0, 1\)"):
+            calibrate_variance(self.pv, self.resid, target=-1.0)
+
+    def test_rejects_target_at_zero(self):
+        with self.assertRaisesRegex(ValueError, r"target must be finite and strictly in \(0, 1\)"):
+            calibrate_variance(self.pv, self.resid, target=0.0)
+
+    def test_rejects_target_at_one(self):
+        with self.assertRaisesRegex(ValueError, r"target must be finite and strictly in \(0, 1\)"):
+            calibrate_variance(self.pv, self.resid, target=1.0)
+
+    def test_rejects_target_above_one(self):
+        # Previously converged silently to the upper boundary scale factor (1e6) instead of raising.
+        with self.assertRaisesRegex(ValueError, r"target must be finite and strictly in \(0, 1\)"):
+            calibrate_variance(self.pv, self.resid, target=2.0)
+
+    def test_rejects_nan_target(self):
+        # Previously converged silently to the lower boundary scale factor instead of raising: NaN
+        # comparisons are always False, so `coverage(mid) < target` was always False too.
+        with self.assertRaisesRegex(ValueError, r"target must be finite and strictly in \(0, 1\)"):
+            calibrate_variance(self.pv, self.resid, target=float("nan"))
+
+    def test_rejects_mismatched_shapes(self):
+        with self.assertRaisesRegex(ValueError, "same shape"):
+            calibrate_variance(self.pv[:5], self.resid, target=0.9)
+
+    def test_rejects_empty_sample(self):
+        with self.assertRaisesRegex(ValueError, "nonempty"):
+            calibrate_variance(np.array([]), np.array([]), target=0.9)
+
+    def test_rejects_non_finite_predicted_var(self):
+        pv = np.concatenate([self.pv, [np.nan]])
+        resid = np.concatenate([self.resid, [0.0]])
+        with self.assertRaisesRegex(ValueError, "predicted_var must contain only finite"):
+            calibrate_variance(pv, resid, target=0.9)
+
+    def test_rejects_non_finite_residuals(self):
+        pv = np.concatenate([self.pv, [1.0]])
+        resid = np.concatenate([self.resid, [np.inf]])
+        with self.assertRaisesRegex(ValueError, "residuals must contain only finite"):
+            calibrate_variance(pv, resid, target=0.9)
+
+    def test_rejects_zero_predicted_var(self):
+        pv = np.concatenate([self.pv, [0.0]])
+        resid = np.concatenate([self.resid, [0.0]])
+        with self.assertRaisesRegex(ValueError, "strictly positive"):
+            calibrate_variance(pv, resid, target=0.9)
+
+    def test_rejects_negative_predicted_var(self):
+        pv = np.concatenate([self.pv, [-1.0]])
+        resid = np.concatenate([self.resid, [0.0]])
+        with self.assertRaisesRegex(ValueError, "strictly positive"):
+            calibrate_variance(pv, resid, target=0.9)
+
+    def test_valid_target_and_data_still_calibrates(self):
+        # Negative control: a legitimate target in (0, 1) with valid paired held-out data is
+        # unaffected by the new validation.
+        c = calibrate_variance(self.pv, self.resid, target=0.9)
+        self.assertTrue(np.isfinite(c))
+        self.assertGreater(c, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

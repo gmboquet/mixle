@@ -428,17 +428,36 @@ def calibrate_variance(predicted_var: np.ndarray, residuals: np.ndarray, *, targ
     multiply ``predicted_var`` by it to recalibrate (generic GP/kriging variance recalibration).
 
     Args:
-        predicted_var: ``(m,)`` held-out kriging variances.
+        predicted_var: ``(m,)`` held-out kriging variances (must be strictly positive).
         residuals: ``(m,)`` held-out ``actual - predicted``.
-        target: desired central coverage (e.g. 0.9).
+        target: desired central coverage (e.g. 0.9); must be finite and strictly in ``(0, 1)``.
 
     Returns:
         The variance multiplier ``c`` (> 0).
+
+    Raises:
+        ValueError: if ``target`` is not finite and strictly in ``(0, 1)`` -- a target ``<= 0``,
+            ``>= 1``, or NaN previously converged to a silent boundary scale factor (``1e-6`` or
+            ``1e6``) instead of raising; if ``predicted_var`` and ``residuals`` do not have the same
+            nonempty shape (a valid paired held-out sample is required); or if either contains
+            non-finite values, or ``predicted_var`` is not strictly positive everywhere.
     """
     from scipy.stats import norm
 
+    if not (np.isfinite(target) and 0.0 < target < 1.0):
+        raise ValueError(f"target must be finite and strictly in (0, 1), got {target!r}.")
     pv = np.asarray(predicted_var, dtype=float)
     r = np.asarray(residuals, dtype=float)
+    if pv.shape != r.shape:
+        raise ValueError(f"predicted_var and residuals must have the same shape, got {pv.shape} and {r.shape}.")
+    if pv.size == 0:
+        raise ValueError("predicted_var and residuals must be nonempty: calibration needs a paired held-out sample.")
+    if not np.all(np.isfinite(pv)):
+        raise ValueError("predicted_var must contain only finite values.")
+    if not np.all(np.isfinite(r)):
+        raise ValueError("residuals must contain only finite values.")
+    if not np.all(pv > 0):
+        raise ValueError("predicted_var must be strictly positive (a variance of zero or less is not valid).")
     z = norm.ppf(0.5 + target / 2.0)
 
     def coverage(c: float) -> float:
