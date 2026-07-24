@@ -7,9 +7,39 @@ import warnings
 import numpy as np
 from scipy.stats import norm
 
-from mixle.doe.batch import monte_carlo_qei
+from mixle.doe.batch import monte_carlo_qei, propose_local_penalization, propose_qei_batch
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None  # the proposal drivers fit the torch GP surrogate
+
+
+class _StubSurrogate:
+    """Fake GP surrogate for exercising propose_qei_batch/propose_local_penalization's OWN validation
+    and selection logic without requiring torch. The real default surrogate
+    (mixle.models.gaussian_process.GaussianProcessRegressor) is torch-only, but both drivers accept any
+    object with .fit/.predict via their `gp=` injection point, so a deterministic stand-in exercises the
+    batch-building loop directly. Mean/covariance are a well-formed function of the candidate points alone
+    (optimum at the origin, an RBF-like correlation structure that is PSD by construction) -- optionally
+    with a NaN patch over a caller-chosen region, to simulate a localized GP pathology.
+    """
+
+    def __init__(self, nan_where=None):
+        self._nan_where = nan_where
+
+    def fit(self, x, y, **kwargs):
+        return self
+
+    def predict(self, x, y, pts, return_cov=True):
+        pts = np.atleast_2d(np.asarray(pts, dtype=np.float64))
+        mean = -np.sum(pts**2, axis=1)
+        d = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=-1)
+        cov = 0.1 * np.exp(-(d**2)) + 1e-9 * np.eye(pts.shape[0])
+        if self._nan_where is not None:
+            bad = self._nan_where(pts)
+            mean = mean.copy()
+            mean[bad] = np.nan
+            cov = cov.copy()
+            cov[np.ix_(bad, bad)] = np.nan
+        return mean, cov
 
 
 class MonteCarloQeiTest(unittest.TestCase):
@@ -96,6 +126,131 @@ class SafeCholeskyValidationTest(unittest.TestCase):
     def test_non_finite_covariance_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "not finite"):
             monte_carlo_qei([0.0, 0.0], [[1.0, 0.0], [0.0, np.nan]], best=1.0, samples=100, seed=0)
+
+
+class MonteCarloQeiInputValidationTest(unittest.TestCase):
+    """MXR-080-0167 at the monte_carlo_qei level: nonpositive/fractional sample counts, mean/cov shape
+    mismatches, and non-finite posterior moments used to be silently accepted (truncated, broadcast into
+    an opaque numpy crash, or propagated as a NaN result) instead of rejected with a clear error.
+    """
+
+    def test_nonpositive_samples_rejected(self):
+        with self.assertRaisesRegex(ValueError, "samples"):
+            monte_carlo_qei([0.5], [[0.64]], best=1.0, samples=0, seed=0)
+        with self.assertRaisesRegex(ValueError, "samples"):
+            monte_carlo_qei([0.5], [[0.64]], best=1.0, samples=-5, seed=0)
+
+    def test_fractional_samples_rejected(self):
+        # int(10.5) == 10 would silently truncate instead of naming the invalid input.
+        with self.assertRaisesRegex(ValueError, "samples"):
+            monte_carlo_qei([0.5], [[0.64]], best=1.0, samples=10.5, seed=0)
+
+    def test_cov_mean_shape_mismatch_rejected(self):
+        with self.assertRaisesRegex(ValueError, "shape"):
+            monte_carlo_qei([0.5, 0.5, 0.5], [[1.0, 0.0], [0.0, 1.0]], best=1.0, samples=100, seed=0)
+
+    def test_non_finite_mean_rejected(self):
+        with self.assertRaisesRegex(ValueError, "not finite|non-finite"):
+            monte_carlo_qei([np.nan, 0.5], [[1.0, 0.0], [0.0, 1.0]], best=1.0, samples=100, seed=0)
+
+    def test_a_well_posed_call_is_unaffected(self):
+        # negative control: ordinary, valid inputs still work exactly as before.
+        best, mu, sigma = 1.0, 0.5, 0.8
+        z = (best - mu) / sigma
+        analytic = (best - mu) * norm.cdf(z) + sigma * norm.pdf(z)
+        val = monte_carlo_qei([mu], [[sigma**2]], best, maximize=False, samples=200000, seed=0)
+        self.assertAlmostEqual(val, analytic, places=2)
+
+
+class BatchDriverInputValidationTest(unittest.TestCase):
+    """MXR-080-0167 at the propose_qei_batch / propose_local_penalization level. Uses _StubSurrogate
+    (dependency-injected via `gp=`) instead of the real torch GP, so these run with or without torch and
+    isolate the drivers' OWN validation/selection logic from surrogate-fit behavior.
+    """
+
+    def setUp(self):
+        self.bounds = [(-1.0, 1.0), (-1.0, 1.0)]
+        rng = np.random.RandomState(0)
+        self.x = rng.uniform(-1, 1, size=(5, 2))
+        self.y = -np.sum(self.x**2, axis=1)
+
+    # -- nonpositive/fractional counts --------------------------------------------------------------
+
+    def test_propose_qei_batch_rejects_nonpositive_or_fractional_q(self):
+        for bad_q in (0, -1, 2.5):
+            with self.assertRaises(ValueError):
+                propose_qei_batch(
+                    self.x, self.y, self.bounds, q=bad_q, n_candidates=10, mc_samples=32, gp=_StubSurrogate()
+                )
+
+    def test_propose_qei_batch_rejects_nonpositive_or_fractional_n_candidates(self):
+        for bad_n in (0, -1, 10.5):
+            with self.assertRaises(ValueError):
+                propose_qei_batch(
+                    self.x, self.y, self.bounds, q=2, n_candidates=bad_n, mc_samples=32, gp=_StubSurrogate()
+                )
+
+    def test_propose_qei_batch_rejects_nonpositive_or_fractional_mc_samples(self):
+        for bad_mc in (0, -1, 10.5):
+            with self.assertRaises(ValueError):
+                propose_qei_batch(
+                    self.x, self.y, self.bounds, q=2, n_candidates=10, mc_samples=bad_mc, gp=_StubSurrogate()
+                )
+
+    def test_propose_local_penalization_rejects_nonpositive_or_fractional_q(self):
+        for bad_q in (0, -1, 2.5):
+            with self.assertRaises(ValueError):
+                propose_local_penalization(self.x, self.y, self.bounds, q=bad_q, n_candidates=10, gp=_StubSurrogate())
+
+    def test_propose_local_penalization_rejects_nonpositive_or_fractional_n_candidates(self):
+        for bad_n in (0, -1, 10.5):
+            with self.assertRaises(ValueError):
+                propose_local_penalization(self.x, self.y, self.bounds, q=2, n_candidates=bad_n, gp=_StubSurrogate())
+
+    # -- all-NaN merit --------------------------------------------------------------------------------
+
+    def test_propose_qei_batch_all_nan_merit_raises_instead_of_leaving_best_c_none(self):
+        # a NaN observation makes the incumbent (ys.min()/ys.max()) NaN, so every candidate's q-EI is
+        # NaN even though the stub surrogate itself is perfectly well-formed. The old code left
+        # best_c=None, which np.asarray(None, dtype=float64) turns into a 0-d NaN array that corrupts the
+        # next batch step's np.vstack with an opaque shape-mismatch crash.
+        y_nan = self.y.copy()
+        y_nan[0] = np.nan
+        with self.assertRaisesRegex(ValueError, "no candidate produced a finite"):
+            propose_qei_batch(self.x, y_nan, self.bounds, q=2, n_candidates=10, mc_samples=32, gp=_StubSurrogate())
+
+    def test_propose_local_penalization_all_nan_merit_raises_instead_of_arbitrary_pick(self):
+        y_nan = self.y.copy()
+        y_nan[0] = np.nan
+        with self.assertRaisesRegex(ValueError, "no candidate produced a finite"):
+            propose_local_penalization(self.x, y_nan, self.bounds, q=2, n_candidates=10, gp=_StubSurrogate())
+
+    def test_propose_local_penalization_never_selects_a_nan_merit_candidate_over_a_finite_one(self):
+        # the more precise failure np.argmax([1, nan, 5]) == 1 (NOT 2) causes: with SOME but not all
+        # candidates NaN, argmax on the raw merit array would hand a NaN-scored candidate a win over
+        # genuinely better finite ones. Candidates with x0 > 0.5 get a NaN posterior from the stub; the
+        # fix must never place a pick there, even though plenty of finite-merit candidates remain.
+        gp = _StubSurrogate(nan_where=lambda pts: pts[:, 0] > 0.5)
+        batch = propose_local_penalization(self.x, self.y, self.bounds, q=3, n_candidates=40, seed=0, gp=gp)
+        self.assertFalse((batch[:, 0] > 0.5).any())
+
+    # -- negative controls ----------------------------------------------------------------------------
+
+    def test_propose_qei_batch_negative_control_still_selects_sensible_candidates(self):
+        batch = propose_qei_batch(
+            self.x, self.y, self.bounds, q=2, n_candidates=20, mc_samples=64, seed=0, gp=_StubSurrogate()
+        )
+        self.assertEqual(batch.shape, (2, 2))
+        self.assertTrue(np.isfinite(batch).all())
+        self.assertTrue(((batch >= -1.0) & (batch <= 1.0)).all())
+
+    def test_propose_local_penalization_negative_control_still_selects_sensible_candidates(self):
+        batch = propose_local_penalization(
+            self.x, self.y, self.bounds, q=2, n_candidates=20, seed=0, gp=_StubSurrogate()
+        )
+        self.assertEqual(batch.shape, (2, 2))
+        self.assertTrue(np.isfinite(batch).all())
+        self.assertTrue(((batch >= -1.0) & (batch <= 1.0)).all())
 
 
 @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")
