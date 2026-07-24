@@ -208,17 +208,28 @@ def _bin_cell_counts(cell_indices: Sequence[float] | np.ndarray, num_cells: int)
     return counts[:num_cells].astype(np.float64)
 
 
-def _clipped_rates(beta: np.ndarray, design: np.ndarray, log_offset: np.ndarray) -> np.ndarray:
-    """Per-cell fitted rate ``exp(clip(eta))`` at the linear predictor ``eta = design @ beta + log_offset``.
+def _clipped_rates_and_mask(
+    beta: np.ndarray, design: np.ndarray, log_offset: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-cell fitted rate ``exp(clip(eta))`` and the clip's 0/1 derivative, at ``eta = design@beta + log_offset``.
 
     The clip is a standard optimizer-robustness guard: a wild L-BFGS-B line-search step can otherwise send
     ``eta`` far enough that ``exp(eta)`` overflows to ``inf``, which
     ``InhomogeneousPoissonProcessDistribution`` itself rejects outright (it requires finite rates) -- an
     unclipped evaluation would risk aborting the whole optimization on a step the line search would
     otherwise have corrected on its own.
+
+    ``mask`` is ``d(clip(eta))/d(eta)``: ``1`` where ``eta`` is strictly inside ``(-_RATE_CLIP,
+    _RATE_CLIP)`` (the clip is inactive, so ``rate`` responds to ``beta`` exactly like the unclipped
+    ``exp``), and ``0`` where the clip has saturated ``rate`` at a constant (MXR-080-0113: outside the
+    clip range, ``rate`` no longer changes with ``beta``, so by the chain rule neither the gradient nor
+    the Hessian may treat it as if it still does). Every caller that differentiates through
+    :func:`_clipped_rates_and_mask` must multiply by this mask to stay the exact derivative of the
+    function actually being evaluated.
     """
     eta = design @ beta + log_offset
-    return np.exp(np.clip(eta, -_RATE_CLIP, _RATE_CLIP))
+    mask = (eta > -_RATE_CLIP) & (eta < _RATE_CLIP)
+    return np.exp(np.clip(eta, -_RATE_CLIP, _RATE_CLIP)), mask.astype(np.float64)
 
 
 def _nll_and_grad(
@@ -230,29 +241,37 @@ def _nll_and_grad(
     reimplemented, to score the NLL value; only its (closed-form, standard Poisson-GLM) gradient is
     supplied locally, for speed. A module-level function (rather than a closure over ``_fit_beta``'s
     locals) so it can be exercised and finite-differenced directly by tests, independent of the optimizer.
+
+    The gradient's data term is masked by the clip's derivative (MXR-080-0113): ``rate``'s dependence on
+    ``beta`` vanishes wherever the clip has saturated it, so the unmasked ``design.T @ (rate - counts)``
+    is only the derivative of the *unclipped* objective, not of the clipped ``nll`` value actually
+    returned above -- silently wrong (and, per the audit, off by many orders of magnitude at a genuinely
+    saturated cell) outside the clip range.
     """
-    rates = _clipped_rates(beta, design, log_offset)
+    rates, mask = _clipped_rates_and_mask(beta, design, log_offset)
     dist = InhomogeneousPoissonProcessDistribution(rates, edges=edges)
     log_lik = float(dist.seq_log_density(counts[None, :])[0])
     nll = -log_lik + ridge * float(beta @ beta)
-    grad = design.T @ (rates - counts) + 2.0 * ridge * beta
+    grad = design.T @ (mask * (rates - counts)) + 2.0 * ridge * beta
     return nll, grad
 
 
 def _penalized_hessian(beta: np.ndarray, design: np.ndarray, log_offset: np.ndarray, ridge: float) -> np.ndarray:
     """Exact Hessian of :func:`_nll_and_grad`'s objective at ``beta`` -- the Laplace posterior's precision.
 
-    ``d^2/dbeta^2 [-loglik] = X^T diag(rates) X`` is the standard Poisson-GLM Fisher information (MXR-080-
-    0112 numerically verified this term against finite-differencing :func:`_nll_and_grad`'s gradient).
+    ``d^2/dbeta^2 [-loglik] = X^T diag(mask * rates) X`` is the standard Poisson-GLM Fisher information,
+    restricted (via the same clip-derivative ``mask`` as the gradient, MXR-080-0113) to cells where the
+    rate clip is inactive (MXR-080-0112 numerically verified this term, at ``mask == 1`` everywhere,
+    against finite-differencing :func:`_nll_and_grad`'s gradient).
     ``d^2/dbeta^2 [ridge * beta @ beta] = 2 * ridge * I``: the gradient's ridge term is ``2 * ridge * beta``
     (correct), but differentiating a *first* derivative of ``2 * ridge * beta`` once more with respect to
     ``beta`` reproduces the same constant factor, ``2 * ridge * I`` -- not ``ridge * I``, which is what this
     Hessian previously added (MXR-080-0112), silently understating posterior uncertainty by folding in only
     half of the prior's actual curvature.
     """
-    rates = _clipped_rates(beta, design, log_offset)
+    rates, mask = _clipped_rates_and_mask(beta, design, log_offset)
     p = design.shape[1]
-    return design.T @ (rates[:, None] * design) + 2.0 * ridge * np.eye(p)
+    return design.T @ ((mask * rates)[:, None] * design) + 2.0 * ridge * np.eye(p)
 
 
 def _fit_beta(
@@ -268,6 +287,11 @@ def _fit_beta(
     Returns:
         ``(beta, beta_cov, rates)`` -- the fitted coefficients, their Laplace covariance, and the fitted
         per-cell expected counts ``lambda_c * area_c`` (offset already folded in).
+
+    Raises:
+        ValueError: the optimizer does not report convergence, the fitted ``beta`` is not finite, or the
+            penalized Hessian is singular (MXR-080-0113: an unconverged fit is not a valid posterior mode,
+            so it must not be silently treated as one).
     """
     num_cells, p = design.shape
     edges = np.arange(num_cells + 1, dtype=np.float64)
@@ -276,10 +300,19 @@ def _fit_beta(
     result = minimize(
         _nll_and_grad, beta0, args=(design, counts, log_offset, ridge, edges), jac=True, method="L-BFGS-B"
     )
-    beta_hat = result.x
+    if not result.success:
+        raise ValueError(f"SDM beta fit did not converge: {result.message}")
+    beta_hat = np.asarray(result.x, dtype=np.float64)
+    if not np.all(np.isfinite(beta_hat)):
+        raise ValueError("SDM beta fit produced non-finite coefficients.")
     hessian = _penalized_hessian(beta_hat, design, log_offset, ridge)
-    beta_cov = np.linalg.inv(hessian)
-    rates_hat = _clipped_rates(beta_hat, design, log_offset)
+    try:
+        beta_cov = np.linalg.inv(hessian)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(
+            "SDM penalized Hessian is singular; cannot form a Laplace covariance (try increasing ridge)."
+        ) from exc
+    rates_hat, _ = _clipped_rates_and_mask(beta_hat, design, log_offset)
     return beta_hat, beta_cov, rates_hat
 
 
