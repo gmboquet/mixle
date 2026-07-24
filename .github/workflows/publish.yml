@@ -38,12 +38,15 @@ jobs:
       # so pin it to the commit being built rather than the wall-clock build time -- otherwise two
       # builds of the identical source tree produce byte-different artifacts (different digests),
       # which breaks any downstream fingerprint/provenance check that expects a build to be
-      # deterministic in the source it was built from.
+      # deterministic in the source it was built from. The wheel is reproducible from this alone; the
+      # sdist needs an extra repack step (scripts/normalize_sdist.py) -- SOURCE_DATE_EPOCH alone does
+      # not reach every tar-member mtime setuptools' sdist command writes, and this fixes that.
       - name: Build
         run: |
           python -m pip install --upgrade pip build twine
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD)"
           python -m build
+          python scripts/normalize_sdist.py dist/*.tar.gz "$SOURCE_DATE_EPOCH"
       # Validate metadata renders on PyPI before any upload.
       - name: Twine check
         run: twine check dist/*

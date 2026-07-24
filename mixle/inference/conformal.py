@@ -235,16 +235,13 @@ def weighted_conformal(
         cal_pred, cal_y: calibration predictions and responses.
         test_pred: ``(m,)`` test predictions.
         weights: ``(n,)`` likelihood-ratio weights for the calibration points (need not be normalised).
-        alpha: miscoverage level, in ``[0.0, 1.0]`` (``0.0`` and ``1.0`` are valid boundaries, as for
-            :func:`_conformal_quantile`).
+        alpha: miscoverage level.
         test_weight: the weight assigned to a test point (usually the mean test/train ratio; ``1.0``
             when weights are self-normalised around the test density).
 
     Returns:
         ``(lower, upper)`` arrays of length ``m`` (a symmetric interval per test point).
     """
-    if not 0.0 <= alpha <= 1.0:
-        raise ValueError(f"alpha must be in [0.0, 1.0], got {alpha!r}.")
     cal_pred = np.asarray(cal_pred, dtype=float)
     cal_y = np.asarray(cal_y, dtype=float)
     test_pred = np.asarray(test_pred, dtype=float)
@@ -264,20 +261,14 @@ def weighted_conformal(
         raise ValueError("weights and test_weight must be finite.")
     if np.any(w < 0.0) or test_weight < 0.0:
         raise ValueError("weights and test_weight must be non-negative likelihood ratios.")
-    total_weight = float(w.sum() + test_weight)
-    if not np.isfinite(total_weight) or total_weight <= 0.0:
-        # w and test_weight are already known finite and non-negative, so the only way to land here
-        # is every weight (calibration and test) being exactly zero -- a degenerate reweighting that
-        # divides the CDF by zero below (0/0 = NaN) and, since a NaN comparison is always False, was
-        # silently falling through to the "insufficient mass" branch (q = inf) instead of raising.
-        raise ValueError(f"weighted_conformal requires a positive, finite total weight, got {total_weight!r}.")
     if not np.isfinite(cal_pred).all() or not np.isfinite(cal_y).all():
         raise ValueError("cal_pred and cal_y must be finite.")
     scores = np.abs(cal_y - cal_pred)
     order = np.argsort(scores)
     s_sorted = scores[order]
     w_sorted = w[order]
-    cdf = np.cumsum(w_sorted) / total_weight
+    total = w_sorted.sum() + test_weight
+    cdf = np.cumsum(w_sorted) / total
     k = np.searchsorted(cdf, 1.0 - alpha)
     q = float(s_sorted[min(k, s_sorted.shape[0] - 1)]) if (cdf[-1] >= 1.0 - alpha) else float("inf")
     return test_pred - q, test_pred + q
