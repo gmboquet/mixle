@@ -7,6 +7,82 @@ import numpy as np
 
 from mixle.analysis.spatial_mixture import SpatialMixture
 from mixle.stats import GaussianEstimator, MultivariateGaussianDistribution, MultivariateGaussianEstimator
+from mixle.stats.compute.pdist import DataSequenceEncoder, SequenceEncodableProbabilityDistribution
+
+
+class _TaggedEncoder(DataSequenceEncoder):
+    """Encodes each observation as ``(raw_value, tag)``; ``tag`` records which encoder instance ran,
+    so scoring a component with a DIFFERENT component's encoder is directly observable in a test."""
+
+    def __init__(self, tag: int) -> None:
+        self.tag = tag
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _TaggedEncoder) and other.tag == self.tag
+
+    def seq_encode(self, x):
+        raw = np.asarray(x, dtype=float)
+        return np.column_stack([raw, np.full(raw.shape[0], self.tag, dtype=float)])
+
+
+class _TaggedDistribution(SequenceEncodableProbabilityDistribution):
+    """A minimal pluggable "emission" that only scores sanely when the data it is handed was encoded
+    by ITS OWN ``dist_to_encoder()``: scoring with a differently-tagged encoding (i.e. some other
+    component's encoder) returns a large negative penalty instead of a real log-density, so misuse is
+    directly observable rather than merely numerically off."""
+
+    def __init__(self, tag: int) -> None:
+        self.tag = tag
+
+    def log_density(self, x):
+        raw, tag = x
+        return -(raw**2) if tag == self.tag else -1e6
+
+    def seq_log_density(self, x):
+        raw, tag = x[:, 0], x[:, 1]
+        return np.where(tag == self.tag, -(raw**2), -1e6)
+
+    def dist_to_encoder(self):
+        return _TaggedEncoder(self.tag)
+
+    def sampler(self, seed=None):
+        raise NotImplementedError
+
+    def estimator(self, pseudo_count=None):
+        raise NotImplementedError
+
+
+class _OkEncoder(DataSequenceEncoder):
+    """A trivial pass-through encoder, structurally unremarkable on its own."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _OkEncoder)
+
+    def seq_encode(self, x):
+        return np.asarray(x, dtype=float)
+
+
+class _WrongShapeDistribution(SequenceEncodableProbabilityDistribution):
+    """A pluggable "emission" whose ``seq_log_density`` deliberately returns the wrong shape, to
+    exercise the encoder-contract shape check independent of any encoder mix-up."""
+
+    def __init__(self, out_shape: tuple[int, ...]) -> None:
+        self.out_shape = out_shape
+
+    def log_density(self, x):
+        return 0.0
+
+    def seq_log_density(self, x):
+        return np.zeros(self.out_shape)
+
+    def dist_to_encoder(self):
+        return _OkEncoder()
+
+    def sampler(self, seed=None):
+        raise NotImplementedError
+
+    def estimator(self, pseudo_count=None):
+        raise NotImplementedError
 
 
 def _layered_field(seed=0):
@@ -175,6 +251,74 @@ class SpatialMixtureInitializationTest(unittest.TestCase):
         np.testing.assert_allclose(q.sum(axis=1), 1.0, atol=1e-8)
         counts = np.bincount(sm.labels().ravel(), minlength=k)
         self.assertTrue((counts > 0).all(), "a well-posed fit ended up with an empty component")
+
+
+class SpatialMixtureContractTest(unittest.TestCase):
+    """MXR-080-0116: observation count must match prod(shape), and every component must be scored
+    with its OWN fitted encoder -- never a different component's -- while still honoring a shared,
+    structurally compatible encoder contract (one log-density value per cell)."""
+
+    def test_rejects_observation_count_mismatch(self):
+        # a plain assertRaises(ValueError) would also pass against the pre-fix code for most of
+        # these -- a mismatched length already crashed *some* mismatches downstream inside the M-step
+        # (an incidental "shapes (5,) and (16,) not aligned" from np.dot deep in the accumulator), just
+        # not with a clear boundary error naming the expected count, and not for every mismatch. Assert
+        # the actual validation message so this only passes against the real fix.
+        sm = SpatialMixture((4, 4), 2, GaussianEstimator(), beta=0.5)  # 16 cells
+        for bad_n in (0, 1, 5, 15, 17, 20):
+            with self.assertRaisesRegex(ValueError, r"prod\(shape\)=16"):
+                sm.fit([float(i) for i in range(bad_n)], seed=0, max_iter=2)
+
+    def test_negative_control_matching_observation_count_fits(self):
+        sm = SpatialMixture((4, 4), 2, GaussianEstimator(), beta=0.5)
+        sm.fit([float(i % 2) * 10.0 for i in range(16)], seed=0, max_iter=3)
+        self.assertEqual(sm.responsibilities().shape, (16, 2))
+
+    def test_each_component_is_scored_with_its_own_encoder(self):
+        # tags 0, 1, 2 stand in for three components whose fitted encoders genuinely differ (a
+        # legitimate scenario the class's pluggable-emission design explicitly allows) but are
+        # structurally compatible (same encoded shape/dtype). Scoring with the WRONG encoder is a
+        # huge penalty (see _TaggedDistribution), making misuse of a shared/hoisted encoder observable.
+        sm = SpatialMixture((2, 2), 3, GaussianEstimator(), beta=0.0)
+        sm.components = [_TaggedDistribution(tag=j) for j in range(3)]
+        data = [0.0, 1.0, 2.0, 3.0]
+
+        emis = sm._emission_loglik(data)
+
+        self.assertEqual(emis.shape, (4, 3))
+        for j in range(3):
+            self.assertTrue(np.all(emis[:, j] > -1e5), f"component {j} was not scored with its own encoder")
+            np.testing.assert_allclose(emis[:, j], -(np.arange(4.0) ** 2))
+
+    def test_rejects_structurally_incompatible_component_output(self):
+        # component 0 is a normal (correctly-shaped) pluggable emission; component 1 deliberately
+        # returns a (4, 2) log-density array instead of (4,) -- the shared responsibilities/neighbor
+        # bookkeeping cannot use that, and it must be rejected with a clear error, not an incidental
+        # column_stack crash or a silent shape mismatch.
+        sm = SpatialMixture((2, 2), 2, GaussianEstimator(), beta=0.0)
+        sm.components = [_TaggedDistribution(tag=0), _WrongShapeDistribution(out_shape=(4, 2))]
+        with self.assertRaises(ValueError):
+            sm._emission_loglik([0.0, 1.0, 2.0, 3.0])
+
+    def test_negative_control_genuinely_compatible_pluggable_emissions_score_correctly(self):
+        # real (non-stub) emission family, real fit -- per-component encoder use must stay correct.
+        rng = np.random.RandomState(5)
+        shape, k = (5, 5), 2
+        true = np.zeros((5, 5), dtype=int)
+        true[3:] = 1
+        obs = [float(rng.normal([0.0, 8.0][true.ravel()[i]], 0.3)) for i in range(25)]
+        sm = SpatialMixture(shape, k, GaussianEstimator(), beta=1.0).fit(obs, seed=1)
+
+        emis = sm._emission_loglik(obs)
+
+        self.assertEqual(emis.shape, (25, k))
+        self.assertTrue(np.isfinite(emis).all())
+        # identify components by fitted mean (EM label order is arbitrary) and confirm the
+        # near-zero cell scores higher under the near-zero component than under the near-eight one.
+        low_component = int(np.argmin([sm.component(j).mu for j in range(k)]))
+        high_component = 1 - low_component
+        low_cell_idx = 0  # shape.ravel()[0] has true label 0, i.e. obs drawn near 0.0
+        self.assertGreater(emis[low_cell_idx, low_component], emis[low_cell_idx, high_component])
 
 
 if __name__ == "__main__":

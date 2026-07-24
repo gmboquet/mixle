@@ -79,9 +79,31 @@ class SpatialMixture:
         self.n = n
         self._neighbors = _grid_neighbors(self.shape)
 
-    def _emission_loglik(self, data_enc) -> np.ndarray:
-        """``(n, K)`` log-likelihood of every cell under each component, via the emissions' encoders."""
-        return np.column_stack([c.seq_log_density(data_enc) for c in self.components])
+    def _emission_loglik(self, data) -> np.ndarray:
+        """``(n, K)`` log-likelihood of every cell under each component.
+
+        MXR-080-0116: each component is encoded and scored with its OWN ``dist_to_encoder()``, never a
+        different component's -- the class's pluggable-emission design explicitly allows components
+        whose fitted encoders differ (e.g. a family whose encoder captures per-fit discovered support),
+        so reusing one shared encoding across components would silently score most of them with the
+        wrong encoder. Every component must still honor the structurally compatible encoder contract
+        the shared responsibilities/neighbor bookkeeping requires: one log-density value per cell,
+        regardless of which emission family produced it. That is enforced here, directly on each
+        component's output, rather than left to an incidental ``column_stack`` shape error.
+        """
+        cols = []
+        for j, c in enumerate(self.components):
+            col = np.asarray(c.seq_log_density(c.dist_to_encoder().seq_encode(data)))
+            if col.shape != (self.n,):
+                raise ValueError(
+                    f"component {j} ({type(c).__name__}) violates the encoder contract: scoring "
+                    f"{self.n} cells produced a log-density array of shape {col.shape}, expected "
+                    f"({self.n},) -- every component's encoder must produce exactly one log-density "
+                    "value per cell for the shared spatial responsibilities/neighbor bookkeeping to "
+                    "stay valid"
+                )
+            cols.append(col)
+        return np.column_stack(cols)
 
     def _reestimate(self, acc_enc, q: np.ndarray, current: list | None = None) -> list:
         """Responsibility-weighted M-step: drive each component's accumulator and re-estimate (mixle contract).
@@ -135,7 +157,11 @@ class SpatialMixture:
         re-estimated (MXR-080-0115).
 
         Raises:
-            ValueError: if ``max_iter`` or ``mf_iter`` is not a positive integer.
+            ValueError: if ``max_iter`` or ``mf_iter`` is not a positive integer, or if
+                ``observations`` does not have exactly ``prod(shape)`` entries (MXR-080-0116: a
+                mismatched count would otherwise let responsibilities, neighbors, and encoded data
+                describe different numbers of cells, surfacing later as an unrelated shape-mismatch
+                crash deep inside the M-step instead of a clear error here).
         """
         max_iter = int(max_iter)
         if max_iter < 1:
@@ -145,6 +171,11 @@ class SpatialMixture:
             raise ValueError(f"mf_iter must be a positive integer, got {mf_iter!r}")
 
         data = list(observations)
+        if len(data) != self.n:
+            raise ValueError(
+                f"observations must have exactly prod(shape)={self.n} entries, one per grid cell in "
+                f"shape {self.shape} (row order matching shape.ravel()); got {len(data)}"
+            )
         rng = np.random.RandomState(seed)
         acc_enc = self.emission.accumulator_factory().make().acc_to_encoder().seq_encode(data)
 
@@ -153,14 +184,14 @@ class SpatialMixture:
         lab = self._repair_empty_components(rng.randint(self.k, size=self.n))
         self.components = self._reestimate(acc_enc, np.eye(self.k)[lab], current=None)
         for _ in range(5):
-            lab = self._emission_loglik(self.components[0].dist_to_encoder().seq_encode(data)).argmax(axis=1)
+            lab = self._emission_loglik(data).argmax(axis=1)
             lab = self._repair_empty_components(lab)
             self.components = self._reestimate(acc_enc, np.eye(self.k)[lab], current=self.components)
 
         q = np.eye(self.k)[lab]
         for t in range(max_iter):
             beta_t = self.beta * min(1.0, (t + 1) / max(1.0, 0.3 * max_iter))  # anneal the coupling in
-            emis = self._emission_loglik(self.components[0].dist_to_encoder().seq_encode(data))
+            emis = self._emission_loglik(data)
             for _ in range(mf_iter):  # mean-field fixed point for the Potts posterior
                 field = np.array([q[nb].sum(axis=0) if nb.size else np.zeros(self.k) for nb in self._neighbors])
                 logq = emis + beta_t * field
