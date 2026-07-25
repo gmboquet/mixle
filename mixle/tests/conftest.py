@@ -402,9 +402,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # P13 usable-information receipts (mixle/experimental/v_information.py): polynomial-Gaussian V-info
     # estimates on synthetic linear/quadratic tasks -- pure numpy, no torch.
     "v_information_test.py": ("experimental",),
-    # P10 PAC-Bayes certificates (mixle/experimental/pac_bayes.py): the coverage receipt fits ~150 GMMs
-    # to measure the empirical 1-delta guarantee -- pure numpy, stochastic, no torch.
-    "pac_bayes_test.py": ("experimental", "stochastic", "slow"),
+    # P10 PAC-Bayes certificates (mixle/experimental/pac_bayes.py): theorem-matched finite-hypothesis
+    # Gibbs-risk receipts plus a small deterministic-seed coverage check -- pure numpy, no torch.
+    "pac_bayes_test.py": ("experimental",),
     # P6 optimal-transport model geometry (mixle/experimental/ot_geometry.py): closed-form Bures-Wasserstein
     # + barycenter axioms plus a small GMM-merge measurement -- pure numpy/scipy, no torch.
     "ot_geometry_test.py": ("experimental",),

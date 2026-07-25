@@ -1,119 +1,135 @@
-"""P10 (experimental) -- PAC-Bayes generalization certificates that compose along the tree.
-
-Receipts: the KL is closed form and composes additively; the McAllester bound holds with the
-promised ``1 - delta`` coverage, is non-vacuous, and tightens as ``n`` grows; and the per-node KL
-decomposition localizes an overfit subtree. The tightness/coverage are measured, per the card's
-kill criterion, not assumed.
-"""
+"""Theorem-matched receipts for finite-hypothesis PAC-Bayes certificates."""
 
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from mixle.experimental.pac_bayes import (
-    bounded_losses,
+    PACBayesAssumptions,
+    categorical_kl,
     certify_generalization,
     gaussian_kl,
-    per_component_kl,
-    total_kl,
-)
-from mixle.inference.estimation import optimize
-from mixle.stats import (
-    GaussianDistribution,
-    GaussianEstimator,
-    MixtureDistribution,
-    MixtureEstimator,
+    mcallester_bound,
 )
 
-
-def _prior():
-    return MixtureDistribution([GaussianDistribution(0.0, 25.0), GaussianDistribution(0.0, 25.0)], [0.5, 0.5])
+pytestmark = pytest.mark.experimental
 
 
-def _fit(data, seed):
-    return optimize(
-        data,
-        MixtureEstimator([GaussianEstimator(), GaussianEstimator()]),
-        out=None,
-        rng=np.random.RandomState(seed),
-        max_its=100,
-    )
+def _assumptions(**overrides):
+    values = {
+        "hypothesis_space_id": "bernoulli-grid-v1",
+        "prior_id": "uniform-before-sample-v1",
+        "sample_iid": True,
+        "hypotheses_fixed_before_sample": True,
+        "prior_fixed_before_sample": True,
+        "loss_fixed_before_sample": True,
+    }
+    values.update(overrides)
+    return PACBayesAssumptions(**values)
 
 
-def _two_cluster(rng, n, held=False):
-    m = 3000 if held else n // 2
-    return np.concatenate([rng.normal(-2, 1, m), rng.normal(3, 1.5, m)]).tolist()
+def _problem(seed, n, true_probability=0.65):
+    predictions = np.asarray([0.1, 0.3, 0.5, 0.7, 0.9])
+    observations = np.random.default_rng(seed).binomial(1, true_probability, size=n)
+    losses = (predictions[:, None] - observations[None, :]) ** 2
+    prior = np.full(predictions.size, 1.0 / predictions.size)
+    empirical = losses.mean(axis=1)
+    logits = np.log(prior) - n * empirical
+    posterior = np.exp(logits - logits.max())
+    posterior /= posterior.sum()
+    true_losses = true_probability * (1.0 - predictions) ** 2 + (1.0 - true_probability) * predictions**2
+    return losses, posterior, prior, true_losses
 
 
-def test_gaussian_kl_closed_form() -> None:
+def test_gaussian_kl_is_only_a_validated_parameter_law_primitive():
     assert gaussian_kl(0.0, 1.0, 0.0, 1.0) == 0.0
-    # KL(N(0,1)||N(0,4)) = 0.5(ln 4 + 1/4 - 1).
     assert np.isclose(gaussian_kl(0.0, 1.0, 0.0, 4.0), 0.5 * (np.log(4.0) + 0.25 - 1.0))
+    with pytest.raises(ValueError, match="positive"):
+        gaussian_kl(0.0, 0.0, 0.0, 1.0)
 
 
-def test_kl_composes_additively() -> None:
-    model = MixtureDistribution([GaussianDistribution(-2, 1), GaussianDistribution(3, 2)], [0.4, 0.6])
-    prior = _prior()
-    node = per_component_kl(model, prior)
-    # total = sum of per-node Gaussian KL + the mixing-weight KL term.
-    from mixle.experimental.pac_bayes import _categorical_kl
-
-    expected = sum(node) + _categorical_kl(np.asarray(model.w), np.asarray(prior.w))
-    assert np.isclose(total_kl(model, prior), expected)
+def test_categorical_kl_is_over_hypotheses_and_decomposes_exactly():
+    posterior = [0.7, 0.2, 0.1]
+    prior = [0.4, 0.4, 0.2]
+    kl, terms = categorical_kl(posterior, prior)
+    assert np.isclose(kl, sum(terms))
+    assert kl >= 0
 
 
-def test_bound_holds_and_is_non_vacuous_and_tightens() -> None:
-    gaps = []
-    for n in (200, 1000, 5000):
-        rng = np.random.default_rng(0)
-        tr = _two_cluster(rng, n)
-        te = _two_cluster(rng, n, held=True)
-        model = _fit(tr, 0)
-        cert = certify_generalization(model, _prior(), tr, delta=0.05)
-        test_loss = float(np.mean(bounded_losses(model, te)))
-        assert test_loss <= cert.bound, f"bound violated at n={n}: test {test_loss:.4f} > {cert.bound:.4f}"
-        assert not cert.vacuous, f"bound was vacuous at n={n}"
-        gaps.append(cert.bound - test_loss)
-    # The certificate tightens with more data.
-    assert gaps[0] > gaps[-1], f"bound did not tighten with n: gaps={gaps}"
+def test_certificate_matches_finite_hypothesis_gibbs_risk_theorem():
+    losses, posterior, prior, true_losses = _problem(seed=1, n=500)
+    certificate = certify_generalization(
+        losses,
+        posterior,
+        prior,
+        assumptions=_assumptions(),
+        delta=0.05,
+    )
+    true_gibbs_risk = float(posterior @ true_losses)
+    assert true_gibbs_risk <= certificate.bound
+    assert not certificate.vacuous
+    assert certificate.theorem.startswith("McAllester bounded-loss PAC-Bayes")
+    assert certificate.assumptions.prior_fixed_before_sample is True
 
 
-def test_coverage_respects_delta() -> None:
-    """Over replications, P(held-out loss > bound) must be <= delta (the PAC-Bayes guarantee)."""
-    delta, R, n = 0.1, 150, 500
+def test_data_dependent_posterior_is_allowed_but_prior_must_be_precommitted():
+    losses, posterior, prior, _ = _problem(seed=2, n=100)
+    first = certify_generalization(losses, posterior, prior, assumptions=_assumptions())
+    alternative_posterior = np.roll(posterior, 1)
+    second = certify_generalization(losses, alternative_posterior, prior, assumptions=_assumptions())
+    assert first.posterior != second.posterior
+    assert first.prior == second.prior
+
+    with pytest.raises(ValueError, match="prior_fixed_before_sample"):
+        certify_generalization(
+            losses,
+            posterior,
+            prior,
+            assumptions=_assumptions(prior_fixed_before_sample=False),
+        )
+
+
+def test_bound_complexity_tightens_with_sample_size_for_fixed_risk_and_kl():
+    small = mcallester_bound(0.2, 1.5, 50, delta=0.05)
+    large = mcallester_bound(0.2, 1.5, 5_000, delta=0.05)
+    assert large < small
+
+
+def test_empirical_coverage_on_fixed_hypotheses_and_prior():
+    delta = 0.1
     violations = 0
-    for i in range(R):
-        rng = np.random.default_rng(2000 + i)
-        tr = _two_cluster(rng, n)
-        te = _two_cluster(rng, n, held=True)
-        model = _fit(tr, i)
-        cert = certify_generalization(model, _prior(), tr, delta=delta)
-        if float(np.mean(bounded_losses(model, te))) > cert.bound:
-            violations += 1
-    rate = violations / R
-    assert rate <= delta + 0.03, f"coverage violated: {rate:.3f} > delta={delta}"
+    replications = 100
+    for seed in range(replications):
+        losses, posterior, prior, true_losses = _problem(seed=seed, n=200)
+        certificate = certify_generalization(
+            losses,
+            posterior,
+            prior,
+            assumptions=_assumptions(),
+            delta=delta,
+        )
+        violations += float(posterior @ true_losses) > certificate.bound
+    assert violations / replications <= delta
 
 
-def test_per_node_localizes_the_overfit_subtree() -> None:
-    """A component collapsed onto outliers carries almost all the KL -- the blame localizes."""
-    # Component 1 is tight (var 0.01) and far -- the overfit subtree; component 0 is reasonable.
-    overfit = MixtureDistribution([GaussianDistribution(0.0, 4.0), GaussianDistribution(10.0, 0.01)], [0.9, 0.1])
-    node = per_component_kl(overfit, _prior())
-    cert = certify_generalization(overfit, _prior(), np.random.default_rng(0).normal(0, 2, 500).tolist())
-    assert cert.worst_subtree() == 1, f"blame not localized to the overfit component: {node}"
-    assert node[1] > 10 * node[0], f"overfit component's KL should dominate: {node}"
+@pytest.mark.parametrize(
+    "losses,posterior,prior,match",
+    [
+        ([[0.1, 1.1]], [1.0], [1.0], r"\[0, 1\]"),
+        ([[0.1, np.nan]], [1.0], [1.0], "finite"),
+        ([[0.1, 0.2]], [1.0, 0.0], [0.5, 0.5], "one entry"),
+        ([[0.1, 0.2], [0.3, 0.4]], [0.5, 0.5], [1.0, 0.0], "strictly positive"),
+    ],
+)
+def test_invalid_certificate_inputs_fail_closed(losses, posterior, prior, match):
+    with pytest.raises(ValueError, match=match):
+        certify_generalization(losses, posterior, prior, assumptions=_assumptions())
 
 
-def test_bounded_loss_is_in_unit_interval() -> None:
-    model = _fit(_two_cluster(np.random.default_rng(0), 400), 0)
-    losses = bounded_losses(model, np.random.default_rng(1).normal(0, 3, 500).tolist())
-    assert np.all(losses >= 0.0) and np.all(losses < 1.0)
-
-
-def test_determinism() -> None:
-    rng = np.random.default_rng(3)
-    tr = _two_cluster(rng, 400)
-    model = _fit(tr, 0)
-    c1 = certify_generalization(model, _prior(), tr)
-    c2 = certify_generalization(model, _prior(), tr)
-    assert c1.as_dict() == c2.as_dict()
+def test_assumptions_and_result_are_durable_and_deterministic():
+    losses, posterior, prior, _ = _problem(seed=3, n=100)
+    first = certify_generalization(losses, posterior, prior, assumptions=_assumptions()).as_dict()
+    second = certify_generalization(losses, posterior, prior, assumptions=_assumptions()).as_dict()
+    assert first == second
+    assert first["assumptions"]["hypothesis_space_id"] == "bernoulli-grid-v1"

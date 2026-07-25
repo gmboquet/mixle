@@ -108,12 +108,11 @@ Current contents:
   predictive log-loss from conditioning on ``X``, and the usability gap
   ``I(X;Y) - I_V`` (against the closed-form Gaussian ``I(X;Y)``) is a receipt on the *library's* ceiling --
   large when the generative law sits outside the current grammar, closing when the missing feature is added.
-- :mod:`mixle.experimental.pac_bayes` -- P10, compositional PAC-Bayes generalization certificates:
-  closed-form :func:`~mixle.experimental.pac_bayes.gaussian_kl`, an additively-composing
-  :func:`~mixle.experimental.pac_bayes.total_kl` with per-node blame, the McAllester
-  :func:`~mixle.experimental.pac_bayes.mcallester_bound`, and
-  :func:`~mixle.experimental.pac_bayes.certify_generalization` turning a Gaussian-mixture fit into a
-  non-vacuous, ``1 - delta``-valid held-out-risk certificate with per-subtree blame.
+- :mod:`mixle.experimental.pac_bayes` -- P10, theorem-matched finite-hypothesis PAC-Bayes certificates:
+  an explicit data-independent prior and sample-dependent posterior over fixed predictors, bounded-loss
+  matrices, a finite-space categorical KL, the McAllester bound, and an assumption-bearing
+  :func:`~mixle.experimental.pac_bayes.certify_generalization` receipt for a ``1 - delta``-valid
+  Gibbs-risk bound with an exact per-hypothesis KL decomposition.
 - :mod:`mixle.experimental.ot_geometry` -- P6, optimal-transport geometry of model space:
   :func:`~mixle.experimental.ot_geometry.bures_wasserstein` (closed-form ``W2`` between Gaussians),
   :func:`~mixle.experimental.ot_geometry.gaussian_barycenter` (Bures barycenter fixed-point), and
