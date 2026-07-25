@@ -16,7 +16,7 @@ import pytest
 from scipy.stats import norm
 
 from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork, _LinearGaussianFactor, _MarginalFactor
-from mixle.inference.condition import ConditionReceipt, condition, do
+from mixle.inference.condition import ConditionReceipt, ImpossibleEvidenceError, condition, do
 from mixle.inference.structure import DependencyTreeDistribution
 from mixle.stats import (
     CategoricalDistribution,
@@ -318,3 +318,85 @@ def test_hmm_rejects_a_negative_time_index_instead_of_numpy_aliasing_it():
     hmm = _hmm_fixture()
     with pytest.raises(ValueError):
         condition(hmm, {-1: 0.0}, method="exact")
+
+
+# --------------------------------------------------------------------------------------------- #
+# (h) impossible evidence and the complete-record posterior contract
+# --------------------------------------------------------------------------------------------- #
+
+
+def _mixed_composite():
+    return CompositeDistribution(
+        [
+            CategoricalDistribution({"left": 1.0}),
+            GaussianDistribution(2.0, 1.0),
+        ]
+    )
+
+
+@pytest.mark.parametrize("method", ["exact", "sir"])
+def test_impossible_evidence_returns_an_explicit_non_samplable_posterior(method):
+    post = condition(_mixed_composite(), {0: "right"}, method=method, n_particles=16, seed=4)
+
+    assert not post.possible
+    assert post.receipt.evidence_status == "impossible"
+    assert post.receipt.log_evidence == float("-inf")
+    if method == "sir":
+        assert post.receipt.ess == 0.0
+        assert post.receipt.ess_ratio == 0.0
+    with pytest.raises(ImpossibleEvidenceError):
+        post.sample(1)
+    with pytest.raises(ImpossibleEvidenceError):
+        post.mean(1)
+    with pytest.raises(ImpossibleEvidenceError):
+        post.log_density({1: 2.0})
+
+
+def test_hmm_impossible_evidence_is_explicit_instead_of_producing_nan_state_weights():
+    hmm = HiddenMarkovModelDistribution(
+        [CategoricalDistribution({"seen": 1.0}), CategoricalDistribution({"also-seen": 1.0})],
+        [0.5, 0.5],
+        [[0.8, 0.2], [0.2, 0.8]],
+    )
+
+    post = condition(hmm, {0: "never-seen"}, method="exact")
+
+    assert not post.possible
+    assert post.receipt.evidence_status == "impossible"
+    with pytest.raises(ImpossibleEvidenceError):
+        post.sample(1)
+
+
+def test_exact_and_sir_samples_are_complete_native_records_with_evidence_present():
+    model = _mixed_composite()
+    exact = condition(model, {0: "left"}, method="exact", seed=8)
+    approximate = condition(model, {0: "left"}, method="sir", n_particles=32, seed=8)
+
+    exact_rows = exact.sample(4, seed=9)
+    approximate_rows = approximate.sample(4, seed=9)
+
+    assert exact.receipt.sample_contract == "full_record"
+    assert approximate.receipt.sample_contract == "full_record"
+    assert all(isinstance(row, tuple) and len(row) == 2 and row[0] == "left" for row in exact_rows)
+    assert all(isinstance(row, tuple) and len(row) == 2 and row[0] == "left" for row in approximate_rows)
+
+
+def test_vector_and_mixture_exact_samples_restore_observed_coordinates():
+    first = MultivariateGaussianDistribution(np.zeros(2), np.eye(2))
+    second = MultivariateGaussianDistribution(np.ones(2), np.eye(2))
+    mixture = MixtureDistribution([first, second], [0.4, 0.6])
+
+    vector_rows = condition(first, {0: 7.0}, method="exact").sample(4, seed=1)
+    mixture_rows = condition(mixture, {0: 7.0}, method="exact").sample(4, seed=1)
+
+    assert isinstance(vector_rows, np.ndarray)
+    assert vector_rows.shape == (4, 2)
+    assert np.all(vector_rows[:, 0] == 7.0)
+    assert all(isinstance(row, np.ndarray) and row.shape == (2,) and row[0] == 7.0 for row in mixture_rows)
+
+
+def test_generic_sir_does_not_invent_a_continuous_kde_for_mixed_records():
+    post = condition(_mixed_composite(), {0: "left"}, method="sir", n_particles=32, seed=2)
+
+    with pytest.raises(NotImplementedError, match="base measure"):
+        post.log_density({1: 2.0})

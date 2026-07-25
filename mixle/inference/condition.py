@@ -17,13 +17,12 @@ surfaces are composed.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
-from scipy.special import logsumexp
 
 from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork
 from mixle.inference.causal import do as _bn_do
@@ -37,13 +36,17 @@ from mixle.stats.latent.hidden_markov import HiddenMarkovModelDistribution
 from mixle.stats.latent.mixture import MixtureDistribution
 from mixle.stats.univariate.discrete.point_mass import PointMassDistribution
 
-__all__ = ["FieldPath", "ConditionReceipt", "Posterior", "condition", "do"]
+__all__ = ["FieldPath", "ConditionReceipt", "ImpossibleEvidenceError", "Posterior", "condition", "do"]
 
 FieldPath = tuple[int, ...]
 
 
 class _NoExactRule(Exception):
     """Internal: raised when a combinator has no closed-form conditioning rule -- triggers SIR."""
+
+
+class ImpossibleEvidenceError(ValueError):
+    """Raised when an operation requires a posterior for evidence with zero model probability."""
 
 
 def _norm_path(key: Any) -> FieldPath:
@@ -161,6 +164,9 @@ class ConditionReceipt:
     """What ``condition()`` actually did: the method used and (for SIR) the importance-sampling health."""
 
     method: str  # "exact" | "sir"
+    evidence_status: str = "possible"  # "possible" | "impossible"
+    log_evidence: float | None = None
+    sample_contract: str = "full_record"
     ess: float | None = None
     ess_ratio: float | None = None
     n_particles: int | None = None
@@ -168,12 +174,17 @@ class ConditionReceipt:
 
 
 class Posterior:
-    """A ``condition()`` result: scoreable/samplable over the unobserved fields.
+    """A ``condition()`` result with one sampling contract across exact and approximate paths.
 
     Distinct from :class:`mixle.stats.compute.posterior.Posterior` (that hierarchy is for
     parameter/latent/predictive posteriors keyed by ``sample(rng)``); this one is evidence
     conditioning within a fitted joint model, with the signature the M0 card specifies:
     ``sample(n)`` / ``log_density(partial_row)`` / ``mean(field)`` / ``.receipt``.
+
+    ``sample(n)`` always returns complete records in the base model's native record type, with
+    evidence fields present and clamped. ``log_density`` scores assignments to unobserved fields
+    only when the selected conditioning implementation has a valid density with respect to their
+    base measure. Generic SIR intentionally does not invent one for mixed or categorical records.
     """
 
     def __init__(
@@ -194,19 +205,85 @@ class Posterior:
         # below). None for SIR posteriors: there is no closed-form distribution object to hand back.
         self.model = model
 
+    @property
+    def possible(self) -> bool:
+        """Whether the evidence has nonzero probability under the conditioning model."""
+        return self.receipt.evidence_status == "possible"
+
+    def _require_possible(self) -> None:
+        if not self.possible:
+            raise ImpossibleEvidenceError("Cannot use a posterior for evidence with zero model probability.")
+
     def sample(self, n: int = 1, *, seed: int | None = None) -> Any:
-        """``n`` draws over the unobserved fields (a list/array in original field order)."""
-        return self._sample_fn(int(n), seed)
+        """Draw ``n`` complete native records, including the clamped evidence fields."""
+        self._require_possible()
+        n = int(n)
+        if n < 1:
+            raise ValueError("n must be >= 1")
+        return self._sample_fn(n, seed)
 
     def log_density(self, partial_row: Any) -> float:
         """Log-density of an assignment to the unobserved fields under the posterior."""
+        self._require_possible()
         if self._log_density_fn is None:
-            raise NotImplementedError(f"{type(self).__name__} does not support log_density for this posterior.")
+            raise NotImplementedError(
+                f"{type(self).__name__} does not have a valid generic log_density for this posterior's base measure."
+            )
         return self._log_density_fn(partial_row)
 
     def mean(self, field: FieldPath | int) -> Any:
         """Posterior mean of one unobserved field (same ``FieldPath``/``int`` used in ``evidence``)."""
+        self._require_possible()
         return self._mean_fn(_norm_path(field))
+
+
+def _impossible_posterior(
+    *,
+    method: str,
+    warning: str,
+    n_particles: int | None = None,
+) -> Posterior:
+    """Return an explicit, inspectable result for zero-probability evidence."""
+    receipt = ConditionReceipt(
+        method=method,
+        evidence_status="impossible",
+        log_evidence=float("-inf"),
+        ess=0.0 if n_particles is not None else None,
+        ess_ratio=0.0 if n_particles is not None else None,
+        n_particles=n_particles,
+        warnings=[warning],
+    )
+    return Posterior(
+        sample_fn=lambda _n, _seed: None,
+        log_density_fn=None,
+        mean_fn=lambda _path: None,
+        receipt=receipt,
+        model=None,
+    )
+
+
+def _restore_observed_records(samples: Any, n: int, dim: int, observed: dict[int, Any]) -> Any:
+    """Expand compact conditional draws back into complete base-model-native records."""
+    unobserved = [i for i in range(dim) if i not in observed]
+    if not isinstance(samples, np.ndarray):
+        complete_rows = []
+        for compact in samples:
+            compact_values = list(compact) if isinstance(compact, (list, tuple, np.ndarray)) else [compact]
+            slots = dict(observed)
+            slots.update(zip(unobserved, compact_values))
+            row = [slots[i] for i in range(dim)]
+            complete_rows.append(np.asarray(row) if isinstance(compact, np.ndarray) else tuple(row))
+        return complete_rows
+    compact = np.asarray(samples)
+    if compact.ndim == 1:
+        compact = compact.reshape(n, len(unobserved))
+    dtype = np.result_type(compact.dtype, np.asarray(list(observed.values())).dtype)
+    complete = np.empty((n, dim), dtype=dtype)
+    for i, value in observed.items():
+        complete[:, i] = value
+    for j, i in enumerate(unobserved):
+        complete[:, i] = compact[:, j]
+    return complete
 
 
 # --------------------------------------------------------------------------------------------- #
@@ -252,12 +329,20 @@ def _condition_gaussian_like(model: Any, ev: dict[FieldPath, Any]) -> Posterior:
     if any(len(p) != 1 for p in ev):
         raise _NoExactRule("nested evidence is not supported for a Gaussian-like leaf")
     observed = {p[0]: v for p, v in ev.items()}
+    observed_indices = sorted(observed)
+    observed_value = np.asarray([observed[i] for i in observed_indices], dtype=np.float64)
+    log_evidence = _safe_log_density(model.marginal(observed_indices), observed_value)
+    if log_evidence == float("-inf"):
+        return _impossible_posterior(
+            method="exact",
+            warning="evidence has zero density under the Gaussian-like model.",
+        )
     cond = model.condition(observed)
     unobs = [i for i in range(int(model.dim)) if i not in observed]
     pos = {f: j for j, f in enumerate(unobs)}
 
     def sample_fn(n: int, s: int | None) -> Any:
-        return cond.sampler(seed=s).sample(n)
+        return _restore_observed_records(cond.sampler(seed=s).sample(n), n, int(model.dim), observed)
 
     def log_density_fn(row: Any) -> float:
         return float(cond.log_density(row))
@@ -265,7 +350,7 @@ def _condition_gaussian_like(model: Any, ev: dict[FieldPath, Any]) -> Posterior:
     def mean_fn(path: FieldPath) -> float:
         return _analytic_mean(cond, pos[path[0]])
 
-    receipt = ConditionReceipt(method="exact")
+    receipt = ConditionReceipt(method="exact", log_evidence=log_evidence)
     return Posterior(sample_fn=sample_fn, log_density_fn=log_density_fn, mean_fn=mean_fn, receipt=receipt, model=cond)
 
 
@@ -273,19 +358,44 @@ def _condition_composite(model: CompositeDistribution, ev: dict[FieldPath, Any],
     top, nested = _split(ev)
     working = list(model.dists)
     sub_posts: dict[int, Posterior] = {}
+    log_evidence = 0.0
     for i, sub_ev in nested.items():
         sp = _condition_exact(working[i], sub_ev, seed=seed)
+        if not sp.possible:
+            return _impossible_posterior(
+                method="exact",
+                warning=f"nested evidence for composite field {i} has zero probability.",
+            )
         if sp.model is None:
             raise _NoExactRule("nested composite field has no closed-form posterior to splice back in")
         sub_posts[i] = sp
         working[i] = sp.model
+        if sp.receipt.log_evidence is not None:
+            log_evidence += sp.receipt.log_evidence
+    for i, value in top.items():
+        field_log_evidence = _safe_log_density(model.dists[i], value)
+        if field_log_evidence == float("-inf"):
+            return _impossible_posterior(
+                method="exact",
+                warning=f"evidence for composite field {i} has zero probability.",
+            )
+        log_evidence += field_log_evidence
     working_composite = CompositeDistribution(working)
     cond = working_composite.condition(top)
     unobs = [i for i in range(model.count) if i not in top]
     pos = {f: j for j, f in enumerate(unobs)}
 
     def sample_fn(n: int, s: int | None) -> Any:
-        return cond.sampler(seed=s).sample(n)
+        rng = RandomState(s)
+        columns: list[list[Any] | np.ndarray] = []
+        for i, child in enumerate(model.dists):
+            if i in top:
+                columns.append([top[i]] * n)
+            elif i in sub_posts:
+                columns.append(sub_posts[i].sample(n, seed=_rng_seed(rng)))
+            else:
+                columns.append(child.sampler(seed=_rng_seed(rng)).sample(n))
+        return list(zip(*columns))
 
     def log_density_fn(row: Any) -> float:
         return float(cond.log_density(row))
@@ -298,7 +408,7 @@ def _condition_composite(model: CompositeDistribution, ev: dict[FieldPath, Any],
             raise NotImplementedError(f"no nested posterior recorded for field {path}")
         return _analytic_mean(cond.dists[pos[i]])
 
-    receipt = ConditionReceipt(method="exact")
+    receipt = ConditionReceipt(method="exact", log_evidence=log_evidence)
     return Posterior(sample_fn=sample_fn, log_density_fn=log_density_fn, mean_fn=mean_fn, receipt=receipt, model=cond)
 
 
@@ -312,12 +422,33 @@ def _condition_mixture(model: MixtureDistribution, ev: dict[FieldPath, Any]) -> 
     dim = getattr(model.components[0], "dim", None)
     if dim is None:
         raise _NoExactRule("mixture components have no dim attribute")
+    observed_indices = sorted(observed)
+    observed_values = [observed[i] for i in observed_indices]
+    try:
+        observed_value: Any = np.asarray(observed_values, dtype=np.float64)
+    except (TypeError, ValueError):
+        observed_value = tuple(observed_values)
+    component_log_evidence = np.asarray(
+        [
+            model.log_w[k] + _safe_log_density(component.marginal(observed_indices), observed_value)
+            for k, component in enumerate(model.components)
+        ],
+        dtype=np.float64,
+    )
+    finite = np.isfinite(component_log_evidence)
+    if not finite.any():
+        return _impossible_posterior(
+            method="exact",
+            warning="evidence has zero probability under every positive-weight mixture component.",
+        )
+    m = float(component_log_evidence[finite].max())
+    log_evidence = float(m + np.log(np.exp(component_log_evidence[finite] - m).sum()))
     cond = model.conditional(observed)
     unobs = [i for i in range(int(dim)) if i not in observed]
     pos = {f: j for j, f in enumerate(unobs)}
 
     def sample_fn(n: int, s: int | None) -> Any:
-        return cond.sampler(seed=s).sample(n)
+        return _restore_observed_records(cond.sampler(seed=s).sample(n), n, int(dim), observed)
 
     def log_density_fn(row: Any) -> float:
         return float(cond.log_density(row))
@@ -327,7 +458,7 @@ def _condition_mixture(model: MixtureDistribution, ev: dict[FieldPath, Any]) -> 
         means = np.array([_analytic_mean(c, j) for c in cond.components], dtype=np.float64)
         return float(np.sum(cond.w * means))
 
-    receipt = ConditionReceipt(method="exact")
+    receipt = ConditionReceipt(method="exact", log_evidence=log_evidence)
     return Posterior(sample_fn=sample_fn, log_density_fn=log_density_fn, mean_fn=mean_fn, receipt=receipt, model=cond)
 
 
@@ -349,8 +480,13 @@ def _condition_hmm(model: HiddenMarkovModelDistribution, ev: dict[FieldPath, Any
         return log_b
 
     q = MarkovChainLatentPosterior(model.log_w, model.log_transitions, _emission_log_b(observed, t_max + 1))
-    marginals = q.marginals()  # (T, K) smoothed state responsibilities
     log_z = q.log_likelihood()  # log p(evidence), the forward normalizer
+    if not np.isfinite(log_z):
+        return _impossible_posterior(
+            method="exact",
+            warning="HMM evidence has zero probability under every latent-state path.",
+        )
+    marginals = q.marginals()  # (T, K) smoothed state responsibilities
 
     def _state_marginals_at(t: int) -> np.ndarray:
         """``p(z_t | evidence)`` at any time, extending past the last evidenced time by prediction."""
@@ -411,7 +547,7 @@ def _condition_hmm(model: HiddenMarkovModelDistribution, ev: dict[FieldPath, Any
         means = np.array([_analytic_mean(model.topics[k]) for k in range(n_states)], dtype=np.float64)
         return float(np.sum(w * means))
 
-    receipt = ConditionReceipt(method="exact")
+    receipt = ConditionReceipt(method="exact", log_evidence=float(log_z))
     post = Posterior(sample_fn=sample_fn, log_density_fn=log_density_fn, mean_fn=mean_fn, receipt=receipt, model=None)
     post.state_marginals = marginals  # convenience for callers wanting q(z_t | evidence) directly
     return post
@@ -571,21 +707,30 @@ def _condition_sir(model: Any, ev: dict[FieldPath, Any], *, n_particles: int, se
     warnings: list[str] = []
     finite = np.isfinite(log_weights)
     if not finite.any():
-        w_norm = np.full(n_particles, 1.0 / n_particles)
-        ess = 0.0
-        warnings.append("all importance weights are zero (evidence has zero density under the prior).")
-    else:
-        m = log_weights[finite].max()
-        w = np.where(finite, np.exp(log_weights - m), 0.0)
-        sw = w.sum()
-        w_norm = w / sw
-        ess = float(1.0 / np.sum(w_norm**2))
+        return _impossible_posterior(
+            method="sir",
+            warning="all importance weights are zero; evidence has zero probability under the prior.",
+            n_particles=n_particles,
+        )
+    m = log_weights[finite].max()
+    w = np.where(finite, np.exp(log_weights - m), 0.0)
+    sw = w.sum()
+    w_norm = w / sw
+    ess = float(1.0 / np.sum(w_norm**2))
+    log_evidence = float(m + np.log(sw) - np.log(n_particles))
     ess_ratio = ess / n_particles
     if ess_ratio < 0.01:
         warnings.append(
             f"ESS ratio {ess_ratio:.4f} < 0.01 threshold -- evidence may be near-impossible under the prior."
         )
-    receipt = ConditionReceipt(method="sir", ess=ess, ess_ratio=ess_ratio, n_particles=n_particles, warnings=warnings)
+    receipt = ConditionReceipt(
+        method="sir",
+        log_evidence=log_evidence,
+        ess=ess,
+        ess_ratio=ess_ratio,
+        n_particles=n_particles,
+        warnings=warnings,
+    )
 
     def sample_fn(n: int, s: int | None) -> Any:
         r = RandomState(s) if s is not None else RandomState(_rng_seed(rng))
@@ -593,30 +738,13 @@ def _condition_sir(model: Any, ev: dict[FieldPath, Any], *, n_particles: int, se
         return [records[j] for j in idx]
 
     def mean_fn(path: FieldPath) -> float:
-        vals = np.array([float(_extract(records[j], path)) for j in range(n_particles)], dtype=np.float64)
+        try:
+            vals = np.array([float(_extract(records[j], path)) for j in range(n_particles)], dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("Posterior.mean is defined only for numeric fields.") from exc
         return float(np.sum(w_norm * vals))
 
-    def log_density_fn(partial_row: dict[FieldPath | int, Any]) -> float:
-        return _weighted_kde_log_density(records, w_norm, {_norm_path(k): v for k, v in partial_row.items()})
-
-    return Posterior(sample_fn=sample_fn, log_density_fn=log_density_fn, mean_fn=mean_fn, receipt=receipt, model=None)
-
-
-def _weighted_kde_log_density(records: Sequence[Any], w_norm: np.ndarray, partial_row: dict[FieldPath, Any]) -> float:
-    """A self-normalized-weight-KDE estimate of the SIR posterior's log-density (Silverman bandwidth).
-
-    This is an ESTIMATE, not exact -- there is no closed-form density for a generic SIR posterior.
-    """
-    paths = sorted(partial_row)
-    x0 = np.array([float(partial_row[p]) for p in paths], dtype=np.float64)
-    x = np.array([[float(_extract(r, p)) for p in paths] for r in records], dtype=np.float64)
-    n, d = x.shape
-    std = x.std(axis=0)
-    std[std == 0.0] = 1.0
-    bw = std * 1.06 * (n ** (-1.0 / (d + 4)))
-    diffs = (x - x0) / bw
-    log_kernel = -0.5 * np.sum(diffs**2, axis=1) - np.sum(np.log(bw)) - 0.5 * d * np.log(2.0 * np.pi)
-    return float(logsumexp(log_kernel + np.log(w_norm + 1e-300)))
+    return Posterior(sample_fn=sample_fn, log_density_fn=None, mean_fn=mean_fn, receipt=receipt, model=None)
 
 
 # --------------------------------------------------------------------------------------------- #

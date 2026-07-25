@@ -26,6 +26,7 @@ from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork
 from mixle.inference.causal import do as _bn_do
 from mixle.inference.condition import (
     FieldPath,
+    ImpossibleEvidenceError,
     Posterior,
     _generate_weighted,
     _is_gaussian_like,
@@ -67,6 +68,7 @@ class SimulationReceipt:
     plausibility: float | None  # log p_base(evidence); None when there is no evidence to score
     plausibility_method: str  # "exact" | "sir" | "no-evidence"
     method: str  # conditioning method for the working posterior: "exact" | "sir" | "none"
+    evidence_status: str = "possible"  # "possible" | "impossible"
     ess: float | None = None
     ess_ratio: float | None = None
     composition_order: str = "do-then-condition"
@@ -127,6 +129,25 @@ def _extract(record: Any, path: FieldPath) -> Any:
     return v
 
 
+def _validate_disjoint_scenario_paths(
+    interventions: dict[FieldPath, Any],
+    evidence: dict[FieldPath, Any],
+) -> None:
+    """Reject evidence that an intervention would replace wholly or in part."""
+    overlaps = []
+    for intervention_path in interventions:
+        for evidence_path in evidence:
+            prefix_length = min(len(intervention_path), len(evidence_path))
+            if intervention_path[:prefix_length] == evidence_path[:prefix_length]:
+                overlaps.append((intervention_path, evidence_path))
+    if overlaps:
+        detail = ", ".join(f"{intervention!r} vs {observed!r}" for intervention, observed in overlaps)
+        raise ValueError(
+            "scenario evidence and interventions must address disjoint fields; "
+            f"overlap would overwrite evidence ({detail})."
+        )
+
+
 def _condition_after_do_bn(
     net: HeterogeneousBayesianNetwork,
     interventions: dict[int, Any],
@@ -134,7 +155,7 @@ def _condition_after_do_bn(
     *,
     n_particles: int,
     seed: int | None,
-) -> tuple[list[tuple], np.ndarray, SimulationReceipt]:
+) -> tuple[list[tuple], np.ndarray | None, SimulationReceipt]:
     """``condition()`` has no dispatch rule for ``InterventionalNetwork`` (M0's ``do()`` result for a
     BN) -- realize "do() first, then condition()" here directly, in one ancestral pass over
     ``net.order`` per particle: an intervened field is FIXED with no weight contribution (its
@@ -143,11 +164,16 @@ def _condition_after_do_bn(
     ``_generate_weighted`` -- except intervened fields skip the weight term, which is the entire
     difference between ``do()`` and ``condition()``.
     """
+    if n_particles < 1:
+        raise ValueError("n_particles must be >= 1")
     rng = RandomState(seed)
     top = {p[0]: v for p, v in evidence.items() if len(p) == 1}
     if any(len(p) != 1 for p in evidence):
         raise NotImplementedError("nested evidence is not supported for a HeterogeneousBayesianNetwork scenario.")
     by_child = {f.child: f for f in net.factors}
+    invalid = (set(interventions) | set(top)) - set(by_child)
+    if invalid:
+        raise ValueError(f"scenario field indices do not exist on this Bayesian network: {sorted(invalid)}.")
     n_fields = len(net.factors)
     records: list[tuple] = []
     log_weights = np.empty(n_particles, dtype=np.float64)
@@ -173,9 +199,18 @@ def _condition_after_do_bn(
     else:
         finite = np.isfinite(log_weights)
         if not finite.any():
-            w_norm = np.full(n_particles, 1.0 / n_particles)
             ess = 0.0
-            warnings.append("all importance weights are zero (evidence has zero density under do(...)).")
+            warnings.append("all importance weights are zero; evidence has zero probability under do(...).")
+            receipt = SimulationReceipt(
+                plausibility=None,
+                plausibility_method="no-evidence",
+                method="sir",
+                evidence_status="impossible",
+                ess=ess,
+                ess_ratio=0.0,
+                warnings=warnings,
+            )
+            return records, None, receipt
         else:
             m = log_weights[finite].max()
             w = np.where(finite, np.exp(log_weights - m), 0.0)
@@ -265,6 +300,8 @@ def _exact_evidence_log_density(model: Any, top: dict[int, Any]) -> float | None
 def _sir_evidence_log_density(model: Any, ev: dict[FieldPath, Any], *, n_particles: int, rng: RandomState) -> float:
     """SNIS estimate of ``log p_base(evidence)`` -- reuses M0's own generative decomposition
     (``_generate_weighted``) rather than a second per-combinator dispatch table (see M2.md)."""
+    if n_particles < 1:
+        raise ValueError("n_particles must be >= 1")
     log_weights = np.empty(n_particles, dtype=np.float64)
     for i in range(n_particles):
         _, lw = _generate_weighted(model, ev, rng)
@@ -311,16 +348,19 @@ class Simulator:
         self.scenario = scenario
         self._seed = seed
         self._n_particles = int(n_particles)
+        if self._n_particles < 1:
+            raise ValueError("n_particles must be >= 1")
         self._rng = RandomState(seed)
-
-        plausibility, plaus_method = plausibility_receipt(
-            base, scenario.evidence, n_particles=n_particles, seed=_rng_seed(self._rng)
-        )
 
         interventions = _norm_evidence(scenario.interventions) if scenario.interventions else {}
         evidence = _norm_evidence(scenario.evidence) if scenario.evidence else {}
+        _validate_disjoint_scenario_paths(interventions, evidence)
 
-        self._bn_records: tuple[list[tuple], np.ndarray] | None = None
+        plausibility, plaus_method = plausibility_receipt(
+            base, dict(evidence), n_particles=n_particles, seed=_rng_seed(self._rng)
+        )
+
+        self._bn_records: tuple[list[tuple], np.ndarray | None] | None = None
         self._hmm_model: HiddenMarkovModelDistribution | None = None
         self._hmm_evidence: dict[int, Any] = {}
         self._posterior: Posterior | None = None
@@ -328,6 +368,10 @@ class Simulator:
 
         if interventions:
             if isinstance(base, HeterogeneousBayesianNetwork):
+                if any(len(path) != 1 for path in interventions):
+                    raise NotImplementedError(
+                        "nested interventions are not supported for a HeterogeneousBayesianNetwork scenario."
+                    )
                 iv = {p[0]: v for p, v in interventions.items()}
                 _bn_do(base, iv)  # validates field indices are in range; raises ValueError otherwise
                 records, w_norm, receipt = _condition_after_do_bn(
@@ -338,6 +382,7 @@ class Simulator:
                     plausibility=plausibility,
                     plausibility_method=plaus_method,
                     method=receipt.method,
+                    evidence_status=receipt.evidence_status,
                     ess=receipt.ess,
                     ess_ratio=receipt.ess_ratio,
                     warnings=receipt.warnings,
@@ -353,7 +398,19 @@ class Simulator:
             self._hmm_model = working
             self._hmm_evidence = {p[0]: v for p, v in evidence.items()}
             method = "exact" if evidence else "none"
-            self.receipt = SimulationReceipt(plausibility=plausibility, plausibility_method=plaus_method, method=method)
+            evidence_status = "possible"
+            if evidence:
+                evidence_posterior = condition(working, dict(evidence), method="exact")
+                evidence_status = evidence_posterior.receipt.evidence_status
+                if not evidence_posterior.possible:
+                    self._posterior = evidence_posterior
+                    self._hmm_model = None
+            self.receipt = SimulationReceipt(
+                plausibility=plausibility,
+                plausibility_method=plaus_method,
+                method=method,
+                evidence_status=evidence_status,
+            )
             return
 
         if evidence:
@@ -362,6 +419,7 @@ class Simulator:
                 plausibility=plausibility,
                 plausibility_method=plaus_method,
                 method=self._posterior.receipt.method,
+                evidence_status=self._posterior.receipt.evidence_status,
                 ess=self._posterior.receipt.ess,
                 ess_ratio=self._posterior.receipt.ess_ratio,
                 warnings=list(self._posterior.receipt.warnings),
@@ -373,8 +431,18 @@ class Simulator:
     def rollout(self, n: int = 1) -> list[Any]:
         """``n`` draws from the resolved scenario (do() applied, evidence conditioned, seed-fixed)."""
         n = int(n)
+        if n < 1:
+            raise ValueError("n must be >= 1")
+        if self.receipt.evidence_status == "impossible":
+            raise ImpossibleEvidenceError(
+                "Cannot roll out a scenario whose evidence has zero probability after intervention."
+            )
         if self._bn_records is not None:
             records, w_norm = self._bn_records
+            if w_norm is None:
+                raise ImpossibleEvidenceError(
+                    "Cannot roll out a scenario whose evidence has zero probability after intervention."
+                )
             idx = self._rng.choice(len(records), size=n, replace=True, p=w_norm)
             return [records[j] for j in idx]
         if self._hmm_model is not None:
