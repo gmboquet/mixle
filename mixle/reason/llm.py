@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+from scipy.stats import rankdata
 
 from mixle.inference.calibration import ProbabilityCalibrator, calibrate_probabilities
 from mixle.inference.uncertainty import (
@@ -49,12 +50,33 @@ _STOP = frozenset(
 
 
 def _auc(scores: np.ndarray, outcomes: np.ndarray) -> float:
-    """Rank-based AUC of ``scores`` vs binary ``outcomes`` -- how well the signal separates right/wrong."""
+    """Rank-based AUC of ``scores`` vs binary ``outcomes`` -- how well the signal separates right/wrong.
+
+    Mann-Whitney-U-equivalent rank-sum formula, using AVERAGE ranks for ties
+    (:func:`scipy.stats.rankdata` with ``method="average"``) (MXR-080-0294). Self-consistency-style
+    scores are frequently discrete (``k / n`` agreement), so exact ties are the common case here, not
+    an edge case: a plain ``argsort``-of-``argsort`` ranking breaks ties arbitrarily by array position,
+    which makes the reported AUC depend on input ORDER within a tied group -- nonsensical, since AUC is
+    supposed to depend only on the ``(score, outcome)`` multiset -- and is systematically biased, e.g.
+    four identical scores split 2 correct / 2 incorrect can report 0.25 instead of the correct,
+    order-invariant 0.5 for a signal with zero discrimination. Average ranks are the textbook fix: every
+    tied value shares the mean of the ranks its group spans, which is what makes this formula compute
+    ``P(random positive scores higher than random negative) + 0.5 * P(tie)``, the correct generalization
+    of AUC to tied scores.
+    """
+    scores = np.asarray(scores, dtype=float)
+    outcomes = np.asarray(outcomes, dtype=float)
+    if scores.shape != outcomes.shape:
+        raise ValueError(f"scores and outcomes must have matching shape, got {scores.shape} and {outcomes.shape}.")
+    if not np.isfinite(scores).all():
+        raise ValueError("scores must be finite for AUC.")
+    if not np.isfinite(outcomes).all() or not np.all((outcomes == 0.0) | (outcomes == 1.0)):
+        raise ValueError("outcomes must be finite and binary (0.0/1.0) for AUC.")
     pos = np.sum(outcomes == 1.0)
     neg = np.sum(outcomes == 0.0)
     if pos == 0 or neg == 0:
         return 0.5
-    ranks = np.argsort(np.argsort(scores)) + 1.0  # average-rank ties are negligible for a diagnostic
+    ranks = rankdata(scores, method="average")
     return float((ranks[outcomes == 1.0].sum() - pos * (pos + 1) / 2.0) / (pos * neg))
 
 
@@ -225,8 +247,9 @@ class FactualityModel:
 
     The signal (self-consistency, a token likelihood, ...) is only a raw number; the calibrator turns
     it into a genuine probability of the *information* being correct, learned against labeled facts.
-    ``discrimination`` (held-out AUC on the fit set) reports how much the signal actually knew about
-    correctness -- ~0.5 means the signal was unrelated to truth, no matter how confident it looked.
+    ``discrimination`` (held-out AUC on the fit set, tie-correct -- see :func:`_auc`) reports how much
+    the signal actually knew about correctness -- ~0.5 means the signal was unrelated to truth, no
+    matter how confident it looked.
     """
 
     calibrator: ProbabilityCalibrator
@@ -442,8 +465,9 @@ class LLMUncertainty:
         probability that the information is correct -- it can be systematically over/under-confident,
         or unrelated to truth. This fits a :class:`~mixle.inference.ProbabilityCalibrator` mapping the
         signal to the empirical correctness rate, so the output *is* a probability of the information
-        being right. ``discrimination`` (AUC of signal vs correctness) reports how much the raw signal
-        knew at all -- ~0.5 means it was unrelated to truth, calibration or not.
+        being right. ``discrimination`` (tie-correct AUC of signal vs correctness -- see :func:`_auc`)
+        reports how much the raw signal knew at all -- ~0.5 means it was unrelated to truth, calibration
+        or not.
 
         Args:
             examples: labeled ``(prompt, gold_answer)`` pairs.

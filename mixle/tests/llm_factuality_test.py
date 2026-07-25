@@ -6,6 +6,7 @@ import numpy as np
 
 from mixle.inference import expected_calibration_error
 from mixle.reason import FactualityModel, LLMUncertainty
+from mixle.reason.llm import _auc  # white-box: MXR-080-0294
 
 
 class KnowsSomeLLM:
@@ -74,6 +75,62 @@ class FactualityTest(unittest.TestCase):
         )
         self.assertGreater(fm.discrimination, 0.7)
         self.assertGreater(fm.probability(prompts[1]), fm.probability(prompts[0]))
+
+
+class TieCorrectAucTest(unittest.TestCase):  # white-box: MXR-080-0294
+    def test_four_identical_scores_balanced_outcomes_is_exactly_half(self):
+        # The audit's exact scenario: 4 identical scores, 2 correct / 2 incorrect. The old
+        # argsort-of-argsort ranking gave arbitrary distinct ranks to the tied scores and reported
+        # 0.25 for this exact (score, outcome) pairing instead of the mathematically required 0.5 (a
+        # tied, non-discriminating signal must score as chance, exactly 0.5).
+        scores = np.array([0.7, 0.7, 0.7, 0.7])
+        outcomes = np.array([1.0, 0.0, 1.0, 0.0])
+        self.assertAlmostEqual(_auc(scores, outcomes), 0.5, places=12)
+
+    def test_auc_is_order_invariant_under_ties(self):
+        # AUC depends only on the (score, outcome) multiset, never on array order. The old ranking
+        # broke this for tied scores (see test_four_identical_scores_balanced_outcomes_is_exactly_half);
+        # every arrangement of the same multiset must now agree.
+        scores = np.array([0.7, 0.7, 0.7, 0.7])
+        for outcomes in (
+            [1.0, 0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ):
+            self.assertAlmostEqual(_auc(scores, np.array(outcomes)), 0.5, places=12)
+
+    def test_partial_ties_still_use_average_rank(self):
+        # 2 and 3 are tied (rank 2.5 each); 1 is rank 1, 4 is rank 4. Positive outcome on the tied
+        # pair (index 1) and the top score (index 3); negative on rank 1 and one of the tied pair.
+        scores = np.array([1.0, 2.0, 2.0, 4.0])
+        outcomes = np.array([0.0, 1.0, 0.0, 1.0])
+        # rank-sum of positives = 2.5 (score 2.0) + 4 (score 4.0) = 6.5; pos=2, neg=2
+        # AUC = (6.5 - 2*3/2) / (2*2) = (6.5 - 3) / 4 = 0.875
+        self.assertAlmostEqual(_auc(scores, outcomes), 0.875, places=12)
+
+    def test_no_ties_matches_original_argsort_formula(self):
+        # With no ties, average-rank and argsort-of-argsort ranks coincide -- the fix must not change
+        # behavior on the (already-correct) no-ties case.
+        rng = np.random.RandomState(0)
+        scores = rng.uniform(size=50)
+        outcomes = (rng.uniform(size=50) < 0.5).astype(float)
+        ranks_old = np.argsort(np.argsort(scores)) + 1.0
+        pos, neg = outcomes.sum(), (1.0 - outcomes).sum()
+        expected = (ranks_old[outcomes == 1.0].sum() - pos * (pos + 1) / 2.0) / (pos * neg)
+        self.assertAlmostEqual(_auc(scores, outcomes), float(expected), places=9)
+
+    def test_degenerate_all_one_class_returns_half(self):
+        self.assertEqual(_auc(np.array([0.1, 0.9]), np.array([1.0, 1.0])), 0.5)
+        self.assertEqual(_auc(np.array([0.1, 0.9]), np.array([0.0, 0.0])), 0.5)
+
+    def test_rejects_non_binary_outcomes(self):
+        with self.assertRaises(ValueError):
+            _auc(np.array([0.1, 0.9]), np.array([0.0, 0.5]))
+
+    def test_rejects_non_finite_scores(self):
+        with self.assertRaises(ValueError):
+            _auc(np.array([0.1, float("nan")]), np.array([0.0, 1.0]))
 
 
 if __name__ == "__main__":
