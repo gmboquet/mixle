@@ -177,18 +177,42 @@ def fuse_claims(
     adjudication (:func:`_any_claim_clears_accept_bar`); otherwise ``abstained=True`` and the caller must not
     surface ``mean`` as a resolved answer. ``provenance`` records every claim's id/version/content_hash/weight
     so a fused belief is always attributable back to the models that produced it.
+
+    Every scalar that reaches the precision arithmetic is validated up front (``value``/``variance``/
+    ``reliability`` per claim, plus ``prior_prec`` and ``sigma_flag``) and the resulting per-claim and
+    total precision are both re-checked as strictly positive and finite immediately before they are
+    divided by -- this function never returns a :class:`FusedBelief` carrying a NaN or negative
+    ``variance`` (MXR-080-0283); it raises ``ValueError`` instead.
     """
     if not claims:
         raise ValueError("fuse_claims needs at least one ModelClaim")
+    if not math.isfinite(sigma_flag) or sigma_flag <= 0:
+        raise ValueError(f"sigma_flag must be finite and > 0, got {sigma_flag!r}")
+    if not math.isfinite(prior_prec) or prior_prec < 0:
+        raise ValueError(f"prior_prec must be finite and >= 0, got {prior_prec!r}")
     for c in claims:
-        if c.variance <= 0:
-            raise ValueError(f"ModelClaim {c.model_id!r} has non-positive variance {c.variance!r}")
+        if not math.isfinite(c.value):
+            raise ValueError(f"ModelClaim {c.model_id!r} has a non-finite value {c.value!r}")
+        if not math.isfinite(c.variance) or c.variance <= 0:
+            raise ValueError(f"ModelClaim {c.model_id!r} has non-positive/non-finite variance {c.variance!r}")
+        if not math.isfinite(c.reliability) or c.reliability <= 0:
+            raise ValueError(f"ModelClaim {c.model_id!r} has non-positive/non-finite reliability {c.reliability!r}")
 
     precisions = [c.reliability / c.variance for c in claims]
+    for c, p in zip(claims, precisions):
+        if not math.isfinite(p) or p <= 0:
+            raise ValueError(f"ModelClaim {c.model_id!r} has a non-positive/non-finite effective precision {p!r}")
     total_prec = sum(precisions)
+    if not math.isfinite(total_prec) or total_prec <= 0:
+        raise ValueError(f"fuse_claims produced a non-positive/non-finite total precision {total_prec!r}")
     prec_fused = total_prec + prior_prec
+    if not math.isfinite(prec_fused) or prec_fused <= 0:
+        raise ValueError(f"fuse_claims produced a non-positive/non-finite fused precision {prec_fused!r}")
+
     mean = sum(p * c.value for p, c in zip(precisions, claims)) / prec_fused
     variance = 1.0 / prec_fused
+    if not math.isfinite(mean) or not math.isfinite(variance) or variance <= 0:
+        raise ValueError("fuse_claims produced a non-finite fused mean/variance from otherwise-valid inputs")
     per_claim_weight = [p / total_prec for p in precisions]
 
     # One weight-dict key per CLAIM, not per distinct model_id -- see FusedBelief's docstring. A
