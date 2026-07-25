@@ -113,7 +113,12 @@ from mixle.models.partially_observable_markov_decision_process import (
     PartiallyObservableMarkovDecisionProcessModel,
     baum_welch_pomdp,
 )
-from mixle.models.pinn import PINNRegression, PINNRegressionEstimator
+from mixle.models.pinn import (
+    PINNConstraintReceipt,
+    PINNProblemSpec,
+    PINNRegression,
+    PINNRegressionEstimator,
+)
 from mixle.models.qat import QATWrapper, apply_qat, fake_quantize, fake_quantize_int4, set_fake_quant_enabled
 from mixle.models.random_forest import (
     RandomForestConditional,
@@ -209,6 +214,8 @@ __all__ = [
     "PCFGParseNode",
     "PINNRegression",
     "PINNRegressionEstimator",
+    "PINNProblemSpec",
+    "PINNConstraintReceipt",
     "QATWrapper",
     "apply_qat",
     "fake_quantize",
