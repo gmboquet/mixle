@@ -383,3 +383,66 @@ class ArrowFeatherDeprecatedApiTest(unittest.TestCase):
         future_warnings = [w for w in caught if issubclass(w.category, FutureWarning)]
         self.assertEqual(future_warnings, [], [str(w.message) for w in future_warnings])
         self.assertEqual(records, [("red", 1), ("blue", 2), ("red", 3)])
+
+
+class ArrowEmptyColumnsProjectionTest(unittest.TestCase):
+    """``columns=[]`` (explicitly project to zero columns) must preserve the row count, not silently
+    return zero records.
+
+    ``_table_records`` builds each row via ``zip(*(pydict[c] for c in cols))``. Python's ``zip()``
+    called with zero iterables (i.e. ``cols == []``, which is what an explicit ``columns=[]`` resolves
+    to -- ``cols = columns if columns is not None else ...`` and ``[] is not None``) returns an empty
+    iterator immediately, with no way to know how many rows the table actually had. So ``columns=[]``
+    used to silently return ``[]`` regardless of row count, instead of one zero-width record (``()``)
+    per row. ``text_source.read_csv`` already gets ``columns=[]`` right (its ``_select`` helper
+    operates per-row rather than doing a single ``zip(*[])`` over the whole table) -- the same "local
+    vs remote / connector-to-connector projection semantics must match" principle behind
+    MXR-080-0065's CSV ``columns=[]`` truthiness bug in ``hadoop_source.py`` (already fixed), just a
+    separate, pre-existing instance of it inside this module's own ``_table_records`` helper.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="mixle_arrow_empty_columns_test_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _csv_equivalent_records(self, rows):
+        """Write ``rows`` to a sibling CSV and read it back via the local text connector with
+        ``columns=[]``, as the cross-connector agreement baseline this class checks against."""
+        from mixle.data.sources import text_source
+
+        path = os.path.join(self.tmpdir, "equivalent.csv")
+        with open(path, "w") as f:
+            f.write("a,b\n")
+            for a, b in rows:
+                f.write("%s,%s\n" % (a, b))
+        return list(text_source.read_csv(path, columns=[]).records())
+
+    def test_read_parquet_empty_columns_preserves_row_count(self):
+        table = pa.table({"a": pa.array([1, 2, 3]), "b": pa.array(["x", "y", "z"])})
+        path = _write_parquet(self.tmpdir, "empty_cols.parquet", table)
+        records = list(read_parquet(path, columns=[]).records())
+        self.assertEqual(len(records), table.num_rows)
+        self.assertEqual(records, [(), (), ()])
+        self.assertEqual(records, self._csv_equivalent_records([(1, "x"), (2, "y"), (3, "z")]))
+
+    def test_read_feather_empty_columns_preserves_row_count(self):
+        table = pa.table({"a": pa.array([1, 2, 3]), "b": pa.array(["x", "y", "z"])})
+        path = _write_feather(self.tmpdir, "empty_cols.feather", table)
+        records = list(read_feather(path, columns=[]).records())
+        self.assertEqual(len(records), table.num_rows)
+        self.assertEqual(records, [(), (), ()])
+        self.assertEqual(records, self._csv_equivalent_records([(1, "x"), (2, "y"), (3, "z")]))
+
+    def test_empty_columns_differs_from_columns_none(self):
+        # Negative control pinning the exact symptom: columns=[] (zero columns, row count preserved)
+        # must NOT collapse to the same result as columns=None (no filter, every column) -- the bug
+        # made an explicitly-empty projection indistinguishable from "return nothing at all".
+        table = pa.table({"a": pa.array([1, 2, 3]), "b": pa.array(["x", "y", "z"])})
+        path = _write_parquet(self.tmpdir, "empty_cols_vs_none.parquet", table)
+        empty = list(read_parquet(path, columns=[]).records())
+        none = list(read_parquet(path, columns=None).records())
+        self.assertNotEqual(empty, none)
+        self.assertEqual(empty, [(), (), ()])
+        self.assertEqual(none, [(1, "x"), (2, "y"), (3, "z")])
