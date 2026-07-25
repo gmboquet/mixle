@@ -15,6 +15,10 @@ stochastic samples into calibrated uncertainty:
 * **Conformal answer-or-abstain**: calibrate a confidence threshold on labeled examples so that
   *when the model answers, it is correct with probability >= 1 - alpha* -- a finite-sample selective-
   risk guarantee. The model abstains on questions it does not know instead of confabulating.
+* **Claim-level corroboration** (:meth:`LLMUncertainty.assess_claims`): lexical overlap only ever
+  establishes *candidacy* -- that a resample is plausibly about the same thing as a claim -- never
+  support by itself; a negation/polarity check on the shared content words is what separates genuine
+  corroboration from a resample that shares the claim's vocabulary while disagreeing with it.
 
 The dependency boundary is domain-neutral: it takes a plain ``generate``
 callable and an ``equivalent`` relation, so it works with a local
@@ -29,6 +33,7 @@ import re
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 import numpy as np
@@ -95,8 +100,12 @@ def content_overlap(sample: str, claim: str, *, threshold: float = 0.6) -> bool:
 
     Counts every content word equally, so boilerplate shared across responses ("the tower is located
     in ...") can mask that the *informative* word (the city) differs. :func:`information_corroborator`
-    fixes that by weighting words by their information content; it is the default in
-    :meth:`LLMUncertainty.assess_claims`.
+    fixes that by weighting words by their information content, and is the candidacy signal behind
+    :meth:`LLMUncertainty.assess_claims`'s default corroborator. Like :func:`information_corroborator`,
+    this measures topical overlap only, never polarity: a negated sentence sharing a claim's content
+    words still counts as covering them. :mod:`mixle.substrate.factuality` layers a negation/polarity
+    check on top of this exact function for that reason (see its ``Corroboration``), and
+    :func:`_default_claim_corroborator` below does the analogous thing for this module.
     """
     cw = _content_words(claim)
     if not cw:
@@ -112,6 +121,12 @@ def information_corroborator(samples: Sequence[str], *, overlap: float = 0.5) ->
     ``overlap`` of the claim's *information-weighted* words -- so whether the distinctive fact (a city,
     a number, a name) matches drives the decision, not the shared filler. Inverse-document-frequency
     weighting: ``w(word) = log((N + 1) / (df + 0.5))``.
+
+    This is a CANDIDACY test, not a support test: it says nothing about polarity, so a sample that
+    negates the claim while sharing its distinctive words still corroborates by this measure alone
+    (:func:`content_overlap` has the identical limitation). :meth:`LLMUncertainty.assess_claims`'s
+    default corroborator (:func:`_default_claim_corroborator`) uses this as its candidacy signal, gated
+    by a negation/polarity check -- see :class:`Corroboration`.
     """
     df: Counter[str] = Counter()
     for s in samples:
@@ -129,6 +144,127 @@ def information_corroborator(samples: Sequence[str], *, overlap: float = 0.5) ->
         num = sum(weight(w) for w in cw if w in sw)
         den = sum(weight(w) for w in cw)
         return den > 0.0 and num / den >= overlap
+
+    return corroborates
+
+
+# -- claim-level corroboration: lexical candidacy gated by a negation/polarity check ---------------
+#
+# Plain lexical overlap (content_overlap / information_corroborator) is a CANDIDACY signal, not a
+# support signal: two statements can share almost every content word and mean opposite things ("the
+# drug cures cancer" / "the drug cures no cancer and does not work"). This is not a real entailment
+# model -- it is a negation-cue heuristic, tractable without an NLI dependency this codebase does not
+# otherwise carry. It mirrors mixle.substrate.factuality's MXR-080-0258 fix and is duplicated here
+# rather than imported: mixle.substrate.factuality already imports content_overlap from this module,
+# and this module should not import back from mixle.substrate for a few lines of regex neither side
+# needs the other's copy of.
+
+_NEGATORS = frozenset(
+    {
+        "no",
+        "not",
+        "never",
+        "none",
+        "nobody",
+        "nothing",
+        "nowhere",
+        "neither",
+        "nor",
+        "cannot",
+        "without",
+        "lacks",
+        "lacking",
+        "fails",
+        "unable",
+    }
+)
+
+_NEG_WINDOW = 4  # how many tokens after a negator its scope reaches, e.g. "not [X Y Z]"
+
+
+def _tokens(text: str) -> list[str]:
+    """Tokenize with n't-contraction expansion (doesn't -> does not) so a negation survives a
+    contraction instead of splitting into two non-negator fragments ("doesn" + "t")."""
+    normalized = re.sub(r"n't\b", " not", str(text).lower())
+    return re.findall(r"[a-z0-9]+", normalized)
+
+
+def _sentences(text: str) -> list[str]:
+    return [s for s in re.split(r"(?<=[.!?])\s+|\n+", str(text).strip()) if s]
+
+
+def _negated_content_words(text: str) -> set[str]:
+    """Content words inside a negation marker's forward scope, sentence-scoped.
+
+    A negator's scope never crosses a sentence boundary (an unrelated negation two sentences later in
+    a long response can't falsely taint an earlier claim's words) and stops at the next negator (so
+    two independent negations in one sentence -- "cures no cancer and does not work" -- are not merged
+    into one span).
+    """
+    negated: set[str] = set()
+    for sent in _sentences(text) or [text]:
+        toks = _tokens(sent)
+        for i, tok in enumerate(toks):
+            if tok not in _NEGATORS:
+                continue
+            for nxt in toks[i + 1 : i + 1 + _NEG_WINDOW]:
+                if nxt in _NEGATORS:
+                    break  # a second negator starts its own scope; do not merge the two
+                if nxt not in _STOP:
+                    negated.add(nxt)
+    return negated
+
+
+class Corroboration(StrEnum):
+    """A corroborator's verdict on one (sample, claim) pair -- three-way, never a bare bool.
+
+    Mirrors :class:`mixle.substrate.factuality.Corroboration` (MXR-080-0258): lexical candidacy
+    (matching content words) is necessary but not sufficient for SUPPORTED -- a contradiction can
+    share every content word with the claim it contradicts (see the module-level comment above this
+    section for the exact example). UNVERIFIED is a real, distinct outcome from SUPPORTED -- "found no
+    reason to doubt it" is not "confirmed" -- so a caller can never mistake silence for verification.
+    """
+
+    SUPPORTED = "supported"
+    CONTRADICTED = "contradicted"
+    UNVERIFIED = "unverified"
+
+
+def _coerce_verdict(result: Corroboration | bool) -> Corroboration:
+    """Accept a legacy ``bool``-returning corroborator too: ``True`` -> SUPPORTED, ``False`` ->
+    UNVERIFIED. Never CONTRADICTED -- a bare bool has no way to express a contradiction, so mapping a
+    falsy legacy result to "unverified" rather than guessing is the only reading that can't overclaim.
+    """
+    if isinstance(result, Corroboration):
+        return result
+    return Corroboration.SUPPORTED if result else Corroboration.UNVERIFIED
+
+
+def _default_claim_corroborator(samples: Sequence[str]) -> Callable[[str, str], Corroboration]:
+    """The default :meth:`LLMUncertainty.assess_claims` corroborator (MXR-080-0295):
+    :func:`information_corroborator`'s information-weighted overlap as candidacy, gated by a
+    negation/polarity check.
+
+    Overlap alone only establishes that ``sample`` is plausibly about the same thing as ``claim`` --
+    candidacy, not support. Among the content words the two texts share, if any disagrees in polarity
+    (negated in one, not the other -- e.g. "the drug works" vs "the drug does not work") the pair is
+    CONTRADICTED regardless of how much else overlaps. Otherwise, candidacy is enough for SUPPORTED. No
+    overlap at all -- or candidacy with no shared word left to check polarity on -- is UNVERIFIED,
+    never guessed as supported.
+    """
+    candidacy = information_corroborator(samples)
+
+    def corroborates(sample: str, claim: str) -> Corroboration:
+        if not candidacy(sample, claim):
+            return Corroboration.UNVERIFIED
+        shared = (_content_words(claim) - _NEGATORS) & (_content_words(sample) - _NEGATORS)
+        if not shared:
+            return Corroboration.UNVERIFIED
+        neg_claim = _negated_content_words(claim)
+        neg_sample = _negated_content_words(sample)
+        if any((w in neg_claim) != (w in neg_sample) for w in shared):
+            return Corroboration.CONTRADICTED
+        return Corroboration.SUPPORTED
 
     return corroborates
 
@@ -214,13 +350,21 @@ def _require_positive_n(value: Any) -> int:
 class ClaimAssessment:
     """Reliability of one claim inside a response, by cross-sample corroboration.
 
-    ``support`` is the fraction of independent resamples that corroborate the claim (in ``[0, 1]``);
-    ``reliable`` is ``support >= threshold``. A claim the model actually knows recurs across samples
-    (high support); a fabricated one appears once and vanishes (low support).
+    ``support`` is the fraction of independent resamples whose corroboration verdict was
+    :attr:`Corroboration.SUPPORTED` (in ``[0, 1]``); ``contradicted`` is the fraction verdicted
+    :attr:`Corroboration.CONTRADICTED` -- a distinct, stronger-than-merely-unsupported signal: some
+    resample did not just fail to back the claim, it actively disagreed (MXR-080-0295; mirrors
+    :class:`mixle.substrate.factuality.ClaimVerdict`). ``reliable`` requires both good support AND
+    zero contradiction (``contradicted == 0.0 and support >= threshold``): lexical overlap with a
+    resample is never enough by itself, since a negated resample can share most of a claim's
+    vocabulary while disagreeing with it. A claim the model actually knows recurs, unnegated, across
+    samples (high support, zero contradiction); a fabricated one appears once and vanishes (low
+    support); a claim the model contradicts itself on is flagged regardless of raw overlap.
     """
 
     claim: str
     support: float
+    contradicted: float
     reliable: bool
 
 
@@ -228,17 +372,30 @@ class ClaimAssessment:
 class InformationAssessment:
     """UQ over the *information content* of a response: every claim scored, plus a summary.
 
-    ``claims`` is the per-claim reliability; ``reliability`` the mean support (how trustworthy the
-    response's information is overall); ``fabricated`` the claims below threshold (likely hallucinated).
+    ``claims`` is the per-claim reliability; ``reliability`` the mean support across claims (how
+    trustworthy the response's information is overall) -- ``None`` when the response had no
+    extractable claims at all (empty, unparseable, or evasive) rather than a vacuous ``1.0``
+    (MXR-080-0295; mirrors :attr:`mixle.substrate.factuality.FactualityReceipt.grounded_fraction`):
+    there is nothing that was checked, so this is UNASSESSED, not "everything checked out."
+    ``fabricated`` is the claims below threshold (likely hallucinated).
     """
 
     claims: list[ClaimAssessment]
-    reliability: float
+    reliability: float | None
 
     @property
     def fabricated(self) -> list[ClaimAssessment]:
         """Return claims assessed as unreliable."""
         return [c for c in self.claims if not c.reliable]
+
+    def is_reliable(self, threshold: float = 1.0) -> bool:
+        """True iff overall reliability meets ``threshold`` (default 1.0: every claim must be reliable).
+
+        Fails closed when there is nothing to assess: a response with no extractable claims is never
+        reported as "reliable", regardless of ``threshold`` -- mirrors
+        :meth:`mixle.substrate.factuality.FactualityReceipt.is_grounded`.
+        """
+        return self.reliability is not None and self.reliability >= threshold
 
 
 @dataclass(frozen=True)
@@ -364,7 +521,7 @@ class LLMUncertainty:
         prompt: str,
         *,
         extract: Callable[[str], Sequence[str]] | None = None,
-        corroborates: Callable[[str, str], bool] | None = None,
+        corroborates: Callable[[str, str], Corroboration | bool] | None = None,
         n: int | None = None,
         threshold: float = 0.5,
     ) -> InformationAssessment:
@@ -372,15 +529,20 @@ class LLMUncertainty:
 
         Finer-grained than :meth:`assess`: a response can be internally consistent (low semantic
         entropy) yet contain one fabricated fact. This decomposes the response into claims and checks
-        each *unit of information* separately -- a claim the model knows recurs across independent
-        resamples; a hallucinated one appears once. This is UQ *on the information in what is said*,
-        not just on the answer as a whole.
+        each *unit of information* separately -- a claim the model knows recurs, unnegated, across
+        independent resamples; a hallucinated one appears once; a claim a resample actively disagrees
+        with is flagged regardless of how much vocabulary it shares with that resample. This is UQ *on
+        the information in what is said*, not just on the answer as a whole.
 
         Args:
             prompt: the query.
             extract: ``response -> [claim, ...]`` (default :func:`sentence_claims`).
-            corroborates: ``(other_sample, claim) -> bool`` -- does a resample support the claim?
-                (default :func:`content_overlap`; pass an entailment/NLI check for real text).
+            corroborates: ``(other_sample, claim) -> Corroboration`` -- does a resample support the
+                claim? (default: :func:`information_corroborator`'s overlap as candidacy, gated by a
+                negation/polarity check -- see :func:`_default_claim_corroborator`; pass an
+                entailment/NLI check for real text.) A plain ``bool``-returning callable is still
+                accepted for compatibility: ``True`` -> SUPPORTED, ``False`` -> UNVERIFIED, never
+                CONTRADICTED (a bare bool cannot express disagreement).
             n: number of samples (the first is the response scored; the rest corroborate). Must be a
                 positive integer -- see :func:`_require_positive_n`.
             threshold: support below which a claim is flagged as unreliable/fabricated.
@@ -390,15 +552,24 @@ class LLMUncertainty:
         if len(samples) < 2:
             samples = samples + [g.text for g in self.sample(prompt, 2 - len(samples))]
         primary, others = samples[0], samples[1:]
-        # default corroboration weights words by information content over the drawn samples, so the
-        # distinctive fact drives the decision rather than shared boilerplate.
-        corr = corroborates or information_corroborator(samples)
+        # default corroboration weights words by information content over the drawn samples (as
+        # candidacy only), then gates on a negation/polarity check -- see _default_claim_corroborator.
+        corr = corroborates or _default_claim_corroborator(samples)
         claims = list(extract(primary))
         assessed: list[ClaimAssessment] = []
         for claim in claims:
-            support = float(np.mean([corr(s, claim) for s in others])) if others else 1.0
-            assessed.append(ClaimAssessment(claim, support, support >= threshold))
-        reliability = float(np.mean([c.support for c in assessed])) if assessed else 1.0
+            if others:
+                verdicts = [_coerce_verdict(corr(s, claim)) for s in others]
+                support = sum(1 for v in verdicts if v is Corroboration.SUPPORTED) / len(verdicts)
+                contradicted = sum(1 for v in verdicts if v is Corroboration.CONTRADICTED) / len(verdicts)
+            else:
+                # Unreachable in practice: the top-up above guarantees len(others) >= 1 whenever
+                # sample() drew at least 1 record (now always true -- see _require_positive_n). Fails
+                # closed rather than assuming "reliable" if it is ever reached some other way.
+                support, contradicted = 0.0, 0.0
+            reliable = contradicted == 0.0 and support >= threshold
+            assessed.append(ClaimAssessment(claim, support, contradicted, reliable))
+        reliability = float(np.mean([c.support for c in assessed])) if assessed else None
         return InformationAssessment(assessed, reliability)
 
     # -- conformal answer-or-abstain ----------------------------------------------------------
