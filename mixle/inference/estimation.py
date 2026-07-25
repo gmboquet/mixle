@@ -99,9 +99,10 @@ def _maybe_structured_model(
     For flat tuple records the independent :class:`CompositeDistribution` the automatic detector
     produces is a Naive-Bayes assumption — the one heterogeneous data most often violates. This
     discovers the cross-field dependency graph (:func:`mixle.inference.learn_bayesian_network`) and
-    returns it only when it beats the independent composite by BIC on the same data; anything else —
-    no edges found, non-record data, too few rows, or an expected data/numeric failure — yields
-    ``None`` and the historical composite path proceeds untouched, so the default is never worse.
+    returns it only when it beats the independent composite by BIC on the same data. Unsupported
+    shapes, too few rows, and a discovered graph with no edges yield ``None`` and the historical
+    composite path proceeds untouched. Once fitting starts, errors propagate: an internal fit
+    failure must not be misreported as an unsupported-data routing decision.
 
     Returns ``(structured, composite)``: ``structured`` is the winning dependence model or ``None``;
     ``composite`` is the fully fitted independent composite whenever the BIC gate paid for that fit
@@ -109,78 +110,75 @@ def _maybe_structured_model(
     model. The keyword-only EM knobs (``delta``/``init_p``/``objective``/``reuse_estep_ll``) are
     threaded into that composite fit so it is exactly the fit the caller would otherwise run.
     """
-    try:
-        rows = list(data)
-        if len(rows) < 40:
-            return None, None
-        first = rows[0]
-        if not isinstance(first, tuple) or len(first) < 2:
-            return None, None
-        n_fields = len(first)
-        if any(not isinstance(r, tuple) or len(r) != n_fields for r in rows):
-            return None, None
-        if any(not isinstance(v, (str, bool, int, float, np.integer, np.floating)) for v in first):
-            return None, None  # nested/sequence fields: structure search handles flat records only
-
-        from mixle.inference.bayesian_network import bayesian_network_bic, learn_bayesian_network
-        from mixle.inference.structure import _num_free_params
-        from mixle.utils.automatic import get_estimator
-
-        # all-continuous records get a second dependence candidate below (a copula), which models
-        # heterogeneous marginals + dependence a linear-Gaussian network cannot; other records only try the BN.
-        all_continuous = all(isinstance(v, (float, np.floating)) for v in first)
-        net = learn_bayesian_network(rows)
-        if not net.edges() and not all_continuous:
-            return None, None  # independence is what the composite already models; keep the automatic families
-
-        composite = optimize(
-            rows,
-            get_estimator(rows),
-            max_its=max_its,
-            delta=delta,
-            init_p=init_p,
-            rng=rng,
-            out=None,
-            reuse_estep_ll=reuse_estep_ll,
-            objective=objective,
-        )
-        enc = composite.dist_to_encoder().seq_encode(rows)
-        comp_ll = float(np.sum(composite.seq_log_density(enc)))
-        n_log = float(np.log(max(len(rows), 2)))
-        comp_params = _num_free_params(composite)
-        comp_bic = -2.0 * comp_ll + comp_params * n_log
-
-        # candidate dependence models, each scored by BIC on the same data; the independent composite is the
-        # baseline and wins ties, so this never returns a worse model than the historical default.
-        candidates: list[tuple[float, Any, str]] = []
-        if net.edges():
-            candidates.append((bayesian_network_bic(net, rows), net, "bayesian-network"))
-        if all_continuous:
-            from mixle.inference.copula_structure import copula_candidates
-
-            candidates.extend(copula_candidates(rows, composite, comp_params, comp_bic, n_log, max_its, rng))
-        if not candidates:
-            return None, composite
-        # a later, more complex candidate (e.g. a vine) only displaces an earlier, simpler one (e.g. the
-        # plain Gaussian copula core it can degenerate to exactly on low-dimensional data) when it wins by
-        # more than floating-point noise -- otherwise a sub-ulp BIC difference from platform/BLAS variance
-        # would nondeterministically pick the more complex, mathematically-equivalent model.
-        best_bic, best_model, desc = candidates[0]
-        for bic, model, name in candidates[1:]:
-            if bic < best_bic - 1e-6 * max(1.0, abs(best_bic)):
-                best_bic, best_model, desc = bic, model, name
-        if best_bic >= comp_bic:
-            return None, composite
-        if out is not None:
-            out.write(
-                "structure: %s dependence beats independent fields (BIC %.1f < %.1f)\n" % (desc, best_bic, comp_bic)
-            )
-        return best_model, composite
-    except (ValueError, TypeError, KeyError, IndexError, FloatingPointError, OverflowError, ZeroDivisionError):
-        # The data-shape and numeric failures the structure search actually raises (np.linalg.LinAlgError
-        # is a ValueError): fall back to the historical composite path. Anything else -- an AttributeError,
-        # ImportError, ... -- is a structure-path regression and must surface, not be silently swallowed.
+    rows = list(data)
+    if len(rows) < 40:
         return None, None
+    first = rows[0]
+    if not isinstance(first, tuple) or len(first) < 2:
+        return None, None
+    n_fields = len(first)
+    if any(not isinstance(row, tuple) or len(row) != n_fields for row in rows):
+        return None, None
+    scalar = (str, bool, int, float, np.integer, np.floating)
+    if any(not isinstance(value, scalar) for row in rows for value in row):
+        return None, None  # nested/sequence fields: structure search handles flat records only
+
+    from mixle.inference.bayesian_network import bayesian_network_bic, learn_bayesian_network
+    from mixle.inference.structure import _num_free_params
+    from mixle.utils.automatic import get_estimator
+
+    # All-continuous records get a second dependence candidate below (a copula), which models
+    # heterogeneous marginals + dependence a linear-Gaussian network cannot; other records only try the BN.
+    all_continuous = all(isinstance(value, (float, np.floating)) for row in rows for value in row)
+    net = learn_bayesian_network(rows)
+    if not net.edges() and not all_continuous:
+        return None, None  # independence is what the composite already models; keep the automatic families
+
+    composite = optimize(
+        rows,
+        get_estimator(rows),
+        max_its=max_its,
+        delta=delta,
+        init_p=init_p,
+        rng=rng,
+        out=None,
+        reuse_estep_ll=reuse_estep_ll,
+        objective=objective,
+    )
+    enc = composite.dist_to_encoder().seq_encode(rows)
+    comp_ll = float(np.sum(composite.seq_log_density(enc)))
+    n_log = float(np.log(max(len(rows), 2)))
+    comp_params = _num_free_params(composite)
+    comp_bic = -2.0 * comp_ll + comp_params * n_log
+    if not np.isfinite(comp_bic):
+        raise ValueError("automatic structure selection produced a non-finite independent-model BIC.")
+
+    # Candidate dependence models are scored by BIC on the same data. The independent composite is
+    # the baseline and wins ties; a failed or non-finite fit is an error, not a routing fallback.
+    candidates: list[tuple[float, Any, str]] = []
+    if net.edges():
+        candidates.append((bayesian_network_bic(net, rows), net, "bayesian-network"))
+    if all_continuous:
+        from mixle.inference.copula_structure import copula_candidates
+
+        candidates.extend(copula_candidates(rows, composite, comp_params, comp_bic, n_log, max_its, rng))
+    if not candidates:
+        return None, composite
+    if any(not np.isfinite(bic) for bic, _, _ in candidates):
+        raise ValueError("automatic structure selection produced a non-finite candidate BIC.")
+    # A later, more complex candidate only displaces an earlier, simpler one when it wins by more
+    # than floating-point noise; otherwise platform/BLAS variance could select it nondeterministically.
+    best_bic, best_model, desc = candidates[0]
+    for bic, model, name in candidates[1:]:
+        if bic < best_bic - 1e-6 * max(1.0, abs(best_bic)):
+            best_bic, best_model, desc = bic, model, name
+    if best_bic >= comp_bic:
+        return None, composite
+    if out is not None:
+        out.write(
+            "structure: %s dependence beats independent fields (BIC %.1f < %.1f)\n" % (desc, best_bic, comp_bic)
+        )
+    return best_model, composite
 
 
 # --- data-encoding helpers --------------------------------------------------
@@ -491,33 +489,45 @@ def _em_loop(
     from mixle.inference.transaction import MutableStateSnapshot
 
     _, old_ll = ll_fn(enc_data, model)
+    old_ll = float(old_ll)
     has_v = enc_vdata is not None
-    best_vll = ll_fn(enc_vdata, model)[1] if has_v else old_ll
-    best_model = model
-    best_state = MutableStateSnapshot.capture(best_model)
+    best_vll = float(ll_fn(enc_vdata, model)[1]) if has_v else old_ll
+    current_is_finite = bool(np.isfinite(old_ll))
+    initial_is_selectable = current_is_finite and bool(np.isfinite(best_vll))
+    best_model = model if initial_is_selectable else None
+    best_state = MutableStateSnapshot.capture(model) if initial_is_selectable else None
 
     for i in range(int(max_its)):
         transaction = MutableStateSnapshot.capture(model, estimator)
         proposal = step_fn(enc_data, estimator, model)
         nxt = getattr(proposal, "model", proposal)
         strategy_accepted = bool(getattr(proposal, "accepted", True))
-        _, ll = ll_fn(enc_data, nxt)
-        vll = ll_fn(enc_vdata, nxt)[1] if has_v else ll
-        # ll and old_ll can both be -inf (e.g. two successive collapsed/singular-covariance steps);
-        # -inf - -inf is nan by IEEE 754, which is the semantics every downstream nan-comparison below
-        # already relies on (nan >= 0 and nan < delta are both False, so a nan dll is inert) -- silence
-        # the resulting RuntimeWarning rather than changing behavior.
-        with np.errstate(invalid="ignore"):
-            dll = ll - old_ll
+        _, candidate_ll = ll_fn(enc_data, nxt)
+        ll = float(candidate_ll)
+        vll = float(ll_fn(enc_vdata, nxt)[1]) if has_v else ll
+        had_finite_baseline = current_is_finite
+        if had_finite_baseline:
+            with np.errstate(invalid="ignore"):
+                dll = ll - old_ll
+        else:
+            # An invalid initializer is not a best state and cannot be an ordering baseline. Permit
+            # exactly the first finite candidate to establish the baseline, then resume the normal
+            # monotonicity contract. If no finite candidate is produced, the run fails below.
+            dll = float("inf") if np.isfinite(ll) else float("nan")
 
         # A non-finite step (e.g. a collapsed/singular covariance producing a NaN/-inf
         # log-likelihood) is never an improvement: never accept it, and do not let it
-        # poison the convergence reference ``old_ll`` (which would stall every later
-        # iteration on NaN comparisons). For finite ``ll`` this is the historical guard.
+        # poison the convergence reference. A finite proposal may repair a non-finite
+        # initializer; after that, finite ``ll`` follows the historical monotonicity guard.
         ll_finite = bool(np.isfinite(ll))
-        accepted = strategy_accepted and ll_finite and ((dll >= -1.0e-12) or (not monotone))
+        accepted = (
+            strategy_accepted
+            and ll_finite
+            and (not had_finite_baseline or (dll >= -1.0e-12) or (not monotone))
+        )
         if accepted:
             model = nxt
+            current_is_finite = True
         else:
             transaction.restore()
 
@@ -527,12 +537,14 @@ def _em_loop(
         # not model (unchanged on a rejected step) -- and never select a non-finite step.
         if accepted:
             old_ll = ll
-            if track_best and best_vll < vll:
+            if track_best and np.isfinite(vll) and (best_model is None or best_vll < vll):
                 best_vll = vll
                 best_model = nxt
                 best_state = MutableStateSnapshot.capture(best_model)
+            elif not track_best:
+                best_vll = vll
 
-        converged = accepted and (delta is not None) and (0.0 <= dll < delta)
+        converged = accepted and had_finite_baseline and (delta is not None) and (0.0 <= dll < delta)
         if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
             _write_em_iter(out, i + 1, ll, dll, vll, has_v, obj_label)
         if on_step is not None:
@@ -542,7 +554,11 @@ def _em_loop(
         if converged or (not accepted):
             break
 
+    if not current_is_finite:
+        raise ValueError("EM did not produce a finite objective from its non-finite initial model.")
     if track_best:
+        if best_model is None or best_state is None:
+            raise ValueError("EM did not produce a model with a finite validation objective.")
         best_state.restore()
         return best_model, best_vll
     return model, best_vll
@@ -575,10 +591,10 @@ def _fused_em_loop(
     report it and we fall back to scoring ``model`` directly for that iteration.
     """
     has_v = enc_vdata is not None
-    best_model = model
-    best_score = ll_fn(enc_vdata, model)[1] if has_v else None
+    best_model = None
+    best_score = None
     prev_ll = None
-    accepted_model = model
+    accepted_model = None
     nxt = None
     converged = False
     exhausted = True
@@ -601,8 +617,8 @@ def _fused_em_loop(
             break
 
         accepted_model = model
-        score = ll_fn(enc_vdata, model)[1] if has_v else ll_model
-        if best_score is None or score >= best_score:
+        score = float(ll_fn(enc_vdata, model)[1]) if has_v else float(ll_model)
+        if np.isfinite(score) and (best_score is None or score >= best_score):
             best_score = score
             best_model = model
 
@@ -629,11 +645,15 @@ def _fused_em_loop(
         final_ll = ll_fn(enc_data, nxt)[1]
         if np.isfinite(final_ll) and (prev_ll is None or final_ll - prev_ll >= -1.0e-12):
             accepted_model = nxt
-            score = ll_fn(enc_vdata, nxt)[1] if has_v else final_ll
-            if best_score is None or score >= best_score:
+            score = float(ll_fn(enc_vdata, nxt)[1]) if has_v else float(final_ll)
+            if np.isfinite(score) and (best_score is None or score >= best_score):
                 best_score = score
                 best_model = nxt
 
+    if accepted_model is None:
+        raise ValueError("fused EM did not produce a finite objective from its non-finite initial model.")
+    if track_best and best_model is None:
+        raise ValueError("fused EM did not produce a model with a finite validation objective.")
     chosen = best_model if track_best else accepted_model
     return chosen, (best_score if best_score is not None else 0.0)
 
@@ -667,6 +687,64 @@ def _model_objective(estimator: ParameterEstimator, model: SequenceEncodableProb
 
 
 _VALID_OBJECTIVES = ("auto", "mle", "map", "vb")
+_VALID_STRUCTURES = ("auto", "off")
+_VALID_SCHEDULES = ("auto", "full")
+
+
+def _validate_optimize_controls(
+    *,
+    max_its: Any,
+    delta: Any,
+    init_p: Any,
+    print_iter: Any,
+    objective: Any,
+    structure: Any,
+    schedule: Any,
+    reuse_estep_ll: Any,
+    monotone: Any,
+    track_best: Any,
+) -> None:
+    """Fail closed on public optimizer controls before routing or initialization."""
+
+    def is_bool(value: Any) -> bool:
+        return isinstance(value, (bool, np.bool_))
+
+    if is_bool(max_its) or not isinstance(max_its, (int, np.integer)) or int(max_its) < 1:
+        raise ValueError(f"optimize(): max_its must be a positive integer, got {max_its!r}")
+    if (
+        delta is not None
+        and (
+            is_bool(delta)
+            or not isinstance(delta, (int, float, np.integer, np.floating))
+            or not np.isfinite(delta)
+            or float(delta) < 0.0
+        )
+    ):
+        raise ValueError(f"optimize(): delta must be None or a finite non-negative number, got {delta!r}")
+    if (
+        is_bool(init_p)
+        or not isinstance(init_p, (int, float, np.integer, np.floating))
+        or not np.isfinite(init_p)
+        or not 0.0 < float(init_p) <= 1.0
+    ):
+        raise ValueError(f"optimize(): init_p must be finite and in (0, 1], got {init_p!r}")
+    if is_bool(print_iter) or not isinstance(print_iter, (int, np.integer)) or int(print_iter) < 0:
+        raise ValueError(f"optimize(): print_iter must be a non-negative integer, got {print_iter!r}")
+    for name, value, choices in (
+        ("objective", objective, _VALID_OBJECTIVES),
+        ("structure", structure, _VALID_STRUCTURES),
+        ("schedule", schedule, _VALID_SCHEDULES),
+    ):
+        if not isinstance(value, str) or value not in choices:
+            raise ValueError(f"optimize(): {name} must be one of {choices!r}, got {value!r}")
+    for name, value, optional in (
+        ("reuse_estep_ll", reuse_estep_ll, False),
+        ("monotone", monotone, True),
+        ("track_best", track_best, True),
+    ):
+        if not (is_bool(value) or (optional and value is None)):
+            expected = "None or a boolean" if optional else "a boolean"
+            raise TypeError(f"optimize(): {name} must be {expected}, got {value!r}")
 
 
 def _resolve_objective(
@@ -995,14 +1073,19 @@ def optimize(
             is met.
 
     """
+    _validate_optimize_controls(
+        max_its=max_its,
+        delta=delta,
+        init_p=init_p,
+        print_iter=print_iter,
+        objective=objective,
+        structure=structure,
+        schedule=schedule,
+        reuse_estep_ll=reuse_estep_ll,
+        monotone=monotone,
+        track_best=track_best,
+    )
     rng = _resolve_rng_arg(rng, seed)
-    if not (max_its >= 1):
-        # range(int(max_its)) is empty for any max_its < 1 (including NaN, since a NaN comparison is
-        # always False -- `not (x >= 1)` catches that case too, unlike `x < 1` alone), and every EM
-        # loop variant below sets its pre-loop `best_model = model` and returns that unchanged when the
-        # loop never runs -- the caller gets back the unfitted initial estimate, indistinguishable from
-        # a converged fit.
-        raise ValueError(f"optimize(): max_its must be a positive integer, got {max_its!r}")
     if fused_options is not None:
         unknown = set(fused_options) - {"parallel", "lse_bits", "lse_span"}
         if unknown:
@@ -1145,12 +1228,7 @@ def optimize(
 
     try:
         if prev_estimate is None:
-            if init_p <= 0.0:
-                p = 0.10
-            else:
-                p = min(max(init_p, 0.0), 1.0)
-
-            mm = seq_initialize(enc_data=enc_data, estimator=est, rng=rng, p=p)
+            mm = seq_initialize(enc_data=enc_data, estimator=est, rng=rng, p=float(init_p))
         else:
             mm = prev_estimate
 
