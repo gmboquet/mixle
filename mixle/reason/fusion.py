@@ -469,6 +469,11 @@ def skill_weighted_fuse(
     return fused
 
 
+def _require_positive_int(name: str, value: Any) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive int, got {value!r}")
+
+
 def _build():
     import torch
     import torch.nn as nn
@@ -479,15 +484,38 @@ def _build():
         ``forward(mu, log_prec)`` takes ``(batch, n_tokens, latent)`` expert means and log-precisions and
         returns ``(fused_mu, fused_prec)`` -- each ``(batch, latent)``. A unit prior keeps it well-posed when
         every expert is uncertain. Differentiable, so the encoders emitting the experts train through it.
+
+        ``mu``/``log_prec`` must have identical, non-empty ``(batch, n_tokens, latent)`` shapes (broadcasting
+        a mismatched token or latent axis would silently fuse the wrong pairing) and the resulting fused
+        precision must come out strictly positive and finite (a zero ``prior_prec`` combined with every
+        expert's precision underflowing to exactly 0.0 would otherwise divide by zero) -- both are checked
+        explicitly and raise ``ValueError`` rather than silently producing a wrong-shaped or NaN/Inf result
+        (MXR-080-0288).
         """
 
         def __init__(self, prior_prec: float = 1.0) -> None:
             super().__init__()
+            if not math.isfinite(prior_prec) or prior_prec < 0:
+                raise ValueError(f"prior_prec must be finite and >= 0, got {prior_prec!r}")
             self.prior_prec = float(prior_prec)
 
         def forward(self, mu: Any, log_prec: Any) -> tuple[Any, Any]:
+            if mu.shape != log_prec.shape:
+                raise ValueError(
+                    f"mu and log_prec must have the same shape, got {tuple(mu.shape)} vs {tuple(log_prec.shape)}"
+                )
+            if mu.dim() != 3:
+                raise ValueError(f"mu/log_prec must be rank-3 (batch, n_tokens, latent), got rank {mu.dim()}")
+            if mu.shape[1] == 0:
+                raise ValueError("ProductOfExpertsFusion needs at least one token to fuse, got an empty token axis")
+
             prec = torch.nn.functional.softplus(log_prec)  # (b, n, m) >= 0
             fused_prec = prec.sum(dim=1) + self.prior_prec  # precisions add (+ prior)
+            if not torch.isfinite(fused_prec).all() or (fused_prec <= 0).any():
+                raise ValueError(
+                    "ProductOfExpertsFusion produced a non-positive/non-finite fused precision -- likely a "
+                    "zero prior_prec combined with every expert's precision underflowing to 0"
+                )
             fused_mu = (prec * mu).sum(dim=1) / fused_prec  # precision-weighted mean
             return fused_mu, fused_prec
 
@@ -500,6 +528,10 @@ def _build():
 
         def __init__(self, token_dim: int, latent_dim: int, n_classes: int, hidden: int = 32) -> None:
             super().__init__()
+            _require_positive_int("token_dim", token_dim)
+            _require_positive_int("latent_dim", latent_dim)
+            _require_positive_int("n_classes", n_classes)
+            _require_positive_int("hidden", hidden)
             self.encoder = nn.Sequential(nn.Linear(token_dim, hidden), nn.GELU(), nn.Linear(hidden, 2 * latent_dim))
             self.latent_dim = int(latent_dim)
             self.fusion = ProductOfExpertsFusion()
@@ -521,6 +553,11 @@ def _build():
         using less compute than a deeper ViT.
 
         ``n_tokens`` is required (positional embeddings); ``attn_layers`` trades cost for relational capacity.
+        ``latent_dim`` must be divisible by ``heads`` (multi-head attention's own constraint, enforced here
+        with a message that names these two constructor arguments rather than relying on a deep, generic
+        torch internal assertion). At call time, ``forward`` requires the runtime token count to match the
+        one the positional embedding table (``self.pos``) was built for at construction -- a mismatch would
+        otherwise broadcast silently (a batch of 1 runtime token, especially) into a wrong-shaped result.
         """
 
         def __init__(
@@ -535,6 +572,15 @@ def _build():
             hidden: int = 32,
         ) -> None:
             super().__init__()
+            _require_positive_int("token_dim", token_dim)
+            _require_positive_int("latent_dim", latent_dim)
+            _require_positive_int("n_classes", n_classes)
+            _require_positive_int("n_tokens", n_tokens)
+            _require_positive_int("attn_layers", attn_layers)
+            _require_positive_int("heads", heads)
+            _require_positive_int("hidden", hidden)
+            if latent_dim % heads != 0:
+                raise ValueError(f"latent_dim ({latent_dim}) must be divisible by heads ({heads})")
             self.latent_dim = int(latent_dim)
             self.encoder = nn.Sequential(nn.Linear(token_dim, hidden), nn.GELU(), nn.Linear(hidden, 2 * latent_dim))
             self.proj = nn.Linear(2 * latent_dim, latent_dim)
@@ -547,6 +593,13 @@ def _build():
             self.head = nn.Linear(2 * latent_dim, n_classes)
 
         def forward(self, tokens: Any) -> Any:
+            if tokens.dim() != 3:
+                raise ValueError(f"tokens must be rank-3 (batch, n_tokens, token_dim), got rank {tokens.dim()}")
+            if tokens.shape[1] != self.pos.shape[1]:
+                raise ValueError(
+                    f"tokens has {tokens.shape[1]} tokens but this model's positional table was built for "
+                    f"{self.pos.shape[1]} (n_tokens is fixed at construction)"
+                )
             t = self.proj(self.encoder(tokens)) + self.pos  # per-token latent + position
             t = self.attn(t)  # relational mixing (O(N^2) but only a few layers)
             h = self.to_expert(t)
