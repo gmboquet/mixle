@@ -19,6 +19,7 @@ Each lowers to the composable :class:`~mixle.models.neural_density.NeuralDensity
 
 from __future__ import annotations
 
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -38,6 +39,63 @@ _BUILDERS: dict[str, tuple[str, bool]] = {
 }
 
 
+def _positive_int(value: Any, name: str, *, minimum: int = 1) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer >= {minimum}")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return result
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a positive finite real number")
+    result = float(value)
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a positive finite real number")
+    return result
+
+
+def _nonnegative_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite non-negative real number")
+    result = float(value)
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative real number")
+    return result
+
+
+def _matrix(
+    value: Any,
+    *,
+    name: str,
+    width: int,
+    discrete: bool = False,
+    categories: int | None = None,
+) -> np.ndarray:
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a rectangular matrix with width {width}") from error
+    if raw.ndim != 2 or raw.shape[0] == 0 or raw.shape[1] != width:
+        raise ValueError(f"{name} must have exact shape (rows, {width}) with at least one row")
+    if discrete:
+        if raw.dtype.kind not in {"i", "u"}:
+            raise ValueError(f"{name} must contain integer category indices without float coercion")
+        result = raw.astype(np.int64, copy=False)
+        if np.any(result < 0) or categories is None or np.any(result >= categories):
+            raise ValueError(f"{name} category indices must lie in [0, {categories})")
+        return result
+    try:
+        result = raw.astype(float, copy=False)
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{name} must be a finite numeric matrix") from error
+    if not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} must contain only finite values")
+    return result
+
+
 class _DensitySpec:
     """Config for a neural-density module: which builder + its kwargs + fit hyperparameters. Pickle-safe."""
 
@@ -53,13 +111,40 @@ class _DensitySpec:
         lr: float = 5e-3,
         extra: dict | None = None,
     ):
+        if kind not in _BUILDERS:
+            raise ValueError(f"unknown neural density kind {kind!r}")
+        if not isinstance(field, str) or not field:
+            raise ValueError("conditional density field must be a non-empty string")
         self.kind = kind
         self.params = dict(params)
         self.conditional = _BUILDERS[kind][1]
         self.field = field
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
+        self.m_steps = _positive_int(m_steps, "m_steps")
+        self.lr = _positive_finite(lr, "lr")
         self.extra = dict(extra or {})  # leaf-specific extras (e.g. the EBM's noise_ratio)
+        for name in ("dim", "x_dim", "y_dim", "hidden", "layers", "blocks", "latent", "eval_samples", "k"):
+            if name in self.params:
+                minimum = 2 if kind == "conditional_flow" and name == "y_dim" else 1
+                self.params[name] = _positive_int(self.params[name], name, minimum=minimum)
+        if "n_categories" in self.params:
+            self.params["n_categories"] = _positive_int(
+                self.params["n_categories"], "category count", minimum=2
+            )
+        if "noise_ratio" in self.extra:
+            self.extra["noise_ratio"] = _positive_int(self.extra["noise_ratio"], "noise_ratio")
+
+    @property
+    def discrete(self) -> bool:
+        return self.kind in {"ar_categorical", "conditional_ar_categorical"}
+
+    @property
+    def observation_dim(self) -> int:
+        return int(self.params["y_dim"] if self.conditional else self.params["dim"])
+
+    @property
+    def categories(self) -> int | None:
+        value = self.params.get("n_categories")
+        return None if value is None else int(value)
 
     def build_module(self) -> Any:
         from mixle.models import (
@@ -114,25 +199,96 @@ def _density_fit(rv: RandomVariable, data: Any, **kw: Any) -> RandomVariable:
     ``its`` (default 8) is the number of warm-started M-steps; each M-step is ``spec.m_steps`` gradient steps.
     Conditional densities need the covariates: ``.fit(y, given={"x": X})``.
     """
+    spec: _DensitySpec = rv._args[0]
+    supported = {
+        "backend",
+        "delta",
+        "engine",
+        "given",
+        "its",
+        "max_its",
+        "missing",
+        "num_workers",
+        "precision",
+        "print_iter",
+        "rng",
+        "seed",
+    }
+    unknown = sorted(set(kw) - supported)
+    if unknown:
+        raise TypeError(f"unsupported neural-density fit control(s): {', '.join(unknown)}")
+    if kw.get("missing", "error") != "error":
+        raise NotImplementedError("neural-density fitting does not support missing='marginalize'")
+    if "its" in kw and kw.get("max_its", 100) != 100:
+        raise ValueError("its and max_its are aliases; pass only one")
+    max_its = _positive_int(kw.get("its", kw.get("max_its", 8)), "density fit iterations")
+    delta = _nonnegative_finite(kw.get("delta", 1e-8), "delta")
+    if kw.get("seed") is not None and kw.get("rng") is not None:
+        raise ValueError("pass at most one of seed and rng")
+    seed = kw.get("seed")
+    rng = kw.get("rng")
+    if seed is not None:
+        if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, Integral):
+            raise TypeError("seed must be an integer")
+        seed = int(seed)
+        if seed < 0 or seed >= 2**32:
+            raise ValueError("seed must lie in [0, 2**32)")
+        torch_seed = seed
+    elif rng is not None:
+        if not isinstance(rng, np.random.RandomState):
+            raise TypeError("rng must be a numpy.random.RandomState")
+        torch_seed = int(rng.randint(0, 2**31))
+    else:
+        torch_seed = 0
+
+    ys = _matrix(
+        data,
+        name="density observations",
+        width=spec.observation_dim,
+        discrete=spec.discrete,
+        categories=spec.categories,
+    )
+    if not spec.conditional:
+        rows = list(ys)
+    else:
+        given = kw.get("given")
+        if not isinstance(given, dict) or spec.field not in given:
+            raise ValueError(f"conditional density fit needs covariates: .fit(y, given={{{spec.field!r}: X}})")
+        if set(given) != {spec.field}:
+            raise ValueError(f"conditional density given data must contain only field {spec.field!r}")
+        xs = _matrix(
+            given[spec.field],
+            name=f"given[{spec.field!r}]",
+            width=int(spec.params["x_dim"]),
+        )
+        if xs.shape[0] != ys.shape[0]:
+            raise ValueError(
+                f"given[{spec.field!r}] has {xs.shape[0]} rows but observations have {ys.shape[0]}"
+            )
+        rows = list(zip(xs, ys))
+
+    import torch
+
     from mixle.inference import optimize
 
-    spec: _DensitySpec = rv._args[0]
-    its = int(kw.get("its", 8))
-    leaf = spec.make_leaf()
-
-    if not spec.conditional:
-        rows = [np.atleast_1d(np.asarray(v, dtype=float)) for v in data]
-        fitted = optimize(rows, leaf.estimator(), prev_estimate=leaf, max_its=its, out=None)
-        return RandomVariable._bound(fitted, name=rv._name)
-
-    given = kw.get("given") or {}
-    if spec.field not in given:
-        raise ValueError(f"conditional density fit needs covariates: .fit(y, given={{{spec.field!r}: X}})")
-    xs = [np.atleast_1d(np.asarray(x, dtype=float)) for x in np.asarray(given[spec.field], dtype=float)]
-    ys = [np.atleast_1d(np.asarray(v, dtype=float)) for v in data]
-    if len(xs) != len(ys):
-        raise ValueError(f"given[{spec.field!r}] has length {len(xs)} but data has length {len(ys)}.")
-    fitted = optimize(list(zip(xs, ys)), leaf.estimator(), prev_estimate=leaf, max_its=its, out=None)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(torch_seed)
+        leaf = spec.make_leaf()
+        fitted = optimize(
+            rows,
+            leaf.estimator(),
+            prev_estimate=leaf,
+            max_its=max_its,
+            delta=delta,
+            out=None,
+            backend=kw.get("backend", "local"),
+            num_workers=kw.get("num_workers"),
+            engine=kw.get("engine"),
+            precision=kw.get("precision"),
+            print_iter=kw.get("print_iter", 0),
+            rng=rng,
+            seed=seed,
+        )
     return RandomVariable._bound(fitted, name=rv._name)
 
 

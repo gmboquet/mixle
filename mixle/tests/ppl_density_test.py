@@ -50,7 +50,7 @@ class UnconditionalPPLTest(unittest.TestCase):
         _seed()
         import itertools
 
-        data = [np.array([r % 3, (r // 3) % 3], dtype=float) for r in np.random.randint(0, 9, size=300)]
+        data = [np.array([r % 3, (r // 3) % 3], dtype=int) for r in np.random.randint(0, 9, size=300)]
         m = DiscreteAR(2, 3, hidden=16).fit(data, its=4)
         configs = np.array(list(itertools.product(range(3), repeat=2)), dtype=float)
         total = float(np.exp(m.dist.seq_log_density(m.dist.dist_to_encoder().seq_encode(list(configs)))).sum())
