@@ -64,17 +64,23 @@ def _redact_action(action: Action) -> Action:
 
 
 def _redact_investigation(inv: Investigation) -> Investigation:
-    """Return a copy of ``inv`` with its answer and every step's evidence fragments redacted.
+    """Return a copy of ``inv`` with its answer, every step's evidence fragments, and every failure
+    message redacted.
 
     Evidence is already redacted at the source (see ``_redact_action``), but this is the harness's
     last line of defense: whatever ``Investigation`` a caller retains via ``HarnessResult.investigation``
     must never show more than the top-level, masked answer does -- inspecting the full retained trace
-    must not recover what the top-level masking was supposed to hide."""
+    must not recover what the top-level masking was supposed to hide. ``Step.error``/``Investigation.error``
+    (MXR-080-0256) carry a raised exception's ``"Type: message"`` -- an action or answerer failure whose
+    message happens to echo back part of a secret-bearing request would otherwise reach the retained
+    trace through a boundary this function was already supposed to cover unconditionally."""
     from mixle.substrate.security import redact_secrets
 
-    steps = [replace(s, fragments=[redact_secrets(f) for f in s.fragments]) for s in inv.steps]
+    steps = [
+        replace(s, fragments=[redact_secrets(f) for f in s.fragments], error=redact_secrets(s.error)) for s in inv.steps
+    ]
     answer = redact_secrets(inv.answer) if inv.answer is not None else None
-    return replace(inv, answer=answer, steps=steps)
+    return replace(inv, answer=answer, steps=steps, error=redact_secrets(inv.error))
 
 
 class Harness:
