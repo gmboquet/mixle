@@ -4,27 +4,88 @@ The estimator path has :func:`mixle.inference.fit_with_provenance`; this is its 
 ``rv.fit(...)`` (any ``how`` -- EM / MAP / MCMC / VI / ...), then builds a :class:`~mixle.inference.
 provenance.Header` from the fitted model's *lowered* distribution (``rv.dist``), so the header gets the
 concrete schema and final log-likelihood alongside the data hash, training settings, timing, resources, and
-environment. The header is returned (and attached as ``rv.header`` when the RV permits attribute setting).
+environment. The explicit result object is authoritative; this function never mutates the fitted object to
+attach metadata.
 """
 
 from __future__ import annotations
 
+import hashlib
 import time
-from typing import Any
+from collections.abc import Iterator
+from typing import Any, NamedTuple
+
+import numpy as np
 
 
-def fit_with_provenance(rv: Any, data: Any, *, seed: int | None = None, **fit_kw: Any):
-    """Fit a PPL ``RandomVariable`` on ``data`` and return ``(fitted_rv, header)`` with full provenance.
+class PPLFitResult(NamedTuple):
+    """Explicit fitted-object and provenance pair.
 
-    ``fit_kw`` is passed through to ``rv.fit`` (``how=``, ``max_its=``, ``delta=``, ``backend=``, ...). The
-    header is built from the fitted model's lowered distribution so it carries schema + final log-likelihood
-    where available; ``method`` records the requested ``how``. The header is returned regardless; it is
-    also attached as ``fitted.header`` when the RandomVariable allows it (RVs with ``__slots__`` do not)."""
+    A named tuple preserves the historical ``fitted, header = ...`` unpacking
+    contract while avoiding optional, failure-prone mutation of ``fitted``.
+    """
+
+    fitted: Any
+    header: Any
+
+
+def _replayable_data(data: Any) -> Any:
+    """Materialize a one-shot iterator exactly once; preserve replayable data sources."""
+    if isinstance(data, Iterator):
+        return list(data)
+    return data
+
+
+def _rng_record(rng: np.random.RandomState, requested_seed: int | None, effective_seed: int) -> dict[str, Any]:
+    algorithm, keys, position, has_gauss, cached_gaussian = rng.get_state()
+    state_bytes = (
+        algorithm.encode("ascii")
+        + keys.tobytes()
+        + int(position).to_bytes(8, "big", signed=False)
+        + int(has_gauss).to_bytes(1, "big", signed=False)
+        + np.float64(cached_gaussian).tobytes()
+    )
+    return {
+        "kind": "numpy.random.RandomState",
+        "algorithm": algorithm,
+        "requested_seed": requested_seed,
+        "effective_seed": effective_seed,
+        "initial_state_sha256": hashlib.sha256(state_bytes).hexdigest(),
+    }
+
+
+def fit_with_provenance(
+    rv: Any,
+    data: Any,
+    *,
+    seed: int | None = None,
+    **fit_kw: Any,
+) -> PPLFitResult:
+    """Fit a PPL random variable and return an explicit provenance result.
+
+    One exact replayable representation of one-shot data is used for both fit
+    and hashing. ``seed=None`` has the deterministic effective seed ``0``;
+    otherwise the exact non-negative integer seed initializes the
+    ``RandomState`` passed to ``rv.fit``. Supplying a separate ``rng`` is
+    rejected so the recorded state cannot disagree with the state used.
+    """
     from mixle.inference.production.provenance import _resource_usage, build_header
+
+    if "rng" in fit_kw:
+        raise ValueError("fit_with_provenance owns the random-state contract; pass seed= instead of rng=")
+    if isinstance(seed, (bool, np.bool_)) or (seed is not None and not isinstance(seed, (int, np.integer))):
+        raise TypeError("seed must be a non-negative integer or None")
+    effective_seed = 0 if seed is None else int(seed)
+    if effective_seed < 0:
+        raise ValueError("seed must be a non-negative integer or None")
+    rng = np.random.RandomState(effective_seed)
+    random_state = _rng_record(rng, None if seed is None else int(seed), effective_seed)
+    fit_kw["rng"] = rng
+    training_data = _replayable_data(data)
 
     cpu0 = _resource_usage().get("cpu_time_s")
     t0 = time.time()
-    fitted = rv.fit(data, **fit_kw)
+    fitted = rv.fit(training_data, **fit_kw)
     t1 = time.time()
     usage = _resource_usage()
     if cpu0 is not None and usage.get("cpu_time_s") is not None:
@@ -36,12 +97,16 @@ def fit_with_provenance(rv: Any, data: Any, *, seed: int | None = None, **fit_kw
         "max_its": fit_kw.get("max_its"),
         "delta": fit_kw.get("delta"),
         "backend": fit_kw.get("backend", "local"),
-        "seed": seed,
+        "seed": effective_seed,
+        "random_state": random_state,
         "surface": "ppl",
     }
-    header = build_header(model, data, training=training, started=t0, finished=t1, resources=usage)
-    try:
-        fitted.header = header
-    except Exception:  # noqa: BLE001
-        pass
-    return fitted, header
+    header = build_header(
+        model,
+        training_data,
+        training=training,
+        started=t0,
+        finished=t1,
+        resources=usage,
+    )
+    return PPLFitResult(fitted=fitted, header=header)

@@ -150,7 +150,7 @@ from mixle.ppl.predictive import (
     prior_predictive_check,
 )
 from mixle.ppl.priors import Potts, TotalVariation
-from mixle.ppl.provenance import fit_with_provenance
+from mixle.ppl.provenance import PPLFitResult, fit_with_provenance
 from mixle.ppl.summarize import hdi, posterior_summary
 from mixle.ppl.survival import censored_loglik, fit_censored, kaplan_meier
 
@@ -228,6 +228,7 @@ __all__ = [
     "prior_predictive_check",
     "fit_censored",
     "fit_with_provenance",
+    "PPLFitResult",
     "censored_loglik",
     "kaplan_meier",
     "hdi",
