@@ -6,10 +6,21 @@ from unittest import mock
 import numpy as np
 
 import mixle.task.calibrated_generator as calibrated_generator_module
-from mixle.reason.language_bridge import ABSTAIN, Claim, PosteriorDescriber, _sample_scalar, claim_score, parse_evidence
+from mixle.reason.language_bridge import (
+    ABSTAIN,
+    Claim,
+    PosteriorDescriber,
+    SchemaField,
+    _sample_scalar,
+    claim_score,
+    parse_evidence,
+)
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 
-SCHEMA = {"text": "categorical", "brightness": "numeric"}
+# "text" is explicitly OPTIONAL (MXR-080-0289: required-ness must be expressible, not implicit for
+# every field) -- exercised by test_partial_evidence_is_fine below; "brightness" uses the plain-string
+# shorthand, which defaults to required=True.
+SCHEMA = {"text": SchemaField(kind="categorical", required=False), "brightness": "numeric"}
 
 
 def _toy_extractor(sentence: str) -> dict:
@@ -67,6 +78,77 @@ class ParseEvidenceTest(unittest.TestCase):
     def test_empty_schema_rejected(self):
         with self.assertRaises(ValueError):
             parse_evidence("whatever", {}, _toy_extractor)
+
+
+class EvidenceSchemaValidationTest(unittest.TestCase):
+    """Regression coverage for MXR-080-0289: evidence parsing previously validated only fields the
+    extractor happened to return -- an invalid schema kind on an omitted field was never detected,
+    "required" could not be expressed at all, non-finite numerics passed straight through, and any
+    categorical value (including ``None``) was silently ``str()``-coerced into a fabricated label."""
+
+    def test_required_field_missing_is_rejected(self):
+        schema = {"a": "numeric", "b": "categorical"}  # both required by default (shorthand)
+        with self.assertRaises(ValueError):
+            parse_evidence("whatever", schema, lambda _x: {"a": 1.0})  # "b" omitted
+
+    def test_optional_field_may_be_omitted(self):
+        schema = {"a": "numeric", "b": SchemaField(kind="categorical", required=False)}
+        got = parse_evidence("whatever", schema, lambda _x: {"a": 1.0})
+        self.assertEqual(got, {"a": 1.0})
+
+    def test_invalid_schema_kind_detected_even_for_a_field_the_extractor_omits(self):
+        # "b" is never in the extractor's output at all -- the bad kind must still be caught, because
+        # the schema itself is validated before the extractor ever runs.
+        schema = {"a": "numeric", "b": "not_a_real_kind"}
+        with self.assertRaises(ValueError):
+            parse_evidence("whatever", schema, lambda _x: {"a": 1.0})
+
+    def test_invalid_schema_kind_rejected_at_construction_even_without_calling_parse_evidence(self):
+        with self.assertRaises(ValueError):
+            SchemaField(kind="not_a_real_kind")
+
+    def test_numeric_nan_rejected(self):
+        schema = {"brightness": "numeric"}
+        with self.assertRaises(ValueError):
+            parse_evidence("whatever", schema, lambda _x: {"brightness": float("nan")})
+
+    def test_numeric_infinity_rejected(self):
+        schema = {"brightness": "numeric"}
+        with self.assertRaises(ValueError):
+            parse_evidence("whatever", schema, lambda _x: {"brightness": float("inf")})
+        with self.assertRaises(ValueError):
+            parse_evidence("whatever", schema, lambda _x: {"brightness": float("-inf")})
+
+    def test_categorical_none_is_rejected_not_silently_stringified(self):
+        schema = {"text": "categorical"}
+        with self.assertRaises(ValueError) as ctx:
+            parse_evidence("whatever", schema, lambda _x: {"text": None})
+        self.assertNotIn("'None'", str(ctx.exception))  # must not have been coerced to the string "None"
+
+    def test_categorical_arbitrary_object_is_rejected_not_silently_stringified(self):
+        schema = {"text": "categorical"}
+        with self.assertRaises(ValueError):
+            parse_evidence("whatever", schema, lambda _x: {"text": ["not", "a", "string"]})
+        with self.assertRaises(ValueError):
+            parse_evidence("whatever", schema, lambda _x: {"text": 5})
+
+    def test_categorical_value_outside_declared_domain_rejected(self):
+        schema = {"text": SchemaField(kind="categorical", categories=frozenset({"cat", "dog"}))}
+        with self.assertRaises(ValueError):
+            parse_evidence("whatever", schema, lambda _x: {"text": "bird"})
+
+    def test_categorical_value_inside_declared_domain_accepted(self):
+        schema = {"text": SchemaField(kind="categorical", categories=frozenset({"cat", "dog"}))}
+        got = parse_evidence("whatever", schema, lambda _x: {"text": "cat"})
+        self.assertEqual(got, {"text": "cat"})
+
+    def test_categories_must_be_non_empty_when_declared(self):
+        with self.assertRaises(ValueError):
+            SchemaField(kind="categorical", categories=frozenset())
+
+    def test_categories_only_valid_for_categorical_kind(self):
+        with self.assertRaises(ValueError):
+            SchemaField(kind="numeric", categories=frozenset({"a"}))
 
 
 class ClaimScoreStandaloneTest(unittest.TestCase):
