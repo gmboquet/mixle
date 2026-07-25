@@ -69,6 +69,12 @@ class StreamingEstimatorTestCase(unittest.TestCase):
             constant(0.0)
         with self.assertRaises(ValueError):
             harmonic(0.5)
+        with self.assertRaises(ValueError):
+            constant(float("nan"))
+        with self.assertRaises(ValueError):
+            harmonic(float("nan"))
+        with self.assertRaises(ValueError):
+            harmonic(0.75, offset=float("nan"))
 
     def test_streaming_update_matches_manual_decayed_accumulator(self):
         estimator = GaussianEstimator()

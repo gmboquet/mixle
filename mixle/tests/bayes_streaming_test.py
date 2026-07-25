@@ -62,6 +62,23 @@ def _estimate(estimator, model, data, rho=None):
     return estimator.estimate(nobs, acc.value())
 
 
+def _forgetting_reference(estimator, model, batches, rho):
+    """Reference update: decay retained OLD statistics, then add each new batch in full."""
+    history = None
+    nobs = 0.0
+    for batch in batches:
+        incoming = _accumulate(estimator, model, batch)
+        if history is None:
+            history = incoming
+            nobs = float(len(batch))
+        else:
+            history.scale(rho)
+            history.combine(incoming.value())
+            nobs = rho * nobs + len(batch)
+        model = estimator.estimate(nobs, history.value())
+    return model, nobs
+
+
 def _posterior_stream_cases():
     def poisson_case():
         prior = GammaDistribution(2.0, 0.5)
@@ -173,22 +190,29 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
         self.assertPriorClose(model2.get_prior(), expected2.get_prior())
         self.assertPriorClose(stream.estimator.get_prior(), model2.get_prior())
 
-    def test_forgetting_scales_batch_sufficient_statistics(self):
+    def test_forgetting_decays_old_evidence_and_keeps_new_evidence_at_full_weight(self):
         prior = NormalGammaDistribution(1.0, 2.0, 3.0, 4.0)
         start = GaussianDistribution(1.0, 2.0, prior=prior)
+        estimator = GaussianEstimator(prior=prior)
         stream = BayesianStreamingEstimator(
-            GaussianEstimator(prior=prior),
+            estimator,
             mode="forgetting",
             schedule=forgetting(0.5),
             model=start,
         )
 
-        batch = [0.0, 2.0, 4.0]
-        model = stream.update(batch)
-        expected = _estimate(GaussianEstimator(prior=prior), start, batch, rho=0.5)
+        batch1 = [0.0, 2.0, 4.0]
+        model1 = stream.update(batch1)
+        expected1, expected_nobs1 = _forgetting_reference(estimator, start, [batch1], rho=0.5)
+        self.assertPriorClose(model1.get_prior(), expected1.get_prior())
+        self.assertAlmostEqual(stream.nobs, expected_nobs1)
 
-        self.assertPriorClose(model.get_prior(), expected.get_prior())
-        self.assertAlmostEqual(stream.nobs, 1.5)
+        batch2 = [10.0, 12.0]
+        model2 = stream.update(batch2)
+        expected2, expected_nobs2 = _forgetting_reference(estimator, start, [batch1, batch2], rho=0.5)
+        self.assertPriorClose(model2.get_prior(), expected2.get_prior())
+        self.assertAlmostEqual(stream.nobs, expected_nobs2)
+        self.assertEqual(expected_nobs2, 0.5 * len(batch1) + len(batch2))
 
     def test_mixture_posterior_carry_updates_weight_and_component_priors(self):
         weight_prior = DirichletDistribution(np.asarray([2.0, 3.0]))
@@ -253,8 +277,10 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
         estimator = MixtureEstimator(component_estimators, prior=prior)
         stream = BayesianStreamingEstimator(estimator, mode="forgetting", schedule=forgetting(rho), model=start)
 
-        data = [None, 2, 3, 4, None, 4, 2, 3]
-        model = stream.update(data)
+        batch1 = [None, 2, 3, 4, None, 4, 2, 3]
+        stream.update(batch1)
+        batch2 = [4, 4, None, 3]
+        model = stream.update(batch2)
 
         expected_estimator = MixtureEstimator(
             [
@@ -266,12 +292,12 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
             ],
             prior=prior,
         )
-        expected = _estimate(expected_estimator, start, data, rho=rho)
+        expected, expected_nobs = _forgetting_reference(expected_estimator, start, [batch1, batch2], rho=rho)
 
         self.assertPriorClose(model.get_prior(), expected.get_prior())
         for component in model.components:
             self.assertEqual(component.dist.min_val, 2)
-        self.assertAlmostEqual(stream.nobs, len(data) * rho)
+        self.assertAlmostEqual(stream.nobs, expected_nobs)
 
     def test_nested_estimator_scalers_preserve_child_support_metadata(self):
         # The streaming forgetting step scales the accumulator (acc.scale(rho)) before estimate.
@@ -363,11 +389,69 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
                 self.assertPriorClose(model2.get_prior(), expected2.get_prior())
                 self.assertPriorClose(stream.estimator.get_prior(), model2.get_prior())
 
+    def test_cold_start_uses_the_estimator_encoder_without_double_counting(self):
+        prior = NormalGammaDistribution(0.0, 1.0, 2.0, 3.0)
+        estimator = GaussianEstimator(prior=prior)
+        data = [-2.0, 0.0, 3.0]
+        stream = BayesianStreamingEstimator(estimator, init_p=1.0, rng=np.random.RandomState(8))
+
+        model = stream.update(data)
+        expected = _estimate(
+            estimator,
+            GaussianDistribution(0.0, 1.0, prior=prior),
+            data,
+        )
+
+        self.assertPriorClose(model.get_prior(), expected.get_prior())
+        self.assertEqual(stream.step, 1)
+        self.assertEqual(stream.nobs, len(data))
+
+    def test_reset_restores_the_original_estimator_and_rng_state(self):
+        prior = NormalGammaDistribution(0.0, 1.0, 2.0, 3.0)
+        estimator = GaussianEstimator(prior=prior)
+        start = GaussianDistribution(0.0, 1.0, prior=prior)
+        stream = BayesianStreamingEstimator(estimator, model=start, init_p=0.5, rng=np.random.RandomState(3))
+        stream.update([-1.0, 0.0, 2.0])
+        self.assertIsNot(stream.estimator, estimator)
+
+        stream.reset()
+        self.assertIs(stream.estimator, estimator)
+        self.assertIsNone(stream.model)
+        self.assertEqual((stream.step, stream.nobs), (0, 0.0))
+        first = stream.update([-1.0, 0.0, 2.0]).get_prior()
+        stream.reset()
+        second = stream.update([-1.0, 0.0, 2.0]).get_prior()
+        self.assertPriorClose(first, second)
+
+    def test_forgetting_schedules_and_constructor_controls_fail_closed(self):
+        prior = NormalGammaDistribution(0.0, 1.0, 2.0, 3.0)
+        estimator = GaussianEstimator(prior=prior)
+        start = GaussianDistribution(0.0, 1.0, prior=prior)
+        with self.assertRaises(ValueError):
+            forgetting(float("nan"))
+        with self.assertRaises(ValueError):
+            BayesianStreamingEstimator(estimator, init_p=float("nan"))
+        with self.assertRaises(ValueError):
+            BayesianStreamingEstimator(estimator, schedule=forgetting(0.5))
+        with self.assertRaises(TypeError):
+            BayesianStreamingEstimator(estimator, mode="forgetting", schedule=0.5)
+
+        stream = BayesianStreamingEstimator(
+            estimator,
+            mode="forgetting",
+            schedule=lambda _step: float("nan"),
+            model=start,
+        )
+        with self.assertRaisesRegex(ValueError, "expected 0 < rho <= 1"):
+            stream.update([0.0, 1.0])
+        self.assertIs(stream.model, start)
+        self.assertEqual((stream.step, stream.nobs), (0, 0.0))
+
     def test_forgetting_across_conjugate_families(self):
         rho = 0.4
         for name, factory in _posterior_stream_cases():
             with self.subTest(family=name):
-                start, estimator, batch1, _ = factory()
+                start, estimator, batch1, batch2 = factory()
                 stream = BayesianStreamingEstimator(
                     estimator,
                     mode="forgetting",
@@ -375,12 +459,18 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
                     model=start,
                 )
 
-                model = stream.update(batch1)
+                stream.update(batch1)
+                model = stream.update(batch2)
                 expected_start, expected_estimator, _, _ = factory()
-                expected = _estimate(expected_estimator, expected_start, batch1, rho=rho)
+                expected, expected_nobs = _forgetting_reference(
+                    expected_estimator,
+                    expected_start,
+                    [batch1, batch2],
+                    rho,
+                )
 
                 self.assertPriorClose(model.get_prior(), expected.get_prior())
-                self.assertAlmostEqual(stream.nobs, len(batch1) * rho)
+                self.assertAlmostEqual(stream.nobs, expected_nobs)
 
 
 if __name__ == "__main__":
