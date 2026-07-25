@@ -2,7 +2,7 @@
 
 import unittest
 
-from mixle.substrate import ContextBudget, Substrate, retrieve
+from mixle.substrate import ContextBudget, Retrieval, Substrate, retrieve
 from mixle.telemetry import Telemetry
 
 
@@ -162,6 +162,70 @@ class CountValidationTest(unittest.TestCase):
         s = _two_kind_shard()
         r = retrieve(s, "refund", k=4)
         self.assertEqual(r.top(0), [])
+
+
+class WeightValidationTest(unittest.TestCase):
+    """MXR-080-0248: per-kind weights must be finite and non-negative."""
+
+    def test_negative_weight_rejected(self):
+        s = _mixed_shard()
+        with self.assertRaises(ValueError):
+            retrieve(s, "refund", k=6, weights={"artifact": -5.0})
+
+    def test_nan_weight_rejected(self):
+        s = _mixed_shard()
+        with self.assertRaises(ValueError):
+            retrieve(s, "refund", k=6, weights={"artifact": float("nan")})
+
+    def test_infinite_weight_rejected(self):
+        s = _mixed_shard()
+        with self.assertRaises(ValueError):
+            retrieve(s, "refund", k=6, weights={"artifact": float("inf")})
+
+    def test_bool_weight_rejected(self):
+        s = _mixed_shard()
+        with self.assertRaises(TypeError):
+            retrieve(s, "refund", k=6, weights={"artifact": True})
+
+    def test_valid_weight_still_favors_a_kind(self):
+        s = _mixed_shard()
+        r = retrieve(s, "refund", k=6, weights={"artifact": 5.0})
+        self.assertEqual(r.items[0].kind, "artifact")
+
+
+class RetrievalConstructionTest(unittest.TestCase):
+    """MXR-080-0248: Retrieval is built from aligned, validated (item, score) pairs -- not
+    independently-settable parallel items/scores lists consumed via zip() downstream."""
+
+    @staticmethod
+    def _two_items():
+        s = Substrate()
+        a = s.add("text", "one")
+        b = s.add("text", "two")
+        return [s.get(a), s.get(b)]
+
+    def test_mismatched_items_and_scores_rejected(self):
+        items = self._two_items()
+        with self.assertRaises(ValueError):
+            Retrieval(query="q", items=items, scores=[1.0])  # 2 items, 1 score
+
+    def test_nan_score_rejected(self):
+        items = self._two_items()
+        with self.assertRaises(ValueError):
+            Retrieval(query="q", items=[items[0]], scores=[float("nan")])
+
+    def test_infinite_score_rejected(self):
+        items = self._two_items()
+        with self.assertRaises(ValueError):
+            Retrieval(query="q", items=[items[0]], scores=[float("inf")])
+
+    def test_valid_retrieval_keeps_items_scores_hits_and_provenance_aligned(self):
+        items = self._two_items()
+        r = Retrieval(query="q", items=items, scores=[3.0, 1.0])
+        self.assertEqual(len(r.items), 2)
+        self.assertEqual(len(r.scores), 2)
+        self.assertEqual(len(r.hits), 2)
+        self.assertEqual(len(r.provenance()), 2)  # zip() can no longer silently drop a tail
 
 
 if __name__ == "__main__":
