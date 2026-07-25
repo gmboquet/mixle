@@ -237,9 +237,12 @@ def test_population_step_with_scalar_only_objective_does_not_crash_on_nan_pvalue
 
 
 def test_scalar_only_verdict_carries_nan_p_value_contract():
-    # Pins the exact contract test_population_step_with_scalar_only_objective_does_not_crash_on_nan_
-    # pvalue_pool depends on: challenger_beats_champion's scalar-only branch returns p_value=nan (not,
-    # say, 1.0 or 0.0), so a pooling caller must treat it as "exclude", never as a real, poolable value.
+    # Pins two related contracts on challenger_beats_champion's scalar-only branch. (1) The nan
+    # p_value pooling contract test_population_step_with_scalar_only_objective_does_not_crash_on_nan_
+    # pvalue_pool depends on: p_value=nan (not, say, 1.0 or 0.0), so a pooling caller must treat it as
+    # "exclude", never as a real, poolable value. (2) The promotion contract: nan p_value means no
+    # paired test backs the verdict, so has_statistical_evidence and therefore promote are both False
+    # -- regardless of favored -- for every scalar-only comparison, however favorable its raw delta.
     obj = _ScalarOnlyObjective()
     verdict = challenger_beats_champion(
         _ScalarOnlyModel(1.0), _ScalarOnlyModel(0.5), [0.0], objective=obj, require_calibration=False
@@ -247,6 +250,9 @@ def test_scalar_only_verdict_carries_nan_p_value_contract():
     assert math.isnan(verdict.p_value)
     assert all(math.isnan(c) for c in verdict.ci)
     assert verdict.favored == "challenger"
+    # has_statistical_evidence is False whenever p_value is nan (see the property in verify.py) --
+    # it is the gate promote (below) depends on.
+    assert verdict.has_statistical_evidence is False
     # promote requires has_statistical_evidence (p_value not nan) as of verify.py's da1fec0b fix: a
     # scalar-only verdict can never auto-promote, however favorable its raw delta, since no sampling-
     # uncertainty estimate backs it.
