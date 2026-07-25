@@ -112,7 +112,7 @@ sage = ["passagemath-symbolics>=10.4"]
 # it via monkeypatching, the direct Mongo analogue of the SQL connector's tests using a disposable
 # sqlite file -- a real, fast, dependency-light local target instead of a genuine network round trip
 # (MXR-080-1666). No local mongod/Docker is assumed anywhere in this suite.
-test = ["pytest>=8", "pytest-xdist>=3.0", "pytest-cov>=5.0", "mongomock>=4.1"]
+test = ["pytest>=8", "pytest-xdist>=3.0", "pytest-cov>=5.0", "mongomock>=4.3"]
 # The optional Cython popcount/LNS kernels (mixle/engines/*.pyx) compile on demand via
 # mixle.engines.build_kernels.compile_*_kernels() into an isolated per-ABI cache directory (never the
 # installed package, which may be read-only) using portable, per-architecture compiler flags -- not
