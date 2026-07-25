@@ -68,11 +68,65 @@ class CrossModalModel:
         self.latent_dim = int(latent_dim)
         self._mods: dict[str, _Modality] = {}
         self._fitted = False
+        self._n_train: int | None = None
         self._conformal: dict[str, tuple[float, np.ndarray, float]] = {}  # target -> (alpha, scale, q)
 
+    def _invalidate_fitted_state(self) -> None:
+        """Clear every fitted/calibration artifact after a structural mutation (MXR-080-0276).
+
+        ``_fitted`` describes the WHOLE model: every registered modality is (supposedly) trained
+        jointly through the shared latent, and every stored conformal radius was computed against
+        the modalities' encoders/decoders *as they existed at calibration time*. Registering or
+        replacing a modality changes that structure, so anything that depended on the old structure
+        -- the fitted flag, training metadata, and every target's conformal radius, not just the
+        touched modality's -- must be cleared together, in the same operation as the mutation. A
+        caller must :meth:`fit` (and re-:meth:`calibrate` any target it cares about) again before
+        beliefs/predictions/intervals are trustworthy.
+        """
+        self._fitted = False
+        self._n_train = None
+        self._conformal = {}
+
     def add_modality(self, name: str, in_dim: int, *, hidden: tuple[int, ...] = (64,)) -> CrossModalModel:
-        """Register a modality with learned encoder ``q(z|x)`` and decoder ``p(x|z)``."""
+        """Register a NEW modality with a learned encoder ``q(z|x)`` and decoder ``p(x|z)``.
+
+        MXR-080-0276: a duplicate ``name`` is rejected rather than silently replaced. Silently
+        replacing a registered modality's encoder/decoder previously left ``_fitted`` and any
+        stored conformal radii intact, so a later prediction could combine a fresh, untrained
+        replacement encoder/decoder with calibration computed against the OLD one and still
+        advertise calibrated coverage. Use :meth:`replace_modality` to deliberately replace an
+        existing modality -- it invalidates fitted/calibration state as part of the same operation.
+
+        Raises:
+            ValueError: ``name`` is already registered.
+        """
+        if name in self._mods:
+            raise ValueError(
+                f"modality {name!r} is already registered (in_dim={self._mods[name].in_dim}); "
+                f"use replace_modality({name!r}, ...) to deliberately replace it"
+            )
         self._mods[name] = _Modality(name, int(in_dim), self.latent_dim, tuple(hidden), _torch())
+        self._invalidate_fitted_state()
+        return self
+
+    def replace_modality(self, name: str, in_dim: int, *, hidden: tuple[int, ...] = (64,)) -> CrossModalModel:
+        """Deliberately replace a registered modality with a fresh, untrained encoder/decoder pair.
+
+        MXR-080-0276: unlike :meth:`add_modality` (which rejects a duplicate name outright), this
+        method exists specifically to allow overwriting an existing modality's encoder/decoder --
+        but doing so invalidates every dependent fitted/calibration artifact in the SAME operation
+        (see :meth:`_invalidate_fitted_state`): ``_fitted`` is cleared, training metadata is
+        cleared, and every stored conformal radius is cleared, since each was computed against this
+        modality's prior encoder/decoder. Call :meth:`fit` (and re-:meth:`calibrate` any target)
+        again before relying on beliefs/predictions/intervals.
+
+        Raises:
+            KeyError: ``name`` is not already registered.
+        """
+        if name not in self._mods:
+            raise KeyError(f"modality {name!r} is not registered; use add_modality({name!r}, ...) instead")
+        self._mods[name] = _Modality(name, int(in_dim), self.latent_dim, tuple(hidden), _torch())
+        self._invalidate_fitted_state()
         return self
 
     # -- posterior over the latent (product of experts) ---------------------------------------
