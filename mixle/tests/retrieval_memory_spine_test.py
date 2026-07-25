@@ -11,9 +11,7 @@ Four receipts, each asserting a real, measured number:
    information-theoretically incapable of ever seeing the needle, no matter how much it trains),
    ``RetrievalMemorySpine`` achieves a measurably lower needle-probe loss than the window-only E1 baseline
    at the same window budget -- a real number from real training, not a threshold asserted on faith.
-4. state cost: bytes-per-token actually used by the carried state, measured directly (E2's ratio is left as
-   a documented placeholder -- see ``RETRIEVAL_MEMORY_UNAVAILABLE_PIECES``, E2 is not reachable from this
-   worktree's base as of this writing).
+4. state cost: bytes-per-token actually used by the carried state, measured directly.
 5. carried state is bitwise-deterministic given a seed (same contract as E1's context_spine_test.py).
 """
 
@@ -89,7 +87,8 @@ def test_step_documents_differentiable_boundary_as_a_receipt_field():
     state = model.init_state(1)
     for chunk in _chunks(x, y, chunk_size)[:-1]:
         state, _ = model.step(state, chunk)
-    # Index has been archived from the first two chunks by now -- the third step should actually retrieve.
+    # Five of the first eight tokens have left the three-token cache; the third step also archives four
+    # positions as they leave its cache and may retrieve them only after their local masks expire.
     last_chunk = _chunks(x, y, chunk_size)[-1]
     state, loss = model.step(state, last_chunk)
 
@@ -97,7 +96,10 @@ def test_step_documents_differentiable_boundary_as_a_receipt_field():
     assert "differentiable_boundary" in receipt and isinstance(receipt["differentiable_boundary"], str)
     assert "gradient" in receipt["differentiable_boundary"].lower()
     assert receipt["retrieval_k_requested"] == 2
-    assert receipt["index_len_per_layer"] == [chunk_size * 2] * model.n_layer  # two prior chunks archived
+    assert receipt["index_len_before_per_layer"] == [5] * model.n_layer
+    assert receipt["index_len_per_layer"] == [9] * model.n_layer
+    assert receipt["cache_index_position_overlap_per_layer"] == [0] * model.n_layer
+    assert receipt["dual_visible_position_count_per_layer"] == [0] * model.n_layer
     assert all(c > 0 for c in receipt["retrieved_per_layer"]), "index was non-empty; retrieval should fire"
     print(f"[E6 receipt] step() receipt: {receipt}")
 
@@ -155,10 +157,9 @@ def test_retrieval_beats_window_only_baseline_beyond_the_window():
 
 
 def test_state_bytes_per_token_receipt():
-    # E2 (moment-closure attention) is not reachable from this worktree's base -- see the module docstring
-    # and RETRIEVAL_MEMORY_UNAVAILABLE_PIECES. This receipt reports RetrievalMemorySpine's OWN measured
-    # state cost (bytes actually carried per streamed token) honestly, in place of the card's E2 ratio.
-    assert "E2" in RETRIEVAL_MEMORY_UNAVAILABLE_PIECES
+    # Former roadmap gaps are now implemented; this receipt reports RetrievalMemorySpine's measured state
+    # cost directly so callers can compare it against the current moment-closure implementation.
+    assert RETRIEVAL_MEMORY_UNAVAILABLE_PIECES == {}
 
     vocab, d_model, n_layer, n_head, window, chunk_size = 10, 32, 2, 2, 3, 4
     model = _build_model(0, vocab=vocab, d_model=d_model, n_layer=n_layer, n_head=n_head, window=window, retrieval_k=4)
@@ -176,7 +177,7 @@ def test_state_bytes_per_token_receipt():
     bytes_per_token = state_bytes / n_tokens
     print(
         f"[E6 receipt] state cost: {state_bytes} bytes carried after {n_tokens} tokens "
-        f"({bytes_per_token:.2f} bytes/token). E2 comparison: {RETRIEVAL_MEMORY_UNAVAILABLE_PIECES['E2']}"
+        f"({bytes_per_token:.2f} bytes/token)."
     )
     assert state_bytes > 0
     assert bytes_per_token > 0.0
