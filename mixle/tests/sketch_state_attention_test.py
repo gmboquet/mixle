@@ -10,8 +10,7 @@ Six receipts, mirroring the design note's Test plan section 1:1:
 5. Misfit receipts for graduation.py bookkeeping (fd_misfit_receipt / tensor_sketch_misfit_receipt feed a
    real ExperimentalMechanism's misfit_receipt field).
 6. The E7 bake-off: evaluate() against SlidingWindowSpine (E1) plus all three E3 mechanisms at matched
-   state bytes, small stand-in ranges, with the E2-unavailable placeholder honestly surfaced (E2 has not
-   landed anywhere reachable as of this writing -- see E3_UNAVAILABLE_COMPARISONS).
+   state bytes and small stand-in ranges.
 """
 
 from __future__ import annotations
@@ -430,12 +429,8 @@ def _build_e7_mechanisms():
 def test_e7_bakeoff_e1_vs_e3_mechanisms_matched_state_bytes():
     """evaluate() run against SlidingWindowSpine (E1 baseline) and all three E3 mechanisms at the same
     ranges/state_budget_bytes, rendered through comparison_table() -- the design note's acceptance receipt
-    #2 ("E7 table vs E1/E2 at matched state bytes"). E2 (moment-closure attention) has not landed anywhere
-    reachable from this worktree (checked via `git branch -a` / `gh pr list --search moment-closure-attention`
-    at implementation time: the branch sits at this worktree's own base commit with zero real work, and no
-    PR references it) -- per this project's convention for honestly naming an unreachable dependency rather
-    than fabricating or silently dropping it, the table below is E1 vs the three E3 sketches only, with
-    E3_UNAVAILABLE_COMPARISONS["E2"] surfaced alongside it instead of a fabricated row."""
+    #2 ("E7 table vs E1/E2 at matched state bytes"). Cross-family E2 comparison is now available through
+    the current moment-closure implementation rather than a roadmap placeholder."""
     mechanisms = _build_e7_mechanisms()
     kwargs = dict(
         ranges=_E7_RANGES,
@@ -455,14 +450,12 @@ def test_e7_bakeoff_e1_vs_e3_mechanisms_matched_state_bytes():
         assert result["within_state_budget"], f"{name} exceeded the shared state_budget_bytes"
         print(f"[E3 receipt] E7 bake-off: {name} state_bytes_used={result['state_bytes_used']}")
 
-    assert "E2" in E3_UNAVAILABLE_COMPARISONS
-    table = comparison_table(results) + "\n\n[E2 column pending] " + E3_UNAVAILABLE_COMPARISONS["E2"]
+    assert E3_UNAVAILABLE_COMPARISONS == {}
+    table = comparison_table(results)
 
     assert isinstance(table, str) and table.strip()
     for name in mechanisms:
         assert name in table
     for r in _E7_RANGES:
         assert str(r) in table
-    assert "moment-closure attention (roadmap E2) has not been implemented" in table
-
     print("[E3 receipt] E7 bake-off comparison table:\n" + table)
