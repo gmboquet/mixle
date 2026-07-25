@@ -15,12 +15,11 @@ network's weights, trained or not. This is the same "hard constraint, not a soft
 :func:`~mixle.models.energy.build_convex_energy_net` (which enforce a shape by reparameterizing weights):
 here the architecture itself makes conservation a property of the *dynamics*, not of the density.
 
-``leapfrog_rollout`` integrates the learned (or true) vector field with a leapfrog scheme, which -- when ``H``
-is separable (``H(q, p) = T(p) + V(q)``) -- is exactly symplectic, keeping the *discretized* trajectory's
-energy error bounded and oscillating rather than drifting away over long rollouts: the numerical-integration
-counterpart of the continuous-time conservation property above. ``HamiltonianNet`` does not enforce that
-separable structure (one MLP over the concatenated ``(q, p)``), so for a genuinely non-separable learned ``H``
-the scheme is not exactly symplectic; in practice this has not been observed to cause unbounded energy drift.
+``leapfrog_rollout`` integrates the learned vector field with a leapfrog scheme. That method is symplectic only
+for a separable Hamiltonian, ``H(q, p) = V(q) + T(p)``. ``HamiltonianNet`` therefore uses a structurally
+separable network by default. A general Hamiltonian can still be represented with ``separable=False`` for
+derivative learning, but ``leapfrog_rollout`` rejects it instead of silently applying an unsupported
+integrator.
 
 Requires torch.
 """
@@ -36,20 +35,40 @@ from mixle.models.neural import make_mlp
 class HamiltonianNet:
     """Learns a scalar ``H(q, p)`` and exposes the symplectic-gradient dynamics it implies.
 
-    ``dim`` is the dimension of ``q`` (and of ``p``, always equal); ``hidden`` sizes the MLP computing
-    ``H`` from the concatenated ``(q, p)``. ``module`` (the underlying ``torch.nn.Module``) is exposed
-    directly for training with an ordinary optimizer loop against derivative-matching data.
+    ``dim`` is the dimension of ``q`` (and of ``p``, always equal); ``hidden`` sizes the network computing
+    ``H``. By default the network is masked into independent ``V(q)`` and ``T(p)`` branches whose scalar
+    outputs are summed, making the supported leapfrog premise structural rather than advisory. Set
+    ``separable=False`` only when learning a general Hamiltonian that will be integrated by another method.
+    ``module`` (the underlying ``torch.nn.Module``) is exposed directly for training with an ordinary
+    optimizer loop against derivative-matching data.
     """
 
-    def __init__(self, dim: int, hidden: Sequence[int] = (64, 64)) -> None:
-        if int(dim) <= 0:
-            raise ValueError("HamiltonianNet dim must be positive; got %r" % (dim,))
-        self.dim = int(dim)
-        self.module = make_mlp(2 * self.dim, hidden, 1, activation="tanh")  # tanh: smooth second derivatives
+    def __init__(
+        self,
+        dim: int,
+        hidden: Sequence[int] = (64, 64),
+        *,
+        separable: bool = True,
+    ) -> None:
+        self.dim = _positive_int(dim, "dim")
+        if not isinstance(hidden, Sequence) or isinstance(hidden, (str, bytes)):
+            raise ValueError("hidden must be a non-empty sequence of positive integer widths")
+        hidden = tuple(_positive_int(width, f"hidden[{index}]") for index, width in enumerate(hidden))
+        if not hidden:
+            raise ValueError("hidden must be a non-empty sequence of positive integer widths")
+        if not isinstance(separable, bool):
+            raise ValueError("separable must be a boolean")
+        self.is_separable = separable
+        self.module = (
+            _make_separable_mlp(self.dim, hidden)
+            if separable
+            else make_mlp(2 * self.dim, hidden, 1, activation="tanh")
+        )
 
     def hamiltonian(self, q: Any, p: Any) -> Any:
         """``H(q, p)``, shape ``(...,)`` -- squeezes the module's scalar output dimension."""
         torch = _torch()
+        _validate_state_pair(self, q, p, require_grad=False)
         qp = torch.cat([q, p], dim=-1)
         return self.module(qp).squeeze(-1)
 
@@ -60,6 +79,7 @@ class HamiltonianNet:
         the returned derivatives carry gradients back through ``self.module``'s parameters, so this composes
         into a training loop that fits derivative-matching data end to end.
         """
+        _validate_state_pair(self, q, p, require_grad=True)
         torch = _torch()
         h = self.hamiltonian(q, p).sum()
         dh_dq, dh_dp = torch.autograd.grad(h, [q, p], create_graph=True)
@@ -70,16 +90,24 @@ def leapfrog_rollout(net: HamiltonianNet, q0: Any, p0: Any, dt: float, n_steps: 
     """Leapfrog integration of ``net``'s learned (or untrained) Hamiltonian flow.
 
     Returns ``(qs, ps)``, each shaped ``(n_steps + 1, *q0.shape)`` -- the trajectory including the initial
-    state. This scheme is exactly symplectic when ``H`` is separable in ``(q, p)``; ``HamiltonianNet`` does
-    not enforce that structure. A symplectic integrator is the right numerical counterpart to a conservative
-    continuous-time system: unlike a generic (e.g. Euler) integrator, its energy error stays bounded and
-    oscillates rather than drifting monotonically over long rollouts -- and in practice this has held up
-    even for the non-separable case here, though it is not guaranteed by the exact-symplecticity argument.
+    state. This scheme is available only when ``net.is_separable`` is true. A symplectic integrator is the
+    right numerical counterpart to a conservative continuous-time system: unlike a generic (e.g. Euler)
+    integrator, its energy error stays bounded and oscillates rather than drifting monotonically over long
+    rollouts.
     """
+    if not isinstance(net, HamiltonianNet):
+        raise TypeError("net must be a HamiltonianNet")
+    if not net.is_separable:
+        raise ValueError(
+            "leapfrog_rollout requires a separable Hamiltonian; construct HamiltonianNet with separable=True"
+        )
+    dt = _positive_finite_scalar(dt, "dt")
+    n_steps = _positive_int(n_steps, "n_steps")
+    _validate_state_pair(net, q0, p0, require_grad=False)
     torch = _torch()
     q, p = q0.clone(), p0.clone()
     qs, ps = [q.clone()], [p.clone()]
-    for _ in range(int(n_steps)):
+    for _ in range(n_steps):
         # `.clone().requires_grad_(True)` (not `.detach().requires_grad_(True)`) -- ``time_derivative``
         # needs its inputs to require grad (it calls ``torch.autograd.grad`` on them), but we must NOT
         # sever them from the incoming graph: doing so would block gradients from ever reaching ``q0``/
@@ -115,6 +143,66 @@ def leapfrog_rollout(net: HamiltonianNet, q0: Any, p0: Any, dt: float, n_steps: 
         qs.append(q.clone())
         ps.append(p.clone())
     return torch.stack(qs), torch.stack(ps)
+
+
+def _make_separable_mlp(dim: int, hidden: Sequence[int]) -> Any:
+    """Build ``V(q) + T(p)`` as a standard Sequential with permanently masked cross-branch weights."""
+    torch = _torch()
+    from torch.nn.utils import prune
+
+    layers = []
+    previous_branch_width = dim
+    for branch_width in hidden:
+        linear = torch.nn.Linear(2 * previous_branch_width, 2 * branch_width)
+        mask = torch.zeros_like(linear.weight)
+        mask[:branch_width, :previous_branch_width] = 1
+        mask[branch_width:, previous_branch_width:] = 1
+        prune.custom_from_mask(linear, name="weight", mask=mask)
+        layers.extend((linear, torch.nn.Tanh()))
+        previous_branch_width = branch_width
+    layers.append(torch.nn.Linear(2 * previous_branch_width, 1))
+    return torch.nn.Sequential(*layers)
+
+
+def _positive_int(value: Any, name: str) -> int:
+    import numbers
+
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise ValueError(f"{name} must be a positive integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
+
+
+def _positive_finite_scalar(value: Any, name: str) -> float:
+    import math
+    import numbers
+
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise ValueError(f"{name} must be a strictly positive finite scalar")
+    result = float(value)
+    if not math.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a strictly positive finite scalar")
+    return result
+
+
+def _validate_state_pair(net: HamiltonianNet, q: Any, p: Any, *, require_grad: bool) -> None:
+    torch = _torch()
+    if not isinstance(q, torch.Tensor) or not isinstance(p, torch.Tensor):
+        raise TypeError("q and p must be torch tensors")
+    if q.ndim < 1 or p.ndim < 1 or q.numel() == 0 or p.numel() == 0:
+        raise ValueError("q and p must be non-empty tensors with a state dimension")
+    if q.shape != p.shape or q.shape[-1] != net.dim:
+        raise ValueError(f"q and p must have identical shape (..., {net.dim})")
+    if q.device != p.device or q.dtype != p.dtype:
+        raise ValueError("q and p must have the same device and dtype")
+    if not q.is_floating_point() or not p.is_floating_point():
+        raise ValueError("q and p must use a floating-point dtype")
+    if not bool(torch.isfinite(q).all()) or not bool(torch.isfinite(p).all()):
+        raise ValueError("q and p must contain only finite values")
+    if require_grad and (not q.requires_grad or not p.requires_grad):
+        raise ValueError("q and p must both require gradients for time_derivative")
 
 
 def _torch() -> Any:

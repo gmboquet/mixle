@@ -43,8 +43,43 @@ class HamiltonianNetTest(unittest.TestCase):
     def test_invalid_dim_raises(self):
         from mixle.models.hamiltonian import HamiltonianNet
 
-        with self.assertRaises(ValueError):
-            HamiltonianNet(dim=0)
+        for dim in (0, -1, 1.5, True):
+            with self.subTest(dim=dim), self.assertRaises(ValueError):
+                HamiltonianNet(dim=dim)
+
+    def test_default_network_is_structurally_separable(self):
+        from mixle.models.hamiltonian import HamiltonianNet
+
+        torch.manual_seed(2)
+        net = HamiltonianNet(dim=1, hidden=[8])
+        q1, q2 = torch.tensor([0.2]), torch.tensor([1.1])
+        p1, p2 = torch.tensor([-0.4]), torch.tensor([0.7])
+        lhs = net.hamiltonian(q1, p1) + net.hamiltonian(q2, p2)
+        rhs = net.hamiltonian(q1, p2) + net.hamiltonian(q2, p1)
+        self.assertTrue(torch.allclose(lhs, rhs, atol=1e-6))
+
+    def test_general_hamiltonian_is_rejected_by_separable_leapfrog(self):
+        from mixle.models.hamiltonian import HamiltonianNet, leapfrog_rollout
+
+        net = HamiltonianNet(dim=1, hidden=[8], separable=False)
+        with self.assertRaisesRegex(ValueError, "requires a separable Hamiltonian"):
+            leapfrog_rollout(net, torch.tensor([1.0]), torch.tensor([0.0]), 0.1, 2)
+
+    def test_rollout_validates_states_and_controls(self):
+        from mixle.models.hamiltonian import HamiltonianNet, leapfrog_rollout
+
+        net = HamiltonianNet(dim=2, hidden=[8])
+        good = torch.ones(2)
+        for dt in (0, -1, float("nan"), float("inf")):
+            with self.subTest(dt=dt), self.assertRaises(ValueError):
+                leapfrog_rollout(net, good, good, dt, 2)
+        for steps in (0, -1, 1.5, True):
+            with self.subTest(steps=steps), self.assertRaises(ValueError):
+                leapfrog_rollout(net, good, good, 0.1, steps)
+        with self.assertRaisesRegex(ValueError, "identical shape"):
+            leapfrog_rollout(net, torch.ones(2), torch.ones(3), 0.1, 2)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            leapfrog_rollout(net, torch.tensor([1.0, float("nan")]), good, 0.1, 2)
 
     def test_learns_the_harmonic_oscillator_and_the_learned_flow_stays_bounded(self):
         # H = 0.5(q^2 + p^2): dq/dt = p, dp/dt = -q -- a textbook conservative system. Fit the derivative-
