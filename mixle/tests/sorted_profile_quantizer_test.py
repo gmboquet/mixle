@@ -19,11 +19,12 @@ import numpy as np
 
 from mixle.models.sorted_profile_quantizer import (
     DEFAULT_GOF_THRESHOLD,
+    SortedProfileEncoding,
     detect_anomaly,
     fit_sorted_profile,
     reconstruct,
 )
-from mixle.stats import GammaEstimator, GaussianEstimator
+from mixle.stats import GammaEstimator, GaussianDistribution, GaussianEstimator
 
 
 def _adam_second_moment_like(rng: np.random.RandomState, n: int, steps: int = 50, beta2: float = 0.98) -> np.ndarray:
@@ -160,6 +161,129 @@ class DenseFallbackTest(unittest.TestCase):
         )
         self.assertFalse(encoding.used_dense_fallback)
         self.assertLess(encoding.goodness_of_fit, DEFAULT_GOF_THRESHOLD)
+
+    def test_dense_fallback_preserves_source_dtype_and_bits(self):
+        for source in (
+            np.array([np.nextafter(1.0, 2.0)], dtype=np.float64),
+            np.array([2**60 + 1], dtype=np.int64),
+            np.array([65535], dtype=np.uint16),
+        ):
+            encoding = fit_sorted_profile(source)
+            restored = reconstruct(encoding)
+            with self.subTest(dtype=source.dtype):
+                self.assertTrue(encoding.used_dense_fallback)
+                self.assertEqual(restored.dtype, source.dtype)
+                np.testing.assert_array_equal(restored, source)
+                payload = encoding.to_bytes()
+                self.assertEqual(encoding.nbytes(), len(payload))
+                np.testing.assert_array_equal(reconstruct(SortedProfileEncoding.from_bytes(payload)), source)
+
+    def test_encoding_payload_and_receipt_invariants_are_validated(self):
+        source = np.array([1.0], dtype=np.float64)
+        valid = fit_sorted_profile(source)
+        for payload in (valid.to_bytes()[:-1], valid.to_bytes() + b"\x00", b"BAD!" + valid.to_bytes()[4:]):
+            with self.subTest(length=len(payload)), self.assertRaises(ValueError):
+                SortedProfileEncoding.from_bytes(payload)
+        with self.assertRaises(ValueError):
+            valid.dense_values[0] = 2.0
+
+        for kwargs in (
+            {"goodness_of_fit": np.nan},
+            {"goodness_of_fit": -0.1},
+            {"goodness_of_fit": 1.1},
+            {"source_dtype": "<f4"},
+            {"n_tail": 1},
+        ):
+            values = {
+                "shape": (1,),
+                "top_k_values": None,
+                "top_k_indices": None,
+                "tail_distribution": None,
+                "permutation_indices": None,
+                "goodness_of_fit": 1.0,
+                "used_dense_fallback": True,
+                "dense_values": source,
+                "n_tail": 0,
+                "source_dtype": source.dtype.str,
+                "_index_dtype": np.dtype(np.uint8),
+                **kwargs,
+            }
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                SortedProfileEncoding(**values)
+
+    def test_fit_and_anomaly_thresholds_fail_closed(self):
+        for tensor in ([0.0, np.nan], [0.0, np.inf]):
+            with self.subTest(tensor=tensor), self.assertRaises(ValueError):
+                fit_sorted_profile(tensor)
+        for kwargs in (
+            {"top_k": -1},
+            {"top_k": 1.5},
+            {"top_k": 3},
+            {"gof_threshold": -0.1},
+            {"gof_threshold": np.nan},
+            {"gof_threshold": 1.1},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                fit_sorted_profile([0.0, 1.0], **kwargs)
+
+        reference = fit_sorted_profile(
+            np.random.RandomState(17).normal(size=64),
+            tail_family=GaussianEstimator(),
+            gof_threshold=1.0,
+        )
+        for kwargs in (
+            {"ratio_threshold": 0.0},
+            {"ratio_threshold": np.nan},
+            {"abs_margin": -0.1},
+            {"abs_margin": np.inf},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                detect_anomaly(np.zeros(64), reference, **kwargs)
+
+    def test_reconstruction_rejects_non_finite_distribution_quantiles(self):
+        class _BadDistribution:
+            @staticmethod
+            def cdf(_value):
+                return 0.5
+
+            @staticmethod
+            def quantile(_probability):
+                return np.nan
+
+        encoding = SortedProfileEncoding(
+            shape=(2,),
+            top_k_values=np.array([], dtype=np.float64),
+            top_k_indices=np.array([], dtype=np.uint8),
+            tail_distribution=_BadDistribution(),
+            permutation_indices=np.array([0, 1], dtype=np.uint8),
+            goodness_of_fit=0.1,
+            used_dense_fallback=False,
+            n_tail=2,
+            source_dtype=np.dtype(np.float64).str,
+            _index_dtype=np.dtype(np.uint8),
+        )
+        with self.assertRaisesRegex(ValueError, "quantiles"):
+            reconstruct(encoding)
+
+    def test_parametric_wire_payload_round_trips(self):
+        distribution = GaussianDistribution(0.0, 1.0)
+        encoding = SortedProfileEncoding(
+            shape=(3,),
+            top_k_values=np.array([9.0], dtype=np.float64),
+            top_k_indices=np.array([1], dtype=np.uint8),
+            tail_distribution=distribution,
+            permutation_indices=np.array([0, 2], dtype=np.uint8),
+            goodness_of_fit=0.1,
+            used_dense_fallback=False,
+            n_tail=2,
+            source_dtype=np.dtype(np.float64).str,
+            _index_dtype=np.dtype(np.uint8),
+        )
+        restored = SortedProfileEncoding.from_bytes(encoding.to_bytes())
+        self.assertEqual(restored.nbytes(), encoding.nbytes())
+        np.testing.assert_array_equal(restored.top_k_values, encoding.top_k_values)
+        np.testing.assert_array_equal(restored.top_k_indices, encoding.top_k_indices)
+        np.testing.assert_array_equal(restored.permutation_indices, encoding.permutation_indices)
 
 
 class ReconstructionCorrectnessTest(unittest.TestCase):
