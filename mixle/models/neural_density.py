@@ -12,7 +12,9 @@ are flows". Ready instances ship: :func:`build_coupling_flow` (a RealNVP-style f
 autoregressive flow, *exact*, richer autoregressive dependence), :func:`build_vae` (a variational autoencoder, a
 *latent-variable* density whose ``log_density`` is the ELBO lower bound) and :func:`build_autoregressive_categorical`
 (an exact autoregressive density over **discrete** vectors) -- structurally different families, continuous and
-discrete, behind one adapter. Any other density (a normalized energy model, ...) plugs in the same way.
+discrete, behind one adapter. The VAE reports a reproducible multi-sample estimate of its ELBO and exposes the
+estimate's Monte Carlo standard error; it is not presented as an exact density. Any other density (a normalized
+energy model, ...) plugs in the same way.
 """
 
 from __future__ import annotations
@@ -352,7 +354,7 @@ _register_module_class("CouplingFlow", _build_coupling_flow_class)
 # --- a second, structurally different instance: a variational autoencoder (a latent-variable density) ---------
 
 
-def build_vae(dim: int, *, latent: int = 2, hidden: int = 32) -> Any:
+def build_vae(dim: int, *, latent: int = 2, hidden: int = 32, eval_samples: int = 16) -> Any:
     """Build a variational autoencoder over ``R^dim``.
 
     An amortized encoder ``q(z | x)`` and a decoder ``p(x | z)`` (diagonal-Gaussian, learned observation scale)
@@ -360,29 +362,34 @@ def build_vae(dim: int, *, latent: int = 2, hidden: int = 32) -> Any:
     is represented through a low-dimensional latent rather than an invertible map, while the same
     :class:`NeuralDensity` adapter can still use it because it exposes the same two methods.
 
-    ``log_density(x)`` returns the **ELBO**, a lower bound on ``log p(x)``, not the exact value. Compare VAE
-    leaves with other bounded leaves whenever possible. Mixing a VAE with an exact-density leaf, such as a
-    Gaussian or flow, compares a bound against an exact value and can under-weight the VAE.
-
-    ``log_density`` is **deterministic**: it evaluates the ELBO at the encoder mean ``z = mu(x)`` (no ``randn``
-    resample), so repeated scoring of the same ``x`` is bit-identical and an EM log-likelihood stays monotone.
-    Training still uses the reparameterized sample (``training=True``) for an unbiased gradient.
+    At evaluation, ``log_density(x)`` returns a **deterministic Monte Carlo estimate of the ELBO** using
+    ``eval_samples`` fixed local draws from ``q(z | x)``. ``elbo_estimate(x)`` returns that estimate together
+    with its Monte Carlo standard error. It is an estimate of a lower bound, not an exact log density and not
+    itself guaranteed to remain below ``log p(x)`` at finite sample count. Compare VAE leaves with other bounded
+    leaves whenever possible. Training uses fresh reparameterized samples for an unbiased gradient.
     """
-    return _module_class("VAE")(dim, latent, hidden)
+    return _module_class("VAE")(dim, latent, hidden, eval_samples)
 
 
 def _build_vae_class(torch: Any, nn: Any) -> Any:
     class VAE(nn.Module):
-        def __init__(self, dim: int, latent: int = 2, hidden: int = 32) -> None:
+        def __init__(self, dim: int, latent: int = 2, hidden: int = 32, eval_samples: int = 16) -> None:
             super().__init__()
             self.dim = int(dim)
             self.latent = int(latent)
             self.hidden = int(hidden)
+            self.eval_samples = _sample_count(eval_samples)
             self.enc = nn.Sequential(nn.Linear(self.dim, self.hidden), nn.Tanh())
             self.enc_mu = nn.Linear(self.hidden, self.latent)
             self.enc_log_var = nn.Linear(self.hidden, self.latent)
             self.dec = nn.Sequential(nn.Linear(self.latent, self.hidden), nn.Tanh(), nn.Linear(self.hidden, self.dim))
             self.log_obs_scale = nn.Parameter(torch.zeros(1))  # learned diagonal p(x|z) scale
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(0x4D49584C45)
+            self.register_buffer(
+                "_eval_eps",
+                torch.randn(self.eval_samples, self.latent, generator=generator),
+            )
 
         def _decode_logp(self, x: Any, z: Any) -> Any:
             recon = self.dec(z)
@@ -393,17 +400,33 @@ def _build_vae_class(torch: Any, nn: Any) -> Any:
                 - 0.5 * self.dim * float(np.log(2.0 * np.pi))
             )
 
-        def log_density(self, x: Any) -> Any:
+        def _posterior(self, x: Any) -> tuple[Any, Any, Any]:
             h = self.enc(x)
             mu, log_var = self.enc_mu(h), self.enc_log_var(h).clamp(-8.0, 8.0)
-            # Deterministic when scoring: z = mu (encoder mean) so log_density is a fixed function of x, giving a
-            # monotone EM LL. During training a reparameterized draw keeps the gradient unbiased.
+            return mu, log_var, 0.5 * (torch.exp(log_var) + mu**2 - 1.0 - log_var).sum(1)
+
+        def elbo_estimate(self, x: Any) -> tuple[Any, Any]:
+            """Return a reproducible multi-sample ELBO estimate and its per-row Monte Carlo standard error."""
+            mu, log_var, kl = self._posterior(x)
+            eps = self._eval_eps.to(device=x.device, dtype=x.dtype)
+            z = mu[:, None, :] + torch.exp(0.5 * log_var)[:, None, :] * eps[None, :, :]
+            n, samples = z.shape[:2]
+            repeated_x = x[:, None, :].expand(n, samples, self.dim)
+            log_p = self._decode_logp(repeated_x.reshape(-1, self.dim), z.reshape(-1, self.latent)).reshape(n, samples)
+            draws = log_p - kl[:, None]
+            estimate = draws.mean(1)
+            if samples == 1:
+                standard_error = torch.zeros_like(estimate)
+            else:
+                standard_error = draws.std(1, unbiased=True) / float(samples) ** 0.5
+            return estimate, standard_error
+
+        def log_density(self, x: Any) -> Any:
+            mu, log_var, kl = self._posterior(x)
             if self.training:
                 z = mu + torch.exp(0.5 * log_var) * torch.randn_like(mu)  # reparameterization
-            else:
-                z = mu
-            kl = 0.5 * (torch.exp(log_var) + mu**2 - 1.0 - log_var).sum(1)
-            return self._decode_logp(x, z) - kl  # ELBO: E_q[log p(x|z)] - KL(q(z|x) || p(z))
+                return self._decode_logp(x, z) - kl
+            return self.elbo_estimate(x)[0]
 
         def sample(self, n: int, *, generator: Any = None) -> Any:
             z = torch.randn(int(n), self.latent, device=self.log_obs_scale.device, generator=generator)
@@ -560,9 +583,13 @@ def _build_autoregressive_categorical_class(torch: Any, nn: Any) -> Any:
             return self.lout(h).view(-1, self.D, self.C)  # (n, D, C)
 
         def log_density(self, x: Any) -> Any:
-            log_p = torch.log_softmax(self._logits(x), dim=-1)  # (n, D, C), each row a proper conditional
-            idx = x.long().clamp(0, self.C - 1).unsqueeze(-1)  # (n, D, 1)
-            return log_p.gather(-1, idx).squeeze(-1).sum(1)  # sum_i log p(x_i | x_{<i})
+            in_support = torch.isfinite(x) & (x == torch.round(x)) & (x >= 0) & (x < self.C)
+            valid_rows = in_support.all(1)
+            safe_x = torch.where(in_support, x, torch.zeros_like(x))
+            log_p = torch.log_softmax(self._logits(safe_x), dim=-1)  # (n, D, C), proper conditionals
+            idx = safe_x.long().unsqueeze(-1)  # (n, D, 1)
+            score = log_p.gather(-1, idx).squeeze(-1).sum(1)
+            return torch.where(valid_rows, score, torch.full_like(score, -torch.inf))
 
         def sample(self, n: int, *, generator: Any = None) -> Any:
             x = torch.zeros(int(n), self.D, device=next(self.parameters()).device)

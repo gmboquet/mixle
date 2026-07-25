@@ -65,10 +65,9 @@ class _NeuralFamily(NeuralDensity):
 class VAE(_NeuralFamily):
     """A latent-variable ``p(x)`` over ``R^dim`` via a variational autoencoder.
 
-    ``log_density`` is the ELBO -- a lower bound on ``log p(x)`` -- evaluated deterministically at the encoder
-    mean so an EM log-likelihood stays monotone. Compare it with other bounded leaves whenever possible; mixing it
-    with an exact-density leaf, such as a Gaussian or flow, compares a bound against an exact value and can
-    under-weight the VAE. See :func:`~mixle.models.neural_density.build_vae` for the full statement.
+    ``log_density`` is a reproducible multi-sample estimate of the ELBO, with uncertainty available from the
+    wrapped module's ``elbo_estimate`` method. It is not an exact log density. See
+    :func:`~mixle.models.neural_density.build_vae` for the full statement.
     """
 
     def __init__(
@@ -77,12 +76,19 @@ class VAE(_NeuralFamily):
         *,
         latent: int = 2,
         hidden: int = 32,
+        eval_samples: int = 16,
         m_steps: int = 120,
         lr: float = 5e-3,
         device: str = "cpu",
         name: str | None = None,
     ) -> None:
-        super().__init__(build_vae(dim, latent=latent, hidden=hidden), m_steps=m_steps, lr=lr, device=device, name=name)
+        super().__init__(
+            build_vae(dim, latent=latent, hidden=hidden, eval_samples=eval_samples),
+            m_steps=m_steps,
+            lr=lr,
+            device=device,
+            name=name,
+        )
 
 
 class Flow(_NeuralFamily):

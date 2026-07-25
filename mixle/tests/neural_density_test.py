@@ -121,10 +121,23 @@ class CompositionTest(unittest.TestCase):
 
 
 class VAETest(unittest.TestCase):
+    def test_eval_score_is_a_reproducible_multi_sample_elbo_with_uncertainty(self):
+        _seed()
+        module = build_vae(1, latent=1, hidden=4, eval_samples=32)
+        module.eval()
+        x = torch.tensor([[0.25], [1.0]])
+
+        estimate, standard_error = module.elbo_estimate(x)
+
+        torch.testing.assert_close(module.log_density(x), estimate)
+        torch.testing.assert_close(module.log_density(x), module.log_density(x))
+        self.assertEqual(tuple(standard_error.shape), (2,))
+        self.assertTrue(torch.isfinite(standard_error).all())
+        self.assertTrue((standard_error >= 0).all())
+
     def test_vae_elbo_beats_gaussian_on_multimodal_density(self):
         _seed()
-        # the VAE's log_density is the ELBO (a LOWER bound). If the bound already beats the Gaussian's EXACT
-        # log-likelihood, the VAE's true likelihood beats it by at least that margin -- a valid one-sided claim.
+        # The VAE's score is a reproducible multi-sample estimate of its variational objective.
         train, test = _two_modes(0), _two_modes(1)
         vae = NeuralDensity(build_vae(2, latent=2, hidden=64), m_steps=150, lr=5e-3)
         fit = optimize(train, vae.estimator(), prev_estimate=vae, max_its=15, out=None)
@@ -198,6 +211,13 @@ def _markov_discrete(seed, n=1000, dim=3, cats=4):
 
 
 class AutoregressiveCategoricalTest(unittest.TestCase):
+    def test_invalid_values_have_zero_probability_and_do_not_condition_later_coordinates(self):
+        _seed()
+        leaf = NeuralDensity(build_autoregressive_categorical(2, 3, hidden=8))
+        invalid = np.array([[-1.0, 0.0], [3.0, 0.0], [0.5, 1.0], [np.inf, 2.0]])
+        score = leaf.module.log_density(torch.as_tensor(invalid, dtype=torch.float32))
+        self.assertTrue(torch.isneginf(score).all())
+
     def test_density_sums_to_one_over_the_finite_space(self):
         _seed()
         # exactness for a discrete density: sum over ALL C^dim configurations must be 1.
