@@ -57,9 +57,16 @@ def read_remote(
 
                     table = pq.read_table(fh, columns=columns)
                 else:
-                    import pyarrow.feather as feather
+                    import pyarrow.ipc as ipc
 
-                    table = feather.read_table(fh, columns=columns)
+                    # pyarrow.feather.read_table is deprecated as of 24.0.0 (Feather V2 *is* the Arrow
+                    # IPC file format) -- read via the IPC reader directly, then apply the same explicit
+                    # column projection the deprecated call used to do internally, so `columns` keeps
+                    # filtering/reordering exactly as before.
+                    with ipc.open_file(fh) as reader:
+                        table = reader.read_all()
+                    if columns is not None:
+                        table = table.select(columns)
                 return _table_records(table, None)
 
             import io
@@ -71,7 +78,7 @@ def read_remote(
 
                 rows = list(csv.reader(tmp))
                 header, body = rows[0], rows[1:]
-                idx = [header.index(c) for c in columns] if columns else list(range(len(header)))
+                idx = [header.index(c) for c in columns] if columns is not None else list(range(len(header)))
                 return [r[idx[0]] if len(idx) == 1 else tuple(r[i] for i in idx) for r in body]
 
             import json

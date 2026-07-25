@@ -25,13 +25,11 @@ from mixle.data.structure import EXCHANGEABLE, SampleStructure
 
 try:  # optional dependency
     import pyarrow.dataset as _pa_dataset
-    import pyarrow.feather as _feather
     import pyarrow.ipc as _ipc
     import pyarrow.parquet as _pq
     import pyarrow.types as _pat
 except ImportError:  # pragma: no cover - exercised only without pyarrow
     _pq = None
-    _feather = None
     _pa_dataset = None
     _ipc = None
     _pat = None
@@ -159,6 +157,11 @@ def read_feather(
 
     def factory():
         _require_arrow()
-        return _table_records(_feather.read_table(path, columns=resolved_columns), resolved_columns)
+        # pyarrow.feather.read_table is deprecated as of 24.0.0 (Feather V2 *is* the Arrow IPC file
+        # format) -- read via the IPC reader directly instead. _table_records already applies its own
+        # `columns` selection, so no separate projection step is needed here.
+        with _ipc.open_file(path) as reader:
+            table = reader.read_all()
+        return _table_records(table, resolved_columns)
 
     return LazySource(factory, structure, schema)

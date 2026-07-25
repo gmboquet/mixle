@@ -7,13 +7,24 @@ applied it, always returning whole objects -- unlike the local ``text_source`` c
 project ``columns`` down to a scalar (one requested column) or tuple (several), matching CSV's own
 convention in this same file.
 
-The fix: (a) implements Feather via ``pyarrow.feather.read_table``, the same Arrow reader
-``mixle.data.sources.arrow_source.read_feather`` already uses, mirroring the existing Parquet branch;
+The fix: (a) implements Feather via the same Arrow IPC reader
+``mixle.data.sources.arrow_source.read_feather`` uses, mirroring the existing Parquet branch (both were
+later migrated off the deprecated ``pyarrow.feather.read_table``/``write_feather`` onto
+``pyarrow.ipc.open_file(...).read_all()`` / ``pyarrow.ipc.new_file(...)``, per MXR-080-0070's follow-up);
 (b) applies ``columns`` projection to JSON/JSONL with semantics identical to
 ``text_source.read_json``/``read_jsonl`` (missing keys raise ``KeyError``, a single requested column
 collapses to a scalar rather than a length-1 tuple); and (c) validates ``fmt`` against the
 accepted-format registry (``_BINARY | _TEXT``) up front, before any I/O, instead of only discovering
 an unsupported format deep inside a read call via fsspec.
+
+Also covers two smaller, unrelated fixes bundled into this same file because they touch the same
+module: the CSV branch's ``columns=[]`` truthiness bug (an explicitly-empty column list was falsy and
+fell through to "no filter", disagreeing with the local ``text_source.read_csv`` connector, which
+treats ``columns=[]`` as "project to zero columns" via an ``is not None`` check -- same class of "local
+vs remote projection semantics must match exactly" bug as MXR-080-0065 above, just a different,
+pre-existing instance), and the deprecated ``pyarrow.feather.read_table``/``write_feather`` calls
+(pyarrow 24+ emits ``FutureWarning``; migrated to ``pyarrow.ipc.open_file(...).read_all()`` /
+``pyarrow.ipc.new_file(...)``, mirroring the fix in ``arrow_source.read_feather``).
 
 fsspec's local filesystem backend (used implicitly for a plain, schemeless path) is the standard way
 to exercise fsspec-based code without cloud credentials or a mocking library -- only the storage
@@ -22,6 +33,7 @@ not.
 """
 
 import json
+import warnings
 
 import pytest
 
@@ -32,9 +44,13 @@ pytest.importorskip("fsspec")  # required unconditionally by read_remote, both b
 
 def _write_feather(path, table):
     pytest.importorskip("pyarrow")
-    import pyarrow.feather as feather
+    # pyarrow.feather.write_feather is deprecated (pyarrow 24+) in favor of writing the IPC file format
+    # directly -- Feather V2 *is* the Arrow IPC file format. Same deprecation-free pattern as
+    # arrow_source_test.py's own _write_feather helper.
+    import pyarrow.ipc as ipc
 
-    feather.write_feather(table, str(path))
+    with ipc.new_file(str(path), table.schema) as writer:
+        writer.write_table(table)
 
 
 def _make_table():
@@ -149,6 +165,77 @@ def test_csv_projection_still_works_unchanged(tmp_path):
 
     assert list(hadoop_source.read_remote(str(path), "csv", columns=["b"]).records()) == ["x", "y"]
     assert list(hadoop_source.read_remote(str(path), "csv").records()) == [("1", "x"), ("2", "y")]
+
+
+# --------------------------------------------------------------------------- CSV columns=[] truthiness bug
+
+
+def test_csv_columns_empty_list_matches_local_text_source(tmp_path):
+    """``read_remote``'s CSV branch used to build ``idx`` with a truthiness check (``if columns``), so
+    an explicitly-empty ``columns=[]`` was falsy and fell through to the "no filter" branch -- returning
+    every column instead of projecting to zero columns. ``text_source.read_csv`` already gets this right
+    via an ``is not None`` check: ``columns=[]`` means "project to zero columns" there (every row becomes
+    ``()``), and ``columns=None`` (omitted) is the only case that means "no filter". Remote and local must
+    agree for both inputs.
+    """
+    path = tmp_path / "data.csv"
+    path.write_text("a,b\n1,x\n2,y\n")
+
+    remote_empty = list(hadoop_source.read_remote(str(path), "csv", columns=[]).records())
+    local_empty = list(text_source.read_csv(str(path), columns=[]).records())
+    assert remote_empty == local_empty == [(), ()]
+
+
+def test_csv_columns_empty_list_differs_from_columns_none(tmp_path):
+    """Negative control distinguishing the two: ``columns=[]`` (zero columns) must NOT collapse to the
+    same result as ``columns=None`` (no filter, every column) for either connector -- pinning the exact
+    symptom of the truthiness bug, where the two were indistinguishable."""
+    path = tmp_path / "data.csv"
+    path.write_text("a,b\n1,x\n2,y\n")
+
+    remote_empty = list(hadoop_source.read_remote(str(path), "csv", columns=[]).records())
+    remote_none = list(hadoop_source.read_remote(str(path), "csv", columns=None).records())
+    local_empty = list(text_source.read_csv(str(path), columns=[]).records())
+    local_none = list(text_source.read_csv(str(path), columns=None).records())
+
+    assert remote_empty != remote_none
+    assert local_empty != local_none
+    assert remote_none == local_none == [("1", "x"), ("2", "y")]
+
+
+# --------------------------------------------------------------------------- deprecated pyarrow.feather API
+
+
+def test_feather_read_emits_no_future_warning(tmp_path):
+    """pyarrow 24+ deprecated ``pyarrow.feather.read_table`` in favor of
+    ``pyarrow.ipc.open_file(...).read_all()`` (Feather V2 *is* the Arrow IPC file format), emitting a
+    ``FutureWarning`` on every call. Confirm the migrated read path no longer triggers it."""
+    pytest.importorskip("pyarrow")
+    path = tmp_path / "data.feather"
+    _write_feather(path, _make_table())
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        records = list(hadoop_source.read_remote(str(path), "feather").records())
+
+    future_warnings = [w for w in caught if issubclass(w.category, FutureWarning)]
+    assert not future_warnings, [str(w.message) for w in future_warnings]
+    assert records == [(1, "x"), (2, "y"), (3, "z")]  # migration must not change the actual data
+
+
+def test_feather_write_fixture_emits_no_future_warning(tmp_path):
+    """This file's own ``_write_feather`` fixture used to call the equally-deprecated
+    ``pyarrow.feather.write_feather``. Confirm the fixture itself (now on ``pyarrow.ipc.new_file``) is
+    clean too, so no test in this module silently relies on deprecated pyarrow behavior."""
+    pytest.importorskip("pyarrow")
+    path = tmp_path / "data.feather"
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _write_feather(path, _make_table())
+
+    future_warnings = [w for w in caught if issubclass(w.category, FutureWarning)]
+    assert not future_warnings, [str(w.message) for w in future_warnings]
 
 
 def test_unsupported_format_raises_before_any_io():

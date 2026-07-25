@@ -26,6 +26,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import warnings
 
 import pytest
 
@@ -338,3 +339,47 @@ class ArrowConnectorRegistryTest(unittest.TestCase):
             with self.subTest(kind=kind):
                 src = sources_pkg.open(kind, path)
                 self.assertIsNotNone(src.schema)
+
+
+class ArrowFeatherDeprecatedApiTest(unittest.TestCase):
+    """``read_feather`` used to call the deprecated ``pyarrow.feather.read_table`` -- pyarrow 24+ emits a
+    ``FutureWarning`` on every call ("pyarrow.feather.read_table is deprecated as of 24.0.0. Use
+    pyarrow.ipc.open_file() / RecordBatchFileReader instead. Feather V2 is the Arrow IPC file format.").
+    Migrated to ``pyarrow.ipc.open_file(...).read_all()`` -- the same IPC reader this module's own
+    schema-inference path above (and this test file's ``_write_feather`` helper) already used,
+    deprecation-free. Bundled into this audit's test file because it touches the same ``read_feather``
+    factory the MXR-080-0070 schema-inference fix lives in; the deprecation itself is unrelated to that
+    finding.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="mixle_arrow_feather_deprecation_test_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_read_feather_emits_no_future_warning(self):
+        # A small table of its own (not _wide_table(), whose signed-int columns hold a -2 that Mixle's
+        # Count type legitimately rejects by design -- see ArrowSchemaConformanceTest -- unrelated to
+        # this fix) since this test reads every column with no `columns` filter.
+        table = pa.table({"id": pa.array([1, 2, 3], type=pa.int32()), "label": pa.array(["a", "b", "c"])})
+        path = _write_feather(self.tmpdir, "warn.feather", table)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            records = list(read_feather(path).records())
+        future_warnings = [w for w in caught if issubclass(w.category, FutureWarning)]
+        self.assertEqual(future_warnings, [], [str(w.message) for w in future_warnings])
+        self.assertEqual(records, [(1, "a"), (2, "b"), (3, "c")])
+
+    def test_read_feather_with_columns_emits_no_future_warning(self):
+        # Also pins that the manual `columns` projection replacing the old `columns=` read kwarg keeps
+        # selecting (and ordering) the right fields, not just that the warning is gone. Uses "u32" (not
+        # one of the signed columns, which hold a -2) since Mixle's Count type legitimately rejects
+        # negative values by design (see ArrowSchemaConformanceTest) -- unrelated to this fix.
+        path = _write_feather(self.tmpdir, "warn_cols.feather", _wide_table())
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            records = list(read_feather(path, columns=["cat", "u32"]).records())
+        future_warnings = [w for w in caught if issubclass(w.category, FutureWarning)]
+        self.assertEqual(future_warnings, [], [str(w.message) for w in future_warnings])
+        self.assertEqual(records, [("red", 1), ("blue", 2), ("red", 3)])
