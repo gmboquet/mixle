@@ -397,14 +397,57 @@ class Ontology:
         return kept, rejected
 
 
+def _require_unique(names: list[str], *, what: str) -> None:
+    """Raise if ``names`` contains a duplicate (MXR-080-0300).
+
+    A repeated entity/relation name previously made ``{name: index}`` silently keep only the LAST
+    occurrence's index while position-indexed output (``entities[i]``/``relations[i]``) still walked
+    every position -- the earlier occurrence became permanently unreachable by name, with index and
+    name maps disagreeing and no error raised anywhere.
+    """
+    seen: set[str] = set()
+    dupes: set[str] = set()
+    for n in names:
+        (dupes if n in seen else seen).add(n)
+    if dupes:
+        raise ValueError(f"duplicate {what} name(s), index/name maps would be ambiguous: {sorted(dupes)}")
+
+
+def _masked_log_normalize(lp: np.ndarray, mask: np.ndarray, *, context: str) -> np.ndarray:
+    """Numerically stable log-normalization restricted to ``mask`` (MXR-080-0300).
+
+    Returns a probability vector that is exactly 0 outside ``mask`` and sums to 1 over it. The
+    stabilizing shift is the max over ONLY the masked-in (admissible) entries -- the previous code
+    subtracted the GLOBAL max (including masked-OUT entries) from every entry; when every log-
+    probability, admissible or not, was ``-inf``, that global max was itself ``-inf``, so
+    ``-inf - -inf = nan`` poisoned every entry, and ``total <= 0`` is False for NaN, so a dictionary
+    of NaN "probabilities" was silently returned as if it were a valid posterior. This raises
+    instead when the admissible subset carries no finite mass at all: fail closed rather than
+    quietly answer with garbage, or with an empty result indistinguishable from "the schema admits
+    no candidate" (handled separately, before this is ever called).
+    """
+    admissible = lp[mask]
+    m = admissible.max()
+    if not np.isfinite(m):
+        raise ValueError(f"{context}: no admissible candidate has finite log-probability mass")
+    p = np.zeros_like(lp, dtype=float)
+    p[mask] = np.exp(admissible - m)
+    total = p.sum()
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError(f"{context}: admissible probability mass did not normalize to a finite positive total")
+    return p / total
+
+
 class OntologyConstrainedKG:
     """A fitted KG embedding, typed by an ontology: probability mass only on schema-consistent triples.
 
     Wraps a :class:`~mixle.stats.graphs.knowledge_graph.KnowledgeGraphDistribution` (entities and
     relations as integer indices) together with the symbolic ontology and the index<->name maps. The
     tail posterior is masked to entities that satisfy the FULL triple contract for the completion --
-    range, the head's domain, irreflexivity, and disjointness (MXR-080-0299) -- and renormalized, so
-    completion can never propose an ontology-violating tail -- ``Graph(ontology)`` as a distribution.
+    range, the head's domain, irreflexivity, and disjointness (MXR-080-0299) -- over a validated,
+    numerically-stable-normalized model output (MXR-080-0300), and renormalized, so completion can
+    never propose an ontology-violating tail nor silently degrade into NaN "probabilities" --
+    ``Graph(ontology)`` as a distribution.
     """
 
     def __init__(
@@ -421,8 +464,27 @@ class OntologyConstrainedKG:
         self.entities = list(entities)
         self.relations = list(relations)
         self.types = dict(types)
+        # MXR-080-0300: a duplicate name would otherwise silently make the {name: index} map below
+        # disagree with position-indexed output built from self.entities/self.relations.
+        _require_unique(self.entities, what="entity")
+        _require_unique(self.relations, what="relation")
         self._eidx = {e: i for i, e in enumerate(self.entities)}
         self._ridx = {r: i for i, r in enumerate(self.relations)}
+
+    def _validate_log_posterior(self, lp: np.ndarray, relation: str) -> None:
+        """Validate a KG model's raw log-posterior vector before it is ever normalized (MXR-080-0300):
+        an unvalidated NaN, +inf, wrong-length, or non-1-D output previously corrupted downstream
+        normalization silently instead of failing at the boundary where the bad value entered."""
+        if lp.ndim != 1 or lp.shape[0] != len(self.entities):
+            shape = getattr(lp, "shape", None)
+            raise ValueError(
+                f"tail_log_posterior for {relation!r} must be a 1-D vector of length "
+                f"{len(self.entities)} (one entry per entity); got shape {shape}"
+            )
+        if np.isnan(lp).any():
+            raise ValueError(f"tail_log_posterior for {relation!r} contains NaN log-probabilities")
+        if np.isposinf(lp).any():
+            raise ValueError(f"tail_log_posterior for {relation!r} contains +inf log-probabilities")
 
     def _candidate_mask(self, head: str, relation: str) -> np.ndarray:
         """Which entities are POSITIVELY confirmed admissible as the tail of ``(head, relation, ?)``
@@ -468,17 +530,22 @@ class OntologyConstrainedKG:
         every genuinely valid tail -- for one such relation, self-completion was assigned the
         LARGEST probability of any candidate. The mask now also checks the head's domain,
         irreflexivity, and disjointness.
+
+        MXR-080-0300: the raw model output is validated before it is ever normalized -- a NaN,
+        +inf, wrong-length, or non-vector ``tail_log_posterior`` raises instead of silently
+        producing a dictionary of NaN "probabilities". Returns ``{}`` when the ontology
+        structurally admits no candidate for this completion (an ordinary, expected outcome -- e.g.
+        an empty range class), but RAISES when the schema admits candidates and every one of them
+        is nonetheless degenerate (``-inf`` / carries no finite mass): that is an anomalous
+        model/data failure, not a schema fact, and returning ``{}`` for both would hide the
+        difference.
         """
-        lp = self.kg.tail_log_posterior(self._eidx[head], self._ridx[relation])
+        lp = np.asarray(self.kg.tail_log_posterior(self._eidx[head], self._ridx[relation]))
+        self._validate_log_posterior(lp, relation)
         mask = self._candidate_mask(head, relation)
         if not mask.any():
             return {}
-        p = np.exp(lp - lp.max())
-        p[~mask] = 0.0
-        total = p.sum()
-        if total <= 0:
-            return {}
-        p /= total
+        p = _masked_log_normalize(lp, mask, context=f"tail_posterior({head!r}, {relation!r})")
         return {self.entities[i]: float(p[i]) for i in np.flatnonzero(mask)}
 
     def complete(self, head: str, relation: str) -> tuple[str, float] | None:
