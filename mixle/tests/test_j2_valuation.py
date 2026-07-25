@@ -653,3 +653,47 @@ def test_sensitivity_independent_factors_negative_control():
     assert 0.0 <= sens["price"] <= 1.0
     assert sens["grade"] > 0.5  # grade dominates NPV variance for these constants (matches the
     assert 0.05 < sens["price"] < 0.5  # closed-form ~0.81 / ~0.18 split, loosely bounded here)
+
+
+# --- NPVDistribution construction-time validation: same samples-carrying-result-type guard applied ---
+# --- to carcinogenic_risk.RiskQuantity, closing the same gap found in this sibling module. Since ---
+# --- NPVDistribution is a NamedTuple (not a dataclass), the guard is a __new__ override on a genuine ---
+# --- subclass rather than a __post_init__ (typing.NamedTuple forbids overriding __new__ directly). ---
+
+
+def _npv_distribution_kwargs(**overrides):
+    base = dict(samples=np.array([1.0, 2.0, 3.0]), mean=2.0, p10=1.0, p50=2.0, p90=3.0, sensitivity={})
+    base.update(overrides)
+    return base
+
+
+def test_npv_distribution_rejects_empty_or_non_finite_samples():
+    """`NPVDistribution` had no construction-time validation at all: empty or NaN/Inf samples were
+    silently accepted. Defense-in-depth so invalid state can never flow downstream even if
+    `monte_carlo_npv` itself (or some other caller) fails to validate its own inputs."""
+    with pytest.raises(ValueError):
+        NPVDistribution(**_npv_distribution_kwargs(samples=np.array([])))
+    with pytest.raises(ValueError):
+        NPVDistribution(**_npv_distribution_kwargs(samples=np.array([1.0, np.nan, 3.0])))
+    with pytest.raises(ValueError):
+        NPVDistribution(**_npv_distribution_kwargs(samples=np.array([1.0, np.inf, 3.0])))
+
+
+def test_npv_distribution_rejects_empty_or_non_finite_samples_positionally():
+    """The same validation applies to positional construction, not only keyword -- `__new__`
+    intercepts every construction path, unlike a factory function a caller could bypass."""
+    with pytest.raises(ValueError):
+        NPVDistribution(np.array([]), 0.0, 0.0, 0.0, 0.0, {})
+    with pytest.raises(ValueError):
+        NPVDistribution(np.array([1.0, np.nan]), 0.0, 0.0, 0.0, 0.0, {})
+
+
+def test_npv_distribution_accepts_valid_samples():
+    """Negative control: a legitimate, non-empty, finite samples array still constructs cleanly and
+    keeps behaving like a normal NamedTuple (indexing, unpacking, field access)."""
+    result = NPVDistribution(**_npv_distribution_kwargs())
+    assert isinstance(result, tuple)
+    assert result.mean == 2.0
+    assert result[0] is result.samples
+    samples, mean, p10, p50, p90, sensitivity = result
+    assert mean == 2.0 and p10 == 1.0 and p50 == 2.0 and p90 == 3.0 and sensitivity == {}

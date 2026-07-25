@@ -236,7 +236,24 @@ def capex_opex(plan: Any, *, params: dict) -> tuple[float, float]:
     return capex_total, opex_total
 
 
-class NPVDistribution(NamedTuple):
+class _NPVDistributionFields(NamedTuple):
+    """Field layout for :class:`NPVDistribution` -- kept as a plain, unvalidated `NamedTuple` base
+    because ``typing.NamedTuple``'s class-creation machinery prohibits overriding ``__new__``/
+    ``__init__`` directly on a class that inherits from ``NamedTuple`` itself; a genuine subclass
+    (:class:`NPVDistribution` below) is the standard way around that to add construction-time
+    validation while keeping every existing ``NPVDistribution(...)`` call site (keyword or
+    positional) unchanged.
+    """
+
+    samples: np.ndarray
+    mean: float
+    p10: float
+    p50: float
+    p90: float
+    sensitivity: dict
+
+
+class NPVDistribution(_NPVDistributionFields):
     """A Monte-Carlo DCF outcome: the full NPV sample, not just a point estimate.
 
     ``samples`` is the length-``n`` array of per-draw NPVs (real dollars, one entry per Monte-Carlo
@@ -248,14 +265,31 @@ class NPVDistribution(NamedTuple):
     variance explained *on its own*, mathematically in ``[0, 1]`` and not required to sum to ``1`` --
     NPV is multiplicative in grade and price, so some variance is a grade/price interaction effect
     attributed to neither) plus the raw ``"grade_variance"`` / ``"price_variance"`` / ``"total_variance"``.
+
+    Construction validates ``samples``: non-empty and finite (no NaN/Inf) -- defense-in-depth so
+    invalid state can never flow downstream to a caller even if some upstream computation (here,
+    :func:`monte_carlo_npv`) fails to validate its own inputs, the same guard applied to
+    ``carcinogenic_risk.RiskQuantity`` and the ``_SampleDerivedQuantity`` carriers elsewhere in
+    ``mixle.analysis``.
     """
 
-    samples: np.ndarray
-    mean: float
-    p10: float
-    p50: float
-    p90: float
-    sensitivity: dict
+    __slots__ = ()
+
+    def __new__(
+        cls,
+        samples: np.ndarray,
+        mean: float,
+        p10: float,
+        p50: float,
+        p90: float,
+        sensitivity: dict,
+    ) -> NPVDistribution:
+        arr = np.asarray(samples, dtype=float)
+        if arr.size == 0:
+            raise ValueError("NPVDistribution.samples must be non-empty.")
+        if not np.isfinite(arr).all():
+            raise ValueError("NPVDistribution.samples must be finite (no NaN/Inf).")
+        return super().__new__(cls, samples, mean, p10, p50, p90, sensitivity)
 
 
 def _unpack_schedule(schedule: Any) -> tuple[np.ndarray, np.ndarray]:
