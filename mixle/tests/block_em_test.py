@@ -22,6 +22,7 @@ from mixle.inference.block_em import (
     _active_responsibilities,
     _constrained_block_weights,
     _incremental_candidate_log_density,
+    _normalizer_max_abs_error,
     _select_active,
     run_block_em,
 )
@@ -317,6 +318,29 @@ class BlockEMSpeedupTestCase(unittest.TestCase):
         )
         self.assertTrue(bool(impossible[0]))
         self.assertEqual(float(incremental[0]), float("-inf"))
+
+    def test_normalizer_audit_handles_infinite_rows_without_nan_evasion(self):
+        self.assertEqual(
+            _normalizer_max_abs_error(
+                np.asarray([-np.inf, -2.0]),
+                np.asarray([-np.inf, -2.0]),
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            _normalizer_max_abs_error(
+                np.asarray([-np.inf, -2.0]),
+                np.asarray([-3.0, -2.0]),
+            ),
+            float("inf"),
+        )
+        self.assertEqual(
+            _normalizer_max_abs_error(
+                np.asarray([np.nan]),
+                np.asarray([np.nan]),
+            ),
+            float("inf"),
+        )
 
     def test_starvation_updates_replace_lower_value_work_inside_the_budget(self):
         eligible = list(range(8))

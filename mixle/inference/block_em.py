@@ -136,10 +136,9 @@ class BlockEMStats:
     lower bound, as disclosed by ``objective_exact``; ``measured_q_gain`` is the complete-data
     gain used for the next scheduling decision.
 
-    ``acceptance_basis == "vanilla_escape"`` marks a round where repeated rejections triggered one
-    unconditional full-tree EM step (see ``escape_after_rejections``). ``stop_reason`` is set on
-    the FINAL entry when the run terminated early; ``"rejection_livelock"`` means the scheduler
-    kept producing rejected proposals even after a vanilla escape had been spent.
+    ``escape_attempted`` marks the one full-tree proposal allowed after repeated rejections.
+    That proposal remains objective-gated; ``acceptance_basis == "vanilla_escape"`` means it
+    passed the gate. ``stop_reason`` is set on the final entry when no gated operator progresses.
     """
 
     round_index: int
@@ -163,6 +162,7 @@ class BlockEMStats:
     assumptions: BlockEMAssumptionReceipt | None = None
     timing: BlockEMTimingReceipt | None = None
     stop_reason: str | None = None
+    escape_attempted: bool = False
 
     @property
     def active_fraction(self) -> float:
@@ -409,6 +409,22 @@ def _incremental_candidate_log_density(
     return candidate, impossible, int(np.count_nonzero(cancellation_rows))
 
 
+def _normalizer_max_abs_error(candidate: np.ndarray, audited: np.ndarray) -> float:
+    """Return a finite comparison error, treating matching ``-inf`` entries as exact."""
+    candidate = np.asarray(candidate, dtype=np.float64)
+    audited = np.asarray(audited, dtype=np.float64)
+    if candidate.shape != audited.shape:
+        return float("inf")
+    if np.any(np.isnan(candidate)) or np.any(np.isnan(audited)):
+        return float("inf")
+    if np.any(np.isposinf(candidate)) or np.any(np.isposinf(audited)):
+        return float("inf")
+    if not np.array_equal(np.isneginf(candidate), np.isneginf(audited)):
+        return float("inf")
+    finite = np.isfinite(candidate) & np.isfinite(audited)
+    return float(np.max(np.abs(candidate[finite] - audited[finite]))) if np.any(finite) else 0.0
+
+
 def _select_active(
     eligible: list[int],
     scores: dict[int, float],
@@ -530,12 +546,11 @@ def run_block_em(
     when every proposal the scheduler can produce regresses observed likelihood (seen in practice
     with stochastic GradLeaf M-steps once the closed-form blocks reach their conditional fixed
     point), the loop would otherwise pay full proposal cost forever without moving. After that many
-    CONSECUTIVE rejected rounds, one exact vanilla full-tree EM step is taken UNCONDITIONALLY
-    (``acceptance_basis="vanilla_escape"``) -- monotone for closed-form leaves by the EM theorem,
-    and for stochastic leaves it is precisely the take-the-step-and-let-the-next-E-step-resort
-    semantics vanilla ``optimize`` uses. If a second full rejection streak accumulates without any
-    normally-accepted round after the escape, no operator available makes progress from this point:
-    the run stops early and the final receipt carries ``stop_reason="rejection_livelock"``.
+    CONSECUTIVE rejected rounds, one exact vanilla full-tree proposal is attempted through the same
+    observed-objective gate (``escape_attempted=True`` and, only when accepted,
+    ``acceptance_basis="vanilla_escape"``). If it also rejects, no available operator establishes
+    progress, so the run stops early with ``stop_reason="rejection_livelock"`` rather than accepting
+    a loss.
 
     ``max_skip_rounds`` bounds starvation: a purely greedy top-score-wins ranking can, on a real
     fixture, rank the same eligible block last round after round (its own gain-per-cost score
@@ -660,6 +675,7 @@ def run_block_em(
     current_ll_mat: np.ndarray | None = None
     current_log_density: np.ndarray | None = None
     current_impossible: np.ndarray | None = None
+    initial_objective: float | None = None
     mutable_state = has_mutable_state(model, estimator)
     map_objective = estimator.get_prior() is not None
 
@@ -807,6 +823,10 @@ def run_block_em(
             gamma_active = gamma[:, active_indices]
             responsibility_columns = model.num_components
         current_value = objective_value(log_density, model)
+        if not np.isfinite(current_value):
+            raise ValueError("block EM requires a finite objective at the accepted current model.")
+        if initial_objective is None:
+            initial_objective = current_value
         responsibility_seconds = time.perf_counter() - responsibility_started
         exact_delta = None if old_value is None else current_value - old_value
 
@@ -918,12 +938,13 @@ def run_block_em(
                 audit_matrix = ll_mat.copy()
                 audit_matrix[:, candidate_indices] = candidate_columns
                 audited_log_density = _log_density_from_matrix(audit_matrix, candidate.log_w)
-                scale = max(1.0, float(np.max(np.abs(audited_log_density))))
+                finite_audited = np.abs(audited_log_density[np.isfinite(audited_log_density)])
+                scale = max(1.0, float(np.max(finite_audited))) if finite_audited.size else 1.0
                 audit_span = objective_audit_interval if objective_audit_interval is not None else 1
                 audit_tolerance = (
                     64.0 * np.finfo(np.float64).eps * scale * max(1, audit_span) * max(1, len(candidate_indices))
                 )
-                normalizer_audit_error = float(np.max(np.abs(candidate_log_density - audited_log_density)))
+                normalizer_audit_error = _normalizer_max_abs_error(candidate_log_density, audited_log_density)
                 normalizer_audit_failed = normalizer_audit_error > audit_tolerance
                 candidate_log_density = audited_log_density
                 candidate_impossible = np.all(
@@ -941,18 +962,10 @@ def run_block_em(
         audit_failed = q_accepted and candidate_value + accept_tolerance < current_value
 
         observed_accepted = np.isfinite(candidate_value) and candidate_value + accept_tolerance >= current_value
-        # An escape round takes the exact vanilla full-tree step UNCONDITIONALLY (monotone for
-        # closed-form leaves; deliberate take-the-step semantics for stochastic ones) -- gating it
-        # would just re-reject the proposal the livelock keeps regenerating.
-        accepted = (
-            observed_accepted
-            if map_objective
-            else (
-                (escape_round and np.isfinite(candidate_value))
-                or (q_accepted and not audit_failed)
-                or (not q_accepted and observed_accepted)
-            )
-        )
+        # Every operator, including the one full-tree livelock escape, must establish a
+        # non-decreasing observed objective. A failed incremental-normalizer audit also rejects
+        # the round even when its exact recomputation happens to look acceptable.
+        accepted = observed_accepted and not normalizer_audit_failed
         if accepted:
             model = candidate
             if sparse_round:
@@ -989,6 +1002,8 @@ def run_block_em(
             for idx in active:
                 last_q_gain[idx] = 0.0
             rejected_streak += 1
+            if escape_round:
+                escapes_since_accept = 1
 
         component_block_cost: dict[int, float] = {}
         for profile in (estep_profile, candidate_profile):
@@ -1105,8 +1120,11 @@ def run_block_em(
                 wall_time_seconds=wall_time_seconds,
                 assumptions=assumptions,
                 timing=timing,
+                escape_attempted=escape_round,
             )
         )
+        if len(history) > 1 and history[-1].objective + accept_tolerance < history[-2].objective:
+            raise RuntimeError("block EM accepted a decreasing observed objective.")
 
         if delta is not None and exact_delta is not None and 0.0 <= exact_delta < delta:
             stall_streak += 1
@@ -1120,7 +1138,11 @@ def run_block_em(
         audit_started = time.perf_counter()
         final_value = objective_value(_log_density_from_matrix(current_ll_mat, model.log_w), model)
         audit_seconds = time.perf_counter() - audit_started
-        if final_value + accept_tolerance < history[-1].objective:
+        objective_floor = max(
+            [initial_objective if initial_objective is not None else float("-inf")]
+            + [item.objective for item in history]
+        )
+        if not np.isfinite(final_value) or final_value + accept_tolerance < objective_floor:
             raise RuntimeError("final observed objective violated the certified EM lower bound.")
         history[-1].objective = final_value
         history[-1].objective_exact = True
