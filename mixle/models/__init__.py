@@ -66,7 +66,7 @@ from mixle.models.grammar import (
 )
 from mixle.models.hamiltonian import HamiltonianNet, leapfrog_rollout
 from mixle.models.knowledge_graph import KnowledgeGraphFitResult, TransEKnowledgeGraphModel
-from mixle.models.language_model import LM
+from mixle.models.language_model import LM, LMFitReceipt
 from mixle.models.mixture_density import (
     NeuralConditionalDensity,
     build_conditional_autoregressive_categorical,
@@ -150,6 +150,7 @@ from mixle.models.transformer import build_causal_lm
 
 __all__ = [
     "LM",
+    "LMFitReceipt",
     "CategoricalEmbedding",
     "EmbeddingSpec",
     "CausalSkeleton",

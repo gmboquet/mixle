@@ -6,7 +6,7 @@ A causal Transformer trained on a token stream::
     lm.fit(token_ids, epochs=3, batch_size=64, device="mps")          # pretrain (single process)
     lm.fit(token_ids, dense=True, distributed=True, precision="bf16") # packed DDP/FSDP2 training
     text = lm.generate(prompt_ids, n=200, temperature=0.8)            # autoregressive sampling
-    nll  = lm.nll(held_out_ids)                                       # bits/token on held-out data
+    nll  = lm.nll(held_out_ids)                                       # nats/token on held-out data
 
 ``fit`` retains the non-buffering streaming estimator for compatibility. Packed
 ``dense=True`` training uses the distributed-gradient backend when requested,
@@ -18,15 +18,50 @@ The rest of the multi-stage pipeline (CPT-with-EWC, DPO) is ``mixle.models.conti
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
+
+from mixle.models.grad_leaf import _module_mode
+
+
+@dataclass(frozen=True)
+class LMFitReceipt:
+    """Token-accounting receipt for one packed dense corpus layout."""
+
+    objective: str
+    input_tokens: int
+    consumed_tokens_per_epoch: int
+    supervised_tokens_per_epoch: int
+    discarded_cross_row_transitions_per_epoch: int
+    dropped_tail_tokens: int
+    epochs: int
 
 
 def _torch() -> Any:
     import torch
 
     return torch
+
+
+def _exact_int(value: Any, name: str, *, minimum: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    return result
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a positive finite real number")
+    result = float(value)
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a positive finite real number")
+    return result
 
 
 def _forward_all_positions(module: Any, x: Any, *, position_ids: Any = None) -> Any:
@@ -75,16 +110,39 @@ class LM:
         self.n_head = int(n_head)
         self.block = int(block)
         self.device = device
+        self.last_fit_receipt: LMFitReceipt | None = None
         # embedding=CategoricalEmbedding ties one word embedding across LMs (e.g. a mixture's per-cluster experts)
         self.module = build_causal_lm(self.vocab, d_model, n_layer, n_head, self.block, embedding=embedding)
 
     def _check_ids(self, ids: Any, where: str) -> np.ndarray:
         """Validate that every token id is a nonnegative int below ``vocab``; raise naming the offending id."""
-        arr = np.asarray([int(t) for t in ids], dtype=np.int64)
+        torch = _torch()
+        if torch.is_tensor(ids):
+            if ids.ndim != 1 or ids.dtype not in (
+                torch.int8,
+                torch.int16,
+                torch.int32,
+                torch.int64,
+                torch.uint8,
+            ):
+                raise TypeError(f"{where}: token ids must be a one-dimensional sequence of exact integers")
+            arr = ids.detach().to(device="cpu", dtype=torch.int64).numpy().copy()
+        else:
+            try:
+                values = list(ids)
+            except TypeError as exc:
+                raise TypeError(f"{where}: token ids must be an iterable of exact integers") from exc
+            for index, token in enumerate(values):
+                if isinstance(token, (bool, np.bool_)) or not isinstance(token, Integral):
+                    raise TypeError(f"{where}: token id at index {index} must be an exact integer; got {token!r}")
+            arr = np.asarray(values, dtype=np.int64)
+        if arr.ndim != 1:
+            raise ValueError(f"{where}: token ids must be one-dimensional")
         if arr.size:
             bad = arr[(arr < 0) | (arr >= self.vocab)]
             if bad.size:
                 raise ValueError("%s: token id %d is outside the vocabulary [0, %d)" % (where, int(bad[0]), self.vocab))
+        arr.setflags(write=False)
         return arr
 
     def to_dict(self) -> dict:
@@ -94,7 +152,7 @@ class LM:
         loads the saved ``state_dict`` into it, so a round-tripped LM is standalone (any external tie is dropped).
         """
         torch = _torch()
-        state = {k: v.cpu() for k, v in self.module.state_dict().items()}
+        state = {k: v.detach().to(device="cpu").clone() for k, v in self.module.state_dict().items()}
         return {
             "vocab": self.vocab,
             "d_model": self.d_model,
@@ -145,8 +203,11 @@ class LM:
         torch = _torch()
         try:
             payload = torch.load(path, weights_only=True)
-        except TypeError:  # torch < 1.13 has no weights_only kwarg
-            payload = torch.load(path)
+        except TypeError as exc:  # pragma: no cover - supported Torch versions provide safe loading
+            raise RuntimeError(
+                "safe LM loading requires torch.load(..., weights_only=True); "
+                "upgrade Torch rather than falling back to executable pickle loading"
+            ) from exc
         return cls.from_dict(payload)
 
     def fit(
@@ -190,11 +251,12 @@ class LM:
         - ``dense=True``: packed dense teacher forcing on a BOUNDED corpus. The token stream is cut
           into non-overlapping rows of ``block + 1`` tokens (a partial tail row is dropped; there is
           no padding, so no attention-mask or EOS special-casing is needed -- document boundaries are
-          whatever the ids encode); every row contributes ``block`` shifted next-token targets in a
-          single forward, recovering the ~``block``x supervision the streaming path leaves unused.
-          Token ids stay integer end to end (no float conversion). ``seed`` drives row shuffling and
-          ``log(epoch, mean_loss)`` reports per-epoch training loss, both as in :meth:`fit_pairs`.
-          With ``distributed=True`` this objective is executed by the selected
+          whatever the ids encode). Every row consumes ``block+1`` tokens but contributes ``block``
+          shifted targets: the corpus's first token and each cross-row transition are not supervised,
+          and the partial tail is not consumed. :attr:`last_fit_receipt` reports those counts
+          explicitly. Token ids stay integer end to end (no float conversion). ``seed`` drives row
+          shuffling and ``log(epoch, mean_loss)`` reports per-epoch training loss, both as in
+          :meth:`fit_pairs`. With ``distributed=True`` this objective is executed by the selected
           distributed-gradient backend.
 
         Parallel sizes are executable contracts. ``torch_native`` supports
@@ -254,7 +316,7 @@ class LM:
             from mixle.utils.parallel.torch_neural import StreamingTokenEncodedData
 
             handle = StreamingTokenEncodedData(
-                token_ids,
+                ids,
                 block=self.block,
                 batch_size=batch_size,
                 epochs=epochs,
@@ -270,9 +332,7 @@ class LM:
             from mixle.data.stream_token_source import stream_token_source
             from mixle.models.streaming_transformer_leaf import stream_fit
 
-            src = stream_token_source(
-                token_ids, block=self.block, batch_size=batch_size, epochs=epochs, shuffle=shuffle
-            )
+            src = stream_token_source(ids, block=self.block, batch_size=batch_size, epochs=epochs, shuffle=shuffle)
             self.module = stream_fit(self.module, src, lr=lr, device=self.device)[0].module
         return self
 
@@ -336,7 +396,7 @@ class LM:
             max_grad_norm=max_grad_norm,
             compile=compile,
         )
-        flat = torch.as_tensor(ids[: n_rows * stride], dtype=torch.int64).view(n_rows, stride)
+        flat = torch.tensor(ids[: n_rows * stride], dtype=torch.int64).view(n_rows, stride)
         try:
             start_epoch = 0
             if resume:
@@ -379,6 +439,16 @@ class LM:
         while hasattr(wrapped, "module"):
             wrapped = wrapped.module
         self.module = getattr(wrapped, "_orig_mod", wrapped)
+        consumed = n_rows * stride
+        self.last_fit_receipt = LMFitReceipt(
+            objective="packed_causal_lm",
+            input_tokens=len(ids),
+            consumed_tokens_per_epoch=consumed,
+            supervised_tokens_per_epoch=n_rows * self.block,
+            discarded_cross_row_transitions_per_epoch=max(0, n_rows - 1),
+            dropped_tail_tokens=len(ids) - consumed,
+            epochs=int(epochs),
+        )
         return self
 
     def _fit_dense(
@@ -395,9 +465,11 @@ class LM:
         """Packed dense teacher forcing: non-overlapping ``block + 1``-token rows, all-position loss.
 
         Row ``r`` covers ``ids[r*(block+1) : (r+1)*(block+1)]``; inputs are its first ``block`` tokens
-        and targets its last ``block`` (shift by one), so every consumed token is supervised exactly
-        once and rows carry no padding. A partial tail row is dropped. Rows are gathered from the flat
-        id tensor per batch, so nothing beyond one batch is materialized on the device.
+        and targets its last ``block`` (shift by one). Thus each row consumes ``block+1`` tokens and
+        supervises ``block`` targets. The first corpus token is context-only, transitions between rows
+        are discarded, and a partial tail row is dropped. :attr:`last_fit_receipt` records each count.
+        Rows are gathered from the flat id tensor per batch, so nothing beyond one batch is materialized
+        on the device.
         """
         torch = _torch()
         stride = self.block + 1
@@ -410,7 +482,7 @@ class LM:
         module = self.module.to(self.device)
         module.train()
         opt = torch.optim.Adam(module.parameters(), lr=lr)
-        flat = torch.as_tensor(ids[: n_rows * stride], dtype=torch.int64).view(n_rows, stride)
+        flat = torch.tensor(ids[: n_rows * stride], dtype=torch.int64).view(n_rows, stride)
         for epoch in range(int(epochs)):
             order = rng.permutation(n_rows) if shuffle else np.arange(n_rows)
             total = count = 0.0
@@ -427,6 +499,16 @@ class LM:
                 count += n_targets
             if log is not None:
                 log(epoch, total / max(count, 1.0))
+        consumed = n_rows * stride
+        self.last_fit_receipt = LMFitReceipt(
+            objective="packed_causal_lm",
+            input_tokens=len(ids),
+            consumed_tokens_per_epoch=consumed,
+            supervised_tokens_per_epoch=n_rows * self.block,
+            discarded_cross_row_transitions_per_epoch=max(0, n_rows - 1),
+            dropped_tail_tokens=len(ids) - consumed,
+            epochs=int(epochs),
+        )
         return self
 
     def fit_pairs(
@@ -454,15 +536,16 @@ class LM:
         pairs = list(pairs)
         if not pairs:
             return self  # nothing to fine-tune on
+        pad_id = int(self._check_ids([pad_id], "fit_pairs (pad_id)")[0])
         rng = np.random.RandomState(seed)
         rows, tmask = [], []
         for prompt, completion in pairs:
-            self._check_ids(prompt, "fit_pairs (prompt)")
-            self._check_ids(completion, "fit_pairs (completion)")
-            seq = [int(t) for t in prompt] + [int(t) for t in completion]
+            prompt_array = self._check_ids(prompt, "fit_pairs (prompt)")
+            completion_array = self._check_ids(completion, "fit_pairs (completion)")
+            seq = prompt_array.tolist() + completion_array.tolist()
             keep = [False] * (len(seq) if mask_prompt else 0)
             if mask_prompt:
-                for i in range(len(prompt), len(seq)):
+                for i in range(len(prompt_array), len(seq)):
                     keep[i] = True
             else:
                 keep = [True] * len(seq)
@@ -517,30 +600,51 @@ class LM:
         so callers can strip it -- and its presence distinguishes 'finished' from 'ran out of budget').
         """
         torch = _torch()
-        self._check_ids(prompt_ids, "generate")
+        prompt = self._check_ids(prompt_ids, "generate")
+        if not len(prompt):
+            raise ValueError("generate requires a non-empty prompt")
+        n = _exact_int(n, "n", minimum=0)
+        temperature = _positive_finite(temperature, "temperature")
+        if not isinstance(greedy, (bool, np.bool_)):
+            raise TypeError("greedy must be a boolean")
+        seed = _exact_int(seed, "seed", minimum=0)
+        stop_token: int | None = None
         if stop_id is not None:
-            self._check_ids([stop_id], "generate (stop_id)")
+            stop_token = int(self._check_ids([stop_id], "generate (stop_id)")[0])
         rng = np.random.RandomState(seed)
-        self.module.to(self.device).eval()
-        w = [int(t) for t in prompt_ids]
+        self.module.to(self.device)
+        w = prompt.tolist()
         out = list(w)
-        for _ in range(int(n)):
-            # feed the window unpadded: positions run 0..len-1 exactly as in training (fit / fit_pairs),
-            # and the attention cost tracks the true length instead of always paying the full block
-            win = w[-self.block :]
-            with torch.no_grad():
-                logits = self.module(torch.as_tensor([win], dtype=torch.float32).to(self.device))[0].cpu().numpy()
-            if greedy:
-                nxt = int(logits.argmax())
-            else:
-                p = np.exp((logits - logits.max()) / max(temperature, 1e-6))
-                p /= p.sum()
-                nxt = int(rng.choice(len(p), p=p))
-            w.append(nxt)
-            out.append(nxt)
-            if stop_id is not None and nxt == int(stop_id):
-                break
-        self.module.train()
+        with _module_mode(self.module, train=False), torch.no_grad():
+            for _ in range(n):
+                # Feed the window unpadded: positions run 0..len-1 exactly as in training, and token IDs
+                # remain int64 so values above 2**24 are never rounded through float32.
+                win = w[-self.block :]
+                x = torch.as_tensor([win], dtype=torch.int64, device=self.device)
+                raw_logits = self.module(x)
+                if (
+                    not isinstance(raw_logits, torch.Tensor)
+                    or tuple(raw_logits.shape) != (1, self.vocab)
+                    or not bool(torch.isfinite(raw_logits).all())
+                ):
+                    raise ValueError(
+                        f"generate module logits must be a finite (1, {self.vocab}) matrix; "
+                        f"got {getattr(raw_logits, 'shape', None)}"
+                    )
+                logits = raw_logits[0].detach().to(device="cpu", dtype=torch.float64).numpy()
+                if greedy:
+                    nxt = int(logits.argmax())
+                else:
+                    probabilities = np.exp((logits - logits.max()) / temperature)
+                    normalizer = float(probabilities.sum())
+                    if not np.all(np.isfinite(probabilities)) or not np.isfinite(normalizer) or normalizer <= 0.0:
+                        raise ValueError("generate produced invalid sampling probabilities")
+                    probabilities /= normalizer
+                    nxt = int(rng.choice(len(probabilities), p=probabilities))
+                w.append(nxt)
+                out.append(nxt)
+                if stop_token is not None and nxt == stop_token:
+                    break
         return out
 
     def nll(self, token_ids: Any) -> float:
@@ -561,6 +665,6 @@ class LM:
         chunk = 4096
         for start in range(0, n, chunk):
             stop = min(start + chunk, n)
-            ctx = np.stack([ids[i : i + self.block] for i in range(start, stop)]).astype("float32")
+            ctx = np.stack([ids[i : i + self.block] for i in range(start, stop)]).astype(np.int64, copy=False)
             total += float(np.sum(leaf.seq_log_density((ctx, ids[self.block + start : self.block + stop]))))
         return -total / n
