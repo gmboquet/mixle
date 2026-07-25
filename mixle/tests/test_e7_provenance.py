@@ -13,6 +13,8 @@ dict for the posterior step, standing in for the not-yet-landed ``mixle_pde`` ar
 import hashlib
 import json
 
+import pytest
+
 from mixle.reason.language_bridge import Claim
 from mixle.reason.receipt import content_edge_hash, decision_receipt
 from mixle.substrate.core import Substrate
@@ -27,7 +29,8 @@ def _synthetic_posterior_header(tmp_path):
     """A hand-built header shaped exactly like IC-2's frozen ``{schema, content_hash, crs, grid, units,
     provenance, created}`` so `decision_receipt` reads it as an on-disk artifact sibling, the same way
     it would read a real `mixle_pde.io.artifacts.save_posterior` output."""
-    array_digest = hashlib.sha256(b"mean|cov|synthetic-field-posterior-arrays").hexdigest()
+    artifact_bytes = b"mean|cov|synthetic-field-posterior-arrays"
+    array_digest = hashlib.sha256(artifact_bytes).hexdigest()
     header = {
         "schema": "mixle_pde.field_posterior/v1",
         "content_hash": array_digest,
@@ -38,6 +41,7 @@ def _synthetic_posterior_header(tmp_path):
         "created": "2026-07-14T00:00:00Z",
     }
     path_prefix = tmp_path / "posterior_run_001"
+    path_prefix.write_bytes(artifact_bytes)
     (tmp_path / "posterior_run_001.json").write_text(json.dumps(header))
     return str(path_prefix), array_digest
 
@@ -78,7 +82,7 @@ def test_decision_receipt_chain_is_hashed_and_validates(tmp_path):
     # the data hash is directly re-derivable from the raw input via the public helper
     assert lineage["data"]["content_hash"] == content_edge_hash(dataset_ref)
 
-    # the posterior's IC-2 array digest is PRESERVED as the artifact digest, never recomputed
+    # the posterior's declared IC-2 digest is independently recomputed from artifact bytes
     assert lineage["posterior"]["content_hash"] == array_digest
 
     # each edge's parent_hash chains to the previous edge -- data -> posterior -> claim -> decision
@@ -96,6 +100,7 @@ def test_decision_receipt_chain_is_hashed_and_validates(tmp_path):
     meta = item.payload["manifest"]["meta"]
     assert meta["artifact_ref"] == posterior_ref
     assert meta["content_hash"] == array_digest
+    assert meta["digest_algorithm"] == "sha256"
     assert meta["crs"] == "EPSG:32611"
     assert meta["grid"]["shape"] == [4, 4, 4]
     assert "mean" not in meta and "cov" not in meta and "samples" not in meta
@@ -106,3 +111,78 @@ def test_decision_receipt_chain_is_hashed_and_validates(tmp_path):
 
     # the outcome is the decision itself
     assert receipt["outcome"]["action"] == "drill"
+
+
+def test_receipt_rejects_missing_corrupt_or_mismatched_artifacts(tmp_path):
+    substrate = Substrate()
+    kwargs = {
+        "dataset_ref": {"dataset": 1},
+        "claim": {"claim": "ok"},
+        "decision": {"decision": "ok"},
+        "substrate": substrate,
+    }
+    with pytest.raises(FileNotFoundError):
+        decision_receipt(posterior_ref=tmp_path / "missing", **kwargs)
+
+    artifact = tmp_path / "posterior"
+    artifact.write_bytes(b"artifact")
+    artifact.with_name("posterior.json").write_text("{not-json")
+    with pytest.raises(ValueError, match="invalid JSON"):
+        decision_receipt(posterior_ref=artifact, **kwargs)
+
+    artifact.with_name("posterior.json").write_text(
+        json.dumps({"content_hash": hashlib.sha256(b"different").hexdigest()})
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        decision_receipt(posterior_ref=artifact, **kwargs)
+
+
+def test_artifact_bytes_not_reference_determine_posterior_identity(tmp_path):
+    artifact = tmp_path / "posterior"
+    artifact.write_bytes(b"version-one")
+    first = decision_receipt(
+        dataset_ref={"dataset": 1},
+        posterior_ref=artifact,
+        claim={"claim": "ok"},
+        decision={"decision": "ok"},
+        substrate=Substrate(),
+    )
+    artifact.write_bytes(b"version-two")
+    second = decision_receipt(
+        dataset_ref={"dataset": 1},
+        posterior_ref=artifact,
+        claim={"claim": "ok"},
+        decision={"decision": "ok"},
+        substrate=Substrate(),
+    )
+    first_hash = first["provenance"]["lineage"][1]["content_hash"]
+    second_hash = second["provenance"]["lineage"][1]["content_hash"]
+    assert first_hash != second_hash
+
+
+def test_ordinary_hex_string_is_not_implicitly_trusted_as_a_digest():
+    value = "a" * 64
+    assert content_edge_hash(value) != value
+
+
+def test_rooted_registry_uses_full_digest_and_rejects_manifest_collision(tmp_path):
+    artifact = tmp_path / "posterior"
+    artifact.write_bytes(b"artifact")
+    digest = hashlib.sha256(b"artifact").hexdigest()
+    substrate_root = tmp_path / "substrate"
+    substrate = Substrate(str(substrate_root))
+    kwargs = {
+        "dataset_ref": {"dataset": 1},
+        "posterior_ref": artifact,
+        "claim": {"claim": "ok"},
+        "decision": {"decision": "ok"},
+        "substrate": substrate,
+    }
+    decision_receipt(**kwargs)
+    registry = substrate_root / "receipt_registry" / "field_posterior" / digest
+    assert registry.is_dir()
+    assert len(registry.name) == 64
+
+    (registry / "manifest.json").write_text('{"different":true}')
+    with pytest.raises(RuntimeError, match="manifest collision"):
+        decision_receipt(**kwargs)
