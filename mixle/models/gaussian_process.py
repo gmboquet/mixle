@@ -47,14 +47,19 @@ class GaussianProcessRegressor:
         self.kernel_name = _KERNELS.get(str(kernel).lower())
         if self.kernel_name is None:
             raise ValueError(f"unknown kernel {kernel!r}; choose from {sorted(set(_KERNELS))}.")
+        lengthscale = _finite_positive(lengthscale, "lengthscale")
+        amplitude = _finite_positive(amplitude, "amplitude")
+        noise = _finite_positive(noise, "noise")
+        jitter = _finite_positive(jitter, "jitter")
+        mean = _finite_scalar(mean, "mean")
         torch, engine = _torch_engine(engine, precision=precision)
         self.torch = torch
         self.engine = engine
         self.log_lengthscale = _raw_positive(torch, engine, lengthscale)
         self.log_amplitude = _raw_positive(torch, engine, amplitude)
         self.log_noise = _raw_positive(torch, engine, noise)
-        self.mean = engine.asarray(float(mean)).clone().detach().requires_grad_(True)
-        self.jitter = float(jitter)
+        self.mean = engine.asarray(mean).clone().detach().requires_grad_(True)
+        self.jitter = jitter
 
     def parameters(self):
         """Return trainable raw kernel/noise parameters and the mean."""
@@ -76,23 +81,56 @@ class GaussianProcessRegressor:
         return float(self.log_noise.detach().exp().cpu().item())
 
     def _xy(self, x: Any, y: Any) -> tuple[Any, Any]:
-        xx = self.engine.asarray(x)
+        xx = self._x(x, "x")
+        yy = self.engine.asarray(y)
+        if len(yy.shape) == 2 and yy.shape[1] == 1:
+            yy = yy[:, 0]
+        elif len(yy.shape) != 1:
+            raise ValueError("y must be a one-dimensional vector or a two-dimensional single-column matrix")
+        if yy.shape[0] != xx.shape[0]:
+            raise ValueError(f"x and y must contain the same number of rows, got {xx.shape[0]} and {yy.shape[0]}")
+        if yy.shape[0] == 0:
+            raise ValueError("x and y must contain at least one observation")
+        if not bool(self.torch.all(self.torch.isfinite(yy)).detach().cpu().item()):
+            raise ValueError("y must contain only finite values")
+        return xx, yy
+
+    def _x(self, value: Any, name: str, *, n_features: int | None = None, allow_empty: bool = False) -> Any:
+        xx = self.engine.asarray(value)
         if len(xx.shape) == 1:
             xx = xx[:, None]
-        yy = self.engine.asarray(y)
-        if len(yy.shape) > 1:
-            yy = yy.reshape((-1,))
-        return xx, yy
+        elif len(xx.shape) != 2:
+            raise ValueError(f"{name} must be a one- or two-dimensional input array")
+        if xx.shape[1] == 0:
+            raise ValueError(f"{name} must contain at least one feature")
+        if not allow_empty and xx.shape[0] == 0:
+            raise ValueError(f"{name} must contain at least one row")
+        if n_features is not None and xx.shape[1] != n_features:
+            raise ValueError(f"{name} must contain exactly {n_features} features, got {xx.shape[1]}")
+        if not bool(self.torch.all(self.torch.isfinite(xx)).detach().cpu().item()):
+            raise ValueError(f"{name} must contain only finite values")
+        return xx
+
+    def _validate_parameters(self) -> None:
+        for name, parameter in (
+            ("lengthscale", self.log_lengthscale.exp()),
+            ("amplitude", self.log_amplitude.exp()),
+            ("noise", self.log_noise.exp()),
+        ):
+            value = parameter.detach()
+            if not bool(self.torch.all(self.torch.isfinite(value)).cpu().item()) or not bool(
+                self.torch.all(value > 0.0).cpu().item()
+            ):
+                raise RuntimeError(f"Gaussian-process {name} is not finite and positive")
+        if not bool(self.torch.all(self.torch.isfinite(self.mean.detach())).cpu().item()):
+            raise RuntimeError("Gaussian-process mean is not finite")
 
     def kernel(self, x1: Any, x2: Any) -> Any:
         """Return the covariance matrix between two input arrays under the configured kernel."""
         torch = self.torch
-        x1 = self.engine.asarray(x1)
-        x2 = self.engine.asarray(x2)
-        if len(x1.shape) == 1:
-            x1 = x1[:, None]
-        if len(x2.shape) == 1:
-            x2 = x2[:, None]
+        self._validate_parameters()
+        x1 = self._x(x1, "x1", allow_empty=True)
+        x2 = self._x(x2, "x2", n_features=x1.shape[1], allow_empty=True)
         diff = (x1[:, None, :] - x2[None, :, :]) / self.log_lengthscale.exp()
         dist2 = torch.sum(diff * diff, dim=2)
         amp2 = self.log_amplitude.exp() ** 2
@@ -110,6 +148,7 @@ class GaussianProcessRegressor:
     def log_marginal_likelihood(self, x: Any, y: Any) -> Any:
         """Return the exact GP log marginal likelihood for training data."""
         torch = self.torch
+        self._validate_parameters()
         xx, yy = self._xy(x, y)
         n = yy.shape[0]
         k = self.kernel(xx, xx)
@@ -147,6 +186,7 @@ class GaussianProcessRegressor:
         ``(value, iterations)`` tuple; those live behind ``return_result=True``
         now (``result.value`` / ``result.iterations``).
         """
+        self._xy(x, y)
         result = optimize_torch_objective(
             self.parameters(),
             lambda: self.log_marginal_likelihood(x, y),
@@ -169,10 +209,9 @@ class GaussianProcessRegressor:
         """Return posterior predictive mean, and optionally covariance."""
         torch = self.torch
         with torch.no_grad():
+            self._validate_parameters()
             x, y = self._xy(x_train, y_train)
-            xs = self.engine.asarray(x_new)
-            if len(xs.shape) == 1:
-                xs = xs[:, None]
+            xs = self._x(x_new, "x_new", n_features=x.shape[1], allow_empty=True)
             n = y.shape[0]
             k = self.kernel(x, x)
             eye = torch.eye(n, dtype=y.dtype, device=y.device)
@@ -186,6 +225,21 @@ class GaussianProcessRegressor:
                 return mean.detach().cpu().numpy()
             v = torch.linalg.solve_triangular(chol, kxs, upper=False)
             cov = self.kernel(xs, xs) - v.T.matmul(v)
+            cov = 0.5 * (cov + cov.T)
+            if not bool(torch.all(torch.isfinite(cov)).cpu().item()):
+                raise RuntimeError("Gaussian-process posterior covariance contains non-finite values")
+            scale = max(1.0, float(torch.max(torch.abs(cov)).cpu().item())) if cov.numel() else 1.0
+            tolerance = 100.0 * torch.finfo(cov.dtype).eps * max(1, cov.shape[0]) * scale
+            diagonal = torch.diagonal(cov)
+            if bool(torch.any(diagonal < -tolerance).cpu().item()):
+                raise RuntimeError("Gaussian-process posterior covariance has materially negative variance")
+            if cov.numel():
+                eigenvalues = torch.linalg.eigvalsh(cov)
+                if bool(torch.any(eigenvalues < -tolerance).cpu().item()):
+                    raise RuntimeError("Gaussian-process posterior covariance is not positive semidefinite")
+                cov = cov.clone()
+                diagonal = torch.diagonal(cov)
+                diagonal.copy_(torch.clamp(diagonal, min=0.0))
             return mean.detach().cpu().numpy(), cov.detach().cpu().numpy()
 
     def predict_monotone(self, x_train: Any, y_train: Any, x_new: Any, increasing: bool = True) -> np.ndarray:
@@ -197,39 +251,78 @@ class GaussianProcessRegressor:
         inputs (e.g. monotone age-depth / dose-response fits); reduces to :meth:`predict` when the
         posterior mean is already monotone.
         """
-        x_sort_key = np.asarray(x_new, dtype=float).reshape(-1)
-        mean = np.asarray(self.predict(x_train, y_train, x_new), dtype=float).reshape(-1)
+        if not isinstance(increasing, (bool, np.bool_)):
+            raise TypeError("increasing must be a boolean")
+        train_coordinates = _scalar_coordinates(x_train, "x_train")
+        x_sort_key = _scalar_coordinates(x_new, "x_new", allow_empty=True)
+        mean = np.asarray(self.predict(train_coordinates, y_train, x_sort_key), dtype=float).reshape(-1)
+        if x_sort_key.size == 0:
+            return mean
         order = np.argsort(x_sort_key, kind="stable")
-        fitted = _pava(mean[order] if increasing else -mean[order])
+        sorted_x = x_sort_key[order]
+        sorted_mean = mean[order]
+        _, first, inverse, counts = np.unique(
+            sorted_x, return_index=True, return_inverse=True, return_counts=True
+        )
+        group_mean = np.add.reduceat(sorted_mean, first) / counts
+        fitted_groups = _pava(group_mean if increasing else -group_mean, weights=counts)
         if not increasing:
-            fitted = -fitted
+            fitted_groups = -fitted_groups
+        fitted = fitted_groups[inverse]
         out = np.empty_like(mean)
         out[order] = fitted
         return out
 
 
-def _pava(y: np.ndarray) -> np.ndarray:
-    """Pool-adjacent-violators: the L2-closest non-decreasing sequence to ``y`` (equal weights)."""
+def _pava(y: np.ndarray, weights: np.ndarray | None = None) -> np.ndarray:
+    """Return the weighted-L2 closest non-decreasing sequence to ``y``."""
     y = np.asarray(y, dtype=float)
+    if y.ndim != 1 or not np.all(np.isfinite(y)):
+        raise ValueError("PAVA values must be a one-dimensional finite vector")
     n = y.size
+    if weights is None:
+        weights = np.ones(n, dtype=float)
+    else:
+        weights = np.asarray(weights, dtype=float)
+        if weights.shape != (n,) or not np.all(np.isfinite(weights)) or np.any(weights <= 0.0):
+            raise ValueError("PAVA weights must be a finite positive vector matching the values")
     if n <= 1:
         return y.astype(float).copy()
     vals: list[float] = []
-    counts: list[int] = []
-    for yi in y:
+    block_weights: list[float] = []
+    block_counts: list[int] = []
+    for yi, wi in zip(y, weights):
         vals.append(float(yi))
-        counts.append(1)
+        block_weights.append(float(wi))
+        block_counts.append(1)
         while len(vals) >= 2 and vals[-2] > vals[-1]:
-            v2, c2 = vals.pop(), counts.pop()
-            v1, c1 = vals.pop(), counts.pop()
-            vals.append((v1 * c1 + v2 * c2) / (c1 + c2))
-            counts.append(c1 + c2)
+            v2, w2, c2 = vals.pop(), block_weights.pop(), block_counts.pop()
+            v1, w1, c1 = vals.pop(), block_weights.pop(), block_counts.pop()
+            vals.append((v1 * w1 + v2 * w2) / (w1 + w2))
+            block_weights.append(w1 + w2)
+            block_counts.append(c1 + c2)
     out = np.empty(n, dtype=float)
     pos = 0
-    for v, c in zip(vals, counts):
+    for v, c in zip(vals, block_counts):
         out[pos : pos + c] = v
         pos += c
     return out
+
+
+def _scalar_coordinates(value: Any, name: str, *, allow_empty: bool = False) -> np.ndarray:
+    try:
+        coordinates = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be numeric scalar coordinates") from exc
+    if coordinates.ndim == 2 and coordinates.shape[1] == 1:
+        coordinates = coordinates[:, 0]
+    elif coordinates.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional or a two-dimensional single-column matrix")
+    if not allow_empty and coordinates.size == 0:
+        raise ValueError(f"{name} must contain at least one coordinate")
+    if not np.all(np.isfinite(coordinates)):
+        raise ValueError(f"{name} must contain only finite coordinates")
+    return coordinates
 
 
 def _torch_engine(engine: Any | None, precision: Any | None = None) -> tuple[Any, Any]:
@@ -250,3 +343,20 @@ def _torch_engine(engine: Any | None, precision: Any | None = None) -> tuple[Any
 
 def _raw_positive(torch: Any, engine: Any, value: float) -> Any:
     return torch.log(engine.asarray(float(value))).clone().detach().requires_grad_(True)
+
+
+def _finite_positive(value: Any, name: str) -> float:
+    result = _finite_scalar(value, name)
+    if result <= 0.0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+
+def _finite_scalar(value: Any, name: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a real scalar") from exc
+    if not np.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result

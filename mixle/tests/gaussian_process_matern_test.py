@@ -25,6 +25,17 @@ class KernelNameTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             GaussianProcessRegressor(kernel="banana")
 
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_invalid_parameters_fail_before_raw_conversion(self):
+        from mixle.models.gaussian_process import GaussianProcessRegressor
+
+        for name in ("lengthscale", "amplitude", "noise", "jitter"):
+            for value in (0.0, -1.0, np.inf, np.nan):
+                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                    GaussianProcessRegressor(**{name: value})
+        with self.assertRaises(ValueError):
+            GaussianProcessRegressor(mean=np.nan)
+
 
 @unittest.skipUnless(HAS_TORCH, "torch is not installed")
 class KernelMathTest(unittest.TestCase):
@@ -74,6 +85,28 @@ class KernelMathTest(unittest.TestCase):
         gp.fit(x, y, max_its=120, out=None)
         pred = gp.predict(x, y, x)
         self.assertLess(float(np.sqrt(np.mean((pred - y) ** 2))), 0.2)  # fits the data
+
+    def test_observation_contracts_and_posterior_covariance(self):
+        from mixle.models.gaussian_process import GaussianProcessRegressor
+
+        gp = GaussianProcessRegressor()
+        for x, y in [
+            (np.zeros((0, 1)), np.zeros(0)),
+            (np.ones((3, 2)), np.ones(2)),
+            (np.array([[0.0], [np.nan]]), np.ones(2)),
+            (np.ones((2, 1)), np.array([1.0, np.inf])),
+            (np.ones((4, 1)), np.ones((2, 2))),
+        ]:
+            with self.subTest(x=x, y=y), self.assertRaises(ValueError):
+                gp.log_marginal_likelihood(x, y)
+        x = np.linspace(-1.0, 1.0, 8)
+        y = np.sin(x)
+        mean, covariance = gp.predict(x, y, np.linspace(-0.8, 0.8, 7), return_cov=True)
+        self.assertEqual(mean.shape, (7,))
+        np.testing.assert_allclose(covariance, covariance.T, atol=1.0e-12)
+        self.assertTrue(np.all(np.isfinite(covariance)))
+        self.assertGreaterEqual(float(np.min(np.diag(covariance))), 0.0)
+        self.assertGreaterEqual(float(np.min(np.linalg.eigvalsh(covariance))), -1.0e-10)
 
 
 if __name__ == "__main__":
