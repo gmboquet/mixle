@@ -128,6 +128,67 @@ class LLMAssessment:
 
 
 @dataclass(frozen=True)
+class Generation:
+    """One stochastic sample from ``generate``, normalized: text immutably paired with its
+    log-probability when the generator provides one (MXR-080-0296).
+
+    Before this, only :meth:`LLMUncertainty.assess` split a ``(text, logprob)`` pair from a plain
+    string -- :meth:`LLMUncertainty.decompose` clustered the raw tuples themselves (comparing
+    ``(text, logprob)`` tuples for equality instead of the text, silently discarding every logprob),
+    and :meth:`LLMUncertainty.assess_claims` handed a raw tuple straight to string-only claim
+    extractors and corroborators. :meth:`LLMUncertainty.sample` now builds ``list[Generation]`` once,
+    at the boundary, so every consumer sees the same normalized shape and a text/logprob split can no
+    longer happen in only some call paths.
+    """
+
+    text: str
+    logprob: float | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "text", str(self.text))
+        if self.logprob is None:
+            return
+        if isinstance(self.logprob, bool) or not isinstance(self.logprob, (int, float)):
+            raise TypeError(
+                f"Generation.logprob must be a real number or None, got {type(self.logprob).__name__}: {self.logprob!r}"
+            )
+        flp = float(self.logprob)
+        if not math.isfinite(flp):
+            raise ValueError(f"Generation.logprob must be finite, got {flp!r}")
+        object.__setattr__(self, "logprob", flp)
+
+
+def _coerce_generation(raw: Any) -> Generation:
+    """Normalize one raw ``generate()`` return value (a plain string, or a ``(text, logprob)`` pair)
+    to a :class:`Generation`."""
+    if isinstance(raw, tuple):
+        if len(raw) != 2:
+            raise ValueError(
+                f"generate() returned a tuple of length {len(raw)}; expected a plain string or a (text, logprob) pair."
+            )
+        text, logprob = raw
+        return Generation(text=text, logprob=logprob)
+    return Generation(text=raw)
+
+
+def _require_positive_n(value: Any) -> int:
+    """Validate a strictly positive integer sample count (MXR-080-0296).
+
+    ``n or self.n``-style fallbacks silently treat ``0`` as "use the default" (``0`` is falsy in
+    Python) and let a negative count fall through to ``range(negative)`` -- an empty range, i.e. zero
+    samples drawn with no error at all. Every entry point that accepts a sample count funnels through
+    this instead: ``0``, a negative count, and a non-integer are all rejected up front rather than
+    silently reinterpreted. ``bool`` is rejected too (a subclass of ``int`` in Python; ``True``/``False``
+    as a sample count is almost certainly a caller mistake, not intent).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"n must be a positive integer, got {type(value).__name__}: {value!r}")
+    if value < 1:
+        raise ValueError(f"n must be a positive integer, got {value!r}")
+    return int(value)
+
+
+@dataclass(frozen=True)
 class ClaimAssessment:
     """Reliability of one claim inside a response, by cross-sample corroboration.
 
@@ -196,26 +257,38 @@ class LLMUncertainty:
     ) -> None:
         self.generate = generate
         self.equivalent = equivalent
-        self.n = int(n)
+        self.n = _require_positive_n(n)
         self._threshold: float | None = None
         self._alpha: float | None = None
 
-    def sample(self, prompt: str, n: int | None = None) -> list[Any]:
-        """Draw ``n`` stochastic responses to ``prompt``.
+    def sample(self, prompt: str, n: int | None = None) -> list[Generation]:
+        """Draw ``n`` stochastic responses to ``prompt``, normalized to :class:`Generation` records.
 
         ``generate`` may return a plain string, or a ``(text, logprob)`` pair -- the sequence
-        log-probability ``log P(s)``. When logprobs are provided they are used to marginalize the
-        string distribution over meaning classes exactly (:func:`mixle.inference.marginalize_meaning`)
-        rather than by sample counting.
+        log-probability ``log P(s)``. Normalized ONCE here, at the boundary (MXR-080-0296): every one
+        of :meth:`assess` / :meth:`decompose` / :meth:`assess_claims` consumes the same
+        ``list[Generation]`` shape rather than each re-deriving (or failing to re-derive) whether
+        ``generate`` returned tuples. ``generate`` must return the same shape on every call (plain
+        text throughout, or ``(text, logprob)`` throughout) -- a generator that mixes the two raises
+        rather than silently letting the unrecognized shape through unflagged. ``n`` (explicit or the
+        constructor default) must be a positive integer -- see :func:`_require_positive_n`.
         """
-        return [self.generate(prompt) for _ in range(int(n or self.n))]
+        count = _require_positive_n(n) if n is not None else self.n
+        samples = [_coerce_generation(self.generate(prompt)) for _ in range(count)]
+        has_logprob = {g.logprob is not None for g in samples}
+        if len(has_logprob) > 1:
+            raise ValueError("generate() must consistently return plain text or (text, logprob) pairs, not a mix.")
+        return samples
 
     @staticmethod
-    def _split(samples: list[Any]) -> tuple[list[Any], np.ndarray | None]:
-        """Separate ``(text, logprob)`` pairs into texts + log-probs; pass strings through unchanged."""
-        if samples and isinstance(samples[0], tuple) and len(samples[0]) == 2:
-            return [s[0] for s in samples], np.array([float(s[1]) for s in samples])
-        return samples, None
+    def _unzip(samples: list[Generation]) -> tuple[list[str], np.ndarray | None]:
+        """Split normalized :class:`Generation` records into an aligned text list + logprob array
+        (``None`` when the generator did not supply log-probabilities -- :meth:`sample` already
+        guarantees every record in ``samples`` agrees on that)."""
+        texts = [g.text for g in samples]
+        if samples and samples[0].logprob is not None:
+            return texts, np.array([g.logprob for g in samples], dtype=float)
+        return texts, None
 
     def assess(self, prompt: str, n: int | None = None) -> LLMAssessment:
         """Sample, marginalize the string distribution over meaning classes, and report the answer.
@@ -224,7 +297,7 @@ class LLMUncertainty:
         equivalence class of strings), and ``semantic_entropy`` the entropy of that meaning marginal
         -- not a per-string token probability.
         """
-        texts, log_probs = self._split(self.sample(prompt, n))
+        texts, log_probs = self._unzip(self.sample(prompt, n))
         m = marginalize_meaning(texts, self.equivalent, log_probs=log_probs)
         top = int(np.argmax(m.probs))
         clusters = sorted(zip(m.representatives, m.probs.tolist()), key=lambda t: -t[1])
@@ -242,9 +315,11 @@ class LLMUncertainty:
         Each prompt is a member; all members' samples are pooled to define shared meaning-clusters,
         then each member's distribution over those clusters feeds :func:`decompose_entropy`. Epistemic
         = disagreement across paraphrasings (prompt-sensitivity / model uncertainty); aleatoric =
-        within-member spread.
+        within-member spread. Clusters on each sample's TEXT (MXR-080-0296) -- previously this
+        clustered whatever :meth:`sample` returned raw, so a ``(text, logprob)`` generator got its
+        tuples compared for equality instead of their text, and every logprob was silently discarded.
         """
-        members = [self.sample(p, n) for p in prompts]
+        members = [[g.text for g in self.sample(p, n)] for p in prompts]
         pooled = [s for member in members for s in member]
         clusters = cluster_samples(pooled, self.equivalent)
         reps = clusters.representatives
@@ -283,13 +358,14 @@ class LLMUncertainty:
             extract: ``response -> [claim, ...]`` (default :func:`sentence_claims`).
             corroborates: ``(other_sample, claim) -> bool`` -- does a resample support the claim?
                 (default :func:`content_overlap`; pass an entailment/NLI check for real text).
-            n: number of samples (the first is the response scored; the rest corroborate).
+            n: number of samples (the first is the response scored; the rest corroborate). Must be a
+                positive integer -- see :func:`_require_positive_n`.
             threshold: support below which a claim is flagged as unreliable/fabricated.
         """
         extract = extract or sentence_claims
-        samples = self.sample(prompt, n)
+        samples = [g.text for g in self.sample(prompt, n)]
         if len(samples) < 2:
-            samples = samples + self.sample(prompt, 2 - len(samples))
+            samples = samples + [g.text for g in self.sample(prompt, 2 - len(samples))]
         primary, others = samples[0], samples[1:]
         # default corroboration weights words by information content over the drawn samples, so the
         # distinctive fact drives the decision rather than shared boilerplate.
