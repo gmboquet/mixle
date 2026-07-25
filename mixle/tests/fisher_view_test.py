@@ -759,6 +759,22 @@ class FisherViewTestCase(unittest.TestCase):
         info = view.fisher_information(stats=stats[:2], diagonal=False, ridge=0.0)
         self.assertTrue(np.all(np.isfinite(info)))
 
+    def test_generic_single_fisher_vector_requires_external_reference_geometry(self):
+        view = FisherView(GaussianDistribution(0.0, 1.0))
+        stat = view.expected_sufficient_statistics(1.25)
+        center = np.zeros_like(stat)
+        with self.assertRaisesRegex(ValueError, "external center"):
+            view.fisher_vector(1.25)
+        with self.assertRaisesRegex(ValueError, "external Fisher metric"):
+            view.fisher_vector(1.25, center=center)
+        vector = view.fisher_vector(1.25, center=center, fisher=np.ones_like(stat))
+        self.assertGreater(np.linalg.norm(vector), 0.0)
+
+    def test_exact_model_single_fisher_vector_is_not_zero_by_self_centering(self):
+        view = GaussianDistribution(0.0, 1.0).to_fisher()
+        vector = view.fisher_vector(1.25)
+        self.assertGreater(np.linalg.norm(vector), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

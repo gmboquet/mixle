@@ -28,6 +28,56 @@ ObjectiveCallable = Callable[[Any, Any, Any], Any]
 ParameterObjectiveCallable = Callable[[Mapping[str, Any], Any, Any], Any]
 
 
+def _validated_objective_weights(weights: Sequence[float] | None) -> np.ndarray | None:
+    if weights is None:
+        return None
+    values = np.asarray(weights, dtype=np.float64)
+    if (
+        values.ndim != 1
+        or values.size == 0
+        or not np.all(np.isfinite(values))
+        or np.any(values < 0.0)
+        or float(np.sum(values)) <= 0.0
+    ):
+        raise ValueError("objective weights must be a non-empty finite non-negative vector with positive sum.")
+    return values
+
+
+def _validate_objective_controls(
+    max_its: Any,
+    lr: Any,
+    tol: Any,
+    print_iter: Any,
+    maximize: Any,
+    restore_best: Any,
+) -> tuple[int, float, float, int]:
+    if isinstance(max_its, (bool, np.bool_)) or not isinstance(max_its, (int, np.integer)) or int(max_its) <= 0:
+        raise ValueError("max_its must be a positive integer.")
+    if (
+        isinstance(lr, (bool, np.bool_))
+        or not isinstance(lr, (int, float, np.integer, np.floating))
+        or not np.isfinite(lr)
+        or float(lr) <= 0.0
+    ):
+        raise ValueError("lr must be finite and positive.")
+    if (
+        isinstance(tol, (bool, np.bool_))
+        or not isinstance(tol, (int, float, np.integer, np.floating))
+        or not np.isfinite(tol)
+        or float(tol) < 0.0
+    ):
+        raise ValueError("tol must be finite and non-negative.")
+    if (
+        isinstance(print_iter, (bool, np.bool_))
+        or not isinstance(print_iter, (int, np.integer))
+        or int(print_iter) <= 0
+    ):
+        raise ValueError("print_iter must be a positive integer.")
+    if not isinstance(maximize, (bool, np.bool_)) or not isinstance(restore_best, (bool, np.bool_)):
+        raise ValueError("maximize and restore_best must be boolean.")
+    return int(max_its), float(lr), float(tol), int(print_iter)
+
+
 # --- objective declarations & objective classes ----------------------------
 @dataclass
 class ObjectiveFitResult:
@@ -151,16 +201,22 @@ class ExpectedLogDensity:
     """Objective ``sum_i w_i log q_model(x_i)`` for encoded observations."""
 
     def __init__(self, weights: Sequence[float] | None = None, normalize: bool = False) -> None:
-        self.weights = None if weights is None else np.asarray(weights, dtype=np.float64)
+        self.weights = _validated_objective_weights(weights)
+        if not isinstance(normalize, (bool, np.bool_)):
+            raise ValueError("normalize must be boolean.")
         self.normalize = bool(normalize)
 
     def __call__(self, model: SequenceEncodableProbabilityDistribution, enc: Any, engine: Any) -> Any:
         scores = backend_seq_log_density(model, enc, engine)
+        if len(scores.shape) == 0 or int(scores.shape[0]) == 0:
+            raise ValueError("ExpectedLogDensity requires at least one scored observation.")
         if self.weights is None:
             obj = engine.sum(scores)
             if self.normalize:
                 obj = obj / engine.asarray(float(scores.shape[0]))
             return obj
+        if self.weights.shape != (int(scores.shape[0]),):
+            raise ValueError("objective weights must have exactly one value per scored observation.")
         weights = engine.asarray(self.weights)
         obj = engine.sum(scores * weights)
         if self.normalize:
@@ -211,15 +267,21 @@ class UnnormalizedLogLikelihood:
         self.log_partition = log_partition
         self.partition_enc = partition_enc.payload if hasattr(partition_enc, "payload") else partition_enc
         self.reference_log_density = reference_log_density
-        self.weights = None if weights is None else np.asarray(weights, dtype=np.float64)
+        self.weights = _validated_objective_weights(weights)
+        if not isinstance(normalize, (bool, np.bool_)):
+            raise ValueError("normalize must be boolean.")
         self.normalize = bool(normalize)
 
     def __call__(self, model: Any, enc: Any, engine: Any) -> Any:
         raw = self.log_unnormalized(model, enc, engine)
+        if len(raw.shape) == 0 or int(raw.shape[0]) == 0:
+            raise ValueError("UnnormalizedLogLikelihood requires at least one scored observation.")
         if self.weights is None:
             data_term = engine.sum(raw)
             nobs = engine.asarray(float(raw.shape[0]))
         else:
+            if self.weights.shape != (int(raw.shape[0]),):
+                raise ValueError("objective weights must have exactly one value per scored observation.")
             weights = engine.asarray(self.weights)
             data_term = engine.sum(raw * weights)
             nobs = engine.sum(weights)
@@ -233,6 +295,8 @@ class UnnormalizedLogLikelihood:
         if self.log_partition is not None:
             return self.log_partition(model, engine)
         scores = self.log_unnormalized(model, self.partition_enc, engine)
+        if len(scores.shape) == 0 or int(scores.shape[0]) == 0:
+            raise ValueError("partition samples must contain at least one observation.")
         if self.reference_log_density is not None:
             scores = scores - self.reference_log_density(self.partition_enc, engine)
         return engine.logsumexp(scores, axis=0) - engine.log(engine.asarray(float(scores.shape[0])))
@@ -275,6 +339,9 @@ def fit_objective(
     best objective value seen, not necessarily the last attempted optimizer
     step.
     """
+    max_its, lr, tol, print_iter = _validate_objective_controls(
+        max_its, lr, tol, print_iter, maximize, restore_best
+    )
     torch, engine = _torch_for_gradient_fit(engine, precision=precision)
     if hasattr(enc, "payload"):
         enc = enc.payload
@@ -292,7 +359,7 @@ def fit_objective(
         return objective(shadow, enc, engine)
 
     history, best_value, best_iteration, best_state, iterations, converged = _run_objective_optimization(
-        opt, optimizer, objective_value, leaves, sign, max(1, int(max_its)), tol, maximize, out, print_iter, "objective"
+        opt, optimizer, objective_value, leaves, sign, max_its, tol, maximize, out, print_iter, "objective"
     )
 
     final_delta = history[-1] - history[-2] if len(history) > 1 else None
@@ -346,8 +413,12 @@ def variational_projection(
     """
     if enc is None:
         if data is None:
-            if sample_size <= 0:
-                raise ValueError("sample_size must be positive when data/enc is not supplied.")
+            if (
+                isinstance(sample_size, (bool, np.bool_))
+                or not isinstance(sample_size, (int, np.integer))
+                or int(sample_size) <= 0
+            ):
+                raise ValueError("sample_size must be a positive integer when data/enc is not supplied.")
             data = source.sampler(seed=seed).sample(size=int(sample_size))
         enc = target.dist_to_encoder().seq_encode(data)
     objective = ExpectedLogDensity(normalize=True)
@@ -391,6 +462,9 @@ def optimize_torch_objective(
     supervised neural-network losses.  When ``restore_best`` is true, supplied
     tensors are copied back to their best seen values before returning.
     """
+    max_its, lr, tol, print_iter = _validate_objective_controls(
+        max_its, lr, tol, print_iter, maximize, restore_best
+    )
     torch, _ = _torch_for_gradient_fit(engine, precision=precision)
     params = [p for p in parameters if getattr(p, "requires_grad", False)]
     if not params:
@@ -398,7 +472,7 @@ def optimize_torch_objective(
     opt = _make_optimizer(torch, optimizer, params, lr)
     sign = 1.0 if maximize else -1.0
     history, best_value, best_iteration, best_state, iterations, converged = _run_objective_optimization(
-        opt, optimizer, objective, params, sign, max(1, int(max_its)), tol, maximize, out, print_iter, "torch objective"
+        opt, optimizer, objective, params, sign, max_its, tol, maximize, out, print_iter, "torch objective"
     )
 
     if restore_best:
@@ -451,6 +525,9 @@ def fit_parameter_objective(
     constrained engine tensors.  When ``restore_best`` is true, returned
     detached values are the best seen named parameters.
     """
+    max_its, lr, tol, print_iter = _validate_objective_controls(
+        max_its, lr, tol, print_iter, maximize, restore_best
+    )
     if isinstance(parameters, ObjectiveParameterSet):
         param_set = parameters
         torch = param_set.torch
@@ -478,7 +555,7 @@ def fit_parameter_objective(
         objective_value,
         params,
         sign,
-        max(1, int(max_its)),
+        max_its,
         tol,
         maximize,
         out,
@@ -514,8 +591,12 @@ def projection_samples(
     source: SequenceEncodableProbabilityDistribution, sample_size: int, seed: int | None = None
 ) -> Sequence[Any]:
     """Draw reusable samples for Monte-Carlo projection experiments."""
-    if sample_size <= 0:
-        raise ValueError("sample_size must be positive.")
+    if (
+        isinstance(sample_size, (bool, np.bool_))
+        or not isinstance(sample_size, (int, np.integer))
+        or int(sample_size) <= 0
+    ):
+        raise ValueError("sample_size must be a positive integer.")
     rng = RandomState(seed)
     return source.sampler(seed=int(rng.randint(2**31 - 1))).sample(size=int(sample_size))
 
@@ -557,7 +638,11 @@ def _run_objective_optimization(
             best_value = cur
             best_iteration = step_index
             best_state = _clone_parameter_state(params)
-        return len(history) > 2 and abs(cur - history[-2]) < tol * max(1.0, abs(cur))
+        if len(history) <= 2:
+            return False
+        previous = history[-2]
+        directional_change = (cur - previous) if maximize else (previous - cur)
+        return 0.0 <= directional_change < tol * max(1.0, abs(cur), abs(previous))
 
     for i in range(iterations):
         if optimizer == "lbfgs":
@@ -600,7 +685,10 @@ def _make_optimizer(torch: Any, optimizer: str, parameters: Sequence[Any], lr: f
 
 
 def _objective_scalar(value: Any) -> float:
-    return float(value.detach().cpu().item())
+    result = float(value.detach().cpu().item())
+    if not np.isfinite(result):
+        raise GradientFitError(f"objective returned a non-finite scalar value: {result!r}.")
+    return result
 
 
 def _objective_best_entry(history: Sequence[float], maximize: bool = True) -> tuple[float, int]:
@@ -658,7 +746,10 @@ def _objective_gradient_norm(torch: Any, parameters: Sequence[Any], objective: C
             param.grad = None
     if total is None:
         return 0.0
-    return float(torch.sqrt(total).detach().cpu().item())
+    result = float(torch.sqrt(total).detach().cpu().item())
+    if not np.isfinite(result):
+        raise GradientFitError("objective returned a non-finite gradient.")
+    return result
 
 
 def _normalize_objective_parameters(parameters: Any) -> Sequence[ObjectiveParameter]:
