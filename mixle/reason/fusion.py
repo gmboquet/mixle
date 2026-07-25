@@ -94,10 +94,16 @@ class FusedBelief:
     accepted, rejected, or unresolved by a predeclared, deterministic cross-model test (see
     :func:`_adjudicate_claims`); ONLY accepted claims contribute to ``mean``/``variance``/``weights``,
     so one claim clearing adjudication no longer drags every conflicting claim along with it. ``weights``
-    is 0.0 for any claim excluded this way (still sums to 1 across the surviving claims). ``abstained``
-    is ``True`` iff ``disagreement`` is ``True`` AND not a single claim was accepted -- ``mean``/
-    ``variance`` then fall back to the precision-weighted fusion of ALL claims (still *a* number, never
-    absent), but callers MUST check ``abstained`` before surfacing ``mean`` as a driller-facing number.
+    is 0.0 for any claim excluded this way. ``abstained`` is ``True`` iff ``disagreement`` is ``True``
+    AND not a single claim was accepted -- ``mean``/``variance`` then fall back to the precision-weighted
+    fusion of ALL claims (still *a* number, never absent), but callers MUST check ``abstained`` before
+    surfacing ``mean`` as a driller-facing number.
+
+    ``weights`` sums to 1 across the surviving claims when :func:`fuse_claims` was called with no prior
+    (the default). A positive ``prior_prec`` takes its own share of the fused precision -- ``weights``
+    (which only ever has one entry per CLAIM) then sums to ``1 - prior_weight``, and
+    ``provenance["prior_prec"]``/``["prior_mean"]``/``["prior_weight"]`` report exactly what that prior
+    was and how much of the shrinkage it is responsible for (MXR-080-0286).
     """
 
     mean: float
@@ -248,25 +254,36 @@ def fuse_claims(
     claims: list[ModelClaim],
     *,
     prior_prec: float = 0.0,
+    prior_mean: float | None = None,
     sigma_flag: float = 3.0,
     verifier: Any = None,
 ) -> FusedBelief:
     """Precision-weighted product-of-experts fusion of independent external-model claims (workstream L5).
 
-    Exactly the rule stated at the top of this module (``prec_fused = sum(prec_i) + prior_prec``,
-    ``mean = sum(prec_i * value_i) / prec_fused``), applied to scalar :class:`ModelClaim`\\ s instead of
-    learned tokens: ``prec_i = reliability_i / variance_i``. On disagreement (worst pairwise standardized
-    distance ``> sigma_flag``), every claim is independently classified as accepted, rejected, or
-    unresolved by a predeclared, deterministic cross-model test (:func:`_adjudicate_claims`); ONLY
-    accepted claims feed ``mean``/``variance``/``weights`` (see :class:`FusedBelief`'s docstring for the
-    full inclusion-gating and abstention contract). ``provenance`` records every claim's
+    Exactly the rule stated at the top of this module generalized to an explicit prior mean
+    (``prec_fused = sum(prec_i) + prior_prec``, ``mean = (sum(prec_i * value_i) + prior_prec *
+    prior_mean) / prec_fused``), applied to scalar :class:`ModelClaim`\\ s instead of learned tokens:
+    ``prec_i = reliability_i / variance_i``. On disagreement (worst pairwise standardized distance
+    ``> sigma_flag``), every claim is independently classified as accepted, rejected, or unresolved by a
+    predeclared, deterministic cross-model test (:func:`_adjudicate_claims`); ONLY accepted claims feed
+    ``mean``/``variance``/``weights`` (see :class:`FusedBelief`'s docstring for the full inclusion-gating
+    and abstention contract). ``provenance`` records every claim's
     id/version/content_hash/weight/adjudication-status so a fused belief is always attributable back to
     the models that produced it and to exactly why each one was or was not trusted.
 
+    ``prior_prec`` MUST be paired with an explicit ``prior_mean`` whenever it is positive: unlike the
+    torch :class:`ProductOfExpertsFusion` at the bottom of this module, whose experts describe an
+    arbitrary LEARNED latent space where a zero-mean prior is the standard, principled convention (as in
+    a VAE), a :class:`ModelClaim`'s ``value`` is a real PHYSICAL quantity (a temperature, a flow rate, ...)
+    -- silently shrinking it toward 0 has no physical justification and can quietly change a
+    physical-unit prediction (MXR-080-0286). ``provenance["prior_weight"]`` reports the prior's own share
+    of the fused precision so the attribution is honest about where any shrinkage comes from; ``weights``
+    (which is claims-only) then sums to ``1 - prior_weight`` rather than always summing to 1.
+
     Every scalar that reaches the precision arithmetic is validated up front (``value``/``variance``/
-    ``reliability`` per claim, plus ``prior_prec`` and ``sigma_flag``) and the resulting per-claim and
-    total precision are both re-checked as strictly positive and finite immediately before they are
-    divided by -- this function never returns a :class:`FusedBelief` carrying a NaN or negative
+    ``reliability`` per claim, plus ``prior_prec``/``prior_mean``/``sigma_flag``) and the resulting
+    per-claim and total precision are both re-checked as strictly positive and finite immediately before
+    they are divided by -- this function never returns a :class:`FusedBelief` carrying a NaN or negative
     ``variance`` (MXR-080-0283); it raises ``ValueError`` instead.
     """
     if not claims:
@@ -275,6 +292,14 @@ def fuse_claims(
         raise ValueError(f"sigma_flag must be finite and > 0, got {sigma_flag!r}")
     if not math.isfinite(prior_prec) or prior_prec < 0:
         raise ValueError(f"prior_prec must be finite and >= 0, got {prior_prec!r}")
+    if prior_prec > 0 and prior_mean is None:
+        raise ValueError(
+            "fuse_claims requires an explicit prior_mean when prior_prec > 0 -- a precision-only prior "
+            "silently implies a zero-centered prior mean, which is rarely physically meaningful (e.g. "
+            "shrinking a temperature claim toward 0 degrees for no physical reason)"
+        )
+    if prior_mean is not None and not math.isfinite(prior_mean):
+        raise ValueError(f"prior_mean must be finite, got {prior_mean!r}")
     for c in claims:
         if not math.isfinite(c.value):
             raise ValueError(f"ModelClaim {c.model_id!r} has a non-finite value {c.value!r}")
@@ -326,12 +351,21 @@ def fuse_claims(
     prec_fused = included_total_prec + prior_prec
     if not math.isfinite(prec_fused) or prec_fused <= 0:
         raise ValueError(f"fuse_claims produced a non-positive/non-finite fused precision {prec_fused!r}")
-    mean = sum(precisions[i] * claims[i].value for i in included_idx) / prec_fused
+    numerator = sum(precisions[i] * claims[i].value for i in included_idx)
+    if prior_prec > 0:
+        numerator += prior_prec * prior_mean  # prior_mean is guaranteed non-None here (validated above)
+    mean = numerator / prec_fused
     variance = 1.0 / prec_fused
     if not math.isfinite(mean) or not math.isfinite(variance) or variance <= 0:
         raise ValueError("fuse_claims produced a non-finite fused mean/variance from otherwise-valid inputs")
-    per_claim_weight = [(precisions[i] / included_total_prec) if i in included else 0.0 for i in range(len(claims))]
+    # Divide by the FULL fused precision (claims + prior), not just the claims' own total, so `weights`
+    # honestly reflects each claim's share of the ACTUAL fused result: when prior_prec > 0 the claims no
+    # longer explain 100% of `mean`, so `weights` sums to `1 - prior_weight` rather than always 1
+    # (MXR-080-0286) -- `provenance["prior_weight"]` reports the prior's own share explicitly so the
+    # shortfall is never silently unexplained.
+    per_claim_weight = [(precisions[i] / prec_fused) if i in included else 0.0 for i in range(len(claims))]
     weights = dict(zip(weight_keys, per_claim_weight))
+    prior_weight = (prior_prec / prec_fused) if prior_prec > 0 else 0.0
 
     provenance: dict[str, Any] = {
         "claims": [
@@ -347,6 +381,9 @@ def fuse_claims(
         ],
         "max_pairwise_standardized_distance": max_z,
         "sigma_flag": sigma_flag,
+        "prior_prec": prior_prec,
+        "prior_mean": prior_mean,
+        "prior_weight": prior_weight,
     }
     if adjudication is not None:
         for entry, a in zip(provenance["claims"], adjudication):

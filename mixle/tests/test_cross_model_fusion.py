@@ -69,15 +69,49 @@ def test_weights_track_reliability_and_provenance_is_attributable():
     assert by_id["modelB"]["content_hash"] == "d" * 64
 
 
-def test_prior_precision_pulls_the_fused_mean_and_shrinks_variance():
-    claims = [
-        ModelClaim(value=5.0, variance=1.0, model_id="only", version="v1", content_hash="e" * 64),
-    ]
+def test_prior_prec_without_an_explicit_prior_mean_is_rejected():
+    """Regression test for MXR-080-0286: prior_prec used to be added to the denominator with NO prior
+    mean contributing to the numerator at all, an undeclared zero-centered prior that silently shrunk
+    every fused claim toward 0 -- physically meaningless for a real quantity like a temperature. A
+    positive prior_prec must now be paired with an explicit prior_mean or fuse_claims raises."""
+    claims = [ModelClaim(value=5.0, variance=1.0, model_id="only", version="v1", content_hash="e" * 64)]
+    with pytest.raises(ValueError):
+        fuse_claims(claims, prior_prec=1.0)
+
+
+def test_prior_pulls_the_fused_mean_toward_the_declared_prior_not_silently_toward_zero():
+    """Physical-unit reproduction of MXR-080-0286: a claimed temperature anomaly of +5 degC regularized
+    with prior_prec=1.0 used to silently shrink to 2.5 degC -- halfway to 0 degC, a value with no
+    physical meaning for a temperature anomaly. With an explicit prior_mean, it now shrinks toward
+    whatever prior was actually declared (0 degC is a valid choice if a caller truly wants it, but it
+    must be requested, not assumed), and provenance reports exactly how much of the shrinkage the prior
+    is responsible for."""
+    claims = [ModelClaim(value=5.0, variance=1.0, model_id="cmip_ensemble_mean", version="v1", content_hash="e" * 64)]
     unregularized = fuse_claims(claims)
-    regularized = fuse_claims(claims, prior_prec=1.0)
+    zero_centered = fuse_claims(claims, prior_prec=1.0, prior_mean=0.0)
+    physical_prior = fuse_claims(claims, prior_prec=1.0, prior_mean=14.0)  # e.g. a real climatological prior
+
     assert unregularized.mean == pytest.approx(5.0, abs=1e-9)
-    assert regularized.mean == pytest.approx(2.5, abs=1e-9)  # (1*5 + 0) / (1 + 1)
-    assert regularized.variance < unregularized.variance
+    assert zero_centered.mean == pytest.approx(2.5, abs=1e-9)  # (1*5.0 + 1*0.0) / (1 + 1) -- explicit, not implied
+    assert physical_prior.mean == pytest.approx(9.5, abs=1e-9)  # (1*5.0 + 1*14.0) / (1 + 1) -- toward 14, not 0
+    assert zero_centered.variance < unregularized.variance
+    assert physical_prior.variance == pytest.approx(zero_centered.variance)  # shrinkage magnitude is prior-mean-free
+
+    # provenance must honestly attribute the prior's own share of the fused precision
+    assert physical_prior.provenance["prior_prec"] == pytest.approx(1.0)
+    assert physical_prior.provenance["prior_mean"] == pytest.approx(14.0)
+    assert physical_prior.provenance["prior_weight"] == pytest.approx(0.5, abs=1e-9)  # 1 / (1 + 1)
+    assert sum(physical_prior.weights.values()) == pytest.approx(0.5, abs=1e-9)  # the claim explains only half now
+    assert unregularized.provenance["prior_weight"] == pytest.approx(0.0)
+    assert sum(unregularized.weights.values()) == pytest.approx(1.0, abs=1e-9)  # unaffected with no prior
+
+
+def test_prior_mean_must_be_finite_when_supplied():
+    claims = [ModelClaim(value=5.0, variance=1.0, model_id="only", version="v1", content_hash="e" * 64)]
+    with pytest.raises(ValueError):
+        fuse_claims(claims, prior_prec=1.0, prior_mean=float("nan"))
+    with pytest.raises(ValueError):
+        fuse_claims(claims, prior_prec=1.0, prior_mean=float("inf"))
 
 
 def test_verifier_accepting_a_claim_prevents_abstention_on_disagreement():
