@@ -49,7 +49,9 @@ tolerance.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -73,7 +75,9 @@ __all__ = [
     "ProductQuantizer",
     "QuantizedKeyAttentionSpine",
     "QuantizedKeyCellState",
+    "QuantizedSoftmaxReceipt",
     "SlidingCellWindow",
+    "quantized_softmax_weights",
 ]
 
 
@@ -95,8 +99,10 @@ class SlidingCellWindow:
     """
 
     def __init__(self, window: int, value_dim: int) -> None:
-        if window < 1:
+        if isinstance(window, (bool, np.bool_)) or not isinstance(window, Integral) or int(window) < 1:
             raise ValueError(f"window must be >= 1, got {window}")
+        if isinstance(value_dim, (bool, np.bool_)) or not isinstance(value_dim, Integral) or int(value_dim) < 1:
+            raise ValueError(f"value_dim must be a positive exact integer, got {value_dim}")
         self.window = int(window)
         self.value_dim = int(value_dim)
         self._ring: list[tuple[int, np.ndarray]] = []
@@ -109,9 +115,13 @@ class SlidingCellWindow:
 
     def push(self, cell_id: int, value: Any) -> tuple[int, np.ndarray] | None:
         """Add one token; return the ``(cell_id, value)`` it evicted, or ``None`` if the window isn't full."""
-        value = np.asarray(value, dtype=np.float64)
+        value = np.array(value, dtype=np.float64, copy=True)
         if value.shape != (self.value_dim,):
             raise ValueError(f"value must have shape ({self.value_dim},), got {value.shape}")
+        if not np.isfinite(value).all():
+            raise ValueError("value must contain only finite entries")
+        if isinstance(cell_id, (bool, np.bool_)) or not isinstance(cell_id, Integral) or int(cell_id) < 0:
+            raise ValueError(f"cell_id must be a non-negative exact integer, got {cell_id}")
         cell_id = int(cell_id)
         self._ring.append((cell_id, value))
         self.counts[cell_id] = self.counts.get(cell_id, 0) + 1
@@ -151,7 +161,7 @@ class CellCountTree:
     """
 
     def __init__(self, capacity: int) -> None:
-        if capacity < 1:
+        if isinstance(capacity, (bool, np.bool_)) or not isinstance(capacity, Integral) or int(capacity) < 1:
             raise ValueError(f"capacity must be >= 1, got {capacity}")
         self.capacity = int(capacity)
         self._nodes: list[dict[int, int]] = [{} for _ in range(self.capacity + 1)]
@@ -159,8 +169,15 @@ class CellCountTree:
 
     def add(self, pos: int, cell_id: int, count: int = 1) -> None:
         """Record ``count`` tokens of ``cell_id`` at stream position ``pos`` (0-based, < capacity)."""
+        if isinstance(pos, (bool, np.bool_)) or not isinstance(pos, Integral):
+            raise ValueError(f"pos must be an exact integer, got {pos}")
         if not 0 <= pos < self.capacity:
             raise ValueError(f"pos must be in [0, {self.capacity}), got {pos}")
+        if isinstance(cell_id, (bool, np.bool_)) or not isinstance(cell_id, Integral) or int(cell_id) < 0:
+            raise ValueError(f"cell_id must be a non-negative exact integer, got {cell_id}")
+        if isinstance(count, (bool, np.bool_)) or not isinstance(count, Integral) or int(count) <= 0:
+            raise ValueError(f"count must be a positive exact integer, got {count}")
+        pos = int(pos)
         cell_id = int(cell_id)
         touches = 0
         i = pos + 1
@@ -173,8 +190,11 @@ class CellCountTree:
 
     def prefix(self, pos: int) -> dict[int, int]:
         """Cell counts over positions ``[0, pos)``."""
+        if isinstance(pos, (bool, np.bool_)) or not isinstance(pos, Integral):
+            raise ValueError(f"pos must be an exact integer, got {pos}")
         if not 0 <= pos <= self.capacity:
             raise ValueError(f"pos must be in [0, {self.capacity}], got {pos}")
+        pos = int(pos)
         out: dict[int, int] = {}
         touches = 0
         i = pos
@@ -188,6 +208,8 @@ class CellCountTree:
 
     def range_counts(self, lo: int, hi: int) -> dict[int, int]:
         """Cell counts over positions ``[lo, hi)`` via the group inverse: ``prefix(hi) - prefix(lo)``."""
+        if any(isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral) for value in (lo, hi)):
+            raise ValueError(f"lo and hi must be exact integers, got lo={lo}, hi={hi}")
         if lo > hi:
             raise ValueError(f"need lo <= hi, got [{lo}, {hi})")
         upper = self.prefix(hi)
@@ -209,6 +231,19 @@ class CellCountTree:
 
 
 @dataclass
+class QuantizedSoftmaxReceipt:
+    """Verified error scope for one quantized-softmax evaluation."""
+
+    bits: int
+    span: float
+    grid_step: float
+    clipped_logits: int
+    finite_logits: int
+    max_logit_error: float
+    max_relative_probability_error_bound: float
+
+
+@dataclass
 class QuantizedKeyCellState:
     """Near window (stop-gradient KV cache, as E1) + far-field cell store, per layer.
 
@@ -227,6 +262,7 @@ class QuantizedKeyCellState:
     cache_v: list[Any] = field(default_factory=list)
     pos: int = 0
     drops: int = 0
+    lse_receipts: list[QuantizedSoftmaxReceipt | None] = field(default_factory=list)
 
 
 if _HAS_TORCH:
@@ -266,13 +302,43 @@ if _HAS_TORCH:
             reseed_threshold: float = 0.1,
         ) -> None:
             super().__init__()
+            integer_args = {
+                "head_dim": head_dim,
+                "n_blocks": n_blocks,
+                "codes_per_block": codes_per_block,
+            }
+            for name, value in integer_args.items():
+                if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral) or int(value) <= 0:
+                    raise ValueError(f"{name} must be a positive exact integer, got {value}")
+            head_dim = int(head_dim)
+            n_blocks = int(n_blocks)
+            codes_per_block = int(codes_per_block)
             if head_dim % n_blocks != 0:
                 raise ValueError(f"head_dim={head_dim} must divide into n_blocks={n_blocks}")
             if codebook_update not in ("gradient", "ema"):
                 raise ValueError(f"codebook_update must be 'gradient' or 'ema', got {codebook_update!r}")
-            self.head_dim = int(head_dim)
-            self.n_blocks = int(n_blocks)
-            self.codes_per_block = int(codes_per_block)
+            real_args = {
+                "beta": (beta, 0.0, None),
+                "ema_decay": (ema_decay, 0.0, 1.0),
+                "ema_eps": (ema_eps, 0.0, None),
+                "reseed_threshold": (reseed_threshold, 0.0, None),
+            }
+            for name, (value, lower, upper) in real_args.items():
+                if (
+                    isinstance(value, (bool, np.bool_))
+                    or not isinstance(value, Real)
+                    or not math.isfinite(float(value))
+                ):
+                    raise ValueError(f"{name} must be a finite real number")
+                if name in {"ema_eps"} and float(value) <= lower:
+                    raise ValueError(f"{name} must be positive")
+                if name != "ema_eps" and float(value) < lower:
+                    raise ValueError(f"{name} must be non-negative")
+                if upper is not None and float(value) >= upper:
+                    raise ValueError(f"{name} must be less than {upper}")
+            self.head_dim = head_dim
+            self.n_blocks = n_blocks
+            self.codes_per_block = codes_per_block
             self.sub_dim = head_dim // n_blocks
             self.beta = float(beta)
             self.codebook_update = codebook_update
@@ -297,9 +363,9 @@ if _HAS_TORCH:
                     # update scheme spends its first phase waiting for the encoder to reorganize --
                     # the decay-insensitive ~1.6x friction floor measured in ema_friction.py.
                     for b_idx in range(self.n_blocks):
-                        picks = torch.randperm(kb.shape[0])[: self.codes_per_block]
+                        picks = torch.randperm(kb.shape[0], device=kb.device)[: self.codes_per_block]
                         if len(picks) < self.codes_per_block:
-                            picks = torch.randint(0, kb.shape[0], (self.codes_per_block,))
+                            picks = torch.randint(0, kb.shape[0], (self.codes_per_block,), device=kb.device)
                         self.codebooks.data[b_idx] = kb[picks, b_idx]
                         self._ema_embed_avg[b_idx] = kb[picks, b_idx]
                         self._ema_cluster_size[b_idx].fill_(1.0)
@@ -329,29 +395,44 @@ if _HAS_TORCH:
 
         def encode(self, k: Any) -> Any:
             """``(..., head_dim) -> (..., n_blocks)`` nearest-code indices (no gradient; argmin is discrete)."""
+            if not torch.is_tensor(k) or k.shape[-1:] != (self.head_dim,):
+                raise ValueError(f"k must be a tensor whose final dimension is head_dim={self.head_dim}")
+            if not (k.is_floating_point() or k.is_complex()) or k.is_complex():
+                raise TypeError("k must be a real floating-point tensor")
+            if not bool(torch.isfinite(k).all().item()):
+                raise ValueError("k must contain only finite values")
             blocks = k.detach().reshape(*k.shape[:-1], self.n_blocks, self.sub_dim)
             dist = ((blocks.unsqueeze(-2) - self.codebooks) ** 2).sum(-1)  # (..., n_blocks, codes_per_block)
             return dist.argmin(-1)
 
         def reconstruct(self, codes: Any) -> Any:
             """``(..., n_blocks) -> (..., head_dim)`` codebook lookup; differentiable w.r.t. the codebooks."""
+            if not torch.is_tensor(codes) or codes.shape[-1:] != (self.n_blocks,):
+                raise ValueError(f"codes must be a tensor whose final dimension is n_blocks={self.n_blocks}")
+            if codes.dtype != torch.long:
+                raise TypeError("codes must use torch.long integer indices")
+            if codes.numel() and bool(((codes < 0) | (codes >= self.codes_per_block)).any().item()):
+                raise ValueError(f"codes must lie in [0, {self.codes_per_block})")
             gathered = [self.codebooks[b_idx][codes[..., b_idx]] for b_idx in range(self.n_blocks)]
             return torch.cat(gathered, dim=-1)
 
         def forward(self, k: Any) -> tuple[Any, Any, Any]:
             codes = self.encode(k)
+            if self.codebook_update == "ema" and self.training and torch.is_grad_enabled():
+                self._ema_update(k, codes)
+                # The update changes the codebook. Re-encode against that committed state so the
+                # returned codes reconstruct the returned quantized keys exactly.
+                codes = self.encode(k)
             quant = self.reconstruct(codes)
             blocks_flat = k  # commitment in the full-key metric == sum of per-block metrics
             if self.codebook_update == "ema":
-                # encoder-side pull only; the codebook is trained by the EMA cluster step (applied
-                # AFTER this batch used the current codes -- the standard VQ-VAE-EMA ordering, so
-                # the returned codes and quantized keys stay mutually consistent)
+                # Encoder-side pull only; the codebook is trained by the committed EMA cluster step.
                 commit = self.beta * F.mse_loss(blocks_flat, quant.detach())
-                if self.training and torch.is_grad_enabled():
-                    self._ema_update(k, codes)
             else:
                 commit = F.mse_loss(blocks_flat, quant.detach()) + self.beta * F.mse_loss(quant, blocks_flat.detach())
-            k_q = k + (quant - k).detach()  # straight-through
+            # Numerically equal to the committed lookup while carrying the identity gradient to k.
+            # This ordering avoids the cancellation-rounding residue in ``k + (quant-k)``.
+            k_q = quant.detach() + (k - k.detach())
             return k_q, codes, commit
 
     def _windowed_logits(
@@ -431,28 +512,76 @@ if _HAS_TORCH:
         new_cache_v = v_full_raw[:, -window:]
         return near_logits, gap_logits, vh, new_cache_k, new_cache_v, evicted_k_raw, evicted_v_raw
 
-    def quantized_softmax_weights(logits: Any, *, bits: int, span: float = 24.0) -> Any:
-        """Unnormalized softmax weights through the Q-LSE grid: ONE ``2^bits`` exp table, no real exp.
+    def quantized_softmax_weights(
+        logits: Any,
+        *,
+        bits: int,
+        span: float = 24.0,
+        return_receipt: bool = False,
+    ) -> Any:
+        """Return unnormalized weights from one ``2**bits`` exponential lookup table.
 
-        ``mixle.engines.qlut.quantized_logsumexp``'s exact semantics, elementwise: shift by the
-        row max, round to the ``span / 2^bits`` grid, clamp scores more than ``span`` below the max
-        into the bottom bin, and read ``exp`` off the precomputed table (``-inf`` rows get weight
-        0, matching softmax's treatment of masked slots). Dividing by the row sum gives softmax
-        weights within ``exp(+-lse_error_bound(bits, span)) - 1`` relative of exact -- the same
-        grid half-step bound, now carried through the attention READOUT rather than just the
-        scorer. The histogram+dot evaluation of these same numbers is the O(2^bits) form; here the
-        table gather is per element because the readout needs the per-slot weights against values.
+        Finite logits are max-shifted, rounded to the ``span / 2**bits`` grid, and values below the
+        table range are clipped to its bottom bin. ``-inf`` is the only accepted mask value.
+
+        Clipping is *not* covered by the grid half-step alone. With ``return_receipt=True`` this
+        function also returns a :class:`QuantizedSoftmaxReceipt` computed from the actual logits.
+        Its relative-probability bound uses the maximum error between every exact shifted logit and
+        its represented grid value, so it remains valid when clipping occurs (and may honestly be
+        large or infinite). The ordinary grid-only bound applies exactly when ``clipped_logits == 0``.
         """
+        if isinstance(bits, (bool, np.bool_)) or not isinstance(bits, Integral) or not 1 <= int(bits) <= 24:
+            raise ValueError(f"bits must be an exact integer in [1, 24], got {bits}")
+        if isinstance(span, (bool, np.bool_)) or not isinstance(span, Real) or not math.isfinite(float(span)):
+            raise ValueError(f"span must be a finite positive real number, got {span}")
+        if float(span) <= 0:
+            raise ValueError(f"span must be a finite positive real number, got {span}")
+        if not torch.is_tensor(logits) or not logits.is_floating_point():
+            raise TypeError("logits must be a real floating-point tensor")
+        if logits.ndim < 1 or logits.shape[-1] == 0:
+            raise ValueError("logits must have a non-empty final dimension")
+        if bool((torch.isnan(logits) | torch.isposinf(logits)).any().item()):
+            raise ValueError("logits must not contain NaN or +inf; use -inf for masked entries")
+        bits = int(bits)
+        span = float(span)
         levels = 1 << bits
         delta = span / levels
         finite = torch.isfinite(logits)
         m = logits.masked_fill(~finite, float("-inf")).amax(dim=-1, keepdim=True)
         m = torch.where(torch.isfinite(m), m, torch.zeros_like(m))  # all-masked rows: any shift works
-        idx = torch.clamp(torch.round((logits - m) / delta).long() + levels - 1, min=0, max=levels - 1)
+        shifted = logits - m
+        raw_idx = torch.round(shifted / delta).long() + levels - 1
+        clipped = finite & (raw_idx < 0)
+        idx = torch.clamp(raw_idx, min=0, max=levels - 1)
         table = torch.exp((torch.arange(levels, device=logits.device, dtype=torch.float64) - (levels - 1)) * delta).to(
             logits.dtype
         )
-        return table[idx] * finite.to(logits.dtype)
+        if not bool((table > 0).all().item()):
+            raise ValueError(
+                f"logits dtype {logits.dtype} cannot represent the requested exp table over span={span}; "
+                "use a wider floating-point dtype or a smaller span"
+            )
+        weights = table[idx] * finite.to(logits.dtype)
+        if not return_receipt:
+            return weights
+
+        represented = (idx.to(logits.dtype) - (levels - 1)) * delta
+        errors = torch.abs(represented[finite] - shifted[finite])
+        max_error = float(errors.max().item()) if errors.numel() else 0.0
+        try:
+            relative_bound = math.expm1(2.0 * max_error)
+        except OverflowError:
+            relative_bound = float("inf")
+        receipt = QuantizedSoftmaxReceipt(
+            bits=bits,
+            span=span,
+            grid_step=delta,
+            clipped_logits=int(clipped.sum().item()),
+            finite_logits=int(finite.sum().item()),
+            max_logit_error=max_error,
+            max_relative_probability_error_bound=relative_bound,
+        )
+        return weights, receipt
 
     def _far_bank(codes: Any, counts: Any, vsum: Any, q_raw: Any, pq: ProductQuantizer) -> tuple[Any, Any]:
         """Far-field logits and mean values from the cell store.
@@ -582,16 +711,60 @@ if _HAS_TORCH:
             lse_span: float = 24.0,
         ) -> None:
             super().__init__()
-            assert d_model % n_head == 0
-            self.vocab = int(vocab)
-            self.d_model = int(d_model)
-            self.n_layer = int(n_layer)
-            self.n_head = int(n_head)
+            integer_args = {
+                "vocab": vocab,
+                "d_model": d_model,
+                "n_layer": n_layer,
+                "n_head": n_head,
+                "window": window,
+                "n_blocks": n_blocks,
+                "codes_per_block": codes_per_block,
+                "max_cells": max_cells,
+            }
+            for name, value in integer_args.items():
+                if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral) or int(value) <= 0:
+                    raise ValueError(f"{name} must be a positive exact integer, got {value}")
+            vocab = int(vocab)
+            d_model = int(d_model)
+            n_layer = int(n_layer)
+            n_head = int(n_head)
+            window = int(window)
+            n_blocks = int(n_blocks)
+            codes_per_block = int(codes_per_block)
+            max_cells = int(max_cells)
+            if d_model % n_head != 0:
+                raise ValueError(f"d_model={d_model} must be divisible by n_head={n_head}")
+            if (d_model // n_head) % n_blocks != 0:
+                raise ValueError(f"head_dim={d_model // n_head} must be divisible by n_blocks={n_blocks}")
+            if (
+                isinstance(commit_weight, (bool, np.bool_))
+                or not isinstance(commit_weight, Real)
+                or not math.isfinite(float(commit_weight))
+                or float(commit_weight) < 0
+            ):
+                raise ValueError("commit_weight must be a finite non-negative real number")
+            if lse_bits is not None and (
+                isinstance(lse_bits, (bool, np.bool_))
+                or not isinstance(lse_bits, Integral)
+                or not 1 <= int(lse_bits) <= 24
+            ):
+                raise ValueError(f"lse_bits must be None or an exact integer in [1, 24], got {lse_bits}")
+            if (
+                isinstance(lse_span, (bool, np.bool_))
+                or not isinstance(lse_span, Real)
+                or not math.isfinite(float(lse_span))
+                or float(lse_span) <= 0
+            ):
+                raise ValueError("lse_span must be a finite positive real number")
+            self.vocab = vocab
+            self.d_model = d_model
+            self.n_layer = n_layer
+            self.n_head = n_head
             self.head_dim = d_model // n_head
-            self.window = int(window)
-            self.n_blocks = int(n_blocks)
-            self.codes_per_block = int(codes_per_block)
-            self.max_cells = int(max_cells)
+            self.window = window
+            self.n_blocks = n_blocks
+            self.codes_per_block = codes_per_block
+            self.max_cells = max_cells
             self.commit_weight = float(commit_weight)
             # Q-LSE readout: with lse_bits set, INFERENCE steps (no grad) normalize the joint
             # softmax through the quantized-exp table (quantized_softmax_weights); training steps
@@ -614,17 +787,24 @@ if _HAS_TORCH:
             )
 
         def init_state(self, batch_size: int, *, device: str = "cpu") -> QuantizedKeyCellState:
+            if isinstance(batch_size, (bool, np.bool_)) or not isinstance(batch_size, Integral) or int(batch_size) <= 0:
+                raise ValueError(f"batch_size must be a positive exact integer, got {batch_size}")
+            batch_size = int(batch_size)
             shape = (batch_size, self.n_head, self.max_cells)
             return QuantizedKeyCellState(
                 codes=[
                     torch.zeros(*shape, self.n_blocks, dtype=torch.long, device=device) for _ in range(self.n_layer)
                 ],
                 counts=[torch.zeros(*shape, dtype=torch.long, device=device) for _ in range(self.n_layer)],
-                vsum=[torch.zeros(*shape, self.head_dim, device=device) for _ in range(self.n_layer)],
+                vsum=[
+                    torch.zeros(*shape, self.head_dim, device=device, dtype=self.tok.weight.dtype)
+                    for _ in range(self.n_layer)
+                ],
                 cache_k=[None] * self.n_layer,
                 cache_v=[None] * self.n_layer,
                 pos=0,
                 drops=0,
+                lse_receipts=[None] * self.n_layer,
             )
 
         def detach(self, state: QuantizedKeyCellState) -> QuantizedKeyCellState:
@@ -636,6 +816,7 @@ if _HAS_TORCH:
                 cache_v=[v.detach() if v is not None else None for v in state.cache_v],
                 pos=state.pos,
                 drops=state.drops,
+                lse_receipts=list(state.lse_receipts),
             )
 
         def occupancy_receipt(self, state: QuantizedKeyCellState) -> dict[str, Any]:
@@ -646,6 +827,20 @@ if _HAS_TORCH:
                 "capacity": self.max_cells,
                 "possible_cells": self.codes_per_block**self.n_blocks,
                 "dropped_tokens": state.drops,
+                "quantized_softmax": [
+                    None
+                    if receipt is None
+                    else {
+                        "bits": receipt.bits,
+                        "span": receipt.span,
+                        "grid_step": receipt.grid_step,
+                        "clipped_logits": receipt.clipped_logits,
+                        "finite_logits": receipt.finite_logits,
+                        "max_logit_error": receipt.max_logit_error,
+                        "max_relative_probability_error_bound": receipt.max_relative_probability_error_bound,
+                    }
+                    for receipt in state.lse_receipts
+                ],
             }
 
         def step(self, state: QuantizedKeyCellState, chunk: tuple[Any, Any]) -> tuple[QuantizedKeyCellState, Any]:
@@ -658,6 +853,7 @@ if _HAS_TORCH:
             new_vsum: list[Any] = []
             new_cache_k: list[Any] = []
             new_cache_v: list[Any] = []
+            new_lse_receipts: list[QuantizedSoftmaxReceipt | None] = []
             drops = state.drops
             commit_total = h.new_zeros(())
             for layer in range(self.n_layer):
@@ -687,10 +883,16 @@ if _HAS_TORCH:
                 # attention over the whole stream with far keys quantized -- the collapse identity's LHS.
                 joint_logits = torch.cat([far_logits, gap_logits, near_logits], dim=-1)
                 if self.lse_bits is not None and not torch.is_grad_enabled():
-                    w = quantized_softmax_weights(joint_logits, bits=self.lse_bits, span=self.lse_span)
+                    w, lse_receipt = quantized_softmax_weights(
+                        joint_logits,
+                        bits=self.lse_bits,
+                        span=self.lse_span,
+                        return_receipt=True,
+                    )
                     joint = w / w.sum(dim=-1, keepdim=True).clamp(min=torch.finfo(w.dtype).tiny)
                 else:
                     joint = joint_logits.softmax(dim=-1)
+                    lse_receipt = None
                 n_cells = far_logits.shape[-1]
                 n_unfolded = gap_logits.shape[-1]
                 out = (
@@ -720,6 +922,7 @@ if _HAS_TORCH:
                 new_vsum.append(vsum_l)
                 new_cache_k.append(cache_k)
                 new_cache_v.append(cache_v)
+                new_lse_receipts.append(lse_receipt)
 
             logits = self.head(self.ln_f(h))
             loss = F.cross_entropy(logits.reshape(b * t, self.vocab), y.reshape(b * t))
@@ -734,5 +937,6 @@ if _HAS_TORCH:
                 cache_v=new_cache_v,
                 pos=state.pos + t,
                 drops=drops,
+                lse_receipts=new_lse_receipts,
             )
             return new_state, loss
