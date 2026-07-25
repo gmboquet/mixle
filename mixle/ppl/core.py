@@ -1976,7 +1976,17 @@ class RandomVariable:
         # own their fit through the registered fit_fn hook -- no per-family branch in core. State-space
         # is registered in mixle.ppl.statespace; PDEStateSpace by the mixle-pde plugin.
         if self._kind == "sample" and isinstance(self._family, CompositeFamily) and self._family.fit_fn is not None:
-            bespoke_options = {"max_its": max_its, "delta": delta, "missing": missing, **kw}
+            bespoke_options = {
+                "max_its": max_its,
+                "delta": delta,
+                "missing": missing,
+                "backend": backend,
+                "num_workers": num_workers,
+                "engine": engine,
+                "precision": precision,
+                "print_iter": print_iter,
+                **kw,
+            }
             return _stash_explanation(self._family.fit_fn(self, data, **bespoke_options))
 
         # Indexed-flat hierarchical: Normal(Normal(m, t).each(by="g"), s).fit(y, given={"g": labels}).
