@@ -23,6 +23,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.engines._optional_extension import load_optional_extension
+
 # Veltkamp splitting factor for IEEE double (53-bit significand): 2**ceil(53/2) + 1.
 _SPLITTER = float(2**27 + 1)
 
@@ -137,12 +139,11 @@ def dd_sum(x: Any) -> DoubleDouble:
     return DoubleDouble(hi[0], lo[0])
 
 
-try:  # optional compiled FMA kernel -- ~3x on the dot (numpy has no FMA, pays the Veltkamp split)
-    from mixle.engines._dd_kernels import dd_dot_c as _dd_dot_c
-
-    HAS_DD_KERNELS = True
-except ImportError:  # pragma: no cover - package works fine without the compiled accelerator
-    HAS_DD_KERNELS = False
+_DD_EXTENSION = load_optional_extension("mixle.engines._dd_kernels", ("dd_dot_c",))
+HAS_DD_KERNELS = _DD_EXTENSION.available
+DD_EXTENSION_DIAGNOSTIC = _DD_EXTENSION.diagnostic
+if HAS_DD_KERNELS:  # pragma: no cover - depends on the optional local build
+    (_dd_dot_c,) = _DD_EXTENSION.values
 
 
 def _require_equal_length(a: np.ndarray, b: np.ndarray) -> None:

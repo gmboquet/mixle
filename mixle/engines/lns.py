@@ -29,12 +29,13 @@ from typing import Any, Final
 
 import numpy as np
 
-try:  # optional compiled one-pass tree kernel for the integer log-sum-exp (bit-identical, ~8x)
-    from mixle.engines._lns_kernel import logsumexp_rows as _logsumexp_rows_c
+from mixle.engines._optional_extension import load_optional_extension
 
-    _HAS_LNS_KERNEL = True
-except ImportError:  # pragma: no cover - extension optional
-    _HAS_LNS_KERNEL = False
+_LNS_EXTENSION = load_optional_extension("mixle.engines._lns_kernel", ("logsumexp_rows",))
+_HAS_LNS_KERNEL = _LNS_EXTENSION.available
+LNS_EXTENSION_DIAGNOSTIC = _LNS_EXTENSION.diagnostic
+if _HAS_LNS_KERNEL:  # pragma: no cover - depends on the optional local build
+    (_logsumexp_rows_c,) = _LNS_EXTENSION.values
 
 
 # --- MXR-080-0138: log-zero sentinel + saturating code range -------------------------------------------

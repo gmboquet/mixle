@@ -19,13 +19,16 @@ from typing import Any
 
 import numpy as np
 
-try:
-    from mixle.engines._bitpacked import binary_gemm as _binary_gemm_c
-    from mixle.engines._bitpacked import ternary_gemm as _ternary_gemm_c
+from mixle.engines._optional_extension import load_optional_extension
 
-    HAS_BITPACKED = True
-except ImportError:  # pragma: no cover - extension optional
-    HAS_BITPACKED = False
+_BITPACKED_EXTENSION = load_optional_extension(
+    "mixle.engines._bitpacked",
+    ("binary_gemm", "ternary_gemm"),
+)
+HAS_BITPACKED = _BITPACKED_EXTENSION.available
+BITPACKED_EXTENSION_DIAGNOSTIC = _BITPACKED_EXTENSION.diagnostic
+if HAS_BITPACKED:  # pragma: no cover - depends on the optional local build
+    _binary_gemm_c, _ternary_gemm_c = _BITPACKED_EXTENSION.values
 
 # pack_pm1's declared alphabet is {-1,+1} OR {0,1} (see its docstring); the union is {-1,0,1}. pack_ternary's
 # declared alphabet is {-1,0,+1}. Both are the same set, so one check serves both entry points.

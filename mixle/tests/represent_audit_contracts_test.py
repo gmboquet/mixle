@@ -8,10 +8,17 @@ import numpy as np
 
 from mixle.represent.graph import GraphEmbedding, GraphEncoder
 from mixle.represent.heterogeneous import HeterogeneousEncoder
-from mixle.represent.segment import ByteSegmenter, SetSegmenter, WholeSegmenter, WindowSegmenter
+from mixle.represent.segment import ByteSegmenter, PatchSegmenter, SetSegmenter, WholeSegmenter, WindowSegmenter
 
 
 class SegmentContractTest(unittest.TestCase):
+    def test_patch_segmentation_rejects_implicit_border_loss(self):
+        with self.assertRaisesRegex(ValueError, "divisible"):
+            PatchSegmenter(8).segment(np.zeros((10, 10)))
+        for patch in (True, 0, -1, 1.5):
+            with self.subTest(patch=patch), self.assertRaises(ValueError):
+                PatchSegmenter(patch)
+
     def test_window_covers_and_pads_the_final_tail(self):
         segmenter = WindowSegmenter(window=4, hop=4)
         np.testing.assert_array_equal(
