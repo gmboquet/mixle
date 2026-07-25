@@ -27,8 +27,10 @@ Workstream L (cross-model adjudication): the same precision-weighted product-of-
 not to learned tokens but to scalar claims from independent *external* models (a CMIP climate projection, a
 hydrology emulator, ...). :func:`fuse_claims` fuses a list of :class:`ModelClaim` into one :class:`FusedBelief`,
 flags when two models disagree beyond a standardized-distance threshold, and -- on disagreement -- adjudicates
-via an IC-6-shaped ``verifier`` plus the ``language_bridge`` conformal claim score before ever emitting a fused
-point, so a driller-facing cross-model number is never quietly averaged out of a real disagreement.
+via an IC-6-shaped ``verifier`` plus a predeclared, calibrated pairwise significance test (deterministic, no
+Monte Carlo tail luck involved) before ever emitting a fused point, classifying every claim as accepted,
+rejected, or unresolved so a driller-facing cross-model number is never quietly averaged out of -- or
+contaminated by -- a real disagreement.
 
 L8 (multi-climate-model ensemble fusion) does not add new fusion math: a real climate question is never
 answered by one model, it is answered by an ensemble (CMIP members, AI emulators, ...) with uneven skill
@@ -43,8 +45,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from typing import Any
-
-import numpy as np
 
 
 def fusion_flops(n_tokens: int, latent_dim: int, *, attention: bool = False) -> int:
@@ -79,18 +79,25 @@ class ModelClaim:
 class FusedBelief:
     """The precision-weighted fusion of several :class:`ModelClaim`, with attribution and an honesty gate.
 
-    ``weights`` has exactly one entry per input claim (always sums to 1), keyed by that claim's
-    ``model_id`` -- except when two or more claims share a ``model_id`` (repeated ensemble members of
-    the same model is the realistic case; see :func:`skill_weighted_fuse`), in which case only the
-    FIRST such claim keeps the bare ``model_id`` key and every later one is disambiguated
-    ``"{model_id}#{n}"`` (matching the id-collision convention in
-    :meth:`mixle.epistemic.portfolio.HypothesisPortfolio.resample`) so no claim's share is dropped.
-    ``provenance["claims"]`` entries carry this same key under ``"weight_key"`` for exact correlation.
+    ``weights`` has exactly one entry per input claim, keyed by that claim's ``model_id`` -- except
+    when two or more claims share a ``model_id`` (repeated ensemble members of the same model is the
+    realistic case; see :func:`skill_weighted_fuse`), in which case only the FIRST such claim keeps the
+    bare ``model_id`` key and every later one is disambiguated ``"{model_id}#{n}"`` (matching the
+    id-collision convention in :meth:`mixle.epistemic.portfolio.HypothesisPortfolio.resample`) so no
+    claim's share is dropped. This SAME stable per-claim identity (not the possibly-duplicated bare
+    ``model_id``) is threaded through cross-model adjudication too, so two distinct claims that happen
+    to share a ``model_id`` are compared like any other pair instead of silently colliding. This same
+    key appears in ``provenance["claims"]`` under ``"weight_key"`` for exact correlation.
+
     ``disagreement`` fires when the worst pairwise standardized distance between two claims exceeds
-    ``sigma_flag`` (default 3-sigma); ``abstained`` is only ever ``True`` when ``disagreement`` is
-    ``True`` AND no single claim clears the conformal accept bar under cross-model adjudication -- the
-    mean/variance are still the precision-weighted values even then, but callers MUST check
-    ``abstained`` before surfacing ``mean`` as a driller-facing number.
+    ``sigma_flag`` (default 3-sigma). On disagreement, every claim is independently classified as
+    accepted, rejected, or unresolved by a predeclared, deterministic cross-model test (see
+    :func:`_adjudicate_claims`); ONLY accepted claims contribute to ``mean``/``variance``/``weights``,
+    so one claim clearing adjudication no longer drags every conflicting claim along with it. ``weights``
+    is 0.0 for any claim excluded this way (still sums to 1 across the surviving claims). ``abstained``
+    is ``True`` iff ``disagreement`` is ``True`` AND not a single claim was accepted -- ``mean``/
+    ``variance`` then fall back to the precision-weighted fusion of ALL claims (still *a* number, never
+    absent), but callers MUST check ``abstained`` before surfacing ``mean`` as a driller-facing number.
     """
 
     mean: float
@@ -112,53 +119,129 @@ def _max_pairwise_standardized_distance(claims: list[ModelClaim]) -> float:
     return worst
 
 
-def _any_claim_clears_accept_bar(
-    claims: list[ModelClaim], *, verifier: Any = None, n_samples: int = 200, seed: int = 0, width_sigma: float = 1.0
-) -> bool:
-    """Cross-model adjudication for a disagreeing claim set: does *any* claim survive scrutiny?
+def _connected_components(n: int, edges: set[tuple[int, int]]) -> list[list[int]]:
+    """Connected components of the undirected graph on ``range(n)`` implied by ``edges``."""
+    adjacency: list[list[int]] = [[] for _ in range(n)]
+    for i, j in edges:
+        adjacency[i].append(j)
+        adjacency[j].append(i)
+    seen = [False] * n
+    components: list[list[int]] = []
+    for start in range(n):
+        if seen[start]:
+            continue
+        seen[start] = True
+        stack, component = [start], []
+        while stack:
+            node = stack.pop()
+            component.append(node)
+            for neighbor in adjacency[node]:
+                if not seen[neighbor]:
+                    seen[neighbor] = True
+                    stack.append(neighbor)
+        components.append(component)
+    return components
 
-    Two independent checks, either of which can clear a claim (so it is not folded into an abstain):
 
-    1. IC-6 ``verifier`` (if supplied): ``verifier.verify(claim, context) -> Verdict``-shaped, duck-typed
-       so this module never imports ``mixle_mlops`` (E10 owns the real physical/calibration verifiers).
-    2. ``language_bridge.claim_score`` (frozen at ``reason/language_bridge.py:146``): build a
-       ``width_sigma``-sigma interval :class:`~mixle.reason.language_bridge.Claim` around each model's value
-       and score it -- via the *other* models' synthetic posteriors -- for coverage-per-unit-width. Under
-       real disagreement (the only path that reaches this function) every other model's mass sits many sigma
-       away from a claim's own interval, so its cross-model coverage is 0 and the score cannot clear any
-       positive bar; near-agreeing claims (the common case that never reaches here because disagreement is
-       False) would instead see substantial cross-coverage. A claim "clears the bar" iff its score against at
-       least one other model's posterior is strictly positive.
+def _pairwise_p_value(z: float) -> float:
+    """Two-sided p-value for a standardized distance ``z`` under the null that both claims estimate the
+    same true value with correctly-specified, independent Gaussian noise: ``erfc(z / sqrt(2))``. This is
+    the exact, closed-form significance behind the ``sigma_flag`` bar (``z > 3`` <=> ``p < 0.0027``) --
+    reported per claim so adjudication's classification carries real, quantified uncertainty rather than
+    a silent binary pass/fail."""
+    if not math.isfinite(z):
+        return 1.0
+    return math.erfc(z / math.sqrt(2.0))
+
+
+def _adjudicate_claims(
+    claims: list[ModelClaim],
+    weight_keys: list[str],
+    *,
+    verifier: Any = None,
+    sigma_flag: float = 3.0,
+) -> list[dict[str, Any]]:
+    """Predeclared, calibrated cross-model adjudication for a disagreeing claim set (MXR-080-0284/0285).
+
+    Deterministic and seed-free -- there is no Monte Carlo sampling anywhere in this function, so the
+    verdict can never depend on tail luck. Every claim is classified independently as ``"accepted"``,
+    ``"rejected"``, or ``"unresolved"``:
+
+    1. Build the agreement graph on the claims: an edge between claims i and j iff their pairwise
+       standardized distance ``|value_i - value_j| / sqrt(variance_i + variance_j)`` is at most
+       ``sigma_flag`` -- the SAME statistic and SAME predeclared bar already used to decide the set
+       disagrees in the first place (default 3-sigma, a two-sided ~0.27% false-flag rate per pair under
+       the null that both claims are unbiased independent estimates of the same quantity; see
+       :func:`_pairwise_p_value`). Comparisons are keyed by each claim's own list index, never by its
+       (possibly duplicated) ``model_id``, so distinct claims that share a ``model_id`` -- e.g. two
+       realizations of the same ensemble member -- are compared like any other pair instead of one
+       silently overwriting or skipping the other.
+    2. Find the graph's connected components. If exactly one component is uniquely the largest
+       (size >= 2, no tie), its members are "accepted" (a corroborated core) and every claim outside it
+       is "rejected" (a confirmed minority/outlier against that core). If every claim is isolated, or
+       two-or-more components tie for largest, there is no statistical basis to prefer one claim over
+       another: every claim is "unresolved".
+    3. An IC-6 ``verifier`` (if supplied) is an independent, per-claim override, exactly as before:
+       ``verifier.verify(candidate, context) -> Verdict``-shaped, duck-typed so this module never imports
+       ``mixle_mlops``. A claim the verifier vouches for is "accepted" regardless of step 2 -- it can only
+       ever promote a claim, never reject one the graph already accepted.
+
+    Accepting one claim never implicitly clears any other: each claim's status is decided on its own, so
+    callers can gate inclusion in the fused mean per claim (MXR-080-0285) instead of an all-or-nothing
+    "did anything clear the bar" gate that let a single lucky pass drag every conflicting claim along.
+
+    Known scope limit: this detects "one clear outlier against a corroborated core," not general robust
+    clustering -- e.g. two same-size, mutually-disagreeing corroborated pairs are both left "unresolved"
+    rather than one being arbitrarily preferred over the other.
     """
-    from mixle.reason.language_bridge import Claim, claim_score
+    n = len(claims)
+    z = [[0.0] * n for _ in range(n)]
+    edges: set[tuple[int, int]] = set()
+    for i in range(n):
+        for j in range(i + 1, n):
+            zij = abs(claims[i].value - claims[j].value) / math.sqrt(claims[i].variance + claims[j].variance)
+            z[i][j] = z[j][i] = zij
+            if zij <= sigma_flag:
+                edges.add((i, j))
 
-    if len(claims) < 2:
-        return True  # nothing to adjudicate against -- a lone claim cannot disagree with itself
-
-    rng = np.random.default_rng(seed)
-    posteriors = {c.model_id: rng.normal(c.value, math.sqrt(c.variance), n_samples) for c in claims}
-
-    for claim in claims:
-        if verifier is not None:
+    verifier_passed: list[bool | None] = [None] * n
+    if verifier is not None:
+        for i, claim in enumerate(claims):
             context = {
                 "claims": [
-                    {"model_id": o.model_id, "value": o.value, "variance": o.variance} for o in claims if o is not claim
+                    {"model_id": o.model_id, "value": o.value, "variance": o.variance}
+                    for j, o in enumerate(claims)
+                    if j != i
                 ]
             }
             candidate = {"model_id": claim.model_id, "value": claim.value, "variance": claim.variance}
             verdict = verifier.verify(candidate, context)
-            if getattr(verdict, "passed", False):
-                return True
+            verifier_passed[i] = bool(getattr(verdict, "passed", False))
 
-        sd = math.sqrt(claim.variance)
-        interval = Claim(field=claim.model_id, lo=claim.value - width_sigma * sd, hi=claim.value + width_sigma * sd)
-        for other in claims:
-            if other.model_id == claim.model_id:
-                continue
-            score = claim_score(interval, posterior=posteriors[other.model_id], n_samples=n_samples, seed=seed)
-            if score > 0.0:
-                return True
-    return False
+    components = _connected_components(n, edges)
+    max_size = max((len(comp) for comp in components), default=0)
+    core_components = [comp for comp in components if len(comp) == max_size]
+    graph_status = ["unresolved"] * n
+    if max_size >= 2 and len(core_components) == 1:
+        core = set(core_components[0])
+        for i in range(n):
+            graph_status[i] = "accepted" if i in core else "rejected"
+
+    results: list[dict[str, Any]] = []
+    for i in range(n):
+        status = "accepted" if verifier_passed[i] else graph_status[i]
+        others_z = [z[i][j] for j in range(n) if j != i]
+        min_z = min(others_z) if others_z else math.inf
+        results.append(
+            {
+                "weight_key": weight_keys[i],
+                "status": status,
+                "min_pairwise_z": min_z,
+                "min_pairwise_p_value": _pairwise_p_value(min_z),
+                "verifier_passed": verifier_passed[i],
+            }
+        )
+    return results
 
 
 def fuse_claims(
@@ -173,10 +256,12 @@ def fuse_claims(
     Exactly the rule stated at the top of this module (``prec_fused = sum(prec_i) + prior_prec``,
     ``mean = sum(prec_i * value_i) / prec_fused``), applied to scalar :class:`ModelClaim`\\ s instead of
     learned tokens: ``prec_i = reliability_i / variance_i``. On disagreement (worst pairwise standardized
-    distance ``> sigma_flag``), the fused point is only trusted once at least one claim clears cross-model
-    adjudication (:func:`_any_claim_clears_accept_bar`); otherwise ``abstained=True`` and the caller must not
-    surface ``mean`` as a resolved answer. ``provenance`` records every claim's id/version/content_hash/weight
-    so a fused belief is always attributable back to the models that produced it.
+    distance ``> sigma_flag``), every claim is independently classified as accepted, rejected, or
+    unresolved by a predeclared, deterministic cross-model test (:func:`_adjudicate_claims`); ONLY
+    accepted claims feed ``mean``/``variance``/``weights`` (see :class:`FusedBelief`'s docstring for the
+    full inclusion-gating and abstention contract). ``provenance`` records every claim's
+    id/version/content_hash/weight/adjudication-status so a fused belief is always attributable back to
+    the models that produced it and to exactly why each one was or was not trusted.
 
     Every scalar that reaches the precision arithmetic is validated up front (``value``/``variance``/
     ``reliability`` per claim, plus ``prior_prec`` and ``sigma_flag``) and the resulting per-claim and
@@ -205,33 +290,50 @@ def fuse_claims(
     total_prec = sum(precisions)
     if not math.isfinite(total_prec) or total_prec <= 0:
         raise ValueError(f"fuse_claims produced a non-positive/non-finite total precision {total_prec!r}")
-    prec_fused = total_prec + prior_prec
-    if not math.isfinite(prec_fused) or prec_fused <= 0:
-        raise ValueError(f"fuse_claims produced a non-positive/non-finite fused precision {prec_fused!r}")
-
-    mean = sum(p * c.value for p, c in zip(precisions, claims)) / prec_fused
-    variance = 1.0 / prec_fused
-    if not math.isfinite(mean) or not math.isfinite(variance) or variance <= 0:
-        raise ValueError("fuse_claims produced a non-finite fused mean/variance from otherwise-valid inputs")
-    per_claim_weight = [p / total_prec for p in precisions]
 
     # One weight-dict key per CLAIM, not per distinct model_id -- see FusedBelief's docstring. A
     # claim keeps its bare model_id as the key unless an earlier claim in this list already claimed
     # it, in which case it is disambiguated "{model_id}#{n}"; either way every claim's own precision
-    # share survives into `weights`, so it always sums to 1.0 even with duplicate model_ids.
+    # share survives into `weights`, so it always sums to 1.0 even with duplicate model_ids. This SAME
+    # identity is threaded through adjudication below (MXR-080-0284) instead of re-deriving a second,
+    # bare-model_id-keyed identity that can silently collide on duplicates.
     seen: dict[str, int] = {}
     weight_keys: list[str] = []
     for c in claims:
         count = seen.get(c.model_id, 0)
         seen[c.model_id] = count + 1
         weight_keys.append(c.model_id if count == 0 else f"{c.model_id}#{count}")
-    weights = dict(zip(weight_keys, per_claim_weight))
 
     max_z = _max_pairwise_standardized_distance(claims)
     disagreement = max_z > sigma_flag
-    abstained = disagreement and not _any_claim_clears_accept_bar(claims, verifier=verifier)
 
-    provenance = {
+    adjudication: list[dict[str, Any]] | None = None
+    if disagreement:
+        adjudication = _adjudicate_claims(claims, weight_keys, verifier=verifier, sigma_flag=sigma_flag)
+        accepted_idx = [i for i, a in enumerate(adjudication) if a["status"] == "accepted"]
+    else:
+        accepted_idx = list(range(len(claims)))
+
+    abstained = disagreement and not accepted_idx
+    # Nothing survived adjudication: mean/variance fall back to ALL claims so they are still *a* number
+    # (never NaN/absent) -- `abstained=True` forces callers to check before trusting it, matching
+    # FusedBelief's documented contract. Once something IS accepted, only accepted claims contribute
+    # (MXR-080-0285: one claim's pass no longer drags every conflicting claim along into the mean).
+    included_idx = accepted_idx if accepted_idx else list(range(len(claims)))
+    included = set(included_idx)
+
+    included_total_prec = sum(precisions[i] for i in included_idx)
+    prec_fused = included_total_prec + prior_prec
+    if not math.isfinite(prec_fused) or prec_fused <= 0:
+        raise ValueError(f"fuse_claims produced a non-positive/non-finite fused precision {prec_fused!r}")
+    mean = sum(precisions[i] * claims[i].value for i in included_idx) / prec_fused
+    variance = 1.0 / prec_fused
+    if not math.isfinite(mean) or not math.isfinite(variance) or variance <= 0:
+        raise ValueError("fuse_claims produced a non-finite fused mean/variance from otherwise-valid inputs")
+    per_claim_weight = [(precisions[i] / included_total_prec) if i in included else 0.0 for i in range(len(claims))]
+    weights = dict(zip(weight_keys, per_claim_weight))
+
+    provenance: dict[str, Any] = {
         "claims": [
             {
                 "model_id": c.model_id,
@@ -239,12 +341,20 @@ def fuse_claims(
                 "content_hash": c.content_hash,
                 "weight": w,
                 "weight_key": k,
+                "included_in_fused_mean": i in included,
             }
-            for c, w, k in zip(claims, per_claim_weight, weight_keys)
+            for i, (c, w, k) in enumerate(zip(claims, per_claim_weight, weight_keys))
         ],
         "max_pairwise_standardized_distance": max_z,
         "sigma_flag": sigma_flag,
     }
+    if adjudication is not None:
+        for entry, a in zip(provenance["claims"], adjudication):
+            entry["adjudication_status"] = a["status"]
+            entry["min_pairwise_z"] = a["min_pairwise_z"]
+            entry["min_pairwise_p_value"] = a["min_pairwise_p_value"]
+            entry["verifier_passed"] = a["verifier_passed"]
+
     return FusedBelief(
         mean=mean,
         variance=variance,

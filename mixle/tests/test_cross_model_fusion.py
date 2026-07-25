@@ -225,3 +225,139 @@ def test_weights_key_by_bare_model_id_when_there_is_no_collision():
     )
     assert set(fused.weights) == {"modelA", "modelB"}
     assert all(entry["weight_key"] == entry["model_id"] for entry in fused.provenance["claims"])
+
+
+class AdjudicationIdentityAndInclusionTest:
+    """Regression tests for MXR-080-0284 (duplicate model_id corrupts adjudication) and MXR-080-0285
+    (one random tail sample / one accepted claim could clear an entire disagreeing set).
+
+    Old mechanism: adjudication stored synthetic posteriors in a `{model_id: draws}` dict (duplicates
+    silently overwrote each other) and skipped comparing any two claims that shared a model_id --
+    "distinct ensemble realizations" of the same model were therefore NEVER actually compared against
+    each other. Acceptance was "did >= 1 of 200 random draws land in a 1-sigma interval", a seeded,
+    non-calibrated coin flip; a SINGLE claim clearing that bar set `abstained=False` for the whole set,
+    and mean/variance still silently blended in every OTHER claim regardless of whether it was ever
+    actually vetted.
+
+    New mechanism: deterministic pairwise significance test (same statistic/bar as the disagreement
+    flag itself), connected components identify a corroborated core vs. an outlier, and each claim's
+    accept/reject/unresolved status independently gates whether it contributes to mean/variance/weights.
+    """
+
+    def test_two_claims_sharing_a_model_id_are_compared_against_each_other_not_skipped(self):
+        """P1 and P2 are two DISTINCT realizations of the same underlying model "M" (a real CMIP
+        ensemble routinely submits several realizations of one model) that wildly disagree (707 sigma
+        apart); P3 is a different model that closely agrees with P1. Under the old model_id-keyed
+        adjudication, P1 was NEVER compared against P2 (both "M") -- it only ever got compared against
+        P3, trivially cleared, and that ONE clearance both (a) declared the whole set NOT abstained and
+        (b) left P2 blended into the fused mean despite never having survived any real comparison.
+        """
+        p1 = ModelClaim(value=0.0, variance=0.01, model_id="M", version="realization-1", content_hash="1" * 64)
+        p2 = ModelClaim(value=100.0, variance=0.01, model_id="M", version="realization-2", content_hash="2" * 64)
+        p3 = ModelClaim(value=0.05, variance=0.01, model_id="N", version="v1", content_hash="3" * 64)
+        fused = fuse_claims([p1, p2, p3])
+
+        assert fused.disagreement is True
+        assert fused.abstained is False  # P1+P3 corroborate each other -- a real resolution exists
+
+        by_key = {e["weight_key"]: e for e in fused.provenance["claims"]}
+        assert by_key["M"]["adjudication_status"] == "accepted"  # P1: corroborated by P3
+        assert by_key["N"]["adjudication_status"] == "accepted"  # P3: corroborates P1
+        assert by_key["M#1"]["adjudication_status"] == "rejected"  # P2: the 707-sigma outlier
+
+        # P2 (the outlier sharing P1's model_id) must be EXCLUDED from the fused mean, not blended in.
+        assert fused.weights["M#1"] == pytest.approx(0.0, abs=1e-12)
+        assert by_key["M#1"]["included_in_fused_mean"] is False
+        assert by_key["M"]["included_in_fused_mean"] is True
+        assert by_key["N"]["included_in_fused_mean"] is True
+        # only P1 (0.0) and P3 (0.05), equal precision -> simple average, nowhere near P2's 100.0
+        assert fused.mean == pytest.approx(0.025, abs=1e-9)
+        assert fused.weights["M"] == pytest.approx(0.5, abs=1e-9)
+        assert fused.weights["N"] == pytest.approx(0.5, abs=1e-9)
+
+    def test_verifier_accepting_only_one_claim_excludes_the_others_from_the_fused_mean(self):
+        """Sharpest test of MXR-080-0285's inclusion-gating fix: a verifier that vouches for exactly ONE
+        of three wildly disagreeing claims must leave ONLY that claim in the fused mean/weights -- not
+        silently drag the other two (which the verifier never vouched for) along too."""
+
+        class _OnlyAcceptsA:
+            def verify(self, claim, context):
+                class _Verdict:
+                    passed = claim["model_id"] == "A"
+
+                return _Verdict()
+
+        fused = fuse_claims(
+            [
+                ModelClaim(value=10.0, variance=0.01, model_id="A", version="v1", content_hash="a" * 64),
+                ModelClaim(value=500.0, variance=0.01, model_id="B", version="v1", content_hash="b" * 64),
+                ModelClaim(value=-500.0, variance=0.01, model_id="C", version="v1", content_hash="c" * 64),
+            ],
+            verifier=_OnlyAcceptsA(),
+        )
+        assert fused.disagreement is True
+        assert fused.abstained is False
+        assert fused.mean == pytest.approx(10.0, abs=1e-6)  # ONLY A, not an average dragged toward B/C
+        assert fused.weights == {"A": pytest.approx(1.0), "B": pytest.approx(0.0), "C": pytest.approx(0.0)}
+        by_key = {e["weight_key"]: e for e in fused.provenance["claims"]}
+        assert by_key["A"]["verifier_passed"] is True
+        assert by_key["B"]["verifier_passed"] is False
+        assert by_key["C"]["verifier_passed"] is False
+
+    def test_two_mutually_disagreeing_claims_with_no_verifier_are_unresolved_and_abstain(self):
+        """With exactly two claims and no third arbiter, neither the graph (no edge, both isolated) nor
+        a verifier can prefer one over the other -- both are "unresolved", nothing is "accepted", and
+        the set abstains. This pins down that "unresolved" (no basis to pick a winner) is distinct from
+        "rejected" (a confirmed outlier against a corroborated core)."""
+        fused = fuse_claims(
+            [
+                ModelClaim(value=2.0, variance=0.1, model_id="cmipA", version="v1", content_hash="a" * 64),
+                ModelClaim(value=4.0, variance=0.1, model_id="cmipB", version="v1", content_hash="b" * 64),
+            ]
+        )
+        assert fused.abstained is True
+        statuses = {e["weight_key"]: e["adjudication_status"] for e in fused.provenance["claims"]}
+        assert statuses == {"cmipA": "unresolved", "cmipB": "unresolved"}
+        assert "rejected" not in statuses.values()
+
+    def test_adjudication_is_deterministic_no_seed_dependence(self):
+        """The old mechanism accepted a genuinely-disagreeing 3.04-sigma pair in a seed-dependent,
+        non-trivial fraction of calls (empirically ~16% over 400 seeds) because acceptance hinged on
+        whether >= 1 of 200 random draws landed inside a narrow interval. The new mechanism has no RNG
+        anywhere in the adjudication path, so repeated calls on identical input are byte-for-byte
+        identical -- this pair (3.04 sigma, just past the disagreement flag) must ALWAYS abstain."""
+        claims = [
+            ModelClaim(value=0.0, variance=1.0, model_id="A", version="v1", content_hash="a" * 64),
+            ModelClaim(value=4.3, variance=1.0, model_id="B", version="v1", content_hash="b" * 64),
+        ]
+        outcomes = {(fuse_claims(claims).abstained, round(fuse_claims(claims).mean, 12)) for _ in range(25)}
+        assert outcomes == {(True, round(2.15, 12))}
+
+    def test_provenance_reports_calibrated_z_and_p_value_per_claim(self):
+        """Genuine, quantified uncertainty (not a silent binary pass/fail from one MC draw set): every
+        claim's provenance entry carries its nearest-other-claim standardized distance and the exact
+        two-sided p-value implied by it under the null of a shared true value."""
+        fused = fuse_claims(
+            [
+                ModelClaim(value=2.0, variance=0.1, model_id="cmipA", version="v1", content_hash="a" * 64),
+                ModelClaim(value=4.0, variance=0.1, model_id="cmipB", version="v1", content_hash="b" * 64),
+            ]
+        )
+        z = abs(2.0 - 4.0) / math.sqrt(0.1 + 0.1)
+        for entry in fused.provenance["claims"]:
+            assert entry["min_pairwise_z"] == pytest.approx(z, abs=1e-6)
+            assert 0.0 < entry["min_pairwise_p_value"] < 0.01  # z ~ 4.47 -- a very small two-sided p-value
+            assert entry["verifier_passed"] is None  # no verifier was supplied
+
+    def test_no_disagreement_means_no_adjudication_fields_are_populated(self):
+        """When claims agree, adjudication never runs at all -- provenance should not claim a status."""
+        fused = fuse_claims(
+            [
+                ModelClaim(value=2.0, variance=0.1, model_id="cmipA", version="v1", content_hash="a" * 64),
+                ModelClaim(value=2.1, variance=0.1, model_id="cmipB", version="v1", content_hash="b" * 64),
+            ]
+        )
+        assert fused.disagreement is False
+        for entry in fused.provenance["claims"]:
+            assert "adjudication_status" not in entry
+            assert entry["included_in_fused_mean"] is True
