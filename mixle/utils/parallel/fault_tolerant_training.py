@@ -121,7 +121,8 @@ class LoaderState:
 
 def resume_batches(corpus: Any, state: LoaderState):
     """Resume a loader shaped like :class:`mixle.data.streaming_corpus.StreamingCorpus` (anything exposing
-    ``epoch_batches(epoch) -> Iterator[(x, y)]`` with that contract) exactly at ``state.batch_idx``.
+    ``epoch_batches(epoch) -> Iterator[(context, targets, loss_mask)]`` with that contract) exactly at
+    ``state.batch_idx``.
 
     Determinism is what makes this correct rather than approximate: re-materializing the whole epoch and
     discarding the already-consumed prefix reproduces bitwise-identical remaining batches to what an
