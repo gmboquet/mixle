@@ -298,6 +298,16 @@ class CrossModalModel:
         of this method -- :meth:`encode`, :meth:`predict`, :meth:`calibrate`, :meth:`predict_interval`
         -- could silently return a meaningless, randomly-initialized "belief" with no indication
         anything was wrong. Checked here once, since all four route through this method.
+
+        ``obs`` carries exactly ONE observation per modality: each value must be a 1-D array of
+        length ``in_dim`` (MXR-080-0278). Previously ``np.atleast_2d`` silently accepted a
+        ``(B, in_dim)`` batch, fused it through the product-of-experts as if it were legitimate --
+        modalities with unequal batch sizes could broadcast into unintended cross-row pairings --
+        and then returned only row 0, discarding the rest with no signal anything was dropped.
+        No caller in this codebase passes a genuine batch here; call this once per observation.
+
+        Raises:
+            ValueError: some modality's observation is not a 1-D array of the registered width.
         """
         if not self._fitted:
             raise RuntimeError("CrossModalModel.belief() called before fit(): the encoders are untrained.")
@@ -307,7 +317,14 @@ class CrossModalModel:
         experts = []
         for name, x in obs.items():
             mod = self._mods[name]
-            xs = (np.atleast_2d(np.asarray(x, dtype=float)) - mod.mean) / mod.scale
+            xa = np.asarray(x, dtype=float)
+            if xa.shape != (mod.in_dim,):
+                raise ValueError(
+                    f"belief() takes exactly one observation per modality (a 1-D array of length "
+                    f"in_dim); modality {name!r} has in_dim={mod.in_dim} but got an array of shape "
+                    f"{xa.shape} -- pass a single row, not a batch"
+                )
+            xs = (np.atleast_2d(xa) - mod.mean) / mod.scale
             with torch.no_grad():
                 experts.append(self._expert(mod, torch.as_tensor(xs, dtype=torch.float64)))
         with torch.no_grad():
@@ -321,7 +338,11 @@ class CrossModalModel:
         return self.belief(obs).mean()
 
     def predict(self, obs: dict[str, Any], target: str) -> np.ndarray:
-        """Generate the ``target`` modality from the modalities in ``obs`` (cross-modal generation)."""
+        """Generate the ``target`` modality from the modalities in ``obs`` (cross-modal generation).
+
+        ``obs`` takes exactly one observation per modality; see :meth:`belief` (MXR-080-0278) --
+        this method inherits that contract entirely through its call below.
+        """
         torch = _torch()
         if target not in self._mods:
             raise KeyError(f"unknown modality {target!r}")
