@@ -3,8 +3,8 @@
 Three receipts:
 1. ``SelectiveScan`` satisfies the ``ContextMechanism`` protocol, trains via ``train_tbptt`` without
    error, and ``detach()`` actually cuts the TBPTT backward graph.
-2. ``log_density`` returns one finite ``-mean_nll`` per row, independent of batch composition (scoring a
-   row alone vs. as part of a larger batch gives the same number).
+2. ``log_density`` returns one finite conditional sequence log likelihood per row, independent of batch
+   composition (scoring a row alone vs. as part of a larger batch gives the same number).
 3. The Selective Copying small-scale parity receipt notes/designs/E5.md section 5a and
    ``selective_scan.py``'s own module comment point at: a real, measured accuracy on a Selective Copying
    task (sparse data tokens interspersed with distractor "blank" tokens must be recalled in order,
@@ -87,7 +87,7 @@ def test_detach_cuts_the_backward_graph():
 
 
 # -------------------------------------------------------------------------------------------------------
-# 2. log_density: one finite -mean_nll per row, independent of batch composition.
+# 2. log_density: one finite token-summed log likelihood per row, independent of batch composition.
 # -------------------------------------------------------------------------------------------------------
 
 
