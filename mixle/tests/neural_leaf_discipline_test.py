@@ -84,6 +84,57 @@ class NeuralGaussianScoringPurityTest(unittest.TestCase):
         expected = -0.5 * ((y - mean) ** 2).sum(axis=1) - 0.5 * np.log(2.0 * np.pi)
         np.testing.assert_allclose(scored, expected, rtol=1e-6, atol=1e-6)
 
+    def test_noise_and_training_controls_are_not_coerced(self):
+        module = _dropout_regressor()
+        for kwargs in (
+            {"noise": 0.0},
+            {"noise": -1.0},
+            {"noise": np.nan},
+            {"noise": np.inf},
+            {"noise": True},
+            {"m_steps": 0},
+            {"m_steps": 1.5},
+            {"lr": 0.0},
+            {"lr": np.nan},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                NeuralGaussian(module, **kwargs)
+
+    def test_scoring_rejects_row_and_output_width_broadcasting(self):
+        leaf = NeuralGaussian(torch.nn.Linear(2, 1))
+        x = np.zeros((3, 2))
+        for y in (np.zeros((1, 1)), np.zeros((3, 2)), np.zeros(3)):
+            with self.subTest(shape=np.asarray(y).shape), self.assertRaisesRegex(ValueError, "shape|rows"):
+                leaf.seq_log_density((x, y))
+
+        class _FlatOutput(torch.nn.Module):
+            def forward(self, value):
+                return value[:, 0]
+
+        with self.assertRaisesRegex(ValueError, "two-dimensional"):
+            NeuralGaussian(_FlatOutput()).seq_log_density((x, np.zeros((3, 1))))
+
+    def test_conditional_sampling_preserves_batch_rows(self):
+        leaf = NeuralGaussian(torch.nn.Linear(2, 1), noise=0.5)
+        sampler = leaf.sampler(seed=3)
+
+        self.assertEqual(sampler.sample_given(np.zeros(2)).shape, (1,))
+        self.assertEqual(sampler.sample_given(np.zeros((4, 2))).shape, (4, 1))
+
+    def test_accumulation_and_estimation_require_aligned_effective_weights(self):
+        leaf = NeuralGaussian(torch.nn.Linear(2, 1), m_steps=1)
+        accumulator = leaf.estimator().accumulator_factory().make()
+        x = np.zeros((3, 2))
+        y = np.zeros((3, 1))
+        for weights in (np.ones(2), np.ones((3, 1)), [1.0, -1.0, 1.0], [0.0, 0.0, np.nan]):
+            with self.subTest(weights=np.asarray(weights).shape), self.assertRaises(ValueError):
+                accumulator.seq_update((x, y), weights, leaf)
+
+        with self.assertRaisesRegex(ValueError, "positive effective weight"):
+            leaf.estimator().estimate(None, (x, y, np.zeros(3)))
+        with self.assertRaisesRegex(ValueError, "target shape"):
+            leaf.estimator().estimate(None, (x, np.zeros((3, 2)), np.ones(3)))
+
 
 class NeuralCategoricalScoringPurityTest(unittest.TestCase):
     """G-1: same purity contract for the discriminative sibling."""

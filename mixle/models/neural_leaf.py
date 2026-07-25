@@ -59,6 +59,59 @@ def _place_module(module: Any, dev: Any, torch: Any) -> Any:
     return next((p.dtype for p in module.parameters() if p.dtype.is_floating_point), torch.float32)
 
 
+def _positive_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a positive finite real number")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a positive finite real number") from exc
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a positive finite real number")
+    return result
+
+
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be a positive integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
+
+
+def _matrix(value: Any, name: str, *, allow_empty_rows: bool = True) -> np.ndarray:
+    array = np.asarray(value, dtype=float)
+    if array.ndim == 1 and array.size:
+        array = array.reshape(1, -1)
+    if array.ndim != 2 or array.shape[1] == 0:
+        raise ValueError(f"{name} must be a two-dimensional matrix with a non-empty feature axis")
+    if not allow_empty_rows and array.shape[0] == 0:
+        raise ValueError(f"{name} must contain at least one row")
+    return check_finite(array, name)
+
+
+def _weights(value: Any, rows: int, name: str = "weights") -> np.ndarray:
+    weights = np.asarray(value, dtype=float)
+    if weights.ndim != 1 or weights.shape != (rows,):
+        raise ValueError(f"{name} must be a one-dimensional array with exactly {rows} entries")
+    check_finite(weights, name)
+    if np.any(weights < 0.0):
+        raise ValueError(f"{name} must be non-negative")
+    return weights
+
+
+def _validate_regression_batch(x: Any, y: Any, where: str) -> tuple[np.ndarray, np.ndarray]:
+    x_matrix = _matrix(x, f"{where} (x)")
+    y_matrix = _matrix(y, f"{where} (y)")
+    if x_matrix.shape[0] != y_matrix.shape[0]:
+        raise ValueError(
+            f"{where} requires x and y to have the same number of rows; "
+            f"got {x_matrix.shape[0]} and {y_matrix.shape[0]}"
+        )
+    return x_matrix, y_matrix
+
+
 class NeuralGaussian(SequenceEncodableProbabilityDistribution):
     """``p(y | x) = N(y; module(x), noise^2 I)`` as a mixle leaf. Observation is the pair ``(x, y)``."""
 
@@ -74,9 +127,9 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
         device: Any = None,
     ) -> None:
         self.module = module
-        self.noise = float(noise)
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
+        self.noise = _positive_finite(noise, "noise")
+        self.m_steps = _positive_int(m_steps, "m_steps")
+        self.lr = _positive_finite(lr, "lr")
         self.name = name
         self.device = device  # None => CUDA if available, else CPU (see _resolve_device)
 
@@ -84,12 +137,21 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
         return "NeuralGaussian(noise=%.3g)" % self.noise
 
     def _forward(self, x: np.ndarray) -> np.ndarray:
+        x = _matrix(x, "NeuralGaussian._forward (x)")
         torch = _torch()
         dev = _resolve_device(self.device, torch)
         dtype = _place_module(self.module, dev, torch)
         with _module_mode(self.module, train=False), torch.no_grad():
-            mean = self.module(torch.as_tensor(np.atleast_2d(x), dtype=dtype, device=dev))
-        return np.atleast_2d(mean.detach().cpu().numpy())
+            mean = self.module(torch.as_tensor(x, dtype=dtype, device=dev))
+        if not isinstance(mean, torch.Tensor):
+            raise TypeError("NeuralGaussian module must return a torch.Tensor")
+        mean_array = np.asarray(mean.detach().cpu().numpy())
+        if mean_array.ndim != 2 or mean_array.shape[0] != x.shape[0] or mean_array.shape[1] == 0:
+            raise ValueError(
+                "NeuralGaussian module output must be a two-dimensional matrix with one row per input; "
+                f"got input {x.shape} and output {mean_array.shape}"
+            )
+        return check_finite(mean_array, "NeuralGaussian module output")
 
     def log_density(self, xy: Any) -> float:
         """Return ``log p(y | x)`` for one encoded observation pair ``(x, y)``."""
@@ -98,10 +160,15 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
         """Return per-row Gaussian conditional log densities for encoded ``(x, y)`` arrays."""
-        x, y = enc
-        check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "NeuralGaussian.seq_log_density (x)")
+        if not isinstance(enc, (tuple, list)) or len(enc) != 2:
+            raise ValueError("NeuralGaussian.seq_log_density expects an (x, y) pair")
+        x, y = _validate_regression_batch(enc[0], enc[1], "NeuralGaussian.seq_log_density")
         mean = self._forward(x)
-        y = check_finite(np.atleast_2d(np.asarray(y, dtype=float)), "NeuralGaussian.seq_log_density (y)")
+        if mean.shape != y.shape:
+            raise ValueError(
+                "NeuralGaussian target shape must exactly match module output shape; "
+                f"got target {y.shape} and output {mean.shape}"
+            )
         d = y.shape[1]
         sq = ((y - mean) ** 2).sum(axis=1)
         return -0.5 * sq / (self.noise**2) - 0.5 * d * np.log(2.0 * np.pi * self.noise**2)
@@ -119,9 +186,17 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
 
     def backend_seq_log_density(self, enc: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded ``(x, y)`` pairs."""
-        x, y = enc
-        mean = engine.asarray(self._forward(x))
-        yy = engine.asarray(np.atleast_2d(np.asarray(y, dtype=float)))
+        if not isinstance(enc, (tuple, list)) or len(enc) != 2:
+            raise ValueError("NeuralGaussian.backend_seq_log_density expects an (x, y) pair")
+        x, y = _validate_regression_batch(enc[0], enc[1], "NeuralGaussian.backend_seq_log_density")
+        mean_array = self._forward(x)
+        if mean_array.shape != y.shape:
+            raise ValueError(
+                "NeuralGaussian target shape must exactly match module output shape; "
+                f"got target {y.shape} and output {mean_array.shape}"
+            )
+        mean = engine.asarray(mean_array)
+        yy = engine.asarray(y)
         d = int(yy.shape[1])
         resid = yy - mean
         sq = engine.sum(resid * resid, axis=1)
@@ -186,9 +261,12 @@ class NeuralGaussianSampler(DistributionSampler):
         raise NotImplementedError("NeuralGaussian is conditional p(y|x); use sampler().sample_given(x).")
 
     def sample_given(self, x: Any) -> np.ndarray:
-        """Draw one Gaussian response from ``p(y | x)``."""
-        mean = self.dist._forward(x)[0]
-        return mean + self.dist.noise * self.rng.randn(*mean.shape)
+        """Draw Gaussian responses from ``p(y | x)``, preserving an input batch axis when supplied."""
+        x_array = np.asarray(x)
+        batched = x_array.ndim == 2
+        mean = self.dist._forward(x)
+        sample = mean + self.dist.noise * self.rng.randn(*mean.shape)
+        return sample if batched else sample[0]
 
 
 class NeuralGaussianEncoder(DataSequenceEncoder):
@@ -219,18 +297,24 @@ class NeuralGaussianAccumulator(SequenceEncodableStatisticAccumulator):
     # buffering during streamed updates.
     def update(self, xy: Any, weight: float, estimate: Any) -> None:
         """Add one weighted observation pair to the accumulator."""
-        self.x.append(np.asarray(xy[0], dtype=float).reshape(1, -1))
-        self.y.append(np.asarray(xy[1], dtype=float).reshape(1, -1))
-        self.w.append(np.asarray([float(weight)], dtype=float))
+        if not isinstance(xy, (tuple, list)) or len(xy) != 2:
+            raise ValueError("NeuralGaussianAccumulator.update expects an (x, y) pair")
+        x, y = _validate_regression_batch(xy[0], xy[1], "NeuralGaussianAccumulator.update")
+        if x.shape[0] != 1:
+            raise ValueError("NeuralGaussianAccumulator.update accepts exactly one observation")
+        weights = _weights([weight], 1)
+        self.x.append(x)
+        self.y.append(y)
+        self.w.append(weights)
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
         """Add a batch of encoded observation pairs and responsibility weights."""
-        x, y = enc
-        xb = np.asarray(x, dtype=float)
-        yb = np.asarray(y, dtype=float)
-        self.x.append(xb.reshape(len(xb), -1))
-        self.y.append(yb.reshape(len(yb), -1))
-        self.w.append(np.asarray(weights, dtype=float).ravel())
+        if not isinstance(enc, (tuple, list)) or len(enc) != 2:
+            raise ValueError("NeuralGaussianAccumulator.seq_update expects an (x, y) pair")
+        x, y = _validate_regression_batch(enc[0], enc[1], "NeuralGaussianAccumulator.seq_update")
+        self.x.append(x)
+        self.y.append(y)
+        self.w.append(_weights(weights, x.shape[0]))
 
     def initialize(self, xy: Any, weight: float, rng: Any) -> None:
         """Initialize from one observation using the ordinary update path."""
@@ -244,9 +328,12 @@ class NeuralGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         """Merge the value tuple from another neural-Gaussian accumulator."""
         xo, yo, wo = other  # another accumulator's value(): contiguous (n, dim) arrays
         if len(xo):
-            self.x.append(np.asarray(xo, dtype=float))
-            self.y.append(np.asarray(yo, dtype=float))
-            self.w.append(np.asarray(wo, dtype=float).ravel())
+            x, y = _validate_regression_batch(xo, yo, "NeuralGaussianAccumulator.combine")
+            self.x.append(x)
+            self.y.append(y)
+            self.w.append(_weights(wo, x.shape[0]))
+        elif len(yo) or len(wo):
+            raise ValueError("an empty neural-Gaussian accumulator must have empty x, y, and weights")
         return self
 
     def value(self) -> tuple:
@@ -259,9 +346,10 @@ class NeuralGaussianAccumulator(SequenceEncodableStatisticAccumulator):
     def from_value(self, value: tuple) -> NeuralGaussianAccumulator:
         """Restore accumulator buffers from a value tuple."""
         x, y, w = value
-        self.x = [np.asarray(x, dtype=float)] if len(x) else []
-        self.y = [np.asarray(y, dtype=float)] if len(y) else []
-        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
+        self.x = []
+        self.y = []
+        self.w = []
+        self.combine((x, y, w))
         return self
 
     def acc_to_encoder(self) -> NeuralGaussianEncoder:
@@ -294,9 +382,9 @@ class NeuralGaussianEstimator(ParameterEstimator):
         device: Any = None,
     ) -> None:
         self.module = module
-        self.noise = float(noise)
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
+        self.noise = _positive_finite(noise, "noise")
+        self.m_steps = _positive_int(m_steps, "m_steps")
+        self.lr = _positive_finite(lr, "lr")
         self.name = name
         self.device = device
 
@@ -309,15 +397,19 @@ class NeuralGaussianEstimator(ParameterEstimator):
         torch = _torch()
         xs, ys, ws = suff_stat
         if len(xs) == 0:
+            if len(ys) or len(ws):
+                raise ValueError("empty neural-Gaussian sufficient statistics must have empty x, y, and weights")
             return NeuralGaussian(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
+        xs, ys = _validate_regression_batch(xs, ys, "NeuralGaussianEstimator.estimate")
+        ws = _weights(ws, xs.shape[0])
+        if not np.any(ws > 0.0):
+            raise ValueError("NeuralGaussianEstimator.estimate requires positive effective weight")
         dev = _resolve_device(self.device, torch)
         dtype = _place_module(self.module, dev, torch)
-        xs = np.asarray(xs, dtype=float).reshape(len(xs), -1)
-        ys = np.asarray(ys, dtype=float).reshape(len(ys), -1)
         xt = torch.as_tensor(xs, dtype=dtype, device=dev)
         yt = torch.as_tensor(ys, dtype=dtype, device=dev)
-        wt = torch.as_tensor(np.array(ws), dtype=dtype, device=dev)
-        wsum = float(wt.sum()) + 1e-8
+        wt = torch.as_tensor(ws, dtype=dtype, device=dev)
+        wsum = wt.sum()
         log_noise = (
             torch.log(torch.tensor(float(self.noise), dtype=dtype, device=dev)).clone().detach().requires_grad_(True)
         )
@@ -327,13 +419,25 @@ class NeuralGaussianEstimator(ParameterEstimator):
             for _ in range(self.m_steps):
                 opt.zero_grad()
                 mean = self.module(xt)
+                if not isinstance(mean, torch.Tensor) or tuple(mean.shape) != tuple(yt.shape):
+                    actual_shape = getattr(mean, "shape", None)
+                    raise ValueError(
+                        "NeuralGaussian module output must exactly match target shape during estimation; "
+                        f"got target {tuple(yt.shape)} and output {actual_shape}"
+                    )
+                if not bool(torch.isfinite(mean).all()):
+                    raise ValueError("NeuralGaussian module produced non-finite output during estimation")
                 sig2 = torch.exp(2.0 * log_noise)
                 nll = (
                     wt * (0.5 * ((yt - mean) ** 2).sum(1) / sig2 + 0.5 * d * torch.log(2.0 * np.pi * sig2))
                 ).sum() / wsum
+                if not bool(torch.isfinite(nll)):
+                    raise ValueError("NeuralGaussian estimation objective became non-finite")
                 nll.backward()
                 opt.step()
-        self.noise = float(torch.exp(log_noise).detach())  # warm-start noise for the next EM iteration
+        self.noise = _positive_finite(
+            float(torch.exp(log_noise).detach()), "fitted noise"
+        )  # warm-start noise for the next EM iteration
         return NeuralGaussian(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
 
 
