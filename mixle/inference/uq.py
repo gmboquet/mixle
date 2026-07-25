@@ -38,6 +38,8 @@ class UQResult:
     # -- mixle model: Laplace parameter posterior --------------------------------------------------
     def sample_models(self, n: int = 200, *, seed: int | None = None) -> list[Any]:
         """``n`` fitted models drawn from the parameter posterior (epistemic ensemble)."""
+        if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 1:
+            raise ValueError("n must be a positive integer")
         post = self.payload["posterior"]
         rng = np.random.RandomState(seed) if seed is not None else None
         return post.sample(int(n), rng=rng)
@@ -46,7 +48,12 @@ class UQResult:
         self, readout: Callable[[Any], float], alpha: float = 0.1, *, n: int = 400, seed: int = 0
     ) -> tuple[float, float]:
         """A ``1-alpha`` credible interval on ``readout(model)`` over the parameter posterior."""
+        _validate_alpha(alpha)
+        if not callable(readout):
+            raise TypeError("readout must be callable")
         vals = np.asarray([float(readout(m)) for m in self.sample_models(n, seed=seed)], dtype=float)
+        if not np.all(np.isfinite(vals)):
+            raise ValueError("readout must return a finite value for every posterior model")
         lo, hi = np.quantile(vals, [alpha / 2.0, 1.0 - alpha / 2.0])
         return float(lo), float(hi)
 
@@ -57,7 +64,7 @@ class UQResult:
 
         predict = self.payload["predict"]
         q = self.payload["qhat"] if alpha is None else None
-        pred = np.atleast_1d(predict(x))
+        pred = _finite_prediction(predict(x), "predict")
         if q is not None:
             return pred - q, pred + q
         lo, hi = split_conformal(self.payload["cal_pred"], self.payload["cal_y"], pred, alpha=float(alpha))
@@ -67,8 +74,11 @@ class UQResult:
         """Ensemble disagreement (std across members) at ``x`` -- 0.0 for a single predictor."""
         members = self.payload.get("members")
         if not members:
-            return np.zeros(np.atleast_1d(self.payload["predict"](x)).shape)
-        preds = np.stack([np.atleast_1d(m(x)) for m in members])
+            return np.zeros(_finite_prediction(self.payload["predict"](x), "predict").shape)
+        predictions = [_finite_prediction(member(x), "ensemble member") for member in members]
+        if any(prediction.shape != predictions[0].shape for prediction in predictions[1:]):
+            raise ValueError("ensemble members must return predictions with matching shapes")
+        preds = np.stack(predictions)
         return preds.std(axis=0)
 
     # -- LLM callable: semantic entropy ------------------------------------------------------------
@@ -78,12 +88,21 @@ class UQResult:
 
         gen = self.payload["generate"]
         equivalent = self.payload.get("equivalent")
+        if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 1:
+            raise ValueError("n must be a positive integer")
         samples = [gen(prompt) for _ in range(int(n))]
-        return float(_se(samples, equivalent))
+        entropy = float(_se(samples, equivalent))
+        if not np.isfinite(entropy):
+            raise ValueError("semantic entropy calculation returned a non-finite value")
+        return entropy
 
     def confident(self, prompt: Any, *, n: int = 8, max_entropy: float | None = None) -> bool:
         """True when semantic entropy is below the threshold -- else the model disagrees with itself."""
         thr = self.payload["max_entropy"] if max_entropy is None else float(max_entropy)
+        if thr is None:
+            raise ValueError("confident() requires calibrated prompts or an explicit max_entropy")
+        if not np.isfinite(thr) or thr < 0.0:
+            raise ValueError("max_entropy must be a finite non-negative value")
         return self.semantic_entropy(prompt, n=n) <= thr
 
     def report(self) -> dict[str, Any]:
@@ -119,14 +138,41 @@ def _as_predict(model: Any) -> Callable[[Any], np.ndarray]:
         import torch
 
         def predict(x: Any) -> np.ndarray:
-            model.eval()
-            with torch.no_grad():
-                xt = torch.as_tensor(np.atleast_2d(np.asarray(x, dtype=float)), dtype=torch.float32)
-                out = model(xt)
-                return np.asarray(out).reshape(-1) if not hasattr(out, "numpy") else out.cpu().numpy().reshape(-1)
+            modes = {module: bool(module.training) for module in model.modules()}
+            try:
+                model.eval()
+                with torch.no_grad():
+                    xt = torch.as_tensor(np.atleast_2d(np.asarray(x, dtype=float)), dtype=torch.float32)
+                    out = model(xt)
+                    values = out.detach().cpu().numpy() if hasattr(out, "detach") else np.asarray(out)
+                    return _finite_prediction(values, "torch model")
+            finally:
+                for module, training in modes.items():
+                    module.training = training
 
         return predict
-    return lambda x: np.atleast_1d(np.asarray(model(x), dtype=float)).reshape(-1)
+    return lambda x: _finite_prediction(model(x), "predictor")
+
+
+def _finite_prediction(values: Any, source: str) -> np.ndarray:
+    try:
+        prediction = np.atleast_1d(np.asarray(values, dtype=float)).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{source} must return finite numeric predictions") from exc
+    if prediction.size == 0 or not np.all(np.isfinite(prediction)):
+        raise ValueError(f"{source} must return at least one finite prediction")
+    return prediction
+
+
+def _validate_alpha(alpha: float) -> float:
+    if (
+        isinstance(alpha, (bool, np.bool_))
+        or not isinstance(alpha, (int, float, np.integer, np.floating))
+        or not np.isfinite(alpha)
+        or not 0.0 < float(alpha) < 1.0
+    ):
+        raise ValueError("alpha must be a finite number strictly between 0 and 1")
+    return float(alpha)
 
 
 def _uq_mixle(model: Any, data: Any) -> UQResult:
@@ -157,8 +203,16 @@ def _uq_point(predictor: Any, data: Any, alpha: float) -> UQResult:
     else:
         predict = _as_predict(predictor)
 
-    cal_pred = np.asarray([float(predict(xi)[0]) for xi in x_cal], dtype=float)
-    cal_y = np.asarray([float(v) for v in y_cal], dtype=float)
+    x_cal = list(x_cal)
+    cal_y = np.asarray(list(y_cal), dtype=float)
+    if len(x_cal) == 0 or cal_y.ndim != 1 or len(cal_y) != len(x_cal):
+        raise ValueError("X_cal and y_cal must be non-empty and contain the same number of rows")
+    if not np.all(np.isfinite(cal_y)):
+        raise ValueError("y_cal must contain only finite values")
+    rows = [predict(xi) for xi in x_cal]
+    if any(len(row) != 1 for row in rows):
+        raise ValueError("regression predictors must return exactly one value per calibration row")
+    cal_pred = np.asarray([row[0] for row in rows], dtype=float)
     lo, hi = split_conformal(cal_pred, cal_y, cal_pred, alpha=alpha)
     qhat = float((hi - cal_pred).mean())
     return UQResult(
@@ -183,11 +237,14 @@ def _uq_llm(
 
     # calibrate an abstention threshold from example prompts, if given: the (1-alpha) quantile of
     # semantic entropy over the calibration prompts becomes the "too uncertain" cutoff.
-    max_entropy = float("inf")
+    max_entropy = None
     if data is not None:
         ents = [semantic_entropy([generate(p) for _ in range(8)], equivalent) for p in data]
-        if ents:
-            max_entropy = float(np.quantile(ents, 1.0 - alpha))
+        if not ents:
+            raise ValueError("LLM uncertainty calibration requires at least one prompt")
+        if not np.all(np.isfinite(ents)):
+            raise ValueError("semantic entropy calibration produced a non-finite value")
+        max_entropy = float(np.quantile(ents, 1.0 - alpha))
     return UQResult(
         kind="llm_semantic",
         method="semantic entropy over meaning classes",
@@ -217,6 +274,7 @@ def uq(
     Returns:
         A :class:`UQResult` exposing the method-appropriate accessors and its own calibration numbers.
     """
+    alpha = _validate_alpha(alpha)
     if _is_mixle_model(thing):
         return _uq_mixle(thing, data)
     if isinstance(thing, (list, tuple)) and thing and (_is_torch_module(thing[0]) or callable(thing[0])):

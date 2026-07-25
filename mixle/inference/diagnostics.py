@@ -20,11 +20,18 @@ def _as_chains(chains: Any) -> np.ndarray:
 
     Accepts ``(n_chains, n_draws)`` (scalar parameter) or ``(n_chains, n_draws, d)``.
     """
-    arr = np.asarray(chains, dtype=float)
+    try:
+        arr = np.asarray(chains, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("chains must be a finite numeric array") from exc
     if arr.ndim == 2:
         arr = arr[:, :, None]
     if arr.ndim != 3:
         raise ValueError("chains must have shape (n_chains, n_draws) or (n_chains, n_draws, d).")
+    if 0 in arr.shape:
+        raise ValueError("chains cannot have an empty chain, draw, or parameter dimension")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("chains must contain only finite draws")
     return arr
 
 
@@ -45,7 +52,7 @@ def rhat(chains: Any) -> np.ndarray:
     arr = _as_chains(chains)
     m, n, d = arr.shape
     if m < 2 or n < 2:
-        return np.full(d, np.nan)
+        raise ValueError("R-hat requires at least two chains with at least two draws each")
     chain_means = arr.mean(axis=1)  # (m, d)
     w = arr.var(axis=1, ddof=1).mean(axis=0)  # within-chain variance (d,)
     b = n * chain_means.var(axis=0, ddof=1)  # between-chain variance (d,)
@@ -60,12 +67,18 @@ def rhat(chains: Any) -> np.ndarray:
     return np.where(w > 0.0, finite, degenerate)
 
 
-def _geyer_tau(centered: np.ndarray, var: np.ndarray, lag_limit: int) -> np.ndarray:
+def _geyer_tau(
+    centered: np.ndarray,
+    within_var: np.ndarray,
+    var_plus: np.ndarray,
+    lag_limit: int,
+) -> np.ndarray:
     """Integrated autocorrelation time per component via Geyer's initial monotone sequence.
 
     Args:
         centered: ``(n_chains, n_draws, k)`` draws, each chain centered by its own mean.
-        var: ``(k,)`` pooled variances of ``centered`` (all strictly positive).
+        within_var: ``(k,)`` mean within-chain sample variances.
+        var_plus: ``(k,)`` marginal variance estimates including between-chain variation.
         lag_limit: largest autocorrelation lag considered.
 
     Autocorrelations are pooled across chains and paired lag-by-lag (``P_0 = rho_0 + rho_1``,
@@ -87,8 +100,10 @@ def _geyer_tau(centered: np.ndarray, var: np.ndarray, lag_limit: int) -> np.ndar
         if lag == 0:
             rho_even = np.ones(k, dtype=float)
         else:
-            rho_even = np.mean(centered[:, :-lag] * centered[:, lag:], axis=(0, 1)) / var
-        rho_odd = np.mean(centered[:, : -(lag + 1)] * centered[:, lag + 1 :], axis=(0, 1)) / var
+            acov_even = np.mean(centered[:, :-lag] * centered[:, lag:], axis=(0, 1))
+            rho_even = 1.0 - (within_var - acov_even) / var_plus
+        acov_odd = np.mean(centered[:, : -(lag + 1)] * centered[:, lag + 1 :], axis=(0, 1))
+        rho_odd = 1.0 - (within_var - acov_odd) / var_plus
         pair = np.minimum(rho_even + rho_odd, prev)
         active &= pair > 0.0
         psum = np.where(active, psum + pair, psum)
@@ -111,7 +126,10 @@ def ess(samples: Any, max_lag: int | None = None) -> np.ndarray:
     Returns:
         A length-``d`` array of ESS values.
     """
-    arr = np.asarray(samples, dtype=float)
+    try:
+        arr = np.asarray(samples, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("samples must be a finite numeric array") from exc
     if arr.ndim == 1:
         arr = arr[None, :, None]
     elif arr.ndim == 2:
@@ -119,18 +137,35 @@ def ess(samples: Any, max_lag: int | None = None) -> np.ndarray:
     if arr.ndim != 3:
         raise ValueError("samples must have shape (n_draws,), (n_draws, d), or (n_chains, n_draws, d).")
     m, n, d = arr.shape
-    if n <= 1:
-        return np.full(d, float(n) * m)
+    if 0 in arr.shape or n < 2:
+        raise ValueError("ESS requires at least two finite draws and a non-empty parameter dimension")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("samples must contain only finite draws")
+    if max_lag is not None:
+        if isinstance(max_lag, (bool, np.bool_)) or not isinstance(max_lag, (int, np.integer)):
+            raise ValueError("max_lag must be a non-negative integer or None")
+        if max_lag < 0:
+            raise ValueError("max_lag must be a non-negative integer or None")
     centered = arr - arr.mean(axis=1, keepdims=True)  # center each chain
-    var = np.mean(centered * centered, axis=(0, 1))  # (d,)
+    within_var = arr.var(axis=1, ddof=1).mean(axis=0)
+    if m > 1:
+        between = n * arr.mean(axis=1).var(axis=0, ddof=1)
+        var_plus = (n - 1.0) / n * within_var + between / n
+    else:
+        var_plus = within_var.copy()
     n_total = m * n
     out = np.empty(d, dtype=float)
-    nonzero = var > 0.0
-    out[~nonzero] = float(n_total)
+    nonzero = var_plus > 0.0
+    out[~nonzero] = float(n_total)  # every draw is the same value
     if not np.any(nonzero):
         return out
     lag_limit = n - 1 if max_lag is None else min(int(max_lag), n - 1)
-    tau = _geyer_tau(centered[:, :, nonzero], var[nonzero], lag_limit)
+    tau = _geyer_tau(
+        centered[:, :, nonzero],
+        within_var[nonzero],
+        var_plus[nonzero],
+        lag_limit,
+    )
     out[nonzero] = np.maximum(1.0, n_total / tau)
     return out
 
@@ -162,12 +197,18 @@ def split_rhat(chains: Any) -> np.ndarray:
     rank-normalizes the pooled draws (robust to heavy tails / non-normality), then applies the
     Gelman-Rubin R-hat. Convergence is typically declared at ``< 1.01``.
     """
-    return rhat(_rank_normalize(_split_chains(_as_chains(chains))))
+    arr = _as_chains(chains)
+    if arr.shape[0] < 2 or arr.shape[1] < 4:
+        raise ValueError("rank-normalized split R-hat requires at least two chains with four draws each")
+    return rhat(_rank_normalize(_split_chains(arr)))
 
 
 def ess_bulk(chains: Any) -> np.ndarray:
     """Bulk effective sample size: ESS of the rank-normalized split chains (mixing in the distribution body)."""
-    return ess(_rank_normalize(_split_chains(_as_chains(chains))))
+    arr = _as_chains(chains)
+    if arr.shape[1] < 4:
+        raise ValueError("bulk ESS requires at least four draws per chain")
+    return ess(_rank_normalize(_split_chains(arr)))
 
 
 def ess_tail(chains: Any, prob: float = 0.05) -> np.ndarray:
@@ -177,7 +218,16 @@ def ess_tail(chains: Any, prob: float = 0.05) -> np.ndarray:
     q_{1-prob})])`` over the split chains (Vehtari et al. 2021), surfacing poor tail exploration that
     bulk-ESS misses.
     """
+    if (
+        isinstance(prob, (bool, np.bool_))
+        or not isinstance(prob, (int, float, np.integer, np.floating))
+        or not np.isfinite(prob)
+        or not 0.0 < float(prob) < 0.5
+    ):
+        raise ValueError("prob must be a finite number strictly between 0 and 0.5")
     s = _split_chains(_as_chains(chains))
+    if s.shape[1] < 2:
+        raise ValueError("tail ESS requires at least four draws per chain")
     m, n, d = s.shape
     out = np.empty(d, dtype=float)
     for k in range(d):
@@ -204,7 +254,10 @@ def folded_split_rhat(chains: Any) -> np.ndarray:
     chain *scales/tails*, catching the case where chains share a mean but differ in spread. Use together
     with :func:`split_rhat` (or :func:`rhat_max`).
     """
-    return rhat(_rank_normalize(_split_chains(_fold(_as_chains(chains)))))
+    arr = _as_chains(chains)
+    if arr.shape[0] < 2 or arr.shape[1] < 4:
+        raise ValueError("folded split R-hat requires at least two chains with four draws each")
+    return rhat(_rank_normalize(_split_chains(_fold(arr))))
 
 
 def rhat_max(chains: Any) -> np.ndarray:
@@ -226,7 +279,7 @@ def mcse_mean(chains: Any) -> np.ndarray:
     arr = _as_chains(chains)
     m, n, d = arr.shape
     sd = arr.reshape(m * n, d).std(axis=0, ddof=1)
-    return sd / np.sqrt(ess(arr))
+    return sd / np.sqrt(ess_bulk(arr))
 
 
 def mcmc_summary(chains: Any) -> list[dict[str, float]]:
@@ -270,12 +323,31 @@ def geweke_z(chain: Any, first: float = 0.1, last: float = 0.5) -> np.ndarray:
     a large ``|z|`` flags a chain still drifting. Returns one z per parameter. Complements the
     multi-chain :func:`split_rhat`.
     """
-    series = np.asarray(chain, dtype=float)
+    try:
+        series = np.asarray(chain, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("chain must be a finite one- or two-dimensional numeric array") from exc
     if series.ndim == 1:
         series = series[:, None]  # (n,) single chain, single parameter -> (n, 1)
+    if series.ndim != 2 or series.shape[1] == 0 or series.shape[0] < 4:
+        raise ValueError("chain must contain at least four draws for one or more parameters")
+    if not np.all(np.isfinite(series)):
+        raise ValueError("chain must contain only finite draws")
+    for name, fraction in (("first", first), ("last", last)):
+        if (
+            isinstance(fraction, (bool, np.bool_))
+            or not isinstance(fraction, (int, float, np.integer, np.floating))
+            or not np.isfinite(fraction)
+            or not 0.0 < float(fraction) < 1.0
+        ):
+            raise ValueError(f"{name} must be a finite fraction strictly between 0 and 1")
+    if first + last > 1.0:
+        raise ValueError("first and last diagnostic windows must not overlap")
     n, d = series.shape
-    na = max(2, int(first * n))
-    nb = max(2, int(last * n))
+    na = int(first * n)
+    nb = int(last * n)
+    if na < 2 or nb < 2:
+        raise ValueError("first and last fractions must each select at least two draws")
     a = series[:na]
     b = series[n - nb :]
     z = np.empty(d, dtype=float)
