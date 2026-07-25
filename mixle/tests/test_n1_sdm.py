@@ -333,6 +333,74 @@ def test_nll_and_grad_data_term_matches_numerical_differentiation():
     assert np.allclose(analytic_grad, numerical_grad, atol=1e-3, rtol=1e-4)
 
 
+# -- MXR-080-1439: the prior-dominated honesty flag must compare data curvature against the trace of the
+# SAME penalized-Hessian ridge term _penalized_hessian uses (2 * ridge * I, MXR-080-0112), not half of it --
+
+
+def _make_prior_dominated_boundary_fixture() -> tuple[list[SpeciesObservation], np.ndarray, np.ndarray, float]:
+    """A deterministic fixture engineered so that, at ``ridge=2.5`` and ``p=2``, ``data_curvature`` falls
+    strictly between ``ridge * p`` (5.0) and ``2 * ridge * p`` (10.0): three presences (in cells 1, 3, 6
+    of 8) under unit area/zero log-offset fits to ``data_curvature ~= 7.354``. The OLD ``prior_curvature
+    = ridge * p`` formula therefore reports "not prior-dominated" (5.0 < 7.354) while the mathematically
+    consistent ``prior_curvature = 2 * ridge * p`` formula reports "prior-dominated" (10.0 > 7.354) for
+    the exact same fit."""
+    num_cells = 8
+    env = np.array([-1.0, -0.6, -0.2, 0.1, 0.3, 0.5, 0.8, 1.0])
+    area = np.ones(num_cells)
+    ridge = 2.5
+    occurrences = [
+        SpeciesObservation(species_id="x", detection=True, location=np.array([1.5])),
+        SpeciesObservation(species_id="x", detection=True, location=np.array([3.5])),
+        SpeciesObservation(species_id="x", detection=True, location=np.array([6.5])),
+    ]
+    return occurrences, env.reshape(-1, 1), area, ridge
+
+
+def test_fit_sdm_prior_dominated_uses_the_full_two_ridge_hessian_trace():
+    """MXR-080-1439 exact regression: at this fixture's boundary point, the OLD ``prior_curvature =
+    ridge * p`` sits BELOW ``data_curvature`` (reports ``prior_dominated=False``) while the corrected
+    ``prior_curvature = 2 * ridge * p`` -- the same ``2 * ridge * I`` convention ``_penalized_hessian``
+    already uses for the Laplace covariance itself (MXR-080-0112) -- sits ABOVE it (reports
+    ``prior_dominated=True``). A driller-facing field must not be reported as data-supported when it is
+    actually still prior-dominated (``posterior_protocol.DerivedQuantity``'s honesty flag)."""
+    occurrences, covariates, area, ridge = _make_prior_dominated_boundary_fixture()
+    p = covariates.shape[1] + 1
+
+    model = fit_sdm(occurrences, covariates, area, ridge=ridge)
+
+    # Recompute data_curvature from the model's own fitted state (no background in this fixture, so
+    # effective_area == cell_area) to pin the boundary fixture itself, not just trust the search that
+    # found it.
+    log_offset = np.log(model.cell_area)
+    rates_hat, mask = _clipped_rates_and_mask(model.beta, model.design, log_offset)
+    assert np.all(mask == 1.0)  # sanity: the rate clip is inactive here (not what this test targets)
+    data_curvature = float(np.trace(model.design.T @ (rates_hat[:, None] * model.design)))
+
+    old_prior_curvature = ridge * p
+    new_prior_curvature = 2.0 * ridge * p
+    assert old_prior_curvature < data_curvature < new_prior_curvature  # the boundary this fixture targets
+
+    dq = model.derived_quantity(lambda draws: draws, 2, np.random.default_rng(0))
+    assert dq.prior_dominated is True  # corrected answer -- was False under the pre-fix ridge*p formula
+
+
+def test_fit_sdm_negative_control_prior_dominated_still_false_with_ample_data():
+    """Negative control: an ordinary, well-informed fit (light ridge, hundreds of presences) still
+    reports ``prior_dominated=False`` after the MXR-080-1439 fix -- the fix corrects the comparison, it
+    does not make the flag universally ``True``."""
+    rng = np.random.default_rng(17)
+    num_cells = 200
+    env = rng.uniform(-1.0, 1.0, size=num_cells)
+    lambda_true = np.exp(0.2 + 1.0 * env)
+    area = np.ones(num_cells)
+    occurrences, _ = _synthetic_presences(lambda_true, area, rng)
+
+    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-3)
+
+    dq = model.derived_quantity(lambda draws: draws, 2, np.random.default_rng(0))
+    assert dq.prior_dominated is False
+
+
 # -- MXR-080-0113: gradient/Hessian must stay the exact derivative of the CLIPPED objective, and a
 # non-converged fit must not be treated as a valid posterior --
 
