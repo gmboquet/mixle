@@ -35,8 +35,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
-
 try:
     import torch
     import torch.nn as nn
@@ -55,6 +53,22 @@ __all__ = [
 ]
 
 
+def _normalize_quant_config(bits: Any, clip_percentile: Any) -> tuple[int, float | None]:
+    import numbers
+
+    from mixle.task.quantize import _QMAX
+
+    if isinstance(bits, bool) or not isinstance(bits, numbers.Integral) or int(bits) not in _QMAX:
+        raise ValueError(f"bits must be one of {sorted(_QMAX)}, got {bits}")
+    if clip_percentile is not None:
+        if isinstance(clip_percentile, bool) or not isinstance(clip_percentile, numbers.Real):
+            raise ValueError("clip_percentile must be in (0, 100]")
+        clip_percentile = float(clip_percentile)
+        if not 0.0 < clip_percentile <= 100.0:
+            raise ValueError("clip_percentile must be in (0, 100]")
+    return int(bits), clip_percentile
+
+
 if _HAS_TORCH:
 
     class _FakeQuantSTE(torch.autograd.Function):
@@ -65,12 +79,25 @@ if _HAS_TORCH:
 
         @staticmethod
         def forward(ctx: Any, x: Any, bits: int, clip_percentile: float | None) -> Any:
-            from mixle.task.quantize import quantize_dequantize_array
+            from mixle.task.quantize import _QMAX
 
-            w = x.detach().cpu().numpy().astype(np.float64)
-            wq, scale = quantize_dequantize_array(w, bits=bits, clip_percentile=clip_percentile)
-            dq = (wq.astype(np.float64) * scale).astype(np.float32)
-            return torch.as_tensor(dq, dtype=x.dtype, device=x.device)
+            qmax = _QMAX[bits]
+            detached = x.detach()
+            absolute = detached.abs()
+            if clip_percentile is None:
+                magnitude = absolute.max()
+            else:
+                # torch.quantile does not implement every low-precision CPU dtype. Promotion to fp32
+                # is lossless for fp16/bfloat16 and stays on the declared device; float64 remains
+                # float64, so QAT never introduces the old unrelated float32 precision bottleneck.
+                quantile_input = (
+                    absolute
+                    if absolute.dtype in (torch.float32, torch.float64)
+                    else absolute.to(dtype=torch.float32)
+                )
+                magnitude = torch.quantile(quantile_input.reshape(-1), clip_percentile / 100.0).to(x.dtype)
+            scale = torch.where(magnitude > 0, magnitude / qmax, torch.ones_like(magnitude))
+            return torch.clamp(torch.round(detached / scale), -qmax, qmax) * scale
 
         @staticmethod
         def backward(ctx: Any, grad_output: Any) -> tuple[Any, None, None]:
@@ -90,20 +117,21 @@ if _HAS_TORCH:
         def __init__(
             self, base: Any, *, bits: int = 4, clip_percentile: float | None = None, enabled: bool = True
         ) -> None:
-            from mixle.task.quantize import _QMAX
-
             super().__init__()
             if not isinstance(base, nn.Linear):
                 raise TypeError(f"QATWrapper wraps an nn.Linear, got {type(base).__name__}")
-            if bits not in _QMAX:
-                raise ValueError(f"bits must be one of {sorted(_QMAX)}, got {bits}")
             self.base = base
-            self.bits = int(bits)
-            self.clip_percentile = clip_percentile
+            self.configure(bits=bits, clip_percentile=clip_percentile)
             # a plain attribute (not a buffer/parameter): flip off to run this layer at its real fp32
             # weight -- e.g. to check a QAT-trained model's full-precision quality (see
             # set_fake_quant_enabled), with no change to the wrapped Linear or the surrounding model.
-            self.enabled = bool(enabled)
+            if not isinstance(enabled, bool):
+                raise ValueError("enabled must be a boolean")
+            self.enabled = enabled
+
+        def configure(self, *, bits: int, clip_percentile: float | None) -> None:
+            """Explicitly replace the quantizer configuration without adding another wrapper."""
+            self.bits, self.clip_percentile = _normalize_quant_config(bits, clip_percentile)
 
         @property
         def weight(self) -> Any:
@@ -142,6 +170,15 @@ def fake_quantize(x: Any, *, bits: int = 4, clip_percentile: float | None = None
     backward passes the gradient through unchanged (STE)."""
     if not _HAS_TORCH:  # pragma: no cover - torch is optional
         raise ImportError("mixle.models.qat requires torch")
+    if not isinstance(x, torch.Tensor):
+        raise TypeError("x must be a torch tensor")
+    if not x.is_floating_point() or x.is_complex():
+        raise ValueError("x must use a real floating-point dtype")
+    if x.numel() == 0:
+        raise ValueError("x must not be empty")
+    if not bool(torch.isfinite(x).all()):
+        raise ValueError("x must contain only finite values")
+    bits, clip_percentile = _normalize_quant_config(bits, clip_percentile)
     return _FakeQuantSTE.apply(x, bits, clip_percentile)
 
 
@@ -150,7 +187,13 @@ def fake_quantize_int4(x: Any, *, clip_percentile: float | None = None) -> Any:
     return fake_quantize(x, bits=4, clip_percentile=clip_percentile)
 
 
-def apply_qat(model: Any, *, bits: int = 4, clip_percentile: float | None = None) -> Any:
+def apply_qat(
+    model: Any,
+    *,
+    bits: int = 4,
+    clip_percentile: float | None = None,
+    reconfigure: bool = False,
+) -> Any:
     """Replace every ``nn.Linear`` under ``model`` in place with a :class:`QATWrapper`, so the whole
     model trains quantization-aware (straight-through int4 fake-quant on every Linear weight, every
     forward call). Mirrors ``mixle.experimental.program.lora``'s wrapping pattern: walk
@@ -161,9 +204,28 @@ def apply_qat(model: Any, *, bits: int = 4, clip_percentile: float | None = None
     """
     if not _HAS_TORCH:  # pragma: no cover - torch is optional
         raise ImportError("mixle.models.qat requires torch")
+    if not isinstance(model, nn.Module):
+        raise TypeError("model must be a torch.nn.Module")
+    if not isinstance(reconfigure, bool):
+        raise ValueError("reconfigure must be a boolean")
+
+    # Validate once even when the model has no Linear leaves, without allocating parameters or
+    # advancing the caller's random-number generator.
+    bits, clip_percentile = _normalize_quant_config(bits, clip_percentile)
 
     def replace(m: Any) -> None:
         for name, child in list(m.named_children()):
+            if isinstance(child, QATWrapper):
+                requested = (bits, clip_percentile)
+                current = (child.bits, child.clip_percentile)
+                if current != requested:
+                    if not reconfigure:
+                        raise ValueError(
+                            "model already contains a QATWrapper with a different configuration; "
+                            "pass reconfigure=True to update it explicitly"
+                        )
+                    child.configure(bits=bits, clip_percentile=clip_percentile)
+                continue
             if isinstance(child, nn.Linear):
                 setattr(m, name, QATWrapper(child, bits=bits, clip_percentile=clip_percentile))
             else:
@@ -180,7 +242,11 @@ def set_fake_quant_enabled(model: Any, enabled: bool) -> Any:
     Returns ``model`` for chaining.
     """
     if _HAS_TORCH:
+        if not isinstance(model, nn.Module):
+            raise TypeError("model must be a torch.nn.Module")
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
         for m in model.modules():
             if isinstance(m, QATWrapper):
-                m.enabled = bool(enabled)
+                m.enabled = enabled
     return model
