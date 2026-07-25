@@ -111,7 +111,8 @@ class NeuralPPLTest(unittest.TestCase):
         self.assertLess(nll, 0.5)  # learned next-token prediction (random would be ~log(v) ~ 2.8 nats)
 
     def test_streaming_transformer_leaf_does_not_buffer_the_corpus(self):
-        # the keystone: seq_update IS a train step; value() is (loss_sum, tokens) telemetry, NEVER the corpus
+        # The stream driver takes one persistent-optimizer step per batch and returns only weighted telemetry,
+        # never the corpus. Distributed accumulators use foldable model-sized gradients internally.
         from mixle.data.stream_token_source import stream_token_source
         from mixle.models.streaming_transformer_leaf import stream_fit
         from mixle.models.transformer import build_causal_lm
@@ -129,7 +130,7 @@ class NeuralPPLTest(unittest.TestCase):
         # while cutting training cost ~3x vs. the original epochs=30.
         src = stream_token_source(ids, block=b, batch_size=128, epochs=10, seed=0)  # a generator, not a buffered list
         leaf, payload = stream_fit(module, src, lr=3e-3)
-        self.assertEqual(len(payload), 2)  # (loss_sum, tokens) -- the accumulator never held the corpus
+        self.assertEqual(len(payload), 2)  # (weighted loss sum, effective weight) -- never the corpus
         ctx = np.stack([ids[i : i + b] for i in range(64)]).astype("float32")
         nll = -np.mean(leaf.seq_log_density((ctx, ids[b : b + 64])))
         self.assertLess(nll, 0.5)  # the streamed model learned next-token prediction
