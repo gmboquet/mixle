@@ -302,7 +302,16 @@ class Substrate:
         ``scope`` alone (see :meth:`reindex`); when there are too few same-scope items to learn one (or
         for a non-text query), ranking falls back to a lexical token overlap. Structured items with no
         text always rank lexically over their serialized payload + tags.
+
+        ``k`` must be an exact, non-negative :class:`int` (MXR-080-0236, see :func:`_require_count`):
+        "return up to ``k`` results," never a negative-indexing slice trick. Checked before
+        :meth:`reindex` (a potentially expensive rebuild) ever runs, so an invalid ``k`` fails fast.
+        :func:`~mixle.substrate.retrieve.retrieve`'s diversified and flat merge paths, and
+        :meth:`~mixle.substrate.retrieve.Retrieval.top`, all validate through this same function, so a
+        result count means exactly the same thing -- and an invalid one is rejected exactly the same
+        way -- at every entry point across the retrieval surface.
         """
+        k = _require_count(k, "k")
         if self._dirty:
             self.reindex()
         candidates = self.all(kind=kind, scope=scope)
@@ -324,7 +333,7 @@ class Substrate:
             scored = [(item, _lexical_score(query, item)) for item in candidates]
 
         scored.sort(key=lambda t: -t[1])
-        return scored[: int(k)]
+        return scored[:k]
 
     # -- persistence -------------------------------------------------------------------------------
     def save(self, root: str | None = None) -> str:
@@ -429,3 +438,26 @@ def _lexical_score(query: str, item: SubstrateItem) -> float:
     if not toks:
         return 0.0
     return sum(1.0 for t in q if _token_matches(t, toks)) / len(q)
+
+
+def _require_count(value: Any, name: str) -> int:
+    """Validate ``value`` is an exact, non-negative integer result count (MXR-080-0236).
+
+    ``k`` (and every other "how many results" parameter across the retrieval surface --
+    :func:`~mixle.substrate.retrieve.retrieve` and :meth:`~mixle.substrate.retrieve.Retrieval.top`)
+    means "return up to this many results," never a negative-indexing slice trick. Before this check,
+    a bare ``int(k)`` silently truncated a fractional ``k`` (``k=2.7`` quietly became ``2``) and
+    accepted ``bool`` (``k=True`` quietly asked for one result), while a negative ``k`` fell through to
+    ordinary Python slicing with THREE different silent outcomes for the very same invalid input:
+    :meth:`Substrate.search`'s ``scored[:k]`` returned all but the final item for ``k=-1``;
+    :func:`~mixle.substrate.retrieve.retrieve`'s diversified path (a ``while len(merged) < k`` loop)
+    returned nothing at all for the same input, because ``0 < -1`` is already false; and its flat path
+    (``sorted(...)[:k]``) returned all but a trailing item, same as ``search``. None of the three
+    raised. Every entry point that accepts a result count now validates through this one function, so
+    an invalid count is always rejected, and a valid one always means the same thing, everywhere.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int, got {type(value).__name__}: {value!r}")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative, got {value!r}")
+    return value

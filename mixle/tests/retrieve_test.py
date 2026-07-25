@@ -90,5 +90,79 @@ class TelemetryTest(unittest.TestCase):
         self.assertIn("kinds_covered", events[0].outcome)
 
 
+def _two_kind_shard():
+    # >= 2 items per kind so a k=-1 bug's effect at the per-kind AND the merge stage stay
+    # distinguishable from each other (a 1-item kind's "all but the last" is indistinguishable from
+    # "none" -- see CountValidationTest.test_retrieve_diversify_and_flat_diverge_on_negative_k).
+    s = Substrate()
+    s.add("text", "refund policy alpha", tags=["policy"])
+    s.add("text", "refund policy beta", tags=["policy"])
+    s.add("artifact", "refund-router artifact one", payload={"ref": "/x"})
+    s.add("artifact", "refund-router artifact two", payload={"ref": "/y"})
+    return s
+
+
+class CountValidationTest(unittest.TestCase):
+    """MXR-080-0236: k (and Retrieval.top's n) must be an exact, non-negative int, with identical
+    semantics across Substrate.search and retrieve()'s diversified and flat merge paths."""
+
+    def test_search_rejects_negative_k(self):
+        s = _two_kind_shard()
+        with self.assertRaises(ValueError):
+            s.search("refund", k=-1)
+
+    def test_search_rejects_bool_k(self):
+        s = _two_kind_shard()
+        with self.assertRaises(TypeError):
+            s.search("refund", k=True)
+
+    def test_search_rejects_fractional_k(self):
+        s = _two_kind_shard()
+        with self.assertRaises(TypeError):
+            s.search("refund", k=2.7)
+
+    def test_search_k_zero_returns_nothing(self):
+        s = _two_kind_shard()
+        self.assertEqual(s.search("refund", k=0), [])
+
+    def test_retrieve_diversify_and_flat_diverge_on_negative_k_pre_fix(self):
+        """The audit's own reproduction: pre-fix, diversify's ``while len(merged) < k`` loop treated
+        k=-1 as "already satisfied" and returned NOTHING, while the flat path's ``sorted(...)[:k]``
+        fell through to Python's negative-index slicing and returned all but a trailing item -- two
+        different silent wrong answers for the very same invalid input. Both must now raise the same
+        error instead of disagreeing."""
+        s = _two_kind_shard()
+        with self.assertRaises(ValueError):
+            retrieve(s, "refund", k=-1, diversify=True)
+        with self.assertRaises(ValueError):
+            retrieve(s, "refund", k=-1, diversify=False)
+
+    def test_retrieve_rejects_bool_and_fractional_k(self):
+        s = _two_kind_shard()
+        with self.assertRaises(TypeError):
+            retrieve(s, "refund", k=True)
+        with self.assertRaises(TypeError):
+            retrieve(s, "refund", k=1.5)
+
+    def test_top_rejects_negative_n(self):
+        s = _two_kind_shard()
+        r = retrieve(s, "refund", k=4)
+        with self.assertRaises(ValueError):
+            r.top(-1)
+
+    def test_top_rejects_bool_and_fractional_n(self):
+        s = _two_kind_shard()
+        r = retrieve(s, "refund", k=4)
+        with self.assertRaises(TypeError):
+            r.top(True)
+        with self.assertRaises(TypeError):
+            r.top(1.5)
+
+    def test_top_n_zero_returns_nothing(self):
+        s = _two_kind_shard()
+        r = retrieve(s, "refund", k=4)
+        self.assertEqual(r.top(0), [])
+
+
 if __name__ == "__main__":
     unittest.main()
