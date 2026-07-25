@@ -17,6 +17,34 @@ from mixle.ppl import (
 from mixle.ppl.conformal import conformal_quantile
 
 
+class _MutablePredictor:
+    def __init__(self, offset=0.0):
+        self.offset = float(offset)
+
+    def predict(self, given):
+        return np.asarray(given["x"], dtype=float) + self.offset
+
+
+class _KnowledgeGraphStub:
+    num_entities = 3
+    num_relations = 2
+
+    def __init__(self, logp=None):
+        self.logp = np.log([0.2, 0.3, 0.5]) if logp is None else np.asarray(logp, dtype=float)
+
+    def tail_log_posterior(self, h, r):
+        return self.logp
+
+    def head_log_posterior(self, r, t):
+        return self.logp
+
+    def relation_log_posterior(self, h, t):
+        return np.log([0.4, 0.6])
+
+    def complete(self, h=None, r=None, t=None):
+        return self.relation_log_posterior(h, t) if r is None else self.logp
+
+
 class ConformalRegressorTestCase(unittest.TestCase):
     def setUp(self):
         rng = np.random.RandomState(0)
@@ -54,6 +82,16 @@ class ConformalRegressorTestCase(unittest.TestCase):
         const = _ConstMean(np.mean(self.cal[1]))
         cp = conformal(const, self.cal[1], given=self.cal[0], alpha=0.1)
         self.assertGreater(cp.covers(self.te[1], given=self.te[0]).mean(), 0.86)
+
+    def test_calibration_uses_a_frozen_model_snapshot(self):
+        original = _MutablePredictor()
+        cp = ConformalRegressor(original, [0.0, 1.0], given={"x": [0.0, 1.0]}, alpha=0.5)
+        original.offset = 100.0
+        lo, hi = cp.interval({"x": [0.0, 1.0]})
+        np.testing.assert_allclose((lo + hi) / 2.0, [0.0, 1.0])
+        cp.result.offset = 1.0
+        with self.assertRaisesRegex(RuntimeError, "changed after calibration"):
+            cp.interval({"x": [0.0, 1.0]})
 
 
 class ConformalQuantileRegressorTestCase(unittest.TestCase):
@@ -290,6 +328,30 @@ class ConformalKnowledgeGraphTestCase(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             ConformalKnowledgeGraph(self.m, self.cal, slot="entity", alpha=0.1)
+
+    def test_knowledge_graph_indices_posteriors_and_snapshot_are_strict(self):
+        from mixle.ppl import ConformalKnowledgeGraph
+
+        calibration = np.array([[0, 0, 2], [1, 1, 1]], dtype=int)
+        original = _KnowledgeGraphStub()
+        conformal_kg = ConformalKnowledgeGraph(original, calibration)
+        original.logp[:] = np.log([0.9, 0.05, 0.05])
+        self.assertEqual(conformal_kg.completion_set(h=0, r=0, t=None).ndim, 1)
+        conformal_kg.kg.logp[:] = np.log([0.9, 0.05, 0.05])
+        with self.assertRaisesRegex(RuntimeError, "changed after calibration"):
+            conformal_kg.completion_set(h=0, r=0, t=None)
+
+        for triples in (
+            [[0.0, 0.0, 1.0]],
+            [[-1, 0, 1]],
+            [[0, 2, 1]],
+            [[0, 0, 3]],
+        ):
+            with self.subTest(triples=triples), self.assertRaises(ValueError):
+                ConformalKnowledgeGraph(_KnowledgeGraphStub(), triples)
+        for logp in ([0.0, 0.0], [np.nan, 0.0, 0.0], np.log([0.2, 0.2, 0.2])):
+            with self.subTest(logp=logp), self.assertRaises(ValueError):
+                ConformalKnowledgeGraph(_KnowledgeGraphStub(logp), calibration)
 
 
 if __name__ == "__main__":
