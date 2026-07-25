@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -337,6 +338,10 @@ class MCMCTestCase(unittest.TestCase):
         self.assertLess(result.acceptance_rate, 0.3)
         self.assertLess(abs(float(samples.mean()) - 1.0), 0.35)
 
+    def test_independent_proposal_rejects_a_missing_density(self):
+        with self.assertRaisesRegex(TypeError, "requires a callable log_density"):
+            IndependentProposal(lambda rng: rng.normal(), None)
+
     def test_blocked_metropolis_within_gibbs_updates_dict_state(self):
         def log_target(state):
             x = float(state["x"])
@@ -670,6 +675,43 @@ class ParameterPosteriorTestCase(unittest.TestCase):
                     self.assertAlmostEqual(a, b, places=8)
             else:
                 self.assertAlmostEqual(theta, bridge.initial_theta, places=8)
+
+    def test_categorical_bridge_rejects_invalid_initial_simplexes_without_repair(self):
+        bridge = build_parameter_bridge(CategoricalDistribution({"a": 0.2, "b": 0.5, "c": 0.3}))
+        invalid = (
+            {"a": -0.1, "b": 0.6, "c": 0.5},
+            {"a": 0.0, "b": 0.5, "c": 0.5},
+            {"a": 0.2, "b": 0.5, "c": 0.4},
+            {"a": 0.5, "b": 0.5},
+        )
+        for state in invalid:
+            with self.subTest(state=state), self.assertRaises(ValueError):
+                bridge.to_unconstrained(state)
+
+    def test_parameter_mapping_preserves_driver_specific_diagnostics(self):
+        raw = MCMCResult(
+            samples=[np.asarray([np.log(2.0)])],
+            log_probs=np.asarray([-1.0]),
+            accepted=np.asarray([True]),
+            transition_labels=("nuts",),
+        )
+        object.__setattr__(raw, "tree_depth", np.asarray([4]))
+        object.__setattr__(raw, "divergences", np.asarray([False]))
+        object.__setattr__(raw, "step_size", 0.125)
+        object.__setattr__(raw, "num_target_evals", 17)
+        with patch("mixle.inference.mcmc.parameter_bridge.nuts", return_value=raw):
+            mapped = sample_parameter_posterior(
+                PoissonDistribution(1.0),
+                [1, 2],
+                sampler="nuts",
+                steps=1,
+                burn_in=0,
+            )
+        self.assertAlmostEqual(mapped.samples[0], 2.0)
+        np.testing.assert_array_equal(mapped.tree_depth, raw.tree_depth)
+        np.testing.assert_array_equal(mapped.divergences, raw.divergences)
+        self.assertEqual(mapped.step_size, raw.step_size)
+        self.assertEqual(mapped.num_target_evals, raw.num_target_evals)
 
 
 class GenericParameterBridgeTestCase(unittest.TestCase):

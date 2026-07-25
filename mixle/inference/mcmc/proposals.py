@@ -237,11 +237,15 @@ class AdaptiveCovarianceProposal(Proposal):
 
 
 class IndependentProposal(Proposal):
-    """Independence proposal from a sampler plus optional log density."""
+    """Independence proposal with the density required for its Hastings correction."""
 
     def __init__(
-        self, sampler: Callable[[np.random.RandomState], Any], log_density: Callable[[Any], float] | None = None
+        self, sampler: Callable[[np.random.RandomState], Any], log_density: Callable[[Any], float]
     ) -> None:
+        if not callable(sampler):
+            raise TypeError("sampler must be callable.")
+        if not callable(log_density):
+            raise TypeError("an independence proposal requires a callable log_density.")
         self.sampler = sampler
         self._log_density = log_density
 
@@ -250,10 +254,11 @@ class IndependentProposal(Proposal):
         return self.sampler(rng)
 
     def log_density(self, proposed: Any, current: Any) -> float:
-        """Return the proposal log density when one was supplied."""
-        if self._log_density is None:
-            return 0.0
-        return float(self._log_density(proposed))
+        """Return ``log q(proposed)`` for the independence Hastings ratio."""
+        value = float(self._log_density(proposed))
+        if np.isnan(value):
+            raise ValueError("independence proposal log_density returned NaN.")
+        return value
 
 
 class MixtureProposal(Proposal):
