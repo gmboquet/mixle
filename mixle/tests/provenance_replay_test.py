@@ -77,7 +77,7 @@ def test_altered_config_changes_the_receipt() -> None:
     data, model = _fit()
     receipt = record_fit(model, data, seed=7, estimator=GaussianEstimator())
     assert receipt.seed == 7
-    assert receipt.estimator == "GaussianEstimator"
+    assert receipt.estimator.endswith(".GaussianEstimator")
 
     # A receipt recorded with a different seed is a different recipe.
     other = record_fit(model, data, seed=99, estimator=GaussianEstimator())

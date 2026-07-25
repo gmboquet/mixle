@@ -38,6 +38,33 @@ class SkillWrappingTest(unittest.TestCase):
         sk = skill("half", _scalar_art(), call=lambda x: x / 2, registry=reg)
         self.assertEqual(sk(10), 5)
 
+    def test_skill_identity_binds_implementation_artifact_and_descriptor(self):
+        reg = SkillRegistry()
+        state = {"scale": 2}
+
+        def scale(value):
+            return value * state["scale"]
+
+        sk = skill("scale", scale, description="scale a value", registry=reg)
+        self.assertTrue(sk.verify_identity())
+        self.assertEqual(len(sk.implementation_digest), 64)
+        self.assertEqual(len(sk.artifact_digest), 64)
+        self.assertEqual(len(sk.descriptor_digest), 64)
+        state["scale"] = 3
+        self.assertFalse(sk.verify_identity())
+
+    def test_same_result_does_not_make_different_code_the_same_skill(self):
+        def first(value):
+            return value + 0
+
+        def second(value):
+            return 0 + value
+
+        a = skill("a", first, registry=SkillRegistry())
+        b = skill("b", second, registry=SkillRegistry())
+        self.assertEqual(a(3), b(3))
+        self.assertNotEqual(a.implementation_digest, b.implementation_digest)
+
     def test_cannot_derive_callable_raises(self):
         reg = SkillRegistry()
         with self.assertRaises(TypeError):
@@ -75,6 +102,7 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(len(ids), 2)
         self.assertTrue(all(i.kind == "artifact" for i in s.all()))
         self.assertTrue(any(i.payload.get("skill") == "greet" for i in s.all()))
+        self.assertTrue(all(len(i.payload["implementation_digest"]) == 64 for i in s.all()))
 
     def test_default_registry_is_shared(self):
         before = len(default_registry())
