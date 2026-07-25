@@ -25,10 +25,23 @@ _N_PARAMS = 2  # both loglogistic and hill are fit with a 2-element coefficient 
 
 @dataclass(frozen=True)
 class _SampleDerivedQuantity:
-    """A concrete IC-1 `DerivedQuantity`: a draw matrix + the honesty flag, CI by empirical quantile."""
+    """A concrete IC-1 `DerivedQuantity`: a draw matrix + the honesty flag, CI by empirical quantile.
+
+    Construction validates ``samples``: non-empty and finite (no NaN/Inf) -- defense-in-depth so
+    invalid state can never flow downstream to a caller, even if some upstream pushforward fails to
+    validate its own inputs (the same "samples-carrying result type" guard applied to
+    ``carcinogenic_risk.RiskQuantity`` and ``health_risk._SampleDerivedQuantity``).
+    """
 
     samples: np.ndarray
     prior_dominated: bool = False
+
+    def __post_init__(self) -> None:
+        arr = np.asarray(self.samples, dtype=float)
+        if arr.size == 0:
+            raise ValueError("_SampleDerivedQuantity.samples must be non-empty.")
+        if not np.isfinite(arr).all():
+            raise ValueError("_SampleDerivedQuantity.samples must be finite (no NaN/Inf).")
 
     def credible_interval(self, level: float = 0.95) -> tuple[float, float]:
         alpha = (1.0 - level) / 2.0
@@ -425,7 +438,13 @@ def rfd_exceedance(
     resampling. ``bmd.bmdl`` must also be finite: a ``BMDResult`` with ``status != "ok"`` (see
     :class:`BMDResult`) has no real BMDL to divide by an uncertainty factor, and a NaN silently
     compared with ``draws > nan`` would quietly evaluate to all-``False`` -- a fabricated-looking
-    "0% exceedance" result -- rather than surfacing the underlying unidentifiability.
+    "0% exceedance" result -- rather than surfacing the underlying unidentifiability. The
+    finite/nonnegative exposure check applies uniformly to a `Posterior`'s own draws too, not only
+    to a plain array/scalar: it lives inside ``fn`` below (the pushforward handed to
+    ``Posterior.derived_quantity``), not in a separate top-level check on the raw ``exposure`` --
+    otherwise a mis-specified exposure posterior could emit a negative or NaN draw that flowed
+    straight through `draws > rfd` (silently ``False`` for NaN) into a confident-looking "not
+    exceeding" result with no warning.
     """
     from mixle.reason.posterior_protocol import Posterior
 
@@ -444,7 +463,16 @@ def rfd_exceedance(
     rfd = bmd.bmdl / uf
 
     def fn(draws: np.ndarray) -> np.ndarray:
-        return (draws > rfd).astype(float)
+        # Validated here -- not only in `_as_dose_samples` -- so a `Posterior`'s own draws are
+        # checked exactly like a plain array/scalar's: previously only the array/scalar path (via
+        # `_as_dose_samples`) rejected a negative or non-finite exposure draw, while the `Posterior`
+        # branch below handed `fn` straight to `exposure.derived_quantity`, unchecked.
+        arr = np.asarray(draws, dtype=float)
+        if not np.all(np.isfinite(arr)):
+            raise ValueError("exposure draws must all be finite")
+        if np.any(arr < 0):
+            raise ValueError("exposure draws must all be nonnegative")
+        return (arr > rfd).astype(float)
 
     if isinstance(exposure, Posterior):
         return exposure.derived_quantity(fn, n, rng)

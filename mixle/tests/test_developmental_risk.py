@@ -345,3 +345,97 @@ def test_valid_rfd_exceedance_call_still_works():
 
     dq_scalar = rfd_exceedance(5.0, result, uf=100.0, n=10, rng=rng)
     assert dq_scalar.samples.shape == (10,)
+
+
+# Follow-up sweep (companion to MXR-080-0074/0075's fix in carcinogenic_risk.py): the same two
+# defensive patterns applied there -- construction-time validation on a samples-carrying result
+# type, and closing a silent-fallthrough gap in exposure/uncertainty consumption -- were found
+# still open in this sibling module.
+
+
+class _RawDrawDerivedQuantity:
+    """Minimal IC-1 `DerivedQuantity`-conforming wrapper around a pushforward's raw output."""
+
+    def __init__(self, samples: np.ndarray):
+        self.samples = np.asarray(samples, dtype=float)
+        self.prior_dominated = False
+
+    def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
+        a = (1.0 - level) / 2.0
+        return np.quantile(self.samples, a, axis=0), np.quantile(self.samples, 1.0 - a, axis=0)
+
+
+class _RawDrawPosterior:
+    """A minimal IC-1 `Posterior` whose `samples()` returns caller-supplied draws verbatim, so a
+    test can hand `rfd_exceedance` draws a real posterior should never produce (negative/NaN) --
+    mirrors `test_carcinogenic_risk.py`'s `_RawDrawPosterior`."""
+
+    def __init__(self, draws: np.ndarray):
+        self._draws = np.asarray(draws, dtype=float)
+
+    def samples(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        return self._draws
+
+    @property
+    def mean(self) -> np.ndarray:
+        return np.mean(self._draws, axis=0)
+
+    @property
+    def cov(self) -> np.ndarray:
+        return np.atleast_2d(np.cov(self._draws, rowvar=False))
+
+    def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
+        a = (1.0 - level) / 2.0
+        return np.quantile(self._draws, a, axis=0), np.quantile(self._draws, 1.0 - a, axis=0)
+
+    def derived_quantity(self, fn, n: int, rng: np.random.Generator) -> _RawDrawDerivedQuantity:
+        return _RawDrawDerivedQuantity(fn(self.samples(n, rng)))
+
+
+def test_sample_derived_quantity_rejects_empty_or_non_finite_samples():
+    """`_SampleDerivedQuantity` had no construction-time validation at all: empty, NaN, or Inf
+    samples were silently accepted. Defense-in-depth so invalid state can never flow downstream even
+    if some upstream pushforward (here, `rfd_exceedance`) fails to validate its own inputs."""
+    from mixle.analysis.developmental_risk import _SampleDerivedQuantity
+
+    with pytest.raises(ValueError):
+        _SampleDerivedQuantity(samples=np.array([]))
+    with pytest.raises(ValueError):
+        _SampleDerivedQuantity(samples=np.array([0.0, np.nan, 1.0]))
+    with pytest.raises(ValueError):
+        _SampleDerivedQuantity(samples=np.array([0.0, np.inf, 1.0]))
+
+
+def test_sample_derived_quantity_accepts_valid_samples():
+    """Negative control: a legitimate, non-empty, finite sample array still constructs cleanly."""
+    from mixle.analysis.developmental_risk import _SampleDerivedQuantity
+
+    dq = _SampleDerivedQuantity(samples=np.array([0.0, 1.0, 1.0, 0.0]))
+    assert dq.credible_interval(0.5) is not None
+
+
+def test_rfd_exceedance_posterior_draws_validated_same_as_plain_array():
+    """`rfd_exceedance`'s array/scalar exposure path validates finite/nonnegative via
+    `_as_dose_samples`, but a `Posterior`'s own draws were handed straight to `fn` with no check at
+    all -- a mis-specified exposure posterior emitting a negative or NaN draw silently produced a
+    confident-looking "not exceeding" (0.0) result instead of raising (NaN compared with `> rfd` is
+    silently False). Both must now raise, exactly like the plain-array path already does."""
+    result = _valid_bmd_result()
+
+    negative_draws = np.array([[-5.0], [0.01], [0.02]])
+    with pytest.raises(ValueError, match="exposure"):
+        rfd_exceedance(_RawDrawPosterior(negative_draws), result, uf=100.0, n=3, rng=np.random.default_rng(0))
+
+    nan_draws = np.array([[np.nan], [0.01], [0.02]])
+    with pytest.raises(ValueError, match="exposure"):
+        rfd_exceedance(_RawDrawPosterior(nan_draws), result, uf=100.0, n=3, rng=np.random.default_rng(0))
+
+
+def test_rfd_exceedance_posterior_with_legitimate_draws_still_works():
+    """Negative control: a well-behaved exposure `Posterior` (finite, nonnegative draws) still
+    produces a working exceedance `DerivedQuantity` through the now-validated `fn` pushforward."""
+    result = _valid_bmd_result()
+    draws = np.array([[0.001], [0.01], [100.0]])
+    dq = rfd_exceedance(_RawDrawPosterior(draws), result, uf=100.0, n=3, rng=np.random.default_rng(0))
+    assert np.asarray(dq.samples).shape[0] == 3
+    assert set(np.unique(dq.samples)).issubset({0.0, 1.0})
