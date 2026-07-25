@@ -44,6 +44,24 @@ def _mlp(sizes: list[int], torch: Any) -> Any:
     return torch.nn.Sequential(*layers[:-1]).double()  # drop trailing ReLU
 
 
+def _require_positive_int(value: Any, name: str) -> int:
+    """Validate ``value`` is an exact, positive :class:`int` (MXR-080-0277).
+
+    Mirrors this codebase's ``_require_count`` convention (e.g. ``mixle.substrate.multihop``): a
+    plain Python ``int``, never a ``bool`` (a ``bool`` is an ``int`` subclass and would otherwise
+    silently mean 0 or 1) and never a float (even a whole-valued one like ``2.0``, silently
+    truncated by a bare ``int()``). Unlike ``_require_count`` (which allows 0 for a "how many"
+    count), zero or negative is rejected outright here: training for zero or a negative number of
+    epochs never updates the randomly-initialized encoder/decoder weights at all, so silently
+    accepting it and still marking the model ``_fitted`` would certify random noise as trained.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int, got {type(value).__name__}: {value!r}")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive, got {value!r}")
+    return value
+
+
 class _Modality:
     def __init__(self, name: str, in_dim: int, latent_dim: int, hidden: tuple[int, ...], torch: Any) -> None:
         self.name = name
@@ -153,6 +171,44 @@ class CrossModalModel:
         return mean, var
 
     # -- training -----------------------------------------------------------------------------
+    def _validate_training_table(self, data: dict[str, Any], names: list[str]) -> dict[str, np.ndarray]:
+        """Validate the COMPLETE aligned training table before any state mutation (MXR-080-0277).
+
+        Every modality's data must be non-empty, match its registered ``in_dim``, and be finite;
+        every modality must share the SAME row count (rows are aligned records: row ``i`` of every
+        modality is that record's several views, so a length mismatch means there is no such
+        alignment). Previously ``n`` was read from one arbitrary modality and never checked against
+        the rest, so a mismatch either crashed deep inside torch with an opaque shape error, or --
+        when shapes happened to be broadcast-compatible (e.g. one modality with a single row) --
+        silently trained against the WRONG pairing of rows instead of failing. Everything is
+        checked here, up front, against a single reference row count, so a misaligned or malformed
+        table is rejected with a clear error naming the modality and the failed check, before
+        ``fit`` changes any per-modality normalization statistic or the model's fitted state.
+        """
+        arrays: dict[str, np.ndarray] = {}
+        n: int | None = None
+        ref_name = names[0]
+        for name in names:
+            X = np.atleast_2d(np.asarray(data[name], dtype=float))
+            mod = self._mods[name]
+            if X.shape[0] == 0:
+                raise ValueError(f"modality {name!r} has no rows (empty training data)")
+            if X.shape[1] != mod.in_dim:
+                raise ValueError(
+                    f"modality {name!r} declared in_dim={mod.in_dim} but training data has width {X.shape[1]}"
+                )
+            if not np.all(np.isfinite(X)):
+                raise ValueError(f"modality {name!r} training data contains non-finite values (NaN/Inf)")
+            if n is None:
+                n, ref_name = X.shape[0], name
+            elif X.shape[0] != n:
+                raise ValueError(
+                    f"modality {name!r} has {X.shape[0]} rows but modality {ref_name!r} has {n} rows; "
+                    "all modalities must share the same row count (aligned records)"
+                )
+            arrays[name] = X
+        return arrays
+
     def fit(
         self,
         data: dict[str, Any],
@@ -168,15 +224,35 @@ class CrossModalModel:
         the same ``N`` rows -- row ``i`` is one record's several views). ``beta`` weights the KL rate;
         with ``subsample=True`` the ELBO is also evaluated on each single-modality subset so the model
         can infer ``z`` from any one modality alone (the MVAE training trick).
+
+        MXR-080-0277: the complete aligned training table -- equal row counts across every
+        modality, each modality's declared ``in_dim`` matching its data's actual width, non-empty
+        data, and finite values -- is validated up front, before any per-modality normalization
+        statistic or the model's fitted state is touched. ``epochs`` is validated as a genuine
+        positive ``int``: a zero or negative value previously still set ``_fitted = True`` on
+        encoders/decoders that were never actually updated (their random init weights, dressed up
+        as a "trained" model).
+
+        Raises:
+            ValueError: ``data``'s modalities don't match the registered set; a modality's data is
+                empty, has the wrong width, contains non-finite values, or has a row count that
+                disagrees with the other modalities; or ``epochs`` is not positive.
+            TypeError: ``epochs`` is not a plain ``int`` (a ``bool`` or a float, whole-valued or
+                not, is rejected).
         """
         torch = _torch()
         names = list(self._mods)
+        if not names:
+            raise ValueError("fit() requires at least one registered modality; call add_modality() first")
         if set(data) != set(names):
             raise ValueError(f"data modalities {sorted(data)} != registered {sorted(names)}")
-        n = len(next(iter(data.values())))
+        epochs = _require_positive_int(epochs, "epochs")
+        arrays = self._validate_training_table(data, names)
+
+        n = arrays[names[0]].shape[0]  # validated equal across every modality above
         tensors: dict[str, Any] = {}
         for name in names:
-            X = np.atleast_2d(np.asarray(data[name], dtype=float))
+            X = arrays[name]
             mod = self._mods[name]
             mod.mean = X.mean(axis=0)
             mod.scale = X.std(axis=0) + 1e-8
@@ -192,7 +268,7 @@ class CrossModalModel:
         if subsample and len(names) > 1:
             subsets += [[name] for name in names]
 
-        for _ in range(int(epochs)):
+        for _ in range(epochs):
             opt.zero_grad()
             loss = torch.zeros((), dtype=torch.float64)
             for subset in subsets:
