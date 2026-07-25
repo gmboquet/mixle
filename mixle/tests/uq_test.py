@@ -1,4 +1,4 @@
-"""uq(): one verb, method auto-selected -- Laplace posterior / split conformal / semantic entropy."""
+"""uq(): one verb, method auto-selected -- Laplace curvature / split conformal / semantic entropy."""
 
 import unittest
 
@@ -17,17 +17,19 @@ except ImportError:
 
 
 class MixleModelUQTest(unittest.TestCase):
-    def test_parameter_posterior_covers_the_truth(self):
+    def test_parameter_likelihood_approximation_covers_the_truth(self):
         data = [float(x) for x in np.random.RandomState(0).normal(5.0, 2.0, 300)]
         model = optimize(data, st.GaussianEstimator(), out=None)
         r = uq(model, data)
-        self.assertEqual(r.kind, "parameter_posterior")
-        lo, hi = r.credible_interval(lambda d: d.mean(), alpha=0.1, n=400)
+        self.assertEqual(r.kind, "parameter_likelihood_approximation")
+        lo, hi = r.parameter_interval(lambda d: d.mean(), alpha=0.1, n=400)
         self.assertLess(lo, 5.0)
         self.assertGreater(hi, 5.0)
-        self.assertLess(hi - lo, 1.5)  # 300 points -> a tight posterior, not a vacuous interval
+        self.assertLess(hi - lo, 1.5)  # 300 points -> tight local likelihood curvature, not a vacuous interval
+        with self.assertRaises(ValueError):
+            r.credible_interval(lambda d: d.mean(), alpha=0.1, n=20)
 
-    def test_needs_data_for_the_posterior(self):
+    def test_needs_data_for_the_approximation(self):
         model = optimize([float(x) for x in np.random.RandomState(0).randn(100)], st.GaussianEstimator(), out=None)
         with self.assertRaises(ValueError):
             uq(model)

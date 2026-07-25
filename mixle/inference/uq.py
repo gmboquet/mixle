@@ -4,8 +4,8 @@
 uncertainty method, returning a :class:`UQResult` with the method name and the
 quantities needed for downstream checks.
 
-  * a fitted mixle model (has ``seq_log_density``) -> a Laplace parameter posterior; sample fitted
-    models, read any summary, get a credible interval (epistemic uncertainty over parameters).
+  * a fitted mixle model (has ``seq_log_density``) -> a Laplace likelihood-curvature approximation;
+    sample fitted models and get an explicitly approximate parameter interval.
   * a torch module / any point predictor callable over arrays -> split-conformal calibration from a
     held-out ``(X, y)``; ``interval(x)`` returns a prediction interval with finite-sample coverage.
     Give a LIST of predictors instead and it becomes a deep ensemble (epistemic spread + conformal).
@@ -31,16 +31,18 @@ __all__ = ["UQResult", "uq"]
 class UQResult:
     """The uncertainty of a predictor, with the method that produced it and receipts to check it."""
 
-    kind: str  # 'parameter_posterior' | 'conformal_regressor' | 'ensemble_regressor' | 'llm_semantic'
+    kind: str
     method: str  # human-readable method name
     payload: dict[str, Any]
 
-    # -- mixle model: Laplace parameter posterior --------------------------------------------------
+    # -- mixle model: Laplace parameter approximation ----------------------------------------------
     def sample_models(self, n: int = 200, *, seed: int | None = None) -> list[Any]:
-        """``n`` fitted models drawn from the parameter posterior (epistemic ensemble)."""
+        """``n`` fitted models drawn from the parameter approximation."""
         if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 1:
             raise ValueError("n must be a positive integer")
-        post = self.payload["posterior"]
+        post = self.payload.get("posterior", self.payload.get("approximation"))
+        if post is None:
+            raise TypeError("this UQ result has no parameter approximation")
         rng = np.random.RandomState(seed) if seed is not None else None
         return post.sample(int(n), rng=rng)
 
@@ -48,6 +50,18 @@ class UQResult:
         self, readout: Callable[[Any], float], alpha: float = 0.1, *, n: int = 400, seed: int = 0
     ) -> tuple[float, float]:
         """A ``1-alpha`` credible interval on ``readout(model)`` over the parameter posterior."""
+        approximation = self.payload.get("posterior", self.payload.get("approximation"))
+        if approximation is None or not bool(getattr(approximation, "is_posterior", False)):
+            raise ValueError(
+                "credible_interval requires an explicit-prior posterior; use parameter_interval for "
+                "a likelihood-curvature approximation"
+            )
+        return self.parameter_interval(readout, alpha=alpha, n=n, seed=seed)
+
+    def parameter_interval(
+        self, readout: Callable[[Any], float], alpha: float = 0.1, *, n: int = 400, seed: int = 0
+    ) -> tuple[float, float]:
+        """A central interval over draws from the disclosed parameter approximation."""
         _validate_alpha(alpha)
         if not callable(readout):
             raise TypeError("readout must be callable")
@@ -179,12 +193,12 @@ def _uq_mixle(model: Any, data: Any) -> UQResult:
     from mixle.inference.blackbox import laplace_posterior
 
     if data is None:
-        raise ValueError("uq(mixle_model, data): the fitting data is needed to build the Laplace posterior")
+        raise ValueError("uq(mixle_model, data): fitting data is needed to build the Laplace approximation")
     post = laplace_posterior(model, list(data))
     return UQResult(
-        kind="parameter_posterior",
-        method="laplace (unconstrained Gaussian over parameters)",
-        payload={"posterior": post, "n_params": int(len(post.u_mode))},
+        kind="parameter_likelihood_approximation",
+        method="laplace likelihood curvature (unconstrained Gaussian over parameters)",
+        payload={"approximation": post, "n_params": int(len(post.u_mode)), "metadata": post.summary()},
     )
 
 
@@ -264,7 +278,7 @@ def uq(
     Args:
         thing: a fitted mixle model, a torch module / point-predictor callable (or a list of them for
             a deep ensemble), or an LLM-style callable that maps a prompt to a generation.
-        data: for a mixle model, the fitting data (builds the Laplace posterior); for a point
+        data: for a mixle model, the fitting data (builds a Laplace likelihood-curvature approximation); for a point
             predictor, ``(X_cal, y_cal)`` calibration data; for an LLM, optional example prompts used
             to calibrate an abstention threshold.
         alpha: target miscoverage / abstention level (``1 - alpha`` coverage).

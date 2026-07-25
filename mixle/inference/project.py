@@ -41,6 +41,41 @@ __all__ = [
 ]
 
 
+def _spd_matrix(value: Any, dimension: int, name: str) -> np.ndarray:
+    matrix = np.asarray(value, dtype=float)
+    if matrix.shape != (dimension, dimension) or not np.all(np.isfinite(matrix)):
+        raise ValueError(f"{name} must be a finite ({dimension}, {dimension}) covariance matrix")
+    if not np.allclose(matrix, matrix.T, rtol=1e-10, atol=1e-12):
+        raise ValueError(f"{name} must be symmetric")
+    matrix = 0.5 * (matrix + matrix.T)
+    try:
+        np.linalg.cholesky(matrix)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(f"{name} must be positive definite") from exc
+    return matrix
+
+
+def _validated_gaussian_components(
+    weights: Any, means: Any, covariances: Any, univariate: bool
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
+    w = np.asarray(weights, dtype=float)
+    mus = np.asarray(means, dtype=float)
+    covs = np.asarray(covariances, dtype=float)
+    if w.ndim != 1 or w.size < 1 or not np.all(np.isfinite(w)) or np.any(w < 0):
+        raise ValueError("mixture weights must be a non-empty finite non-negative vector")
+    total = float(np.sum(w))
+    if not np.isfinite(total) or total <= 0:
+        raise ValueError("mixture weights must have positive finite total mass")
+    if mus.ndim != 2 or mus.shape[0] != w.size or mus.shape[1] < 1 or not np.all(np.isfinite(mus)):
+        raise ValueError("Gaussian component means must form a finite (k, d) array aligned with weights")
+    if covs.shape != (w.size, mus.shape[1], mus.shape[1]):
+        raise ValueError("Gaussian component covariances must have shape (k, d, d)")
+    checked_covariances = np.stack(
+        [_spd_matrix(covariance, mus.shape[1], f"component covariance {index}") for index, covariance in enumerate(covs)]
+    )
+    return w / total, mus, checked_covariances, univariate
+
+
 def _gaussian_components(mixture: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
     """Extract ``(w, mus (K,d), covs (K,d,d), univariate)`` from any Gaussian mixture, or raise.
 
@@ -48,34 +83,40 @@ def _gaussian_components(mixture: Any) -> tuple[np.ndarray, np.ndarray, np.ndarr
     :class:`MixtureDistribution` whose components are (multivariate) Gaussians. ``univariate`` records
     whether the components were 1-D scalar Gaussians so the result can be returned in the same kind.
     """
-    w = np.asarray(getattr(mixture, "w", None), dtype=float)
-    if w is None or w.ndim != 1:
+    raw_weights = getattr(mixture, "w", None)
+    if raw_weights is None:
+        raise CapabilityError("collapse/reduce need a mixture with a 1-D weight vector `w`.")
+    w = np.asarray(raw_weights, dtype=float)
+    if w.ndim != 1:
         raise CapabilityError("collapse/reduce need a mixture with a 1-D weight vector `w`.")
 
     if hasattr(mixture, "mu") and hasattr(mixture, "sig2"):  # GaussianMixtureDistribution: full (K,d,d)
         mus = np.asarray(mixture.mu, dtype=float)
         covs = np.asarray(mixture.sig2, dtype=float)
         if mus.ndim == 2 and covs.ndim == 3:
-            return w, mus, covs, False
+            return _validated_gaussian_components(w, mus, covs, False)
 
     components = getattr(mixture, "components", None)
     if not components:
         raise CapabilityError("mixture exposes no Gaussian components to project.")
-    mus, covs, univariate = [], [], False
+    mus, covs, component_kinds = [], [], []
     for c in components:
         if hasattr(c, "covar"):  # MultivariateGaussianDistribution(mu, covar)
             mus.append(np.asarray(c.mu, dtype=float).ravel())
             covs.append(np.asarray(c.covar, dtype=float))
+            component_kinds.append("multivariate")
         elif hasattr(c, "sigma2") and hasattr(c, "mu"):  # univariate GaussianDistribution(mu, sigma2)
-            univariate = True
             mus.append(np.array([float(c.mu)]))
             covs.append(np.array([[float(c.sigma2)]]))
+            component_kinds.append("univariate")
         else:
             raise CapabilityError(
                 f"component {type(c).__name__} is not Gaussian; use mixle.ops.project for a sampling "
                 "projection onto a target family."
             )
-    return w, np.asarray(mus), np.asarray(covs), univariate
+    if len(set(component_kinds)) != 1:
+        raise ValueError("all Gaussian mixture components must have the same dimensional kind")
+    return _validated_gaussian_components(w, mus, covs, component_kinds[0] == "univariate")
 
 
 def _as_distribution(mu: np.ndarray, cov: np.ndarray, univariate: bool) -> Any:
@@ -117,12 +158,22 @@ def gaussian_kl(p: Any, q: Any) -> float:
 
     mp, sp = _mc(p)
     mq, sq = _mc(q)
+    if mp.size < 1 or mp.shape != mq.shape or not np.all(np.isfinite(mp)) or not np.all(np.isfinite(mq)):
+        raise ValueError("Gaussian means must be finite and have the same non-zero dimension")
     d = mp.shape[0]
-    sq_inv = np.linalg.inv(sq)
+    sp = _spd_matrix(sp, d, "p covariance")
+    sq = _spd_matrix(sq, d, "q covariance")
     diff = mq - mp
-    _, ldp = np.linalg.slogdet(sp)
-    _, ldq = np.linalg.slogdet(sq)
-    return float(0.5 * (np.trace(sq_inv @ sp) + diff @ sq_inv @ diff - d + (ldq - ldp)))
+    sign_p, ldp = np.linalg.slogdet(sp)
+    sign_q, ldq = np.linalg.slogdet(sq)
+    if sign_p <= 0 or sign_q <= 0:
+        raise ValueError("Gaussian covariances must have positive determinants")
+    solved_covariance = np.linalg.solve(sq, sp)
+    solved_difference = np.linalg.solve(sq, diff)
+    value = float(0.5 * (np.trace(solved_covariance) + diff @ solved_difference - d + (ldq - ldp)))
+    if value < -1e-10:
+        raise RuntimeError("Gaussian KL evaluated to a materially negative value")
+    return max(value, 0.0)
 
 
 def collapse_mixture(mixture: Any) -> Any:
@@ -169,7 +220,6 @@ def reduce_mixture(mixture: Any, n_components: int, *, method: str = "runnalls")
     w, mus, covs, univariate = _gaussian_components(mixture)
     if n_components < 1:
         raise ValueError("n_components must be >= 1.")
-    w = w / w.sum()
     # active list of (weight, mean, cov); merge in place until the target count is reached
     comps = [[float(w[k]), mus[k].copy(), covs[k].copy()] for k in range(len(w))]
     while len(comps) > n_components:
@@ -245,8 +295,8 @@ def fisher_merge(estimates: Any, fishers: Any = None) -> np.ndarray:
     if not thetas:
         raise ValueError("fisher_merge needs at least one estimate.")
     p = thetas[0].shape[0]
-    if any(t.shape[0] != p for t in thetas):
-        raise ValueError("all estimates must have the same length.")
+    if p < 1 or any(t.shape[0] != p for t in thetas) or any(not np.all(np.isfinite(t)) for t in thetas):
+        raise ValueError("all estimates must be finite, non-empty, and have the same length.")
     m = len(thetas)
 
     if fishers is None:
@@ -262,19 +312,29 @@ def fisher_merge(estimates: Any, fishers: Any = None) -> np.ndarray:
     else:  # a single Fisher broadcast to every estimate
         fs = [np.asarray(fishers, dtype=float) for _ in thetas]
 
-    full = any(f.ndim == 2 for f in fs)
-    if full:
-        num = np.zeros(p)
-        den = np.zeros((p, p))
-        for t, f in zip(thetas, fs):
-            fm = np.diag(f) if f.ndim <= 1 else f  # promote diagonal Fishers to matrices
-            num += fm @ t
-            den += fm
-        return np.linalg.solve(den + 1e-12 * np.eye(p), num)
-    # diagonal fast path: per-coordinate precision weighting, with a guard for zero total precision
-    fs2 = [np.broadcast_to(np.atleast_1d(f), (p,)).astype(float) for f in fs]
-    den = np.sum(fs2, axis=0)
-    num = np.sum([f * t for t, f in zip(thetas, fs2)], axis=0)
-    zero = den <= 0
-    out = np.where(zero, np.mean(thetas, axis=0), num / np.where(zero, 1.0, den))
-    return out
+    information: list[np.ndarray] = []
+    for index, f in enumerate(fs):
+        if f.ndim <= 1:
+            try:
+                diagonal = np.broadcast_to(np.atleast_1d(f), (p,)).astype(float)
+            except ValueError as exc:
+                raise ValueError(f"Fisher {index} cannot be broadcast to {p} diagonal entries") from exc
+            if not np.all(np.isfinite(diagonal)) or np.any(diagonal < 0):
+                raise ValueError(f"Fisher {index} diagonal must be finite and non-negative")
+            information.append(np.diag(diagonal))
+            continue
+        if f.ndim != 2 or f.shape != (p, p) or not np.all(np.isfinite(f)):
+            raise ValueError(f"Fisher {index} must be a scalar, length-{p} diagonal, or ({p}, {p}) matrix")
+        if not np.allclose(f, f.T, rtol=1e-10, atol=1e-12):
+            raise ValueError(f"Fisher {index} must be symmetric")
+        fm = 0.5 * (f + f.T)
+        tolerance = 1e-10 * max(1.0, float(np.linalg.norm(fm, ord=2)))
+        if np.min(np.linalg.eigvalsh(fm)) < -tolerance:
+            raise ValueError(f"Fisher {index} must be positive semidefinite")
+        information.append(fm)
+    denominator = np.sum(information, axis=0)
+    tolerance = 1e-10 * max(1.0, float(np.linalg.norm(denominator, ord=2)))
+    if np.min(np.linalg.eigvalsh(denominator)) <= tolerance:
+        raise ValueError("combined Fisher information must be positive definite")
+    numerator = np.sum([f @ theta for f, theta in zip(information, thetas)], axis=0)
+    return np.linalg.solve(denominator, numerator)
