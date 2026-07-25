@@ -77,6 +77,50 @@ class EvaluateCheckpointTest(unittest.TestCase):
         r2 = evaluate_checkpoint(model, seed=7, n_examples=32)
         self.assertEqual(r1.scores(), r2.scores())
 
+    def test_induction_instances_are_unambiguous_and_recorded(self):
+        report = evaluate_checkpoint(_tiny_model(), seed=9, n_examples=24)
+        task = next(task for task in report.tasks if task.name == "in_context_induction")
+        instances = task.details["instances"]
+        self.assertEqual(len(instances["contexts"]), 24)
+        for context, target, planted in zip(
+            instances["contexts"], instances["targets"], instances["plant_positions"]
+        ):
+            a = context[-1]
+            occurrences = [index for index, token in enumerate(context[:-1]) if token == a]
+            self.assertEqual(occurrences, [planted])
+            self.assertEqual(context[planted + 1], target)
+
+    def test_failed_tasks_are_explicit_receipts_not_nan_scores(self):
+        class _BrokenModel(torch.nn.Module):
+            vocab = VOCAB
+            block = BLOCK
+
+            def __init__(self):
+                super().__init__()
+                self.anchor = torch.nn.Parameter(torch.zeros(1))
+
+            def forward(self, x):
+                return torch.full((len(x), self.vocab), float("nan"), device=self.anchor.device)
+
+        report = evaluate_checkpoint(_BrokenModel(), n_examples=4)
+        self.assertEqual(len(report.tasks), 4)
+        self.assertTrue(all(not task.succeeded for task in report.tasks))
+        self.assertTrue(all(task.score is None and "non-finite" in task.error for task in report.tasks))
+
+    def test_eval_controls_are_not_coerced(self):
+        model = _tiny_model()
+        for kwargs in (
+            {"n_examples": 0},
+            {"n_examples": 1.5},
+            {"n_examples": True},
+            {"seed": -1},
+            {"seed": True},
+            {"checkpoint_id": ""},
+            {"metadata": []},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                evaluate_checkpoint(model, **kwargs)
+
 
 def _make_report(checkpoint_id: str, scores: dict[str, float], directions: dict[str, bool]) -> EvalReport:
     tasks = [
@@ -141,6 +185,53 @@ class RegressionTrackingTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             track_regression([], reference="bogus")
 
+    def test_rejects_schema_direction_and_checkpoint_drift(self):
+        baseline = _make_report("rung-0", {"accuracy_metric": 0.8}, {"accuracy_metric": True})
+        cases = (
+            _make_report("rung-1", {"other_metric": 0.8}, {"other_metric": True}),
+            _make_report("rung-1", {"accuracy_metric": 0.8}, {"accuracy_metric": False}),
+            _make_report(
+                "rung-1",
+                {"accuracy_metric": 0.8, "new_metric": 0.1},
+                {"accuracy_metric": True, "new_metric": True},
+            ),
+        )
+        for report in cases:
+            with self.subTest(schema=[task.name for task in report.tasks]), self.assertRaisesRegex(
+                ValueError, "schema"
+            ):
+                track_regression([baseline, report])
+        with self.assertRaisesRegex(ValueError, "checkpoint_id"):
+            track_regression([baseline, _make_report("rung-0", {"accuracy_metric": 0.7}, {"accuracy_metric": True})])
+
+    def test_rejects_duplicate_failed_and_non_finite_metrics(self):
+        duplicate = [
+            TaskResult("same", 1.0, True, 1),
+            TaskResult("same", 2.0, True, 1),
+        ]
+        with self.assertRaisesRegex(ValueError, "unique"):
+            EvalReport("duplicate", duplicate, 0)
+
+        failed = EvalReport(
+            "failed",
+            [TaskResult("accuracy_metric", None, True, 1, succeeded=False, error="device failure")],
+            0,
+        )
+        with self.assertRaisesRegex(ValueError, "failed"):
+            track_regression([failed])
+
+        corrupted = _make_report("corrupt", {"accuracy_metric": 0.8}, {"accuracy_metric": True})
+        corrupted.tasks[0].score = np.nan
+        with self.assertRaisesRegex(ValueError, "finite"):
+            track_regression([corrupted])
+        with self.assertRaises((TypeError, ValueError)):
+            TaskResult("invalid", np.nan, True, 1)
+
+    def test_rejects_non_finite_threshold(self):
+        for threshold in (-0.1, np.nan, np.inf, True):
+            with self.subTest(threshold=threshold), self.assertRaises((TypeError, ValueError)):
+                track_regression([], threshold=threshold)
+
 
 # ---------------------------------------------------------------------------
 # Discrimination: a trained toy model must score measurably better than random init on every axis.
@@ -179,12 +270,13 @@ def _batch_parity(rng: np.random.Generator, batch: int):
 
 def _batch_induction(rng: np.random.Generator, batch: int):
     ctx_len = min(BLOCK, 16)
-    seqs = rng.integers(0, VOCAB, size=(batch, ctx_len))
     a = rng.integers(0, VOCAB, size=batch)
     b = rng.integers(0, VOCAB, size=batch)
     b = np.where(b == a, (b + 1) % VOCAB, b)
     plant_pos = rng.integers(0, ctx_len - 3, size=batch)
+    seqs = np.empty((batch, ctx_len), dtype=np.int64)
     for i in range(batch):
+        seqs[i] = rng.choice(np.delete(np.arange(VOCAB), a[i]), size=ctx_len)
         p = int(plant_pos[i])
         seqs[i, p] = a[i]
         seqs[i, p + 1] = b[i]
