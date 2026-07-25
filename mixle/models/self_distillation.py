@@ -33,6 +33,7 @@ the loss-hook composition pattern, applied at the place this model family's trai
 from __future__ import annotations
 
 import copy
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -143,7 +144,20 @@ def _forward_with_keep_mask(model: Any, x: Any, keep_mask: list) -> Any:
     the last position (``CausalLM.forward``'s own output shape) since that is what the acceptance-relevant
     cross-entropy and consistency losses score here.
     """
-    xt = x.long()
+    if not isinstance(x, torch.Tensor):
+        raise TypeError("x must be a torch tensor")
+    if x.ndim != 2 or x.shape[0] == 0 or x.shape[1] == 0:
+        raise ValueError("x must have non-empty shape (batch, sequence)")
+    if x.shape[1] > model.block:
+        raise ValueError(f"x sequence length {x.shape[1]} exceeds configured block size {model.block}")
+    if len(keep_mask) != len(model.blocks) or any(not isinstance(keep, bool) for keep in keep_mask):
+        raise ValueError("keep_mask must contain exactly one boolean per model block")
+    xt = model._validated_ids(
+        x,
+        name="x",
+        expected_shapes=(tuple(x.shape),),
+        upper_bound=model.vocab,
+    )
     t = xt.shape[1]
     pos = torch.arange(t, device=xt.device)
     h = model.tok(xt) + model.pos(pos)[None, :, :]
@@ -151,10 +165,18 @@ def _forward_with_keep_mask(model: Any, x: Any, keep_mask: list) -> Any:
         if keep:
             h = blk(h)
         # else: drop this block -- identity, the defining move of stochastic depth
-    return model.head(model.ln(h))[:, -1]
+    logits = model.head(model.ln(h)) * getattr(model, "mup_output_multiplier", 1.0)
+    return logits[:, -1]
 
 
-def stochastic_depth_forward(model: Any, x: Any, drop_prob: float, generator: Any = None) -> tuple:
+def stochastic_depth_forward(
+    model: Any,
+    x: Any,
+    drop_prob: float,
+    generator: Any = None,
+    *,
+    return_keep_mask: bool = False,
+) -> tuple:
     """Run ``model`` on ``x`` twice: once at full depth, once with each block independently dropped with
     probability ``drop_prob`` (at least one block is always kept, so the partial pass never degenerates to
     the bare embedding/head). Returns ``(full_output, partial_output)`` -- the pair
@@ -165,11 +187,19 @@ def stochastic_depth_forward(model: Any, x: Any, drop_prob: float, generator: An
     ``mixle/tests/self_distillation_test.py``.
     """
     _require_torch()
+    drop_prob = _probability(drop_prob, "drop_prob", upper_inclusive=True)
+    if not isinstance(return_keep_mask, bool):
+        raise TypeError("return_keep_mask must be a boolean")
+    if not hasattr(model, "blocks"):
+        raise TypeError("model must expose a transformer block sequence")
     n = len(model.blocks)
-    full_output = _forward_with_keep_mask(model, x, [True] * n)
-    if drop_prob <= 0.0:
-        partial_output = _forward_with_keep_mask(model, x, [True] * n)
-        return full_output, partial_output
+    if n == 0 and drop_prob > 0.0:
+        raise ValueError("a model with zero blocks cannot use positive stochastic-depth drop probability")
+    full_mask = [True] * n
+    full_output = _forward_with_keep_mask(model, x, full_mask)
+    if drop_prob == 0.0:
+        partial_output = _forward_with_keep_mask(model, x, full_mask)
+        return (full_output, partial_output, full_mask) if return_keep_mask else (full_output, partial_output)
 
     if generator is not None:
         r = torch.rand(n, generator=generator)
@@ -181,7 +211,7 @@ def stochastic_depth_forward(model: Any, x: Any, drop_prob: float, generator: An
     if not any(keep_mask):
         keep_mask[keep_idx_if_empty] = True
     partial_output = _forward_with_keep_mask(model, x, keep_mask)
-    return full_output, partial_output
+    return (full_output, partial_output, keep_mask) if return_keep_mask else (full_output, partial_output)
 
 
 @dataclass
@@ -190,10 +220,10 @@ class TrainStats:
     consistency, and EMA-teacher consistency losses, kept separately so a caller can see which pressure is
     doing what (and the combined total actually optimized)."""
 
-    ce_loss: list = field(default_factory=list)
-    stochastic_depth_loss: list = field(default_factory=list)
-    ema_consistency_loss: list = field(default_factory=list)
-    total_loss: list = field(default_factory=list)
+    ce_loss: list[float] = field(default_factory=list)
+    stochastic_depth_loss: list[float] = field(default_factory=list)
+    ema_consistency_loss: list[float] = field(default_factory=list)
+    total_loss: list[float] = field(default_factory=list)
 
 
 def train_with_self_distillation(
@@ -234,58 +264,240 @@ def train_with_self_distillation(
     update. ``ema_weight``/``stochastic_depth_weight`` each default to ``consistency_weight`` when unset.
     """
     _require_torch()
-    torch.manual_seed(int(seed))
-    model.to(device).train()
-    ema_teacher = EMATeacher(model, decay=ema_decay)
-
-    from mixle.models.optimizer_routing import resolve_neural_optimizer
-
-    opt, optimizer_receipt = resolve_neural_optimizer(model, optimizer, lr=lr, sign_stable=False)
-
-    sd_weight = float(consistency_weight if stochastic_depth_weight is None else stochastic_depth_weight)
-    ema_w = float(consistency_weight if ema_weight is None else ema_weight)
-
-    def _fresh_iter() -> Any:
-        return iter(data()) if callable(data) else iter(data)
-
-    data_iter = _fresh_iter()
-    stats = TrainStats()
-
-    for step in range(int(steps)):
+    steps = _positive_int(steps, "steps")
+    seed = _integer(seed, "seed")
+    ema_decay = _probability(ema_decay, "ema_decay", upper_inclusive=False)
+    drop_prob = _probability(drop_prob, "drop_prob", upper_inclusive=True)
+    consistency_weight = _nonnegative_finite(consistency_weight, "consistency_weight")
+    sd_weight = _nonnegative_finite(
+        consistency_weight if stochastic_depth_weight is None else stochastic_depth_weight,
+        "stochastic_depth_weight",
+    )
+    ema_w = _nonnegative_finite(
+        consistency_weight if ema_weight is None else ema_weight,
+        "ema_weight",
+    )
+    lr = _positive_finite(lr, "lr")
+    if consistency_mode not in {"mse", "kl"}:
+        raise ValueError("consistency_mode must be 'mse' or 'kl'")
+    if log is not None and not callable(log):
+        raise TypeError("log must be callable or None")
+    if not callable(data):
         try:
-            ctx, nxt = next(data_iter)
-        except StopIteration:
-            data_iter = _fresh_iter()
-            ctx, nxt = next(data_iter)
+            iter(data)
+        except TypeError as exc:
+            raise TypeError("data must be an iterable or a zero-argument callable returning an iterable") from exc
+    if not hasattr(model, "blocks") or not hasattr(model, "vocab") or not hasattr(model, "block"):
+        raise TypeError("model must provide transformer blocks, vocabulary size, and block size")
+    if len(model.blocks) == 0 and drop_prob > 0.0:
+        raise ValueError("a zero-block model cannot use positive stochastic-depth drop probability")
+    try:
+        target_device = torch.device(device)
+    except (TypeError, RuntimeError) as exc:
+        raise ValueError(f"invalid torch device {device!r}") from exc
 
-        x = torch.as_tensor(np.asarray(ctx), dtype=torch.float32, device=device)
-        y = torch.as_tensor(np.asarray(nxt), dtype=torch.long, device=device)
+    original_training = bool(model.training)
+    initial_student_digest = _model_digest(model)
+    teacher: EMATeacher | None = None
+    stats = TrainStats()
+    keep_schedule: list[list[bool]] = []
+    completed_steps = 0
+    try:
+        torch.manual_seed(seed)
+        generator = torch.Generator().manual_seed(seed)
+        model.to(target_device).train()
+        teacher = EMATeacher(model, decay=ema_decay)
+        initial_teacher_digest = _model_digest(teacher.ema_model)
 
-        full_out, partial_out = stochastic_depth_forward(model, x, drop_prob)
-        ce_loss = F.cross_entropy(full_out, y)
-        sd_loss = consistency_loss(partial_out, full_out.detach(), mode=consistency_mode)
-        with torch.no_grad():
-            teacher_out = ema_teacher.forward(x)
-        ema_loss = consistency_loss(full_out, teacher_out, mode=consistency_mode)
+        from mixle.models.optimizer_routing import resolve_neural_optimizer
 
-        loss = ce_loss + sd_weight * sd_loss + ema_w * ema_loss
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-        ema_teacher.update(model)
+        opt, optimizer_receipt = resolve_neural_optimizer(model, optimizer, lr=lr, sign_stable=False)
 
-        stats.ce_loss.append(float(ce_loss.detach()))
-        stats.stochastic_depth_loss.append(float(sd_loss.detach()))
-        stats.ema_consistency_loss.append(float(ema_loss.detach()))
-        stats.total_loss.append(float(loss.detach()))
-        if log is not None:
-            log(step, stats)
+        restartable = callable(data)
 
-    model.eval()
-    model.self_distillation_receipt = {
-        "optimizer": optimizer_receipt,
-        "steps": int(steps),
-        "ema_decay": float(ema_decay),
-        "drop_prob": float(drop_prob),
-    }
-    return model
+        def _fresh_iter() -> Any:
+            produced = data() if restartable else data
+            try:
+                return iter(produced)
+            except TypeError as exc:
+                raise TypeError("data callable must return an iterable") from exc
+
+        data_iter = _fresh_iter()
+
+        def _next_batch() -> Any:
+            nonlocal data_iter
+            try:
+                return next(data_iter)
+            except StopIteration:
+                if not restartable:
+                    raise ValueError(
+                        f"data iterator was exhausted after {completed_steps} of {steps} requested steps"
+                    ) from None
+                data_iter = _fresh_iter()
+                try:
+                    return next(data_iter)
+                except StopIteration:
+                    raise ValueError("data callable returned an empty iterable") from None
+
+        for step in range(steps):
+            x, y = _validated_batch(_next_batch(), model, target_device, torch)
+
+            full_out, partial_out, keep_mask = stochastic_depth_forward(
+                model,
+                x,
+                drop_prob,
+                generator,
+                return_keep_mask=True,
+            )
+            if (
+                full_out.shape != (len(x), model.vocab)
+                or partial_out.shape != full_out.shape
+                or not bool(torch.all(torch.isfinite(full_out)).detach().cpu().item())
+                or not bool(torch.all(torch.isfinite(partial_out)).detach().cpu().item())
+            ):
+                raise RuntimeError("self-distillation model outputs must be finite (batch, vocab) logits")
+            ce_loss = F.cross_entropy(full_out, y)
+            sd_loss = consistency_loss(partial_out, full_out.detach(), mode=consistency_mode)
+            with torch.no_grad():
+                teacher_out = teacher.forward(x)
+            ema_loss = consistency_loss(full_out, teacher_out, mode=consistency_mode)
+
+            loss = ce_loss + sd_weight * sd_loss + ema_w * ema_loss
+            if not bool(torch.isfinite(loss).detach().cpu().item()):
+                raise RuntimeError("self-distillation objective became non-finite")
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            if any(
+                not bool(torch.all(torch.isfinite(parameter)).detach().cpu().item())
+                for parameter in model.parameters()
+            ):
+                raise RuntimeError("self-distillation produced non-finite model parameters")
+            teacher.update(model)
+
+            stats.ce_loss.append(float(ce_loss.detach()))
+            stats.stochastic_depth_loss.append(float(sd_loss.detach()))
+            stats.ema_consistency_loss.append(float(ema_loss.detach()))
+            stats.total_loss.append(float(loss.detach()))
+            keep_schedule.append(list(keep_mask))
+            completed_steps += 1
+            if log is not None:
+                log(step, stats)
+
+        model.self_distillation_receipt = {
+            "schema_version": "1.0.0",
+            "student": {
+                "class": f"{type(model).__module__}.{type(model).__qualname__}",
+                "initial_sha256": initial_student_digest,
+                "final_sha256": _model_digest(model),
+            },
+            "teacher": {
+                "class": f"{type(teacher.ema_model).__module__}.{type(teacher.ema_model).__qualname__}",
+                "initial_sha256": initial_teacher_digest,
+                "final_sha256": _model_digest(teacher.ema_model),
+                "decay": ema_decay,
+            },
+            "objective": {
+                "mode": consistency_mode,
+                "ema_weight": ema_w,
+                "stochastic_depth_weight": sd_weight,
+            },
+            "budget": {"requested_steps": steps, "completed_steps": completed_steps},
+            "seed": seed,
+            "drop_prob": drop_prob,
+            "keep_schedule": keep_schedule,
+            "losses": {
+                "cross_entropy": list(stats.ce_loss),
+                "stochastic_depth": list(stats.stochastic_depth_loss),
+                "ema_consistency": list(stats.ema_consistency_loss),
+                "total": list(stats.total_loss),
+            },
+            "optimizer": optimizer_receipt,
+        }
+        return model
+    finally:
+        model.train(original_training)
+
+
+def _validated_batch(batch: Any, model: Any, device: Any, torch_module: Any) -> tuple[Any, Any]:
+    if not isinstance(batch, (tuple, list)) or len(batch) != 2:
+        raise ValueError("each self-distillation batch must be a (context, next_token) pair")
+    context, target = batch
+    try:
+        context_array = np.asarray(context)
+        target_array = np.asarray(target)
+    except Exception as exc:
+        raise ValueError("context and next_token must be array-like") from exc
+    if context_array.ndim != 2 or context_array.shape[0] == 0 or context_array.shape[1] == 0:
+        raise ValueError("context must have non-empty shape (batch, sequence)")
+    if context_array.shape[1] > model.block:
+        raise ValueError(
+            f"context sequence length {context_array.shape[1]} exceeds configured block size {model.block}"
+        )
+    if target_array.ndim != 1 or len(target_array) != len(context_array):
+        raise ValueError("next_token must be a one-dimensional vector aligned with context rows")
+    for values, name in ((context_array, "context"), (target_array, "next_token")):
+        if values.dtype.kind not in {"i", "u", "f"}:
+            raise ValueError(f"{name} must contain numeric token ids")
+        if values.dtype.kind == "f" and (
+            not np.all(np.isfinite(values)) or not np.all(values == np.round(values))
+        ):
+            raise ValueError(f"{name} must contain finite integer-valued token ids")
+        if np.any(values < 0) or np.any(values >= model.vocab):
+            raise ValueError(f"{name} token ids must lie in [0, {model.vocab})")
+    return (
+        torch_module.as_tensor(context_array, dtype=torch_module.long, device=device),
+        torch_module.as_tensor(target_array, dtype=torch_module.long, device=device),
+    )
+
+
+def _model_digest(model: Any) -> str:
+    digest = hashlib.sha256()
+    digest.update(f"{type(model).__module__}.{type(model).__qualname__}".encode())
+    for name, tensor in sorted(model.state_dict().items()):
+        value = tensor.detach().cpu().contiguous()
+        digest.update(name.encode())
+        digest.update(str(value.dtype).encode())
+        digest.update(str(tuple(value.shape)).encode())
+        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _probability(value: Any, name: str, *, upper_inclusive: bool) -> float:
+    result = _nonnegative_finite(value, name)
+    if result > 1.0 or (not upper_inclusive and result == 1.0):
+        boundary = "[0, 1]" if upper_inclusive else "[0, 1)"
+        raise ValueError(f"{name} must lie in {boundary}")
+    return result
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    result = _nonnegative_finite(value, name)
+    if result == 0.0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+
+def _nonnegative_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a real scalar, not a boolean")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a real scalar") from exc
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative")
+    return result
+
+
+def _positive_int(value: Any, name: str) -> int:
+    result = _integer(value, name)
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+
+def _integer(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer")
+    return int(value)

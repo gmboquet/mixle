@@ -142,6 +142,85 @@ class StochasticDepthCorrectnessTest(unittest.TestCase):
         self.assertGreater(float(consistency_loss(a, c, mode="mse")), 0.0)
         self.assertGreaterEqual(float(consistency_loss(a, c, mode="kl")), 0.0)
 
+    def test_invalid_drop_probability_fails_before_forward(self):
+        model = build_causal_lm(vocab=7, d_model=8, n_layer=1, n_head=2, block=4)
+        x = torch.zeros((2, 4), dtype=torch.long)
+        for value in (-0.1, 1.1, np.nan):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                stochastic_depth_forward(model, x, value)
+
+
+class SelfDistillationContractTest(unittest.TestCase):
+    def _model(self):
+        torch.manual_seed(12)
+        return build_causal_lm(vocab=7, d_model=8, n_layer=2, n_head=2, block=4)
+
+    @staticmethod
+    def _data():
+        return [(np.array([[0, 1, 2, 3], [3, 2, 1, 0]]), np.array([4, 5]))]
+
+    def test_receipt_captures_actual_training_and_caller_mode_is_restored(self):
+        model = self._model().eval()
+        fitted = train_with_self_distillation(
+            model,
+            data=self._data,
+            steps=2,
+            ema_decay=0.9,
+            drop_prob=0.5,
+            consistency_weight=0.25,
+            lr=1.0e-3,
+            seed=19,
+        )
+        self.assertIs(fitted, model)
+        self.assertFalse(model.training)
+        receipt = model.self_distillation_receipt
+        self.assertEqual(receipt["schema_version"], "1.0.0")
+        self.assertEqual(receipt["budget"], {"requested_steps": 2, "completed_steps": 2})
+        self.assertEqual(receipt["seed"], 19)
+        self.assertEqual(len(receipt["keep_schedule"]), 2)
+        self.assertTrue(all(len(mask) == 2 and any(mask) for mask in receipt["keep_schedule"]))
+        self.assertEqual(len(receipt["losses"]["total"]), 2)
+        self.assertEqual(len(receipt["student"]["initial_sha256"]), 64)
+        self.assertEqual(receipt["teacher"]["initial_sha256"], receipt["student"]["initial_sha256"])
+        self.assertEqual(receipt["objective"]["ema_weight"], 0.25)
+        self.assertEqual(receipt["objective"]["stochastic_depth_weight"], 0.25)
+
+    def test_empty_or_invalid_data_fails_clearly_and_restores_mode(self):
+        model = self._model().eval()
+        with self.assertRaisesRegex(ValueError, "empty iterable"):
+            train_with_self_distillation(model, data=lambda: [], steps=1)
+        self.assertFalse(model.training)
+
+        invalid_batches = [
+            (np.ones((2, 4)), np.ones(1)),
+            (np.ones((2, 5)), np.ones(2)),
+            (np.array([[0, 1, 2, 7], [0, 1, 2, 3]]), np.ones(2)),
+            (np.ones((2, 4)), np.array([-1, 2])),
+            (np.array([[0.0, 1.5, 2.0, 3.0]]), np.array([1])),
+            (np.ones((1, 4), dtype=bool), np.array([1])),
+        ]
+        for batch in invalid_batches:
+            with self.subTest(batch=batch), self.assertRaises(ValueError):
+                train_with_self_distillation(model, data=[batch], steps=1)
+            self.assertFalse(model.training)
+
+    def test_invalid_training_controls_are_rejected(self):
+        model = self._model()
+        cases = [
+            {"steps": 0},
+            {"steps": 1, "ema_decay": 1.0},
+            {"steps": 1, "drop_prob": -0.1},
+            {"steps": 1, "consistency_weight": -1.0},
+            {"steps": 1, "ema_weight": np.inf},
+            {"steps": 1, "stochastic_depth_weight": -1.0},
+            {"steps": 1, "lr": 0.0},
+            {"steps": 1, "seed": 1.5},
+            {"steps": 1, "consistency_mode": "unknown"},
+        ]
+        for controls in cases:
+            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError)):
+                train_with_self_distillation(model, data=self._data, **controls)
+
 
 class J3CompressibilityAcceptanceTest(unittest.TestCase):
     """THE acceptance criterion (substituting G3's coarsen() for the not-yet-built J2 ladder, per the
