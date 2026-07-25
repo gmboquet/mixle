@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from mixle.substrate.core import Substrate, SubstrateItem
+from mixle.substrate.core import Substrate, SubstrateItem, _require_count
 
 
 @dataclass
@@ -35,8 +35,12 @@ class Retrieval:
         return sorted(self.by_kind())
 
     def top(self, n: int) -> list[SubstrateItem]:
-        """Return the top ``n`` retrieved items."""
-        return self.items[: int(n)]
+        """Return the top ``n`` retrieved items.
+
+        ``n`` shares :func:`~mixle.substrate.core.Substrate.search`'s exact-non-negative-integer
+        contract (MXR-080-0236) -- no bool, no fractional value, no negative-indexing trick.
+        """
+        return self.items[: _require_count(n, "n")]
 
     def provenance(self) -> list[dict[str, Any]]:
         """Return compact provenance records for retrieved items."""
@@ -77,13 +81,19 @@ def retrieve(
     """Plan a cross-kind retrieval for ``query`` (see module docstring).
 
     Args:
-        k: total items to return.
+        k: total items to return. Must be an exact, non-negative :class:`int` (MXR-080-0236, see
+            :func:`~mixle.substrate.core._require_count`) -- ``bool`` and fractional values are
+            rejected, and a negative ``k`` raises rather than silently slicing from the end. Validated
+            once, up front, before any per-kind search runs, and used identically by both the
+            diversified and flat merge paths below so a given ``k`` means the same thing regardless of
+            ``diversify``.
         kinds: restrict to these substrate kinds (default: every kind present).
         weights: per-kind score multipliers (e.g. ``{"artifact": 1.2}`` to favor deployable models).
         diversify: when True (default), interleave the top hits of each kind so the result spans
             modalities; when False, take a flat merged top-k (whichever kind scores highest wins).
         scope: restrict to a team/access scope.
     """
+    k = _require_count(k, "k")
     present = kinds if kinds is not None else sorted({i.kind for i in substrate.all(scope=scope)})
     weights = weights or {}
 
