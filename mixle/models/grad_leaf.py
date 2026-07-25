@@ -33,6 +33,7 @@ from __future__ import annotations
 import inspect
 import operator
 from contextlib import contextmanager
+from functools import wraps
 from typing import Any
 
 import numpy as np
@@ -120,6 +121,78 @@ def _resolve_dtype(torch: Any) -> Any:
     return None
 
 
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be an integer, not a boolean.")
+    try:
+        result = operator.index(value)
+    except TypeError as exc:
+        raise TypeError(f"{name} must be an integer.") from exc
+    if result <= 0:
+        raise ValueError(f"{name} must be positive.")
+    return result
+
+
+def _positive_float(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a positive finite number, not a boolean.")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a positive finite number.") from exc
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a positive finite number.")
+    return result
+
+
+def _validate_precision(precision: Any) -> str:
+    if not isinstance(precision, str):
+        raise TypeError("precision must be one of 'auto', 'fp32', 'fp64', or 'bf16'.")
+    aliases = {
+        "auto": "auto",
+        "fp32": "fp32",
+        "float32": "fp32",
+        "fp64": "fp64",
+        "float64": "fp64",
+        "bf16": "bf16",
+        "bfloat16": "bf16",
+    }
+    try:
+        return aliases[precision.lower()]
+    except KeyError as exc:
+        raise ValueError("precision must be one of 'auto', 'fp32', 'fp64', or 'bf16'.") from exc
+
+
+def _precision_policy(torch: Any, precision: str, device: Any, module: Any) -> tuple[Any, bool]:
+    """Resolve active-engine precision before the leaf fallback, including module/data dtype."""
+    normalized = _validate_precision(precision)
+    engine_dtype = _resolve_dtype(torch)
+    if engine_dtype is not None:
+        chosen = engine_dtype
+    elif normalized == "auto":
+        chosen = next(
+            (
+                tensor.dtype
+                for tensor in (*module.parameters(), *module.buffers())
+                if tensor.dtype in {torch.float32, torch.float64}
+            ),
+            torch.float32,
+        )
+    else:
+        chosen = {
+            "fp32": torch.float32,
+            "fp64": torch.float64,
+            "bf16": torch.bfloat16,
+        }[normalized]
+    if chosen == torch.bfloat16:
+        if device.type not in {"cpu", "cuda"}:
+            raise ValueError(f"bf16 gradient leaves are not supported on {device.type} devices.")
+        return torch.float32, True
+    if chosen not in {torch.float32, torch.float64}:
+        raise ValueError(f"unsupported active-engine Torch dtype for gradient leaves: {chosen}.")
+    return chosen, False
+
+
 @contextmanager
 def _module_mode(module: Any, *, train: bool) -> Any:
     """Hold ``module`` in train/eval mode for the block, restoring every submodule's prior flag on exit.
@@ -197,6 +270,27 @@ def _call_sample_with_seed(method: Any, *args: Any, torch: Any, device: Any, see
             torch.mps.set_rng_state(mps_state)
 
 
+def _preserve_fit_mode(method: Any) -> Any:
+    """Run an estimator method in training mode and restore every caller-owned mode flag."""
+
+    @wraps(method)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with _module_mode(self.module, train=True):
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
+def _validate_scores(scores: Any, rows: int, torch: Any, context: str) -> Any:
+    if not isinstance(scores, torch.Tensor):
+        raise TypeError(f"{context} must return a Torch tensor.")
+    if tuple(scores.shape) != (rows,):
+        raise ValueError(f"{context} must return exactly one score per row; got shape {tuple(scores.shape)}.")
+    if not bool(torch.isfinite(scores).all()):
+        raise FloatingPointError(f"{context} returned a non-finite score.")
+    return scores
+
+
 def looks_like_torch_module(obj: Any) -> bool:
     """A bare torch density module: scores batches and carries parameters -- coercible to a leaf."""
     return (
@@ -228,28 +322,26 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         device: Any = None,
         batch_size: int | None = None,
         max_optimizer_steps: int | None = None,
-        precision: str = "fp32",
+        precision: str = "auto",
         name: str | None = None,
         loss: Any = None,
         optimizer: Any = None,
         lr_decay: float | None = None,
     ) -> None:
         self.module = module
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
+        self.m_steps = _positive_int(m_steps, "m_steps")
+        self.lr = _positive_float(lr, "lr")
         self.device = device  # None => active engine's device, else CUDA if available, else CPU (_resolve_device)
-        self.batch_size = None if batch_size is None else int(batch_size)
-        if self.batch_size is not None and self.batch_size <= 0:
-            raise ValueError("batch_size must be positive when supplied.")
-        self.max_optimizer_steps = None if max_optimizer_steps is None else int(max_optimizer_steps)
-        if self.max_optimizer_steps is not None and self.max_optimizer_steps <= 0:
-            raise ValueError("max_optimizer_steps must be positive when supplied.")
-        self.precision = precision
+        self.batch_size = None if batch_size is None else _positive_int(batch_size, "batch_size")
+        self.max_optimizer_steps = (
+            None if max_optimizer_steps is None else _positive_int(max_optimizer_steps, "max_optimizer_steps")
+        )
+        self.precision = _validate_precision(precision)
         self.name = name
         self.loss = loss
         self.optimizer = optimizer
-        self.lr_decay = None if lr_decay is None else float(lr_decay)
-        if self.lr_decay is not None and not 0.0 < self.lr_decay <= 1.0:
+        self.lr_decay = None if lr_decay is None else _positive_float(lr_decay, "lr_decay")
+        if self.lr_decay is not None and self.lr_decay > 1.0:
             raise ValueError("lr_decay must lie in (0, 1] when supplied.")
         if self.lr_decay is not None and callable(optimizer):
             raise ValueError(
@@ -272,17 +364,26 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         # ``*`` either way, same tuple-default pattern GradEstimator.estimate uses for the M-step.
         fields = x if isinstance(x, tuple) else (x,)
         dev = _resolve_device(self.device, torch)
-        self.module.to(dev)
+        dtype, use_bf16 = _precision_policy(torch, self.precision, dev, self.module)
+        self.module.to(device=dev, dtype=dtype)
         xts = tuple(
             torch.as_tensor(
                 check_finite(np.atleast_2d(np.asarray(f, dtype=float)), f"{type(self).__name__}.seq_log_density"),
-                dtype=torch.float32,
+                dtype=dtype,
                 device=dev,
             )
             for f in fields
         )
-        with _module_mode(self.module, train=False), torch.no_grad():
-            return self.module.log_density(*xts).cpu().numpy().reshape(-1)
+        autocast_dev = dev.type
+        with (
+            _module_mode(self.module, train=False),
+            torch.no_grad(),
+            torch.autocast(device_type=autocast_dev, dtype=torch.bfloat16, enabled=use_bf16),
+        ):
+            scores = _validate_scores(
+                self.module.log_density(*xts), xts[0].shape[0], torch, f"{type(self.module).__name__}.log_density"
+            )
+            return scores.float().cpu().numpy() if scores.dtype == torch.bfloat16 else scores.cpu().numpy()
 
     def sampler(self, seed: int | None = None) -> GradLeafSampler:
         return GradLeafSampler(self, seed)
@@ -368,22 +469,46 @@ class DataBufferAccumulator(SequenceEncodableStatisticAccumulator):
 
     def __init__(self, encoder: Any, n_fields: int = 1) -> None:
         self.encoder = encoder
-        self.n_fields = int(n_fields)
+        self.n_fields = _positive_int(n_fields, "n_fields")
         self.parts: list[list] = [[] for _ in range(self.n_fields)]
         self.w: list = []
+        self._schema_bound = False
 
     # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
     def _append(self, enc: Any, weights: np.ndarray) -> None:
         fields = enc if isinstance(enc, tuple) else (enc,)
-        # the declared n_fields is a default, not a ceiling: a generic bridge (GradLeaf) doesn't know a bare
-        # module's arity until the first real batch arrives, so widen once, from empty, to match it.
-        if len(fields) != len(self.parts) and not any(self.parts):
+        if not fields:
+            raise ValueError("gradient accumulator batches must contain at least one field.")
+        # The declared arity is only an initial allocation hint: the first actual batch pins the schema.
+        if not self._schema_bound:
             self.parts = [[] for _ in fields]
             self.n_fields = len(fields)
-        for buf, f in zip(self.parts, fields):
+            self._schema_bound = True
+        elif len(fields) != self.n_fields:
+            raise ValueError(f"gradient accumulator expected {self.n_fields} fields, received {len(fields)}.")
+
+        prepared = []
+        rows = None
+        for index, f in enumerate(fields):
             fb = np.asarray(f, dtype=float)
-            buf.append(fb.reshape(fb.shape[0], 1) if fb.ndim == 1 else fb)
-        self.w.append(np.asarray(weights, dtype=float).ravel())
+            if fb.ndim == 0:
+                raise ValueError(f"gradient accumulator field {index} must have a row dimension.")
+            fb = fb.reshape(fb.shape[0], 1) if fb.ndim == 1 else fb
+            if rows is None:
+                rows = fb.shape[0]
+            elif fb.shape[0] != rows:
+                raise ValueError("all gradient accumulator fields must have the same row count.")
+            prepared.append(fb)
+        wb = np.asarray(weights, dtype=float)
+        if wb.ndim != 1:
+            raise ValueError("gradient accumulator weights must be one-dimensional.")
+        if wb.shape[0] != rows:
+            raise ValueError(
+                f"gradient accumulator received {wb.shape[0]} weights for {rows} rows."
+            )
+        for buf, fb in zip(self.parts, prepared):
+            buf.append(fb)
+        self.w.append(wb)
 
     def update(self, x: Any, weight: float, estimate: Any) -> None:
         self._append(self.encoder.seq_encode([x]), np.asarray([float(weight)]))
@@ -399,16 +524,8 @@ class DataBufferAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, other: Any) -> DataBufferAccumulator:
         *fields, ws = other
-        if len(ws):
-            # same widen-once rule as _append: a combine()-fed root (the mp/mpi/dask/ray fan-in path)
-            # starts at the declared default arity and must adopt the workers' true arity before
-            # zipping, or every field past the first is silently dropped for conditional leaves.
-            if len(fields) != len(self.parts) and not any(self.parts):
-                self.parts = [[] for _ in fields]
-                self.n_fields = len(fields)
-            for buf, f in zip(self.parts, fields):
-                buf.append(np.asarray(f, dtype=float))
-            self.w.append(np.asarray(ws, dtype=float).ravel())
+        if fields or len(ws):
+            self._append(tuple(fields), np.asarray(ws, dtype=float))
         return self
 
     def value(self) -> tuple:
@@ -418,8 +535,10 @@ class DataBufferAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, v: tuple) -> DataBufferAccumulator:
         *fields, w = v
-        self.parts = [[np.asarray(f, dtype=float)] if len(f) else [] for f in fields]
-        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
+        self.parts = [[] for _ in range(max(len(fields), 1))]
+        self.w = []
+        self._schema_bound = False
+        self._append(tuple(fields), np.asarray(w, dtype=float))
         return self
 
     def acc_to_encoder(self) -> Any:
@@ -429,7 +548,7 @@ class DataBufferAccumulator(SequenceEncodableStatisticAccumulator):
 class DataBufferAccumulatorFactory(StatisticAccumulatorFactory):
     def __init__(self, encoder: Any, n_fields: int = 1) -> None:
         self.encoder = encoder
-        self.n_fields = int(n_fields)
+        self.n_fields = _positive_int(n_fields, "n_fields")
 
     def make(self) -> DataBufferAccumulator:
         return DataBufferAccumulator(self.encoder, self.n_fields)
@@ -450,28 +569,26 @@ class GradEstimator(ParameterEstimator):
         device: Any = None,
         batch_size: int | None = None,
         max_optimizer_steps: int | None = None,
-        precision: str = "fp32",
+        precision: str = "auto",
         name: str | None = None,
         loss: Any = None,
         optimizer: Any = None,
         lr_decay: float | None = None,
     ) -> None:
         self.module = module
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
+        self.m_steps = _positive_int(m_steps, "m_steps")
+        self.lr = _positive_float(lr, "lr")
         self.device = device
-        self.batch_size = None if batch_size is None else int(batch_size)
-        if self.batch_size is not None and self.batch_size <= 0:
-            raise ValueError("batch_size must be positive when supplied.")
-        self.max_optimizer_steps = None if max_optimizer_steps is None else int(max_optimizer_steps)
-        if self.max_optimizer_steps is not None and self.max_optimizer_steps <= 0:
-            raise ValueError("max_optimizer_steps must be positive when supplied.")
-        self.precision = precision
+        self.batch_size = None if batch_size is None else _positive_int(batch_size, "batch_size")
+        self.max_optimizer_steps = (
+            None if max_optimizer_steps is None else _positive_int(max_optimizer_steps, "max_optimizer_steps")
+        )
+        self.precision = _validate_precision(precision)
         self.name = name
         self.loss = loss
         self.optimizer = optimizer
-        self.lr_decay = None if lr_decay is None else float(lr_decay)
-        if self.lr_decay is not None and not 0.0 < self.lr_decay <= 1.0:
+        self.lr_decay = None if lr_decay is None else _positive_float(lr_decay, "lr_decay")
+        if self.lr_decay is not None and self.lr_decay > 1.0:
             raise ValueError("lr_decay must lie in (0, 1] when supplied.")
         if self.lr_decay is not None and callable(optimizer):
             raise ValueError(
@@ -501,21 +618,41 @@ class GradEstimator(ParameterEstimator):
     def accumulator_factory(self) -> DataBufferAccumulatorFactory:
         return DataBufferAccumulatorFactory(GradLeafEncoder(), n_fields=1)
 
+    @_preserve_fit_mode
     def estimate(self, nobs: float | None, suff_stat: tuple) -> GradLeaf:
         torch = _torch()
         *fields, ws = suff_stat
         params = [p for p in self.module.parameters() if p.requires_grad]
-        if not fields or len(fields[0]) == 0 or not params:  # nothing to fit, or a fully frozen (fixed) module
+        if not fields:
+            return self._leaf()
+        arrays = tuple(np.asarray(field, dtype=float) for field in fields)
+        if any(array.ndim == 0 for array in arrays):
+            raise ValueError("gradient M-step fields must have a row dimension.")
+        n = arrays[0].shape[0]
+        if any(array.shape[0] != n for array in arrays):
+            raise ValueError("gradient M-step fields must have identical row counts.")
+        weights = np.asarray(ws, dtype=float)
+        if weights.ndim != 1 or weights.shape[0] != n:
+            raise ValueError(f"gradient M-step requires exactly one weight per row; got {weights.shape} for {n} rows.")
+        if n == 0:
+            return self._leaf()
+        if not np.isfinite(weights).all():
+            raise ValueError("gradient M-step weights must be finite.")
+        if np.any(weights < 0.0):
+            raise ValueError("gradient M-step weights must be non-negative.")
+        weight_total = float(weights.sum())
+        if not np.isfinite(weight_total) or weight_total <= 0.0:
+            raise ValueError("gradient M-step weights must have positive finite total mass.")
+        if not params:  # a fully frozen module is a fixed distribution, after validating its supplied batch
             return self._leaf()
         dev = _resolve_device(self.device, torch)
+        dtype, use_bf16 = _precision_policy(torch, self.precision, dev, self.module)
         # data stays on CPU (mirrors softmax_leaf.py) -- each minibatch is moved to the device, so a
         # larger-than-device-memory dataset still fits; batch_size=None keeps today's single full-batch pass.
-        xs = tuple(torch.as_tensor(np.asarray(f, dtype=float), dtype=torch.float32) for f in fields)
-        w = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32)
-        w = w / w.sum().clamp(min=1e-8)  # normalized once, up front -- batch_size=None reproduces the old math exactly
-        n = xs[0].shape[0]
+        xs = tuple(torch.as_tensor(array, dtype=dtype) for array in arrays)
+        w = torch.as_tensor(weights / weight_total, dtype=dtype)
         bs = self.batch_size or n
-        self.module.to(dev).train()
+        self.module.to(device=dev, dtype=dtype)
         self._fit_rounds += 1
         # SAEM window: a per-round Robbins--Monro schedule lr / t**a with a in (0.5, 1] satisfies
         # sum(step)=inf and sum(step^2)<inf -- the step-size conditions stochastic-approximation EM
@@ -524,7 +661,12 @@ class GradEstimator(ParameterEstimator):
         # best-visited-iterate guarantee provided by the outer loop.
         effective_lr = self.lr if self.lr_decay is None else self.lr / (self._fit_rounds**self.lr_decay)
         pre_step_state = {key: value.detach().clone() for key, value in self.module.state_dict().items()}
-        analytic_receipt = _run_analytic_m_step(self.module, xs, w, self.batch_size)
+        try:
+            analytic_receipt = _run_analytic_m_step(self.module, xs, w, self.batch_size)
+        except Exception as exc:
+            with torch.no_grad():
+                self.module.load_state_dict(pre_step_state)
+            raise RuntimeError(f"gradient analytic M-step failed; module state was restored: {exc}") from exc
         if analytic_receipt is not None:
             recovered = not all(bool(torch.isfinite(p).all()) for p in params)
             if recovered:
@@ -555,8 +697,7 @@ class GradEstimator(ParameterEstimator):
         opt, optimizer_receipt = _build_optimizer(
             self.module, params, self.optimizer, effective_lr, torch, sign_stable=bs >= n
         )
-        autocast_dev = "cuda" if str(dev).startswith("cuda") else "cpu"
-        use_bf16 = self.precision == "bf16"
+        autocast_dev = dev.type
         # Divergence guard: an aggressive step can drive parameters non-finite, after which the
         # module's own log_density may RAISE (e.g. a torch.distributions constraint check) from
         # inside this M-step -- before the outer EM loop's non-finite acceptance gate or its
@@ -568,8 +709,9 @@ class GradEstimator(ParameterEstimator):
         optimizer_steps = 0
         epochs_completed = 0
         stop = False
-        for _ in range(self.m_steps):  # m_steps is epochs; max_optimizer_steps can make update budgets comparable
+        for epoch in range(self.m_steps):  # m_steps is epochs; max_optimizer_steps can compare update budgets
             perm = torch.randperm(n) if bs < n else torch.arange(n)
+            epoch_completed = True
             for k in range(0, n, bs):
                 idx = perm[k : k + bs]
                 xb = tuple(xt[idx].to(dev) for xt in xs)
@@ -580,10 +722,22 @@ class GradEstimator(ParameterEstimator):
                     with torch.autocast(device_type=autocast_dev, dtype=torch.bfloat16, enabled=use_bf16):
                         if self.loss is not None:
                             loss = self.loss(self.module, *xb, wb)
+                            if not isinstance(loss, torch.Tensor):
+                                raise TypeError("custom gradient loss must return a Torch tensor.")
+                            if loss.ndim != 0:
+                                raise ValueError(
+                                    f"custom gradient loss must return a scalar tensor; got shape {tuple(loss.shape)}."
+                                )
                         else:
                             # tuple default: log_density(*fields) -- a single field unpacks to log_density(x),
                             # identical to before; a conditional bare module's log_density(x, y, ...) just works.
-                            loss = -(wb * self.module.log_density(*xb)).sum()
+                            scores = _validate_scores(
+                                self.module.log_density(*xb),
+                                len(idx),
+                                torch,
+                                f"{type(self.module).__name__}.log_density",
+                            )
+                            loss = -(wb * scores).sum()
                             # ``w`` is normalized over the full M-step data. A uniform minibatch's raw
                             # weighted sum is smaller by E[batch_size / n]; rescale it so every optimizer
                             # step is an unbiased estimate of the same full responsibility-weighted Q
@@ -599,19 +753,29 @@ class GradEstimator(ParameterEstimator):
                         optimizer_steps += 1
                         if not all(bool(torch.isfinite(p).all()) for p in params):
                             step_healthy = False
-                except (ValueError, RuntimeError):
+                except FloatingPointError:
                     step_healthy = False
+                except Exception as exc:
+                    with torch.no_grad():
+                        self.module.load_state_dict(pre_step_state)
+                    raise RuntimeError(
+                        f"gradient M-step failed at epoch {epoch + 1}, batch starting at row {k}; "
+                        f"module state was restored: {exc}"
+                    ) from exc
                 if not step_healthy:
                     with torch.no_grad():
                         self.module.load_state_dict(pre_step_state)
                     self.nonfinite_recoveries += 1
                     recovered = True
                     stop = True
+                    epoch_completed = False
                     break
                 if self.max_optimizer_steps is not None and optimizer_steps >= self.max_optimizer_steps:
                     stop = True
+                    epoch_completed = k + bs >= n
                     break
-            epochs_completed += 1
+            if epoch_completed:
+                epochs_completed += 1
             if stop:
                 break
         leaf = self._leaf()
