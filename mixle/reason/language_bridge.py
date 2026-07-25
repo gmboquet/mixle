@@ -311,10 +311,33 @@ class PosteriorDescriber:
         n_probe: int = 300,
         seed: int = 0,
     ) -> None:
-        if tol <= 0:
-            raise ValueError(f"tol must be > 0, got {tol}")
+        # MXR-080-0292: every candidate-geometry / conformal-prerequisite parameter is validated here,
+        # before any candidate is ever generated. Previously k<=0 or an empty width_multiples let an
+        # empty candidate set reach the generator; a zero or negative multiple produced a point or
+        # reversed interval; a non-finite tol/multiple slipped past a bare `<= 0` check (a NaN
+        # comparison is always False); alpha outside (0, 1) and a non-positive probe count reached
+        # calibration/generation unexamined; and an empty field_name silently labeled every claim.
+        if not isinstance(field_name, str) or not field_name:
+            raise ValueError(f"field_name must be a non-empty str, got {field_name!r}")
+        if not np.isfinite(tol) or tol <= 0:
+            raise ValueError(f"tol must be finite and > 0, got {tol!r}")
+        width_multiples = tuple(width_multiples)
+        if not width_multiples:
+            raise ValueError("width_multiples must be non-empty")
+        if not all(np.isfinite(m) and m > 0 for m in width_multiples):
+            raise ValueError(f"width_multiples must all be finite and > 0, got {width_multiples!r}")
+        if any(width_multiples[i] >= width_multiples[i + 1] for i in range(len(width_multiples) - 1)):
+            raise ValueError(
+                f"width_multiples must be strictly increasing (narrowest to widest), got {width_multiples!r}"
+            )
+        if isinstance(k, bool) or not isinstance(k, (int, np.integer)) or k < 1:
+            raise ValueError(f"k must be a positive int, got {k!r}")
         if k > len(width_multiples):
             raise ValueError(f"k={k} exceeds the number of configured width_multiples ({len(width_multiples)})")
+        if not (0.0 < alpha < 1.0):
+            raise ValueError(f"alpha must be strictly between 0 and 1, got {alpha!r}")
+        if isinstance(n_probe, bool) or not isinstance(n_probe, (int, np.integer)) or n_probe < 1:
+            raise ValueError(f"n_probe must be a positive int, got {n_probe!r}")
         self.field_name = field_name
         self.tol = float(tol)
         self.width_multiples = width_multiples[:k]
