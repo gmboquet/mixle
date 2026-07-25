@@ -167,6 +167,24 @@ class GatesTest(unittest.TestCase):
         self.assertNotIn("sk-abcdefghij1234567890XYZ", r.investigation.answer)
         self.assertTrue(all("sk-abcdefghij1234567890XYZ" not in f for f in r.investigation.evidence))
 
+    def test_retained_investigation_redacts_a_secret_leaked_through_a_failed_actions_error(self):
+        # Step.error/Investigation.error (MXR-080-0256) carry a raised exception's "Type: message" --
+        # this postdates _redact_investigation's original fields (answer/fragments), so a secret echoed
+        # back by a failing action's own error message was a live gap until this was covered too.
+        reasoner = Reasoner(_answerer)
+
+        def _boom(q):
+            raise ValueError("could not process request containing sk-abcdefghij1234567890XYZ")
+
+        reasoner.add_action(Action("diag", "compute", run=_boom, description="diagnostic"))
+        h = Harness(reasoner, name="t")
+        r = h.handle("diagnostic dump token")
+        self.assertIsNotNone(r.investigation)
+        step = r.investigation.steps[0]
+        self.assertTrue(step.failed)
+        self.assertNotIn("sk-abcdefghij1234567890XYZ", step.error)
+        self.assertIn("ValueError", step.error)  # the error TYPE survives redaction, just not the secret
+
     def test_ui_hook_sees_every_result_and_cannot_break_the_path(self):
         seen = []
 
