@@ -27,6 +27,68 @@ from typing import Any
 import numpy as np
 
 
+def _alpha(value: Any) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("alpha must be a finite probability strictly between 0 and 1")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as error:
+        raise TypeError("alpha must be a finite probability strictly between 0 and 1") from error
+    if not np.isfinite(result) or not 0.0 < result < 1.0:
+        raise ValueError("alpha must be a finite probability strictly between 0 and 1")
+    return result
+
+
+def _finite_vector(value: Any, name: str) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{name} must be a finite numeric vector") from error
+    if result.ndim != 1 or result.size == 0:
+        raise ValueError(f"{name} must be a non-empty one-dimensional vector")
+    if not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} must contain only finite values")
+    return result
+
+
+def _probabilities(value: Any, name: str, *, classes: int | None = None) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{name} must be a finite normalized probability matrix") from error
+    if result.ndim != 2 or result.shape[0] == 0 or result.shape[1] < 2:
+        raise ValueError(f"{name} must have shape (rows, classes) with non-empty rows and at least two classes")
+    if classes is not None and result.shape[1] != classes:
+        raise ValueError(f"{name} must have exactly {classes} classes; got {result.shape[1]}")
+    if not np.all(np.isfinite(result)) or np.any(result < 0.0) or np.any(result > 1.0):
+        raise ValueError(f"{name} must contain finite probabilities in [0, 1]")
+    if not np.allclose(result.sum(axis=1), 1.0, rtol=0.0, atol=1e-8):
+        raise ValueError(f"{name} rows must sum to 1")
+    return result.copy()
+
+
+def _labels(value: Any, rows: int, classes: int, name: str = "labels") -> np.ndarray:
+    raw = np.asarray(value)
+    if raw.ndim != 1 or raw.shape != (rows,):
+        raise ValueError(f"{name} must be one-dimensional with exactly {rows} entries")
+    if raw.dtype.kind not in {"i", "u"}:
+        raise ValueError(f"{name} must contain exact integer class indices")
+    result = raw.astype(np.int64, copy=False)
+    if np.any(result < 0) or np.any(result >= classes):
+        raise ValueError(f"{name} must lie in [0, {classes})")
+    return result
+
+
+def _paired_bands(qlo: Any, qhi: Any, *, rows: int | None = None, source: str) -> tuple[np.ndarray, np.ndarray]:
+    lower = _finite_vector(np.asarray(qlo).reshape(-1), f"{source} lower predictions")
+    upper = _finite_vector(np.asarray(qhi).reshape(-1), f"{source} upper predictions")
+    if lower.shape != upper.shape or (rows is not None and lower.size != rows):
+        raise ValueError(f"{source} lower and upper predictions must align exactly with each other and targets")
+    if np.any(lower > upper):
+        raise ValueError(f"{source} lower predictions must not exceed upper predictions")
+    return lower, upper
+
+
 def conformal_quantile(scores: Any, alpha: float) -> float:
     """The level-``alpha`` conformal quantile of calibration ``scores``.
 
@@ -35,7 +97,8 @@ def conformal_quantile(scores: Any, alpha: float) -> float:
     size -- ``(n + 1)(1 - alpha) > n`` -- no finite threshold gives the requested coverage
     and ``inf`` is returned, representing an unconstrained prediction set.
     """
-    s = np.sort(np.asarray(scores, dtype=float))
+    alpha = _alpha(alpha)
+    s = np.sort(_finite_vector(scores, "conformal scores"))
     n = s.size
     if n == 0:
         raise ValueError("conformal calibration needs at least one score.")
@@ -57,9 +120,9 @@ class ConformalRegressor:
 
     def __init__(self, result: Any, y_cal: Any, *, given: dict, alpha: float = 0.1) -> None:
         self.result = result
-        self.alpha = float(alpha)
-        yhat = np.asarray(result.predict(given), dtype=float).reshape(-1)
-        y = np.asarray(y_cal, dtype=float).reshape(-1)
+        self.alpha = _alpha(alpha)
+        yhat = _finite_vector(np.asarray(result.predict(given)).reshape(-1), "calibration predictions")
+        y = _finite_vector(np.asarray(y_cal).reshape(-1), "calibration targets")
         if yhat.shape != y.shape:
             raise ValueError(f"calibration predictions {yhat.shape} and targets {y.shape} disagree.")
         self.scores = np.abs(y - yhat)
@@ -67,13 +130,15 @@ class ConformalRegressor:
 
     def interval(self, given: dict) -> tuple[np.ndarray, np.ndarray]:
         """Return ``(lower, upper)`` arrays of the conformal interval at covariates ``given``."""
-        center = np.asarray(self.result.predict(given), dtype=float).reshape(-1)
+        center = _finite_vector(np.asarray(self.result.predict(given)).reshape(-1), "regression predictions")
         return center - self.qhat, center + self.qhat
 
     def covers(self, y: Any, *, given: dict) -> np.ndarray:
         """Boolean array: does the interval at ``given`` contain each observed ``y``."""
         lo, hi = self.interval(given)
-        y = np.asarray(y, dtype=float).reshape(-1)
+        y = _finite_vector(np.asarray(y).reshape(-1), "coverage targets")
+        if y.shape != lo.shape:
+            raise ValueError("coverage targets and regression predictions must have the same shape")
         return (y >= lo) & (y <= hi)
 
 
@@ -89,22 +154,21 @@ class ConformalClassifier:
     """
 
     def __init__(self, proba_cal: Any, y_cal: Any, *, alpha: float = 0.1) -> None:
-        proba = np.asarray(proba_cal, dtype=float)
-        y = np.asarray(y_cal, dtype=int).reshape(-1)
-        if proba.ndim != 2 or proba.shape[0] != y.shape[0]:
-            raise ValueError("proba_cal must be (n_calibration, n_classes) aligned with y_cal.")
-        self.alpha = float(alpha)
+        proba = _probabilities(proba_cal, "proba_cal")
+        y = _labels(y_cal, proba.shape[0], proba.shape[1], "y_cal")
+        self.n_classes = proba.shape[1]
+        self.alpha = _alpha(alpha)
         self.scores = 1.0 - proba[np.arange(y.size), y]
         self.tau = conformal_quantile(self.scores, self.alpha)
 
     def predict_set(self, proba: Any) -> np.ndarray:
         """Boolean ``(n, K)`` label-inclusion matrix at probabilities ``proba``."""
-        return (1.0 - np.asarray(proba, dtype=float)) <= self.tau
+        return (1.0 - _probabilities(proba, "proba", classes=self.n_classes)) <= self.tau
 
     def covers(self, proba: Any, y: Any) -> np.ndarray:
         """Boolean array: is each true label ``y`` in the predicted set."""
         sets = self.predict_set(proba)
-        y = np.asarray(y, dtype=int).reshape(-1)
+        y = _labels(y, sets.shape[0], sets.shape[1])
         return sets[np.arange(y.size), y]
 
     def set_sizes(self, proba: Any) -> np.ndarray:
@@ -130,23 +194,23 @@ class ConformalQuantileRegressor:
     def __init__(self, lo: Any, hi: Any, y_cal: Any, *, given: dict, alpha: float = 0.1) -> None:
         self.lo = lo
         self.hi = hi
-        self.alpha = float(alpha)
-        y = np.asarray(y_cal, dtype=float).reshape(-1)
-        qlo = np.asarray(lo.predict(given), dtype=float).reshape(-1)
-        qhi = np.asarray(hi.predict(given), dtype=float).reshape(-1)
+        self.alpha = _alpha(alpha)
+        y = _finite_vector(np.asarray(y_cal).reshape(-1), "calibration targets")
+        qlo, qhi = _paired_bands(lo.predict(given), hi.predict(given), rows=y.size, source="calibration")
         self.scores = np.maximum(qlo - y, y - qhi)  # CQR nonconformity (negative when inside the band)
         self.qhat = conformal_quantile(self.scores, self.alpha)
 
     def interval(self, given: dict) -> tuple[np.ndarray, np.ndarray]:
         """Return ``(lower, upper)`` arrays of the calibrated adaptive band at covariates ``given``."""
-        qlo = np.asarray(self.lo.predict(given), dtype=float).reshape(-1)
-        qhi = np.asarray(self.hi.predict(given), dtype=float).reshape(-1)
+        qlo, qhi = _paired_bands(self.lo.predict(given), self.hi.predict(given), source="prediction")
         return qlo - self.qhat, qhi + self.qhat
 
     def covers(self, y: Any, *, given: dict) -> np.ndarray:
         """Boolean array: does the adaptive band at ``given`` contain each observed ``y``."""
         lo, hi = self.interval(given)
-        y = np.asarray(y, dtype=float).reshape(-1)
+        y = _finite_vector(np.asarray(y).reshape(-1), "coverage targets")
+        if y.shape != lo.shape:
+            raise ValueError("coverage targets and quantile bands must have the same shape")
         return (y >= lo) & (y <= hi)
 
 
@@ -215,23 +279,68 @@ class ConformalLinkPredictor:
     over exchangeable held-out edges (a random split of the observed edges).
     """
 
-    def __init__(self, edge_prob: Any, cal_edges: Any, *, alpha: float = 0.1) -> None:
+    def __init__(
+        self,
+        edge_prob: Any,
+        cal_edges: Any,
+        *,
+        alpha: float = 0.1,
+        allow_self_loops: bool = False,
+    ) -> None:
         self.P = np.asarray(edge_prob, dtype=float)
         if self.P.ndim != 2 or self.P.shape[0] != self.P.shape[1]:
             raise ValueError("edge_prob must be a square (n_nodes, n_nodes) probability matrix.")
-        self.alpha = float(alpha)
-        scores = np.array([1.0 - self.P[int(i), int(j)] for i, j in cal_edges], dtype=float)
+        if (
+            self.P.shape[0] == 0
+            or not np.all(np.isfinite(self.P))
+            or np.any(self.P < 0.0)
+            or np.any(self.P > 1.0)
+            or not np.allclose(self.P, self.P.T, rtol=0.0, atol=1e-10)
+        ):
+            raise ValueError("edge_prob must be a finite symmetric undirected-graph probability matrix")
+        self.allow_self_loops = bool(allow_self_loops)
+        if not self.allow_self_loops and not np.allclose(np.diag(self.P), 0.0, rtol=0.0, atol=1e-12):
+            raise ValueError("edge_prob diagonal must be zero when self-loops are disabled")
+        edges = np.asarray(cal_edges)
+        if edges.ndim != 2 or edges.shape[1] != 2 or edges.shape[0] == 0 or edges.dtype.kind not in {"i", "u"}:
+            raise ValueError("cal_edges must be a non-empty (edges, 2) exact-integer array")
+        edges = edges.astype(np.int64, copy=False)
+        if np.any(edges < 0) or np.any(edges >= self.P.shape[0]):
+            raise ValueError("cal_edges endpoints must be valid node indices")
+        if not self.allow_self_loops and np.any(edges[:, 0] == edges[:, 1]):
+            raise ValueError("cal_edges must not contain self-loops")
+        self.P = self.P.copy()
+        self.P.setflags(write=False)
+        self.alpha = _alpha(alpha)
+        scores = 1.0 - self.P[edges[:, 0], edges[:, 1]]
         self.tau = conformal_quantile(scores, self.alpha)
 
     def neighbor_set(self, i: int, candidates: Any = None) -> np.ndarray:
         """Candidate nodes ``j`` in node ``i``'s conformal neighbor set."""
-        row = self.P[int(i)]
-        cand = np.arange(row.size) if candidates is None else np.asarray(candidates, dtype=int)
+        nodes = _labels([i], 1, self.P.shape[0], "node")
+        i = int(nodes[0])
+        row = self.P[i]
+        cand = np.arange(row.size) if candidates is None else _labels(
+            candidates, len(np.asarray(candidates)), row.size, "candidates"
+        )
+        if not self.allow_self_loops:
+            cand = cand[cand != i]
         return cand[(1.0 - row[cand]) <= self.tau]
 
     def covers(self, edges: Any) -> np.ndarray:
         """Boolean array: is each held-out true edge's endpoint in the predicted neighbor set."""
-        return np.array([(1.0 - self.P[int(i), int(j)]) <= self.tau for i, j in edges], dtype=bool)
+        edge_array = np.asarray(edges)
+        if (
+            edge_array.ndim != 2
+            or edge_array.shape[1] != 2
+            or edge_array.dtype.kind not in {"i", "u"}
+            or np.any(edge_array < 0)
+            or np.any(edge_array >= self.P.shape[0])
+        ):
+            raise ValueError("edges must be an (edges, 2) exact-integer array with valid node indices")
+        if not self.allow_self_loops and np.any(edge_array[:, 0] == edge_array[:, 1]):
+            raise ValueError("edges must not contain self-loops")
+        return (1.0 - self.P[edge_array[:, 0], edge_array[:, 1]]) <= self.tau
 
     def set_sizes(self, nodes: Any = None) -> np.ndarray:
         """Neighbor-set size per node (defaults to all nodes)."""

@@ -84,6 +84,34 @@ class ConformalQuantileRegressorTestCase(unittest.TestCase):
         xt = np.asarray(self.x[self.te])
         self.assertGreater(width[xt > 4].mean(), width[xt < 1].mean())  # band widens with the noise
 
+    def test_rejects_misaligned_nonfinite_and_crossed_bands(self):
+        from types import SimpleNamespace
+
+        from mixle.ppl import ConformalQuantileRegressor
+
+        predictor = lambda values: SimpleNamespace(predict=lambda given: np.asarray(values))
+        with self.assertRaises(ValueError):
+            ConformalQuantileRegressor(
+                predictor([0.0, 0.0]),
+                predictor([1.0]),
+                [0.5, 0.5],
+                given={"x": [0, 1]},
+            )
+        with self.assertRaises(ValueError):
+            ConformalQuantileRegressor(
+                predictor([1.0, 0.0]),
+                predictor([0.0, 1.0]),
+                [0.5, 0.5],
+                given={"x": [0, 1]},
+            )
+        with self.assertRaises(ValueError):
+            ConformalQuantileRegressor(
+                predictor([0.0, np.nan]),
+                predictor([1.0, 1.0]),
+                [0.5, 0.5],
+                given={"x": [0, 1]},
+            )
+
 
 class ConformalQuantileTestCase(unittest.TestCase):
     def test_finite_sample_correction(self):
@@ -94,6 +122,14 @@ class ConformalQuantileTestCase(unittest.TestCase):
     def test_alpha_too_small_is_infinite(self):
         # (n+1)(1-alpha) > n  =>  no finite threshold can guarantee coverage
         self.assertEqual(conformal_quantile(np.arange(10.0), 0.01), float("inf"))
+
+    def test_rejects_invalid_alpha_and_scores(self):
+        for alpha in (0.0, 1.0, -0.1, 1.1, np.nan, np.inf, True):
+            with self.subTest(alpha=alpha), self.assertRaises((TypeError, ValueError)):
+                conformal_quantile([0.1, 0.2], alpha)
+        for scores in ([], [0.1, np.nan], [[0.1, 0.2]]):
+            with self.subTest(scores=scores), self.assertRaises(ValueError):
+                conformal_quantile(scores, 0.1)
 
 
 class ConformalClassifierTestCase(unittest.TestCase):
@@ -118,6 +154,24 @@ class ConformalClassifierTestCase(unittest.TestCase):
         sizes = cc.set_sizes(self.P[self.te])
         self.assertGreaterEqual(sizes.min(), 1)  # never empty in practice for a decent model
         self.assertLessEqual(sizes.max(), 4)
+
+    def test_rejects_invalid_labels_and_probabilities(self):
+        valid = np.array([[0.4, 0.6], [0.7, 0.3]])
+        for labels in ([0.0, 1.0], [-1, 1], [0, 2], [0]):
+            with self.subTest(labels=labels), self.assertRaises(ValueError):
+                ConformalClassifier(valid, labels)
+        for probabilities in (
+            [[2.0, -1.0], [0.7, 0.3]],
+            [[0.2, 0.2], [0.7, 0.3]],
+            [[np.nan, 0.0], [0.7, 0.3]],
+        ):
+            with self.subTest(probabilities=probabilities), self.assertRaises(ValueError):
+                ConformalClassifier(probabilities, [0, 1])
+        classifier = ConformalClassifier(valid, [1, 0])
+        with self.assertRaises(ValueError):
+            classifier.predict_set([[0.5, 0.5, 0.0]])
+        with self.assertRaises(ValueError):
+            classifier.covers(valid, [0, -1])
 
 
 class ConformalStructureTestCase(unittest.TestCase):
@@ -188,6 +242,22 @@ class ConformalLinkPredictorTestCase(unittest.TestCase):
     def test_non_square_raises(self):
         with self.assertRaises(ValueError):
             ConformalLinkPredictor(np.zeros((3, 4)), [(0, 1)], alpha=0.1)
+
+    def test_graph_probability_edges_and_self_loop_policy_are_strict(self):
+        valid = np.array([[0.0, 0.6], [0.6, 0.0]])
+        for matrix in (
+            [[0.0, 0.6], [0.2, 0.0]],
+            [[0.1, 0.6], [0.6, 0.0]],
+            [[0.0, np.nan], [np.nan, 0.0]],
+            [[0.0, 1.2], [1.2, 0.0]],
+        ):
+            with self.subTest(matrix=matrix), self.assertRaises(ValueError):
+                ConformalLinkPredictor(matrix, [(0, 1)])
+        for edges in ([(0.0, 1.0)], [(-1, 1)], [(0, 2)], [(0, 0)]):
+            with self.subTest(edges=edges), self.assertRaises(ValueError):
+                ConformalLinkPredictor(valid, edges)
+        predictor = ConformalLinkPredictor(valid, [(0, 1)])
+        self.assertNotIn(0, predictor.neighbor_set(0))
 
 
 class ConformalKnowledgeGraphTestCase(unittest.TestCase):
