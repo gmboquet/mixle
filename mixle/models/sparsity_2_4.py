@@ -31,7 +31,8 @@ Two pieces, glued by ONE borrowed primitive rather than two reimplementations:
    ``torch.sparse.SparseSemiStructuredTensor``), so the exact packing implemented here (2 bits per in-group
    position, 2 positions packed per byte-nibble, 2 nibbles per byte) is THIS module's own documented,
    round-trip-correct encoding of the publicly documented "values + position indices" shape -- not a claim
-   of bit-exact compatibility with a specific cuSPARSELt release. Values are portable float32/float64; a
+   of bit-exact compatibility with a specific cuSPARSELt release. Values preserve portable
+   float16/float32/float64 input precision; a
    real cuSPARSELt handle would additionally repack this into its internal opaque compressed-matrix object
    via ``cusparseLtSpMMACompress`` (or, in this torch build, ``torch.sparse.to_sparse_semi_structured``),
    which requires a CUDA tensor and a cuSPARSELt-capable GPU -- see :func:`cusparselt_status` and the module
@@ -49,9 +50,11 @@ what this torch build actually offers.
 
 from __future__ import annotations
 
+import struct
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from numbers import Real
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -81,10 +84,32 @@ def _linear_ramp(step: int, start_step: int, end_step: int) -> float:
     """
     if end_step <= start_step:
         return 1.0 if step >= end_step else 0.0
+    if step <= start_step:
+        return 0.0
+    if step >= end_step:
+        return 1.0
     return (step - start_step) / (end_step - start_step)
 
 
 ScheduleFn = Callable[[int, int, int], float]
+
+
+def _exact_int(value: Any, name: str, *, minimum: int = 0) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return result
+
+
+def _finite_real(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite real number")
+    result = float(value)
+    if not np.isfinite(result):
+        raise ValueError(f"{name} must be a finite real number")
+    return result
 
 
 class TwoFourSparsityRamp:
@@ -109,8 +134,11 @@ class TwoFourSparsityRamp:
         target_density: float = 0.5,
         schedule: ScheduleFn | None = None,
     ) -> None:
+        start_step = _exact_int(start_step, "start_step")
+        end_step = _exact_int(end_step, "end_step")
         if end_step < start_step:
             raise ValueError(f"end_step ({end_step}) must be >= start_step ({start_step})")
+        target_density = _finite_real(target_density, "target_density")
         if abs(target_density - 0.5) > 1e-9:
             # 2:4 semi-structured sparsity keeps exactly 2 of every 4 entries -- density 0.5 is not a
             # tunable knob of the *pattern* itself (a different target density would need a different
@@ -118,17 +146,24 @@ class TwoFourSparsityRamp:
             # argument (rather than removed) so callers state the density they expect and get a loud error
             # if it doesn't match what 2:4 actually delivers.
             raise ValueError(f"2:4 sparsity has fixed density 0.5; got target_density={target_density}")
-        self.start_step = int(start_step)
-        self.end_step = int(end_step)
-        self.target_density = float(target_density)
+        if schedule is not None and not callable(schedule):
+            raise TypeError("schedule must be callable or None")
+        self.start_step = start_step
+        self.end_step = end_step
+        self.target_density = target_density
         self.schedule: ScheduleFn = schedule or _linear_ramp
 
     def fraction(self, step: int) -> float:
         """Fraction of the weight matrix's OUTPUT ROWS that are under the hard 2:4 constraint at ``step``,
-        in ``[0, 1]``, clipped in case a custom ``schedule`` over/undershoots."""
-        return float(min(1.0, max(0.0, self.schedule(int(step), self.start_step, self.end_step))))
+        in ``[0, 1]``. Invalid custom-schedule results fail closed rather than being silently clipped."""
+        step = _exact_int(step, "step")
+        fraction = _finite_real(self.schedule(step, self.start_step, self.end_step), "schedule result")
+        if fraction < 0.0 or fraction > 1.0:
+            raise ValueError(f"schedule result must be in [0, 1]; got {fraction}")
+        return fraction
 
     def n_constrained_rows(self, step: int, n_rows: int) -> int:
+        n_rows = _exact_int(n_rows, "n_rows")
         return int(round(self.fraction(step) * n_rows))
 
     def project(self, weight: Any, step: int, sigma: Any = None) -> Any:
@@ -155,6 +190,10 @@ class TwoFourSparsityRamp:
         is_tensor = torch is not None and isinstance(weight, torch.Tensor)
         w_np = weight.detach().cpu().numpy().astype(np.float64) if is_tensor else np.asarray(weight, dtype=np.float64)
 
+        if w_np.ndim != 2 or min(w_np.shape) == 0:
+            raise ValueError("2:4 sparsity ramp requires a non-empty two-dimensional weight matrix")
+        if not np.all(np.isfinite(w_np)):
+            raise ValueError("2:4 sparsity ramp requires finite weights")
         d_out, d_in = w_np.shape
         if d_in % 4 != 0:
             raise ValueError(f"2:4 sparsity ramp requires the input dim to be a multiple of 4; got {d_in}")
@@ -252,7 +291,7 @@ def cusparselt_status() -> dict[str, Any]:
 # --------------------------------------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class Compressed2to4:
     """A 2:4 semi-structured-sparse compressed matrix, cuSPARSELt-shaped: the 2 surviving values per group
     of 4 (``values``, half the density of the dense matrix) plus a small per-group index recording which 2
@@ -271,12 +310,123 @@ class Compressed2to4:
     (the last packed index byte may cover an odd group count).
     """
 
+    MAGIC: ClassVar[bytes] = b"M24\x00"
+    FORMAT_VERSION: ClassVar[int] = 1
+    _HEADER: ClassVar[struct.Struct] = struct.Struct("<4sBBQQ")
+    _DTYPE_TO_CODE: ClassVar[dict[np.dtype, int]] = {
+        np.dtype(np.float16): 1,
+        np.dtype(np.float32): 2,
+        np.dtype(np.float64): 3,
+    }
+    _CODE_TO_DTYPE: ClassVar[dict[int, np.dtype]] = {
+        1: np.dtype(np.float16),
+        2: np.dtype(np.float32),
+        3: np.dtype(np.float64),
+    }
+
     values: np.ndarray
     indices: np.ndarray
     shape: tuple[int, int]
+    format_version: int = FORMAT_VERSION
+
+    def __post_init__(self) -> None:
+        version = _exact_int(self.format_version, "format_version", minimum=1)
+        if version != self.FORMAT_VERSION:
+            raise ValueError(f"unsupported Compressed2to4 format_version {version}")
+        if not isinstance(self.shape, (tuple, list)) or len(self.shape) != 2:
+            raise ValueError("shape must be a (d_out, d_in) pair")
+        d_out = _exact_int(self.shape[0], "shape[0]", minimum=1)
+        d_in = _exact_int(self.shape[1], "shape[1]", minimum=1)
+        if d_in % 4 != 0:
+            raise ValueError("Compressed2to4 input dimension must be a multiple of 4")
+        n_groups = d_in // 4
+
+        values = np.asarray(self.values)
+        if values.dtype not in self._DTYPE_TO_CODE:
+            raise TypeError("Compressed2to4 values must use float16, float32, or float64")
+        if values.shape != (d_out, n_groups, 2):
+            raise ValueError(
+                "Compressed2to4 values must have shape "
+                f"{(d_out, n_groups, 2)}; got {values.shape}"
+            )
+        if not np.all(np.isfinite(values)):
+            raise ValueError("Compressed2to4 values must be finite")
+
+        indices = np.asarray(self.indices)
+        expected_indices = (d_out, (n_groups + 1) // 2)
+        if indices.dtype != np.uint8 or indices.shape != expected_indices:
+            raise ValueError(
+                f"Compressed2to4 indices must be uint8 with shape {expected_indices}; "
+                f"got dtype={indices.dtype}, shape={indices.shape}"
+            )
+        for group in range(n_groups):
+            byte = indices[:, group // 2]
+            nibble = byte >> 4 if group % 2 else byte & 0x0F
+            pos0 = nibble & 0b11
+            pos1 = (nibble >> 2) & 0b11
+            if np.any(pos0 >= pos1):
+                raise ValueError("Compressed2to4 packed positions must be distinct and ascending")
+        if n_groups % 2 and np.any(indices[:, -1] & 0xF0):
+            raise ValueError("Compressed2to4 unused high metadata nibble must be zero")
+
+        values = np.ascontiguousarray(values).copy()
+        indices = np.ascontiguousarray(indices).copy()
+        values.setflags(write=False)
+        indices.setflags(write=False)
+        object.__setattr__(self, "values", values)
+        object.__setattr__(self, "indices", indices)
+        object.__setattr__(self, "shape", (d_out, d_in))
+        object.__setattr__(self, "format_version", version)
 
     def nbytes(self) -> int:
-        return int(self.values.nbytes + self.indices.nbytes)
+        """Return the exact size of :meth:`to_bytes`, including its versioned header."""
+        return len(self.to_bytes())
+
+    def to_bytes(self) -> bytes:
+        """Serialize the validated payload without pickle."""
+        dtype_code = self._DTYPE_TO_CODE[self.values.dtype]
+        header = self._HEADER.pack(
+            self.MAGIC,
+            self.format_version,
+            dtype_code,
+            self.shape[0],
+            self.shape[1],
+        )
+        return header + self.values.tobytes(order="C") + self.indices.tobytes(order="C")
+
+    @classmethod
+    def from_bytes(cls, payload: Any) -> Compressed2to4:
+        """Parse a bounded, versioned payload and reject truncation or trailing data."""
+        if not isinstance(payload, (bytes, bytearray, memoryview)):
+            raise TypeError("Compressed2to4 payload must be bytes-like")
+        view = memoryview(payload)
+        if len(view) < cls._HEADER.size:
+            raise ValueError("Compressed2to4 payload is truncated")
+        magic, version, dtype_code, d_out, d_in = cls._HEADER.unpack(view[: cls._HEADER.size])
+        if magic != cls.MAGIC:
+            raise ValueError("Compressed2to4 payload has an invalid magic value")
+        if version != cls.FORMAT_VERSION:
+            raise ValueError(f"unsupported Compressed2to4 payload version {version}")
+        dtype = cls._CODE_TO_DTYPE.get(dtype_code)
+        if dtype is None:
+            raise ValueError(f"unsupported Compressed2to4 dtype code {dtype_code}")
+        if d_out == 0 or d_in == 0 or d_in % 4:
+            raise ValueError("Compressed2to4 payload has an invalid dense shape")
+        n_groups = d_in // 4
+        values_count = d_out * n_groups * 2
+        values_bytes = values_count * dtype.itemsize
+        indices_count = d_out * ((n_groups + 1) // 2)
+        expected = cls._HEADER.size + values_bytes + indices_count
+        if len(view) != expected:
+            raise ValueError(f"Compressed2to4 payload length must be exactly {expected} bytes; got {len(view)}")
+        values_start = cls._HEADER.size
+        values = np.frombuffer(view[values_start : values_start + values_bytes], dtype=dtype).reshape(
+            d_out, n_groups, 2
+        )
+        indices = np.frombuffer(view[values_start + values_bytes :], dtype=np.uint8).reshape(
+            d_out, (n_groups + 1) // 2
+        )
+        return cls(values, indices, (d_out, d_in), format_version=version)
 
 
 def _pack_group_index(pos0: int, pos1: int) -> int:
@@ -298,7 +448,13 @@ def export_2_4_compressed(weight_2_4_masked: Any) -> Compressed2to4:
     constrained matrix, matching how a real cuSPARSELt workflow separates "prune/select the pattern" from
     "compress for the kernel").
     """
-    w_np = _to_numpy(weight_2_4_masked).astype(np.float64)
+    w_np = _to_numpy(weight_2_4_masked)
+    if w_np.ndim != 2 or min(w_np.shape) == 0:
+        raise ValueError("2:4 export requires a non-empty two-dimensional weight matrix")
+    if w_np.dtype not in Compressed2to4._DTYPE_TO_CODE:
+        raise TypeError("2:4 export supports float16, float32, and float64 weights")
+    if not np.all(np.isfinite(w_np)):
+        raise ValueError("2:4 export requires finite weights")
     d_out, d_in = w_np.shape
     if d_in % 4 != 0:
         raise ValueError(f"2:4 export requires the input dim to be a multiple of 4; got {d_in}")
@@ -348,6 +504,8 @@ def decompress(compressed: Compressed2to4) -> np.ndarray:
     """Exact inverse of :func:`export_2_4_compressed`: reconstruct the dense (2:4-sparse) matrix from
     ``values``/``indices``. Round-trips EXACTLY (bit-for-bit on the surviving values, genuine zeros
     elsewhere) -- pinned directly by the compress/decompress test."""
+    if not isinstance(compressed, Compressed2to4):
+        raise TypeError("compressed must be a Compressed2to4 payload")
     d_out, d_in = compressed.shape
     n_groups = d_in // 4
     out = np.zeros((d_out, n_groups, 4), dtype=compressed.values.dtype)
