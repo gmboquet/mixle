@@ -184,6 +184,18 @@ class Ontology:
     def _conforms(self, entity_cls: str | None, required: str) -> bool:
         return entity_cls is not None and self.is_a(entity_cls, required)
 
+    def _pair_violated(self, cls: str, a: str, b: str) -> bool:
+        """Whether ``cls`` is (transitively) both halves of the declared-disjoint pair ``(a, b)``."""
+        return self.is_a(cls, a) and self.is_a(cls, b)
+
+    def _violates_disjoint(self, cls: str) -> bool:
+        """Whether ``cls`` is both halves of ANY declared-disjoint pair.
+
+        Shared by :meth:`check_triple` and :class:`OntologyConstrainedKG`'s completion mask
+        (MXR-080-0299) so the two can never independently drift on what "disjoint" means.
+        """
+        return any(self._pair_violated(cls, a, b) for a, b in self.disjoint)
+
     # -- checking one assertion ---------------------------------------------------------------------
     def check_triple(self, h: str, r: str, t: str, types: dict[str, str]) -> list[str]:
         """Every named violation of ``(h, r, t)`` given entity ``types`` ({} means unconstrained)."""
@@ -202,7 +214,7 @@ class Ontology:
             out.append(f"irreflexive: {r!r} cannot relate {h!r} to itself")
         for a, b in self.disjoint:
             for e, cls in ((h, h_cls), (t, t_cls)):
-                if cls is not None and self.is_a(cls, a) and self.is_a(cls, b):
+                if cls is not None and self._pair_violated(cls, a, b):
                     out.append(f"disjoint: {e!r} is both {a!r} and {b!r}")
         return out
 
@@ -390,8 +402,9 @@ class OntologyConstrainedKG:
 
     Wraps a :class:`~mixle.stats.graphs.knowledge_graph.KnowledgeGraphDistribution` (entities and
     relations as integer indices) together with the symbolic ontology and the index<->name maps. The
-    tail posterior is masked to entities whose class conforms to the relation's range and renormalized,
-    so completion can never propose an ontology-violating tail -- ``Graph(ontology)`` as a distribution.
+    tail posterior is masked to entities that satisfy the FULL triple contract for the completion --
+    range, the head's domain, irreflexivity, and disjointness (MXR-080-0299) -- and renormalized, so
+    completion can never propose an ontology-violating tail -- ``Graph(ontology)`` as a distribution.
     """
 
     def __init__(
@@ -411,21 +424,53 @@ class OntologyConstrainedKG:
         self._eidx = {e: i for i, e in enumerate(self.entities)}
         self._ridx = {r: i for i, r in enumerate(self.relations)}
 
-    def _range_mask(self, relation: str) -> np.ndarray:
+    def _candidate_mask(self, head: str, relation: str) -> np.ndarray:
+        """Which entities are POSITIVELY confirmed admissible as the tail of ``(head, relation, ?)``
+        -- the full triple contract, not just range (MXR-080-0299): range, ``head``'s domain,
+        irreflexivity, and disjointness.
+
+        Completion is the mirror image of :meth:`Ontology.check_triple`'s filtering: check_triple is
+        permissive (an untyped entity is "unconstrained", not proven invalid, because its job is to
+        catch CONFIRMED violations in triples someone else already vetted); a completion mask must be
+        restrictive (an untyped candidate gets ZERO mass, not the benefit of the doubt, because here
+        we are the ones proposing to assert it as fact).
+        """
         sig = self.ontology.relations.get(relation)
         if sig is None:
             raise KeyError(f"unknown relation {relation!r}")
-        _, range_ = sig
-        ok = np.zeros(len(self.entities), dtype=bool)
-        for i, e in enumerate(self.entities):
-            cls = self.types.get(e)
-            ok[i] = cls is not None and self.ontology.is_a(cls, range_)
+        domain, range_ = sig
+        axioms = self.ontology.axioms.get(relation, set())
+        n = len(self.entities)
+
+        h_cls = self.types.get(head)
+        if h_cls is None or not self.ontology.is_a(h_cls, domain) or self.ontology._violates_disjoint(h_cls):
+            return np.zeros(n, dtype=bool)  # head itself is not a confirmed, disjoint-clean `domain`
+
+        irreflexive = "irreflexive" in axioms
+        ok = np.zeros(n, dtype=bool)
+        for i, cand in enumerate(self.entities):
+            if irreflexive and cand == head:
+                continue  # MXR-080-0299: an irreflexive relation cannot complete to the head itself
+            t_cls = self.types.get(cand)
+            if t_cls is None or not self.ontology.is_a(t_cls, range_):
+                continue
+            if self.ontology._violates_disjoint(t_cls):
+                continue
+            ok[i] = True
         return ok
 
     def tail_posterior(self, head: str, relation: str) -> dict[str, float]:
-        """``p(tail | head, relation)`` over ONLY the range-conforming entities (renormalized)."""
+        """``p(tail | head, relation)`` over ONLY entities satisfying the full triple contract for
+        this completion (renormalized).
+
+        MXR-080-0299: previously masked on the candidate tail's range class alone, so e.g. an
+        irreflexive relation's self-completion competed for probability mass on equal footing with
+        every genuinely valid tail -- for one such relation, self-completion was assigned the
+        LARGEST probability of any candidate. The mask now also checks the head's domain,
+        irreflexivity, and disjointness.
+        """
         lp = self.kg.tail_log_posterior(self._eidx[head], self._ridx[relation])
-        mask = self._range_mask(relation)
+        mask = self._candidate_mask(head, relation)
         if not mask.any():
             return {}
         p = np.exp(lp - lp.max())
