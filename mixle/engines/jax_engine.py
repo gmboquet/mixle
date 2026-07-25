@@ -114,6 +114,22 @@ class JaxEngine(ComputeEngine):
         # silently truncate to anyway -- rather than claiming float64 and lying about it. Mirrors
         # TorchEngine's `_no_f64` MPS handling (no float64 hardware there either).
         self._no_f64 = not bool(getattr(jax.config, "jax_enable_x64", False))
+        if isinstance(dtype, np.dtype) and not np.issubdtype(dtype, np.floating):
+            # A concrete non-floating NumPy dtype (e.g. int32/bool, as surfaced by engine discovery
+            # reading a JAX array's own storage dtype -- JAX dtypes are plain np.dtype instances) is
+            # not a meaningful floating-point policy value -- treat it like "no override" so engine
+            # construction/discovery succeeds instead of raising (this used to make engine_of() raise
+            # ValueError for ordinary integer and Boolean JAX arrays, breaking indexing, masks, and
+            # categorical payload dispatch -- mirrors TorchEngine's identical fix, MXR-080-0122). A
+            # *named* precision that resolves to non-floating (e.g. dtype="int64") is a genuine caller
+            # mistake and still raises below, inside normalize_numpy_dtype.
+            dtype = None
+        # Whether the floating-point policy below is a real, caller-requested opinion (True) or just an
+        # implicit default because no floating dtype was given/applicable (False). mixle.engines.engine_of's
+        # mixed-engine check (_engines_compatible) reads this so an engine discovered from a non-floating
+        # leaf (an integer index or Boolean mask array) never conflicts with a genuinely floating sibling
+        # leaf purely because of this filled-in default. Mirrors TorchEngine.dtype_explicit.
+        self.dtype_explicit = dtype is not None
         if dtype is not None:
             self.dtype = normalize_numpy_dtype(dtype)
             if self._no_f64 and self.dtype == np.float64:

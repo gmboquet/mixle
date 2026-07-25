@@ -6,6 +6,7 @@ import numpy as np
 
 from mixle.engines import (
     NUMPY_ENGINE,
+    JaxEngine,
     NumpyEngine,
     SymbolicEngine,
     SymbolicExpression,
@@ -22,6 +23,14 @@ if HAS_TORCH:
     import torch
 else:
     torch = None
+
+HAS_JAX = importlib.util.find_spec("jax") is not None
+if HAS_JAX:
+    import jax
+    import jax.numpy as jnp
+else:
+    jax = None
+    jnp = None
 
 
 def _single_rank_mesh():
@@ -770,6 +779,96 @@ class EngineTestCase(unittest.TestCase):
         mask = torch.tensor([True, False, True])
         self.assertIsInstance(engine_of(mask), TorchEngine)  # discovery on the mask itself
         self.assertTrue(torch.equal(values[mask], torch.tensor([10.0, 30.0])))
+
+    @unittest.skipUnless(HAS_JAX, "jax is not installed")
+    def test_jax_engine_accepts_concrete_non_floating_dtype_as_no_override(self):
+        # Regression: JaxEngine had the same dtype-crash bug class as pre-fix TorchEngine
+        # (MXR-080-0122) -- a concrete non-floating NumPy dtype (as engine discovery reads off an
+        # integer/Boolean JAX array's own storage; JAX dtypes are plain np.dtype instances) must fall
+        # back to the engine's default float policy rather than raising.
+        engine = JaxEngine(dtype=np.dtype("int64"))
+        self.assertTrue(np.issubdtype(engine.dtype, np.floating))
+        self.assertFalse(engine.dtype_explicit)
+        engine_bool = JaxEngine(dtype=np.dtype("bool"))
+        self.assertTrue(np.issubdtype(engine_bool.dtype, np.floating))
+        self.assertFalse(engine_bool.dtype_explicit)
+
+    @unittest.skipUnless(HAS_JAX, "jax is not installed")
+    def test_jax_engine_rejects_invalid_named_precision(self):
+        # Negative control: only a concrete non-floating *dtype object* is treated as "no override"
+        # above -- an invalid named precision string is still a genuine caller mistake and must still
+        # raise (matches TorchEngine's identical precedent, unchanged from before the fix).
+        with self.assertRaises(ValueError):
+            JaxEngine(dtype="int64")
+
+    @unittest.skipUnless(HAS_JAX, "jax is not installed")
+    def test_engine_of_integer_jax_array_no_longer_raises(self):
+        # Regression, exact audit repro: engine_of(jnp.array([1, 2, 3])) used to unconditionally
+        # construct JaxEngine(dtype=x.dtype) with the array's own integer dtype, whose constructor
+        # (via normalize_numpy_dtype) only accepted floating dtypes, raising ValueError -- breaking
+        # indexing (integer index arrays), masks (Boolean arrays), and categorical payload dispatch.
+        eng = engine_of(jnp.array([1, 2, 3]))
+        self.assertIsInstance(eng, JaxEngine)
+        self.assertTrue(np.issubdtype(eng.dtype, np.floating))  # engine keeps its own float POLICY...
+        self.assertFalse(eng.dtype_explicit)  # ...but it is a default, not the array's own dtype
+
+    @unittest.skipUnless(HAS_JAX, "jax is not installed")
+    def test_engine_of_bool_jax_array_no_longer_raises(self):
+        # Regression, Boolean equivalent of the audit repro.
+        eng = engine_of(jnp.array([True, False, True]))
+        self.assertIsInstance(eng, JaxEngine)
+        self.assertFalse(eng.dtype_explicit)
+
+    @unittest.skipUnless(HAS_JAX, "jax is not installed")
+    def test_engine_of_floating_jax_array_dtype_policy_unchanged(self):
+        # Negative control: discovery from a genuinely floating JAX array keeps tracking that array's
+        # own dtype exactly as before the fix.
+        eng32 = engine_of(jnp.array([1.0], dtype=jnp.float32))
+        self.assertEqual(eng32.dtype, np.dtype("float32"))
+        self.assertTrue(eng32.dtype_explicit)
+
+        # float64 is only actually achievable with jax_enable_x64 on (see JaxEngine's own module
+        # docstring) -- scope the ambient config change to this test and restore it unconditionally.
+        orig_x64 = bool(jax.config.jax_enable_x64)
+        self.addCleanup(jax.config.update, "jax_enable_x64", orig_x64)
+        jax.config.update("jax_enable_x64", True)
+        eng64 = engine_of(jnp.array([1.0], dtype=jnp.float64))
+        self.assertEqual(eng64.dtype, np.dtype("float64"))
+        self.assertTrue(eng64.dtype_explicit)
+
+    @unittest.skipUnless(HAS_JAX, "jax is not installed")
+    def test_boolean_mask_with_float_jax_data_does_not_falsely_conflict(self):
+        # Interaction test mirroring test_boolean_mask_with_float_data_does_not_falsely_conflict for
+        # Torch: a Boolean mask array alongside explicit float32 data (the ar.where(mask, a, b) shape,
+        # extremely common) must NOT be treated as a precision-policy conflict -- the mask's engine
+        # carries no real dtype opinion of its own, so it must not clash with the data arrays' genuine
+        # float32 policy. This specifically needs jax_enable_x64=True: with x64 off, the only floating
+        # dtype JAX can actually produce is float32, so an implicit-default mask engine and an explicit
+        # float32 data engine would coincidentally compare equal even WITHOUT the dtype_explicit fix --
+        # x64 on is what makes the mask engine's implicit default (float64) genuinely diverge from the
+        # data's explicit float32, so this is the case that actually exercises the fix.
+        orig_x64 = bool(jax.config.jax_enable_x64)
+        self.addCleanup(jax.config.update, "jax_enable_x64", orig_x64)
+        jax.config.update("jax_enable_x64", True)
+
+        mask = jnp.array([True, False, True])
+        a = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)
+        b = jnp.array([10.0, 20.0, 30.0], dtype=jnp.float32)
+        out = ar.where(mask, a, b)
+        np.testing.assert_allclose(np.asarray(out), [1.0, 20.0, 3.0])
+
+    @unittest.skipUnless(HAS_JAX, "jax is not installed")
+    def test_jax_indexing_and_masking_dispatch_through_fixed_discovery(self):
+        # Regression: integer index arrays and Boolean masks are ordinary, extremely common JAX usage
+        # that engine_of used to break entirely.
+        values = jnp.array([10.0, 20.0, 30.0])
+        idx = jnp.array([0, 2])
+        self.assertIsInstance(engine_of(idx), JaxEngine)  # discovery on the index itself
+        np.testing.assert_allclose(np.asarray(values[idx]), [10.0, 30.0])
+
+        mask = jnp.array([True, False, True])
+        self.assertIsInstance(engine_of(mask), JaxEngine)  # discovery on the mask itself
+        np.testing.assert_allclose(np.asarray(values[mask]), [10.0, 30.0])
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_to_numpy_recurses_ragged_list_of_torch_tensors(self):
