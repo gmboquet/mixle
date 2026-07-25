@@ -55,6 +55,80 @@ class IntervalSoundnessTest(unittest.TestCase):
         cb = CodebookFormat.fit(x, 64)
         self.assertTrue(np.all(Interval.from_quantized(x, cb).contains(x)))
 
+    # -- from_quantized's analytic path trusts a format's static max_rel_error as a bound for ANY
+    # input it might quantize, but that attribute is a duck-typed, self-reported claim -- nothing
+    # enforces it actually holds. mixle's own FloatFormat is safe (mantissa-only, unbounded exponent,
+    # see numeric_formats_test.py's MXR-080-0126 comment for exactly this reasoning), but a format
+    # that flushes underflowing values to exactly zero (the ordinary behavior a REAL bounded float
+    # format's underflow handling would have) would report the same fixed max_rel_error while its
+    # true error at those magnitudes no longer scales with it. Before from_quantized cross-checked
+    # the analytic pad against the error measured on the actual data, this produced an
+    # (effectively) zero-width enclosure around 0 that did NOT contain the nonzero original -- a
+    # silently unsound "certificate", exactly what this module exists to prevent. These two tests
+    # fail against the pre-fix code and pass once the cross-check is in place.
+
+    def test_from_quantized_cross_checks_analytic_bound_against_measured_error(self):
+        class FlushToZeroMockFormat:
+            """Deliberately unsound mock (not FloatFormat, which is correctly unbounded): exposes a
+            static max_rel_error like a real bounded fpN codec would, but round_trip flushes
+            sub-threshold magnitudes to exactly 0.0 -- the behavior a real bounded format would have.
+            """
+
+            max_rel_error = 0.0625  # a plausible-looking analytic bound (~fp8-ish), same for every input
+
+            def __init__(self, flush_threshold):
+                self.flush_threshold = flush_threshold
+
+            def round_trip(self, x):
+                x = np.asarray(x, dtype=np.float64)
+                out = x.copy()
+                out[np.abs(out) < self.flush_threshold] = 0.0
+                return out
+
+            def measured_max_abs_error(self, x):
+                x = np.asarray(x, dtype=np.float64)
+                return float(np.max(np.abs(self.round_trip(x) - x))) if x.size else 0.0
+
+        # the exact seed/data numeric_formats_test.py's MXR-080-0126 comment measures: 40/3000 values
+        # fall below a real fp8's smallest normal magnitude (2**-6).
+        rng = np.random.RandomState(2)
+        x = rng.randn(3000)
+        fmt = FlushToZeroMockFormat(flush_threshold=2.0**-6)
+        flushed = int(np.sum(np.abs(x) < fmt.flush_threshold))
+        self.assertEqual(flushed, 40)  # sanity: the vulnerable case is actually exercised here
+        self.assertTrue(np.all(Interval.from_quantized(x, fmt).contains(x)))
+
+        # a single, easy-to-reason-about scalar case in the same direction: q rounds to exactly 0,
+        # so the analytic pad (proportional to |q|) is also exactly 0 -- only the measured error
+        # (|original - q|) can supply a pad wide enough to actually enclose the nonzero original.
+        tiny = np.array([1e-10])
+        iv_tiny = Interval.from_quantized(tiny, fmt)
+        self.assertEqual(float(fmt.round_trip(tiny)[0]), 0.0)  # confirms this hits the q==0 case
+        self.assertTrue(bool(iv_tiny.contains(tiny)[0]))
+        self.assertGreater(float(iv_tiny.width()[0]), 0.0)  # not a degenerate point at a nonzero value
+
+    def test_from_quantized_cross_check_also_covers_saturating_overflow(self):
+        # Same class of gap in the opposite direction: a format that saturates on overflow instead
+        # of flushing on underflow. Not exercised by the fixed-seed data above, but structurally
+        # identical -- a fixed max_rel_error stops bounding the true error once round_trip clips.
+        class SaturatingMockFormat:
+            max_rel_error = 0.0625
+
+            def __init__(self, sat_max):
+                self.sat_max = sat_max
+
+            def round_trip(self, x):
+                return np.clip(np.asarray(x, dtype=np.float64), -self.sat_max, self.sat_max)
+
+            def measured_max_abs_error(self, x):
+                x = np.asarray(x, dtype=np.float64)
+                return float(np.max(np.abs(self.round_trip(x) - x))) if x.size else 0.0
+
+        fmt = SaturatingMockFormat(sat_max=448.0)  # a real e4m3 fp8's max representable magnitude
+        big = np.array([1.0e6])
+        self.assertEqual(float(fmt.round_trip(big)[0]), fmt.sat_max)  # confirms this hits saturation
+        self.assertTrue(bool(Interval.from_quantized(big, fmt).contains(big)[0]))
+
     # -- MXR-080-0125: [0,0] * [-inf,inf] used to come back [nan,nan] (IEEE 0*inf), and the
     # constructor accepted reversed bounds and NaN endpoints without complaint. --
 

@@ -97,14 +97,36 @@ class Interval:
 
     @classmethod
     def from_quantized(cls, original: Any, fmt: Any) -> Interval:
-        """Enclose ``original`` using the quantized format's error bound."""
+        """Enclose ``original`` using the quantized format's error bound.
+
+        ``max_rel_error`` is a duck-typed, self-reported claim: nothing here enforces that an
+        implementer's static bound actually holds for every value ``fmt`` might quantize, only that it
+        is offered as one. A format that flushes underflowing values to exactly zero, or saturates on
+        overflow, would still report a fixed ``max_rel_error`` while its true error at those magnitudes
+        no longer scales with it -- the analytic pad below would then be too narrow, silently returning
+        an interval that does not actually enclose ``original`` (:class:`~mixle.engines.formats.
+        FloatFormat` avoids this today by staying mantissa-only with an unbounded exponent, so its
+        ``max_rel_error`` genuinely is universal -- see that class's docstring -- but nothing here
+        depends on every format that will ever be passed in honoring that same discipline). Guard
+        against a format that breaks the assumption by cross-checking the analytic pad against the
+        error actually measured on ``original`` -- already in hand, it is quantized right here -- and
+        padding by whichever is WIDER. This needs nothing new from ``fmt`` beyond ``round_trip``, which
+        every caller already requires, and is a no-op whenever ``max_rel_error`` genuinely does bound
+        this data (the analytic pad is then always >= the measured one, by construction).
+        """
+        x = np.asarray(original, dtype=np.float64)
         q = np.asarray(fmt.round_trip(original), dtype=np.float64)
         rel = float(getattr(fmt, "max_rel_error", None) or 0.0)
         if rel <= 0.0:  # codecs without an analytic relative bound: use the measured absolute error
             d = float(fmt.measured_max_abs_error(original))
             return cls(_down(q - d), _up(q + d))
-        # |original - q| <= rel * |original| -> a sound symmetric pad around q
-        d = np.abs(q) * (rel / (1.0 - rel))
+        # |original - q| <= rel * |original| -> a sound symmetric pad around q, PROVIDED max_rel_error
+        # genuinely bounds this data; cross-check against the error observed on `x` itself and take
+        # the wider (safer) of the two, so a format whose analytic claim doesn't hold here still yields
+        # a sound enclosure instead of a silently too-narrow one (see docstring).
+        analytic_d = np.abs(q) * (rel / (1.0 - rel))
+        empirical_d = np.abs(q - x)
+        d = np.maximum(analytic_d, empirical_d)
         return cls(_down(q - d), _up(q + d))
 
     def width(self) -> np.ndarray:
