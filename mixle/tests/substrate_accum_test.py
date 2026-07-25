@@ -174,5 +174,138 @@ class FlywheelWithholdingIsDeltaLevelTest(unittest.TestCase):
         self.assertEqual(len(final.evidence_history), 2)  # the original entry PLUS the batch's own
 
 
+class _WindowedAnswerFn:
+    """A stateful evaluator that ignores the question and retrieved context ENTIRELY: correct only
+    while its own call count falls in ``[lo, hi]`` -- e.g. a warm-then-evicted cache, a rate limiter
+    that later throttles, anything whose answer depends on invocation history rather than content."""
+
+    def __init__(self, lo: int, hi: int, correct: dict[str, str]) -> None:
+        self.calls = 0
+        self.lo, self.hi = lo, hi
+        self.correct = correct
+
+    def __call__(self, question: str, context: list[str]) -> str:
+        self.calls += 1
+        return self.correct[question] if self.lo <= self.calls <= self.hi else "unknown"
+
+    def reset(self) -> None:
+        self.calls = 0
+
+
+class _BudgetedAnswerFn:
+    """A stateful evaluator that IS content-sensitive (right answer iff the needed claim text was
+    retrieved, like ``_answer_from_context``) but also spends a per-pass call budget -- e.g. a
+    rate-limited API. Without resetting the budget between passes, a later pass can silently go
+    "exhausted" regardless of what the store now contains."""
+
+    def __init__(self, budget: int) -> None:
+        self._initial_budget = budget
+        self.budget = budget
+
+    def __call__(self, question: str, context: list[str]) -> str:
+        if self.budget <= 0:
+            return "exhausted"
+        self.budget -= 1
+        fact = _FACTS.get(question)
+        if fact is None:
+            return "unknown"
+        claim_text, answer = fact
+        return answer if claim_text in context else "unknown"
+
+    def reset(self) -> None:
+        self.budget = self._initial_budget
+
+
+def _noop_assimilate_batch(sub: Substrate) -> list[str]:
+    return []  # touches nothing -- any before/after/withheld difference can only be evaluator drift
+
+
+class FlywheelControlsForAStatefulEvaluatorTest(unittest.TestCase):
+    """MXR-080-0247 (High): before/after/withheld must not be confounded by answer_fn's own call-count,
+    cache, or sampler drift -- only by the store's content actually changing."""
+
+    _CORRECT = {qa.question: qa.answer for qa in _QUESTIONS}
+
+    def test_without_reset_a_stateful_evaluator_can_fabricate_an_improvement_from_nothing(self):
+        """Documents the contract, it does not merely restate the bug: measure_flywheel cannot infer
+        statelessness on its own, so a caller that passes a stateful answer_fn and no reset_answer_fn
+        is not protected -- exactly why the fix is an explicit, opt-in reset hook, never silent magic."""
+        # window [3, 4] lands exactly on the "after" pass's two calls (calls 1-2 are "before", 3-4 are
+        # "after", 5-6 are "withheld") -- store content never changes (_noop_assimilate_batch).
+        fn = _WindowedAnswerFn(lo=3, hi=4, correct=self._CORRECT)
+        sub = Substrate()
+
+        report = measure_flywheel(sub, _QUESTIONS, fn, _noop_assimilate_batch)
+
+        self.assertEqual(fn.calls, 6)
+        self.assertEqual(report.before.solve_rate, 0.0)
+        self.assertEqual(report.after.solve_rate, 1.0)  # entirely call-count drift, not content
+        self.assertTrue(report.attribution_confirmed)  # falsely confirmed: the store never changed
+
+    def test_reset_answer_fn_removes_the_fabricated_improvement(self):
+        fn = _WindowedAnswerFn(lo=3, hi=4, correct=self._CORRECT)
+        sub = Substrate()
+
+        report = measure_flywheel(sub, _QUESTIONS, fn, _noop_assimilate_batch, reset_answer_fn=fn.reset)
+
+        # every pass now starts from the identical call-count-0 state, so before/after/withheld all
+        # land on the same side of the window -- an unchanged store correctly measures as unchanged.
+        self.assertEqual(report.before.solve_rate, report.after.solve_rate)
+        self.assertEqual(report.after.solve_rate, report.withheld.solve_rate)
+        self.assertFalse(report.attribution_confirmed)
+
+    def test_without_reset_a_stateful_evaluator_can_also_mask_a_real_improvement(self):
+        """The opposite failure mode: a per-pass budget exhausted by the `before` pass silently starves
+        `after`/`withheld` regardless of what the store now contains, hiding a genuine gain."""
+        fn = _BudgetedAnswerFn(budget=len(_QUESTIONS))
+        sub = Substrate()
+
+        report = measure_flywheel(sub, _QUESTIONS, fn, _assimilate_strong_batch, min_credence=0.6)
+
+        self.assertEqual(report.before.solve_rate, 0.0)  # correct: no beliefs exist yet
+        self.assertEqual(report.after.solve_rate, 0.0)  # WRONG: beliefs exist now, but budget is spent
+        self.assertFalse(report.attribution_confirmed)  # the real improvement is invisible
+
+    def test_reset_answer_fn_recovers_the_real_improvement_the_budget_was_masking(self):
+        fn = _BudgetedAnswerFn(budget=len(_QUESTIONS))
+        sub = Substrate()
+
+        report = measure_flywheel(
+            sub, _QUESTIONS, fn, _assimilate_strong_batch, min_credence=0.6, reset_answer_fn=fn.reset
+        )
+
+        self.assertEqual(report.before.solve_rate, 0.0)
+        self.assertEqual(report.after.solve_rate, 1.0)  # the real improvement, visible now
+        self.assertEqual(report.withheld.solve_rate, report.before.solve_rate)
+        self.assertTrue(report.attribution_confirmed)
+
+    def test_trials_greater_than_one_requires_reset_answer_fn(self):
+        sub = Substrate()
+        with self.assertRaises(ValueError):
+            measure_flywheel(sub, _QUESTIONS, _answer_from_context, _assimilate_strong_batch, trials=3)
+
+    def test_trials_replicate_every_pass_and_expose_a_paired_comparison(self):
+        fn = _BudgetedAnswerFn(budget=len(_QUESTIONS))
+        sub = Substrate()
+
+        report = measure_flywheel(
+            sub,
+            _QUESTIONS,
+            fn,
+            _assimilate_strong_batch,
+            min_credence=0.6,
+            reset_answer_fn=fn.reset,
+            trials=3,
+        )
+
+        self.assertEqual(len(report.before.trial_solve_rates), 3)
+        self.assertEqual(len(report.after.trial_solve_rates), 3)
+        self.assertEqual(len(report.withheld.trial_solve_rates), 3)
+        # a deterministic-once-reset evaluator repeats identically across replicates
+        self.assertEqual(set(report.after.trial_solve_rates), {1.0})
+        self.assertEqual(report.after.solve_rate, 1.0)  # the mean of three identical replicates
+        self.assertTrue(report.attribution_confirmed)
+
+
 if __name__ == "__main__":
     unittest.main()
