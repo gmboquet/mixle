@@ -1,9 +1,9 @@
-"""Coarsening operator R with per-scale receipts (roadmap G3): depth-merge + width-merge + structure-
-projection, iterated under a divergence budget and a trust region, over the real transformer in
+"""Coarsening operator R with per-scale receipts (roadmap G3): depth grouping plus structure
+projection under a divergence budget and a trust region, over the real transformer in
 :mod:`mixle.models.transformer`.
 
 Build vs. borrow: this module builds only what the landscape check found unoccupied for G3 itself (the
-depth-merge Taylor-composition machinery and the width-merge OT-based near-duplicate pairing); it BORROWS
+depth-merge Taylor-composition machinery and an experimental width-representation helper); it BORROWS
 everything else --
 
 * the Gaussian LAW representation and per-layer propagation primitives (:mod:`mixle.models.moment_propagation`,
@@ -12,8 +12,8 @@ everything else --
 * the "structure-projection" move itself, which is exactly roadmap G2
   (:mod:`mixle.models.sigma_weighted_projection`) called directly, not reimplemented.
 
-The three moves
-----------------
+The implemented model moves and representation helper
+-----------------------------------------------------
 1. **Depth-merge** (:func:`depth_merge`): folds two adjacent :class:`~mixle.models.transformer.Block`\\ s
    ``x -> x + f(x)`` and ``x -> x + g(x)`` into one merged block via a SECOND-ORDER Taylor approximation of
    their residual-flow composition ``x -> x + f(x) + g(x + f(x))``:
@@ -32,23 +32,27 @@ The three moves
    laws), :class:`MergedBlock` evaluates the identical algebraic expression using a genuine, per-input
    Jacobian-vector product (not a single frozen linearization anchor).
 
-2. **Width-merge** (:func:`width_merge`): reduces the residual-stream width ``d_model -> target_width`` by
+2. **Experimental width representation**
+   (:func:`experimental_width_merge_representation`): constructs a residual-stream map
+   ``d_model -> target_width`` by
    finding near-duplicate directions of the (Sigma-weighted) residual-stream covariance -- the same
    "functionally near-duplicate, once permutation-aligned, can be merged/averaged" idea as neuron-permutation
    ("git re-basin") symmetries -- via an entropic-OT (Sinkhorn) plan, then projecting down. G2's own
    :func:`~mixle.models.sigma_weighted_projection.sigma_weighted_permutation` was checked first (see its
-   docstring discussion below in :func:`width_merge`) but solves a different-shaped problem (aligning two
+   docstring discussion below) but solves a different-shaped problem (aligning two
    SAME-shape weight matrices via a square permutation against a fixed ``target_profile``), not the
    many-to-few ``d -> target_width`` reduction needed here, so a small companion RECTANGULAR Sinkhorn is
    implemented locally, reusing the identical log-domain fixed-point structure G2 uses for its square case.
+
+   This helper does not rewire a model and is not invoked by :func:`coarsen`.
 
 3. **Structure-projection** (:func:`structure_project`): a thin wrapper directly around G2's
    :func:`~mixle.models.sigma_weighted_projection.sigma_weighted_low_rank` /
    :func:`~mixle.models.sigma_weighted_projection.sigma_weighted_block_sparse` -- no reimplementation.
 
-These are iterated by :func:`coarsen` under a divergence BUDGET (stop once the accumulated closed-form KL
-between teacher and student exceeds it) and a local TRUST REGION (any individual merge whose own local KL
-exceeds the trust region is rejected and the original blocks are kept instead).
+Depth grouping and structure projection are applied by :func:`coarsen` under a divergence BUDGET and a
+local TRUST REGION. The width representation is deliberately separate until normalization, attention,
+embedding, and output-head rewiring can produce a genuine narrower executable model.
 
 H1 is this operator inverted
 -----------------------------
@@ -68,6 +72,7 @@ direction of size change, which is deliberate.
 from __future__ import annotations
 
 import copy
+import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -108,6 +113,7 @@ __all__ = [
     "CoarsenResult",
     "gaussian_kl",
     "depth_merge",
+    "experimental_width_merge_representation",
     "width_merge",
     "structure_project",
     "coarsen",
@@ -391,6 +397,10 @@ class ScaleReceipt:
     kl_divergence: float
     surrogate_closure_error: float
     accepted: bool = True
+    divergence_basis: str = "full_rank_gaussian"
+    regularized_kl_divergence: float | None = None
+    assumptions: tuple[str, ...] = ()
+    sensitivity: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -409,7 +419,8 @@ class ProjectionReceipt:
 class WidthMergeRepresentation:
     """Data-free width-reduction representation: a ``(target_width, d_model)`` merge operator and its
     ``(d_model, target_width)`` (pseudo-inverse) reconstruction, built from an entropic-OT near-duplicate
-    pairing of residual-stream coordinates (see :func:`width_merge`). Kept as an explicit linear map rather
+    pairing of residual-stream coordinates (see
+    :func:`experimental_width_merge_representation`). Kept as an explicit linear map rather
     than folded into new per-layer weight matrices -- conjugating every ``qkv``/``proj``/``mlp`` weight in
     the real model by this map is a real but separable engineering step this representation is designed to
     make straightforward (``W_new = merge @ W @ unmerge`` for a weight whose BOTH axes are ``d_model``,
@@ -607,8 +618,7 @@ def _rectangular_sinkhorn(cost: np.ndarray, n_out: int, temperature: float, n_it
     return np.exp(log_u[:, None] + log_kernel + log_v[None, :])
 
 
-def width_merge(
-    model: Any,
+def experimental_width_merge_representation(
     target_width: int,
     input_law: GaussianLaw,
     temperature: float = 0.1,
@@ -634,9 +644,16 @@ def width_merge(
     ``a_j`` and should be merged into it. The resulting Sinkhorn plan, column-normalized into convex
     combinations, is the merge operator; its pseudo-inverse is the reconstruction ("unmerge") map.
 
-    Returns ``(representation, receipt)`` where ``receipt.teacher_law`` is ``input_law`` itself and
-    ``receipt.student_law`` is ``input_law`` round-tripped through merge-then-unmerge, both ``d_model``-
-    dimensional so :func:`gaussian_kl` applies directly as the (closed-form) width-merge receipt.
+    This is explicitly a representation helper, not a model transformation:
+    it does not rewire transformer weights, normalization, attention heads, or
+    output heads and therefore does not return or claim a smaller executable
+    model.
+
+    ``receipt.kl_divergence`` reports the true support result. It is infinite
+    for a genuine rank reduction because the full-rank teacher assigns mass
+    outside the rank-deficient round-trip support. For callers that explicitly
+    assume isotropic downstream noise, ``regularized_kl_divergence`` and the
+    receipt's sensitivity values report that separate surrogate.
     """
     sigma = np.asarray(input_law.covar, dtype=np.float64)
     d = sigma.shape[0]
@@ -661,31 +678,77 @@ def width_merge(
     narrow_cov = merge @ sigma @ merge.T
     recon_mu = unmerge @ narrow_mu
     recon_cov = unmerge @ narrow_cov @ unmerge.T
-    # `recon_cov` is exactly rank <= target_width (a linear round-trip through a lower-dimensional
-    # bottleneck cannot be full rank), so a literal KL against it is infinite whenever target_width <
-    # d_model (the true teacher law has support the degenerate student law assigns zero density to) -- a
-    # mathematically correct but useless receipt number. We instead spread whatever total variance the
-    # round-trip failed to preserve (`trace(Sigma) - trace(recon_cov)`, itself a closed-form, data-free
-    # quantity) as an ISOTROPIC floor over the discarded directions: the honest, information-free
-    # statement "this reduced representation captures the retained directions' covariance exactly (a
-    # linear projection is exact) and contributes no directional information about what it dropped,
-    # beyond how much of it there was in aggregate." This keeps the receipt full-rank and finite while
-    # still growing with how much width-merge actually threw away.
     leftover_trace = float(max(np.trace(sigma) - np.trace(recon_cov), 0.0))
     floor = leftover_trace / d
-    student_law = _as_law(recon_mu, recon_cov + floor * np.eye(d))
+    sensitivity: dict[str, float] = {}
+    assumptions: tuple[str, ...] = ()
+    regularized_kl: float | None = None
+    if target_width < d:
+        # A rank-deficient Gaussian has no density with respect to the
+        # full-dimensional teacher measure, hence KL(teacher || round-trip) is
+        # infinite. Keep a regularized law only so the optional, explicitly
+        # assumed downstream-noise surrogate remains inspectable.
+        effective_floor = max(floor, np.finfo(np.float64).eps * max(float(np.trace(sigma)) / d, 1.0))
+        student_law = _as_law(recon_mu, recon_cov + effective_floor * np.eye(d))
+        regularized_kl = gaussian_kl(input_law, student_law)
+        for multiplier in (0.5, 1.0, 2.0):
+            assumed_law = _as_law(
+                recon_mu,
+                recon_cov + multiplier * effective_floor * np.eye(d),
+            )
+            sensitivity[f"isotropic_noise_x{multiplier:g}"] = gaussian_kl(input_law, assumed_law)
+        kl = float("inf")
+        basis = "singular_support"
+        assumptions = (
+            "regularized_kl_divergence assumes isotropic downstream noise equal to discarded trace per dimension",
+        )
+    else:
+        student_law = input_law
+        kl = 0.0
+        basis = "full_rank_gaussian"
 
-    kl = gaussian_kl(input_law, student_law)
     receipt = ScaleReceipt(
         name=f"width_merge->{target_width}",
         teacher_law=input_law,
         student_law=student_law,
         kl_divergence=kl,
         surrogate_closure_error=float("nan"),
+        divergence_basis=basis,
+        regularized_kl_divergence=regularized_kl,
+        assumptions=assumptions,
+        sensitivity=sensitivity,
     )
     representation = WidthMergeRepresentation(merge=merge, unmerge=unmerge, target_width=target_width, d_model=d)
-    _ = model  # model is accepted per the roadmap signature; this data-free reduction only needs its input_law
     return representation, receipt
+
+
+def width_merge(
+    model: Any,
+    target_width: int,
+    input_law: GaussianLaw,
+    temperature: float = 0.1,
+    n_iter: int = 200,
+) -> tuple[WidthMergeRepresentation, ScaleReceipt]:
+    """Compatibility wrapper for the experimental representation helper.
+
+    ``model`` is intentionally unused: this function does not transform a
+    model. New code should call
+    :func:`experimental_width_merge_representation`, whose name makes that
+    boundary explicit.
+    """
+    warnings.warn(
+        "width_merge() returns only an experimental representation and does not "
+        "rewire or shrink `model`; use experimental_width_merge_representation()",
+        FutureWarning,
+        stacklevel=2,
+    )
+    _ = model
+    return experimental_width_merge_representation(
+        target_width=target_width,
+        input_law=input_law,
+        temperature=temperature,
+        n_iter=n_iter,
+    )
 
 
 # --------------------------------------------------------------------------------------------------------

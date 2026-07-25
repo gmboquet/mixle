@@ -22,6 +22,7 @@ from mixle.models.coarsening import (
     MergedBlock,
     coarsen,
     depth_merge,
+    experimental_width_merge_representation,
     gaussian_kl,
     structure_project,
     width_merge,
@@ -309,20 +310,40 @@ class WidthMergeAndStructureProjectSmokeTest(unittest.TestCase):
     criterion, but exercised so a regression in either is caught here too).
     """
 
-    def test_width_merge_reduces_dimension_and_receipt_is_finite_nonnegative(self):
+    def test_width_representation_reports_true_singular_support_and_noise_assumption(self):
         rng = np.random.default_rng(6)
         law = _random_law(rng, d=10, scale=0.4)
-        rep, receipt = width_merge(model=None, target_width=6, input_law=law)
+        rep, receipt = experimental_width_merge_representation(target_width=6, input_law=law)
         self.assertEqual(rep.merge.shape, (6, 10))
         self.assertEqual(rep.unmerge.shape, (10, 6))
-        self.assertTrue(np.isfinite(receipt.kl_divergence))
-        self.assertGreaterEqual(receipt.kl_divergence, 0.0)
+        self.assertTrue(np.isinf(receipt.kl_divergence))
+        self.assertEqual(receipt.divergence_basis, "singular_support")
+        self.assertTrue(np.isfinite(receipt.regularized_kl_divergence))
+        self.assertGreater(receipt.regularized_kl_divergence, 0.0)
+        self.assertEqual(set(receipt.sensitivity), {
+            "isotropic_noise_x0.5",
+            "isotropic_noise_x1",
+            "isotropic_noise_x2",
+        })
+        self.assertTrue(receipt.assumptions)
 
     def test_width_merge_identity_width_has_zero_receipt(self):
         rng = np.random.default_rng(7)
         law = _random_law(rng, d=8, scale=0.4)
-        _rep, receipt = width_merge(model=None, target_width=8, input_law=law)
+        _rep, receipt = experimental_width_merge_representation(target_width=8, input_law=law)
         self.assertAlmostEqual(receipt.kl_divergence, 0.0, delta=1e-6)
+        self.assertIsNone(receipt.regularized_kl_divergence)
+
+    def test_legacy_width_merge_warns_that_no_model_is_transformed(self):
+        rng = np.random.default_rng(9)
+        law = _random_law(rng, d=4, scale=0.2)
+        with self.assertWarnsRegex(FutureWarning, "does not rewire or shrink"):
+            representation, _receipt = width_merge(
+                model=object(),
+                target_width=2,
+                input_law=law,
+            )
+        self.assertEqual(representation.target_width, 2)
 
     def test_structure_project_wraps_g2_low_rank_directly(self):
         rng = np.random.default_rng(8)
