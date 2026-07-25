@@ -7,8 +7,9 @@ up nearby historical decisions, estimates which choice had lower realized cost,
 and uses the learned choice only when there is enough comparable evidence.
 
 When the nearby history is sparse or ambiguous, the policy defers to the static
-fallback. This keeps learned orchestration an incremental optimization around a
-known policy rather than an unbounded replacement.
+fallback. Promotion is a separate operation: it requires isolated realized
+holdout outcomes, common support, paired or propensity-aware evaluation, and an
+uncertainty-adjusted improvement threshold.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+from scipy import stats
 
 
 def _featurize(features: dict[str, Any], keys: list[str]) -> np.ndarray:
@@ -27,6 +29,122 @@ def _featurize(features: dict[str, Any], keys: list[str]) -> np.ndarray:
         v = features.get(k, 0.0)
         row.append(float(v) if isinstance(v, (int, float, bool, np.integer, np.floating)) else 0.0)
     return np.asarray(row, dtype=np.float64)
+
+
+def _context_key(features: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """Stable equality key used to keep repeated action outcomes in one split."""
+    if not isinstance(features, dict):
+        raise ValueError("telemetry features must be dictionaries")
+    return tuple(sorted((str(key), repr(value)) for key, value in features.items()))
+
+
+def _realized_cost(outcome: dict[str, Any], cost_key: str) -> float:
+    if not isinstance(outcome, dict) or cost_key not in outcome:
+        raise ValueError(f"every telemetry outcome must contain {cost_key!r}")
+    cost = float(outcome[cost_key])
+    if not np.isfinite(cost):
+        raise ValueError(f"telemetry {cost_key!r} values must be finite")
+    return cost
+
+
+def _outcome_panel(
+    rows: list[tuple[dict[str, Any], str, dict[str, Any]]], cost_key: str
+) -> list[tuple[dict[str, Any], dict[str, float]]]:
+    panels: dict[tuple[tuple[str, str], ...], tuple[dict[str, Any], dict[str, list[float]]]] = {}
+    for features, choice, outcome in rows:
+        if not isinstance(choice, str) or not choice:
+            raise ValueError("telemetry choices must be non-empty strings")
+        key = _context_key(features)
+        if key not in panels:
+            panels[key] = (dict(features), {})
+        panels[key][1].setdefault(choice, []).append(_realized_cost(outcome, cost_key))
+    return [
+        (features, {choice: float(np.mean(costs)) for choice, costs in outcomes.items()})
+        for features, outcomes in panels.values()
+    ]
+
+
+def _paired_policy_costs(
+    rows: list[tuple[dict[str, Any], str, dict[str, Any]]],
+    learned_pick: Callable[[dict[str, Any]], str],
+    static_pick: Callable[[dict[str, Any]], str],
+    cost_key: str,
+) -> dict[str, Any]:
+    panels = _outcome_panel(rows, cost_key)
+    learned_costs: list[float] = []
+    static_costs: list[float] = []
+    for features, outcomes in panels:
+        learned_choice = learned_pick(features)
+        static_choice = static_pick(features)
+        if learned_choice in outcomes and static_choice in outcomes:
+            learned_costs.append(outcomes[learned_choice])
+            static_costs.append(outcomes[static_choice])
+    total = len(panels)
+    return {
+        "method": "paired_realized_outcomes",
+        "learned": np.asarray(learned_costs, dtype=float),
+        "static": np.asarray(static_costs, dtype=float),
+        "n_total": total,
+        "n_supported": len(learned_costs),
+        "overlap_fraction": len(learned_costs) / total if total else 0.0,
+    }
+
+
+def _ips_policy_costs(
+    rows: list[tuple[dict[str, Any], str, dict[str, Any]]],
+    learned_pick: Callable[[dict[str, Any]], str],
+    static_pick: Callable[[dict[str, Any]], str],
+    cost_key: str,
+    propensity_key: str,
+    min_propensity: float,
+) -> dict[str, Any]:
+    learned_costs: list[float] = []
+    static_costs: list[float] = []
+    supported = 0
+    for features, logged_choice, outcome in rows:
+        propensities = outcome.get(propensity_key) if isinstance(outcome, dict) else None
+        if not isinstance(propensities, dict):
+            continue
+        try:
+            probabilities = {str(choice): float(value) for choice, value in propensities.items()}
+        except (TypeError, ValueError):
+            continue
+        if (
+            not probabilities
+            or not np.all(np.isfinite(list(probabilities.values())))
+            or any(value < 0 for value in probabilities.values())
+            or not np.isclose(sum(probabilities.values()), 1.0, rtol=1e-8, atol=1e-10)
+        ):
+            continue
+        learned_choice = learned_pick(features)
+        static_choice = static_pick(features)
+        logged_probability = probabilities.get(logged_choice, 0.0)
+        if (
+            probabilities.get(learned_choice, 0.0) < min_propensity
+            or probabilities.get(static_choice, 0.0) < min_propensity
+            or logged_probability < min_propensity
+        ):
+            continue
+        cost = _realized_cost(outcome, cost_key)
+        learned_costs.append(cost / logged_probability if learned_choice == logged_choice else 0.0)
+        static_costs.append(cost / logged_probability if static_choice == logged_choice else 0.0)
+        supported += 1
+    total = len(rows)
+    return {
+        "method": "inverse_propensity_weighted",
+        "learned": np.asarray(learned_costs, dtype=float),
+        "static": np.asarray(static_costs, dtype=float),
+        "n_total": total,
+        "n_supported": supported,
+        "overlap_fraction": supported / total if total else 0.0,
+    }
+
+
+def _learning_controls(k: int, min_neighbors: int) -> tuple[int, int]:
+    for value, name in ((k, "k"), (min_neighbors, "min_neighbors")):
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    return int(k), int(min_neighbors)
 
 
 @dataclass
@@ -71,37 +189,34 @@ class LearnedPolicy:
     def evaluate(
         self, rows: list[tuple[dict[str, Any], str, dict[str, Any]]], *, cost_key: str = "cost"
     ) -> dict[str, Any]:
-        """Realized-cost comparison on held-out ``rows``: learned policy vs always-static, vs each fixed choice."""
-        learned_cost = static_cost = 0.0
-        deferred = 0
-        by_choice_fixed: dict[str, float] = {}
-        for feats, _choice, outcome in rows:
-            c = float(outcome.get(cost_key, 0.0))
-            # the realized cost of a decision depends on the choice; here we score by matching the row's
-            # own observed (choice, cost) -- so a policy "pays" the row's cost only for the choice it picks.
-            pick, learned = self.decide(feats)
-            deferred += int(not learned)
-            static_pick = self.static(feats)
-            # approximate realized cost by the nearest historical cost for (feats, pick)
-            learned_cost += self._expected_cost(feats, pick, fallback=c)
-            static_cost += self._expected_cost(feats, static_pick, fallback=c)
-            for ch in set(self.choices):
-                by_choice_fixed[ch] = by_choice_fixed.get(ch, 0.0) + self._expected_cost(feats, ch, fallback=c)
-        n = max(len(rows), 1)
-        return {
-            "n": len(rows),
-            "learned_mean_cost": learned_cost / n,
-            "static_mean_cost": static_cost / n,
-            "fixed_mean_cost": {c: v / n for c, v in by_choice_fixed.items()},
-            "deferred_fraction": deferred / n,
-        }
+        """Compare policies on the same contexts with actually observed action costs.
 
-    def _expected_cost(self, features: dict[str, Any], choice: str, *, fallback: float) -> float:
-        if len(self.costs) == 0:
-            return fallback
-        idx = self._neighbors(_featurize(features, self.keys))
-        near = [float(self.costs[i]) for i in idx if self.choices[i] == choice]
-        return float(np.mean(near)) if near else fallback
+        A context contributes only when both the learned and static selected
+        actions have realized outcomes in the supplied holdout panel. No
+        training-neighbor estimate is substituted for a missing outcome.
+        """
+        paired = _paired_policy_costs(rows, lambda f: self.decide(f)[0], self.static, cost_key)
+        panels = _outcome_panel(rows, cost_key)
+        deferred = sum(not self.decide(features)[1] for features, _ in panels)
+        learned_costs = paired["learned"]
+        static_costs = paired["static"]
+        fixed_mean: dict[str, float | None] = {}
+        fixed_support: dict[str, int] = {}
+        for choice in set(self.choices):
+            costs = [outcomes[choice] for _features, outcomes in panels if choice in outcomes]
+            fixed_mean[choice] = float(np.mean(costs)) if costs else None
+            fixed_support[choice] = len(costs)
+        return {
+            "n": paired["n_supported"],
+            "n_holdout_contexts": paired["n_total"],
+            "overlap_fraction": paired["overlap_fraction"],
+            "evaluation_method": paired["method"],
+            "learned_mean_cost": float(np.mean(learned_costs)) if learned_costs.size else None,
+            "static_mean_cost": float(np.mean(static_costs)) if static_costs.size else None,
+            "fixed_mean_cost": fixed_mean,
+            "fixed_support": fixed_support,
+            "deferred_fraction": deferred / len(panels) if panels else 0.0,
+        }
 
 
 def _expand_action_features(feats: dict[str, Any]) -> dict[str, float]:
@@ -122,8 +237,8 @@ class LearnedAcquisition:
     Drop-in for :func:`mixle.substrate.act.score_action` (call it as ``scorer=policy`` in ``investigate``).
     From ``route`` telemetry -- each row a fired action's ``(features={kind,cost,overlap}, value)`` -- it
     estimates the expected *yield* of an action in a query's feature region and scores it ``yield / cost``.
-    Where nearby history is too thin, it FALLS BACK to the static lexical scorer: the same never-worse
-    discipline as :class:`LearnedPolicy`, now on the reasoner's acquisition decisions (J3)."""
+    Where nearby history is too thin, it falls back to the static lexical scorer.
+    This is an abstention rule, not a guarantee that learned decisions are never worse."""
 
     keys: list[str]
     vecs: np.ndarray  # (n, d) standardized historical action-feature vectors
@@ -154,7 +269,7 @@ class LearnedAcquisition:
         feats = action_features(action, question)
         ey = self.expected_yield(feats)
         if ey is None:
-            return self.static(action, question)  # never-worse: defer where evidence is thin
+            return self.static(action, question)  # defer where evidence is thin
         return ey / max(float(feats.get("cost", 1.0)), 1e-9)
 
 
@@ -174,12 +289,20 @@ def learn_action_policy(
     """
     if not rows:
         raise ValueError("learn_action_policy needs telemetry rows")
+    k, min_neighbors = _learning_controls(k, min_neighbors)
     if static_scorer is None:
         from mixle.substrate.act import score_action as static_scorer  # noqa: N806
+    if not callable(static_scorer):
+        raise TypeError("static_scorer must be callable")
     expanded = [_expand_action_features(feats) for feats, _c, _o in rows]
     keys = sorted({k2 for feats in expanded for k2 in feats})
     vecs = np.stack([_featurize(feats, keys) for feats in expanded])
-    values = np.asarray([float(o.get(value_key, 0.0)) for _f, _c, o in rows], dtype=np.float64)
+    try:
+        values = np.asarray([float(o[value_key]) for _f, _c, o in rows], dtype=np.float64)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"every action telemetry outcome must contain numeric {value_key!r}") from exc
+    if not np.all(np.isfinite(values)):
+        raise ValueError("action telemetry values must be finite")
     mean = vecs.mean(axis=0)
     scale = vecs.std(axis=0)
     scale = np.where(scale < 1e-9, 1.0, scale)
@@ -212,10 +335,15 @@ def learn_placement_policy(
     """
     if not rows:
         raise ValueError("learn_placement_policy needs telemetry rows")
+    if not callable(static_policy):
+        raise TypeError("static_policy must be callable")
+    k, min_neighbors = _learning_controls(k, min_neighbors)
     keys = sorted({k2 for feats, _c, _o in rows for k2 in feats})
     vecs = np.stack([_featurize(feats, keys) for feats, _c, _o in rows]) if rows else np.zeros((0, len(keys)))
     choices = [c for _f, c, _o in rows]
-    costs = np.asarray([float(o.get(cost_key, 0.0)) for _f, _c, o in rows], dtype=np.float64)
+    if any(not isinstance(choice, str) or not choice for choice in choices):
+        raise ValueError("telemetry choices must be non-empty strings")
+    costs = np.asarray([_realized_cost(outcome, cost_key) for _features, _choice, outcome in rows], dtype=np.float64)
     mean = vecs.mean(axis=0) if len(vecs) else np.zeros(len(keys))
     scale = vecs.std(axis=0) if len(vecs) else np.ones(len(keys))
     scale = np.where(scale < 1e-9, 1.0, scale)
@@ -243,7 +371,7 @@ def learn_schedule_policy(
 ) -> LearnedPolicy:
     """Learned pool scheduling (J4): when work is pool-eligible, learn where and when it actually runs fastest.
 
-    The same never-worse shape as placement, keyed on realized latency instead of dollar cost: rows are
+    The same evidence-gated shape as placement, keyed on realized latency instead of dollar cost: rows are
     ``(features, choice, outcome)`` where features describe the moment (queue depth, job size, local
     load), choice is the scheduling decision ("run_local" / "queue_pool" / "defer"), and the outcome's
     ``latency`` is what the decision actually cost in wall-clock. Where nearby history is thin, the
@@ -255,60 +383,152 @@ def meta_improve(
     rows: list[tuple[dict[str, Any], str, dict[str, Any]]],
     static_policy: Callable[[dict[str, Any]], str],
     *,
+    holdout_rows: list[tuple[dict[str, Any], str, dict[str, Any]]] | None = None,
     cost_key: str = "cost",
     holdout_frac: float = 0.3,
     seed: int = 0,
     k: int = 8,
     min_neighbors: int = 4,
+    propensity_key: str = "propensities",
+    min_propensity: float = 0.05,
+    min_overlap: float = 0.8,
+    confidence_level: float = 0.95,
+    min_improvement: float = 0.0,
 ) -> dict[str, Any]:
-    """The meta-improve loop (J5): learn from telemetry, PROMOTE only on a never-worse holdout receipt.
+    """Learn from telemetry and promote only with isolated, supported holdout evidence.
 
-    Splits the telemetry into train/holdout, learns a policy on the train slice, and evaluates it against
-    the static policy on the HELD-OUT decisions (realized cost, the same currency the platform pays).
-    The learned policy is promoted iff its held-out mean cost is <= the static policy's -- the receipt is
-    returned either way, so a non-promotion is auditable, not silent. Returns::
+    Repeated outcomes for the same feature context are kept in one split. Evaluation
+    first uses paired realized outcomes when both policies' selected actions were
+    observed for the same context. If a complete propensity map is logged instead,
+    inverse-propensity evaluation is available. Promotion requires minimum overlap
+    and the one-sided confidence bound on ``learned - static`` to beat the requested
+    improvement threshold. Returns::
 
-        {promoted, policy, receipt: {learned_mean_cost, static_mean_cost, deferred_fraction, n}}
+        {promoted, policy, receipt: {learned_mean_cost, static_mean_cost,
+         mean_cost_difference, upper_confidence_bound, overlap_fraction, n}}
 
-    ``policy`` is the learned policy when promoted, else the static one wrapped for the same call shape
-    -- callers can always use the result's policy and get never-worse behavior by construction."""
-    if len(rows) < 4:
-        raise ValueError("meta_improve needs at least 4 telemetry rows to split train/holdout")
-    rng = np.random.RandomState(seed)
-    order = rng.permutation(len(rows))
-    n_hold = max(1, int(round(holdout_frac * len(rows))))
-    hold_idx, train_idx = order[:n_hold], order[n_hold:]
-    train = [rows[i] for i in train_idx]
-    holdout = [rows[i] for i in hold_idx]
+    ``policy`` is learned only when promoted; otherwise it is exactly
+    ``static_policy``. The receipt records either decision.
+    """
+    if not callable(static_policy):
+        raise TypeError("static_policy must be callable")
+    k, min_neighbors = _learning_controls(k, min_neighbors)
+    for value, name in (
+        (holdout_frac, "holdout_frac"),
+        (min_propensity, "min_propensity"),
+        (min_overlap, "min_overlap"),
+        (confidence_level, "confidence_level"),
+        (min_improvement, "min_improvement"),
+    ):
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    if not 0 < holdout_frac < 1:
+        raise ValueError("holdout_frac must be strictly between 0 and 1")
+    if not 0 < min_propensity <= 1:
+        raise ValueError("min_propensity must lie in (0, 1]")
+    if not 0 < min_overlap <= 1:
+        raise ValueError("min_overlap must lie in (0, 1]")
+    if not 0.5 < confidence_level < 1:
+        raise ValueError("confidence_level must lie in (0.5, 1)")
+    if min_improvement < 0:
+        raise ValueError("min_improvement must be >= 0")
+    if not rows:
+        raise ValueError("meta_improve needs non-empty training telemetry")
+
+    if holdout_rows is None:
+        grouped: dict[tuple[tuple[str, str], ...], list[tuple[dict[str, Any], str, dict[str, Any]]]] = {}
+        for row in rows:
+            grouped.setdefault(_context_key(row[0]), []).append(row)
+        context_keys = list(grouped)
+        if len(context_keys) < 4:
+            raise ValueError("meta_improve needs at least 4 distinct contexts to split train/holdout")
+        rng = np.random.RandomState(seed)
+        order = rng.permutation(len(context_keys))
+        n_hold = min(len(context_keys) - 1, max(1, int(round(holdout_frac * len(context_keys)))))
+        hold_keys = {context_keys[index] for index in order[:n_hold]}
+        train = [row for key, group in grouped.items() if key not in hold_keys for row in group]
+        holdout = [row for key, group in grouped.items() if key in hold_keys for row in group]
+        split_method = "context_group_split"
+    else:
+        train = list(rows)
+        holdout = list(holdout_rows)
+        if not holdout:
+            raise ValueError("holdout_rows must be non-empty when supplied")
+        train_contexts = {_context_key(row[0]) for row in train}
+        holdout_contexts = {_context_key(row[0]) for row in holdout}
+        if train_contexts & holdout_contexts:
+            raise ValueError("explicit holdout contexts must be disjoint from training contexts")
+        split_method = "external_isolated_holdout"
 
     learned = learn_placement_policy(train, static_policy, cost_key=cost_key, k=k, min_neighbors=min_neighbors)
-
-    # Explicit off-policy evaluation: a held-out row only tells us the realized cost of the choice that was
-    # ACTUALLY taken, so each policy is scored on the matched subset -- the rows where its pick equals the
-    # logged choice. No matched support for either policy -> no comparison -> no promotion (abstain).
-    def _matched_mean(pick: Callable[[dict[str, Any]], str]) -> tuple[float | None, int]:
-        costs = [float(o.get(cost_key, 0.0)) for f, c, o in holdout if pick(f) == c]
-        return (float(np.mean(costs)) if costs else None, len(costs))
-
-    learned_mean, n_learned = _matched_mean(lambda f: learned.decide(f)[0])
-    static_mean, n_static = _matched_mean(static_policy)
-
-    if learned_mean is None or static_mean is None:
-        promoted = False
-        reason = "insufficient matched holdout support to compare (no promotion without a receipt)"
-    elif learned_mean <= static_mean:
-        promoted = True
-        reason = f"learned {learned_mean:.4g} <= static {static_mean:.4g} on matched held-out decisions"
+    learned_pick = lambda features: learned.decide(features)[0]
+    paired = _paired_policy_costs(holdout, learned_pick, static_policy, cost_key)
+    ips = _ips_policy_costs(
+        holdout,
+        learned_pick,
+        static_policy,
+        cost_key,
+        propensity_key,
+        min_propensity,
+    )
+    eligible = [
+        estimate
+        for estimate in (paired, ips)
+        if estimate["n_supported"] >= 2 and estimate["overlap_fraction"] >= min_overlap
+    ]
+    if eligible:
+        evaluation = max(eligible, key=lambda estimate: (estimate["overlap_fraction"], estimate["n_supported"]))
     else:
+        evaluation = max((paired, ips), key=lambda estimate: (estimate["overlap_fraction"], estimate["n_supported"]))
+
+    learned_costs = evaluation["learned"]
+    static_costs = evaluation["static"]
+    learned_mean = float(np.mean(learned_costs)) if learned_costs.size else None
+    static_mean = float(np.mean(static_costs)) if static_costs.size else None
+    mean_difference = standard_error = upper_bound = None
+    if evaluation["n_supported"] < 2 or evaluation["overlap_fraction"] < min_overlap:
         promoted = False
-        reason = f"learned {learned_mean:.4g} > static {static_mean:.4g}: the teacher stays"
+        reason = (
+            "insufficient common holdout support: "
+            f"{evaluation['n_supported']}/{evaluation['n_total']} supported "
+            f"({evaluation['overlap_fraction']:.1%}, need {min_overlap:.1%})"
+        )
+    else:
+        differences = learned_costs - static_costs
+        mean_difference = float(np.mean(differences))
+        standard_error = float(np.std(differences, ddof=1) / np.sqrt(differences.size))
+        upper_bound = float(mean_difference + stats.norm.ppf(confidence_level) * standard_error)
+        promoted = bool(upper_bound < -min_improvement)
+        if promoted:
+            reason = (
+                f"promoted: same held-out contexts give upper {confidence_level:.1%} bound "
+                f"{upper_bound:.4g} < {-min_improvement:.4g}"
+            )
+        else:
+            reason = (
+                f"not promoted: same held-out contexts give upper {confidence_level:.1%} bound "
+                f"{upper_bound:.4g}, threshold {-min_improvement:.4g}"
+            )
 
     receipt = {
         "learned_mean_cost": learned_mean,
         "static_mean_cost": static_mean,
-        "n_matched_learned": n_learned,
-        "n_matched_static": n_static,
-        "n_holdout": len(holdout),
+        "mean_cost_difference": mean_difference,
+        "standard_error": standard_error,
+        "upper_confidence_bound": upper_bound,
+        "confidence_level": confidence_level,
+        "min_improvement": min_improvement,
+        "evaluation_method": evaluation["method"],
+        "split_method": split_method,
+        "n_matched_learned": evaluation["n_supported"],
+        "n_matched_static": evaluation["n_supported"],
+        "n_evaluated": evaluation["n_supported"],
+        "n_holdout": evaluation["n_total"],
+        "n_holdout_rows": len(holdout),
+        "overlap_fraction": evaluation["overlap_fraction"],
+        "min_overlap": min_overlap,
+        "min_propensity": min_propensity,
+        "same_holdout": True,
         "reason": reason,
     }
     if promoted:
