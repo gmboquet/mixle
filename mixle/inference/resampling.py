@@ -30,6 +30,52 @@ from numpy.random import RandomState
 from scipy.stats import norm
 
 
+def _integer_control(name: str, value: int, *, minimum: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return int(value)
+
+
+def _ci_level(value: float) -> float:
+    if (
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, (int, float, np.integer, np.floating))
+        or not np.isfinite(value)
+        or not 0.0 < float(value) < 1.0
+    ):
+        raise ValueError("ci_level must be a finite number strictly between 0 and 1")
+    return float(value)
+
+
+def _validate_data(data: Any) -> int:
+    parts = list(data) if _is_tuple(data) else [data]
+    if not parts:
+        raise ValueError("data must contain at least one array")
+    lengths = []
+    for part in parts:
+        array = np.asarray(part)
+        if array.ndim == 0:
+            raise ValueError("each data part must have a non-empty observation axis")
+        lengths.append(len(array))
+    if not lengths[0] or any(length != lengths[0] for length in lengths):
+        raise ValueError("all data parts must share the same non-empty first axis")
+    return lengths[0]
+
+
+def _labels(name: str, values: Any, n: int) -> np.ndarray:
+    labels = np.asarray(values)
+    if labels.ndim != 1 or len(labels) != n:
+        raise ValueError(f"{name} must be one-dimensional with length {n}")
+    for value in labels.tolist():
+        if value is None or (isinstance(value, (float, np.floating)) and np.isnan(value)):
+            raise ValueError(f"{name} cannot contain missing labels")
+        try:
+            hash(value)
+        except TypeError as exc:
+            raise ValueError(f"{name} must contain hashable scalar labels") from exc
+    return labels
+
+
 def _as_rng(seed: int | RandomState | None) -> RandomState:
     if isinstance(seed, RandomState):
         return seed
@@ -52,7 +98,10 @@ def _take(data: Any, idx: np.ndarray) -> Any:
 
 def _call(statistic: Callable, data: Any) -> np.ndarray:
     out = statistic(*data) if _is_tuple(data) else statistic(data)
-    return np.asarray(out, dtype=float)
+    result = np.asarray(out, dtype=float)
+    if result.size == 0 or not np.all(np.isfinite(result)):
+        raise ValueError("statistic must return a non-empty finite scalar or fixed-shape array")
+    return result
 
 
 @dataclass
@@ -144,6 +193,27 @@ def bootstrap(
     Returns:
         A :class:`BootstrapResult`.
     """
+    if not callable(statistic):
+        raise TypeError("statistic must be callable")
+    if method not in ("percentile", "basic", "bca"):
+        raise ValueError("method must be 'percentile', 'basic', or 'bca'.")
+    n_boot = _integer_control("n_boot", n_boot, minimum=2)
+    ci_level = _ci_level(ci_level)
+    n = _validate_data(data)
+    if block_length is not None:
+        block_length = _integer_control("block_length", block_length, minimum=1)
+        if block_length > n:
+            raise ValueError("block_length must be in [1, n]")
+    if m is not None:
+        m = _integer_control("m", m, minimum=1)
+        if m > n:
+            raise ValueError("m must be in [1, n]")
+    if groups is not None:
+        groups = _labels("groups", groups, n)
+    if clusters is not None:
+        clusters = _labels("clusters", clusters, n)
+        if len(np.unique(clusters)) < 2:
+            raise ValueError("cluster bootstrap requires at least two independent clusters")
     n_special = sum(x is not None for x in (groups, clusters, block_length, m))
     if n_special > 1:
         raise ValueError(
@@ -152,7 +222,6 @@ def bootstrap(
             "(clusters, then groups, then block_length, then m) and drop the rest."
         )
     rng = _as_rng(seed)
-    n = _n_units(data)
     estimate = _call(statistic, data)
     reps = np.empty((n_boot,) + estimate.shape, dtype=float)
     special = groups is not None or clusters is not None or block_length is not None or m is not None
@@ -179,8 +248,6 @@ def bootstrap(
         hi = 2.0 * estimate - np.quantile(reps, alpha / 2.0, axis=0)
     elif method_used == "bca":
         lo, hi = _bca_interval(data, statistic, estimate, reps, alpha)
-    else:
-        raise ValueError("method must be 'percentile', 'basic', or 'bca'.")
 
     return BootstrapResult(
         estimate=estimate,
@@ -286,9 +353,24 @@ def wild_bootstrap(
     Returns:
         A :class:`BootstrapResult` (percentile interval).
     """
+    if not callable(statistic):
+        raise TypeError("statistic must be callable")
+    if kind not in ("rademacher", "mammen"):
+        raise ValueError("kind must be 'rademacher' or 'mammen'.")
+    n_boot = _integer_control("n_boot", n_boot, minimum=2)
+    ci_level = _ci_level(ci_level)
     rng = _as_rng(seed)
     fitted = np.asarray(fitted, dtype=float)
     residuals = np.asarray(residuals, dtype=float)
+    if (
+        fitted.ndim != 1
+        or residuals.ndim != 1
+        or fitted.size == 0
+        or fitted.shape != residuals.shape
+        or not np.all(np.isfinite(fitted))
+        or not np.all(np.isfinite(residuals))
+    ):
+        raise ValueError("fitted and residuals must be matching non-empty finite vectors")
     n = fitted.shape[0]
     # the observed response is y = fitted + residuals
     estimate = np.asarray(statistic(fitted + residuals), dtype=float)
@@ -302,9 +384,7 @@ def wild_bootstrap(
             a = -(sqrt5 - 1.0) / 2.0
             c = (sqrt5 + 1.0) / 2.0
             v = np.where(rng.rand(n) < p_mammen, a, c)
-        else:
-            raise ValueError("kind must be 'rademacher' or 'mammen'.")
-        reps[b] = np.asarray(statistic(fitted + residuals * v), dtype=float)
+        reps[b] = _call(statistic, fitted + residuals * v)
     alpha = 1.0 - ci_level
     lo = np.quantile(reps, alpha / 2.0, axis=0)
     hi = np.quantile(reps, 1.0 - alpha / 2.0, axis=0)
@@ -344,22 +424,34 @@ def _mean_diff(x: np.ndarray, y: np.ndarray) -> float:
     return float(np.mean(x) - np.mean(y))
 
 
-def _pvalue(observed: float, null: np.ndarray, alternative: str, *, exact: bool = False) -> float:
+def _pvalue(
+    observed: float,
+    null: np.ndarray,
+    alternative: str,
+    *,
+    exact: bool = False,
+    null_value: float = 0.0,
+) -> float:
     """Permutation p-value: ``count / n`` when the full group was enumerated, else Monte-Carlo.
 
     With ``exact=True`` the null set already contains the identity rearrangement, so ``count / n``
     IS the exact p-value; the ``(count + 1) / (n + 1)`` finite-sample correction (which adds the
     identity to a *random* sample of rearrangements) would double-count it.
     """
+    if alternative not in ("two-sided", "greater", "less"):
+        raise ValueError("alternative must be 'two-sided', 'greater', or 'less'.")
+    null = np.asarray(null, dtype=float)
+    if null.ndim != 1 or null.size == 0 or not np.all(np.isfinite(null)) or not np.isfinite(observed):
+        raise ValueError("permutation inference requires a non-empty finite null distribution and statistic")
+    if not np.isfinite(null_value):
+        raise ValueError("null_value must be finite")
     n = null.size
     if alternative == "greater":
         count = np.sum(null >= observed)
     elif alternative == "less":
         count = np.sum(null <= observed)
     elif alternative == "two-sided":
-        count = np.sum(np.abs(null) >= abs(observed))
-    else:
-        raise ValueError("alternative must be 'two-sided', 'greater', or 'less'.")
+        count = np.sum(np.abs(null - null_value) >= abs(observed - null_value))
     if exact:
         return float(count / n)
     return float((count + 1) / (n + 1))
@@ -376,6 +468,7 @@ def permutation_test(
     stratify: np.ndarray | None = None,
     seed: int | RandomState | None = 0,
     exact_max: int = 10000,
+    null_value: float | None = None,
 ) -> PermutationResult:
     """Two-sample permutation test for an arbitrary statistic under a sharp null.
 
@@ -397,6 +490,8 @@ def permutation_test(
         seed: RNG seed.
         exact_max: if the number of distinct rearrangements is ``<= exact_max`` they are enumerated
             for an exact p-value.
+        null_value: reference value for a custom two-sided statistic. Required when ``statistic`` is
+            supplied with ``alternative="two-sided"`` so the absolute tail is centered correctly.
 
     Returns:
         A :class:`PermutationResult`.
@@ -412,9 +507,24 @@ def permutation_test(
             of 1 and returns an exact p-value of ``0.0`` -- reading as maximal significance from zero
             evidence instead of failing loudly.
     """
+    if alternative not in ("two-sided", "greater", "less"):
+        raise ValueError("alternative must be 'two-sided', 'greater', or 'less'.")
+    n_perm = _integer_control("n_perm", n_perm, minimum=1)
+    exact_max = _integer_control("exact_max", exact_max, minimum=1)
+    if statistic is not None and not callable(statistic):
+        raise TypeError("statistic must be callable")
+    if alternative == "two-sided" and statistic is not None and null_value is None:
+        raise ValueError("a custom two-sided statistic requires an explicit finite null_value")
+    null_center = 0.0 if null_value is None else float(null_value)
+    if not np.isfinite(null_center):
+        raise ValueError("null_value must be finite")
+    if paired and stratify is not None:
+        raise ValueError("stratify is not supported with paired sign-flip permutations")
     rng = _as_rng(seed)
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
+    if x.ndim != 1 or y.ndim != 1 or not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
+        raise ValueError("x and y must be finite one-dimensional samples")
     if x.shape[0] == 0 or y.shape[0] == 0:
         raise ValueError(
             f"permutation_test requires at least one observation in each of x and y, got {x.shape[0]} and {y.shape[0]}."
@@ -425,7 +535,7 @@ def permutation_test(
         if x.shape != y.shape:
             raise ValueError("paired test needs x and y of equal length.")
         d = x - y
-        observed = stat(d, np.zeros_like(d))
+        observed = float(stat(d, np.zeros_like(d)))
         n = d.shape[0]
         exact = 2**n <= exact_max
         if exact:
@@ -438,16 +548,22 @@ def permutation_test(
             for p in range(n_perm):
                 signs = rng.choice([-1.0, 1.0], size=n)
                 null[p] = stat(d * signs, np.zeros_like(d))
-        pval = _pvalue(observed, null, alternative, exact=exact)
+        pval = _pvalue(observed, null, alternative, exact=exact, null_value=null_center)
         return PermutationResult(observed, pval, null, null.size, exact, alternative)
 
-    observed = stat(x, y)
+    observed = float(stat(x, y))
     pooled = np.concatenate([x, y])
     nx = x.shape[0]
     labels = np.concatenate([np.zeros(nx, dtype=int), np.ones(y.shape[0], dtype=int)])
 
     if stratify is not None:
-        strata = np.asarray(stratify)
+        strata = _labels("stratify", stratify, len(pooled))
+        swappable = False
+        for group in np.unique(strata):
+            group_labels = labels[strata == group]
+            swappable = swappable or (np.any(group_labels == 0) and np.any(group_labels == 1))
+        if not swappable:
+            raise ValueError("stratified permutation requires at least one stratum containing both samples")
         null = np.empty(n_perm)
         for p in range(n_perm):
             perm = labels.copy()
@@ -455,7 +571,14 @@ def permutation_test(
                 pos = np.nonzero(strata == g)[0]
                 perm[pos] = rng.permutation(perm[pos])
             null[p] = stat(pooled[perm == 0], pooled[perm == 1])
-        return PermutationResult(observed, _pvalue(observed, null, alternative), null, n_perm, False, alternative)
+        return PermutationResult(
+            observed,
+            _pvalue(observed, null, alternative, null_value=null_center),
+            null,
+            n_perm,
+            False,
+            alternative,
+        )
 
     from math import comb
 
@@ -474,7 +597,7 @@ def permutation_test(
         for p in range(n_perm):
             perm = rng.permutation(pooled)
             null[p] = stat(perm[:nx], perm[nx:])
-    pval = _pvalue(observed, null, alternative, exact=exact)
+    pval = _pvalue(observed, null, alternative, exact=exact, null_value=null_center)
     return PermutationResult(observed, pval, null, null.size, exact, alternative)
 
 
