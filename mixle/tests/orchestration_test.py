@@ -1,4 +1,4 @@
-"""Learned orchestration (J2): a placement policy learned from telemetry, never-worse via fallback."""
+"""Learned orchestration (J2): a placement policy learned from telemetry with abstaining fallback."""
 
 import unittest
 
@@ -29,8 +29,14 @@ def _bad_static(f):
 class LearnedPlacementTest(unittest.TestCase):
     def test_beats_fixed_choices_and_a_bad_static_policy(self):
         pol = learn_placement_policy(_telemetry(600, 0), _bad_static, k=12, min_neighbors=4)
-        test = [({"tflop": t}, "local", {"cost": _true_cost(t, "local")}) for t in np.linspace(0, 12, 300)]
+        test = [
+            ({"tflop": t}, choice, {"cost": _true_cost(t, choice)})
+            for t in np.linspace(0, 12, 300)
+            for choice in ("local", "pool")
+        ]
         ev = pol.evaluate(test)
+        self.assertEqual(ev["evaluation_method"], "paired_realized_outcomes")
+        self.assertEqual(ev["overlap_fraction"], 1.0)
         self.assertLessEqual(ev["learned_mean_cost"], ev["fixed_mean_cost"]["local"])
         self.assertLessEqual(ev["learned_mean_cost"], ev["fixed_mean_cost"]["pool"])
         self.assertLess(ev["learned_mean_cost"], ev["static_mean_cost"])  # strictly better than the bad static

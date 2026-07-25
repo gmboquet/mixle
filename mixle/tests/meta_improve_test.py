@@ -1,4 +1,4 @@
-"""J4 learned scheduling + J5 meta-improve loop: promote only on a never-worse holdout receipt."""
+"""J4 learned scheduling + J5 meta-improve loop: promotion needs uncertainty-aware holdout evidence."""
 
 import unittest
 
@@ -42,7 +42,10 @@ class MetaImproveTest(unittest.TestCase):
         self.assertTrue(out["promoted"])
         r = out["receipt"]
         self.assertLess(r["learned_mean_cost"], r["static_mean_cost"])
-        self.assertIn("matched held-out", r["reason"])
+        self.assertIn("same held-out", r["reason"])
+        self.assertEqual(r["evaluation_method"], "paired_realized_outcomes")
+        self.assertEqual(r["overlap_fraction"], 1.0)
+        self.assertLess(r["upper_confidence_bound"], 0.0)
         self.assertEqual(out["policy"]({"size": 9.0}), "queue_pool")  # the promoted policy is usable
 
     def test_no_matched_support_means_no_promotion(self):
@@ -52,7 +55,7 @@ class MetaImproveTest(unittest.TestCase):
         out = meta_improve(_sched_rows(), teleport, cost_key="latency", seed=1)
         self.assertFalse(out["promoted"])
         self.assertIs(out["policy"], teleport)  # the teacher is kept
-        self.assertIn("insufficient matched", out["receipt"]["reason"])
+        self.assertIn("insufficient common", out["receipt"]["reason"])
 
     def test_receipt_is_returned_either_way(self):
         out = meta_improve(_sched_rows(), _always_local, cost_key="latency", seed=1)
