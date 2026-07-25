@@ -66,8 +66,12 @@ def encode_images(images: Any, *, batch: int = 32) -> np.ndarray:
     with torch.no_grad():
         for i in range(0, len(imgs), batch):
             inp = proc(images=imgs[i : i + batch], return_tensors="pt")
+            # current transformers returns a BaseModelOutputWithPooling, not a raw tensor; the
+            # projected per-image embedding (what this function has always promised) lives in
+            # .pooler_output -- CLIPModel.get_image_features runs the pooled vision output through
+            # visual_projection and stores the (n, 512) result back onto that same attribute.
             v = model.get_image_features(**inp)
-            out.append(v.numpy())
+            out.append(v.pooler_output.numpy())
     return np.concatenate(out, axis=0)
 
 
@@ -83,19 +87,24 @@ def encode_texts(texts: Any) -> np.ndarray:
 def generate(prompt: str, *, max_new_tokens: int = 96, temperature: float = 0.0) -> str:
     """One completion from the local LLM (SmolLM2-360M-Instruct) -- the 99%-local answerer."""
     model, tok, torch = _lm()
-    ids = tok.apply_chat_template(
+    # current tokenizers/transformers return a BatchEncoding (dict-like: .input_ids/.attention_mask),
+    # not a raw tensor -- torch.ones_like(ids) on the whole object no longer type-checks. Use the
+    # BatchEncoding's own attention_mask (already correct and padding-aware) and its input_ids as the
+    # tensor model.generate() and the final decode-slice both need.
+    enc = tok.apply_chat_template(
         [{"role": "user", "content": prompt}], return_tensors="pt", add_generation_prompt=True
     )
+    input_ids = enc.input_ids
     with torch.no_grad():
         out = model.generate(
-            ids,
-            attention_mask=torch.ones_like(ids),
+            input_ids,
+            attention_mask=enc.attention_mask,
             max_new_tokens=max_new_tokens,
             do_sample=temperature > 0,
             **({"temperature": temperature, "top_p": 0.9} if temperature > 0 else {}),
             pad_token_id=tok.eos_token_id,
         )
-    return tok.decode(out[0][ids.shape[1] :], skip_special_tokens=True).strip()
+    return tok.decode(out[0][input_ids.shape[1] :], skip_special_tokens=True).strip()
 
 
 # -- the certified perception head (study) ----------------------------------------------------------
