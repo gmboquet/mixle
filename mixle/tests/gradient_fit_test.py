@@ -1,10 +1,18 @@
 import importlib
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from mixle.inference.gradient_fit import fit_map, fit_mle
+from mixle.inference.gradient_fit import (
+    _gradient_best_entry,
+    _gradient_build_state,
+    _gradient_shadow_state,
+    _torch_for_gradient_fit,
+    fit_map,
+    fit_mle,
+)
 from mixle.inference.priors import (
     BetaPrior,
     ConditionalPrior,
@@ -47,6 +55,7 @@ from mixle.stats import (
     WeibullDistribution,
     field,
 )
+from mixle.stats.compute.declarations import ParameterSpec
 
 pytestmark = [pytest.mark.torch, pytest.mark.optional]
 
@@ -62,7 +71,7 @@ class GradientFitTestCase(unittest.TestCase):
     def assertGradientResultDiagnostics(self, result):
         self.assertEqual(len(result.history), result.iterations + 1)
         self.assertAlmostEqual(result.initial_value, result.history[0])
-        self.assertAlmostEqual(result.value, result.history[-1])
+        self.assertAlmostEqual(result.value, max(result.history))
         self.assertAlmostEqual(result.final_delta, result.history[-1] - result.history[-2])
         self.assertIsInstance(result.converged, bool)
         self.assertGreater(result.improvement, 0.0)
@@ -79,6 +88,87 @@ class GradientFitTestCase(unittest.TestCase):
         self.assertTrue(np.isfinite(result.prior_sensitivity))
         self.assertGreaterEqual(result.prior_sensitivity, 0.0)
         self.assertLessEqual(result.prior_sensitivity, 1.0)
+
+    def test_fit_restores_the_best_recorded_iterate_after_degradation(self):
+        truth = GaussianDistribution(2.0, 0.5)
+        data = truth.sampler(seed=91).sample(size=40)
+        start = GaussianDistribution(0.0, 3.0)
+        enc = start.dist_to_encoder().seq_encode(data)
+
+        result = fit_mle(
+            enc,
+            start,
+            max_its=12,
+            lr=0.5,
+            tol=0.0,
+            print_iter=1000,
+            return_result=True,
+        )
+
+        self.assertLess(result.best_iteration, len(result.history) - 1)
+        self.assertLess(result.history[-1], result.best_value)
+        returned_value = float(result.model.seq_log_density(enc).sum())
+        self.assertAlmostEqual(result.value, result.best_value, places=10)
+        self.assertAlmostEqual(returned_value, result.value, places=8)
+
+    def test_all_nan_best_history_is_explicit_not_nanargmax_crash(self):
+        value, iteration = _gradient_best_entry([float("nan"), float("nan")])
+        self.assertTrue(np.isnan(value))
+        self.assertEqual(iteration, 1)
+        value, iteration = _gradient_best_entry([1.0, float("inf"), 2.0])
+        self.assertEqual(value, 2.0)
+        self.assertEqual(iteration, 2)
+
+    def test_ordered_bound_resolution_does_not_depend_on_declaration_order(self):
+        class ReverseOrdered:
+            def __init__(self, high, low, name=None, keys=None):
+                self.high = high
+                self.low = low
+                self.name = name
+                self.keys = keys
+
+        torch, _ = _torch_for_gradient_fit(None)
+        template = ReverseOrdered(4.0, 1.0)
+        declaration = SimpleNamespace(
+            parameters=(
+                ParameterSpec("high", constraint="greater_than:low"),
+                ParameterSpec("low"),
+            )
+        )
+        raw = {
+            "log_high_minus_low": torch.tensor(np.log(3.0), dtype=torch.float64, requires_grad=True),
+            "low": torch.tensor(2.0, dtype=torch.float64, requires_grad=True),
+        }
+        state = ("leaf", template, declaration, raw, {})
+
+        shadow = _gradient_shadow_state(state, torch)
+        built = _gradient_build_state(state, torch)
+
+        self.assertAlmostEqual(float(shadow.low.detach()), 2.0)
+        self.assertAlmostEqual(float(shadow.high.detach()), 5.0)
+        self.assertAlmostEqual(float(built.low), 2.0)
+        self.assertAlmostEqual(float(built.high), 5.0)
+
+    def test_constructor_type_error_is_not_retried_or_masked(self):
+        class ExplodingConstructor:
+            calls = 0
+
+            def __init__(self, value, name=None, keys=None):
+                type(self).calls += 1
+                raise TypeError("internal constructor failure")
+
+        torch, _ = _torch_for_gradient_fit(None)
+        template = object.__new__(ExplodingConstructor)
+        template.value = 1.0
+        template.name = "x"
+        template.keys = "k"
+        declaration = SimpleNamespace(parameters=(ParameterSpec("value"),))
+        raw = {"value": torch.tensor(2.0, dtype=torch.float64, requires_grad=True)}
+        state = ("leaf", template, declaration, raw, {})
+
+        with self.assertRaisesRegex(TypeError, "internal constructor failure"):
+            _gradient_build_state(state, torch)
+        self.assertEqual(ExplodingConstructor.calls, 1)
 
     def test_fit_mle_improves_gaussian_likelihood(self):
         truth = GaussianDistribution(2.0, 0.5)

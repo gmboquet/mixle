@@ -605,25 +605,27 @@ def _objective_scalar(value: Any) -> float:
 
 def _objective_best_entry(history: Sequence[float], maximize: bool = True) -> tuple[float, int]:
     values = np.asarray(history, dtype=np.float64)
-    if values.size == 0 or np.all(np.isnan(values)):
+    finite = np.isfinite(values)
+    if values.size == 0 or not np.any(finite):
         # No finite entry to choose from; fall back to the last (or initial) value.
         idx = values.size - 1 if values.size else 0
         return (float(values[idx]) if values.size else float("nan")), idx
-    idx = int(np.nanargmax(values) if maximize else np.nanargmin(values))
+    fill = -np.inf if maximize else np.inf
+    idx = int(np.argmax(np.where(finite, values, fill)) if maximize else np.argmin(np.where(finite, values, fill)))
     return float(values[idx]), idx
 
 
 def _objective_is_better(value: float, best_value: float, maximize: bool = True) -> bool:
     """Return whether ``value`` improves on ``best_value`` in the requested direction.
 
-    NaN-aware (audit I-2): a NaN candidate never wins, and a NaN incumbent always loses. The
-    historical plain comparison was False whenever ``best_value`` was NaN, so a NaN *initial*
+    Non-finite-aware: a non-finite candidate never wins, and a non-finite incumbent always loses.
+    The historical plain comparison was False whenever ``best_value`` was NaN, so a NaN *initial*
     objective froze best-state tracking forever and ``restore_best=True`` returned the initial
     parameters no matter how far the objective later improved.
     """
-    if np.isnan(value):
+    if not np.isfinite(value):
         return False
-    if np.isnan(best_value):
+    if not np.isfinite(best_value):
         return True
     return value > best_value if maximize else value < best_value
 
