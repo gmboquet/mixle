@@ -739,6 +739,14 @@ def _attach_convergence(post, slots, arr, results) -> None:
     divergence count. ``arr`` is the relabeled unconstrained draws, shape ``(n_chains, n_draws, d)``."""
     from mixle.ppl.diagnostics import bulk_ess, split_rhat, tail_ess
 
+    if arr.shape[0] < 2:
+        # These diagnostics require independent chains. Preserve a valid single-chain posterior but
+        # do not misrepresent the two halves of that chain as independent convergence evidence.
+        post.split_rhat = {s.name: float("nan") for s in slots}
+        post.bulk_ess = {s.name: float("nan") for s in slots}
+        post.tail_ess = {s.name: float("nan") for s in slots}
+        post.num_divergences = int(sum(int(np.sum(getattr(r, "divergences", np.zeros(0)))) for r in results))
+        return
     post.split_rhat = {s.name: float(split_rhat(arr[:, :, k])) for k, s in enumerate(slots)}
     post.bulk_ess = {s.name: float(bulk_ess(arr[:, :, k])) for k, s in enumerate(slots)}
     post.tail_ess = {s.name: float(tail_ess(arr[:, :, k])) for k, s in enumerate(slots)}
