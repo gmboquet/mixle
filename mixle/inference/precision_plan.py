@@ -124,6 +124,13 @@ def recommend_compute_precision(
     s = _numeric_data_sample(sample, sample_size)
     if s is None or s.size == 0:
         return PrecisionPlan(np.float64, "non-numeric / empty data -> float64")
+    if not np.all(np.isfinite(s)):
+        # NaN/Inf anywhere in the sample must route to the safe fallback EXPLICITLY (MXR-080-0145,
+        # mirroring mixle.engines.precision.auto_precision's identical guard): IEEE-754 defines every
+        # comparison against NaN as False, so a NaN `amax` would make `amax > max_magnitude` below
+        # silently evaluate to False and fall through to the OPTIMISTIC float32 branch instead of the
+        # safe float64 fallback -- the opposite of what "risk could not be computed" should mean.
+        return PrecisionPlan(np.float64, "non-finite data (NaN/Inf) -> float64")
     amax = float(np.max(np.abs(s)))
     if amax > max_magnitude:
         return PrecisionPlan(np.float64, "data magnitude %.1e too large for float32 -> float64" % amax)
