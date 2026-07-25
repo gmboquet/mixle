@@ -28,9 +28,35 @@ def torch_available() -> bool:
     """Return whether Torch can be imported for analytic-gradient PPL routes."""
     try:
         import torch  # noqa: F401
-    except Exception:  # noqa: BLE001
+    except ImportError:
         return False
     return True
+
+
+def _validated_observations(data, *, missing: str, allow_marginalize: bool) -> tuple[np.ndarray, np.ndarray | None]:
+    """Return finite scalar observations and an optional missing-row mask.
+
+    NaN is the sole missing-value sentinel.  Infinite observations are invalid,
+    since treating them as missing silently changes the statistical problem.
+    """
+    if missing not in {"error", "marginalize"}:
+        raise ValueError(f"missing={missing!r}; choose 'error' or 'marginalize'.")
+    if missing == "marginalize" and not allow_marginalize:
+        raise NotImplementedError("missing='marginalize' is not supported by this autograd target.")
+    try:
+        arr = np.asarray(data, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("autograd observations must be numeric scalar values.") from exc
+    if arr.ndim != 1 or arr.size == 0:
+        raise ValueError("autograd observations must be a non-empty one-dimensional sequence.")
+    if np.isinf(arr).any():
+        raise ValueError("observations must not contain positive or negative infinity.")
+    missing_rows = np.isnan(arr)
+    if missing == "error" and missing_rows.any():
+        raise ValueError("observations contain NaN; pass missing='marginalize' to integrate missing rows out.")
+    if not missing_rows.any():
+        return arr.copy(), None
+    return np.where(missing_rows, 0.0, arr), (~missing_rows).astype(float)
 
 
 # --- per-family Torch scorers ------------------------------------------------------
@@ -155,16 +181,11 @@ class GradTarget:
 
         self._eng = TorchEngine(dtype="float64")
         self._scorers = _scorers()
-        x_np = np.asarray(data, dtype=float)
+        x_np, observed = _validated_observations(data, missing=missing, allow_marginalize=True)
         # missing='marginalize': a NaN observation is integrated out -> its per-point log-density is
         # zeroed in the sum (weight 0). Replace the NaN with a safe sentinel first so the scorer/data_terms
         # stay finite and no NaN poisons the gradient through the masked (zero-weight) branch.
-        self._w = None
-        if missing == "marginalize":
-            nan = np.isnan(x_np)
-            if nan.any():
-                x_np = np.where(nan, 0.0, x_np)
-                self._w = torch.tensor((~nan).astype(float), dtype=torch.float64)
+        self._w = None if observed is None else torch.tensor(observed, dtype=torch.float64)
         self._x = torch.tensor(x_np, dtype=torch.float64)
         prep, _ = self._scorers[self._fam.name]
         self._data_terms = prep(self._x, torch)
@@ -216,6 +237,8 @@ class GradTarget:
                 loc, scale = self._loc_scale(s, vals)
                 z = (vals[s.index] - loc) / scale
                 plp = plp + (-0.5 * z * z - 0.5 * math.log(2.0 * math.pi))
+                if not self._jacobian:
+                    plp = plp - torch.log(scale)
             elif s.handle is not None:
                 pf = s.handle._family.name
                 theta = vals[s.index]
@@ -272,6 +295,8 @@ class GradTarget:
                 loc, scale = self._loc_scale(s, vals)
                 z = (vals[s.index] - loc) / scale
                 plp = plp + (-0.5 * z * z - 0.5 * math.log(2.0 * math.pi))
+                if not self._jacobian:
+                    plp = plp - torch.log(scale)
             elif s.handle is not None:
                 pf = s.handle._family.name
                 prep_p, apply_p = self._scorers[pf]
@@ -288,18 +313,39 @@ class GradTarget:
     def log_target(self, u_np) -> float:
         """Evaluate the joint log-target in unconstrained coordinates."""
         torch = self._torch
+        u_arr = self._validated_u(u_np)
         with torch.no_grad():
-            u = torch.tensor(np.asarray(u_np, dtype=float), dtype=torch.float64)
+            u = torch.tensor(u_arr, dtype=torch.float64)
             v = self._logtarget_tensor(u)
-        return float(v) if math.isfinite(float(v)) else -1e300
+        out = float(v)
+        if math.isnan(out) or out == math.inf:
+            raise FloatingPointError("autograd log target produced NaN or positive infinity.")
+        return out
 
     def value_and_grad(self, u_np) -> tuple[float, np.ndarray]:
         """Return the joint log-target value and gradient at ``u_np``."""
         torch = self._torch
-        u = torch.tensor(np.asarray(u_np, dtype=float), dtype=torch.float64, requires_grad=True)
+        u = torch.tensor(self._validated_u(u_np), dtype=torch.float64, requires_grad=True)
         v = self._logtarget_tensor(u)
+        if not bool(torch.isfinite(v)):
+            raise FloatingPointError("cannot differentiate a non-finite autograd log target.")
         (g,) = torch.autograd.grad(v, u)
-        return float(v.detach()), g.detach().numpy()
+        grad = g.detach().numpy()
+        if not np.isfinite(grad).all():
+            raise FloatingPointError("autograd produced a non-finite target gradient.")
+        return float(v.detach()), grad
+
+    def _validated_u(self, u_np) -> np.ndarray:
+        """Validate one unconstrained parameter vector at the public boundary."""
+        try:
+            arr = np.asarray(u_np, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("the unconstrained parameter vector must be numeric.") from exc
+        if arr.ndim != 1 or arr.size != len(self.slots):
+            raise ValueError(f"expected a one-dimensional parameter vector of length {len(self.slots)}.")
+        if not np.isfinite(arr).all():
+            raise ValueError("the unconstrained parameter vector must contain only finite values.")
+        return arr.copy()
 
     def grad(self, u_np) -> np.ndarray:
         """Return only the gradient of the joint log-target at ``u_np``."""
@@ -378,7 +424,7 @@ class MixtureGradTarget(GradTarget):
         import torch
 
         from mixle.engines import TorchEngine
-        from mixle.ppl.inference import _to_value
+        from mixle.ppl.inference import _loc_scale, _to_value
 
         self._torch = torch
         self._rv = rv
@@ -395,6 +441,9 @@ class MixtureGradTarget(GradTarget):
             vals, logj = {}, 0.0
             for k, s in enumerate(slots):
                 v, lj = _to_value(s.support, u[k])
+                if s.reparam == "loc_scale":
+                    loc, scale = _loc_scale(s, vals)
+                    v = loc + scale * v
                 vals[s.index] = v
                 logj += lj
             return vals, logj
@@ -405,7 +454,9 @@ class MixtureGradTarget(GradTarget):
         self._jacobian = bool(jacobian)
         self._eng = TorchEngine(dtype="float64")
         self._scorers = _scorers()
-        self._x = torch.tensor(np.asarray(data, dtype=float), dtype=torch.float64)
+        x_np, _ = _validated_observations(data, missing="error", allow_marginalize=False)
+        self._x = torch.tensor(x_np, dtype=torch.float64)
+        self._w = None
         self._data_terms = self._scorers[comp_family][0](self._x, torch)  # prep shared across same-family comps
         self._comp_layouts = comp_layouts  # per comp: (fam_name, [('slot', idx, support) | ('const', value)])
         self._weight = weight  # ('fixed', w) | ('slots', [idx...], alpha)
@@ -420,7 +471,10 @@ class MixtureGradTarget(GradTarget):
         logj = U.new_zeros(B)
         for k, s in enumerate(self.slots):
             uk = U[:, k]
-            if s.support == "positive":
+            if s.reparam == "loc_scale":
+                loc, scale = self._loc_scale(s, vals)
+                vals[s.index] = loc + scale * uk
+            elif s.support == "positive":
                 vals[s.index] = torch.exp(uk)
                 logj = logj + uk
             elif s.support == "unit":
@@ -444,9 +498,20 @@ class MixtureGradTarget(GradTarget):
         ll = torch.logsumexp(log_w + stacked, dim=0).sum(dim=1)  # (B, N) -> (B,)
         plp = U.new_zeros(B)
         for s in self.slots:
-            if s.handle is not None:  # component-parameter prior
+            if s.role == "weight":
+                continue  # Gamma representation is scored once, below
+            if s.reparam == "loc_scale":
+                loc, scale = self._loc_scale(s, vals)
+                z = (vals[s.index] - loc) / scale
+                plp = plp + (-0.5 * z * z - 0.5 * math.log(2.0 * math.pi))
+                if not self._jacobian:
+                    plp = plp - torch.log(scale)
+            elif s.handle is not None:  # fixed or hierarchical component-parameter prior
                 prep_p, apply_p = self._scorers[s.handle._family.name]
-                pargs = [self._t(z) for z in s.handle._args]
+                pargs = [
+                    vals[s.parent_args[j]].reshape(B, 1) if (s.parent_args and j in s.parent_args) else self._t(z)
+                    for j, z in enumerate(s.handle._args)
+                ]
                 xt = vals[s.index].reshape(B, 1)
                 plp = plp + apply_p(pargs, prep_p(xt, torch), xt, self._eng).sum(dim=1)
         if self._weight[0] == "slots":  # Gamma(alpha_k, 1) prior on each unnormalized weight (Dirichlet rep)
@@ -465,29 +530,61 @@ def _mixture_grad_target(rv, data, scorers, jacobian=True):
     if not comps:
         return None
     fam0 = comps[0]._family.name
+    from mixle.ppl.inference import _collect_composite, _is_det_expr, _spec_of
+
+    def prior_supported(handle: RandomVariable) -> bool:
+        if (
+            handle._kind != "sample"
+            or isinstance(handle._family, CompositeFamily)
+            or handle._family.name not in scorers
+        ):
+            return False
+        return all(z is not free and (not isinstance(z, RandomVariable) or prior_supported(z)) for z in handle._args)
+
     for c in comps:  # all components: same leaf family with a Torch scorer, scalar args only
         if c._kind != "sample" or isinstance(c._family, CompositeFamily) or c._family.name != fam0:
             return None
         if fam0 not in scorers:
             return None
         for a in c._args:
-            if isinstance(a, RandomVariable) and (
-                isinstance(a._family, CompositeFamily) or a._family.name not in scorers
-            ):
+            if _spec_of(a) is not None or _is_det_expr(a):
                 return None
-    from mixle.ppl.inference import _collect_composite
+            if isinstance(a, RandomVariable) and not prior_supported(a):
+                return None
 
     slots, _rebuild = _collect_composite(rv)
     build = lambda v: __import__("mixle.ppl.core", fromlist=["lower"]).lower(_rebuild(v), target="dist")  # noqa: E731
-    # map slots -> (component, arg) and the trailing weight slots, replicating _collect_composite's order
-    idx = 0
+    # Map each likelihood argument to its own collected child slot.  Hierarchical
+    # hyperparameters are deliberately absent from this layout: they affect the
+    # prior terms but are not direct arguments of the component likelihood.
     comp_layouts = []
-    for c in comps:
+    used: set[int] = set()
+    for group, c in enumerate(comps):
         layout = []
         for j, a in enumerate(c._args):
-            if isinstance(a, RandomVariable) or a is free:
-                layout.append(("slot", idx, c._family.support[j]))
-                idx += 1
+            if isinstance(a, RandomVariable):
+                matches = [
+                    s for s in slots if s.group == group and s.role == "param" and s.handle is a and s.index not in used
+                ]
+                if len(matches) != 1:
+                    return None
+                used.add(matches[0].index)
+                layout.append(("slot", matches[0].index, c._family.support[j]))
+            elif a is free:
+                matches = [
+                    s
+                    for s in slots
+                    if s.group == group
+                    and s.role == "param"
+                    and s.handle is None
+                    and s.prior is None
+                    and s.index not in used
+                ]
+                if not matches:
+                    return None
+                slot = matches[0]
+                used.add(slot.index)
+                layout.append(("slot", slot.index, c._family.support[j]))
             else:
                 layout.append(("const", float(a)))
         comp_layouts.append((c._family.name, layout))
@@ -497,14 +594,17 @@ def _mixture_grad_target(rv, data, scorers, jacobian=True):
         weight = ("fixed", w)
     else:  # free / Dirichlet -> the trailing K weight slots (Gamma representation)
         if isinstance(weights_arg, RandomVariable) and weights_arg._family.name == "Dirichlet":
-            alpha = np.asarray(weights_arg._args[0], dtype=float)
+            try:
+                alpha = np.asarray(weights_arg._args[0], dtype=float)
+            except (TypeError, ValueError):
+                return None
         else:
             alpha = np.ones(k)
-        weight = ("slots", list(range(idx, idx + k)), alpha)
-        idx += k
-    if idx != len(slots):  # structure we didn't model (e.g. nested) -> fall back
-        return None
-    arr = np.asarray(data, dtype=float)
+        weight_slots = sorted((s for s in slots if s.role == "weight"), key=lambda s: s.group)
+        if len(weight_slots) != k:
+            return None
+        weight = ("slots", [s.index for s in weight_slots], alpha)
+    arr, _ = _validated_observations(data, missing="error", allow_marginalize=False)
     dmean, dstd = float(arr.mean()), float(arr.std() or 1.0)
     return MixtureGradTarget(rv, data, slots, build, dmean, dstd, comp_layouts, weight, fam0, jacobian=jacobian)
 
@@ -520,18 +620,14 @@ def grad_target(rv: RandomVariable, data, missing: str = "error", jacobian: bool
     """
     if not torch_available() or rv._kind != "sample":
         return None
-    try:
-        scorers = _scorers()
-    except Exception:  # noqa: BLE001
-        return None
+    if missing not in {"error", "marginalize"}:
+        raise ValueError(f"missing={missing!r}; choose 'error' or 'marginalize'.")
+    scorers = _scorers()
     if isinstance(rv._family, CompositeFamily):
         if rv._family.name == "Mixture":
             if missing == "marginalize":
                 return None  # mixture-of-leaves missing handling not wired here; caller raises clearly
-            try:
-                return _mixture_grad_target(rv, data, scorers, jacobian=jacobian)
-            except Exception:  # noqa: BLE001
-                return None
+            return _mixture_grad_target(rv, data, scorers, jacobian=jacobian)
         return None
     from mixle.ppl.inference import _is_det_expr, _require_flat, _target_parts
 
@@ -539,9 +635,9 @@ def grad_target(rv: RandomVariable, data, missing: str = "error", jacobian: bool
         return None
 
     def _prior_ok(a) -> bool:  # every prior family (including hierarchical hyperparameters) needs a scorer
-        if isinstance(a._family, CompositeFamily) or a._family.name not in scorers:
+        if a._kind != "sample" or isinstance(a._family, CompositeFamily) or a._family.name not in scorers:
             return False
-        return all(_prior_ok(z) for z in a._args if isinstance(z, RandomVariable))
+        return all(z is not free and (not isinstance(z, RandomVariable) or _prior_ok(z)) for z in a._args)
 
     for a in rv._args:
         # Deterministic-expression slots (a + b, exp(a), ...) have no single prior family to score; there

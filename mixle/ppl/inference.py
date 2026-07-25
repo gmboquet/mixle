@@ -416,6 +416,57 @@ def _collect_composite(rv: RandomVariable):
     single-component list are kept as-is."""
     slots: list[_Slot] = []
 
+    def collect_prior(handle: RandomVariable, support: str, name: str) -> int:
+        """Collect a scalar leaf prior and any random hyperparameters before it.
+
+        Composite targets use sequential synthetic indices rather than the leaf
+        family's argument positions.  Returning the child index lets the prior
+        record exactly which earlier slots supply its hierarchical arguments.
+        """
+        parent_args: dict[int, int] = {}
+        for j, arg in enumerate(handle._args):
+            if isinstance(arg, RandomVariable):
+                parent_name = arg.name or f"{name}.arg{j}"
+                parent_args[j] = collect_prior(arg, handle._family.support[j], parent_name)
+        index = len(slots)
+        if handle._reparam == "loc_scale":
+            slots.append(
+                _Slot(
+                    index,
+                    None,
+                    False,
+                    handle.name or name,
+                    handle,
+                    "real",
+                    parent_args=parent_args,
+                    reparam="loc_scale",
+                )
+            )
+        elif parent_args:
+            slots.append(
+                _Slot(
+                    index,
+                    None,
+                    support == "positive",
+                    handle.name or name,
+                    handle,
+                    support,
+                    parent_args=parent_args,
+                )
+            )
+        else:
+            slots.append(
+                _Slot(
+                    index,
+                    lower(handle, target="dist"),
+                    support == "positive",
+                    handle.name or name,
+                    handle,
+                    support,
+                )
+            )
+        return index
+
     def collect(node: RandomVariable, prefix: str = ""):
         fam = node._family
         if isinstance(fam, CompositeFamily):
@@ -457,7 +508,7 @@ def _collect_composite(rv: RandomVariable):
                     slots.append(_Slot(len(slots), prior, support == "positive", nm, handle, support))
             elif isinstance(a, RandomVariable):
                 nm = a.name or f"{prefix}arg{i}"
-                slots.append(_Slot(len(slots), lower(a, target="dist"), fam.positive[i], nm, a, fam.support[i]))
+                collect_prior(a, fam.support[i], nm)
             elif a is free:
                 slots.append(_Slot(len(slots), None, fam.positive[i], f"{prefix}arg{i}", None, fam.support[i]))
 
@@ -473,13 +524,22 @@ def _collect_composite(rv: RandomVariable):
             counter[0] += n
             return out
 
+        def consume_prior(handle: RandomVariable):
+            # Collection is depth-first: random hyperparameters precede the
+            # parameter they govern.  Consume those bookkeeping slots before
+            # returning the concrete value used by the leaf likelihood.
+            for arg in handle._args:
+                if isinstance(arg, RandomVariable):
+                    consume_prior(arg)
+            return take(1)[0]
+
         def build_node(node: RandomVariable):
             fam = node._family
             if isinstance(fam, CompositeFamily):
                 new_args = []
                 for a in node._args:
                     if isinstance(a, (list, tuple)):
-                        new_args.append([build_node(c) if isinstance(c, RandomVariable) else c for c in a])
+                        new_args.append(tuple(build_node(c) if isinstance(c, RandomVariable) else c for c in a))
                         continue
                     spec = _struct_spec_for(node, a)
                     if spec is not None:  # assemble scalar draws into the vector/matrix value
@@ -497,8 +557,10 @@ def _collect_composite(rv: RandomVariable):
                 spec = _spec_of(a)
                 if spec is not None:
                     new_args.append(_spec_assemble(spec, take(len(_spec_slot_defs(spec)))))
-                elif a is free or isinstance(a, RandomVariable):
+                elif a is free:
                     new_args.append(take(1)[0])
+                elif isinstance(a, RandomVariable):
+                    new_args.append(consume_prior(a))
                 else:
                     new_args.append(a)
             return RandomVariable._sample(
@@ -526,6 +588,9 @@ def _composite_target_parts(rv: RandomVariable, data):
         vals, logj = {}, 0.0
         for k, s in enumerate(slots):
             v, lj = _to_value(s.support, u[k])
+            if s.reparam == "loc_scale":
+                loc, scale = _loc_scale(s, vals)
+                v = loc + scale * v
             vals[s.index] = v
             logj += lj
         return vals, logj
@@ -621,6 +686,12 @@ def _build_target(rv: RandomVariable, data, extra_latents=(), jacobian: bool = T
                 loc, scale = _loc_scale(s, vals)
                 z = (vals[s.index] - loc) / scale
                 plp += -0.5 * z * z - 0.5 * math.log(2.0 * math.pi)
+                if not jacobian:
+                    # MAP is defined by the density in constrained parameter
+                    # coordinates.  N(value | loc, scale) contributes
+                    # phi(z) / scale; only an unconstrained sampling target
+                    # cancels that scale through d(value)/dz.
+                    plp -= math.log(scale)
             elif s.parent_args:  # hierarchical prior: rebuild it with the sampled hyperparameter values
                 pargs = list(s.handle._args)
                 for j, child in s.parent_args.items():
