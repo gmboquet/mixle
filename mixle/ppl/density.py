@@ -158,9 +158,24 @@ def MAF(dim: int, *, hidden: int = 64, blocks: int = 3, m_steps: int = 80, lr: f
     return _rv(_DensitySpec("maf", {"dim": dim, "hidden": hidden, "blocks": blocks}, m_steps=m_steps, lr=lr))
 
 
-def VAE(dim: int, *, latent: int = 2, hidden: int = 32, m_steps: int = 120, lr: float = 5e-3) -> RandomVariable:
-    """A latent-variable ``p(x)`` over ``R^dim`` via a VAE. ``log_density`` is the ELBO (a lower bound); fit ``.fit(x)``."""
-    return _rv(_DensitySpec("vae", {"dim": dim, "latent": latent, "hidden": hidden}, m_steps=m_steps, lr=lr))
+def VAE(
+    dim: int,
+    *,
+    latent: int = 2,
+    hidden: int = 32,
+    eval_samples: int = 16,
+    m_steps: int = 120,
+    lr: float = 5e-3,
+) -> RandomVariable:
+    """A latent-variable ``p(x)`` via a VAE whose score is a reproducible ELBO estimate; fit with ``.fit(x)``."""
+    return _rv(
+        _DensitySpec(
+            "vae",
+            {"dim": dim, "latent": latent, "hidden": hidden, "eval_samples": eval_samples},
+            m_steps=m_steps,
+            lr=lr,
+        )
+    )
 
 
 def DiscreteAR(dim: int, cats: int, *, hidden: int = 64, m_steps: int = 100, lr: float = 5e-3) -> RandomVariable:

@@ -653,9 +653,13 @@ def _build_conditional_autoregressive_categorical_class(torch: Any, nn: Any) -> 
             return self.lout(h).view(-1, self.D, self.C)  # (n, D, C)
 
         def log_density(self, x: Any, y: Any) -> Any:
-            log_p = torch.log_softmax(self._logits(x, y), dim=-1)  # (n, D, C)
-            idx = y.long().clamp(0, self.C - 1).unsqueeze(-1)
-            return log_p.gather(-1, idx).squeeze(-1).sum(1)  # sum_i log p(y_i | y_{<i}, x)
+            in_support = torch.isfinite(y) & (y == torch.round(y)) & (y >= 0) & (y < self.C)
+            valid_rows = in_support.all(1)
+            safe_y = torch.where(in_support, y, torch.zeros_like(y))
+            log_p = torch.log_softmax(self._logits(x, safe_y), dim=-1)  # (n, D, C)
+            idx = safe_y.long().unsqueeze(-1)
+            score = log_p.gather(-1, idx).squeeze(-1).sum(1)
+            return torch.where(valid_rows, score, torch.full_like(score, -torch.inf))
 
         def sample_given(self, x: Any, *, generator: Any = None) -> Any:
             y = torch.zeros(x.shape[0], self.D, device=x.device)

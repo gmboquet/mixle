@@ -137,6 +137,14 @@ def _cond_discrete(seed, n=1200, xcat=3, C=4):
 
 
 class ConditionalAutoregressiveCategoricalTest(unittest.TestCase):
+    def test_invalid_targets_have_zero_conditional_probability(self):
+        _seed()
+        leaf = NeuralConditionalDensity(build_conditional_autoregressive_categorical(1, 2, 3, hidden=8))
+        x = torch.zeros(4, 1)
+        invalid = torch.tensor([[-1.0, 0.0], [3.0, 0.0], [0.5, 1.0], [0.0, torch.inf]])
+        score = leaf.module.log_density(x, invalid)
+        self.assertTrue(torch.isneginf(score).all())
+
     def test_conditional_density_sums_to_one_over_y_space(self):
         _seed()
         # exactness of the conditional: for a fixed x, sum over ALL C^y_dim configs of y must be 1.
