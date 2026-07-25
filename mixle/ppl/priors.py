@@ -17,6 +17,9 @@ posterior is genuinely non-Gaussian, so Laplace/Gauss-Newton only approximate it
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from numbers import Real
+
 import numpy as np
 
 from mixle.ppl._grid import _grid_faces
@@ -34,6 +37,50 @@ class _PenaltyProxy(Proxy):
         return -self._penalty(field_t, torch)
 
 
+def _positive_finite(value, name):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a positive finite real number")
+    result = float(value)
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a positive finite real number")
+    return result
+
+
+@dataclass(frozen=True)
+class _TotalVariationPenalty:
+    face_a: tuple[int, ...]
+    face_b: tuple[int, ...]
+    n_nodes: int
+    weight: float
+    eps: float
+
+    def __call__(self, field_t, torch):
+        values = field_t.reshape(-1)
+        if values.numel() != self.n_nodes:
+            raise ValueError(
+                f"field contains {values.numel()} values; grid geometry requires {self.n_nodes}"
+            )
+        device = values.device
+        a = torch.as_tensor(self.face_a, dtype=torch.long, device=device)
+        b = torch.as_tensor(self.face_b, dtype=torch.long, device=device)
+        difference = values[a] - values[b]
+        return self.weight * torch.sum(
+            torch.sqrt(difference * difference + self.eps * self.eps)
+        )
+
+
+@dataclass(frozen=True)
+class _PottsPenalty:
+    levels: tuple[float, ...]
+    weight: float
+
+    def __call__(self, field_t, torch):
+        well = torch.ones_like(field_t)
+        for level in self.levels:
+            well = well * (field_t - level) ** 2
+        return self.weight * torch.sum(well)
+
+
 def _field_of(over):
     return over.field if hasattr(over, "field") else over
 
@@ -44,14 +91,13 @@ def TotalVariation(over, shape, *, weight: float = 1.0, eps: float = 1e-3) -> tu
     as the squared GMRF prior). Returns the ``(field, proxy)`` pair for :func:`joint`."""
     field = _field_of(over)
     g = _grid_faces(shape, 1.0)
-    fa, fb = g["face_a"], g["face_b"]
-
-    def penalty(field_t, torch):
-        a = torch.as_tensor(fa, dtype=torch.long)
-        b = torch.as_tensor(fb, dtype=torch.long)
-        d = field_t[a] - field_t[b]
-        return float(weight) * torch.sum(torch.sqrt(d * d + eps * eps))
-
+    penalty = _TotalVariationPenalty(
+        face_a=tuple(int(index) for index in g["face_a"]),
+        face_b=tuple(int(index) for index in g["face_b"]),
+        n_nodes=int(g["n"]),
+        weight=_positive_finite(weight, "weight"),
+        eps=_positive_finite(eps, "eps"),
+    )
     return field, _PenaltyProxy(penalty, "tv")
 
 
@@ -61,12 +107,16 @@ def Potts(over, levels, *, weight: float = 1.0) -> tuple:
     smooth relaxation of the Potts model). Combine with :func:`TotalVariation` for piecewise-constant
     regions. Returns the ``(field, proxy)`` pair for :func:`joint`."""
     field = _field_of(over)
-    lv = [float(v) for v in np.asarray(levels, dtype=float).ravel()]
-
-    def penalty(field_t, torch):
-        well = torch.ones_like(field_t)
-        for level in lv:
-            well = well * (field_t - level) ** 2
-        return float(weight) * torch.sum(well)
-
+    try:
+        level_array = np.asarray(levels, dtype=float).ravel()
+    except (TypeError, ValueError) as error:
+        raise TypeError("levels must be a finite one-dimensional numeric collection") from error
+    if level_array.size < 2:
+        raise ValueError("levels must contain at least two distinct finite values")
+    if not np.all(np.isfinite(level_array)):
+        raise ValueError("levels must contain only finite values")
+    lv = tuple(float(value) for value in np.unique(level_array))
+    if len(lv) < 2:
+        raise ValueError("levels must contain at least two distinct finite values")
+    penalty = _PottsPenalty(levels=lv, weight=_positive_finite(weight, "weight"))
     return field, _PenaltyProxy(penalty, "potts")
