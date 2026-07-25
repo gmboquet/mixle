@@ -1,133 +1,222 @@
-"""P10 (experimental) -- compositional PAC-Bayes generalization certificates.
+"""PAC-Bayes certificates over an explicit finite hypothesis space.
 
-A PAC-Bayes bound turns a fit into a *certificate*: with probability at least ``1 - delta`` over
-the training sample, the true (held-out) risk of the fitted model is at most its empirical risk
-plus a complexity term driven by ``KL(posterior || prior)``. For exponential-family leaves the KL
-is closed form, and -- the point of doing this in mixle -- it **composes along the estimator
-tree**: the total KL is the sum of per-node KLs, so a loose bound can be blamed on the subtree
-that contributed the most complexity.
+The posterior and prior accepted here are probability distributions over fixed predictors/hypotheses—not
+observation-density mixture components. The prior must be selected independently of the certified sample;
+the posterior may depend on that sample. Callers provide one bounded loss per hypothesis and sample, and
+an explicit :class:`PACBayesAssumptions` receipt. The certificate uses the finite-space
+``KL(Q || P)`` and the McAllester bounded-loss inequality.
 
-This module implements the McAllester bound over a bounded likelihood loss for Gaussian mixtures:
-
-* :func:`gaussian_kl` -- closed-form KL between two Gaussians;
-* :func:`per_component_kl` / :func:`total_kl` -- the per-node decomposition and its sum;
-* :func:`mcallester_bound` -- the PAC-Bayes upper bound;
-* :func:`certify_generalization` -- fit -> :class:`GeneralizationCertificate` (bound + blame).
-
-Honest scope (P10 kill criterion): the bound is only useful if it is non-vacuous; the test
-measures the bound-vs-held-out gap across sample sizes and the empirical ``1 - delta`` coverage,
-rather than assuming tightness.
-
-Exploratory ``mixle.experimental`` code.
+``gaussian_kl`` remains available only as a mathematical primitive for genuine Gaussian distributions over
+parameters. It is not used by :func:`certify_generalization` and does not convert fitted observation
+distributions into a hypothesis posterior.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import asdict, dataclass
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
 
+__all__ = [
+    "PACBayesAssumptions",
+    "GeneralizationCertificate",
+    "gaussian_kl",
+    "categorical_kl",
+    "mcallester_bound",
+    "certify_generalization",
+]
+
+_THEOREM = (
+    "McAllester bounded-loss PAC-Bayes: with probability at least 1-delta over an IID sample, "
+    "R(Q) <= Rhat(Q) + sqrt((KL(Q||P)+ln(2*sqrt(n)/delta))/(2*n))."
+)
+
+
+def _finite_real(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a real number.")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite.")
+    return result
+
+
+def _probability_vector(value: Any, name: str, *, strictly_positive: bool) -> np.ndarray:
+    result = np.asarray(value, dtype=float)
+    if result.ndim != 1 or result.size == 0 or not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} must be a non-empty finite one-dimensional vector.")
+    if strictly_positive and np.any(result <= 0):
+        raise ValueError(f"{name} must assign strictly positive mass to every hypothesis.")
+    if not strictly_positive and np.any(result < 0):
+        raise ValueError(f"{name} must be non-negative.")
+    total = float(result.sum())
+    if not math.isfinite(total) or total <= 0:
+        raise ValueError(f"{name} must have positive finite total mass.")
+    result = result / total
+    result.setflags(write=False)
+    return result
+
 
 def gaussian_kl(mu_q: float, s2_q: float, mu_p: float, s2_p: float) -> float:
-    """``KL( N(mu_q, s2_q) || N(mu_p, s2_p) )`` in nats (closed form)."""
-    return float(0.5 * (np.log(s2_p / s2_q) + (s2_q + (mu_q - mu_p) ** 2) / s2_p - 1.0))
+    """``KL(N(mu_q, s2_q) || N(mu_p, s2_p))`` for genuine parameter laws."""
+    mu_q = _finite_real(mu_q, "mu_q")
+    mu_p = _finite_real(mu_p, "mu_p")
+    s2_q = _finite_real(s2_q, "s2_q")
+    s2_p = _finite_real(s2_p, "s2_p")
+    if s2_q <= 0 or s2_p <= 0:
+        raise ValueError("Gaussian variances must be positive.")
+    result = 0.5 * (math.log(s2_p / s2_q) + (s2_q + (mu_q - mu_p) ** 2) / s2_p - 1.0)
+    if result < -1e-12:
+        raise RuntimeError("computed Gaussian KL is unexpectedly negative.")
+    return max(float(result), 0.0)
 
 
-def _categorical_kl(q: np.ndarray, p: np.ndarray) -> float:
-    q = np.clip(np.asarray(q, dtype=float), 1e-12, None)
-    p = np.clip(np.asarray(p, dtype=float), 1e-12, None)
-    q = q / q.sum()
-    p = p / p.sum()
-    return float(np.sum(q * np.log(q / p)))
-
-
-def per_component_kl(model: Any, prior: Any) -> list[float]:
-    """Per-component Gaussian KL between the fitted mixture and the prior mixture.
-
-    Both must be Gaussian mixtures with the same number of components (the prior's components are
-    the per-node priors -- typically broad). This is the per-node blame vector.
-    """
-    qc, pc = list(model.components), list(prior.components)
-    if len(qc) != len(pc):
-        raise ValueError("per_component_kl requires model and prior with equal component counts")
-    return [gaussian_kl(q.mu, q.sigma2, p.mu, p.sigma2) for q, p in zip(qc, pc)]
-
-
-def total_kl(model: Any, prior: Any) -> float:
-    """Total ``KL(Q||P)`` = sum of per-component Gaussian KL + the mixing-weight KL (it composes)."""
-    node = sum(per_component_kl(model, prior))
-    weights = _categorical_kl(np.asarray(model.w, dtype=float), np.asarray(prior.w, dtype=float))
-    return float(node + weights)
-
-
-def _max_logdensity_ub(model: Any) -> float:
-    """A data-free upper bound on the mixture's max log-density (sum of component peaks)."""
-    peaks = [w / np.sqrt(2.0 * np.pi * c.sigma2) for w, c in zip(model.w, model.components)]
-    return float(np.log(np.sum(peaks)))
-
-
-def bounded_losses(model: Any, data: Any) -> np.ndarray:
-    """The bounded likelihood loss ``l(x) = 1 - exp(logdensity(x) - c) in [0, 1)`` per observation.
-
-    ``c`` is the data-free max-log-density upper bound, so ``exp(logdensity - c) in (0, 1]`` and the
-    loss is a valid ``[0, 1]``-bounded PAC-Bayes loss.
-    """
-    c = _max_logdensity_ub(model)
-    ld = np.asarray([model.log_density(float(x)) for x in data], dtype=float)
-    return 1.0 - np.exp(np.minimum(ld - c, 0.0))
+def categorical_kl(posterior: Any, prior: Any) -> tuple[float, tuple[float, ...]]:
+    """Finite-hypothesis ``KL(Q || P)`` and its exact per-hypothesis summands."""
+    q = _probability_vector(posterior, "posterior", strictly_positive=False)
+    p = _probability_vector(prior, "prior", strictly_positive=True)
+    if q.shape != p.shape:
+        raise ValueError("posterior and prior must index the same hypotheses.")
+    terms = np.zeros_like(q)
+    positive = q > 0
+    terms[positive] = q[positive] * np.log(q[positive] / p[positive])
+    total = float(terms.sum())
+    if total < -1e-12 or not math.isfinite(total):
+        raise RuntimeError("computed categorical KL is invalid.")
+    return max(total, 0.0), tuple(float(term) for term in terms)
 
 
 def mcallester_bound(empirical_loss: float, kl: float, n: int, *, delta: float = 0.05) -> float:
-    """McAllester PAC-Bayes bound: ``emp + sqrt((KL + ln(2 sqrt(n) / delta)) / (2n))``."""
-    complexity = (kl + np.log(2.0 * np.sqrt(n) / delta)) / (2.0 * n)
-    return float(empirical_loss + np.sqrt(max(complexity, 0.0)))
+    """Return the raw McAllester upper bound for a loss in ``[0, 1]``."""
+    empirical_loss = _finite_real(empirical_loss, "empirical_loss")
+    kl = _finite_real(kl, "kl")
+    delta = _finite_real(delta, "delta")
+    if not 0 <= empirical_loss <= 1:
+        raise ValueError("empirical_loss must lie in [0, 1].")
+    if kl < 0:
+        raise ValueError("kl must be non-negative.")
+    if isinstance(n, (bool, np.bool_)) or not isinstance(n, Integral) or int(n) <= 0:
+        raise ValueError("n must be a positive exact integer.")
+    if not 0 < delta < 1:
+        raise ValueError("delta must lie strictly between 0 and 1.")
+    n = int(n)
+    complexity = (kl + math.log(2.0 * math.sqrt(n) / delta)) / (2.0 * n)
+    return empirical_loss + math.sqrt(complexity)
 
 
-@dataclass
+@dataclass(frozen=True)
+class PACBayesAssumptions:
+    """Caller-attested premises required by the theorem."""
+
+    hypothesis_space_id: str
+    prior_id: str
+    sample_iid: bool
+    hypotheses_fixed_before_sample: bool
+    prior_fixed_before_sample: bool
+    loss_fixed_before_sample: bool
+    loss_lower: float = 0.0
+    loss_upper: float = 1.0
+
+    def validate(self) -> None:
+        if not isinstance(self.hypothesis_space_id, str) or not self.hypothesis_space_id.strip():
+            raise ValueError("hypothesis_space_id must be a non-empty string.")
+        if not isinstance(self.prior_id, str) or not self.prior_id.strip():
+            raise ValueError("prior_id must be a non-empty string.")
+        premises = {
+            "sample_iid": self.sample_iid,
+            "hypotheses_fixed_before_sample": self.hypotheses_fixed_before_sample,
+            "prior_fixed_before_sample": self.prior_fixed_before_sample,
+            "loss_fixed_before_sample": self.loss_fixed_before_sample,
+        }
+        for name, value in premises.items():
+            if not isinstance(value, (bool, np.bool_)):
+                raise TypeError(f"{name} must be a boolean.")
+            if not bool(value):
+                raise ValueError(f"PAC-Bayes premise is not satisfied: {name}.")
+        lower = _finite_real(self.loss_lower, "loss_lower")
+        upper = _finite_real(self.loss_upper, "loss_upper")
+        if lower != 0.0 or upper != 1.0:
+            raise ValueError("this certificate currently requires loss bounds exactly [0, 1].")
+
+
+@dataclass(frozen=True)
 class GeneralizationCertificate:
-    """A PAC-Bayes certificate attached to a fit."""
+    """A theorem-matched finite-hypothesis PAC-Bayes certificate."""
 
     empirical_loss: float
+    empirical_loss_by_hypothesis: tuple[float, ...]
     kl: float
+    hypothesis_kl_terms: tuple[float, ...]
     n: int
     delta: float
+    raw_bound: float
     bound: float
-    per_component_kl: list[float]
-    vacuous: bool  # True if the bound is >= 1 (says nothing for a [0,1] loss)
+    vacuous: bool
+    posterior: tuple[float, ...]
+    prior: tuple[float, ...]
+    theorem: str
+    assumptions: PACBayesAssumptions
 
     def as_dict(self) -> dict[str, Any]:
-        return {
-            "empirical_loss": self.empirical_loss,
-            "kl": self.kl,
-            "n": self.n,
-            "delta": self.delta,
-            "bound": self.bound,
-            "per_component_kl": list(self.per_component_kl),
-            "vacuous": self.vacuous,
-        }
+        result = asdict(self)
+        result["assumptions"] = asdict(self.assumptions)
+        return result
 
-    def worst_subtree(self) -> int:
-        """Index of the component contributing the most KL (where a loose bound is blamed)."""
-        return int(np.argmax(self.per_component_kl))
+    def largest_kl_term(self) -> int:
+        """Index of the largest signed summand in the exact finite-space KL decomposition."""
+        return int(np.argmax(self.hypothesis_kl_terms))
 
 
 def certify_generalization(
-    model: Any, prior: Any, train_data: Any, *, delta: float = 0.05
+    losses: Any,
+    posterior: Any,
+    prior: Any,
+    *,
+    assumptions: PACBayesAssumptions,
+    delta: float = 0.05,
 ) -> GeneralizationCertificate:
-    """Build a PAC-Bayes certificate for ``model`` fitted on ``train_data`` under ``prior``."""
-    data = list(train_data)
-    n = len(data)
-    emp = float(np.mean(bounded_losses(model, data)))
-    components = per_component_kl(model, prior)
-    kl = total_kl(model, prior)
-    bound = mcallester_bound(emp, kl, n, delta=delta)
+    """Certify the Gibbs risk of ``posterior`` over a fixed finite hypothesis class.
+
+    Args:
+        losses: Matrix with shape ``(n_hypotheses, n_samples)`` and values in ``[0, 1]``.
+        posterior: Sample-dependent probability vector ``Q`` over the hypothesis rows.
+        prior: Data-independent probability vector ``P`` over the same rows.
+        assumptions: Explicit theorem-premise receipt; any false premise fails closed.
+        delta: Failure probability in ``(0, 1)``.
+    """
+    if not isinstance(assumptions, PACBayesAssumptions):
+        raise TypeError("assumptions must be a PACBayesAssumptions receipt.")
+    assumptions.validate()
+    loss_matrix = np.asarray(losses, dtype=float)
+    if loss_matrix.ndim != 2 or loss_matrix.shape[0] == 0 or loss_matrix.shape[1] == 0:
+        raise ValueError("losses must have non-empty (n_hypotheses, n_samples) shape.")
+    if not np.all(np.isfinite(loss_matrix)) or np.any(loss_matrix < 0) or np.any(loss_matrix > 1):
+        raise ValueError("losses must contain only finite values in [0, 1].")
+    q = _probability_vector(posterior, "posterior", strictly_positive=False)
+    p = _probability_vector(prior, "prior", strictly_positive=True)
+    if q.shape != (loss_matrix.shape[0],) or p.shape != q.shape:
+        raise ValueError("posterior and prior must have one entry per hypothesis row.")
+
+    empirical_by_hypothesis = loss_matrix.mean(axis=1)
+    empirical_loss = float(q @ empirical_by_hypothesis)
+    kl, terms = categorical_kl(q, p)
+    delta = _finite_real(delta, "delta")
+    raw_bound = mcallester_bound(empirical_loss, kl, loss_matrix.shape[1], delta=delta)
     return GeneralizationCertificate(
-        empirical_loss=emp,
+        empirical_loss=empirical_loss,
+        empirical_loss_by_hypothesis=tuple(float(value) for value in empirical_by_hypothesis),
         kl=kl,
-        n=n,
-        delta=float(delta),
-        bound=bound,
-        per_component_kl=components,
-        vacuous=bound >= 1.0,
+        hypothesis_kl_terms=terms,
+        n=int(loss_matrix.shape[1]),
+        delta=delta,
+        raw_bound=raw_bound,
+        bound=min(raw_bound, 1.0),
+        vacuous=raw_bound >= 1.0,
+        posterior=tuple(float(value) for value in q),
+        prior=tuple(float(value) for value in p),
+        theorem=_THEOREM,
+        assumptions=assumptions,
     )
