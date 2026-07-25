@@ -497,5 +497,151 @@ class SurrogateBoundaryTest(unittest.TestCase):
         self.assertTrue(np.all(point >= [-2.0, -2.0]) and np.all(point <= [2.0, 2.0]))
 
 
+class ThompsonSamplingRngThreadingTest(unittest.TestCase):
+    """``thompson_sampling`` used to silently fall back to a fresh, unseeded ``np.random.RandomState()``
+    whenever ``propose_next``/``propose_batch``'s own (correctly seeded) ``rng`` was not manually
+    re-threaded into ``acq_kwargs`` -- so ``BayesianOptimizer(acq="thompson", seed=...)`` reproduced its
+    Latin-hypercube init design bit-for-bit (that path already used the seeded rng) but drew a
+    DIFFERENT GP-guided proposal on every run, because the acquisition's own randomness came from OS
+    entropy instead of the caller's seed. ``_propose_one`` now threads its own ``rng`` into every
+    acquisition call (an explicit ``acq_kwargs["rng"]``, if given, still wins), so ``acq="thompson"`` is
+    reproducible under a fixed seed with no extra caller wiring, exactly like every other acquisition.
+    Uses ``_MockSurrogate`` so this runs without torch -- the bug and the fix are entirely in the
+    proposal loop's own kwarg wiring, not in the GP surrogate. See also
+    ``doe_optimizer_test.ThompsonSamplingBayesianOptimizerReproducibilityTest`` for the same fix proven
+    end to end against the real ``BayesianOptimizer``/GP.
+    """
+
+    def setUp(self):
+        self.x = np.array([[0.1, 0.1], [0.4, -0.3], [-0.9, 0.7], [1.2, -1.5]])
+        self.y = np.sum(self.x**2, axis=1)
+        self.bounds = [(-2.0, 2.0), (-2.0, 2.0)]
+        self.n_candidates = 5
+
+    def _mock_gp(self, std: float = 0.5) -> _MockSurrogate:
+        # Nonzero std so Thompson's draw is genuinely stochastic, not a degenerate std=0 point mass.
+        return _MockSurrogate(mean=np.zeros(self.n_candidates), cov=np.eye(self.n_candidates) * std * std)
+
+    def _propose_thompson(self, seed, acq_kwargs=None):
+        return propose_next(
+            self.x,
+            self.y,
+            self.bounds,
+            n_candidates=self.n_candidates,
+            seed=seed,
+            acq="thompson",
+            acq_kwargs=acq_kwargs,
+            gp=self._mock_gp(),
+            return_acquisition=True,
+        )
+
+    def test_repeated_calls_with_the_same_seed_are_bit_identical(self):
+        # The direct reproduction of the reported bug: same seed, same everything else, twice.
+        point_a, merit_a = self._propose_thompson(seed=2)
+        point_b, merit_b = self._propose_thompson(seed=2)
+        np.testing.assert_array_equal(point_a, point_b)
+        self.assertEqual(merit_a, merit_b)
+
+    def test_different_seeds_give_different_draws(self):
+        # Sanity check that the mock's nonzero std makes the draw genuinely stochastic -- confirms the
+        # bit-identity above is a real reproducibility guarantee, not a coincidence of a degenerate
+        # (std=0 or seed-insensitive) setup.
+        point_a, merit_a = self._propose_thompson(seed=2)
+        point_b, merit_b = self._propose_thompson(seed=3)
+        self.assertFalse(np.array_equal(point_a, point_b) and merit_a == merit_b)
+
+    def test_explicit_acq_kwargs_rng_still_overrides_the_ambient_seed(self):
+        # A caller that manually threads its own rng via acq_kwargs (the pre-fix workaround, still a
+        # documented, supported override -- see thompson_acquisition_test.py) must still win over the
+        # ambient seed='s rng for the ACQUISITION's own randomness, not be silently shadowed by it.
+        # seed= is held FIXED across every call below: it also controls the Latin-hypercube candidate
+        # SET itself (independent of acq_kwargs), so varying it here would confound "which candidates
+        # exist" with "which one gets picked" -- holding it fixed isolates the acquisition's own draw
+        # as the only thing that can differ. Compares the raw MERIT (a continuous score, returned via
+        # return_acquisition=True inside _propose_thompson), not just the final selected point: with
+        # only n_candidates=5 options, two genuinely-different random draws can coincidentally agree
+        # on the argmax roughly 1-in-5 of the time, which the underlying merit score will not.
+        _, ambient_merit = self._propose_thompson(seed=2)  # ambient seed's rng feeds the Thompson draw
+        _, overridden_merit = self._propose_thompson(seed=2, acq_kwargs={"rng": np.random.RandomState(99)})
+        self.assertNotEqual(ambient_merit, overridden_merit)  # the override actually took effect
+
+        _, overridden_merit_again = self._propose_thompson(seed=2, acq_kwargs={"rng": np.random.RandomState(99)})
+        self.assertEqual(overridden_merit, overridden_merit_again)  # ...and is itself reproducible
+
+    def test_rng_kwarg_is_a_no_op_for_non_thompson_acquisitions(self):
+        # _propose_one now unconditionally passes rng= to every acquisition (so thompson_sampling gets
+        # threaded); every other builtin must ignore it via its own **_ catch-all with zero effect --
+        # proven directly at the function contract, not just "two runs happened to match".
+        mean = np.array([-1.0, 0.0, 1.0, 2.0, -2.0])
+        std = np.array([1.0, 0.5, 0.2, 0.1, 0.3])
+        for fn in (expected_improvement, log_expected_improvement, probability_of_improvement, upper_confidence_bound):
+            with self.subTest(fn=fn.__name__):
+                without_rng = fn(mean=mean, std=std, best=0.0)
+                with_rng = fn(mean=mean, std=std, best=0.0, rng=np.random.RandomState(0))
+                np.testing.assert_array_equal(without_rng, with_rng)
+
+    def test_default_acq_ei_path_produces_identical_proposals_regardless_of_the_threading_fix(self):
+        # BayesianOptimizer/propose_next default to acq="ei", which takes no rng at all -- the fix must
+        # be a complete no-op for the default path end to end (not just at the bare acquisition
+        # function above), across two independent mock surrogates standing in for two separate fits.
+        mean = np.array([0.0, 0.0, -50.0, 0.0, 0.0])
+        cov = np.eye(self.n_candidates) * 0.01
+        point_a, merit_a = propose_next(
+            self.x,
+            self.y,
+            self.bounds,
+            n_candidates=self.n_candidates,
+            seed=2,
+            return_acquisition=True,
+            gp=_MockSurrogate(mean=mean, cov=cov),
+        )
+        point_b, merit_b = propose_next(
+            self.x,
+            self.y,
+            self.bounds,
+            n_candidates=self.n_candidates,
+            seed=2,
+            return_acquisition=True,
+            gp=_MockSurrogate(mean=mean, cov=cov),
+        )
+        np.testing.assert_array_equal(point_a, point_b)
+        self.assertEqual(merit_a, merit_b)
+
+    def test_thompson_acquisition_advances_the_shared_rng_state_beyond_candidate_generation(self):
+        # RNG-state-hashing mechanism proof: starting from identical RandomState(seed) instances, ei
+        # (which draws no randomness of its own) advances the rng only through Latin-hypercube
+        # candidate generation, while thompson (which draws one extra standard_normal per candidate
+        # from the SAME stream) must leave the rng at a strictly later position in its underlying
+        # random stream -- direct evidence the acquisition's randomness is genuinely pulled from the
+        # threaded rng, not merely coincidentally reproducible.
+        mean = np.zeros(self.n_candidates)
+        cov = np.eye(self.n_candidates) * 0.25
+
+        rng_ei = np.random.RandomState(2)
+        propose_next(
+            self.x, self.y, self.bounds, n_candidates=self.n_candidates, seed=rng_ei, acq="ei", gp=self._mock_gp()
+        )
+        pos_after_ei = rng_ei.get_state()[2]
+
+        rng_thompson = np.random.RandomState(2)
+        propose_next(
+            self.x,
+            self.y,
+            self.bounds,
+            n_candidates=self.n_candidates,
+            seed=rng_thompson,
+            acq="thompson",
+            gp=self._mock_gp(),
+        )
+        pos_after_thompson = rng_thompson.get_state()[2]
+
+        self.assertGreater(
+            pos_after_thompson,
+            pos_after_ei,
+            "thompson consumed no more of the shared rng's random stream than ei did -- its own draw "
+            "is not actually being pulled from the threaded rng",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -432,5 +432,78 @@ class AskTellOptimizationTest(unittest.TestCase):
         self.assertGreater(len({tuple(np.round(p, 6)) for p in batch}), 1)
 
 
+@unittest.skipUnless(HAS_TORCH, "torch is not installed")
+class ThompsonSamplingBayesianOptimizerReproducibilityTest(unittest.TestCase):
+    """``thompson_sampling`` used to fall back to a fresh, unseeded ``np.random.RandomState()``
+    whenever the proposal loop's own seeded ``rng`` was not manually re-threaded into ``acq_kwargs``.
+    ``BayesianOptimizer(acq="thompson", seed=2)`` therefore reproduced its Latin-hypercube init design
+    bit-for-bit across runs (that path always used ``self.rng`` correctly) but drew a DIFFERENT
+    GP-guided proposal every time, since Thompson's own draw came from OS entropy rather than
+    ``self.rng``. ``mixle.doe.bayesopt._propose_one`` now threads its ``rng`` into every acquisition
+    call, so a seeded ``BayesianOptimizer`` is fully reproducible under ``acq="thompson"`` too, exactly
+    like it already was for ``acq="ei"``/``"pi"``/``"ucb"``. See also
+    ``doe_bayesopt_test.ThompsonSamplingRngThreadingTest`` for the torch-free proof at the
+    ``propose_next``/acquisition-function level.
+    """
+
+    bounds = [(-2.0, 2.0), (0.0, 5.0)]
+
+    @staticmethod
+    def _objective(p):
+        return float(np.sum(np.asarray(p) ** 2))
+
+    def _run(self, seed=2, n_init=4, n_gp=3):
+        opt = BayesianOptimizer(self.bounds, acq="thompson", seed=seed, n_init=n_init, n_candidates=64)
+        init_pts = [opt.ask() for _ in range(n_init)]
+        for p in init_pts:
+            opt.tell(p, self._objective(p))
+        gp_pts = [opt.ask() for _ in range(n_gp)]  # now in GP-acquisition (thompson) territory
+        return np.array(init_pts), np.array(gp_pts)
+
+    def test_gp_guided_thompson_proposals_are_bit_identical_across_runs(self):
+        # The exact reported reproduction: two seed=2 runs.
+        init_a, gp_a = self._run()
+        init_b, gp_b = self._run()
+        np.testing.assert_array_equal(init_a, init_b)  # already true pre-fix -- the LHS design was fine
+        np.testing.assert_array_equal(gp_a, gp_b)  # the actual bug: this used to differ run to run
+
+    def test_bit_identical_even_with_unrelated_optimizer_calls_interleaved(self):
+        # Burn-in: drive several unrelated BayesianOptimizer instances (different seeds, an unseeded
+        # one, and a different acquisition) through full ask/tell cycles between the two seed=2 runs,
+        # to rule out any hidden shared/global state -- not merely that a single instance's own rng is
+        # self-consistent.
+        init_a, gp_a = self._run()
+
+        for burn_seed in (None, 5, 9):
+            burn = BayesianOptimizer(self.bounds, acq="ei", seed=burn_seed, n_init=3, n_candidates=32)
+            for _ in range(4):
+                p = burn.ask()
+                burn.tell(p, self._objective(p))
+
+        unrelated_thompson = BayesianOptimizer(self.bounds, acq="thompson", seed=123, n_init=3, n_candidates=32)
+        for _ in range(3):
+            p = unrelated_thompson.ask()
+            unrelated_thompson.tell(p, self._objective(p))
+        unrelated_thompson.ask(2)  # its own GP-guided thompson draws, deliberately left un-told
+
+        init_b, gp_b = self._run()
+        np.testing.assert_array_equal(init_a, init_b)
+        np.testing.assert_array_equal(gp_a, gp_b)
+
+    def test_default_acq_ei_path_is_unaffected_by_the_rng_threading_change(self):
+        # Negative control at the BayesianOptimizer level: the default acquisition takes no rng at
+        # all, so it must remain exactly as reproducible (and only as reproducible) as before.
+        def run_ei(seed):
+            opt = BayesianOptimizer(self.bounds, acq="ei", seed=seed, n_init=4, n_candidates=64)
+            init_pts = [opt.ask() for _ in range(4)]
+            for p in init_pts:
+                opt.tell(p, self._objective(p))
+            return np.array([opt.ask() for _ in range(3)])
+
+        ei_a = run_ei(2)
+        ei_b = run_ei(2)
+        np.testing.assert_array_equal(ei_a, ei_b)
+
+
 if __name__ == "__main__":
     unittest.main()
