@@ -44,6 +44,11 @@ def _require_arrow() -> None:
 
 def _table_records(table: Any, columns: list[str] | None) -> list[Any]:
     cols = columns if columns is not None else table.column_names
+    if not cols:
+        # zip(*()) with zero iterables returns an empty iterator regardless of row count, so an
+        # explicit columns=[] (project to zero columns) would silently discard the row count instead
+        # of yielding one zero-width record per row. Row count must come from the table directly.
+        return [() for _ in range(table.num_rows)]
     pydict = table.select(cols).to_pydict()
     rows = zip(*(pydict[c] for c in cols))
     return [r[0] if len(cols) == 1 else r for r in rows]

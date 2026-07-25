@@ -60,6 +60,13 @@ def _make_table():
     return pa.table({"a": [1, 2, 3], "b": ["x", "y", "z"]})
 
 
+def _write_parquet(path, table):
+    pytest.importorskip("pyarrow")
+    import pyarrow.parquet as pq
+
+    pq.write_table(table, str(path))
+
+
 # --------------------------------------------------------------------------- Feather (MXR-080-0065a)
 
 
@@ -201,6 +208,73 @@ def test_csv_columns_empty_list_differs_from_columns_none(tmp_path):
     assert remote_empty != remote_none
     assert local_empty != local_none
     assert remote_none == local_none == [("1", "x"), ("2", "y")]
+
+
+# --------------------------------------------------------------------------- Parquet/Feather columns=[] zip bug
+
+
+def test_parquet_columns_empty_list_matches_local_text_source(tmp_path):
+    """``arrow_source._table_records`` -- shared by this module's Parquet and Feather branches via
+    ``_table_records(table, None)`` after the table itself is already projected down to zero columns --
+    used to build each row via ``zip(*(pydict[c] for c in cols))``. With zero columns, Python's
+    ``zip()`` called with zero iterables returns an empty iterator with no way to know how many rows
+    the table actually had, so an explicit ``columns=[]`` silently returned zero records regardless of
+    the file's real row count, instead of one zero-width record (``()``) per row. Remote Parquet and
+    local ``text_source.read_csv`` (which already gets ``columns=[]`` right) must agree.
+    """
+    pytest.importorskip("pyarrow")
+    path = tmp_path / "data.parquet"
+    _write_parquet(path, _make_table())
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n1,x\n2,y\n3,z\n")
+
+    remote = list(hadoop_source.read_remote(str(path), "parquet", columns=[]).records())
+    local = list(text_source.read_csv(str(csv_path), columns=[]).records())
+
+    assert remote == local == [(), (), ()]
+
+
+def test_feather_columns_empty_list_matches_local_text_source(tmp_path):
+    """Same ``_table_records`` zip-with-zero-columns bug as the Parquet case above, reached via this
+    module's Feather branch (``table.select([])`` then ``_table_records(table, None)``)."""
+    pytest.importorskip("pyarrow")
+    path = tmp_path / "data.feather"
+    _write_feather(path, _make_table())
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n1,x\n2,y\n3,z\n")
+
+    remote = list(hadoop_source.read_remote(str(path), "feather", columns=[]).records())
+    local = list(text_source.read_csv(str(csv_path), columns=[]).records())
+
+    assert remote == local == [(), (), ()]
+
+
+def test_parquet_columns_empty_list_differs_from_columns_none(tmp_path):
+    """Negative control pinning the exact symptom: columns=[] (zero columns, row count preserved) must
+    NOT collapse to the same result as columns=None (no filter, every column)."""
+    pytest.importorskip("pyarrow")
+    path = tmp_path / "data.parquet"
+    _write_parquet(path, _make_table())
+
+    empty = list(hadoop_source.read_remote(str(path), "parquet", columns=[]).records())
+    none = list(hadoop_source.read_remote(str(path), "parquet", columns=None).records())
+
+    assert empty != none
+    assert empty == [(), (), ()]
+    assert none == [(1, "x"), (2, "y"), (3, "z")]
+
+
+def test_feather_columns_empty_list_differs_from_columns_none(tmp_path):
+    pytest.importorskip("pyarrow")
+    path = tmp_path / "data.feather"
+    _write_feather(path, _make_table())
+
+    empty = list(hadoop_source.read_remote(str(path), "feather", columns=[]).records())
+    none = list(hadoop_source.read_remote(str(path), "feather", columns=None).records())
+
+    assert empty != none
+    assert empty == [(), (), ()]
+    assert none == [(1, "x"), (2, "y"), (3, "z")]
 
 
 # --------------------------------------------------------------------------- deprecated pyarrow.feather API
