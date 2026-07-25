@@ -466,7 +466,12 @@ def get_hybrid_image_estimator(dim: int = IMAGE_FEATURE_DIM) -> "ParameterEstima
     from mixle.represent.modality import image_features
 
     name = f"image_features_{dim}"
-    register_feature_fn(name, lambda img, _dim=dim: image_features(img, dim=_dim))
+    register_feature_fn(
+        name,
+        lambda img, _dim=dim: image_features(img, dim=_dim),
+        version="image-features-v1",
+        feature_dim=dim,
+    )
     return FeatureMapEstimator(name, Flow(dim=dim).estimator())
 
 

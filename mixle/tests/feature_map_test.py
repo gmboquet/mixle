@@ -10,7 +10,11 @@ import unittest
 import numpy as np
 
 from mixle.inference import optimize
-from mixle.models.feature_map import FeatureMapDensity, FeatureMapEstimator, register_feature_fn
+from mixle.models.feature_map import (
+    FeatureMapDensity,
+    FeatureMapEstimator,
+    register_feature_fn,
+)
 from mixle.stats import MultivariateGaussianEstimator
 from mixle.utils.serialization import from_json, to_json
 
@@ -19,7 +23,7 @@ def _pair_sums(x):
     return np.array([float(np.sum(x[:2])), float(np.sum(x[2:]))])
 
 
-register_feature_fn("test_pair_sums", _pair_sums)
+register_feature_fn("test_pair_sums", _pair_sums, version="1", feature_dim=2)
 
 
 def _data(n=200, seed=0):
@@ -58,20 +62,42 @@ class FeatureMapTest(unittest.TestCase):
         back = from_json(to_json(fitted))
         self.assertIsInstance(back, FeatureMapDensity)
         self.assertEqual(back.feature_name, "test_pair_sums")
+        self.assertEqual(back.feature_version, "1")
+        self.assertEqual(back.feature_dim, 2)
+        self.assertEqual(back.feature_digest, fitted.feature_digest)
         enc = fitted.dist_to_encoder().seq_encode(data)
         self.assertTrue(np.allclose(fitted.seq_log_density(enc), back.seq_log_density(enc)))
 
-    def test_sampler_draws_from_the_feature_space(self):
+    def test_raw_sampler_is_unavailable_and_feature_sampler_is_explicit(self):
         fitted = optimize(
             _data(), FeatureMapEstimator("test_pair_sums", MultivariateGaussianEstimator(dim=2)), max_its=3, out=None
         )
-        draws = fitted.sampler(0).sample(5)
+        with self.assertRaisesRegex(NotImplementedError, "cannot sample raw items"):
+            fitted.sampler(0)
+        draws = fitted.feature_sampler(0).sample(5)
         self.assertEqual(np.asarray(draws).shape, (5, 2))  # feature space is 2-D, not the raw 4-D input
 
     def test_unregistered_feature_name_raises(self):
-        est = FeatureMapEstimator("does_not_exist", MultivariateGaussianEstimator(dim=2))
         with self.assertRaises(KeyError):
-            optimize(_data(n=10), est, max_its=1, out=None)
+            FeatureMapEstimator("does_not_exist", MultivariateGaussianEstimator(dim=2))
+
+    def test_duplicate_registration_cannot_change_an_existing_identity(self):
+        def incompatible(x):
+            return np.asarray(x[:2], dtype=float)
+
+        with self.assertRaisesRegex(ValueError, "already registered"):
+            register_feature_fn("test_pair_sums", incompatible, version="1", feature_dim=2)
+
+    def test_feature_shape_and_finiteness_are_checked_before_stacking(self):
+        register_feature_fn("test_bad_shape", lambda x: np.asarray(x), version="1", feature_dim=2)
+        encoder = FeatureMapEstimator(
+            "test_bad_shape",
+            MultivariateGaussianEstimator(dim=2),
+        ).accumulator_factory().make().acc_to_encoder()
+        with self.assertRaisesRegex(ValueError, "must return shape"):
+            encoder.seq_encode([[1.0], [1.0, 2.0]])
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            encoder.seq_encode([[1.0, np.nan]])
 
 
 if __name__ == "__main__":
