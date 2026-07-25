@@ -62,9 +62,31 @@ class StructuredVITestCase(unittest.TestCase):
     def test_unknown_family_and_non_handle_rejected_at_guide_build(self):
         mu = Normal(0, 10)
         with self.assertRaises(ValueError):
+            Guide()
+        with self.assertRaises(ValueError):
+            Guide(first=mu, second=mu)
+        with self.assertRaises(ValueError):
             Guide(mu=(mu, "studentt"))  # not a supported q-family
         with self.assertRaises(TypeError):
             Guide(mu=3.0)  # not a RandomVariable handle
+
+    def test_guide_is_complete_and_validated_before_graph_execution(self):
+        from unittest.mock import patch
+
+        mu, tau = Normal(0, 10), Gamma(1, 1)
+        model = Normal(mu, tau)
+        with patch("mixle.ppl.guide.Graph.fit") as fit:
+            with self.assertRaisesRegex(ValueError, "missing"):
+                structured_vi((model, [0.0]), Guide(mu=mu))
+            fit.assert_not_called()
+        with patch("mixle.ppl.guide.Graph.fit") as fit:
+            with self.assertRaisesRegex(ValueError, "requires 'gaussian'"):
+                structured_vi((model, [0.0]), Guide(mu=(mu, "gamma"), tau=tau))
+            fit.assert_not_called()
+        with self.assertRaises(ValueError):
+            structured_vi((model, [0.0]), Guide(mu=mu, tau=tau), max_its=0)
+        with self.assertRaises(ValueError):
+            structured_vi((model, [0.0]), Guide(mu=mu, tau=tau), tol=np.nan)
 
     def test_admixture_lda_recovers_topics_without_lda_distribution(self):
         # LDA via the guide surface: declare topic Dirichlet factors, fit by mean-field VI from
@@ -105,6 +127,30 @@ class StructuredVITestCase(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             admixture([[0, 1, 2]], [Normal(0, 1)], alpha=0.3)
+
+    def test_admixture_rejects_invalid_corpus_priors_and_controls(self):
+        from mixle.ppl import admixture
+
+        topics = [Dirichlet([0.1, 0.1]), Dirichlet([0.1, 0.1])]
+        invalid = [
+            ([], topics, {}),
+            ([[]], topics, {}),
+            ([[0.0, 1.0]], topics, {}),
+            ([[0, 2]], topics, {}),
+            ([[0, 1]], [topics[0], topics[0]], {}),
+            ([[0, 1]], topics, {"alpha": 0.0}),
+            ([[0, 1]], topics, {"alpha": [0.1]}),
+            ([[0, 1]], topics, {"max_its": 0}),
+            ([[0, 1]], topics, {"inner_its": 0}),
+            ([[0, 1]], topics, {"tol": np.inf}),
+        ]
+        for docs, topic_handles, kwargs in invalid:
+            with self.subTest(docs=docs, kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                admixture(docs, topic_handles, **kwargs)
+
+        bad_topics = [Dirichlet([0.1, 0.1]), Dirichlet([0.1, -0.1])]
+        with self.assertRaises(ValueError):
+            admixture([[0, 1]], bad_topics)
 
     def test_summary_lists_named_latents_and_elbo(self):
         rng = np.random.RandomState(5)

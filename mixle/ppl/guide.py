@@ -34,7 +34,11 @@ q-families, and latent-feature (IBP-style) factors -- those raise a clear error 
 
 from __future__ import annotations
 
+from numbers import Integral, Real
+from types import MappingProxyType
 from typing import Any
+
+import numpy as np
 
 from mixle.ppl.core import RandomVariable
 from mixle.ppl.vmp import DirichletVNode, GammaVNode, GaussianVNode, Graph
@@ -61,12 +65,15 @@ class Guide:
     """
 
     def __init__(self, **latents: Any) -> None:
-        self._latents: dict[str, tuple[RandomVariable, str | None]] = {}
+        if not latents:
+            raise ValueError("Guide requires at least one named latent")
+        validated: dict[str, tuple[RandomVariable, str | None]] = {}
+        seen_handles = {}
         for name, spec in latents.items():
             if isinstance(spec, tuple):
                 handle, family = spec
-                family = str(family).lower()
-                if family not in _NODE_OF_FAMILY:
+                family = None if family is None else str(family).lower()
+                if family is not None and family not in _NODE_OF_FAMILY:
                     raise ValueError(
                         f"unknown variational family {family!r} for {name!r}; "
                         f"use one of {sorted(set(_NODE_OF_FAMILY))}."
@@ -75,7 +82,15 @@ class Guide:
                 handle, family = spec, None
             if not isinstance(handle, RandomVariable):
                 raise TypeError(f"guide latent {name!r} must be a RandomVariable handle, got {type(handle).__name__}.")
-            self._latents[name] = (handle, family)
+            previous = seen_handles.get(id(handle))
+            if previous is not None:
+                raise ValueError(
+                    f"guide latent handle is aliased by both {previous!r} and {name!r}; "
+                    "each inferred latent must have exactly one owner"
+                )
+            seen_handles[id(handle)] = name
+            validated[name] = (handle, family)
+        self._latents = MappingProxyType(validated)
 
     def names(self) -> tuple[str, ...]:
         """Return the declared latent names in guide order."""
@@ -97,7 +112,7 @@ class StructuredVIPosterior:
 
     def __init__(self, gres, guide: Guide) -> None:
         self._g = gres
-        self._guide = guide
+        self._guide = Guide(**dict(guide._latents))
         self.elbo = gres.elbo
         self.elbo_trace = gres.elbo_trace
         self.acceptance_rate = None
@@ -133,6 +148,45 @@ class StructuredVIPosterior:
         return f"StructuredVIPosterior({self._guide!r}, elbo={self.elbo:.4g})"
 
 
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a positive integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a positive finite real number")
+    result = float(value)
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a positive finite real number")
+    return result
+
+
+def _model_latents(model: RandomVariable) -> dict[int, RandomVariable]:
+    found = {}
+    visiting = set()
+
+    def visit(value: Any, *, root: bool = False) -> None:
+        if not isinstance(value, RandomVariable):
+            return
+        identity = id(value)
+        if identity in visiting:
+            raise ValueError("structured VI model contains a cyclic RandomVariable dependency")
+        if not root:
+            found[identity] = value
+        visiting.add(identity)
+        for argument in value._args:
+            visit(argument)
+        visiting.remove(identity)
+
+    visit(model, root=True)
+    return found
+
+
 def structured_vi(observations, guide: Guide, *, max_its: int = 300, tol: float = 1e-8) -> StructuredVIPosterior:
     """Fit a structured model by mean-field VMP / coordinate-ascent VI under a declared :class:`Guide`.
 
@@ -151,16 +205,52 @@ def structured_vi(observations, guide: Guide, *, max_its: int = 300, tol: float 
         ValueError: if a guide latent is not actually an inferred latent of the model, or its declared
             q-family does not match the model's conjugate factor (the projection constraint is checked).
     """
+    if not isinstance(guide, Guide):
+        raise TypeError("guide must be a Guide")
+    max_its = _positive_int(max_its, "max_its")
+    tol = _positive_finite(tol, "tol")
     if isinstance(observations, tuple) and len(observations) == 2 and isinstance(observations[0], RandomVariable):
         observations = [observations]
-    pairs = list(observations)
+    try:
+        pairs = list(observations)
+    except TypeError as error:
+        raise TypeError("observations must be (model, data) pairs") from error
     if not pairs:
         raise ValueError("structured_vi needs at least one (model, data) observation factor.")
 
-    g = Graph()
-    for model, data in pairs:
+    inferred = {}
+    validated_pairs = []
+    for item in pairs:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            raise ValueError("each structured VI observation must be exactly (model, data)")
+        model, data = item
         if not isinstance(model, RandomVariable):
             raise TypeError("each observation must be (model_RandomVariable, data).")
+        inferred.update(_model_latents(model))
+        validated_pairs.append((model, data))
+    declared = {id(handle): name for name, (handle, _) in guide._latents.items()}
+    missing = [handle for identity, handle in inferred.items() if identity not in declared]
+    stray = [name for identity, name in declared.items() if identity not in inferred]
+    if missing or stray:
+        missing_names = [handle._name or f"<{handle._family.name}:{identity}>" for identity, handle in inferred.items() if identity not in declared]
+        raise ValueError(
+            "guide must project every inferred latent exactly once; "
+            f"missing={missing_names}, not_in_model={stray}"
+        )
+    for name, (handle, family) in guide._latents.items():
+        expected = {"Normal": "gaussian", "Gamma": "gamma", "Dirichlet": "dirichlet"}.get(
+            getattr(handle._family, "name", None)
+        )
+        if expected is None:
+            raise NotImplementedError(f"structured VI does not support latent family {handle._family.name!r}")
+        if family is not None and _NODE_OF_FAMILY[family] is not _NODE_OF_FAMILY[expected]:
+            raise ValueError(
+                f"guide declares q({name})={family!r}, but latent family {handle._family.name!r} "
+                f"requires {expected!r}"
+            )
+
+    g = Graph()
+    for model, data in validated_pairs:
         g.observe(model, data)
     res = g.fit(max_its=max_its, tol=tol)
 
@@ -246,53 +336,97 @@ def admixture(docs, topics, *, alpha=1.0, max_its: int = 100, inner_its: int = 4
     coordinate-ascent (q(theta_d), q(beta_k) Dirichlet + categorical responsibilities q(z)) fits any
     admixture over a categorical vocabulary -- no ``LDADistribution`` involved.
     """
-    import numpy as np
-
-    from mixle.ppl.core import RandomVariable
-
+    try:
+        topics = list(topics)
+    except TypeError as error:
+        raise TypeError("topics must be a non-empty sequence of Dirichlet handles") from error
     if not topics or any(not isinstance(t, RandomVariable) or t._family.name != "Dirichlet" for t in topics):
         raise TypeError(
             "`topics` must be a non-empty list of Dirichlet RandomVariable handles (the q(beta_k) factors)."
         )
-    eta = np.array([np.asarray(t._args[0], dtype=float) for t in topics])  # (K, V) per-topic word priors
+    if len({id(topic) for topic in topics}) != len(topics):
+        raise ValueError("each admixture topic handle must be unique")
+    eta_rows = [np.asarray(topic._args[0], dtype=float) for topic in topics]
+    if any(row.ndim != 1 or row.size < 2 for row in eta_rows):
+        raise ValueError("each topic prior must be a one-dimensional concentration vector of length >= 2")
+    if len({row.shape for row in eta_rows}) != 1:
+        raise ValueError("all topic priors must use the same vocabulary size")
+    eta = np.stack(eta_rows)  # (K, V) per-topic word priors
+    if not np.all(np.isfinite(eta)) or np.any(eta <= 0.0):
+        raise ValueError("topic Dirichlet concentrations must be finite and strictly positive")
     K, V = eta.shape
-    docs = [np.asarray(d, dtype=int) for d in docs]
-    if any(d.size and (d.max() >= V or d.min() < 0) for d in docs):
-        raise ValueError(f"document word ids must be in [0, {V}) for topics of vocabulary size {V}.")
+    try:
+        raw_docs = list(docs)
+    except TypeError as error:
+        raise TypeError("docs must be a non-empty corpus of token sequences") from error
+    if not raw_docs:
+        raise ValueError("docs must contain at least one document")
+    documents = []
+    for index, document in enumerate(raw_docs):
+        raw = np.asarray(document)
+        if raw.ndim != 1 or raw.dtype.kind not in {"i", "u"}:
+            raise ValueError(f"document {index} must be a one-dimensional vector of exact integer word ids")
+        encoded = raw.astype(np.int64, copy=False)
+        if np.any(encoded < 0) or np.any(encoded >= V):
+            raise ValueError(f"document word ids must be in [0, {V}) for vocabulary size {V}")
+        documents.append(encoded)
+    if not any(document.size for document in documents):
+        raise ValueError("docs must contain at least one observed token")
+    max_its = _positive_int(max_its, "max_its")
+    inner_its = _positive_int(inner_its, "inner_its")
+    tol = _positive_finite(tol, "tol")
+    if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, Integral):
+        raise TypeError("seed must be an integer")
+    seed = int(seed)
+    if seed < 0 or seed >= 2**32:
+        raise ValueError("seed must lie in [0, 2**32)")
+    alpha_array = np.asarray(alpha, dtype=float)
+    if alpha_array.ndim == 0:
+        alpha_vector = np.full(K, float(alpha_array))
+    elif alpha_array.shape == (K,):
+        alpha_vector = alpha_array.copy()
+    else:
+        raise ValueError(f"alpha must be a positive scalar or a vector of length {K}")
+    if not np.all(np.isfinite(alpha_vector)) or np.any(alpha_vector <= 0.0):
+        raise ValueError("alpha concentrations must be finite and strictly positive")
 
     rng = np.random.RandomState(seed)
     lam = rng.gamma(100.0, 1.0 / 100.0, (K, V)) + eta  # random init breaks the topic-label symmetry
-    gamma = np.full((len(docs), K), float(alpha) + 1.0)
+    gamma = np.tile(alpha_vector + 1.0, (len(documents), 1))
     ll_trace = []
-    for _ in range(int(max_its)):
+    for _ in range(max_its):
         elog_beta = _dirichlet_expectation(lam)  # (K, V)
         new_lam = eta.astype(float).copy()
-        ll = 0.0
-        beta_hat = lam / lam.sum(1, keepdims=True)
-        for d, w in enumerate(docs):
+        for d, w in enumerate(documents):
             if w.size == 0:
                 continue
             elog_beta_w = elog_beta[:, w]  # (K, n)
             g = gamma[d].copy()
-            for _ in range(int(inner_its)):
+            for _ in range(inner_its):
                 elog_theta = _dirichlet_expectation(g)  # (K,)
                 from scipy.special import logsumexp
 
                 log_phi = elog_theta[:, None] + elog_beta_w  # (K, n)
                 log_phi -= logsumexp(log_phi, axis=0, keepdims=True)
                 phi = np.exp(log_phi)  # (K, n)  responsibilities q(z)
-                g_new = float(alpha) + phi.sum(axis=1)
+                g_new = alpha_vector + phi.sum(axis=1)
                 if np.mean(np.abs(g_new - g)) < tol:
                     g = g_new
                     break
                 g = g_new
             gamma[d] = g
             np.add.at(new_lam, (slice(None), w), phi)  # lam[k, w_n] += phi[k, n]
+        lam = new_lam
+        beta_hat = lam / lam.sum(1, keepdims=True)
+        ll = 0.0
+        for d, w in enumerate(documents):
+            if w.size == 0:
+                continue
+            g = gamma[d]
             theta_hat = g / g.sum()
             ll += float(np.sum(np.log(theta_hat @ beta_hat[:, w] + 1e-300)))  # fitted-model doc LL
-        lam = new_lam
         ll_trace.append(ll)
-        if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < 1e-6 * max(1.0, abs(ll_trace[-2])):
+        if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
             break
     return AdmixturePosterior(lam, gamma, topics, ll_trace)
 
