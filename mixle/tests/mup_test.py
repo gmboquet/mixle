@@ -86,9 +86,8 @@ def _train_eval(d_model: int, lr: float, seed: int, *, use_mup: bool, n_steps: i
     width_mult = d_model / BASE_WIDTH
     if use_mup:
         apply_mup_init(model, base_width=BASE_WIDTH, base_std=0.02)
-        out_mult = output_forward_multiplier(width_mult)
-    else:
-        out_mult = 1.0
+        assert model.mup_output_multiplier.item() == pytest.approx(output_forward_multiplier(width_mult))
+    out_mult = 1.0
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     for x, y in _batches(seed=100 + seed, n_batches=n_steps):
         xt, yt = torch.from_numpy(x), torch.from_numpy(y)
@@ -223,6 +222,36 @@ def test_apply_mup_init_rescales_hidden_weight_std_with_width():
     # LayerNorm affine params keep their identity init (Theta(1), width-independent) at every width.
     assert torch.allclose(big.blocks[0].ln1.weight, torch.ones_like(big.blocks[0].ln1.weight))
     assert torch.allclose(big.blocks[0].ln1.bias, torch.zeros_like(big.blocks[0].ln1.bias))
+
+
+def test_apply_mup_init_scales_live_readout_values_and_gradients_across_widths():
+    x = torch.tensor([[1, 2, 3]])
+    for width in (8, 16, 32):
+        torch.manual_seed(width)
+        model = build_causal_lm(vocab=VOCAB, d_model=width, n_layer=1, n_head=2, block=BLOCK)
+        apply_mup_init(model, base_width=8, base_std=0.02)
+        expected = output_forward_multiplier(width / 8)
+        assert model.mup_output_multiplier.item() == pytest.approx(expected)
+
+        model.mup_output_multiplier.fill_(1.0)
+        raw_logits = model(x)
+        raw_all_logits = model(x, return_all_logits=True)
+        raw_gradient = torch.autograd.grad(raw_logits.sum(), model.blocks[0].attn.proj.weight)[0]
+
+        model.mup_output_multiplier.fill_(expected)
+        scaled_logits = model(x)
+        scaled_all_logits = model(x, return_all_logits=True)
+        scaled_gradient = torch.autograd.grad(scaled_logits.sum(), model.blocks[0].attn.proj.weight)[0]
+
+        assert torch.allclose(scaled_logits, raw_logits * expected, rtol=1.0e-6, atol=1.0e-7)
+        assert torch.allclose(
+            scaled_all_logits, raw_all_logits * expected, rtol=1.0e-6, atol=1.0e-7
+        )
+        assert torch.allclose(scaled_gradient, raw_gradient * expected, rtol=1.0e-5, atol=1.0e-7)
+        assert "mup_output_multiplier" in model.state_dict()
+        restored = build_causal_lm(vocab=VOCAB, d_model=width, n_layer=1, n_head=2, block=BLOCK)
+        restored.load_state_dict(model.state_dict())
+        assert restored.mup_output_multiplier.item() == pytest.approx(expected)
 
 
 # --- 1. the core acceptance criterion: transferred lr vs. independently-tuned optimum ------------

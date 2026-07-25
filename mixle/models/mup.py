@@ -55,6 +55,7 @@ init/lr. This reproduces the correct output-scale behavior without touching weig
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -71,8 +72,8 @@ _ROLES: tuple[Role, ...] = ("input", "hidden", "output")
 
 def _check_width_mult(width_mult: float) -> float:
     width_mult = float(width_mult)
-    if width_mult <= 0:
-        raise ValueError(f"width_mult must be positive, got {width_mult}.")
+    if not math.isfinite(width_mult) or width_mult <= 0:
+        raise ValueError(f"width_mult must be finite and positive, got {width_mult}.")
     return width_mult
 
 
@@ -210,6 +211,11 @@ def apply_mup_init(model, *, base_width: int, base_std: float = 0.02) -> None:
     """
     if not _HAS_TORCH:  # pragma: no cover - torch is optional
         raise ImportError("apply_mup_init requires torch.")
+    if isinstance(base_width, bool) or not isinstance(base_width, int) or base_width <= 0:
+        raise ValueError("base_width must be a positive integer")
+    base_std = float(base_std)
+    if not math.isfinite(base_std) or base_std <= 0.0:
+        raise ValueError("base_std must be finite and positive")
     width_mult = float(model.d_model) / float(base_width)
     roles = classify_causal_lm_params(model)
     named = dict(model.named_parameters())
@@ -227,6 +233,16 @@ def apply_mup_init(model, *, base_width: int, base_std: float = 0.02) -> None:
         std = base_std * init_std_multiplier(role, width_mult)
         nn.init.normal_(p, mean=0.0, std=std)
     enable_mup_attention(model, enabled=True)
+    multiplier = output_forward_multiplier(width_mult)
+    current_multiplier = getattr(model, "mup_output_multiplier", None)
+    if current_multiplier is None:
+        model.register_buffer(
+            "mup_output_multiplier",
+            next(model.parameters()).detach().new_tensor(multiplier),
+            persistent=True,
+        )
+    else:
+        current_multiplier.fill_(multiplier)
 
 
 @dataclass(frozen=True)

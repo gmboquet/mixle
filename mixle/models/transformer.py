@@ -128,6 +128,10 @@ if _HAS_TORCH:
             self.ln = nn.LayerNorm(d_model)
             self.head = nn.Linear(d_model, vocab, bias=False)
             self.head.weight = self.tok.weight  # weight tying
+            # Persistent production readout scale. Standard parametrization uses 1; apply_mup_init()
+            # replaces it with target_width/base_width ** -1 so every logits path implements the
+            # output-role part of the muP abc-parametrization.
+            self.register_buffer("mup_output_multiplier", torch.tensor(1.0), persistent=True)
             # activation (gradient) checkpointing: recompute block activations in backward instead of
             # storing them -- the standard memory/compute trade for long blocks or deep stacks. A plain
             # attribute (not a ctor arg) so modules saved before the flag existed rebuild unchanged.
@@ -234,6 +238,7 @@ if _HAS_TORCH:
                 else:
                     h = blk(h)
             logits = self.head(self.ln(h))
+            logits = logits * getattr(self, "mup_output_multiplier", 1.0)
             return logits if return_all_logits else logits[:, -1]
 
 
