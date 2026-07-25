@@ -56,8 +56,9 @@ Current contents:
   ``mamba-ssm`` source.
 - :mod:`mixle.experimental.ssm_hybrid` -- E5 part 2, the hybrid block:
   :class:`~mixle.experimental.ssm_hybrid.HybridBlock` composes E1's local windowed attention, E5 part 1's
-  selective-scan SSM branch, and E2's moment-closure far field into one ``ContextMechanism``, with a real
-  per-mechanism contribution receipt exposed via ``report()``. See ``notes/designs/E5.md`` for the design.
+  selective-scan SSM branch, and E2's moment-closure far field into one ``ContextMechanism``. Its
+  ``report()`` exposes descriptive routing mass, explicitly not output attribution. See
+  ``notes/designs/E5.md`` for the design.
 - :mod:`mixle.experimental.long_context_eval` -- E7, the long-context referee suite (needle / copy /
   multi-hop / multi-scale-perplexity probes, a length curriculum, matched-FLOPs / matched-state-bytes
   bookkeeping) every Track-E mechanism is measured against on the same terms.
