@@ -198,5 +198,96 @@ class ConstrainedDecodeTest(unittest.TestCase):
         self.assertEqual(dec.below_floor, [])
 
 
+class ConstructionSafetyTest(unittest.TestCase):
+    """MXR-080-0297: duplicate/cyclic/invalid construction must be rejected, not silently accepted."""
+
+    def test_add_class_rejects_duplicate_name(self):
+        ont = Ontology().add_class("A").add_class("B", "A").add_class("C", "B")
+        with self.assertRaises(ValueError):
+            ont.add_class("C", "A")  # would have silently overwritten C's parent B -> A
+        self.assertEqual(ont.classes["C"], "B")  # unchanged by the rejected call
+
+    def test_add_class_duplicate_self_reference_rejected(self):
+        # a duplicate add_class("X", "X") is rejected as a duplicate name before self-parentage
+        # would even be considered -- it can never sneak through as a "new" class.
+        ont = Ontology().add_class("X")
+        with self.assertRaises(ValueError):
+            ont.add_class("X", "X")
+        self.assertIsNone(ont.classes["X"])
+
+    def test_add_class_unknown_parent_rejected(self):
+        with self.assertRaises(ValueError):
+            Ontology().add_class("X", "NoSuchParent")
+
+    def test_replace_class_requires_existing_name(self):
+        with self.assertRaises(KeyError):
+            Ontology().add_class("A").replace_class("NeverAdded", "A")
+
+    def test_replace_class_unknown_parent_rejected(self):
+        with self.assertRaises(ValueError):
+            Ontology().add_class("A").replace_class("A", "NoSuchParent")
+
+    def test_replace_class_self_parent_rejected(self):
+        ont = Ontology().add_class("X")
+        with self.assertRaises(ValueError):
+            ont.replace_class("X", "X")
+
+    def test_replace_class_cycle_through_replacement_rejected(self):
+        # P -> Q is fine; reparenting P to Q (Q's current ancestor chain already leads back to P)
+        # would close a 2-cycle P -> Q -> P. This can ONLY happen through replacement, since a
+        # freshly add_class'd name can never already be its own ancestor.
+        ont = Ontology().add_class("P").add_class("Q", "P")
+        with self.assertRaises(ValueError):
+            ont.replace_class("P", "Q")
+        self.assertEqual(ont.classes["P"], None)  # unchanged by the rejected call
+        self.assertEqual(ont.classes["Q"], "P")
+
+    def test_replace_class_deeper_cycle_through_replacement_rejected(self):
+        ont = Ontology().add_class("A").add_class("B", "A").add_class("C", "B")  # C -> B -> A
+        with self.assertRaises(ValueError):
+            ont.replace_class("A", "C")  # would close A -> C -> B -> A
+
+    def test_legitimate_replace_class_reparents_without_error(self):
+        ont = Ontology().add_class("P").add_class("Q", "P").add_class("R")
+        ont.replace_class("Q", "R")  # Q moves from under P to under R -- no cycle, must succeed
+        self.assertEqual(ont.classes["Q"], "R")
+        self.assertTrue(ont.is_a("Q", "R"))
+        self.assertFalse(ont.is_a("Q", "P"))
+
+    def test_add_relation_rejects_duplicate_name(self):
+        ont = Ontology().add_class("Person").add_class("City").add_relation("lives_in", "Person", "City")
+        with self.assertRaises(ValueError):
+            ont.add_relation("lives_in", "Person", "City", "functional")
+        self.assertEqual(ont.axioms["lives_in"], set())  # unchanged by the rejected call
+
+    def test_replace_relation_requires_existing_name(self):
+        ont = Ontology().add_class("Person").add_class("City")
+        with self.assertRaises(KeyError):
+            ont.replace_relation("lives_in", "Person", "City")
+
+    def test_replace_relation_redefines_signature_and_axioms(self):
+        ont = Ontology().add_class("Person").add_class("City").add_relation("lives_in", "Person", "City")
+        ont.replace_relation("lives_in", "Person", "City", "functional")
+        self.assertEqual(ont.axioms["lives_in"], {"functional"})
+
+    def test_add_disjoint_rejects_unknown_class(self):
+        with self.assertRaises(ValueError):
+            Ontology().add_class("Person").add_disjoint("Person", "Nonexistent")
+
+    def test_add_disjoint_rejects_identical_class(self):
+        with self.assertRaises(ValueError):
+            Ontology().add_class("Person").add_disjoint("Person", "Person")
+
+    def test_is_a_raises_loudly_on_cycle_instead_of_silent_partial_answer(self):
+        # Construction now makes a cycle unreachable through the public API; this exercises is_a's
+        # own defense-in-depth guard by installing a cycle directly on .classes, bypassing the API
+        # (e.g. as if some future code path or direct attribute access did so) -- MXR-080-0297 says
+        # a cycle must never again look like an ordinary, silently-stopped "not an ancestor" False.
+        ont = Ontology().add_class("P").add_class("Q", "P")
+        ont.classes["P"] = "Q"  # direct mutation: P -> Q -> P
+        with self.assertRaises(RuntimeError):
+            ont.is_a("P", "SomethingElse")
+
+
 if __name__ == "__main__":
     unittest.main()
