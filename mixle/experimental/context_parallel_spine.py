@@ -25,15 +25,10 @@ for the fallback (gather-raw-K-then-RoPE-once) if this tolerance had not held in
 absolute divergence even under real multi-chunk SGD training, comfortably inside the documented
 ``rtol=1e-4`` tolerance (F1's own precedent).
 
-Cache convention: ``SlidingWindowSpine.step``'s ``cp_size==1`` path caches the RoPE'd ``k_full`` (it
-reassigns ``k_full = _apply_rope(...)`` before slicing into ``cache_k``), not a raw pre-RoPE ``k_full``.
-The ``cp_size>1`` branch must reproduce that exact convention -- per-shard RoPE, then concat -- when it
-writes back to the cache, or ``cache_k`` silently diverges from the dense reference starting the *second*
-streamed chunk even though the first chunk's loss (and every single-chunk-only comparison) matches
-bit-exactly. This was caught by this module's own test suite during implementation, not anticipated by
-the design note's algorithm section (which describes ``cache ++ chunk`` as "raw k/v, pre-RoPE" as the
-sharding INPUT, without stating what convention the cache is written back in) -- see
-``SlidingWindowSpine.step``'s ``cp_size>1`` branch in ``context_spine.py`` for the fix.
+Cache convention: ``SlidingWindowSpine.step`` caches raw K/V together with explicit absolute
+positions. RoPE is applied once, after the current raw keys and raw cached keys are assembled for
+attention. Both dense and context-parallel paths use this convention, preventing older keys from
+being rotated again on every streamed chunk.
 
 Unlike F1's TP (`n_head % tp_size == 0`) and CP (`block % cp_size == 0`), which both fail fast on
 uneven division, this module's KV axis length (``cache_len + t``) varies chunk to chunk and is not
@@ -68,15 +63,23 @@ if _HAS_TORCH:
         exactly (duplicated rather than imported: this module is infrastructure over
         ``SlidingWindowSpine``, not a piece of its public surface, and should not create an import
         dependency between the two sibling ``mixle.experimental`` modules)."""
-        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
+        if positions.ndim != 1:
+            raise ValueError("RoPE positions must be one-dimensional.")
+        if isinstance(head_dim, bool) or not isinstance(head_dim, int) or head_dim <= 0 or head_dim % 2:
+            raise ValueError("RoPE head_dim must be a positive even integer.")
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=positions.device) / head_dim)
+        )
         freqs = positions.to(torch.float32)[:, None] * inv_freq[None, :]  # (len, head_dim/2)
         freqs = torch.cat([freqs, freqs], dim=-1)  # (len, head_dim)
         return freqs.sin(), freqs.cos()
 
     def _apply_rope(x: Any, sin: Any, cos: Any) -> Any:
         """``x``: ``(batch, T, n_head, head_dim)``; ``sin``/``cos``: ``(T, head_dim)``."""
-        sin = sin[None, :, None, :]
-        cos = cos[None, :, None, :]
+        if x.ndim != 4 or sin.shape != (x.shape[1], x.shape[-1]) or cos.shape != sin.shape:
+            raise ValueError("RoPE tensors do not match the expected (batch, time, head, head_dim) layout.")
+        sin = sin.to(device=x.device, dtype=x.dtype)[None, :, None, :]
+        cos = cos.to(device=x.device, dtype=x.dtype)[None, :, None, :]
         return x * cos + _rotate_half(x) * sin
 
     @dataclass
@@ -102,8 +105,22 @@ if _HAS_TORCH:
         trailing chunk, or fewer than ``cp_size`` chunks if the axis is shorter than ``cp_size``) -- both
         cases are exercised by ``context_parallel_spine_test.py``'s window-edge-case tests.
         """
-        cp_size = int(cp_size)
-        assert cp_size >= 1, "cp_size must be >= 1, got %r" % (cp_size,)
+        if isinstance(cp_size, bool) or not isinstance(cp_size, int) or cp_size < 1:
+            raise ValueError("cp_size must be a positive integer.")
+        if (
+            not torch.is_tensor(k_full)
+            or not torch.is_tensor(v_full)
+            or not torch.is_tensor(key_positions)
+            or k_full.ndim != 4
+            or v_full.shape != k_full.shape
+            or key_positions.ndim != 1
+            or key_positions.shape[0] != k_full.shape[1]
+        ):
+            raise ValueError("K, V, and positions must have aligned KV-cache layouts.")
+        if k_full.shape[1] == 0:
+            raise ValueError("the KV axis must be non-empty.")
+        if k_full.device != v_full.device or k_full.device != key_positions.device:
+            raise ValueError("K, V, and positions must be on the same device.")
         k_chunks = torch.chunk(k_full, cp_size, dim=1)
         v_chunks = torch.chunk(v_full, cp_size, dim=1)
         pos_chunks = torch.chunk(key_positions, cp_size, dim=0)
@@ -139,7 +156,37 @@ if _HAS_TORCH:
         (mod float non-associativity of the per-shard-RoPE-then-gather order -- see the module
         docstring).
         """
+        if (
+            not torch.is_tensor(q)
+            or not torch.is_tensor(query_positions)
+            or q.ndim != 4
+            or query_positions.ndim != 1
+            or query_positions.shape[0] != q.shape[1]
+            or q.shape[-1] != head_dim
+        ):
+            raise ValueError("queries and query positions have an invalid attention layout.")
+        if not shards:
+            raise ValueError("at least one KV shard is required.")
+        if window is not None and (isinstance(window, bool) or not isinstance(window, int) or window <= 0):
+            raise ValueError("window must be None or a positive integer.")
+
         device = q.device
+        for shard in shards:
+            if (
+                shard.k_shard.ndim != 4
+                or shard.v_shard.shape != shard.k_shard.shape
+                or shard.k_shard.shape[0] != q.shape[0]
+                or shard.k_shard.shape[2:] != q.shape[2:]
+                or shard.key_positions_shard.ndim != 1
+                or shard.key_positions_shard.shape[0] != shard.k_shard.shape[1]
+            ):
+                raise ValueError("a KV shard has an invalid layout.")
+            if (
+                shard.k_shard.device != device
+                or shard.v_shard.device != device
+                or shard.key_positions_shard.device != device
+            ):
+                raise ValueError("queries and every KV shard must be on the same device.")
         sin_q, cos_q = _rope_angles(query_positions, head_dim)
         q = _apply_rope(q, sin_q, cos_q)
 
@@ -151,10 +198,16 @@ if _HAS_TORCH:
         full_k = torch.cat(roped_k_shards, dim=1)  # all-gather (RoPE'd K), concat in position order
         full_v = torch.cat([shard.v_shard for shard in shards], dim=1)  # all-gather (raw V)
         full_key_positions = torch.cat([shard.key_positions_shard for shard in shards], dim=0)
+        if full_key_positions.numel() == 0 or (
+            full_key_positions.numel() > 1 and not torch.all(full_key_positions[1:] > full_key_positions[:-1])
+        ):
+            raise ValueError("KV shard positions must form one strictly increasing sequence.")
 
         b, t, n_head, _ = q.shape
         delta = query_positions[:, None] - full_key_positions[None, :]  # (t, len(keys))
         allowed = (delta >= 0) & (delta < window) if window is not None else (delta >= 0)
+        if not torch.all(torch.any(allowed, dim=1)):
+            raise ValueError("every query must have at least one causal key.")
         mask = torch.zeros(t, full_key_positions.shape[0], device=device)
         mask = mask.masked_fill(~allowed, float("-inf"))
 
@@ -179,9 +232,10 @@ if _HAS_TORCH:
         average, the communication/bookkeeping overhead of sharding is very unlikely to pay for itself --
         that is a performance heads-up, not a correctness problem, hence a warning.
         """
-        cp_size = int(cp_size)
-        if cp_size < 1:
-            raise ValueError("cp_size must be >= 1, got %r" % (cp_size,))
+        if isinstance(cp_size, bool) or not isinstance(cp_size, int) or cp_size < 1:
+            raise ValueError("cp_size must be a positive integer.")
+        if window is not None and (isinstance(window, bool) or not isinstance(window, int) or window <= 0):
+            raise ValueError("window must be None or a positive integer.")
         if window is not None and cp_size > 1:
             per_shard = window // cp_size
             if per_shard <= 1:
