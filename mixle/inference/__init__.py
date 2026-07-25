@@ -82,7 +82,7 @@ from mixle.inference.causal import do as bn_do
 #      "condition" entirely once the submodule is bound). Every existing caller already reaches the
 #      function the unambiguous way -- `from mixle.inference.condition import condition` or
 #      `mixle.inference.condition.condition(...)` -- so nothing regresses by leaving it that way.
-_CONDITION_LAZY_NAMES = frozenset({"do", "Posterior", "ConditionReceipt", "FieldPath"})
+_CONDITION_LAZY_NAMES = frozenset({"do", "Posterior", "ConditionReceipt", "ImpossibleEvidenceError", "FieldPath"})
 
 # M2's scenario simulators (mixle.inference.scenario) sit on top of condition.py and eagerly import
 # mixle.stats.latent.hidden_markov -- the same circular-import hazard condition.py's own lazy export
@@ -412,6 +412,7 @@ __all__ = [
     # or `from mixle.inference.condition import condition`; see the module-level comment above.
     "Posterior",
     "ConditionReceipt",
+    "ImpossibleEvidenceError",
     "FieldPath",
     "Forecast",
     "forecast",

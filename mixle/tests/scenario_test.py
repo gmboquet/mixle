@@ -14,9 +14,10 @@ import numpy as np
 import pytest
 
 from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork, _LinearGaussianFactor, _MarginalFactor
+from mixle.inference.condition import ImpossibleEvidenceError
 from mixle.inference.condition import condition as m0_condition
-from mixle.inference.scenario import Scenario, simulate
-from mixle.stats import GaussianDistribution, HiddenMarkovModelDistribution
+from mixle.inference.scenario import Scenario, Simulator, simulate
+from mixle.stats import CategoricalDistribution, GaussianDistribution, HiddenMarkovModelDistribution
 from mixle.stats.combinator.composite import CompositeDistribution
 from mixle.stats.compute.posterior import MarkovChainLatentPosterior
 
@@ -183,3 +184,40 @@ def test_hmm_rollout_is_deterministic_given_seed():
     r1 = sim1.rollout(30)
     r2 = sim2.rollout(30)
     assert r1 == r2
+
+
+# --------------------------------------------------------------------------------------------- #
+# (e) impossible and conflicting scenario evidence
+# --------------------------------------------------------------------------------------------- #
+
+
+def test_scenario_rejects_evidence_that_an_intervention_would_overwrite():
+    model = CompositeDistribution(
+        [
+            CompositeDistribution([GaussianDistribution(0.0, 1.0)]),
+            GaussianDistribution(0.0, 1.0),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="disjoint fields"):
+        simulate(Scenario(interventions={0: (1.0,)}, evidence={(0, 0): 1.0}), base=model, seed=0)
+    with pytest.raises(ValueError, match="disjoint fields"):
+        simulate(Scenario(interventions={1: 1.0}, evidence={1: 1.0}), base=model, seed=0)
+
+
+def test_bn_scenario_reports_impossible_post_intervention_evidence_without_prior_rollout():
+    net = HeterogeneousBayesianNetwork(
+        [
+            _MarginalFactor(0, CategoricalDistribution({"possible": 1.0})),
+            _MarginalFactor(1, GaussianDistribution(0.0, 1.0)),
+        ]
+    )
+    scenario = Scenario(interventions={1: 2.0}, evidence={0: "impossible"})
+
+    sim = Simulator(base=net, scenario=scenario, seed=3, n_particles=16)
+
+    assert sim.receipt.evidence_status == "impossible"
+    assert sim.receipt.ess == 0.0
+    assert sim.receipt.ess_ratio == 0.0
+    with pytest.raises(ImpossibleEvidenceError):
+        sim.rollout(1)
