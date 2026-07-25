@@ -5,7 +5,7 @@
 names, units, or coordinate space. That gap is a real, observed source of silent bugs: two posteriors
 can both "satisfy IC-1" while their axes mean different things (the concrete case that motivated this:
 G2's ``invert_source`` reports ``(x, y, rate)`` while G6's ``design_monitoring_network`` expects
-``(x, y, log_rate, onset)``, and composing them needed a hand-written delta-method bridge that nothing
+``(x, y, log_rate, onset)``, and composing them needed a hand-written transform bridge that nothing
 validated -- if a future edit reordered an axis or changed a unit, no error would fire; the numbers
 would just be wrong).
 
@@ -13,7 +13,7 @@ This module adds, additively and opt-in (it changes no existing posterior), thre
 
   * :class:`PosteriorSchema` / :class:`AxisSpec` -- declare what each latent axis *is*.
   * :func:`adapt` -- convert a posterior from one schema's convention to another's (reorder,
-    coordinate-transform e.g. linear<->log via the delta method, marginalize dropped axes), and
+    coordinate-transform under an explicit supported probability model, marginalize dropped axes), and
     **raise loudly** when a target axis has no source axis to build it from, instead of silently
     producing a wrong number. This is the general, validated replacement for hand-written bridges.
   * :func:`join_independent` -- block-diagonally combine independent posteriors (e.g. an ``(x, y,
@@ -30,7 +30,14 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["AxisSpec", "PosteriorSchema", "SchematizedPosterior", "adapt", "join_independent"]
+__all__ = [
+    "AdaptationReceipt",
+    "AxisSpec",
+    "PosteriorSchema",
+    "SchematizedPosterior",
+    "adapt",
+    "join_independent",
+]
 
 _SPACES = ("linear", "log")
 
@@ -42,8 +49,8 @@ class AxisSpec:
 
     Example: G2 stores the release rate directly -> ``AxisSpec("rate", "kg/s", "linear")``; G6 wants
     it log-transformed -> ``AxisSpec("rate", "kg/s", "log")``. Same ``name``/``unit`` (it's the same
-    physical quantity), different ``space`` -- which is exactly the information :func:`adapt` needs to
-    build the (delta-method) transform automatically instead of by hand.
+    physical quantity), different ``space`` -- which is exactly the information :func:`adapt` needs,
+    together with an explicit probability model, to build the transform.
     """
 
     name: str
@@ -51,6 +58,10 @@ class AxisSpec:
     space: str = "linear"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("AxisSpec.name must be a non-empty string.")
+        if not isinstance(self.unit, str):
+            raise TypeError("AxisSpec.unit must be a string.")
         if self.space not in _SPACES:
             raise ValueError(f"AxisSpec.space must be one of {_SPACES}; got {self.space!r}")
 
@@ -62,6 +73,12 @@ class PosteriorSchema:
     axes: tuple[AxisSpec, ...]
 
     def __post_init__(self) -> None:
+        axes = tuple(self.axes)
+        if not axes:
+            raise ValueError("PosteriorSchema requires at least one semantic axis.")
+        if any(not isinstance(axis, AxisSpec) for axis in axes):
+            raise TypeError("PosteriorSchema.axes must contain AxisSpec values.")
+        object.__setattr__(self, "axes", axes)
         names = [a.name for a in self.axes]
         if len(set(names)) != len(names):
             raise ValueError(f"duplicate axis names in schema: {names}")
@@ -93,10 +110,24 @@ class PosteriorSchema:
             raise ValueError("posterior mean and covariance must contain only finite values")
         if not np.allclose(cov, cov.T, rtol=1e-10, atol=1e-12):
             raise ValueError("posterior covariance must be symmetric")
-        eigenvalues = np.linalg.eigvalsh((cov + cov.T) / 2.0)
-        tolerance = 1e-12 * max(1.0, float(np.max(np.abs(eigenvalues))))
+        if np.any(np.diag(cov) < 0.0):
+            raise ValueError("posterior covariance cannot contain negative marginal variance")
+        scale = np.sqrt(np.maximum(np.diag(cov), np.finfo(float).tiny))
+        correlation = cov / np.outer(scale, scale)
+        eigenvalues = np.linalg.eigvalsh((correlation + correlation.T) / 2.0)
+        tolerance = np.finfo(float).eps * max(1, self.arity) * 100.0
         if float(np.min(eigenvalues)) < -tolerance:
             raise ValueError("posterior covariance must be positive semidefinite")
+
+
+@dataclass(frozen=True)
+class AdaptationReceipt:
+    """Assumption and numerical status of a coordinate-space adaptation."""
+
+    transformation_model: str
+    transformed_axes: tuple[str, ...]
+    approximation_error: float
+    assumption: str
 
 
 @dataclass
@@ -109,14 +140,28 @@ class SchematizedPosterior:
     mean: np.ndarray
     cov: np.ndarray
     schema: PosteriorSchema
+    prior_dominated: bool | None = None
+    adaptation_receipt: AdaptationReceipt | None = None
 
     def __post_init__(self) -> None:
         self.mean = np.asarray(self.mean, dtype=float)
         self.cov = np.asarray(self.cov, dtype=float)
         self.schema.validate(self.mean, self.cov)
+        if self.prior_dominated is not None and not isinstance(self.prior_dominated, (bool, np.bool_)):
+            raise TypeError("prior_dominated must be True, False, or None when the diagnostic is unavailable.")
+        if self.prior_dominated is not None:
+            self.prior_dominated = bool(self.prior_dominated)
 
     def samples(self, n: int, rng: np.random.Generator) -> np.ndarray:
-        return rng.multivariate_normal(self.mean, self.cov, size=int(n))
+        count = _positive_count(n, "n")
+        if not hasattr(rng, "multivariate_normal") or not callable(rng.multivariate_normal):
+            raise TypeError("rng must provide multivariate_normal(mean, cov, size).")
+        draws = np.asarray(rng.multivariate_normal(self.mean, self.cov, size=count), dtype=float)
+        if draws.shape != (count, self.schema.arity) or not np.isfinite(draws).all():
+            raise ValueError(
+                f"rng must return finite posterior draws with shape {(count, self.schema.arity)}, got {draws.shape}."
+            )
+        return draws
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         from scipy.stats import norm
@@ -130,15 +175,29 @@ class SchematizedPosterior:
     def derived_quantity(self, fn: Any, n: int, rng: np.random.Generator) -> Any:
         from mixle.reason.posterior_protocol import DerivedQuantity  # noqa: F401 (documents intent)
 
+        if not callable(fn):
+            raise TypeError("derived quantity function must be callable.")
         draws = self.samples(n, rng)
-        samples = np.asarray(fn(draws))
-        return _SchemaDerivedQuantity(samples=samples)
+        samples = np.asarray(fn(draws), dtype=float)
+        if samples.ndim not in (1, 2) or samples.shape[0] != len(draws):
+            raise ValueError("derived quantity must return one scalar or vector row per posterior draw.")
+        if samples.ndim == 2 and samples.shape[1] == 0:
+            raise ValueError("derived quantity cannot return empty vectors.")
+        if not np.isfinite(samples).all():
+            raise ValueError("derived quantity samples must contain only finite values.")
+        return _SchemaDerivedQuantity(samples=samples, prior_dominated=self.prior_dominated)
 
 
 @dataclass
 class _SchemaDerivedQuantity:
     samples: np.ndarray
-    prior_dominated: bool = False
+    prior_dominated: bool | None
+
+    def require_prior_dominance(self) -> bool:
+        """Return the diagnostic or fail closed when inference did not provide it."""
+        if self.prior_dominated is None:
+            raise RuntimeError("prior-dominance state is unknown; inference supplied no validated diagnostic.")
+        return self.prior_dominated
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         if not np.isfinite(level) or not 0.0 < level < 1.0:
@@ -147,39 +206,19 @@ class _SchemaDerivedQuantity:
         return np.quantile(self.samples, a, axis=0), np.quantile(self.samples, 1.0 - a, axis=0)
 
 
-def _transform_axis(
-    mean: np.ndarray, cov: np.ndarray, i: int, from_space: str, to_space: str
-) -> tuple[np.ndarray, np.ndarray]:
-    """Delta-method coordinate change of a single axis ``i`` from ``from_space`` to ``to_space``,
-    updating both the mean and the full covariance row/column for that axis. Only linear<->log is
-    implemented (the case that actually arises); anything else raises rather than silently no-op'ing."""
-    if from_space == to_space:
-        return mean, cov
-    mean = mean.copy()
-    cov = cov.copy()
-    if from_space == "linear" and to_space == "log":
-        x = mean[i]
-        if x <= 0:
-            raise ValueError(f"cannot log-transform axis {i}: mean {x} is not positive")
-        # y = log x: dy/dx = 1/x. mean_y = log(mean_x); Cov scales by the Jacobian on axis i.
-        j = 1.0 / x
-        mean[i] = np.log(x)
-    elif from_space == "log" and to_space == "linear":
-        # x = exp(y): dx/dy = exp(y) = mean_x. mean_x = exp(mean_y).
-        j = np.exp(mean[i])
-        mean[i] = j
-    else:
-        raise ValueError(f"unsupported coordinate change {from_space!r} -> {to_space!r} (only linear<->log)")
-    cov[i, :] *= j
-    cov[:, i] *= j
-    return mean, cov
-
-
-def adapt(mean: np.ndarray, cov: np.ndarray, source: PosteriorSchema, target: PosteriorSchema) -> SchematizedPosterior:
+def adapt(
+    mean: np.ndarray,
+    cov: np.ndarray,
+    source: PosteriorSchema,
+    target: PosteriorSchema,
+    *,
+    transformation_model: str | None = None,
+    prior_dominated: bool | None = None,
+) -> SchematizedPosterior:
     """Convert a Gaussian posterior from ``source`` convention to ``target`` convention.
 
-    Matches target axes to source axes **by name**, applies any per-axis coordinate change (linear
-    <-> log, via the delta method on the covariance), reorders to the target order, and marginalizes
+    Matches target axes to source axes **by name**, applies any supported
+    coordinate change under an explicit probability model, reorders to the target order, and marginalizes
     (drops) any source axis not in the target. Raises :class:`KeyError` if a ``target`` axis has no
     source axis of the same name -- the case that must never silently produce a wrong number, because
     the information to build that axis genuinely isn't present (use :func:`join_independent` to append
@@ -202,7 +241,7 @@ def adapt(mean: np.ndarray, cov: np.ndarray, source: PosteriorSchema, target: Po
             f"legitimately comes from a separate posterior."
         )
 
-    work_mean, work_cov = mean.copy(), cov.copy()
+    conversions: list[tuple[int, str, str]] = []
     for tgt_axis in target.axes:
         si, src_axis = source_by_name[tgt_axis.name]
         if src_axis.unit != tgt_axis.unit:
@@ -210,12 +249,110 @@ def adapt(mean: np.ndarray, cov: np.ndarray, source: PosteriorSchema, target: Po
                 f"axis {tgt_axis.name!r} unit mismatch: source {src_axis.unit!r} vs target {tgt_axis.unit!r}"
             )
         if src_axis.space != tgt_axis.space:
-            work_mean, work_cov = _transform_axis(work_mean, work_cov, si, src_axis.space, tgt_axis.space)
+            conversions.append((si, src_axis.space, tgt_axis.space))
+
+    receipt = None
+    work_mean, work_cov = mean.copy(), cov.copy()
+    if conversions:
+        directions = {(from_space, to_space) for _, from_space, to_space in conversions}
+        if transformation_model != "joint_log_normal":
+            raise ValueError(
+                "linear/log adaptation requires transformation_model='joint_log_normal'; "
+                "Gaussian linear moments alone do not establish positive support."
+            )
+        if len(directions) != 1:
+            raise ValueError("mixed linear-to-log and log-to-linear conversions are not supported in one adaptation.")
+        indices = [index for index, _, _ in conversions]
+        direction = next(iter(directions))
+        if direction == ("linear", "log"):
+            work_mean, work_cov = _linear_moments_to_log(work_mean, work_cov, indices)
+        elif direction == ("log", "linear"):
+            work_mean, work_cov = _log_moments_to_linear(work_mean, work_cov, indices)
+        else:
+            raise ValueError(f"unsupported coordinate change {direction!r}.")
+        receipt = AdaptationReceipt(
+            transformation_model=transformation_model,
+            transformed_axes=tuple(source.axes[index].name for index in indices),
+            approximation_error=0.0,
+            assumption="moments are exact only under the declared joint log-normal/normal model",
+        )
 
     order = [source_by_name[a.name][0] for a in target.axes]
     new_mean = work_mean[order]
     new_cov = work_cov[np.ix_(order, order)]
-    return SchematizedPosterior(new_mean, new_cov, target)
+    return SchematizedPosterior(
+        new_mean,
+        new_cov,
+        target,
+        prior_dominated=prior_dominated,
+        adaptation_receipt=receipt,
+    )
+
+
+def _linear_moments_to_log(
+    mean: np.ndarray,
+    cov: np.ndarray,
+    indices: list[int],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Recover joint normal moments from declared log-normal/normal moments."""
+    source_mean = mean.copy()
+    source_cov = cov.copy()
+    result_mean = mean.copy()
+    result_cov = cov.copy()
+    transformed = set(indices)
+    for index in indices:
+        value = source_mean[index]
+        if value <= 0.0:
+            raise ValueError(f"cannot log-transform axis {index}: declared log-normal mean {value} is not positive.")
+        variance = source_cov[index, index]
+        log_variance = float(np.log1p(variance / value**2))
+        result_mean[index] = float(np.log(value) - 0.5 * log_variance)
+    for i in indices:
+        for j in range(len(mean)):
+            if j in transformed:
+                ratio = source_cov[i, j] / (source_mean[i] * source_mean[j])
+                if ratio <= -1.0:
+                    raise ValueError("linear moments are incompatible with a joint log-normal covariance.")
+                value = float(np.log1p(ratio))
+            else:
+                value = float(source_cov[i, j] / source_mean[i])
+            result_cov[i, j] = value
+            result_cov[j, i] = value
+    return result_mean, result_cov
+
+
+def _log_moments_to_linear(
+    mean: np.ndarray,
+    cov: np.ndarray,
+    indices: list[int],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute exact log-normal/normal moments from joint normal moments."""
+    source_mean = mean.copy()
+    source_cov = cov.copy()
+    result_mean = mean.copy()
+    result_cov = cov.copy()
+    transformed = set(indices)
+    linear_means = {
+        index: float(np.exp(source_mean[index] + 0.5 * source_cov[index, index]))
+        for index in indices
+    }
+    for index, value in linear_means.items():
+        result_mean[index] = value
+    for i in indices:
+        for j in range(len(mean)):
+            if j in transformed:
+                value = linear_means[i] * linear_means[j] * float(np.expm1(source_cov[i, j]))
+            else:
+                value = linear_means[i] * float(source_cov[i, j])
+            result_cov[i, j] = value
+            result_cov[j, i] = value
+    return result_mean, result_cov
+
+
+def _positive_count(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or int(value) <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return int(value)
 
 
 def join_independent(*blocks: tuple[np.ndarray, np.ndarray, PosteriorSchema]) -> SchematizedPosterior:
