@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import unittest
 import warnings
+from unittest import mock
 
 import numpy as np
 
@@ -163,11 +164,193 @@ class MultiFidelityTest(unittest.TestCase):
             f"[M4 receipt] multi-fidelity RMSE={rmse_mf:.4f} (n_train={em_mf.receipt.n_train}) vs "
             f"single-fidelity RMSE={rmse_sf:.4f} (n_train={em_sf.receipt.n_train}) at matched cost={budget}"
         )
-        # Matched budget, not bit-identical cost: the multi-fidelity loop's last pick can overshoot
-        # max_cost by less than one fidelity's cost before the `spent < max_cost` check stops it (same
-        # semantics as mixle.doe.multifidelity.multi_fidelity_minimize).
-        self.assertAlmostEqual(em_mf.receipt.cost_spent, em_sf.receipt.cost_spent, delta=1.0)
+        # MXR-080-0182: multi-fidelity training reserves each evaluation's cost against the budget before
+        # spending it, so cost_spent never exceeds the requested budget -- it previously could overshoot,
+        # both from an unconditional per-fidelity seeding phase that ignored the budget entirely (bounded
+        # only by n_init times the summed cost across all fidelities, not by a single evaluation) and
+        # from the sequential loop's last pick landing after the check meant to stop it. Single-fidelity
+        # always spends its full declared budget by construction, so this is a matched-*or-less* cost
+        # comparison, not a bit-identical one.
+        self.assertLessEqual(em_mf.receipt.cost_spent, budget)
+        self.assertLessEqual(em_mf.receipt.cost_spent, em_sf.receipt.cost_spent)
         self.assertLess(rmse_mf, rmse_sf)
+
+
+# --------------------------------------------------------------------------- MXR-080-0181 (ruled out)
+# mixle.doe.multifidelity.multi_fidelity_minimize's `target` need not have been a member of `fidelities`,
+# so a target outside the queryable set was never evaluated and the fallback silently returned a
+# lower-fidelity result mislabeled as the target answer. `_fit_multi_fidelity` cannot exhibit this: unlike
+# multi_fidelity_minimize, neither it nor the public `emulate()` exposes a separate `target` parameter --
+# target is always derived as `float(fids.max())`, which is trivially a member of `fids` by construction.
+# This is a documentation test (nothing was broken, nothing was fixed) that pins the structural guarantee
+# so it stays true if either function's shape ever changes.
+class TargetFidelityStructuralGuaranteeTest(unittest.TestCase):
+    def test_emulate_exposes_no_target_parameter(self):
+        import inspect
+
+        from mixle.task.emulate import emulate
+
+        self.assertNotIn("target", inspect.signature(emulate).parameters)
+
+    def test_fit_multi_fidelity_target_is_always_a_member_of_fidelities(self):
+        for fidelities in [(0.3, 1.0), (0.1, 0.5, 1.0), (2.0, 7.0)]:
+            fids = np.asarray(fidelities, dtype=np.float64)
+            target = float(fids.max())
+            self.assertIn(target, fids.tolist())
+
+
+# --------------------------------------------------------------------------- MXR-080-0182
+# _fit_multi_fidelity's initial per-fidelity seeding ignored the training budget entirely -- it
+# unconditionally drew and evaluated n_init points at EVERY fidelity before checking cost at all, so the
+# overshoot was bounded only by n_init times the summed cost across all fidelities, not by a single
+# evaluation the way the sequential loop's own (also unguarded) last pick was. Every evaluation -- seeding
+# and the sequential loop alike -- must now reserve its cost against the remaining budget before spending.
+class MultiFidelityBudgetEnforcementTest(unittest.TestCase):
+    @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")
+    def test_seeding_never_overshoots_budget_with_large_n_init(self):
+        from mixle.task.emulate import emulate
+
+        # n_init=10 at fidelities costing 1.0 and 5.0 would unconditionally spend 10*(1.0+5.0)=60 on
+        # seeding alone -- 20 over this budget=50 run (of which 10 is reserved for the holdout) before
+        # the pre-fix code ever reached its sequential loop.
+        budget = 50
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            em = emulate(
+                _forrester_mf,
+                BOUNDS_1D,
+                budget=budget,
+                fidelities=(1.0, 5.0),
+                n_init=10,
+                holdout_frac=0.05,
+                n_candidates=50,
+                n_reference=30,
+                seed=5,
+            )
+        self.assertLessEqual(em.receipt.cost_spent, budget)
+
+    def test_budget_too_small_for_cheapest_fidelity_is_rejected(self):
+        from mixle.task.emulate import emulate
+
+        # budget=10.5 with holdout_frac=0.05 reserves a 10.0 holdout (< budget, so that check alone
+        # passes), leaving max_cost=0.5 for training -- below the cheapest fidelity's own cost of 1.0.
+        with self.assertRaisesRegex(ValueError, "cheapest fidelity"):
+            emulate(
+                _forrester_mf,
+                BOUNDS_1D,
+                budget=10.5,
+                fidelities=(1.0, 5.0),
+                n_init=10,
+                holdout_frac=0.05,
+                seed=5,
+            )
+
+
+# --------------------------------------------------------------------------- MXR-080-0183
+# _fit_multi_fidelity's sequential loop caught every exception from surrogate fitting with a bare
+# `except Exception` and turned it into a silent early stop: a genuine numerical failure (e.g. a singular
+# covariance surfacing as LinAlgError) and a completely unrelated bug (e.g. a stray TypeError) were both
+# swallowed identically, and the returned Emulator/receipt carried no trace that anything had gone wrong.
+# Only well-defined numerical failure types are caught now, and EmulatorReceipt always carries an explicit
+# `stopped_reason` (+ `error` when it failed).
+class MultiFidelitySurrogateFitFailureStatusTest(unittest.TestCase):
+    @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")
+    def test_normal_multi_fidelity_run_reports_budget_exhausted_with_no_error(self):
+        from mixle.task.emulate import emulate
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            em = emulate(_forrester_mf, BOUNDS_1D, budget=30, fidelities=(0.3, 1.0), n_init=2, seed=2)
+        self.assertEqual(em.receipt.stopped_reason, "budget_exhausted")
+        self.assertIsNone(em.receipt.error)
+
+    @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")
+    def test_normal_single_fidelity_run_reports_budget_exhausted_with_no_error(self):
+        from mixle.task.emulate import emulate
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            em = emulate(_true_f, BOUNDS_2D, budget=24, n_init=4, seed=0)
+        self.assertEqual(em.receipt.stopped_reason, "budget_exhausted")
+        self.assertIsNone(em.receipt.error)
+
+    @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")
+    def test_a_genuine_numerical_failure_after_partial_progress_reports_explicit_status(self):
+        """A failure AFTER at least one successful fit must be gracefully absorbed -- there is a
+        previously-fit surrogate to fall back to -- with the failure surfaced via stopped_reason/error.
+
+        Unlike mixle.doe.multifidelity.multi_fidelity_minimize (whose single, always-guarded fit call
+        makes any failure immediately gracefully absorbable), _fit_multi_fidelity needs at least one
+        prior successful fit to fall back to; see test_surrogate_never_fits_even_once_propagates below
+        for the no-partial-success case.
+        """
+        emulate_mod = importlib.import_module("mixle.task.emulate")
+        from mixle.task.emulate import emulate
+
+        real_fit_surrogate = emulate_mod._fit_surrogate
+        call_count = {"n": 0}
+
+        def _fail_on_second_call(x, y, gp, fit_kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise np.linalg.LinAlgError("simulated singular covariance")
+            return real_fit_surrogate(x, y, gp, fit_kwargs)
+
+        with mock.patch.object(emulate_mod, "_fit_surrogate", side_effect=_fail_on_second_call):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                em = emulate(_forrester_mf, BOUNDS_1D, budget=40, fidelities=(0.3, 1.0), n_init=2, seed=0)
+        self.assertEqual(em.receipt.stopped_reason, "surrogate_fit_failed")
+        self.assertIsNotNone(em.receipt.error)
+        self.assertIn("LinAlgError", em.receipt.error)
+        self.assertGreaterEqual(call_count["n"], 2)
+
+    def test_surrogate_never_fits_even_once_propagates(self):
+        """No partial success exists to fall back to, so the failure must propagate -- same as
+        _fit_single_fidelity's existing unguarded _fit_surrogate call -- rather than returning a broken
+        Emulator with no gp."""
+        emulate_mod = importlib.import_module("mixle.task.emulate")
+        from mixle.task.emulate import emulate
+
+        with mock.patch.object(
+            emulate_mod, "_fit_surrogate", side_effect=np.linalg.LinAlgError("simulated singular covariance")
+        ):
+            with self.assertRaises(np.linalg.LinAlgError):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    emulate(_forrester_mf, BOUNDS_1D, budget=40, fidelities=(0.3, 1.0), n_init=2, seed=0)
+
+    def test_an_unrelated_bug_propagates_instead_of_being_swallowed(self):
+        emulate_mod = importlib.import_module("mixle.task.emulate")
+        from mixle.task.emulate import emulate
+
+        with mock.patch.object(emulate_mod, "_fit_surrogate", side_effect=TypeError("simulated unrelated coding bug")):
+            with self.assertRaises(TypeError):
+                emulate(_forrester_mf, BOUNDS_1D, budget=40, fidelities=(0.3, 1.0), n_init=2, seed=0)
+
+    @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")
+    def test_a_transient_unrelated_bug_also_propagates_not_swallowed(self):
+        """A bug that fails only ONCE (e.g. a one-off coding mistake, as opposed to a persistent
+        misconfiguration) is the most dangerous case for a bare `except Exception`: if caught, the loop
+        would break silently and a later, unrelated success could mask it completely. Confirms the
+        narrowed except doesn't even attempt to catch it, transient or not."""
+        emulate_mod = importlib.import_module("mixle.task.emulate")
+        from mixle.task.emulate import emulate
+
+        real_fit_surrogate = emulate_mod._fit_surrogate
+        call_count = {"n": 0}
+
+        def _fail_on_second_call(x, y, gp, fit_kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise TypeError("simulated unrelated coding bug (transient)")
+            return real_fit_surrogate(x, y, gp, fit_kwargs)
+
+        with mock.patch.object(emulate_mod, "_fit_surrogate", side_effect=_fail_on_second_call):
+            with self.assertRaises(TypeError):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    emulate(_forrester_mf, BOUNDS_1D, budget=40, fidelities=(0.3, 1.0), n_init=2, seed=0)
 
 
 if __name__ == "__main__":

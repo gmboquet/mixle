@@ -60,6 +60,28 @@ __all__ = ["Emulator", "EmulatorReceipt", "emulate"]
 _COVERAGE_Z = 1.0  # +/- 1 std -> the nominal two-sided coverage of a calibrated Gaussian error bar
 
 
+def _surrogate_fit_error_types() -> tuple[type[BaseException], ...]:
+    """The well-defined numerical failure types a GP surrogate fit can raise -- never a bare ``Exception``.
+
+    Mirrors :func:`mixle.doe.multifidelity._surrogate_fit_error_types` (duplicated here rather than
+    imported: this module already reimplements multi-fidelity's BOCA fidelity choice locally instead of
+    importing it -- see the module docstring -- so a local copy keeps that same self-contained shape). A
+    singular/indefinite covariance during fitting raises ``numpy.linalg.LinAlgError`` (a numpy-backed
+    surrogate) or ``torch.linalg.LinAlgError`` (the default torch-backed one, out of
+    ``torch.linalg.cholesky`` inside ``GaussianProcessRegressor.log_marginal_likelihood``/``predict``) --
+    both a genuine "this data is ill-conditioned" failure, not a programming error. Anything else (a bad
+    ``fit_kwargs`` optimizer name, a missing torch install, an unrelated bug) must propagate instead of
+    being swallowed. Torch is imported lazily here, matching :func:`mixle.doe.bayesopt._fit_surrogate`'s
+    own lazy import, so merely importing this module never requires torch.
+    """
+    errors: tuple[type[BaseException], ...] = (np.linalg.LinAlgError,)
+    try:
+        import torch
+    except ImportError:
+        return errors
+    return (*errors, torch.linalg.LinAlgError)
+
+
 @dataclass(frozen=True)
 class EmulatorReceipt:
     """A measured, not asserted, report of an :class:`Emulator`'s own quality.
@@ -70,7 +92,15 @@ class EmulatorReceipt:
     emulator's own ``mean +/- 1 std``; ``nominal_coverage`` is what that fraction should be if the
     error bars are calibrated (``~0.6827`` for a Gaussian posterior). ``cost_spent`` is the total
     simulator cost actually used (holdout + training; each single-fidelity call costs 1, each
-    multi-fidelity call costs its fidelity's entry in ``costs``).
+    multi-fidelity call costs its fidelity's entry in ``costs``) and never exceeds ``budget``.
+
+    ``stopped_reason`` is ``"budget_exhausted"`` -- training ran until no further evaluation fit in the
+    budget, the normal termination for both placement strategies (single-fidelity always reaches it, by
+    construction, since it has no early-stop path of its own) -- or ``"surrogate_fit_failed"``
+    (multi-fidelity only): a well-defined numerical failure (e.g. a singular covariance surfacing as
+    ``LinAlgError``) aborted training early, and the surrogate reflects fewer evaluations than the full
+    budget would have bought. ``error`` then holds a diagnostic string, else ``None``. Any other
+    exception out of surrogate fitting propagates out of :func:`emulate` instead of being reported here.
     """
 
     held_out_rmse: float
@@ -80,6 +110,8 @@ class EmulatorReceipt:
     n_train: int
     cost_spent: float
     fidelities: tuple[float, ...] | None
+    stopped_reason: str
+    error: str | None
 
 
 class Emulator:
@@ -148,7 +180,11 @@ def emulate(
     the surrogate: single fidelity via :func:`mixle.doe.active.active_learning_design` (``method``
     ``"alc"`` or ``"alm"``; ``"random"`` places a plain Latin-hypercube design instead, for comparison),
     multi-fidelity via ALC-at-target-fidelity point choice plus BOCA-style cost-aware fidelity choice
-    (see the module docstring). Returns a fitted :class:`Emulator`.
+    (see the module docstring), reserving each evaluation's cost against the remaining budget before
+    spending it so ``cost_spent`` never exceeds ``budget``. Returns a fitted :class:`Emulator`; see
+    :class:`EmulatorReceipt` for how its ``.receipt.stopped_reason``/``.receipt.error`` report an early,
+    well-defined numerical failure during multi-fidelity training instead of silently returning a
+    surrogate fit on less data than the budget implies.
     """
     if int(budget) <= 0:
         raise ValueError("budget must be positive.")
@@ -173,8 +209,13 @@ def emulate(
         )
         target_fidelity = None
         fid_tuple = None
+        # _fit_single_fidelity has no early-stop-on-failure path of its own: it either spends its full
+        # budget (the design here always affords exactly n_holdout + train_budget calls, validated up
+        # front) or lets a surrogate-fit exception propagate unguarded -- same as multi-fidelity's own
+        # fallback below when no surrogate ever fits at all.
+        stopped_reason, error = "budget_exhausted", None
     else:
-        gp, x_train, y_train, x_hold, y_hold, cost_spent, target_fidelity = _fit_multi_fidelity(
+        gp, x_train, y_train, x_hold, y_hold, cost_spent, target_fidelity, stopped_reason, error = _fit_multi_fidelity(
             simulator,
             b,
             d,
@@ -199,6 +240,8 @@ def emulate(
         target_fidelity=target_fidelity,
         cost_spent=cost_spent,
         fidelities=fid_tuple,
+        stopped_reason=stopped_reason,
+        error=error,
     )
     return Emulator(gp, x_train, y_train, b, target_fidelity, receipt)
 
@@ -252,11 +295,16 @@ def _fit_multi_fidelity(
     n_reference: int,
     rng: RandomState,
     fit_kwargs: dict[str, Any] | None,
-) -> tuple[Any, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float]:
+) -> tuple[Any, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float, str, str | None]:
     fids = np.asarray(fidelities, dtype=np.float64).ravel()
     if fids.size < 2:
         raise ValueError("fidelities must list at least two fidelity levels.")
-    target = float(fids.max())
+    target = float(fids.max())  # always a member of fids by construction -- there is no separate
+    # caller-supplied target parameter here to decouple from fidelities (unlike
+    # mixle.doe.multifidelity.multi_fidelity_minimize's `target`), so the MXR-080-0181-style
+    # substitution risk (a target never evaluated because it was never in the queryable set) cannot
+    # arise structurally: whatever fids.max() is, seeding below always evaluates it at least once,
+    # budget permitting.
     cost_arr = fids if costs is None else np.asarray(costs, dtype=np.float64).ravel()
     cost_map = {float(s): float(c) for s, c in zip(fids, cost_arr)}
     if any(c <= 0.0 for c in cost_map.values()):
@@ -267,24 +315,49 @@ def _fit_multi_fidelity(
     if hold_cost >= budget:
         raise ValueError(f"budget={budget} is too small to reserve a target-fidelity holdout costing {hold_cost}.")
     max_cost = budget - hold_cost
+    cheapest = min(cost_map.values())
+    if cheapest > max_cost:
+        # Reserve before spend, taken to its logical conclusion: if not even the cheapest fidelity fits
+        # in what's left after the holdout reservation, reject up front instead of letting seeding spend
+        # anyway. Without this, seeding below can overshoot max_cost by far more than the sequential
+        # loop's own worst case (one fidelity's cost): it seeds n_init points at EVERY fidelity
+        # unconditionally, so the overshoot is bounded by n_init times the total cost across all
+        # fidelities, not by a single evaluation (MXR-080-0182 pattern, same root cause as
+        # mixle.doe.multifidelity.multi_fidelity_minimize's pre-fix budget overshoot).
+        raise ValueError(
+            f"budget={budget} leaves only {max_cost} for multi-fidelity training after the holdout "
+            f"reservation; the cheapest fidelity ({cheapest}) alone exceeds it."
+        )
 
     x_hold = latin_hypercube(b, n_holdout, rng)
     y_hold = np.array([float(simulator(np.asarray(p, dtype=np.float64), target)) for p in x_hold], dtype=np.float64)
 
     rows: list[np.ndarray] = []
     y: list[float] = []
-    for s in fids:  # seed every fidelity, same as multi_fidelity_minimize
+    spent = 0.0
+    for s in fids:  # seed every fidelity, budget permitting (mirrors multi_fidelity_minimize's fix)
+        c = cost_map[float(s)]
         for xx in latin_hypercube(b, n_init, rng):
+            if spent + c > max_cost:
+                break  # this fidelity's next seed point would overshoot the remaining training budget
             rows.append(np.append(xx, s))
             y.append(float(simulator(np.asarray(xx, dtype=np.float64), float(s))))
+            spent += c
     x_aug = np.asarray(rows, dtype=np.float64)
     y_arr = np.asarray(y, dtype=np.float64)
-    spent = float(sum(cost_map[float(s)] for s in x_aug[:, -1]))
 
+    fit_error_types = _surrogate_fit_error_types()
+    stopped_reason = "budget_exhausted"
+    error: str | None = None
+    gp: Any = None
     while spent < max_cost:
         try:
             gp = _fit_surrogate(x_aug, y_arr, None, fit_kwargs)
-        except Exception:  # noqa: BLE001 -- GP fit can fail on ill-conditioned data; stop gracefully
+        except fit_error_types as exc:
+            if gp is None:
+                raise  # no previously-successful surrogate on this data/config to fall back to
+            stopped_reason = "surrogate_fit_failed"
+            error = f"{type(exc).__name__}: {exc}"
             break
         cand = latin_hypercube(b, int(n_candidates), rng)
         ref = latin_hypercube(b, int(n_reference), rng)
@@ -295,24 +368,46 @@ def _fit_multi_fidelity(
         xstar = cand[int(np.argmax(alc))]
 
         # which fidelity to actually spend: the one that most reduces target-fidelity variance per unit
-        # cost (BOCA's fidelity choice, unchanged from mixle.doe.multifidelity.multi_fidelity_minimize).
-        best_s, best_score = target, -np.inf
+        # cost (BOCA's fidelity choice, unchanged from mixle.doe.multifidelity.multi_fidelity_minimize),
+        # among those that still fit in the remaining budget.
+        best_s, best_score = None, -np.inf
         for s in fids:
+            c = cost_map[float(s)]
+            if spent + c > max_cost:
+                continue  # would overshoot the remaining budget; not eligible this round
             pts = np.array([np.append(xstar, target), np.append(xstar, float(s))])
             _, c2 = gp.predict(x_aug, y_arr, pts, return_cov=True)
             c2 = np.atleast_2d(np.asarray(c2, dtype=np.float64))
             var_reduction = c2[0, 1] ** 2 / max(c2[1, 1], 1e-12)
-            score = var_reduction / cost_map[float(s)]
+            score = var_reduction / c
             if score > best_score:
                 best_score, best_s = score, float(s)
+        if best_s is None:
+            break  # nothing affordable in the remaining budget; stopped_reason stays "budget_exhausted"
 
         yn = float(simulator(np.asarray(xstar, dtype=np.float64), best_s))
         x_aug = np.vstack([x_aug, np.append(xstar, best_s)])
         y_arr = np.append(y_arr, yn)
         spent += cost_map[best_s]
 
-    gp = _fit_surrogate(x_aug, y_arr, None, fit_kwargs)
-    return gp, x_aug, y_arr, x_hold, y_hold, spent + hold_cost, target
+    if stopped_reason == "budget_exhausted":
+        # The loop's own last successful fit (if any) is one point stale relative to the final
+        # x_aug/y_arr: each iteration fits, then selects and appends a point, so the freshest point is
+        # never reflected in a fit until the next iteration -- which may never come. Re-fit once more so
+        # the returned gp is in sync with everything actually collected. If this also fails, fall back to
+        # the last known-good `gp` rather than crashing on a redundant retry that (for genuinely
+        # ill-conditioned accumulated data) would likely fail identically anyway; predict() takes
+        # x_train/y_train explicitly at call time, so a hyperparameter-stale gp evaluated against the
+        # full x_aug/y_arr remains functionally sound, just not re-tuned to the most recent point.
+        try:
+            gp = _fit_surrogate(x_aug, y_arr, None, fit_kwargs)
+        except fit_error_types as exc:
+            if gp is None:
+                raise  # seeding-only data never fit successfully even once; nothing to fall back to
+            stopped_reason = "surrogate_fit_failed"
+            error = f"{type(exc).__name__}: {exc}"
+
+    return gp, x_aug, y_arr, x_hold, y_hold, spent + hold_cost, target, stopped_reason, error
 
 
 def _build_receipt(
@@ -325,6 +420,8 @@ def _build_receipt(
     target_fidelity: float | None,
     cost_spent: float,
     fidelities: tuple[float, ...] | None,
+    stopped_reason: str,
+    error: str | None,
 ) -> EmulatorReceipt:
     xq = x_hold if target_fidelity is None else np.column_stack([x_hold, np.full(x_hold.shape[0], target_fidelity)])
     mean, cov = gp.predict(x_train, y_train, xq, return_cov=True)
@@ -343,4 +440,6 @@ def _build_receipt(
         n_train=int(x_train.shape[0]),
         cost_spent=float(cost_spent),
         fidelities=fidelities,
+        stopped_reason=stopped_reason,
+        error=error,
     )
