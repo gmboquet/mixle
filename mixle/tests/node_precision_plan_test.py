@@ -15,6 +15,7 @@ import pytest
 import mixle.stats as st
 from mixle.inference.node_precision_plan import (
     FUSED_FP32_REL_LL_BOUND,
+    _data_magnitude_safe,
     mixed_precision_fit,
     recommend_tree_precision,
 )
@@ -96,6 +97,63 @@ class RecommendTreePrecisionTest(unittest.TestCase):
     def test_none_model(self):
         plan = recommend_tree_precision(None, [1.0, 2.0])
         self.assertEqual(np.dtype(plan.dtype_for(())), np.float64)
+
+    def test_nan_in_data_falls_back_every_node_to_float64(self):
+        # Regression (MXR-080-0145 sibling): NaN in the sample makes np.max return NaN, and IEEE-754
+        # defines every comparison against NaN as False -- so _data_magnitude_safe's
+        # `amax > max_magnitude` was False and fell through to the SAFE-looking `return True` instead
+        # of the correct float64 verdict, silently promoting otherwise-safe leaves (components 0/1) to
+        # float32 even though the data feeding them contains NaN. The data-magnitude check gates every
+        # node UNIFORMLY (see recommend_tree_precision's docstring), so a NaN anywhere in the sample
+        # must fall every node -- not just the ones near the near-degenerate component 2 -- back to
+        # float64.
+        m, data, _ = _mixed_tree()
+        data = list(data)
+        data[0] = (float("nan"),) + tuple(data[0][1:])
+        plan = recommend_tree_precision(m, data)
+        self.assertTrue(all(not n.reduced() for n in plan.nodes.values()))
+        self.assertIn("non-finite", plan.nodes[()].rationale)
+        self.assertIn("non-finite", plan.nodes[("components", "0")].rationale)
+
+
+class DataMagnitudeSafeTest(unittest.TestCase):
+    """Direct unit coverage of node_precision_plan._data_magnitude_safe's NaN/Inf guard -- the shared
+    data-magnitude check recommend_tree_precision gates every node of the tree with uniformly."""
+
+    def test_nan_in_data_is_unsafe(self):
+        data = list(np.random.RandomState(11).randn(2000) * 2.0 + 1.0)
+        data[500] = float("nan")
+        safe, rationale, amax = _data_magnitude_safe(data, 1e6, 4096)
+        self.assertFalse(safe)
+        self.assertIn("non-finite", rationale)
+        self.assertIsNone(amax)
+
+    def test_all_nan_data_is_unsafe(self):
+        safe, rationale, amax = _data_magnitude_safe([float("nan")] * 50, 1e6, 4096)
+        self.assertFalse(safe)
+        self.assertIn("non-finite", rationale)
+        self.assertIsNone(amax)
+
+    def test_inf_in_data_is_unsafe(self):
+        # Analogous to the NaN case above. +inf/-inf happen to already be caught by the `amax`
+        # magnitude check (abs(inf) > 1e6 is True), but the guard must be explicit rather than relying
+        # on that incidental comparison behavior.
+        pos_inf = list(np.random.RandomState(12).randn(2000) * 2.0 + 1.0)
+        pos_inf[500] = float("inf")
+        safe, _, _ = _data_magnitude_safe(pos_inf, 1e6, 4096)
+        self.assertFalse(safe)
+
+        neg_inf = list(np.random.RandomState(13).randn(2000) * 2.0 + 1.0)
+        neg_inf[500] = float("-inf")
+        safe, _, _ = _data_magnitude_safe(neg_inf, 1e6, 4096)
+        self.assertFalse(safe)
+
+    def test_finite_well_conditioned_data_is_safe(self):
+        # Negative control for the NaN/Inf guard: finite, well-conditioned data must be unaffected.
+        data = list(np.random.RandomState(14).randn(2000) * 2.0 + 1.0)
+        safe, rationale, amax = _data_magnitude_safe(data, 1e6, 4096)
+        self.assertTrue(safe)
+        self.assertIsNotNone(amax)
 
 
 class MixedPrecisionFitTest(unittest.TestCase):
