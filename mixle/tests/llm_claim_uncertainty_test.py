@@ -5,6 +5,12 @@ import unittest
 import numpy as np
 
 from mixle.reason import LLMUncertainty, content_overlap, sentence_claims
+from mixle.reason.llm import (  # white-box: MXR-080-0295
+    Corroboration,
+    _default_claim_corroborator,
+    _negated_content_words,
+    information_corroborator,
+)
 
 
 class ExtractorTest(unittest.TestCase):
@@ -77,6 +83,98 @@ class ClaimUQTest(unittest.TestCase):
         d = {c.claim: c for c in info.claims}
         self.assertTrue(d["claim-1"].reliable)
         self.assertFalse(d["claim-2"].reliable)
+
+
+class DefaultClaimCorroboratorTest(unittest.TestCase):  # white-box: MXR-080-0295
+    """Coverage for the negation-aware default corroborator, mirroring
+    mixle.substrate.factuality's MXR-080-0258 test pattern (same adversarial pair)."""
+
+    def test_negated_resample_sharing_claim_vocabulary_is_contradicted_not_supported(self):
+        # The audit's exact adversarial pattern (mirrored from the substrate/factuality.py precedent):
+        # a resample that shares almost every content word with a claim but negates it. Pre-fix, both
+        # content_overlap and information_corroborator -- lexical-overlap-only -- treat this as full
+        # corroboration; the negation-aware default must not.
+        claim = "The drug cures cancer."
+        negated = "The drug cures no cancer and does not work."
+        self.assertTrue(content_overlap(negated, claim, threshold=0.5))  # candidacy still clears
+        self.assertTrue(information_corroborator([claim, negated])(negated, claim))  # old default: True
+        verdict = _default_claim_corroborator([claim, negated])(negated, claim)
+        self.assertEqual(verdict, Corroboration.CONTRADICTED)
+
+    def test_genuine_support_with_no_negation_still_supported(self):
+        # Guard against the fix over-correcting to "everything is contradicted".
+        samples = ["The tower is 300 meters tall.", "The tower is 300 meters tall, built in 1889."]
+        verdict = _default_claim_corroborator(samples)(samples[1], samples[0])
+        self.assertEqual(verdict, Corroboration.SUPPORTED)
+
+    def test_unrelated_sample_is_unverified_not_contradicted(self):
+        samples = ["The tower is 300 meters tall.", "The moon orbits the earth."]
+        verdict = _default_claim_corroborator(samples)(samples[1], samples[0])
+        self.assertEqual(verdict, Corroboration.UNVERIFIED)
+
+    def test_symmetric_negation_is_still_supported(self):
+        # Both texts negate the same shared content the same way -- agreement, not disagreement, so a
+        # genuinely negative claim can still be genuinely corroborated (not "any negation anywhere
+        # fails the claim").
+        claim = "The drug does not cure cancer."
+        sample = "Clinical trials show the drug does not cure cancer."
+        verdict = _default_claim_corroborator([claim, sample])(sample, claim)
+        self.assertEqual(verdict, Corroboration.SUPPORTED)
+
+    def test_legacy_bool_corroborator_still_accepted_by_assess_claims(self):
+        # A pre-0295 caller-supplied `corroborates=(sample, claim) -> bool` must keep working.
+        uq = LLMUncertainty(lambda p: "X", n=4)
+        info = uq.assess_claims(
+            "q",
+            extract=lambda text: ["claim-1"],
+            corroborates=lambda sample, claim: True,
+            threshold=0.5,
+        )
+        self.assertTrue(info.claims[0].reliable)
+        self.assertEqual(info.claims[0].contradicted, 0.0)
+
+    def test_contraction_negation_is_detected(self):
+        # n't-contractions must survive tokenization ("doesn't" -> "does not") for the negation check
+        # to see them at all.
+        self.assertIn("work", _negated_content_words("The drug doesn't work."))
+
+
+class ContradictedClaimEndToEndTest(unittest.TestCase):  # MXR-080-0295
+    def test_resample_that_contradicts_the_primary_answer_is_not_reliable(self):
+        responses = iter(
+            [
+                "The drug cures cancer.",
+                "The drug cures no cancer and does not work.",
+                "The drug cures no cancer and does not work.",
+                "The drug cures no cancer and does not work.",
+            ]
+        )
+        uq = LLMUncertainty(lambda p: next(responses), n=4)
+        info = uq.assess_claims("Does the drug cure cancer?", threshold=0.5)
+        claim = info.claims[0]
+        self.assertEqual(claim.support, 0.0)
+        self.assertEqual(claim.contradicted, 1.0)
+        self.assertFalse(claim.reliable)
+        self.assertIn(claim, info.fabricated)
+
+    def test_zero_extractable_claims_reports_unassessed_not_perfect_reliability(self):
+        # MXR-080-0295 (Critical): an empty/evasive primary response used to report reliability == 1.0
+        # (vacuously "fully reliable"). No fragment in "Hm. Well." has >= 2 words, so sentence_claims
+        # extracts nothing -- this must be UNASSESSED (None), not a perfect score, and is_reliable()
+        # must fail closed regardless of threshold.
+        uq = LLMUncertainty(lambda p: "Hm. Well.", n=4)
+        info = uq.assess_claims("evasive question")
+        self.assertEqual(info.claims, [])
+        self.assertIsNone(info.reliability)
+        self.assertFalse(info.is_reliable())
+        self.assertFalse(info.is_reliable(threshold=0.0))  # fails closed no matter how low the bar is
+
+    def test_literally_empty_response_is_also_unassessed(self):
+        uq = LLMUncertainty(lambda p: "", n=4)
+        info = uq.assess_claims("q")
+        self.assertEqual(info.claims, [])
+        self.assertIsNone(info.reliability)
+        self.assertFalse(info.is_reliable())
 
 
 class AssessClaimsTupleGenerationTest(unittest.TestCase):  # MXR-080-0296
