@@ -22,9 +22,48 @@ per-class probabilities (e.g. the posterior of a mixle generative classifier).  
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import pickle
+from numbers import Integral
 from typing import Any
 
 import numpy as np
+
+
+def _digest(value: Any) -> str:
+    """Content digest used to bind a calibrated scorer to one model state."""
+    try:
+        payload = pickle.dumps(value, protocol=5)
+    except (pickle.PickleError, AttributeError, TypeError):
+        state = getattr(value, "__dict__", repr(value))
+        try:
+            payload = pickle.dumps(state, protocol=5)
+        except (pickle.PickleError, AttributeError, TypeError):
+            payload = repr(state).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _frozen_model(value: Any, name: str) -> tuple[Any, str]:
+    try:
+        frozen = copy.deepcopy(value)
+    except Exception as error:
+        raise TypeError(f"{name} must support copying so calibration can bind an immutable model state") from error
+    return frozen, _digest(frozen)
+
+
+def _assert_unchanged(value: Any, expected: str, name: str) -> None:
+    if _digest(value) != expected:
+        raise RuntimeError(f"{name} changed after calibration; recalibrate before requesting conformal sets")
+
+
+def _index(value: Any, upper: int, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an exact integer index")
+    result = int(value)
+    if result < 0 or result >= upper:
+        raise ValueError(f"{name} must lie in [0, {upper})")
+    return result
 
 
 def _alpha(value: Any) -> float:
@@ -119,9 +158,12 @@ class ConformalRegressor:
     """
 
     def __init__(self, result: Any, y_cal: Any, *, given: dict, alpha: float = 0.1) -> None:
-        self.result = result
+        self.result, self._result_digest = _frozen_model(result, "regression result")
         self.alpha = _alpha(alpha)
-        yhat = _finite_vector(np.asarray(result.predict(given)).reshape(-1), "calibration predictions")
+        predict = getattr(self.result, "predict", None)
+        if not callable(predict):
+            raise TypeError("regression result must expose callable predict(given)")
+        yhat = _finite_vector(np.asarray(predict(given)).reshape(-1), "calibration predictions")
         y = _finite_vector(np.asarray(y_cal).reshape(-1), "calibration targets")
         if yhat.shape != y.shape:
             raise ValueError(f"calibration predictions {yhat.shape} and targets {y.shape} disagree.")
@@ -130,6 +172,7 @@ class ConformalRegressor:
 
     def interval(self, given: dict) -> tuple[np.ndarray, np.ndarray]:
         """Return ``(lower, upper)`` arrays of the conformal interval at covariates ``given``."""
+        _assert_unchanged(self.result, self._result_digest, "regression result")
         center = _finite_vector(np.asarray(self.result.predict(given)).reshape(-1), "regression predictions")
         return center - self.qhat, center + self.qhat
 
@@ -192,16 +235,25 @@ class ConformalQuantileRegressor:
     """
 
     def __init__(self, lo: Any, hi: Any, y_cal: Any, *, given: dict, alpha: float = 0.1) -> None:
-        self.lo = lo
-        self.hi = hi
+        self.lo, self._lo_digest = _frozen_model(lo, "lower quantile model")
+        self.hi, self._hi_digest = _frozen_model(hi, "upper quantile model")
+        if not callable(getattr(self.lo, "predict", None)) or not callable(getattr(self.hi, "predict", None)):
+            raise TypeError("lower and upper quantile models must expose callable predict(given)")
         self.alpha = _alpha(alpha)
         y = _finite_vector(np.asarray(y_cal).reshape(-1), "calibration targets")
-        qlo, qhi = _paired_bands(lo.predict(given), hi.predict(given), rows=y.size, source="calibration")
+        qlo, qhi = _paired_bands(
+            self.lo.predict(given),
+            self.hi.predict(given),
+            rows=y.size,
+            source="calibration",
+        )
         self.scores = np.maximum(qlo - y, y - qhi)  # CQR nonconformity (negative when inside the band)
         self.qhat = conformal_quantile(self.scores, self.alpha)
 
     def interval(self, given: dict) -> tuple[np.ndarray, np.ndarray]:
         """Return ``(lower, upper)`` arrays of the calibrated adaptive band at covariates ``given``."""
+        _assert_unchanged(self.lo, self._lo_digest, "lower quantile model")
+        _assert_unchanged(self.hi, self._hi_digest, "upper quantile model")
         qlo, qhi = _paired_bands(self.lo.predict(given), self.hi.predict(given), source="prediction")
         return qlo - self.qhat, qhi + self.qhat
 
@@ -231,9 +283,11 @@ class ConformalStructure:
     """
 
     def __init__(self, dist: Any, calibration: Any, *, alpha: float = 0.1) -> None:
-        self.dist = dist
-        self.alpha = float(alpha)
-        self.scores = np.array([-float(dist.log_density(s)) for s in calibration], dtype=float)
+        self.dist, self._dist_digest = _frozen_model(dist, "structure distribution")
+        if not callable(getattr(self.dist, "log_density", None)):
+            raise TypeError("structure distribution must expose callable log_density")
+        self.alpha = _alpha(alpha)
+        self.scores = np.array([-float(self.dist.log_density(s)) for s in calibration], dtype=float)
         self.qhat = conformal_quantile(self.scores, self.alpha)  # largest admitted nonconformity
 
     @property
@@ -243,6 +297,7 @@ class ConformalStructure:
 
     def contains(self, structure: Any) -> bool:
         """Is ``structure`` in the conformal set (its log-probability above the threshold)."""
+        _assert_unchanged(self.dist, self._dist_digest, "structure distribution")
         return bool(-float(self.dist.log_density(structure)) <= self.qhat)
 
     def covers(self, structures: Any) -> np.ndarray:
@@ -256,6 +311,7 @@ class ConformalStructure:
         The enumerator yields structures in descending log-probability, so the scan stops at the
         threshold.
         """
+        _assert_unchanged(self.dist, self._dist_digest, "structure distribution")
         out = []
         for structure, log_p in self.dist.enumerator():
             if log_p < self.log_prob_threshold:
@@ -363,29 +419,104 @@ class ConformalKnowledgeGraph:
     def __init__(self, kg: Any, calibration: Any, *, slot: str = "tail", alpha: float = 0.1) -> None:
         if slot not in ("tail", "head", "relation"):
             raise ValueError("slot must be 'tail', 'head', or 'relation'.")
-        self.kg = kg
+        self.kg, self._kg_digest = _frozen_model(kg, "knowledge-graph model")
+        try:
+            self.num_entities = int(self.kg.num_entities)
+            self.num_relations = int(self.kg.num_relations)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise TypeError("knowledge-graph model must declare num_entities and num_relations") from error
+        if self.num_entities <= 0 or self.num_relations <= 0:
+            raise ValueError("knowledge-graph entity and relation counts must be positive")
+        for method in ("tail_log_posterior", "head_log_posterior", "relation_log_posterior", "complete"):
+            if not callable(getattr(self.kg, method, None)):
+                raise TypeError(f"knowledge-graph model must expose callable {method}()")
         self.slot = slot
-        self.alpha = float(alpha)
-        scores = [1.0 - float(np.exp(self._posterior(h, r, t)[self._truth(h, r, t)])) for h, r, t in calibration]
+        self.alpha = _alpha(alpha)
+        triples = self._triples(calibration, "calibration")
+        scores = [
+            1.0 - float(np.exp(self._posterior(h, r, t)[self._truth(h, r, t)]))
+            for h, r, t in triples
+        ]
         self.tau = conformal_quantile(scores, self.alpha)
 
+    def _triples(self, value: Any, name: str) -> np.ndarray:
+        raw = np.asarray(value)
+        if raw.ndim != 2 or raw.shape[0] == 0 or raw.shape[1] != 3 or raw.dtype.kind not in {"i", "u"}:
+            raise ValueError(f"{name} triples must be a non-empty (rows, 3) exact-integer array")
+        triples = raw.astype(np.int64, copy=False)
+        if (
+            np.any(triples[:, 0] < 0)
+            or np.any(triples[:, 0] >= self.num_entities)
+            or np.any(triples[:, 2] < 0)
+            or np.any(triples[:, 2] >= self.num_entities)
+            or np.any(triples[:, 1] < 0)
+            or np.any(triples[:, 1] >= self.num_relations)
+        ):
+            raise ValueError(f"{name} triples contain an out-of-range entity or relation index")
+        return triples
+
+    @staticmethod
+    def _log_posterior(value: Any, width: int, name: str) -> np.ndarray:
+        try:
+            result = np.asarray(value, dtype=float)
+        except (TypeError, ValueError) as error:
+            raise TypeError(f"{name} must return a finite normalized log-probability vector") from error
+        if result.ndim != 1 or result.shape != (width,) or not np.all(np.isfinite(result)):
+            raise ValueError(f"{name} must return exactly {width} finite log probabilities")
+        maximum = float(np.max(result))
+        log_normalizer = maximum + float(np.log(np.exp(result - maximum).sum()))
+        if not np.isclose(log_normalizer, 0.0, rtol=0.0, atol=1e-8):
+            raise ValueError(f"{name} log probabilities must be normalized")
+        return result
+
     def _posterior(self, h: int, r: int, t: int) -> np.ndarray:
+        _assert_unchanged(self.kg, self._kg_digest, "knowledge-graph model")
+        h = _index(h, self.num_entities, "head")
+        r = _index(r, self.num_relations, "relation")
+        t = _index(t, self.num_entities, "tail")
         if self.slot == "tail":
-            return self.kg.tail_log_posterior(int(h), int(r))
+            return self._log_posterior(
+                self.kg.tail_log_posterior(h, r),
+                self.num_entities,
+                "tail_log_posterior",
+            )
         if self.slot == "head":
-            return self.kg.head_log_posterior(int(r), int(t))
-        return self.kg.relation_log_posterior(int(h), int(t))
+            return self._log_posterior(
+                self.kg.head_log_posterior(r, t),
+                self.num_entities,
+                "head_log_posterior",
+            )
+        return self._log_posterior(
+            self.kg.relation_log_posterior(h, t),
+            self.num_relations,
+            "relation_log_posterior",
+        )
 
     def _truth(self, h: int, r: int, t: int) -> int:
         return int({"tail": t, "head": h, "relation": r}[self.slot])
 
     def completion_set(self, h: int | None = None, r: int | None = None, t: int | None = None) -> np.ndarray:
         """Candidate fillers in the conformal set for the missing slot of a query."""
-        p = np.exp(self.kg.complete(h=h, r=r, t=t))
+        _assert_unchanged(self.kg, self._kg_digest, "knowledge-graph model")
+        expected_missing = {"tail": "t", "head": "h", "relation": "r"}[self.slot]
+        values = {"h": h, "r": r, "t": t}
+        missing = [name for name, value in values.items() if value is None]
+        if missing != [expected_missing]:
+            raise ValueError(f"completion query for slot {self.slot!r} must leave only {expected_missing!r} unset")
+        if h is not None:
+            h = _index(h, self.num_entities, "head")
+        if r is not None:
+            r = _index(r, self.num_relations, "relation")
+        if t is not None:
+            t = _index(t, self.num_entities, "tail")
+        width = self.num_relations if self.slot == "relation" else self.num_entities
+        logp = self._log_posterior(self.kg.complete(h=h, r=r, t=t), width, "complete")
+        p = np.exp(logp)
         return np.flatnonzero((1.0 - p) <= self.tau)
 
     def covers(self, triples: Any) -> np.ndarray:
         """Boolean array: is each held-out true triple's filler in the completion set."""
+        triples = self._triples(triples, "coverage")
         return np.array(
             [(1.0 - np.exp(self._posterior(h, r, t)[self._truth(h, r, t)])) <= self.tau for h, r, t in triples],
             dtype=bool,
@@ -393,6 +524,7 @@ class ConformalKnowledgeGraph:
 
     def set_sizes(self, triples: Any) -> np.ndarray:
         """Completion-set size for each query (the slot of each triple is treated as missing)."""
+        triples = self._triples(triples, "set-size")
         out = []
         for h, r, t in triples:
             q = {"tail": (h, r, None), "head": (None, r, t), "relation": (h, None, t)}[self.slot]
