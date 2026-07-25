@@ -23,12 +23,13 @@ def test_adapt_plus_join_reproduces_the_handwritten_g2_to_g6_bridge():
     cov3 = np.array([[0.030, -0.007, 0.0010], [-0.007, 0.0036, 0.0005], [0.0010, 0.0005, 0.0200]])
     onset_mean, onset_sd = 0.5, 0.22
 
-    # what SourcePosterior.to_doe_prior computes by hand (minus its 1e-6 PD jitter):
+    # Exact joint-log-normal moment conversion (minus any downstream PD jitter):
     rate = mean3[2]
-    expected_mean = np.array([mean3[0], mean3[1], np.log(rate), onset_mean])
+    log_rate_var = np.log1p(cov3[2, 2] / rate**2)
+    expected_mean = np.array([mean3[0], mean3[1], np.log(rate) - 0.5 * log_rate_var, onset_mean])
     expected_cov = np.zeros((4, 4))
     expected_cov[:2, :2] = cov3[:2, :2]
-    expected_cov[2, 2] = cov3[2, 2] / rate**2
+    expected_cov[2, 2] = log_rate_var
     expected_cov[:2, 2] = cov3[:2, 2] / rate
     expected_cov[2, :2] = expected_cov[:2, 2]
     expected_cov[3, 3] = onset_sd**2
@@ -36,7 +37,7 @@ def test_adapt_plus_join_reproduces_the_handwritten_g2_to_g6_bridge():
     # the same thing via validated, composable operations:
     g2_schema = PosteriorSchema((AxisSpec("x", "m"), AxisSpec("y", "m"), AxisSpec("rate", "kg/s", "linear")))
     rate_logged = PosteriorSchema((AxisSpec("x", "m"), AxisSpec("y", "m"), AxisSpec("rate", "kg/s", "log")))
-    logged = adapt(mean3, cov3, g2_schema, rate_logged)
+    logged = adapt(mean3, cov3, g2_schema, rate_logged, transformation_model="joint_log_normal")
 
     onset_schema = PosteriorSchema((AxisSpec("onset", "s"),))
     joined = join_independent(
@@ -47,6 +48,7 @@ def test_adapt_plus_join_reproduces_the_handwritten_g2_to_g6_bridge():
     np.testing.assert_allclose(joined.mean, expected_mean, rtol=1e-12)
     np.testing.assert_allclose(joined.cov, expected_cov, atol=1e-12)
     assert joined.schema.names == ["x", "y", "rate", "onset"]
+    assert logged.adaptation_receipt.approximation_error == 0.0
 
 
 def test_adapt_raises_when_a_target_axis_is_absent_from_source():
@@ -83,8 +85,8 @@ def test_linear_log_roundtrip_is_exact_for_a_single_step():
     lin = PosteriorSchema((AxisSpec("rate", "kg/s", "linear"),))
     log = PosteriorSchema((AxisSpec("rate", "kg/s", "log"),))
     mean, cov = np.array([6.0]), np.array([[0.02]])
-    there = adapt(mean, cov, lin, log)
-    back = adapt(there.mean, there.cov, log, lin)
+    there = adapt(mean, cov, lin, log, transformation_model="joint_log_normal")
+    back = adapt(there.mean, there.cov, log, lin, transformation_model="joint_log_normal")
     np.testing.assert_allclose(back.mean, mean, rtol=1e-12)
     np.testing.assert_allclose(back.cov, cov, rtol=1e-12)  # reciprocal Jacobians at the same point
 
@@ -93,7 +95,20 @@ def test_log_transform_rejects_nonpositive_mean():
     lin = PosteriorSchema((AxisSpec("rate", "kg/s", "linear"),))
     log = PosteriorSchema((AxisSpec("rate", "kg/s", "log"),))
     with pytest.raises(ValueError, match="not positive"):
-        adapt(np.array([-1.0]), np.array([[1.0]]), lin, log)
+        adapt(
+            np.array([-1.0]),
+            np.array([[1.0]]),
+            lin,
+            log,
+            transformation_model="joint_log_normal",
+        )
+
+
+def test_log_transform_requires_an_explicit_supported_probability_model():
+    lin = PosteriorSchema((AxisSpec("rate", "kg/s", "linear"),))
+    log = PosteriorSchema((AxisSpec("rate", "kg/s", "log"),))
+    with pytest.raises(ValueError, match="joint_log_normal"):
+        adapt(np.array([6.0]), np.array([[0.2]]), lin, log)
 
 
 def test_schematized_posterior_satisfies_the_ic1_protocol():
@@ -106,6 +121,46 @@ def test_schematized_posterior_satisfies_the_ic1_protocol():
     assert np.all(lo < hi)
     dq = sp.derived_quantity(lambda draws: draws[:, 0] + draws[:, 1], 100, rng)
     assert dq.samples.shape == (100,)
+    assert dq.prior_dominated is None
+    with pytest.raises(RuntimeError, match="unknown"):
+        dq.require_prior_dominance()
+
+
+def test_prior_dominance_diagnostic_is_propagated_to_derived_quantities():
+    schema = PosteriorSchema((AxisSpec("x"),))
+    posterior = SchematizedPosterior(np.array([0.0]), np.array([[1.0]]), schema, prior_dominated=True)
+    derived = posterior.derived_quantity(lambda draws: draws[:, 0], 10, np.random.default_rng(0))
+    assert derived.require_prior_dominance() is True
+
+
+@pytest.mark.parametrize("count", [0, -1, 1.5])
+def test_sampling_requires_a_positive_integral_count(count):
+    posterior = SchematizedPosterior(
+        np.array([0.0]),
+        np.array([[1.0]]),
+        PosteriorSchema((AxisSpec("x"),)),
+    )
+    with pytest.raises(ValueError, match="positive integer"):
+        posterior.samples(count, np.random.default_rng(0))
+
+
+@pytest.mark.parametrize(
+    "derived",
+    [
+        lambda draws: np.array(1.0),
+        lambda draws: np.zeros((len(draws) - 1,)),
+        lambda draws: np.full(len(draws), np.nan),
+        lambda draws: np.empty((len(draws), 0)),
+    ],
+)
+def test_derived_quantity_validates_one_finite_output_per_draw(derived):
+    posterior = SchematizedPosterior(
+        np.array([0.0]),
+        np.array([[1.0]]),
+        PosteriorSchema((AxisSpec("x"),)),
+    )
+    with pytest.raises(ValueError, match="derived quantity"):
+        posterior.derived_quantity(derived, 5, np.random.default_rng(0))
 
 
 def test_join_independent_rejects_duplicate_axis_names():
@@ -126,6 +181,17 @@ def test_schematized_posterior_rejects_invalid_covariance(covariance):
     schema = PosteriorSchema(tuple(AxisSpec(f"x{i}") for i in range(covariance.shape[0])))
     with pytest.raises(ValueError, match="covariance|finite"):
         SchematizedPosterior(np.zeros(covariance.shape[0]), covariance, schema)
+
+
+def test_negative_marginal_variance_cannot_hide_behind_a_large_axis():
+    schema = PosteriorSchema((AxisSpec("small"), AxisSpec("large")))
+    with pytest.raises(ValueError, match="negative marginal"):
+        SchematizedPosterior(np.zeros(2), np.diag([-0.5, 1.0e12]), schema)
+
+
+def test_schema_requires_at_least_one_semantic_axis():
+    with pytest.raises(ValueError, match="at least one"):
+        PosteriorSchema(())
 
 
 @pytest.mark.parametrize("level", [-0.1, 0.0, 1.0, 1.1, float("nan")])
