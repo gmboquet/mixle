@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from mixle.analysis.emissions import Footprint, transition_risk
+from mixle.analysis.emissions import Footprint, TransitionRiskResult, transition_risk
 
 
 def _footprint(total: float) -> Footprint:
@@ -152,5 +152,41 @@ def test_well_shaped_multi_scenario_input_still_ranks_correctly():
     result = transition_risk(_footprint(1_000.0), _price_paths(), npv_samples=npv_samples)
     assert result.samples.shape == (5_000, 2)
     assert result.scenario_mean[HIGH_IDX] < result.scenario_mean[LOW_IDX]
+    lo, hi = result.credible_interval(0.9)
+    assert np.all(lo <= hi)
+
+
+# --- TransitionRiskResult construction-time validation: same samples-carrying-result-type guard ---
+# --- applied to carcinogenic_risk.RiskQuantity, closing the same gap found in this sibling module. ---
+
+
+def _result_kwargs(**overrides):
+    base = dict(
+        samples=np.array([[1.0, 2.0], [3.0, 4.0]]),
+        prior_dominated=False,
+        scenario_mean=np.array([2.0, 3.0]),
+        ranking=[1, 0],
+        carbon_cost=np.array([0.5, 0.6]),
+        provenance={},
+    )
+    base.update(overrides)
+    return base
+
+
+def test_transition_risk_result_rejects_empty_or_non_finite_samples():
+    """`TransitionRiskResult` had no construction-time validation at all: empty or NaN/Inf samples
+    were silently accepted. Defense-in-depth so invalid state can never flow downstream even if
+    `transition_risk` itself (or some other caller) fails to validate its own inputs."""
+    with pytest.raises(ValueError):
+        TransitionRiskResult(**_result_kwargs(samples=np.zeros((0, 2)), scenario_mean=np.array([])))
+    with pytest.raises(ValueError):
+        TransitionRiskResult(**_result_kwargs(samples=np.array([[1.0, np.nan], [3.0, 4.0]])))
+    with pytest.raises(ValueError):
+        TransitionRiskResult(**_result_kwargs(samples=np.array([[1.0, np.inf], [3.0, 4.0]])))
+
+
+def test_transition_risk_result_accepts_valid_samples():
+    """Negative control: a legitimate, non-empty, finite samples matrix still constructs cleanly."""
+    result = TransitionRiskResult(**_result_kwargs())
     lo, hi = result.credible_interval(0.9)
     assert np.all(lo <= hi)

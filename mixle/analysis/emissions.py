@@ -284,6 +284,12 @@ class TransitionRiskResult:
     (scenario indices sorted best -> worst by ``scenario_mean``), and ``carbon_cost`` (the
     priced-and-discounted carbon cost subtracted from each scenario) carry the scenario-level
     comparison :func:`transition_risk` exists to produce.
+
+    Construction validates ``samples``: non-empty and finite (no NaN/Inf) -- defense-in-depth so
+    invalid state can never flow downstream to a caller even if some upstream pushforward (here,
+    :func:`transition_risk`) fails to validate its own inputs, the same guard applied to
+    ``carcinogenic_risk.RiskQuantity`` and the ``_SampleDerivedQuantity`` carriers elsewhere in
+    ``mixle.analysis``.
     """
 
     samples: np.ndarray
@@ -292,6 +298,13 @@ class TransitionRiskResult:
     ranking: list[int]
     carbon_cost: np.ndarray
     provenance: dict
+
+    def __post_init__(self) -> None:
+        arr = np.asarray(self.samples, dtype=float)
+        if arr.size == 0:
+            raise ValueError("TransitionRiskResult.samples must be non-empty.")
+        if not np.isfinite(arr).all():
+            raise ValueError("TransitionRiskResult.samples must be finite (no NaN/Inf).")
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         """Per-scenario central ``level`` interval of the carbon-adjusted NPV, each shape ``(k,)``."""
