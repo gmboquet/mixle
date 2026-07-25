@@ -6,12 +6,20 @@ or generation model is built here (see ``notes/designs/M5.md`` part (c) for the 
 
 * :func:`parse_evidence` -- an extractor callable (the same ``teacher(x) -> dict`` shape
   :func:`mixle.task.structured_out.solve_structured` decomposes) produces a raw ``{field: value}``
-  dict from NL/record input; this module validates it against a caller-declared schema
-  (``{field: "categorical" | "numeric"}`` -- the same shape
-  :attr:`~mixle.task.structured_out.StructuredSolution.schema` already returns) BEFORE it reaches
-  :func:`~mixle.reason.cross_modal.CrossModalJoint.infer` / :func:`~mixle.reason.inference_program.run_inference_program`,
-  so a schema violation is a clear ``ValueError`` here rather than a confusing downstream
-  ``log_density`` crash.
+  dict from NL/record input; this module validates it against a caller-declared schema BEFORE it
+  reaches :func:`~mixle.reason.cross_modal.CrossModalJoint.infer` /
+  :func:`~mixle.reason.inference_program.run_inference_program`, so a schema violation is a clear
+  ``ValueError`` here rather than a confusing downstream ``log_density`` crash. A schema field may be
+  declared with the plain shorthand string ``"categorical" | "numeric"`` -- the same shape
+  :attr:`~mixle.task.structured_out.StructuredSolution.schema` already returns, treated as a REQUIRED
+  field with no further restriction -- or a full :class:`SchemaField` for an OPTIONAL field or a
+  categorical field restricted to a declared closed set of values. Validation happens in two passes:
+  the schema itself is checked (every declared field's kind, and categories if any) BEFORE the
+  extractor ever runs, so a malformed schema cannot hide behind a call that happens not to exercise
+  the bad field; then the extractor's actual output is checked field-by-field against it -- every
+  required field must be present, every numeric value must be finite, and every categorical value must
+  already be a legitimate ``str`` (a member of ``categories`` when declared) rather than an arbitrary
+  object silently stringified into a fabricated label.
 * :class:`PosteriorDescriber` / :func:`claim_score` -- draft ``k`` candidate :class:`Claim`\\ s at
   different ABSOLUTE precision widths (multiples of a required ``tol``, the same "caller declares the
   precision that counts" contract :func:`mixle.task.regress.solve_regression` already uses for numeric
@@ -36,6 +44,7 @@ from mixle.utils.callables import accepts_call
 
 __all__ = [
     "Schema",
+    "SchemaField",
     "parse_evidence",
     "Claim",
     "claim_score",
@@ -43,25 +52,95 @@ __all__ = [
     "ABSTAIN",
 ]
 
-Schema = dict[str, str]  # {field_name: "categorical" | "numeric"}
 _KINDS = ("categorical", "numeric")
 
 
-def _validate_evidence(raw: dict[str, Any], schema: Schema) -> dict[str, Any]:
+@dataclass(frozen=True)
+class SchemaField:
+    """One declared evidence field: its value kind, whether the extractor must supply it, and (for
+    categorical fields) the closed set of values that count as legitimate.
+
+    ``kind="numeric"`` accepts only finite ``int``/``float`` (``bool`` excluded -- never a genuine
+    numeric measurement; NaN/Infinity excluded -- "validated" evidence must be usable arithmetic, not
+    merely type-correct). ``kind="categorical"`` accepts only values that are ALREADY a ``str`` --
+    never an arbitrary object (including ``None``) silently stringified into a fabricated label -- and,
+    when ``categories`` is declared, only a value already a MEMBER of that closed set (an undeclared
+    label is rejected, not silently admitted as a new de facto category).
+
+    ``required=True`` (the default) means :func:`parse_evidence` raises if the extractor omits this
+    field; ``required=False`` preserves the "partial evidence is fine" contract for fields the caller
+    genuinely expects may go unmentioned.
+    """
+
+    kind: str
+    required: bool = True
+    categories: frozenset[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in _KINDS:
+            raise ValueError(f"schema field kind must be one of {_KINDS}, got {self.kind!r}")
+        if self.categories is not None:
+            if self.kind != "categorical":
+                raise ValueError(f"categories is only valid for kind='categorical', got kind={self.kind!r}")
+            cats = frozenset(self.categories)
+            if not cats:
+                raise ValueError("categories must be non-empty when declared")
+            non_str = sorted(repr(c) for c in cats if not isinstance(c, str))
+            if non_str:
+                raise ValueError(f"categories must all be str, got non-str member(s) {non_str}")
+            object.__setattr__(self, "categories", cats)
+
+
+Schema = dict[str, "SchemaField | str"]  # {field_name: SchemaField(...) | "categorical" | "numeric"}
+
+
+def _normalize_schema(schema: Schema) -> dict[str, SchemaField]:
+    """Validate the SCHEMA ITSELF -- every declared field's kind and categories -- before the extractor
+    ever runs, so an invalid schema is caught even for a field a given call's extractor happens to
+    omit (previously a field's kind was only checked when the extractor's raw output actually included
+    it, so e.g. a typo'd kind string on a field nothing ever populates silently never fired)."""
+    if not schema:
+        raise ValueError("parse_evidence needs a non-empty schema")
+    out: dict[str, SchemaField] = {}
+    for key, decl in schema.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"schema field names must be non-empty str, got {key!r}")
+        if isinstance(decl, str):
+            decl = SchemaField(kind=decl)  # shorthand -- required, no categories restriction
+        elif not isinstance(decl, SchemaField):
+            raise TypeError(f"schema field {key!r} must be a kind string or a SchemaField, got {type(decl).__name__}")
+        out[key] = decl  # SchemaField.__post_init__ already validated kind/categories
+    return out
+
+
+def _validate_evidence(raw: dict[str, Any], schema: dict[str, SchemaField]) -> dict[str, Any]:
     unknown = [k for k in raw if k not in schema]
     if unknown:
         raise ValueError(f"extractor returned undeclared field(s) {sorted(unknown)!r}; schema is {sorted(schema)!r}")
+    missing = sorted(k for k, decl in schema.items() if decl.required and k not in raw)
+    if missing:
+        raise ValueError(f"extractor omitted required field(s) {missing!r}")
     out: dict[str, Any] = {}
     for key, value in raw.items():
-        kind = schema[key]
-        if kind == "numeric":
+        decl = schema[key]
+        if decl.kind == "numeric":
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"field {key!r} is declared numeric but the extractor returned {value!r}")
-            out[key] = float(value)
-        elif kind == "categorical":
-            out[key] = str(value)
-        else:
-            raise ValueError(f"schema field {key!r} has unknown kind {kind!r}; expected one of {_KINDS}")
+            value = float(value)
+            if not np.isfinite(value):
+                raise ValueError(f"field {key!r} is declared numeric but the extractor returned non-finite {value!r}")
+            out[key] = value
+        else:  # "categorical" -- SchemaField.__post_init__ already rejected any other kind
+            if not isinstance(value, str):
+                raise ValueError(
+                    f"field {key!r} is declared categorical but the extractor returned "
+                    f"{value!r} ({type(value).__name__}), not a str -- no object is stringified into a label"
+                )
+            if decl.categories is not None and value not in decl.categories:
+                raise ValueError(
+                    f"field {key!r} value {value!r} is not one of the declared categories {sorted(decl.categories)!r}"
+                )
+            out[key] = value
     return out
 
 
@@ -71,16 +150,18 @@ def parse_evidence(text: Any, schema: Schema, extractor: Callable[[Any], dict[st
     ``extractor(text) -> {field: raw_value}`` does the actual parsing (a keyword/regex rule, a
     calibrated :func:`~mixle.task.structured_out.solve_structured` student, an LLM call -- this module
     is agnostic to how); this function's only job is enforcing the declared ``schema`` BEFORE the
-    result is trusted as evidence: every returned field must be declared, numeric fields must actually
-    be numbers, categorical fields are normalized to ``str``. The returned dict is ready to pass
-    straight to ``CrossModalJoint.infer(...)`` or as ``run_inference_program``'s ``evidence=``.
+    result is trusted as evidence: the schema itself is validated first (so a malformed schema raises
+    even on a call whose extractor happens not to touch the bad field), then every required field must
+    be present, numeric fields must be finite numbers, and categorical fields must already be a ``str``
+    (and a declared category, when one is set) -- never an arbitrary object silently stringified into a
+    fabricated label. The returned dict is ready to pass straight to ``CrossModalJoint.infer(...)`` or
+    as ``run_inference_program``'s ``evidence=``.
     """
-    if not schema:
-        raise ValueError("parse_evidence needs a non-empty schema")
+    fields = _normalize_schema(schema)
     raw = extractor(text)
     if not isinstance(raw, dict):
         raise TypeError(f"extractor(text) must return a dict, got {type(raw).__name__}")
-    return _validate_evidence(raw, schema)
+    return _validate_evidence(raw, fields)
 
 
 @dataclass(frozen=True)
