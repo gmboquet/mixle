@@ -17,6 +17,8 @@ import itertools  # noqa: E402
 from mixle.inference import optimize  # noqa: E402
 from mixle.models.mixture_density import (  # noqa: E402
     NeuralConditionalDensity,
+    NeuralConditionalDensityAccumulator,
+    NeuralConditionalDensityEstimator,
     build_conditional_autoregressive_categorical,
     build_conditional_flow,
     build_mdn,
@@ -199,6 +201,68 @@ class GeneralityTest(unittest.TestCase):
         y = np.array([[2.0], [4.0]])  # exactly on the mean => log N = -0.5*log(2pi)
         got = leaf.seq_log_density((x, y))
         self.assertTrue(np.allclose(got, -0.5 * np.log(2 * np.pi), atol=1e-5))
+
+
+class ConditionalContractTest(unittest.TestCase):
+    def test_schema_controls_and_responsibilities_are_validated(self):
+        module = build_mdn(1, 1, k=2, hidden=4)
+        for constructor in (NeuralConditionalDensity, NeuralConditionalDensityEstimator):
+            with self.assertRaises(ValueError):
+                constructor(module, m_steps=0)
+            with self.assertRaises(TypeError):
+                constructor(module, m_steps=1.5)
+            with self.assertRaises(ValueError):
+                constructor(module, lr=np.nan)
+
+        leaf = NeuralConditionalDensity(module, m_steps=1)
+        with self.assertRaisesRegex(ValueError, "identical row counts"):
+            leaf.seq_log_density((np.zeros((2, 1)), np.zeros((3, 1))))
+        for weights in (
+            np.array([1.0]),
+            np.array([-1.0, 2.0]),
+            np.array([0.0, 0.0]),
+            np.array([1.0, np.nan]),
+        ):
+            with self.assertRaises(ValueError):
+                leaf.estimator().estimate(None, (np.zeros((2, 1)), np.zeros((2, 1)), weights))
+
+    def test_accumulator_rejects_row_and_weight_mismatches(self):
+        accumulator = NeuralConditionalDensityAccumulator()
+        with self.assertRaisesRegex(ValueError, "identical row counts"):
+            accumulator.seq_update((np.zeros((2, 1)), np.zeros((3, 1))), np.ones(2), None)
+        with self.assertRaisesRegex(ValueError, "one weight per row"):
+            accumulator.seq_update((np.zeros((2, 1)), np.zeros((2, 1))), np.ones(1), None)
+
+    def test_fit_restores_complete_mode_and_requires_one_score_per_row(self):
+        module = build_conditional_flow(1, 2, hidden=4, layers=2)
+        module.train()
+        module.s[0].eval()
+        modes_before = [part.training for part in module.modules()]
+        NeuralConditionalDensity(module, m_steps=1).estimator().estimate(
+            None,
+            (np.zeros((2, 1)), np.zeros((2, 2)), np.ones(2)),
+        )
+        self.assertEqual([part.training for part in module.modules()], modes_before)
+
+        class WrongShape(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.value = torch.nn.Parameter(torch.zeros(1))
+
+            def log_density(self, x, y):
+                return self.value + torch.zeros((len(x), 1), device=x.device)
+
+        with self.assertRaisesRegex(RuntimeError, "one score per row"):
+            NeuralConditionalDensity(WrongShape(), m_steps=1).estimator().estimate(
+                None,
+                (np.zeros((2, 1)), np.zeros((2, 1)), np.ones(2)),
+            )
+
+    def test_sample_given_rejects_batched_input_instead_of_dropping_rows(self):
+        sampler = NeuralConditionalDensity(build_mdn(1, 1, k=2, hidden=4)).sampler(0)
+        with self.assertRaisesRegex(ValueError, "sample_given_batch"):
+            sampler.sample_given(np.zeros((2, 1)))
+        self.assertEqual(sampler.sample_given_batch(np.zeros((2, 1))).shape, (2, 1))
 
 
 if __name__ == "__main__":

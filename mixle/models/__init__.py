@@ -71,6 +71,7 @@ from mixle.models.mixture_density import (
     NeuralConditionalDensity,
     build_conditional_autoregressive_categorical,
     build_conditional_flow,
+    build_contrastive_projection,
     build_mdn,
     build_projection_leaf,
 )
@@ -243,6 +244,7 @@ __all__ = [
     "leapfrog_rollout",
     "learn_pc_skeleton",
     "build_autoregressive_categorical",
+    "build_contrastive_projection",
     "build_conditional_autoregressive_categorical",
     "build_conditional_flow",
     "build_convex_energy_net",
