@@ -36,6 +36,7 @@ fold the near-field/far-field split into one undifferentiated block" rule).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from numbers import Integral
 from typing import Any
 
 try:
@@ -66,22 +67,19 @@ __all__ = [
     "E3_UNAVAILABLE_COMPARISONS",
 ]
 
-E3_UNAVAILABLE_COMPARISONS: dict[str, str] = {
-    "E2": (
-        "moment-closure attention (roadmap E2) has not been implemented anywhere reachable from this "
-        "worktree as of 2026-07-09; moment-closure-attention exists only as an unpushed local "
-        "branch/worktree sitting at this worktree's own base commit (b5928139, the E7 tip) -- i.e. zero "
-        "E2 work has landed anywhere reachable. Per this project's convention for documenting unreachable "
-        "dependencies honestly instead of blocking or fabricating a result (mixle.task.pilot_ladder's "
-        "PILOT_LADDER_UNAVAILABLE_PIECES pattern), the E7 comparison table below is E1 vs the three E3 "
-        "sketches only, with this string standing in for the E2 column rather than a fabricated row."
-    ),
-}
+# Retained for compatibility with the roadmap-era API. All formerly missing comparison pieces now exist.
+E3_UNAVAILABLE_COMPARISONS: dict[str, str] = {}
 
 
 def _require_torch() -> None:
     if not _HAS_TORCH:
         raise ImportError("mixle.experimental.sketch_state_attention requires torch.")
+
+
+def _positive_integer(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral) or int(value) <= 0:
+        raise ValueError(f"{name} must be a positive exact integer, got {value}")
+    return int(value)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -128,7 +126,19 @@ if _HAS_TORCH:
         ``(m, d)`` new rows, inserted one at a time (insert into a zero row; shrink whenever none remains).
         Returns the updated ``(ell, d)`` ``B`` -- unbatched, matching the design note's Proposed API
         signature exactly (the batched spine-internal use reuses the same ``_fd_insert_row`` primitive)."""
-        del ell  # ell is implied by B.shape[0]; kept in the signature to match the design note's API.
+        ell = _positive_integer(ell, "ell")
+        if not torch.is_tensor(B) or not torch.is_tensor(rows) or B.ndim != 2 or rows.ndim != 2:
+            raise TypeError("B and rows must be real floating-point matrices")
+        if not B.is_floating_point() or not rows.is_floating_point():
+            raise TypeError("B and rows must be real floating-point matrices")
+        if B.shape[0] != ell or B.shape[1] == 0 or ell > B.shape[1]:
+            raise ValueError("B must have shape (ell, d) with 1 <= ell <= d")
+        if rows.shape[1] != B.shape[1] or rows.device != B.device or rows.dtype != B.dtype:
+            raise ValueError("rows must match B's feature dimension, device, and dtype")
+        if not bool(torch.isfinite(B).all().item()) or not bool(torch.isfinite(rows).all().item()):
+            raise ValueError("B and rows must contain only finite values")
+        if not bool((B.abs().sum(dim=-1) == 0).any().item()):
+            raise ValueError("B must be a valid FD state containing at least one exact zero insertion row")
         B = B.clone()
         for t in range(rows.shape[0]):
             B = _fd_insert_row(B, rows[t], B.shape[0])
@@ -140,9 +150,28 @@ if _HAS_TORCH:
         theorem's guarantee is that ANY ``B`` produced by streaming ``A``'s rows through FD satisfies
         ``||A^T A - B^T B||_2 <= `` this quantity); ``B`` is accepted to match the design note's Proposed API
         signature and to allow a caller to sanity-check ``B.shape[0] == ell``."""
-        if B is not None and int(B.shape[0]) != int(ell):
-            raise ValueError(f"B has {B.shape[0]} rows, expected ell={ell}.")
-        if k <= 0:
+        ell = _positive_integer(ell, "ell")
+        if isinstance(k, bool) or not isinstance(k, Integral) or not 0 <= int(k) < ell:
+            raise ValueError(f"k must be an exact integer in [0, ell), got {k}")
+        k = int(k)
+        if not torch.is_tensor(A) or A.ndim != 2 or not A.is_floating_point() or A.shape[1] == 0:
+            raise TypeError("A must be a real floating-point matrix with a non-empty feature dimension")
+        if ell > A.shape[1]:
+            raise ValueError(f"ell={ell} must not exceed A's feature dimension {A.shape[1]}")
+        if not bool(torch.isfinite(A).all().item()):
+            raise ValueError("A must contain only finite values")
+        if B is not None:
+            if (
+                not torch.is_tensor(B)
+                or B.ndim != 2
+                or B.shape != (ell, A.shape[1])
+                or B.device != A.device
+                or B.dtype != A.dtype
+            ):
+                raise ValueError(f"B must have shape {(ell, A.shape[1])} on A's device and dtype")
+            if not bool(torch.isfinite(B).all().item()):
+                raise ValueError("B must contain only finite values")
+        if k == 0:
             resid = torch.linalg.norm(A, ord="fro") ** 2
         else:
             s = torch.linalg.svdvals(A)
@@ -159,6 +188,11 @@ if _HAS_TORCH:
         """``degree`` independent ``(hash, sign)`` pairs, fixed at construction (the "oblivious" part --
         the hash/sign choice does not depend on the data). ``hash_i: [d] -> [sketch_dim]``,
         ``sign_i: [d] -> {-1, +1}``."""
+        d = _positive_integer(d, "d")
+        sketch_dim = _positive_integer(sketch_dim, "sketch_dim")
+        degree = _positive_integer(degree, "degree")
+        if isinstance(seed, bool) or not isinstance(seed, Integral):
+            raise ValueError(f"seed must be an exact integer, got {seed}")
         gen = torch.Generator(device="cpu").manual_seed(int(seed))
         hashes, signs = [], []
         for _ in range(degree):
@@ -183,6 +217,31 @@ if _HAS_TORCH:
         FFT circular convolution (Pham & Pagh 2013): ``TS(x) = IFFT(prod_i FFT(CS_i(x)))``. The defining
         property this implements: ``TS(x)^T TS(y)`` is an unbiased estimator of ``(x^T y)^p`` for
         ``p = len(hashes)``, with variance ``O(1 / sketch_dim)``."""
+        sketch_dim = _positive_integer(sketch_dim, "sketch_dim")
+        if not torch.is_tensor(x) or not x.is_floating_point() or x.ndim < 1 or x.shape[-1] == 0:
+            raise TypeError("x must be a real floating-point tensor with a non-empty final dimension")
+        if not bool(torch.isfinite(x).all().item()):
+            raise ValueError("x must contain only finite values")
+        if not hashes or len(hashes) != len(signs):
+            raise ValueError("hashes and signs must have equal non-zero degree")
+        for index, (hash_values, sign_values) in enumerate(zip(hashes, signs)):
+            if (
+                not torch.is_tensor(hash_values)
+                or hash_values.dtype != torch.long
+                or hash_values.shape != (x.shape[-1],)
+                or hash_values.device != x.device
+            ):
+                raise ValueError(f"hashes[{index}] must be a torch.long vector on x's device")
+            if (
+                not torch.is_tensor(sign_values)
+                or sign_values.shape != (x.shape[-1],)
+                or sign_values.device != x.device
+            ):
+                raise ValueError(f"signs[{index}] must be a vector on x's device")
+            if bool(((hash_values < 0) | (hash_values >= sketch_dim)).any().item()):
+                raise ValueError(f"hashes[{index}] contains an index outside [0, sketch_dim)")
+            if not bool(((sign_values == -1) | (sign_values == 1)).all().item()):
+                raise ValueError(f"signs[{index}] must contain only -1 and +1")
         prod = None
         for h, s in zip(hashes, signs):
             cs = _count_sketch(x, h, s, sketch_dim)
@@ -381,9 +440,62 @@ class FrequentDirectionsState:
     cache_k: list[Any] = field(default_factory=list)  # per layer: (batch, cache_len<=window, n_head, head_dim) | None
     cache_v: list[Any] = field(default_factory=list)
     pos: int = 0
+    receipt: dict[str, Any] = field(default_factory=dict)
 
 
 if _HAS_TORCH:
+
+    def _frequent_directions_far_scan(
+        q_raw: Any,
+        B: Any,
+        Z: Any,
+        evicted_k: Any,
+        evicted_v: Any,
+        *,
+        cache_len: int,
+        window: int,
+        ell: int,
+        head_dim: int,
+        far_count_before: int,
+    ) -> tuple[Any, Any, Any, float | None]:
+        """Advance FD state at each query's exact window crossing and return query-aligned far outputs."""
+        t = q_raw.shape[1]
+        n_evict = 0 if evicted_k is None else evicted_k.shape[1]
+        processed = 0
+        outputs: list[Any] = []
+        min_denominator: float | None = None
+        phi_q = _phi(q_raw)
+        for query_index in range(t):
+            target = max(0, cache_len + query_index + 1 - window)
+            if target > n_evict:
+                raise RuntimeError("local-window eviction schedule is inconsistent with FD far-state scan")
+            while processed < target:
+                phi_key = _phi(evicted_k[:, processed])
+                row = torch.cat([phi_key, evicted_v[:, processed]], dim=-1)
+                B = _fd_insert_row(B, row, ell)
+                Z = Z + phi_key
+                processed += 1
+            if far_count_before + processed == 0:
+                outputs.append(q_raw.new_zeros(q_raw.shape[0], q_raw.shape[2], head_dim))
+                continue
+            B_K = B[..., :head_dim]
+            B_V = B[..., head_dim:]
+            S_approx = torch.einsum("bnld,bnle->bnde", B_K, B_V)
+            query = phi_q[:, query_index]
+            numerator = torch.einsum("bhd,bhde->bhe", query, S_approx)
+            denominator = torch.einsum("bhd,bhd->bh", query, Z)
+            if not bool(torch.isfinite(numerator).all().item()) or not bool(torch.isfinite(denominator).all().item()):
+                raise ValueError("Frequent-Directions far readout produced non-finite values")
+            if bool((denominator <= 0).any().item()):
+                raise ValueError(
+                    "Frequent-Directions far normalizer must be strictly positive when far state is non-empty"
+                )
+            current_min = float(denominator.min().item())
+            min_denominator = current_min if min_denominator is None else min(min_denominator, current_min)
+            outputs.append(numerator / denominator.unsqueeze(-1))
+        if processed != n_evict:
+            raise RuntimeError("FD far-state scan did not consume every token that left the local window")
+        return B, Z, torch.stack(outputs, dim=1), min_denominator
 
     class FrequentDirectionsSpine(nn.Module):
         """(b) FD sketch of the KV outer-product stream, exact per Liberty (2013).
@@ -408,22 +520,33 @@ if _HAS_TORCH:
             ell: int = 16,
         ) -> None:
             super().__init__()
-            assert d_model % n_head == 0
-            self.vocab = int(vocab)
-            self.d_model = int(d_model)
-            self.n_layer = int(n_layer)
-            self.n_head = int(n_head)
+            self.vocab = _positive_integer(vocab, "vocab")
+            self.d_model = _positive_integer(d_model, "d_model")
+            self.n_layer = _positive_integer(n_layer, "n_layer")
+            self.n_head = _positive_integer(n_head, "n_head")
+            self.window = _positive_integer(window, "window")
+            self.ell = _positive_integer(ell, "ell")
+            if self.d_model % self.n_head != 0:
+                raise ValueError(f"d_model={self.d_model} must be divisible by n_head={self.n_head}")
             self.head_dim = d_model // n_head
-            self.window = int(window)
-            self.ell = int(ell)
             self.d_row = 2 * self.head_dim
+            if self.ell > self.d_row:
+                raise ValueError(f"ell={self.ell} must not exceed augmented row dimension {self.d_row}")
             (self.tok, self.qkv, self.proj, self.ln1, self.ln2, self.mlp, self.ln_f, self.head) = _transformer_block(
-                vocab, d_model, n_layer, n_head
+                self.vocab, self.d_model, self.n_layer, self.n_head
             )
 
         def init_state(self, batch_size: int, *, device: str = "cpu") -> FrequentDirectionsState:
-            B = [torch.zeros(batch_size, self.n_head, self.ell, self.d_row, device=device) for _ in range(self.n_layer)]
-            Z = [torch.zeros(batch_size, self.n_head, self.head_dim, device=device) for _ in range(self.n_layer)]
+            batch_size = _positive_integer(batch_size, "batch_size")
+            dtype = self.tok.weight.dtype
+            B = [
+                torch.zeros(batch_size, self.n_head, self.ell, self.d_row, device=device, dtype=dtype)
+                for _ in range(self.n_layer)
+            ]
+            Z = [
+                torch.zeros(batch_size, self.n_head, self.head_dim, device=device, dtype=dtype)
+                for _ in range(self.n_layer)
+            ]
             return FrequentDirectionsState(
                 B=B, Z=Z, cache_k=[None] * self.n_layer, cache_v=[None] * self.n_layer, pos=0
             )
@@ -435,6 +558,7 @@ if _HAS_TORCH:
                 cache_k=[k.detach() if k is not None else None for k in state.cache_k],
                 cache_v=[v.detach() if v is not None else None for v in state.cache_v],
                 pos=state.pos,
+                receipt=dict(state.receipt),
             )
 
         def step(self, state: FrequentDirectionsState, chunk: tuple[Any, Any]) -> tuple[FrequentDirectionsState, Any]:
@@ -446,6 +570,8 @@ if _HAS_TORCH:
             new_cache_v: list[Any] = []
             new_B: list[Any] = []
             new_Z: list[Any] = []
+            denominator_minima: list[float | None] = []
+            far_counts: list[int] = []
             for layer in range(self.n_layer):
                 hn = self.ln1[layer](h)
                 qkv = self.qkv[layer](hn).reshape(b, t, 3, self.n_head, self.head_dim)
@@ -462,28 +588,28 @@ if _HAS_TORCH:
                     pos=state.pos,
                 )
 
-                B_layer, Z_layer = state.B[layer], state.Z[layer]
-                B_K = B_layer[..., : self.head_dim]  # (b, n_head, ell, head_dim)
-                B_V = B_layer[..., self.head_dim :]
-                S_approx = torch.einsum("bnld,bnle->bnde", B_K, B_V)  # (b, n_head, head_dim, head_dim)
-
-                phi_q = _phi(q_raw)
-                far_num = torch.einsum("bthd,bnde->bthe", phi_q, S_approx)
-                far_den = torch.einsum("bthd,bnd->bth", phi_q, Z_layer).clamp(min=1e-6)
-                far_out = far_num / far_den.unsqueeze(-1)
+                cache_len = 0 if state.cache_k[layer] is None else state.cache_k[layer].shape[1]
+                far_count_before = state.pos - cache_len
+                if far_count_before < 0:
+                    raise ValueError("state position cannot be smaller than its cache length")
+                B_layer, Z_layer, far_out, denominator_minimum = _frequent_directions_far_scan(
+                    q_raw,
+                    state.B[layer],
+                    state.Z[layer],
+                    evicted_k,
+                    evicted_v,
+                    cache_len=cache_len,
+                    window=self.window,
+                    ell=self.ell,
+                    head_dim=self.head_dim,
+                    far_count_before=far_count_before,
+                )
+                denominator_minima.append(denominator_minimum)
+                far_counts.append(far_count_before + (0 if evicted_k is None else evicted_k.shape[1]))
 
                 out = local_out + far_out
                 h = h + self.proj[layer](out.reshape(b, t, self.d_model))
                 h = h + self.mlp[layer](self.ln2[layer](h))
-
-                if evicted_k is not None:
-                    phi_evicted = _phi(evicted_k)  # (b, n_evict, n_head, head_dim)
-                    rows = torch.cat([phi_evicted, evicted_v], dim=-1)  # (b, n_evict, n_head, d_row)
-                    rows = rows.permute(0, 2, 1, 3)  # (b, n_head, n_evict, d_row)
-                    B_layer = B_layer.clone()
-                    for i in range(rows.shape[2]):
-                        B_layer = _fd_insert_row(B_layer, rows[:, :, i], self.ell)
-                    Z_layer = Z_layer + phi_evicted.sum(dim=1)  # sum over n_evict -> (b, n_head, head_dim)
 
                 new_B.append(B_layer)
                 new_Z.append(Z_layer)
@@ -493,7 +619,16 @@ if _HAS_TORCH:
             logits = self.head(self.ln_f(h))
             loss = F.cross_entropy(logits.reshape(b * t, self.vocab), y.reshape(b * t))
             new_state = FrequentDirectionsState(
-                B=new_B, Z=new_Z, cache_k=new_cache_k, cache_v=new_cache_v, pos=state.pos + t
+                B=new_B,
+                Z=new_Z,
+                cache_k=new_cache_k,
+                cache_v=new_cache_v,
+                pos=state.pos + t,
+                receipt={
+                    "far_tokens_per_layer": far_counts,
+                    "minimum_positive_denominator_per_layer": denominator_minima,
+                    "chunk_boundary_invariant_update": True,
+                },
             )
             return new_state, loss
 
@@ -506,19 +641,75 @@ if _HAS_TORCH:
 @dataclass
 class TensorSketchState:
     C: list[Any] = field(default_factory=list)  # per layer: (batch, n_head, sketch_dim, d_v)
+    Z: list[Any] = field(default_factory=list)  # per layer: (batch, n_head, sketch_dim), kernel normalizer
     cache_k: list[Any] = field(default_factory=list)
     cache_v: list[Any] = field(default_factory=list)
     pos: int = 0
+    receipt: dict[str, Any] = field(default_factory=dict)
 
 
 if _HAS_TORCH:
 
+    def _tensor_sketch_far_scan(
+        q_raw: Any,
+        C: Any,
+        Z: Any,
+        evicted_k: Any,
+        evicted_v: Any,
+        hashes: list[Any],
+        signs: list[Any],
+        *,
+        cache_len: int,
+        window: int,
+        sketch_dim: int,
+        head_dim: int,
+        far_count_before: int,
+    ) -> tuple[Any, Any, Any, float | None]:
+        """Advance TensorSketch numerator and denominator at every query's exact window crossing."""
+        t = q_raw.shape[1]
+        n_evict = 0 if evicted_k is None else evicted_k.shape[1]
+        processed = 0
+        outputs: list[Any] = []
+        min_denominator: float | None = None
+        ts_q = tensor_sketch_project(_phi(q_raw), hashes, signs, sketch_dim)
+        for query_index in range(t):
+            target = max(0, cache_len + query_index + 1 - window)
+            if target > n_evict:
+                raise RuntimeError("local-window eviction schedule is inconsistent with TensorSketch far-state scan")
+            while processed < target:
+                ts_key = tensor_sketch_project(_phi(evicted_k[:, processed]), hashes, signs, sketch_dim)
+                C = C + torch.einsum("bhm,bhe->bhme", ts_key, evicted_v[:, processed])
+                Z = Z + ts_key
+                processed += 1
+            if far_count_before + processed == 0:
+                outputs.append(q_raw.new_zeros(q_raw.shape[0], q_raw.shape[2], head_dim))
+                continue
+            query = ts_q[:, query_index]
+            numerator = torch.einsum("bhm,bhme->bhe", query, C)
+            denominator = torch.einsum("bhm,bhm->bh", query, Z)
+            if not bool(torch.isfinite(numerator).all().item()) or not bool(torch.isfinite(denominator).all().item()):
+                raise ValueError("TensorSketch far readout produced non-finite values")
+            if bool((denominator <= 0).any().item()):
+                raise ValueError(
+                    "TensorSketch estimated kernel normalizer must be strictly positive; "
+                    "increase sketch_dim or choose a different seed"
+                )
+            current_min = float(denominator.min().item())
+            min_denominator = current_min if min_denominator is None else min(min_denominator, current_min)
+            outputs.append(numerator / denominator.unsqueeze(-1))
+        if processed != n_evict:
+            raise RuntimeError("TensorSketch far-state scan did not consume every token that left the local window")
+        return C, Z, torch.stack(outputs, dim=1), min_denominator
+
     class TensorSketchSpine(nn.Module):
         """(c) Tensor sketch (Count Sketch + circular convolution) of degree-``p`` key features (Pham &
         Pagh 2013). Local half identical in shape to (b); far-field half accumulates
-        ``C_t = C_{t-1} + TS(phi(k_t)) v_t^T`` for evicted tokens and reads it back as
-        ``TS(phi(q))^T C`` (no normalizer -- the design note's Algorithm section for (c) doesn't specify
-        one, unlike (a)/(b); this mirrors that exactly rather than inventing an extra division).
+        ``C_t = C_{t-1} + TS(phi(k_t)) v_t^T`` and
+        ``Z_t = Z_{t-1} + TS(phi(k_t))`` for evicted tokens. It reads normalized polynomial-kernel
+        kernel readout as ``TS(phi(q))^T C / TS(phi(q))^T Z`` and fails closed if sketch collision makes
+        the estimated denominator non-positive. This is a normalized estimator of polynomial-kernel
+        attention, not a probability distribution: TensorSketch inner-product estimates can be signed,
+        so non-negative per-token weights are not claimed.
         """
 
         def __init__(
@@ -534,40 +725,86 @@ if _HAS_TORCH:
             seed: int = 0,
         ) -> None:
             super().__init__()
-            assert d_model % n_head == 0
-            self.vocab = int(vocab)
-            self.d_model = int(d_model)
-            self.n_layer = int(n_layer)
-            self.n_head = int(n_head)
+            self.vocab = _positive_integer(vocab, "vocab")
+            self.d_model = _positive_integer(d_model, "d_model")
+            self.n_layer = _positive_integer(n_layer, "n_layer")
+            self.n_head = _positive_integer(n_head, "n_head")
+            self.window = _positive_integer(window, "window")
+            self.sketch_dim = _positive_integer(sketch_dim, "sketch_dim")
+            self.degree = _positive_integer(degree, "degree")
+            if isinstance(seed, bool) or not isinstance(seed, Integral):
+                raise ValueError(f"seed must be an exact integer, got {seed}")
+            if self.d_model % self.n_head != 0:
+                raise ValueError(f"d_model={self.d_model} must be divisible by n_head={self.n_head}")
             self.head_dim = d_model // n_head
-            self.window = int(window)
-            self.sketch_dim = int(sketch_dim)
-            self.degree = int(degree)
             (self.tok, self.qkv, self.proj, self.ln1, self.ln2, self.mlp, self.ln_f, self.head) = _transformer_block(
-                vocab, d_model, n_layer, n_head
+                self.vocab, self.d_model, self.n_layer, self.n_head
             )
-            self._hashes: list[list[Any]] = []
-            self._signs: list[list[Any]] = []
-            for layer in range(n_layer):
+            self._hash_names: list[list[str]] = []
+            self._sign_names: list[list[str]] = []
+            for layer in range(self.n_layer):
                 hashes, signs = make_tensor_sketch_hashes(
-                    self.head_dim, sketch_dim=self.sketch_dim, degree=self.degree, seed=seed + layer
+                    self.head_dim,
+                    sketch_dim=self.sketch_dim,
+                    degree=self.degree,
+                    seed=int(seed) + layer,
                 )
-                self._hashes.append(hashes)
-                self._signs.append(signs)
+                layer_hash_names: list[str] = []
+                layer_sign_names: list[str] = []
+                for degree_index, (hash_values, sign_values) in enumerate(zip(hashes, signs)):
+                    hash_name = f"_tensor_hash_{layer}_{degree_index}"
+                    sign_name = f"_tensor_sign_{layer}_{degree_index}"
+                    self.register_buffer(hash_name, hash_values)
+                    self.register_buffer(sign_name, sign_values)
+                    layer_hash_names.append(hash_name)
+                    layer_sign_names.append(sign_name)
+                self._hash_names.append(layer_hash_names)
+                self._sign_names.append(layer_sign_names)
+
+        @property
+        def _hashes(self) -> list[list[Any]]:
+            """Registered hash maps, grouped by layer (compatibility view)."""
+            return [[getattr(self, name) for name in names] for names in self._hash_names]
+
+        @property
+        def _signs(self) -> list[list[Any]]:
+            """Registered sign maps, grouped by layer (compatibility view)."""
+            return [[getattr(self, name) for name in names] for names in self._sign_names]
 
         def init_state(self, batch_size: int, *, device: str = "cpu") -> TensorSketchState:
+            batch_size = _positive_integer(batch_size, "batch_size")
+            dtype = self.tok.weight.dtype
             C = [
-                torch.zeros(batch_size, self.n_head, self.sketch_dim, self.head_dim, device=device)
+                torch.zeros(
+                    batch_size,
+                    self.n_head,
+                    self.sketch_dim,
+                    self.head_dim,
+                    device=device,
+                    dtype=dtype,
+                )
                 for _ in range(self.n_layer)
             ]
-            return TensorSketchState(C=C, cache_k=[None] * self.n_layer, cache_v=[None] * self.n_layer, pos=0)
+            Z = [
+                torch.zeros(batch_size, self.n_head, self.sketch_dim, device=device, dtype=dtype)
+                for _ in range(self.n_layer)
+            ]
+            return TensorSketchState(
+                C=C,
+                Z=Z,
+                cache_k=[None] * self.n_layer,
+                cache_v=[None] * self.n_layer,
+                pos=0,
+            )
 
         def detach(self, state: TensorSketchState) -> TensorSketchState:
             return TensorSketchState(
                 C=[c.detach() for c in state.C],
+                Z=[z.detach() for z in state.Z],
                 cache_k=[k.detach() if k is not None else None for k in state.cache_k],
                 cache_v=[v.detach() if v is not None else None for v in state.cache_v],
                 pos=state.pos,
+                receipt=dict(state.receipt),
             )
 
         def step(self, state: TensorSketchState, chunk: tuple[Any, Any]) -> tuple[TensorSketchState, Any]:
@@ -578,6 +815,9 @@ if _HAS_TORCH:
             new_cache_k: list[Any] = []
             new_cache_v: list[Any] = []
             new_C: list[Any] = []
+            new_Z: list[Any] = []
+            denominator_minima: list[float | None] = []
+            far_counts: list[int] = []
             for layer in range(self.n_layer):
                 hn = self.ln1[layer](h)
                 qkv = self.qkv[layer](hn).reshape(b, t, 3, self.n_head, self.head_dim)
@@ -595,30 +835,52 @@ if _HAS_TORCH:
                 )
 
                 hashes, signs = self._hashes[layer], self._signs[layer]
-                phi_q = _phi(q_raw)
-                ts_q = tensor_sketch_project(phi_q, hashes, signs, self.sketch_dim)  # (b, t, n_head, sketch_dim)
-                # C is (b, n_head, sketch_dim, head_dim):
-                far_out = torch.einsum("bthm,bnme->bthe", ts_q, state.C[layer])
+                cache_len = 0 if state.cache_k[layer] is None else state.cache_k[layer].shape[1]
+                far_count_before = state.pos - cache_len
+                if far_count_before < 0:
+                    raise ValueError("state position cannot be smaller than its cache length")
+                C_layer, Z_layer, far_out, denominator_minimum = _tensor_sketch_far_scan(
+                    q_raw,
+                    state.C[layer],
+                    state.Z[layer],
+                    evicted_k,
+                    evicted_v,
+                    hashes,
+                    signs,
+                    cache_len=cache_len,
+                    window=self.window,
+                    sketch_dim=self.sketch_dim,
+                    head_dim=self.head_dim,
+                    far_count_before=far_count_before,
+                )
+                denominator_minima.append(denominator_minimum)
+                far_counts.append(far_count_before + (0 if evicted_k is None else evicted_k.shape[1]))
 
                 out = local_out + far_out
                 h = h + self.proj[layer](out.reshape(b, t, self.d_model))
                 h = h + self.mlp[layer](self.ln2[layer](h))
 
-                C_layer = state.C[layer]
-                if evicted_k is not None:
-                    phi_evicted = _phi(evicted_k)  # (b, n_evict, n_head, head_dim)
-                    ts_k = tensor_sketch_project(phi_evicted, hashes, signs, self.sketch_dim)
-                    contrib = torch.einsum("bnhm,bnhe->bnhme", ts_k, evicted_v)  # (b, n_evict, n_head, m, head_dim)
-                    contrib = contrib.sum(dim=1)  # (b, n_head, sketch_dim, head_dim)
-                    C_layer = C_layer + contrib
-
                 new_C.append(C_layer)
+                new_Z.append(Z_layer)
                 new_cache_k.append(cache_k)
                 new_cache_v.append(cache_v)
 
             logits = self.head(self.ln_f(h))
             loss = F.cross_entropy(logits.reshape(b * t, self.vocab), y.reshape(b * t))
-            new_state = TensorSketchState(C=new_C, cache_k=new_cache_k, cache_v=new_cache_v, pos=state.pos + t)
+            new_state = TensorSketchState(
+                C=new_C,
+                Z=new_Z,
+                cache_k=new_cache_k,
+                cache_v=new_cache_v,
+                pos=state.pos + t,
+                receipt={
+                    "far_tokens_per_layer": far_counts,
+                    "minimum_positive_denominator_per_layer": denominator_minima,
+                    "chunk_boundary_invariant_update": True,
+                    "normalized_kernel_estimator": True,
+                    "nonnegative_attention_weights_guaranteed": False,
+                },
+            )
             return new_state, loss
 
 
@@ -633,7 +895,7 @@ if _HAS_TORCH:
         """Stream ``A``'s rows through FD, then report the realized ``||A^T A - B^T B||_2`` against
         Liberty's Theorem 1.1 bound -- "how tight is the guarantee in practice", the (b) misfit receipt."""
         d = A.shape[1]
-        B0 = torch.zeros(ell, d, dtype=A.dtype)
+        B0 = torch.zeros(ell, d, dtype=A.dtype, device=A.device)
         B = frequent_directions_update(B0, A, ell)
         realized = float(torch.linalg.matrix_norm(A.T @ A - B.T @ B, ord=2))
         bound = frequent_directions_error_bound(A, B, ell, k)
