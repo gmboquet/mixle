@@ -19,6 +19,7 @@ Paths* (2007).
 """
 
 from math import factorial
+from numbers import Integral
 from typing import Any
 
 import numpy as np
@@ -46,7 +47,22 @@ def signature_tensor_product(a: list[np.ndarray], b: list[np.ndarray], depth: in
     return out
 
 
-def path_signature(path: Any, depth: int) -> list[np.ndarray]:
+def _positive_limit(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a positive integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
+
+
+def path_signature(
+    path: Any,
+    depth: int,
+    *,
+    max_elements: int = 1_000_000,
+    max_work_elements: int = 10_000_000,
+) -> list[np.ndarray]:
     """Return the truncated signature of a piecewise-linear path up to level ``depth``.
 
     Args:
@@ -57,16 +73,46 @@ def path_signature(path: Any, depth: int) -> list[np.ndarray]:
     Returns:
         The list of signature tensors. Computed exactly by Chen's identity over the segments.
     """
-    pts = np.asarray(path, dtype=np.float64)
-    if pts.ndim != 2:
-        raise ValueError("path must have shape (n_points, d).")
-    if int(depth) < 0:
-        raise ValueError("depth must be non-negative.")
+    try:
+        pts = np.asarray(path, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise TypeError("path must be a finite numeric array with shape (n_points, d)") from error
+    if pts.ndim != 2 or pts.shape[1] == 0:
+        raise ValueError("path must have shape (n_points, d) with d >= 1.")
+    if not np.all(np.isfinite(pts)):
+        raise ValueError("path must contain only finite coordinates")
+    if isinstance(depth, (bool, np.bool_)) or not isinstance(depth, Integral):
+        raise TypeError("depth must be an exact non-negative integer")
+    depth = int(depth)
+    if depth < 0:
+        raise ValueError("depth must be an exact non-negative integer")
+    max_elements = _positive_limit(max_elements, "max_elements")
+    max_work_elements = _positive_limit(max_work_elements, "max_work_elements")
+    dimension = int(pts.shape[1])
+    if dimension == 1:
+        total_elements = depth + 1
+    else:
+        total_elements = 1
+        level_elements = 1
+        for _level in range(1, depth + 1):
+            level_elements *= dimension
+            total_elements += level_elements
+            if total_elements > max_elements:
+                break
+    if total_elements > max_elements:
+        raise ValueError(
+            f"signature requires more than max_elements={max_elements} tensor elements"
+        )
+    estimated_work = max(1, int(pts.shape[0]) - 1) * total_elements * max(1, depth + 1)
+    if estimated_work > max_work_elements:
+        raise ValueError(
+            f"signature work estimate {estimated_work} exceeds max_work_elements={max_work_elements}"
+        )
     if pts.shape[0] < 2:
-        return [np.array(1.0)] + [np.zeros((pts.shape[1],) * k) for k in range(1, int(depth) + 1)]
-    sig = _segment_signature(pts[1] - pts[0], int(depth))
+        return [np.array(1.0)] + [np.zeros((pts.shape[1],) * k) for k in range(1, depth + 1)]
+    sig = _segment_signature(pts[1] - pts[0], depth)
     for i in range(1, pts.shape[0] - 1):
-        sig = signature_tensor_product(sig, _segment_signature(pts[i + 1] - pts[i], int(depth)), int(depth))
+        sig = signature_tensor_product(sig, _segment_signature(pts[i + 1] - pts[i], depth), depth)
     return sig
 
 

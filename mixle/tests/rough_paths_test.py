@@ -16,6 +16,30 @@ def _outer_power(v, k):
 
 
 class RoughPathsTest(unittest.TestCase):
+    def test_contract_rejects_coercion_nonfinite_paths_and_unbounded_requests(self):
+        path = np.zeros((2, 3))
+        for depth in (1.5, "2", True):
+            with self.subTest(depth=depth), self.assertRaises(TypeError):
+                path_signature(path, depth)
+        with self.assertRaises(ValueError):
+            path_signature(np.array([[0.0], [np.nan]]), 2)
+        with self.assertRaises(ValueError):
+            path_signature(np.zeros((2, 0)), 2)
+        with self.assertRaisesRegex(ValueError, "max_elements"):
+            path_signature(path, 10, max_elements=100)
+        with self.assertRaisesRegex(ValueError, "max_elements"):
+            path_signature(path, 10**9, max_elements=100)
+        with self.assertRaisesRegex(ValueError, "max_work_elements"):
+            path_signature(np.zeros((100, 2)), 3, max_work_elements=100)
+
+    def test_zero_depth_and_single_point_paths_are_bounded(self):
+        zero = path_signature(np.array([[1.0, 2.0]]), 0)
+        self.assertEqual(len(zero), 1)
+        self.assertEqual(float(zero[0]), 1.0)
+        single = path_signature(np.array([[1.0, 2.0]]), 3)
+        self.assertEqual([level.shape for level in single], [(), (2,), (2, 2), (2, 2, 2)])
+        self.assertTrue(all(np.all(level == 0.0) for level in single[1:]))
+
     def test_linear_path_closed_form(self):
         # signature of a straight segment a->b: level k == (b-a)^{otimes k}/k!
         a, b = np.array([0.3, -0.2, 0.5]), np.array([1.0, 0.4, -0.1])

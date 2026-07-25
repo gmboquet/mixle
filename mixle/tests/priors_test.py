@@ -4,9 +4,13 @@ The PDE-forward variants of these (complex-valued observations, multistart over 
 moved to the mixle-pde package's tests along with the PDE stack.
 """
 
+import pickle
 import unittest
 
 import numpy as np
+
+from mixle.ppl._grid import _grid_faces
+from mixle.ppl.priors import Potts, TotalVariation
 
 try:
     import torch  # noqa: F401
@@ -16,7 +20,67 @@ except ImportError:
     HAS_TORCH = False
 
 if HAS_TORCH:
-    from mixle.ppl import GP, Gaussian, Potts, RandomWalk, TotalVariation, joint
+    from mixle.ppl import GP, Gaussian, RandomWalk, joint
+
+
+class SpatialPriorContractTest(unittest.TestCase):
+    def test_grid_rejects_invalid_shape_and_spacing(self):
+        for shape in ((), (0,), (-1, 2), (2.0, 3), (True, 2)):
+            with self.subTest(shape=shape), self.assertRaises((TypeError, ValueError)):
+                _grid_faces(shape, 1.0)
+        for spacing in (0.0, -1.0, np.inf, np.nan, [1.0, 0.0]):
+            with self.subTest(spacing=spacing), self.assertRaises(ValueError):
+                _grid_faces((2, 2), spacing)
+
+    def test_degenerate_one_cell_axes_have_valid_empty_faces(self):
+        one = _grid_faces((1,), 2.0)
+        self.assertEqual(one["n"], 1)
+        np.testing.assert_array_equal(one["boundary"], [0])
+        self.assertEqual(one["interior"].size, 0)
+        self.assertEqual(one["face_a"].size, 0)
+        slab = _grid_faces((1, 3), [1.0, 2.0])
+        self.assertEqual(slab["n"], 3)
+        self.assertEqual(slab["face_a"].size, 2)
+        self.assertTrue(np.all(np.isfinite(slab["face_w"])))
+        self.assertTrue(np.all(slab["face_w"] > 0.0))
+
+    def test_prior_specifications_are_validated(self):
+        for kwargs in (
+            {"shape": (0,), "weight": 1.0, "eps": 1e-3},
+            {"shape": (2,), "weight": 0.0, "eps": 1e-3},
+            {"shape": (2,), "weight": np.inf, "eps": 1e-3},
+            {"shape": (2,), "weight": 1.0, "eps": 0.0},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                TotalVariation(object(), **kwargs)
+        for levels in ([], [1.0], [1.0, 1.0], [0.0, np.nan]):
+            with self.subTest(levels=levels), self.assertRaises((TypeError, ValueError)):
+                Potts(object(), levels)
+        with self.assertRaises(ValueError):
+            Potts(object(), [0.0, 1.0], weight=-1.0)
+
+    def test_penalty_proxies_round_trip_through_pickle(self):
+        _, tv = TotalVariation(object(), shape=(2, 2), weight=2.0, eps=0.1)
+        _, potts = Potts(object(), levels=[0.0, 2.0], weight=3.0)
+        tv_back = pickle.loads(pickle.dumps(tv))
+        potts_back = pickle.loads(pickle.dumps(potts))
+        self.assertEqual(tv_back.prefix, "tv")
+        self.assertEqual(potts_back.prefix, "potts")
+        self.assertEqual(tv_back._penalty, tv._penalty)
+        self.assertEqual(potts_back._penalty, potts._penalty)
+
+    @unittest.skipUnless(HAS_TORCH, "requires PyTorch")
+    def test_penalty_indices_follow_field_device_and_geometry(self):
+        _, tv = TotalVariation(object(), shape=(2, 2), weight=2.0, eps=0.1)
+        values = torch.tensor([0.0, 1.0, 2.0, 3.0])
+        output = tv.loglik(values, {}, torch)
+        self.assertEqual(output.device, values.device)
+        self.assertTrue(torch.isfinite(output))
+        with self.assertRaisesRegex(ValueError, "requires 4"):
+            tv.loglik(torch.tensor([0.0, 1.0]), {}, torch)
+        if torch.cuda.is_available():
+            cuda_values = values.cuda()
+            self.assertEqual(tv.loglik(cuda_values, {}, torch).device.type, "cuda")
 
 
 @unittest.skipUnless(HAS_TORCH, "requires PyTorch")
