@@ -15,6 +15,7 @@ new transport family.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -80,27 +81,60 @@ def cycle_inconsistency(
     given_value: np.ndarray,
     *,
     n_draws: int = 20,
-    forward: Callable[[np.ndarray], np.ndarray] | None = None,
+    forward: Callable[[np.ndarray], np.ndarray],
+    scale: float | np.ndarray,
 ) -> float:
-    """Return disagreement among posterior target samples for one observation.
+    """Return scaled A -> B -> A round-trip error for one observation.
 
-    A well-determined posterior yields draws that agree closely. A collapsed
-    observation region yields draws that disagree, without needing the true
-    target at serving time. If ``forward`` is supplied, agreement is checked in
-    observation space rather than raw target space.
+    ``sampler`` draws B conditioned on the originating A value and ``forward``
+    maps each B draw back into A space. ``scale`` supplies the positive,
+    unit-aware residual scale for A. A constant but wrong forward map therefore
+    receives a nonzero error instead of a falsely perfect dispersion score.
     """
-    x_batch = np.repeat(np.atleast_2d(np.asarray(given_value, dtype=np.float64)), n_draws, axis=0)
-    draws = np.asarray(sampler.sample_given_batch(x_batch), dtype=np.float64)
-    if forward is not None:
-        draws = np.asarray([forward(d) for d in draws], dtype=np.float64)
-    return float(np.mean(np.var(draws, axis=0)))
+    given = _validated_vector(given_value, "given_value")
+    count = _positive_count(n_draws, "n_draws")
+    if not callable(forward):
+        raise TypeError("forward must map a target draw back into the originating observation space.")
+    residual_scale = np.asarray(scale, dtype=np.float64)
+    try:
+        residual_scale = np.broadcast_to(residual_scale, given.shape)
+    except ValueError as exc:
+        raise ValueError(f"scale must be scalar or broadcast to shape {given.shape}.") from exc
+    if not np.isfinite(residual_scale).all() or np.any(residual_scale <= 0.0):
+        raise ValueError("scale must contain only finite positive values.")
+
+    x_batch = np.repeat(given.reshape(1, -1), count, axis=0)
+    draws = _validated_draws(sampler.sample_given_batch(x_batch), count)
+    round_trip = np.asarray([_validated_vector(forward(draw), "forward(draw)") for draw in draws])
+    if round_trip.shape != (count, len(given)):
+        raise ValueError(
+            f"forward must return one vector with shape {given.shape} per draw; got {round_trip.shape}."
+        )
+    standardized = (round_trip - given) / residual_scale
+    return float(np.mean(np.square(standardized)))
 
 
 def posterior_mean_estimate(sampler: Any, given_value: np.ndarray, *, n_draws: int = 20) -> np.ndarray:
     """Return the posterior-sample mean of the target given ``given_value``."""
-    x_batch = np.repeat(np.atleast_2d(np.asarray(given_value, dtype=np.float64)), n_draws, axis=0)
-    draws = np.asarray(sampler.sample_given_batch(x_batch), dtype=np.float64)
+    given = _validated_vector(given_value, "given_value")
+    count = _positive_count(n_draws, "n_draws")
+    x_batch = np.repeat(given.reshape(1, -1), count, axis=0)
+    draws = _validated_draws(sampler.sample_given_batch(x_batch), count)
     return draws.mean(axis=0)
+
+
+@dataclass(frozen=True)
+class CycleKLReceipt:
+    """Monte Carlo evidence for a probabilistic round-trip comparison."""
+
+    source: str
+    target: str
+    raw_estimate: float
+    standard_error: float
+    confidence_interval: tuple[float, float]
+    sample_count: int
+    nonnegative_estimate: float
+    clipped_to_nonnegative: bool
 
 
 def joint_cycle_consistency_receipt(
@@ -112,7 +146,7 @@ def joint_cycle_consistency_receipt(
     n_round_trip: int = 300,
     n_kl_samples: int = 500,
     seed: int = 0,
-) -> float:
+) -> CycleKLReceipt:
     """Cross-modal generalization (workstream L2) of this module's round-trip closure signal.
 
     ``cycle_inconsistency`` above measures round-trip closure (A -> B -> A) for a NEURAL transport,
@@ -131,15 +165,27 @@ def joint_cycle_consistency_receipt(
     distributions have been shuffled relative to ``joint``'s, standing in for a broken/incompatible
     A<-B projection) breaks that identity and the receipt becomes clearly, measurably elevated.
     """
+    if source == target:
+        raise ValueError("source and target must name distinct modalities.")
+    if source not in joint.names or target not in joint.names:
+        raise ValueError(f"source and target must be present in joint.names={joint.names!r}.")
     backward = joint if backward_joint is None else backward_joint
-    rng = np.random.RandomState(seed)
+    if backward.names != joint.names:
+        raise ValueError("backward_joint must have the same ordered modality schema as joint.")
+    round_trip_count = _positive_count(n_round_trip, "n_round_trip")
+    kl_count = _positive_count(n_kl_samples, "n_kl_samples")
+    if kl_count < 2:
+        raise ValueError("n_kl_samples must be at least two to estimate Monte Carlo uncertainty.")
+    if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)):
+        raise ValueError("seed must be an integer.")
+    rng = np.random.RandomState(int(seed))
 
     true_marginal = joint.infer({}, [source])
     forward_sampler = true_marginal.sampler(seed=int(rng.randint(0, 2**31 - 1)))
 
     round_trip_components = []
     round_trip_weights = []
-    for _ in range(n_round_trip):
+    for _ in range(round_trip_count):
         a_value = forward_sampler.sample()[0]
         post_target = joint.infer({source: a_value}, [target])
         b_sampler = post_target.sampler(seed=int(rng.randint(0, 2**31 - 1)))
@@ -147,17 +193,31 @@ def joint_cycle_consistency_receipt(
         post_source = backward.infer({target: b_value}, [source])
         for component, weight in zip(post_source.components, post_source.w):
             round_trip_components.append(component)
-            round_trip_weights.append(weight / n_round_trip)
+            round_trip_weights.append(weight / round_trip_count)
 
     round_trip = MixtureDistribution(round_trip_components, w=np.asarray(round_trip_weights, dtype=np.float64))
 
     kl_sampler = round_trip.sampler(seed=int(rng.randint(0, 2**31 - 1)))
     kl_terms = [
         round_trip.log_density(x) - true_marginal.log_density(x)
-        for x in (kl_sampler.sample() for _ in range(n_kl_samples))
+        for x in (kl_sampler.sample() for _ in range(kl_count))
     ]
-    # KL divergence is non-negative in theory; clamp away small Monte-Carlo undershoot at (near-)zero.
-    return float(max(float(np.mean(kl_terms)), 0.0))
+    kl_values = np.asarray(kl_terms, dtype=np.float64)
+    if kl_values.shape != (kl_count,) or not np.isfinite(kl_values).all():
+        raise ValueError("round-trip KL evaluation produced non-finite log-density ratios.")
+    raw = float(np.mean(kl_values))
+    standard_error = float(np.std(kl_values, ddof=1) / np.sqrt(kl_count))
+    margin = 1.96 * standard_error
+    return CycleKLReceipt(
+        source=source,
+        target=target,
+        raw_estimate=raw,
+        standard_error=standard_error,
+        confidence_interval=(raw - margin, raw + margin),
+        sample_count=kl_count,
+        nonnegative_estimate=max(raw, 0.0),
+        clipped_to_nonnegative=raw < 0.0,
+    )
 
 
 def selective_error(errors: Sequence[float], abstain_scores: Sequence[float], keep_frac: float) -> float:
@@ -168,8 +228,34 @@ def selective_error(errors: Sequence[float], abstain_scores: Sequence[float], ke
     """
     errors = np.asarray(errors, dtype=np.float64)
     abstain_scores = np.asarray(abstain_scores, dtype=np.float64)
-    if not 0.0 < keep_frac <= 1.0:
+    if errors.ndim != 1 or abstain_scores.ndim != 1 or not len(errors) or len(errors) != len(abstain_scores):
+        raise ValueError("errors and abstain_scores must be non-empty aligned one-dimensional arrays.")
+    if not np.isfinite(errors).all() or not np.isfinite(abstain_scores).all():
+        raise ValueError("errors and abstain_scores must contain only finite values.")
+    if not np.isfinite(keep_frac) or not 0.0 < keep_frac <= 1.0:
         raise ValueError(f"keep_frac must be in (0, 1], got {keep_frac}")
-    n_keep = max(1, int(round(keep_frac * len(errors))))
-    order = np.argsort(abstain_scores)
+    n_keep = max(1, int(np.ceil(keep_frac * len(errors))))
+    order = np.argsort(abstain_scores, kind="stable")
     return float(np.mean(errors[order[:n_keep]]))
+
+
+def _positive_count(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or int(value) <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return int(value)
+
+
+def _validated_vector(value: Any, name: str) -> np.ndarray:
+    vector = np.asarray(value, dtype=np.float64)
+    if vector.ndim == 0:
+        vector = vector.reshape(1)
+    if vector.ndim != 1 or not len(vector) or not np.isfinite(vector).all():
+        raise ValueError(f"{name} must be a non-empty finite vector.")
+    return vector
+
+
+def _validated_draws(value: Any, expected_rows: int) -> np.ndarray:
+    draws = np.asarray(value, dtype=np.float64)
+    if draws.ndim != 2 or draws.shape[0] != expected_rows or draws.shape[1] <= 0 or not np.isfinite(draws).all():
+        raise ValueError(f"sampler must return a finite two-dimensional table with {expected_rows} rows.")
+    return draws
