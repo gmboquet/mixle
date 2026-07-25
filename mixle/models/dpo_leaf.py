@@ -39,9 +39,17 @@ def _torch() -> Any:
 
 
 def _logp_np(logits: np.ndarray, a: np.ndarray) -> np.ndarray:
+    logits = np.asarray(logits, dtype=float)
+    actions = _exact_actions(a, "actions", len(logits))
+    if logits.ndim != 2 or logits.shape[0] != len(actions) or logits.shape[1] < 2:
+        raise ValueError("logits must have shape (n, actions) with at least two actions")
+    if not np.all(np.isfinite(logits)):
+        raise ValueError("logits must contain only finite values")
+    if np.any(actions >= logits.shape[1]):
+        raise ValueError(f"actions must lie in [0, {logits.shape[1]})")
     m = logits.max(axis=1, keepdims=True)
     logp = logits - m - np.log(np.exp(logits - m).sum(axis=1, keepdims=True))
-    return logp[np.arange(len(a)), a]
+    return logp[np.arange(len(actions)), actions]
 
 
 class DPOModel(SequenceEncodableProbabilityDistribution):
@@ -52,12 +60,19 @@ class DPOModel(SequenceEncodableProbabilityDistribution):
     def __init__(
         self, policy: Any, ref: Any, beta: float = 0.1, m_steps: int = 100, lr: float = 1e-3, device: str = "cpu"
     ) -> None:
+        torch = _torch()
+        _validate_independent_modules(policy, ref, torch)
         self.policy = policy
         self.ref = ref
-        self.beta = float(beta)
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
-        self.device = device
+        self.beta = _positive_finite(beta, "beta")
+        self.m_steps = _positive_int(m_steps, "m_steps")
+        self.lr = _positive_finite(lr, "lr")
+        try:
+            self.device = str(torch.device(device))
+        except (TypeError, RuntimeError) as exc:
+            raise ValueError(f"invalid torch device {device!r}") from exc
+        for parameter in self.ref.parameters():
+            parameter.requires_grad_(False)
 
     def __str__(self) -> str:
         return "DPOModel(beta=%.3g)" % self.beta
@@ -65,23 +80,41 @@ class DPOModel(SequenceEncodableProbabilityDistribution):
     def _logits(self, module: Any, x: np.ndarray) -> np.ndarray:
         torch = _torch()
         module.to(self.device)
+        context = _contexts(x)
+        dtype = next(
+            (parameter.dtype for parameter in module.parameters() if parameter.dtype.is_floating_point),
+            torch.float32,
+        )
         with _module_mode(module, train=False), torch.no_grad():
-            return module(torch.as_tensor(np.atleast_2d(x), dtype=torch.float32).to(self.device)).cpu().numpy()
+            output = module(torch.as_tensor(context, dtype=dtype, device=self.device))
+        logits = np.asarray(output.detach().cpu().numpy(), dtype=float)
+        if logits.ndim != 2 or logits.shape[0] != len(context) or logits.shape[1] < 2:
+            raise ValueError("DPO modules must return shape (n, actions) with at least two actions")
+        if not np.all(np.isfinite(logits)):
+            raise ValueError("DPO modules returned non-finite logits")
+        return logits
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
         """Return per-row DPO preference log likelihoods for encoded triples."""
-        x, ch, rj = enc
-        ch = np.asarray(ch, dtype=int)
-        rj = np.asarray(rj, dtype=int)
+        x, ch, rj = _preference_batch(enc)
         lp_pol = self._logits(self.policy, x)
         lp_ref = self._logits(self.ref, x)
+        if lp_ref.shape != lp_pol.shape:
+            raise ValueError(
+                f"policy and reference logits must have the same shape, got {lp_pol.shape} and {lp_ref.shape}"
+            )
+        if np.any(ch >= lp_pol.shape[1]) or np.any(rj >= lp_pol.shape[1]):
+            raise ValueError(f"chosen and rejected actions must lie in [0, {lp_pol.shape[1]})")
         margin = (_logp_np(lp_pol, ch) - _logp_np(lp_ref, ch)) - (_logp_np(lp_pol, rj) - _logp_np(lp_ref, rj))
-        return -np.logaddexp(0.0, -self.beta * margin)  # log sigmoid(beta * margin)
+        result = -np.logaddexp(0.0, -self.beta * margin)
+        if not np.all(np.isfinite(result)):
+            raise RuntimeError("DPO preference log likelihood became non-finite")
+        return result  # log sigmoid(beta * margin)
 
     def log_density(self, xcr: Any) -> float:
         """Return the DPO log likelihood for one ``(x, chosen, rejected)`` triple."""
         x, ch, rj = xcr
-        return float(self.seq_log_density((np.atleast_2d(x), [int(ch)], [int(rj)]))[0])
+        return float(self.seq_log_density((np.atleast_2d(x), [ch], [rj]))[0])
 
     def prefers(self, x: Any) -> np.ndarray:
         """The policy's argmax action at ``x`` -- what the aligned policy now picks."""
@@ -108,9 +141,15 @@ class DPOModel(SequenceEncodableProbabilityDistribution):
         return state
 
     def __pysp_setstate__(self, state: dict[str, Any]) -> None:
-        self.__dict__.update(state)
-        self.policy = decode_module(state["policy"])
-        self.ref = decode_module(state["ref"])
+        restored = type(self)(
+            decode_module(state["policy"]),
+            decode_module(state["ref"]),
+            beta=state["beta"],
+            m_steps=state["m_steps"],
+            lr=state["lr"],
+            device=state["device"],
+        )
+        self.__dict__.update(restored.__dict__)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize policy/reference modules and DPO hyperparameters."""
@@ -159,10 +198,19 @@ class DPOEncoder(DataSequenceEncoder):
 
     def seq_encode(self, data: list) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Convert preference triples into batched contexts and integer action arrays."""
-        x = np.array([np.atleast_1d(np.asarray(d[0], dtype=float)) for d in data])
-        ch = np.array([int(d[1]) for d in data], dtype=int)
-        rj = np.array([int(d[2]) for d in data], dtype=int)
-        return (x, ch, rj)
+        if not isinstance(data, list):
+            raise TypeError("DPOEncoder.seq_encode expects a list of preference triples")
+        if not data:
+            return (np.zeros((0, 0)), np.zeros(0, dtype=int), np.zeros(0, dtype=int))
+        if any(not isinstance(row, (tuple, list)) or len(row) != 3 for row in data):
+            raise ValueError("every DPO observation must be a (context, chosen, rejected) triple")
+        return _preference_batch(
+            (
+                [row[0] for row in data],
+                [row[1] for row in data],
+                [row[2] for row in data],
+            )
+        )
 
 
 class DPOAccumulator(SequenceEncodableStatisticAccumulator):
@@ -176,17 +224,19 @@ class DPOAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, xcr: Any, weight: float, estimate: Any) -> None:
         """Add one weighted preference triple to the accumulator."""
-        self.x.append(np.atleast_1d(np.asarray(xcr[0], dtype=float)))
-        self.ch.append(int(xcr[1]))
-        self.rj.append(int(xcr[2]))
-        self.w.append(float(weight))
+        x, chosen, rejected = _preference_batch(([xcr[0]], [xcr[1]], [xcr[2]]))
+        validated_weight = _weights([weight], 1)
+        self.x.append(x[0])
+        self.ch.append(int(chosen[0]))
+        self.rj.append(int(rejected[0]))
+        self.w.append(float(validated_weight[0]))
 
     def seq_update(self, enc: Any, weights: Any, estimate: Any) -> None:
         """Add an encoded batch of preference triples and optional weights."""
-        x, ch, rj = enc
-        ws = np.asarray(weights, dtype=float).ravel() if weights is not None else np.ones(len(x))
+        x, ch, rj = _preference_batch(enc)
+        ws = np.ones(len(x)) if weights is None else _weights(weights, len(x))
         for i in range(len(x)):
-            self.x.append(np.atleast_1d(x[i]))
+            self.x.append(x[i])
             self.ch.append(int(ch[i]))
             self.rj.append(int(rj[i]))
             self.w.append(float(ws[i]))
@@ -201,11 +251,18 @@ class DPOAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, other: Any) -> DPOAccumulator:
         """Merge the value tuple from another DPO accumulator."""
-        xo, co, ro, wo = other
+        if not isinstance(other, tuple) or len(other) != 4:
+            raise ValueError("DPO sufficient statistics must be an (x, chosen, rejected, weights) tuple")
+        if len(other[0]) == 0:
+            if any(len(field) != 0 for field in other[1:]):
+                raise ValueError("empty DPO sufficient-statistic fields must all be empty")
+            return self
+        xo, co, ro = _preference_batch(other[:3])
+        wo = _weights(other[3], len(xo))
         self.x.extend(xo)
-        self.ch.extend(co)
-        self.rj.extend(ro)
-        self.w.extend(wo)
+        self.ch.extend(co.tolist())
+        self.rj.extend(ro.tolist())
+        self.w.extend(wo.tolist())
         return self
 
     def value(self) -> tuple:
@@ -214,7 +271,8 @@ class DPOAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, v: tuple) -> DPOAccumulator:
         """Restore accumulator buffers from a value tuple."""
-        self.x, self.ch, self.rj, self.w = list(v[0]), list(v[1]), list(v[2]), list(v[3])
+        self.x, self.ch, self.rj, self.w = [], [], [], []
+        self.combine(v)
         return self
 
     def acc_to_encoder(self) -> DPOEncoder:
@@ -236,12 +294,20 @@ class DPOModelEstimator(ParameterEstimator):
     outer_objective_compatible = False
 
     def __init__(self, policy: Any, ref: Any, beta: float, m_steps: int, lr: float, device: str) -> None:
+        torch = _torch()
+        if policy is not None or ref is not None:
+            if policy is None or ref is None:
+                raise ValueError("policy and ref must either both be modules or both be None")
+            _validate_independent_modules(policy, ref, torch)
         self.policy = policy
         self.ref = ref
-        self.beta = float(beta)
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
-        self.device = device
+        self.beta = _positive_finite(beta, "beta")
+        self.m_steps = _positive_int(m_steps, "m_steps")
+        self.lr = _positive_finite(lr, "lr")
+        try:
+            self.device = str(torch.device(device))
+        except (TypeError, RuntimeError) as exc:
+            raise ValueError(f"invalid torch device {device!r}") from exc
 
     def accumulator_factory(self) -> DPOAccumulatorFactory:
         """Return an accumulator factory for weighted preference triples."""
@@ -250,35 +316,159 @@ class DPOModelEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple) -> DPOModel:
         """Run the weighted DPO M-step and return the updated policy leaf."""
         torch = _torch()
-        xs, chs, rjs, ws = suff_stat
-        out = DPOModel(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
+        if self.policy is None or self.ref is None:
+            raise ValueError("DPO estimation requires independent policy and reference modules")
+        if not isinstance(suff_stat, tuple) or len(suff_stat) != 4:
+            raise ValueError("DPO sufficient statistics must be an (x, chosen, rejected, weights) tuple")
+        xs, chs, rjs = _preference_batch(suff_stat[:3])
         if len(xs) == 0:
-            return out
+            raise ValueError("DPO estimation requires at least one preference")
+        ws = _weights(suff_stat[3], len(xs))
         dev = self.device
         self.policy.to(dev)
         self.ref.to(dev)
         for p in self.ref.parameters():
             p.requires_grad_(False)  # frozen reference
-        # the generic buffer stores every field as float batch arrays; restore shapes/dtypes at tensor prep
-        xt = torch.as_tensor(np.asarray(xs, dtype=float).reshape(len(xs), -1), dtype=torch.float32).to(dev)
-        ct = torch.as_tensor(np.asarray(chs).ravel().astype(int), dtype=torch.long).to(dev)
-        rt = torch.as_tensor(np.asarray(rjs).ravel().astype(int), dtype=torch.long).to(dev)
-        wt = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32).to(dev)  # per-pair weight
-        wsum = wt.sum().clamp(min=1e-8)
+        dtype = next(
+            (parameter.dtype for parameter in self.policy.parameters() if parameter.dtype.is_floating_point),
+            torch.float32,
+        )
+        xt = torch.as_tensor(xs, dtype=dtype, device=dev)
+        ct = torch.as_tensor(chs, dtype=torch.long, device=dev)
+        rt = torch.as_tensor(rjs, dtype=torch.long, device=dev)
+        wt = torch.as_tensor(ws, dtype=dtype, device=dev)
+        wsum = wt.sum()
         ar = torch.arange(len(ct), device=dev)
-        opt = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
+        trainable = [parameter for parameter in self.policy.parameters() if parameter.requires_grad]
+        if not trainable:
+            raise ValueError("DPO policy must contain at least one trainable parameter")
+        opt = torch.optim.Adam(trainable, lr=self.lr)
         with _module_mode(self.ref, train=False), torch.no_grad():  # reference log-probs are constant -- compute once
             lr_all = torch.log_softmax(self.ref(xt), dim=1)
+            _validate_torch_logits(lr_all, len(xs), "reference", torch)
+            if torch.any(ct >= lr_all.shape[1]) or torch.any(rt >= lr_all.shape[1]):
+                raise ValueError(f"chosen and rejected actions must lie in [0, {lr_all.shape[1]})")
             lr_ch, lr_rj = lr_all[ar, ct], lr_all[ar, rt]
         with _module_mode(self.policy, train=True):
             for _ in range(self.m_steps):
                 opt.zero_grad()
                 lp = torch.log_softmax(self.policy(xt), dim=1)
+                _validate_torch_logits(lp, len(xs), "policy", torch)
+                if lp.shape != lr_all.shape:
+                    raise ValueError(
+                        f"policy and reference logits must have the same shape, got "
+                        f"{tuple(lp.shape)} and {tuple(lr_all.shape)}"
+                    )
                 margin = (lp[ar, ct] - lr_ch) - (lp[ar, rt] - lr_rj)
                 loss = -(wt * torch.nn.functional.logsigmoid(self.beta * margin)).sum() / wsum  # weighted DPO loss
+                if not bool(torch.isfinite(loss).detach().cpu().item()):
+                    raise RuntimeError("DPO objective became non-finite")
                 loss.backward()
                 opt.step()
-        return out
+                if any(
+                    not bool(torch.all(torch.isfinite(parameter)).detach().cpu().item())
+                    for parameter in trainable
+                ):
+                    raise RuntimeError("DPO optimization produced non-finite policy parameters")
+        return DPOModel(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
+
+
+def _validate_independent_modules(policy: Any, ref: Any, torch: Any) -> None:
+    if not isinstance(policy, torch.nn.Module) or not isinstance(ref, torch.nn.Module):
+        raise TypeError("policy and ref must be torch.nn.Module instances")
+    if policy is ref:
+        raise ValueError("policy and ref must be independently owned modules, not the same object")
+    policy_storage = {
+        parameter.untyped_storage().data_ptr()
+        for parameter in policy.parameters()
+        if parameter.numel()
+    }
+    ref_storage = {
+        parameter.untyped_storage().data_ptr()
+        for parameter in ref.parameters()
+        if parameter.numel()
+    }
+    if policy_storage & ref_storage:
+        raise ValueError("policy and ref must not share parameter storage")
+
+
+def _contexts(value: Any) -> np.ndarray:
+    try:
+        contexts = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("DPO contexts must form a numeric two-dimensional matrix") from exc
+    if contexts.ndim == 1:
+        contexts = np.atleast_2d(contexts)
+    if contexts.ndim != 2 or contexts.shape[0] == 0 or contexts.shape[1] == 0:
+        raise ValueError("DPO contexts must have non-empty shape (n, features)")
+    if not np.all(np.isfinite(contexts)):
+        raise ValueError("DPO contexts must contain only finite values")
+    return contexts
+
+
+def _preference_batch(enc: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if not isinstance(enc, (tuple, list)) or len(enc) != 3:
+        raise ValueError("DPO data must be an (x, chosen, rejected) triple")
+    contexts = _contexts(enc[0])
+    chosen = _exact_actions(enc[1], "chosen", len(contexts))
+    rejected = _exact_actions(enc[2], "rejected", len(contexts))
+    if np.any(chosen == rejected):
+        raise ValueError("chosen and rejected actions must differ for every preference")
+    return contexts, chosen, rejected
+
+
+def _exact_actions(value: Any, name: str, n_rows: int) -> np.ndarray:
+    actions = np.asarray(value)
+    if actions.ndim != 1 or len(actions) != n_rows:
+        raise ValueError(f"{name} must be a one-dimensional vector with {n_rows} rows")
+    if actions.dtype.kind not in {"i", "u", "f"}:
+        raise ValueError(f"{name} actions must be numeric integers")
+    if actions.dtype.kind == "f" and (
+        not np.all(np.isfinite(actions)) or not np.all(actions == np.round(actions))
+    ):
+        raise ValueError(f"{name} actions must be finite integer values")
+    if np.any(actions < 0):
+        raise ValueError(f"{name} actions must be non-negative")
+    if np.any(actions > np.iinfo(np.intp).max):
+        raise ValueError(f"{name} actions exceed the supported integer index range")
+    return actions.astype(int, copy=False)
+
+
+def _weights(value: Any, n_rows: int) -> np.ndarray:
+    weights = np.asarray(value, dtype=float)
+    if weights.ndim != 1 or len(weights) != n_rows:
+        raise ValueError(f"DPO weights must be a one-dimensional vector with {n_rows} rows")
+    if not np.all(np.isfinite(weights)) or np.any(weights <= 0.0):
+        raise ValueError("DPO weights must contain only finite, strictly positive values")
+    return weights
+
+
+def _validate_torch_logits(logits: Any, n_rows: int, name: str, torch: Any) -> None:
+    if logits.ndim != 2 or logits.shape[0] != n_rows or logits.shape[1] < 2:
+        raise ValueError(f"{name} must return shape (n, actions) with at least two actions")
+    if not bool(torch.all(torch.isfinite(logits)).detach().cpu().item()):
+        raise ValueError(f"{name} returned non-finite logits")
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a real scalar, not a boolean")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a real scalar") from exc
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be finite and positive")
+    return result
+
+
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
 
 
 def _register_serializable() -> None:

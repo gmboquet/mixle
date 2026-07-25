@@ -74,6 +74,74 @@ def test_dpo_weighting_changes_the_fitted_policy():
     assert prefer_A.prefers(xb)[0] != prefer_B.prefers(xb)[0]  # weighting steered the outcome
 
 
+def test_dpo_rejects_aliased_policy_reference_before_freezing_policy():
+    torch = pytest.importorskip("torch")
+    import torch.nn as nn
+
+    from mixle.models.dpo_leaf import DPOModel
+
+    policy = nn.Linear(2, 3)
+    with pytest.raises(ValueError, match="same object"):
+        DPOModel(policy, policy)
+    assert all(parameter.requires_grad for parameter in policy.parameters())
+
+    reference = nn.Linear(2, 3)
+    reference.weight = policy.weight
+    with pytest.raises(ValueError, match="share parameter storage"):
+        DPOModel(policy, reference)
+    assert all(parameter.requires_grad for parameter in policy.parameters())
+
+
+def test_dpo_validates_controls_preferences_actions_and_weights():
+    torch = pytest.importorskip("torch")
+    import copy
+
+    import torch.nn as nn
+
+    from mixle.models.dpo_leaf import DPOModel, DPOModelEstimator
+
+    policy = nn.Linear(2, 3)
+    reference = copy.deepcopy(policy)
+    for controls in (
+        {"beta": 0.0},
+        {"beta": np.nan},
+        {"m_steps": 0},
+        {"lr": -1.0},
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            DPOModel(policy, copy.deepcopy(reference), **controls)
+
+    model = DPOModel(policy, reference, m_steps=1)
+    assert all(parameter.requires_grad for parameter in policy.parameters())
+    assert all(not parameter.requires_grad for parameter in reference.parameters())
+    invalid_encoded = [
+        (np.ones((2, 2)), np.array([-1, 0]), np.array([1, 2])),
+        (np.ones((2, 2)), np.array([0, 1]), np.array([0, 2])),
+        (np.ones((2, 2)), np.array([0.5, 1.0]), np.array([1, 2])),
+        (np.ones((2, 2)), np.array([0, 1]), np.array([1])),
+        (np.array([[1.0, np.nan]]), np.array([0]), np.array([1])),
+        (np.ones((1, 2)), np.array([np.iinfo(np.uint64).max], dtype=np.uint64), np.array([1])),
+    ]
+    for encoded in invalid_encoded:
+        with pytest.raises(ValueError):
+            model.seq_log_density(encoded)
+    with pytest.raises(ValueError, match=r"\[0, 3\)"):
+        model.seq_log_density((np.ones((1, 2)), np.array([3]), np.array([1])))
+
+    estimator = DPOModelEstimator(policy, reference, beta=0.1, m_steps=1, lr=1.0e-3, device="cpu")
+    for weights in (
+        np.array([0.0]),
+        np.array([-1.0]),
+        np.array([np.inf]),
+        np.array([1.0, 2.0]),
+    ):
+        with pytest.raises(ValueError):
+            estimator.estimate(
+                None,
+                ([np.ones(2)], [0], [1], weights),
+            )
+
+
 # --------------------------------------------------------------------------- registry traversal
 
 
