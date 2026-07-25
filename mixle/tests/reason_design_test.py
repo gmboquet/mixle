@@ -36,9 +36,31 @@ def _prior():
 
 
 class BudgetTest(unittest.TestCase):
+    def test_hidden_outcome_selection_requires_explicit_observed_evidence(self):
+        store = _store([(0, 1.0)])
+        with self.assertRaisesRegex(ValueError, "evidence_is_observed"):
+            select_evidence_batch(store, _prior(), budget=1.0)
+
+    def test_invalid_economics_and_design_space_are_rejected(self):
+        store = _store([(0, 1.0), (1, 2.0)])
+        cases = [
+            {"budget": np.nan},
+            {"budget": -1.0},
+            {"budget": 1.0, "fine_cost": 0.0},
+            {"budget": 1.0, "coarse_cost": np.inf},
+            {"budget": 1.0, "fidelities": ("typo",)},
+            {"budget": 1.0, "candidates": (-1,)},
+            {"budget": 1.0, "max_items": 1.5},
+        ]
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                select_evidence_batch(store, _prior(), evidence_is_observed=True, **kwargs)
+
     def test_respects_the_budget(self):
         store = _store([(i % D, float(i)) for i in range(12)])
-        plan = select_evidence_batch(store, _prior(), budget=1.0, fine_cost=1.0, coarse_cost=0.2)
+        plan = select_evidence_batch(
+            store, _prior(), budget=1.0, fine_cost=1.0, coarse_cost=0.2, evidence_is_observed=True
+        )
         self.assertLessEqual(plan.total_cost, 1.0 + 1e-9)
         self.assertGreater(plan.total_gain, 0.0)
         self.assertTrue(all(f in ("coarse", "fine") for _i, f, _g, _c in plan.items))
@@ -49,7 +71,15 @@ class NonMyopicTest(unittest.TestCase):
         # three payloads all observing the SAME component with the same value -> redundant
         redundant = [(0, 3.0), (0, 3.0), (0, 3.0)] + [(1, -2.0), (2, 4.0)]
         store = _store(redundant)
-        plan = select_evidence_batch(store, _prior(), budget=10.0, fine_cost=1.0, coarse_cost=1.0, max_items=3)
+        plan = select_evidence_batch(
+            store,
+            _prior(),
+            budget=10.0,
+            fine_cost=1.0,
+            coarse_cost=1.0,
+            max_items=3,
+            evidence_is_observed=True,
+        )
         picked_components = [store.payloads[i][0] for i in plan.indices]
         # adaptive greedy diversifies across components instead of picking the three identical ones
         self.assertEqual(len(set(picked_components)), len(picked_components))
@@ -60,7 +90,15 @@ class NonMyopicTest(unittest.TestCase):
         store = _store(payloads)
         prior = _prior()
         k = 3
-        adaptive = select_evidence_batch(store, prior, budget=100.0, fine_cost=1.0, coarse_cost=1.0, max_items=k)
+        adaptive = select_evidence_batch(
+            store,
+            prior,
+            budget=100.0,
+            fine_cost=1.0,
+            coarse_cost=1.0,
+            max_items=k,
+            evidence_is_observed=True,
+        )
 
         # naive: rank all items by their single-step gain against the PRIOR, take top-k, then assimilate
         before = _query_entropy(prior, None)
@@ -80,7 +118,9 @@ class FidelityTest(unittest.TestCase):
     def test_prefers_cheap_coarse_under_a_tight_budget(self):
         # coarse is much cheaper; under a tight budget the plan should favour coarse to buy more information
         store = _store([(i % D, float(i)) for i in range(8)])
-        plan = select_evidence_batch(store, _prior(), budget=0.8, fine_cost=1.0, coarse_cost=0.2)
+        plan = select_evidence_batch(
+            store, _prior(), budget=0.8, fine_cost=1.0, coarse_cost=0.2, evidence_is_observed=True
+        )
         fidelities = [f for _i, f, _g, _c in plan.items]
         self.assertIn("coarse", fidelities)
         self.assertGreaterEqual(len(plan.items), 2)  # cheap fidelity let it acquire several items

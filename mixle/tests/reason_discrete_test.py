@@ -3,7 +3,7 @@
 import numpy as np
 
 from mixle.inference.belief import CategoricalBelief
-from mixle.reason import model_evidence, reason_discrete
+from mixle.reason import DecisionAction, model_evidence, reason_discrete
 from mixle.stats import GaussianDistribution
 
 
@@ -35,6 +35,18 @@ def test_prior_and_labels_round_trip():
     assert abs(ans.attribution[0][1]) < 1e-12  # removed ~0 nats
 
 
+def test_top_requires_an_exact_nonnegative_count():
+    ans = reason_discrete(2, [])
+    assert ans.top(0) == []
+    for value in (-1, True, 1.5, np.nan):
+        try:
+            ans.top(value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid top-k value {value!r} to fail")
+
+
 def test_decide_is_exact_bayes_action_with_abstention():
     # posterior favors h1 (MAP) but an asymmetric loss makes declaring h1 risky
     ans = reason_discrete(2, [("src", np.log([0.35, 0.65]))])
@@ -53,8 +65,27 @@ def test_decide_is_exact_bayes_action_with_abstention():
 
     # a priced abstain beats both when uncertainty is expensive
     d2 = ans.decide(loss, abstain_cost=0.5)
-    assert d2["action"] == "abstain" and d2["expected_loss"] == 0.5
+    assert d2["action"] is DecisionAction.ABSTAIN and d2["expected_loss"] == 0.5
 
     # callable-loss form agrees with the matrix form
     d3 = ans.decide(lambda a, h: loss[a][h])
     assert d3["action"] == 0 and abs(d3["alternatives"][1] - 3.5) < 1e-12
+
+
+def test_decide_rejects_empty_duplicate_and_nonfinite_alternatives():
+    ans = reason_discrete(2, [])
+    invalid = [
+        (np.empty((0, 2)), []),
+        (np.zeros((2, 2)), ["same", "same"]),
+        (np.asarray([[0.0, np.nan], [1.0, 0.0]]), ["a", "b"]),
+    ]
+    for loss, actions in invalid:
+        try:
+            ans.decide(loss, actions)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid action space {actions!r} to fail")
+    decision = ans.decide(np.zeros((1, 2)), ["abstain"], abstain_cost=1.0)
+    assert "abstain" in decision["alternatives"]
+    assert DecisionAction.ABSTAIN in decision["alternatives"]
