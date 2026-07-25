@@ -12,6 +12,7 @@ mode and reports a mean ~10 away from the true one.
 """
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -103,7 +104,19 @@ class InferenceProgramTwoHopVsNaiveTest(unittest.TestCase):
         self.assertEqual(sampled.receipt.n_particles, 100)
         self.assertEqual(moment.receipt.propagation, "moment")
         self.assertEqual(moment.receipt.n_hops, 2)
-        self.assertEqual(sampled.receipt.hop_targets, [("B",), ("C",)])
+        self.assertEqual(sampled.receipt.hop_targets, (("B",), ("C",)))
+        self.assertRegex(sampled.receipt.receipt_digest, r"^sha256:[0-9a-f]{64}$")
+        self.assertRegex(sampled.receipt.program_digest, r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(len(sampled.receipt.hops), 2)
+        self.assertEqual(sampled.receipt.hops[0].output_particles, 100)
+
+    def test_receipt_identity_changes_with_evidence_and_seed(self):
+        baseline = run_inference_program({"A": 0.0}, self.hops, n_samples=20, seed=0).receipt
+        changed_evidence = run_inference_program({"A": 1.0}, self.hops, n_samples=20, seed=0).receipt
+        changed_seed = run_inference_program({"A": 0.0}, self.hops, n_samples=20, seed=1).receipt
+        self.assertNotEqual(baseline.evidence_digest, changed_evidence.evidence_digest)
+        self.assertNotEqual(baseline.program_digest, changed_seed.program_digest)
+        self.assertNotEqual(baseline.receipt_digest, changed_seed.receipt_digest)
 
     def test_invalid_propagation_rejected(self):
         with self.assertRaises(ValueError):
@@ -120,6 +133,59 @@ class InferenceProgramTwoHopVsNaiveTest(unittest.TestCase):
     def test_empty_program_rejected(self):
         with self.assertRaises(ValueError):
             run_inference_program({"A": 0.0}, [])
+
+    def test_colliding_evidence_and_incomplete_carry_are_rejected_before_execution(self):
+        collision = [
+            InferenceHop(joint=self.joint_ab, target=("B",), extra_evidence={"A": 1.0}),
+            InferenceHop(joint=self.joint_bc, target=("C",), carry={"B": "B"}),
+        ]
+        with self.assertRaisesRegex(ValueError, "collide"):
+            run_inference_program({"A": 0.0}, collision)
+        missing = [
+            InferenceHop(joint=self.joint_ab, target=("A", "B")),
+            InferenceHop(joint=self.joint_bc, target=("C",), carry={"B": "B"}),
+        ]
+        with self.assertRaisesRegex(ValueError, "consume every prior target"):
+            run_inference_program({}, missing)
+
+    def test_duplicate_targets_and_degenerate_particle_counts_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unique"):
+            InferenceHop(joint=self.joint_ab, target=("B", "B"))
+        for count in (0, -1, 1.5):
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                run_inference_program({"A": 0.0}, self.hops, n_samples=count)
+
+    def test_sampled_draw_arity_is_checked_instead_of_truncated(self):
+        class WrongSampler:
+            def sample(self, n=None):
+                return [("only-one-field",)] * n
+
+        class FakeJoint:
+            def __init__(self, names):
+                self.names = names
+                leaf = SimpleNamespace(value=1)
+                self.joint = SimpleNamespace(
+                    w=np.array([1.0]),
+                    components=[SimpleNamespace(dists=[leaf for _ in names])],
+                )
+
+            def infer(self, observed, target):
+                del observed
+                component = SimpleNamespace(dists=[SimpleNamespace(value=1) for _ in target])
+                return SimpleNamespace(
+                    components=[component],
+                    w=np.array([1.0]),
+                    sampler=lambda seed: WrongSampler(),
+                )
+
+        first = FakeJoint(("A", "B", "C"))
+        second = FakeJoint(("B", "C", "D"))
+        bad_hops = [
+            InferenceHop(first, ("B", "C")),
+            InferenceHop(second, ("D",), carry={"B": "B", "C": "C"}),
+        ]
+        with self.assertRaisesRegex(ValueError, "fields; expected 2"):
+            run_inference_program({"A": 0.0}, bad_hops, n_samples=3)
 
 
 class InferenceProgramSingleHopReduceTest(unittest.TestCase):
