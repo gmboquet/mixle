@@ -21,18 +21,16 @@ reimplementing them:
   textbook projected-gradient ("alternating projection") scheme: a gradient step on the (convex,
   quadratic-in-What) weighted objective, alternated with a hard projection onto the structural
   constraint set (a fixed support mask, or a dynamically re-selected 2:4 pattern);
-* the permutation case is solved with Sinkhorn's algorithm -- the standard entropic-OT relaxation of a
-  linear assignment problem. ``torchsort``/POT/``geomloss`` were checked (see the PR description) and
-  are not installed in this environment; Sinkhorn itself is a well-known ~10-line fixed-point iteration
-  (alternating row/column normalization of a Gibbs kernel in log-domain for numerical stability), so it
-  is implemented directly here rather than pulling in a heavy optional dependency for a few lines of
-  numpy. This is also the differentiable "profile . arrangement" building block roadmap item G4 (later,
-  not this item) reuses for permutation x profile quantization.
+* the permutation case is an exact linear-assignment solve over profile rows. It intentionally does not
+  claim to expose an entropic-transport relaxation or differentiable Sinkhorn object.
 """
 
 from __future__ import annotations
 
+import pickle
+import warnings
 from dataclasses import dataclass, field
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -44,6 +42,8 @@ __all__ = [
     "sigma_weighted_block_sparse",
     "sigma_weighted_permutation",
     "sigma_weighted_butterfly",
+    "ButterflyProjection",
+    "CovarianceAdjustmentWarning",
     "ProjectionReport",
     "project",
 ]
@@ -54,17 +54,103 @@ __all__ = [
 # --------------------------------------------------------------------------------------------------------
 
 
+class CovarianceAdjustmentWarning(RuntimeWarning):
+    """A covariance had only roundoff-scale negative eigenvalues and was projected to the PSD cone."""
+
+
+def _exact_int(value: Any, name: str, *, minimum: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    return result
+
+
+def _nonnegative_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite non-negative real number")
+    result = float(value)
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative real number")
+    return result
+
+
+def _validate_problem(w: Any, sigma: Any) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return finite matrix weights and their finite symmetric PSD input covariance."""
+    w_array = np.asarray(w)
+    sigma_array = np.asarray(sigma)
+    if np.iscomplexobj(w_array) or np.iscomplexobj(sigma_array):
+        raise TypeError("W and Sigma must be real-valued")
+    try:
+        w_array = np.asarray(w_array, dtype=np.float64)
+        sigma_array = np.asarray(sigma_array, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("W and Sigma must be real numeric arrays") from exc
+    if w_array.ndim != 2 or not all(w_array.shape):
+        raise ValueError(f"W must be a non-empty two-dimensional matrix; got shape {w_array.shape}")
+    expected = (w_array.shape[1], w_array.shape[1])
+    if sigma_array.shape != expected:
+        raise ValueError(
+            f"Sigma must be square with side == W.shape[1]; got W {w_array.shape}, Sigma {sigma_array.shape}"
+        )
+    if not np.all(np.isfinite(w_array)) or not np.all(np.isfinite(sigma_array)):
+        raise ValueError("W and Sigma must contain only finite values")
+
+    scale = max(1.0, float(np.max(np.abs(sigma_array))))
+    symmetry_tolerance = 1.0e-12 * scale
+    asymmetry = float(np.max(np.abs(sigma_array - sigma_array.T)))
+    if asymmetry > symmetry_tolerance:
+        raise ValueError(
+            f"Sigma must be symmetric within tolerance {symmetry_tolerance:.3g}; maximum asymmetry is {asymmetry:.3g}"
+        )
+    sigma_symmetric = 0.5 * (sigma_array + sigma_array.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(sigma_symmetric)
+    spectral_scale = max(1.0, float(np.max(np.abs(eigenvalues))))
+    psd_tolerance = 1.0e-12 * spectral_scale
+    minimum_eigenvalue = float(eigenvalues[0])
+    if minimum_eigenvalue < -psd_tolerance:
+        raise ValueError(
+            f"Sigma must be positive semidefinite; minimum eigenvalue {minimum_eigenvalue:.6g} "
+            f"is below tolerance {-psd_tolerance:.6g}"
+        )
+
+    correction = max(0.0, -minimum_eigenvalue)
+    if correction:
+        clipped = np.maximum(eigenvalues, 0.0)
+        sigma_symmetric = (eigenvectors * clipped) @ eigenvectors.T
+        warnings.warn(
+            f"Sigma had a roundoff-scale minimum eigenvalue {minimum_eigenvalue:.6g}; "
+            f"projected it to the PSD cone (maximum eigenvalue correction {correction:.6g})",
+            CovarianceAdjustmentWarning,
+            stacklevel=2,
+        )
+    return w_array, sigma_symmetric, correction
+
+
 def sigma_weighted_error(w: Any, w_hat: Any, sigma: Any) -> float:
-    """``tr((W - What) @ Sigma @ (What - W)^T)`` -- the Sigma-weighted reconstruction objective itself.
+    """``tr((W - What) @ Sigma @ (W - What)^T)`` -- the Sigma-weighted reconstruction objective itself.
 
     Used both as the convergence check inside the iterative solvers below and as the metric the tests
-    compare solvers against each other with. ``Sigma`` is assumed PSD (a covariance matrix); this
-    function does not itself validate that -- callers pass a real covariance (e.g. from
-    :func:`mixle.models.moment_propagation.propagate_moments`) or a synthetic ``A @ A.T`` construction.
+    compare solvers against each other with.
     """
-    diff = np.asarray(w, dtype=np.float64) - np.asarray(w_hat, dtype=np.float64)
-    sigma = np.asarray(sigma, dtype=np.float64)
-    return float(np.trace(diff @ sigma @ diff.T))
+    w_array, sigma_array, _ = _validate_problem(w, sigma)
+    w_hat_array = np.asarray(w_hat)
+    if np.iscomplexobj(w_hat_array):
+        raise TypeError("W_hat must be real-valued")
+    try:
+        w_hat_array = np.asarray(w_hat_array, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("W_hat must be a real numeric array") from exc
+    if w_hat_array.shape != w_array.shape:
+        raise ValueError(f"W_hat shape {w_hat_array.shape} must match W shape {w_array.shape}")
+    if not np.all(np.isfinite(w_hat_array)):
+        raise ValueError("W_hat must contain only finite values")
+    diff = w_array - w_hat_array
+    result = float(np.trace(diff @ sigma_array @ diff.T))
+    if not np.isfinite(result) or result < -1.0e-10:
+        raise ValueError("Sigma-weighted error must be finite and non-negative")
+    return max(0.0, result)
 
 
 def _symmetric_sqrt_and_pinv_sqrt(sigma: np.ndarray, rcond: float = 1e-10) -> tuple[np.ndarray, np.ndarray]:
@@ -73,9 +159,7 @@ def _symmetric_sqrt_and_pinv_sqrt(sigma: np.ndarray, rcond: float = 1e-10) -> tu
     near-zero eigenvalues as exactly rank-deficient directions (their pseudo-inverse contribution is
     zero, matching the fact that ``Sigma`` assigns no weight/cost to those directions at all).
     """
-    sigma = 0.5 * (sigma + sigma.T)
     eigval, eigvec = np.linalg.eigh(sigma)
-    eigval = np.clip(eigval, 0.0, None)
     sqrt_eigval = np.sqrt(eigval)
     threshold = rcond * float(sqrt_eigval.max() if sqrt_eigval.size else 0.0)
     inv_sqrt_eigval = np.where(sqrt_eigval > threshold, np.reciprocal(np.where(sqrt_eigval > 0, sqrt_eigval, 1.0)), 0.0)
@@ -113,17 +197,16 @@ def sigma_weighted_low_rank(w: Any, sigma: Any, rank: int) -> np.ndarray:
     special case of this is "optimal brain damage"-style weighted SVD); here it is implemented for a
     full (non-diagonal) ``Sigma``.
     """
-    w = np.asarray(w, dtype=np.float64)
-    sigma = np.asarray(sigma, dtype=np.float64)
-    if w.shape[1] != sigma.shape[0] or sigma.shape[0] != sigma.shape[1]:
-        raise ValueError(f"Sigma must be square with side == W.shape[1]; got W {w.shape}, Sigma {sigma.shape}")
+    w, sigma, _ = _validate_problem(w, sigma)
+    rank = _exact_int(rank, "rank", minimum=0)
+    if rank > min(w.shape):
+        raise ValueError(f"rank must not exceed min(W.shape)={min(w.shape)}")
 
     sigma_half, sigma_half_pinv = _symmetric_sqrt_and_pinv_sqrt(sigma)
 
     b = w @ sigma_half
     u, s, vt = np.linalg.svd(b, full_matrices=False)
-    r = int(max(0, min(rank, s.shape[0])))
-    b_hat = (u[:, :r] * s[:r]) @ vt[:r, :]
+    b_hat = (u[:, :rank] * s[:rank]) @ vt[:rank, :]
     return b_hat @ sigma_half_pinv
 
 
@@ -181,9 +264,9 @@ def sigma_weighted_block_sparse(
     step), so only convergence to a LOCAL optimum of the alternating scheme is guaranteed -- NOT global
     optimality over all possible 2:4 masks (that combinatorial problem is not attempted here).
     """
-    w = np.asarray(w, dtype=np.float64)
-    sigma = np.asarray(sigma, dtype=np.float64)
-    sigma = 0.5 * (sigma + sigma.T)
+    w, sigma, _ = _validate_problem(w, sigma)
+    max_iter = _exact_int(max_iter, "max_iter", minimum=1)
+    tol = _nonnegative_finite(tol, "tol")
 
     if isinstance(block_pattern_or_2_4, str):
         if block_pattern_or_2_4 != "2:4":
@@ -212,82 +295,45 @@ def sigma_weighted_block_sparse(
 
 
 # --------------------------------------------------------------------------------------------------------
-# 3. permutation -- Sinkhorn soft-permutation solver (feeds G4's "profile . arrangement")
+# 3. permutation -- exact row assignment
 # --------------------------------------------------------------------------------------------------------
-
-
-def _sinkhorn_log_domain(log_kernel: np.ndarray, n_iter: int) -> np.ndarray:
-    """Standard log-domain Sinkhorn fixed point: alternately renormalize rows/columns of a Gibbs kernel
-    (in log-space, for numerical stability) until the coupling is (approximately) doubly stochastic.
-    Uniform marginals (``1/n`` each) since we are relaxing a square PERMUTATION matrix, whose row/column
-    sums are all exactly 1.
-    """
-    n = log_kernel.shape[0]
-    log_u = np.zeros(n)
-    log_v = np.zeros(n)
-    log_marginal = -np.log(n)
-    for _ in range(n_iter):
-        log_u = log_marginal - _logsumexp(log_kernel + log_v[None, :], axis=1)
-        log_v = log_marginal - _logsumexp(log_kernel + log_u[:, None], axis=0)
-    return np.exp(log_u[:, None] + log_kernel + log_v[None, :])
-
-
-def _logsumexp(a: np.ndarray, axis: int) -> np.ndarray:
-    m = np.max(a, axis=axis, keepdims=True)
-    m = np.where(np.isfinite(m), m, 0.0)
-    out = m + np.log(np.sum(np.exp(a - m), axis=axis, keepdims=True))
-    return np.squeeze(out, axis=axis)
 
 
 def sigma_weighted_permutation(
     w: Any,
     sigma: Any,
     target_profile: Any,
-    temperature: float = 0.1,
-    max_iter: int = 100,
 ) -> np.ndarray:
-    """Sinkhorn-based soft-permutation solver for ``What = P @ target_profile`` -- the "profile o
-    arrangement" pattern (roadmap H4/R1, feeding G4's permutation x profile quantization): find the
-    ROW-permutation ``P`` of a fixed canonical ``target_profile`` that best matches ``W`` under the
-    Sigma-weighted objective ``min_P tr((W - P @ target_profile) Sigma (W - P @ target_profile)^T)``.
+    """Exact row-permutation solver for ``What = P @ target_profile``.
 
     This is a linear assignment problem in disguise: it decomposes over ROW-PAIRS (row ``i`` of ``W``
     matched to row ``j`` of ``target_profile``) with pairwise cost
     ``cost[i,j] = (W_i - profile_j) @ Sigma @ (W_i - profile_j)^T``, so the discrete problem
-    ``min_{P permutation} sum_i cost[i, perm(i)]`` is EXACTLY a linear assignment problem. We solve it
-    with the differentiable Sinkhorn relaxation the roadmap asks for (a Gibbs kernel
-    ``K = exp(-cost/temperature)``, alternately row/column normalized in log-domain -- this is the
-    ``torchsort``/POT-style soft-permutation building block G4 later reuses for a jointly-differentiable
-    profile+arrangement objective), THEN round the converged soft doubly-stochastic coupling to a hard
-    permutation via linear-sum-assignment (Hungarian) on the SAME cost matrix -- a standard, exact
-    final-rounding step (the Sinkhorn relaxation supplies the differentiable pattern; committing to a
-    hard answer is a separate, exact combinatorial step, not claimed to itself be "the Sinkhorn
-    solution"). Convergence contract: the returned answer is the exact optimum of the linear assignment
-    problem (Hungarian rounding is exact for assignment problems); the SINKHORN PLAN itself only
-    converges to the true permutation in the low-temperature limit -- what "converged Sinkhorn solution"
-    means here is that repeated Sinkhorn normalization has converged to a fixed doubly-stochastic
-    coupling for the given ``temperature``, not that temperature itself has been annealed to zero.
+    ``min_{P permutation} sum_i cost[i, perm(i)]`` is exactly a linear assignment problem. The returned
+    hard permutation is therefore computed directly with the Hungarian algorithm. This function exposes
+    no temperature or iteration controls because it does not compute or return an entropic soft plan.
     """
-    w = np.asarray(w, dtype=np.float64)
-    sigma = np.asarray(sigma, dtype=np.float64)
-    sigma = 0.5 * (sigma + sigma.T)
-    profile = np.asarray(target_profile, dtype=np.float64)
+    w, sigma, _ = _validate_problem(w, sigma)
+    profile = np.asarray(target_profile)
+    if np.iscomplexobj(profile):
+        raise TypeError("target_profile must be real-valued")
+    try:
+        profile = np.asarray(profile, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("target_profile must be a real numeric matrix") from exc
     if w.shape != profile.shape:
         raise ValueError(f"target_profile shape {profile.shape} must match W shape {w.shape}")
+    if not np.all(np.isfinite(profile)):
+        raise ValueError("target_profile must contain only finite values")
     n = w.shape[0]
 
     # pairwise Sigma-weighted cost between every row of W and every row of the profile
     diff = w[:, None, :] - profile[None, :, :]  # (n, n, d_in)
     cost = np.einsum("ijk,kl,ijl->ij", diff, sigma, diff)
 
-    log_kernel = -cost / max(temperature, 1e-8)
-    soft_plan = _sinkhorn_log_domain(log_kernel, n_iter=max_iter)
-
     row_ind, col_ind = linear_sum_assignment(cost)
     perm = np.zeros((n, n), dtype=np.float64)
     perm[row_ind, col_ind] = 1.0
-
-    _ = soft_plan  # the differentiable relaxation this function demonstrates; hard rounding uses `cost` directly
     return perm @ profile
 
 
@@ -326,12 +372,111 @@ def _compose_apply_order(mats: list[np.ndarray], n: int) -> np.ndarray:
     return out
 
 
+@dataclass(frozen=True)
+class ButterflyProjection:
+    """Compact executable product of sparse butterfly factors.
+
+    ``apply(x)`` accepts vectors or batches whose last dimension is ``d_in`` and returns the equivalent
+    of ``x @ projection.to_dense().T`` without materializing an ``N x N`` matrix. ``projection @ x``
+    provides ordinary matrix-multiplication orientation for arrays whose first dimension is ``d_in``.
+    NumPy consumers that require a dense matrix remain compatible through ``np.asarray(projection)``.
+    """
+
+    a: tuple[np.ndarray, ...]
+    b: tuple[np.ndarray, ...]
+    strides: tuple[int, ...]
+    d_out: int
+    d_in: int
+    n: int
+
+    def __post_init__(self) -> None:
+        if not self.a or len(self.a) != len(self.b) or len(self.a) != len(self.strides):
+            raise ValueError("butterfly factors must have equal non-zero stage counts")
+        for name, factors in (("a", self.a), ("b", self.b)):
+            stable: list[np.ndarray] = []
+            for factor in factors:
+                array = np.array(factor, dtype=np.float64, copy=True)
+                if array.shape != (self.n,) or not np.all(np.isfinite(array)):
+                    raise ValueError(f"butterfly {name} factors must be finite vectors of length {self.n}")
+                array.setflags(write=False)
+                stable.append(array)
+            object.__setattr__(self, name, tuple(stable))
+        if any(stride <= 0 or stride >= self.n for stride in self.strides):
+            raise ValueError("butterfly strides must lie in [1, n)")
+        if not (0 < self.d_out <= self.n and 0 < self.d_in <= self.n):
+            raise ValueError("butterfly logical dimensions must lie in [1, n]")
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """Logical dense matrix shape."""
+        return self.d_out, self.d_in
+
+    @property
+    def parameter_count(self) -> int:
+        """Number of stored floating-point factor parameters."""
+        return sum(factor.size for factor in self.a + self.b)
+
+    @property
+    def parameter_nbytes(self) -> int:
+        """Physical bytes occupied by stored floating-point factors."""
+        return sum(factor.nbytes for factor in self.a + self.b)
+
+    @property
+    def serialized_nbytes(self) -> int:
+        """Actual protocol-5 pickle size of the executable representation."""
+        return len(pickle.dumps(self, protocol=5))
+
+    def apply(self, x: Any) -> np.ndarray:
+        """Apply the projection to vectors/batches stored along their final axis."""
+        array = np.asarray(x)
+        if np.iscomplexobj(array):
+            raise TypeError("butterfly inputs must be real-valued")
+        try:
+            array = np.asarray(array, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("butterfly inputs must be real numeric arrays") from exc
+        if array.ndim == 0 or array.shape[-1] != self.d_in:
+            raise ValueError(f"butterfly input's final dimension must be {self.d_in}; got shape {array.shape}")
+        if not np.all(np.isfinite(array)):
+            raise ValueError("butterfly inputs must contain only finite values")
+
+        current = np.zeros(array.shape[:-1] + (self.n,), dtype=np.float64)
+        current[..., : self.d_in] = array
+        indices = np.arange(self.n)
+        for a_factor, b_factor, stride in zip(self.a, self.b, self.strides, strict=True):
+            partner = indices ^ stride
+            current = a_factor * current + b_factor * current[..., partner]
+        result = current[..., : self.d_out]
+        if not np.all(np.isfinite(result)):
+            raise ValueError("butterfly application produced non-finite values")
+        return result
+
+    def to_dense(self) -> np.ndarray:
+        """Materialize the logical dense matrix only when a caller explicitly requests it."""
+        return self.apply(np.eye(self.d_in)).T
+
+    def __array__(self, dtype: Any | None = None, copy: bool | None = None) -> np.ndarray:
+        array = self.to_dense()
+        if dtype is not None:
+            array = array.astype(dtype, copy=False)
+        if copy:
+            array = array.copy()
+        return array
+
+    def __matmul__(self, other: Any) -> np.ndarray:
+        array = np.asarray(other)
+        if array.ndim == 0 or array.shape[0] != self.d_in:
+            raise ValueError(f"right operand's first dimension must be {self.d_in}; got shape {array.shape}")
+        row_oriented = np.moveaxis(array, 0, -1)
+        return np.moveaxis(self.apply(row_oriented), -1, 0)
+
+
 def sigma_weighted_butterfly(
     w: Any,
     sigma: Any,
     n_stages: int | None = None,
     n_sweeps: int = 4,
-) -> np.ndarray:
+) -> ButterflyProjection:
     """Sigma-weighted BUTTERFLY structured projection: constrain ``What`` to be (the top-left
     ``d_out x d_in`` block of) an ``N x N`` "butterfly matrix" -- a product of ``L`` sparse factors, each
     with exactly 2 nonzeros per row connecting index ``j`` to ``j XOR stride`` (``stride`` doubling stage to
@@ -366,16 +511,18 @@ def sigma_weighted_butterfly(
        solve is a real, distinct least-squares fit and the returned ``What`` has the genuine sparse
        butterfly parameter count, not a dense low-rank or block-sparse structure.
     """
-    w = np.asarray(w, dtype=np.float64)
-    sigma = np.asarray(sigma, dtype=np.float64)
-    sigma = 0.5 * (sigma + sigma.T)
+    w, sigma, _ = _validate_problem(w, sigma)
     d_out, d_in = w.shape
-    if sigma.shape != (d_in, d_in):
-        raise ValueError(f"Sigma must be square with side == W.shape[1]; got W {w.shape}, Sigma {sigma.shape}")
+    n_sweeps = _exact_int(n_sweeps, "n_sweeps", minimum=1)
 
     n = _next_pow2(max(d_out, d_in, 2))
     l_full = n.bit_length() - 1  # log2(n), n is a power of two
-    l = l_full if n_stages is None else int(max(1, min(n_stages, l_full)))
+    if n_stages is None:
+        l = l_full
+    else:
+        l = _exact_int(n_stages, "n_stages", minimum=1)
+        if l > l_full:
+            raise ValueError(f"n_stages must not exceed log2(N)={l_full}")
     strides = [1 << i for i in range(l)]
 
     w_pad = np.zeros((n, n), dtype=np.float64)
@@ -394,7 +541,7 @@ def sigma_weighted_butterfly(
     stages = [_butterfly_stage_matrix(n, strides[i], a[i], b[i]) for i in range(l)]
 
     idx = np.arange(n)
-    for _sweep in range(max(1, n_sweeps)):
+    for _sweep in range(n_sweeps):
         for k in range(l):
             pre = _compose_apply_order(stages[:k], n) if k > 0 else np.eye(n)
             post = _compose_apply_order(stages[k + 1 :], n) if k < l - 1 else np.eye(n)
@@ -414,8 +561,7 @@ def sigma_weighted_butterfly(
             b[k] = theta[n:]
             stages[k] = _butterfly_stage_matrix(n, strides[k], a[k], b[k])
 
-    what_pad = _compose_apply_order(stages, n)
-    return what_pad[:d_out, :d_in]
+    return ButterflyProjection(tuple(a), tuple(b), tuple(strides), d_out=d_out, d_in=d_in, n=n)
 
 
 # --------------------------------------------------------------------------------------------------------
@@ -439,7 +585,7 @@ class ProjectionReport:
     stats: dict[str, Any] = field(default_factory=dict)
 
 
-def project(w: Any, sigma: Any, structure: str, **kw: Any) -> tuple[np.ndarray, ProjectionReport]:
+def project(w: Any, sigma: Any, structure: str, **kw: Any) -> tuple[Any, ProjectionReport]:
     """Unified front door for roadmap G2's four structure families:
     ``structure in {"low_rank", "block_sparse", "butterfly", "perm_profile"}``.
 
@@ -457,10 +603,27 @@ def project(w: Any, sigma: Any, structure: str, **kw: Any) -> tuple[np.ndarray, 
     * ``"block_sparse"``: ``pattern`` (``"2:4"`` or a boolean mask shaped like ``W``; required), optional
       ``max_iter``, ``tol``.
     * ``"butterfly"``: optional ``n_stages``, ``n_sweeps``.
-    * ``"perm_profile"``: ``target_profile`` (required), optional ``temperature``, ``max_iter``.
+    * ``"perm_profile"``: ``target_profile`` (required).
     """
-    w = np.asarray(w, dtype=np.float64)
-    sigma = np.asarray(sigma, dtype=np.float64)
+    w, sigma, covariance_correction = _validate_problem(w, sigma)
+    contracts = {
+        "low_rank": ({"rank"}, {"rank"}),
+        "block_sparse": ({"pattern", "max_iter", "tol"}, {"pattern"}),
+        "butterfly": ({"n_stages", "n_sweeps"}, set()),
+        "perm_profile": ({"target_profile"}, {"target_profile"}),
+    }
+    if structure not in contracts:
+        raise ValueError(
+            f"unrecognized structure {structure!r}; expected one of "
+            '"low_rank", "block_sparse", "butterfly", "perm_profile"'
+        )
+    allowed, required = contracts[structure]
+    unexpected = set(kw) - allowed
+    missing = required - set(kw)
+    if unexpected:
+        raise TypeError(f"unexpected {structure} options: {', '.join(sorted(unexpected))}")
+    if missing:
+        raise TypeError(f"missing required {structure} options: {', '.join(sorted(missing))}")
 
     if structure == "low_rank":
         rank = kw["rank"]
@@ -477,23 +640,18 @@ def project(w: Any, sigma: Any, structure: str, **kw: Any) -> tuple[np.ndarray, 
     elif structure == "butterfly":
         extra = {k: v for k, v in kw.items() if k in ("n_stages", "n_sweeps")}
         what = sigma_weighted_butterfly(w, sigma, **extra)
-        n = _next_pow2(max(w.shape[0], w.shape[1], 2))
-        l = (
-            n.bit_length() - 1
-            if extra.get("n_stages") is None
-            else int(max(1, min(extra["n_stages"], n.bit_length() - 1)))
-        )
-        stats = {"n": int(n), "n_stages": int(l), "param_count": int(2 * n * l)}
+        stats = {
+            "n": what.n,
+            "n_stages": len(what.strides),
+            "param_count": what.parameter_count,
+            "parameter_nbytes": what.parameter_nbytes,
+            "serialized_nbytes": what.serialized_nbytes,
+            "dense_nbytes": int(np.prod(what.shape) * np.dtype(np.float64).itemsize),
+        }
     elif structure == "perm_profile":
         target_profile = kw["target_profile"]
-        extra = {k: v for k, v in kw.items() if k in ("temperature", "max_iter")}
-        what = sigma_weighted_permutation(w, sigma, target_profile, **extra)
+        what = sigma_weighted_permutation(w, sigma, target_profile)
         stats = {"n_rows": int(w.shape[0])}
-    else:
-        raise ValueError(
-            f"unrecognized structure {structure!r}; expected one of "
-            '"low_rank", "block_sparse", "butterfly", "perm_profile"'
-        )
-
+    stats["covariance_psd_correction"] = covariance_correction
     err = sigma_weighted_error(w, what, sigma)
     return what, ProjectionReport(structure=structure, sigma_weighted_error=err, stats=stats)

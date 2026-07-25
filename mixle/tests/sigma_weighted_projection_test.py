@@ -195,7 +195,7 @@ class PermutationOptimalityTest(unittest.TestCase):
         w = np.eye(n)[true_perm] @ profile
         sigma = _random_sigma(rng, d)
 
-        what = sigma_weighted_permutation(w, sigma, profile, temperature=0.05, max_iter=200)
+        what = sigma_weighted_permutation(w, sigma, profile)
         np.testing.assert_allclose(what, w, atol=1e-8)
         self.assertAlmostEqual(sigma_weighted_error(w, what, sigma), 0.0, places=8)
 
@@ -210,7 +210,7 @@ class PermutationOptimalityTest(unittest.TestCase):
         best_err = min(
             sigma_weighted_error(w, np.eye(n)[list(perm)] @ profile, sigma) for perm in itertools.permutations(range(n))
         )
-        what = sigma_weighted_permutation(w, sigma, profile, temperature=0.05, max_iter=200)
+        what = sigma_weighted_permutation(w, sigma, profile)
         solver_err = sigma_weighted_error(w, what, sigma)
 
         print(f"[permutation] solver error: {solver_err:.6f}, brute-force global optimum: {best_err:.6f}")
