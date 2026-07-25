@@ -7,18 +7,10 @@ Three receipts:
 2. ``report()``'s per-mechanism contribution receipt is a real reading of the forward pass's own softmax
    weights: ``local + far_field + ssm`` sums to 1.0 (float tolerance), and all three shares are
    non-negative, on a real trained step (not a degenerate all-zero or NaN receipt).
-3. "Hybrid beats each alone at matched params on mixed local/global tasks" (notes/designs/E5.md section
-   5b): ``HybridBlock`` vs. a local-attention-only ablation (``SlidingWindowSpine``, reused directly -- it
-   already IS the local-only ablation) vs. an SSM-only ablation (``SelectiveScan``, likewise reused
-   directly) at matched total parameter count (<5% apart), on E7's ``copy_suite`` (local, distance=3, well
-   inside the shared ``window=5``) and ``needle_suite`` (global, distance=8, past the window -- must be
-   carried by the SSM or far-field branch). Measured, single-threaded (``OMP_NUM_THREADS=1``, matching
-   this repo's determinism convention): hybrid gets 0.85/0.075 accuracy (local/global) vs. local-only's
-   0.30/0.00 and SSM-only's 0.075/0.00 -- the hybrid cleanly beats BOTH ablations on BOTH tasks at this
-   configuration. Reported as a real measurement at one matched-parameter configuration and training
-   budget, not a universal claim across all hyperparameters -- notes/designs/E5.md section 6 documents the
-   real capacity trade-off (three branches split a matched parameter budget three ways) this receipt's
-   configuration had to work around.
+3. A matched-parameter comparison of the hybrid, local-only, and SSM-only mechanisms under E7's corrected
+   dependency-only training protocol. The old full-sequence protocol was dominated by identity targets and
+   produced obsolete superiority numbers; this receipt records the corrected measurements without
+   asserting that the current experimental hybrid has graduated.
 """
 
 import math
@@ -137,7 +129,7 @@ def test_contribution_receipt_sums_to_one_and_is_real():
 # -------------------------------------------------------------------------------------------------------
 
 
-def test_hybrid_beats_ablations_at_matched_params_on_local_and_global_tasks():
+def test_hybrid_ablations_are_measured_at_matched_params():
     vocab = 8
     window = 5
 
@@ -188,8 +180,8 @@ def test_hybrid_beats_ablations_at_matched_params_on_local_and_global_tasks():
             rng=rng,
         )
         results[name] = {
-            "local_acc": local_task["loss_threshold_success_rate"],
-            "global_acc": global_task["loss_threshold_success_rate"],
+            "local_success": local_task["loss_threshold_success_rate"],
+            "global_success": global_task["loss_threshold_success_rate"],
         }
         print(
             f"[E5 part-2 receipt] {name}: local(copy@3) success={local_task['loss_threshold_success_rate']:.3f} "
@@ -198,17 +190,6 @@ def test_hybrid_beats_ablations_at_matched_params_on_local_and_global_tasks():
             f"loss={global_task['mean_probe_loss']:.3f} (chance={global_task['chance_loss']:.3f})"
         )
 
-    # Real, measured comparison at this configuration -- honestly asserted, not cherry-picked past what was
-    # actually observed (see this module's docstring for the exact numbers this assertion is built around).
-    assert results["hybrid"]["local_acc"] > results["local_only"]["local_acc"], (
-        "hybrid should beat the local-only ablation on the local task at matched params"
-    )
-    assert results["hybrid"]["local_acc"] > results["ssm_only"]["local_acc"], (
-        "hybrid should beat the SSM-only ablation on the local task at matched params"
-    )
-    assert results["hybrid"]["global_acc"] >= results["local_only"]["global_acc"], (
-        "hybrid should be at least as good as the local-only ablation on the global task at matched params"
-    )
-    assert results["hybrid"]["global_acc"] >= results["ssm_only"]["global_acc"], (
-        "hybrid should be at least as good as the SSM-only ablation on the global task at matched params"
-    )
+    for receipt in results.values():
+        assert 0.0 <= receipt["local_success"] <= 1.0
+        assert 0.0 <= receipt["global_success"] <= 1.0
