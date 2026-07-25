@@ -82,3 +82,32 @@ def test_repeated_realizations_of_the_same_model_keep_distinct_weights_and_skill
     # each realization's OWN skill, not both collapsed onto the last one's (5.0)
     assert by_version["r1i1p1f1"]["skill"] == pytest.approx(2.0, abs=1e-9)
     assert by_version["r2i1p1f1"]["skill"] == pytest.approx(5.0, abs=1e-9)
+
+
+def test_outlier_realization_of_the_same_model_is_rejected_not_silently_kept():
+    """Regression test for MXR-080-0284/0285 at the L8 (ensemble) level: a real CMIP ensemble routinely
+    submits several realizations of the SAME model (e.g. CESM2's r1i1p1f1, r2i1p1f1, ...). If ONE
+    realization is a wild outlier (a blown run) while another realization of that SAME model agrees with
+    an independent third model, the old model_id-keyed adjudication never actually compared the two
+    CESM2 realizations against each other (both "CESM2") -- the outlier could silently ride along in the
+    fused projection. It must now be identified and excluded, even though it shares a model_id with a
+    realization that IS trusted.
+    """
+    good_realization = ClimateMember(
+        value=2.0, variance=0.01, model_id="CESM2", version="r1i1p1f1", content_hash="a" * 64, skill=2.0
+    )
+    blown_run = ClimateMember(
+        value=200.0, variance=0.01, model_id="CESM2", version="r2i1p1f1", content_hash="b" * 64, skill=2.0
+    )
+    corroborating_other_model = ClimateMember(
+        value=2.05, variance=0.01, model_id="GFDL-ESM4", version="r1i1p1f1", content_hash="c" * 64, skill=2.0
+    )
+    fused = skill_weighted_fuse([good_realization, blown_run, corroborating_other_model])
+
+    assert fused.disagreement is True
+    assert fused.abstained is False  # the good realization + GFDL corroborate each other
+
+    by_version = {entry["version"]: entry for entry in fused.provenance["claims"]}
+    assert by_version["r1i1p1f1"]["adjudication_status"] == "accepted"
+    assert by_version["r2i1p1f1"]["adjudication_status"] == "rejected"  # the blown run, excluded
+    assert fused.mean == pytest.approx(2.025, abs=1e-6)  # only the two agreeing members, not the 200.0 outlier
