@@ -15,10 +15,9 @@ sigma_k(x)^2)`` -- whose entire mixture (weights, means, variances) is a functio
 and heteroscedastic. Any other conditional density (a conditional flow, an autoregressive head) plugs in the same
 way: give it ``log_density(x, y)`` and ``sample_given(x)``.
 
-:func:`build_projection_leaf` is a different kind of ready instance -- a **contrastive** ``p(y | x)`` (an InfoNCE
-projection between two, typically frozen, embedding spaces) whose ``log_density`` is not a calibrated density at
-all but still trains and composes through the exact same adapter: the stage-1 "frozen encoder -> projection ->
-frozen encoder" pattern, generalized to a family with no domain nouns.
+:func:`build_contrastive_projection` is the separate batch-objective/ranker for an InfoNCE projection between
+two, typically frozen, embedding spaces. It deliberately does not implement ``log_density`` and cannot be wrapped
+as a conditional distribution: cross-row negatives are not per-observation probabilities.
 """
 
 from __future__ import annotations
@@ -28,11 +27,17 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
-from mixle.models.grad_leaf import _call_sample_with_seed, _module_mode, _resolve_device
+from mixle.models.grad_leaf import (
+    GradEstimator,
+    _call_sample_with_seed,
+    _module_mode,
+    _positive_float,
+    _positive_int,
+    _resolve_device,
+)
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
-    ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
@@ -89,9 +94,13 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
     def __init__(
         self, module: Any, *, m_steps: int = 60, lr: float = 5e-3, device: str = "cpu", name: str | None = None
     ) -> None:
+        if not callable(getattr(module, "log_density", None)):
+            raise TypeError(
+                "NeuralConditionalDensity requires module.log_density(x, y) with one independent score per row."
+            )
         self.module = module
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
+        self.m_steps = _positive_int(m_steps, "m_steps")
+        self.lr = _positive_float(lr, "lr")
         self.device = device
         self.name = name
 
@@ -109,12 +118,21 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
         xs, ys = enc
         xx = check_finite(np.atleast_2d(np.asarray(xs, dtype=float)), "NeuralConditionalDensity.seq_log_density (x)")
         yy = check_finite(np.atleast_2d(np.asarray(ys, dtype=float)), "NeuralConditionalDensity.seq_log_density (y)")
+        if xx.shape[0] != yy.shape[0]:
+            raise ValueError("conditional density x and y batches must have identical row counts.")
         dev = _resolve_device(self.device, torch)
         self.module.to(dev)
         xt = torch.as_tensor(xx, dtype=torch.float32, device=dev)
         yt = torch.as_tensor(yy, dtype=torch.float32, device=dev)
         with _module_mode(self.module, train=False), torch.no_grad():
-            return self.module.log_density(xt, yt).cpu().numpy().reshape(-1)
+            scores = self.module.log_density(xt, yt)
+            if tuple(scores.shape) != (xt.shape[0],):
+                raise ValueError(
+                    f"conditional log_density must return one score per row; got shape {tuple(scores.shape)}."
+                )
+            if not bool(torch.isfinite(scores).all()):
+                raise FloatingPointError("conditional log_density returned non-finite scores.")
+            return scores.cpu().numpy()
 
     def sampler(self, seed: int | None = None) -> NeuralConditionalDensitySampler:
         """Return a conditional sampler for drawing ``y`` given ``x``."""
@@ -180,11 +198,17 @@ class NeuralConditionalDensitySampler(DistributionSampler):
         dev = _resolve_device(self.dist.device, torch)
         self.dist.module.to(dev)
         seed = int(self.rng.randint(0, 2**31 - 1))
-        xt = torch.as_tensor(np.atleast_2d(np.asarray(x, dtype=float)), dtype=torch.float32, device=dev)
+        rows = check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "sample_given")
+        if rows.shape[0] != 1:
+            raise ValueError("sample_given accepts one conditioning row; use sample_given_batch for a batch.")
+        xt = torch.as_tensor(rows, dtype=torch.float32, device=dev)
         with _module_mode(self.dist.module, train=False), torch.no_grad():
-            return _call_sample_with_seed(
-                self.dist.module.sample_given, xt, torch=torch, device=dev, seed=seed
-            ).cpu().numpy()[0]
+            output = _call_sample_with_seed(self.dist.module.sample_given, xt, torch=torch, device=dev, seed=seed)
+            if not isinstance(output, torch.Tensor) or output.ndim < 1 or output.shape[0] != 1:
+                raise ValueError("conditional sample_given must return one output row per conditioning row.")
+            if not bool(torch.isfinite(output).all()):
+                raise FloatingPointError("conditional sample_given returned non-finite output.")
+            return output.cpu().numpy()[0]
 
     def sample_given_batch(self, x_batch: Any) -> np.ndarray:
         """One draw of ``y ~ p(y | x)`` for every row of ``x_batch`` (shape ``(n, x_dim)``), in one
@@ -199,11 +223,17 @@ class NeuralConditionalDensitySampler(DistributionSampler):
         dev = _resolve_device(self.dist.device, torch)
         self.dist.module.to(dev)
         seed = int(self.rng.randint(0, 2**31 - 1))
-        xt = torch.as_tensor(np.atleast_2d(np.asarray(x_batch, dtype=float)), dtype=torch.float32, device=dev)
+        rows = check_finite(np.atleast_2d(np.asarray(x_batch, dtype=float)), "sample_given_batch")
+        if rows.shape[0] == 0:
+            raise ValueError("sample_given_batch requires at least one conditioning row.")
+        xt = torch.as_tensor(rows, dtype=torch.float32, device=dev)
         with _module_mode(self.dist.module, train=False), torch.no_grad():
-            return _call_sample_with_seed(
-                self.dist.module.sample_given, xt, torch=torch, device=dev, seed=seed
-            ).cpu().numpy()  # (n, y_dim)
+            output = _call_sample_with_seed(self.dist.module.sample_given, xt, torch=torch, device=dev, seed=seed)
+            if not isinstance(output, torch.Tensor) or output.ndim < 1 or output.shape[0] != len(rows):
+                raise ValueError("conditional sample_given must return one output row per conditioning row.")
+            if not bool(torch.isfinite(output).all()):
+                raise FloatingPointError("conditional sample_given returned non-finite output.")
+            return output.cpu().numpy()  # (n, y_dim)
 
 
 class NeuralConditionalDensityEncoder(DataSequenceEncoder):
@@ -242,9 +272,16 @@ class NeuralConditionalDensityAccumulator(SequenceEncodableStatisticAccumulator)
         x, y = enc
         xb = np.asarray(x, dtype=float)
         yb = np.asarray(y, dtype=float)
+        if xb.ndim == 0 or yb.ndim == 0:
+            raise ValueError("conditional accumulator fields must have a row dimension.")
         self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
         self.y.append(yb.reshape(yb.shape[0], 1) if yb.ndim == 1 else yb)
-        self.w.append(np.asarray(weights, dtype=float).ravel())
+        wb = np.asarray(weights, dtype=float)
+        if xb.shape[0] != yb.shape[0]:
+            raise ValueError("conditional accumulator x and y fields must have identical row counts.")
+        if wb.ndim != 1 or wb.shape[0] != xb.shape[0]:
+            raise ValueError("conditional accumulator requires exactly one weight per row.")
+        self.w.append(wb)
 
     def initialize(self, xy: Any, weight: float, rng: Any) -> None:
         """Initialize from one observation using the ordinary update path."""
@@ -257,10 +294,8 @@ class NeuralConditionalDensityAccumulator(SequenceEncodableStatisticAccumulator)
     def combine(self, other: Any) -> NeuralConditionalDensityAccumulator:
         """Merge the value tuple from another conditional-density accumulator."""
         xo, yo, wo = other
-        if len(xo):
-            self.x.append(np.asarray(xo, dtype=float))
-            self.y.append(np.asarray(yo, dtype=float))
-            self.w.append(np.asarray(wo, dtype=float).ravel())
+        if len(xo) or len(yo) or len(wo):
+            self.seq_update((xo, yo), np.asarray(wo, dtype=float), None)
         return self
 
     def value(self) -> tuple:
@@ -273,9 +308,9 @@ class NeuralConditionalDensityAccumulator(SequenceEncodableStatisticAccumulator)
     def from_value(self, value: tuple) -> NeuralConditionalDensityAccumulator:
         """Restore accumulator buffers from a value tuple."""
         x, y, w = value
-        self.x = [np.asarray(x, dtype=float)] if len(x) else []
-        self.y = [np.asarray(y, dtype=float)] if len(y) else []
-        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
+        self.x, self.y, self.w = [], [], []
+        if len(x) or len(y) or len(w):
+            self.seq_update((x, y), np.asarray(w, dtype=float), None)
         return self
 
     def acc_to_encoder(self) -> NeuralConditionalDensityEncoder:
@@ -291,45 +326,22 @@ class NeuralConditionalDensityAccumulatorFactory(StatisticAccumulatorFactory):
         return NeuralConditionalDensityAccumulator()
 
 
-class NeuralConditionalDensityEstimator(ParameterEstimator):
+class NeuralConditionalDensityEstimator(GradEstimator):
     """M-step: responsibility-weighted MLE ``max sum_i w_i log p(y_i | x_i)`` by gradient ascent (warm-started)."""
 
     def __init__(
         self, module: Any, *, m_steps: int = 60, lr: float = 5e-3, device: str = "cpu", name: str | None = None
     ) -> None:
-        self.module = module
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
-        self.device = device
-        self.name = name
+        super().__init__(module, m_steps=m_steps, lr=lr, device=device, name=name)
 
     def accumulator_factory(self) -> NeuralConditionalDensityAccumulatorFactory:
         """Return an accumulator factory for weighted conditional-density batches."""
         return NeuralConditionalDensityAccumulatorFactory()
 
-    def _make(self) -> NeuralConditionalDensity:
+    def _leaf(self) -> NeuralConditionalDensity:
         return NeuralConditionalDensity(
             self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name
         )
-
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralConditionalDensity:
-        """Run the weighted conditional log-likelihood M-step and return the updated leaf."""
-        torch = _torch()
-        xs, ys, ws = suff_stat
-        if len(xs) == 0:
-            return self._make()
-        x = torch.as_tensor(np.asarray(xs, dtype=float), dtype=torch.float32, device=self.device)
-        y = torch.as_tensor(np.asarray(ys, dtype=float), dtype=torch.float32, device=self.device)
-        w = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32, device=self.device)
-        w = w / w.sum().clamp(min=1e-8)
-        self.module.to(self.device).train()
-        opt = torch.optim.Adam(self.module.parameters(), lr=self.lr)
-        for _ in range(self.m_steps):
-            opt.zero_grad()
-            loss = -(w * self.module.log_density(x, y)).sum()  # weighted negative conditional log-likelihood
-            loss.backward()
-            opt.step()
-        return self._make()
 
 
 # --- a ready conditional-density module to wrap: a mixture density network (Bishop 1994) --------------------
@@ -469,7 +481,44 @@ def _build_conditional_flow_class(torch: Any, nn: Any) -> Any:
 _register_module_class("ConditionalFlow", _build_conditional_flow_class)
 
 
-# --- the contrastive instance: a projection between two (typically frozen) embedding spaces --------------------
+# --- batch-contrastive projection/ranker (deliberately not a probability-distribution leaf) --------------------
+
+
+def build_contrastive_projection(
+    d_x: int,
+    d_y: int,
+    *,
+    encoder_x: Any = None,
+    encoder_y: Any = None,
+    proj_dim: int | None = None,
+    hidden: int = 64,
+    freeze_encoders: bool = True,
+    temperature: float = 0.07,
+) -> Any:
+    """Build a contrastive projection/ranker between two embedding spaces.
+
+    This is the stage-1 multimodal pattern -- frozen encoder -> trainable projection -> frozen encoder -- stated
+    with no domain nouns. ``encoder_x``/``encoder_y`` are any torch module mapping a raw item to a ``d_x``/``d_y``
+    embedding; both default to ``nn.Identity()``, so ``x``/``y`` may already BE the embeddings (pass precomputed
+    vectors straight in, no backbone required). Encoders are frozen by default (``freeze_encoders=True``): their
+    parameters get ``requires_grad_(False)`` and the module is pinned in ``eval()`` regardless of the outer
+    ``train()``/``eval()`` calls the M-step makes, so no dropout/batchnorm noise leaks into a "frozen" backbone
+    and no gradient ever reaches it. The only trainable piece is a small projection head per side (``d_x`` /
+    ``d_y`` -> ``hidden`` -> ``proj_dim``, default ``proj_dim = min(d_x, d_y)``) mapping BOTH embeddings into one
+    shared, L2-normalized space -- the CLIP design (two projections into a shared space), not a single asymmetric
+    ``x -> y`` regression -- so the same leaf answers "which y matches this x" and "which x matches this y".
+
+    ``contrastive_loss`` is a symmetric weighted InfoNCE objective over a complete paired batch. Anchor weights
+    and the two candidate/negative measures are explicit and independently validated, so responsibilities are
+    never applied only after cross-row negative contributions have already been formed. ``score_pairs`` and
+    ``similarity_matrix`` are batch-independent retrieval surfaces.
+
+    This object intentionally has no ``log_density`` or ``sample_given`` method: a contrastive batch objective
+    is not a normalized per-observation probability distribution and cannot be composed into mixture/HMM EM.
+    """
+    return _module_class("ContrastiveProjection")(
+        d_x, d_y, encoder_x, encoder_y, proj_dim, hidden, freeze_encoders, temperature
+    )
 
 
 def build_projection_leaf(
@@ -483,41 +532,21 @@ def build_projection_leaf(
     freeze_encoders: bool = True,
     temperature: float = 0.07,
 ) -> Any:
-    """A contrastive (InfoNCE / CLIP-style) conditional ``p(y | x)`` between two embedding spaces -- ready to wrap.
-
-    This is the stage-1 multimodal pattern -- frozen encoder -> trainable projection -> frozen encoder -- stated
-    with no domain nouns. ``encoder_x``/``encoder_y`` are any torch module mapping a raw item to a ``d_x``/``d_y``
-    embedding; both default to ``nn.Identity()``, so ``x``/``y`` may already BE the embeddings (pass precomputed
-    vectors straight in, no backbone required). Encoders are frozen by default (``freeze_encoders=True``): their
-    parameters get ``requires_grad_(False)`` and the module is pinned in ``eval()`` regardless of the outer
-    ``train()``/``eval()`` calls the M-step makes, so no dropout/batchnorm noise leaks into a "frozen" backbone
-    and no gradient ever reaches it. The only trainable piece is a small projection head per side (``d_x`` /
-    ``d_y`` -> ``hidden`` -> ``proj_dim``, default ``proj_dim = min(d_x, d_y)``) mapping BOTH embeddings into one
-    shared, L2-normalized space -- the CLIP design (two projections into a shared space), not a single asymmetric
-    ``x -> y`` regression -- so the same leaf answers "which y matches this x" and "which x matches this y".
-
-    ``log_density(x, y)`` returns, per row, the (negative) SYMMETRIC INFONCE loss for a batch of ``n`` paired
-    embeddings: every row's projected pair is scored against every OTHER row in the batch as a negative, in both
-    directions (``x -> y`` and ``y -> x``), log-softmax-normalized over the batch dimension, then averaged. That
-    is exactly what the shared :class:`NeuralConditionalDensity` M-step already does with ``log_density`` --
-    weight it and sum it -- so no separate loss path is needed: the M-step's responsibility-weighted-NLL gradient
-    ascent on ``log_density`` **is** InfoNCE training, "for free" from the adapter's existing contract. As with
-    :func:`~mixle.models.neural_density.build_vae`'s ELBO, this is an honest score against itself (or another
-    leaf scored the same batch-relative way) rather than a calibrated ``log p(y | x)`` -- there is no way to
-    integrate a softmax-over-the-current-batch score to 1 over all ``y``. A batch of a single row has no
-    negatives to contrast against, so ``log_density`` returns ``0`` for it rather than raising.
-
-    ``sample_given`` is not defined -- a contrastive leaf is discriminative (it scores/ranks pairs); it has no
-    generative ``p(y | x)`` to draw from. Retrieve a matching ``y`` by comparing ``module.embed_x(x)`` against
-    ``module.embed_y(candidates)`` (cosine similarity in the shared space) instead.
-    """
-    return _module_class("ProjectionLeaf")(
-        d_x, d_y, encoder_x, encoder_y, proj_dim, hidden, freeze_encoders, temperature
+    """Compatibility spelling for :func:`build_contrastive_projection`; the result is not a distribution leaf."""
+    return build_contrastive_projection(
+        d_x,
+        d_y,
+        encoder_x=encoder_x,
+        encoder_y=encoder_y,
+        proj_dim=proj_dim,
+        hidden=hidden,
+        freeze_encoders=freeze_encoders,
+        temperature=temperature,
     )
 
 
-def _build_projection_leaf_class(torch: Any, nn: Any) -> Any:
-    class ProjectionLeaf(nn.Module):
+def _build_contrastive_projection_class(torch: Any, nn: Any) -> Any:
+    class ContrastiveProjection(nn.Module):
         def __init__(
             self,
             d_x: int,
@@ -530,11 +559,14 @@ def _build_projection_leaf_class(torch: Any, nn: Any) -> Any:
             temperature: float = 0.07,
         ) -> None:
             super().__init__()
-            self.d_x = int(d_x)
-            self.d_y = int(d_y)
-            self.proj_dim = int(proj_dim) if proj_dim is not None else max(1, min(self.d_x, self.d_y))
-            self.hidden = int(hidden)
+            self.d_x = _positive_int(d_x, "d_x")
+            self.d_y = _positive_int(d_y, "d_y")
+            self.proj_dim = _positive_int(proj_dim, "proj_dim") if proj_dim is not None else min(self.d_x, self.d_y)
+            self.hidden = _positive_int(hidden, "hidden")
+            if not isinstance(freeze_encoders, (bool, np.bool_)):
+                raise TypeError("freeze_encoders must be Boolean.")
             self._freeze_encoders = bool(freeze_encoders)
+            temperature = _positive_float(temperature, "temperature")
             self.encoder_x = encoder_x if encoder_x is not None else nn.Identity()
             self.encoder_y = encoder_y if encoder_y is not None else nn.Identity()
             if self._freeze_encoders:
@@ -554,7 +586,7 @@ def _build_projection_leaf_class(torch: Any, nn: Any) -> Any:
             )
             self.log_tau = nn.Parameter(torch.log(torch.tensor(float(temperature))))
 
-        def train(self, mode: bool = True) -> ProjectionLeaf:
+        def train(self, mode: bool = True) -> ContrastiveProjection:
             super().train(mode)
             if self._freeze_encoders:  # a frozen backbone stays in eval() no matter what the M-step requests
                 self.encoder_x.eval()
@@ -569,29 +601,75 @@ def _build_projection_leaf_class(torch: Any, nn: Any) -> Any:
         def embed_y(self, y: Any) -> Any:
             return nn.functional.normalize(self.proj_y(self.encoder_y(y)), dim=-1)
 
-        def log_density(self, x: Any, y: Any) -> Any:
+        def similarity_matrix(self, x: Any, y: Any) -> Any:
+            """Return all pairwise projected cosine similarities, independent of unrelated batches."""
             px, py = self.embed_x(x), self.embed_y(y)
-            n = px.shape[0]
-            if n <= 1:  # no negatives in the batch to contrast against
-                return torch.zeros(n, device=px.device, dtype=px.dtype)
             tau = self.log_tau.exp().clamp(min=1e-2, max=100.0)
-            logits = (px @ py.t()) / tau  # (n, n): logits[i, j] = similarity(x_i, y_j)
-            idx = torch.arange(n, device=px.device)
-            log_x2y = torch.log_softmax(logits, dim=1)[idx, idx]  # x_i's correct y among the batch's y's
-            log_y2x = torch.log_softmax(logits, dim=0)[idx, idx]  # y_i's correct x among the batch's x's
-            return 0.5 * (log_x2y + log_y2x)  # symmetric InfoNCE, per row
+            return (px @ py.t()) / tau
 
-        def sample_given(self, x: Any) -> Any:
-            raise NotImplementedError(
-                "ProjectionLeaf is a discriminative/contrastive leaf (it scores how well x and y "
-                "embeddings match); it has no generative p(y | x) to sample from. Retrieve a y by "
-                "comparing embed_x(x) against embed_y(candidates) in the shared space instead."
+        def score_pairs(self, x: Any, y: Any) -> Any:
+            """Score aligned pairs without using any other row as a negative."""
+            if x.shape[0] != y.shape[0]:
+                raise ValueError("score_pairs requires aligned x and y row counts.")
+            px, py = self.embed_x(x), self.embed_y(y)
+            tau = self.log_tau.exp().clamp(min=1e-2, max=100.0)
+            return torch.sum(px * py, dim=-1) / tau
+
+        @staticmethod
+        def _measure(value: Any, rows: int, reference: Any, name: str) -> Any:
+            if value is None:
+                result = torch.ones(rows, device=reference.device, dtype=reference.dtype)
+            else:
+                result = torch.as_tensor(value, device=reference.device, dtype=reference.dtype)
+            if tuple(result.shape) != (rows,):
+                raise ValueError(f"{name} must have shape ({rows},).")
+            if not bool(torch.isfinite(result).all()) or bool((result < 0).any()):
+                raise ValueError(f"{name} must be finite and non-negative.")
+            total = result.sum()
+            if not bool(torch.isfinite(total)) or not bool(total > 0):
+                raise ValueError(f"{name} must have positive finite total mass.")
+            return result / total
+
+        def contrastive_loss(
+            self,
+            x: Any,
+            y: Any,
+            *,
+            anchor_weights: Any = None,
+            x_candidate_weights: Any = None,
+            y_candidate_weights: Any = None,
+        ) -> Any:
+            """Return symmetric weighted InfoNCE with explicit anchor and candidate measures."""
+            if x.shape[0] != y.shape[0]:
+                raise ValueError("contrastive_loss requires aligned x and y row counts.")
+            rows = x.shape[0]
+            if rows < 2:
+                raise ValueError("contrastive_loss requires at least two paired rows.")
+            logits = self.similarity_matrix(x, y)
+            anchors = self._measure(anchor_weights, rows, logits, "anchor_weights")
+            x_measure = self._measure(x_candidate_weights, rows, logits, "x_candidate_weights")
+            y_measure = self._measure(y_candidate_weights, rows, logits, "y_candidate_weights")
+            active = anchors > 0
+            if bool(((x_measure <= 0) & active).any()) or bool(((y_measure <= 0) & active).any()):
+                raise ValueError("every positive-weight anchor must have positive matched candidate mass.")
+            log_x_measure = torch.where(x_measure > 0, torch.log(x_measure), torch.full_like(x_measure, -torch.inf))
+            log_y_measure = torch.where(y_measure > 0, torch.log(y_measure), torch.full_like(y_measure, -torch.inf))
+            diagonal = torch.arange(rows, device=logits.device)
+            x_to_y = (
+                logits[diagonal, diagonal] + log_y_measure - torch.logsumexp(logits + log_y_measure[None, :], dim=1)
             )
+            y_to_x = (
+                logits[diagonal, diagonal] + log_x_measure - torch.logsumexp(logits + log_x_measure[:, None], dim=0)
+            )
+            pair_log_score = 0.5 * (x_to_y + y_to_x)
+            return -(anchors[active] * pair_log_score[active]).sum()
 
-    return ProjectionLeaf
+    return ContrastiveProjection
 
 
-_register_module_class("ProjectionLeaf", _build_projection_leaf_class)
+_register_module_class("ContrastiveProjection", _build_contrastive_projection_class)
+# Preserve deserialization of pre-release artifacts while removing their invalid probability surface.
+_register_module_class("ProjectionLeaf", _build_contrastive_projection_class)
 
 
 # --- the discrete conditional: an autoregressive categorical conditioned on x -- exact p(y|x) over discrete y ----
