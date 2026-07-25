@@ -366,12 +366,9 @@ def test_a_transient_tool_failure_is_retried_in_place_not_desynced_onto_later_ga
 
 # --- a low-power calibration verdict must not resolve a knowledge gap ---
 #
-# CalibrationVerdict.passed reads True for a low_power result BY DESIGN (a check that had no
-# statistical power to catch a problem should not itself block on that account alone -- see
-# mixle.inference.calibration_gate.CalibrationVerdict's docstring); CalibrationVerdict.low_power
-# distinguishes "undetectable with this little data" from a real, well-powered pass. route_task must
-# honor that distinction: a bare duck-typed `.passed` is not sufficient resolving evidence for an
-# epistemic knowledge gap if the same verdict also reports `low_power=True`.
+# CalibrationVerdict uses an explicit indeterminate state for a low-power result. Its `.passed`
+# property is therefore False, while `.low_power` explains why the result is inconclusive. route_task
+# must keep the epistemic gap open and record that reason instead of treating non-rejection as proof.
 
 
 def _predictive_ensemble(truth_sd: float, ensemble_sd: float, *, k: int, m: int = 500, seed: int = 0):
@@ -400,11 +397,12 @@ def _well_powered_calibration_tool(gap):
 def test_low_power_calibration_verdict_does_not_resolve_the_knowledge_gap():
     """The reported bug, reproduced end to end: a low-power (undetectable-with-this-data)
     calibration result must not close out a knowledge gap. Confirm the fixture really is in the
-    low-power-but-nominally-passed regime at the calibration_gate level, then confirm route_task
+    low-power indeterminate regime at the calibration_gate level, then confirm route_task
     leaves the gap open rather than treating that bare pass as resolving evidence."""
     direct_verdict = posterior_predictive_calibration(*_predictive_ensemble(truth_sd=1.0, ensemble_sd=0.3, k=6))
-    assert direct_verdict.calibration_status == "low_power"
-    assert direct_verdict.passed  # by design -- see CalibrationVerdict's docstring
+    assert direct_verdict.calibration_status == "indeterminate"
+    assert not direct_verdict.passed
+    assert direct_verdict.indeterminate
     assert direct_verdict.low_power
 
     catalog = [

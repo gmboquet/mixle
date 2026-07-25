@@ -54,6 +54,8 @@ def test_tiny_holdout_is_flagged_low_power_not_false_alarmed():
     ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=0.3, k=6)  # overconfident but only 6 points
     verdict = posterior_predictive_calibration(ensemble, y)
     assert verdict.low_power
+    assert verdict.indeterminate
+    assert not verdict.passed
     assert any("LOW POWER" in r for r in verdict.reasons)
 
 
@@ -75,19 +77,19 @@ def test_calibration_status_is_failed_for_a_miscalibrated_posterior():
     assert not verdict.low_power
 
 
-def test_calibration_status_is_low_power_not_a_bare_pass_for_a_tiny_holdout():
+def test_calibration_status_is_indeterminate_not_a_pass_for_a_tiny_holdout():
     ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=0.3, k=6)
     verdict = posterior_predictive_calibration(ensemble, y)
-    assert verdict.calibration_status == "low_power"
-    assert verdict.passed  # low_power still reads as passed=True for the routing-layer predicate
+    assert verdict.calibration_status == "indeterminate"
+    assert not verdict.passed
+    assert verdict.indeterminate
     assert verdict.low_power
 
 
 def test_a_failure_that_misses_even_a_loose_threshold_is_failed_not_low_power():
     """A posterior so badly miscalibrated it fails even a LOOSE (low-power) null threshold is real
-    evidence of a problem: calibration_status must read 'failed', not 'low_power', even though the
-    threshold itself was loose enough to admit gross miscalibration -- low_power only qualifies a
-    PASS (see CalibrationVerdict's docstring), it never demotes a genuine failure.
+    evidence of a problem: calibration_status must read 'failed', not 'indeterminate', even though
+    the threshold itself was loose enough to admit gross miscalibration.
     """
     ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=0.02, k=6)
     verdict = posterior_predictive_calibration(ensemble, y)
@@ -127,15 +129,13 @@ def _simulate(theta, rng):
     return theta[0] + rng.normal(0.0, _SIGMA, size=_NOBS)
 
 
-def _correct_fit(y):
+def _correct_fit(y, rng):
     post_mean = _POST_VAR * (np.sum(y) / _SIGMA**2)  # conjugate Gaussian posterior mean (prior mean 0)
-    rng = np.random.default_rng(int(abs(np.sum(y) * 1e6)) % (2**32))
     return rng.normal(post_mean, _POST_SD, size=600)
 
 
-def _overconfident_fit(y):
+def _overconfident_fit(y, rng):
     post_mean = _POST_VAR * (np.sum(y) / _SIGMA**2)
-    rng = np.random.default_rng(int(abs(np.sum(y) * 1e6)) % (2**32))
     return rng.normal(post_mean, _POST_SD / 3.0, size=600)  # deliberately 3x too tight
 
 
@@ -148,6 +148,100 @@ def test_sbc_fails_a_deliberately_overconfident_inference():
     verdict = simulation_based_calibration(_prior, _simulate, _overconfident_fit, n_sims=300, seed=0)
     assert not verdict.passed
     assert "mis-dispersed" in verdict.reasons[0]
+
+
+def test_sbc_randomizes_exact_ties_against_the_continuous_uniform_null():
+    def point_prior(_rng):
+        return np.array([0.0])
+
+    def point_simulator(_theta, _rng):
+        return np.array([0.0])
+
+    def point_fit(_y, rng):
+        del rng
+        return np.zeros(40)
+
+    verdict = simulation_based_calibration(point_prior, point_simulator, point_fit, n_sims=300, seed=9)
+
+    assert verdict.passed, verdict.reasons
+    assert verdict.calibration_status == "passed"
+
+
+def test_sbc_requires_and_controls_the_fit_rng():
+    with pytest.raises(ValueError, match="named 'rng'"):
+        simulation_based_calibration(_prior, _simulate, lambda _y: np.zeros(10), n_sims=5)
+
+    seen: list[int] = []
+
+    def recording_fit(_y, rng):
+        seen.append(int(rng.randint(0, 2**31 - 1)))
+        return rng.normal(size=20)
+
+    simulation_based_calibration(
+        _prior,
+        _simulate,
+        recording_fit,
+        n_sims=8,
+        error_tol=100.0,
+        bins=2,
+        min_expected_count_per_bin=1.0,
+        low_power_threshold=101.0,
+        seed=17,
+    )
+    first = seen.copy()
+    seen.clear()
+    simulation_based_calibration(
+        _prior,
+        _simulate,
+        recording_fit,
+        n_sims=8,
+        error_tol=100.0,
+        bins=2,
+        min_expected_count_per_bin=1.0,
+        low_power_threshold=101.0,
+        seed=17,
+    )
+    assert seen == first
+
+
+def test_underpowered_sbc_is_indeterminate_and_cannot_promote():
+    verdict = simulation_based_calibration(
+        _prior,
+        _simulate,
+        _correct_fit,
+        n_sims=6,
+        bins=10,
+        error_tol=100.0,
+        low_power_threshold=101.0,
+        seed=3,
+    )
+
+    assert verdict.calibration_status == "indeterminate"
+    assert verdict.indeterminate
+    assert verdict.low_power
+    assert not verdict.passed
+
+
+def test_unseeded_randomized_checks_are_indeterminate_not_promotable():
+    ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=1.0)
+    predictive = posterior_predictive_calibration(ensemble, y, pit_seed=None)
+    sbc = simulation_based_calibration(
+        _prior,
+        _simulate,
+        _correct_fit,
+        n_sims=60,
+        bins=10,
+        error_tol=100.0,
+        low_power_threshold=101.0,
+        seed=None,
+    )
+
+    assert predictive.calibration_status == "indeterminate"
+    assert not predictive.randomness_controlled
+    assert not predictive.passed
+    assert sbc.calibration_status == "indeterminate"
+    assert not sbc.randomness_controlled
+    assert not sbc.passed
 
 
 # --- the IC-6 verifier adapter (route_task drop-in) ---
@@ -166,6 +260,16 @@ def test_verifier_fails_an_overconfident_payload():
     verdict = CalibrationVerifier().verify(claim={"payload": {"ensemble": ensemble, "held_out_y": y}})
     assert verdict["passed"] is False
     assert verdict["calibration_status"] == "failed"
+
+
+def test_verifier_refuses_to_promote_an_underpowered_non_rejection():
+    ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=0.3, k=6)
+    verdict = CalibrationVerifier().verify(claim={"payload": {"ensemble": ensemble, "held_out_y": y}})
+
+    assert verdict["passed"] is False
+    assert verdict["calibration_status"] == "indeterminate"
+    assert verdict["indeterminate"] is True
+    assert verdict["low_power"] is True
 
 
 def test_verifier_fails_closed_when_given_nothing_to_check():
@@ -200,4 +304,4 @@ def test_sbc_rejects_empty_simulations_and_draws():
     with pytest.raises(ValueError, match="n_sims"):
         simulation_based_calibration(_prior, _simulate, _correct_fit, n_sims=0)
     with pytest.raises(ValueError, match="posterior draws"):
-        simulation_based_calibration(_prior, _simulate, lambda _y: np.array([]), n_sims=1)
+        simulation_based_calibration(_prior, _simulate, lambda _y, rng: np.array([]), n_sims=1)
