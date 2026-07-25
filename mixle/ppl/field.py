@@ -87,6 +87,45 @@ def register_sparse_solve_detector(fn) -> None:
     _SPARSE_SOLVE_DETECTORS.append(fn)
 
 
+def _positive_scalar(value, label: str) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a finite positive scalar.") from exc
+    if not np.isfinite(out) or out <= 0.0:
+        raise ValueError(f"{label} must be a finite positive scalar.")
+    return out
+
+
+def _coordinate_index(index, *, label="field index") -> np.ndarray:
+    try:
+        out = np.asarray(index, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a finite one- or two-dimensional numeric array.") from exc
+    if out.ndim not in (1, 2) or out.shape[0] == 0 or not np.isfinite(out).all():
+        raise ValueError(f"{label} must be a non-empty finite one- or two-dimensional numeric array.")
+    if out.ndim == 2 and out.shape[1] == 0:
+        raise ValueError(f"{label} must contain at least one coordinate column.")
+    return out.copy()
+
+
+def _validate_symmetric_matrix(matrix, size: int, label: str, *, positive_definite: bool) -> np.ndarray:
+    out = np.asarray(matrix, dtype=float)
+    if out.shape != (size, size) or not np.isfinite(out).all():
+        raise ValueError(f"{label} must be a finite {size}x{size} matrix.")
+    if not np.allclose(out, out.T, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError(f"{label} must be symmetric.")
+    out = 0.5 * (out + out.T)
+    eig = np.linalg.eigvalsh(out)
+    scale = max(float(np.max(np.abs(eig))), 1.0)
+    threshold = 1.0e-10 * scale
+    if positive_definite and eig[0] <= threshold:
+        raise ValueError(f"{label} must be positive-definite.")
+    if not positive_definite and eig[0] < -threshold:
+        raise ValueError(f"{label} must be positive-semidefinite.")
+    return out
+
+
 # --------------------------------------------------------------------------------------------------
 # Field priors: a kernel turns an index grid into a prior precision matrix Lambda (field ~ N(0, Lambda^-1)).
 # --------------------------------------------------------------------------------------------------
@@ -118,15 +157,30 @@ class RandomWalk(FieldKernel):
     ridge: float | None = None
 
     def precision(self, index: np.ndarray) -> np.ndarray:
-        """Build the finite-difference precision matrix for the indexed random walk."""
-        n = len(index)
-        D = np.eye(n)
-        for _ in range(self.order):
-            D = np.diff(D, axis=0)
-        lam = D.T @ D / float(self.scale) ** 2
+        """Build a spacing-aware finite-difference precision on a 1-D physical grid."""
+        x = _coordinate_index(index, label="RandomWalk index")
+        if isinstance(self.order, (bool, np.bool_)) or self.order not in (1, 2):
+            raise ValueError("RandomWalk order must be exactly 1 or 2.")
+        if x.ndim != 1 or x.size <= self.order:
+            raise ValueError("RandomWalk requires a one-dimensional grid with more points than its order.")
+        dx = np.diff(x)
+        if np.any(dx <= 0.0):
+            raise ValueError("RandomWalk index must be strictly increasing.")
+        scale = _positive_scalar(self.scale, "RandomWalk scale")
+        n = x.size
+        if self.order == 1:
+            # Integrated squared derivative: sum (df)^2 / dx.
+            D = np.diff(np.eye(n), axis=0) / np.sqrt(dx)[:, None]
+        else:
+            # Integrated squared curvature on an irregular grid.  Adjacent
+            # interval slopes are differenced at their midpoint spacing.
+            slope = np.diff(np.eye(n), axis=0) / dx[:, None]
+            midpoint_dx = 0.5 * (dx[:-1] + dx[1:])
+            D = np.diff(slope, axis=0) / np.sqrt(midpoint_dx)[:, None]
+        lam = D.T @ D / scale**2
         if self.ridge is not None:
-            lam = lam + np.eye(n) / float(self.ridge) ** 2
-        return lam
+            lam = lam + np.eye(n) / _positive_scalar(self.ridge, "RandomWalk ridge") ** 2
+        return _validate_symmetric_matrix(lam, n, "RandomWalk precision", positive_definite=self.ridge is not None)
 
 
 @dataclass
@@ -143,12 +197,16 @@ class RBF(FieldKernel):
 
     def covariance(self, index: np.ndarray) -> np.ndarray:
         """Return the RBF covariance matrix plus diagonal jitter for ``index``."""
-        x = np.asarray(index, dtype=float)
+        x = _coordinate_index(index, label="RBF index")
         if x.ndim == 1:
             x = x[:, None]
+        lengthscale = _positive_scalar(self.lengthscale, "RBF lengthscale")
+        amplitude = _positive_scalar(self.amplitude, "RBF amplitude")
+        jitter = _positive_scalar(self.jitter, "RBF jitter")
         d2 = np.sum((x[:, None, :] - x[None, :, :]) ** 2, axis=-1)
-        k = rbf_from_scaled_sqdist(d2 / float(self.lengthscale) ** 2, float(self.amplitude))
-        return k + self.jitter * np.eye(len(x))
+        k = rbf_from_scaled_sqdist(d2 / lengthscale**2, amplitude)
+        cov = k + jitter * np.eye(len(x))
+        return _validate_symmetric_matrix(cov, len(x), "RBF covariance", positive_definite=True)
 
     def precision(self, index: np.ndarray) -> np.ndarray:
         """Return the inverse of the jittered RBF covariance matrix."""
@@ -177,9 +235,14 @@ class AnisotropicRBF(FieldKernel):
     def _transform(self, x: np.ndarray) -> np.ndarray:
         """Whiten the coordinates so Euclidean distance becomes the anisotropic distance."""
         if self.metric is not None:
-            chol = np.linalg.cholesky(np.asarray(self.metric, dtype=float))  # M = L L^T ; u = L^T x
+            metric = _validate_symmetric_matrix(self.metric, x.shape[1], "anisotropic metric", positive_definite=True)
+            chol = np.linalg.cholesky(metric)  # M = L L^T ; u = L^T x
             return x @ chol
         r = np.asarray(self.ranges, dtype=float)
+        if r.shape != (x.shape[1],) or not np.isfinite(r).all() or np.any(r <= 0.0):
+            raise ValueError(f"anisotropic ranges must contain one finite positive value per {x.shape[1]} axes.")
+        if not np.isfinite(float(self.angle)):
+            raise ValueError("anisotropic angle must be finite.")
         if x.shape[1] == 2 and self.angle:
             c, s = np.cos(self.angle), np.sin(self.angle)
             rot = np.array([[c, s], [-s, c]])  # rotate into the principal frame
@@ -188,24 +251,43 @@ class AnisotropicRBF(FieldKernel):
 
     def covariance(self, index: np.ndarray) -> np.ndarray:
         """Return the anisotropic RBF covariance matrix plus diagonal jitter."""
-        x = np.asarray(index, dtype=float)
+        x = _coordinate_index(index, label="anisotropic RBF index")
         if x.ndim == 1:
             x = x[:, None]
+        amplitude = _positive_scalar(self.amplitude, "anisotropic amplitude")
+        jitter = _positive_scalar(self.jitter, "anisotropic jitter")
         u = self._transform(x)
         d2 = np.sum((u[:, None, :] - u[None, :, :]) ** 2, axis=-1)
-        k = rbf_from_scaled_sqdist(d2, float(self.amplitude))
-        return k + self.jitter * np.eye(len(x))
+        k = rbf_from_scaled_sqdist(d2, amplitude)
+        cov = k + jitter * np.eye(len(x))
+        return _validate_symmetric_matrix(cov, len(x), "anisotropic covariance", positive_definite=True)
 
     def precision(self, index: np.ndarray) -> np.ndarray:
         """Return the inverse of the anisotropic RBF covariance matrix."""
         return np.linalg.inv(self.covariance(index))
 
 
+def _geographic_coordinates(latlon_deg: np.ndarray, label: str) -> np.ndarray:
+    try:
+        out = np.asarray(latlon_deg, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must have shape (n, 2) with finite latitude/longitude degrees.") from exc
+    if out.ndim == 1:
+        if out.shape != (2,):
+            raise ValueError(f"{label} must have shape (n, 2) with finite latitude/longitude degrees.")
+        out = out.reshape(1, 2)
+    if out.ndim != 2 or out.shape[0] == 0 or out.shape[1] != 2 or not np.isfinite(out).all():
+        raise ValueError(f"{label} must have shape (n, 2) with finite latitude/longitude degrees.")
+    if np.any((out[:, 0] < -90.0) | (out[:, 0] > 90.0)):
+        raise ValueError(f"{label} latitude must be within [-90, 90] degrees.")
+    if np.any((out[:, 1] < -180.0) | (out[:, 1] > 180.0)):
+        raise ValueError(f"{label} longitude must be within [-180, 180] degrees.")
+    return out.copy()
+
+
 def _unit_vectors(latlon_deg: np.ndarray) -> np.ndarray:
     """Map ``(lat, lon)`` rows in degrees to unit vectors on the sphere (n, 3)."""
-    a = np.atleast_2d(np.asarray(latlon_deg, dtype=float))
-    if a.shape[1] != 2:
-        raise ValueError("a spherical index needs two columns: latitude and longitude (degrees).")
+    a = _geographic_coordinates(latlon_deg, "spherical index")
     lat, lon = np.radians(a[:, 0]), np.radians(a[:, 1])
     cl = np.cos(lat)
     return np.stack([cl * np.cos(lon), cl * np.sin(lon), np.sin(lat)], axis=1)
@@ -219,14 +301,15 @@ def great_circle_distance(latlon_a: np.ndarray, latlon_b: np.ndarray | None = No
     the full pairwise ``(n, n)`` matrix for ``latlon_a``; otherwise the ``(na, nb)`` cross matrix (a float
     when both are single points). Uses the haversine formula for accuracy at small angles.
     """
-    a = np.atleast_2d(np.asarray(latlon_a, dtype=float))
-    b = a if latlon_b is None else np.atleast_2d(np.asarray(latlon_b, dtype=float))
+    radius = _positive_scalar(radius, "great-circle radius")
+    a = _geographic_coordinates(latlon_a, "latlon_a")
+    b = a if latlon_b is None else _geographic_coordinates(latlon_b, "latlon_b")
     lat_a, lon_a = np.radians(a[:, 0])[:, None], np.radians(a[:, 1])[:, None]
     lat_b, lon_b = np.radians(b[:, 0])[None, :], np.radians(b[:, 1])[None, :]
     dlat, dlon = lat_b - lat_a, lon_b - lon_a
     h = np.sin(dlat / 2) ** 2 + np.cos(lat_a) * np.cos(lat_b) * np.sin(dlon / 2) ** 2
     theta = 2.0 * np.arcsin(np.sqrt(np.clip(h, 0.0, 1.0)))
-    d = float(radius) * theta
+    d = radius * theta
     return float(d[0, 0]) if d.shape == (1, 1) else d
 
 
@@ -237,9 +320,10 @@ def _chordal_sq(index: np.ndarray, radius: float) -> np.ndarray:
     the chord are positive-definite on the sphere for every lengthscale (they are ordinary R^3 kernels of
     the embedded points), unlike a kernel of the raw geodesic distance, which is PD only for some scales.
     """
+    radius = _positive_scalar(radius, "spherical radius")
     u = _unit_vectors(index)
     g = np.clip(u @ u.T, -1.0, 1.0)
-    d2 = 2.0 * float(radius) ** 2 * (1.0 - g)
+    d2 = 2.0 * radius**2 * (1.0 - g)
     np.fill_diagonal(d2, 0.0)
     return np.maximum(d2, 0.0)
 
@@ -262,9 +346,13 @@ class GreatCircleRBF(FieldKernel):
 
     def covariance(self, index: np.ndarray) -> np.ndarray:
         """Return the chordal-distance RBF covariance on spherical coordinates."""
+        lengthscale = _positive_scalar(self.lengthscale, "spherical RBF lengthscale")
+        amplitude = _positive_scalar(self.amplitude, "spherical RBF amplitude")
+        jitter = _positive_scalar(self.jitter, "spherical RBF jitter")
         d2 = _chordal_sq(index, self.radius)
-        k = rbf_from_scaled_sqdist(d2 / float(self.lengthscale) ** 2, float(self.amplitude))
-        return k + self.jitter * np.eye(len(d2))
+        k = rbf_from_scaled_sqdist(d2 / lengthscale**2, amplitude)
+        cov = k + jitter * np.eye(len(d2))
+        return _validate_symmetric_matrix(cov, len(d2), "spherical RBF covariance", positive_definite=True)
 
     def precision(self, index: np.ndarray) -> np.ndarray:
         """Return the inverse of the spherical RBF covariance matrix."""
@@ -290,8 +378,12 @@ class GreatCircleMatern(FieldKernel):
 
     def covariance(self, index: np.ndarray) -> np.ndarray:
         """Return the chordal-distance Matern covariance on spherical coordinates."""
+        ls = _positive_scalar(self.lengthscale, "spherical Matern lengthscale")
+        amp = _positive_scalar(self.amplitude, "spherical Matern amplitude")
+        jitter = _positive_scalar(self.jitter, "spherical Matern jitter")
+        if self.nu not in (0.5, 1.5, 2.5):
+            raise ValueError("nu must be 0.5, 1.5, or 2.5")
         r = np.sqrt(_chordal_sq(index, self.radius))
-        ls, amp = float(self.lengthscale), float(self.amplitude)
         r_scaled = r / ls  # lengthscale-scaled chordal distance, shared by all three Matern smoothnesses
         if self.nu == 0.5:
             k = exponential_from_scaled_dist(r_scaled, amp)
@@ -299,9 +391,8 @@ class GreatCircleMatern(FieldKernel):
             k = matern32_from_scaled_dist(r_scaled, amp)
         elif self.nu == 2.5:
             k = matern52_from_scaled_dist(r_scaled, amp)
-        else:
-            raise ValueError("nu must be 0.5, 1.5, or 2.5")
-        return k + self.jitter * np.eye(len(r))
+        cov = k + jitter * np.eye(len(r))
+        return _validate_symmetric_matrix(cov, len(r), "spherical Matern covariance", positive_definite=True)
 
     def precision(self, index: np.ndarray) -> np.ndarray:
         """Return the inverse of the spherical Matern covariance matrix."""
@@ -317,14 +408,31 @@ class GaussianField:
     name: str = "field"
 
     def __post_init__(self):
-        """Normalize the index and cache the kernel precision and optional covariance."""
-        self.index = np.asarray(self.index)
+        """Evaluate one canonical kernel representation and validate the Gaussian measure."""
+        self.index = _coordinate_index(self.index)
         self.dim = len(self.index)
-        self.precision = np.asarray(self.kernel.precision(self.index), dtype=float)
-        if self.precision.shape != (self.dim, self.dim):
-            raise ValueError(f"kernel precision is {self.precision.shape}, expected {(self.dim, self.dim)}.")
-        cov = self.kernel.covariance(self.index)  # prior covariance, when the kernel provides it directly
-        self.covariance = None if cov is None else np.asarray(cov, dtype=float)
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("field name must be a non-empty string.")
+        if not isinstance(self.kernel, FieldKernel):
+            raise TypeError("kernel must implement the FieldKernel protocol.")
+        # A covariance-providing kernel is evaluated exactly once.  Its precision
+        # is derived from that same matrix, so a stateful provider cannot create
+        # mutually inconsistent cached representations.
+        covariance = self.kernel.covariance(self.index)
+        if covariance is not None:
+            self.covariance = _validate_symmetric_matrix(
+                covariance, self.dim, "field covariance", positive_definite=True
+            )
+            self.precision = np.linalg.solve(self.covariance, np.eye(self.dim))
+            self.precision = 0.5 * (self.precision + self.precision.T)
+        else:
+            self.covariance = None
+            self.precision = _validate_symmetric_matrix(
+                self.kernel.precision(self.index),
+                self.dim,
+                "field precision",
+                positive_definite=True,
+            )
 
 
 @dataclass
@@ -357,17 +465,29 @@ class FieldSystem:
         if len(set(names)) != len(names):
             raise ValueError(f"field names must be unique; got {names}.")
         self.names = names
+        reference_index = self.fields[0].index
+        if any(
+            f.index.shape != reference_index.shape or not np.array_equal(f.index, reference_index) for f in self.fields
+        ):
+            raise ValueError(
+                "all fields in a FieldSystem must use exactly the same index coordinates; "
+                "interpolate onto one mesh explicitly before coupling."
+            )
         if self.coregion is not None:
             b = np.asarray(self.coregion, dtype=float)
             k = len(self.fields)
-            if b.shape != (k, k):
+            if b.shape != (k, k) or not np.isfinite(b).all():
                 raise ValueError(f"coregion must be {k}x{k} for {k} fields; got {b.shape}.")
             if not np.allclose(b, b.T):
                 raise ValueError("coregion must be symmetric.")
             if np.linalg.eigvalsh(b).min() <= 0:
                 raise ValueError("coregion must be positive-definite.")
-            if any(f.dim != self.fields[0].dim for f in self.fields):
-                raise ValueError("coregionalization (coregion=) requires all fields to share one index/dim.")
+            shared_precision = self.fields[0].precision
+            if any(not np.allclose(f.precision, shared_precision, rtol=1.0e-10, atol=1.0e-12) for f in self.fields[1:]):
+                raise ValueError(
+                    "coregionalization requires identical component field precisions; "
+                    "otherwise a shared spatial prior would discard declared kernels."
+                )
             self.coregion = b
 
 
