@@ -446,12 +446,39 @@ class FisherView:
         vectorizer: SufficientStatisticVectorizer | None = None,
         ridge: float = 1.0e-8,
     ) -> np.ndarray:
-        """Return a single Fisher vector for one observation."""
+        """Return a single Fisher vector using a model or caller-supplied reference geometry.
+
+        A generic view cannot estimate either a center or Fisher metric from one observation: doing
+        so centers the observation by itself and produces a zero vector by construction.
+        """
         if vectorizer is None and not self.vectorizer.labels:
             stat = self.expected_sufficient_statistics(x, estimate=estimate)
         else:
             vec = vectorizer if vectorizer is not None else self.vectorizer
             stat = self.expected_sufficient_statistics(x, estimate=estimate, vectorizer=vec)
+        stat = np.asarray(stat, dtype=np.float64)
+        if stat.ndim != 1 or stat.size == 0 or not np.all(np.isfinite(stat)):
+            raise ValueError("single-observation sufficient statistics must be a non-empty finite vector.")
+        if center is None:
+            model_mean = getattr(self, "_model_mean", None)
+            if model_mean is None:
+                raise ValueError(
+                    "a generic single-observation Fisher vector requires an external center "
+                    "or a view with a model Fisher center."
+                )
+            center = np.asarray(model_mean(), dtype=np.float64)
+        else:
+            center = np.asarray(center, dtype=np.float64)
+        if center.shape != stat.shape or not np.all(np.isfinite(center)):
+            raise ValueError("Fisher center must be a finite vector matching the sufficient-statistic shape.")
+        uses_generic_metric = type(self).fisher_vectors is FisherView.fisher_vectors
+        if metric != "identity" and fisher is None and uses_generic_metric:
+            raise ValueError(
+                "a generic single-observation Fisher vector requires an external Fisher metric "
+                "for diagonal or full whitening."
+            )
+        if fisher is not None and not np.all(np.isfinite(np.asarray(fisher, dtype=np.float64))):
+            raise ValueError("Fisher metric must contain only finite values.")
         return self.fisher_vectors(
             stats=np.reshape(stat, (1, -1)), metric=metric, center=center, fisher=fisher, ridge=ridge
         )[0]

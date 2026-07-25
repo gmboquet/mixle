@@ -495,6 +495,67 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         self.assertGreater(after, before)
         self.assertAlmostEqual(after, result.value)
 
+    def test_objective_weights_require_observed_positive_mass(self):
+        from mixle.inference.objectives import ExpectedLogDensity, UnnormalizedLogLikelihood
+
+        for weights in ([], [0.0, 0.0], [1.0, np.nan], [1.0, -0.1]):
+            with self.subTest(weights=weights), self.assertRaises(ValueError):
+                ExpectedLogDensity(weights=weights, normalize=True)
+            with self.subTest(unnormalized_weights=weights), self.assertRaises(ValueError):
+                UnnormalizedLogLikelihood(
+                    lambda model, enc, engine: engine.asarray(enc),
+                    log_partition=lambda model, engine: engine.asarray(0.0),
+                    weights=weights,
+                    normalize=True,
+                )
+
+    def test_zero_iterations_and_nonfinite_objectives_fail_before_success_results(self):
+        from mixle.inference.objectives import optimize_torch_objective
+        from mixle.stats.compute.gradient import GradientFitError
+
+        x = torch.tensor(0.0, dtype=torch.float64, requires_grad=True)
+        with self.assertRaisesRegex(ValueError, "max_its"):
+            optimize_torch_objective([x], lambda: -(x**2), engine=self.engine, max_its=0)
+        with self.assertRaises(GradientFitError):
+            optimize_torch_objective(
+                [x],
+                lambda: x * 0.0 + torch.tensor(float("nan"), dtype=x.dtype),
+                engine=self.engine,
+                max_its=1,
+            )
+
+    def test_worsening_objective_is_not_reported_as_converged(self):
+        from mixle.inference.objectives import _run_objective_optimization
+
+        x = torch.tensor(0.0, dtype=torch.float64, requires_grad=True)
+        values = iter((1.0, 0.9, 0.8, 0.7))
+
+        class NoOpOptimizer:
+            def zero_grad(self):
+                x.grad = None
+
+            def step(self):
+                pass
+
+        def objective():
+            return x * 0.0 + next(values)
+
+        history, _best, _best_it, _state, _iterations, converged = _run_objective_optimization(
+            NoOpOptimizer(),
+            "adam",
+            objective,
+            [x],
+            1.0,
+            3,
+            100.0,
+            True,
+            None,
+            1,
+            "worsening",
+        )
+        self.assertEqual(history, [1.0, 0.9, 0.8, 0.7])
+        self.assertFalse(converged)
+
 
 if __name__ == "__main__":
     unittest.main()
