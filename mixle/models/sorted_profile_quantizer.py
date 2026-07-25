@@ -46,7 +46,10 @@ under 65536 elements) rather than a speed win, unless restricted to block forms 
 
 from __future__ import annotations
 
+import json
+import struct
 from dataclasses import dataclass, field
+from numbers import Real
 from typing import Any
 
 import numpy as np
@@ -79,17 +82,6 @@ DEFAULT_GOF_THRESHOLD = 0.05
 DEFAULT_ANOMALY_RATIO = 2.0
 DEFAULT_ANOMALY_ABS_MARGIN = 0.02
 
-# Conservative fixed per-distribution parameter-storage budget (bytes) used by
-# `SortedProfileEncoding.nbytes`: every tail family used here (Gaussian, Gamma, Student-t, ...) is
-# parameterized by a small, fixed number of scalars (2-3 floats) plus a family tag; rather than fragile
-# introspection across distribution classes (which do not share a uniform `get_parameters()` contract --
-# e.g. `GaussianDistribution` exposes `.mu`/`.sigma2` directly, `GammaDistribution` exposes
-# `get_parameters()`), we budget a flat, deliberately generous constant here. This is negligible relative
-# to tensor sizes this module targets (thousands+ elements), so precision here does not matter to the
-# measured compression ratio.
-_DISTRIBUTION_PARAM_BYTES = 64
-
-
 def _index_dtype(n: int) -> np.dtype:
     """Smallest unsigned integer dtype that can address ``n`` distinct positions -- the honest per-index
     storage cost of a literal permutation array (R1: "arbitrary permutations are gather ops", stored as
@@ -107,7 +99,7 @@ def _index_dtype(n: int) -> np.dtype:
     return np.dtype(np.uint64)
 
 
-@dataclass
+@dataclass(frozen=True)
 class SortedProfileEncoding:
     """Storage format for one tensor's sorted-profile (permutation x monotone) encoding.
 
@@ -148,7 +140,106 @@ class SortedProfileEncoding:
     used_dense_fallback: bool
     dense_values: np.ndarray | None = None
     n_tail: int = 0
+    source_dtype: str = "<f4"
+    format_version: int = 1
     _index_dtype: np.dtype = field(default_factory=lambda: np.dtype(np.uint32), repr=False)
+
+    MAGIC = b"MSPQ"
+    FORMAT_VERSION = 1
+    _HEADER = struct.Struct("<4sBI")
+
+    def __post_init__(self) -> None:
+        if self.format_version != self.FORMAT_VERSION:
+            raise ValueError(f"unsupported SortedProfileEncoding format_version {self.format_version}")
+        if not isinstance(self.shape, (tuple, list)) or any(
+            isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)) or int(size) < 0
+            for size in self.shape
+        ):
+            raise ValueError("shape must contain exact non-negative integer dimensions")
+        shape = tuple(int(size) for size in self.shape)
+        size = int(np.prod(shape, dtype=np.int64)) if shape else 1
+        if size <= 0:
+            raise ValueError("SortedProfileEncoding requires a non-empty source shape")
+        source_dtype = np.dtype(self.source_dtype)
+        if source_dtype.kind not in {"i", "u", "f"} or source_dtype.kind == "b":
+            raise TypeError("source_dtype must be a real integer or floating dtype")
+        goodness = _bounded_finite(self.goodness_of_fit, "goodness_of_fit", minimum=0.0, maximum=1.0)
+        if not isinstance(self.used_dense_fallback, (bool, np.bool_)):
+            raise TypeError("used_dense_fallback must be a boolean")
+        n_tail = _exact_int(self.n_tail, "n_tail", minimum=0)
+        index_dtype = np.dtype(self._index_dtype)
+        expected_index_dtype = _index_dtype(size)
+        if index_dtype != expected_index_dtype:
+            raise ValueError(f"_index_dtype must be {expected_index_dtype} for a source of size {size}")
+
+        if self.used_dense_fallback:
+            if self.dense_values is None:
+                raise ValueError("dense fallback requires dense_values")
+            dense_values = np.asarray(self.dense_values)
+            if dense_values.shape != (size,) or dense_values.dtype != source_dtype:
+                raise ValueError(
+                    f"dense_values must have shape {(size,)} and dtype {source_dtype}; "
+                    f"got shape={dense_values.shape}, dtype={dense_values.dtype}"
+                )
+            if not np.all(np.isfinite(dense_values)):
+                raise ValueError("dense_values must be finite")
+            if any(
+                value is not None
+                for value in (
+                    self.top_k_values,
+                    self.top_k_indices,
+                    self.tail_distribution,
+                    self.permutation_indices,
+                )
+            ):
+                raise ValueError("dense fallback cannot also contain head/tail fields")
+            if n_tail != 0:
+                raise ValueError("dense fallback must set n_tail=0")
+            object.__setattr__(self, "dense_values", _immutable_copy(dense_values))
+        else:
+            if self.dense_values is not None or self.tail_distribution is None:
+                raise ValueError("parametric encoding requires tail_distribution and no dense_values")
+            if n_tail < 2 or n_tail > size:
+                raise ValueError("parametric encoding requires 2 <= n_tail <= size")
+            top_count = size - n_tail
+            top_values = np.asarray(self.top_k_values)
+            top_indices = np.asarray(self.top_k_indices)
+            permutation = np.asarray(self.permutation_indices)
+            if top_values.shape != (top_count,) or top_values.dtype != source_dtype:
+                raise ValueError(
+                    f"top_k_values must have shape {(top_count,)} and source dtype {source_dtype}"
+                )
+            if top_indices.shape != (top_count,) or top_indices.dtype != index_dtype:
+                raise ValueError(
+                    f"top_k_indices must have shape {(top_count,)} and dtype {index_dtype}"
+                )
+            if permutation.shape != (n_tail,) or permutation.dtype != index_dtype:
+                raise ValueError(
+                    f"permutation_indices must have shape {(n_tail,)} and dtype {index_dtype}"
+                )
+            if not np.all(np.isfinite(top_values)):
+                raise ValueError("top_k_values must be finite")
+            all_indices = np.concatenate((top_indices.astype(np.int64), permutation.astype(np.int64)))
+            if (
+                np.any(all_indices < 0)
+                or np.any(all_indices >= size)
+                or np.unique(all_indices).size != size
+            ):
+                raise ValueError("head and tail indices must form a disjoint permutation of the source")
+            if not callable(getattr(self.tail_distribution, "quantile", None)):
+                raise TypeError("tail_distribution must provide quantile(probability)")
+            if not callable(getattr(self.tail_distribution, "cdf", None)):
+                raise TypeError("tail_distribution must provide cdf(value)")
+            object.__setattr__(self, "top_k_values", _immutable_copy(top_values))
+            object.__setattr__(self, "top_k_indices", _immutable_copy(top_indices))
+            object.__setattr__(self, "permutation_indices", _immutable_copy(permutation))
+
+        object.__setattr__(self, "shape", shape)
+        object.__setattr__(self, "source_dtype", source_dtype.str)
+        object.__setattr__(self, "goodness_of_fit", goodness)
+        object.__setattr__(self, "used_dense_fallback", bool(self.used_dense_fallback))
+        object.__setattr__(self, "n_tail", n_tail)
+        object.__setattr__(self, "_index_dtype", index_dtype)
 
     @property
     def size(self) -> int:
@@ -156,33 +247,182 @@ class SortedProfileEncoding:
         return int(np.prod(self.shape)) if len(self.shape) else 1
 
     def nbytes(self) -> int:
-        """Measured storage footprint of the encoding, in bytes.
+        """Return the exact size of the versioned :meth:`to_bytes` representation."""
+        return len(self.to_bytes())
 
-        Dense fallback: exactly the byte count of ``dense_values`` (float32). Otherwise: top-k exact values
-        (float32) + top-k indices (minimal dtype) + permutation indices (minimal dtype) +
-        :data:`_DISTRIBUTION_PARAM_BYTES` for the fitted tail distribution + one float32 for the
-        goodness-of-fit receipt itself (a real, non-decorative receipt is part of what is shipped).
-        """
-        if self.used_dense_fallback:
-            return int(self.dense_values.astype(np.float32).nbytes)
-        top_k_n = 0 if self.top_k_values is None else self.top_k_values.size
-        idx_dtype_bytes = self._index_dtype.itemsize
+    def to_bytes(self) -> bytes:
+        """Serialize this validated encoding without pickle."""
+        distribution_json = None
+        if self.tail_distribution is not None:
+            from mixle.utils.serialization import to_json
+
+            distribution_json = to_json(self.tail_distribution, separators=(",", ":"), sort_keys=True)
+        metadata = {
+            "shape": self.shape,
+            "source_dtype": self.source_dtype,
+            "goodness_of_fit": self.goodness_of_fit,
+            "used_dense_fallback": self.used_dense_fallback,
+            "n_tail": self.n_tail,
+            "index_dtype": self._index_dtype.str,
+            "tail_distribution": distribution_json,
+        }
+        metadata_bytes = json.dumps(metadata, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        if len(metadata_bytes) > 16 * 1024 * 1024:
+            raise ValueError("SortedProfileEncoding metadata exceeds 16 MiB")
+        arrays = (
+            (self.dense_values,)
+            if self.used_dense_fallback
+            else (self.top_k_values, self.top_k_indices, self.permutation_indices)
+        )
         return (
-            top_k_n * np.dtype(np.float32).itemsize  # top_k_values
-            + top_k_n * idx_dtype_bytes  # top_k_indices
-            + self.n_tail * idx_dtype_bytes  # permutation_indices
-            + _DISTRIBUTION_PARAM_BYTES  # tail_distribution
-            + np.dtype(np.float32).itemsize  # goodness_of_fit receipt
+            self._HEADER.pack(self.MAGIC, self.format_version, len(metadata_bytes))
+            + metadata_bytes
+            + b"".join(array.tobytes(order="C") for array in arrays)
+        )
+
+    @classmethod
+    def from_bytes(cls, payload: Any) -> SortedProfileEncoding:
+        """Parse an exact-length, versioned encoding payload."""
+        if not isinstance(payload, (bytes, bytearray, memoryview)):
+            raise TypeError("SortedProfileEncoding payload must be bytes-like")
+        view = memoryview(payload)
+        if len(view) < cls._HEADER.size:
+            raise ValueError("SortedProfileEncoding payload is truncated")
+        magic, version, metadata_size = cls._HEADER.unpack(view[: cls._HEADER.size])
+        if magic != cls.MAGIC or version != cls.FORMAT_VERSION:
+            raise ValueError("SortedProfileEncoding payload has invalid magic or version")
+        if metadata_size > 16 * 1024 * 1024 or cls._HEADER.size + metadata_size > len(view):
+            raise ValueError("SortedProfileEncoding metadata length is invalid")
+        metadata_end = cls._HEADER.size + metadata_size
+        try:
+            metadata = json.loads(bytes(view[cls._HEADER.size : metadata_end]).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("SortedProfileEncoding metadata is invalid JSON") from exc
+        required = {
+            "shape",
+            "source_dtype",
+            "goodness_of_fit",
+            "used_dense_fallback",
+            "n_tail",
+            "index_dtype",
+            "tail_distribution",
+        }
+        if not isinstance(metadata, dict) or set(metadata) != required:
+            raise ValueError("SortedProfileEncoding metadata has an invalid schema")
+        shape = tuple(metadata["shape"])
+        source_dtype = np.dtype(metadata["source_dtype"])
+        index_dtype = np.dtype(metadata["index_dtype"])
+        size = int(np.prod(shape, dtype=np.int64)) if shape else 1
+        n_tail = metadata["n_tail"]
+        offset = metadata_end
+        if metadata["used_dense_fallback"]:
+            value_bytes = size * source_dtype.itemsize
+            if len(view) != offset + value_bytes:
+                raise ValueError("dense SortedProfileEncoding payload has an invalid length")
+            dense = np.frombuffer(view[offset:], dtype=source_dtype).copy()
+            return cls(
+                shape=shape,
+                top_k_values=None,
+                top_k_indices=None,
+                tail_distribution=None,
+                permutation_indices=None,
+                goodness_of_fit=metadata["goodness_of_fit"],
+                used_dense_fallback=True,
+                dense_values=dense,
+                n_tail=0,
+                source_dtype=source_dtype.str,
+                format_version=version,
+                _index_dtype=index_dtype,
+            )
+
+        n_tail = _exact_int(n_tail, "n_tail", minimum=2)
+        top_count = size - n_tail
+        top_bytes = top_count * source_dtype.itemsize
+        top_index_bytes = top_count * index_dtype.itemsize
+        permutation_bytes = n_tail * index_dtype.itemsize
+        expected = offset + top_bytes + top_index_bytes + permutation_bytes
+        if len(view) != expected:
+            raise ValueError("parametric SortedProfileEncoding payload has an invalid length")
+        top_values = np.frombuffer(view[offset : offset + top_bytes], dtype=source_dtype).copy()
+        offset += top_bytes
+        top_indices = np.frombuffer(view[offset : offset + top_index_bytes], dtype=index_dtype).copy()
+        offset += top_index_bytes
+        permutation = np.frombuffer(view[offset:], dtype=index_dtype).copy()
+        distribution_json = metadata["tail_distribution"]
+        if not isinstance(distribution_json, str):
+            raise ValueError("parametric payload requires a serialized tail_distribution")
+        from mixle.utils.serialization import from_json
+
+        distribution = from_json(distribution_json)
+        return cls(
+            shape=shape,
+            top_k_values=top_values,
+            top_k_indices=top_indices,
+            tail_distribution=distribution,
+            permutation_indices=permutation,
+            goodness_of_fit=metadata["goodness_of_fit"],
+            used_dense_fallback=False,
+            dense_values=None,
+            n_tail=n_tail,
+            source_dtype=source_dtype.str,
+            format_version=version,
+            _index_dtype=index_dtype,
         )
 
 
-def _as_flat_numpy(tensor: Any) -> np.ndarray:
-    """Flatten ``tensor`` (numpy array or torch tensor) to a 1-D float64 numpy array."""
+def _immutable_copy(value: np.ndarray) -> np.ndarray:
+    result = np.ascontiguousarray(value).copy()
+    result.setflags(write=False)
+    return result
+
+
+def _exact_int(value: Any, name: str, *, minimum: int = 0, maximum: int | None = None) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result < minimum or (maximum is not None and result > maximum):
+        bound = f"[{minimum}, {maximum}]" if maximum is not None else f">= {minimum}"
+        raise ValueError(f"{name} must be {bound}")
+    return result
+
+
+def _bounded_finite(
+    value: Any,
+    name: str,
+    *,
+    minimum: float,
+    maximum: float | None = None,
+    strict_minimum: bool = False,
+) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite real number")
+    result = float(value)
+    if not np.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    below = result <= minimum if strict_minimum else result < minimum
+    if below or (maximum is not None and result > maximum):
+        interval = f"({minimum}, {maximum}]" if strict_minimum else f"[{minimum}, {maximum}]"
+        raise ValueError(f"{name} must be in {interval}")
+    return result
+
+
+def _as_source_array(tensor: Any, where: str) -> np.ndarray:
+    """Return a finite real numpy view while preserving the source dtype and shape."""
     if hasattr(tensor, "detach"):  # torch.Tensor
-        flat = tensor.detach().cpu().numpy()
+        array = tensor.detach().cpu().numpy()
     else:
-        flat = np.asarray(tensor)
-    return flat.reshape(-1).astype(np.float64)
+        array = np.asarray(tensor)
+    if array.dtype.kind not in {"i", "u", "f"} or array.dtype.kind == "b":
+        raise TypeError(f"{where} requires a real integer or floating tensor")
+    if array.size == 0:
+        raise ValueError(f"{where} requires a non-empty tensor")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{where} requires finite tensor values")
+    return array
+
+
+def _as_flat_numpy(tensor: Any, where: str) -> np.ndarray:
+    return _as_source_array(tensor, where).reshape(-1).astype(np.float64)
 
 
 def fit_sorted_profile(
@@ -216,12 +456,18 @@ def fit_sorted_profile(
     if tail_family is None:
         tail_family = GaussianEstimator()
 
-    flat = _as_flat_numpy(tensor)
+    source = _as_source_array(tensor, "fit_sorted_profile")
+    source_flat = source.reshape(-1)
+    flat = source_flat.astype(np.float64)
     n = flat.size
-    if n == 0:
-        raise ValueError("fit_sorted_profile requires a non-empty tensor")
-    shape = tuple(tensor.shape) if hasattr(tensor, "shape") else (n,)
-    top_k = int(max(0, min(top_k, n)))
+    shape = tuple(source.shape)
+    top_k = _exact_int(top_k, "top_k", minimum=0, maximum=n)
+    gof_threshold = _bounded_finite(
+        gof_threshold,
+        "gof_threshold",
+        minimum=0.0,
+        maximum=1.0,
+    )
     idx_dtype = _index_dtype(n)
 
     if top_k > 0:
@@ -239,28 +485,32 @@ def fit_sorted_profile(
 
     if n_tail < 2:
         # Nothing left to fit a distribution to -- dense fallback is the only honest option.
-        return SortedProfileEncoding(
+        encoding = SortedProfileEncoding(
             shape=shape,
             top_k_values=None,
             top_k_indices=None,
             tail_distribution=None,
             permutation_indices=None,
-            goodness_of_fit=float("inf"),
+            goodness_of_fit=1.0,
             used_dense_fallback=True,
-            dense_values=flat.astype(np.float32),
+            dense_values=source_flat.copy(),
             n_tail=0,
+            source_dtype=source.dtype.str,
             _index_dtype=idx_dtype,
         )
+        encoding.to_bytes()
+        return encoding
 
     tail_distribution = estimate(list(tail_values), tail_family)
     d_stat, _p_value = ks_test(tail_values, tail_distribution)
+    d_stat = _bounded_finite(d_stat, "computed goodness_of_fit", minimum=0.0, maximum=1.0)
 
     order = np.argsort(tail_values)  # ascending: sorted_tail[r] = tail_values[order[r]]
     permutation_indices = tail_original_indices[order].astype(idx_dtype)
 
     used_dense_fallback = d_stat > gof_threshold
     if used_dense_fallback:
-        return SortedProfileEncoding(
+        encoding = SortedProfileEncoding(
             shape=shape,
             top_k_values=None,
             top_k_indices=None,
@@ -268,14 +518,17 @@ def fit_sorted_profile(
             permutation_indices=None,
             goodness_of_fit=d_stat,
             used_dense_fallback=True,
-            dense_values=flat.astype(np.float32),
+            dense_values=source_flat.copy(),
             n_tail=0,
+            source_dtype=source.dtype.str,
             _index_dtype=idx_dtype,
         )
+        encoding.to_bytes()
+        return encoding
 
-    return SortedProfileEncoding(
+    encoding = SortedProfileEncoding(
         shape=shape,
-        top_k_values=flat[top_k_indices].astype(np.float32) if top_k > 0 else np.array([], dtype=np.float32),
+        top_k_values=source_flat[top_k_indices].copy() if top_k > 0 else np.array([], dtype=source.dtype),
         top_k_indices=top_k_indices.astype(idx_dtype) if top_k > 0 else np.array([], dtype=idx_dtype),
         tail_distribution=tail_distribution,
         permutation_indices=permutation_indices,
@@ -283,8 +536,11 @@ def fit_sorted_profile(
         used_dense_fallback=False,
         dense_values=None,
         n_tail=n_tail,
+        source_dtype=source.dtype.str,
         _index_dtype=idx_dtype,
     )
+    encoding.to_bytes()
+    return encoding
 
 
 def reconstruct(encoding: SortedProfileEncoding) -> np.ndarray:
@@ -295,10 +551,12 @@ def reconstruct(encoding: SortedProfileEncoding) -> np.ndarray:
     approximate (reconstructed from the fitted parametric quantile function) otherwise.
 
     Returns:
-        np.ndarray: float32 array reshaped to ``encoding.shape``.
+        np.ndarray: array reshaped to ``encoding.shape`` using the recorded source dtype.
     """
+    if not isinstance(encoding, SortedProfileEncoding):
+        raise TypeError("encoding must be a SortedProfileEncoding")
     if encoding.used_dense_fallback:
-        return encoding.dense_values.reshape(encoding.shape)
+        return encoding.dense_values.copy().reshape(encoding.shape)
 
     n = encoding.size
     out = np.zeros(n, dtype=np.float64)
@@ -307,13 +565,15 @@ def reconstruct(encoding: SortedProfileEncoding) -> np.ndarray:
     # Reconstruct the sorted tail profile from the fitted quantile function at the midpoint of each rank's
     # probability mass -- the standard "plotting position" for turning n ranks into n quantile queries.
     ranks = (np.arange(n_tail, dtype=np.float64) + 0.5) / n_tail
-    sorted_tail_hat = np.array([encoding.tail_distribution.quantile(float(q)) for q in ranks])
+    sorted_tail_hat = np.asarray([encoding.tail_distribution.quantile(float(q)) for q in ranks], dtype=np.float64)
+    if sorted_tail_hat.shape != (n_tail,) or not np.all(np.isfinite(sorted_tail_hat)):
+        raise ValueError("tail_distribution returned invalid reconstruction quantiles")
     out[encoding.permutation_indices.astype(np.int64)] = sorted_tail_hat
 
     if encoding.top_k_values is not None and encoding.top_k_values.size > 0:
         out[encoding.top_k_indices.astype(np.int64)] = encoding.top_k_values
 
-    return out.astype(np.float32).reshape(encoding.shape)
+    return out.astype(np.dtype(encoding.source_dtype)).reshape(encoding.shape)
 
 
 @dataclass(frozen=True)
@@ -362,16 +622,23 @@ def detect_anomaly(
     Returns:
         AnomalyReport
     """
+    if not isinstance(reference_encoding, SortedProfileEncoding):
+        raise TypeError("reference_encoding must be a SortedProfileEncoding")
+    ratio_threshold = _bounded_finite(
+        ratio_threshold,
+        "ratio_threshold",
+        minimum=0.0,
+        strict_minimum=True,
+    )
+    abs_margin = _bounded_finite(abs_margin, "abs_margin", minimum=0.0)
     if reference_encoding.used_dense_fallback:
         raise ValueError(
             "detect_anomaly requires a reference_encoding with a fitted tail_distribution "
             "(reference_encoding.used_dense_fallback was True, so there is no fitted family to score against)"
         )
 
-    flat = _as_flat_numpy(tensor)
+    flat = _as_flat_numpy(tensor, "detect_anomaly")
     n = flat.size
-    if n == 0:
-        raise ValueError("detect_anomaly requires a non-empty tensor")
 
     top_k_ref = reference_encoding.top_k_values.size if reference_encoding.top_k_values is not None else 0
     top_k = int(max(0, min(top_k_ref, n - 2)))  # keep >= 2 non-outlier values to score against
@@ -386,6 +653,7 @@ def detect_anomaly(
         tail_values = flat
 
     d_stat, _p_value = ks_test(tail_values, reference_encoding.tail_distribution)
+    d_stat = _bounded_finite(d_stat, "computed anomaly ks_statistic", minimum=0.0, maximum=1.0)
     ref_d = reference_encoding.goodness_of_fit
     threshold = max(ratio_threshold * ref_d, ref_d + abs_margin)
     is_anomaly = d_stat > threshold
