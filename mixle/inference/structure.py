@@ -485,8 +485,24 @@ class MixtureOfDependencyTrees:
 
     def __init__(self, components: Sequence[DependencyTreeDistribution], weights: Sequence[float]) -> None:
         self.components = list(components)
-        self.weights = np.asarray(weights, dtype=np.float64)
-        self.log_weights = np.log(np.clip(self.weights, 1e-300, None))
+        if not self.components:
+            raise ValueError("MixtureOfDependencyTrees requires at least one component.")
+        n_fields = len(self.components[0].parents)
+        if any(len(component.parents) != n_fields for component in self.components):
+            raise ValueError("all dependency-tree mixture components must have the same number of fields.")
+        values = np.asarray(weights, dtype=np.float64)
+        if (
+            values.ndim != 1
+            or values.shape != (len(self.components),)
+            or not np.all(np.isfinite(values))
+            or np.any(values < 0.0)
+        ):
+            raise ValueError("mixture weights must be a finite non-negative vector matching the components.")
+        if not np.isclose(float(values.sum()), 1.0, rtol=1.0e-10, atol=1.0e-12):
+            raise ValueError("mixture weights must sum to one.")
+        self.weights = values.copy()
+        with np.errstate(divide="ignore"):
+            self.log_weights = np.where(self.weights > 0.0, np.log(self.weights), -np.inf)
 
     @property
     def w(self) -> np.ndarray:
@@ -525,9 +541,21 @@ class MixtureOfDependencyTrees:
         """Posterior ``p(component | record)`` for each record -- the E-step and a soft cluster assignment."""
         enc = self.dist_to_encoder().seq_encode(list(data))
         joint = self._component_ll(enc) + self.log_weights[None, :]
-        joint -= joint.max(axis=1, keepdims=True)
+        if joint.shape[0] == 0:
+            return np.empty((0, self.n_components), dtype=np.float64)
+        if np.any(np.isnan(joint)) or np.any(np.isposinf(joint)):
+            raise ValueError("component log densities must be finite or -inf.")
+        row_max = joint.max(axis=1, keepdims=True)
+        impossible = np.isneginf(row_max[:, 0])
+        if np.any(impossible):
+            rows = np.flatnonzero(impossible).tolist()
+            raise ValueError(f"mixture assigns zero probability to observations at rows {rows}.")
+        joint -= row_max
         r = np.exp(joint)
-        return r / r.sum(axis=1, keepdims=True)
+        row_sum = r.sum(axis=1, keepdims=True)
+        if np.any(~np.isfinite(row_sum)) or np.any(row_sum <= 0.0):
+            raise ValueError("mixture responsibilities could not be normalized.")
+        return r / row_sum
 
     def sampler(self, seed: int | None = None) -> Any:
         """Return a sampler for the mixture of dependency trees."""
@@ -569,22 +597,33 @@ def learn_mixture_structure(
 
     Each iteration re-learns a dependency forest per cluster on its currently-assigned points (M-step), then
     reassigns every record to its most-probable cluster (E-step), until assignments stabilize. Runs ``restarts``
-    random initializations and returns the highest-likelihood fit. Empty/tiny clusters are re-seeded so a
-    component never collapses. Deterministic given ``seed``: the one ``RandomState`` drives the k-means/random
-    initializations AND every per-cluster fit's EM init (via :func:`learn_structure`'s ``rng``).
+    random initializations and returns the highest-likelihood fit. Empty/tiny clusters receive a
+    rescue fit and temporary proposal mass, but the returned weights count only actual hard
+    memberships and may therefore contain an honest zero. Deterministic given ``seed``: the one
+    ``RandomState`` drives initialization, rescue, and every per-cluster fit.
 
     ``field_estimators`` pins each field's family (forwarded to :func:`learn_structure`) instead of re-running
     the automatic detector per cluster per iteration. Beyond the speedup, pinning matters for identifiability:
     the detector models a multimodal column with a Gaussian MIXTURE, which lets ONE cluster absorb what the
     caller intended as two -- with per-field families pinned to unimodal models, regimes that differ in level
     must separate into different components to score well.
-    random initializations and returns the highest-likelihood fit. Empty or very small clusters are re-seeded so a
-    component never collapses.
     """
-    if n_components < 1:
+    if (
+        isinstance(n_components, (bool, np.bool_))
+        or not isinstance(n_components, (int, np.integer))
+        or n_components < 1
+    ):
         raise ValueError(f"n_components must be >= 1, got {n_components}")
+    if isinstance(restarts, (bool, np.bool_)) or not isinstance(restarts, (int, np.integer)) or restarts < 1:
+        raise ValueError("restarts must be a positive integer.")
+    if isinstance(max_iter, (bool, np.bool_)) or not isinstance(max_iter, (int, np.integer)) or max_iter < 1:
+        raise ValueError("max_iter must be a positive integer.")
     data = list(data)
     n = len(data)
+    if n == 0:
+        raise ValueError("learn_mixture_structure requires at least one observation.")
+    if n_components > n:
+        raise ValueError("n_components cannot exceed the number of observations.")
     rng = np.random.RandomState(seed)
     # capped at n: a starved cluster's rescue (below) draws `min_size` DISTINCT points from the
     # whole dataset (replace=False) -- uncapped, a small dataset with few components could compute
@@ -598,31 +637,48 @@ def learn_mixture_structure(
             subset, field_estimators=field_estimators, min_gain=min_gain, n_bins=n_bins, max_its=max_its, rng=rng
         )
 
-    # seed the first restarts with k-means (numeric-level split, then full-feature split), rest random
-    inits = [
-        _kmeans_init(data, n_components, rng, numeric_only=True),
-        _kmeans_init(data, n_components, rng, numeric_only=False),
-    ]
-    inits += [rng.randint(0, n_components, n) for _ in range(max(0, restarts - len(inits)))]
+    # Honor the exact restart budget: numeric k-means first, full-feature k-means second, then random.
+    inits = [_kmeans_init(data, n_components, rng, numeric_only=True)]
+    if restarts >= 2:
+        inits.append(_kmeans_init(data, n_components, rng, numeric_only=False))
+    inits.extend(rng.randint(0, n_components, n) for _ in range(restarts - len(inits)))
     for assign in inits:
-        model: MixtureOfDependencyTrees | None = None
-        prev = None
+        assign = np.asarray(assign, dtype=np.int64)
         for _it in range(max_iter):
             comps, counts = [], []
             for k in range(n_components):
-                idx = np.flatnonzero(assign == k)
-                if len(idx) < min_size:  # re-seed a starved component from random points
-                    idx = rng.choice(n, size=min_size, replace=False)
-                comps.append(learn([data[i] for i in idx]))
-                counts.append(len(idx))
+                member_idx = np.flatnonzero(assign == k)
+                fit_idx = (
+                    member_idx
+                    if len(member_idx) >= min_size
+                    else rng.choice(n, size=min_size, replace=False)
+                )
+                comps.append(learn([data[i] for i in fit_idx]))
+                counts.append(len(member_idx))
             weights = np.asarray(counts, dtype=np.float64)
+            # A truly empty component needs a temporary E-step proposal mass to compete after its
+            # rescue fit. This is not reported as fitted membership: the final model below is
+            # refitted and weighted from the actual assignment counts only.
+            weights[weights == 0.0] = 1.0
             weights /= weights.sum()
             model = MixtureOfDependencyTrees(comps, weights)
             new = model.responsibilities(data).argmax(axis=1)
-            if prev is not None and np.array_equal(new, prev):
+            if np.array_equal(new, assign):
                 break
-            prev, assign = assign, new
-        assert model is not None
+            assign = new
+
+        # Fit the returned model to the final assignment, with rescue rows used only to initialize
+        # empty/tiny component distributions and never counted as observed membership.
+        comps, counts = [], []
+        for k in range(n_components):
+            member_idx = np.flatnonzero(assign == k)
+            fit_idx = (
+                member_idx if len(member_idx) >= min_size else rng.choice(n, size=min_size, replace=False)
+            )
+            comps.append(learn([data[i] for i in fit_idx]))
+            counts.append(len(member_idx))
+        weights = np.asarray(counts, dtype=np.float64) / float(n)
+        model = MixtureOfDependencyTrees(comps, weights)
         ll = float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
         if ll > best_ll:
             best_ll, best = ll, model

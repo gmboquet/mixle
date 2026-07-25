@@ -6,6 +6,7 @@ by a wide margin on held-out data -- and must NOT invent edges where the fields 
 """
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -78,6 +79,74 @@ class MixtureNComponentsGuardTest(unittest.TestCase):
         model = learn_mixture_structure(_dependent(2, n=8), 3, restarts=1, max_iter=2, seed=0)
         self.assertIsInstance(model, MixtureOfDependencyTrees)
         self.assertEqual(model.n_components, 3)
+
+    def test_honors_the_exact_restart_budget(self):
+        data = [(float(i),) for i in range(4)]
+        tree = DependencyTreeDistribution([None], [st.GaussianDistribution(0.0, 1.0)])
+        with (
+            mock.patch(
+                "mixle.inference.structure._kmeans_init",
+                return_value=np.asarray([0, 0, 1, 1]),
+            ) as initialize,
+            mock.patch("mixle.inference.structure.learn_structure", return_value=tree),
+        ):
+            learn_mixture_structure(data, 2, restarts=1, max_iter=1, seed=0)
+        self.assertEqual(initialize.call_count, 1)
+
+    def test_hard_em_compares_consecutive_assignments(self):
+        data = [(float(i),) for i in range(4)]
+        tree = DependencyTreeDistribution([None], [st.GaussianDistribution(0.0, 10.0)])
+        initial = np.asarray([0, 0, 1, 1])
+        stable = np.asarray([0, 1, 0, 1])
+
+        def responsibilities(_model, _data):
+            result = np.zeros((len(stable), 2))
+            result[np.arange(len(stable)), stable] = 1.0
+            return result
+
+        with (
+            mock.patch("mixle.inference.structure._kmeans_init", return_value=initial),
+            mock.patch("mixle.inference.structure.learn_structure", return_value=tree) as learn,
+            mock.patch.object(MixtureOfDependencyTrees, "responsibilities", responsibilities),
+        ):
+            learn_mixture_structure(data, 2, restarts=1, max_iter=5, seed=0)
+        # Two hard-EM fits reach B then compare B with B; one final fit materializes B.
+        self.assertEqual(learn.call_count, 6)
+
+    def test_rescue_rows_are_not_reported_as_cluster_membership(self):
+        data = [(float(i),) for i in range(4)]
+        tree = DependencyTreeDistribution([None], [st.GaussianDistribution(0.0, 10.0)])
+        assignment = np.zeros(len(data), dtype=np.int64)
+
+        def responsibilities(_model, _data):
+            result = np.zeros((len(data), 2))
+            result[:, 0] = 1.0
+            return result
+
+        with (
+            mock.patch("mixle.inference.structure._kmeans_init", return_value=assignment),
+            mock.patch("mixle.inference.structure.learn_structure", return_value=tree),
+            mock.patch.object(MixtureOfDependencyTrees, "responsibilities", responsibilities),
+        ):
+            model = learn_mixture_structure(data, 2, restarts=1, max_iter=1, seed=0)
+        np.testing.assert_array_equal(model.weights, [1.0, 0.0])
+
+
+class MixtureOfDependencyTreesValidationTest(unittest.TestCase):
+    def setUp(self):
+        self.tree = DependencyTreeDistribution([None], [st.CategoricalDistribution({"a": 1.0})])
+
+    def test_constructor_rejects_malformed_weights_and_components(self):
+        with self.assertRaises(ValueError):
+            MixtureOfDependencyTrees([], [])
+        for weights in ([1.0], [0.4, 0.4], [1.1, -0.1], [np.nan, np.nan]):
+            with self.subTest(weights=weights), self.assertRaises(ValueError):
+                MixtureOfDependencyTrees([self.tree, self.tree], weights)
+
+    def test_impossible_rows_do_not_produce_nan_responsibilities(self):
+        model = MixtureOfDependencyTrees([self.tree, self.tree], [0.5, 0.5])
+        with self.assertRaisesRegex(ValueError, "zero probability"):
+            model.responsibilities([("missing",)])
 
 
 class DependencyGainTest(unittest.TestCase):
