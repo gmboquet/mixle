@@ -17,6 +17,7 @@ from mixle.experimental.ot_geometry import (
     gaussian_barycenter,
     gaussian_barycenter_params,
     mixture_barycenter,
+    mixture_barycenter_with_receipt,
 )
 from mixle.inference.estimation import optimize
 from mixle.stats import (
@@ -102,29 +103,29 @@ def test_mixture_merge_is_measured_honestly() -> None:
     ens_comps = [c for m in gmms for c in m.components]
     ens_w = np.concatenate([np.asarray(m.w) / len(gmms) for m in gmms])
     ensemble = MixtureDistribution(ens_comps, (ens_w / ens_w.sum()).tolist())
-    barycenter = mixture_barycenter(gmms)
+    barycenter, receipt = mixture_barycenter_with_receipt(gmms)
 
     ld_ens, ld_bary = held_ld(ensemble), held_ld(barycenter)
-    # The barycenter must at least be a VALID, sane merge (finite, matched-cost r=2 components).
+    # The exact mass-splitting LP may need more support atoms than any individual input mixture.
     assert np.isfinite(ld_bary)
-    assert len(barycenter.components) == 2
+    assert len(barycenter.components) == receipt.output_components
+    assert receipt.max_marginal_error < 1e-9
+    assert receipt.mass_error < 1e-9
     # Honest kill-criterion check: the barycenter should be within a modest margin of ensembling,
     # even when (as here) ensembling's extra capacity edges it out. We record, not overclaim.
     assert ld_bary >= ld_ens - 0.25, f"barycenter {ld_bary:.4f} far below ensemble {ld_ens:.4f}"
 
 
-def test_requires_equal_component_counts() -> None:
+def test_supports_unequal_component_counts() -> None:
     m2 = MixtureDistribution([GaussianDistribution(0, 1), GaussianDistribution(2, 1)], [0.5, 0.5])
     m3 = MixtureDistribution(
         [GaussianDistribution(0, 1), GaussianDistribution(1, 1), GaussianDistribution(2, 1)],
         [1 / 3, 1 / 3, 1 / 3],
     )
-    try:
-        mixture_barycenter([m2, m3])
-    except ValueError as e:
-        assert "equal component counts" in str(e)
-    else:
-        raise AssertionError("expected ValueError on unequal component counts")
+    result, receipt = mixture_barycenter_with_receipt([m2, m3])
+    assert sorted(receipt.input_component_counts) == [2, 3]
+    assert len(result.components) == receipt.output_components
+    assert receipt.max_marginal_error < 1e-9
 
 
 def test_determinism() -> None:
