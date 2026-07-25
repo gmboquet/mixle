@@ -11,7 +11,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from mixle.ppl.core import register_composite, register_family
+from mixle.ppl.core import (
+    RandomVariable,
+    _CholeskySpec,
+    _OrderedSpec,
+    _SimplexSpec,
+    _VectorSpec,
+    free,
+    register_composite,
+    register_family,
+)
 from mixle.stats.bayes.dirichlet import DirichletDistribution, DirichletEstimator
 from mixle.stats.combinator.sequence import SequenceDistribution, SequenceEstimator
 from mixle.stats.directional.von_mises import VonMisesDistribution, VonMisesEstimator
@@ -73,6 +82,137 @@ from mixle.stats.univariate.discrete.negative_binomial import NegativeBinomialDi
 from mixle.stats.univariate.discrete.poisson import PoissonDistribution, PoissonEstimator
 from mixle.stats.univariate.discrete.skellam import SkellamDistribution, SkellamEstimator
 
+
+def _fixed_numeric(value):
+    """Return a fixed numeric array, or ``None`` for symbolic/non-numeric parameter expressions."""
+    if value is free or isinstance(value, RandomVariable):
+        return None
+    try:
+        arr = np.asarray(list(value.values()) if isinstance(value, dict) else value, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    return arr
+
+
+def _validate_positive_vector(args):
+    arr = _fixed_numeric(args[0])
+    if arr is not None and (arr.ndim != 1 or arr.size == 0 or not np.isfinite(arr).all() or np.any(arr <= 0.0)):
+        raise ValueError("Dirichlet alpha must be a non-empty finite vector with every entry > 0.")
+
+
+def _validate_probability_vector(args):
+    arr = _fixed_numeric(args[0])
+    if arr is None:
+        return
+    if arr.ndim != 1 or arr.size == 0 or not np.isfinite(arr).all() or np.any(arr < 0.0):
+        raise ValueError("Categorical probabilities must be a non-empty finite non-negative vector.")
+    if not np.isclose(float(arr.sum()), 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError("Categorical probabilities must sum to one.")
+
+
+def _validate_uniform_bounds(args):
+    low, high = (_fixed_numeric(value) for value in args)
+    if low is not None and high is not None and low.ndim == high.ndim == 0 and not float(low) < float(high):
+        raise ValueError("Uniform requires low < high.")
+
+
+def _validate_probability_open_lower(args):
+    p = _fixed_numeric(args[-1])
+    if p is not None and np.any(p <= 0.0):
+        raise ValueError("Probability parameter must be greater than zero.")
+
+
+def _validate_logseries_probability(args):
+    p = _fixed_numeric(args[0])
+    if p is not None and (np.any(p <= 0.0) or np.any(p >= 1.0)):
+        raise ValueError("LogSeries requires 0 < p < 1.")
+
+
+def _validate_nakagami(args):
+    m = _fixed_numeric(args[0])
+    if m is not None and np.any(m < 0.5):
+        raise ValueError("Nakagami requires m >= 0.5.")
+
+
+def _validate_fixed_simplex(value, shape, label):
+    arr = np.asarray(value, dtype=float)
+    if arr.shape != shape or not np.isfinite(arr).all() or np.any(arr < 0.0):
+        raise ValueError(f"{label} must be a finite non-negative array with shape {shape}.")
+    row_sums = arr.sum(axis=-1)
+    if not np.allclose(row_sums, 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError(f"{label} must sum to one along its final axis.")
+
+
+def _validate_mixture_args(args):
+    comps, weights = args
+    if not isinstance(comps, tuple) or not comps:
+        raise ValueError("Mixture composites require a non-empty component tuple.")
+    if isinstance(weights, np.ndarray):
+        _validate_fixed_simplex(weights, (len(comps),), "Mixture weights")
+
+
+def _validate_hmm_args(args):
+    comps, transitions, initial = args
+    if not isinstance(comps, tuple) or not comps:
+        raise ValueError("Markov requires a non-empty emission tuple.")
+    k = len(comps)
+    if isinstance(transitions, np.ndarray):
+        _validate_fixed_simplex(transitions, (k, k), "Markov transitions")
+    elif isinstance(transitions, _SimplexSpec) and (transitions.rows != k or transitions.alpha.shape != (k,)):
+        raise ValueError("Markov transition specification must contain one length-k simplex per state.")
+    if isinstance(initial, np.ndarray):
+        _validate_fixed_simplex(initial, (k,), "Markov initial")
+    elif isinstance(initial, _SimplexSpec) and (initial.rows != 1 or initial.alpha.shape != (k,)):
+        raise ValueError("Markov initial specification must be one length-k simplex.")
+
+
+def _validate_lda_args(args):
+    k, vocab, alpha = args
+    if (
+        isinstance(k, (bool, np.bool_))
+        or not isinstance(k, (int, np.integer))
+        or k <= 0
+        or isinstance(vocab, (bool, np.bool_))
+        or not isinstance(vocab, (int, np.integer))
+        or vocab <= 0
+        or not np.isfinite(alpha)
+        or alpha <= 0.0
+    ):
+        raise ValueError("LDA requires positive exact topic/vocabulary dimensions and finite alpha > 0.")
+
+
+def _validate_mvn_args(args):
+    dim, mean, cov = args
+    if isinstance(dim, (bool, np.bool_)) or not isinstance(dim, (int, np.integer)) or dim <= 0:
+        raise ValueError("MVN dim must be an exact positive integer.")
+    if mean is not None and not isinstance(mean, (_VectorSpec, _OrderedSpec)):
+        arr = np.asarray(mean, dtype=float)
+        if arr.shape != (dim,) or not np.isfinite(arr).all():
+            raise ValueError(f"MVN mean must be finite with shape ({dim},).")
+    if cov is not None and not isinstance(cov, _CholeskySpec):
+        arr = np.asarray(cov, dtype=float)
+        if arr.shape != (dim, dim) or not np.isfinite(arr).all() or not np.allclose(arr, arr.T):
+            raise ValueError(f"MVN cov must be a finite symmetric ({dim}, {dim}) matrix.")
+        try:
+            np.linalg.cholesky(arr)
+        except np.linalg.LinAlgError as error:
+            raise ValueError("MVN cov must be positive definite.") from error
+
+
+def _validate_diag_args(args):
+    dim, mean, var = args
+    if isinstance(dim, (bool, np.bool_)) or not isinstance(dim, (int, np.integer)) or dim <= 0:
+        raise ValueError("DiagGaussian dim must be an exact positive integer.")
+    if mean is not None and not isinstance(mean, (_VectorSpec, _OrderedSpec)):
+        arr = np.asarray(mean, dtype=float)
+        if arr.shape != (dim,) or not np.isfinite(arr).all():
+            raise ValueError(f"DiagGaussian mean must be finite with shape ({dim},).")
+    if var is not None and not isinstance(var, _VectorSpec):
+        arr = np.asarray(var, dtype=float)
+        if arr.shape != (dim,) or not np.isfinite(arr).all() or np.any(arr <= 0.0):
+            raise ValueError(f"DiagGaussian var must be finite and positive with shape ({dim},).")
+
+
 # --- family registration: (user-facing args) -> (underlying *Distribution kwargs) ---
 register_family(
     "Normal",
@@ -130,6 +270,7 @@ register_family(
     lambda p: {"p": float(p)},
     arity=1,
     support=("unit",),
+    validator=_validate_probability_open_lower,
     read=lambda d: {"p": d.p},
 )
 register_family(
@@ -147,6 +288,8 @@ register_family(
     DirichletEstimator,
     lambda alpha: {"alpha": np.asarray(alpha, dtype=float)},
     arity=1,
+    positive=(True,),
+    validator=_validate_positive_vector,
     read=lambda d: {"alpha": np.asarray(d.alpha), "mean": np.asarray(d.alpha) / float(np.sum(d.alpha))},
 )
 register_family(
@@ -199,6 +342,7 @@ register_family(
     arity=2,
     positive=(True, False),
     support=("positive", "unit"),
+    validator=_validate_probability_open_lower,
     init_fit=_nb_init,
     read=lambda d: {"r": d.r, "p": d.p},
 )
@@ -269,6 +413,7 @@ register_family(
     lambda p: {"p": float(p)},
     arity=1,
     support=("unit",),
+    validator=_validate_logseries_probability,
     seed_at=lambda v, s: {"p": 0.5},
     read=lambda d: {"p": d.p},
 )
@@ -329,6 +474,7 @@ register_family(
     lambda m, omega: {"m": float(m), "omega": float(omega)},
     arity=2,
     positive=(True, True),
+    validator=_validate_nakagami,
     seed_at=lambda v, s: {"m": 1.0, "omega": max(float(v) ** 2, 1e-2)},
     read=lambda d: {"m": d.m, "omega": d.omega},
 )
@@ -350,7 +496,14 @@ def _cat_args(probs):
     return {"pmap": {i: float(v) for i, v in enumerate(probs)}}
 
 
-register_family("Categorical", CategoricalDistribution, CategoricalEstimator, _cat_args, arity=1)
+register_family(
+    "Categorical",
+    CategoricalDistribution,
+    CategoricalEstimator,
+    _cat_args,
+    arity=1,
+    validator=_validate_probability_vector,
+)
 
 register_family(
     "Weibull",
@@ -388,6 +541,7 @@ register_family(
     UniformEstimator,
     lambda low, high: {"low": float(low), "high": float(high)},
     arity=2,
+    validator=_validate_uniform_bounds,
     read=lambda d: {"low": d.low, "high": d.high},
 )
 register_family(
@@ -415,7 +569,7 @@ register_family(
     BinomialEstimator,
     lambda n, p: {"p": float(p), "n": int(n)},
     arity=2,
-    support=("real", "unit"),
+    support=("fixed_nonnegative_integer", "unit"),
     read=lambda d: {"n": d.n, "p": d.p},
 )
 
@@ -465,7 +619,15 @@ def _mix_read(d, read_params):
     return {"components": [read_params(c) for c in d.components], "weights": np.asarray(d.w)}
 
 
-register_composite("Mixture", _mix_dist, _mix_est, seed_fn=_mix_seed, dist_cls=MixtureDistribution, read=_mix_read)
+register_composite(
+    "Mixture",
+    _mix_dist,
+    _mix_est,
+    seed_fn=_mix_seed,
+    dist_cls=MixtureDistribution,
+    read=_mix_read,
+    validator=_validate_mixture_args,
+)
 
 
 # --- SemiMix: semi-supervised mixture (observations are (value, prior) pairs) ------
@@ -478,9 +640,28 @@ def _semimix_dist(args, lower_child):
 
 
 def _semimix_est(args, lower_child_est, name, keys):
-    comps, _weights = args
+    comps, weights = args
     estimators = [lower_child_est(c) for c in comps]
-    return SemiSupervisedMixtureEstimator(estimators, name=name)
+    base = SemiSupervisedMixtureEstimator(estimators, name=name)
+    return _FixedSemiMixEstimator(base, weights) if isinstance(weights, np.ndarray) else base
+
+
+class _FixedSemiMixEstimator:
+    """Delegate component estimation while preserving constructor-declared mixture weights."""
+
+    def __init__(self, base, weights):
+        self.base = base
+        self.weights = np.asarray(weights, dtype=float).copy()
+
+    def accumulator_factory(self):
+        return self.base.accumulator_factory()
+
+    def estimate(self, nobs, suff_stat):
+        fitted = self.base.estimate(nobs, suff_stat)
+        return SemiSupervisedMixtureDistribution(fitted.components, w=self.weights, name=fitted.name)
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
 
 
 def _semimix_read(d, read_params):
@@ -488,7 +669,12 @@ def _semimix_read(d, read_params):
 
 
 register_composite(
-    "SemiMix", _semimix_dist, _semimix_est, dist_cls=SemiSupervisedMixtureDistribution, read=_semimix_read
+    "SemiMix",
+    _semimix_dist,
+    _semimix_est,
+    dist_cls=SemiSupervisedMixtureDistribution,
+    read=_semimix_read,
+    validator=_validate_mixture_args,
 )
 
 
@@ -524,7 +710,38 @@ def _hmm_dist(args, lower_child):
 
 def _hmm_est(args, lower_child_est, name, keys):
     comps = args[0]
-    return HiddenMarkovEstimator([lower_child_est(c) for c in comps], name=name)
+    base = HiddenMarkovEstimator([lower_child_est(c) for c in comps], name=name)
+    fixed_transitions = args[1] if len(args) > 1 and isinstance(args[1], np.ndarray) else None
+    fixed_initial = args[2] if len(args) > 2 and isinstance(args[2], np.ndarray) else None
+    if fixed_transitions is None and fixed_initial is None:
+        return base
+    return _FixedHMMEstimator(base, fixed_transitions, fixed_initial)
+
+
+class _FixedHMMEstimator:
+    """Delegate emission estimation while preserving fixed initial/transition probabilities."""
+
+    def __init__(self, base, transitions, initial):
+        self.base = base
+        self.transitions = None if transitions is None else np.asarray(transitions, dtype=float).copy()
+        self.initial = None if initial is None else np.asarray(initial, dtype=float).copy()
+
+    def accumulator_factory(self):
+        return self.base.accumulator_factory()
+
+    def estimate(self, nobs, suff_stat):
+        fitted = self.base.estimate(nobs, suff_stat)
+        return HiddenMarkovModelDistribution(
+            topics=fitted.topics,
+            w=fitted.w if self.initial is None else self.initial,
+            transitions=fitted.transitions if self.transitions is None else self.transitions,
+            len_dist=fitted.len_dist,
+            name=fitted.name,
+            use_numba=fitted.use_numba,
+        )
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
 
 
 def _flatten_obs(data):
@@ -543,7 +760,9 @@ def _hmm_seed(args, data, rng, seed_child):
     topics = [seed_child(c, arr[i], scale, rng) for c, i in zip(comps, idx)]
     if any(t is None for t in topics):
         return None
-    return HiddenMarkovModelDistribution(topics, w=np.ones(k) / k, transitions=np.ones((k, k)) / k)
+    transitions = args[1] if len(args) > 1 and isinstance(args[1], np.ndarray) else np.ones((k, k)) / k
+    initial = args[2] if len(args) > 2 and isinstance(args[2], np.ndarray) else np.ones(k) / k
+    return HiddenMarkovModelDistribution(topics, w=initial, transitions=transitions)
 
 
 def _hmm_read(d, read_params):
@@ -555,7 +774,13 @@ def _hmm_read(d, read_params):
 
 
 register_composite(
-    "Markov", _hmm_dist, _hmm_est, seed_fn=_hmm_seed, dist_cls=HiddenMarkovModelDistribution, read=_hmm_read
+    "Markov",
+    _hmm_dist,
+    _hmm_est,
+    seed_fn=_hmm_seed,
+    dist_cls=HiddenMarkovModelDistribution,
+    read=_hmm_read,
+    validator=_validate_hmm_args,
 )
 
 
@@ -583,7 +808,15 @@ def _lda_read(d, read_params):
     return {"topics": [np.asarray(t.p_vec) for t in d.topics], "alpha": np.asarray(d.alpha)}
 
 
-register_composite("LDA", _lda_dist, _lda_est, seed_fn=_lda_seed, dist_cls=LDADistribution, read=_lda_read)
+register_composite(
+    "LDA",
+    _lda_dist,
+    _lda_est,
+    seed_fn=_lda_seed,
+    dist_cls=LDADistribution,
+    read=_lda_read,
+    validator=_validate_lda_args,
+)
 
 
 # --- multivariate Gaussian (data are vectors) -------------------------------------
@@ -591,40 +824,135 @@ def _mvn_dist(args, lower_child):
     dim = args[0]
     mean = args[1] if len(args) > 1 else None
     cov = args[2] if len(args) > 2 else None
-    mu = np.asarray(mean, dtype=float) if isinstance(mean, np.ndarray) else np.zeros(dim)
-    covar = np.asarray(cov, dtype=float) if isinstance(cov, np.ndarray) else np.eye(dim)
+    mu = np.zeros(dim) if mean is None else np.asarray(mean, dtype=float)
+    covar = np.eye(dim) if cov is None else np.asarray(cov, dtype=float)
     return MultivariateGaussianDistribution(mu, covar)
 
 
 def _mvn_est(args, lower_child_est, name, keys):
-    return MultivariateGaussianEstimator(args[0])
+    dim, mean, cov = args
+    fixed_mean = np.asarray(mean, dtype=float) if isinstance(mean, np.ndarray) else None
+    fixed_cov = np.asarray(cov, dtype=float) if isinstance(cov, np.ndarray) else None
+    base = MultivariateGaussianEstimator(dim, name=name, keys=keys)
+    if fixed_mean is None and fixed_cov is None:
+        return base
+    return _FixedMVNEstimator(base, fixed_mean, fixed_cov)
+
+
+class _FixedMVNEstimator:
+    """Estimate unspecified MVN slots while preserving fixed conventional parameters."""
+
+    def __init__(self, base, mean, cov):
+        self.base = base
+        self.mean = None if mean is None else np.asarray(mean, dtype=float).copy()
+        self.cov = None if cov is None else np.asarray(cov, dtype=float).copy()
+
+    def accumulator_factory(self):
+        return self.base.accumulator_factory()
+
+    def estimate(self, nobs, suff_stat):
+        fitted = self.base.estimate(nobs, suff_stat)
+        mean = fitted.mu if self.mean is None else self.mean
+        if self.cov is not None:
+            cov = self.cov
+        elif self.mean is None or suff_stat[2] <= 0:
+            cov = fitted.covar
+        else:
+            count = float(suff_stat[2])
+            sample_mean = np.asarray(suff_stat[0], dtype=float) / count
+            second = np.asarray(suff_stat[1], dtype=float) / count
+            raw_cov = (
+                second
+                - np.outer(sample_mean, mean)
+                - np.outer(mean, sample_mean)
+                + np.outer(mean, mean)
+            )
+            cov = self.base._regularize_covar(raw_cov)
+        return MultivariateGaussianDistribution(mean, cov, name=self.base.name, keys=self.base.keys)
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
 
 
 def _mvn_read(d, read_params):
     return {"mean": np.asarray(d.mu), "cov": np.asarray(d.covar)}
 
 
-register_composite("MVN", _mvn_dist, _mvn_est, dist_cls=MultivariateGaussianDistribution, read=_mvn_read)
+register_composite(
+    "MVN",
+    _mvn_dist,
+    _mvn_est,
+    dist_cls=MultivariateGaussianDistribution,
+    read=_mvn_read,
+    validator=_validate_mvn_args,
+)
 
 
 def _diag_dist(args, lower_child):
     dim = args[0]
     mean = args[1] if len(args) > 1 else None
     var = args[2] if len(args) > 2 else None
-    mu = np.asarray(mean, dtype=float) if isinstance(mean, np.ndarray) else np.zeros(dim)
-    covar = np.asarray(var, dtype=float) if isinstance(var, np.ndarray) else np.ones(dim)
+    mu = np.zeros(dim) if mean is None else np.asarray(mean, dtype=float)
+    covar = np.ones(dim) if var is None else np.asarray(var, dtype=float)
     return DiagonalGaussianDistribution(mu, covar)
 
 
 def _diag_est(args, lower_child_est, name, keys):
-    return DiagonalGaussianEstimator(dim=args[0])
+    dim, mean, var = args
+    fixed_mean = np.asarray(mean, dtype=float) if isinstance(mean, np.ndarray) else None
+    fixed_var = np.asarray(var, dtype=float) if isinstance(var, np.ndarray) else None
+    base = DiagonalGaussianEstimator(dim=dim, name=name, keys=keys)
+    if fixed_mean is None and fixed_var is None:
+        return base
+    return _FixedDiagEstimator(base, fixed_mean, fixed_var)
+
+
+class _FixedDiagEstimator:
+    """Estimate unspecified diagonal-Gaussian slots while preserving fixed parameters."""
+
+    def __init__(self, base, mean, var):
+        self.base = base
+        self.mean = None if mean is None else np.asarray(mean, dtype=float).copy()
+        self.var = None if var is None else np.asarray(var, dtype=float).copy()
+
+    def accumulator_factory(self):
+        return self.base.accumulator_factory()
+
+    def estimate(self, nobs, suff_stat):
+        fitted = self.base.estimate(nobs, suff_stat)
+        mean = fitted.mu if self.mean is None else self.mean
+        if self.var is not None:
+            var = self.var
+        elif self.mean is None or suff_stat[2] <= 0:
+            var = fitted.covar
+        else:
+            count = float(suff_stat[2])
+            sample_mean = np.asarray(suff_stat[0], dtype=float) / count
+            second = np.asarray(suff_stat[1], dtype=float) / count
+            raw_var = second - 2.0 * mean * sample_mean + mean * mean
+            floor = max(
+                self.base.min_covar,
+                self.base.ridge * float(np.mean(raw_var[raw_var > 0.0])) if np.any(raw_var > 0.0) else 0.0,
+            )
+            var = np.maximum(raw_var, floor)
+        return DiagonalGaussianDistribution(mean, var, name=self.base.name, keys=self.base.keys)
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
 
 
 def _diag_read(d, read_params):
     return {"mean": np.asarray(d.mu), "var": np.asarray(d.covar)}
 
 
-register_composite("DiagGaussian", _diag_dist, _diag_est, dist_cls=DiagonalGaussianDistribution, read=_diag_read)
+register_composite(
+    "DiagGaussian",
+    _diag_dist,
+    _diag_est,
+    dist_cls=DiagonalGaussianDistribution,
+    read=_diag_read,
+    validator=_validate_diag_args,
+)
 
 
 # Linear-Gaussian state space (time series): the StateSpace composite self-registers (with its

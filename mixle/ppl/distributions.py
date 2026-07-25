@@ -8,6 +8,7 @@ registrations live in :mod:`mixle.ppl._lowering`). A parameter slot accepts a co
 
 from __future__ import annotations
 
+from numbers import Integral
 from typing import Any
 
 import numpy as np
@@ -21,6 +22,49 @@ from mixle.ppl.core import (
     free,
     ordered,
 )
+
+
+def _exact_dimension(value: Any, label: str, *, allow_zero: bool = False) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise ValueError(f"{label} must be an exact integer, got {value!r}.")
+    result = int(value)
+    minimum = 0 if allow_zero else 1
+    if result < minimum:
+        relation = "non-negative" if allow_zero else "positive"
+        raise ValueError(f"{label} must be {relation}, got {result}.")
+    return result
+
+
+def _fixed_array(value: Any, shape: tuple[int, ...], label: str, *, positive: bool = False) -> np.ndarray:
+    try:
+        arr = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{label} must be a numeric array with shape {shape}.") from error
+    if arr.shape != shape or not np.isfinite(arr).all():
+        raise ValueError(f"{label} must be a finite numeric array with shape {shape}, got {arr.shape}.")
+    if positive and np.any(arr <= 0.0):
+        raise ValueError(f"{label} must contain only strictly positive values.")
+    return arr.copy()
+
+
+def _fixed_simplex(value: Any, size: int, label: str) -> np.ndarray:
+    arr = _fixed_array(value, (size,), label)
+    if np.any(arr < 0.0) or not np.isclose(float(arr.sum()), 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError(f"{label} must be a non-negative length-{size} probability vector summing to one.")
+    return arr
+
+
+def _mixture_weights(weights: Any, size: int, label: str):
+    if weights is None or weights is free:
+        return weights
+    if isinstance(weights, RandomVariable):
+        if weights._kind != "sample" or weights._family.name != "Dirichlet":
+            raise ValueError(f"{label} must be fixed probabilities, free, or a Dirichlet prior.")
+        alpha = weights._args[0]
+        if not isinstance(alpha, (_SimplexSpec, _VectorSpec)):
+            _fixed_array(alpha, (size,), f"{label} Dirichlet concentration", positive=True)
+        return weights
+    return _fixed_simplex(weights, size, label)
 
 
 # --- constructors: conventional parameterizations, return symbolic RandomVariables ---
@@ -76,8 +120,12 @@ def Dirichlet(
     concentration by maximum likelihood, inferring the dimension ``K`` from the observed simplex
     data (no ``dim=`` needed); pass ``dim=K`` to request the explicit positive-``K``-vector parameter
     treatment for ``how='mcmc'|'ensemble'|'map'``."""
+    if dim is not None:
+        dim = _exact_dimension(dim, "Dirichlet dim")
     if alpha is free and dim is not None:
-        alpha = _VectorSpec(int(dim), "positive", name="alpha")
+        alpha = _VectorSpec(dim, "positive", name="alpha")
+    elif dim is not None and alpha is not free:
+        _fixed_array(alpha, (dim,), "Dirichlet alpha", positive=True)
     return RandomVariable._sample("Dirichlet", (alpha,), name=name, keys=keys)
 
 
@@ -207,9 +255,18 @@ def Categorical(
     ``Categorical(logits=Net(out=K))`` is **neural classification**: ``p(y|x) = softmax(Net(x))``, the
     softmax-link sibling of logistic regression. Fit with the conditional verb ``.fit(y, given={"x": X})``."""
     if logits is not None:
+        if probs is not None:
+            raise ValueError("Categorical accepts either probs or logits, not both.")
         return RandomVariable._sample("Categorical", (logits,), name=name, keys=keys)
+    if probs is None:
+        raise ValueError("Categorical requires probs, logits, or the explicit token free.")
+    if dim is not None:
+        dim = _exact_dimension(dim, "Categorical dim")
     if probs is free and dim is not None:
-        probs = _SimplexSpec(np.ones(int(dim)), rows=1, name="p")
+        probs = _SimplexSpec(np.ones(dim), rows=1, name="p")
+    elif dim is not None and probs is not free:
+        values = list(probs.values()) if isinstance(probs, dict) else probs
+        _fixed_simplex(values, dim, "Categorical probs")
     return RandomVariable._sample("Categorical", (probs,), name=name, keys=keys)
 
 
@@ -245,6 +302,7 @@ def Pareto(scale: Any, shape: Any, *, name: str | None = None, keys: str | None 
 
 def Binomial(n: Any, p: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Symbolic binomial distribution with ``n`` trials and success probability ``p``."""
+    n = _exact_dimension(n, "Binomial n", allow_zero=True)
     return RandomVariable._sample("Binomial", (n, p), name=name, keys=keys)
 
 
@@ -263,6 +321,9 @@ def Mix(components, weights=None, *, name: str | None = None) -> RandomVariable:
     mixture implementation.
     """
     comps = tuple(_as_rv(c) for c in components)
+    if not comps:
+        raise ValueError("Mix requires at least one component.")
+    weights = _mixture_weights(weights, len(comps), "Mix weights")
     return RandomVariable._sample("Mixture", (comps, weights), name=name)
 
 
@@ -276,6 +337,9 @@ def SemiMix(components, weights=None, *, name: str | None = None) -> RandomVaria
     fits a 2-component Gaussian mixture from a mix of labeled and unlabeled rows.
     """
     comps = tuple(_as_rv(c) for c in components)
+    if not comps:
+        raise ValueError("SemiMix requires at least one component.")
+    weights = _mixture_weights(weights, len(comps), "SemiMix weights")
     return RandomVariable._sample("SemiMix", (comps, weights), name=name)
 
 
@@ -316,7 +380,17 @@ def MVN(dim: int, *, mean=None, cov=None, name: str | None = None) -> RandomVari
     ``mean=free`` (a ``dim``-vector on the real line) or ``mean=ordered`` (increasing entries,
     for identifiability) and/or ``cov=free`` (a full SPD covariance via its Cholesky factor) and
     fit with ``how='mcmc'|'ensemble'|'map'``."""
-    dim = int(dim)
+    dim = _exact_dimension(dim, "MVN dim")
+    if mean is not None and mean is not free and mean is not ordered:
+        mean = _fixed_array(mean, (dim,), "MVN mean")
+    if cov is not None and cov is not free:
+        cov = _fixed_array(cov, (dim, dim), "MVN cov")
+        if not np.allclose(cov, cov.T, rtol=1.0e-10, atol=1.0e-12):
+            raise ValueError("MVN cov must be symmetric.")
+        try:
+            np.linalg.cholesky(cov)
+        except np.linalg.LinAlgError as error:
+            raise ValueError("MVN cov must be positive definite.") from error
     cov_spec = _CholeskySpec(dim, name="S") if cov is free else cov
     return RandomVariable._sample("MVN", (dim, _mean_spec(mean, dim), cov_spec), name=name)
 
@@ -326,7 +400,11 @@ def DiagGaussian(dim: int, *, mean=None, var=None, name: str | None = None) -> R
     recovers mean and per-axis variance by EM; the **mean vector** (``mean=free`` / ``ordered``)
     and **diagonal variances** (``var=free``, a positive vector) are also inferable parameters via
     ``how='mcmc'|'ensemble'|'map'``."""
-    dim = int(dim)
+    dim = _exact_dimension(dim, "DiagGaussian dim")
+    if mean is not None and mean is not free and mean is not ordered:
+        mean = _fixed_array(mean, (dim,), "DiagGaussian mean")
+    if var is not None and var is not free:
+        var = _fixed_array(var, (dim,), "DiagGaussian var", positive=True)
     var_spec = _VectorSpec(dim, "positive", name="s2") if var is free else var
     return RandomVariable._sample("DiagGaussian", (dim, _mean_spec(mean, dim), var_spec), name=name)
 
@@ -335,7 +413,14 @@ def LDA(num_topics: int, vocab_size: int, *, alpha: float = 1.0, name: str | Non
     """Latent Dirichlet allocation. Fit on a list of documents, each a bag of
     ``(word_id, count)`` pairs over word ids ``0..vocab_size-1``. Topics are recovered
     as word distributions; alpha (the document-topic Dirichlet) is fixed by default."""
-    return RandomVariable._sample("LDA", (int(num_topics), int(vocab_size), float(alpha)), name=name)
+    num_topics = _exact_dimension(num_topics, "LDA num_topics")
+    vocab_size = _exact_dimension(vocab_size, "LDA vocab_size")
+    if isinstance(alpha, (bool, np.bool_)) or not np.isscalar(alpha):
+        raise ValueError(f"LDA alpha must be a finite positive scalar, got {alpha!r}.")
+    alpha = float(alpha)
+    if not np.isfinite(alpha) or alpha <= 0.0:
+        raise ValueError(f"LDA alpha must be a finite positive scalar, got {alpha!r}.")
+    return RandomVariable._sample("LDA", (num_topics, vocab_size, alpha), name=name)
 
 
 def _simplex_arg(spec, rows: int, k: int):
@@ -345,10 +430,20 @@ def _simplex_arg(spec, rows: int, k: int):
     if spec is None:
         return None
     if isinstance(spec, RandomVariable) and spec._kind == "sample" and spec._family.name == "Dirichlet":
+        alpha = spec._args[0]
+        if not isinstance(alpha, (_SimplexSpec, _VectorSpec)):
+            _fixed_array(alpha, (k,), "Markov Dirichlet concentration", positive=True)
         return _SimplexSpec(spec._args[0], rows=rows, name=spec._name)
     if spec is free:
         return _SimplexSpec(np.ones(k), rows=rows)
-    return np.asarray(spec, dtype=float)  # a fixed transition matrix / initial distribution
+    if isinstance(spec, RandomVariable):
+        raise ValueError("Markov structural probabilities must be fixed, free, or a Dirichlet prior.")
+    if rows == 1:
+        return _fixed_simplex(spec, k, "Markov initial")
+    arr = _fixed_array(spec, (rows, k), "Markov transitions")
+    if np.any(arr < 0.0) or not np.allclose(arr.sum(axis=1), 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError("Markov transitions must be a non-negative row-stochastic matrix.")
+    return arr
 
 
 def Markov(
@@ -366,11 +461,16 @@ def Markov(
     ordered-emission constraint for identifiability).
     """
     if isinstance(emission, (list, tuple)):
+        if not emission:
+            raise ValueError("Markov requires at least one emission state.")
         comps = tuple(_as_rv(e) for e in emission)
+        if states is not None and _exact_dimension(states, "Markov states") != len(comps):
+            raise ValueError("Markov states must match the number of supplied emissions.")
         states = len(comps)
     else:
         if states is None:
             raise ValueError("Markov(emission, states=...) needs states, or a list of emissions.")
+        states = _exact_dimension(states, "Markov states")
         comps = tuple(_as_rv(emission) for _ in range(states))
     trans = _simplex_arg(transitions, states, states)
     init = _simplex_arg(initial, 1, states)

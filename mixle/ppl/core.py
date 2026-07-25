@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from numbers import Integral
 from typing import Any
 
 import numpy as np
@@ -173,7 +174,7 @@ class _Free:
     __slots__ = ()
 
     def __call__(self, dim: int, *, name=None, kind: str = "vector", support: str = "real"):
-        return _param_handle(int(dim), name=name, kind=kind, support=support)
+        return _param_handle(dim, name=name, kind=kind, support=support)
 
     def __mul__(self, other):  # free * Field -> an OLS regression coefficient
         if isinstance(other, Field):
@@ -423,7 +424,11 @@ class _SimplexSpec:
 
     def __init__(self, alpha, rows: int = 1, name: str | None = None):
         self.alpha = np.asarray(alpha, dtype=float)
-        self.rows = int(rows)
+        if self.alpha.ndim != 1 or self.alpha.size == 0 or not np.isfinite(self.alpha).all():
+            raise ValueError("simplex concentration must be a non-empty finite vector.")
+        if np.any(self.alpha <= 0.0):
+            raise ValueError("simplex concentration entries must be strictly positive.")
+        self.rows = _exact_positive_int(rows, "simplex rows")
         self.name = name
 
 
@@ -434,7 +439,9 @@ class _VectorSpec:
     __slots__ = ("dim", "support", "name")
 
     def __init__(self, dim: int, support: str = "real", name: str | None = None):
-        self.dim = int(dim)
+        self.dim = _exact_positive_int(dim, "vector dimension")
+        if support not in {"real", "positive", "unit"}:
+            raise ValueError(f"vector support must be real, positive, or unit, got {support!r}.")
         self.support = support
         self.name = name
 
@@ -447,7 +454,7 @@ class _OrderedSpec:
     __slots__ = ("dim", "name")
 
     def __init__(self, dim: int, name: str | None = None):
-        self.dim = int(dim)
+        self.dim = _exact_positive_int(dim, "ordered dimension")
         self.name = name
 
 
@@ -479,7 +486,7 @@ class _CholeskySpec:
     __slots__ = ("dim", "name")
 
     def __init__(self, dim: int, name: str | None = None):
-        self.dim = int(dim)
+        self.dim = _exact_positive_int(dim, "Cholesky dimension")
         self.name = name
 
 
@@ -933,6 +940,7 @@ class Family:
         "init_fit",
         "read",
         "support",
+        "validator",
     )
 
     def __init__(
@@ -947,6 +955,7 @@ class Family:
         init_fit=None,
         read=None,
         support=None,
+        validator=None,
     ):
         self.name = name
         self.dist_cls = dist_cls
@@ -970,9 +979,45 @@ class Family:
         # read(dist) -> {conventional param name: value}: the inverse of construction, so
         # fitted params return in the *same* parameterization the user wrote (sd, not sigma2).
         self.read = read
+        # Optional family-specific validation supplements the common finite/support contract below.
+        # It receives the complete conventional argument tuple.
+        self.validator = validator
+
+    def validate_args(self, args: tuple[Any, ...]) -> None:
+        """Validate fixed conventional parameters without rejecting symbolic parameter expressions."""
+        if len(args) != self.arity:
+            raise ValueError(f"{self.name} expects {self.arity} parameter(s), got {len(args)}.")
+        structural = (_Free, RandomVariable, _SimplexSpec, _VectorSpec, _OrderedSpec, _CholeskySpec)
+        for index, (arg, support) in enumerate(zip(args, self.support)):
+            if arg is None:
+                raise ValueError(f"{self.name} parameter {index} cannot be None.")
+            if isinstance(arg, structural):
+                continue
+            values = list(arg.values()) if isinstance(arg, dict) else arg
+            try:
+                arr = np.asarray(values)
+            except (TypeError, ValueError):
+                continue  # neural/callable expressions are validated by their owning lowering route
+            if arr.dtype.kind not in "fiu":
+                continue
+            if arr.dtype.kind == "b" or not np.isfinite(arr.astype(float)).all():
+                raise ValueError(f"{self.name} parameter {index} must be finite numeric data.")
+            numeric = arr.astype(float)
+            if support == "positive" and np.any(numeric <= 0.0):
+                raise ValueError(f"{self.name} parameter {index} must be strictly positive.")
+            if support == "unit" and (np.any(numeric < 0.0) or np.any(numeric > 1.0)):
+                raise ValueError(f"{self.name} parameter {index} must lie in [0, 1].")
+            if support == "nonnegative" and np.any(numeric < 0.0):
+                raise ValueError(f"{self.name} parameter {index} must be non-negative.")
+            if support == "fixed_nonnegative_integer":
+                if numeric.ndim != 0 or numeric < 0.0 or numeric != np.floor(numeric):
+                    raise ValueError(f"{self.name} parameter {index} must be an exact non-negative integer.")
+        if self.validator is not None:
+            self.validator(args)
 
     def make_dist(self, args: tuple[Any, ...], name: str | None):
         """Construct the concrete distribution for conventional PPL arguments."""
+        self.validate_args(args)
         kwargs = self.to_dist(*args)
         if name is not None:
             kwargs.setdefault("name", name)
@@ -999,9 +1044,9 @@ class CompositeFamily:
     that lowers a child RandomVariable to a dist / estimator.
     """
 
-    __slots__ = ("name", "dist_fn", "est_fn", "seed_fn", "read", "fit_fn")
+    __slots__ = ("name", "dist_fn", "est_fn", "seed_fn", "read", "fit_fn", "validator")
 
-    def __init__(self, name, dist_fn, est_fn, seed_fn=None, read=None, fit_fn=None):
+    def __init__(self, name, dist_fn, est_fn, seed_fn=None, read=None, fit_fn=None, validator=None):
         self.name = name
         self.dist_fn = dist_fn
         self.est_fn = est_fn
@@ -1017,6 +1062,11 @@ class CompositeFamily:
         # family owns its fitter and core needs no per-family branch. This is the extension point a
         # plugin (e.g. mixle-pde) uses to register a fittable composite without touching core.
         self.fit_fn = fit_fn
+        self.validator = validator
+
+    def validate_args(self, args: tuple[Any, ...]) -> None:
+        if self.validator is not None:
+            self.validator(args)
 
 
 _FAMILIES: dict[str, Any] = {}
@@ -1025,7 +1075,17 @@ _DIST_TO_COMPOSITE_READ: dict[type, Any] = {}  # composite dist type -> read(dis
 
 
 def register_family(
-    name, dist_cls, est_cls, to_dist, arity, seed_at=None, positive=None, init_fit=None, read=None, support=None
+    name,
+    dist_cls,
+    est_cls,
+    to_dist,
+    arity,
+    seed_at=None,
+    positive=None,
+    init_fit=None,
+    read=None,
+    support=None,
+    validator=None,
 ) -> Family:
     """Register a flat PPL family and its distribution/estimator lowering rules."""
     fam = Family(
@@ -1039,15 +1099,18 @@ def register_family(
         init_fit=init_fit,
         read=read,
         support=support,
+        validator=validator,
     )
     _FAMILIES[name] = fam
     _DIST_TO_FAMILY[dist_cls] = fam
     return fam
 
 
-def register_composite(name, dist_fn, est_fn, seed_fn=None, dist_cls=None, read=None, fit_fn=None) -> CompositeFamily:
+def register_composite(
+    name, dist_fn, est_fn, seed_fn=None, dist_cls=None, read=None, fit_fn=None, validator=None
+) -> CompositeFamily:
     """Register a composite PPL family with custom lowering or fitting hooks."""
-    fam = CompositeFamily(name, dist_fn, est_fn, seed_fn=seed_fn, read=read, fit_fn=fit_fn)
+    fam = CompositeFamily(name, dist_fn, est_fn, seed_fn=seed_fn, read=read, fit_fn=fit_fn, validator=validator)
     _FAMILIES[name] = fam
     if dist_cls is not None and read is not None:
         _DIST_TO_COMPOSITE_READ[dist_cls] = read
@@ -1198,6 +1261,8 @@ class RandomVariable:
     @classmethod
     def _sample(cls, family_name, args, *, name=None, keys=None, scope="shared") -> RandomVariable:
         fam = _FAMILIES[family_name]
+        if isinstance(fam, (Family, CompositeFamily)):
+            fam.validate_args(tuple(args))
         return cls("sample", family=fam, args=args, name=name, keys=keys, scope=scope)
 
     def each(self, by: str | None = None) -> RandomVariable:
@@ -1927,6 +1992,11 @@ class RandomVariable:
         mode under flat priors); for ``how='map'/'mcmc'`` with missing data build the model with
         ``mixle.stats.marginalized()`` leaves directly.
         """
+        if self._kind == "sample" and isinstance(self._family, (Family, CompositeFamily)):
+            # Revalidate at execution because fixed arrays/lists may have been mutated after the
+            # symbolic model was created. Construction, fitting, lowering, and reconstruction share
+            # this one family contract.
+            self._family.validate_args(self._args)
         if missing not in ("error", "marginalize"):
             raise ValueError(f"missing={missing!r}; choose 'error' or 'marginalize'.")
         # ``auto`` and ``em`` are resolved/handled by ``fit`` itself; every other ``how`` is a pure
@@ -2191,6 +2261,15 @@ def constrain(*constraints) -> RandomVariable:
     return RandomVariable("joint", args=(leaves, combined), name=None)
 
 
+def _exact_positive_int(value: Any, label: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise ValueError(f"{label} must be an exact positive integer, got {value!r}.")
+    value = int(value)
+    if value <= 0:
+        raise ValueError(f"{label} must be an exact positive integer, got {value!r}.")
+    return value
+
+
 def _param_handle(dim: int, *, name=None, kind: str = "vector", support: str = "real") -> RandomVariable:
     """Build a referenceable vector/matrix parameter handle (the result of calling ``free(...)``).
 
@@ -2199,7 +2278,7 @@ def _param_handle(dim: int, *, name=None, kind: str = "vector", support: str = "
     referenced in constraints — ``m = free(3, name="mu"); MVN(3, mean=m).fit(X, constraints=increasing(m))``.
     The handle behaves like a vector RV in constraint expressions (``m[i]``, ``m[0] < m[1]``, ...).
     """
-    dim = int(dim)
+    dim = _exact_positive_int(dim, "free dimension")
     if kind == "vector":
         spec = _VectorSpec(dim, support, name)
     elif kind == "ordered":
@@ -2218,6 +2297,8 @@ def _rv_reconstruct(kind, fam_name, args, name, keys, dist, scope, reparam=None)
     if kind == "bound":
         return RandomVariable._bound(dist, name=name)
     family = _FAMILIES[fam_name] if fam_name is not None else None
+    if kind == "sample" and isinstance(family, (Family, CompositeFamily)):
+        family.validate_args(tuple(args))
     return RandomVariable(kind, family=family, args=args, name=name, keys=keys, scope=scope, reparam=reparam)
 
 
@@ -2253,6 +2334,7 @@ def lower(rv: RandomVariable, *, target: str = "dist"):
 
     fam = rv._family
     if isinstance(fam, CompositeFamily):
+        fam.validate_args(rv._args)
         if target == "dist":
             result = fam.dist_fn(rv._args, lambda c: lower(c, target="dist"))
         elif target == "estimator":

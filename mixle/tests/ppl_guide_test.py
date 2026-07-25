@@ -148,9 +148,8 @@ class StructuredVITestCase(unittest.TestCase):
             with self.subTest(docs=docs, kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
                 admixture(docs, topic_handles, **kwargs)
 
-        bad_topics = [Dirichlet([0.1, 0.1]), Dirichlet([0.1, -0.1])]
         with self.assertRaises(ValueError):
-            admixture([[0, 1]], bad_topics)
+            Dirichlet([0.1, -0.1])
 
     def test_summary_lists_named_latents_and_elbo(self):
         rng = np.random.RandomState(5)
