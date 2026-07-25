@@ -60,7 +60,15 @@ if _HAS_TORCH:
     for _i in range(_N_TEST):
         _est = posterior_mean_estimate(_back_sampler, _Y_TEST[_i], n_draws=20)
         _errors.append(abs(float(_est[0]) - float(_X_TEST[_i, 0])))
-        _cycle_scores.append(cycle_inconsistency(_back_sampler, _Y_TEST[_i], n_draws=20))
+        _cycle_scores.append(
+            cycle_inconsistency(
+                _back_sampler,
+                _Y_TEST[_i],
+                n_draws=20,
+                forward=lambda x: np.maximum(x, 0.0),
+                scale=_NOISE,
+            )
+        )
         _fwd_draws = np.asarray([_fwd_sampler.sample_given(_X_TEST[_i]) for _ in range(20)])
         _marginal_conf.append(float(np.var(_fwd_draws)))
     _ERRORS = np.asarray(_errors)

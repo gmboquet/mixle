@@ -36,6 +36,7 @@ from mixle.reason.core import (
 )
 from mixle.reason.cross_modal import CrossModalJoint
 from mixle.reason.cycle_consistency import (
+    CycleKLReceipt,
     cycle_inconsistency,
     fit_cycle_transport,
     joint_cycle_consistency_receipt,
@@ -121,6 +122,7 @@ __all__ = [
     "task_sufficient_projection",
     "read_out",
     "cycle_inconsistency",
+    "CycleKLReceipt",
     "fit_cycle_transport",
     "posterior_mean_estimate",
     "selective_error",

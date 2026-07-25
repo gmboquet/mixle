@@ -218,7 +218,11 @@ class CycleConsistencyReceiptFlagsBrokenProjectionTest(unittest.TestCase):
         receipt = joint_cycle_consistency_receipt(
             self.well_behaved, "image", "text", n_round_trip=200, n_kl_samples=400, seed=0
         )
-        self.assertLess(receipt, 0.1)
+        self.assertLess(receipt.nonnegative_estimate, 0.1)
+        self.assertEqual(receipt.sample_count, 400)
+        self.assertGreaterEqual(receipt.standard_error, 0.0)
+        self.assertLessEqual(receipt.confidence_interval[0], receipt.raw_estimate)
+        self.assertGreaterEqual(receipt.confidence_interval[1], receipt.raw_estimate)
 
     def test_broken_backward_projection_is_clearly_elevated(self):
         well_receipt = joint_cycle_consistency_receipt(
@@ -233,7 +237,29 @@ class CycleConsistencyReceiptFlagsBrokenProjectionTest(unittest.TestCase):
             n_kl_samples=400,
             seed=0,
         )
-        self.assertGreater(broken_receipt, max(well_receipt * 10.0, 1.0))
+        self.assertGreater(
+            broken_receipt.nonnegative_estimate,
+            max(well_receipt.nonnegative_estimate * 10.0, 1.0),
+        )
+
+    def test_invalid_sample_counts_and_backward_schema_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            joint_cycle_consistency_receipt(
+                self.well_behaved,
+                "image",
+                "text",
+                n_round_trip=0,
+            )
+        reordered = CrossModalJoint(names=("text", "image"), joint=self.broken.joint)
+        with self.assertRaisesRegex(ValueError, "same ordered modality schema"):
+            joint_cycle_consistency_receipt(
+                self.well_behaved,
+                "image",
+                "text",
+                backward_joint=reordered,
+                n_round_trip=2,
+                n_kl_samples=2,
+            )
 
 
 if __name__ == "__main__":

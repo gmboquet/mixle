@@ -158,7 +158,18 @@ def run_anchor_harness(*, n_train: int = 2000, n_test: int = 200, seed: int = 0)
 
     # Cycle-consistency on the final hop gates abstention.
     hop2_sampler = hops[1].fit.sampler(seed=seed + 2)
-    inconsistencies = np.array([cycle_inconsistency(hop2_sampler, density_true[i], n_draws=20) for i in range(n_test)])
+    inconsistencies = np.array(
+        [
+            cycle_inconsistency(
+                hop2_sampler,
+                density_true[i],
+                n_draws=20,
+                forward=lambda grade: grade / _DENSITY_TO_GRADE,
+                scale=_NOISE_STD / _DENSITY_TO_GRADE,
+            )
+            for i in range(n_test)
+        ]
+    )
     abstain_threshold = float(np.quantile(inconsistencies, 0.9))  # flag the most self-inconsistent decile
     abstained_site_ids = [i for i, v in enumerate(inconsistencies) if v > abstain_threshold]
 
