@@ -12,31 +12,32 @@ already lives.
 Repo-boundary note (see the PR body for the full explanation): this PR only touches the core ``mixle``
 repository. ``mixle-pde`` (E2's ``io/artifacts.py`` -- IC-2) and ``mixle-mlops`` (E3/E4/E5) had not
 landed on ``release/0.8.0`` as of this PR, so ``decision_receipt`` does not import either package.
-Instead it accepts already-content-hashed ``*_ref`` handles (the same opaque-string convention IC-3's
-``run_inversion``/``query_posterior`` use) and, when ``posterior_ref`` names an on-disk IC-2 artifact
-(a ``{posterior_ref}.json`` sibling exists, carrying the frozen ``HEADER_KEYS``), reads that header
-directly (plain ``json.load`` -- no ``mixle_pde`` import) rather than depending on a real
-``load_posterior``. ``claim``/``decision`` accept a plain dict, any dataclass, or an ad hoc object
-(e.g. a ``mixle.reason.language_bridge.Claim``); each is normalized to a dict before hashing.
+Instead it verifies an on-disk posterior artifact directly and, when present,
+checks its ``{posterior_ref}.json`` sidecar against a streaming SHA-256 of the
+artifact bytes. ``claim`` and ``decision`` accept a plain dictionary or
+dataclass and are encoded through a strict versioned canonical schema.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
+import os
 import re
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mixle.data.hashing import dataset_hash
 from mixle.inference.production.provenance import build_header
+from mixle.semantics import canonical_json
 from mixle.substrate.core import Substrate
 from mixle.substrate.ingest import ingest_artifacts
 from mixle.task.trace_record import validate_trace_record
 
-__all__ = ["decision_receipt", "content_edge_hash"]
+__all__ = ["ContentDigest", "decision_receipt", "content_edge_hash"]
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -45,79 +46,101 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _FALLBACK_ARTIFACT_SCHEMA = "mixle_pde.field_posterior/v1"
 
 
+@dataclass(frozen=True)
+class ContentDigest:
+    """A validated digest value, distinct from an ordinary 64-character string."""
+
+    algorithm: str
+    hexdigest: str
+
+    def __post_init__(self) -> None:
+        if self.algorithm != "sha256" or not _HEX64.fullmatch(self.hexdigest):
+            raise ValueError("ContentDigest currently requires sha256 and 64 lowercase hexadecimal characters.")
+
+
 def content_edge_hash(value: Any) -> str:
-    """The hash for one lineage edge: pass an already-hashed hex digest through unchanged (the IC-2/IC-3
-    ``*_ref`` convention), else fingerprint ``value`` with :func:`mixle.data.hashing.dataset_hash` (a
-    stable sha256 over a canonical byte encoding) so the edge is deterministic and independently
-    re-derivable from the same inline payload."""
-    if isinstance(value, str) and _HEX64.match(value):
-        return value
-    return dataset_hash([value])
+    """Hash a strict versioned canonical envelope for one inline lineage value."""
+    if isinstance(value, ContentDigest):
+        return value.hexdigest
+    normalized = _to_canonical_value(value)
+    payload = canonical_json({"schema": "mixle.content-edge/v1", "value": normalized})
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _stringify_ref(ref: Any) -> str:
     if isinstance(ref, str):
         return ref
-    return json.dumps(ref, sort_keys=True, default=str)
+    if isinstance(ref, ContentDigest):
+        return f"{ref.algorithm}:{ref.hexdigest}"
+    return canonical_json(_to_canonical_value(ref)).decode("utf-8")
 
 
 def _to_plain(value: Any) -> dict[str, Any]:
-    """Normalize a claim/decision payload into a JSON-friendly dict so it can be hashed and embedded."""
+    """Normalize a claim/decision through the strict canonical receipt schema."""
     if isinstance(value, dict):
-        return dict(value)
+        out = dict(value)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         out = dict(dataclasses.asdict(value))
-        text_fn = getattr(value, "text", None)
-        if callable(text_fn):
-            try:
-                out.setdefault("text", text_fn())
-            except Exception:  # noqa: BLE001 - best-effort text surface only
-                pass
-        return out
-    if hasattr(value, "__dict__"):
-        return dict(vars(value))
-    return {"value": value}
+    elif not isinstance(value, dict):
+        raise TypeError("claim and decision must be dictionaries or dataclass instances.")
+    canonical_json(_to_canonical_value(out))
+    return out
 
 
-def _posterior_reference(posterior_ref: Any) -> tuple[str, dict[str, Any]]:
-    """Resolve ``posterior_ref`` (a bare string/path/hash, an IC-2-header-shaped dict, or an ad hoc
-    object) into ``(ref_str, header_meta)``. When ``posterior_ref`` is a path with an on-disk IC-2
-    sibling ``{posterior_ref}.json``, that header (frozen ``HEADER_KEYS``: schema/content_hash/crs/
-    grid/units/provenance/created) is read directly -- no ``mixle_pde`` import required."""
+def _posterior_reference(posterior_ref: Any) -> tuple[str, dict[str, Any], str]:
+    """Resolve and verify a posterior artifact, returning location, metadata, and byte digest."""
     if isinstance(posterior_ref, dict):
         ref = (
             posterior_ref.get("artifact_ref")
             or posterior_ref.get("ref")
             or posterior_ref.get("path")
-            or posterior_ref.get("content_hash")
         )
-        return (str(ref) if ref is not None else _stringify_ref(posterior_ref)), dict(posterior_ref)
-    if isinstance(posterior_ref, str):
-        header_path = Path(f"{posterior_ref}.json")
-        if header_path.is_file():
-            try:
-                meta = json.loads(header_path.read_text())
-            except Exception:  # noqa: BLE001 - an unreadable/corrupt header falls back to a bare ref
-                meta = {}
-            if isinstance(meta, dict):
-                return posterior_ref, meta
-        return posterior_ref, {}
-    meta = {
-        k: getattr(posterior_ref, k)
-        for k in ("schema", "grid", "crs", "units", "content_hash", "provenance")
-        if hasattr(posterior_ref, k)
-    }
-    ref = getattr(posterior_ref, "path", None) or getattr(posterior_ref, "ref", None) or posterior_ref
-    return _stringify_ref(ref), meta
+        if not isinstance(ref, (str, os.PathLike)):
+            raise ValueError("posterior metadata must include a filesystem artifact_ref, ref, or path.")
+        meta = dict(posterior_ref)
+    elif isinstance(posterior_ref, (str, os.PathLike)):
+        ref = posterior_ref
+        meta = {}
+    else:
+        raise TypeError("posterior_ref must be a filesystem path or a metadata dictionary containing one.")
+
+    path = Path(ref)
+    if not path.is_file():
+        raise FileNotFoundError(f"posterior artifact does not exist or is not a regular file: {path}")
+    header_path = Path(f"{path}.json")
+    if header_path.exists():
+        try:
+            sidecar = json.loads(header_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"posterior sidecar is unreadable or invalid JSON: {header_path}") from exc
+        if not isinstance(sidecar, dict):
+            raise ValueError(f"posterior sidecar must contain a JSON object: {header_path}")
+        overlap = set(meta) & set(sidecar)
+        mismatched = {key for key in overlap if meta[key] != sidecar[key]}
+        if mismatched:
+            raise ValueError(f"posterior metadata conflicts with sidecar fields: {sorted(mismatched)!r}")
+        meta = {**sidecar, **meta}
+
+    digest = _stream_sha256(path)
+    declared = meta.get("content_hash")
+    if declared is not None and _declared_hexdigest(declared) != digest:
+        raise ValueError("posterior content_hash does not match the artifact bytes.")
+    meta["content_hash"] = digest
+    meta["digest_algorithm"] = "sha256"
+    canonical_json(_to_canonical_value(meta))
+    return str(path), meta, digest
 
 
 def _registry_dir_for(substrate: Substrate, digest: str) -> Path:
     """A stable, per-digest micro-directory to host one ``manifest.json`` for `ingest_artifacts` --
     under the substrate's own root when it has one (persistent), else a shared scratch location. Never
     holds array bytes: only the small JSON manifest referencing the real artifact."""
-    base = substrate.root if substrate.root is not None else Path(tempfile.gettempdir()) / "mixle_receipt_registry"
-    d = Path(base) / "field_posterior" / digest[:16]
-    d.mkdir(parents=True, exist_ok=True)
+    if not _HEX64.fullmatch(digest):
+        raise ValueError("registry digest must be 64 lowercase hexadecimal characters.")
+    if substrate.root is None:
+        raise ValueError("rootless substrates require an isolated temporary registry.")
+    d = Path(substrate.root) / "receipt_registry" / "field_posterior" / digest
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
     return d
 
 
@@ -134,16 +157,26 @@ def _ingest_posterior(
         "crs": meta.get("crs"),
         "units": meta.get("units"),
         "content_hash": digest,
+        "digest_algorithm": "sha256",
     }
-    registry_dir = _registry_dir_for(substrate, digest)
     manifest = {
         "mixle_artifact": "field_posterior",
         "kind": "field_posterior",
         "parent": meta.get("provenance", {}).get("parent") if isinstance(meta.get("provenance"), dict) else None,
         "meta": record,
     }
-    (registry_dir / "manifest.json").write_text(json.dumps(manifest))
-    ids = ingest_artifacts(substrate, str(registry_dir))
+    if substrate.root is None:
+        with tempfile.TemporaryDirectory(prefix=f"mixle-receipt-{os.getpid()}-") as temporary_root:
+            registry_dir = Path(temporary_root) / "field_posterior" / digest
+            registry_dir.mkdir(mode=0o700, parents=True)
+            _write_manifest_once(registry_dir / "manifest.json", manifest)
+            ids = ingest_artifacts(substrate, str(registry_dir))
+    else:
+        registry_dir = _registry_dir_for(substrate, digest)
+        _write_manifest_once(registry_dir / "manifest.json", manifest)
+        ids = ingest_artifacts(substrate, str(registry_dir))
+    if not ids:
+        raise RuntimeError("posterior artifact manifest was not ingested.")
     item_id = ids[0] if ids else ""
     return item_id, record
 
@@ -153,11 +186,11 @@ def decision_receipt(
 ) -> dict[str, Any]:
     """Build an IC-5 trace record for one data -> posterior -> claim -> decision chain.
 
-    ``dataset_ref`` / ``posterior_ref`` are content-hashed handles (the IC-2/IC-3 ``*_ref`` convention;
-    a bare string is treated as already-hashed, anything else is fingerprinted). ``claim`` / ``decision``
-    are the interpretation/decision payloads (a dict, a dataclass, or an ad hoc object such as a
-    ``language_bridge.Claim``), normalized to a dict before hashing. The posterior is ingested into
-    ``substrate`` as a referenced (not copied) artifact.
+    ``dataset_ref`` is canonically fingerprinted. ``posterior_ref`` must resolve
+    to an accessible file whose bytes are hashed and checked against any
+    declared sidecar digest. ``claim`` and ``decision`` are canonical
+    dictionaries or dataclasses. The posterior is ingested into ``substrate``
+    as a referenced (not copied) artifact.
 
     Returns a dict that satisfies :func:`mixle.task.trace_record.validate_trace_record`: every scalar
     output (the posterior, the claim, the decision) resolves to a hashed lineage edge whose ``content_hash``
@@ -166,10 +199,7 @@ def decision_receipt(
     """
     data_hash = content_edge_hash(dataset_ref)
 
-    ref_str, posterior_meta = _posterior_reference(posterior_ref)
-    posterior_hash = posterior_meta.get("content_hash") or content_edge_hash(
-        {"ref": ref_str, **{k: v for k, v in posterior_meta.items() if k != "content_hash"}}
-    )
+    ref_str, posterior_meta, posterior_hash = _posterior_reference(posterior_ref)
     substrate_item_id, artifact_record = _ingest_posterior(substrate, ref_str, posterior_meta, posterior_hash)
 
     claim_record = _to_plain(claim)
@@ -243,3 +273,69 @@ def decision_receipt(
     }
     validate_trace_record(receipt)
     return receipt
+
+
+def _stream_sha256(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    before = path.stat()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(chunk_size):
+            digest.update(chunk)
+    after = path.stat()
+    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    if identity_before != identity_after:
+        raise RuntimeError(f"posterior artifact changed while it was being hashed: {path}")
+    return digest.hexdigest()
+
+
+def _declared_hexdigest(value: Any) -> str:
+    if isinstance(value, ContentDigest):
+        return value.hexdigest
+    if not isinstance(value, str):
+        raise TypeError("declared content_hash must be a hexadecimal string or ContentDigest.")
+    candidate = value.removeprefix("sha256:")
+    if not _HEX64.fullmatch(candidate):
+        raise ValueError("declared content_hash must be 64 lowercase hexadecimal characters.")
+    return candidate
+
+
+def _write_manifest_once(path: Path, manifest: dict[str, Any]) -> None:
+    payload = canonical_json(_to_canonical_value(manifest))
+    if path.exists():
+        try:
+            existing = path.read_bytes()
+        except OSError as exc:
+            raise RuntimeError(f"cannot verify existing receipt manifest: {path}") from exc
+        if existing != payload:
+            raise RuntimeError(f"receipt manifest collision for immutable digest directory: {path.parent.name}")
+        return
+    temporary = path.with_name(f".manifest.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.read_bytes() != payload:
+                raise RuntimeError(f"receipt manifest collision for immutable digest directory: {path.parent.name}")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _to_canonical_value(value: Any) -> Any:
+    if isinstance(value, ContentDigest):
+        return {"algorithm": value.algorithm, "hexdigest": value.hexdigest}
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return _to_canonical_value(dataclasses.asdict(value))
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("receipt mappings require string keys.")
+        return {key: _to_canonical_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_to_canonical_value(item) for item in value]
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    raise TypeError(f"value of type {type(value).__name__} is not supported by the canonical receipt schema.")
