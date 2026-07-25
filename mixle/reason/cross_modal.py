@@ -45,6 +45,30 @@ class CrossModalJoint:
     names: tuple[str, ...]
     joint: MixtureDistribution
 
+    def __post_init__(self) -> None:
+        names = tuple(self.names)
+        object.__setattr__(self, "names", names)
+        if not names:
+            raise ValueError("CrossModalJoint requires at least one named modality.")
+        if any(not isinstance(name, str) or not name.strip() for name in names):
+            raise ValueError("modality names must be non-empty strings.")
+        if len(set(names)) != len(names):
+            raise ValueError(f"modality names must be unique, got {names!r}.")
+        components = tuple(getattr(self.joint, "components", ()))
+        weights = np.asarray(getattr(self.joint, "w", ()), dtype=np.float64)
+        if not components:
+            raise ValueError("CrossModalJoint requires at least one latent-regime component.")
+        if weights.shape != (len(components),):
+            raise ValueError("joint weights must contain exactly one value per latent-regime component.")
+        for index, component in enumerate(components):
+            if not isinstance(component, CompositeDistribution):
+                raise TypeError(f"joint component {index} must be a CompositeDistribution.")
+            if component.count != len(names):
+                raise ValueError(
+                    f"joint component {index} has {component.count} fields; expected {len(names)} "
+                    "from the modality schema."
+                )
+
     @classmethod
     def from_components(
         cls,
@@ -61,6 +85,10 @@ class CrossModalJoint:
         tying every modality together.
         """
         names = tuple(names)
+        if not component_fields:
+            raise ValueError("component_fields must contain at least one latent regime.")
+        if len(weights) != len(component_fields):
+            raise ValueError("weights must contain exactly one value per latent regime.")
         if any(len(fields) != len(names) for fields in component_fields):
             raise ValueError(
                 f"every regime must supply one distribution per modality ({len(names)} modalities), "
@@ -97,6 +125,10 @@ class CrossModalJoint:
         if target is None:
             target = remaining
         target = list(target)
+        if not target:
+            raise ValueError("target must contain at least one unobserved modality.")
+        if len(set(target)) != len(target):
+            raise ValueError(f"target modalities must be unique, got {target!r}.")
         missing = [name for name in target if name not in remaining]
         if missing:
             raise ValueError(
