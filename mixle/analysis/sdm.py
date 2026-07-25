@@ -510,8 +510,15 @@ def fit_sdm(
 
     beta_hat, beta_cov, rates_hat = _fit_beta(design, counts, log_offset, ridge)
 
+    # data_curvature is the trace of the DATA term of the exact penalized Hessian _penalized_hessian
+    # computes (X^T diag(rates) X); for an apples-to-apples comparison, prior_curvature must be the
+    # trace of that SAME Hessian's ridge contribution, which _penalized_hessian's own docstring
+    # establishes is 2 * ridge * I (MXR-080-0112), so its trace is 2 * ridge * p -- not ridge * p
+    # (MXR-080-1439: using ridge * p understated the prior's curvature by half relative to the data
+    # term it is being compared against, so this honesty flag could read "not prior-dominated" in
+    # cases a mathematically consistent comparison would call prior-dominated).
     data_curvature = float(np.trace(design.T @ (rates_hat[:, None] * design)))
-    prior_curvature = float(ridge * p)
+    prior_curvature = float(2.0 * ridge * p)
     prior_dominated = prior_curvature > data_curvature
 
     var_scale = 1.0
