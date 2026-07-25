@@ -306,6 +306,33 @@ class CrossModalModelTest(unittest.TestCase):
         self.assertTrue(m._fitted)
         self.assertEqual(m._n_train, 200)
 
+    # -- MXR-080-0278: belief()/predict() must reject batched observations -------------------------
+    def test_belief_and_predict_reject_batched_observations(self):
+        # Pre-fix: np.atleast_2d silently accepted a (B, in_dim) batch and returned only row 0,
+        # discarding the rest; unequal batch sizes across modalities broadcast into unintended
+        # cross-row pairings before that silent row-0 selection. No caller anywhere in this
+        # codebase passes a genuine batch, so both are now rejected outright.
+        from mixle.reason import CrossModalModel
+
+        rng = np.random.RandomState(24)
+        _, xA, xB = _two_view_data(rng, 200, k=2, dA=4, dB=3)
+        m = CrossModalModel(latent_dim=3, seed=0)
+        m.add_modality("A", 4).add_modality("B", 3)
+        m.fit({"A": xA, "B": xB}, epochs=40, beta=0.3)
+
+        batch = xA[10:14]
+        with self.assertRaises(ValueError):
+            m.belief({"A": batch})
+        with self.assertRaises(ValueError):
+            m.predict({"A": batch}, target="B")
+        with self.assertRaises(ValueError):  # unequal batch sizes: A has 3 rows, B has 1
+            m.belief({"A": xA[0:3], "B": xB[0:1]})
+
+        # a genuine single observation per modality still works, and differs row to row
+        b0 = m.belief({"A": xA[0]})
+        b1 = m.belief({"A": xA[1]})
+        self.assertFalse(np.allclose(b0.mean(), b1.mean()))
+
 
 if __name__ == "__main__":
     unittest.main()
