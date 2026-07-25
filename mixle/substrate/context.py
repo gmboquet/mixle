@@ -169,9 +169,11 @@ def _access_policy_dict(scope: str) -> dict[str, Any]:
 def _provenance_refs(item: SubstrateItem) -> list[dict[str, Any]]:
     """Summarize ``item.provenance`` as one IC-13 ``SourceRef``-shaped dict (``uri`` is the only
     required field there). The substrate's own file-byte digest (``provenance["content_hash"]``, a
-    truncated sha256 -- see ``freshness.content_hash``) is NOT put in ``sha256`` here: that field is
-    64-hex only, while the substrate's is a 32-hex digest of different provenance; it is preserved
-    verbatim in ``metadata["substrate_provenance"]`` instead so it is never lost nor misrepresented."""
+    full, algorithm-labelled sha256 digest -- ``"sha256:<64-hex>"``, see ``freshness.content_hash``)
+    is NOT put in ``sha256`` here: that field is a bare 64-hex string with no algorithm label, while
+    the substrate's carries the ``"sha256:"`` prefix and hashes different bytes (the referenced
+    file's contents, not this IC-13 ``SourceRef``); it is preserved verbatim in
+    ``metadata["substrate_provenance"]`` instead so it is never lost nor misrepresented."""
     prov = item.provenance or {}
     uri = prov.get("source") or prov.get("path") or prov.get("uri") or f"substrate:{item.id}"
     ref: dict[str, Any] = {"uri": str(uri)}
