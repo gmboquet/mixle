@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from numbers import Real
 from typing import Any
 
 import numpy as np
@@ -26,11 +27,9 @@ class ErdosRenyiGraphModel:
     """Independent Bernoulli edge model for directed or undirected graphs."""
 
     def __init__(self, p: float, directed: bool = False, self_loops: bool = False, name: str | None = None) -> None:
-        if p < 0.0 or p > 1.0 or not np.isfinite(p):
-            raise ValueError("ErdosRenyiGraphModel requires p in [0, 1].")
-        self.p = float(p)
-        self.directed = bool(directed)
-        self.self_loops = bool(self_loops)
+        self.p = _probability(p, "p")
+        self.directed = _exact_bool(directed, "directed")
+        self.self_loops = _exact_bool(self_loops, "self_loops")
         self.name = name
 
     def __str__(self) -> str:
@@ -70,8 +69,8 @@ class ErdosRenyiGraphModel:
 
     def sample(self, num_nodes: int, seed: int | None = None) -> np.ndarray:
         """Draw one binary adjacency matrix."""
-        if num_nodes < 0:
-            raise ValueError("num_nodes must be non-negative.")
+        num_nodes = _exact_int(num_nodes, "num_nodes", minimum=0)
+        seed = _seed(seed)
         rng = np.random.RandomState(seed)
         mat = (rng.rand(num_nodes, num_nodes) < self.p).astype(np.int8)
         if not self.directed:
@@ -102,22 +101,20 @@ class StochasticBlockGraphModel:
         name: str | None = None,
     ) -> None:
         probs = np.asarray(block_probs, dtype=np.float64)
-        if probs.ndim != 2 or probs.shape[0] != probs.shape[1]:
-            raise ValueError("block_probs must be a square matrix.")
+        if probs.ndim != 2 or probs.shape[0] != probs.shape[1] or probs.shape[0] == 0:
+            raise ValueError("block_probs must be a non-empty square matrix.")
         if np.any(~np.isfinite(probs)) or np.any(probs < 0.0) or np.any(probs > 1.0):
             raise ValueError("block probabilities must be finite and in [0, 1].")
-        assignments = np.asarray(block_assignments, dtype=np.int64)
-        if assignments.ndim != 1:
-            raise ValueError("block_assignments must be a one-dimensional sequence.")
-        if assignments.size and (assignments.min() < 0 or assignments.max() >= probs.shape[0]):
-            raise ValueError("block assignments must index block_probs.")
-        if not directed and not np.allclose(probs, probs.T):
+        assignments = _assignments(block_assignments, probs.shape[0])
+        directed = _exact_bool(directed, "directed")
+        self_loops = _exact_bool(self_loops, "self_loops")
+        if not directed and not np.array_equal(probs, probs.T):
             raise ValueError("undirected block_probs must be symmetric.")
         self.block_probs = probs
         self.block_assignments = assignments
         self.num_blocks = int(probs.shape[0])
-        self.directed = bool(directed)
-        self.self_loops = bool(self_loops)
+        self.directed = directed
+        self.self_loops = self_loops
         self.name = name
 
     def __str__(self) -> str:
@@ -193,13 +190,18 @@ def fit_erdos_renyi_mle(
     name: str | None = None,
 ) -> ErdosRenyiGraphModel:
     """Conjugate-Bernoulli MLE of the edge probability (module-level estimation, not a classmethod-fit)."""
+    directed = _exact_bool(directed, "directed")
+    self_loops = _exact_bool(self_loops, "self_loops")
+    pseudo_count = _nonnegative_finite(pseudo_count, "pseudo_count")
+    prior_p = _probability(prior_p, "prior_p")
     adj = _as_adjacency(adjacency)
+    _validate_adjacency_structure(adj, directed=directed, self_loops=self_loops)
     values = _edge_values(adj, directed=directed, self_loops=self_loops)
     successes = float(values.sum())
     total = float(values.size)
     if pseudo_count > 0.0:
-        successes += float(pseudo_count) * float(prior_p)
-        total += float(pseudo_count)
+        successes += pseudo_count * prior_p
+        total += pseudo_count
     p = 0.5 if total == 0.0 else successes / total
     return ErdosRenyiGraphModel(p, directed=directed, self_loops=self_loops, name=name)
 
@@ -215,12 +217,22 @@ def fit_stochastic_block_mle(
     name: str | None = None,
 ) -> StochasticBlockGraphModel:
     """Conjugate-Bernoulli MLE of block edge probabilities for fixed assignments (module-level estimation)."""
+    directed = _exact_bool(directed, "directed")
+    self_loops = _exact_bool(self_loops, "self_loops")
+    pseudo_count = _nonnegative_finite(pseudo_count, "pseudo_count")
+    prior_p = _probability(prior_p, "prior_p")
     adj = _as_adjacency(adjacency)
-    assignments = np.asarray(block_assignments, dtype=np.int64)
+    _validate_adjacency_structure(adj, directed=directed, self_loops=self_loops)
+    if num_blocks is None:
+        assignments = _assignments(block_assignments)
+        if assignments.size == 0:
+            raise ValueError("num_blocks is required when block_assignments is empty")
+        num_blocks = int(assignments.max()) + 1
+    else:
+        num_blocks = _exact_int(num_blocks, "num_blocks", minimum=1)
+        assignments = _assignments(block_assignments, num_blocks)
     if assignments.shape[0] != adj.shape[0]:
         raise ValueError("block_assignments length must equal the number of nodes.")
-    if num_blocks is None:
-        num_blocks = 0 if assignments.size == 0 else int(assignments.max()) + 1
     successes = np.zeros((num_blocks, num_blocks), dtype=np.float64)
     totals = np.zeros((num_blocks, num_blocks), dtype=np.float64)
     for i, j in _edge_indices(adj.shape[0], directed=directed, self_loops=self_loops):
@@ -232,9 +244,9 @@ def fit_stochastic_block_mle(
             successes[b, a] += adj[i, j]
             totals[b, a] += 1.0
     if pseudo_count > 0.0:
-        successes += float(pseudo_count) * float(prior_p)
-        totals += float(pseudo_count)
-    probs = np.divide(successes, totals, out=np.full_like(successes, float(prior_p)), where=totals > 0.0)
+        successes += pseudo_count * prior_p
+        totals += pseudo_count
+    probs = np.divide(successes, totals, out=np.full_like(successes, prior_p), where=totals > 0.0)
     if not directed:
         probs = 0.5 * (probs + probs.T)
     return StochasticBlockGraphModel(probs, assignments, directed=directed, self_loops=self_loops, name=name)
@@ -252,15 +264,22 @@ def hard_em_stochastic_block_model(
     prior_p: float = 0.5,
 ) -> HardEMResult:
     """Classification/hard-EM fit for a stochastic block model."""
-    if num_blocks <= 0:
-        raise ValueError("num_blocks must be positive.")
+    num_blocks = _exact_int(num_blocks, "num_blocks", minimum=1)
+    max_its = _exact_int(max_its, "max_its", minimum=1)
+    restarts = _exact_int(restarts, "restarts", minimum=1)
+    seed = _seed(seed)
+    directed = _exact_bool(directed, "directed")
+    self_loops = _exact_bool(self_loops, "self_loops")
+    pseudo_count = _nonnegative_finite(pseudo_count, "pseudo_count")
+    prior_p = _probability(prior_p, "prior_p")
     adj = _as_adjacency(adjacency)
+    _validate_adjacency_structure(adj, directed=directed, self_loops=self_loops)
     rng = np.random.RandomState(seed)
     best_model = None
     best_history: list[float] = []
     best_ll = -np.inf
 
-    for _ in range(max(1, int(restarts))):
+    for _ in range(restarts):
         assignments = _initial_assignments(adj.shape[0], num_blocks, rng)
         history: list[float] = []
         model = fit_stochastic_block_mle(
@@ -274,7 +293,7 @@ def hard_em_stochastic_block_model(
         )
         ll = model.log_likelihood(adj)
         history.append(ll)
-        for _ in range(max(1, int(max_its))):
+        for _ in range(max_its):
             candidate_assignments = _hard_reassign(adj, model)
             candidate_model = fit_stochastic_block_mle(
                 adj,
@@ -310,6 +329,60 @@ def _as_adjacency(adjacency: Any) -> np.ndarray:
     if np.any((adj != 0.0) & (adj != 1.0)):
         raise ValueError("adjacency must contain binary values 0/1.")
     return adj
+
+
+def _exact_bool(value: Any, name: str) -> bool:
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a boolean")
+    return bool(value)
+
+
+def _exact_int(value: Any, name: str, *, minimum: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return result
+
+
+def _seed(value: Any) -> int | None:
+    if value is None:
+        return None
+    result = _exact_int(value, "seed", minimum=0)
+    if result > np.iinfo(np.uint32).max:
+        raise ValueError("seed must fit in an unsigned 32-bit integer")
+    return result
+
+
+def _nonnegative_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite non-negative real number")
+    result = float(value)
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative real number")
+    return result
+
+
+def _probability(value: Any, name: str) -> float:
+    result = _nonnegative_finite(value, name)
+    if result > 1.0:
+        raise ValueError(f"{name} must be in [0, 1]")
+    return result
+
+
+def _assignments(value: Any, num_blocks: int | None = None) -> np.ndarray:
+    assignments = np.asarray(value)
+    if assignments.ndim != 1:
+        raise ValueError("block_assignments must be a one-dimensional sequence")
+    if assignments.dtype.kind not in {"i", "u"}:
+        raise ValueError("block_assignments must contain exact integer indices")
+    if np.any(assignments < 0) or np.any(assignments > np.iinfo(np.intp).max):
+        raise ValueError("block_assignments must contain supported non-negative indices")
+    assignments = assignments.astype(np.int64, copy=False)
+    if num_blocks is not None and assignments.size and np.any(assignments >= num_blocks):
+        raise ValueError(f"block_assignments must index the {num_blocks} declared blocks")
+    return assignments
 
 
 def _validate_adjacency_structure(adj: np.ndarray, directed: bool, self_loops: bool) -> None:
