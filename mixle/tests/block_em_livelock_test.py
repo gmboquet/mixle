@@ -140,14 +140,15 @@ class RejectionLivelockTest:
         )
 
         bases = [s.acceptance_basis for s in stats]
-        # three rejections from the start; one escape is spent (taken unconditionally, honestly
-        # recorded even though it regresses); the second streak stops the run.
+        # Three rejections from the start; one full-tree escape is attempted through the same
+        # objective gate, rejects, and terminates without changing the accepted model.
         assert bases[:3] == ["rejected"] * 3
-        assert bases.count("vanilla_escape") == 1
-        assert bases.index("vanilla_escape") == 3
-        assert stats[3].accepted
+        assert bases == ["rejected"] * 4
+        assert stats[3].escape_attempted
+        assert not stats[3].accepted
+        assert model is start
         assert stats[-1].stop_reason == "rejection_livelock"
-        assert len(stats) == 7 < 40
+        assert len(stats) == 4 < 40
 
     def test_healthy_fit_never_escapes(self):
         start, estimator, enc = _problem()
