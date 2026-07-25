@@ -72,6 +72,7 @@ direction of size change, which is deliberate.
 from __future__ import annotations
 
 import copy
+import hashlib
 import warnings
 from dataclasses import dataclass, field
 from typing import Any
@@ -110,6 +111,7 @@ __all__ = [
     "ScaleReceipt",
     "ProjectionReceipt",
     "WidthMergeRepresentation",
+    "CoarseningMetrics",
     "CoarsenResult",
     "gaussian_kl",
     "depth_merge",
@@ -136,11 +138,11 @@ if _HAS_TORCH:
         ``torch.autograd.functional.jvp``'s reverse-over-reverse trick fails) nor forward-mode-AD support
         (so ``torch.func.jvp`` also fails) -- both were tried and both raise ``NotImplementedError`` from
         inside attention. A numerical directional derivative needs neither: it is two ordinary forward
-        passes, so it works through ANY module, including opaque/no-grad-support kernels like SDPA. This is
-        what turns two SEQUENTIAL blocks into one block with (at most) two extra forward passes, i.e. a
-        genuine depth cut in the sense that matters for the receipt/acceptance story: one entry in
-        ``model.blocks`` instead of two, with second-order-accurate behavior and no loss of either branch's
-        own nonlinearity. The finite-difference evaluations remain attached to autograd: training
+        passes, so it works through ANY module, including opaque/no-grad-support kernels like SDPA. This
+        groups two sequential blocks into one logical manifest entry, but it is not itself a compute or
+        parameter reduction: the merged forward performs four block-branch evaluations and retains both
+        component blocks. :class:`CoarseningMetrics` makes those costs explicit. The finite-difference
+        evaluations remain attached to autograd: training
         differentiates the exact function used by the forward pass, including both component blocks and
         the correction term.
         """
@@ -401,6 +403,8 @@ class ScaleReceipt:
     regularized_kl_divergence: float | None = None
     assumptions: tuple[str, ...] = ()
     sensitivity: dict[str, float] = field(default_factory=dict)
+    scope: str = "local_candidate"
+    artifact_digest: str | None = None
 
 
 @dataclass
@@ -413,6 +417,9 @@ class ProjectionReceipt:
     name: str
     mode: str
     sigma_weighted_error: float
+    accepted: bool = True
+    final_kl_divergence: float | None = None
+    artifact_digest: str | None = None
 
 
 @dataclass
@@ -434,28 +441,57 @@ class WidthMergeRepresentation:
     d_model: int
 
 
+@dataclass(frozen=True)
+class CoarseningMetrics:
+    """Structural measurements for the source and returned executable models.
+
+    ``estimated_block_evaluations`` counts ordinary block-branch evaluations
+    in one forward: a plain block costs one and the current numerical Taylor
+    merge costs four. FLOPs and latency are deliberately not fabricated
+    without shapes or calibration inputs.
+    """
+
+    source_parameter_count: int
+    result_parameter_count: int
+    source_parameter_bytes: int
+    result_parameter_bytes: int
+    source_manifest_entries: int
+    result_manifest_entries: int
+    source_leaf_blocks: int
+    result_leaf_blocks: int
+    source_estimated_block_evaluations: int
+    result_estimated_block_evaluations: int
+    latency_seconds: float | None = None
+    latency_basis: str = "unmeasured: no calibration input was supplied"
+
+
 @dataclass
 class CoarsenResult:
     """Output of :func:`coarsen`: the new (shallower) model, the full per-scale receipt map, and the
     bookkeeping needed to see exactly which merges were accepted vs. rejected and why.
 
-    ``structure_receipts`` is the (separate, additive) third move's own receipt list -- see
-    :func:`_narrow_block_linears` -- kept OUT of ``receipt_map`` deliberately: ``receipt_map`` values are
+    ``structure_receipts`` is the third move's own receipt list -- see
+    :func:`_narrow_block_mlp2` -- kept OUT of ``receipt_map`` deliberately: ``receipt_map`` values are
     :class:`ScaleReceipt` (closed-form KL against a Gaussian law, consumed as-is by hybrid's
     ``surrogate_closure_error``-keyed stage ranking in :mod:`mixle.models.compress`), while structure-
     projection's own receipt is a :class:`ProjectionReceipt` (a Sigma-weighted reconstruction error, not a
-    KL) -- mixing the two dataclasses into one dict would silently break that attribute lookup.
+    KL) -- mixing the two dataclasses into one dict would silently break that attribute lookup. The
+    ``final_artifact`` scale receipt is authoritative for the returned model: its end-to-end law,
+    ``total_kl``, and digest are computed after every accepted structure projection.
     """
 
     model: Any
     receipt_map: dict[str, ScaleReceipt] = field(default_factory=dict)
     accepted_pairs: list[tuple[int, int]] = field(default_factory=list)
     rejected_pairs: list[tuple[int, int]] = field(default_factory=list)
+    depth_only_kl: float = 0.0
     total_kl: float = 0.0
     budget: float = float("inf")
     trust_region: float = float("inf")
     within_budget: bool = True
     structure_receipts: list[ProjectionReceipt] = field(default_factory=list)
+    artifact_digest: str | None = None
+    metrics: CoarseningMetrics | None = None
 
 
 # --------------------------------------------------------------------------------------------------------
@@ -788,21 +824,12 @@ def structure_project(
 # 3b. structure-projection actually wired into coarsen() -- the real parameter-count reduction
 # --------------------------------------------------------------------------------------------------------
 #
-# depth_merge (move 1) genuinely cuts the number of SEQUENTIAL blocks, but every block it keeps or merges
-# still holds its ORIGINAL, full-size nn.Linear weight matrices (MergedBlock literally holds block_a and
-# block_b as full submodules) -- so depth-merge alone changes the compute-graph shape without changing
-# real parameter count at all. Move 3 (structure-projection, :func:`structure_project` above) was built
-# but, until here, never actually called from :func:`coarsen` -- this is that wiring: a POST-HOC pass,
-# applied to the FINAL block list only, that replaces each block's three biggest weight matrices
-# (``attn.qkv``, ``mlp[0]``, ``mlp[2]``) with a genuinely smaller :class:`LowRankLinear` factorization via
-# G2's Sigma-weighted low-rank solver, data-free (the ``Sigma`` is G1's own propagated activation
-# covariance already computed as a side-effect of :func:`_block_branch`, never real data).
-#
-# Deliberately kept OUT of the accept/reject loop above (not folded into depth_merge's own trust-region
-# check): running it post-hoc, on the loop's FINAL output, means it cannot perturb `total_kl`,
-# `accepted_pairs`/`rejected_pairs`, or any individual `ScaleReceipt.kl_divergence` -- so every existing
-# depth-merge acceptance criterion (``mixle/tests/coarsening_test.py``) is unaffected byte-for-byte by this
-# addition. The rank chosen for each matrix is pinned just below that matrix's own dense/low-rank
+# Depth grouping retains both full component blocks and performs more block-branch evaluations, so it is
+# not described as parameter, FLOP, or latency compression. Structure projection supplies the actual
+# parameter reduction by replacing a selected dense matrix with :class:`LowRankLinear`. Every proposed
+# projection is propagated through the complete candidate and accepted only when the final executable
+# model remains inside both the aggregate budget and trust region. The rank chosen for each matrix is
+# pinned just below that matrix's own dense/low-rank
 # break-even point (:func:`_break_even_rank`) -- the LARGEST rank that still guarantees fewer stored
 # parameters than the original dense matrix, i.e. the smallest, safest cut that is still a REAL reduction
 # (minimizing the Sigma-weighted reconstruction error this pass introduces on top of whatever depth_merge
@@ -912,6 +939,79 @@ def _flatten_blocks(entries: list[Any]) -> list[Any]:
     return flattened
 
 
+def _propagate_entry_law(law: GaussianLaw, entry: Any) -> GaussianLaw:
+    """Propagate the law through the executable function of one manifest entry."""
+    if isinstance(entry, MergedBlock):
+        d = law.mu.shape[0]
+        eye = np.eye(d)
+        f_mean, f_cov, j_f, _cross_xf, _sigmas_a = _block_branch(law, entry.block_a)
+        g_mean, g_cov, j_g, _cross_xg, _sigmas_b = _block_branch(law, entry.block_b)
+        a_mat = eye + j_g
+        branch_mean = f_mean + g_mean + j_g @ f_mean
+        branch_jacobian = j_f + j_g + j_g @ j_f
+        cross_fg = j_f @ law.covar @ j_g.T
+        branch_cov = (
+            a_mat @ f_cov @ a_mat.T
+            + g_cov
+            + a_mat @ cross_fg
+            + (a_mat @ cross_fg).T
+        )
+        cross = law.covar @ branch_jacobian.T
+        return _residual_add(law, branch_mean, branch_cov, cross)
+    branch_mean, branch_cov, _jacobian, cross, _sigmas = _block_branch(law, entry)
+    return _residual_add(law, branch_mean, branch_cov, cross)
+
+
+def _propagate_sequence_law(input_law: GaussianLaw, entries: list[Any]) -> GaussianLaw:
+    law = input_law
+    for entry in entries:
+        law = _propagate_entry_law(law, entry)
+    return law
+
+
+def _entry_input_laws(input_law: GaussianLaw, entries: list[Any]) -> list[GaussianLaw]:
+    laws: list[GaussianLaw] = []
+    law = input_law
+    for entry in entries:
+        laws.append(law)
+        law = _propagate_entry_law(law, entry)
+    return laws
+
+
+def _artifact_digest(model: Any) -> str:
+    """Content digest of the returned executable state and manifest types."""
+    digest = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        value = tensor.detach().cpu().contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(value.dtype).encode("ascii"))
+        digest.update(str(tuple(value.shape)).encode("ascii"))
+        digest.update(value.numpy().tobytes())
+    for entry in model.blocks:
+        digest.update(type(entry).__module__.encode("utf-8"))
+        digest.update(type(entry).__qualname__.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _parameter_measurements(model: Any) -> tuple[int, int]:
+    parameters = list(model.parameters())
+    return (
+        sum(parameter.numel() for parameter in parameters),
+        sum(parameter.numel() * parameter.element_size() for parameter in parameters),
+    )
+
+
+def _estimated_block_evaluations(entries: list[Any]) -> int:
+    total = 0
+    for entry in entries:
+        if isinstance(entry, MergedBlock):
+            # f(x), g(x), g(x + eps*f(x)), g(x - eps*f(x))
+            total += 4
+        else:
+            total += 1
+    return total
+
+
 # --------------------------------------------------------------------------------------------------------
 # 4. coarsen -- the iterated top-level operator R
 # --------------------------------------------------------------------------------------------------------
@@ -944,6 +1044,13 @@ def coarsen(
     """
     if not _HAS_TORCH:
         raise RuntimeError("coarsen requires torch (mixle.models.transformer is torch-only).")
+    for value, name in ((budget, "budget"), (trust_region, "trust_region")):
+        if isinstance(value, (bool, np.bool_)) or not np.isscalar(value):
+            raise TypeError(f"{name} must be a non-negative real scalar")
+        if np.isnan(float(value)) or float(value) < 0.0:
+            raise ValueError(f"{name} must be a non-negative real scalar")
+    budget = float(budget)
+    trust_region = float(trust_region)
 
     blocks = _flatten_blocks(list(model.blocks))
     new_blocks: list[Any] = []
@@ -1000,28 +1107,97 @@ def coarsen(
         out_idx += 1
         i += 1
 
-    # Move 3, actually wired in: post-hoc, data-free structure-projection of the FINAL block list's own
-    # weight matrices (see the section above `coarsen` for why this runs here rather than inside the loop)
-    # -- this is what makes `count_params(new_model) < count_params(model)` genuinely true, on top of
-    # depth_merge's sequential-call reduction alone. Uses the SAME per-entry law the accept/reject loop
-    # already computed, so it costs no additional propagation.
-    narrowed_blocks: list[Any] = []
-    structure_receipts: list[ProjectionReceipt] = []
-    for entry, entry_law in zip(new_blocks, block_input_laws):
-        narrowed_entry, entry_receipts = _narrow_coarsened_entry(entry, entry_law)
-        narrowed_blocks.append(narrowed_entry)
-        structure_receipts.extend(entry_receipts)
+    # The local merge sum above is useful for choosing candidates, but it is
+    # not an end-to-end bound. Measure the complete executable candidate
+    # against the complete leaf-model law and roll all depth groups back if
+    # their composed error violates the caller's budget.
+    teacher_output_law = _propagate_sequence_law(input_law, blocks)
+    depth_output_law = _propagate_sequence_law(input_law, new_blocks)
+    depth_final_kl = gaussian_kl(teacher_output_law, depth_output_law)
+    if depth_final_kl > budget:
+        for receipt in receipt_map.values():
+            if receipt.accepted and receipt.name == "depth_merge":
+                receipt.accepted = False
+        rejected_pairs.extend(pair for pair in accepted_pairs if pair not in rejected_pairs)
+        accepted_pairs = []
+        new_blocks = list(blocks)
+        block_input_laws = _entry_input_laws(input_law, new_blocks)
+        depth_output_law = teacher_output_law
+        depth_final_kl = 0.0
+    depth_only_kl = depth_final_kl
 
-    new_model = CoarsenedLM(model, narrowed_blocks)
-    within_budget = total_kl <= budget
+    # Budget every structure projection against the final executable model.
+    # A failed proposal is rolled back individually, while later proposals may
+    # still be considered against the last accepted artifact.
+    final_blocks = list(new_blocks)
+    structure_receipts: list[ProjectionReceipt] = []
+    final_kl = depth_final_kl
+    for index in range(len(final_blocks)):
+        entry_laws = _entry_input_laws(input_law, final_blocks)
+        entry = final_blocks[index]
+        entry_law = entry_laws[index]
+        narrowed_entry, entry_receipts = _narrow_coarsened_entry(entry, entry_law)
+        if not entry_receipts:
+            continue
+        candidate_blocks = list(final_blocks)
+        candidate_blocks[index] = narrowed_entry
+        candidate_output_law = _propagate_sequence_law(input_law, candidate_blocks)
+        candidate_kl = gaussian_kl(teacher_output_law, candidate_output_law)
+        accepted = candidate_kl <= budget and abs(candidate_kl - final_kl) <= trust_region
+        for receipt in entry_receipts:
+            receipt.accepted = accepted
+            receipt.final_kl_divergence = candidate_kl
+        structure_receipts.extend(entry_receipts)
+        if accepted:
+            final_blocks = candidate_blocks
+            depth_output_law = candidate_output_law
+            final_kl = candidate_kl
+
+    new_model = CoarsenedLM(model, final_blocks)
+    artifact_digest = _artifact_digest(new_model)
+    for receipt in receipt_map.values():
+        receipt.artifact_digest = artifact_digest
+    for receipt in structure_receipts:
+        receipt.artifact_digest = artifact_digest
+    receipt_map["final_artifact"] = ScaleReceipt(
+        name="final_artifact",
+        teacher_law=teacher_output_law,
+        student_law=depth_output_law,
+        kl_divergence=final_kl,
+        surrogate_closure_error=float("nan"),
+        accepted=final_kl <= budget,
+        scope="final_artifact",
+        artifact_digest=artifact_digest,
+    )
+
+    source_parameters, source_bytes = _parameter_measurements(model)
+    result_parameters, result_bytes = _parameter_measurements(new_model)
+    result_leaves = _flatten_blocks(list(new_model.blocks))
+    metrics = CoarseningMetrics(
+        source_parameter_count=source_parameters,
+        result_parameter_count=result_parameters,
+        source_parameter_bytes=source_bytes,
+        result_parameter_bytes=result_bytes,
+        source_manifest_entries=len(model.blocks),
+        result_manifest_entries=len(new_model.blocks),
+        source_leaf_blocks=len(blocks),
+        result_leaf_blocks=len(result_leaves),
+        source_estimated_block_evaluations=_estimated_block_evaluations(list(model.blocks)),
+        result_estimated_block_evaluations=_estimated_block_evaluations(list(new_model.blocks)),
+    )
+    total_kl = final_kl
+    within_budget = final_kl <= budget
     return CoarsenResult(
         model=new_model,
         receipt_map=receipt_map,
         accepted_pairs=accepted_pairs,
         rejected_pairs=rejected_pairs,
+        depth_only_kl=depth_only_kl,
         total_kl=total_kl,
         budget=budget,
         trust_region=trust_region,
         within_budget=within_budget,
         structure_receipts=structure_receipts,
+        artifact_digest=artifact_digest,
+        metrics=metrics,
     )
