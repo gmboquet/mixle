@@ -15,7 +15,7 @@ from __future__ import annotations
 import inspect
 import math
 from collections.abc import Callable, Sequence
-from numbers import Integral
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -63,8 +63,14 @@ _FITTERS: dict[str, Callable[..., RandomVariable]] = {}
 
 def register_fitter(name: str) -> Callable[[Callable[..., RandomVariable]], Callable[..., RandomVariable]]:
     """Register ``fn`` as the fitter for ``how=name`` in :data:`_FITTERS`."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("fitter name must be a non-empty string.")
 
     def deco(fn: Callable[..., RandomVariable]) -> Callable[..., RandomVariable]:
+        if not callable(fn):
+            raise TypeError("registered fitter must be callable.")
+        if name in _FITTERS:
+            raise ValueError(f"fitter {name!r} is already registered; silent replacement is forbidden.")
         _FITTERS[name] = fn
         return fn
 
@@ -1205,6 +1211,13 @@ def register_family(
     validator=None,
 ) -> Family:
     """Register a flat PPL family and its distribution/estimator lowering rules."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("family name must be a non-empty string.")
+    if name in _FAMILIES:
+        raise ValueError(f"family {name!r} is already registered; silent replacement is forbidden.")
+    if dist_cls in _DIST_TO_FAMILY:
+        other = _DIST_TO_FAMILY[dist_cls]
+        raise ValueError(f"distribution class {dist_cls.__name__} is already registered as family {other.name!r}.")
     fam = Family(
         name,
         dist_cls,
@@ -1227,6 +1240,14 @@ def register_composite(
     name, dist_fn, est_fn, seed_fn=None, dist_cls=None, read=None, fit_fn=None, validator=None
 ) -> CompositeFamily:
     """Register a composite PPL family with custom lowering or fitting hooks."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("composite family name must be a non-empty string.")
+    if name in _FAMILIES:
+        raise ValueError(f"family {name!r} is already registered; silent replacement is forbidden.")
+    if dist_cls is not None and dist_cls in _DIST_TO_COMPOSITE_READ:
+        raise ValueError(
+            f"composite distribution class {dist_cls.__name__} already has a registered parameter reader."
+        )
     fam = CompositeFamily(name, dist_fn, est_fn, seed_fn=seed_fn, read=read, fit_fn=fit_fn, validator=validator)
     _FAMILIES[name] = fam
     if dist_cls is not None and read is not None:
@@ -1343,6 +1364,19 @@ def _inferable_parameter_dimension(rv: RandomVariable) -> int | None:
             return total
         if name == "Sequence":
             return model(node._args[0])
+        if name in {"MVN", "DiagGaussian"}:
+            dim, mean, spread = node._args
+            total = int(dim) if mean is None else slot(mean)
+            if total is None:
+                return None
+            if spread is None:
+                total += int(dim) * (int(dim) + 1) // 2 if name == "MVN" else int(dim)
+            else:
+                count = slot(spread)
+                if count is None:
+                    return None
+                total += count
+            return total
         if name == "Markov":
             components = node._args[0]
             total = 0
@@ -1423,6 +1457,40 @@ def compare(models, data, *, by: str = "aic"):
         for r in rows:
             r["d_elpd"] = r["elpd"] - best
     return rows
+
+
+def _indexed_group_layout(labels, expected_rows: int) -> tuple[np.ndarray, tuple, dict]:
+    """Validate group identities and return stable first-seen integer indices."""
+    raw = np.asarray(labels, dtype=object)
+    if raw.ndim != 1 or raw.size != expected_rows:
+        raise ValueError(f"group labels must be one-dimensional with {expected_rows} rows; got shape {raw.shape}.")
+    ordered = []
+    mapping = {}
+    indices = np.empty(expected_rows, dtype=int)
+    label_type = None
+    for row, value in enumerate(raw.tolist()):
+        if isinstance(value, np.generic):
+            value = value.item()
+        if value is None or (isinstance(value, Real) and not math.isfinite(float(value))):
+            raise ValueError(f"group label at row {row} must be finite and non-null.")
+        try:
+            hash(value)
+        except TypeError as exc:
+            raise TypeError(f"group label at row {row} is not hashable.") from exc
+        current_type = type(value)
+        if label_type is None:
+            label_type = current_type
+        elif current_type is not label_type:
+            raise TypeError(
+                f"group labels must have one homogeneous type; saw {label_type.__name__} and {current_type.__name__}."
+            )
+        if value not in mapping:
+            mapping[value] = len(ordered)
+            ordered.append(value)
+        indices[row] = mapping[value]
+    if not ordered:
+        raise ValueError("group labels must contain at least one group.")
+    return indices, tuple(ordered), dict(mapping)
 
 
 def read_params(dist):
@@ -1531,7 +1599,13 @@ class RandomVariable:
         fam_name = self._family.name if self._family is not None else None
         durable_cache = {
             key: self._cache[key]
-            for key in ("certificate", "_fit_explanation", "_free_parameter_count", "_group_labels")
+            for key in (
+                "certificate",
+                "_fit_explanation",
+                "_free_parameter_count",
+                "_group_labels",
+                "_group_index",
+            )
             if key in self._cache
         }
         return (
@@ -1807,6 +1881,18 @@ class RandomVariable:
         return _inferable_parameter_dimension(self)
 
     @property
+    def group_index(self) -> dict | None:
+        """Stable label-to-posterior-index mapping for an indexed-group fit."""
+        mapping = self._cache.get("_group_index")
+        return None if mapping is None else dict(mapping)
+
+    @property
+    def group_labels(self) -> tuple | None:
+        """Group labels in stable first-observation order for an indexed-group fit."""
+        labels = self._cache.get("_group_labels")
+        return None if labels is None else tuple(labels)
+
+    @property
     def columns(self) -> list:
         """For a ``constrain(...)`` joint RV: the variable names, in sample-column order. A
         vector-valued variable expands to one name per entry (``v[0]``, ``v[1]``, ...)."""
@@ -2063,7 +2149,8 @@ class RandomVariable:
         """Return the ``(n_draws, n_obs)`` log-likelihood matrix used by WAIC / PSIS-LOO.
 
         For a Bayesian fit (``how='mcmc'|'hmc'|'ensemble'|'vi'``) each row is the log-likelihood of the
-        data under one posterior draw; for a point-estimate fit it is a single row.
+        data under one posterior draw. Point estimates have no posterior-draw matrix; use
+        :meth:`plugin_log_likelihood` for their ordinary per-observation plug-in score.
         """
         r = self._result
         if (
@@ -2071,15 +2158,28 @@ class RandomVariable:
             and supports(r, PointwiseLogLikelihood)
             and getattr(r, "build", None) is not None
         ):
-            return r.pointwise_log_likelihood(data)
-        return np.asarray(self.log_prob(list(data)), dtype=float)[None, :]
+            matrix = np.asarray(r.pointwise_log_likelihood(data), dtype=float)
+            if matrix.ndim != 2 or matrix.shape[0] < 2:
+                raise ValueError("posterior pointwise log likelihood must contain at least two draw rows.")
+            return matrix
+        raise NotImplementedError(
+            "Bayesian pointwise log likelihood is unavailable for this point-estimate artifact; "
+            "use plugin_log_likelihood(data), AIC, or BIC instead."
+        )
+
+    def plugin_log_likelihood(self, data) -> np.ndarray:
+        """Per-observation log likelihood under the fitted point estimate (no posterior integration)."""
+        values = np.asarray(self.log_prob(list(data)), dtype=float)
+        if values.ndim != 1 or not values.size or np.isnan(values).any() or np.isposinf(values).any():
+            raise ValueError("plug-in log likelihood must be a non-empty one-dimensional vector without NaN or +Inf.")
+        return values
 
     def waic(self, data) -> dict:
         """Widely Applicable Information Criterion from the posterior (lower ``waic`` is better).
 
         Returns ``{elpd_waic, p_waic, waic, se, n_draws, pointwise}``. Estimates out-of-sample
         predictive accuracy by integrating over parameter uncertainty -- the Bayesian analogue of
-        ``aic``/``bic`` -- and falls back to a point estimate for non-Bayesian fits.
+        ``aic``/``bic``. Point-estimate fits are rejected.
         """
         from mixle.ppl import diagnostics as _diag
 
@@ -2108,14 +2208,44 @@ class RandomVariable:
         return self.params
 
     def mean(self, samples: int = 20000, seed: int = 0):
-        """Expected value of the random variable (Monte-Carlo; works for any RV —
-        concrete, transformed, convolved, or conditioned). For a joint ``constrain(...)``
-        RV this is the per-variable mean vector."""
+        """Expected value, using an analytic distribution moment before bounded Monte Carlo."""
+        samples = _exact_positive_int(samples, "moment sample count")
+        if samples > 1_000_000:
+            raise ValueError("moment sample count must not exceed 1,000,000.")
+        distribution = None
+        if self._kind == "sum":
+            a, b = self._args
+            if a is b:
+                return 2.0 * a.mean(samples=samples, seed=seed)
+            if not _expressions_share_leaf(a, b):
+                distribution = _convolve(lower(a, target="dist"), lower(b, target="dist"))
+        elif self._kind in {"sample", "bound", "apply"}:
+            distribution = lower(self, target="dist")
+        analytic = getattr(distribution, "mean", None)
+        if callable(analytic):
+            value = np.asarray(analytic())
+            return float(value) if value.ndim == 0 else value
         s = np.asarray(self.sample(samples, seed=seed), dtype=float)
         return s.mean(axis=0) if self._kind == "joint" else float(np.mean(s))
 
     def var(self, samples: int = 20000, seed: int = 0):
-        """Variance of the random variable (Monte-Carlo); per-variable for a joint RV."""
+        """Variance, using an analytic distribution moment before bounded Monte Carlo."""
+        samples = _exact_positive_int(samples, "moment sample count")
+        if samples > 1_000_000:
+            raise ValueError("moment sample count must not exceed 1,000,000.")
+        distribution = None
+        if self._kind == "sum":
+            a, b = self._args
+            if a is b:
+                return 4.0 * a.var(samples=samples, seed=seed)
+            if not _expressions_share_leaf(a, b):
+                distribution = _convolve(lower(a, target="dist"), lower(b, target="dist"))
+        elif self._kind in {"sample", "bound", "apply"}:
+            distribution = lower(self, target="dist")
+        analytic = getattr(distribution, "variance", None)
+        if callable(analytic):
+            value = np.asarray(analytic())
+            return float(value) if value.ndim == 0 else value
         s = np.asarray(self.sample(samples, seed=seed), dtype=float)
         return s.var(axis=0) if self._kind == "joint" else float(np.var(s))
 
@@ -2436,10 +2566,15 @@ class RandomVariable:
         # longer carries it (see the "bound" branch in explain_fit()).
         _original_how = how
         _parameter_dimension = _inferable_parameter_dimension(self)
+        _group_receipt = None
 
         def _stash_explanation(rv):
             if _parameter_dimension is not None:
                 rv._cache["_free_parameter_count"] = int(_parameter_dimension)
+            if _group_receipt is not None:
+                labels, mapping = _group_receipt
+                rv._cache["_group_labels"] = tuple(labels)
+                rv._cache["_group_index"] = dict(mapping)
             try:
                 rv._cache["_fit_explanation"] = self.explain_fit(
                     how=_original_how, constraints=kw.get("constraints"), potentials=kw.get("potentials")
@@ -2448,17 +2583,60 @@ class RandomVariable:
                 pass
             return rv
 
+        structural_shortcut = (
+            self._kind == "sample"
+            and _parameter_dimension == 0
+            and not any(_expr_has_gather(argument) for argument in self._args)
+            and not any(isinstance(argument, (_LinearPredictor, _NeuralPredictor)) for argument in self._args)
+            and not (isinstance(self._family, CompositeFamily) and self._family.fit_fn is not None)
+        )
+        if structural_shortcut:
+            if how not in {"auto", "em"}:
+                raise ValueError(f"how={how!r} requested inference, but the model declares no inferable parameters.")
+            if missing != "error":
+                raise NotImplementedError("a fully specified model has no missing-data fitting route.")
+            if backend != "local" or num_workers is not None or engine is not None or precision is not None:
+                raise ValueError("a fully specified model performs no distributed or precision-planned fit.")
+            if print_iter != 0:
+                raise ValueError("a fully specified model performs no iterative fit and cannot consume print_iter.")
+            if kw:
+                raise ValueError(f"a fully specified model cannot consume fit option(s) {sorted(kw)}.")
+            concrete = lower(self, target="dist")
+            return _stash_explanation(RandomVariable._bound(concrete, name=self._name))
+
         if self._kind == "sample" and any(_expr_has_gather(a) for a in self._args):
             # A data-indexed latent (theta[Field("g")]) makes the parameter per-observation -> the
             # per-observation (indexed) target.
             from mixle.ppl import inference as _inf
 
-            return _stash_explanation(_inf.indexed_fit(self, data, how=how, **kw))
+            if missing != "error":
+                raise NotImplementedError("indexed latent fitting does not support missing='marginalize'.")
+            if backend != "local" or num_workers is not None or engine is not None or precision is not None:
+                raise NotImplementedError("indexed latent fitting currently supports only local execution.")
+            if print_iter != 0:
+                raise NotImplementedError("indexed latent fitting does not implement print_iter.")
+            allowed = {"given", "rng", "draws", "burn", "thin"}
+            unknown = sorted(set(kw) - allowed)
+            if unknown:
+                raise TypeError(f"unsupported indexed fit control(s): {', '.join(unknown)}")
+            return _stash_explanation(
+                _inf.indexed_fit(self, data, how=how, max_iter=max_its, tol=delta, **kw)
+            )
 
         # regression / GLM: a linear predictor (covariates) in a parameter slot
         if self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
             from mixle.ppl import regression as _reg
 
+            if missing != "error":
+                raise NotImplementedError("regression fitting does not support missing='marginalize'.")
+            if backend != "local" or num_workers is not None or engine is not None or precision is not None:
+                raise NotImplementedError("regression fitting currently supports only local execution.")
+            if print_iter != 0:
+                raise NotImplementedError("regression fitting does not implement print_iter.")
+            allowed = {"given", "inner_max_iter", "l2", "max_iter", "quantile", "tol"}
+            unknown = sorted(set(kw) - allowed)
+            if unknown:
+                raise TypeError(f"unsupported regression fit control(s): {', '.join(unknown)}")
             regression_options = dict(kw)
             regression_options.setdefault("max_iter", max_its)
             regression_options.setdefault("tol", delta)
@@ -2468,13 +2646,38 @@ class RandomVariable:
         if self._kind == "sample" and any(isinstance(a, _NeuralPredictor) for a in self._args):
             from mixle.ppl import neural as _neu
 
-            return _neu.neural_fit(self, data, **kw)
+            if how != "auto":
+                raise NotImplementedError("neural conditional fitting currently supports how='auto' only.")
+            if missing != "error":
+                raise NotImplementedError("neural conditional fitting does not support missing='marginalize'.")
+            if backend != "local" or num_workers is not None or engine is not None or precision is not None:
+                raise NotImplementedError("neural conditional fitting currently supports only local execution.")
+            if print_iter != 0:
+                raise NotImplementedError("neural conditional fitting does not implement print_iter.")
+            if delta != 1e-8:
+                raise NotImplementedError("neural conditional fitting does not implement a delta tolerance.")
+            allowed = {"batch_size", "device", "epochs", "ewc", "given", "init", "lr", "weights"}
+            unknown = sorted(set(kw) - allowed)
+            if unknown:
+                raise TypeError(f"unsupported neural fit control(s): {', '.join(unknown)}")
+            neural_options = dict(kw)
+            neural_options.setdefault("epochs", max_its)
+            result = _neu.neural_fit(self, data, **neural_options)
+            result.fit_request = {
+                "route": "neural",
+                "how": "auto",
+                "epochs": int(neural_options["epochs"]),
+                "missing": missing,
+                "backend": backend,
+            }
+            return result
 
         # Composite families with a bespoke fitter (state-space Kalman/RTS+EM, PDE-constrained fields)
         # own their fit through the registered fit_fn hook -- no per-family branch in core. State-space
         # is registered in mixle.ppl.statespace; PDEStateSpace by the mixle-pde plugin.
         if self._kind == "sample" and isinstance(self._family, CompositeFamily) and self._family.fit_fn is not None:
             bespoke_options = {
+                "how": how,
                 "max_its": max_its,
                 "delta": delta,
                 "missing": missing,
@@ -2503,13 +2706,13 @@ class RandomVariable:
                 given = kw.pop("given", None)
                 if not given or _gby not in given:
                     raise ValueError(f"each(by={_gby!r}) needs the group index: fit(..., given={{{_gby!r}: labels}}).")
-                labels = np.asarray(given[_gby])
-                if len(labels) != len(data):
-                    raise ValueError(f"given[{_gby!r}] has length {len(labels)} but data has length {len(data)}.")
+                data = list(data)
+                group_ids, group_labels, group_index = _indexed_group_layout(given[_gby], len(data))
                 if any(k != _gby for k in given):
                     raise NotImplementedError("indexed-flat hierarchical with extra covariates is not supported yet.")
                 yarr = np.asarray(data, dtype=float)
-                data = [yarr[labels == g].tolist() for g in sorted(set(labels.tolist()))]
+                data = [yarr[group_ids == group].tolist() for group in range(len(group_labels))]
+                _group_receipt = (group_labels, group_index)
 
         grouped = self._kind == "sample" and any(
             isinstance(a, RandomVariable) and a._scope == "grouped" for a in self._args

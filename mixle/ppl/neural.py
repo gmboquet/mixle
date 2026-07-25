@@ -207,7 +207,7 @@ def neural_fit(
     init: Any = None,
     weights: Any = None,
     ewc: Any = None,
-    **_: Any,
+    **unknown: Any,
 ) -> NeuralResult:
     """Fit a neural-headed conditional RV. ``data`` is the response ``y``; ``given`` carries the covariates.
 
@@ -220,6 +220,8 @@ def neural_fit(
     per-observation loss weights (e.g. an SFT prompt mask: 0 on prompt tokens, 1 on the completion); ``ewc=``
     is an ``(anchor, fisher, lambda)`` EWC penalty for continued pretraining without forgetting.
     """
+    if unknown:
+        raise TypeError(f"unsupported neural fit control(s): {', '.join(sorted(unknown))}")
     import torch
 
     from mixle.inference import estimate

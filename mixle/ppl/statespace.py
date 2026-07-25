@@ -263,13 +263,29 @@ def statespace_fit(
     rv: RandomVariable,
     data,
     *,
+    how: str = "auto",
     max_its: int = 200,
     tol: float | None = None,
     delta: float = 1e-8,
     missing: str = "error",
-    **_,
+    backend: str = "local",
+    num_workers: int | None = None,
+    engine: Any = None,
+    precision: Any = None,
+    print_iter: int = 0,
+    **unknown,
 ) -> RandomVariable:
     """Fit a ``LocalLevel`` or ``AR1`` state-space expression by Kalman EM."""
+    if unknown:
+        raise TypeError(f"unsupported state-space fit control(s): {', '.join(sorted(unknown))}")
+    if how not in {"auto", "em"}:
+        raise NotImplementedError(f"state-space fitting implements EM, not how={how!r}")
+    if backend != "local" or num_workers is not None or engine is not None or precision is not None:
+        raise NotImplementedError("state-space fitting currently supports only local execution")
+    if print_iter != 0:
+        raise NotImplementedError("state-space fitting does not implement print_iter")
+    if tol is not None and delta != 1e-8:
+        raise ValueError("tol and delta are aliases; pass only one")
     (phi_free,) = rv._args
     tolerance = delta if tol is None else tol
     result = _kalman_em(data, bool(phi_free), max_its, tolerance, missing=missing)
