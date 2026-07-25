@@ -43,7 +43,9 @@ no-op) when torch is not installed.
 from __future__ import annotations
 
 import copy
+import operator
 from collections.abc import Sequence
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
@@ -66,7 +68,51 @@ __all__ = [
 if _HAS_TORCH:
     __all__[:0] = ["MoEBlock", "MoEMLP", "SharedResidualMoEBlock", "SharedResidualMoEMLP"]
 
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be an integer, not a boolean")
+    try:
+        result = operator.index(value)
+    except TypeError as exc:
+        raise TypeError(f"{name} must be an integer") from exc
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+
+def _integer(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be an integer, not a boolean")
+    try:
+        return operator.index(value)
+    except TypeError as exc:
+        raise TypeError(f"{name} must be an integer") from exc
+
+
+def _nonnegative_float(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a finite non-negative number, not a boolean")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a finite non-negative number") from exc
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return result
+
+
 if _HAS_TORCH:
+
+
+    @contextmanager
+    def _module_modes(module: Any) -> Any:
+        states = [(part, part.training) for part in module.modules()]
+        try:
+            yield
+        finally:
+            for part, training in states:
+                part.training = training
+
 
     class MoEMLP(nn.Module):
         """``N`` expert MLPs (same shape as :class:`~mixle.models.transformer.Block`'s dense MLP) plus a
@@ -94,13 +140,18 @@ if _HAS_TORCH:
             aux_loss_weight: float = 0.01,
         ) -> None:
             super().__init__()
+            d_model = _positive_int(d_model, "d_model")
+            n_experts = _positive_int(n_experts, "n_experts")
+            top_k = _positive_int(top_k, "top_k")
             if not (1 <= top_k <= n_experts):
                 raise ValueError(f"top_k={top_k} must be in [1, n_experts={n_experts}]")
-            self.d_model = int(d_model)
-            self.n_experts = int(n_experts)
-            self.top_k = int(top_k)
-            self.expert_hidden = int(expert_hidden) if expert_hidden is not None else 4 * self.d_model
-            self.aux_loss_weight = float(aux_loss_weight)
+            self.d_model = d_model
+            self.n_experts = n_experts
+            self.top_k = top_k
+            self.expert_hidden = (
+                _positive_int(expert_hidden, "expert_hidden") if expert_hidden is not None else 4 * self.d_model
+            )
+            self.aux_loss_weight = _nonnegative_float(aux_loss_weight, "aux_loss_weight")
             self.gate = nn.Linear(d_model, n_experts, bias=False)
             self.experts = nn.ModuleList(
                 [
@@ -115,19 +166,26 @@ if _HAS_TORCH:
 
         def forward(self, x: Any) -> Any:
             shape = x.shape
+            if not shape or shape[-1] != self.d_model:
+                raise ValueError(f"MoEMLP input must end in d_model={self.d_model}")
             flat = x.reshape(-1, shape[-1])
             n_tokens = flat.shape[0]
+            if n_tokens == 0:
+                raise ValueError("MoEMLP requires at least one token")
 
             logits = self.gate(flat)  # (n_tokens, n_experts)
             probs = F.softmax(logits, dim=-1)
+            if not bool(torch.isfinite(probs).all()):
+                raise ValueError("MoEMLP routing probabilities must be finite")
             self.last_gate_probs = probs.detach()
 
             top_w, top_idx = probs.topk(self.top_k, dim=-1)  # (n_tokens, top_k) each
-            # NOT renormalized to sum to 1: the raw gate probability of each selected expert is the
-            # combine weight (Switch Transformer's y = p_i(x) * FFN_i(x)), which is what carries a
-            # gradient back to the gate's parameters through the main task loss -- a top_k=1
-            # renormalization would collapse every selected weight to the constant 1.0 and cut that path,
-            # leaving the gate learnable only through the auxiliary load-balance loss.
+            # Forward-normalize selected weights so identical copied experts preserve the dense
+            # function exactly. Detaching the denominator retains a straight-through main-loss
+            # gradient to the selected gate probabilities, including top_k=1.
+            combine_w = top_w / top_w.sum(dim=-1, keepdim=True).detach().clamp_min(
+                torch.finfo(top_w.dtype).tiny
+            )
             out = flat.new_zeros(n_tokens, self.d_model)
             for e, expert in enumerate(self.experts):
                 # tokens that picked expert e in ANY of their top_k slots
@@ -135,7 +193,7 @@ if _HAS_TORCH:
                 token_mask = slot.any(dim=-1)
                 if not bool(token_mask.any()):
                     continue
-                weight = (top_w * slot).sum(dim=-1)[token_mask]  # combine weight if e appears once (top_k<=n_experts)
+                weight = (combine_w * slot).sum(dim=-1)[token_mask]
                 out[token_mask] += weight.unsqueeze(-1) * expert(flat[token_mask])
 
             # Switch-Transformer load-balance auxiliary loss: n_experts * sum_e f_e * P_e, minimized when
@@ -172,17 +230,20 @@ if _HAS_TORCH:
             disjoint_loss_weight: float = 0.01,
         ) -> None:
             super().__init__()
+            d_model = _positive_int(d_model, "d_model")
+            n_experts = _positive_int(n_experts, "n_experts")
+            top_k = _positive_int(top_k, "top_k")
+            shared_hidden = _positive_int(shared_hidden, "shared_hidden")
+            residual_hidden = _positive_int(residual_hidden, "residual_hidden")
             if not (1 <= top_k <= n_experts):
                 raise ValueError(f"top_k={top_k} must be in [1, n_experts={n_experts}]")
-            if shared_hidden < 1 or residual_hidden < 1:
-                raise ValueError("shared_hidden and residual_hidden must both be positive")
-            self.d_model = int(d_model)
-            self.n_experts = int(n_experts)
-            self.top_k = int(top_k)
-            self.shared_hidden = int(shared_hidden)
-            self.residual_hidden = int(residual_hidden)
-            self.aux_loss_weight = float(aux_loss_weight)
-            self.disjoint_loss_weight = float(disjoint_loss_weight)
+            self.d_model = d_model
+            self.n_experts = n_experts
+            self.top_k = top_k
+            self.shared_hidden = shared_hidden
+            self.residual_hidden = residual_hidden
+            self.aux_loss_weight = _nonnegative_float(aux_loss_weight, "aux_loss_weight")
+            self.disjoint_loss_weight = _nonnegative_float(disjoint_loss_weight, "disjoint_loss_weight")
             self.gate = nn.Linear(d_model, n_experts, bias=False)
             self.shared = nn.Sequential(
                 nn.Linear(d_model, self.shared_hidden), nn.GELU(), nn.Linear(self.shared_hidden, d_model)
@@ -210,9 +271,15 @@ if _HAS_TORCH:
 
         def forward(self, x: Any) -> Any:
             shape = x.shape
+            if not shape or shape[-1] != self.d_model:
+                raise ValueError(f"SharedResidualMoEMLP input must end in d_model={self.d_model}")
             flat = x.reshape(-1, shape[-1])
             n_tokens = flat.shape[0]
+            if n_tokens == 0:
+                raise ValueError("SharedResidualMoEMLP requires at least one token")
             probs = F.softmax(self.gate(flat), dim=-1)
+            if not bool(torch.isfinite(probs).all()):
+                raise ValueError("SharedResidualMoEMLP routing probabilities must be finite")
             self.last_gate_probs = probs.detach()
             top_w, top_idx = probs.topk(self.top_k, dim=-1)
             # Normalize the selected forward weights so an exact dense factorization stays on the
@@ -338,28 +405,41 @@ def upcycle_dense_to_moe(
     seed: int = 0,
     noise_std: float = 0.01,
     probe_tokens: int = 64,
+    preservation_tolerance: float = 0.2,
 ) -> tuple[Any, dict]:
     """ "Sparse upcycling" (Komatsuzaki et al., 2023): build a fresh ``MoEBlock`` whose attention is
     copied unchanged from ``dense_block`` and whose ``n_experts`` expert MLPs are each initialized as a
     near-copy of ``dense_block``'s trained dense MLP (exact weights + small seeded Gaussian
     perturbation per expert, so experts start distinguishable rather than identical dead-gradient
-    copies). Unlike H1's growth operators this is NOT exactly function-preserving -- the gate's
-    top-``k`` hard selection is a nonlinearity the dense path never had, so upcycled output only
-    APPROXIMATES the original dense output. That approximation is measured, not assumed: a fixed probe
-    batch is pushed through both blocks and the relative L2 output gap is returned in the receipt.
+    copies). Selected gate weights are forward-normalized, so ``noise_std=0`` preserves the dense
+    function up to the declared floating-point tolerance even with top-1 routing. With nonzero noise,
+    a fixed probe batch measures the approximation and construction fails if the relative L2 gap
+    exceeds ``preservation_tolerance``.
 
-    Returns ``(moe_block, receipt)`` where ``receipt`` has ``relative_output_diff`` (the measured gap,
-    expected small but nonzero), ``n_experts``, ``top_k``, ``noise_std``, and ``seed``.
+    Returns ``(moe_block, receipt)`` where the receipt records the measured gap, declared tolerance,
+    preservation result, source substrate, and construction controls.
     """
     if not _HAS_TORCH:  # pragma: no cover - torch is optional
         raise ImportError("upcycle_dense_to_moe requires torch")
 
+    n_experts = _positive_int(n_experts, "n_experts")
+    top_k = _positive_int(top_k, "top_k")
+    probe_tokens = _positive_int(probe_tokens, "probe_tokens")
+    seed = _integer(seed, "seed")
+    noise_std = _nonnegative_float(noise_std, "noise_std")
+    preservation_tolerance = _nonnegative_float(preservation_tolerance, "preservation_tolerance")
     d_model = dense_block.ln1.normalized_shape[0]
     n_head = dense_block.attn.h
     dense_hidden = dense_block.mlp[0].out_features
+    reference = dense_block.mlp[0].weight
+    source_training = dense_block.training
 
-    gen = torch.Generator().manual_seed(int(seed))
-    moe_block = MoEBlock(d_model, n_head, n_experts, top_k=top_k, expert_hidden=dense_hidden)
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    with torch.random.fork_rng():
+        torch.manual_seed(seed)
+        moe_block = MoEBlock(d_model, n_head, n_experts, top_k=top_k, expert_hidden=dense_hidden).to(
+            device=reference.device, dtype=reference.dtype
+        )
 
     moe_block.ln1.load_state_dict(dense_block.ln1.state_dict())
     moe_block.ln2.load_state_dict(dense_block.ln2.state_dict())
@@ -370,24 +450,38 @@ def upcycle_dense_to_moe(
         for expert in moe_block.mlp.experts:
             expert.load_state_dict(dense_mlp_state)
             for p in expert.parameters():
-                p.add_(torch.randn(p.shape, generator=gen) * noise_std)
+                noise = torch.randn(p.shape, generator=gen, dtype=p.dtype, device="cpu").to(p.device)
+                p.add_(noise * noise_std)
 
-    with torch.no_grad():
-        probe = torch.randn(1, probe_tokens, d_model, generator=gen)
+    with _module_modes(dense_block), torch.no_grad():
+        probe = torch.randn(1, probe_tokens, d_model, generator=gen, dtype=reference.dtype, device="cpu").to(
+            reference.device
+        )
         dense_block.eval()
         moe_block.eval()
         dense_out = dense_block(probe)
         moe_out = moe_block(probe)
         gap = torch.linalg.norm(moe_out - dense_out) / torch.linalg.norm(dense_out).clamp_min(1.0e-12)
+    moe_block.train(source_training)
+    gap_value = float(gap)
 
     receipt = {
-        "relative_output_diff": float(gap),
-        "n_experts": int(n_experts),
-        "top_k": int(top_k),
-        "noise_std": float(noise_std),
-        "seed": int(seed),
-        "probe_tokens": int(probe_tokens),
+        "relative_output_diff": gap_value,
+        "preservation_tolerance": preservation_tolerance,
+        "preserved": gap_value <= preservation_tolerance,
+        "n_experts": n_experts,
+        "top_k": top_k,
+        "noise_std": noise_std,
+        "seed": seed,
+        "probe_tokens": probe_tokens,
+        "device": str(reference.device),
+        "dtype": str(reference.dtype),
     }
+    if not receipt["preserved"]:
+        raise RuntimeError(
+            f"upcycled MoE relative output gap {gap_value:.6g} exceeds declared "
+            f"preservation_tolerance={preservation_tolerance:.6g}"
+        )
     return moe_block, receipt
 
 
@@ -412,6 +506,15 @@ def factorize_dense_mlp_to_moe(
     """
     if not _HAS_TORCH:  # pragma: no cover - torch is optional
         raise ImportError("factorize_dense_mlp_to_moe requires torch")
+    n_experts = _positive_int(n_experts, "n_experts")
+    top_k = _positive_int(top_k, "top_k")
+    probe_tokens = _positive_int(probe_tokens, "probe_tokens")
+    seed = _integer(seed, "seed")
+    if isinstance(common_fraction, (bool, np.bool_)):
+        raise TypeError("common_fraction must be a finite number in (0, 1)")
+    common_fraction = float(common_fraction)
+    if not np.isfinite(common_fraction):
+        raise ValueError("common_fraction must be finite")
     if not 0.0 < common_fraction < 1.0:
         raise ValueError("common_fraction must be in (0, 1)")
     if not isinstance(dense_mlp, nn.Sequential) or len(dense_mlp) != 3:
@@ -424,15 +527,17 @@ def factorize_dense_mlp_to_moe(
     hidden = first.out_features
     shared_hidden = min(hidden - 1, max(1, int(round(common_fraction * hidden))))
     residual_hidden = hidden - shared_hidden
-    module = SharedResidualMoEMLP(
-        first.in_features,
-        n_experts,
-        shared_hidden=shared_hidden,
-        residual_hidden=residual_hidden,
-        top_k=top_k,
-        aux_loss_weight=aux_loss_weight,
-        disjoint_loss_weight=disjoint_loss_weight,
-    ).to(device=first.weight.device, dtype=first.weight.dtype)
+    with torch.random.fork_rng():
+        torch.manual_seed(seed)
+        module = SharedResidualMoEMLP(
+            first.in_features,
+            n_experts,
+            shared_hidden=shared_hidden,
+            residual_hidden=residual_hidden,
+            top_k=top_k,
+            aux_loss_weight=aux_loss_weight,
+            disjoint_loss_weight=disjoint_loss_weight,
+        ).to(device=first.weight.device, dtype=first.weight.dtype)
     module.shared[1] = copy.deepcopy(activation)
     for expert in module.residual_experts:
         expert[1] = copy.deepcopy(activation)
@@ -464,7 +569,7 @@ def factorize_dense_mlp_to_moe(
             expert[2].bias.zero_()
         module.gate.weight.zero_()
 
-        generator = torch.Generator().manual_seed(int(seed))
+        generator = torch.Generator().manual_seed(seed)
         probe = torch.randn(probe_tokens, first.in_features, generator=generator).to(
             device=first.weight.device, dtype=first.weight.dtype
         )
@@ -566,8 +671,31 @@ def expert_collapse_receipt(
 
     if not routing_history:
         raise ValueError("expert_collapse_receipt requires at least one routing-weight snapshot")
+    merged_effective_frac = _nonnegative_float(merged_effective_frac, "merged_effective_frac")
+    shattered_instability = _nonnegative_float(shattered_instability, "shattered_instability")
+    shattered_edge_threshold = _nonnegative_float(shattered_edge_threshold, "shattered_edge_threshold")
+    shattered_edge_frac = _nonnegative_float(shattered_edge_frac, "shattered_edge_frac")
+    if not 0.0 < merged_effective_frac <= 1.0:
+        raise ValueError("merged_effective_frac must lie in (0, 1]")
+    if shattered_instability > 1.0:
+        raise ValueError("shattered_instability must lie in [0, 1]")
+    if shattered_edge_threshold > 1.0:
+        raise ValueError("shattered_edge_threshold must lie in [0, 1]")
+    if shattered_edge_frac > 1.0:
+        raise ValueError("shattered_edge_frac must lie in [0, 1]")
 
     rounds = [np.asarray(r, dtype=np.float64) for r in routing_history]
+    for index, round_probs in enumerate(rounds):
+        if round_probs.ndim != 2:
+            raise ValueError(f"routing snapshot {index} must be two-dimensional")
+        if round_probs.shape[0] == 0 or round_probs.shape[1] == 0:
+            raise ValueError(f"routing snapshot {index} must contain tokens and experts")
+        if not np.isfinite(round_probs).all():
+            raise ValueError(f"routing snapshot {index} must be finite")
+        if np.any(round_probs < 0.0):
+            raise ValueError(f"routing snapshot {index} must be non-negative")
+        if not np.allclose(round_probs.sum(axis=1), 1.0, rtol=1.0e-6, atol=1.0e-8):
+            raise ValueError(f"routing snapshot {index} rows must sum to one")
     n_experts = rounds[0].shape[1]
     if any(r.shape[1] != n_experts for r in rounds):
         raise ValueError("every round in routing_history must have the same number of experts")

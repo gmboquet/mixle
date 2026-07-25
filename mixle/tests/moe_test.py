@@ -18,6 +18,7 @@ torch = pytest.importorskip("torch")
 
 from mixle.models.moe import (
     MoEBlock,
+    MoEMLP,
     SharedResidualMoEMLP,
     expert_collapse_receipt,
     factorize_dense_mlp_to_moe,
@@ -183,6 +184,23 @@ class ExpertCollapseReceiptTest:
         # scenario should NOT also read as "merged" -- averaging alone hides it, instability catches it.
         assert receipt["merged"] is False, receipt["diagnosis"]
 
+    @pytest.mark.parametrize(
+        "history, kwargs",
+        [
+            ([np.ones(3)], {}),
+            ([np.empty((0, 3))], {}),
+            ([np.array([[0.5, np.nan, 0.5]])], {}),
+            ([np.array([[0.5, -0.1, 0.6]])], {}),
+            ([np.array([[0.2, 0.2, 0.2]])], {}),
+            ([np.full((2, 3), 1.0 / 3.0)], {"merged_effective_frac": 0.0}),
+            ([np.full((2, 3), 1.0 / 3.0)], {"shattered_instability": np.inf}),
+            ([np.full((2, 3), 1.0 / 3.0)], {"shattered_edge_threshold": 1.1}),
+        ],
+    )
+    def test_invalid_routing_state_and_thresholds_are_rejected(self, history, kwargs):
+        with pytest.raises(ValueError):
+            expert_collapse_receipt(history, **kwargs)
+
 
 class UpcyclingReceiptTest:
     def _trained_looking_dense(self, d_model=32, n_head=4, seed=0):
@@ -203,6 +221,64 @@ class UpcyclingReceiptTest:
         assert receipt["relative_output_diff"] < 0.2, (
             f"upcycled output diverged too far from dense (relative diff {receipt['relative_output_diff']:.4f})"
         )
+
+    def test_zero_noise_is_function_preserving_with_enforced_tolerance(self):
+        dense = self._trained_looking_dense()
+        rng_before = torch.random.get_rng_state().clone()
+        moe, receipt = upcycle_dense_to_moe(
+            dense,
+            n_experts=4,
+            top_k=1,
+            seed=0,
+            noise_std=0.0,
+            preservation_tolerance=1.0e-6,
+        )
+        assert receipt["preserved"] is True
+        assert receipt["relative_output_diff"] <= receipt["preservation_tolerance"]
+        torch.testing.assert_close(torch.random.get_rng_state(), rng_before)
+        probe = torch.randn(2, 7, 32)
+        with torch.no_grad():
+            torch.testing.assert_close(moe(probe), dense(probe), rtol=1.0e-5, atol=1.0e-6)
+
+    def test_declared_preservation_tolerance_is_enforced(self):
+        with pytest.raises(RuntimeError, match="exceeds declared"):
+            upcycle_dense_to_moe(
+                self._trained_looking_dense(),
+                n_experts=4,
+                noise_std=0.01,
+                preservation_tolerance=0.0,
+            )
+
+    def test_upcycling_preserves_source_substrate_and_complete_mode_state(self):
+        dense = self._trained_looking_dense().double()
+        dense.train()
+        dense.attn.eval()
+        modes_before = [part.training for part in dense.modules()]
+        moe, receipt = upcycle_dense_to_moe(
+            dense,
+            n_experts=2,
+            noise_std=0.0,
+            probe_tokens=3,
+            preservation_tolerance=1.0e-12,
+        )
+        assert [part.training for part in dense.modules()] == modes_before
+        assert next(moe.parameters()).dtype == torch.float64
+        assert next(moe.parameters()).device == next(dense.parameters()).device
+        assert receipt["dtype"] == "torch.float64"
+
+    @pytest.mark.parametrize(
+        "kwargs, error",
+        [
+            ({"noise_std": -1.0}, ValueError),
+            ({"noise_std": np.nan}, ValueError),
+            ({"probe_tokens": 0}, ValueError),
+            ({"probe_tokens": 1.5}, TypeError),
+            ({"preservation_tolerance": -1.0}, ValueError),
+        ],
+    )
+    def test_invalid_upcycling_controls_are_rejected(self, kwargs, error):
+        with pytest.raises(error):
+            upcycle_dense_to_moe(self._trained_looking_dense(), n_experts=2, **kwargs)
 
     def test_upcycling_is_closer_than_a_fresh_random_moe(self):
         """The whole point of upcycling is starting close to the dense function instead of from random
@@ -231,12 +307,37 @@ class UpcyclingReceiptTest:
         dense = self._trained_looking_dense()
 
         _, small_noise_receipt = upcycle_dense_to_moe(dense, n_experts=4, top_k=1, seed=0, noise_std=0.001)
-        _, large_noise_receipt = upcycle_dense_to_moe(dense, n_experts=4, top_k=1, seed=0, noise_std=0.2)
+        _, large_noise_receipt = upcycle_dense_to_moe(
+            dense,
+            n_experts=4,
+            top_k=1,
+            seed=0,
+            noise_std=0.2,
+            preservation_tolerance=3.0,
+        )
 
         assert small_noise_receipt["relative_output_diff"] < large_noise_receipt["relative_output_diff"]
 
 
 class SharedResidualMoETest:
+    def test_auxiliary_losses_reject_invalid_weights_and_routing_inputs(self):
+        for bad in (-1.0, np.nan, np.inf):
+            with pytest.raises(ValueError):
+                MoEMLP(4, 2, aux_loss_weight=bad)
+            with pytest.raises(ValueError):
+                SharedResidualMoEMLP(
+                    4,
+                    2,
+                    shared_hidden=4,
+                    residual_hidden=4,
+                    disjoint_loss_weight=bad,
+                )
+        module = MoEMLP(4, 2)
+        with pytest.raises(ValueError, match="at least one token"):
+            module(torch.empty(0, 4))
+        with pytest.raises(ValueError, match="finite"):
+            module(torch.full((2, 4), torch.nan))
+
     def test_dense_factorization_is_function_preserving_at_matched_active_width(self):
         torch.manual_seed(19)
         dense = Block(24, 4).mlp
