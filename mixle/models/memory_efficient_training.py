@@ -41,6 +41,8 @@ Three pieces, per the roadmap spec:
 
 from __future__ import annotations
 
+import copy
+import operator
 from dataclasses import dataclass
 from typing import Any
 
@@ -96,6 +98,35 @@ _FP8_FORMAT_MAX = {
 }
 
 _DEFAULT_UNDERFLOW_FRACTION_THRESHOLD = 0.5
+_SUPPORTED_FP8_FORMATS = frozenset(_FP8_FORMAT_MAX)
+
+
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be an integer, not a boolean.")
+    try:
+        result = operator.index(value)
+    except TypeError as exc:
+        raise TypeError(f"{name} must be an integer.") from exc
+    if result <= 0:
+        raise ValueError(f"{name} must be positive.")
+    return result
+
+
+def _finite_float(value: Any, name: str, *, minimum: float | None = None, maximum: float | None = None) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a finite number, not a boolean.")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a finite number.") from exc
+    if not np.isfinite(result):
+        raise ValueError(f"{name} must be finite.")
+    if minimum is not None and result < minimum:
+        raise ValueError(f"{name} must be at least {minimum}.")
+    if maximum is not None and result > maximum:
+        raise ValueError(f"{name} must be at most {maximum}.")
+    return result
 
 
 @dataclass(frozen=True)
@@ -150,10 +181,23 @@ def fp8_cast_with_guard(
     """
     if not _HAS_TORCH:
         raise ImportError("fp8_cast_with_guard requires torch.")
+    if not isinstance(tensor, torch.Tensor) or not tensor.is_floating_point():
+        raise TypeError("tensor must be a floating-point Torch tensor.")
+    if fp8_dtype not in _SUPPORTED_FP8_FORMATS:
+        raise ValueError(f"fp8_dtype must be one of {sorted(_SUPPORTED_FP8_FORMATS)}.")
     if fallback_dtype is None:
         fallback_dtype = torch.bfloat16
+    supported_fallbacks = {torch.float16, torch.bfloat16, torch.float32, torch.float64}
+    if fallback_dtype not in supported_fallbacks:
+        raise ValueError("fallback_dtype must be float16, bfloat16, float32, or float64.")
+    underflow_fraction_threshold = _finite_float(
+        underflow_fraction_threshold,
+        "underflow_fraction_threshold",
+        minimum=0.0,
+        maximum=1.0,
+    )
 
-    if not hasattr(torch, fp8_dtype):
+    if getattr(torch, fp8_dtype, None) is None:
         return Fp8CastResult(
             tensor=tensor.to(fallback_dtype),
             used_fp8=False,
@@ -266,14 +310,44 @@ _DEFAULT_INT8_FLUSHED_FRACTION_THRESHOLD = 0.3
 
 
 def _flatten_to_numpy(tensor: Any) -> np.ndarray:
-    if hasattr(tensor, "detach"):  # torch.Tensor
-        return tensor.detach().cpu().numpy().reshape(-1).astype(np.float64)
-    return np.asarray(tensor).reshape(-1).astype(np.float64)
+    if _HAS_TORCH and isinstance(tensor, torch.Tensor):
+        if not tensor.is_floating_point():
+            raise TypeError("optimizer moments must be floating-point tensors.")
+        source = tensor.detach().cpu()
+        if source.dtype == torch.bfloat16:
+            source = source.float()
+        array = source.numpy()
+    else:
+        array = np.asarray(tensor)
+        if not np.issubdtype(array.dtype, np.floating):
+            raise TypeError("optimizer moments must be floating-point arrays.")
+    flat = array.reshape(-1).astype(np.float64)
+    if not np.isfinite(flat).all():
+        raise ValueError("optimizer moments must contain only finite values.")
+    return flat
+
+
+def _source_dtype(tensor: Any) -> np.dtype:
+    if _HAS_TORCH and isinstance(tensor, torch.Tensor):
+        mapping = {
+            torch.float16: np.dtype(np.float16),
+            torch.bfloat16: np.dtype(np.float32),
+            torch.float32: np.dtype(np.float32),
+            torch.float64: np.dtype(np.float64),
+        }
+        try:
+            return mapping[tensor.dtype]
+        except KeyError as exc:
+            raise TypeError(f"unsupported optimizer-moment dtype: {tensor.dtype}.") from exc
+    dtype = np.asarray(tensor).dtype
+    if dtype not in {np.dtype(np.float16), np.dtype(np.float32), np.dtype(np.float64)}:
+        raise TypeError(f"unsupported optimizer-moment dtype: {dtype}.")
+    return dtype
 
 
 def _tensor_shape(tensor: Any) -> tuple:
     if hasattr(tensor, "shape"):
-        return tuple(tensor.shape)
+        return tuple(int(dim) for dim in tensor.shape)
     return (np.asarray(tensor).size,)
 
 
@@ -290,8 +364,10 @@ def quantize_int8_blockwise(
         length as ``flat``; ``scales`` is one ``float32`` per block.
     """
     flat = np.asarray(flat, dtype=np.float64).reshape(-1)
+    if not np.isfinite(flat).all():
+        raise ValueError("int8 blockwise source values must be finite.")
     n = flat.size
-    block_size = max(int(block_size), 1)
+    block_size = _positive_int(block_size, "block_size")
     n_blocks = int(np.ceil(n / block_size)) if n else 0
     codes = np.zeros(n, dtype=np.int8)
     scales = np.zeros(n_blocks, dtype=np.float32)
@@ -310,8 +386,20 @@ def dequantize_int8_blockwise(
 ) -> np.ndarray:
     """Invert :func:`quantize_int8_blockwise`. Returns a ``float32`` array the same length as ``codes``."""
     codes = np.asarray(codes)
+    scales = np.asarray(scales)
+    if codes.ndim != 1 or codes.dtype != np.int8:
+        raise ValueError("int8 blockwise codes must be a one-dimensional int8 array.")
+    if scales.ndim != 1 or not np.issubdtype(scales.dtype, np.floating):
+        raise ValueError("int8 blockwise scales must be a one-dimensional floating array.")
+    if not np.isfinite(scales).all() or np.any(scales <= 0.0):
+        raise ValueError("int8 blockwise scales must be positive and finite.")
     n = codes.size
-    block_size = max(int(block_size), 1)
+    block_size = _positive_int(block_size, "block_size")
+    expected_scales = (n + block_size - 1) // block_size if n else 0
+    if scales.size != expected_scales:
+        raise ValueError(
+            f"int8 blockwise payload requires {expected_scales} scales for {n} codes; received {scales.size}."
+        )
     out = np.zeros(n, dtype=np.float32)
     for b, scale in enumerate(scales):
         lo, hi = b * block_size, min((b + 1) * block_size, n)
@@ -343,15 +431,158 @@ class CompressedMomentEncoding:
     int8_scales: np.ndarray | None = None
     int8_block_size: int = _DEFAULT_INT8_BLOCK_SIZE
     dense_values: np.ndarray | None = None
+    source_dtype: str = "<f4"
+    schema_version: int = 1
+    requested_method: str = "auto"
+    fallback_reason: str | None = None
+
+    @staticmethod
+    def _text_tensor(value: str) -> Any:
+        if not _HAS_TORCH:
+            raise ImportError("tensor-state encoding requires torch.")
+        return torch.from_numpy(np.frombuffer(value.encode("utf-8"), dtype=np.uint8).copy())
+
+    @staticmethod
+    def _tensor_text(value: Any, name: str) -> str:
+        if not _HAS_TORCH or not isinstance(value, torch.Tensor) or value.dtype != torch.uint8 or value.ndim != 1:
+            raise ValueError(f"{name} must be a one-dimensional uint8 tensor.")
+        try:
+            return value.detach().cpu().numpy().tobytes().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{name} is not valid UTF-8.") from exc
 
     def nbytes(self) -> int:
         """Measured storage footprint, in bytes -- delegates to G4's own receipt-carrying
         ``nbytes()`` for the G4 branch; computes int8/dense directly."""
         if self.method == "g4":
+            if self.g4_encoding is None:
+                raise ValueError("g4 encoding payload is missing.")
             return self.g4_encoding.nbytes()
         if self.method == "int8":
-            return int(self.int8_codes.nbytes + self.int8_scales.astype(np.float32).nbytes)
-        return int(self.dense_values.astype(np.float32).nbytes)
+            if self.int8_codes is None or self.int8_scales is None:
+                raise ValueError("int8 encoding payload is incomplete.")
+            return int(self.int8_codes.nbytes + self.int8_scales.nbytes)
+        if self.method == "dense":
+            if self.dense_values is None:
+                raise ValueError("dense encoding payload is missing.")
+            return int(self.dense_values.nbytes)
+        raise ValueError(f"unknown compressed moment method {self.method!r}.")
+
+    def to_tensor_state(self) -> dict[str, Any]:
+        """Return a portable tensor tree with no custom Python objects or NumPy arrays."""
+        if not _HAS_TORCH:
+            raise ImportError("tensor-state encoding requires torch.")
+        # Validate coverage, dtype, finiteness, and active-branch completeness before checkpointing.
+        decompress_moment(self)
+        method_codes = {"dense": 0, "int8": 1, "g4": 2}
+        state = {
+            "schema_version": torch.tensor(self.schema_version, dtype=torch.int64),
+            "method": torch.tensor(method_codes[self.method], dtype=torch.int64),
+            "shape": torch.tensor(self.shape, dtype=torch.int64),
+            "source_dtype": self._text_tensor(self.source_dtype),
+            "requested_method": self._text_tensor(self.requested_method),
+            "fallback_reason": self._text_tensor(self.fallback_reason or ""),
+            "int8_block_size": torch.tensor(self.int8_block_size, dtype=torch.int64),
+            "int8_codes": torch.empty(0, dtype=torch.int8),
+            "int8_scales": torch.empty(0, dtype=torch.float32),
+            "dense_values": torch.empty(0, dtype=torch.float32),
+            "g4_payload": torch.empty(0, dtype=torch.uint8),
+        }
+        if self.method == "int8":
+            state["int8_codes"] = torch.from_numpy(np.asarray(self.int8_codes, dtype=np.int8).copy())
+            state["int8_scales"] = torch.from_numpy(np.asarray(self.int8_scales, dtype=np.float32).copy())
+        elif self.method == "dense":
+            state["dense_values"] = torch.from_numpy(np.asarray(self.dense_values).copy())
+        else:
+            state["g4_payload"] = torch.from_numpy(
+                np.frombuffer(self.g4_encoding.to_bytes(), dtype=np.uint8).copy()
+            )
+        return state
+
+    @classmethod
+    def from_tensor_state(cls, state: Any) -> CompressedMomentEncoding:
+        """Rebuild and validate an encoding from :meth:`to_tensor_state` output."""
+        if not _HAS_TORCH:
+            raise ImportError("tensor-state decoding requires torch.")
+        required = {
+            "schema_version",
+            "method",
+            "shape",
+            "source_dtype",
+            "requested_method",
+            "fallback_reason",
+            "int8_block_size",
+            "int8_codes",
+            "int8_scales",
+            "dense_values",
+            "g4_payload",
+        }
+        if not isinstance(state, dict) or set(state) != required:
+            raise ValueError("compressed tensor state has missing or unknown fields.")
+        scalar_names = ("schema_version", "method", "int8_block_size")
+        for name in scalar_names:
+            value = state[name]
+            if not isinstance(value, torch.Tensor) or value.dtype != torch.int64 or value.ndim != 0:
+                raise ValueError(f"{name} must be a scalar int64 tensor.")
+        schema_version = int(state["schema_version"].item())
+        if schema_version != 1:
+            raise ValueError(f"unsupported compressed tensor-state schema version {schema_version}.")
+        method_codes = {0: "dense", 1: "int8", 2: "g4"}
+        try:
+            method = method_codes[int(state["method"].item())]
+        except KeyError as exc:
+            raise ValueError("compressed tensor state has an unknown method code.") from exc
+        shape_tensor = state["shape"]
+        if not isinstance(shape_tensor, torch.Tensor) or shape_tensor.dtype != torch.int64 or shape_tensor.ndim != 1:
+            raise ValueError("shape must be a one-dimensional int64 tensor.")
+        shape = tuple(int(dim) for dim in shape_tensor.tolist())
+        source_dtype = cls._tensor_text(state["source_dtype"], "source_dtype")
+        requested_method = cls._tensor_text(state["requested_method"], "requested_method")
+        if requested_method not in {"auto", "g4", "int8", "dense"}:
+            raise ValueError("compressed tensor state has an unknown requested method.")
+        fallback_reason = cls._tensor_text(state["fallback_reason"], "fallback_reason") or None
+        branch_names = ("int8_codes", "int8_scales", "dense_values", "g4_payload")
+        for name in branch_names:
+            if not isinstance(state[name], torch.Tensor):
+                raise ValueError(f"{name} must be a tensor.")
+        active_names = {
+            "dense": {"dense_values"},
+            "int8": {"int8_codes", "int8_scales"},
+            "g4": {"g4_payload"},
+        }[method]
+        if any(state[name].numel() for name in branch_names if name not in active_names):
+            raise ValueError("compressed tensor state populates fields from an inactive method branch.")
+        kwargs: dict[str, Any] = {}
+        if method == "dense":
+            value = state["dense_values"]
+            if not isinstance(value, torch.Tensor) or not value.is_floating_point():
+                raise ValueError("dense_values must be a floating-point tensor.")
+            kwargs["dense_values"] = value.detach().cpu().numpy().copy()
+        elif method == "int8":
+            codes, scales = state["int8_codes"], state["int8_scales"]
+            if not isinstance(codes, torch.Tensor) or codes.dtype != torch.int8 or codes.ndim != 1:
+                raise ValueError("int8_codes must be a one-dimensional int8 tensor.")
+            if not isinstance(scales, torch.Tensor) or scales.dtype != torch.float32 or scales.ndim != 1:
+                raise ValueError("int8_scales must be a one-dimensional float32 tensor.")
+            kwargs["int8_codes"] = codes.detach().cpu().numpy().copy()
+            kwargs["int8_scales"] = scales.detach().cpu().numpy().copy()
+        else:
+            payload = state["g4_payload"]
+            if not isinstance(payload, torch.Tensor) or payload.dtype != torch.uint8 or payload.ndim != 1:
+                raise ValueError("g4_payload must be a one-dimensional uint8 tensor.")
+            kwargs["g4_encoding"] = SortedProfileEncoding.from_bytes(payload.detach().cpu().numpy().tobytes())
+        encoding = cls(
+            method=method,
+            shape=shape,
+            int8_block_size=int(state["int8_block_size"].item()),
+            source_dtype=source_dtype,
+            schema_version=schema_version,
+            requested_method=requested_method,
+            fallback_reason=fallback_reason,
+            **kwargs,
+        )
+        decompress_moment(encoding)
+        return encoding
 
 
 def choose_compression_method(
@@ -376,6 +607,9 @@ def choose_compression_method(
     ``method`` for a possible further downgrade to ``"dense"`` if int8 itself proves untrustworthy
     for this specific tensor (see :data:`_DEFAULT_INT8_ADVERSARIAL_RELATIVE_ERROR`).
     """
+    min_size_for_g4 = _positive_int(min_size_for_g4, "min_size_for_g4")
+    g4_top_k_fraction = _finite_float(g4_top_k_fraction, "g4_top_k_fraction", minimum=0.0, maximum=1.0)
+    g4_gof_threshold = _finite_float(g4_gof_threshold, "g4_gof_threshold", minimum=0.0, maximum=1.0)
     flat = _flatten_to_numpy(tensor)
     n = flat.size
     if n >= min_size_for_g4:
@@ -411,8 +645,36 @@ def compress_moment(
     Returns:
         CompressedMomentEncoding
     """
+    if method not in {"auto", "g4", "int8", "dense"}:
+        raise ValueError("method must be one of 'auto', 'g4', 'int8', or 'dense'.")
+    min_size_for_g4 = _positive_int(min_size_for_g4, "min_size_for_g4")
+    g4_top_k_fraction = _finite_float(g4_top_k_fraction, "g4_top_k_fraction", minimum=0.0, maximum=1.0)
+    g4_gof_threshold = _finite_float(g4_gof_threshold, "g4_gof_threshold", minimum=0.0, maximum=1.0)
+    int8_block_size = _positive_int(int8_block_size, "int8_block_size")
+    int8_adversarial_relative_error = _finite_float(
+        int8_adversarial_relative_error,
+        "int8_adversarial_relative_error",
+        minimum=0.0,
+    )
+    int8_flushed_fraction_threshold = _finite_float(
+        int8_flushed_fraction_threshold,
+        "int8_flushed_fraction_threshold",
+        minimum=0.0,
+        maximum=1.0,
+    )
     flat = _flatten_to_numpy(tensor)
     shape = _tensor_shape(tensor)
+    source_dtype = _source_dtype(tensor)
+
+    def dense(reason: str | None = None) -> CompressedMomentEncoding:
+        return CompressedMomentEncoding(
+            method="dense",
+            shape=shape,
+            dense_values=flat.astype(source_dtype, copy=True),
+            source_dtype=source_dtype.str,
+            requested_method=method,
+            fallback_reason=reason,
+        )
 
     chosen = method
     if chosen == "auto":
@@ -429,8 +691,14 @@ def compress_moment(
         g4_encoding = fit_sorted_profile(tensor, top_k=top_k, tail_family=tail_family, gof_threshold=g4_gof_threshold)
         if g4_encoding.used_dense_fallback:
             # G4's own receipt rejected the fit -- honor it rather than force a bad G4 encoding.
-            return CompressedMomentEncoding(method="dense", shape=shape, dense_values=flat.astype(np.float32))
-        return CompressedMomentEncoding(method="g4", shape=shape, g4_encoding=g4_encoding)
+            return dense("g4 goodness-of-fit guard rejected the encoding")
+        return CompressedMomentEncoding(
+            method="g4",
+            shape=shape,
+            g4_encoding=g4_encoding,
+            source_dtype=source_dtype.str,
+            requested_method=method,
+        )
 
     if chosen == "int8":
         codes, scales = quantize_int8_blockwise(flat, block_size=int8_block_size)
@@ -445,26 +713,67 @@ def compress_moment(
             # rel_error) or a single-outlier-dominated block flushing most of its OTHER values to
             # zero while barely moving the tensor-wide L2 norm (caught by flushed_fraction) -- fall
             # back to dense.
-            return CompressedMomentEncoding(method="dense", shape=shape, dense_values=flat.astype(np.float32))
+            return dense(
+                "int8 reconstruction guard rejected the encoding "
+                f"(relative_error={rel_error:.6g}, flushed_fraction={flushed_fraction:.6g})"
+            )
         return CompressedMomentEncoding(
             method="int8",
             shape=shape,
             int8_codes=codes,
             int8_scales=scales.astype(np.float32),
             int8_block_size=int8_block_size,
+            source_dtype=source_dtype.str,
+            requested_method=method,
         )
 
-    return CompressedMomentEncoding(method="dense", shape=shape, dense_values=flat.astype(np.float32))
+    return dense()
 
 
 def decompress_moment(encoding: CompressedMomentEncoding) -> np.ndarray:
-    """Invert :func:`compress_moment`. Returns a ``float32`` array reshaped to ``encoding.shape``."""
+    """Invert a complete versioned compressed-moment payload."""
+    if not isinstance(encoding, CompressedMomentEncoding):
+        raise TypeError("encoding must be a CompressedMomentEncoding.")
+    if encoding.schema_version != 1:
+        raise ValueError(f"unsupported compressed-moment schema version {encoding.schema_version}.")
+    if encoding.method not in {"g4", "int8", "dense"}:
+        raise ValueError(f"unknown compressed moment method {encoding.method!r}.")
+    if not isinstance(encoding.shape, tuple) or any(
+        isinstance(dim, (bool, np.bool_)) or not isinstance(dim, (int, np.integer)) or int(dim) < 0
+        for dim in encoding.shape
+    ):
+        raise ValueError("compressed-moment shape must contain non-negative integer dimensions.")
+    expected_size = int(np.prod(encoding.shape, dtype=np.int64))
+    try:
+        source_dtype = np.dtype(encoding.source_dtype)
+    except TypeError as exc:
+        raise ValueError(f"invalid compressed-moment source dtype {encoding.source_dtype!r}.") from exc
+    if source_dtype not in {np.dtype(np.float16), np.dtype(np.float32), np.dtype(np.float64)}:
+        raise ValueError(f"unsupported compressed-moment source dtype {source_dtype}.")
     if encoding.method == "g4":
-        return _g4_reconstruct(encoding.g4_encoding)
-    if encoding.method == "int8":
+        if encoding.g4_encoding is None:
+            raise ValueError("g4 compressed-moment payload is missing.")
+        flat = np.asarray(_g4_reconstruct(encoding.g4_encoding)).reshape(-1)
+    elif encoding.method == "int8":
+        if encoding.int8_codes is None or encoding.int8_scales is None:
+            raise ValueError("int8 compressed-moment payload is incomplete.")
         flat = dequantize_int8_blockwise(encoding.int8_codes, encoding.int8_scales, encoding.int8_block_size)
-        return flat.reshape(encoding.shape)
-    return encoding.dense_values.reshape(encoding.shape)
+    else:
+        if encoding.dense_values is None:
+            raise ValueError("dense compressed-moment payload is missing.")
+        flat = np.asarray(encoding.dense_values)
+        if flat.dtype != source_dtype:
+            raise ValueError(
+                f"dense compressed-moment dtype {flat.dtype} does not match declared {source_dtype}."
+            )
+        flat = flat.reshape(-1)
+    if flat.size != expected_size:
+        raise ValueError(
+            f"compressed-moment payload has {flat.size} values but shape {encoding.shape} requires {expected_size}."
+        )
+    if not np.isfinite(flat).all():
+        raise ValueError("compressed-moment payload reconstructs non-finite values.")
+    return flat.astype(source_dtype, copy=False).reshape(encoding.shape)
 
 
 class CompressedOptimizerState:
@@ -493,16 +802,44 @@ class CompressedOptimizerState:
     ``CompressedOptimizerState`` directly should not have to know this internal detail to stay safe).
     """
 
-    def __init__(self, shape: tuple, method: str = "auto", **compress_kwargs: Any) -> None:
-        self.shape = tuple(shape)
+    def __init__(
+        self,
+        shape: tuple,
+        method: str = "auto",
+        *,
+        state_dtype: Any = None,
+        **compress_kwargs: Any,
+    ) -> None:
+        if not isinstance(shape, tuple) or any(
+            isinstance(dim, (bool, np.bool_)) or not isinstance(dim, (int, np.integer)) or int(dim) < 0
+            for dim in shape
+        ):
+            raise ValueError("optimizer-state shape must contain non-negative integer dimensions.")
+        if method not in {"auto", "g4", "int8", "dense"}:
+            raise ValueError("method must be one of 'auto', 'g4', 'int8', or 'dense'.")
+        if not _HAS_TORCH:
+            raise ImportError("CompressedOptimizerState requires torch.")
+        state_dtype = torch.float32 if state_dtype is None else state_dtype
+        if state_dtype not in {torch.float32, torch.float64}:
+            raise ValueError("state_dtype must be torch.float32 or torch.float64.")
+        self.shape = tuple(int(dim) for dim in shape)
         self.method = method
+        self.state_dtype = state_dtype
         self._compress_kwargs = compress_kwargs
         self._m: CompressedMomentEncoding | None = None
         self._v: CompressedMomentEncoding | None = None
 
     def set(self, m: Any, v: Any) -> None:
+        m = torch.as_tensor(m, dtype=self.state_dtype)
+        v = torch.as_tensor(v, dtype=self.state_dtype)
+        if tuple(m.shape) != self.shape or tuple(v.shape) != self.shape:
+            raise ValueError("moment shapes must match the declared optimizer-state shape.")
+        if not bool(torch.isfinite(m).all()) or not bool(torch.isfinite(v).all()):
+            raise ValueError("optimizer moments must be finite.")
+        if bool((v < 0).any()):
+            raise ValueError("Adam second moments must be non-negative.")
         self._m = compress_moment(m, method=self.method, **self._compress_kwargs)
-        sqrt_v = v.clamp_min(0.0).sqrt() if hasattr(v, "clamp_min") else np.sqrt(np.clip(v, 0.0, None))
+        sqrt_v = v.sqrt()
         self._v = compress_moment(sqrt_v, method=self.method, **self._compress_kwargs)
 
     def get(self, device: Any = None, dtype: Any = None) -> tuple[Any, Any]:
@@ -513,8 +850,10 @@ class CompressedOptimizerState:
         m = torch.from_numpy(decompress_moment(self._m))
         sqrt_v = torch.from_numpy(decompress_moment(self._v))
         v = sqrt_v * sqrt_v  # nonnegative by construction, regardless of any reconstruction noise
-        if dtype is not None:
-            m, v = m.to(dtype), v.to(dtype)
+        target_dtype = self.state_dtype if dtype is None else dtype
+        if target_dtype not in {torch.float32, torch.float64}:
+            raise ValueError("optimizer state can only be restored as torch.float32 or torch.float64.")
+        m, v = m.to(target_dtype), v.to(target_dtype)
         if device is not None:
             m, v = m.to(device), v.to(device)
         return m, v
@@ -533,6 +872,55 @@ class CompressedOptimizerState:
             self._m.method if self._m is not None else None,
             self._v.method if self._v is not None else None,
         )
+
+    def to_tensor_state(self) -> dict[str, Any]:
+        """Return a resumable tensor tree suitable for safe optimizer checkpoints."""
+        if self._m is None or self._v is None:
+            raise RuntimeError("cannot checkpoint optimizer state before moments are initialized.")
+        dtype_code = 0 if self.state_dtype == torch.float32 else 1
+        return {
+            "schema_version": torch.tensor(1, dtype=torch.int64),
+            "shape": torch.tensor(self.shape, dtype=torch.int64),
+            "state_dtype": torch.tensor(dtype_code, dtype=torch.int64),
+            "m": self._m.to_tensor_state(),
+            "v": self._v.to_tensor_state(),
+        }
+
+    @classmethod
+    def from_tensor_state(
+        cls,
+        state: Any,
+        *,
+        method: str,
+        compress_kwargs: dict[str, Any] | None = None,
+    ) -> CompressedOptimizerState:
+        required = {"schema_version", "shape", "state_dtype", "m", "v"}
+        if not isinstance(state, dict) or set(state) != required:
+            raise ValueError("optimizer tensor state has missing or unknown fields.")
+        for name in ("schema_version", "state_dtype"):
+            value = state[name]
+            if not isinstance(value, torch.Tensor) or value.dtype != torch.int64 or value.ndim != 0:
+                raise ValueError(f"{name} must be a scalar int64 tensor.")
+        if int(state["schema_version"].item()) != 1:
+            raise ValueError("unsupported optimizer tensor-state schema version.")
+        shape = state["shape"]
+        if not isinstance(shape, torch.Tensor) or shape.dtype != torch.int64 or shape.ndim != 1:
+            raise ValueError("optimizer tensor-state shape must be a one-dimensional int64 tensor.")
+        dtype_codes = {0: torch.float32, 1: torch.float64}
+        try:
+            state_dtype = dtype_codes[int(state["state_dtype"].item())]
+        except KeyError as exc:
+            raise ValueError("optimizer tensor state has an unknown state-dtype code.") from exc
+        result = cls(
+            tuple(int(dim) for dim in shape.tolist()),
+            method=method,
+            state_dtype=state_dtype,
+            **(compress_kwargs or {}),
+        )
+        result._m = CompressedMomentEncoding.from_tensor_state(state["m"])
+        result._v = CompressedMomentEncoding.from_tensor_state(state["v"])
+        result.get()
+        return result
 
 
 if _HAS_TORCH:
@@ -564,11 +952,30 @@ if _HAS_TORCH:
             eps: float = 1e-8,
             weight_decay: float = 0.0,
             compression_method: str = "auto",
+            state_dtype: Any = None,
             **compress_kwargs: Any,
         ) -> None:
+            lr = _finite_float(lr, "lr", minimum=0.0)
+            eps = _finite_float(eps, "eps", minimum=0.0)
+            if eps == 0.0:
+                raise ValueError("eps must be positive.")
+            weight_decay = _finite_float(weight_decay, "weight_decay", minimum=0.0)
+            if not isinstance(betas, tuple) or len(betas) != 2:
+                raise TypeError("betas must be a two-item tuple.")
+            beta1 = _finite_float(betas[0], "beta1", minimum=0.0)
+            beta2 = _finite_float(betas[1], "beta2", minimum=0.0)
+            if beta1 >= 1.0 or beta2 >= 1.0:
+                raise ValueError("Adam betas must lie in [0, 1).")
+            if compression_method not in {"auto", "g4", "int8", "dense"}:
+                raise ValueError("compression_method must be one of 'auto', 'g4', 'int8', or 'dense'.")
+            state_dtype = torch.float32 if state_dtype is None else state_dtype
+            if state_dtype not in {torch.float32, torch.float64}:
+                raise ValueError("state_dtype must be torch.float32 or torch.float64.")
+            betas = (beta1, beta2)
             defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
             super().__init__(params, defaults)
             self.compression_method = compression_method
+            self.state_dtype = state_dtype
             self._compress_kwargs = compress_kwargs
 
         @torch.no_grad()
@@ -587,21 +994,34 @@ if _HAS_TORCH:
                     if p.grad is None:
                         continue
                     grad = p.grad
+                    if grad.is_sparse:
+                        raise RuntimeError("CompressedAdam does not support sparse gradients.")
+                    if not p.is_floating_point() or p.is_complex():
+                        raise TypeError("CompressedAdam parameters must be real floating-point tensors.")
+                    if not bool(torch.isfinite(grad).all()):
+                        raise FloatingPointError("CompressedAdam gradients must be finite.")
+                    grad = grad.to(self.state_dtype)
                     if weight_decay != 0:
-                        grad = grad.add(p, alpha=weight_decay)
+                        grad = grad.add(p.to(self.state_dtype), alpha=weight_decay)
 
                     state = self.state[p]
                     if "step" not in state:
-                        state["step"] = 0
+                        state["step"] = torch.zeros((), dtype=torch.int64)
                         state["compressed"] = CompressedOptimizerState(
-                            tuple(p.shape), method=self.compression_method, **self._compress_kwargs
+                            tuple(p.shape),
+                            method=self.compression_method,
+                            state_dtype=self.state_dtype,
+                            **self._compress_kwargs,
                         )
-                        state["compressed"].set(torch.zeros_like(p), torch.zeros_like(p))
+                        state["compressed"].set(
+                            torch.zeros_like(p, dtype=self.state_dtype),
+                            torch.zeros_like(p, dtype=self.state_dtype),
+                        )
 
-                    state["step"] += 1
-                    t = state["step"]
+                    state["step"].add_(1)
+                    t = int(state["step"].item())
                     compressed: CompressedOptimizerState = state["compressed"]
-                    m, v = compressed.get(device=p.device, dtype=p.dtype)
+                    m, v = compressed.get(device=p.device)
                     # v is Adam's second-moment buffer -- strictly non-negative by construction --
                     # but a symmetric-family compression path (G4's default GaussianEstimator tail
                     # fit is unbounded) can reconstruct a near-zero true v as a small NEGATIVE
@@ -617,10 +1037,39 @@ if _HAS_TORCH:
                     m_hat = m / bias_correction1
                     v_hat = v / bias_correction2
 
-                    p.add_(-lr * m_hat / (v_hat.sqrt() + eps))
+                    update = -lr * m_hat / (v_hat.sqrt() + eps)
+                    p.add_(update.to(p.dtype))
                     compressed.set(m, v)
 
             return loss
+
+        def state_dict(self) -> dict[str, Any]:
+            """Return standard optimizer metadata plus tensor-only compressed moment payloads."""
+            packed = copy.deepcopy(super().state_dict())
+            for state in packed["state"].values():
+                compressed = state.pop("compressed", None)
+                if compressed is not None:
+                    state["compressed_tensor_state"] = compressed.to_tensor_state()
+            return packed
+
+        def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+            """Restore a :meth:`state_dict` without requiring custom-object deserialization."""
+            packed = copy.deepcopy(state_dict)
+            for state in packed.get("state", {}).values():
+                tensor_state = state.pop("compressed_tensor_state", None)
+                if tensor_state is not None:
+                    compressed = CompressedOptimizerState.from_tensor_state(
+                        tensor_state,
+                        method=self.compression_method,
+                        compress_kwargs=self._compress_kwargs,
+                    )
+                    if compressed.state_dtype != self.state_dtype:
+                        raise ValueError(
+                            f"checkpoint state dtype {compressed.state_dtype} does not match optimizer "
+                            f"state_dtype {self.state_dtype}."
+                        )
+                    state["compressed"] = compressed
+            super().load_state_dict(packed)
 
     __all__.append("CompressedAdam")
 
