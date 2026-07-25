@@ -146,6 +146,16 @@ def propose_next_constrained(
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     x, y = _validate_xy(x, y)
+    if y.size == 0:
+        # Same defect class as bayesopt._propose_one / batch.propose_qei_batch /
+        # batch.propose_local_penalization: without this check, _fit_surrogate below is what actually
+        # executes first with zero observations, not _best_feasible's own zero-size guard. In a
+        # torch-free environment that means GaussianProcessRegressor's unrelated, opaque "requires
+        # torch" ImportError fires instead of a clear, named error -- and even with torch installed,
+        # fitting a GP to an empty dataset silently succeeds (it degenerates to the prior mean/std)
+        # rather than failing fast, so the real error would only surface several lines later. Check
+        # here, first, so every environment gets the same clear error.
+        raise ValueError("cannot propose a next constrained point with zero observations; call tell() first.")
     c = np.atleast_2d(np.asarray(c, dtype=np.float64))
     if c.shape[0] != x.shape[0]:
         raise ValueError("c must have one row of constraint values per observation.")
