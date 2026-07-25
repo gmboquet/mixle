@@ -12,9 +12,13 @@ stochastic samples into calibrated uncertainty:
   higher temperature as a proxy ensemble); the disagreement *across* members is epistemic (the model
   is unsure), the spread *within* is aleatoric (the question is genuinely open).
   (:func:`mixle.inference.decompose_entropy`.)
-* **Conformal answer-or-abstain**: calibrate a confidence threshold on labeled examples so that
-  *when the model answers, it is correct with probability >= 1 - alpha* -- a finite-sample selective-
-  risk guarantee. The model abstains on questions it does not know instead of confabulating.
+* **Selective answer-or-abstain** (:meth:`LLMUncertainty.calibrate`): calibrate a confidence threshold
+  on labeled examples so that *when the model answers, it is correct with probability >= 1 - alpha* --
+  with probability >= ``1 - delta`` over the random calibration set itself (Geifman & El-Yaniv 2017;
+  Angelopoulos et al. 2021 "Learn then Test"): a proper finite-sample ``(alpha, delta)``-PAC
+  selective-risk guarantee via an exact Clopper-Pearson bound, Bonferroni-corrected across every
+  candidate threshold tried -- not a same-sample point estimate. The model abstains on questions it
+  does not know instead of confabulating.
 * **Claim-level corroboration** (:meth:`LLMUncertainty.assess_claims`): lexical overlap only ever
   establishes *candidacy* -- that a resample is plausibly about the same thing as a claim -- never
   support by itself; a negation/polarity check on the shared content words is what separates genuine
@@ -37,6 +41,7 @@ from enum import StrEnum
 from typing import Any
 
 import numpy as np
+from scipy.stats import beta as beta_dist
 from scipy.stats import rankdata
 
 from mixle.inference.calibration import ProbabilityCalibrator, calibrate_probabilities
@@ -418,6 +423,71 @@ class FactualityModel:
         return float(self.calibrator.predict([float(self.signal(prompt))])[0])
 
 
+# -- selective-risk calibration: a finite-sample (alpha, delta)-PAC threshold, not a same-sample
+#    point estimate (MXR-080-0293) -----------------------------------------------------------------
+#
+# This solves a different statistical task from mixle.inference.conformal's split-conformal machinery
+# (interval/set coverage: "does the emitted region contain the truth", an unconditional/marginal
+# guarantee over every test point) -- this is SELECTIVE classification / risk control: "given that we
+# chose to answer (confidence >= tau), is the answer correct", a guarantee CONDITIONAL on a
+# data-dependent selection event. Marginal coverage says nothing about that conditional rate, so
+# mixle.inference.conformal.conformal_label_threshold is not a drop-in fit here; this is instead the
+# standard construction for exactly this problem (Geifman & El-Yaniv 2017 "Selective Classification for
+# Deep Neural Networks"; Angelopoulos et al. 2021 "Learn then Test"), self-contained in this module the
+# same way MXR-080-0295's corroboration heuristic above is.
+
+
+def _clopper_pearson_upper(k: int, n: int, delta: float) -> float:
+    """Exact one-sided ``(1 - delta)``-confidence upper bound on a Binomial rate from ``k`` successes
+    (here: selective errors) in ``n`` trials (Clopper & Pearson 1934): ``Beta^-1(1 - delta; k+1, n-k)``.
+
+    An EXACT tail bound, not an asymptotic approximation (e.g. Hoeffding) -- which is what keeps
+    :func:`_selective_risk_threshold` usable at the calibration-set sizes this module actually sees,
+    especially in the near-zero-error regime a well-behaved confidence signal produces at high
+    thresholds. ``k >= n`` (every answer in the bucket was wrong) returns 1.0: no finite sample rules
+    out a true 100% error rate.
+    """
+    if k >= n:
+        return 1.0
+    return float(beta_dist.ppf(1.0 - delta, k + 1, n - k))
+
+
+def _selective_risk_threshold(confs: np.ndarray, errs: np.ndarray, *, alpha: float, delta: float) -> float:
+    """The smallest confidence threshold whose TRUE selective risk is ``<= alpha`` with probability
+    ``>= 1 - delta`` (MXR-080-0293) -- see :meth:`LLMUncertainty.calibrate` for the full statement of
+    the guarantee and its assumptions.
+
+    For each candidate threshold ``tau`` (every unique observed confidence, ``m`` candidates total),
+    replaces the same-sample empirical error on ``{conf >= tau}`` with its exact Clopper-Pearson upper
+    confidence bound (:func:`_clopper_pearson_upper`) at level ``1 - delta / m``. The ``1 / m`` is a
+    Bonferroni correction for testing ``m`` thresholds against the same calibration data -- exactly the
+    correction the previous same-sample selection omitted, which is how it could approve a threshold
+    after one lucky small sample. The correction makes the bound simultaneously valid for every
+    candidate threshold at once, so selecting the smallest ``tau`` whose bound clears ``alpha`` remains
+    valid regardless of the selection rule. Candidates are scanned from smallest to largest (most to
+    least inclusive answered set); the first (most inclusive) one whose bound clears ``alpha`` is
+    returned, maximizing how often the model answers subject to the risk guarantee.
+
+    Returns ``+inf`` (refuse everything) if no threshold's bound clears ``alpha`` -- too little
+    calibration data for the requested ``(alpha, delta)``, or the signal genuinely does not
+    discriminate well enough, rather than deploying an uncertified threshold.
+    """
+    candidates = np.unique(confs)
+    m = candidates.shape[0]
+    if m == 0:
+        return float("inf")
+    per_test_delta = delta / m
+    for tau in candidates:
+        answered = confs >= tau
+        n_tau = int(answered.sum())
+        if n_tau == 0:
+            continue
+        k_tau = int(round(float(errs[answered].sum())))
+        if _clopper_pearson_upper(k_tau, n_tau, per_test_delta) <= alpha:
+            return float(tau)
+    return float("inf")
+
+
 class LLMUncertainty:
     """Calibrated uncertainty and selective prediction for any ``generate(prompt) -> str`` LLM.
 
@@ -425,7 +495,7 @@ class LLMUncertainty:
         generate: ``callable(prompt) -> str`` -- one stochastic sample from the model.
         equivalent: ``callable(a, b) -> bool`` deciding whether two answers mean the same thing
             (default exact match; pass a normalizer / embedding / entailment check for real text).
-        n: default number of samples per prompt.
+        n: default number of samples per prompt (must be a positive integer).
     """
 
     def __init__(
@@ -440,6 +510,7 @@ class LLMUncertainty:
         self.n = _require_positive_n(n)
         self._threshold: float | None = None
         self._alpha: float | None = None
+        self._delta: float | None = None
 
     def sample(self, prompt: str, n: int | None = None) -> list[Generation]:
         """Draw ``n`` stochastic responses to ``prompt``, normalized to :class:`Generation` records.
@@ -572,48 +643,78 @@ class LLMUncertainty:
         reliability = float(np.mean([c.support for c in assessed])) if assessed else None
         return InformationAssessment(assessed, reliability)
 
-    # -- conformal answer-or-abstain ----------------------------------------------------------
+    # -- selective answer-or-abstain -----------------------------------------------------------
     def calibrate(
         self,
         examples: Sequence[tuple[str, Any]],
         *,
         correct: Callable[[Any, Any], bool] | None = None,
         alpha: float = 0.1,
+        delta: float = 0.05,
         n: int | None = None,
     ) -> LLMUncertainty:
-        """Calibrate a confidence threshold for selective risk ``<= alpha`` on labeled ``(prompt, gold)``.
+        """Calibrate a selective-risk threshold with a finite-sample ``(alpha, delta)``-PAC guarantee.
 
-        For each example, the model's answer (majority meaning-cluster) and its confidence are
+        For each labeled example, the model's answer (majority meaning-cluster) and its confidence are
         computed; ``correct(answer, gold)`` (default the ``equivalent`` relation) marks it right or
-        wrong. The threshold is the lowest confidence at which the selective error rate on the
-        calibration set is ``<= alpha`` -- so :meth:`answer` abstains below it and, when it answers,
-        is right with probability about ``1 - alpha``.
+        wrong. The threshold is chosen by :func:`_selective_risk_threshold` (MXR-080-0293): the
+        smallest confidence ``tau`` (the most inclusive answered set) whose exact Clopper-Pearson upper
+        confidence bound on the selective error rate -- Bonferroni-corrected across every candidate
+        threshold tried -- is ``<= alpha``.
+
+        Statistical guarantee and assumptions: assuming the calibration ``(prompt, gold)`` examples and
+        future queries are exchangeable draws from the same distribution, with probability ``>= 1 -
+        delta`` over the randomness of the calibration set, the deployed threshold's TRUE selective
+        risk (``P(wrong | confidence >= threshold)`` on a fresh query) is ``<= alpha``. This is a proper
+        finite-sample ``(alpha, delta)``-PAC guarantee (Geifman & El-Yaniv 2017 "Selective
+        Classification for Deep Neural Networks"; Angelopoulos et al. 2021 "Learn then Test") -- NOT a
+        same-sample point estimate. The previous implementation picked the smallest threshold whose
+        SAME-SAMPLE empirical error happened to be ``<= alpha``, with no correction for either (a) the
+        calibration set being finite, or (b) implicitly searching over every candidate threshold on
+        that same data -- so a small calibration set could approve a threshold after one lucky correct
+        example, with no relationship to the advertised ``1 - alpha`` guarantee. ``delta`` is the
+        honest second parameter that same-sample selection omitted entirely: no finite calibration set
+        can certify a threshold with zero failure probability.
+
+        If no threshold's bound clears ``alpha`` (too little calibration data for the requested
+        ``alpha``/``delta``), the threshold is set just above the maximum observed confidence, so
+        :meth:`answer` abstains on everything rather than deploying an uncertified threshold.
+
+        Args:
+            examples: labeled ``(prompt, gold_answer)`` pairs to calibrate against; must be non-empty.
+            correct: ``(answer, gold) -> bool`` (default the ``equivalent`` relation).
+            alpha: target selective risk (miscoverage), in ``[0.0, 1.0]`` -- the guarantee is on the
+                TRUE risk, not this calibration set's empirical risk.
+            delta: failure probability of the guarantee itself, in the open interval ``(0.0, 1.0)`` --
+                the guarantee holds with probability ``>= 1 - delta`` over the random calibration set.
+            n: samples per prompt (passed to :meth:`assess`).
         """
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"alpha must be in [0.0, 1.0], got {alpha!r}.")
+        if not 0.0 < delta < 1.0:
+            raise ValueError(f"delta must be in the open interval (0.0, 1.0), got {delta!r}.")
+        examples = list(examples)
+        if not examples:
+            raise ValueError("calibrate() requires at least one labeled example.")
         corr = correct or self.equivalent or (lambda a, b: a == b)
         confs, errs = [], []
         for prompt, gold in examples:
             a = self.assess(prompt, n)
             confs.append(a.confidence)
             errs.append(0.0 if corr(a.answer, gold) else 1.0)
-        confs = np.asarray(confs)
-        errs = np.asarray(errs)
-        # among candidate thresholds (observed confidences), the smallest tau whose answered set has
-        # empirical error <= alpha; if none qualifies, refuse everything (tau just above the max).
-        best = float(confs.max()) + 1e-9
-        for tau in np.unique(confs):
-            answered = confs >= tau
-            if answered.any() and errs[answered].mean() <= alpha:
-                best = float(tau)
-                break
-        self._threshold = best
+        confs_arr = np.asarray(confs, dtype=float)
+        errs_arr = np.asarray(errs, dtype=float)
+        self._threshold = _selective_risk_threshold(confs_arr, errs_arr, alpha=alpha, delta=delta)
         self._alpha = float(alpha)
+        self._delta = float(delta)
         return self
 
     def answer(self, prompt: str, n: int | None = None) -> LLMAssessment | None:
         """Answer ``prompt`` if confident enough, else ``None`` (abstain).
 
         Requires a prior :meth:`calibrate`. Returns the :class:`LLMAssessment` when
-        ``confidence >= threshold`` (so the answer meets the selective-risk guarantee), else ``None``.
+        ``confidence >= threshold`` (so the answer meets the calibrated ``(alpha, delta)``
+        selective-risk guarantee), else ``None``.
         """
         if self._threshold is None:
             raise RuntimeError("call calibrate(...) before answer()")
