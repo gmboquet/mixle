@@ -90,6 +90,19 @@ def tune_training(
     result = multi_fidelity_minimize(
         objective, space.bounds(), fidelities=fidelities, costs=costs, max_cost=max_cost, n_init=n_init, seed=seed
     )
+    if not result["target_evaluated"]:
+        # `x`/`y` are None here (MXR-080-0181): the budget ran out -- or the surrogate fit failed --
+        # before a single target-fidelity evaluation was affordable. Surface that plainly instead of
+        # letting `np.asarray(None, dtype=np.float64)` silently become `array(nan)` and fail later with
+        # an unrelated-looking error out of `space.decode` (e.g. "invalid index to scalar variable").
+        target = float(max(fidelities))
+        raise ValueError(
+            f"tune_training: budget too tight to ever reach the target fidelity {target} -- "
+            f"max_cost={max_cost}, fidelities={fidelities!r}, costs={costs!r}, n_init={n_init!r}. "
+            f"The multi-fidelity search stopped ({result['stopped_reason']!r}) without affording a "
+            f"single evaluation at the target fidelity, so no best recipe/loss is available. Raise "
+            f"max_cost, reduce n_init, or lower the target fidelity's cost."
+        )
     best_x = np.asarray(result["x"], dtype=np.float64)  # best target-fidelity point
     return TrainingSearchResult(recipe=space.decode(best_x), loss=float(result["y"]), history=result)
 
