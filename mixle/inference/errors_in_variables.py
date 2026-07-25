@@ -46,10 +46,18 @@ def deming_regression(x, y, variance_ratio: float = 1.0) -> DemingFit:
     Returns:
         A :class:`DemingFit` with the unbiased ``slope`` / ``intercept`` and the recovered latent ``x*``.
     """
-    x, y = np.asarray(x, dtype=float).ravel(), np.asarray(y, dtype=float).ravel()
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    if x.ndim != 1 or y.ndim != 1:
+        raise ValueError("x and y must be one-dimensional paired measurements")
+    if x.shape != y.shape:
+        raise ValueError("x and y must contain the same number of observations")
     if x.shape[0] < 2:
         raise ValueError("deming_regression requires at least 2 observations")
+    if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
+        raise ValueError("x and y must contain only finite values")
     lam = float(variance_ratio)
+    if not np.isfinite(lam) or lam <= 0:
+        raise ValueError("variance_ratio must be finite and > 0")
     xb, yb = x.mean(), y.mean()
     sxx = np.mean((x - xb) ** 2)
     syy = np.mean((y - yb) ** 2)
@@ -58,12 +66,16 @@ def deming_regression(x, y, variance_ratio: float = 1.0) -> DemingFit:
         raise ValueError(
             "deming_regression requires x to have nonzero variance (a constant x carries no information about the slope)"
         )
-    if sxy == 0.0:
-        # x and y are exactly uncorrelated: the Deming quadratic lam*sxy*b^2 + (lam*sxx-syy)*b - sxy = 0
-        # degenerates to (lam*sxx - syy)*b = 0, whose solution is slope=0 (the coefficient is nonzero
-        # here, since sxx > 0 is already guaranteed above and generically lam*sxx != syy) -- not the
-        # division by `2*sxy` below, which would otherwise produce +-inf/nan.
-        slope = 0.0
+    covariance_scale = max(sxx, syy, 1.0)
+    if abs(sxy) <= np.finfo(float).eps * covariance_scale:
+        # With zero cross-covariance, the Deming principal axis is horizontal only
+        # when the x direction has the larger error-standardised variance. The
+        # alternative is vertical (an infinite y-on-x slope), or non-identifiable
+        # when both directions tie; neither has a finite slope representation.
+        if syy < lam * sxx:
+            slope = 0.0
+        else:
+            raise ValueError("Deming slope is vertical or unidentified for this zero-covariance design")
     else:
         slope = (syy - lam * sxx + np.sqrt((syy - lam * sxx) ** 2 + 4.0 * lam * sxy**2)) / (2.0 * sxy)
     intercept = yb - slope * xb
@@ -105,23 +117,56 @@ def simex(
     """
     rng = seed if isinstance(seed, RandomState) else RandomState(seed)
     x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float).ravel()
+    y = np.asarray(y, dtype=float)
+    if x.ndim not in {1, 2} or x.shape[0] < 1 or (x.ndim == 2 and x.shape[1] < 1):
+        raise ValueError("x must be a non-empty one- or two-dimensional predictor array")
+    if y.ndim != 1 or y.shape[0] != x.shape[0]:
+        raise ValueError("y must be one-dimensional and aligned with x")
+    if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
+        raise ValueError("x and y must contain only finite values")
     vec = x.ndim == 1
     Xc = x[:, None] if vec else x
     n, p = Xc.shape
-    sig = np.broadcast_to(np.asarray(sigma_u, dtype=float), (p,))
+    try:
+        sig = np.broadcast_to(np.asarray(sigma_u, dtype=float), (p,))
+    except ValueError as exc:
+        raise ValueError("sigma_u must be scalar or contain one value per predictor column") from exc
+    if not np.all(np.isfinite(sig)) or np.any(sig < 0):
+        raise ValueError("sigma_u must contain finite non-negative standard deviations")
     if lambdas is None:
         lambdas = np.array([0.0, 0.5, 1.0, 1.5, 2.0])
-    theta0 = np.atleast_1d(np.asarray(fit_fn(x, y), dtype=float))
+    else:
+        lambdas = np.asarray(lambdas, dtype=float)
+    if lambdas.ndim != 1 or lambdas.size < 2 or not np.all(np.isfinite(lambdas)) or np.any(lambdas < 0):
+        raise ValueError("lambdas must be a finite one-dimensional array of at least two non-negative levels")
+    if isinstance(n_sims, (bool, np.bool_)) or not isinstance(n_sims, (int, np.integer)) or n_sims < 1:
+        raise ValueError("n_sims must be a positive integer")
+    if extrapolation not in {"linear", "quadratic"}:
+        raise ValueError("extrapolation must be 'linear' or 'quadratic'")
+    deg = 2 if extrapolation == "quadratic" else 1
+    if np.unique(lambdas).size <= deg:
+        raise ValueError(f"{extrapolation} extrapolation requires at least {deg + 1} distinct lambda levels")
+
+    def fit_parameters(predictors: np.ndarray) -> np.ndarray:
+        value = np.asarray(fit_fn(predictors, y), dtype=float)
+        if value.ndim > 1 or value.size < 1 or not np.all(np.isfinite(value)):
+            raise ValueError("fit_fn must return a non-empty finite scalar or one-dimensional parameter vector")
+        return np.atleast_1d(value)
+
+    theta0 = fit_parameters(x)
     curve = np.empty((len(lambdas), theta0.shape[0]))
     for i, lam in enumerate(lambdas):
         acc = np.zeros_like(theta0)
         for _ in range(n_sims):
             noisy = Xc + np.sqrt(lam) * sig[None, :] * rng.standard_normal((n, p))
-            acc += np.atleast_1d(np.asarray(fit_fn(noisy[:, 0] if vec else noisy, y), dtype=float))
+            fitted = fit_parameters(noisy[:, 0] if vec else noisy)
+            if fitted.shape != theta0.shape:
+                raise ValueError("fit_fn returned inconsistent parameter dimensions")
+            acc += fitted
         curve[i] = acc / n_sims
-    deg = 2 if extrapolation == "quadratic" else 1
     estimate = np.array([np.polyval(np.polyfit(lambdas, curve[:, j], deg), -1.0) for j in range(theta0.shape[0])])
+    if not np.all(np.isfinite(estimate)):
+        raise RuntimeError("SIMEX extrapolation produced non-finite estimates")
     # "naive" is the documented lambda=0 (no added noise) estimate -- theta0, the direct fit on
     # the actual data. curve[0] is instead the average of n_sims NOISY refits at whatever
     # lambdas[0] happens to be, which only coincides with theta0 when the caller's own lambdas
@@ -151,6 +196,18 @@ def propagate_uncertainty(
         ``{'mean', 'std', 'quantiles', 'levels', 'samples'}`` over the propagated outputs.
     """
     s = np.asarray(samples, dtype=float)
+    if s.ndim < 1 or s.shape[0] < 2:
+        raise ValueError("samples must contain at least two draws along the first axis")
+    if not np.all(np.isfinite(s)):
+        raise ValueError("samples must contain only finite values")
+    levels = np.asarray(quantiles, dtype=float)
+    if (
+        levels.ndim != 1
+        or levels.size < 1
+        or not np.all(np.isfinite(levels))
+        or np.any((levels < 0) | (levels > 1))
+    ):
+        raise ValueError("quantiles must be a non-empty finite one-dimensional sequence in [0, 1]")
     # Matching the outer shape is NECESSARY but not SUFFICIENT to prove `func` is genuinely
     # vectorised (row-independent): a per-draw function written with a numpy reduction that forgot
     # `axis=` (e.g. `lambda row: row / row.sum()`, intended per-row but summing over everything when
@@ -164,12 +221,15 @@ def propagate_uncertainty(
         row0_ref = None  # func doesn't support a single-draw call; fall back to the shape-only check
     try:
         out = np.asarray(func(s), dtype=float)
-        matches_single_draw = row0_ref is None or np.allclose(out[0], row0_ref, equal_nan=True)
-        if out.shape[0] != s.shape[0] or not matches_single_draw:
+        matches_single_draw = row0_ref is None or (
+            out.ndim >= 1 and out[0].shape == row0_ref.shape and np.allclose(out[0], row0_ref, equal_nan=True)
+        )
+        if out.ndim < 1 or out.shape[0] != s.shape[0] or not matches_single_draw:
             raise ValueError
     except Exception:  # noqa: BLE001
         out = np.array([np.asarray(func(row), dtype=float) for row in s])
-    levels = np.asarray(quantiles, dtype=float)
+    if out.ndim < 1 or out.shape[0] != s.shape[0] or not np.all(np.isfinite(out)):
+        raise ValueError("func must return finite outputs with a consistent shape for every draw")
     return {
         "mean": out.mean(axis=0),
         "std": out.std(axis=0, ddof=1),
