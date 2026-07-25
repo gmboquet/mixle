@@ -14,6 +14,8 @@ import numpy as np
 from mixle.experimental.e_process import (
     EProcess,
     MeanShiftDetector,
+    PredictableLikelihoodRatio,
+    TestMartingaleValidity,
     normal_mixture_eprocess,
 )
 
@@ -107,22 +109,33 @@ def test_detects_a_real_mean_shift_with_power() -> None:
 
 
 def test_generic_eprocess_reject_rule_and_receipt() -> None:
-    """The generic EProcess multiplies ratios and rejects at 1/alpha, peeking-safe."""
-    e = EProcess()
-    # Feed constant log-ratio 0.2 per step; after k steps log_e = 0.2k, e = exp(0.2k).
-    for _ in range(20):
-        e.update(0.2)
-    assert e.n == 20
-    assert np.isclose(e.log_e_value, 4.0)
-    assert e.rejects(alpha=0.05)  # exp(4) = 54.6 >= 1/0.05 = 20
+    """A declared Bernoulli likelihood-ratio martingale rejects and remains peeking-safe."""
+    validity = TestMartingaleValidity(
+        null_hypothesis="observations are iid Bernoulli(0.5)",
+        alternative_hypothesis="observations are iid Bernoulli(0.9)",
+        assumptions=("observations are revealed sequentially", "both mass functions are normalized"),
+        normalization_evidence="sum_x q(x) / p(x) * p(x) = sum_x q(x) = 1",
+    )
+    martingale = PredictableLikelihoodRatio(
+        log_alternative=lambda _history, x: np.log(0.9 if x else 0.1),
+        log_null=lambda _history, _x: np.log(0.5),
+        validity=validity,
+    )
+    e = EProcess(martingale)
+    for _ in range(6):
+        e.update(1)
+    assert e.n == 6
+    assert np.isclose(e.log_e_value, 6 * np.log(1.8))
+    assert e.rejects(alpha=0.05)
     # A process that spikes then decays must still report the peak crossing (peeking-safe).
-    e2 = EProcess()
-    for lr in [3.5, -3.0, -3.0]:  # crosses 1/0.05 at step 1 (e=33), then decays
-        e2.update(lr)
+    e2 = EProcess(martingale)
+    for observation in [1] * 6 + [0] * 4:
+        e2.update(observation)
     assert not e2.rejects(alpha=0.05), "current e-value has decayed below threshold"
     assert e2.ever_rejected(alpha=0.05), "but the peak crossed -- an anytime reject already happened"
     rec = e2.receipt(alpha=0.05)
     assert rec["rejected"] is True and rec["threshold"] == 20.0
+    assert rec.validity is validity and rec.numerical_status == "finite"
 
 
 def test_determinism_given_seed() -> None:
