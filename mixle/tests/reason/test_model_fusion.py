@@ -7,6 +7,7 @@ should set ``abstain`` rather than silently presenting the fused mean as settled
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from mixle.reason import Latent
@@ -84,6 +85,48 @@ class FuseModelsDisagreementTest:
         assert res.abstain is False
         assert res.disagreement["flagged_pairs"] == []
 
+    def test_strong_shared_prior_cannot_hide_raw_claim_conflict(self):
+        prior = Latent.vector(1, var=1.0e-9)
+        res = fuse_models(
+            prior,
+            [_claim("A", "1", y=-10.0, r=1.0), _claim("B", "1", y=10.0, r=1.0)],
+        )
+        assert res.abstain is True
+        assert res.disagreement["pairwise"]["A@1|B@1"]["mahalanobis_squared"] == pytest.approx(200.0)
+
+    def test_covariance_geometry_detects_jointly_implausible_difference(self):
+        prior = Latent.vector(2, var=10.0)
+        covariance = [[1.0, 0.999], [0.999, 1.0]]
+        claim_a = ModelClaim(
+            LinearGaussianEvidence(H=np.eye(2), y=[0.0, 0.0], R=covariance, name="ignored"),
+            "A",
+            "1",
+        )
+        claim_b = ModelClaim(
+            LinearGaussianEvidence(H=np.eye(2), y=[1.0, -1.0], R=covariance, name="ignored"),
+            "B",
+            "1",
+        )
+        res = fuse_models(prior, [claim_a, claim_b])
+        assert res.abstain is True
+        assert res.disagreement["pairwise"]["A@1|B@1"]["degrees_of_freedom"] == 2
+
+    def test_incomparable_measurement_operators_fail_closed(self):
+        prior = Latent.vector(2, var=10.0)
+        claim_a = ModelClaim(
+            LinearGaussianEvidence(H=[[1.0, 0.0]], y=[0.0], R=[[1.0]], name="ignored"),
+            "A",
+            "1",
+        )
+        claim_b = ModelClaim(
+            LinearGaussianEvidence(H=[[0.0, 1.0]], y=[0.0], R=[[1.0]], name="ignored"),
+            "B",
+            "1",
+        )
+        res = fuse_models(prior, [claim_a, claim_b])
+        assert res.abstain is True
+        assert res.disagreement["incomparable_pairs"] == ["A@1|B@1"]
+
 
 class ModelClaimValidationTest:
     def test_reliability_must_be_in_unit_interval(self):
@@ -101,3 +144,9 @@ class ModelClaimValidationTest:
         prior = Latent.vector(1, var=10.0)
         with pytest.raises(ValueError):
             fuse_models(prior, [])
+
+    @pytest.mark.parametrize("threshold", [float("nan"), float("inf"), -1.0])
+    def test_disagreement_threshold_must_be_finite_and_nonnegative(self, threshold):
+        prior = Latent.vector(1, var=10.0)
+        with pytest.raises(ValueError, match="finite and non-negative"):
+            fuse_models(prior, [_claim("A", "1", y=1.0, r=1.0)], disagree_sigma=threshold)
