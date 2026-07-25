@@ -2,16 +2,17 @@
 
 Frame (see the ConditionalJIT track, D1-D6): **the estimator tree is an IR**. Every node -- a leaf
 distribution or a combinator subtree (Composite/Mixture/Sequence/Conditional/Optional/...) -- can
-report its own residual, its Q-gain (Neal-Hinton free-energy lower-bound improvement), its E/M cost,
-its update kind, and cheap health receipts. Later track items (freeze/roll-up caching, a block-EM
-scheduler, leaf hot-swapping, backend re-specialization, a learned controller) all read these reports;
-none of them may change what a fit computes -- only how it is scheduled -- so this module never runs
-its own EM, it only instruments/observes the existing machinery in :mod:`mixle.inference.em` and
+report a self-distribution diagnostic, its E/M cost, its update kind, and cheap health receipts.
+When a caller supplies an observed objective, it can additionally report that objective's gain.
+Later track items (freeze/roll-up caching, a block-EM scheduler, leaf hot-swapping, backend
+re-specialization, a learned controller) read these reports; none of them may change what a fit
+computes -- only how it is scheduled -- so this module never runs its own EM, it only
+instruments/observes the existing machinery in :mod:`mixle.inference.em` and
 :mod:`mixle.inference.estimation`.
 
 Design choices (documented here because later D-track items depend on this interface):
 
-* **residual** -- a Monte-Carlo estimate of this node's own negative log-density,
+* **self diagnostic** -- a Monte-Carlo estimate of this node's own negative log-density,
   ``-mean(log_density(x))`` over samples drawn from the node's *own current fit*
   (``node.sampler().sample(n)``). This is available at EVERY node generically (every
   ``ProbabilityDistribution`` has ``sampler`` and ``log_density``) without needing per-combinator data
@@ -19,13 +20,11 @@ Design choices (documented here because later D-track items depend on this inter
   exact real-data residual cannot be computed generically for an arbitrary subtree without
   reimplementing every combinator's data-projection rule -- out of scope for an S-effort generic
   dispatcher). For an exponential-family leaf this MC residual converges to the differential/Shannon
-  entropy of the fit; it is a legitimate "how much spread/uncertainty is still in this subtree's fit"
-  signal, not a real-data fit residual. Callers who want a real-data top-level residual can pass
-  ``data``/``enc_data`` and read the *root* row, whose residual/Q-gain instead comes from the actual
-  EM objective (see :func:`root_em_report`).
-* **Q-gain** -- ``residual_before - residual_after`` for the SAME field path across two
-  :func:`flat_report_table` calls that bracket one EM update (pass the earlier table as
-  ``prev_table``). This is a genuine before/after delta of the tracked residual, not invented. The
+  entropy of the fit; it is a legitimate spread diagnostic, but it is not fit progress. Lower
+  self-entropy can mean collapse, so it never produces ``q_gain``. Callers may supply an explicit
+  observed-objective residual to :func:`node_report`; only that evidence can produce a gain.
+* **Q-gain** -- ``objective_residual_before - objective_residual_after`` for the same checked
+  objective. The
   Neal-Hinton guarantee (coordinate ascent on one computable free energy F) is proven only for the
   actual tracked EM objective at the TOP level (see :mod:`mixle.inference.em`'s ``run_em`` /
   :mod:`mixle.inference.estimation`'s ``optimize``, whose ``delta``-gated loop never accepts a
@@ -87,6 +86,7 @@ class NodeReport:
     m_step_cost: float
     param_count: int
     health: dict[str, Any] = field(default_factory=dict)
+    residual_kind: str = "self_entropy_diagnostic"
 
     @property
     def is_healthy(self) -> bool:
@@ -234,6 +234,7 @@ def node_report(
     seed: int = 0,
     nobs: float | None = None,
     prev_residual: float | None = None,
+    objective_residual: float | None = None,
 ) -> NodeReport:
     """Return a :class:`NodeReport` for a single node (leaf or combinator subtree).
 
@@ -243,13 +244,20 @@ def node_report(
     update_kind = _update_kind(dist)
     # A frozen/no-op node (the Neutral capability, e.g. NullDistribution) contributes nothing to be
     # fit and typically cannot even sample -- report an exact 0.0 residual rather than NaN.
-    residual = 0.0 if update_kind == "frozen" else _residual_mc(dist, n_mc=n_mc, seed=seed)
+    if objective_residual is None:
+        residual = 0.0 if update_kind == "frozen" else _residual_mc(dist, n_mc=n_mc, seed=seed)
+        residual_kind = "self_entropy_diagnostic"
+    else:
+        residual = float(objective_residual)
+        if not np.isfinite(residual):
+            raise ValueError("objective_residual must be finite")
+        residual_kind = "observed_objective"
     param_count = _param_count(dist)
     e_step_cost, m_step_cost = _em_cost(update_kind, param_count, 1.0 if nobs is None else float(nobs))
     health = _health_receipts(dist)
 
     q_gain: float | None = None
-    if prev_residual is not None and np.isfinite(prev_residual) and np.isfinite(residual):
+    if residual_kind == "observed_objective" and prev_residual is not None and np.isfinite(prev_residual):
         q_gain = float(prev_residual - residual)
 
     return NodeReport(
@@ -262,6 +270,7 @@ def node_report(
         m_step_cost=m_step_cost,
         param_count=param_count,
         health=health,
+        residual_kind=residual_kind,
     )
 
 
@@ -319,10 +328,11 @@ def flat_report_table(
     """Walk a composed tree and return one :class:`NodeReport` per node, in traversal order.
 
     Satisfies "composed tree -> flat table": every leaf and every combinator subtree gets exactly one
-    row, keyed by its ``field_path``. Pass the previous call's return value as ``prev_table`` to
-    populate each row's ``q_gain`` as the residual improvement across an intervening EM update.
+    row, keyed by its ``field_path``. These generic rows contain self-entropy diagnostics, so
+    ``prev_table`` is retained for API compatibility but cannot turn entropy change into
+    ``q_gain`` and is therefore ignored.
     """
-    prev_by_path = {r.field_path: r.residual for r in prev_table} if prev_table else {}
+    del prev_table
     rows: list[NodeReport] = []
     for i, (node_path, node) in enumerate(walk_tree(dist)):
         rows.append(
@@ -332,7 +342,6 @@ def flat_report_table(
                 n_mc=n_mc,
                 seed=seed + i,
                 nobs=nobs,
-                prev_residual=prev_by_path.get(node_path),
             )
         )
     return rows

@@ -19,7 +19,6 @@ from mixle.inference.em import PosteriorTransformEM, observed_log_likelihood, ru
 from mixle.inference.freeze_rollup import (
     FreezeRollupCache,
     _resolve_payload,
-    detect_frozen,
     run_em_freeze_rollup,
 )
 from mixle.stats import (
@@ -171,9 +170,9 @@ class FreezeStreakBookkeepingTestCase(unittest.TestCase):
     """A rejected round's ``transaction.restore()`` undoes ``model``/``estimator``'s own mutable
     state, but before this fix ``run_em_freeze_rollup`` ALSO called ``detect_frozen`` against that
     round's (about to be discarded) M-step ``candidate`` to score it for the accept/reject gate --
-    polluting the cache's streak/prev_residual/prev_weight bookkeeping with a state that was never
-    actually accepted. The next round's real ``detect_frozen(cache, model)`` call then compared
-    against a residual/weight left over from a discarded candidate instead of the model that is
+    polluting the cache's score/weight convergence bookkeeping with a state that was never actually
+    accepted. The next round's real ``detect_frozen(cache, model)`` call then compared against
+    scores/weights left over from a discarded candidate instead of the model that is
     actually still in play, letting a spuriously "converged" reading accumulate freeze-patience
     streak progress the real (accepted) trajectory never earned -- eventually freezing a component
     that never actually converged and permanently skipping its real M-step.
@@ -190,22 +189,14 @@ class FreezeStreakBookkeepingTestCase(unittest.TestCase):
         self.assertFalse(history[0].accepted, "accept_tolerance=-1e6 should force this round to be rejected")
         self.assertIs(model, start, "a rejected round must return the original (unmodified) model")
 
-        # A cache that only ever probed `start` (never the discarded candidate) is the ground
-        # truth for what a rejected round's bookkeeping SHOULD read.
-        fresh_cache = FreezeRollupCache(freeze_patience=2)
-        detect_frozen(fresh_cache, start)
+        payload = _resolve_payload(enc)
+        expected_scores = np.column_stack(
+            [start.components[idx].seq_log_density(_component_enc(payload, idx)) for idx in range(start.num_components)]
+        )
+        np.testing.assert_allclose(cache._last_component_scores, expected_scores)
 
         for idx in range(start.num_components):
-            self.assertEqual(
-                cache._prev_residual[idx],
-                fresh_cache._prev_residual[idx],
-                f"component {idx}'s cached residual was polluted by the rejected round's discarded candidate",
-            )
-            self.assertEqual(
-                cache._prev_weight[idx],
-                fresh_cache._prev_weight[idx],
-                f"component {idx}'s cached weight was polluted by the rejected round's discarded candidate",
-            )
+            self.assertEqual(cache._prev_weight[idx], float(start.w[idx]))
 
 
 class FreezeRollupCacheInvalidationTestCase(unittest.TestCase):

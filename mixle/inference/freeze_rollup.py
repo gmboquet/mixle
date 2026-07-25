@@ -1,12 +1,11 @@
 """Freeze/roll-up cache -- per-datum log-density caching over frozen subtrees (workstream D2).
 
 Frame (see the ConditionalJIT track, D1-D6): **the estimator tree is an IR**. D1
-(:mod:`mixle.inference.node_report`) instruments every node with a per-round residual/Q-gain
-report and an ``update_kind`` classification. D2 spends that report: once a subtree's D1 report
-says it has stopped changing (a structurally ``"frozen"`` node, or a converged residual/Q-gain),
-this module skips recomputing its per-datum log-density on every subsequent E-step round and
-instead reuses a cached array -- turning E-step cost from ``O(full tree)`` into
-``O(active fraction)``.
+(:mod:`mixle.inference.node_report`) instruments every node with an ``update_kind`` classification.
+D2 combines that structural signal with directly evaluated component scores: once a subtree is
+structurally frozen, or its real-data scores and collapsed weight have converged, this module skips
+recomputing its per-datum log-density on every subsequent E-step round and instead reuses a cached
+array -- turning E-step cost from ``O(full tree)`` into ``O(active fraction)``.
 
 Correctness backbone (unchanged from the rest of the D-track): freeze/roll-up is a SCHEDULING
 optimization only. It never changes what is computed, only how often -- a cached per-datum
@@ -164,11 +163,11 @@ class FreezeRollupCache:
     """Per-mixture-component cache of per-datum log-density, keyed by component index.
 
     A component is eligible for caching once :func:`mixle.inference.node_report.node_report`
-    reports it as D1-``"frozen"`` (the ``Neutral`` capability) or as having a converged residual/
-    Q-gain (``abs(q_gain) < q_gain_tol``) sustained for ``freeze_patience`` consecutive rounds
+    reports it as D1-``"frozen"`` (the ``Neutral`` capability) or the directly evaluated global
+    accepted real-data component scores have stabilized for ``freeze_patience`` consecutive rounds
     while its mixture weight has collapsed below ``weight_tol`` (the natural mixture-specific
     trigger: a near-zero-weight component's data-weighted M-step contribution is ~0, so its
-    params -- and hence its residual/Q-gain -- stop moving). Once frozen, the caller (see
+    params -- and hence its real-data scores -- stop moving). Once frozen, the caller (see
     :func:`run_em_freeze_rollup`) also skips that component's M-step entirely and carries its
     model object forward unchanged, so the cached signature can never go stale on its own; the
     cache only invalidates if a caller explicitly mutates/re-estimates a "frozen" component
@@ -189,9 +188,10 @@ class FreezeRollupCache:
         self.weight_delta_tol = float(weight_delta_tol)
         self.freeze_patience = max(1, int(freeze_patience))
         self._entries: dict[int, _CacheEntry] = {}
-        self._prev_residual: dict[int, float] = {}
         self._prev_weight: dict[int, float] = {}
         self._frozen_streak: dict[int, int] = {}
+        self._last_component_scores: np.ndarray | None = None
+        self._component_score_change: dict[int, float] = {}
 
     def invalidate(self, idx: int | None = None) -> None:
         """Drop a cached entry (``idx=None`` clears the whole cache and freeze streaks).
@@ -203,27 +203,44 @@ class FreezeRollupCache:
         if idx is None:
             self._entries.clear()
             self._frozen_streak.clear()
-            self._prev_residual.clear()
             self._prev_weight.clear()
+            self._last_component_scores = None
+            self._component_score_change.clear()
         else:
             self._entries.pop(idx, None)
             self._frozen_streak.pop(idx, None)
-            self._prev_residual.pop(idx, None)
             self._prev_weight.pop(idx, None)
+            self._component_score_change.pop(idx, None)
+
+    def record_component_scores(self, matrix: np.ndarray) -> None:
+        """Record accepted real-data component scores and their maximum rowwise movement."""
+        current = np.asarray(matrix, dtype=np.float64).copy()
+        previous = self._last_component_scores
+        self._component_score_change = {}
+        if previous is not None and previous.shape == current.shape:
+            for idx in range(current.shape[1]):
+                before = previous[:, idx]
+                after = current[:, idx]
+                if np.any(np.isnan(before)) or np.any(np.isnan(after)):
+                    change = float("inf")
+                elif not np.array_equal(np.isneginf(before), np.isneginf(after)):
+                    change = float("inf")
+                else:
+                    finite = np.isfinite(before) & np.isfinite(after)
+                    change = float(np.max(np.abs(after[finite] - before[finite]))) if np.any(finite) else 0.0
+                self._component_score_change[idx] = change
+        self._last_component_scores = current
 
     def is_frozen(self, idx: int, component: Any, weight: float) -> bool:
-        """Return the D1-driven freeze verdict for component ``idx`` this round.
+        """Return the evidence-driven freeze verdict for component ``idx`` this round.
 
-        Reads a fresh :class:`~mixle.inference.node_report.NodeReport` every round (cheap: a
-        small Monte-Carlo self-residual, not a real-data pass) so a component that later moves
-        again (unfrozen) is detected immediately -- the streak resets to 0 the instant the
-        residual/Q-gain stops looking converged, the weight climbs back out of ``weight_tol``, or
-        the weight itself is still moving.
+        Reads the node's structural update kind and accepted real-data component-score movement.
+        The streak resets when those scores stop looking converged, the weight climbs back out of
+        ``weight_tol``, or the weight itself is still moving.
 
-        Both a converged own-residual/Q-gain AND a converged *weight* are required: a mixture
-        component's own fit (mean/variance) can stabilize well before the joint E-step's
-        responsibility reallocation across near-degenerate components finishes settling its
-        weight (slow-manifold EM plateaus). Freezing on residual/Q-gain alone would risk locking
+        Both converged component scores AND a converged *weight* are required: a mixture
+        component's parameters can stabilize well before the joint E-step's responsibility
+        reallocation finishes settling its weight. Freezing on either signal alone would risk locking
         in a component's weight (and hence the M-step never revisiting it) before it has actually
         reached its coordinate-ascent fixed point -- silently changing what the fit converges to,
         which the ConditionalJIT track's own correctness backbone forbids (a scheduler may change
@@ -231,17 +248,16 @@ class FreezeRollupCache:
         (``abs(weight - prev_weight) < weight_delta_tol``) for ``freeze_patience`` consecutive
         rounds is the guard against that false-freeze failure mode.
         """
-        report = node_report(component, field_path=str(idx), prev_residual=self._prev_residual.get(idx))
-        self._prev_residual[idx] = report.residual
-        residual_converged = report.update_kind == "frozen" or (
-            report.q_gain is not None and abs(report.q_gain) < self.q_gain_tol
+        report = node_report(component, field_path=str(idx))
+        score_converged = report.update_kind == "frozen" or (
+            idx in self._component_score_change and self._component_score_change[idx] < self.q_gain_tol
         )
         weight_collapsed = weight < self.weight_tol
         prev_weight = self._prev_weight.get(idx)
         weight_converged = prev_weight is not None and abs(weight - prev_weight) < self.weight_delta_tol
         self._prev_weight[idx] = weight
 
-        converged = residual_converged and weight_collapsed and weight_converged
+        converged = score_converged and weight_collapsed and weight_converged
         streak = self._frozen_streak.get(idx, 0) + 1 if converged else 0
         self._frozen_streak[idx] = streak
         return streak >= self.freeze_patience
@@ -843,7 +859,7 @@ def run_em_freeze_rollup(
         # carried forward unchanged by `_m_step`, so `frozen_idx` is still exactly correct for
         # `candidate`'s frozen columns (the cache's own signature check is the belt-and-suspenders
         # guard against a bad reuse). A second `detect_frozen` call here would instead update
-        # `cache`'s streak/prev_residual/prev_weight bookkeeping from a candidate that might be
+        # `cache`'s convergence/weight bookkeeping from a candidate that might be
         # REJECTED a few lines below -- `transaction.restore()` undoes `model`/`estimator`'s own
         # mutable state on rejection, but never touched `cache`'s internal dicts, so a rejected
         # round's discarded candidate would otherwise leak into next round's convergence signal
@@ -876,6 +892,7 @@ def run_em_freeze_rollup(
                 accepted=accepted,
             )
         )
+        cache.record_component_scores(ll_mat_c if accepted else ll_mat)
 
         if delta is not None and 0.0 <= round_value - old_value < delta:
             break

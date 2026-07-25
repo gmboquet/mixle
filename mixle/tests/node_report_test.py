@@ -135,13 +135,18 @@ class NodeReportProtocolTestCase(unittest.TestCase):
             self.assertGreaterEqual(row.m_step_cost, 0.0)
             self.assertGreaterEqual(row.param_count, 1)
 
-        # A second table with the first as prev_table populates q_gain (diagnostic, per-node delta).
+        # A second table must not relabel self-entropy movement as fit progress.
         table2 = flat_report_table(fitted, nobs=float(len(data)), prev_table=table)
         self.assertEqual(len(table2), len(table))
-        # Same field paths -> every row's q_gain is computable (residual is finite before and after).
         for row in table2:
-            self.assertIsNotNone(row.q_gain)
-            self.assertTrue(math.isfinite(row.q_gain))
+            self.assertIsNone(row.q_gain)
+            self.assertEqual(row.residual_kind, "self_entropy_diagnostic")
+
+    def test_only_an_observed_objective_can_produce_q_gain(self):
+        dist = GaussianDistribution(0.0, 1.0)
+        report = node_report(dist, objective_residual=12.0, prev_residual=15.5)
+        self.assertEqual(report.residual_kind, "observed_objective")
+        self.assertEqual(report.q_gain, 3.5)
 
     # -- 3. Q-gain sanity check on the real, tracked EM objective ---------------------------------
     def test_root_em_objective_is_non_decreasing(self):

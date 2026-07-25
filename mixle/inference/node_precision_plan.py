@@ -1,15 +1,14 @@
-"""Per-NODE precision planning for a composed distribution tree.
+"""Executed-subtree precision planning for a composed distribution tree.
 
 ``mixle.inference.precision_plan`` picks ONE compute precision for a whole model. This module
 generalizes that decision to every NODE of a composed tree (a :class:`~mixle.stats.latent.mixture.
 MixtureDistribution` of components, a :class:`~mixle.stats.combinator.composite.CompositeDistribution`
 of factors, and any nesting of the two): each node gets its own safety verdict, reusing the exact
-per-leaf safety check ``precision_plan`` already validates (family whitelist + variance floor), then
-those leaf verdicts are aggregated UP the tree. This is the roadmap's "fits are deterministic given
-seed, and sufficient statistics are ADDITIVE, so error bounds compose like stats" insight applied
-literally: a non-leaf node is float32-safe iff every leaf beneath it is, and its advertised summed-LL
-error bound is the SUM of its leaves' bounds (each leaf's bound independently verified, see
-``precision_plan``'s module docstring).
+per-leaf safety check ``precision_plan`` already validates (family whitelist + variance floor).
+The proposed verdict is then reconciled with the subtrees the mixed-precision driver can actually
+execute. Reduced subtrees are compared against float64 on the supplied data and carry an absolute
+log-score enclosure. Relative likelihood errors are never added: cancellation can make that
+composition unbounded.
 
 Two things live here:
 
@@ -28,19 +27,17 @@ Two things live here:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
 
 from mixle.inference.precision_plan import _FP32_SAFE
 
-# The verified reduced-precision band from precision_plan's module docstring: the fused float32 score
-# stays within ~1e-6 RELATIVE summed-log-likelihood error of the float64 computation. Because
-# sufficient statistics (and, to first order, per-row log-densities) are ADDITIVE across independent
-# leaves/factors, the advertised bound for a subtree with N reduced-precision leaves is N * this
-# constant -- see TreePrecisionPlan.advertised_bound.
-FUSED_FP32_REL_LL_BOUND = 1e-6
+# An executable subtree remains reduced only when its observed absolute
+# per-row log-score error is within this validation tolerance.
+FUSED_FP32_ABS_LOG_TOLERANCE = 1e-4
 
 Path = tuple[str, ...]
 
@@ -57,9 +54,12 @@ class NodePrecision:
         is_leaf: True for an actual distribution leaf (not a mixture/composite combinator).
         compute_dtype: The chosen dtype (``np.float32`` or ``np.float64``).
         rationale: Human-readable reason, reusing precision_plan's per-leaf wording where applicable.
-        rel_error_bound: The advertised relative summed-log-likelihood error bound FOR THIS NODE's
-            subtree (0.0 when ``compute_dtype`` is float64 -- exact).
+        abs_log_error_bound: Triangle-inequality enclosure on the absolute error of the unweighted
+            summed log score over the validation rows. It is not a relative or out-of-sample bound.
         leaf_count: Number of leaves in this node's subtree (1 for a leaf itself).
+        validation_rows: Number of rows used to establish ``abs_log_error_bound``.
+        execution_scope: Whether this node executes independently, inherits a parent's dtype, or is
+            combined in float64.
     """
 
     path: Path
@@ -67,8 +67,10 @@ class NodePrecision:
     is_leaf: bool
     compute_dtype: Any
     rationale: str
-    rel_error_bound: float
+    abs_log_error_bound: float | None
     leaf_count: int
+    validation_rows: int = 0
+    execution_scope: str = "proposed"
 
     def reduced(self) -> bool:
         return np.dtype(self.compute_dtype) != np.float64
@@ -86,6 +88,8 @@ class TreePrecisionPlan:
 
     root_type: str
     nodes: dict[Path, NodePrecision] = field(default_factory=dict)
+    validation_fingerprint: str | None = None
+    validation_rows: int = 0
 
     def dtype_for(self, path: Path) -> Any:
         return self.nodes[path].compute_dtype
@@ -100,13 +104,17 @@ class TreePrecisionPlan:
     def top_level_child_paths(self) -> list[Path]:
         """Paths one level below the root -- the granularity :func:`mixed_precision_fit` can actually
         execute at independently (see that function's docstring for why)."""
-        return sorted((p for p in self.nodes if len(p) == 1), key=lambda p: int(p[-1]) if p[-1].isdigit() else p[-1])
+        paths = [
+            path for path in self.nodes if len(path) == 2 and path[0] in {"components", "dists"} and path[1].isdigit()
+        ]
+        return sorted(paths, key=lambda path: (path[0], int(path[1])))
 
     def advertised_bound(self, path: Path = ()) -> float:
-        """The advertised relative summed-log-likelihood error bound for ``path``'s subtree (default:
-        whole tree). Sums the verified per-leaf bound (``FUSED_FP32_REL_LL_BOUND``) over every REDUCED
-        leaf beneath ``path`` -- the additive composition the roadmap calls for."""
-        return self.nodes[path].rel_error_bound
+        """Return the validation-data absolute summed-log-score error enclosure for ``path``."""
+        bound = self.nodes[path].abs_log_error_bound
+        if bound is None:
+            raise ValueError(f"node {path!r} does not execute independently and has no separate error enclosure")
+        return bound
 
     def summary(self) -> str:
         lines = [f"TreePrecisionPlan({self.root_type}):"]
@@ -169,8 +177,7 @@ def _walk(
     min_variance: float,
     nodes: dict[Path, NodePrecision],
 ) -> NodePrecision:
-    """Recursively compute the per-node verdict, aggregating bottom-up (post-order): a non-leaf node
-    is float32-safe iff every child is, and its bound is the sum of its children's bounds."""
+    """Recursively compute a proposed verdict before execution-boundary reconciliation."""
     tname = type(model).__name__
     if tname == "MixtureDistribution":
         children = [
@@ -196,14 +203,13 @@ def _walk(
             unsafe = [".".join(c.path) or "<child>" for c in children if not c.reduced()]
             rationale = "unsafe leaf(ren) below %s -> float64" % (", ".join(unsafe) or "?")
         dtype = np.float32 if safe else np.float64
-        bound = FUSED_FP32_REL_LL_BOUND * leaf_count if safe else 0.0
         node = NodePrecision(
             path=path,
             node_type=tname,
             is_leaf=False,
             compute_dtype=dtype,
             rationale=rationale,
-            rel_error_bound=bound,
+            abs_log_error_bound=0.0,
             leaf_count=leaf_count,
         )
         nodes[path] = node
@@ -223,11 +229,171 @@ def _walk(
         is_leaf=True,
         compute_dtype=dtype,
         rationale=rationale,
-        rel_error_bound=FUSED_FP32_REL_LL_BOUND if safe else 0.0,
+        abs_log_error_bound=0.0,
         leaf_count=1,
     )
     nodes[path] = node
     return node
+
+
+def _data_fingerprint(data: list[Any]) -> str:
+    """Bind a plan to the exact validation rows used for its error enclosure."""
+    digest = hashlib.sha256()
+    for row in data:
+        if isinstance(row, np.ndarray):
+            arr = np.ascontiguousarray(row)
+            digest.update(str(arr.dtype).encode())
+            digest.update(repr(arr.shape).encode())
+            digest.update(arr.tobytes())
+        else:
+            digest.update(repr(row).encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _score_error_enclosure(child: Any, data: list[Any]) -> tuple[np.ndarray | None, str]:
+    """Compare the exact executable fused subtree in float32 and float64 on ``data``."""
+    from mixle.stats.compute.fused_codegen import fused_seq_log_density, fusible
+
+    if not fusible(child):
+        return None, "subtree is not fusible, so reduced precision cannot execute"
+    try:
+        encoded = child.dist_to_encoder().seq_encode(data)
+        score64 = np.asarray(fused_seq_log_density(child, encoded, compute_dtype=None), dtype=np.float64)
+        score32 = np.asarray(
+            fused_seq_log_density(child, encoded, compute_dtype=np.float32),
+            dtype=np.float64,
+        )
+    except Exception as exc:  # noqa: BLE001 - failed validation means safe float64 fallback
+        return None, f"reduced-score validation failed ({type(exc).__name__})"
+    if score32.shape != score64.shape or score64.shape != (len(data),):
+        return None, "reduced and float64 scorers did not return one aligned score per row"
+    if (
+        np.any(np.isnan(score32))
+        or np.any(np.isnan(score64))
+        or np.any(np.isposinf(score32))
+        or np.any(np.isposinf(score64))
+    ):
+        return None, "non-finite score encountered during precision validation"
+    impossible32 = np.isneginf(score32)
+    impossible64 = np.isneginf(score64)
+    if not np.array_equal(impossible32, impossible64):
+        return None, "reduced precision changed which observations are impossible"
+    error = np.zeros(len(data), dtype=np.float64)
+    finite = ~impossible64
+    error[finite] = np.abs(score32[finite] - score64[finite])
+    if not np.all(np.isfinite(error)):
+        return None, "score-error enclosure was non-finite"
+    maximum = float(np.max(error)) if error.size else 0.0
+    if maximum > FUSED_FP32_ABS_LOG_TOLERANCE:
+        return None, (f"observed absolute row-score error {maximum:.3g} exceeds {FUSED_FP32_ABS_LOG_TOLERANCE:.3g}")
+    return error, f"validated max absolute row-score error {maximum:.3g}"
+
+
+def _execution_children(model: Any, data: list[Any]) -> list[tuple[Path, Any, list[Any]]]:
+    """Return the independent subtree calls made by :func:`mixed_precision_fit`."""
+    tname = type(model).__name__
+    if tname == "MixtureDistribution":
+        return [(("components", str(i)), child, data) for i, child in enumerate(model.components)]
+    if tname == "CompositeDistribution":
+        children: list[tuple[Path, Any, list[Any]]] = []
+        for i, child in enumerate(model.dists):
+            try:
+                child_data = [row[i] for row in data]
+            except (IndexError, TypeError) as exc:
+                raise ValueError(f"composite training row does not contain field {i}") from exc
+            children.append((("dists", str(i)), child, child_data))
+        return children
+    return []
+
+
+def _assign_executed_subtree(
+    nodes: dict[Path, NodePrecision],
+    path: Path,
+    dtype: Any,
+    rationale: str,
+    bound: float,
+    validation_rows: int,
+) -> None:
+    """Make every descendant reflect the one dtype actually used by its fused parent call."""
+    for node_path, node in list(nodes.items()):
+        if node_path[: len(path)] != path:
+            continue
+        if node_path == path:
+            nodes[node_path] = replace(
+                node,
+                compute_dtype=dtype,
+                rationale=rationale,
+                abs_log_error_bound=bound,
+                validation_rows=validation_rows,
+                execution_scope="independent_subtree",
+            )
+        else:
+            nodes[node_path] = replace(
+                node,
+                compute_dtype=dtype,
+                rationale=f"{node.rationale}; inherits executed dtype from {'.'.join(path)}",
+                abs_log_error_bound=0.0 if np.dtype(dtype) == np.float64 else None,
+                validation_rows=validation_rows,
+                execution_scope=f"inherited_from:{'.'.join(path)}",
+            )
+
+
+def _reconcile_execution(model: Any, data: list[Any], nodes: dict[Path, NodePrecision]) -> None:
+    """Replace proposed leaf verdicts with the dtypes and bounds that actually execute."""
+    children = _execution_children(model, data)
+    if not children:
+        root = nodes[()]
+        nodes[()] = replace(
+            root,
+            compute_dtype=np.float64,
+            rationale="no independently executable child subtree -> float64 fallback",
+            abs_log_error_bound=0.0,
+            validation_rows=len(data),
+            execution_scope="float64_fallback",
+        )
+        return
+
+    child_errors: list[np.ndarray] = []
+    for path, child, child_data in children:
+        proposed = nodes[path]
+        error: np.ndarray | None = None
+        detail = proposed.rationale
+        if proposed.reduced():
+            error, detail = _score_error_enclosure(child, child_data)
+        if error is None:
+            dtype = np.float64
+            bound = 0.0
+            if proposed.reduced():
+                detail = f"{detail} -> float64"
+            child_errors.append(np.zeros(len(data), dtype=np.float64))
+        else:
+            dtype = np.float32
+            bound = float(np.sum(error))
+            child_errors.append(error)
+        _assign_executed_subtree(nodes, path, dtype, detail, bound, len(data))
+
+    stacked = np.stack(child_errors, axis=1) if child_errors else np.zeros((len(data), 0))
+    if type(model).__name__ == "MixtureDistribution":
+        # logsumexp is 1-Lipschitz in the infinity norm.
+        root_error = np.max(stacked, axis=1) if stacked.shape[1] else np.zeros(len(data))
+    else:
+        # Composite log scores add; triangle inequality gives a valid enclosure.
+        root_error = np.sum(stacked, axis=1)
+    root = nodes[()]
+    root_rationale = (
+        "child subtree scores combined in float64"
+        if any(nodes[path].reduced() for path, _child, _data in children)
+        else f"{root.rationale}; child subtree scores combined in float64"
+    )
+    nodes[()] = replace(
+        root,
+        compute_dtype=np.float64,
+        rationale=root_rationale,
+        abs_log_error_bound=float(np.sum(root_error)),
+        validation_rows=len(data),
+        execution_scope="float64_combine",
+    )
 
 
 def recommend_tree_precision(
@@ -240,13 +406,11 @@ def recommend_tree_precision(
     """Return the per-NODE precision plan for a composed tree.
 
     Walks ``model`` (a Mixture / Composite / leaf, and any nesting thereof) and computes a safety
-    verdict at EVERY node: leaves get the identical per-leaf check ``precision_plan`` uses (family
-    whitelist + variance floor); non-leaf nodes aggregate their children (safe iff ALL children are
-    safe) and their advertised error bound is the additive sum of their leaves' bounds. The (global)
-    data-magnitude check is evaluated once against ``data`` and gates every node uniformly, matching
-    ``precision_plan.recommend_compute_precision`` -- only the leaf/family conditioning genuinely
-    varies node-to-node in this codebase (see this module's and ``mixed_precision_fit``'s docstrings
-    for why data conditioning isn't yet split per-node).
+    proposed verdict at every node, then reconciles it with the independently callable subtrees the
+    executor actually uses. Each reduced executable subtree is scored in float32 and float64 on
+    ``data``; the plan records a triangle-inequality absolute error enclosure. Descendants inherit
+    their executable parent's dtype and do not advertise independent bounds. The root mixture or
+    composite combines child scores in float64.
 
     Args:
         model: The composed distribution tree (root).
@@ -261,12 +425,28 @@ def recommend_tree_precision(
     """
     nodes: dict[Path, NodePrecision] = {}
     if model is None:
-        nodes[()] = NodePrecision((), "NoneType", True, np.float64, "no model to inspect -> float64", 0.0, 0)
+        nodes[()] = NodePrecision(
+            (),
+            "NoneType",
+            True,
+            np.float64,
+            "no model to inspect -> float64",
+            0.0,
+            0,
+            execution_scope="float64_fallback",
+        )
         return TreePrecisionPlan(root_type="NoneType", nodes=nodes)
 
-    data_safe, data_rationale, _ = _data_magnitude_safe(data, max_magnitude, sample_size)
+    rows = list(data)
+    data_safe, data_rationale, _ = _data_magnitude_safe(rows, max_magnitude, sample_size)
     _walk(model, (), data_safe, data_rationale, min_variance, nodes)
-    return TreePrecisionPlan(root_type=type(model).__name__, nodes=nodes)
+    _reconcile_execution(model, rows, nodes)
+    return TreePrecisionPlan(
+        root_type=type(model).__name__,
+        nodes=nodes,
+        validation_fingerprint=_data_fingerprint(rows),
+        validation_rows=len(rows),
+    )
 
 
 # --------------------------------------------------------------------------------------------------
@@ -304,11 +484,10 @@ def mixed_precision_fit(
     a combinator this driver doesn't recognize) is fit at plain float64 with a warning-free no-op
     fallback (there is nothing to split).
 
-    Each child accumulates sufficient statistics in its OWN accumulator, at its OWN dtype for the row
-    arithmetic; every accumulator's OUTPUT (and the softmax/logsumexp responsibility normalization for
-    a mixture) is float64, matching the "accumulation is ALWAYS float64" invariant precision_plan
-    documents -- so, like the model-global allocator, results never drift regardless of which nodes
-    ran reduced; only the per-row SCORE of the reduced nodes is computed cheaper.
+    Reduced precision applies only to scoring. Sufficient-statistic accumulation and mixture
+    normalization remain float64. Every reduced score call is compared with float64 at runtime; a
+    subtree that stops meeting the absolute error tolerance is permanently downgraded to float64 in
+    the supplied plan.
 
     Args:
         model: MixtureDistribution or CompositeDistribution to fit (used as both the shape AND the
@@ -325,38 +504,102 @@ def mixed_precision_fit(
     Returns:
         The fitted model (same top-level type as ``model``).
     """
+    rows = list(data)
+    if not rows:
+        raise ValueError("mixed_precision_fit requires at least one observation")
+    if isinstance(max_its, bool) or not isinstance(max_its, (int, np.integer)) or int(max_its) < 1:
+        raise ValueError("max_its must be a positive integer")
+    if delta is not None and (not np.isfinite(delta) or float(delta) < 0.0):
+        raise ValueError("delta must be None or a finite non-negative number")
+
     tname = type(model).__name__
     if plan is None:
-        plan = recommend_tree_precision(model, data)
+        plan = recommend_tree_precision(model, rows)
+    elif plan.root_type != tname:
+        raise ValueError(f"precision plan is for {plan.root_type}, not {tname}")
+    elif plan.validation_fingerprint != _data_fingerprint(rows):
+        raise ValueError("precision plan was validated on different data")
 
     if tname == "MixtureDistribution":
-        return _mixed_precision_fit_mixture(model, data, plan, max_its, delta, weights)
+        return _mixed_precision_fit_mixture(model, rows, plan, int(max_its), delta, weights)
     if tname == "CompositeDistribution":
-        return _mixed_precision_fit_composite(model, data, plan, max_its, delta, weights)
+        return _mixed_precision_fit_composite(model, rows, plan, int(max_its), delta, weights)
     # Nothing to split at the top level -- fall back to the ordinary (float64) fit for correctness.
     from mixle.inference.estimation import optimize
 
-    return optimize(data, model.estimator(), prev_estimate=model, max_its=max_its, delta=delta, out=None)
+    return optimize(rows, model.estimator(), prev_estimate=model, max_its=int(max_its), delta=delta, out=None)
 
 
-def _child_score(child: Any, enc: Any, compute_dtype: Any) -> np.ndarray:
+def _child_score(child: Any, enc: Any, compute_dtype: Any) -> tuple[np.ndarray, Any, np.ndarray]:
+    """Score one executable subtree, dynamically checking any reduced execution."""
     from mixle.stats.compute.fused_codegen import fused_seq_log_density, fusible
 
-    dtype = compute_dtype if compute_dtype is not None and np.dtype(compute_dtype) != np.float64 else None
-    if fusible(child):
-        return fused_seq_log_density(child, enc, compute_dtype=dtype)
-    return np.asarray(child.seq_log_density(enc), dtype=np.float64)
+    reduced = compute_dtype is not None and np.dtype(compute_dtype) != np.float64
+    if not fusible(child):
+        score = np.asarray(child.seq_log_density(enc), dtype=np.float64)
+        return score, np.float64, np.zeros(score.shape, dtype=np.float64)
+
+    score64 = np.asarray(fused_seq_log_density(child, enc, compute_dtype=None), dtype=np.float64)
+    if not reduced:
+        return score64, np.float64, np.zeros(score64.shape, dtype=np.float64)
+    score32 = np.asarray(fused_seq_log_density(child, enc, compute_dtype=np.float32), dtype=np.float64)
+    if score32.shape != score64.shape:
+        return score64, np.float64, np.zeros(score64.shape, dtype=np.float64)
+    invalid = np.isnan(score32) | np.isnan(score64) | np.isposinf(score32) | np.isposinf(score64)
+    if np.any(invalid) or not np.array_equal(np.isneginf(score32), np.isneginf(score64)):
+        return score64, np.float64, np.zeros(score64.shape, dtype=np.float64)
+    error = np.zeros(score64.shape, dtype=np.float64)
+    finite = np.isfinite(score64)
+    error[finite] = np.abs(score32[finite] - score64[finite])
+    if np.any(error > FUSED_FP32_ABS_LOG_TOLERANCE):
+        return score64, np.float64, np.zeros(score64.shape, dtype=np.float64)
+    return score32, np.float32, error
 
 
-def _child_accumulate(child: Any, enc: Any, w: np.ndarray, compute_dtype: Any) -> Any:
+def _child_accumulate(child: Any, enc: Any, w: np.ndarray) -> Any:
+    """Accumulate sufficient statistics in float64 regardless of scoring precision."""
     from mixle.stats.compute.fused_codegen import fused_accumulate, fusible
 
-    dtype = compute_dtype if compute_dtype is not None and np.dtype(compute_dtype) != np.float64 else None
     if fusible(child):
-        return fused_accumulate(child, enc, w, compute_dtype=dtype)
+        return fused_accumulate(child, enc, w, compute_dtype=None)
     acc = child.accumulator_factory().make()
     acc.seq_update(enc, w, child)
     return acc.value()
+
+
+def _validated_weights(n: int, weights: np.ndarray | None) -> np.ndarray:
+    w = np.ones(n, dtype=np.float64) if weights is None else np.asarray(weights, dtype=np.float64)
+    if w.shape != (n,) or not np.all(np.isfinite(w)) or np.any(w < 0.0) or not float(np.sum(w)) > 0.0:
+        raise ValueError("weights must be a finite non-negative vector aligned with data and have positive mass")
+    return w
+
+
+def _update_runtime_plan(
+    plan: TreePrecisionPlan,
+    paths: list[Path],
+    dtypes: list[Any],
+    errors: list[np.ndarray],
+    root_kind: str,
+) -> None:
+    for path, dtype, error in zip(paths, dtypes, errors):
+        bound = float(np.sum(error))
+        rationale = (
+            f"runtime-validated max absolute row-score error {float(np.max(error)) if error.size else 0.0:.3g}"
+            if np.dtype(dtype) == np.float32
+            else "runtime validation selected float64"
+        )
+        _assign_executed_subtree(plan.nodes, path, dtype, rationale, bound, len(error))
+    stacked = np.stack(errors, axis=1)
+    root_error = np.max(stacked, axis=1) if root_kind == "MixtureDistribution" else np.sum(stacked, axis=1)
+    root = plan.nodes[()]
+    plan.nodes[()] = replace(
+        root,
+        compute_dtype=np.float64,
+        rationale="runtime child scores combined in float64",
+        abs_log_error_bound=float(np.sum(root_error)),
+        validation_rows=len(root_error),
+        execution_scope="float64_combine",
+    )
 
 
 def _mixed_precision_fit_mixture(
@@ -368,39 +611,68 @@ def _mixed_precision_fit_mixture(
     weights: np.ndarray | None,
 ) -> Any:
     n = len(data)
-    w = np.ones(n, dtype=np.float64) if weights is None else np.asarray(weights, dtype=np.float64)
+    w = _validated_weights(n, weights)
     K = model.num_components
     encs = [model.components[i].dist_to_encoder().seq_encode(data) for i in range(K)]
-    dtypes = [plan.dtype_for(("components", str(i))) for i in range(K)]
+    paths = [("components", str(i)) for i in range(K)]
+    dtypes = [plan.dtype_for(path) for path in paths]
 
     components = list(model.components)
-    log_w = np.log(np.asarray(model.w, dtype=np.float64) + 1e-300)
+    mixture_weights = np.asarray(model.w, dtype=np.float64)
+    if (
+        mixture_weights.shape != (K,)
+        or not np.all(np.isfinite(mixture_weights))
+        or np.any(mixture_weights < 0.0)
+        or not float(np.sum(mixture_weights)) > 0.0
+    ):
+        raise ValueError("mixture weights must be a finite non-negative vector with positive mass")
+    mixture_weights = mixture_weights / np.sum(mixture_weights)
+    with np.errstate(divide="ignore"):
+        log_w = np.log(mixture_weights)
     prev_total_ll: float | None = None
 
     for _ in range(max_its):
         ll_mat = np.full((n, K), -np.inf, dtype=np.float64)
+        score_errors: list[np.ndarray] = []
         for i in range(K):
-            ll_mat[:, i] = _child_score(components[i], encs[i], dtypes[i]) + log_w[i]
+            score, actual_dtype, error = _child_score(components[i], encs[i], dtypes[i])
+            if score.shape != (n,) or error.shape != (n,):
+                raise ValueError(f"mixture component {i} scorer did not return one aligned score per observation")
+            dtypes[i] = actual_dtype
+            score_errors.append(error)
+            ll_mat[:, i] = score + log_w[i]
 
+        if np.any(np.isnan(ll_mat)) or np.any(np.isposinf(ll_mat)):
+            raise ValueError("mixture component scoring produced NaN or +inf")
         ll_max = ll_mat.max(axis=1, keepdims=True)
-        bad = np.isinf(ll_max.flatten())
-        if np.any(bad):
-            ll_mat[bad, :] = log_w.copy()
-            ll_max[bad] = np.max(log_w)
-        shifted = ll_mat - ll_max
-        np.exp(shifted, out=shifted)
-        row_sum = shifted.sum(axis=1, keepdims=True)
-        total_ll = float(np.dot(w, (ll_max[:, 0] + np.log(row_sum[:, 0]))))
-        resp = shifted * (w[:, None] / row_sum)
+        impossible = np.isneginf(ll_max[:, 0])
+        rejected = np.flatnonzero(impossible & (w > 0.0))
+        if rejected.size:
+            preview = rejected[:8].tolist()
+            raise ValueError(f"mixture assigns zero probability to positive-weight observations at rows {preview}")
+        valid = ~impossible
+        resp = np.zeros((n, K), dtype=np.float64)
+        log_norm = np.zeros(n, dtype=np.float64)
+        if np.any(valid):
+            shifted = ll_mat[valid] - ll_max[valid]
+            shifted = np.exp(shifted)
+            row_sum = shifted.sum(axis=1, keepdims=True)
+            if np.any(~np.isfinite(row_sum)) or np.any(row_sum <= 0.0):
+                raise ValueError("mixture responsibility normalization failed")
+            resp[valid] = shifted * (w[valid, None] / row_sum)
+            log_norm[valid] = ll_max[valid, 0] + np.log(row_sum[:, 0])
+        total_ll = float(np.dot(w[valid], log_norm[valid]))
+        _update_runtime_plan(plan, paths, dtypes, score_errors, "MixtureDistribution")
 
         comp_counts = resp.sum(axis=0)
-        suff_stats = [_child_accumulate(components[i], encs[i], resp[:, i], dtypes[i]) for i in range(K)]
+        suff_stats = [_child_accumulate(components[i], encs[i], resp[:, i]) for i in range(K)]
 
         estimators = model.estimator().estimators
         components = [estimators[i].estimate(comp_counts[i], suff_stats[i]) for i in range(K)]
         total = comp_counts.sum()
         new_w = comp_counts / total if total > 0 else np.asarray(model.w, dtype=np.float64)
-        log_w = np.log(new_w + 1e-300)
+        with np.errstate(divide="ignore"):
+            log_w = np.log(new_w)
 
         if delta is not None and prev_total_ll is not None and abs(total_ll - prev_total_ll) < delta:
             prev_total_ll = total_ll
@@ -421,12 +693,16 @@ def _mixed_precision_fit_composite(
     weights: np.ndarray | None,
 ) -> Any:
     n = len(data)
-    w = np.ones(n, dtype=np.float64) if weights is None else np.asarray(weights, dtype=np.float64)
+    w = _validated_weights(n, weights)
     m = len(model.dists)
     # Composite factors observe x[i] of each tuple observation.
-    factor_data = [[x[i] for x in data] for i in range(m)]
+    try:
+        factor_data = [[x[i] for x in data] for i in range(m)]
+    except (IndexError, TypeError) as exc:
+        raise ValueError("composite training rows do not match the model's factors") from exc
     encs = [model.dists[i].dist_to_encoder().seq_encode(factor_data[i]) for i in range(m)]
-    dtypes = [plan.dtype_for(("dists", str(i))) for i in range(m)]
+    paths = [("dists", str(i)) for i in range(m)]
+    dtypes = [plan.dtype_for(path) for path in paths]
 
     dists = list(model.dists)
     prev_total_ll: float | None = None
@@ -434,9 +710,26 @@ def _mixed_precision_fit_composite(
     for _ in range(max_its):
         total_ll = 0.0
         suff_stats = []
+        score_errors: list[np.ndarray] = []
         for i in range(m):
-            total_ll += float(np.dot(w, _child_score(dists[i], encs[i], dtypes[i])))
-            suff_stats.append(_child_accumulate(dists[i], encs[i], w, dtypes[i]))
+            score, actual_dtype, error = _child_score(dists[i], encs[i], dtypes[i])
+            if score.shape != (n,) or error.shape != (n,):
+                raise ValueError(f"composite factor {i} scorer did not return one aligned score per observation")
+            dtypes[i] = actual_dtype
+            score_errors.append(error)
+            if np.any(np.isnan(score)) or np.any(np.isposinf(score)):
+                raise ValueError(f"composite factor {i} scoring produced NaN or +inf")
+            impossible = np.isneginf(score)
+            rejected = np.flatnonzero(impossible & (w > 0.0))
+            if rejected.size:
+                raise ValueError(
+                    f"composite factor {i} assigns zero probability to positive-weight observations "
+                    f"at rows {rejected[:8].tolist()}"
+                )
+            valid = ~impossible
+            total_ll += float(np.dot(w[valid], score[valid]))
+            suff_stats.append(_child_accumulate(dists[i], encs[i], w))
+        _update_runtime_plan(plan, paths, dtypes, score_errors, "CompositeDistribution")
 
         estimator = model.estimator()
         child_estimators = getattr(estimator, "estimators", None)

@@ -2,15 +2,16 @@
 with a retained path back on misfit (workstream D4).
 
 Frame (see the ConditionalJIT track, D1-D6): **the estimator tree is an IR**. D1
-(:mod:`mixle.inference.node_report`) instruments every node with a per-round residual/Q-gain
-report and an ``update_kind`` classification -- in particular ``"gradient"`` for a
+(:mod:`mixle.inference.node_report`) instruments every node with a diagnostic report and an
+``update_kind`` classification -- in particular ``"gradient"`` for a
 :class:`~mixle.models.grad_leaf.GradLeaf` node, whose M-step is ``m_steps`` iterations of SGD/Adam
 rather than a closed-form update. D2 (:mod:`mixle.inference.freeze_rollup`) and D3
-(:mod:`mixle.inference.block_em`) both spend a converged/near-zero D1 Q-gain on SCHEDULING
-decisions (skip an E-step recompute, skip a turn in this round's M-step) while leaving the node's
-own model object untouched. D4 goes one step further for gradient leaves specifically: once a
-gradient leaf's own Q-gain has plateaued (gradient descent has stopped making meaningful progress,
-so the remaining M-step compute it would otherwise spend is close to wasted), swap it for a
+(:mod:`mixle.inference.block_em`) use directly evaluated real-data convergence signals for
+SCHEDULING decisions (skip an E-step recompute, skip a turn in this round's M-step) while leaving
+the node's own model object untouched. D4 goes one step further for gradient leaves specifically:
+once the leaf's aligned real-data log scores have plateaued (gradient descent has stopped making
+meaningful progress, so the remaining M-step compute it would otherwise spend is close to wasted),
+swap it for a
 *closed-form* surrogate -- a moment-matched
 :class:`~mixle.stats.multivariate.multivariate_gaussian.MultivariateGaussianDistribution` fit
 against the SAME (responsibility-weighted) data the gradient leaf was trained on -- so every later
@@ -138,9 +139,11 @@ def _as_matrix(data: Any) -> np.ndarray:
 
 
 class PlateauMonitor:
-    """Tracks, per leaf path, how many consecutive rounds a D1 :class:`NodeReport` has reported a
-    near-zero Q-gain for a ``"gradient"``-update-kind node -- the "gradient descent has stopped
-    making meaningful progress" signal :func:`run_em_with_hotswap` swaps on.
+    """Track per-leaf stability of aligned real-data scores across accepted rounds.
+
+    Only a D1 :class:`NodeReport` with ``update_kind == "gradient"`` is eligible. The convergence
+    evidence itself is the maximum rowwise change in scores supplied by
+    :func:`run_em_with_hotswap`, not the leaf's self-sampled entropy.
 
     Deliberately keyed and reset exactly like :class:`mixle.inference.freeze_rollup.
     FreezeRollupCache`'s own ``_frozen_streak``: a report that stops looking plateaued (the node
@@ -158,15 +161,23 @@ class PlateauMonitor:
         self.q_gain_tol = float(q_gain_tol)
         self.patience = max(1, int(patience))
         self.n_mc = int(n_mc)
-        self._prev_residual: dict[Any, float] = {}
+        self._prev_scores: dict[Any, np.ndarray] = {}
         self._streak: dict[Any, int] = {}
 
     def reset(self, path: Any) -> None:
         """Clear the tracked history for ``path`` (e.g. after a swap or a swap-back)."""
-        self._prev_residual.pop(path, None)
+        self._prev_scores.pop(path, None)
         self._streak.pop(path, None)
 
-    def is_plateaued(self, path: Any, leaf: Any, *, nobs: float | None = None, seed: int = _SCORE_SEED) -> bool:
+    def is_plateaued(
+        self,
+        path: Any,
+        leaf: Any,
+        *,
+        scores: np.ndarray | None = None,
+        nobs: float | None = None,
+        seed: int = _SCORE_SEED,
+    ) -> bool:
         """Return whether ``leaf`` (identified by ``path``) has plateaued this round.
 
         Only a D1 ``update_kind == "gradient"`` node can plateau in this module's sense (a
@@ -175,13 +186,8 @@ class PlateauMonitor:
         been swapped for its (closed-form) surrogate is correctly reported as "not plateaued"
         going forward -- there is nothing left to swap.
 
-        D1's own ``residual`` is a MONTE-CARLO estimate (``-mean(log_density(x))`` over the node's
-        own self-samples, see :mod:`mixle.inference.node_report`'s module docstring) -- for a
-        genuinely converged gradient leaf, round-to-round Q-gain is dominated by MC sampling noise
-        rather than any real drift in the fit, so this class uses a much larger ``n_mc`` than D1's
-        own default (``_DEFAULT_PLATEAU_N_MC`` vs D1's ``_DEFAULT_MC_SAMPLES=64``) to push that
-        noise floor down, and a correspondingly looser ``q_gain_tol`` than D2/D3's exact-residual
-        default (their residual is deterministic given unchanged parameters; this one never is).
+        ``scores`` must be the leaf's aligned log scores on the real fitting data. Self-sampled
+        entropy is deliberately not accepted as progress evidence: collapse can reduce entropy.
         """
         report = node_report(
             leaf,
@@ -189,13 +195,28 @@ class PlateauMonitor:
             n_mc=self.n_mc,
             seed=seed,
             nobs=nobs,
-            prev_residual=self._prev_residual.get(path),
         )
-        self._prev_residual[path] = report.residual
-        if report.update_kind != "gradient":
+        if report.update_kind != "gradient" or scores is None:
             self._streak.pop(path, None)
             return False
-        converged = report.q_gain is not None and abs(report.q_gain) < self.q_gain_tol
+        current = np.asarray(scores, dtype=np.float64)
+        if current.ndim != 1 or np.any(np.isnan(current)) or np.any(np.isposinf(current)):
+            self._streak.pop(path, None)
+            self._prev_scores.pop(path, None)
+            return False
+        previous = self._prev_scores.get(path)
+        self._prev_scores[path] = current.copy()
+        if previous is None or previous.shape != current.shape:
+            converged = False
+        elif not np.array_equal(np.isneginf(previous), np.isneginf(current)):
+            converged = False
+        else:
+            finite = np.isfinite(previous) & np.isfinite(current)
+            if not np.any(finite):
+                converged = False
+            else:
+                movement = float(np.max(np.abs(current[finite] - previous[finite])))
+                converged = movement < self.q_gain_tol
         streak = self._streak.get(path, 0) + 1 if converged else 0
         self._streak[path] = streak
         return streak >= self.patience
@@ -347,8 +368,7 @@ def swap_back(tree: Any, swap_record: SwapRecord, *, round_index: int = 0) -> An
 def misfit_receipt(surrogate: MultivariateGaussianDistribution, holdout_data: Any) -> float:
     """A genuine, locally-computed misfit scalar for ``surrogate`` on REAL held-out data: its own
     negative log-likelihood, ``-mean(log_density(x))``. Not a placeholder -- recomputed from real
-    samples every call, exactly the same style of receipt D1's ``residual`` and G1's
-    ``closure_error`` both are (see the respective module docstrings). Lower is better; compared
+    samples every call. Lower is better; compared
     against :attr:`SwapRecord.baseline_misfit` (the receipt measured right after the swap) by
     :func:`should_swap_back` to decide whether the surrogate has since drifted away from the real
     data it was swapped in to approximate.
@@ -563,7 +583,7 @@ def run_em_with_hotswap(
             component = model.components[idx]
             if not isinstance(component, GradLeaf):
                 continue
-            if not monitor.is_plateaued(idx, component, nobs=1.0):
+            if not monitor.is_plateaued(idx, component, scores=ll_mat[:, idx], nobs=1.0):
                 continue
             enc_i = _component_enc(enc_payload, idx)
             surrogate = moment_matched_surrogate(component, enc_i, weights=gamma[:, idx])
@@ -586,7 +606,7 @@ def run_em_with_hotswap(
         candidate, n_grad, n_closed = _m_step_hotswap(enc_payload, estimator, model, gamma, frozen_idx, swapped_idx)
         # Reuse `frozen_idx` (computed against `model` above), not a fresh `detect_frozen(cache,
         # candidate)` call -- see freeze_rollup.run_em_freeze_rollup's matching comment: a second
-        # detect_frozen call here would update the cache's streak/prev_residual/prev_weight
+        # detect_frozen call here would update the cache's score/weight convergence
         # bookkeeping from a candidate that may be REJECTED below, and that pollution is never
         # rolled back by this round's `transaction.restore()` (which only undoes model/estimator's
         # own mutable state), letting a discarded candidate's reading masquerade as convergence
@@ -633,6 +653,7 @@ def run_em_with_hotswap(
                 swapped_back_this_round=tuple(swapped_back_this_round),
             )
         )
+        cache.record_component_scores(ll_mat_c if accepted else ll_mat)
 
         if delta is not None and 0.0 <= round_value - old_value < delta:
             break
