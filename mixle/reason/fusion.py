@@ -432,13 +432,16 @@ def skill_weighted_fuse(
 
     Each :class:`ClimateMember` maps onto an L5 :class:`ModelClaim` with ``reliability = skill``, then
     :func:`fuse_claims` (the frozen precision-weighted product-of-experts rule) does the actual fusion:
-    ``prec_i = skill_i / variance_i`` and the BMA posterior weight is ``skill_i * prec_i / sum_j skill_j *
-    prec_j``, so a higher-skill ensemble member earns proportionally more weight in the fused projection.
+    ``prec_i = skill_i / variance_i`` and the BMA posterior weight is ``prec_i / sum_j prec_j`` -- skill
+    enters ONCE, through the precision it defines, exactly like L5's ``reliability`` (this is NOT
+    ``skill_i * prec_i / sum_j skill_j * prec_j``, which would equal ``skill_i^2 / variance_i`` normalized
+    and double-count skill's influence against the variance-based weighting :func:`fuse_claims` already
+    does), so a higher-skill ensemble member earns proportionally more weight in the fused projection.
     Disagreement/abstention are inherited unchanged from L5: the max pairwise standardized distance flags at
     ``sigma_flag`` (default 3-sigma) and, on disagreement, routes through the same IC-6 ``verifier`` +
-    ``language_bridge`` adjudication before a fused ensemble point is ever trusted. ``provenance`` records
-    every member's ``{model_id, version, content_hash, weight, skill}`` so the fused projection driving
-    L2/L3/L7 is always attributable back to the ensemble members that produced it.
+    deterministic cross-model adjudication before a fused ensemble point is ever trusted. ``provenance``
+    records every member's ``{model_id, version, content_hash, weight, skill}`` so the fused projection
+    driving L2/L3/L7 is always attributable back to the ensemble members that produced it.
     """
     if not members:
         raise ValueError("skill_weighted_fuse needs at least one ClimateMember")
