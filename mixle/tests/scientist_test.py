@@ -59,6 +59,15 @@ class CertifiedPerceptionTest(unittest.TestCase):
     def test_trains_in_seconds(self):
         self.assertLess(self.model.train_seconds, 5.0)  # the head fit itself is near-instant
 
+    def test_image_embeddings_are_plain_arrays_with_the_documented_shape(self):
+        # pins encode_images()'s actual return contract: transformers wraps CLIP's image features in a
+        # BaseModelOutputWithPooling now, not a raw tensor -- this must be unpacked (.pooler_output)
+        # inside encode_images() rather than leaking the wrapper (or its .numpy()-less object) here.
+        for z, n in ((self.ztr, len(self.ytr)), (self.zte, len(self.yte))):
+            self.assertIsInstance(z, np.ndarray)
+            self.assertEqual(z.shape, (n, 512))  # ViT-B/32's joint embedding width, per the docstring
+            self.assertTrue(np.isfinite(z).all())
+
 
 class ScientistConstructorTest(unittest.TestCase):
     """Scientist's constructor surface matches what it actually does -- no dead knobs."""
@@ -108,6 +117,17 @@ class VerifiedReasoningTest(unittest.TestCase):
         inv = self.sci.ask("when is the K-Pg boundary dated to")
         self.assertFalse(inv.abstained)
         self.assertTrue(inv.factuality.verdicts)  # per-claim receipt exists
+
+    def test_generate_handles_the_tokenizer_batchencoding_directly(self):
+        # generate()'s LM-wrapping leaf: apply_chat_template() now returns a BatchEncoding
+        # (.input_ids/.attention_mask), not a raw tensor. This calls it directly -- independent of
+        # retrieval/factuality -- so a regression here fails on the leaf function itself rather than
+        # only surfacing indirectly through ask()/wonder().
+        from mixle.scientist import generate
+
+        text = generate("Reply with just the single word: OK", max_new_tokens=8)
+        self.assertIsInstance(text, str)
+        self.assertTrue(text.strip())
 
 
 class ProposeAndWonderTest(unittest.TestCase):
