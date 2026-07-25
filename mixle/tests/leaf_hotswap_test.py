@@ -21,7 +21,7 @@ torch = pytest.importorskip("torch")
 
 from mixle.inference.em import observed_log_likelihood  # noqa: E402
 from mixle.inference.estimation import optimize  # noqa: E402
-from mixle.inference.freeze_rollup import FreezeRollupCache, detect_frozen  # noqa: E402
+from mixle.inference.freeze_rollup import FreezeRollupCache, _resolve_payload  # noqa: E402
 from mixle.inference.leaf_hotswap import (  # noqa: E402
     PlateauMonitor,
     misfit_receipt,
@@ -41,6 +41,7 @@ from mixle.stats import (  # noqa: E402
     seq_encode,
 )
 from mixle.stats.bayes.dirichlet import DirichletDistribution  # noqa: E402
+from mixle.stats.latent.mixture import _component_enc  # noqa: E402
 
 
 class DiagGauss(torch.nn.Module):
@@ -459,13 +460,16 @@ class TransactionalRollbackTestCase(unittest.TestCase):
 
 
 class PlateauMonitorTestCase(unittest.TestCase):
-    def test_plateau_requires_sustained_near_zero_q_gain(self):
+    def test_plateau_requires_sustained_real_data_score_stability(self):
         monitor = PlateauMonitor(q_gain_tol=1.0e-6, patience=3)
         fitted, _ = _fit_near_convergence(mu=2.0, sigma=1.0, n=500, seed=12)
-        # a genuinely converged leaf should read as plateaued after `patience` consecutive
-        # convergent Q-gain readings -- the first call has no `prev_residual` yet (q_gain is
-        # necessarily None), so it takes `patience + 1` calls total to latch True.
-        plateaued_rounds = [monitor.is_plateaued(0, fitted, nobs=1.0) for _ in range(4)]
+        # A genuinely converged leaf should read as plateaued after `patience` consecutive stable
+        # real-data score readings. The first call establishes the baseline, so it takes
+        # `patience + 1` calls total to latch True.
+        data = np.linspace(-3.0, 3.0, 50)
+        enc = fitted.dist_to_encoder().seq_encode(data)
+        scores = fitted.seq_log_density(enc)
+        plateaued_rounds = [monitor.is_plateaued(0, fitted, scores=scores, nobs=1.0) for _ in range(4)]
         self.assertEqual(plateaued_rounds, [False, False, False, True])
 
     def test_non_gradient_node_never_plateaus(self):
@@ -480,8 +484,8 @@ class FreezeStreakBookkeepingTestCase(unittest.TestCase):
     ``FreezeStreakBookkeepingTestCase``: ``run_em_with_hotswap`` shares D2's
     ``FreezeRollupCache``/``detect_frozen`` machinery, and before this fix it likewise called
     ``detect_frozen`` a second time against each round's (about to be discarded) M-step
-    ``candidate``, polluting the cache's streak/prev_residual/prev_weight bookkeeping with a state
-    a rejected round's ``transaction.restore()`` never rolls back.
+    ``candidate``, polluting the cache's score/weight convergence bookkeeping with a state a
+    rejected round's ``transaction.restore()`` never rolls back.
     """
 
     def test_rejected_round_does_not_pollute_cache_bookkeeping_with_discarded_candidate_state(self):
@@ -507,20 +511,14 @@ class FreezeStreakBookkeepingTestCase(unittest.TestCase):
         self.assertIs(model, start, "a rejected round must return the original (unmodified) model")
         self.assertFalse(swap_records, "no GradLeaf component in this fixture -- nothing should ever swap")
 
-        fresh_cache = FreezeRollupCache(freeze_patience=2)
-        detect_frozen(fresh_cache, start)
+        payload = _resolve_payload(enc)
+        expected_scores = np.column_stack(
+            [start.components[idx].seq_log_density(_component_enc(payload, idx)) for idx in range(start.num_components)]
+        )
+        np.testing.assert_allclose(cache._last_component_scores, expected_scores)
 
         for idx in range(start.num_components):
-            self.assertEqual(
-                cache._prev_residual[idx],
-                fresh_cache._prev_residual[idx],
-                f"component {idx}'s cached residual was polluted by the rejected round's discarded candidate",
-            )
-            self.assertEqual(
-                cache._prev_weight[idx],
-                fresh_cache._prev_weight[idx],
-                f"component {idx}'s cached weight was polluted by the rejected round's discarded candidate",
-            )
+            self.assertEqual(cache._prev_weight[idx], float(start.w[idx]))
 
 
 class DirichletWeightPriorTestCase(unittest.TestCase):

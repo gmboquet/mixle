@@ -8,13 +8,14 @@ codebase can genuinely execute differently, not deeper nesting).
 """
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 
 import mixle.stats as st
 from mixle.inference.node_precision_plan import (
-    FUSED_FP32_REL_LL_BOUND,
+    FUSED_FP32_ABS_LOG_TOLERANCE,
     _data_magnitude_safe,
     mixed_precision_fit,
     recommend_tree_precision,
@@ -65,22 +66,29 @@ class RecommendTreePrecisionTest(unittest.TestCase):
         for j in (0, 1):
             self.assertEqual(np.dtype(plan.dtype_for(("components", "2", "dists", str(j)))), np.float64)
 
-        # root aggregates AND over children -> unsafe component 2 makes the whole tree's root verdict
-        # float64 (the root IS the maximal fused unit only if ALL of it is safe).
+        # Child scores are always combined at the root in float64.
         self.assertEqual(np.dtype(plan.dtype_for(())), np.float64)
+        self.assertEqual(
+            plan.top_level_child_paths(),
+            [("components", "0"), ("components", "1"), ("components", "2")],
+        )
 
         self.assertIn(plan.dtype_for(("components", "2")), (np.float64,))
         self.assertIn("degenerate", plan.nodes[("components", "2", "dists", "0")].rationale)
 
-    def test_advertised_bound_is_additive_over_reduced_leaves(self):
+    def test_advertised_bound_is_an_absolute_executed_subtree_enclosure(self):
         m, data, _ = _mixed_tree()
         plan = recommend_tree_precision(m, data)
-        # component 0 has 2 reduced (float32) leaves -> bound = 2 * the verified per-leaf constant.
-        self.assertAlmostEqual(plan.advertised_bound(("components", "0")), 2 * FUSED_FP32_REL_LL_BOUND)
-        # component 2 is unsafe (float64) -> bound is 0 (exact).
+        self.assertLessEqual(
+            plan.advertised_bound(("components", "0")),
+            len(data) * FUSED_FP32_ABS_LOG_TOLERANCE,
+        )
         self.assertEqual(plan.advertised_bound(("components", "2")), 0.0)
+        self.assertLessEqual(plan.advertised_bound(()), len(data) * FUSED_FP32_ABS_LOG_TOLERANCE)
+        with self.assertRaisesRegex(ValueError, "does not execute independently"):
+            plan.advertised_bound(("components", "0", "dists", "0"))
 
-    def test_all_safe_tree_root_is_float32(self):
+    def test_all_safe_tree_executes_children_in_float32_and_combines_in_float64(self):
         rng = np.random.RandomState(1)
         comps = [
             st.CompositeDistribution(
@@ -91,8 +99,8 @@ class RecommendTreePrecisionTest(unittest.TestCase):
         m = st.MixtureDistribution(comps, list(rng.dirichlet(np.ones(3))))
         data = m.sampler(2).sample(20000)
         plan = recommend_tree_precision(m, data)
-        self.assertEqual(np.dtype(plan.dtype_for(())), np.float32)
-        self.assertTrue(all(n.reduced() for n in plan.nodes.values()))
+        self.assertEqual(np.dtype(plan.dtype_for(())), np.float64)
+        self.assertTrue(all(plan.nodes[path].reduced() for path in plan.top_level_child_paths()))
 
     def test_none_model(self):
         plan = recommend_tree_precision(None, [1.0, 2.0])
@@ -114,6 +122,13 @@ class RecommendTreePrecisionTest(unittest.TestCase):
         self.assertTrue(all(not n.reduced() for n in plan.nodes.values()))
         self.assertIn("non-finite", plan.nodes[()].rationale)
         self.assertIn("non-finite", plan.nodes[("components", "0")].rationale)
+
+    def test_non_fusible_subtree_is_reconciled_to_float64(self):
+        model = st.CompositeDistribution((st.GaussianDistribution(0.0, 1.0), st.GaussianDistribution(1.0, 2.0)))
+        data = model.sampler(0).sample(100)
+        with patch("mixle.stats.compute.fused_codegen.fusible", return_value=False):
+            plan = recommend_tree_precision(model, data)
+        self.assertTrue(all(np.dtype(plan.dtype_for(path)) == np.float64 for path in plan.top_level_child_paths()))
 
 
 class DataMagnitudeSafeTest(unittest.TestCase):
@@ -157,7 +172,7 @@ class DataMagnitudeSafeTest(unittest.TestCase):
 
 
 class MixedPrecisionFitTest(unittest.TestCase):
-    def test_mixed_precision_fit_matches_float64_within_advertised_bound(self):
+    def test_mixed_precision_fit_uses_runtime_validated_scores(self):
         m, data, _ = _mixed_tree()
         plan = recommend_tree_precision(m, data)
 
@@ -169,14 +184,9 @@ class MixedPrecisionFitTest(unittest.TestCase):
         total_ll_f64 = float(f64_fit.seq_log_density(f64_fit.dist_to_encoder().seq_encode(data)).sum())
         total_ll_mixed = float(mixed_fit.seq_log_density(mixed_fit.dist_to_encoder().seq_encode(data)).sum())
 
-        rel_err = abs(total_ll_mixed - total_ll_f64) / abs(total_ll_f64)
-        advertised = plan.advertised_bound(("components", "0")) + plan.advertised_bound(("components", "1"))
-        # generous slack: EM has its own iteration-to-iteration float64 nondeterminism-free but
-        # sensitive dynamics, so allow an extra small additive slack on top of the advertised
-        # per-node relative bound rather than asserting the raw bound alone is sufficient.
-        self.assertLessEqual(
-            rel_err, advertised + 1e-4, msg="mixed-precision fit drifted beyond its own advertised bound"
-        )
+        self.assertTrue(np.isfinite(total_ll_mixed))
+        self.assertLess(abs(total_ll_mixed - total_ll_f64) / abs(total_ll_f64), 1e-3)
+        self.assertLessEqual(plan.advertised_bound(()), len(data) * FUSED_FP32_ABS_LOG_TOLERANCE)
 
     def test_unsafe_component_is_byte_identical_to_float64(self):
         # Regression: when EVERY node is unsafe (all float64), the mixed-precision driver must
@@ -197,6 +207,24 @@ class MixedPrecisionFitTest(unittest.TestCase):
         mixed_fit = mixed_precision_fit(m, data, plan=plan, max_its=8)
 
         self.assertTrue(np.allclose(sorted(f64_fit.w), sorted(mixed_fit.w), atol=1e-10))
+
+    def test_plan_is_bound_to_its_validation_data(self):
+        m, data, _ = _mixed_tree()
+        plan = recommend_tree_precision(m, data)
+        changed = list(data)
+        changed[0] = changed[1]
+        with self.assertRaisesRegex(ValueError, "different data"):
+            mixed_precision_fit(m, changed, plan=plan, max_its=1)
+
+    def test_impossible_mixture_rows_are_rejected_not_replaced_by_priors(self):
+        model = st.MixtureDistribution(
+            [st.CategoricalDistribution({"a": 1.0}), st.CategoricalDistribution({"b": 1.0})],
+            [0.5, 0.5],
+        )
+        data = ["c"]
+        plan = recommend_tree_precision(model, data)
+        with self.assertRaisesRegex(ValueError, "zero probability"):
+            mixed_precision_fit(model, data, plan=plan, max_its=1)
 
 
 if __name__ == "__main__":
