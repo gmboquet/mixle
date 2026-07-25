@@ -7,9 +7,94 @@ compute engine; fitting code turns them into backend tensors at objective time.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class ImproperPriorReceipt:
+    """Explicit acknowledgement required to construct an improper limiting prior.
+
+    Improper priors are not probability distributions and can yield an improper posterior.
+    The non-empty rationale makes that deliberate modeling choice durable in serialized prior
+    payloads instead of letting a zero hyperparameter silently change the statistical contract.
+    """
+
+    rationale: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.rationale, str) or not self.rationale.strip():
+            raise ValueError("an improper-prior receipt requires a non-empty rationale.")
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the durable improper-limit acknowledgement."""
+        return {
+            "status": "improper_limit_acknowledged",
+            "rationale": self.rationale.strip(),
+        }
+
+
+def improper(rationale: str) -> ImproperPriorReceipt:
+    """Create the explicit receipt required for a supported improper limiting prior."""
+    return ImproperPriorReceipt(rationale)
+
+
+def _validated_scalar(
+    name: str,
+    value: Any,
+    *,
+    positive: bool,
+    improper_receipt: ImproperPriorReceipt | None = None,
+) -> float:
+    if improper_receipt is not None and not isinstance(improper_receipt, ImproperPriorReceipt):
+        raise TypeError("improper_receipt must be an ImproperPriorReceipt.")
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be a real number, not a boolean.")
+    try:
+        converted = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a real number.") from exc
+    if not math.isfinite(converted):
+        raise ValueError(f"{name} must be finite.")
+    if positive and converted <= 0.0:
+        if converted < 0.0 or improper_receipt is None:
+            raise ValueError(f"{name} must be positive for a proper prior.")
+    return converted
+
+
+def _validate_receipt_scope(values: Sequence[Any], receipt: ImproperPriorReceipt | None) -> None:
+    has_improper_limit = any(float(value) == 0.0 for value in values)
+    if receipt is not None and not has_improper_limit:
+        raise ValueError("improper_receipt was supplied, but every hyperparameter defines a proper prior.")
+
+
+def _concentrations(alpha: Any) -> list[Any]:
+    if isinstance(alpha, Mapping):
+        values = list(alpha.values())
+    elif hasattr(alpha, "tolist"):
+        values = alpha.tolist()
+        if not isinstance(values, list):
+            values = [values]
+    elif isinstance(alpha, Sequence) and not isinstance(alpha, (str, bytes, bytearray)):
+        values = list(alpha)
+    else:
+        raise TypeError("Dirichlet alpha must be a non-empty one-dimensional sequence or mapping.")
+    if not values or any(
+        isinstance(value, Mapping)
+        or (isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)))
+        for value in values
+    ):
+        raise ValueError("Dirichlet alpha must be a non-empty one-dimensional concentration vector.")
+    return values
+
+
+def _prior_status(receipt: ImproperPriorReceipt | None) -> dict[str, Any]:
+    return {
+        "proper": receipt is None,
+        "improper_receipt": None if receipt is None else receipt.as_dict(),
+    }
 
 
 def as_prior_dict(prior: Any) -> Any:
@@ -39,9 +124,32 @@ class NormalGammaPrior:
     """
 
     mu0: float = 0.0
-    kappa: float = 0.0
-    alpha: float = 1.0
-    beta: float = 0.0
+    kappa: float = 1.0e-6
+    alpha: float = 2.0
+    beta: float = 1.0
+    improper_receipt: ImproperPriorReceipt | None = None
+
+    def __post_init__(self) -> None:
+        _validated_scalar("NormalGammaPrior.mu0", self.mu0, positive=False)
+        _validated_scalar(
+            "NormalGammaPrior.kappa",
+            self.kappa,
+            positive=True,
+            improper_receipt=self.improper_receipt,
+        )
+        _validated_scalar(
+            "NormalGammaPrior.alpha",
+            self.alpha,
+            positive=True,
+            improper_receipt=self.improper_receipt,
+        )
+        _validated_scalar(
+            "NormalGammaPrior.beta",
+            self.beta,
+            positive=True,
+            improper_receipt=self.improper_receipt,
+        )
+        _validate_receipt_scope((self.kappa, self.alpha, self.beta), self.improper_receipt)
 
     def as_dict(self) -> dict:
         """Return the normalized prior payload consumed by MAP fitters."""
@@ -54,7 +162,16 @@ class NormalGammaPrior:
             # Backward-compatible aliases for the legacy dict API.
             "a": float(self.alpha),
             "b": float(self.beta),
+            **_prior_status(self.improper_receipt),
         }
+
+    def to_distribution(self) -> Any:
+        """Convert a proper specification to the stats-layer conjugate distribution."""
+        if self.improper_receipt is not None:
+            raise ValueError("an improper NormalGammaPrior cannot use the analytic conjugate estimator.")
+        from mixle.stats.bayes.normal_gamma import NormalGammaDistribution
+
+        return NormalGammaDistribution(self.mu0, self.kappa, self.alpha, self.beta)
 
 
 @dataclass(frozen=True)
@@ -62,10 +179,26 @@ class DirichletPrior:
     """Dirichlet prior for simplex-valued parameters."""
 
     alpha: Any
+    improper_receipt: ImproperPriorReceipt | None = None
+
+    def __post_init__(self) -> None:
+        values = _concentrations(self.alpha)
+        for index, value in enumerate(values):
+            _validated_scalar(
+                f"DirichletPrior.alpha[{index}]",
+                value,
+                positive=True,
+                improper_receipt=self.improper_receipt,
+            )
+        _validate_receipt_scope(values, self.improper_receipt)
 
     def as_dict(self) -> dict:
         """Return the normalized Dirichlet prior payload."""
-        return {"family": "dirichlet", "alpha": self.alpha}
+        return {
+            "family": "dirichlet",
+            "alpha": self.alpha,
+            **_prior_status(self.improper_receipt),
+        }
 
 
 @dataclass(frozen=True)
@@ -75,10 +208,31 @@ class BetaPrior:
     alpha: float
     beta: float
     parameter: str | None = None
+    improper_receipt: ImproperPriorReceipt | None = None
+
+    def __post_init__(self) -> None:
+        _validated_scalar(
+            "BetaPrior.alpha",
+            self.alpha,
+            positive=True,
+            improper_receipt=self.improper_receipt,
+        )
+        _validated_scalar(
+            "BetaPrior.beta",
+            self.beta,
+            positive=True,
+            improper_receipt=self.improper_receipt,
+        )
+        _validate_receipt_scope((self.alpha, self.beta), self.improper_receipt)
 
     def as_dict(self) -> dict:
         """Return the normalized Beta prior payload."""
-        rv = {"family": "beta", "alpha": float(self.alpha), "beta": float(self.beta)}
+        rv = {
+            "family": "beta",
+            "alpha": float(self.alpha),
+            "beta": float(self.beta),
+            **_prior_status(self.improper_receipt),
+        }
         if self.parameter is not None:
             rv["parameter"] = self.parameter
         return rv
@@ -91,10 +245,31 @@ class GammaPrior:
     shape: float
     rate: float
     parameter: str | None = None
+    improper_receipt: ImproperPriorReceipt | None = None
+
+    def __post_init__(self) -> None:
+        _validated_scalar(
+            "GammaPrior.shape",
+            self.shape,
+            positive=True,
+            improper_receipt=self.improper_receipt,
+        )
+        _validated_scalar(
+            "GammaPrior.rate",
+            self.rate,
+            positive=True,
+            improper_receipt=self.improper_receipt,
+        )
+        _validate_receipt_scope((self.shape, self.rate), self.improper_receipt)
 
     def as_dict(self) -> dict:
         """Return the normalized Gamma prior payload."""
-        rv = {"family": "gamma", "shape": float(self.shape), "rate": float(self.rate)}
+        rv = {
+            "family": "gamma",
+            "shape": float(self.shape),
+            "rate": float(self.rate),
+            **_prior_status(self.improper_receipt),
+        }
         if self.parameter is not None:
             rv["parameter"] = self.parameter
         return rv
@@ -195,24 +370,56 @@ class RecordPrior:
         }
 
 
-def normal_gamma(mu0: float = 0.0, kappa: float = 0.0, alpha: float = 1.0, beta: float = 0.0) -> NormalGammaPrior:
+def normal_gamma(
+    mu0: float = 0.0,
+    kappa: float = 1.0e-6,
+    alpha: float = 2.0,
+    beta: float = 1.0,
+    improper_receipt: ImproperPriorReceipt | None = None,
+) -> NormalGammaPrior:
     """Create a Normal-Gamma prior for Gaussian mean/precision parameters."""
-    return NormalGammaPrior(mu0=mu0, kappa=kappa, alpha=alpha, beta=beta)
+    return NormalGammaPrior(
+        mu0=mu0,
+        kappa=kappa,
+        alpha=alpha,
+        beta=beta,
+        improper_receipt=improper_receipt,
+    )
 
 
-def dirichlet(alpha: Any) -> DirichletPrior:
+def dirichlet(alpha: Any, improper_receipt: ImproperPriorReceipt | None = None) -> DirichletPrior:
     """Create a Dirichlet prior for simplex-valued parameters."""
-    return DirichletPrior(alpha=alpha)
+    return DirichletPrior(alpha=alpha, improper_receipt=improper_receipt)
 
 
-def beta(alpha: float, beta: float, parameter: str | None = None) -> BetaPrior:
+def beta(
+    alpha: float,
+    beta: float,
+    parameter: str | None = None,
+    improper_receipt: ImproperPriorReceipt | None = None,
+) -> BetaPrior:
     """Create a Beta prior for a unit-interval parameter."""
-    return BetaPrior(alpha=alpha, beta=beta, parameter=parameter)
+    return BetaPrior(
+        alpha=alpha,
+        beta=beta,
+        parameter=parameter,
+        improper_receipt=improper_receipt,
+    )
 
 
-def gamma(shape: float, rate: float, parameter: str | None = None) -> GammaPrior:
+def gamma(
+    shape: float,
+    rate: float,
+    parameter: str | None = None,
+    improper_receipt: ImproperPriorReceipt | None = None,
+) -> GammaPrior:
     """Create a Gamma prior for a positive parameter."""
-    return GammaPrior(shape=shape, rate=rate, parameter=parameter)
+    return GammaPrior(
+        shape=shape,
+        rate=rate,
+        parameter=parameter,
+        improper_receipt=improper_receipt,
+    )
 
 
 def composite(children: Sequence[Any]) -> CompositePrior:
@@ -255,6 +462,7 @@ __all__ = [
     "CompositePrior",
     "DirichletPrior",
     "GammaPrior",
+    "ImproperPriorReceipt",
     "MarkovChainPrior",
     "MixturePrior",
     "NormalGammaPrior",
@@ -266,6 +474,7 @@ __all__ = [
     "composite",
     "dirichlet",
     "gamma",
+    "improper",
     "markov_chain",
     "mixture",
     "normal_gamma",
