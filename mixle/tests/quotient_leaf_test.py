@@ -1,4 +1,4 @@
-"""TranslationQuotientLeaf: a conv+global-pool leaf declaring the "translation" group (CARD A3-a spike).
+"""TranslationQuotientLeaf: a periodic-conv leaf declaring the finite cyclic translation group.
 
 Uses a real image dataset (CIFAR-10, loaded from the local HuggingFace cache -- no synthetic data) to check:
 
@@ -92,8 +92,8 @@ class TranslationQuotientLeafTest(unittest.TestCase):
         cls.fitted_baseline = optimize(data, cls.baseline_leaf.estimator(), max_its=1, out=None)
 
     def test_declares_translation_group(self):
-        self.assertEqual(self.quotient_leaf.group, "translation")
-        self.assertEqual(self.quotient_leaf.declared_group(), "translation")
+        self.assertEqual(self.quotient_leaf.group.name, "cyclic_translation_2d")
+        self.assertEqual(self.quotient_leaf.declared_group().boundary, "periodic")
         self.assertIsNone(self.baseline_leaf.group)
 
     def test_quotient_leaf_log_density_is_shift_invariant_on_real_inputs(self):
@@ -103,10 +103,9 @@ class TranslationQuotientLeafTest(unittest.TestCase):
         enc_shift = (x_shift, self.y_test)
         logp_orig = self.fitted_quotient.seq_log_density(enc_orig)
         logp_shift = self.fitted_quotient.seq_log_density(enc_shift)
-        # global average pooling makes the logits (and hence log_density) invariant to interior shifts up to
-        # the boundary strip the shift drags zeros through; a loose but honest tolerance for a real fitted
-        # conv net (not a toy linear map) on 32x32 images shifted by a few pixels.
-        self.assertLess(np.abs(logp_orig - logp_shift).mean(), 1.0)
+        # Circular padding plus uniform orbit reduction makes periodic integer shifts an exact symmetry;
+        # the tolerance covers only floating-point reduction order.
+        self.assertLess(np.abs(logp_orig - logp_shift).mean(), 1.0e-5)
 
     def test_baseline_leaf_lacks_shift_invariance(self):
         x = self.x_test
