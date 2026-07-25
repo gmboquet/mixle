@@ -14,6 +14,7 @@ from mixle.inference.em import (
     OnlineEM,
     PosteriorTransformEM,
     RestartEM,
+    SampledSufficientStatistics,
     StandardEM,
     VariationalEM,
     observed_log_likelihood,
@@ -141,7 +142,10 @@ class EMStrategiesTestCase(unittest.TestCase):
         estimator = GaussianEstimator()
 
         def sampled_suff_stat(enc_data, estimator, model, rng, num_samples, engine):
-            return len(enc_data), (enc_data.sum(), np.dot(enc_data, enc_data), len(enc_data), len(enc_data))
+            return SampledSufficientStatistics(
+                (enc_data.sum(), np.dot(enc_data, enc_data), len(enc_data), len(enc_data)),
+                nobs=len(enc_data),
+            )
 
         result = MonteCarloEM(sampled_suff_stat, num_samples=5, seed=1).step(data, estimator, model)
 
