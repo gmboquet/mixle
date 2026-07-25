@@ -75,6 +75,8 @@ class PatchSegmenter(Segmenter):
     discrete = False
 
     def __init__(self, patch: int = 8) -> None:
+        if isinstance(patch, (bool, np.bool_)) or not isinstance(patch, (int, np.integer)) or patch <= 0:
+            raise ValueError(f"patch must be a positive integer, got {patch!r}")
         self.patch = int(patch)
 
     def segment(self, raw: Any) -> np.ndarray:
@@ -82,6 +84,10 @@ class PatchSegmenter(Segmenter):
         img = np.asarray(raw, dtype=np.float32)
         if img.ndim == 2:
             img = img[None, :, :]
+        if img.ndim != 3:
+            raise ValueError(f"PatchSegmenter requires an (H, W) or (C, H, W) image, got shape {img.shape}")
+        if not np.isfinite(img).all():
+            raise ValueError("PatchSegmenter requires finite image values")
         c, h, w = img.shape
         p = self.patch
         if h < p or w < p:
@@ -92,8 +98,13 @@ class PatchSegmenter(Segmenter):
                 f"PatchSegmenter(patch={p}): image is smaller than the patch size in at least one "
                 f"dimension (got h={h}, w={w}); both must be >= patch."
             )
+        if h % p or w % p:
+            raise ValueError(
+                f"PatchSegmenter(patch={p}) requires image height and width to be divisible by patch; "
+                f"got h={h}, w={w}. Pad or crop explicitly so the geometry change is visible to the caller."
+            )
         hp, wp = h // p, w // p
-        img = img[:, : hp * p, : wp * p].reshape(c, hp, p, wp, p)
+        img = img.reshape(c, hp, p, wp, p)
         patches = img.transpose(1, 3, 0, 2, 4).reshape(hp * wp, c * p * p)
         return patches.astype(np.float32)
 

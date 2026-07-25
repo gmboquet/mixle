@@ -40,6 +40,25 @@ if TYPE_CHECKING:
 # pilot_ladder.py / mixture.py fixes for the same shape of cycle.
 
 
+def _optional_num_nodes(value: Any, *, name: str = "num_nodes") -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be an exact non-Boolean integer or None.")
+    result = int(value)
+    if result < 0:
+        raise ValueError(f"{name} must be non-negative.")
+    return result
+
+
+def _require_graph_size(adjacency: np.ndarray, num_nodes: int | None) -> None:
+    if num_nodes is not None and adjacency.shape != (num_nodes, num_nodes):
+        raise ValueError(
+            f"graph observation has shape {adjacency.shape}; expected ({num_nodes}, {num_nodes}) "
+            "for this fixed-size distribution."
+        )
+
+
 class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
     """Independent Bernoulli distribution over binary graph edges."""
 
@@ -87,9 +106,7 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         self.log_1p = math.log1p(-self.p)
         self.directed = bool(directed)
         self.self_loops = bool(self_loops)
-        self.num_nodes = None if num_nodes is None else int(num_nodes)
-        if self.num_nodes is not None and self.num_nodes < 0:
-            raise ValueError("num_nodes must be non-negative.")
+        self.num_nodes = _optional_num_nodes(num_nodes)
         self.name = name
         self.keys = keys
 
@@ -106,7 +123,13 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def from_model(cls, model: Any) -> ErdosRenyiGraphDistribution:
         """Create a distribution wrapper from an Erdos-Renyi model."""
-        return cls(model.p, directed=model.directed, self_loops=model.self_loops, name=getattr(model, "name", None))
+        return cls(
+            model.p,
+            directed=model.directed,
+            self_loops=model.self_loops,
+            num_nodes=getattr(model, "num_nodes", None),
+            name=getattr(model, "name", None),
+        )
 
     def to_model(self) -> Any:
         """Convert this distribution to the corresponding random-graph model."""
@@ -129,6 +152,7 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
 
         obs = _extract_observation(x, directed=self.directed)
         _validate_graph_constraints(obs.adjacency, self.directed, self.self_loops)
+        _require_graph_size(obs.adjacency, self.num_nodes)
         total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
         return _bernoulli_log_likelihood(successes, total, self.p)
 
@@ -145,6 +169,7 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         for o in x:
             adj = _extract_observation(o, directed=self.directed).adjacency
             _validate_graph_constraints(adj, self.directed, self.self_loops)
+            _require_graph_size(adj, self.num_nodes)
             counts.append(_edge_counts(adj, self.directed, self.self_loops))
         counts = np.asarray(counts, dtype=np.float64).reshape(-1, 2)
         total, successes = counts[:, 0], counts[:, 1]
@@ -169,6 +194,7 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         for o in x:
             adj = _extract_observation(o, directed=self.directed).adjacency
             _validate_graph_constraints(adj, self.directed, self.self_loops)
+            _require_graph_size(adj, self.num_nodes)
             counts.append(_edge_counts(adj, self.directed, self.self_loops))
         counts = np.asarray(counts, dtype=np.float64).reshape(-1, 2)
         total = engine.asarray(counts[:, 0])
@@ -181,9 +207,11 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
 
     def edge_marginals(self, num_nodes: int | None = None) -> np.ndarray:
         """Return the matrix of marginal edge probabilities for ``num_nodes``."""
-        n = self.num_nodes if num_nodes is None else int(num_nodes)
+        n = self.num_nodes if num_nodes is None else _optional_num_nodes(num_nodes)
         if n is None:
             raise ValueError("num_nodes is required when distribution.num_nodes is None.")
+        if self.num_nodes is not None and n != self.num_nodes:
+            raise ValueError(f"num_nodes={n} conflicts with this fixed-size distribution ({self.num_nodes}).")
         mat = np.full((n, n), self.p, dtype=np.float64)
         if not self.self_loops:
             np.fill_diagonal(mat, 0.0)
@@ -195,6 +223,7 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
 
         adj = _extract_observation(x, directed=self.directed).adjacency
         _validate_graph_constraints(adj, self.directed, self.self_loops)
+        _require_graph_size(adj, self.num_nodes)
         total, successes = _edge_counts(adj, self.directed, self.self_loops)
         return {"edge_opportunities": total, "edge_count": successes, "p": self.p}
 
@@ -284,11 +313,11 @@ class ErdosRenyiGraphSampler(DistributionSampler):
 
     def sample_graph(self, num_nodes: int | None = None) -> np.ndarray:
         """Draw one binary graph adjacency matrix."""
-        n = self.dist.num_nodes if num_nodes is None else int(num_nodes)
+        n = self.dist.num_nodes if num_nodes is None else _optional_num_nodes(num_nodes)
         if n is None:
             raise ValueError("num_nodes is required when distribution.num_nodes is None.")
-        if n < 0:
-            raise ValueError("num_nodes must be non-negative.")
+        if self.dist.num_nodes is not None and n != self.dist.num_nodes:
+            raise ValueError(f"num_nodes={n} conflicts with this fixed-size distribution ({self.dist.num_nodes}).")
         mat = (self.rng.rand(n, n) < self.dist.p).astype(np.int8)
         if self.dist.directed:
             if not self.dist.self_loops:
@@ -315,12 +344,18 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate edge counts for Erdos-Renyi graph fitting."""
 
     def __init__(
-        self, directed: bool = False, self_loops: bool = False, name: str | None = None, keys: str | None = None
+        self,
+        directed: bool = False,
+        self_loops: bool = False,
+        num_nodes: int | None = None,
+        name: str | None = None,
+        keys: str | None = None,
     ) -> None:
         self.edge_opportunities = 0.0
         self.edge_count = 0.0
         self.directed = bool(directed)
         self.self_loops = bool(self_loops)
+        self.num_nodes = _optional_num_nodes(num_nodes)
         self.name = name
         self.keys = keys
 
@@ -330,6 +365,8 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
 
         obs = _extract_observation(x, directed=self.directed)
         _validate_graph_constraints(obs.adjacency, self.directed, self.self_loops)
+        expected_nodes = self.num_nodes if estimate is None else estimate.num_nodes
+        _require_graph_size(obs.adjacency, expected_nodes)
         total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
         self.edge_opportunities += float(weight) * total
         self.edge_count += float(weight) * successes
@@ -346,6 +383,8 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
 
         for obs, weight in zip(x, weights):
             _validate_graph_constraints(obs.adjacency, self.directed, self.self_loops)
+            expected_nodes = self.num_nodes if estimate is None else estimate.num_nodes
+            _require_graph_size(obs.adjacency, expected_nodes)
             total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
             self.edge_opportunities += float(weight) * total
             self.edge_count += float(weight) * successes
@@ -381,17 +420,27 @@ class ErdosRenyiGraphAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for ErdosRenyiGraphAccumulator."""
 
     def __init__(
-        self, directed: bool = False, self_loops: bool = False, name: str | None = None, keys: str | None = None
+        self,
+        directed: bool = False,
+        self_loops: bool = False,
+        num_nodes: int | None = None,
+        name: str | None = None,
+        keys: str | None = None,
     ) -> None:
         self.directed = bool(directed)
         self.self_loops = bool(self_loops)
+        self.num_nodes = _optional_num_nodes(num_nodes)
         self.name = name
         self.keys = keys
 
     def make(self) -> ErdosRenyiGraphAccumulator:
         """Create a fresh Erdos-Renyi graph accumulator."""
         return ErdosRenyiGraphAccumulator(
-            directed=self.directed, self_loops=self.self_loops, name=self.name, keys=self.keys
+            directed=self.directed,
+            self_loops=self.self_loops,
+            num_nodes=self.num_nodes,
+            name=self.name,
+            keys=self.keys,
         )
 
 
@@ -412,14 +461,18 @@ class ErdosRenyiGraphEstimator(ParameterEstimator):
         self.self_loops = bool(self_loops)
         self.pseudo_count = pseudo_count
         self.prior_p = float(prior_p)
-        self.num_nodes = None if num_nodes is None else int(num_nodes)
+        self.num_nodes = _optional_num_nodes(num_nodes)
         self.name = name
         self.keys = keys
 
     def accumulator_factory(self) -> ErdosRenyiGraphAccumulatorFactory:
         """Return the accumulator factory used by this estimator."""
         return ErdosRenyiGraphAccumulatorFactory(
-            directed=self.directed, self_loops=self.self_loops, name=self.name, keys=self.keys
+            directed=self.directed,
+            self_loops=self.self_loops,
+            num_nodes=self.num_nodes,
+            name=self.name,
+            keys=self.keys,
         )
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> ErdosRenyiGraphDistribution:

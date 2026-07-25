@@ -46,9 +46,6 @@ if TYPE_CHECKING:
 # call time, once every module in the cycle has finished loading normally -- mirroring the
 # erdos_renyi_graph.py fix for the same shape of cycle.
 
-_EPS = 1.0e-12
-
-
 class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution):
     """Random Dot Product Graph over n nodes with d-dimensional latent positions X (edge prob X X^T)."""
 
@@ -81,18 +78,22 @@ class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution
 
         """
         x = np.asarray(positions, dtype=float)
-        if x.ndim != 2 or x.shape[0] < 1:
+        if x.ndim != 2 or x.shape[0] < 1 or x.shape[1] < 1:
             raise ValueError("RandomDotProductGraphDistribution requires an n-by-d position matrix.")
         if not np.all(np.isfinite(x)):
             raise ValueError("RandomDotProductGraphDistribution requires finite latent positions.")
         self.positions = x
         self.num_nodes = x.shape[0]
         self.dim = x.shape[1]
-        probs = np.clip(x @ x.T, _EPS, 1.0 - _EPS)
+        probs = np.clip(x @ x.T, 0.0, 1.0)
         np.fill_diagonal(probs, 0.0)
         self.probs = probs
-        self._log_p = np.log(np.clip(probs, _EPS, 1.0 - _EPS))
-        self._log_1mp = np.log(np.clip(1.0 - probs, _EPS, 1.0 - _EPS))
+        self._log_p = np.full_like(probs, -np.inf)
+        self._log_1mp = np.full_like(probs, -np.inf)
+        positive = probs > 0.0
+        below_one = probs < 1.0
+        self._log_p[positive] = np.log(probs[positive])
+        self._log_1mp[below_one] = np.log1p(-probs[below_one])
         self.name = name
         self.keys = keys
 
@@ -119,7 +120,9 @@ class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution
         # nonzero diagonal in `a` would otherwise be silently ignored rather than rejected.
         _validate_graph_constraints(a, directed=False, self_loops=False)
         mask = np.triu(np.ones_like(a, dtype=bool), 1)  # undirected, no self-loops
-        return float(np.sum(a[mask] * self._log_p[mask] + (1.0 - a[mask]) * self._log_1mp[mask]))
+        present = a[mask] == 1.0
+        terms = np.where(present, self._log_p[mask], self._log_1mp[mask])
+        return float(np.sum(terms))
 
     def density(self, x: Any) -> float:
         """Return the probability of a graph x."""
@@ -151,7 +154,7 @@ class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution
             adjacencies.append(adj[mask])
         rows = np.asarray(adjacencies, dtype=np.float64)
         a = engine.asarray(rows)
-        return engine.sum(a * log_p[None, :] + (engine.asarray(1.0) - a) * log_1mp[None, :], axis=1)
+        return engine.sum(engine.where(a == engine.asarray(1.0), log_p[None, :], log_1mp[None, :]), axis=1)
 
     def sampler(self, seed: int | None = None) -> RandomDotProductGraphSampler:
         """Return a sampler for drawing graphs from this distribution."""

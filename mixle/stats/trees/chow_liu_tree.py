@@ -159,6 +159,22 @@ class ChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
             raise ValueError("feature_order must be a permutation of feature indices.")
         if sum(parent is None for parent in self.parents) != 1:
             raise ValueError("parents must contain exactly one root entry set to None.")
+        root = self.parents.index(None)
+        if not self.feature_order or self.feature_order[0] != root:
+            raise ValueError("feature_order must begin with the unique root.")
+        order_position = {feature: position for position, feature in enumerate(self.feature_order)}
+        for child, parent in enumerate(self.parents):
+            if parent is None:
+                continue
+            if parent < 0 or parent >= self.num_features:
+                raise ValueError(f"parents[{child}]={parent} is outside the feature range.")
+            if parent == child:
+                raise ValueError(f"parents[{child}] cannot refer to the feature itself.")
+            if order_position[parent] >= order_position[child]:
+                raise ValueError(
+                    f"feature_order must place parent {parent} before child {child}; "
+                    "this also guarantees an acyclic tree rooted at its first feature."
+                )
 
     def __str__(self) -> str:
         return (
