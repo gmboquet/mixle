@@ -180,6 +180,54 @@ class ModuleDeserializationTrustGateTest(unittest.TestCase):
             restored = module_from_bytes(data)
         self.assertEqual(type(restored).__name__, type(module).__name__)
 
+    def test_envelope_round_trip_is_integrity_checked(self):
+        from mixle.models._neural_serial import decode_module, encode_module
+        from mixle.utils.serialization import trusted_deserialization
+
+        payload = encode_module(_mlp_gaussian())
+        with trusted_deserialization():
+            restored = decode_module(payload)
+        self.assertEqual(type(restored).__name__, type(_mlp_gaussian()).__name__)
+
+        payload["sha256"] = "0" * 64
+        with trusted_deserialization(), self.assertRaisesRegex(Exception, "sha256 does not match"):
+            decode_module(payload)
+
+    def test_decode_rejects_invalid_base64_and_wrong_environment(self):
+        from mixle.models._neural_serial import decode_module, encode_module
+        from mixle.utils.serialization import trusted_deserialization
+
+        payload = encode_module(_mlp_gaussian())
+        payload["__neural_module__"] = "not base64!"
+        with trusted_deserialization(), self.assertRaisesRegex(Exception, "strict base64"):
+            decode_module(payload)
+
+        payload = encode_module(_mlp_gaussian())
+        payload["environment"]["python"] = "0.0.0"
+        with trusted_deserialization(), self.assertRaisesRegex(Exception, "does not match"):
+            decode_module(payload)
+
+    def test_decode_checks_declared_limit_before_base64_allocation(self):
+        from unittest.mock import patch
+
+        from mixle.models._neural_serial import decode_module, encode_module
+        from mixle.utils.serialization import trusted_deserialization
+
+        payload = encode_module(_mlp_gaussian())
+        payload["decoded_bytes"] = 5
+        with (
+            patch("mixle.models._neural_serial.MAX_NEURAL_MODULE_BYTES", 4),
+            trusted_deserialization(),
+            self.assertRaisesRegex(Exception, "decoded_bytes"),
+        ):
+            decode_module(payload)
+
+    def test_module_serializer_rejects_non_modules(self):
+        from mixle.models._neural_serial import module_to_bytes
+
+        with self.assertRaisesRegex(TypeError, "torch.nn.Module"):
+            module_to_bytes({"weights": []})
+
 
 def _mlp_gaussian():
     from mixle.models.neural import make_mlp
