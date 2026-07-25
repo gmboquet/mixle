@@ -512,8 +512,13 @@ class Proxy:
 
     def on(self, field_name: str) -> Proxy:
         """Attach this proxy to a named field of a :class:`FieldSystem`; returns ``self`` for chaining."""
+        if not isinstance(field_name, str) or not field_name:
+            raise ValueError("proxy field name must be a non-empty string.")
         self.field = field_name
         return self
+
+    def validate(self, field_dim: int) -> None:
+        """Validate observation shapes against the attached field dimension."""
 
     def params(self) -> list[_ParamSpec]:
         """Return free parameter specifications used by the joint field fit."""
@@ -533,9 +538,39 @@ def _resolve(value, default_init, prefix, name, support):
     """A proxy coefficient is either a fixed float or the ``free`` token -> a scalar param to estimate."""
     from .core import _is_free  # local import to avoid a cycle at module load
 
+    if not isinstance(prefix, str) or not prefix:
+        raise ValueError("proxy prefix must be a non-empty string.")
     if _is_free(value):
-        return None, _ParamSpec(f"{prefix}.{name}", (), support, np.array(float(default_init)))
-    return float(value), None
+        initial = float(default_init)
+        if not np.isfinite(initial) or (support == "positive" and initial <= 0.0):
+            raise ValueError(f"initial value for {prefix}.{name} is outside its {support} support.")
+        return None, _ParamSpec(f"{prefix}.{name}", (), support, np.array(initial))
+    try:
+        fixed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"fixed proxy parameter {prefix}.{name} must be a finite scalar.") from exc
+    if not np.isfinite(fixed) or (support == "positive" and fixed <= 0.0):
+        raise ValueError(f"fixed proxy parameter {prefix}.{name} is outside its {support} support.")
+    return fixed, None
+
+
+def _observation_vector(value, label: str) -> np.ndarray:
+    try:
+        out = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a non-empty finite one-dimensional numeric sequence.") from exc
+    if out.ndim != 1 or out.size == 0 or not np.isfinite(out).all():
+        raise ValueError(f"{label} must be a non-empty finite one-dimensional numeric sequence.")
+    return out.copy()
+
+
+def _observation_index(value, size: int, label: str) -> np.ndarray | None:
+    if value is None:
+        return None
+    raw = _observation_vector(value, label)
+    if raw.size != size or np.any(raw < 0.0) or np.any(raw != np.floor(raw)):
+        raise ValueError(f"{label} must contain exactly {size} non-negative integer entries.")
+    return raw.astype(int)
 
 
 @dataclass
@@ -555,13 +590,19 @@ class GaussianProxy(Proxy):
     prefix: str = "gauss"
 
     def __post_init__(self):
-        self.y = np.asarray(self.y, dtype=float)
-        self.idx = None if self.index is None else np.asarray(self.index, dtype=int)
+        self.y = _observation_vector(self.y, "GaussianProxy y")
+        self.idx = _observation_index(self.index, self.y.size, "GaussianProxy index")
         self._slope_v, self._slope_p = _resolve(self.slope, 1.0, self.prefix, "slope", "real")
         self._int_v, self._int_p = _resolve(self.intercept, float(np.mean(self.y)), self.prefix, "intercept", "real")
         self._scale_v, self._scale_p = _resolve(
             self.scale, float(np.std(self.y)) or 1.0, self.prefix, "scale", "positive"
         )
+
+    def validate(self, field_dim: int) -> None:
+        if self.idx is None and self.y.size != field_dim:
+            raise ValueError(f"GaussianProxy y has {self.y.size} rows but its field has {field_dim} nodes.")
+        if self.idx is not None and np.any(self.idx >= field_dim):
+            raise ValueError(f"GaussianProxy index must be within [0, {field_dim}).")
 
     def params(self) -> list[_ParamSpec]:
         """Return parameter specs for any free slope, intercept, or scale."""
@@ -602,7 +643,21 @@ class LogisticNicheProxy(Proxy):
 
     def __post_init__(self):
         self.P = np.asarray(self.presence, dtype=float)
+        if (
+            self.P.ndim != 2
+            or 0 in self.P.shape
+            or not np.isfinite(self.P).all()
+            or np.any((self.P != 0.0) & (self.P != 1.0))
+        ):
+            raise ValueError("LogisticNicheProxy presence must be a non-empty finite 2-D binary matrix.")
+        self.mu_scale = _positive_scalar(self.mu_scale, "niche mu_scale")
+        if not isinstance(self.prefix, str) or not self.prefix:
+            raise ValueError("proxy prefix must be a non-empty string.")
         self.S = self.P.shape[0]
+
+    def validate(self, field_dim: int) -> None:
+        if self.P.shape[1] != field_dim:
+            raise ValueError(f"LogisticNicheProxy presence has {self.P.shape[1]} field columns; expected {field_dim}.")
 
     def params(self) -> list[_ParamSpec]:
         """Return niche-location, niche-precision, and baseline parameter specifications."""
@@ -638,9 +693,28 @@ class PoissonProxy(Proxy):
     prefix: str = "cox"
 
     def __post_init__(self):
-        self.c = np.asarray(self.counts, dtype=float)
-        self.idx = None if self.index is None else np.asarray(self.index, dtype=int)
+        self.c = _observation_vector(self.counts, "PoissonProxy counts")
+        if np.any(self.c < 0.0) or np.any(self.c != np.floor(self.c)):
+            raise ValueError("PoissonProxy counts must be exact non-negative integers.")
+        self.idx = _observation_index(self.index, self.c.size, "PoissonProxy index")
         self.off = np.asarray(self.offset, dtype=float)
+        if self.off.ndim == 0:
+            self.off = float(self.off)
+        elif self.off.ndim == 1 and self.off.size == self.c.size:
+            self.off = self.off.copy()
+        else:
+            raise ValueError("PoissonProxy offset must be a finite scalar or one value per count.")
+        offset_finite = np.isfinite(self.off).all() if isinstance(self.off, np.ndarray) else np.isfinite(self.off)
+        if not offset_finite:
+            raise ValueError("PoissonProxy offset must contain only finite values.")
+        if not isinstance(self.prefix, str) or not self.prefix:
+            raise ValueError("proxy prefix must be a non-empty string.")
+
+    def validate(self, field_dim: int) -> None:
+        if self.idx is None and self.c.size != field_dim:
+            raise ValueError(f"PoissonProxy counts has {self.c.size} rows but its field has {field_dim} nodes.")
+        if self.idx is not None and np.any(self.idx >= field_dim):
+            raise ValueError(f"PoissonProxy index must be within [0, {field_dim}).")
 
     def loglik(self, field_t, params, torch):
         """Return the Cox-process Poisson log-likelihood up to the count-factorial constant."""
@@ -659,11 +733,31 @@ class CustomProxy(Proxy):
     param_specs: Sequence[tuple] = ()  # each (name, support, init): init's shape sets the param shape
     prefix: str = "custom"
 
+    def __post_init__(self):
+        if not callable(self.loglik_fn):
+            raise TypeError("CustomProxy loglik_fn must be callable.")
+        if not isinstance(self.prefix, str) or not self.prefix:
+            raise ValueError("proxy prefix must be a non-empty string.")
+        # Materialize once so generators cannot change the declared layout.
+        self.param_specs = tuple(self.param_specs)
+        self.params()  # validate declarations at construction
+
     def params(self) -> list[_ParamSpec]:
         """Return the custom parameter specifications declared by ``param_specs``."""
         out = []
-        for name, support, init in self.param_specs:
+        names = set()
+        for raw in self.param_specs:
+            if not isinstance(raw, (tuple, list)) or len(raw) != 3:
+                raise ValueError("each CustomProxy parameter spec must be (name, support, init).")
+            name, support, init = raw
+            if not isinstance(name, str) or not name or name in names:
+                raise ValueError("CustomProxy parameter names must be non-empty and unique.")
+            if support not in {"real", "positive"}:
+                raise ValueError("CustomProxy parameter support must be 'real' or 'positive'.")
             arr = np.asarray(init, dtype=float)
+            if arr.size == 0 or not np.isfinite(arr).all() or (support == "positive" and np.any(arr <= 0.0)):
+                raise ValueError(f"CustomProxy initial value for {name!r} violates its {support} support.")
+            names.add(name)
             out.append(_ParamSpec(name, arr.shape, support, arr))
         return out
 
@@ -695,10 +789,17 @@ class FieldPosterior:
     _proxy_info: dict = _dc_field(default_factory=dict)  # proxy label -> field Fisher-information block
     _supports: dict = _dc_field(default_factory=dict)  # node -> 'real' | 'positive'
     _marg_var: dict = _dc_field(default_factory=dict)  # node -> marginal variance (low-rank path, no full cov)
+    _parameter_ids: dict = _dc_field(default_factory=dict)  # public node alias -> stable layout ID
+    initialization_space: str = "natural"
 
     def mean(self, node: str) -> np.ndarray:
         """Return the posterior mean/MAP value for ``node`` in its natural parameter space."""
         return self.map_values[node]
+
+    def parameter_id(self, node: str) -> str:
+        """Return the stable optimization-layout ID for a public node alias."""
+        self._slice(node)
+        return self._parameter_ids.get(node, node)
 
     def _slice(self, node: str) -> slice:
         if node not in self._layout:
@@ -863,7 +964,11 @@ class FieldPosterior:
             if m.size == 0:  # the degenerate no-field node in pure-parameter inference
                 continue
             sd = self.sd(node)
-            out[node] = {"mean": m if m.size > 1 else float(m[0]), "sd": sd if sd.size > 1 else float(sd[0])}
+            out[node] = {
+                "id": self.parameter_id(node),
+                "mean": m if m.size > 1 else float(m[0]),
+                "sd": sd if sd.size > 1 else float(sd[0]),
+            }
         return out
 
 
@@ -918,6 +1023,17 @@ def fit_field(
     if how not in ("map", "laplace", "gauss_newton", "vi"):
         raise ValueError("how must be 'map', 'laplace', 'gauss_newton', or 'vi'.")
     torch = _torch()
+    if init is not None and not isinstance(init, dict):
+        raise TypeError("init must be a mapping from node names to natural-space values.")
+    init = {} if init is None else dict(init)
+    try:
+        proxies = list(proxies)
+    except TypeError as exc:
+        raise TypeError("proxies must be an iterable of Proxy objects.") from exc
+    if not proxies:
+        raise ValueError("fit_field requires at least one observation proxy.")
+    if any(not isinstance(px, Proxy) for px in proxies):
+        raise TypeError("every field observation must implement the Proxy protocol.")
     if field is None:
         field = _NoField()
 
@@ -930,6 +1046,13 @@ def fit_field(
     def _proxy_field(px):
         return getattr(px, "field", None) or field_name
 
+    field_dim = {fld.name: fld.dim for fld in field_list}
+    for px in proxies:
+        target = _proxy_field(px)
+        if target not in field_dim:
+            raise ValueError(f"proxy targets unknown field {target!r}; available fields are {field_names}.")
+        px.validate(field_dim[target])
+
     # ----- assemble the flat parameter layout: the field(s) first, then each proxy's params -----
     layout: dict[str, tuple[int, int]] = {}
     supports: list[str] = []
@@ -937,25 +1060,52 @@ def fit_field(
     pos = 0
 
     node_support: dict[str, str] = {}
+    parameter_ids: dict[str, str] = {}
+    consumed_init: set[str] = set()
 
     def add(name, size, support, value):
         nonlocal pos
+        if not isinstance(name, str) or not name:
+            raise ValueError("field and proxy parameter names must be non-empty strings.")
+        if name in layout:
+            raise ValueError(f"duplicate field/proxy parameter name {name!r} would corrupt the optimization layout.")
+        if support not in {"real", "positive"}:
+            raise ValueError(f"node {name!r} has unsupported support {support!r}.")
+        if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)) or int(size) < 0:
+            raise ValueError(f"node {name!r} has an invalid parameter size.")
+        size = int(size)
+        arr = np.atleast_1d(np.asarray(value, dtype=float)).ravel()
+        if arr.size != size or not np.isfinite(arr).all():
+            raise ValueError(f"initial value for {name!r} must contain exactly {size} finite natural-space values.")
+        if support == "positive":
+            if np.any(arr <= 0.0):
+                raise ValueError(f"initial value for positive node {name!r} must be strictly positive.")
+            arr = np.log(arr)
         layout[name] = (pos, pos + size)
         supports.extend([support] * size)
         node_support[name] = support
-        init_vals.append(np.atleast_1d(np.asarray(value, dtype=float)).ravel())
+        parameter_ids[name] = f"node:{len(parameter_ids)}"
+        init_vals.append(arr)
         pos += size
 
     for fld in field_list:
-        add(fld.name, fld.dim, "real", np.zeros(fld.dim))
+        value = init[fld.name] if fld.name in init else np.zeros(fld.dim)
+        if fld.name in init:
+            consumed_init.add(fld.name)
+        add(fld.name, fld.dim, "real", value)
     for px in proxies:
-        for spec in px.params():
-            v = init[spec.name] if (init and spec.name in init) else spec.init
+        specs = px.params()
+        for spec in specs:
+            v = init[spec.name] if spec.name in init else spec.init
+            if spec.name in init:
+                consumed_init.add(spec.name)
             add(spec.name, int(np.prod(spec.shape)) if spec.shape else 1, spec.support, v)
+    unknown_init = sorted(set(init) - consumed_init)
+    if unknown_init:
+        raise ValueError(f"init contains unknown node name(s): {unknown_init}.")
 
     u0 = np.concatenate(init_vals) if init_vals else np.zeros(0)
     supports_arr = supports
-    field_dim = {fld.name: fld.dim for fld in field_list}
 
     # ----- joint field prior precision over the contiguous field block (fields are added first) -----
     n_field = sum(fld.dim for fld in field_list)
@@ -992,7 +1142,14 @@ def fit_field(
         ff = u_t[:n_field]
         nlp = 0.5 * ff @ (Lambda_joint @ ff) if n_field else 0.0
         for px in proxies:
-            nlp = nlp - px.loglik(vals[_proxy_field(px)], vals, torch)
+            contribution = px.loglik(vals[_proxy_field(px)], vals, torch)
+            if not torch.is_tensor(contribution):
+                contribution = torch.as_tensor(contribution, dtype=torch.double)
+            if contribution.ndim != 0:
+                raise ValueError(f"{type(px).__name__}.loglik must return one scalar value.")
+            if not bool(torch.isfinite(contribution)):
+                raise FloatingPointError(f"{type(px).__name__}.loglik returned a non-finite value.")
+            nlp = nlp - contribution
         return nlp
 
     # ----- joint MAP via L-BFGS (strong-Wolfe), as in the earth-field engine -----
@@ -1029,7 +1186,14 @@ def fit_field(
 
     if how == "map":
         return FieldPosterior(
-            map_values, np.zeros((0, 0)), layout, field_name, np.zeros((0, 0)), obj, _supports=node_support
+            map_values,
+            np.zeros((0, 0)),
+            layout,
+            field_name,
+            np.zeros((0, 0)),
+            obj,
+            _supports=node_support,
+            _parameter_ids=parameter_ids,
         )
 
     if how == "gauss_newton":
@@ -1070,6 +1234,7 @@ def fit_field(
                 obj,
                 _supports=node_support,
                 _marg_var={field_name: marg_var},
+                _parameter_ids=parameter_ids,
             )
 
         H = jac.T @ jac
@@ -1078,7 +1243,15 @@ def fit_field(
         H = 0.5 * (H + H.T) + 1e-10 * np.eye(H.shape[0])
         cov = np.linalg.inv(H)
         return FieldPosterior(
-            map_values, cov, layout, field_name, H, obj, _field_prior=primary.precision, _supports=node_support
+            map_values,
+            cov,
+            layout,
+            field_name,
+            H,
+            obj,
+            _field_prior=primary.precision,
+            _supports=node_support,
+            _parameter_ids=parameter_ids,
         )
 
     if how == "vi":
@@ -1118,6 +1291,7 @@ def fit_field(
             float(neg_log_post(mu).detach()),
             _supports=node_support,
             _marg_var=vi_marg,
+            _parameter_ids=parameter_ids,
         )
 
     # ----- per-proxy field Fisher information at the MAP (information is additive across proxies) -----
@@ -1176,6 +1350,7 @@ def fit_field(
         _field_prior=primary.precision,
         _proxy_info=proxy_info,
         _supports=node_support,
+        _parameter_ids=parameter_ids,
     )
 
 
