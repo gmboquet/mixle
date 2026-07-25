@@ -152,7 +152,7 @@ class Model:
         # the estimation certificate: which method solved each block, how strong the guarantee, and
         # exactly where (if anywhere) gradient descent was unavoidable. Low-overhead inspection, computed once.
         try:
-            self.certificate = certify(self.fitted, escape_tested=escape_tested)
+            self.certificate = certify(self.fitted, data=fit_data)
         except Exception:  # noqa: BLE001 - certification is a report; never let it break a fit
             self.certificate = None
         if cal_holdout:

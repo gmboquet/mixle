@@ -189,6 +189,7 @@ def study(
 
     classes = sorted(set(y.tolist()))
     heads = []
+    head_data = []
     priors = []
     for c in classes:
         zc = z[fit_idx][y[fit_idx] == c]
@@ -198,13 +199,14 @@ def study(
                 "provide more data for this class, or lower cal_frac so the fit split is bigger"
             )
         heads.append(optimize(list(zc), st.DiagonalGaussianEstimator(dim=z.shape[1]), out=None, max_its=1))
+        head_data.append(list(zc))
         priors.append(len(zc))
     priors = np.asarray(priors, dtype=float)
     priors = priors / priors.sum()
 
     # certify EVERY class head, not just the first: the aggregate guarantee is the weakest head's, and
     # the per-head blocks (qualified by class) keep the receipt auditable for K > 1 problems
-    head_certificates = [certify(h) for h in heads]
+    head_certificates = [certify(head, data=data) for head, data in zip(heads, head_data)]
     certificate = EstimationCertificate(
         guarantee=min(cert.guarantee for cert in head_certificates),
         blocks=[

@@ -2805,7 +2805,7 @@ class RandomVariable:
 
                     target = getattr(result, "_dist", None) or getattr(result, "dist", None) or result
                     why = "soft constraints" if has_constraints else "custom potential"
-                    result._cache["certificate"] = _certify(target, penalized=why)
+                    result._cache["certificate"] = _certify(target, data=data, penalized=why)
                 except Exception:  # noqa: BLE001 - certification must never break a fit
                     pass
             return _stash_explanation(result)

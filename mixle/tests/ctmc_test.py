@@ -24,7 +24,7 @@ class CTMCTest(unittest.TestCase):
         d = st.ContinuousTimeMarkovChainDistribution(_true(), horizon=40.0)
         traj = d.sampler(seed=1).sample(200)
         fit = optimize(traj, st.ContinuousTimeMarkovChainEstimator(3), out=None, max_its=1)
-        cert = certify(fit)
+        cert = certify(fit, data=traj)
         self.assertEqual(cert.guarantee, Guarantee.GLOBAL_UNIQUE)  # closed-form Poisson rates, unique
         self.assertEqual(len(cert.gradient_blocks), 0)
 

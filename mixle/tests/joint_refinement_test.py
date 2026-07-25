@@ -60,7 +60,8 @@ class JointRefinementTest(unittest.TestCase):
 
     def test_certificate_is_heuristic_with_pool_eligible_gradient_blocks(self):
         cert = certify(self.mixture)
-        self.assertEqual(cert.guarantee.name, "HEURISTIC")  # capped by the neural M-steps
+        self.assertEqual(cert.guarantee.name, "UNVERIFIED")
+        self.assertTrue(all(b.candidate_guarantee.name == "HEURISTIC" for b in cert.gradient_blocks))
         self.assertEqual(len(cert.gradient_blocks), 2)  # one per expert
         self.assertTrue(all(b.placement == "pool_eligible" for b in cert.gradient_blocks))
         self.assertIn("required gradient descent", cert.why_not_adam())

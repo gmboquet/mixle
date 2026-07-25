@@ -14,7 +14,8 @@ from mixle.inference import certify, learn_bayesian_network  # noqa: E402
 
 class CrossModalFitTest(unittest.TestCase):
     def setUp(self):
-        self.net = learn_bayesian_network(make_records(300, 0), max_parents=2)
+        self.train = make_records(300, 0)
+        self.net = learn_bayesian_network(self.train, max_parents=2)
 
     def test_modality_fields_become_vector_nodes(self):
         kinds = {f.child: type(f).__name__ for f in self.net.factors}
@@ -25,9 +26,12 @@ class CrossModalFitTest(unittest.TestCase):
         price = next(f for f in self.net.factors if f.child == 3)
         self.assertEqual(set(price.parents), {1, 2})  # price <- image AND signal
 
-    def test_fit_certifies_global_no_gradient(self):
-        cert = certify(self.net)
-        self.assertGreaterEqual(int(cert.guarantee), 4)  # GLOBAL or better
+    def test_fit_reports_unverified_glm_obligations_and_no_gradient(self):
+        cert = certify(self.net, data=self.train)
+        self.assertEqual(int(cert.guarantee), 0)
+        glm = next(block for block in cert.blocks if block.kind == "GLM")
+        self.assertEqual(int(glm.candidate_guarantee), 4)
+        self.assertTrue(glm.proof_obligations)
         self.assertEqual(len(cert.gradient_blocks), 0)  # nothing needed ADAM
         self.assertIn("No gradient descent", cert.why_not_adam())
 
