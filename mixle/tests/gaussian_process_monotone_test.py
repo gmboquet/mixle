@@ -2,6 +2,7 @@
 
 import importlib.util
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -59,6 +60,24 @@ class MonotoneGpTest(unittest.TestCase):
         m = gp.predict_monotone(x, y, x_new, increasing=True)
         order = np.argsort(x_new)
         self.assertTrue(np.all(np.diff(m[order]) >= -1e-9))  # monotone in x, regardless of input order
+
+    def test_multidimensional_coordinates_are_rejected(self):
+        gp, x, y = self._fit()
+        with self.assertRaisesRegex(ValueError, "one-dimensional"):
+            gp.predict_monotone(np.column_stack((x, x)), y, np.column_stack((x, x)))
+        with self.assertRaisesRegex(ValueError, "single-column"):
+            gp.predict_monotone(x, y, np.ones((4, 2)))
+
+    def test_duplicate_coordinates_are_tied_before_projection(self):
+        from mixle.models.gaussian_process import GaussianProcessRegressor
+
+        gp = GaussianProcessRegressor()
+        x_new = np.array([0.0, 1.0, 0.0, 2.0])
+        with patch.object(gp, "predict", return_value=np.array([0.0, 1.5, 2.0, 1.0])):
+            prediction = gp.predict_monotone(np.array([0.0, 1.0]), np.array([0.0, 1.0]), x_new)
+        self.assertEqual(prediction[0], prediction[2])
+        order = np.argsort(x_new, kind="stable")
+        self.assertTrue(np.all(np.diff(prediction[order]) >= -1.0e-12))
 
 
 if __name__ == "__main__":
