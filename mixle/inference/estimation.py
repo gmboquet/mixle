@@ -6,6 +6,7 @@ objects.
 """
 
 from collections.abc import Sequence
+from copy import deepcopy
 from functools import partial
 from typing import IO, Any, NamedTuple, TypeVar
 
@@ -1599,7 +1600,9 @@ def best_of(
 # --- streaming / online estimation ------------------------------------------
 def constant(rho: float):
     """Return a constant streaming step-size schedule."""
-    if rho <= 0.0 or rho > 1.0:
+    if not isinstance(rho, (int, float, np.integer, np.floating)) or isinstance(rho, (bool, np.bool_)):
+        raise TypeError("constant(rho) requires a numeric rho.")
+    if not np.isfinite(rho) or rho <= 0.0 or rho > 1.0:
         raise ValueError("constant(rho) requires 0 < rho <= 1.")
 
     def schedule(t: int) -> float:
@@ -1610,9 +1613,13 @@ def constant(rho: float):
 
 def harmonic(alpha: float, offset: float = 1.0):
     """Return ``rho_t = (offset + t - 1)^(-alpha)`` for streaming EM."""
-    if alpha <= 0.5 or alpha > 1.0:
+    if not isinstance(alpha, (int, float, np.integer, np.floating)) or isinstance(alpha, (bool, np.bool_)):
+        raise TypeError("harmonic(alpha) requires a numeric alpha.")
+    if not isinstance(offset, (int, float, np.integer, np.floating)) or isinstance(offset, (bool, np.bool_)):
+        raise TypeError("harmonic(offset) requires a numeric offset.")
+    if not np.isfinite(alpha) or alpha <= 0.5 or alpha > 1.0:
         raise ValueError("harmonic(alpha) requires 0.5 < alpha <= 1.0.")
-    if offset <= 0.0:
+    if not np.isfinite(offset) or offset <= 0.0:
         raise ValueError("harmonic offset must be positive.")
 
     def schedule(t: int) -> float:
@@ -1635,11 +1642,13 @@ def posterior_carry() -> str:
 def forgetting(rho: float):
     """Return a constant forgetting / power-prior schedule for streaming Bayes.
 
-    ``rho`` in ``(0, 1]`` down-weights each incoming batch's sufficient statistics by a constant
-    factor before the conjugate ``estimate`` call, so older evidence decays geometrically. ``rho=1``
-    recovers ordinary (un-forgotten) accumulation.
+    ``rho`` in ``(0, 1]`` discounts the sufficient statistics retained from PREVIOUS batches before
+    adding the next batch at full weight, so older evidence decays geometrically. ``rho=1`` recovers
+    ordinary un-forgotten accumulation.
     """
-    if rho <= 0.0 or rho > 1.0:
+    if not isinstance(rho, (int, float, np.integer, np.floating)) or isinstance(rho, (bool, np.bool_)):
+        raise TypeError("forgetting(rho) requires a numeric rho.")
+    if not np.isfinite(rho) or rho <= 0.0 or rho > 1.0:
         raise ValueError("forgetting(rho) requires 0 < rho <= 1.")
 
     def schedule(t: int) -> float:
@@ -1677,10 +1686,11 @@ class BayesianStreamingEstimator:
     posterior is carried forward as the next batch's prior by rebuilding the estimator from the fitted
     model (``model.estimator()`` returns an estimator whose prior is the model's posterior).
 
-    ``mode='forgetting'`` applies a power-prior step: the current batch's accumulated sufficient
-    statistics are scaled by ``rho = schedule(step)`` (via the accumulator's ``scale``, which
-    preserves structural support metadata such as a categorical's ``min_val``) before the ordinary
-    conjugate ``estimate`` call, and the batch's contribution to ``nobs`` is scaled to match.
+    ``mode='forgetting'`` retains a running sufficient-statistic accumulator. Before each batch after
+    the first, the retained OLD statistics and effective observation count are scaled by
+    ``rho = schedule(step)``; the new batch is then added at full weight. Estimation always uses the
+    original estimator/prior, avoiding both discounting new evidence and double-counting a carried
+    posterior. Accumulator scaling preserves structural support metadata such as categorical bounds.
 
     The public surface is ``BayesianStreamingEstimator(estimator, mode=..., schedule=...)`` plus
     ``.update(data=None, enc_data=None)`` and ``.reset()``.
@@ -1697,23 +1707,46 @@ class BayesianStreamingEstimator:
         rng: RandomState | None = None,
         num_chunks: int = 1,
     ) -> None:
+        resolved_mode = posterior_carry() if mode is None else mode
+        if resolved_mode not in ("posterior_carry", "forgetting"):
+            raise ValueError("mode must be 'posterior_carry' or 'forgetting'.")
+        if resolved_mode == "posterior_carry" and schedule is not None:
+            raise ValueError("schedule is only valid when mode='forgetting'.")
+        if resolved_mode == "forgetting" and schedule is not None and not callable(schedule):
+            raise TypeError("forgetting schedule must be callable.")
+        if (
+            isinstance(init_p, (bool, np.bool_))
+            or not isinstance(init_p, (int, float, np.integer, np.floating))
+            or not np.isfinite(init_p)
+            or not 0.0 < float(init_p) <= 1.0
+        ):
+            raise ValueError("init_p must be finite and in (0, 1].")
+        if (
+            isinstance(num_chunks, (bool, np.bool_))
+            or not isinstance(num_chunks, (int, np.integer))
+            or int(num_chunks) < 1
+        ):
+            raise ValueError("num_chunks must be a positive integer.")
+
+        self._original_estimator = estimator
+        self._original_init_estimator = estimator if init_estimator is None else init_estimator
         self.estimator = estimator
-        self.init_estimator = estimator if init_estimator is None else init_estimator
-        self.mode = posterior_carry() if mode is None else mode
+        self.init_estimator = self._original_init_estimator
+        self.mode = resolved_mode
         self.schedule = schedule
         if self.mode == "forgetting" and self.schedule is None:
             self.schedule = forgetting(1.0)
-        if self.mode not in ("posterior_carry", "forgetting"):
-            raise ValueError("mode must be 'posterior_carry' or 'forgetting'.")
         self.model = model
-        self.init_p = init_p
+        self.init_p = float(init_p)
         self.rng = (
             RandomState(0) if rng is None else rng
         )  # fixed default: the numpy side of an un-seeded fit is deterministic
-        self.num_chunks = num_chunks
+        self._initial_rng_state = self.rng.get_state()
+        self.num_chunks = int(num_chunks)
         self.step = 0
         self.nobs = 0.0
-        if model is not None:
+        self._history_accumulator = None
+        if model is not None and self.mode == "posterior_carry":
             self._carry_prior_from(model)
 
     def _carry_prior_from(self, model: SequenceEncodableProbabilityDistribution) -> None:
@@ -1727,18 +1760,19 @@ class BayesianStreamingEstimator:
         if callable(make_estimator):
             self.estimator = make_estimator()
 
-    def _ensure_model(self, data: Sequence[T] | None, enc_data: Any | None) -> None:
+    def _ensure_model(self, data: Sequence[T] | None, enc_data: Any | None) -> Any | None:
         if self.model is not None:
-            return
+            return None
         if enc_data is None and data is None:
             raise ValueError("BayesianStreamingEstimator.update requires data for initialization.")
-        p = min(max(self.init_p, 0.0), 1.0) if self.init_p > 0.0 else 0.1
         enc = enc_data if enc_data is not None else self._encode(data)
-        self.model = seq_initialize(enc_data=enc, estimator=self.init_estimator, rng=self.rng, p=p)
-        self._carry_prior_from(self.model)
+        self.model = seq_initialize(enc_data=enc, estimator=self.init_estimator, rng=self.rng, p=self.init_p)
+        return enc
 
     def _encode(self, data: Sequence[T]) -> Any:
-        encoder = self.model.dist_to_encoder()
+        encoder = (
+            _resolve_encoder(self.init_estimator) if self.model is None else self.model.dist_to_encoder()
+        )
         return seq_encode(data, encoder, num_chunks=self.num_chunks)
 
     def _encode_batch(self, data: Sequence[T] | None, enc_data: Any | None) -> Any:
@@ -1752,25 +1786,44 @@ class BayesianStreamingEstimator:
         self, data: Sequence[T] | None = None, enc_data: Any | None = None
     ) -> SequenceEncodableProbabilityDistribution:
         """Consume one batch and return the updated posterior-bearing model."""
-        self._ensure_model(data, enc_data)
-        enc_batch = self._encode_batch(data, enc_data)
+        initialization_batch = self._ensure_model(data, enc_data)
+        enc_batch = initialization_batch if initialization_batch is not None else self._encode_batch(data, enc_data)
         batch_nobs, accumulator = _stream_accumulate(enc_batch, self.estimator, self.model)
 
         if self.mode == "forgetting":
             rho = float(self.schedule(self.step + 1))
-            if rho <= 0.0 or rho > 1.0:
+            if not np.isfinite(rho) or rho <= 0.0 or rho > 1.0:
                 raise ValueError("forgetting schedule returned %r; expected 0 < rho <= 1." % rho)
-            accumulator.scale(rho)
-            batch_nobs *= rho
-
-        self.model = self.estimator.estimate(batch_nobs, accumulator.value())
-        self._carry_prior_from(self.model)
-        self.nobs += batch_nobs
+            candidate_history = self._original_estimator.accumulator_factory().make()
+            if self._history_accumulator is None:
+                candidate_history.from_value(deepcopy(accumulator.value()))
+                effective_nobs = batch_nobs
+            else:
+                candidate_history.from_value(deepcopy(self._history_accumulator.value()))
+                candidate_history.scale(rho)
+                candidate_history.combine(accumulator.value())
+                effective_nobs = rho * self.nobs + batch_nobs
+            candidate_model = self._original_estimator.estimate(
+                effective_nobs,
+                candidate_history.value(),
+            )
+            self._history_accumulator = candidate_history
+            self.model = candidate_model
+            self.estimator = self._original_estimator
+            self.nobs = effective_nobs
+        else:
+            self.model = self.estimator.estimate(batch_nobs, accumulator.value())
+            self._carry_prior_from(self.model)
+            self.nobs += batch_nobs
         self.step += 1
         return self.model
 
     def reset(self) -> None:
-        """Drop the current model and stream counters."""
+        """Restore the original estimator, RNG state, and empty stream state."""
+        self.estimator = self._original_estimator
+        self.init_estimator = self._original_init_estimator
         self.model = None
         self.step = 0
         self.nobs = 0.0
+        self._history_accumulator = None
+        self.rng.set_state(self._initial_rng_state)
