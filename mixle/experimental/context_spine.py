@@ -50,11 +50,16 @@ class ContextMechanism(Protocol):
 
 @dataclass
 class SlidingWindowState:
-    """Per-layer stop-gradient KV cache plus the running absolute position counter (see E1.md's RoPE note)."""
+    """Raw per-layer KV caches and their explicit absolute positions."""
 
     cache_k: list[Any] = field(default_factory=list)  # per layer: (batch, cache_len<=window, n_head, head_dim) | None
     cache_v: list[Any] = field(default_factory=list)
     pos: int = 0
+    cache_positions: list[Any] = field(default_factory=list)
+    batch_size: int | None = None
+    n_head: int | None = None
+    head_dim: int | None = None
+    device: Any | None = None
 
 
 if _HAS_TORCH:
@@ -65,15 +70,23 @@ if _HAS_TORCH:
 
     def _rope_angles(positions: Any, head_dim: int, base: float = 10000.0) -> tuple[Any, Any]:
         """``(sin, cos)`` of shape ``(len(positions), head_dim)`` -- each half-pair shares one rotation frequency."""
-        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
+        if positions.ndim != 1:
+            raise ValueError("RoPE positions must be one-dimensional.")
+        if isinstance(head_dim, bool) or not isinstance(head_dim, int) or head_dim <= 0 or head_dim % 2:
+            raise ValueError("RoPE head_dim must be a positive even integer.")
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=positions.device) / head_dim)
+        )
         freqs = positions.to(torch.float32)[:, None] * inv_freq[None, :]  # (len, head_dim/2)
         freqs = torch.cat([freqs, freqs], dim=-1)  # (len, head_dim)
         return freqs.sin(), freqs.cos()
 
     def _apply_rope(x: Any, sin: Any, cos: Any) -> Any:
         """``x``: ``(batch, T, n_head, head_dim)``; ``sin``/``cos``: ``(T, head_dim)``."""
-        sin = sin[None, :, None, :]
-        cos = cos[None, :, None, :]
+        if x.ndim != 4 or sin.shape != (x.shape[1], x.shape[-1]) or cos.shape != sin.shape:
+            raise ValueError("RoPE tensors do not match the expected (batch, time, head, head_dim) layout.")
+        sin = sin.to(device=x.device, dtype=x.dtype)[None, :, None, :]
+        cos = cos.to(device=x.device, dtype=x.dtype)[None, :, None, :]
         return x * cos + _rotate_half(x) * sin
 
     class SlidingWindowSpine(nn.Module):
@@ -104,17 +117,26 @@ if _HAS_TORCH:
             cp_size: int = 1,
         ) -> None:
             super().__init__()
-            assert d_model % n_head == 0
+            integer_fields = {"vocab": vocab, "d_model": d_model, "n_layer": n_layer, "n_head": n_head}
+            for field_name, field_value in integer_fields.items():
+                if isinstance(field_value, bool) or not isinstance(field_value, int) or field_value <= 0:
+                    raise ValueError(f"{field_name} must be a positive integer.")
+            if d_model % n_head != 0:
+                raise ValueError("d_model must be divisible by n_head.")
             self.vocab = int(vocab)
             self.d_model = int(d_model)
             self.n_layer = int(n_layer)
             self.n_head = int(n_head)
             self.head_dim = d_model // n_head
-            self.window = None if window is None else int(window)
+            if self.head_dim % 2:
+                raise ValueError("d_model / n_head must be even for RoPE.")
+            if window is not None and (isinstance(window, bool) or not isinstance(window, int) or window <= 0):
+                raise ValueError("window must be None or a positive integer.")
+            self.window = window
 
-            self.cp_size = int(cp_size)
-            if self.cp_size < 1:
-                raise ValueError("cp_size must be >= 1, got %r" % (cp_size,))
+            if isinstance(cp_size, bool) or not isinstance(cp_size, int) or cp_size < 1:
+                raise ValueError("cp_size must be a positive integer.")
+            self.cp_size = cp_size
             if self.cp_size > 1:
                 from mixle.experimental.context_parallel_spine import validate_cp_window_plan
 
@@ -137,25 +159,104 @@ if _HAS_TORCH:
             # dedupes shared tensors, so this doesn't double-count in the optimizer's param group.
 
         def init_state(self, batch_size: int, *, device: str = "cpu") -> SlidingWindowState:
-            del batch_size  # cache grows lazily from None on first step; shape doesn't need to be pre-declared
-            return SlidingWindowState(cache_k=[None] * self.n_layer, cache_v=[None] * self.n_layer, pos=0)
+            if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+                raise ValueError("batch_size must be a positive integer.")
+            state_device = torch.device(device)
+            return SlidingWindowState(
+                cache_k=[None] * self.n_layer,
+                cache_v=[None] * self.n_layer,
+                cache_positions=[None] * self.n_layer,
+                pos=0,
+                batch_size=batch_size,
+                n_head=self.n_head,
+                head_dim=self.head_dim,
+                device=state_device,
+            )
 
         def detach(self, state: SlidingWindowState) -> SlidingWindowState:
             return SlidingWindowState(
                 cache_k=[k.detach() if k is not None else None for k in state.cache_k],
                 cache_v=[v.detach() if v is not None else None for v in state.cache_v],
                 pos=state.pos,
+                cache_positions=[p.detach() if p is not None else None for p in state.cache_positions],
+                batch_size=state.batch_size,
+                n_head=state.n_head,
+                head_dim=state.head_dim,
+                device=state.device,
             )
 
+        def _validate_state(self, state: SlidingWindowState, batch_size: int, device: Any) -> None:
+            if not isinstance(state, SlidingWindowState):
+                raise TypeError("state must be a SlidingWindowState.")
+            if isinstance(state.pos, bool) or not isinstance(state.pos, int) or state.pos < 0:
+                raise ValueError("state.pos must be a non-negative integer.")
+            if state.batch_size != batch_size or state.n_head != self.n_head or state.head_dim != self.head_dim:
+                raise ValueError("state batch/head metadata does not match this model and chunk.")
+            if torch.device(state.device) != device:
+                raise ValueError("state device does not match the chunk device.")
+            if not all(len(values) == self.n_layer for values in (state.cache_k, state.cache_v, state.cache_positions)):
+                raise ValueError("state must contain one K, V, and position cache per layer.")
+            presence = [
+                cache_k is not None or cache_v is not None or positions is not None
+                for cache_k, cache_v, positions in zip(state.cache_k, state.cache_v, state.cache_positions)
+            ]
+            if any(presence) and not all(presence):
+                raise ValueError("all layer caches must be empty or populated together.")
+
+            expected_positions = None
+            for layer, (cache_k, cache_v, positions) in enumerate(
+                zip(state.cache_k, state.cache_v, state.cache_positions)
+            ):
+                if cache_k is None or cache_v is None or positions is None:
+                    if cache_k is not None or cache_v is not None or positions is not None:
+                        raise ValueError(f"layer {layer} has a partial cache.")
+                    continue
+                if (
+                    cache_k.ndim != 4
+                    or cache_v.shape != cache_k.shape
+                    or cache_k.shape[0] != batch_size
+                    or cache_k.shape[2:] != (self.n_head, self.head_dim)
+                ):
+                    raise ValueError(f"layer {layer} cache has an invalid layout.")
+                if cache_k.device != device or cache_v.device != device or positions.device != device:
+                    raise ValueError(f"layer {layer} cache is on the wrong device.")
+                if cache_k.dtype != self.tok.weight.dtype or cache_v.dtype != cache_k.dtype:
+                    raise ValueError(f"layer {layer} cache has the wrong dtype.")
+                cache_len = cache_k.shape[1]
+                if positions.ndim != 1 or positions.shape[0] != cache_len or state.pos < cache_len:
+                    raise ValueError(f"layer {layer} cache positions have an invalid layout.")
+                if self.window is not None and cache_len > self.window:
+                    raise ValueError(f"layer {layer} cache exceeds the configured window.")
+                wanted = torch.arange(state.pos - cache_len, state.pos, device=device)
+                if not torch.equal(positions, wanted):
+                    raise ValueError(f"layer {layer} cache positions are not the expected absolute positions.")
+                if expected_positions is None:
+                    expected_positions = positions
+                elif not torch.equal(positions, expected_positions):
+                    raise ValueError("all layer caches must cover the same absolute positions.")
+
         def step(self, state: SlidingWindowState, chunk: tuple[Any, Any]) -> tuple[SlidingWindowState, Any]:
+            if not isinstance(chunk, tuple) or len(chunk) != 2:
+                raise ValueError("chunk must be an (x, y) tuple.")
             x, y = chunk
+            if not torch.is_tensor(x) or not torch.is_tensor(y) or x.ndim != 2 or y.shape != x.shape or x.shape[1] == 0:
+                raise ValueError("x and y must be non-empty tensors with matching (batch, time) shape.")
+            if x.dtype not in (torch.int32, torch.int64) or y.dtype != torch.int64:
+                raise ValueError("x must contain integer token IDs and y must be torch.int64 targets.")
+            if x.device != y.device:
+                raise ValueError("x and y must be on the same device.")
+            model_device = self.tok.weight.device
+            if x.device != model_device:
+                raise ValueError("chunk device must match the model device.")
             b, t = x.shape
             device = x.device
+            self._validate_state(state, b, device)
             query_positions = torch.arange(state.pos, state.pos + t, device=device)
 
             h = self.tok(x)
             new_cache_k: list[Any] = []
             new_cache_v: list[Any] = []
+            new_cache_positions: list[Any] = []
             for layer in range(self.n_layer):
                 hn = self.ln1[layer](h)
                 qkv = self.qkv[layer](hn).reshape(b, t, 3, self.n_head, self.head_dim)
@@ -163,8 +264,7 @@ if _HAS_TORCH:
 
                 cache_k, cache_v = state.cache_k[layer], state.cache_v[layer]
                 if cache_k is not None:
-                    cache_len = cache_k.shape[1]
-                    key_positions = torch.arange(state.pos - cache_len, state.pos + t, device=device)
+                    key_positions = torch.cat([state.cache_positions[layer], query_positions])
                     k_full = torch.cat([cache_k, k], dim=1)
                     v_full = torch.cat([cache_v, v], dim=1)
                 else:
@@ -176,7 +276,7 @@ if _HAS_TORCH:
                     sin_q, cos_q = _rope_angles(query_positions, self.head_dim)
                     sin_k, cos_k = _rope_angles(key_positions, self.head_dim)
                     q = _apply_rope(q, sin_q, cos_q)
-                    k_full = _apply_rope(k_full, sin_k, cos_k)
+                    attention_k = _apply_rope(k_full, sin_k, cos_k)
 
                     delta = query_positions[:, None] - key_positions[None, :]  # (t, len(keys))
                     allowed = (delta >= 0) & (delta < self.window) if self.window is not None else (delta >= 0)
@@ -184,7 +284,7 @@ if _HAS_TORCH:
                     mask = mask.masked_fill(~allowed, float("-inf"))
 
                     qh = q.transpose(1, 2)  # (b, n_head, t, head_dim)
-                    kh = k_full.transpose(1, 2)  # (b, n_head, len(keys), head_dim)
+                    kh = attention_k.transpose(1, 2)  # (b, n_head, len(keys), head_dim)
                     vh = v_full.transpose(1, 2)
                     attn = (qh @ kh.transpose(-2, -1)) / (self.head_dim**0.5)  # (b, n_head, t, len(keys))
                     attn = attn + mask[None, None]
@@ -200,26 +300,27 @@ if _HAS_TORCH:
                     out = cp_window_attention_forward(
                         q, query_positions, shards, window=self.window, head_dim=self.head_dim
                     )
-                    # The cp_size==1 path above reassigns k_full to its RoPE'd form before caching (so
-                    # cache_k is RoPE'd, not raw) -- reproduce that exact convention here, per-shard, so
-                    # cp_size>1's cache matches the dense path's cache bit-for-bit (mod the same
-                    # float-non-associativity already flagged for the attention output itself).
-                    k_full = torch.cat(
-                        [_apply_rope(s.k_shard, *_rope_angles(s.key_positions_shard, self.head_dim)) for s in shards],
-                        dim=1,
-                    )
-
                 h = h + self.proj[layer](out)
                 h = h + self.mlp[layer](self.ln2[layer](h))
 
                 keep = self.window if self.window is not None else k_full.shape[1]
                 new_cache_k.append(k_full[:, -keep:])
                 new_cache_v.append(v_full[:, -keep:])
+                new_cache_positions.append(key_positions[-keep:])
 
             logits = self.head(self.ln_f(h))  # (b, t, vocab)
             loss = F.cross_entropy(logits.reshape(b * t, self.vocab), y.reshape(b * t))
 
-            new_state = SlidingWindowState(cache_k=new_cache_k, cache_v=new_cache_v, pos=state.pos + t)
+            new_state = SlidingWindowState(
+                cache_k=new_cache_k,
+                cache_v=new_cache_v,
+                cache_positions=new_cache_positions,
+                pos=state.pos + t,
+                batch_size=b,
+                n_head=self.n_head,
+                head_dim=self.head_dim,
+                device=device,
+            )
             return new_state, loss
 
 
@@ -239,6 +340,8 @@ def train_tbptt(
     spanning the whole stream means no mid-stream detach happens at all (see ``notes/designs/E1.md``).
     Returns ``{"losses": [float, ...], "state": final_state}`` -- one loss per chunk, detached telemetry.
     """
+    if isinstance(detach_horizon, bool) or not isinstance(detach_horizon, int) or detach_horizon <= 0:
+        raise ValueError("detach_horizon must be a positive integer.")
     losses: list[float] = []
     acc_loss = None
     acc_count = 0
