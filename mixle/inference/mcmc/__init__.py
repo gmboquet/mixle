@@ -18,7 +18,7 @@ rebuilt distribution objects).
 
 from __future__ import annotations
 
-from .conjugate import sample_conjugate_posterior
+from .conjugate import ConjugateUpdateReceipt, ImproperPosteriorError, sample_conjugate_posterior
 from .gradients import torch_available, torch_gradient, value_and_torch_gradient
 from .parameter_bridge import (
     ParameterBridge,
@@ -56,7 +56,9 @@ __all__ = [
     "AdaptiveCovarianceProposal",
     "AdaptiveRandomWalkProposal",
     "BlockProposal",
+    "ConjugateUpdateReceipt",
     "IndependentProposal",
+    "ImproperPosteriorError",
     "LangevinProposal",
     "MCMCResult",
     "MixtureProposal",

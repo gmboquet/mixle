@@ -736,6 +736,12 @@ class GaussianEstimator(ParameterEstimator):
             keys: Optional sufficient-statistic key.
 
         """
+        to_distribution = getattr(prior, "to_distribution", None)
+        if not isinstance(prior, NormalGammaDistribution) and callable(to_distribution):
+            converted_prior = to_distribution()
+            if not isinstance(converted_prior, NormalGammaDistribution):
+                raise TypeError("GaussianEstimator prior conversion did not produce a NormalGammaDistribution.")
+            prior = converted_prior
         pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat

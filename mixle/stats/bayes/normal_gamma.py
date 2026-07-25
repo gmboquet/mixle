@@ -47,12 +47,22 @@ class NormalGammaDistribution(SequenceEncodableProbabilityDistribution):
             prior (Optional): Hyper-prior (stored for interface compatibility).
 
         """
-        self.mu = float(mu)
-        self.lam = float(lam)
-        self.a = float(a)
-        self.b = float(b)
+        self.mu, self.lam, self.a, self.b = self._validated_parameters((mu, lam, a, b))
         self.name = name
         self.prior = prior
+
+    @staticmethod
+    def _validated_parameters(params: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        mu, lam, a, b = (float(value) for value in params)
+        if not np.isfinite(mu):
+            raise ValueError("NormalGammaDistribution requires a finite prior mean.")
+        if not np.isfinite(lam) or lam <= 0.0:
+            raise ValueError("NormalGammaDistribution requires finite lam > 0.")
+        if not np.isfinite(a) or a <= 0.0:
+            raise ValueError("NormalGammaDistribution requires finite a > 0.")
+        if not np.isfinite(b) or b <= 0.0:
+            raise ValueError("NormalGammaDistribution requires finite b > 0.")
+        return mu, lam, a, b
 
     def __str__(self) -> str:
         return "NormalGammaDistribution(%s, %s, %s, %s, name=%s, prior=%s)" % (
@@ -70,10 +80,7 @@ class NormalGammaDistribution(SequenceEncodableProbabilityDistribution):
 
     def set_parameters(self, params: tuple[float, float, float, float]) -> None:
         """Set the parameters from a tuple (mu, lam, a, b)."""
-        self.mu = float(params[0])
-        self.lam = float(params[1])
-        self.a = float(params[2])
-        self.b = float(params[3])
+        self.mu, self.lam, self.a, self.b = self._validated_parameters(params)
 
     def cross_entropy(self, dist: "NormalGammaDistribution") -> float:
         """Cross-entropy H(self, dist) = -E_self[log dist].

@@ -306,6 +306,25 @@ route or should fall back to a numerical approximation.
    est = GaussianEstimator(prior=NormalGammaPrior())
    posterior_model = optimize(data, est, objective="auto", out=None)
 
+Public Beta, Gamma, Dirichlet, and Normal-Gamma prior specifications are proper
+by default and reject non-finite or non-positive hyperparameters. A supported
+zero-hyperparameter limiting prior requires an explicit durable acknowledgement:
+
+.. code-block:: python
+
+   from mixle.inference.priors import BetaPrior, improper
+
+   haldane = BetaPrior(
+       0.0,
+       0.0,
+       improper_receipt=improper("Haldane-limit sensitivity analysis"),
+   )
+
+The serialized prior records ``proper=False`` and includes that rationale.
+Analytic conjugate sampling similarly returns a propriety/provenance receipt,
+never mutates the supplied prototype while attaching a default, and refuses to
+sample if an acknowledged improper prior still yields an improper posterior.
+
 For gradient objectives, see ``mixle.inference.gradient_fit`` and
 ``mixle.inference.target``.
 

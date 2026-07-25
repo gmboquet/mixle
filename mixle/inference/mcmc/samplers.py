@@ -31,6 +31,7 @@ class MCMCResult:
     log_probs: np.ndarray
     accepted: np.ndarray
     transition_labels: tuple[str, ...] | None = None
+    receipt: Any | None = None
 
     def __post_init__(self) -> None:
         log_probs = np.asarray(self.log_probs)
