@@ -99,6 +99,9 @@ except ImportError:  # pragma: no cover - torch is optional
     _HAS_TORCH = False
 
 __all__ = [
+    "MergedBlock",
+    "CoarsenedLM",
+    "LowRankLinear",
     "ScaleReceipt",
     "ProjectionReceipt",
     "WidthMergeRepresentation",
@@ -173,34 +176,136 @@ if _HAS_TORCH:
             return x + f_x + g_x + jvp_gf
 
     class CoarsenedLM(nn.Module):
-        """A :class:`~mixle.models.transformer.CausalLM`-shaped module whose ``blocks`` list may contain a
-        mix of original :class:`~mixle.models.transformer.Block`\\ s and :class:`MergedBlock`\\ s -- the
-        output of :func:`coarsen`. Shares ``tok``/``pos``/``ln``/``head`` with the ORIGINAL model (a
-        coarsening pass changes depth, not the embedding/head, so there is no reason to duplicate or
-        re-tie those); ``forward`` mirrors :meth:`mixle.models.transformer.CausalLM.forward` exactly (minus
-        gradient checkpointing, which the coarsened model, being shallower, needs less).
+        """An independently owned :class:`~mixle.models.transformer.CausalLM`-compatible module.
+
+        ``blocks`` may contain ordinary transformer blocks or :class:`MergedBlock` entries. The
+        embedding, output head, buffers, and supplied blocks are deep-copied as one ownership boundary,
+        preserving weight tying inside the copy without aliasing the source model. The forward contract
+        intentionally matches ``CausalLM``: global ``position_ids``, all-position logits, output scaling,
+        and scalar or per-entry gradient-checkpoint controls are supported.
         """
 
         def __init__(self, base_model: Any, blocks: list[Any]) -> None:
             super().__init__()
-            self.tok = base_model.tok
-            self.pos = base_model.pos
-            self.blocks = nn.ModuleList(blocks)
-            self.ln = base_model.ln
-            self.head = base_model.head
-            self.vocab = base_model.vocab
-            self.d_model = base_model.d_model
+            owned = copy.deepcopy(base_model)
+            self.tok = owned.tok
+            self.pos = owned.pos
+            self.blocks = nn.ModuleList(copy.deepcopy(blocks))
+            self.ln = owned.ln
+            self.head = owned.head
+            self.vocab = int(base_model.vocab)
+            self.d_model = int(base_model.d_model)
             self.n_layer = len(blocks)
-            self.block = base_model.block
+            self.n_head = int(base_model.n_head)
+            self.block = int(base_model.block)
+            self.gradient_checkpointing = copy.deepcopy(
+                getattr(base_model, "gradient_checkpointing", False)
+            )
+            if hasattr(owned, "mup_output_multiplier"):
+                self.register_buffer(
+                    "mup_output_multiplier",
+                    owned.mup_output_multiplier.detach().clone(),
+                    persistent=True,
+                )
 
-        def forward(self, x: Any) -> Any:
-            x = x.long()
-            t = x.shape[1]
-            pos = torch.arange(t, device=x.device)
-            h = self.tok(x) + self.pos(pos)[None, :, :]
-            for blk in self.blocks:
-                h = blk(h)
-            return self.head(self.ln(h))[:, -1]
+        def _checkpoint_block(self, index: int) -> bool:
+            policy = self.gradient_checkpointing
+            if isinstance(policy, bool):
+                return policy
+            return policy[index]
+
+        def _validate_checkpoint_policy(self) -> None:
+            policy = self.gradient_checkpointing
+            if isinstance(policy, bool):
+                return
+            if not isinstance(policy, (list, tuple)):
+                raise ValueError("gradient_checkpointing must be a bool or a per-block list/tuple of bools")
+            if len(policy) != len(self.blocks):
+                raise ValueError(
+                    f"gradient_checkpointing has {len(policy)} entries; expected {len(self.blocks)}"
+                )
+            if any(not isinstance(value, bool) for value in policy):
+                raise ValueError("every per-block gradient_checkpointing entry must be a bool")
+
+        def _validated_ids(
+            self,
+            value: Any,
+            *,
+            name: str,
+            expected_shapes: tuple[tuple[int, ...], ...],
+            upper_bound: int,
+        ) -> Any:
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"{name} must be a torch tensor")
+            if tuple(value.shape) not in expected_shapes:
+                expected = " or ".join(str(shape) for shape in expected_shapes)
+                raise ValueError(f"{name} must have shape {expected}, got {tuple(value.shape)}")
+            if value.device != self.tok.weight.device:
+                raise ValueError(
+                    f"{name} is on {value.device}; model token embeddings are on {self.tok.weight.device}"
+                )
+            if value.dtype == torch.bool or (not value.is_floating_point() and not value.dtype.is_signed):
+                raise ValueError(f"{name} must use a signed integer or floating-point dtype")
+            if value.is_floating_point():
+                if not bool(torch.isfinite(value).all()):
+                    raise ValueError(f"{name} must contain only finite values")
+                if not bool((value == torch.round(value)).all()):
+                    raise ValueError(f"{name} must contain integer-valued entries")
+            ids = value.long()
+            if not bool(((ids >= 0) & (ids < upper_bound)).all()):
+                raise ValueError(f"{name} entries must lie in [0, {upper_bound})")
+            return ids
+
+        def forward(
+            self,
+            x: Any,
+            *,
+            position_ids: Any = None,
+            return_all_logits: bool = False,
+        ) -> Any:
+            if not isinstance(x, torch.Tensor):
+                raise TypeError("x must be a torch tensor")
+            if x.ndim != 2 or x.shape[0] == 0 or x.shape[1] == 0:
+                raise ValueError("x must have non-empty shape (batch, sequence)")
+            batch, sequence = x.shape
+            if sequence > self.block:
+                raise ValueError(
+                    f"x sequence length {sequence} exceeds configured block size {self.block}"
+                )
+            if not isinstance(return_all_logits, bool):
+                raise ValueError("return_all_logits must be a boolean")
+            self._validate_checkpoint_policy()
+            x = self._validated_ids(
+                x,
+                name="x",
+                expected_shapes=((batch, sequence),),
+                upper_bound=self.vocab,
+            )
+            if position_ids is None:
+                position_ids = torch.arange(sequence, device=x.device)
+            position_ids = self._validated_ids(
+                position_ids,
+                name="position_ids",
+                expected_shapes=((sequence,), (batch, sequence)),
+                upper_bound=self.block,
+            )
+            if position_ids.ndim == 1:
+                position_embeddings = self.pos(position_ids)[None, :, :]
+            else:
+                position_embeddings = self.pos(position_ids)
+            hidden = self.tok(x) + position_embeddings
+            for index, block in enumerate(self.blocks):
+                if self._checkpoint_block(index) and self.training and torch.is_grad_enabled():
+                    hidden = torch.utils.checkpoint.checkpoint(
+                        block,
+                        hidden,
+                        use_reentrant=False,
+                    )
+                else:
+                    hidden = block(hidden)
+            logits = self.head(self.ln(hidden))
+            logits = logits * getattr(self, "mup_output_multiplier", 1.0)
+            return logits if return_all_logits else logits[:, -1]
 
     class LowRankLinear(nn.Module):
         """Drop-in replacement for :class:`torch.nn.Linear` whose weight is stored as a genuine
