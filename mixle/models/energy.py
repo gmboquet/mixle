@@ -5,11 +5,12 @@ unavailable in closed form. So unlike the flows (exact) it is trained and scored
 part of the model contract.
 
 * **Training** is Noise-Contrastive Estimation (Gutmann & Hyvärinen 2010), not maximum likelihood: the model
-  learns to tell data from samples of a known noise distribution, and in doing so learns a scalar log-normalizer
-  ``c`` alongside the energy net. NCE is *consistent* -- as data grow, ``c -> log Z`` and ``-E(x) + c -> log p(x)``
-  -- so ``log_density(x) = -E(x) + c`` is an **approximately normalized** log-density, usable directly (no
-  per-evaluation partition estimate). It composes in a mixture, but because it is only approximately normalized
-  it can bias mixture weights against an exact leaf.
+  learns to tell data from samples of a known noise distribution, and in doing so learns a scalar additive
+  normalization offset ``c`` alongside the energy net. NCE is *consistent* -- as data grow,
+  ``c -> -log Z`` and ``-E(x) + c -> log p(x)`` -- so ``log_density(x) = -E(x) + c`` is an
+  **approximately normalized** log-density, usable directly (no per-evaluation partition estimate). It
+  composes in a mixture, but because it is only approximately normalized it can bias mixture weights
+  against an exact leaf.
 * **Sampling** is unnormalized-density MCMC: a few steps of Langevin dynamics ``x <- x - s ∇E(x) + sqrt(2s) ε``.
 
 Its value over the flows is the inductive bias: an energy net imposes no ordering and no invertibility -- it scores
@@ -19,11 +20,13 @@ awkwardly. :func:`build_energy_net` is a ready MLP energy to wrap.
 
 from __future__ import annotations
 
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
+from mixle.models.grad_leaf import _module_mode
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -33,6 +36,13 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 
+try:
+    import torch as _TORCH
+except ImportError:  # pragma: no cover - Torch remains optional
+    _TORCH = None
+
+_ModuleBase = object if _TORCH is None else _TORCH.nn.Module
+
 
 def _torch() -> Any:
     import torch
@@ -40,10 +50,107 @@ def _torch() -> Any:
     return torch
 
 
-class EnergyModel(SequenceEncodableProbabilityDistribution):
-    """``log p(x) ≈ -E(x) + c`` for an energy module (``module.energy(x) -> (n,)`` and a learned scalar ``log_norm``).
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a positive integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
 
-    Approximately normalized (trained by NCE); ``log_density`` returns ``-E(x) + c``. Composes like any leaf.
+
+def _positive_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a positive finite real number")
+    result = float(value)
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a positive finite real number")
+    return result
+
+
+def _validate_module(module: Any) -> tuple[Any, int]:
+    torch = _torch()
+    if not isinstance(module, torch.nn.Module):
+        raise TypeError("module must be a torch.nn.Module")
+    if not callable(getattr(module, "energy", None)):
+        raise TypeError("module must define energy(x)")
+    if not hasattr(module, "log_norm"):
+        raise TypeError("module must expose a scalar log_norm parameter")
+    dim = _positive_int(getattr(module, "dim", None), "module.dim")
+    return torch, dim
+
+
+def _finite_matrix(x: Any, where: str, *, dim: int | None = None) -> np.ndarray:
+    array = np.asarray(x)
+    if np.iscomplexobj(array):
+        raise TypeError(f"{where} must contain real values")
+    try:
+        array = np.asarray(array, dtype=float)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{where} must be a real numeric matrix") from exc
+    array = np.atleast_2d(array)
+    if array.ndim != 2 or not all(array.shape):
+        raise ValueError(f"{where} must be a non-empty two-dimensional matrix")
+    if dim is not None and array.shape[1] != dim:
+        raise ValueError(f"{where} must have exactly {dim} features; got shape {array.shape}")
+    return check_finite(array, where)
+
+
+def _finite_nonnegative_weights(weights: Any, rows: int, where: str) -> np.ndarray:
+    array = np.asarray(weights)
+    if np.iscomplexobj(array):
+        raise TypeError(f"{where} must contain real values")
+    try:
+        array = np.asarray(array, dtype=float)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{where} must be a real numeric vector") from exc
+    if array.shape != (rows,):
+        raise ValueError(f"{where} must have exact shape ({rows},); got {array.shape}")
+    if not np.all(np.isfinite(array)) or np.any(array < 0.0):
+        raise ValueError(f"{where} must contain finite non-negative values")
+    return array
+
+
+def _energy_values(module: Any, x: Any, where: str) -> Any:
+    torch = _torch()
+    values = module.energy(x)
+    if not isinstance(values, torch.Tensor) or tuple(values.shape) != (x.shape[0],):
+        raise ValueError(f"{where} energy output must have exact shape ({x.shape[0]},)")
+    log_norm = module.log_norm
+    if not isinstance(log_norm, torch.Tensor) or log_norm.numel() != 1:
+        raise ValueError(f"{where} log_norm must be a scalar tensor")
+    if not bool(torch.isfinite(values).all()) or not bool(torch.isfinite(log_norm).all()):
+        raise ValueError(f"{where} energy and log_norm must be finite")
+    return values
+
+
+class ICNNLayer(_ModuleBase):
+    """Pickle-stable input-convex layer with a non-negative hidden-state path."""
+
+    def __init__(self, z_dim: int | None, x_dim: int, out_dim: int) -> None:
+        if _TORCH is None:  # pragma: no cover
+            raise ImportError("ICNNLayer requires torch")
+        super().__init__()
+        x_dim = _positive_int(x_dim, "x_dim")
+        out_dim = _positive_int(out_dim, "out_dim")
+        if z_dim is not None:
+            z_dim = _positive_int(z_dim, "z_dim")
+        self.x_path = _TORCH.nn.Linear(x_dim, out_dim)
+        self.raw_z_weight = _TORCH.nn.Parameter(_TORCH.randn(out_dim, z_dim) * 0.1) if z_dim is not None else None
+
+    def forward(self, z: Any, x: Any) -> Any:
+        out = self.x_path(x)
+        if self.raw_z_weight is not None:
+            out = out + _TORCH.nn.functional.linear(z, _TORCH.nn.functional.softplus(self.raw_z_weight))
+        return out
+
+
+class EnergyModel(SequenceEncodableProbabilityDistribution):
+    """``log p(x) ≈ -E(x) + c`` for an energy module.
+
+    The module exposes ``energy(x) -> (n,)`` and a learned scalar ``log_norm`` whose convention is
+    ``c=-log Z``. Approximately normalized (trained by NCE); ``log_density`` returns ``-E(x) + c``.
+    Composes like any leaf.
     """
 
     __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
@@ -60,12 +167,13 @@ class EnergyModel(SequenceEncodableProbabilityDistribution):
         device: str = "cpu",
         name: str | None = None,
     ) -> None:
+        _validate_module(module)
         self.module = module
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
-        self.noise_ratio = int(noise_ratio)
-        self.langevin_steps = int(langevin_steps)
-        self.langevin_step = float(langevin_step)
+        self.m_steps = _positive_int(m_steps, "m_steps")
+        self.lr = _positive_finite(lr, "lr")
+        self.noise_ratio = _positive_int(noise_ratio, "noise_ratio")
+        self.langevin_steps = _positive_int(langevin_steps, "langevin_steps")
+        self.langevin_step = _positive_finite(langevin_step, "langevin_step")
         self.device = device
         self.name = name
 
@@ -74,16 +182,22 @@ class EnergyModel(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: Any) -> float:
         """Return the approximate normalized log density for one observation."""
-        return float(self.seq_log_density(np.atleast_2d(np.asarray(x, dtype=float)))[0])
+        values = self.seq_log_density(x)
+        if values.shape != (1,):
+            raise ValueError(f"EnergyModel.log_density expects one observation; got {values.shape[0]}")
+        return float(values[0])
 
     def seq_log_density(self, x: Any) -> np.ndarray:
         """Return approximate normalized log densities for a batch of observations."""
-        torch = _torch()
-        xx = check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "EnergyModel.seq_log_density")
-        self.module.to(self.device).eval()
+        torch, dim = _validate_module(self.module)
+        xx = _finite_matrix(x, "EnergyModel.seq_log_density", dim=dim)
+        self.module.to(self.device)
         xt = torch.as_tensor(xx, dtype=torch.float32, device=self.device)
-        with torch.no_grad():
-            return (-self.module.energy(xt) + self.module.log_norm).cpu().numpy().reshape(-1)
+        with _module_mode(self.module, train=False), torch.no_grad():
+            result = -_energy_values(self.module, xt, "EnergyModel.seq_log_density") + self.module.log_norm
+            if not bool(torch.isfinite(result).all()):
+                raise ValueError("EnergyModel.seq_log_density produced non-finite scores")
+            return result.cpu().numpy()
 
     def sampler(self, seed: int | None = None) -> EnergyModelSampler:
         """Return a Langevin sampler for the learned energy model."""
@@ -115,6 +229,7 @@ class EnergyModel(SequenceEncodableProbabilityDistribution):
     def __pysp_setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
         self.module = decode_module(state["module"])
+        _validate_module(self.module)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize hyperparameters and module bytes for registry-based round trips."""
@@ -153,17 +268,24 @@ class EnergyModelSampler(DistributionSampler):
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw approximate samples with unadjusted Langevin dynamics."""
-        torch = _torch()
-        n = int(size or 1)
-        self.dist.module.to(self.dist.device).eval()
-        dim = int(self.dist.module.dim)
+        torch, dim = _validate_module(self.dist.module)
+        n = 1 if size is None else _positive_int(size, "size")
+        if not isinstance(batched, (bool, np.bool_)):
+            raise TypeError("batched must be a boolean")
+        self.dist.module.to(self.dist.device)
         x = torch.as_tensor(self.rng.randn(n, dim), dtype=torch.float32, device=self.dist.device)
         s = self.dist.langevin_step
-        for _ in range(self.dist.langevin_steps):
-            x = x.detach().requires_grad_(True)
-            grad = torch.autograd.grad(self.dist.module.energy(x).sum(), x)[0]
-            noise = torch.as_tensor(self.rng.randn(n, dim), dtype=torch.float32, device=self.dist.device)
-            x = x - s * grad + float(np.sqrt(2.0 * s)) * noise
+        with _module_mode(self.dist.module, train=False):
+            for _ in range(self.dist.langevin_steps):
+                x = x.detach().requires_grad_(True)
+                energy = _energy_values(self.dist.module, x, "EnergyModelSampler")
+                grad = torch.autograd.grad(energy.sum(), x)[0]
+                if not bool(torch.isfinite(grad).all()):
+                    raise ValueError("EnergyModelSampler produced non-finite energy gradients")
+                noise = torch.as_tensor(self.rng.randn(n, dim), dtype=torch.float32, device=self.dist.device)
+                x = x - s * grad + float(np.sqrt(2.0 * s)) * noise
+                if not bool(torch.isfinite(x).all()):
+                    raise ValueError("EnergyModelSampler produced non-finite samples")
         out = x.detach().cpu().numpy()
         return out if (size is not None) else out[0]
 
@@ -192,14 +314,14 @@ class EnergyModelAccumulator(SequenceEncodableStatisticAccumulator):
     # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
     def update(self, x: Any, weight: float, estimate: Any) -> None:
         """Add one weighted observation to the NCE accumulator."""
-        self.x.append(np.atleast_1d(np.asarray(x, dtype=float))[None, ...])
-        self.w.append(np.asarray([float(weight)], dtype=float))
+        self.x.append(_finite_matrix(x, "EnergyModelAccumulator observation"))
+        self.w.append(_finite_nonnegative_weights([weight], 1, "EnergyModelAccumulator weights"))
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
         """Add an encoded batch and responsibility weights to the accumulator."""
-        xb = np.asarray(enc, dtype=float)
-        self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
-        self.w.append(np.asarray(weights, dtype=float).ravel())
+        xb = _finite_matrix(enc, "EnergyModelAccumulator observations")
+        self.x.append(xb)
+        self.w.append(_finite_nonnegative_weights(weights, xb.shape[0], "EnergyModelAccumulator weights"))
 
     def initialize(self, x: Any, weight: float, rng: Any) -> None:
         """Initialize from one observation using the ordinary update path."""
@@ -213,8 +335,9 @@ class EnergyModelAccumulator(SequenceEncodableStatisticAccumulator):
         """Merge the value tuple from another energy-model accumulator."""
         xs, ws = other
         if len(xs):
-            self.x.append(np.asarray(xs, dtype=float))
-            self.w.append(np.asarray(ws, dtype=float).ravel())
+            xb = _finite_matrix(xs, "EnergyModelAccumulator combined observations")
+            self.x.append(xb)
+            self.w.append(_finite_nonnegative_weights(ws, xb.shape[0], "EnergyModelAccumulator combined weights"))
         return self
 
     def value(self) -> tuple:
@@ -226,8 +349,15 @@ class EnergyModelAccumulator(SequenceEncodableStatisticAccumulator):
     def from_value(self, v: tuple) -> EnergyModelAccumulator:
         """Restore accumulator buffers from a value tuple."""
         x, w = v
-        self.x = [np.asarray(x, dtype=float)] if len(x) else []
-        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
+        if len(x):
+            xb = _finite_matrix(x, "EnergyModelAccumulator restored observations")
+            self.x = [xb]
+            self.w = [_finite_nonnegative_weights(w, xb.shape[0], "EnergyModelAccumulator restored weights")]
+        else:
+            if len(w):
+                raise ValueError("empty restored observations require empty weights")
+            self.x = []
+            self.w = []
         return self
 
     def acc_to_encoder(self) -> EnergyModelEncoder:
@@ -246,8 +376,9 @@ class EnergyModelAccumulatorFactory(StatisticAccumulatorFactory):
 class EnergyModelEstimator(ParameterEstimator):
     """M-step: Noise-Contrastive Estimation against a Gaussian noise fit to the (weighted) data.
 
-    Learns the energy net *and* the scalar log-normalizer ``log_norm`` by logistic discrimination of data from
-    noise -- so the resulting ``-E(x) + log_norm`` is a consistent, approximately-normalized log-density.
+    Learns the energy net *and* scalar normalization offset ``log_norm = -log Z`` by logistic
+    discrimination of data from noise, so ``-E(x) + log_norm`` is a consistent,
+    approximately-normalized log-density.
     """
 
     # Before NCE learns log_norm, observed ``seq_log_density`` is not a comparable outer objective:
@@ -266,14 +397,16 @@ class EnergyModelEstimator(ParameterEstimator):
         device: str = "cpu",
         name: str | None = None,
     ) -> None:
+        _validate_module(module)
         self.module = module
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
-        self.noise_ratio = int(noise_ratio)
-        self.langevin_steps = int(langevin_steps)
-        self.langevin_step = float(langevin_step)
+        self.m_steps = _positive_int(m_steps, "m_steps")
+        self.lr = _positive_finite(lr, "lr")
+        self.noise_ratio = _positive_int(noise_ratio, "noise_ratio")
+        self.langevin_steps = _positive_int(langevin_steps, "langevin_steps")
+        self.langevin_step = _positive_finite(langevin_step, "langevin_step")
         self.device = device
         self.name = name
+        self._optimizer: Any | None = None
 
     def accumulator_factory(self) -> EnergyModelAccumulatorFactory:
         """Return an accumulator factory for weighted NCE batches."""
@@ -293,47 +426,69 @@ class EnergyModelEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> EnergyModel:
         """Run the weighted NCE M-step and return the updated energy leaf."""
-        torch = _torch()
+        torch, dim = _validate_module(self.module)
         xs, ws = suff_stat
         if len(xs) == 0:
+            if len(ws):
+                raise ValueError("empty energy observations require empty weights")
             return self._make()
-        x = torch.as_tensor(np.asarray(xs, dtype=float), dtype=torch.float32, device=self.device)
-        w = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32, device=self.device)
-        w = w / w.sum().clamp(min=1e-8)
+        x_array = _finite_matrix(xs, "EnergyModelEstimator observations", dim=dim)
+        weight_array = _finite_nonnegative_weights(
+            ws,
+            x_array.shape[0],
+            "EnergyModelEstimator weights",
+        )
+        weight_sum = float(weight_array.sum())
+        if not np.isfinite(weight_sum) or weight_sum <= 0.0:
+            raise ValueError("EnergyModelEstimator weights must have positive finite total mass")
+        x = torch.as_tensor(x_array, dtype=torch.float32, device=self.device)
+        w = torch.as_tensor(weight_array / weight_sum, dtype=torch.float32, device=self.device)
 
         # noise distribution p_n = N(mu, diag var), matched to the weighted-data moments (a good NCE proposal)
         mu = (w[:, None] * x).sum(0)
         var = (w[:, None] * (x - mu) ** 2).sum(0) + 1e-3
-        d = x.shape[1]
-        log_nu = float(np.log(max(self.noise_ratio, 1)))
+        if not bool(torch.isfinite(mu).all()) or not bool(torch.isfinite(var).all()) or bool(torch.any(var <= 0.0)):
+            raise ValueError("EnergyModelEstimator weighted moments must be finite with positive variance")
+        d = dim
+        log_nu = float(np.log(self.noise_ratio))
         const = -0.5 * float(d) * float(np.log(2.0 * np.pi)) - 0.5 * torch.log(var).sum()
 
         def log_pn(z: Any) -> Any:
             return const - 0.5 * (((z - mu) ** 2) / var).sum(1)
 
         def log_pm(z: Any) -> Any:
-            return -self.module.energy(z) + self.module.log_norm
+            return -_energy_values(self.module, z, "EnergyModelEstimator") + self.module.log_norm
 
-        self.module.to(self.device).train()
-        opt = torch.optim.Adam(self.module.parameters(), lr=self.lr)
-        m = int(self.noise_ratio) * x.shape[0]
-        for _ in range(self.m_steps):
-            opt.zero_grad()
-            y = mu + torch.sqrt(var) * torch.randn(m, d, device=self.device)  # noise draws
-            # posterior-that-it-is-data on each side; data weighted by responsibilities, noise averaged
-            # population NCE (as empirical expectations): E_pd[log sig(G - log nu)] + nu * E_pn[log sig(log nu - G)].
-            # The data term is the responsibility-weighted mean (w sums to 1); the noise term carries the nu factor,
-            # so the learned log_norm converges to log Z independently of the noise ratio.
-            loss_data = -(w * torch.nn.functional.logsigmoid(log_pm(x) - log_pn(x) - log_nu)).sum()
-            loss_noise = (
-                -float(self.noise_ratio) * torch.nn.functional.logsigmoid(log_pn(y) + log_nu - log_pm(y)).mean()
-            )
-            (loss_data + loss_noise).backward()
-            opt.step()
+        self.module.to(self.device)
+        if self._optimizer is None:
+            self._optimizer = torch.optim.Adam(self.module.parameters(), lr=self.lr)
+        m = self.noise_ratio * x.shape[0]
+        with _module_mode(self.module, train=True):
+            for _ in range(self.m_steps):
+                self._optimizer.zero_grad()
+                y = mu + torch.sqrt(var) * torch.randn(m, d, device=self.device)  # noise draws
+                # Population NCE: the data term is responsibility weighted (w sums to one), while the
+                # noise expectation carries nu. The learned additive offset therefore approaches -log Z.
+                loss_data = -(w * torch.nn.functional.logsigmoid(log_pm(x) - log_pn(x) - log_nu)).sum()
+                loss_noise = (
+                    -float(self.noise_ratio) * torch.nn.functional.logsigmoid(log_pn(y) + log_nu - log_pm(y)).mean()
+                )
+                loss = loss_data + loss_noise
+                if not bool(torch.isfinite(loss)):
+                    raise ValueError("EnergyModelEstimator NCE loss became non-finite")
+                loss.backward()
+                if any(
+                    parameter.grad is not None and not bool(torch.isfinite(parameter.grad).all())
+                    for parameter in self.module.parameters()
+                ):
+                    raise ValueError("EnergyModelEstimator NCE gradients became non-finite")
+                self._optimizer.step()
+                if any(not bool(torch.isfinite(parameter).all()) for parameter in self.module.parameters()):
+                    raise ValueError("EnergyModelEstimator parameters became non-finite")
         return self._make()
 
 
-# --- a ready energy module to wrap: an MLP energy E(x) with a learned scalar log-normalizer -------------------
+# --- a ready energy module to wrap: an MLP energy E(x) with a learned scalar normalization offset -----------
 #
 # EnergyNet is reachable at MODULE level (built on first use, resolved by name via __getattr__) so a wrapped leaf
 # -- and any mixture holding one -- pickles for distributed EM.
@@ -360,7 +515,7 @@ def _energy_net_class() -> Any:
                 prev = self.hidden
             body += [nn.Linear(prev, 1)]
             self.net = nn.Sequential(*body)
-            self.log_norm = nn.Parameter(torch.zeros(()))  # the NCE-learned scalar log-normalizer
+            self.log_norm = nn.Parameter(torch.zeros(()))  # NCE learns the additive offset -log Z
 
         def energy(self, x: Any) -> Any:
             return self.net(x).squeeze(-1)
@@ -392,18 +547,6 @@ def _convex_energy_net_class() -> Any:
     import torch
     import torch.nn as nn
 
-    class _ICNNLayer(nn.Module):
-        def __init__(self, z_dim: int | None, x_dim: int, out_dim: int) -> None:
-            super().__init__()
-            self.x_path = nn.Linear(x_dim, out_dim)
-            self.raw_z_weight = nn.Parameter(torch.randn(out_dim, z_dim) * 0.1) if z_dim is not None else None
-
-        def forward(self, z: Any, x: Any) -> Any:
-            out = self.x_path(x)
-            if self.raw_z_weight is not None:
-                out = out + torch.nn.functional.linear(z, torch.nn.functional.softplus(self.raw_z_weight))
-            return out
-
     class ConvexEnergyNet(nn.Module):
         def __init__(self, dim: int, hidden: int = 64, layers: int = 3) -> None:
             super().__init__()
@@ -414,9 +557,9 @@ def _convex_energy_net_class() -> Any:
             self.icnn_layers = nn.ModuleList()
             prev_dim: int | None = None
             for out_dim in out_dims:
-                self.icnn_layers.append(_ICNNLayer(prev_dim, self.dim, out_dim))
+                self.icnn_layers.append(ICNNLayer(prev_dim, self.dim, out_dim))
                 prev_dim = out_dim
-            self.log_norm = nn.Parameter(torch.zeros(()))  # the NCE-learned scalar log-normalizer
+            self.log_norm = nn.Parameter(torch.zeros(()))  # NCE learns the additive offset -log Z
 
         def energy(self, x: Any) -> Any:
             z = None
@@ -464,7 +607,7 @@ def _product_energy_net_class() -> Any:
                 raise ValueError("all experts must share one input dim; got %s" % sorted(dims))
             self.experts = nn.ModuleList(experts)
             self.dim = int(next(iter(dims)))
-            self.log_norm = nn.Parameter(torch.zeros(()))  # the product's own NCE-learned normalizer
+            self.log_norm = nn.Parameter(torch.zeros(()))  # the product's own NCE-learned -log Z offset
 
         def expert_energies(self, x: Any) -> Any:
             """``(n, K)`` per-expert energies -- the interpretable decomposition of the total energy."""
@@ -495,11 +638,11 @@ def __getattr__(name: str) -> Any:  # PEP 562: lets ``pickle`` resolve the hoist
 
 
 def build_energy_net(dim: int, *, hidden: int = 64, layers: int = 3) -> Any:
-    """An MLP energy ``E(x): R^dim -> R`` (plus a learned scalar ``log_norm``) -- ready to wrap in an EnergyModel.
+    """An MLP energy ``E(x): R^dim -> R`` plus a learned scalar normalization offset.
 
-    Lower energy = higher (unnormalized) density. ``log_norm`` is the NCE-learned normalizer, so the paired
-    :class:`EnergyModel` scores ``-E(x) + log_norm``. Swap in any module exposing ``energy(x) -> (n,)``, a
-    ``log_norm`` parameter and a ``dim`` attribute.
+    Lower energy = higher unnormalized density. ``log_norm`` uses the ``-log Z`` convention, so the paired
+    :class:`EnergyModel` scores ``-E(x) + log_norm``. Swap in any module exposing ``energy(x) -> (n,)``,
+    a scalar ``log_norm`` parameter, and a ``dim`` attribute.
     """
     return _energy_net_class()(dim, hidden, layers)
 
