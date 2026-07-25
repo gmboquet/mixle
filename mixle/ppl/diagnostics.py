@@ -18,6 +18,7 @@ standard error, matching the conventions of Stan / ArviZ / the R ``loo`` package
 from __future__ import annotations
 
 from collections.abc import Sequence
+from numbers import Integral, Real
 
 import numpy as np
 
@@ -48,16 +49,18 @@ def _autocov(x: np.ndarray) -> np.ndarray:
 def _ess_chains(x: np.ndarray) -> float:
     """Stan effective sample size for one parameter, ``x`` of shape ``(n_chains, n_draws)``."""
     m, n = x.shape
-    if n < 4:
-        return float(m * n)
+    if m < 2 or n < 2:
+        return float("nan")
     acov = np.array([_autocov(x[c]) for c in range(m)])
     mean_acov = acov.mean(axis=0)
     chain_var = acov[:, 0] * n / (n - 1.0)
     w = float(chain_var.mean())
     if not np.isfinite(w) or w <= 0:
-        return float(m * n)
-    b = n * float(np.var(x.mean(axis=1), ddof=1)) if m > 1 else 0.0
+        return float("nan")
+    b = n * float(np.var(x.mean(axis=1), ddof=1))
     var_plus = (n - 1.0) / n * w + b / n
+    if not np.isfinite(var_plus) or var_plus <= 0:
+        return float("nan")
     rho = 1.0 - (w - mean_acov) / var_plus  # rho[0] == 1
     # Geyer initial monotone positive sequence on paired autocorrelations.
     pairs = []
@@ -90,46 +93,83 @@ def _classic_rhat(x: np.ndarray) -> float:
     w = float(np.var(x, axis=1, ddof=1).mean())
     b = n * float(np.var(x.mean(axis=1), ddof=1))
     if w <= 0:
-        return float("nan")
+        return float("inf") if b > 0 else float("nan")
     return float(np.sqrt(((n - 1.0) / n * w + b / n) / w))
 
 
-def split_rhat(draws: np.ndarray) -> float:
-    """Rank-normalized split-R-hat for one parameter (``draws`` is ``(n_chains, n_draws)``).
+def _validate_chains(draws: np.ndarray, fn_name: str) -> np.ndarray:
+    """Return a finite ``(n_chains, n_draws)`` matrix or reject an invalid diagnostic input."""
+    try:
+        x = np.asarray(draws, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{fn_name}(): draws must be a rectangular numeric matrix.") from error
+    if x.ndim != 2:
+        raise ValueError(f"{fn_name}(): draws must have shape (n_chains, n_draws), got {x.shape}.")
+    if x.shape[0] < 2:
+        raise ValueError(f"{fn_name}(): at least two independent chains are required, got {x.shape[0]}.")
+    if x.shape[1] < 4:
+        raise ValueError(f"{fn_name}(): at least four draws per chain are required, got {x.shape[1]}.")
+    if not np.isfinite(x).all():
+        raise ValueError(f"{fn_name}(): draws must be finite (no NaN or Inf).")
+    return x
 
-    Splits each chain in half (catching within-chain non-stationarity), rank-normalizes, then takes the
-    potential scale reduction. Values within ~0.01 of 1.0 indicate convergence; > 1.01 is a warning.
-    """
-    x = np.atleast_2d(np.asarray(draws, dtype=float))
+
+def _split_chains(x: np.ndarray) -> np.ndarray:
+    """Split each validated chain into equal first and last halves."""
     half = x.shape[1] // 2
-    if half < 2:
+    return np.concatenate([x[:, :half], x[:, -half:]], axis=0)
+
+
+def split_rhat(draws: np.ndarray) -> float:
+    """Maximum rank-normalized and folded split-R-hat for one parameter.
+
+    ``draws`` must be a finite ``(n_chains, n_draws)`` matrix with at least two chains and four draws
+    per chain. Splitting catches within-chain non-stationarity; folding about the pooled median also
+    catches scale mismatch. Values within ~0.01 of 1.0 indicate convergence; > 1.01 is a warning.
+    Constant chains have no estimable scale and return ``NaN`` rather than a healthy-looking value.
+    """
+    split = _split_chains(_validate_chains(draws, "split_rhat"))
+    if np.ptp(split) == 0:
         return float("nan")
-    split = np.concatenate([x[:, :half], x[:, half : 2 * half]], axis=0)
-    return _classic_rhat(_rank_normalize(split).reshape(split.shape))
+    rank_rhat = _classic_rhat(_rank_normalize(split).reshape(split.shape))
+    folded = np.abs(split - np.median(split))
+    folded_rhat = _classic_rhat(_rank_normalize(folded).reshape(split.shape))
+    if np.isnan(rank_rhat) and np.isnan(folded_rhat):
+        return float("nan")
+    return float(np.fmax(rank_rhat, folded_rhat))
 
 
 def bulk_ess(draws: np.ndarray) -> float:
-    """Bulk effective sample size: ESS of the rank-normalized draws (efficiency in the distribution body)."""
-    x = np.atleast_2d(np.asarray(draws, dtype=float))
-    return _ess_chains(_rank_normalize(x).reshape(x.shape))
+    """Bulk ESS of split rank-normalized draws; constant chains return ``NaN``."""
+    split = _split_chains(_validate_chains(draws, "bulk_ess"))
+    if np.ptp(split) == 0:
+        return float("nan")
+    return _ess_chains(_rank_normalize(split).reshape(split.shape))
 
 
 def tail_ess(draws: np.ndarray) -> float:
-    """Tail effective sample size: the smaller of the 5% and 95% quantile-indicator ESS (tail efficiency)."""
-    x = np.atleast_2d(np.asarray(draws, dtype=float))
-    q05, q95 = np.quantile(x, 0.05), np.quantile(x, 0.95)
-    lower = _ess_chains((x <= q05).astype(float))
-    upper = _ess_chains((x >= q95).astype(float))
+    """Tail ESS from split 5% and 95% quantile indicators; unavailable cases return ``NaN``."""
+    split = _split_chains(_validate_chains(draws, "tail_ess"))
+    q05, q95 = np.quantile(split, 0.05), np.quantile(split, 0.95)
+    lower = _ess_chains((split <= q05).astype(float))
+    upper = _ess_chains((split >= q95).astype(float))
     return float(min(lower, upper))
 
 
 def convergence_diagnostics(draws: np.ndarray) -> dict:
-    """Return ``{'split_rhat', 'bulk_ess', 'tail_ess'}`` for one parameter's ``(n_chains, n_draws)`` draws."""
-    return {"split_rhat": split_rhat(draws), "bulk_ess": bulk_ess(draws), "tail_ess": tail_ess(draws)}
+    """Return modern convergence metrics plus an explicit availability receipt."""
+    metrics = {"split_rhat": split_rhat(draws), "bulk_ess": bulk_ess(draws), "tail_ess": tail_ess(draws)}
+    unavailable = [name for name, value in metrics.items() if not np.isfinite(value)]
+    return {
+        **metrics,
+        "available": not unavailable,
+        "unavailable": unavailable,
+        "status": "available" if not unavailable else "unavailable",
+    }
 
 
 def _validate_loglik(loglik: np.ndarray, fn_name: str) -> np.ndarray:
-    """Coerce ``loglik`` to a 2-D array and reject degenerate input.
+    """Validate a strict 2-D pointwise log-likelihood matrix.
 
     An empty matrix (zero draws and/or zero observations) sums to ``0.0`` in both ``waic`` and
     ``psis_loo`` below -- indistinguishable from "a model with a perfect, trivial fit" rather than
@@ -138,8 +178,13 @@ def _validate_loglik(loglik: np.ndarray, fn_name: str) -> np.ndarray:
     misorder models instead of erroring). Both are rejected here, at the shared entry point, rather
     than letting either function return a plausible-looking placeholder.
     """
-    ll = np.atleast_2d(np.asarray(loglik, dtype=float))
-    if ll.size == 0:
+    try:
+        ll = np.asarray(loglik, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{fn_name}(): loglik must be a rectangular numeric matrix.") from error
+    if ll.ndim != 2:
+        raise ValueError(f"{fn_name}(): loglik must have shape (n_draws, n_obs), got {ll.shape}.")
+    if ll.shape[0] == 0 or ll.shape[1] == 0:
         raise ValueError(
             f"{fn_name}(): loglik must be a non-empty (n_draws, n_obs) log-likelihood matrix, got shape {ll.shape}."
         )
@@ -224,16 +269,7 @@ def psis_loo(loglik: np.ndarray) -> dict:
     loglik = _validate_loglik(loglik, "psis_loo")
     s, n = loglik.shape
     if s < 2:
-        elpd_i = loglik[0].copy()
-        return {
-            "elpd_loo": float(np.sum(elpd_i)),
-            "p_loo": 0.0,
-            "loo": -2.0 * float(np.sum(elpd_i)),
-            "se": float("nan"),
-            "khat_max": float("nan"),
-            "n_draws": s,
-            "pointwise": elpd_i,
-        }
+        raise ValueError("psis_loo(): at least two posterior draws are required for importance sampling.")
 
     elpd_i = np.empty(n)
     khat = np.empty(n)
@@ -262,7 +298,91 @@ def loo(loglik: np.ndarray) -> dict:
     return psis_loo(loglik)
 
 
-def loo_stacking_weights(pointwise_lpd: np.ndarray, iters: int = 2000, tol: float = 1.0e-10) -> np.ndarray:
+def _validate_stacking_controls(iters: int, tol: float) -> tuple[int, float]:
+    if isinstance(iters, (bool, np.bool_)) or not isinstance(iters, Integral) or iters < 1:
+        raise ValueError(f"loo_stacking_weights(): iters must be a positive integer, got {iters!r}.")
+    if isinstance(tol, (bool, np.bool_)) or not isinstance(tol, Real) or not np.isfinite(tol) or tol < 0:
+        raise ValueError(f"loo_stacking_weights(): tol must be a finite non-negative number, got {tol!r}.")
+    return int(iters), float(tol)
+
+
+def _validate_stacking_lpd(pointwise_lpd: np.ndarray) -> np.ndarray:
+    try:
+        lpd = np.asarray(pointwise_lpd, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise ValueError("loo_stacking_weights(): pointwise_lpd must be a rectangular numeric matrix.") from error
+    if lpd.ndim != 2:
+        raise ValueError(
+            "loo_stacking_weights(): pointwise_lpd must have shape (n_obs, n_models), "
+            f"got {lpd.shape}."
+        )
+    if lpd.shape[0] == 0 or lpd.shape[1] == 0:
+        raise ValueError(
+            "loo_stacking_weights(): pointwise_lpd must contain at least one observation and one model."
+        )
+    if not np.isfinite(lpd).all():
+        raise ValueError("loo_stacking_weights(): pointwise_lpd must be finite (no NaN or Inf).")
+    return lpd
+
+
+def _loo_stacking_fit(pointwise_lpd: np.ndarray, iters: int, tol: float) -> dict:
+    """Optimize LOO stacking weights and return weights with an auditable optimizer receipt."""
+    lpd = _validate_stacking_lpd(pointwise_lpd)
+    iters, tol = _validate_stacking_controls(iters, tol)
+    _, k = lpd.shape
+    if k == 1:
+        return {
+            "weights": np.ones(1),
+            "converged": True,
+            "iterations": 0,
+            "objective": float(np.sum(lpd[:, 0])),
+            "reason": "single_model",
+        }
+
+    w = np.full(k, 1.0 / k)
+
+    def _objective(weights: np.ndarray) -> float:
+        log_weights = np.full(k, -np.inf)
+        positive = weights > 0
+        log_weights[positive] = np.log(weights[positive])
+        return float(np.sum(_logsumexp(lpd + log_weights[None, :], axis=1)))
+
+    objective = _objective(w)
+    converged = False
+    iterations = 0
+    for iteration in range(1, iters + 1):
+        log_weights = np.full(k, -np.inf)
+        positive = w > 0
+        log_weights[positive] = np.log(w[positive])
+        log_joint = lpd + log_weights[None, :]
+        log_mixture = _logsumexp(log_joint, axis=1)
+        w_new = np.exp(log_joint - log_mixture[:, None]).mean(axis=0)
+        w_new /= w_new.sum()
+        new_objective = _objective(w_new)
+        iterations = iteration
+        if abs(new_objective - objective) <= tol * (abs(objective) + 1.0):
+            w = w_new
+            objective = new_objective
+            converged = True
+            break
+        w = w_new
+        objective = new_objective
+    return {
+        "weights": w,
+        "converged": converged,
+        "iterations": iterations,
+        "objective": objective,
+        "reason": "tolerance" if converged else "iteration_limit",
+    }
+
+
+def loo_stacking_weights(
+    pointwise_lpd: np.ndarray,
+    iters: int = 2000,
+    tol: float = 1.0e-10,
+    *,
+    return_result: bool = False,
+) -> np.ndarray | dict:
     """Return LOO stacking weights (Yao, Vehtari, Simpson & Gelman, 2018).
 
     ``pointwise_lpd`` is an ``(n_obs, K)`` matrix of per-model pointwise LOO log-predictive
@@ -270,48 +390,46 @@ def loo_stacking_weights(pointwise_lpd: np.ndarray, iters: int = 2000, tol: floa
     ``w`` maximize the LOO log-score of the weighted predictive distribution,
     ``sum_i log(sum_k w_k * exp(lpd_ik))``. This is concave in ``w`` and solved here by the standard
     mixture-weight EM update (no external optimizer), which respects the simplex by construction.
+    By default this compatibility surface returns only the weights. Set ``return_result=True`` to
+    receive the weights together with convergence, iteration, objective, and termination metadata.
     """
-    if not (iters >= 1):
-        # w is initialized to the uniform simplex point np.full(k, 1/k) below and only updated inside
-        # this loop, so iters=0 (or a negative/NaN value -- `not (iters >= 1)` rejects NaN too, since
-        # a NaN comparison is always False) used to fall through range(int(iters)) as a no-op and
-        # return that untouched uniform initial guess as though it were the fitted stacking solution,
-        # with no indication no optimization actually ran. Matches optimize(max_its < 1)'s rejection.
-        raise ValueError(f"loo_stacking_weights(): iters must be a positive integer, got {iters!r}")
-    lpd = np.atleast_2d(np.asarray(pointwise_lpd, dtype=float))
-    n, k = lpd.shape
-    if k == 1:
-        return np.ones(1)
-    shift = lpd.max(axis=1, keepdims=True)
-    p = np.exp(lpd - shift)  # per-row rescaled predictive densities (the row constant cancels)
-    w = np.full(k, 1.0 / k)
-    prev = -np.inf
-    for _ in range(int(iters)):
-        num = w[None, :] * p
-        denom = num.sum(axis=1)
-        score = float(np.sum(np.log(denom) + shift[:, 0]))
-        w = (num / denom[:, None]).mean(axis=0)
-        if score - prev < tol * (abs(prev) + 1.0):
-            break
-        prev = score
-    return w
+    if not isinstance(return_result, (bool, np.bool_)):
+        raise ValueError(
+            f"loo_stacking_weights(): return_result must be boolean, got {return_result!r}."
+        )
+    result = _loo_stacking_fit(pointwise_lpd, iters, tol)
+    return result if return_result else result["weights"]
 
 
-def loo_stack(logliks: Sequence[np.ndarray]) -> dict:
+def loo_stack(logliks: Sequence[np.ndarray], *, iters: int = 2000, tol: float = 1.0e-10) -> dict:
     """Stack K candidate models by LOO predictive performance.
 
     ``logliks`` is a sequence of ``(n_draws_k, n_obs)`` pointwise log-likelihood matrices over the
     same, aligned observations. Returns the stacking ``weights``, the ``(n_obs, K)`` per-model
-    pointwise LOO densities, each model's ``elpd_loo``, and the ``stacked_elpd_loo`` of the weighted
-    predictive (which is >= the best single-model elpd_loo, since a one-hot weight is feasible).
+    pointwise LOO densities, each model's ``elpd_loo``, the actually achieved ``stacked_elpd_loo``,
+    and an optimizer receipt. A finite iteration limit need not reach the exact optimum.
     """
-    pointwise = np.column_stack([psis_loo(np.asarray(ll, dtype=float))["pointwise"] for ll in logliks])
-    weights = loo_stacking_weights(pointwise)
-    shift = pointwise.max(axis=1, keepdims=True)
-    stacked = float(np.sum(np.log((weights[None, :] * np.exp(pointwise - shift)).sum(axis=1)) + shift[:, 0]))
+    _validate_stacking_controls(iters, tol)
+    if isinstance(logliks, np.ndarray) or not isinstance(logliks, Sequence) or len(logliks) == 0:
+        raise ValueError("loo_stack(): logliks must be a non-empty sequence of log-likelihood matrices.")
+    loo_results = [psis_loo(ll) for ll in logliks]
+    observation_counts = {len(result["pointwise"]) for result in loo_results}
+    if len(observation_counts) != 1:
+        raise ValueError("loo_stack(): every model must describe the same number of aligned observations.")
+    pointwise = np.column_stack([result["pointwise"] for result in loo_results])
+    optimization = _loo_stacking_fit(pointwise, iters, tol)
+    weights = optimization["weights"]
+    stacked = float(optimization["objective"])
+    model_elpds = [float(pointwise[:, j].sum()) for j in range(pointwise.shape[1])]
     return {
         "weights": weights,
         "pointwise": pointwise,
-        "model_elpd_loo": [float(pointwise[:, j].sum()) for j in range(pointwise.shape[1])],
+        "model_elpd_loo": model_elpds,
         "stacked_elpd_loo": stacked,
+        "best_model_elpd_loo": max(model_elpds),
+        "objective_gap_from_best": stacked - max(model_elpds),
+        "converged": optimization["converged"],
+        "iterations": optimization["iterations"],
+        "objective": optimization["objective"],
+        "termination_reason": optimization["reason"],
     }

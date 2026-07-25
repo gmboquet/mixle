@@ -5,7 +5,7 @@ import warnings
 
 import numpy as np
 
-from mixle.ppl.diagnostics import bulk_ess, split_rhat, tail_ess
+from mixle.ppl.diagnostics import bulk_ess, convergence_diagnostics, split_rhat, tail_ess
 
 
 class RankNormalizedDiagnosticsTest(unittest.TestCase):
@@ -27,6 +27,30 @@ class RankNormalizedDiagnosticsTest(unittest.TestCase):
         rng = np.random.RandomState(0)
         bad = rng.standard_normal((4, 1000)) + np.array([[-5], [0], [5], [10]])
         self.assertGreater(split_rhat(bad), 1.5)  # chains in different places
+
+    def test_scale_mismatch_is_detected_by_folded_rhat(self):
+        pattern = np.tile([-1.0, 1.0], 500)
+        mismatched = np.vstack([pattern, pattern * 100.0])
+        self.assertGreater(split_rhat(mismatched), 1.1)
+
+    def test_malformed_and_single_chain_inputs_are_rejected(self):
+        for draws in (np.arange(20.0), np.zeros((2, 2, 5)), np.ones((1, 20))):
+            for diagnostic in (split_rhat, bulk_ess, tail_ess):
+                with self.assertRaises(ValueError):
+                    diagnostic(draws)
+        nonfinite = np.ones((2, 20))
+        nonfinite[0, 0] = np.nan
+        with self.assertRaises(ValueError):
+            convergence_diagnostics(nonfinite)
+
+    def test_constant_chains_are_explicitly_unavailable(self):
+        result = convergence_diagnostics(np.ones((4, 100)))
+        self.assertEqual(result["status"], "unavailable")
+        self.assertFalse(result["available"])
+        self.assertEqual(set(result["unavailable"]), {"split_rhat", "bulk_ess", "tail_ess"})
+        self.assertTrue(np.isnan(result["split_rhat"]))
+        self.assertTrue(np.isnan(result["bulk_ess"]))
+        self.assertTrue(np.isnan(result["tail_ess"]))
 
 
 class NutsDivergenceTest(unittest.TestCase):

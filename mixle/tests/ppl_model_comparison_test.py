@@ -46,11 +46,12 @@ class DiagnosticsMathTestCase(unittest.TestCase):
         self.assertTrue(np.isfinite(w["se"]))
         self.assertEqual(len(w["pointwise"]), len(self.y))
 
-    def test_single_draw_is_graceful(self):
+    def test_single_draw_waic_is_defined_but_loo_is_rejected(self):
         single = self.good[:1]
         self.assertTrue(np.isfinite(waic(single)["waic"]))
         self.assertEqual(waic(single)["p_waic"], 0.0)
-        self.assertTrue(np.isfinite(psis_loo(single)["loo"]))
+        with self.assertRaises(ValueError):
+            psis_loo(single)
 
     def test_waic_rejects_empty_loglik(self):
         # An empty matrix used to sum to 0.0 and return elpd_waic=0.0/waic=0.0 -- indistinguishable
