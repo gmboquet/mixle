@@ -34,6 +34,7 @@ __all__ = [
     "Family",
     "Constraint",
     "Event",
+    "ProbabilityEstimate",
     "constrain",
     "eq",
     "equal",
@@ -517,9 +518,11 @@ class Constraint:
     relation given ``env``, a dict mapping each leaf RV to its value(s).
     """
 
-    __slots__ = ("leaves", "pred", "desc", "residual", "soft")
+    __slots__ = ("leaves", "pred", "desc", "residual", "soft", "reduction")
 
-    def __init__(self, leaves, pred, desc, residual=None, soft=False):
+    def __init__(self, leaves, pred, desc, residual=None, soft=False, reduction="all"):
+        if reduction not in {"all", "any"}:
+            raise ValueError("constraint reduction must be 'all' or 'any'.")
         self.leaves = tuple(leaves)
         self.pred = pred  # env: {leaf_rv -> value(s)} -> bool mask
         self.desc = desc
@@ -531,6 +534,7 @@ class Constraint:
         # ``soft``: a measure-zero relation (equality / ODE residual) that cannot be honored by
         # rejection, so ``fit`` auto-selects the soft-penalty path for it (no ``penalty=`` needed).
         self.soft = soft
+        self.reduction = reduction
 
     @property
     def rv(self):
@@ -542,6 +546,14 @@ class Constraint:
     def eval(self, env):
         """Evaluate the constraint predicate against an environment of RV values."""
         return self.pred(env)
+
+    def eval_rows(self, env, rows: int | None = None) -> np.ndarray:
+        """Evaluate and reduce to exactly one boolean per sampled row."""
+        return _row_mask(self.pred(env), rows=rows, reduction=self.reduction)
+
+    def with_reduction(self, reduction: str) -> Constraint:
+        """Return the same event with vector entries reduced by ``all`` or ``any`` per row."""
+        return Constraint(self.leaves, self.pred, self.desc, self.residual, self.soft, reduction)
 
     def contains(self, x):
         """Evaluate a single-variable constraint directly on that variable's value(s)."""
@@ -566,6 +578,7 @@ class Constraint:
             f"({self.desc} & {other.desc})",
             residual,
             self.soft or other.soft,
+            "all",
         )
 
     def __or__(self, other):
@@ -577,11 +590,12 @@ class Constraint:
             f"({self.desc} | {other.desc})",
             residual,
             self.soft or other.soft,
+            "all",
         )
 
     def __invert__(self):
         # Negation has no smooth penalty surface; only the hard (boolean) mode survives.
-        return Constraint(self.leaves, lambda env: ~np.asarray(self.pred(env)), f"~{self.desc}", None)
+        return Constraint(self.leaves, lambda env: ~np.asarray(self.pred(env)), f"~{self.desc}", None, False, self.reduction)
 
     def __bool__(self):
         raise TypeError(
@@ -594,6 +608,45 @@ class Constraint:
 
 
 Event = Constraint  # back-compat alias
+
+
+class ProbabilityEstimate(float):
+    """A Monte Carlo probability plus the experiment needed to interpret it.
+
+    The numeric value remains backward-compatible with ordinary probability arithmetic. ``hits``,
+    ``trials``, ``seed``, and a Wilson 95% interval distinguish zero observed hits from a mathematical
+    proof that the event has probability zero.
+    """
+
+    def __new__(cls, hits: int, trials: int, seed: int):
+        if not 0 <= hits <= trials or trials <= 0:
+            raise ValueError("probability estimate requires 0 <= hits <= trials and trials > 0.")
+        value = hits / trials
+        obj = float.__new__(cls, value)
+        obj.hits = int(hits)
+        obj.trials = int(trials)
+        obj.seed = int(seed)
+        z2 = 1.959963984540054**2
+        denom = 1.0 + z2 / trials
+        center = (value + z2 / (2.0 * trials)) / denom
+        radius = (
+            1.959963984540054
+            * math.sqrt(value * (1.0 - value) / trials + z2 / (4.0 * trials**2))
+            / denom
+        )
+        obj.lower = 0.0 if hits == 0 else max(0.0, center - radius)
+        obj.upper = 1.0 if hits == trials else min(1.0, center + radius)
+        return obj
+
+    def as_dict(self) -> dict:
+        """Return a serialization-friendly experiment receipt."""
+        return {
+            "estimate": float(self),
+            "hits": self.hits,
+            "trials": self.trials,
+            "seed": self.seed,
+            "interval_95": (self.lower, self.upper),
+        }
 
 
 def _expr_leaves(rv) -> list:
@@ -683,13 +736,24 @@ def _eval_expr(rv, env):
     return env[rv]
 
 
-def _row_mask(mask) -> np.ndarray:
-    """Reduce a constraint's per-sample mask to one boolean per row. A relation between scalars
-    is already ``(n,)``; a whole-vector relation (``v > 0``) yields ``(n, d)`` and means *all
-    entries* hold, so reduce the trailing axes with ``all``."""
+def _row_mask(mask, *, rows: int | None = None, reduction: str = "all") -> np.ndarray:
+    """Validate and reduce a constraint mask to exactly one boolean per sampled row."""
+    if reduction not in {"all", "any"}:
+        raise ValueError("constraint reduction must be 'all' or 'any'.")
     m = np.asarray(mask)
+    if m.dtype.kind != "b":
+        raise TypeError("constraint predicates must return boolean masks.")
+    if m.ndim == 0:
+        if rows is None:
+            return m.reshape(1)
+        return np.full(rows, bool(m), dtype=bool)
+    if rows is not None and m.shape[0] != rows:
+        raise ValueError(f"constraint mask has {m.shape[0]} row(s), expected {rows}.")
     if m.ndim > 1:
-        m = m.all(axis=tuple(range(1, m.ndim)))
+        axes = tuple(range(1, m.ndim))
+        m = m.all(axis=axes) if reduction == "all" else m.any(axis=axes)
+    if m.ndim != 1:
+        raise ValueError("constraint reduction did not produce one boolean per row.")
     return m
 
 
@@ -931,6 +995,32 @@ def _convolve(da, db):
 
         return GammaDistribution(da.k + db.k, da.theta)  # same scale
     return None
+
+
+def _expressions_share_leaf(a, b) -> bool:
+    """Whether two expressions reference at least one identical stochastic leaf."""
+    left = {id(leaf) for leaf in _expr_leaves(a)}
+    return any(id(leaf) in left for leaf in _expr_leaves(b))
+
+
+def _declared_event_width(rv: RandomVariable) -> int:
+    """Return a declared flat event width without sampling the distribution."""
+    if rv._kind in {"apply", "pow"}:
+        return _declared_event_width(rv._args[0])
+    if rv._kind == "select":
+        return 1
+    if rv._kind in {"sum", "prod"}:
+        left, right = (_declared_event_width(arg) for arg in rv._args)
+        if left != right and left != 1 and right != 1:
+            raise ValueError(f"incompatible derived event widths {left} and {right}.")
+        return max(left, right)
+    if rv._kind == "sample" and getattr(rv._family, "name", None) in {"MVN", "DiagGaussian"}:
+        return int(rv._args[0])
+    if rv._kind == "bound" and rv._dist is not None:
+        mean = getattr(rv._dist, "mu", None)
+        if mean is not None and np.ndim(mean) == 1:
+            return int(np.asarray(mean).size)
+    return 1
 
 
 # ------------------------------------------------------------------------- family
@@ -1216,6 +1306,12 @@ def _inferable_parameter_dimension(rv: RandomVariable) -> int | None:
         return 0
 
     def model(node: RandomVariable) -> int | None:
+        if node._kind in {"apply", "pow", "select", "gather"}:
+            return model(node._args[0])
+        if node._kind in {"sum", "prod"}:
+            left = model(node._args[0]) if isinstance(node._args[0], RandomVariable) else 0
+            right = model(node._args[1]) if isinstance(node._args[1], RandomVariable) else 0
+            return None if left is None or right is None else left + right
         if node._kind != "sample":
             return slot(node)
         family = node._family
@@ -1564,6 +1660,27 @@ class RandomVariable:
         return RandomVariable._select(self, index)
 
     # -- algebra (deterministic transforms + convolution) -------------------
+    def independent(self) -> RandomVariable:
+        """Return an explicitly independent copy of one atomic random variable.
+
+        Reusing the same object in an expression means reusing the same draw (``x - x == 0``).
+        Use ``x.independent()`` when an identically distributed but independent draw is intended.
+        """
+        if self._kind == "sample":
+            return RandomVariable(
+                "sample",
+                family=self._family,
+                args=self._args,
+                name=self._name,
+                keys=self._keys,
+                scope=self._scope,
+                reparam=self._reparam,
+                group_by=self._group_by,
+            )
+        if self._kind == "bound":
+            return RandomVariable._bound(self._dist, name=self._name, result=self._result)
+        raise TypeError("independent() applies to an atomic sample or bound random variable.")
+
     def _affine(self, loc, scale) -> RandomVariable:
         from mixle.stats.combinator.transform import AffineTransform
 
@@ -1668,8 +1785,9 @@ class RandomVariable:
 
     @property
     def has_free(self) -> bool:
-        """Whether this sample expression contains one or more free parameters."""
-        return self._kind == "sample" and any(_is_free(a) for a in self._args)
+        """Whether this parameter/expression graph contains one or more inferable unknowns."""
+        dimension = _inferable_parameter_dimension(self)
+        return dimension is None or dimension > 0
 
     @property
     def name(self) -> str | None:
@@ -1698,7 +1816,7 @@ class RandomVariable:
         names = []
         for i, lv in enumerate(leaves):
             base = lv._name or f"rv{i}"
-            w = int(np.asarray(lv.sample(1, seed=0)).reshape(1, -1).shape[1])
+            w = _declared_event_width(lv)
             names.extend([base] if w == 1 else [f"{base}[{j}]" for j in range(w)])
         return names
 
@@ -1741,81 +1859,99 @@ class RandomVariable:
         return self._result
 
     # -- query verbs (valid once concrete) ----------------------------------
-    def sample(self, n: int | None = None, seed: int | None = None, size: int | None = None):
+    def sample(
+        self,
+        n: int | None = None,
+        seed: int | None = None,
+        size: int | None = None,
+        *,
+        max_attempts: int = 100,
+    ):
         """Draw samples from the represented distribution or derived expression.
 
         ``n`` and ``size`` are aliases (``size`` matches the ``stats``-layer samplers); pass at
         most one. ``None`` returns a single draw.
         """
         n = coalesce_alias("n", n, "size", size, required=False, default=None)
+        if n is not None:
+            n = _exact_positive_int(n, "sample size")
+        max_attempts = _exact_positive_int(max_attempts, "max_attempts")
         if self._kind == "joint":  # joint rejection sampling under a relation
             leaves, constraint = self._args
+            if constraint.soft:
+                raise ValueError("measure-zero/soft constraints cannot be sampled by rejection.")
             rng = np.random.RandomState(seed)
             k = n if n is not None else 1
             kept = []
             have = 0
-            while have < k:
+            drawn = 0
+            for _attempt in range(max_attempts):
+                if have >= k:
+                    break
                 batch = max(k * 2, 1024)
                 cols = {lv: np.asarray(lv.sample(batch, seed=int(rng.randint(1, 2**31))), dtype=float) for lv in leaves}
-                mask = _row_mask(constraint.eval(cols))  # per-row; vector relations reduce over entries
-                block = np.concatenate([cols[lv][mask].reshape(int(mask.sum()), -1) for lv in leaves], axis=1)
+                mask = constraint.eval_rows(cols, rows=batch)
+                block = np.concatenate([cols[lv].reshape(batch, -1)[mask] for lv in leaves], axis=1)
                 kept.append(block)
                 have += len(block)
+                drawn += batch
+            if have < k:
+                raise RuntimeError(
+                    "joint rejection sampling exhausted max_attempts "
+                    f"(accepted={have}, drawn={drawn}, observed_rate={have / drawn if drawn else 0.0:.6g})."
+                )
             out = np.concatenate(kept, axis=0)[:k]
             return out if n is not None else out[0]
-        if self._kind == "select":  # entry of a vector RV: sample base, take the component
-            base, index = self._args
-            k = n if n is not None else 1
-            xs = np.asarray(base.sample(k, seed=seed), dtype=float)[..., index]
-            return xs if n is not None else float(xs[0])
-        if self._kind == "sum":  # convolution: sample operands and add
+        if self._kind in {"apply", "sum", "prod", "pow", "select"}:
+            # Evaluate the expression as a DAG: each distinct leaf gets one draw per row and every
+            # repeated reference reuses it. Distinct wrappers, including independent(), draw separately.
+            leaves = _expr_leaves(self)
             rng = np.random.RandomState(seed)
-            a, b = self._args
             k = n if n is not None else 1
-            xs = np.asarray(a.sample(k, seed=int(rng.randint(1, 2**31))))
-            ys = np.asarray(b.sample(k, seed=int(rng.randint(1, 2**31))))
-            out = xs + ys
-            return out if n is not None else float(out[0])
-        if self._kind == "prod":  # product of independent RVs: sample operands and multiply
-            rng = np.random.RandomState(seed)
-            a, b = self._args
-            k = n if n is not None else 1
-            xs = np.asarray(a.sample(k, seed=int(rng.randint(1, 2**31))))
-            ys = np.asarray(b.sample(k, seed=int(rng.randint(1, 2**31))))
-            out = xs * ys
-            return out if n is not None else float(out[0])
-        if self._kind == "pow":  # power of an RV by a constant exponent
-            base, exponent = self._args
-            k = n if n is not None else 1
-            xs = np.asarray(base.sample(k, seed=seed)) ** exponent
-            return xs if n is not None else float(xs[0])
+            env = {
+                leaf: np.asarray(leaf.sample(k, seed=int(rng.randint(1, 2**31))))
+                for leaf in leaves
+            }
+            out = np.asarray(_eval_expr(self, env))
+            if n is not None:
+                return out
+            first = out[0]
+            return float(first) if np.ndim(first) == 0 else first
         if self._kind == "given":  # rejection sampling from the region
             base, event = self._args
+            if event.soft:
+                raise ValueError("measure-zero/soft events cannot be sampled by rejection.")
             rng = np.random.RandomState(seed)
             k = n if n is not None else 1
             kept = []
-            while sum(len(c) for c in kept) < k:
-                draw = np.asarray(base.sample(max(k * 2, 1024), seed=int(rng.randint(1, 2**31))))
-                kept.append(draw[event.contains(draw)])
+            accepted = 0
+            drawn = 0
+            for _attempt in range(max_attempts):
+                if accepted >= k:
+                    break
+                batch = max(k * 2, 1024)
+                draw = np.asarray(base.sample(batch, seed=int(rng.randint(1, 2**31))))
+                mask = event.eval_rows({base: draw}, rows=batch)
+                kept.append(draw[mask])
+                accepted += int(mask.sum())
+                drawn += batch
+            if accepted < k:
+                raise RuntimeError(
+                    "conditional rejection sampling exhausted max_attempts "
+                    f"(accepted={accepted}, drawn={drawn}, observed_rate={accepted / drawn if drawn else 0.0:.6g})."
+                )
             out = np.concatenate(kept)[:k]
-            return out if n is not None else float(out[0])
+            if n is not None:
+                return out
+            first = out[0]
+            return float(first) if np.ndim(first) == 0 else first
         return lower(self, target="dist").sampler(seed=seed).sample(size=n)
-
-    def _kde(self):
-        kde = self._cache.get("_kde")
-        if kde is None:
-            from scipy.stats import gaussian_kde
-
-            s = np.asarray(self.sample(40000, seed=12345))
-            kde = gaussian_kde(s)
-            self._cache["_kde"] = kde
-        return kde
 
     def log_prob(self, x):
         """Evaluate the log probability or log density at ``x``."""
         if self._kind == "joint":  # joint density of independent leaves / Z
             leaves, constraint = self._args
-            widths = [int(np.asarray(lv.sample(1, seed=0)).reshape(1, -1).shape[1]) for lv in leaves]
+            widths = [_declared_event_width(lv) for lv in leaves]
             if any(w > 1 for w in widths):
                 raise NotImplementedError(
                     "joint log_prob over vector-valued variables is not supported yet; use .sample / .mean / .prob."
@@ -1823,30 +1959,60 @@ class RandomVariable:
             xa = np.atleast_2d(np.asarray(x, dtype=float))
             if xa.shape[1] != len(leaves):
                 raise ValueError(f"expected {len(leaves)} columns, got shape {xa.shape}.")
-            logZ = math.log(self.prob())
+            estimate = self.prob()
+            if estimate.hits == 0:
+                raise RuntimeError(
+                    "the joint constraint had zero accepted Monte Carlo draws; "
+                    f"P(constraint) is unresolved in [0, {estimate.upper:.6g}] at 95% confidence."
+                )
+            logZ = math.log(float(estimate))
             env = {lv: xa[:, j] for j, lv in enumerate(leaves)}
             base_lp = sum(np.atleast_1d(lv.log_prob(xa[:, j])) for j, lv in enumerate(leaves))
-            out = np.where(_row_mask(constraint.eval(env)), base_lp - logZ, -np.inf)
+            out = np.where(constraint.eval_rows(env, rows=xa.shape[0]), base_lp - logZ, -np.inf)
             return float(out[0]) if np.ndim(x) == 1 else out
-        if self._kind == "sum":  # exact convolution if closed-form, else KDE
+        if self._kind == "sum":  # exact convolution only; approximation requires a separate explicit API
             a, b = self._args
-            cd = None
-            try:
-                cd = _convolve(lower(a, target="dist"), lower(b, target="dist"))
-            except Exception:  # noqa: BLE001
-                cd = None
+            if a is b:
+                return a._affine(0.0, 2.0).log_prob(x)
+            if _expressions_share_leaf(a, b):
+                raise NotImplementedError(
+                    "the density of a sum with shared stochastic leaves is not implemented; "
+                    "sampling preserves the declared dependency graph."
+                )
+            cd = _convolve(lower(a, target="dist"), lower(b, target="dist"))
             if cd is not None:
                 return RandomVariable._bound(cd).log_prob(x)
-            xv = np.atleast_1d(np.asarray(x, dtype=float))
-            lp = np.log(np.clip(self._kde()(xv), 1e-300, None))
-            return float(lp[0]) if np.isscalar(x) else lp
+            raise NotImplementedError(
+                "this independent sum has no registered exact convolution; "
+                "Mixle does not silently substitute a KDE or change discrete/mixed measure semantics."
+            )
+        if self._kind in {"prod", "pow"}:
+            raise NotImplementedError(
+                f"exact log-density semantics are not registered for derived {self._kind!r} expressions; "
+                "sampling remains available."
+            )
         if self._kind == "given":
             base, event = self._args
-            logZ = math.log(self.prob_of_event())
-            xv = np.atleast_1d(np.asarray(x, dtype=float))
+            estimate = self.prob_of_event()
+            if estimate.hits == 0:
+                raise RuntimeError(
+                    "the conditioning event had zero accepted Monte Carlo draws; "
+                    f"P(event) is unresolved in [0, {estimate.upper:.6g}] at 95% confidence."
+                )
+            logZ = math.log(float(estimate))
+            width = _declared_event_width(base)
+            raw = np.asarray(x, dtype=float)
+            single = np.isscalar(x) if width == 1 else raw.ndim == 1
+            if width == 1:
+                xv = np.atleast_1d(raw)
+            else:
+                xv = raw.reshape(1, -1) if raw.ndim == 1 else raw
+                if xv.ndim != 2 or xv.shape[1] != width:
+                    raise ValueError(f"conditioned vector event expects shape ({width},) or (n, {width}); got {raw.shape}.")
             base_lp = np.atleast_1d(base.log_prob(xv))
-            out = np.where(event.contains(xv), base_lp - logZ, -np.inf)
-            return float(out[0]) if np.isscalar(x) else out
+            mask = event.eval_rows({base: xv}, rows=xv.shape[0])
+            out = np.where(mask, base_lp - logZ, -np.inf)
+            return float(out[0]) if single else out
         d = lower(self, target="dist")
         if np.isscalar(x):
             return float(d.log_density(x))
@@ -1954,29 +2120,41 @@ class RandomVariable:
         return s.var(axis=0) if self._kind == "joint" else float(np.var(s))
 
     def prob(self, samples: int = 40000, seed: int = 999):
-        """Probability that the relation holds (Monte-Carlo), for a ``constrain(...)`` RV."""
+        """Monte Carlo probability receipt for a ``constrain(...)`` relation."""
         if self._kind != "joint":
             raise TypeError("prob() is only defined for a constrain(...) RV.")
-        p = self._cache.get("_pjoint")
-        if p is None:
+        samples = _exact_positive_int(samples, "probability sample count")
+        if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, Integral):
+            raise ValueError("probability seed must be an exact integer.")
+        seed = int(seed)
+        key = ("_pjoint", samples, seed)
+        estimate = self._cache.get(key)
+        if estimate is None:
             leaves, constraint = self._args
             rng = np.random.RandomState(seed)
             cols = {lv: np.asarray(lv.sample(samples, seed=int(rng.randint(1, 2**31))), dtype=float) for lv in leaves}
-            p = max(float(np.mean(_row_mask(constraint.eval(cols)))), 1e-9)
-            self._cache["_pjoint"] = p
-        return p
+            mask = constraint.eval_rows(cols, rows=samples)
+            estimate = ProbabilityEstimate(int(mask.sum()), samples, seed)
+            self._cache[key] = estimate
+        return estimate
 
-    def prob_of_event(self):
-        """P(event) under the base distribution (Monte-Carlo), for a conditioned RV."""
+    def prob_of_event(self, samples: int = 40000, seed: int = 999):
+        """Monte Carlo probability receipt for the event underlying a conditioned RV."""
         if self._kind != "given":
             raise TypeError("prob_of_event() is only defined for a .given(...) RV.")
-        p = self._cache.get("_pevent")
-        if p is None:
+        samples = _exact_positive_int(samples, "probability sample count")
+        if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, Integral):
+            raise ValueError("probability seed must be an exact integer.")
+        seed = int(seed)
+        key = ("_pevent", samples, seed)
+        estimate = self._cache.get(key)
+        if estimate is None:
             base, event = self._args
-            s = np.asarray(base.sample(40000, seed=999))
-            p = max(float(np.mean(event.contains(s))), 1e-6)
-            self._cache["_pevent"] = p
-        return p
+            draws = np.asarray(base.sample(samples, seed=seed))
+            mask = event.eval_rows({base: draws}, rows=samples)
+            estimate = ProbabilityEstimate(int(mask.sum()), samples, seed)
+            self._cache[key] = estimate
+        return estimate
 
     def predict(self, n: int = 1, rng=None):
         """Posterior-predictive draws. For a Bayesian fit (conjugate/mcmc/hmc) this
@@ -1986,12 +2164,21 @@ class RandomVariable:
         """
         import numpy as _np
 
-        rng = rng or _np.random.RandomState()
+        if n is None:
+            n = 1
+        n = _exact_positive_int(n, "predictive sample count")
+        if rng is None:
+            rng = _np.random.RandomState()
+        elif isinstance(rng, (int, np.integer)) and not isinstance(rng, (bool, np.bool_)):
+            rng = _np.random.RandomState(int(rng))
+        if not hasattr(rng, "randint") and not hasattr(rng, "integers"):
+            raise TypeError("rng must be an integer seed, NumPy RandomState, or Generator.")
         r = self._result
         pred = getattr(r, "predictive", None) if r is not None else None
         if pred is not None:
             return pred(n, rng)
-        return self.sample(n)
+        seed = int(rng.randint(0, 2**31 - 1) if hasattr(rng, "randint") else rng.integers(0, 2**31 - 1))
+        return self.sample(n, seed=seed)
 
     def posterior(self, x):
         """Posterior over a latent or a parameter.
