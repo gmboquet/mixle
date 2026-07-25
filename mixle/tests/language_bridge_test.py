@@ -338,6 +338,86 @@ class PosteriorDescriberTest(unittest.TestCase):
             PosteriorDescriber("x", tol=1.0, k=99)
 
 
+class PosteriorDescriberConstructionValidationTest(unittest.TestCase):
+    """Regression coverage for MXR-080-0292: ``k``, ``alpha``, ``n_probe``, ``field_name``, and
+    ``width_multiples`` were not required to be positive, finite, ordered, or non-empty. A
+    zero/negative multiplier produced a point or reversed :class:`Claim`; ``k<=0`` or an empty
+    ``width_multiples`` let an empty candidate set reach the generator; ``tol``'s bare ``<= 0`` check
+    could not catch NaN (a NaN comparison is always False)."""
+
+    def test_k_zero_rejected(self):
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, k=0)
+
+    def test_k_negative_rejected(self):
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, k=-1)
+
+    def test_alpha_zero_rejected(self):
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, alpha=0.0)
+
+    def test_alpha_one_rejected(self):
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, alpha=1.0)
+
+    def test_alpha_negative_rejected(self):
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, alpha=-0.5)
+
+    def test_alpha_greater_than_one_rejected(self):
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, alpha=1.5)
+
+    def test_n_probe_zero_rejected(self):
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, n_probe=0)
+
+    def test_n_probe_negative_rejected(self):
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, n_probe=-5)
+
+    def test_field_name_empty_rejected(self):
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("", tol=1.0)
+
+    def test_width_multiples_empty_rejected(self):
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, k=1, width_multiples=())
+
+    def test_width_multiples_zero_rejected(self):
+        # mult=0 would otherwise create a POINT interval (lo == hi == mean) -- a degenerate candidate.
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, width_multiples=(0.0, 3.0, 10.0))
+
+    def test_width_multiples_negative_rejected(self):
+        # a negative mult would otherwise create a REVERSED interval (lo > hi).
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, width_multiples=(-1.0, 3.0, 10.0))
+
+    def test_width_multiples_non_finite_rejected(self):
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, width_multiples=(float("nan"), 3.0, 10.0))
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, width_multiples=(1.0, float("inf"), 10.0))
+
+    def test_width_multiples_not_strictly_increasing_rejected(self):
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, width_multiples=(10.0, 1.0, 3.0))  # unsorted
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=1.0, width_multiples=(1.0, 1.0, 3.0))  # duplicate
+
+    def test_tol_nan_rejected(self):
+        # tol's old bare `<= 0` check could not catch NaN (NaN comparisons are always False).
+        with self.assertRaises(ValueError):
+            PosteriorDescriber("x", tol=float("nan"))
+
+    def test_calibration_set_with_non_finite_truth_rejected(self):
+        describer = PosteriorDescriber("x", tol=1.0, k=1, width_multiples=(1.0,), n_probe=10)
+        with self.assertRaises(ValueError):
+            describer.calibrate([(_ConstantPosterior(5.0), float("nan"))])
+
+
 class _ConstantPosterior:
     """A deterministic mock posterior: always samples the same constant regardless of seed. Standing
     in for "one fitted/mock posterior reused across several synthetic calibration points" -- the
