@@ -60,6 +60,26 @@ class MaskRampCorrectnessTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             TwoFourSparsityRamp(start_step=0, end_step=10, target_density=0.3)
 
+    def test_ramp_steps_and_custom_schedule_results_are_exact(self):
+        for kwargs in (
+            {"start_step": 0.5, "end_step": 10},
+            {"start_step": True, "end_step": 10},
+            {"start_step": 0, "end_step": np.inf},
+            {"start_step": 0, "end_step": 10, "target_density": np.nan},
+            {"start_step": 0, "end_step": 10, "schedule": 1},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                TwoFourSparsityRamp(**kwargs)
+
+        for result in (np.nan, np.inf, -0.1, 1.1, "0.5"):
+            ramp = TwoFourSparsityRamp(0, 10, schedule=lambda *_args, result=result: result)
+            with self.subTest(result=result), self.assertRaises((TypeError, ValueError)):
+                ramp.fraction(5)
+        ramp = TwoFourSparsityRamp(0, 10)
+        for step in (1.5, True, -1):
+            with self.subTest(step=step), self.assertRaises((TypeError, ValueError)):
+                ramp.fraction(step)
+
     def test_partial_ramp_only_constrains_the_first_fraction_of_rows(self):
         torch.manual_seed(0)
         ramp = TwoFourSparsityRamp(start_step=0, end_step=100)
@@ -143,6 +163,47 @@ class CompressDecompressRoundTripTest(unittest.TestCase):
         self.assertTrue(is_2_4_sparse(w))
         recovered = decompress(export_2_4_compressed(w))
         np.testing.assert_array_equal(recovered, w)
+
+    def test_export_preserves_supported_value_dtypes_and_wire_size(self):
+        base = np.array([[1.0, 0.0, -2.0, 0.0], [0.0, 3.0, 0.0, 4.0]])
+        for dtype in (np.float16, np.float32, np.float64):
+            w = base.astype(dtype)
+            compressed = export_2_4_compressed(w)
+            with self.subTest(dtype=dtype):
+                self.assertEqual(compressed.values.dtype, np.dtype(dtype))
+                np.testing.assert_array_equal(decompress(compressed), w)
+                payload = compressed.to_bytes()
+                self.assertEqual(compressed.nbytes(), len(payload))
+                restored = Compressed2to4.from_bytes(payload)
+                self.assertEqual(restored.values.dtype, np.dtype(dtype))
+                np.testing.assert_array_equal(decompress(restored), w)
+
+    def test_malformed_payloads_fail_before_decompression(self):
+        values = np.array([[[1.0, 2.0]]], dtype=np.float32)
+        indices = np.array([[0b1000]], dtype=np.uint8)  # positions 0 and 2
+        invalid = (
+            {"values": values.astype(np.int32), "indices": indices, "shape": (1, 4)},
+            {"values": np.array([[[np.nan, 2.0]]], dtype=np.float32), "indices": indices, "shape": (1, 4)},
+            {"values": values, "indices": indices.astype(np.int64), "shape": (1, 4)},
+            {"values": values, "indices": np.empty((1, 0), dtype=np.uint8), "shape": (1, 4)},
+            {"values": values, "indices": np.array([[0]], dtype=np.uint8), "shape": (1, 4)},
+            {"values": values, "indices": indices, "shape": (1, 5)},
+            {"values": values, "indices": indices, "shape": (2, 4)},
+            {"values": values, "indices": indices, "shape": (1, 4), "format_version": 2},
+        )
+        for kwargs in invalid:
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                Compressed2to4(**kwargs)
+
+        valid = Compressed2to4(values, indices, (1, 4))
+        with self.assertRaises(ValueError):
+            Compressed2to4.from_bytes(valid.to_bytes()[:-1])
+        with self.assertRaises(ValueError):
+            Compressed2to4.from_bytes(valid.to_bytes() + b"\x00")
+        with self.assertRaises(ValueError):
+            Compressed2to4.from_bytes(b"BAD!" + valid.to_bytes()[4:])
+        with self.assertRaises(ValueError):
+            valid.values[0, 0, 0] = 9.0
 
     def test_export_rejects_a_matrix_that_violates_2_4(self):
         w = np.ones((2, 4))  # 4 nonzeros in one group -- not 2:4
@@ -327,12 +388,11 @@ class InferenceSpeedupEvidenceTest(unittest.TestCase):
         self.assertAlmostEqual(theoretical_flop_speedup, 2.0)
 
         dense_bytes = d_out * d_in * 4  # float32
-        compressed = export_2_4_compressed(
-            sigma_weighted_block_sparse(np.random.default_rng(0).normal(size=(d_out, d_in)), np.eye(d_in), "2:4")
-        )
-        # compressed.values is float64 in this module's numpy path; compare apples-to-apples at float32
-        compressed_bytes_f32 = compressed.values.astype(np.float32).nbytes + compressed.indices.nbytes
-        theoretical_memory_speedup = dense_bytes / compressed_bytes_f32
+        sparse_float32 = sigma_weighted_block_sparse(
+            np.random.default_rng(0).normal(size=(d_out, d_in)), np.eye(d_in), "2:4"
+        ).astype(np.float32)
+        compressed = export_2_4_compressed(sparse_float32)
+        theoretical_memory_speedup = dense_bytes / compressed.nbytes()
         print(
             f"[speedup/theoretical] 2:4 GEMM FLOP-reduction bound={theoretical_flop_speedup:.2f}x "
             f"(vendor claim on real sparse-tensor-core kernels, NOT measured here), "
