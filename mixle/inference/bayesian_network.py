@@ -28,6 +28,24 @@ from mixle.inference.structure import _clone, _columns, _field_estimator, _is_di
 _LOG_2PI = float(np.log(2.0 * np.pi))
 
 
+def _validated_weights(weights: Sequence[float] | None, n: int) -> np.ndarray | None:
+    if weights is None:
+        return None
+    values = np.asarray(weights, dtype=np.float64)
+    if (
+        values.ndim != 1
+        or values.shape != (n,)
+        or not np.all(np.isfinite(values))
+        or np.any(values < 0.0)
+        or float(values.sum()) <= 0.0
+    ):
+        raise ValueError(
+            "Bayesian-network weights must be a finite non-negative vector with one value "
+            "per observation and positive total mass."
+        )
+    return values
+
+
 # --- factors: each models P(field_i | its parents) with a uniform score/sample interface --------------------
 
 
@@ -151,11 +169,12 @@ class _VectorMarginalFactor:
             # relative to the weighted path and every other Gaussian fit in this codebase.
             cov = np.cov(y, rowvar=False, ddof=0)
         else:
-            w = np.asarray(weights, dtype=np.float64)
+            w = _validated_weights(weights, len(y))
+            assert w is not None
             sw = w.sum()
-            mean = (w[:, None] * y).sum(axis=0) / max(sw, 1e-12)
+            mean = (w[:, None] * y).sum(axis=0) / sw
             delta = y - mean
-            cov = (w[:, None, None] * np.einsum("ni,nj->nij", delta, delta)).sum(axis=0) / max(sw, 1e-12)
+            cov = (w[:, None, None] * np.einsum("ni,nj->nij", delta, delta)).sum(axis=0) / sw
         cov = np.atleast_2d(cov) + 1e-6 * np.eye(y.shape[1])
         return cls(child, mean, cov)
 
@@ -222,11 +241,12 @@ class _VectorCLGFactor:
             resid = y - x @ coef
             cov = np.cov(resid, rowvar=False, ddof=0)  # see _VectorMarginalFactor.fit's ddof=0 note above
         else:
-            w = np.asarray(weights, dtype=np.float64)
-            sw = np.sqrt(np.maximum(w, 0.0))
+            w = _validated_weights(weights, len(y))
+            assert w is not None
+            sw = np.sqrt(w)
             coef, *_ = np.linalg.lstsq(x * sw[:, None], y * sw[:, None], rcond=None)
             resid = y - x @ coef
-            cov = (w[:, None, None] * np.einsum("ni,nj->nij", resid, resid)).sum(axis=0) / max(w.sum(), 1e-12)
+            cov = (w[:, None, None] * np.einsum("ni,nj->nij", resid, resid)).sum(axis=0) / w.sum()
         cov = np.atleast_2d(cov) + 1e-6 * np.eye(y.shape[1])
         return cls(child, parents, discrete, vec_dims, coef, cov)
 
@@ -306,11 +326,12 @@ class _LinearGaussianFactor:
             resid = y - x @ coef
             sigma = float(np.sqrt(max(resid.var(), 1e-6)))
         else:
-            w = np.asarray(weights, dtype=np.float64)
-            sw = np.sqrt(np.maximum(w, 0.0))
+            w = _validated_weights(weights, len(y))
+            assert w is not None
+            sw = np.sqrt(w)
             coef, *_ = np.linalg.lstsq(x * sw[:, None], y * sw, rcond=None)
             resid = y - x @ coef
-            var = float(np.sum(w * resid**2) / max(np.sum(w), 1e-12))
+            var = float(np.sum(w * resid**2) / np.sum(w))
             sigma = float(np.sqrt(max(var, 1e-6)))
         return cls(child, parents, discrete, coef, sigma, vec_dims=vec_dims)
 
@@ -485,7 +506,8 @@ def _fit_multinomial_logistic(
     n, d = x.shape
     onehot = np.zeros((n, k))
     onehot[np.arange(n), y_idx] = 1.0
-    w_obs = np.ones(n) if weights is None else np.asarray(weights, dtype=np.float64)
+    validated = _validated_weights(weights, n)
+    w_obs = np.ones(n) if validated is None else validated
 
     def nll_grad(flat: np.ndarray) -> tuple[float, np.ndarray]:
         w = flat.reshape(k - 1, d)
@@ -497,6 +519,13 @@ def _fit_multinomial_logistic(
         return nll, grad.ravel()
 
     res = minimize(nll_grad, np.zeros((k - 1) * d), jac=True, method="L-BFGS-B", options={"maxiter": 500})
+    if (
+        not bool(res.success)
+        or not np.isfinite(res.fun)
+        or not np.all(np.isfinite(res.x))
+        or not np.all(np.isfinite(res.jac))
+    ):
+        raise RuntimeError(f"multinomial logistic optimization failed: {res.message}")
     return res.x.reshape(k - 1, d)
 
 
@@ -546,19 +575,17 @@ class _DiscreteConditionalFactor:
         groups: dict[tuple, list[int]] = {}
         for j in range(n):
             groups.setdefault(tuple(cols[p][j] for p in parents), []).append(j)
-        table = {
-            cfg: _leaf_fit(
-                [cols[child][j] for j in idx],
-                template,
-                max_its,
-                None if weights is None else weights[idx],
-            )
-            for cfg, idx in ((cfg, np.asarray(idx)) for cfg, idx in groups.items())
-        }
+        table = {}
+        for cfg, idx_list in groups.items():
+            idx = np.asarray(idx_list)
+            group_weights = None if weights is None else np.asarray(weights)[idx]
+            if group_weights is not None and float(group_weights.sum()) <= 0.0:
+                continue
+            table[cfg] = _leaf_fit([cols[child][j] for j in idx], template, max_its, group_weights)
         return cls(child, parents, table, backoff)
 
     def n_params(self) -> int:
-        return _num_free_params(self.backoff) * max(1, len(self.table))
+        return _num_free_params(self.backoff) + sum(_num_free_params(dist) for dist in self.table.values())
 
     def describe(self, field_names: Sequence[str] | None = None, *, max_configurations: int = 20) -> dict[str, Any]:
         """The fitted per-configuration table: how many distinct parent-value combinations were observed,
@@ -585,10 +612,12 @@ def _leaf_fit(values: list, template: Any, max_its: int, weights: np.ndarray | N
     directly (one weighted pass — exact for the simple exponential-family leaves the templates are)."""
     if weights is None:
         return fit(values, _clone(template), max_its=max_its, out=None)
+    weights = _validated_weights(weights, len(values))
+    assert weights is not None
     est = _clone(template)
     enc = est.accumulator_factory().make().acc_to_encoder().seq_encode(values)
     acc = est.accumulator_factory().make()
-    acc.seq_update(enc, np.asarray(weights, dtype=np.float64), None)
+    acc.seq_update(enc, weights, None)
     return est.estimate(None, acc.value())
 
 
@@ -685,8 +714,24 @@ class MixtureOfBayesianNetworks:
 
     def __init__(self, components: Sequence[HeterogeneousBayesianNetwork], weights: Sequence[float]) -> None:
         self.components = list(components)
-        self.weights = np.asarray(weights, dtype=np.float64)
-        self.log_weights = np.log(np.clip(self.weights, 1e-300, None))
+        if not self.components:
+            raise ValueError("MixtureOfBayesianNetworks requires at least one component.")
+        n_fields = len(self.components[0].factors)
+        if any(len(component.factors) != n_fields for component in self.components):
+            raise ValueError("all Bayesian-network mixture components must have the same number of fields.")
+        values = np.asarray(weights, dtype=np.float64)
+        if (
+            values.ndim != 1
+            or values.shape != (len(self.components),)
+            or not np.all(np.isfinite(values))
+            or np.any(values < 0.0)
+        ):
+            raise ValueError("mixture weights must be a finite non-negative vector matching the components.")
+        if not np.isclose(float(values.sum()), 1.0, rtol=1.0e-10, atol=1.0e-12):
+            raise ValueError("mixture weights must sum to one.")
+        self.weights = values.copy()
+        with np.errstate(divide="ignore"):
+            self.log_weights = np.where(self.weights > 0.0, np.log(self.weights), -np.inf)
 
     def __str__(self) -> str:
         return f"MixtureOfBayesianNetworks(k={len(self.components)}, weights={np.round(self.weights, 3).tolist()})"
@@ -714,9 +759,21 @@ class MixtureOfBayesianNetworks:
         """Return posterior component probabilities for each record."""
         enc = self.dist_to_encoder().seq_encode(list(data))
         joint = self._component_ll(enc) + self.log_weights[None, :]
-        joint -= joint.max(axis=1, keepdims=True)
+        if joint.shape[0] == 0:
+            return np.empty((0, self.n_components), dtype=np.float64)
+        if np.any(np.isnan(joint)) or np.any(np.isposinf(joint)):
+            raise ValueError("component log densities must be finite or -inf.")
+        row_max = joint.max(axis=1, keepdims=True)
+        impossible = np.isneginf(row_max[:, 0])
+        if np.any(impossible):
+            rows = np.flatnonzero(impossible).tolist()
+            raise ValueError(f"mixture assigns zero probability to observations at rows {rows}.")
+        joint -= row_max
         r = np.exp(joint)
-        return r / r.sum(axis=1, keepdims=True)
+        row_sum = r.sum(axis=1, keepdims=True)
+        if np.any(~np.isfinite(row_sum)) or np.any(row_sum <= 0.0):
+            raise ValueError("mixture responsibilities could not be normalized.")
+        return r / row_sum
 
     def sampler(self, seed: int | None = None) -> Any:
         """Return a sampler for the mixture of Bayesian networks."""
@@ -762,12 +819,24 @@ def learn_mixture_bayesian_network(
     """
     if em not in ("hard", "soft"):
         raise ValueError(f"em must be 'hard' or 'soft', got {em!r}")
-    if n_components < 1:
+    if (
+        isinstance(n_components, (bool, np.bool_))
+        or not isinstance(n_components, (int, np.integer))
+        or n_components < 1
+    ):
         raise ValueError(f"n_components must be >= 1, got {n_components}")
+    if isinstance(restarts, (bool, np.bool_)) or not isinstance(restarts, (int, np.integer)) or restarts < 1:
+        raise ValueError("restarts must be a positive integer.")
+    if isinstance(max_iter, (bool, np.bool_)) or not isinstance(max_iter, (int, np.integer)) or max_iter < 1:
+        raise ValueError("max_iter must be a positive integer.")
     from mixle.inference.structure import _kmeans_init
 
     data = list(data)
     n = len(data)
+    if n == 0:
+        raise ValueError("learn_mixture_bayesian_network requires at least one observation.")
+    if n_components > n:
+        raise ValueError("n_components cannot exceed the number of observations.")
     rng = np.random.RandomState(seed)
     # capped at n: a starved cluster's rescue (below) draws `min_size` DISTINCT points from the
     # whole dataset (replace=False) -- uncapped, a small dataset with few components could compute
@@ -777,11 +846,10 @@ def learn_mixture_bayesian_network(
     def learn(subset: list[tuple], w: np.ndarray | None = None) -> HeterogeneousBayesianNetwork:
         return learn_bayesian_network(subset, max_parents=max_parents, min_gain=min_gain, max_its=max_its, weights=w)
 
-    inits = [
-        _kmeans_init(data, n_components, rng, numeric_only=True),
-        _kmeans_init(data, n_components, rng, numeric_only=False),
-    ]
-    inits += [rng.randint(0, n_components, n) for _ in range(max(0, restarts - len(inits)))]
+    inits = [_kmeans_init(data, n_components, rng, numeric_only=True)]
+    if restarts >= 2:
+        inits.append(_kmeans_init(data, n_components, rng, numeric_only=False))
+    inits.extend(rng.randint(0, n_components, n) for _ in range(restarts - len(inits)))
 
     best: MixtureOfBayesianNetworks | None = None
     best_ll = -np.inf
@@ -798,24 +866,30 @@ def learn_mixture_bayesian_network(
 
 def _hard_em_run(data, n_components, assign, learn, max_iter, min_size, rng):
     n = len(data)
-    model = None
-    prev = None
+    assign = np.asarray(assign, dtype=np.int64)
     for _it in range(max_iter):
         comps, counts = [], []
         for k in range(n_components):
-            idx = np.flatnonzero(assign == k)
-            if len(idx) < min_size:
-                idx = rng.choice(n, size=min_size, replace=False)
-            comps.append(learn([data[i] for i in idx]))
-            counts.append(len(idx))
+            member_idx = np.flatnonzero(assign == k)
+            fit_idx = member_idx if len(member_idx) >= min_size else rng.choice(n, size=min_size, replace=False)
+            comps.append(learn([data[i] for i in fit_idx]))
+            counts.append(len(member_idx))
         weights = np.asarray(counts, dtype=np.float64)
+        weights[weights == 0.0] = 1.0
         weights /= weights.sum()
         model = MixtureOfBayesianNetworks(comps, weights)
         new = model.responsibilities(data).argmax(axis=1)
-        if prev is not None and np.array_equal(new, prev):
+        if np.array_equal(new, assign):
             break
-        prev, assign = assign, new
-    assert model is not None
+        assign = new
+
+    comps, counts = [], []
+    for k in range(n_components):
+        member_idx = np.flatnonzero(assign == k)
+        fit_idx = member_idx if len(member_idx) >= min_size else rng.choice(n, size=min_size, replace=False)
+        comps.append(learn([data[i] for i in fit_idx]))
+        counts.append(len(member_idx))
+    model = MixtureOfBayesianNetworks(comps, np.asarray(counts, dtype=np.float64) / float(n))
     ll = float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
     return model, ll
 
@@ -827,8 +901,8 @@ def _soft_em_run(data, n_components, assign, learn, max_iter, tol: float = 1e-5)
     # inflating its variance and dragging the whole mixture below the hard-EM fit).
     r = np.full((n, n_components), 0.05 / max(n_components - 1, 1))
     r[np.arange(n), assign] = 0.95
-    model = None
-    prev_ll = -np.inf
+    accepted_model = None
+    accepted_ll = -np.inf
     for _it in range(max_iter):
         mass = r.sum(axis=0)
         for k in np.flatnonzero(mass < 2.0):  # a starved component restarts from a random slice
@@ -837,16 +911,24 @@ def _soft_em_run(data, n_components, assign, learn, max_iter, tol: float = 1e-5)
         r /= r.sum(axis=1, keepdims=True)
         comps = [learn(data, w=r[:, k]) for k in range(n_components)]
         mix_w = r.mean(axis=0)
-        model = MixtureOfBayesianNetworks(comps, mix_w)
-        enc = model.dist_to_encoder().seq_encode(data)
-        ll = float(np.sum(model.seq_log_density(enc)))
-        r = model.responsibilities(data)
-        if ll - prev_ll < tol * max(n, 1):
+        candidate = MixtureOfBayesianNetworks(comps, mix_w)
+        enc = candidate.dist_to_encoder().seq_encode(data)
+        ll = float(np.sum(candidate.seq_log_density(enc)))
+        if not np.isfinite(ll):
+            if accepted_model is None:
+                raise ValueError("soft EM produced a non-finite initial objective.")
             break
-        prev_ll = ll
-    assert model is not None
-    ll = float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
-    return model, ll
+        if accepted_model is not None and ll < accepted_ll:
+            break
+        gain = None if accepted_model is None else ll - accepted_ll
+        next_r = candidate.responsibilities(data)
+        accepted_model = candidate
+        accepted_ll = ll
+        if gain is not None and gain < tol * max(n, 1):
+            break
+        r = next_r
+    assert accepted_model is not None
+    return accepted_model, accepted_ll
 
 
 def bayesian_network_bic(model: Any, data: Sequence[tuple]) -> float:
@@ -922,7 +1004,7 @@ def learn_bayesian_network(
     cols = _columns(data)
     n_fields = len(cols)
     n = len(data)
-    w = None if weights is None else np.asarray(weights, dtype=np.float64)
+    w = _validated_weights(weights, n)
     n_eff = float(n) if w is None else float(np.sum(w))
     import mixle.stats as st
 
