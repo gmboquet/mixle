@@ -232,7 +232,7 @@ class FusionAndConditioningTest(unittest.TestCase):
         # Two Gaussian experts about the same scalar latent: exact precision-weighted combination.
         e1 = GaussianBelief([2.0], [[1.0]])  # precision 1
         e2 = GaussianBelief([6.0], [[3.0]])  # precision 1/3
-        fused = e1.fuse(e2)
+        fused = e1.fuse(e2, other_is_likelihood=True)
         prec = 1.0 + 1.0 / 3.0
         exp_var = 1.0 / prec
         exp_mean = exp_var * (2.0 * 1.0 + 6.0 * (1.0 / 3.0))
@@ -244,8 +244,16 @@ class FusionAndConditioningTest(unittest.TestCase):
     def test_fusion_symmetric(self):
         e1 = GaussianBelief([1.0, 2.0], [[2.0, 0.3], [0.3, 1.0]])
         e2 = GaussianBelief([0.0, 1.0], [[1.0, -0.2], [-0.2, 2.0]])
-        np.testing.assert_allclose(e1.fuse(e2).mean(), e2.fuse(e1).mean(), atol=1e-10)
-        np.testing.assert_allclose(e1.fuse(e2).cov(), e2.fuse(e1).cov(), atol=1e-10)
+        np.testing.assert_allclose(
+            e1.fuse(e2, other_is_likelihood=True).mean(),
+            e2.fuse(e1, other_is_likelihood=True).mean(),
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            e1.fuse(e2, other_is_likelihood=True).cov(),
+            e2.fuse(e1, other_is_likelihood=True).cov(),
+            atol=1e-10,
+        )
 
     def test_gaussian_conditioning(self):
         # Condition z=[a,b] on b: closed-form Schur complement.

@@ -60,23 +60,20 @@ def _as_rng(rng: Any) -> RandomState:
 
 
 def _entropy_last(p: np.ndarray) -> np.ndarray:
-    """Shannon entropy (nats) over the last axis, with the ``0 log 0 = 0`` guard.
-
-    ``p`` need not sum to 1 along the last axis (a sub-normalized or all-zero row is fine, and is
-    exactly what callers here can produce), but every entry must be a valid probability mass.
-    That is required for the result to be a true Shannon entropy: entropy is only guaranteed
-    ``>= 0`` when every ``p_i`` lies in ``[0, 1]`` -- e.g. an entry ``> 1`` makes its ``p * log(p)``
-    term positive, which can drive the (negated) sum below zero.
+    """Shannon entropy (nats) over normalized rows, with the ``0 log 0 = 0`` guard.
 
     Raises:
         ValueError: if any entry of ``p`` is non-finite (NaN/inf) or falls outside ``[0, 1]``
             (with a small floating-point tolerance).
     """
-    if not np.all(np.isfinite(p)):
+    p = np.asarray(p, dtype=float)
+    if p.ndim < 1 or p.shape[-1] < 1 or not np.all(np.isfinite(p)):
         raise ValueError("probabilities must be finite (no NaN/inf)")
     tol = 1e-9
     if np.any(p < -tol) or np.any(p > 1.0 + tol):
         raise ValueError("probabilities must lie in [0, 1]")
+    if not np.allclose(np.sum(p, axis=-1), 1.0, rtol=1e-9, atol=1e-12):
+        raise ValueError("probability rows must sum to one")
     with np.errstate(divide="ignore", invalid="ignore"):
         return -np.sum(np.where(p > 0.0, p * np.log(p), 0.0), axis=-1)
 
@@ -131,9 +128,12 @@ def decompose_entropy(member_probs: Any) -> UncertaintyDecomposition:
         raise ValueError("member_probs must have shape (M, ..., K) with at least a member and outcome axis")
     if p.shape[0] < 2:
         raise ValueError("need at least two members (M >= 2) to estimate epistemic uncertainty")
+    if not np.all(np.isfinite(p)) or np.any(p < 0):
+        raise ValueError("member probabilities must be finite and non-negative")
     totals = p.sum(axis=-1, keepdims=True)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        p = np.where(totals > 0.0, p / totals, 0.0)
+    if np.any(~np.isfinite(totals)) or np.any(totals <= 0):
+        raise ValueError("every member probability row must have positive finite mass")
+    p = p / totals
     mean = p.mean(axis=0)  # (..., K)
     total = _entropy_last(mean)  # H(mean)  -> (...)
     aleatoric = _entropy_last(p).mean(axis=0)  # mean_m H(p_m) -> (...)
@@ -155,6 +155,8 @@ def decompose_variance(member_means: Any, member_vars: Any = None) -> Uncertaint
         ``aleatoric = mean_m Var_m``, ``epistemic = Var_m(mean_m)``, ``total`` their sum.
     """
     mu = np.asarray(member_means, dtype=float)
+    if mu.ndim < 1 or not np.all(np.isfinite(mu)):
+        raise ValueError("member_means must be a finite array with a member axis")
     if mu.shape[0] < 2:
         raise ValueError("need at least two members (M >= 2) to estimate epistemic uncertainty")
     epistemic = mu.var(axis=0)  # Var_m E[y|m]
@@ -164,8 +166,8 @@ def decompose_variance(member_means: Any, member_vars: Any = None) -> Uncertaint
         v = np.asarray(member_vars, dtype=float)
         if v.shape != mu.shape:
             raise ValueError(f"member_vars shape {v.shape} must match member_means shape {mu.shape}")
-        if np.any(v < 0.0):
-            raise ValueError("member_vars must be non-negative variances")
+        if not np.all(np.isfinite(v)) or np.any(v < 0.0):
+            raise ValueError("member_vars must be finite non-negative variances")
         aleatoric = v.mean(axis=0)  # mean_m Var[y|m]
     total = aleatoric + epistemic
     return UncertaintyDecomposition(total, aleatoric, epistemic, "variance")
@@ -184,7 +186,12 @@ def predictive_distribution(members: Iterable[Any], support: Sequence[Any]) -> n
     rows = []
     for m in members:
         logs = np.array([float(m.log_density(s)) for s in support], dtype=float)
-        rows.append(_softmax(logs))
+        if np.any(np.isnan(logs)) or np.any(np.isposinf(logs)) or not np.any(np.isfinite(logs)):
+            raise ValueError("each predictive member must assign finite mass to at least one support value")
+        row = np.asarray(_softmax(logs), dtype=float)
+        if not np.all(np.isfinite(row)) or np.any(row < 0) or not np.isclose(row.sum(), 1.0):
+            raise ValueError("predictive member produced an invalid probability row")
+        rows.append(row)
     out = np.asarray(rows, dtype=float)
     if out.shape[0] < 2:
         raise ValueError("need at least two members (M >= 2) to estimate epistemic uncertainty")
@@ -200,6 +207,10 @@ def posterior_ensemble(param_post: Any, build: Callable[[Any], Any], n: int = 20
     list is the "members" the decomposition integrates over -- so epistemic uncertainty here is
     genuine *parameter* uncertainty, not just ensemble disagreement.
     """
+    if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 2:
+        raise ValueError("n must be an integer >= 2")
+    if not callable(build):
+        raise TypeError("build must be callable")
     r = _as_rng(rng)
     return [build(param_post.sample(r)) for _ in range(int(n))]
 
@@ -218,20 +229,41 @@ def cluster_samples(samples: Sequence[Any], equivalent: Callable[[Any, Any], boo
 
     For discrete draws whose *surface form* varies but *meaning* does not -- e.g. LLM generations
     ("Paris", "It's Paris.", "The capital is Paris") -- pass a semantic ``equivalent`` (embedding
-    similarity, an entailment check, normalized match). Greedy single-linkage against each cluster's
-    first member; returns the class distribution and per-sample assignments.
+    similarity, an entailment check, normalized match). True single linkage is
+    computed as the connected components of all pairwise equivalence edges.
     """
+    values = list(samples)
+    if not values:
+        raise ValueError("cluster_samples needs at least one sample")
     eq = equivalent if equivalent is not None else (lambda a, b: a == b)
+    if not callable(eq):
+        raise TypeError("equivalent must be callable")
+    parent = list(range(len(values)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for i in range(len(values)):
+        for j in range(i):
+            if bool(eq(values[i], values[j])):
+                union(i, j)
+    class_by_root: dict[int, int] = {}
     reps: list[Any] = []
     labels: list[int] = []
-    for s in samples:
-        found = next((ci for ci, r in enumerate(reps) if eq(s, r)), None)
-        if found is None:
-            found = len(reps)
-            reps.append(s)
-        labels.append(found)
-    if not reps:
-        raise ValueError("cluster_samples needs at least one sample")
+    for index, value in enumerate(values):
+        root = find(index)
+        if root not in class_by_root:
+            class_by_root[root] = len(reps)
+            reps.append(value)
+        labels.append(class_by_root[root])
     counts = np.bincount(labels, minlength=len(reps)).astype(float)
     return Clustering(reps, counts / counts.sum(), np.asarray(labels))
 
@@ -261,6 +293,8 @@ def marginalize_meaning(
       model this is the unbiased Monte-Carlo estimate of the same marginal.
     """
     c = cluster_samples(items, equivalent)
+    if log_probs is not None and weights is not None:
+        raise ValueError("pass either log_probs or weights, not both")
     if log_probs is None and weights is None:
         return c
     labels = c.labels
@@ -269,6 +303,8 @@ def marginalize_meaning(
         lp = np.asarray(log_probs, dtype=float).reshape(-1)
         if lp.shape[0] != labels.shape[0]:
             raise ValueError("log_probs must have one entry per item")
+        if np.any(np.isnan(lp)) or np.any(np.isposinf(lp)) or not np.any(np.isfinite(lp)):
+            raise ValueError("log_probs must contain at least one finite value and no NaN or +inf")
         logmass = np.full(k, -np.inf)
         for i, lab in enumerate(labels):
             logmass[lab] = np.logaddexp(logmass[lab], lp[i])
@@ -277,8 +313,8 @@ def marginalize_meaning(
         w = np.asarray(weights, dtype=float).reshape(-1)
         if w.shape[0] != labels.shape[0]:
             raise ValueError("weights must have one entry per item")
-        if np.any(w < 0.0):
-            raise ValueError("weights must be non-negative")
+        if not np.all(np.isfinite(w)) or np.any(w < 0.0):
+            raise ValueError("weights must be finite and non-negative")
         mass = np.zeros(k)
         for i, lab in enumerate(labels):
             mass[lab] += w[i]
