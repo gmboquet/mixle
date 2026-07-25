@@ -1805,7 +1805,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             if not comp.is_empty():
                 total = total.add(comp)
                 contributing.append((1, s, None, comp))
-        for length in range(2, built + 1):
+        for length in range(2, built + 2):
             prevnt = nt[length - 1]
             if not prevnt:
                 continue

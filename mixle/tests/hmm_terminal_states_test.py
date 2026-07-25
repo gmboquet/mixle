@@ -219,5 +219,103 @@ class HmmTerminalValuesDensityTest(unittest.TestCase):
             self.assertAlmostEqual(self.d.log_density(list(v)), order[k][1], places=9)
 
 
+class HmmTerminalValuesDisjointCountIndexTest(unittest.TestCase):
+    """Regression: ``_terminal_values_count_index``'s terminal-completion loop silently dropped the
+    DEEPEST length class of sequences.
+
+    The loop is ``for length in range(2, built + 1)``, where ``built`` is the deepest length for which
+    the all-non-terminal prefix DP ``nt`` was successfully built. Completing a length-``L`` sequence
+    (``L - 1`` non-terminal emissions then one terminal emission) needs ``nt[L - 1]``, so the reachable
+    lengths are ``2 .. built + 1`` -- but ``range(2, built + 1)`` stops at ``built``, never visiting
+    ``length == built + 1`` (the completion off ``nt[built]``, the deepest prefix that was actually
+    built). That entire length class vanishes from the index with no signal: ``truncated`` stays False
+    because the loss is structural, not budget-driven. These models all use state-disjoint (unambiguous)
+    emissions so the structural index applies (doesn't defer to the enumerate-and-bin fallback)."""
+
+    def _cross_check(self, d, true_support, max_fine_bucket=5000):
+        """Assert the structural count index is EXACT against an independently-computed true support:
+        matching total(), no duplicates, every unranked (value, log_prob) pair correct, and no leftover
+        true-support entries the index failed to produce."""
+        from mixle.enumeration.quantization.core import Quantizer
+
+        q = Quantizer(bin_width_bits=1.0, oversample=16)
+        result = d._terminal_values_count_index(q, max_fine_bucket)
+        self.assertIsNotNone(result)  # state-disjoint -> structural index applies, not the fallback
+        idx, truncated = result
+        self.assertFalse(truncated)
+        self.assertEqual(idx.total(), len(true_support))
+        h = idx.hist
+        seen = set()
+        for fb in range(h.base, h.base + len(h.data)):
+            for off in range(h.count_at(fb)):
+                value, lp = idx.get_in_bucket(fb, off)
+                v = tuple(value)
+                self.assertNotIn(v, seen)  # no duplicates
+                seen.add(v)
+                self.assertIn(v, true_support)
+                self.assertAlmostEqual(lp, true_support[v], places=9)
+        self.assertEqual(seen, set(true_support))  # nothing from the true support was missed
+
+    def test_repro_two_state_drops_deepest_sequence(self):
+        # State 1's ONLY emission is terminal, so the deepest all-non-terminal prefix is length 1
+        # (state 0 alone): built == 1. Completing it needs length == built + 1 == 2, which the buggy
+        # range(2, built + 1) == range(2, 2) is empty and never visits. True support: ['.'] (stopping
+        # immediately at state 0) and ['a', '!'] (one non-terminal emission, then state 1's terminal).
+        d = HiddenMarkovModelDistribution(
+            [CategoricalDistribution({"a": 0.3, ".": 0.7}), CategoricalDistribution({"!": 1.0})],
+            [1.0, 0.0],
+            [[0.0, 1.0], [0.0, 1.0]],
+            terminal_values={".", "!"},
+        )
+        true_support = {tuple(v): lp for v, lp in d.enumerator().top_k(10)}
+        self.assertEqual(len(true_support), 2)
+        self._cross_check(d, true_support)
+
+    def test_branching_forward_chain_all_depths_present(self):
+        # Three non-terminal states chained strictly forward (0 -> 1 -> 2), each able to jump straight
+        # to the terminal state 3 or advance one step: built == 3 (the 0/1/2 chain). Pre-fix, the
+        # deepest length class (length == built + 1 == 4) -- all 8 length-4 sequences -- was dropped
+        # entirely, along with the correct total (14, not the pre-fix 6).
+        topics = [
+            CategoricalDistribution({"a": 0.5, "b": 0.5}),
+            CategoricalDistribution({"c": 0.5, "d": 0.5}),
+            CategoricalDistribution({"e": 0.5, "f": 0.5}),
+            CategoricalDistribution({".": 1.0}),
+        ]
+        w = [1.0, 0.0, 0.0, 0.0]
+        a = [
+            [0.0, 0.6, 0.0, 0.4],
+            [0.0, 0.0, 0.5, 0.5],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ]
+        d = HiddenMarkovModelDistribution(topics, w, a, terminal_values={"."})
+        true_support = {tuple(v): lp for v, lp in d.enumerator().top_k(20)}
+        self.assertEqual(len(true_support), 14)  # 2 (length 2) + 4 (length 3) + 8 (length 4)
+        self._cross_check(d, true_support)
+
+    def test_l1_and_deep_tier_coexist_through_terminal_less_state(self):
+        # State 0 mixes terminal ('.') and non-terminal (a/b) emissions, so it can stop at length 1
+        # (the L == 1 special case); state 1 has NO terminal items at all, so any continuation MUST
+        # reach state 2 before it can stop: built == 2. Pre-fix, only length == 2 was attempted (a
+        # no-op, since state 1 has no terminal emissions to complete with) and the true length == 3
+        # completions (built + 1) were dropped, losing 4 of the 5 true sequences.
+        topics = [
+            CategoricalDistribution({"a": 0.3, "b": 0.2, ".": 0.5}),
+            CategoricalDistribution({"c": 0.5, "d": 0.5}),
+            CategoricalDistribution({"!": 1.0}),
+        ]
+        w = [1.0, 0.0, 0.0]
+        a = [
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+        ]
+        d = HiddenMarkovModelDistribution(topics, w, a, terminal_values={".", "!"})
+        true_support = {tuple(v): lp for v, lp in d.enumerator().top_k(10)}
+        self.assertEqual(len(true_support), 5)  # 1 (length 1) + 4 (length 3); length 2 is unreachable
+        self._cross_check(d, true_support)
+
+
 if __name__ == "__main__":
     unittest.main()
