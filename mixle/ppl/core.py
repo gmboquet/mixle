@@ -1860,6 +1860,16 @@ class RandomVariable:
     @property
     def has_free(self) -> bool:
         """Whether this parameter/expression graph contains one or more inferable unknowns."""
+        if self._kind == "sample" and getattr(self._family, "name", None) in {"MVN", "DiagGaussian"}:
+            # ``None`` is a concrete standard distribution for generative use but asks the paired
+            # estimator to learn that slot when fit() is called. It is not an explicit free/prior hole,
+            # so constraints over MVN(dim) remain valid generative constraints.
+            return any(
+                value is free
+                or isinstance(value, (_SimplexSpec, _VectorSpec, _OrderedSpec, _CholeskySpec))
+                or isinstance(value, RandomVariable)
+                for value in self._args[1:]
+            )
         dimension = _inferable_parameter_dimension(self)
         return dimension is None or dimension > 0
 
@@ -2615,7 +2625,7 @@ class RandomVariable:
                 raise NotImplementedError("indexed latent fitting currently supports only local execution.")
             if print_iter != 0:
                 raise NotImplementedError("indexed latent fitting does not implement print_iter.")
-            allowed = {"given", "rng", "draws", "burn", "thin"}
+            allowed = {"given", "rng", "draws", "burn", "thin", "constraints", "penalty", "potentials"}
             unknown = sorted(set(kw) - allowed)
             if unknown:
                 raise TypeError(f"unsupported indexed fit control(s): {', '.join(unknown)}")
@@ -2771,7 +2781,7 @@ class RandomVariable:
         # inside its registered fitter (a closure over the RV's family/args).
         if missing == "marginalize" and how != "em":
             # the autograd-target fitters marginalize NaN observations (flat models); thread the flag in.
-            if how in {"map", "mcmc", "hmc", "nuts", "vi", "ensemble", "sample"}:
+            if how in {"map", "mcmc", "hmc", "nuts", "laplace", "vi", "ensemble", "sample"}:
                 kw["missing"] = missing
             else:
                 raise NotImplementedError(
@@ -2781,6 +2791,11 @@ class RandomVariable:
                 )
         fitter = _FITTERS.get(how)
         if fitter is not None:
+            if how in {"map", "laplace"}:
+                if max_its != 100:
+                    kw.setdefault("max_iter", max_its)
+                if delta != 1e-8:
+                    kw.setdefault("tol", delta)
             result = fitter(self, data, **kw)
             if has_constraints or has_potentials:
                 # A penalized objective (soft constraints / residual factors / potentials) means the
