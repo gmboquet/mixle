@@ -188,6 +188,49 @@ class DepthCutAcceptanceTest(unittest.TestCase):
             f"per-merge KLs={[r.kl_divergence for r in result.receipt_map.values()]}"
         )
 
+    def test_final_artifact_budget_digest_and_structural_metrics(self):
+        torch.manual_seed(0)
+        rng = np.random.default_rng(0)
+        d_model = 16
+        model = build_causal_lm(vocab=23, d_model=d_model, n_layer=6, n_head=2, block=16)
+        law = _random_law(rng, d_model, scale=0.3)
+
+        generous = coarsen(model, budget=5.0, trust_region=5.0, input_law=law, n_mc=4)
+        first_structure_kl = generous.structure_receipts[0].final_kl_divergence
+        self.assertIsNotNone(first_structure_kl)
+        self.assertGreater(first_structure_kl, generous.depth_only_kl)
+        tight_budget = (generous.depth_only_kl + first_structure_kl) / 2.0
+        constrained = coarsen(
+            model,
+            budget=tight_budget,
+            trust_region=5.0,
+            input_law=law,
+            n_mc=4,
+        )
+
+        self.assertLessEqual(constrained.total_kl, tight_budget)
+        self.assertTrue(constrained.within_budget)
+        self.assertTrue(any(not receipt.accepted for receipt in constrained.structure_receipts))
+        final_receipt = constrained.receipt_map["final_artifact"]
+        self.assertEqual(final_receipt.scope, "final_artifact")
+        self.assertAlmostEqual(final_receipt.kl_divergence, constrained.total_kl)
+        self.assertEqual(final_receipt.artifact_digest, constrained.artifact_digest)
+        self.assertEqual(len(constrained.artifact_digest), 64)
+        self.assertTrue(
+            all(
+                receipt.artifact_digest == constrained.artifact_digest
+                for receipt in constrained.receipt_map.values()
+            )
+        )
+
+        metrics = constrained.metrics
+        self.assertEqual(metrics.source_leaf_blocks, 6)
+        self.assertEqual(metrics.result_leaf_blocks, 6)
+        self.assertEqual(metrics.source_estimated_block_evaluations, 6)
+        self.assertEqual(metrics.result_estimated_block_evaluations, 12)
+        self.assertLess(metrics.result_parameter_count, metrics.source_parameter_count)
+        self.assertIsNone(metrics.latency_seconds)
+
 
 class ClosedFormReceiptCorrectnessTest(unittest.TestCase):
     """Acceptance criterion: "the per-scale receipt is CLOSED-FORM ... cross-check against a direct
