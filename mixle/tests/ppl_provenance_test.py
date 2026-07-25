@@ -4,8 +4,9 @@ import unittest
 
 import numpy as np
 
+from mixle.data.hashing import dataset_hash
 from mixle.inference.production.provenance import Header
-from mixle.ppl import Normal, fit_with_provenance, free
+from mixle.ppl import Normal, PPLFitResult, fit_with_provenance, free
 
 
 class PPLProvenanceTest(unittest.TestCase):
@@ -33,6 +34,65 @@ class PPLProvenanceTest(unittest.TestCase):
         back = Header.from_dict(header.to_dict())
         self.assertEqual(back.dataset_hash, header.dataset_hash)
         self.assertEqual(back.training["surface"], "ppl")
+
+    def test_seed_is_the_exact_rng_passed_to_fit(self):
+        class Spy:
+            def __init__(self):
+                self.draw = None
+
+            def fit(self, data, **kw):
+                self.draw = int(kw["rng"].randint(0, 2**31))
+                return self
+
+        spy = Spy()
+        result = fit_with_provenance(spy, [1.0, 2.0], seed=17)
+        expected = int(np.random.RandomState(17).randint(0, 2**31))
+        self.assertIsInstance(result, PPLFitResult)
+        self.assertEqual(spy.draw, expected)
+        self.assertEqual(result.header.training["seed"], 17)
+        self.assertEqual(result.header.training["random_state"]["effective_seed"], 17)
+        self.assertEqual(len(result.header.training["random_state"]["initial_state_sha256"]), 64)
+
+    def test_one_shot_data_fit_and_hash_use_the_same_materialization(self):
+        class Spy:
+            def __init__(self):
+                self.seen = None
+
+            def fit(self, data, **_kw):
+                self.seen = list(data)
+                return self
+
+        records = [1.0, 2.0, 3.0]
+        spy = Spy()
+        result = fit_with_provenance(spy, (value for value in records), seed=3)
+        self.assertEqual(spy.seen, records)
+        self.assertEqual(result.header.dataset_hash, dataset_hash(records))
+        self.assertEqual(result.header.n_records, len(records))
+
+    def test_result_does_not_depend_on_attaching_to_fitted_object(self):
+        class Slotted:
+            __slots__ = ("seen",)
+
+            def __init__(self):
+                self.seen = []
+
+            def fit(self, data, **_kw):
+                self.seen = list(data)
+                return self
+
+        fitted, header = fit_with_provenance(Slotted(), [1.0], seed=0)
+        self.assertEqual(fitted.seen, [1.0])
+        self.assertEqual(header.training["surface"], "ppl")
+        self.assertFalse(hasattr(fitted, "header"))
+
+    def test_rng_override_and_invalid_seeds_are_rejected(self):
+        rv = Normal(free, free)
+        with self.assertRaisesRegex(ValueError, "pass seed"):
+            fit_with_provenance(rv, self.data, rng=np.random.RandomState(0))
+        with self.assertRaises(TypeError):
+            fit_with_provenance(rv, self.data, seed=True)
+        with self.assertRaises(ValueError):
+            fit_with_provenance(rv, self.data, seed=-1)
 
 
 if __name__ == "__main__":
