@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy import special, stats
+from scipy import optimize, sparse, special, stats
 
 # --------------------------------------------------------------------------- links
 
@@ -53,6 +53,61 @@ def _solve_psd(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 def _clip01(p: np.ndarray) -> np.ndarray:
     eps = 1e-10
     return np.clip(p, eps, 1.0 - eps)
+
+
+def _regression_data(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return a finite, aligned two-dimensional design and one-dimensional response."""
+    X = np.asarray(x, dtype=float)
+    response = np.asarray(y, dtype=float)
+    if X.ndim != 2:
+        raise ValueError("x must be a two-dimensional (n, p) design matrix")
+    if response.ndim != 1:
+        raise ValueError("y must be a one-dimensional response")
+    n, p = X.shape
+    if n < 1 or p < 1:
+        raise ValueError("x must have at least 1 row and 1 column")
+    if response.shape[0] != n:
+        raise ValueError("x and y must have the same number of rows")
+    if not np.all(np.isfinite(X)):
+        raise ValueError("x must contain only finite values")
+    if not np.all(np.isfinite(response)):
+        raise ValueError("y must contain only finite values")
+    return X, response
+
+
+def _solver_controls(max_iter: int, tol: float) -> None:
+    if isinstance(max_iter, (bool, np.bool_)) or not isinstance(max_iter, (int, np.integer)) or max_iter < 1:
+        raise ValueError("max_iter must be a positive integer")
+    if not np.isfinite(tol) or tol <= 0:
+        raise ValueError("tol must be finite and > 0")
+
+
+def _response_support(family: Family, y: np.ndarray) -> None:
+    if family.name == "binomial" and np.any((y < 0) | (y > 1)):
+        raise ValueError("binomial responses must lie in [0, 1]")
+    if family.name in {"poisson", "negativebinomial"}:
+        if np.any(y < 0) or np.any(y != np.floor(y)):
+            raise ValueError(f"{family.name} responses must be non-negative integers")
+    if family.name in {"gamma", "inverse_gaussian"} and np.any(y <= 0):
+        raise ValueError(f"{family.name} responses must be strictly positive")
+
+
+def _mean_support(family: Family, mu: np.ndarray) -> None:
+    if family.name == "binomial" and np.any((mu <= 0) | (mu >= 1)):
+        raise RuntimeError("IRLS produced binomial means outside (0, 1)")
+    if family.name in {"poisson", "negativebinomial", "gamma", "inverse_gaussian"} and np.any(mu <= 0):
+        raise RuntimeError(f"IRLS produced non-positive {family.name} means")
+
+
+def _prediction_design(x: np.ndarray, p: int) -> np.ndarray:
+    X = np.asarray(x, dtype=float)
+    if X.ndim == 1:
+        X = X[None, :]
+    if X.ndim != 2 or X.shape[1] != p:
+        raise ValueError(f"x must have shape (n, {p})")
+    if not np.all(np.isfinite(X)):
+        raise ValueError("x must contain only finite values")
+    return X
 
 
 _LINKS: dict[str, Link] = {
@@ -185,8 +240,12 @@ class GLMResult:
         fitted: ``(n,)`` fitted means ``mu``.
         deviance: residual deviance.
         dispersion: estimated/assumed dispersion ``phi``.
-        log_likelihood: maximised log-likelihood.
+        log_likelihood: maximised log-likelihood, or ``None`` when the supplied
+            family/response does not define one.
         n_iter: IRLS iterations to convergence.
+        converged: whether the IRLS convergence criterion was met. Public fits
+            currently raise instead of returning this as false.
+        rank: effective design rank among positive-weight observations.
         family / link: names.
         cov: ``(p, p)`` coefficient covariance.
     """
@@ -196,29 +255,43 @@ class GLMResult:
     fitted: np.ndarray
     deviance: float
     dispersion: float
-    log_likelihood: float
+    log_likelihood: float | None
     n_iter: int
     family: str
     link: str
     cov: np.ndarray
+    converged: bool = True
+    rank: int | None = None
     _link: Link = field(repr=False, default=None)
 
     def predict(self, x: np.ndarray, *, offset: np.ndarray | None = None) -> np.ndarray:
         """Predict the mean response ``mu`` at new design rows ``x``."""
-        x = np.atleast_2d(np.asarray(x, dtype=float))
+        x = _prediction_design(x, self.coef.size)
         eta = x @ self.coef
         if offset is not None:
-            eta = eta + np.asarray(offset, dtype=float)
-        return self._link.inv(eta)
+            off = np.asarray(offset, dtype=float)
+            if off.ndim == 0:
+                off = np.full(x.shape[0], float(off))
+            if off.ndim != 1 or off.shape[0] != x.shape[0] or not np.all(np.isfinite(off)):
+                raise ValueError("offset must be a finite scalar or one value per prediction row")
+            eta = eta + off
+        prediction = np.asarray(self._link.inv(eta), dtype=float)
+        if prediction.shape != eta.shape or not np.all(np.isfinite(prediction)):
+            raise RuntimeError("link inverse returned invalid predictions")
+        return prediction
 
     @property
     def aic(self) -> float:
         """Akaike information criterion for the fitted GLM."""
+        if self.log_likelihood is None:
+            raise ValueError("AIC is unavailable because this fit has no defined likelihood")
         return float(-2.0 * self.log_likelihood + 2.0 * self.coef.size)
 
     @property
     def bic(self) -> float:
         """Bayesian information criterion for the fitted GLM."""
+        if self.log_likelihood is None:
+            raise ValueError("BIC is unavailable because this fit has no defined likelihood")
         return float(-2.0 * self.log_likelihood + np.log(self.fitted.size) * self.coef.size)
 
     def z_values(self) -> np.ndarray:
@@ -230,13 +303,15 @@ class GLMResult:
         return 2.0 * stats.norm.sf(np.abs(self.z_values()))
 
 
-def _loglik(family: Family, y: np.ndarray, mu: np.ndarray, phi: float, weights: np.ndarray) -> float:
+def _loglik(family: Family, y: np.ndarray, mu: np.ndarray, phi: float, weights: np.ndarray) -> float | None:
     name = family.name
     if name == "gaussian":
         return float(np.sum(weights * stats.norm.logpdf(y, mu, np.sqrt(phi))))
     if name == "poisson":
         return float(np.sum(weights * stats.poisson.logpmf(y, mu)))
     if name == "binomial":
+        if np.any((y != 0.0) & (y != 1.0)):
+            return None
         m = _clip01(mu)
         return float(np.sum(weights * (y * np.log(m) + (1 - y) * np.log(1 - m))))
     if name == "gamma":
@@ -245,8 +320,14 @@ def _loglik(family: Family, y: np.ndarray, mu: np.ndarray, phi: float, weights: 
     if name == "negativebinomial":
         theta = family.extra
         return float(np.sum(weights * stats.nbinom.logpmf(y, theta, theta / (theta + mu))))
-    # inverse gaussian / fallback: use -deviance/2 as a proxy
-    return float(-0.5 * np.sum(weights * family.unit_deviance(y, mu)) / phi)
+    if name == "inverse_gaussian":
+        log_density = -0.5 * (
+            np.log(2.0 * np.pi * phi)
+            + 3.0 * np.log(y)
+            + (y - mu) ** 2 / (phi * y * mu**2)
+        )
+        return float(np.sum(weights * log_density))
+    return None
 
 
 def glm(
@@ -285,18 +366,31 @@ def glm(
     Returns:
         A :class:`GLMResult`.
     """
-    X = np.atleast_2d(np.asarray(x, dtype=float))
-    y = np.asarray(y, dtype=float).ravel()
+    X, y = _regression_data(x, y)
     n, p = X.shape
-    if n < 1 or p < 1:
-        raise ValueError("x must have at least 1 row and 1 column")
-    if y.shape[0] != n:
-        raise ValueError("x and y must have the same number of rows")
+    _solver_controls(max_iter, tol)
     theta_arg = getattr(family, "extra", theta) if isinstance(family, Family) else theta
     fam = _resolve_family(family, theta_arg)
-    lk = link if isinstance(link, Link) else _LINKS[link or fam.default_link or fam.canonical]
-    off = np.zeros(n) if offset is None else np.asarray(offset, dtype=float).ravel()
-    w = np.ones(n) if weights is None else np.asarray(weights, dtype=float).ravel()
+    if fam.name == "negativebinomial" and (not np.isfinite(fam.extra) or fam.extra <= 0):
+        raise ValueError("theta must be finite and > 0")
+    _response_support(fam, y)
+    if isinstance(link, Link):
+        lk = link
+    else:
+        link_name = link or fam.default_link or fam.canonical
+        if link_name not in _LINKS:
+            raise ValueError(f"unknown link '{link_name}'.")
+        lk = _LINKS[link_name]
+    off = np.zeros(n) if offset is None else np.asarray(offset, dtype=float)
+    w = np.ones(n) if weights is None else np.asarray(weights, dtype=float)
+    if off.ndim != 1 or off.shape[0] != n or not np.all(np.isfinite(off)):
+        raise ValueError("offset must be a finite one-dimensional array aligned with y")
+    if w.ndim != 1 or w.shape[0] != n or not np.all(np.isfinite(w)):
+        raise ValueError("weights must be a finite one-dimensional array aligned with y")
+    if np.any(w < 0) or not np.any(w > 0):
+        raise ValueError("weights must be non-negative with at least one positive value")
+    active = w > 0
+    rank = int(np.linalg.matrix_rank(X[active]))
 
     # initialise mu in the interior of the family's support
     if fam.name == "binomial":
@@ -305,37 +399,64 @@ def glm(
         mu = np.maximum(y, 0.1) + 0.1
     else:
         mu = y.copy()
-    eta = lk.g(mu)
+    eta = np.asarray(lk.g(mu), dtype=float)
+    if eta.shape != mu.shape or not np.all(np.isfinite(eta)):
+        raise ValueError("link is incompatible with the initial response mean")
 
     beta = np.zeros(p)
     dev_old = np.inf
     n_iter = 0
+    converged = False
     for n_iter in range(1, max_iter + 1):
-        dmu = lk.mu_eta(eta)
-        var = fam.variance(mu)
+        dmu = np.asarray(lk.mu_eta(eta), dtype=float)
+        var = np.asarray(fam.variance(mu), dtype=float)
+        if (
+            dmu.shape != mu.shape
+            or var.shape != mu.shape
+            or not np.all(np.isfinite(dmu))
+            or not np.all(np.isfinite(var))
+            or np.any(dmu == 0)
+            or np.any(var <= 0)
+        ):
+            raise RuntimeError("IRLS encountered an invalid link derivative or variance")
         wls_w = w * dmu**2 / var
         z = (eta - off) + (y - mu) / dmu
+        if not np.all(np.isfinite(wls_w)) or not np.all(np.isfinite(z)):
+            raise RuntimeError("IRLS produced non-finite working values")
         XtW = X.T * wls_w
         new_beta = _solve_psd(XtW @ X, XtW @ z)
         new_eta = X @ new_beta + off
         if not (np.all(np.isfinite(new_beta)) and np.all(np.isfinite(new_eta))):
-            break  # divergence (e.g. complete separation): keep the last finite iterate
+            raise RuntimeError("IRLS diverged before convergence")
         beta, eta = new_beta, new_eta
-        mu = lk.inv(eta)
+        mu = np.asarray(lk.inv(eta), dtype=float)
+        if mu.shape != y.shape or not np.all(np.isfinite(mu)):
+            raise RuntimeError("IRLS link inverse produced invalid fitted means")
+        _mean_support(fam, mu)
         dev = float(np.sum(w * fam.unit_deviance(y, mu)))
+        if not np.isfinite(dev):
+            raise RuntimeError("IRLS produced non-finite deviance")
         if np.abs(dev - dev_old) <= tol * (np.abs(dev) + 0.1):
+            converged = True
             break
         dev_old = dev
+    if not converged:
+        raise RuntimeError(f"IRLS failed to converge in {max_iter} iterations")
 
-    dmu = lk.mu_eta(eta)
-    var = fam.variance(mu)
-    wls_w = np.nan_to_num(w * dmu**2 / var, nan=0.0, posinf=0.0, neginf=0.0)
+    dmu = np.asarray(lk.mu_eta(eta), dtype=float)
+    var = np.asarray(fam.variance(mu), dtype=float)
+    wls_w = w * dmu**2 / var
     xtwx_inv = np.linalg.pinv((X.T * wls_w) @ X)  # pinv: robust to collinear high-dim parents
     dev = float(np.sum(w * fam.unit_deviance(y, mu)))
     if fam.estimate_dispersion:
-        phi = float(np.sum(w * (y - mu) ** 2 / var) / max(n - p, 1))
+        residual_df = int(np.count_nonzero(active)) - rank
+        if residual_df <= 0:
+            raise ValueError("dispersion is not identifiable without positive residual degrees of freedom")
+        phi = float(np.sum(w * (y - mu) ** 2 / var) / residual_df)
     else:
         phi = 1.0
+    if not np.isfinite(phi) or phi <= 0:
+        raise RuntimeError("fit produced an invalid dispersion estimate")
     if robust:
         # per-observation score x_i * w_i (y-mu) (dmu/deta) / V(mu); sandwich B (sum gg') B
         score = X * (w * (y - mu) * dmu / var)[:, None]
@@ -343,9 +464,27 @@ def glm(
         cov = xtwx_inv @ meat @ xtwx_inv
     else:
         cov = phi * xtwx_inv
+    if not np.all(np.isfinite(cov)):
+        raise RuntimeError("fit produced a non-finite covariance matrix")
     se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
     ll = _loglik(fam, y, mu, phi, w)
-    return GLMResult(beta, se, mu, dev, phi, ll, n_iter, fam.name, lk.name, cov, _link=lk)
+    if ll is not None and not np.isfinite(ll):
+        raise RuntimeError("fit produced a non-finite log likelihood")
+    return GLMResult(
+        beta,
+        se,
+        mu,
+        dev,
+        phi,
+        ll,
+        n_iter,
+        fam.name,
+        lk.name,
+        cov,
+        converged=True,
+        rank=rank,
+        _link=lk,
+    )
 
 
 # --------------------------------------------------------------------------- penalized
@@ -368,10 +507,12 @@ class PenalizedResult:
     alpha: float
     l1_ratio: float
     n_iter: int
+    converged: bool = True
+    rank: int | None = None
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         """Predict penalized-regression responses for design rows."""
-        return np.atleast_2d(np.asarray(x, dtype=float)) @ self.coef + self.intercept
+        return _prediction_design(x, self.coef.size) @ self.coef + self.intercept
 
 
 def ridge_regression(
@@ -381,19 +522,18 @@ def ridge_regression(
 
     Minimises ``||y - X b||^2 + alpha ||b||^2``; the intercept (if fitted) is not penalised.
     """
-    if alpha < 0:
-        raise ValueError("alpha must be >= 0")
-    X = np.atleast_2d(np.asarray(x, dtype=float))
-    y = np.asarray(y, dtype=float).ravel()
+    if not np.isfinite(alpha) or alpha < 0:
+        raise ValueError("alpha must be finite and >= 0")
+    X, y = _regression_data(x, y)
     if fit_intercept:
         xm, ym = X.mean(axis=0), y.mean()
         Xc, yc = X - xm, y - ym
     else:
         Xc, yc, xm, ym = X, y, np.zeros(X.shape[1]), 0.0
     p = Xc.shape[1]
-    beta = np.linalg.solve(Xc.T @ Xc + alpha * np.eye(p), Xc.T @ yc)
+    beta = _solve_psd(Xc.T @ Xc + alpha * np.eye(p), Xc.T @ yc)
     intercept = float(ym - xm @ beta) if fit_intercept else 0.0
-    return PenalizedResult(beta, intercept, alpha, 0.0, 0)
+    return PenalizedResult(beta, intercept, alpha, 0.0, 0, converged=True, rank=int(np.linalg.matrix_rank(Xc)))
 
 
 def elastic_net(
@@ -411,12 +551,12 @@ def elastic_net(
     Minimises ``(1/2n) ||y - X b||^2 + alpha ( l1_ratio ||b||_1 + (1 - l1_ratio)/2 ||b||^2 )``.
     ``l1_ratio = 1`` is the lasso (sparse), ``l1_ratio = 0`` is ridge.
     """
-    if alpha < 0:
-        raise ValueError("alpha must be >= 0")
-    if not 0.0 <= l1_ratio <= 1.0:
+    if not np.isfinite(alpha) or alpha < 0:
+        raise ValueError("alpha must be finite and >= 0")
+    if not np.isfinite(l1_ratio) or not 0.0 <= l1_ratio <= 1.0:
         raise ValueError("l1_ratio must be in [0, 1]")
-    X = np.atleast_2d(np.asarray(x, dtype=float))
-    y = np.asarray(y, dtype=float).ravel()
+    _solver_controls(max_iter, tol)
+    X, y = _regression_data(x, y)
     n, p = X.shape
     if fit_intercept:
         xm, ym = X.mean(axis=0), y.mean()
@@ -429,6 +569,7 @@ def elastic_net(
     lam1 = alpha * l1_ratio
     lam2 = alpha * (1.0 - l1_ratio)
     n_iter = 0
+    converged = False
     for n_iter in range(1, max_iter + 1):
         max_delta = 0.0
         for j in range(p):
@@ -441,9 +582,20 @@ def elastic_net(
             beta[j] = new
             r = r - Xc[:, j] * beta[j]
         if max_delta < tol:
+            converged = True
             break
+    if not converged:
+        raise RuntimeError(f"elastic net failed to converge in {max_iter} iterations")
     intercept = float(ym - xm @ beta) if fit_intercept else 0.0
-    return PenalizedResult(beta, intercept, alpha, l1_ratio, n_iter)
+    return PenalizedResult(
+        beta,
+        intercept,
+        alpha,
+        l1_ratio,
+        n_iter,
+        converged=True,
+        rank=int(np.linalg.matrix_rank(Xc)),
+    )
 
 
 def lasso(x: np.ndarray, y: np.ndarray, alpha: float = 1.0, **kw) -> PenalizedResult:
@@ -462,10 +614,12 @@ class RegressionFit:
     fitted: np.ndarray
     scale: float
     n_iter: int
+    converged: bool = True
+    rank: int | None = None
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         """Predict fitted regression values for design rows."""
-        return np.atleast_2d(np.asarray(x, dtype=float)) @ self.coef
+        return _prediction_design(x, self.coef.size) @ self.coef
 
 
 def robust_regression(
@@ -483,13 +637,18 @@ def robust_regression(
     uses the Huber weight (tuning ``c = 1.345`` for 95% Gaussian efficiency); ``tukey`` uses the
     redescending Tukey biweight (``c = 4.685``), which rejects gross outliers entirely.
     """
-    X = np.atleast_2d(np.asarray(x, dtype=float))
-    y = np.asarray(y, dtype=float).ravel()
+    _solver_controls(max_iter, tol)
+    X, y = _regression_data(x, y)
+    if method not in {"huber", "tukey"}:
+        raise ValueError("method must be 'huber' or 'tukey'.")
     if c is None:
         c = 1.345 if method == "huber" else 4.685
+    if not np.isfinite(c) or c <= 0:
+        raise ValueError("c must be finite and > 0")
     beta = np.linalg.lstsq(X, y, rcond=None)[0]
     n_iter = 0
     scale = 1.0
+    converged = False
     for n_iter in range(1, max_iter + 1):
         r = y - X @ beta
         scale = max(np.median(np.abs(r - np.median(r))) / 0.6745, 1e-8)
@@ -498,15 +657,20 @@ def robust_regression(
             w = np.where(np.abs(u) <= c, 1.0, c / np.maximum(np.abs(u), 1e-12))
         elif method == "tukey":
             w = np.where(np.abs(u) <= c, (1.0 - (u / c) ** 2) ** 2, 0.0)
-        else:
-            raise ValueError("method must be 'huber' or 'tukey'.")
+        if not np.any(w > 0):
+            raise RuntimeError("robust regression assigned zero weight to every observation")
         XtW = X.T * w
         new = _solve_psd(XtW @ X, XtW @ y)
+        if not np.all(np.isfinite(new)):
+            raise RuntimeError("robust regression produced non-finite coefficients")
         if np.max(np.abs(new - beta)) < tol:
             beta = new
+            converged = True
             break
         beta = new
-    return RegressionFit(beta, X @ beta, float(scale), n_iter)
+    if not converged:
+        raise RuntimeError(f"robust regression failed to converge in {max_iter} iterations")
+    return RegressionFit(beta, X @ beta, float(scale), n_iter, converged=True, rank=int(np.linalg.matrix_rank(X)))
 
 
 def quantile_regression(
@@ -520,20 +684,53 @@ def quantile_regression(
     """
     if not 0.0 < tau < 1.0:
         raise ValueError("tau must be in (0, 1).")
-    X = np.atleast_2d(np.asarray(x, dtype=float))
-    y = np.asarray(y, dtype=float).ravel()
+    _solver_controls(max_iter, tol)
+    if not np.isfinite(eps) or eps <= 0:
+        raise ValueError("eps must be finite and > 0")
+    X, y = _regression_data(x, y)
     beta = np.linalg.lstsq(X, y, rcond=None)[0]
     n_iter = 0
+    converged = False
     for n_iter in range(1, max_iter + 1):
         r = y - X @ beta
         w = np.where(r >= 0, tau, 1.0 - tau) / np.maximum(np.abs(r), eps)
         XtW = X.T * w
         new = _solve_psd(XtW @ X, XtW @ y)
+        if not np.all(np.isfinite(new)):
+            raise RuntimeError("quantile regression produced non-finite coefficients")
         if np.max(np.abs(new - beta)) < tol:
             beta = new
+            converged = True
             break
         beta = new
-    return RegressionFit(beta, X @ beta, float(np.mean(np.abs(y - X @ beta))), n_iter)
+    if not converged:
+        # IRLS can cycle around a non-smooth optimum. Resolve that case with the
+        # exact linear-program formulation rather than returning the last iterate.
+        n, p = X.shape
+        objective = np.concatenate([np.zeros(p), np.full(n, tau), np.full(n, 1.0 - tau)])
+        equality = sparse.hstack(
+            [sparse.csr_matrix(X), sparse.eye(n, format="csr"), -sparse.eye(n, format="csr")],
+            format="csr",
+        )
+        lp = optimize.linprog(
+            objective,
+            A_eq=equality,
+            b_eq=y,
+            bounds=[(None, None)] * p + [(0.0, None)] * (2 * n),
+            method="highs",
+        )
+        if not lp.success or lp.x is None or not np.all(np.isfinite(lp.x[:p])):
+            raise RuntimeError(f"quantile regression failed to converge: {lp.message}")
+        beta = lp.x[:p]
+        n_iter += int(getattr(lp, "nit", 0))
+    return RegressionFit(
+        beta,
+        X @ beta,
+        float(np.mean(np.abs(y - X @ beta))),
+        n_iter,
+        converged=True,
+        rank=int(np.linalg.matrix_rank(X)),
+    )
 
 
 __all__ = [
