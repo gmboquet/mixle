@@ -7,6 +7,7 @@ from mixle.models import (
     TransEKnowledgeGraphModel,
     TruncatedDirichletProcessMixtureModel,
     baum_welch_pomdp,
+    discrete_conditional_independence,
     discrete_conditional_mutual_information,
     fit_induced_pcfg,
     fit_truncated_dpm,
@@ -204,6 +205,50 @@ class DependenceAndCausalityHelpersTestCase(unittest.TestCase):
         self.assertTrue(skeleton.has_edge(1, 2))
         self.assertFalse(skeleton.has_edge(0, 2))
 
+    def test_insufficient_gaussian_evidence_is_inconclusive(self):
+        result = gaussian_conditional_independence([[0.0, 1.0], [1.0, 0.0], [2.0, 2.0]], 0, 1)
+        self.assertEqual(result.status, "inconclusive")
+        self.assertIsNone(result.independent)
+        self.assertIsNone(result.p_value)
+
+    def test_discrete_test_uses_a_calibrated_p_value(self):
+        rng = np.random.RandomState(9)
+        independent = np.column_stack([rng.randint(0, 2, 2000), rng.randint(0, 2, 2000)])
+        dependent_x = rng.randint(0, 2, 2000)
+        dependent = np.column_stack([dependent_x, dependent_x])
+        null_result = discrete_conditional_independence(independent, 0, 1, alpha=0.05)
+        alternative_result = discrete_conditional_independence(dependent, 0, 1, alpha=0.05)
+        self.assertEqual(null_result.status, "independent")
+        self.assertGreater(null_result.p_value, 0.05)
+        self.assertEqual(alternative_result.status, "dependent")
+        self.assertLess(alternative_result.p_value, 0.05)
+
+    def test_discrete_pc_uses_significance_not_mutual_information_scale(self):
+        rng = np.random.RandomState(11)
+        x = rng.randint(0, 2, 12000)
+        y = np.where(rng.random_sample(len(x)) < 0.45, 1 - x, x)
+        data = np.column_stack([x, y])
+        self.assertLess(discrete_conditional_mutual_information(data, 0, 1), 0.05)
+        self.assertEqual(discrete_conditional_independence(data, 0, 1).status, "dependent")
+        skeleton = learn_pc_skeleton(data, alpha=0.05, max_cond_set=0, method="discrete")
+        self.assertTrue(skeleton.has_edge(0, 1))
+
+    def test_ci_problem_schema_is_validated(self):
+        data = np.arange(30.0).reshape(10, 3)
+        invalid = (
+            (0, 0, ()),
+            (0, 1, (0,)),
+            (0, 1, (2, 2)),
+            (0, 3, ()),
+        )
+        for x, y, given in invalid:
+            with self.subTest(x=x, y=y, given=given), self.assertRaises(ValueError):
+                gaussian_conditional_independence(data, x, y, given=given)
+        with self.assertRaises(ValueError):
+            gaussian_conditional_independence(data, 0, 1, ridge=0)
+        with self.assertRaises(ValueError):
+            gaussian_conditional_independence(data, 0, 1, alpha=1)
+
     def test_orient_v_structures_finds_gaussian_collider(self):
         rng = np.random.RandomState(6)
         x = rng.normal(size=1500)
@@ -220,6 +265,21 @@ class DependenceAndCausalityHelpersTestCase(unittest.TestCase):
         self.assertFalse(skeleton.has_edge(0, 2))
         self.assertIn((0, 1), graph.directed_edges)
         self.assertIn((2, 1), graph.directed_edges)
+
+    def test_orientation_rejects_conflicting_collider_evidence(self):
+        from mixle.models import CausalSkeleton
+
+        skeleton = CausalSkeleton(
+            edges={(0, 1), (0, 2), (1, 3)},
+            separating_sets={(1, 2): frozenset(), (0, 3): frozenset()},
+            variable_names=["a", "b", "c", "d"],
+            all_separating_sets={
+                (1, 2): (frozenset(),),
+                (0, 3): (frozenset(),),
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "conflicting orientations"):
+            orient_v_structures(skeleton)
 
 
 if __name__ == "__main__":
