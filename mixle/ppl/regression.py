@@ -1050,9 +1050,11 @@ def regression_fit(
     tol: float = 1e-9,
     quantile=None,
     l2=0.0,
-    **_,
+    **unknown,
 ) -> RandomVariable:
     """Fit a PPL regression expression using the appropriate linear-model route."""
+    if unknown:
+        raise TypeError(f"unsupported regression fit control(s): {', '.join(sorted(unknown))}")
     if how not in {"auto", "map"}:
         raise NotImplementedError(
             f"regression's specialized backend implements point-estimate how='map' only, not how={how!r}."

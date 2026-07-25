@@ -188,6 +188,11 @@ def _validate_loglik(loglik: np.ndarray, fn_name: str) -> np.ndarray:
         raise ValueError(
             f"{fn_name}(): loglik must be a non-empty (n_draws, n_obs) log-likelihood matrix, got shape {ll.shape}."
         )
+    if ll.shape[0] < 2:
+        raise ValueError(
+            f"{fn_name}(): at least two genuine posterior draws are required; "
+            "a one-row plug-in log likelihood is not a Bayesian predictive diagnostic."
+        )
     if not np.isfinite(ll).all():
         raise ValueError(f"{fn_name}(): loglik must be finite (no NaN or Inf).")
     return ll
@@ -198,7 +203,7 @@ def waic(loglik: np.ndarray) -> dict:
     loglik = _validate_loglik(loglik, "waic")
     s, n = loglik.shape
     lppd_i = _lppd_pointwise(loglik)
-    p_waic_i = np.var(loglik, axis=0, ddof=1) if s > 1 else np.zeros(n)
+    p_waic_i = np.var(loglik, axis=0, ddof=1)
     elpd_i = lppd_i - p_waic_i
     elpd = float(np.sum(elpd_i))
     se = float(2.0 * np.sqrt(n * np.var(elpd_i, ddof=1))) if n > 1 else float("nan")

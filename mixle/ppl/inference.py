@@ -2913,7 +2913,17 @@ def _indexed_target(rv: RandomVariable, data, given: dict):
 
 
 def indexed_fit(
-    rv: RandomVariable, data, *, given=None, how="map", rng=None, draws=2000, burn=1000, thin=1, **_
+    rv: RandomVariable,
+    data,
+    *,
+    given=None,
+    how="map",
+    rng=None,
+    draws=2000,
+    burn=1000,
+    thin=1,
+    max_iter=2000,
+    tol=1e-8,
 ) -> RandomVariable:
     """Fit a flat model with a data-indexed latent vector (``theta[Field("g")]``).
 
@@ -2922,6 +2932,17 @@ def indexed_fit(
     Metropolis and returns a full :class:`Posterior` (per-latent summary / credible intervals). Other
     ``how`` values (hmc/nuts) are not yet wired for the indexed target.
     """
+    if isinstance(max_iter, (bool, np.bool_)) or not isinstance(max_iter, (int, np.integer)):
+        raise TypeError("indexed max_iter must be a positive integer")
+    max_iter = int(max_iter)
+    if max_iter <= 0:
+        raise ValueError("indexed max_iter must be a positive integer")
+    if isinstance(tol, (bool, np.bool_)) or not isinstance(tol, (int, float, np.integer, np.floating)):
+        raise TypeError("indexed tol must be a finite non-negative real number")
+    tol = float(tol)
+    if not np.isfinite(tol) or tol < 0.0:
+        raise ValueError("indexed tol must be a finite non-negative real number")
+
     log_target, slots, extract, rep, (dmean, dstd) = _indexed_target(rv, data, given)
 
     if how == "mcmc":
@@ -2951,7 +2972,14 @@ def indexed_fit(
     from scipy.optimize import minimize
 
     u0 = _init_u(slots, dmean, dstd)
-    res = minimize(lambda u: -log_target(u), u0, method="L-BFGS-B", options={"maxiter": 2000})
+    res = minimize(
+        lambda u: -log_target(u),
+        u0,
+        method="L-BFGS-B",
+        options={"maxiter": max_iter, "ftol": tol},
+    )
+    if not bool(res.success) or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x)):
+        raise RuntimeError(f"indexed MAP optimization failed: {res.message}")
     latents, scalars = extract(res.x)
     pop = rv._family.make_dist(tuple(rep(res.x)), rv._name)
     return RandomVariable._bound(pop, name=rv._name, result=IndexedPosterior(latents, scalars))

@@ -205,6 +205,7 @@ def _density_fit(rv: RandomVariable, data: Any, **kw: Any) -> RandomVariable:
         "delta",
         "engine",
         "given",
+        "how",
         "its",
         "max_its",
         "missing",
@@ -217,6 +218,10 @@ def _density_fit(rv: RandomVariable, data: Any, **kw: Any) -> RandomVariable:
     unknown = sorted(set(kw) - supported)
     if unknown:
         raise TypeError(f"unsupported neural-density fit control(s): {', '.join(unknown)}")
+    if kw.get("how", "auto") not in {"auto", "em"}:
+        raise NotImplementedError(
+            f"neural-density fitting implements EM-style optimization, not how={kw['how']!r}"
+        )
     if kw.get("missing", "error") != "error":
         raise NotImplementedError("neural-density fitting does not support missing='marginalize'")
     if "its" in kw and kw.get("max_its", 100) != 100:

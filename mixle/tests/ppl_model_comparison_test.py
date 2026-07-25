@@ -46,10 +46,10 @@ class DiagnosticsMathTestCase(unittest.TestCase):
         self.assertTrue(np.isfinite(w["se"]))
         self.assertEqual(len(w["pointwise"]), len(self.y))
 
-    def test_single_draw_waic_is_defined_but_loo_is_rejected(self):
+    def test_single_draw_is_not_a_bayesian_predictive_diagnostic(self):
         single = self.good[:1]
-        self.assertTrue(np.isfinite(waic(single)["waic"]))
-        self.assertEqual(waic(single)["p_waic"], 0.0)
+        with self.assertRaises(ValueError):
+            waic(single)
         with self.assertRaises(ValueError):
             psis_loo(single)
 
@@ -142,11 +142,13 @@ class RandomVariableComparisonTestCase(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertIn("aic", rows[0])
 
-    def test_point_estimate_fit_falls_back_to_single_draw(self):
+    def test_point_estimate_exposes_plugin_score_not_bayesian_criteria(self):
         m = Normal(Normal(0, 5, name="mu"), 1.0).fit(self.data, how="map")
-        w = m.waic(self.data)
-        self.assertEqual(w["n_draws"], 1)
-        self.assertTrue(np.isfinite(w["waic"]))
+        with self.assertRaises(NotImplementedError):
+            m.waic(self.data)
+        with self.assertRaises(NotImplementedError):
+            m.loo(self.data)
+        self.assertEqual(m.plugin_log_likelihood(self.data).shape, (len(self.data),))
 
     def test_waic_and_loo_on_empty_data_raise(self):
         # RandomVariable.waic/.loo route through pointwise_log_likelihood into waic()/psis_loo(); an
