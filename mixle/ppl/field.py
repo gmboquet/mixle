@@ -5,7 +5,7 @@ over an index grid) carrying a Gaussian-process / Gaussian-Markov-random-field p
 arbitrary list of heterogeneous *proxy* likelihoods (each its own forward model + noise), all coupled to
 the one field and fit in a single joint optimization. The Laplace posterior is then read off any node --
 the field itself or any proxy's latent parameters -- because information is additive: the joint posterior
-precision is the prior precision plus every proxy's Fisher information, evaluated at the joint MAP.
+precision is the prior precision plus every proxy's observed local curvature, evaluated at the joint MAP.
 
 The motivating instance is the earth-field engine: a latent temperature curve ``T(t)`` inferred jointly
 from a benthic delta18O forward model (Gaussian) and foram thermal niches (logistic occupancy), where
@@ -774,9 +774,10 @@ class FieldPosterior:
     """The joint posterior. ``posterior(node)`` returns ``(mean, sd)`` for the field or any proxy param.
 
     The Laplace covariance is the inverse of the joint negative-log-posterior Hessian at the MAP -- the
-    prior precision plus every proxy's Fisher information. ``posterior(field, coupling=False)`` instead
+    prior precision plus every proxy's observed local curvature. ``posterior(field, coupling=False)`` instead
     inverts only the field's own Hessian block (the posterior conditional on the other nodes at their
-    MAP), which is the per-proxy additive-information picture.
+    MAP). The subset diagnostic in :meth:`field_posterior` retains all cross-field and nuisance-parameter
+    curvature contributed by the selected proxies.
     """
 
     map_values: dict
@@ -786,11 +787,141 @@ class FieldPosterior:
     _hessian: np.ndarray
     objective: float
     _field_prior: np.ndarray = _dc_field(default_factory=lambda: np.zeros((0, 0)))
-    _proxy_info: dict = _dc_field(default_factory=dict)  # proxy label -> field Fisher-information block
+    _proxy_info: dict = _dc_field(default_factory=dict)  # proxy label -> full observed-curvature block
+    _field_coordinate_count: int = 0
     _supports: dict = _dc_field(default_factory=dict)  # node -> 'real' | 'positive'
-    _marg_var: dict = _dc_field(default_factory=dict)  # node -> marginal variance (low-rank path, no full cov)
+    _marg_var: dict = _dc_field(default_factory=dict)  # node -> natural-space marginal variance
+    _variational_params: dict = _dc_field(default_factory=dict)  # node -> unconstrained (mean, variance)
     _parameter_ids: dict = _dc_field(default_factory=dict)  # public node alias -> stable layout ID
     initialization_space: str = "natural"
+    converged: bool = True
+    iterations: int = 0
+    termination_reason: str = "not-reported"
+    curvature_method: str = "none"
+    curvature_rank: int | None = None
+    curvature_dim: int | None = None
+    regularization: float = 0.0
+    uncertainty_status: str = "unavailable"
+    approximation: str = "none"
+    multistart_receipt: tuple = ()
+
+    def __post_init__(self):
+        if not isinstance(self.map_values, dict) or not isinstance(self._layout, dict):
+            raise TypeError("posterior values and layout must be dictionaries.")
+        intervals = []
+        for node, bounds in self._layout.items():
+            if (
+                not isinstance(node, str)
+                or not node
+                or not isinstance(bounds, (tuple, list))
+                or len(bounds) != 2
+            ):
+                raise ValueError("posterior layout entries must be named (start, stop) intervals.")
+            lo, hi = bounds
+            if any(isinstance(x, (bool, np.bool_)) or not isinstance(x, (int, np.integer)) for x in (lo, hi)):
+                raise ValueError(f"posterior layout for {node!r} must contain integer bounds.")
+            lo, hi = int(lo), int(hi)
+            if lo < 0 or hi < lo:
+                raise ValueError(f"posterior layout for {node!r} is invalid.")
+            intervals.append((lo, hi, node))
+            if node not in self.map_values:
+                raise ValueError(f"posterior layout node {node!r} has no value.")
+            value = np.atleast_1d(np.asarray(self.map_values[node], dtype=float))
+            if value.size != hi - lo or not np.isfinite(value).all():
+                raise ValueError(f"posterior value for {node!r} must contain {hi - lo} finite value(s).")
+            if self._supports.get(node, "real") not in {"real", "positive"}:
+                raise ValueError(f"posterior support for {node!r} is invalid.")
+            if self._supports.get(node) == "positive" and np.any(value <= 0.0):
+                raise ValueError(f"posterior value for positive node {node!r} must be strictly positive.")
+        intervals.sort()
+        cursor = 0
+        for lo, hi, node in intervals:
+            if lo != cursor:
+                raise ValueError(f"posterior layout is not contiguous at node {node!r}.")
+            cursor = hi
+        dim = cursor
+        if (
+            isinstance(self._field_coordinate_count, (bool, np.bool_))
+            or not isinstance(self._field_coordinate_count, (int, np.integer))
+            or not 0 <= self._field_coordinate_count <= dim
+        ):
+            raise ValueError("posterior field-coordinate count is invalid.")
+        if not np.isfinite(self.objective):
+            raise FloatingPointError("posterior objective must be finite.")
+        if self._cov is None:
+            self._cov = np.zeros((0, 0))
+        cov = np.asarray(self._cov, dtype=float)
+        if cov.size:
+            self._cov = _validate_symmetric_matrix(cov, dim, "posterior covariance", positive_definite=True)
+        elif cov.shape not in {(0,), (0, 0)}:
+            raise ValueError("an unavailable posterior covariance must be empty.")
+        if self._hessian is None:
+            self._hessian = np.zeros((0, 0))
+        hessian = np.asarray(self._hessian, dtype=float)
+        if hessian.size:
+            self._hessian = _validate_symmetric_matrix(
+                hessian, dim, "posterior curvature", positive_definite=True
+            )
+        elif hessian.shape not in {(0,), (0, 0)}:
+            raise ValueError("an unavailable posterior curvature must be empty.")
+        prior = np.asarray(self._field_prior, dtype=float)
+        if prior.size:
+            self._field_prior = _validate_symmetric_matrix(
+                prior, dim, "joint prior curvature", positive_definite=False
+            )
+        for label, block in self._proxy_info.items():
+            if not isinstance(label, str) or not label:
+                raise ValueError("proxy-curvature labels must be non-empty strings.")
+            block = np.asarray(block, dtype=float)
+            if block.shape != (dim, dim) or not np.isfinite(block).all() or not np.allclose(block, block.T):
+                raise ValueError(f"proxy curvature {label!r} must be a finite symmetric {dim}x{dim} matrix.")
+            self._proxy_info[label] = 0.5 * (block + block.T)
+        for node, variance in self._marg_var.items():
+            if node not in self._layout:
+                raise ValueError(f"marginal variance names unknown node {node!r}.")
+            lo, hi = self._layout[node]
+            variance = np.atleast_1d(np.asarray(variance, dtype=float))
+            if variance.size != hi - lo or not np.isfinite(variance).all() or np.any(variance < 0.0):
+                raise ValueError(f"marginal variance for {node!r} must be finite and non-negative.")
+            self._marg_var[node] = variance
+        for node, pair in self._variational_params.items():
+            if node not in self._layout or not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise ValueError(f"variational parameters for {node!r} are malformed.")
+            lo, hi = self._layout[node]
+            mean_u, variance_u = (np.atleast_1d(np.asarray(x, dtype=float)) for x in pair)
+            if (
+                mean_u.size != hi - lo
+                or variance_u.size != hi - lo
+                or not np.isfinite(mean_u).all()
+                or not np.isfinite(variance_u).all()
+                or np.any(variance_u <= 0.0)
+            ):
+                raise ValueError(f"variational parameters for {node!r} must be finite with positive variance.")
+            self._variational_params[node] = (mean_u, variance_u)
+        if not isinstance(self.converged, (bool, np.bool_)):
+            raise TypeError("posterior convergence status must be boolean.")
+        if not isinstance(self.iterations, (int, np.integer)) or self.iterations < 0:
+            raise ValueError("posterior iteration count must be a non-negative integer.")
+        if not isinstance(self.termination_reason, str) or not self.termination_reason:
+            raise ValueError("posterior termination reason must be a non-empty string.")
+        if not isinstance(self.curvature_method, str) or not self.curvature_method:
+            raise ValueError("posterior curvature method must be a non-empty string.")
+        if not isinstance(self.uncertainty_status, str) or not self.uncertainty_status:
+            raise ValueError("posterior uncertainty status must be a non-empty string.")
+        if not isinstance(self.approximation, str) or not self.approximation:
+            raise ValueError("posterior approximation description must be a non-empty string.")
+        if (self.curvature_rank is None) != (self.curvature_dim is None):
+            raise ValueError("posterior curvature rank and dimension must be reported together.")
+        if self.curvature_rank is not None and (
+            isinstance(self.curvature_rank, (bool, np.bool_))
+            or isinstance(self.curvature_dim, (bool, np.bool_))
+            or not isinstance(self.curvature_rank, (int, np.integer))
+            or not isinstance(self.curvature_dim, (int, np.integer))
+            or not 0 <= self.curvature_rank <= self.curvature_dim <= dim
+        ):
+            raise ValueError("posterior curvature rank receipt is invalid.")
+        if self.regularization != 0.0:
+            raise ValueError("posterior regularization must be reported as zero; hidden covariance jitter is forbidden.")
 
     def mean(self, node: str) -> np.ndarray:
         """Return the posterior mean/MAP value for ``node`` in its natural parameter space."""
@@ -820,26 +951,42 @@ class FieldPosterior:
             raise ValueError(f"node {node!r} has only marginal variances (low-rank fit); use sd()/posterior().")
         s = self._slice(node)
         j = self._jacobian(node)
-        return (j[:, None] * self._cov[s, s]) * j[None, :]
+        if not self._cov.size:
+            raise ValueError("this posterior carries no covariance.")
+        out = (j[:, None] * self._cov[s, s]) * j[None, :]
+        return _validate_symmetric_matrix(out, s.stop - s.start, f"covariance for {node!r}", positive_definite=True)
 
     def sd(self, node: str) -> np.ndarray:
         """Return posterior standard deviations for ``node`` in its natural parameter space."""
-        if node in self._marg_var:  # low-rank (Woodbury) path: only marginal variances were formed
-            j = self._jacobian(node)
-            return np.sqrt(np.clip(self._marg_var[node], 1e-12, None)) * j
-        return np.sqrt(np.clip(np.diag(np.atleast_2d(self.cov(node))), 1e-12, None))
+        if node in self._marg_var:  # low-rank / variational path stores natural-space marginal variance
+            return np.sqrt(self._marg_var[node])
+        diagonal = np.diag(np.atleast_2d(self.cov(node)))
+        if not np.isfinite(diagonal).all() or np.any(diagonal <= 0.0):
+            raise ValueError(f"covariance for {node!r} does not define positive finite standard deviations.")
+        return np.sqrt(diagonal)
 
     def posterior(self, node: str, *, coupling: bool = True) -> tuple[np.ndarray, np.ndarray]:
         """``(mean, sd)`` for ``node`` in its natural space. ``coupling=True`` (default) marginalizes the
         other nodes; ``coupling=False`` fixes them at the MAP for an additive-information diagnostic."""
+        if not isinstance(coupling, (bool, np.bool_)):
+            raise TypeError("coupling must be boolean.")
+        self._slice(node)
         m = self.map_values[node]
         if coupling:
             sd = self.sd(node)
         else:
+            if not self._hessian.size:
+                raise ValueError("conditional uncertainty needs a full posterior curvature matrix.")
             s = self._slice(node)
             block = self._hessian[s, s]
+            block = _validate_symmetric_matrix(
+                block, s.stop - s.start, f"conditional curvature for {node!r}", positive_definite=True
+            )
             j = self._jacobian(node)
-            sd_u = np.sqrt(np.clip(np.diag(np.linalg.inv(np.atleast_2d(block))), 1e-12, None))
+            diagonal = np.diag(np.linalg.inv(np.atleast_2d(block)))
+            if not np.isfinite(diagonal).all() or np.any(diagonal <= 0.0):
+                raise ValueError(f"conditional covariance for {node!r} is invalid.")
+            sd_u = np.sqrt(diagonal)
             sd = j * sd_u
         lo, hi = self._layout[node]
         if hi - lo == 1:  # a scalar node returns scalars, matching its scalar MAP value
@@ -849,19 +996,49 @@ class FieldPosterior:
     def field_posterior(self, include: Sequence[str] | None = None) -> tuple[np.ndarray, np.ndarray]:
         """The field posterior ``(mean, sd)`` under a *subset* of proxies, evaluated at the one joint MAP.
 
-        Because information is additive, the field posterior precision under any subset of proxies is the
-        prior precision plus those proxies' Fisher-information blocks. ``include=None`` uses every proxy
+        Because observed curvature is additive, the joint local precision under a subset of proxies is the
+        prior curvature plus those proxies' full observed-curvature blocks. ``include=None`` uses every proxy
         (the joint posterior); ``include=["gauss"]`` uses only that proxy -- so you can read how much each
         proxy sharpens the shared field without re-fitting (which would be ill-posed for a single proxy
-        with a free forward-model gain). The mean is the joint MAP for every subset.
+        with a free forward-model gain). Cross-field and nuisance-parameter blocks are retained before the
+        primary-field marginal is extracted. This remains a local-curvature ablation at the joint MAP, not a
+        separately normalized posterior. The mean is the joint MAP for every subset.
         """
+        if not self._field_prior.size or not self._proxy_info:
+            raise ValueError("proxy-subset uncertainty is available only for a Laplace fit.")
         labels = list(self._proxy_info) if include is None else list(include)
         prec = np.array(self._field_prior, dtype=float)
+        selected = []
         for lab in labels:
             if lab not in self._proxy_info:
                 raise KeyError(f"unknown proxy {lab!r}; proxies are {list(self._proxy_info)}.")
-            prec = prec + self._proxy_info[lab]
-        sd = np.sqrt(np.clip(np.diag(np.linalg.inv(prec)), 1e-12, None))
+            block = self._proxy_info[lab]
+            selected.append(block)
+            prec = prec + block
+        # Always retain every latent-field coordinate so prior and cross-field coupling are represented.
+        # Retain a nuisance coordinate only when a selected proxy contributes curvature involving it;
+        # unrelated parameters otherwise form intentional all-zero rows in the full prior and must not make
+        # a subset diagnostic appear singular.
+        active = set(range(self._field_coordinate_count))
+        if selected:
+            touch_metric = np.max(np.abs(np.stack(selected)), axis=(0, 1))
+            scale = max(float(np.max(touch_metric)), 1.0)
+            touched = np.flatnonzero(touch_metric > 1.0e-12 * scale)
+            active.update(int(i) for i in touched)
+        active = np.asarray(sorted(active), dtype=int)
+        if not active.size:
+            raise ValueError("selected proxies contain no primary-field curvature.")
+        active_prec = prec[np.ix_(active, active)]
+        prec = _validate_symmetric_matrix(
+            active_prec, active.size, "selected-proxy observed curvature", positive_definite=True
+        )
+        cov = np.linalg.inv(prec)
+        s = self._slice(self._field_name)
+        primary_positions = [int(np.flatnonzero(active == i)[0]) for i in range(s.start, s.stop)]
+        diagonal = np.diag(cov[np.ix_(primary_positions, primary_positions)])
+        if not np.isfinite(diagonal).all() or np.any(diagonal <= 0.0):
+            raise ValueError("selected proxies do not define valid primary-field uncertainty.")
+        sd = np.sqrt(diagonal)
         return self.map_values[self._field_name], sd
 
     def sample(self, size: int = 1, rng=None, *, nodes: Sequence[str] | None = None, given: dict | None = None) -> dict:
@@ -890,8 +1067,23 @@ class FieldPosterior:
         Returns:
             ``{node: ndarray}`` with shape ``(size,)`` for scalar nodes and ``(size, dim)`` otherwise.
         """
+        if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)) or size <= 0:
+            raise ValueError("sample size must be a positive integer.")
+        size = int(size)
         if rng is None or isinstance(rng, (int, np.integer)):
             rng = np.random.RandomState(None if rng is None else int(rng))
+        if not hasattr(rng, "standard_normal"):
+            raise TypeError("rng must be an integer seed or a NumPy random generator.")
+        if nodes is not None:
+            if isinstance(nodes, (str, bytes)) or not isinstance(nodes, Sequence):
+                raise TypeError("nodes must be a sequence of unique node names.")
+            nodes = list(nodes)
+            if any(not isinstance(node, str) for node in nodes) or len(nodes) != len(set(nodes)):
+                raise ValueError("nodes must contain unique node names.")
+            for node in nodes:
+                self._slice(node)
+        if given is not None and not isinstance(given, dict):
+            raise TypeError("given must be a mapping from node names to natural-space values.")
         has_full = self._cov is not None and np.asarray(self._cov).size > 0
         if not has_full and not self._marg_var:
             raise ValueError(
@@ -902,7 +1094,14 @@ class FieldPosterior:
 
         def _to_unconstrained(node, value):
             v = np.atleast_1d(np.asarray(value, dtype=float))
-            return np.log(np.clip(v, 1e-12, None)) if self._supports.get(node) == "positive" else v
+            lo, hi = self._layout[node]
+            if v.size != hi - lo or not np.isfinite(v).all():
+                raise ValueError(f"value for {node!r} must contain {hi - lo} finite value(s).")
+            if self._supports.get(node) == "positive":
+                if np.any(v <= 0.0):
+                    raise ValueError(f"value for positive node {node!r} must be strictly positive.")
+                return np.log(v)
+            return v
 
         mu = np.zeros(dim)
         for node, (lo, hi) in self._layout.items():
@@ -934,19 +1133,30 @@ class FieldPosterior:
             solve = np.linalg.solve(s_oo, np.concatenate([(np.array(x_o) - mu[obs])[:, None], s_uo.T], axis=1))
             mu_u = mu[unobs] + s_uo @ solve[:, 0]
             cov_u = s_uu - s_uo @ solve[:, 1:]
-            chol = np.linalg.cholesky(0.5 * (cov_u + cov_u.T) + 1e-12 * np.eye(unobs.size))
+            cov_u = _validate_symmetric_matrix(
+                cov_u, unobs.size, "conditional posterior covariance", positive_definite=True
+            )
+            chol = np.linalg.cholesky(cov_u)
             draws = np.empty((size, dim))
             draws[:, obs] = np.array(x_o)[None, :]
             draws[:, unobs] = mu_u[None, :] + z[:, : unobs.size] @ chol.T
         elif has_full:
             cov = np.atleast_2d(np.asarray(self._cov, dtype=float))
-            chol = np.linalg.cholesky(cov + 1e-12 * np.eye(dim))
+            chol = np.linalg.cholesky(cov)
             draws = mu[None, :] + z @ chol.T
         else:  # mean-field: independent per-node marginal draws
             sdv = np.zeros(dim)
             for node, (lo, hi) in self._layout.items():
-                if node in self._marg_var:
-                    sdv[lo:hi] = np.sqrt(np.clip(np.atleast_1d(self._marg_var[node]), 1e-12, None))
+                if node in self._variational_params:
+                    mean_u, variance_u = self._variational_params[node]
+                    mu[lo:hi] = mean_u
+                    sdv[lo:hi] = np.sqrt(variance_u)
+                elif node in self._marg_var:
+                    if self._supports.get(node) == "positive":
+                        raise ValueError(
+                            f"positive node {node!r} needs unconstrained variational parameters for sampling."
+                        )
+                    sdv[lo:hi] = np.sqrt(np.atleast_1d(self._marg_var[node]))
             draws = mu[None, :] + z * sdv[None, :]
         out = {}
         for node in self._layout if nodes is None else nodes:
@@ -1000,12 +1210,15 @@ def fit_field(
     proxies: Sequence[Proxy],
     *,
     how: str = "laplace",
-    max_iter: int = 500,
+    max_iter: int = 1000,
     lr: float = 0.4,
     init: dict | None = None,
     vi_steps: int = 400,
     vi_lr: float = 0.05,
     vi_samples: int = 4,
+    rng=None,
+    tolerance_grad: float = 1.0e-6,
+    tolerance_change: float = 1.0e-9,
 ) -> FieldPosterior:
     """Fit a latent field jointly to a list of proxy likelihoods.
 
@@ -1014,14 +1227,27 @@ def fit_field(
     ``how='laplace'`` adds the Gaussian posterior (the inverse-Hessian covariance, exact when every
     factor is Gaussian; needs a twice-differentiable forward); ``how='gauss_newton'`` builds the posterior
     from ``J^T J + prior`` with ``J`` the Jacobian of the standardized residual -- first-order only, so it
-    is the posterior for the sparse adjoint solve (where ``how='laplace'`` cannot run) and is exact for a
-    linear forward; ``how='vi'`` fits a mean-field Gaussian variational posterior (reparameterized ADVI on
-    the unconstrained vector), the calibrated approximation for genuinely non-Gaussian posteriors (e.g. with
-    total-variation / Potts priors), and it too is first-order so it works through the sparse solve.
-    Posteriors over any node are read off the returned :class:`FieldPosterior`.
+    works with the sparse adjoint solve (where ``how='laplace'`` cannot run) and is exact only for a linear
+    Gaussian forward with fixed scale; ``how='vi'`` fits a mean-field Gaussian variational posterior
+    (reparameterized ADVI on the unconstrained vector), an explicit approximation for genuinely
+    non-Gaussian posteriors (e.g. with total-variation / Potts priors), and it too is first-order so it
+    works through the sparse solve. Every result reports convergence and uncertainty-approximation
+    metadata; posteriors over any node are read off the returned :class:`FieldPosterior`.
     """
     if how not in ("map", "laplace", "gauss_newton", "vi"):
         raise ValueError("how must be 'map', 'laplace', 'gauss_newton', or 'vi'.")
+    for value, label in ((max_iter, "max_iter"), (vi_steps, "vi_steps"), (vi_samples, "vi_samples")):
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value <= 0:
+            raise ValueError(f"{label} must be a positive integer.")
+    max_iter, vi_steps, vi_samples = int(max_iter), int(vi_steps), int(vi_samples)
+    lr = _positive_scalar(lr, "lr")
+    vi_lr = _positive_scalar(vi_lr, "vi_lr")
+    tolerance_grad = _positive_scalar(tolerance_grad, "tolerance_grad")
+    tolerance_change = _positive_scalar(tolerance_change, "tolerance_change")
+    if rng is None or isinstance(rng, (int, np.integer)):
+        rng = np.random.RandomState(0 if rng is None else int(rng))
+    if not hasattr(rng, "standard_normal"):
+        raise TypeError("rng must be an integer seed or a NumPy random generator.")
     torch = _torch()
     if init is not None and not isinstance(init, dict):
         raise TypeError("init must be a mapping from node names to natural-space values.")
@@ -1124,6 +1350,9 @@ def fit_field(
                 field_prec_joint[o : o + d, o : o + d] = m
                 o += d
     Lambda_joint = torch.as_tensor(field_prec_joint)
+    prior_full = np.zeros((pos, pos))
+    if n_field:
+        prior_full[:n_field, :n_field] = field_prec_joint
 
     def unpack(u_t):
         """Map the unconstrained vector to {node: constrained tensor}."""
@@ -1153,8 +1382,18 @@ def fit_field(
         return nlp
 
     # ----- joint MAP via L-BFGS (strong-Wolfe), as in the earth-field engine -----
+    if pos == 0:
+        neg_log_post(torch.zeros(0, dtype=torch.double))  # validate fixed proxy contributions first
+        raise ValueError("fit_field has no unknown field or proxy coordinates to infer.")
     u = torch.tensor(u0, dtype=torch.double, requires_grad=True)
-    opt = torch.optim.LBFGS([u], lr=lr, max_iter=max_iter, line_search_fn="strong_wolfe")
+    opt = torch.optim.LBFGS(
+        [u],
+        lr=lr,
+        max_iter=max_iter,
+        tolerance_grad=tolerance_grad,
+        tolerance_change=tolerance_change,
+        line_search_fn="strong_wolfe",
+    )
 
     def closure():
         opt.zero_grad()
@@ -1163,6 +1402,27 @@ def fit_field(
         return loss
 
     opt.step(closure)
+    opt.zero_grad()
+    final_loss = neg_log_post(u)
+    if not bool(torch.isfinite(final_loss)) or not bool(torch.isfinite(u).all()):
+        raise FloatingPointError("field MAP optimization ended with non-finite parameters or objective.")
+    final_loss.backward()
+    if u.grad is None or not bool(torch.isfinite(u.grad).all()):
+        raise FloatingPointError("field MAP optimization ended with a missing or non-finite gradient.")
+    grad_inf = float(torch.max(torch.abs(u.grad)).detach()) if u.numel() else 0.0
+    state = opt.state.get(u, {})
+    iterations = int(state.get("n_iter", 0))
+    previous_loss = float(state.get("prev_loss", float(final_loss.detach())))
+    objective_change = abs(previous_loss - float(final_loss.detach()))
+    if grad_inf <= tolerance_grad:
+        termination_reason = "gradient-tolerance"
+    elif iterations < max_iter or objective_change <= tolerance_change * max(1.0, abs(float(final_loss.detach()))):
+        termination_reason = "objective-or-parameter-tolerance"
+    else:
+        raise RuntimeError(
+            "field MAP optimization exhausted max_iter without satisfying its convergence tolerances "
+            f"(iterations={iterations}, gradient_inf={grad_inf:.6g})."
+        )
     # The sparse-forward instrumentation lives with the PDE solver plugin (mixle-pde), which
     # registers a detector. Without the plugin there are no sparse forwards, so the laplace guard is a
     # no-op. Reset every detector, run one forward, then check whether any sparse solve fired.
@@ -1192,14 +1452,26 @@ def fit_field(
             field_name,
             np.zeros((0, 0)),
             obj,
+            _field_coordinate_count=n_field,
             _supports=node_support,
             _parameter_ids=parameter_ids,
+            converged=True,
+            iterations=iterations,
+            termination_reason=termination_reason,
+            uncertainty_status="unavailable",
         )
 
     if how == "gauss_newton":
         # Gauss-Newton posterior: H = J^T J + prior precision, J the Jacobian of the standardized residual.
         # Uses only first-order gradients (one adjoint solve per residual), so it works with the sparse
-        # adjoint solve where the dense Hessian (how='laplace') cannot, and is exact for a linear forward.
+        # adjoint solve where the dense Hessian (how='laplace') cannot. It is exact only for a linear
+        # Gaussian forward with fixed scale; all other accepted uses are explicitly reported as approximate.
+        if any(isinstance(px, GaussianProxy) and px._scale_p is not None for px in proxies):
+            raise ValueError(
+                "how='gauss_newton' does not model free Gaussian log-scale curvature; "
+                "fix the observation scale or use how='laplace'."
+            )
+
         def residual_vec(u_t):
             vals = unpack(u_t)
             parts = []
@@ -1209,11 +1481,19 @@ def fit_field(
                     raise ValueError(
                         f"how='gauss_newton' needs Gaussian-misfit observations; {type(px).__name__} has no residual()."
                     )
-                parts.append(torch.atleast_1d(r))
-            return torch.cat(parts)
+                r = torch.atleast_1d(r)
+                if not bool(torch.isfinite(r).all()):
+                    raise FloatingPointError(f"{type(px).__name__}.residual returned a non-finite value.")
+                parts.append(r)
+            out = torch.cat(parts)
+            if out.ndim != 1 or not out.numel():
+                raise ValueError("how='gauss_newton' needs a non-empty one-dimensional residual vector.")
+            return out
 
         u_star = u.detach().clone().requires_grad_(True)
         jac = torch.autograd.functional.jacobian(residual_vec, u_star).detach().numpy()
+        if jac.ndim != 2 or jac.shape[1] != pos or not np.isfinite(jac).all():
+            raise FloatingPointError("Gauss-Newton residual Jacobian is malformed or non-finite.")
 
         # Low-rank (Woodbury) fast path for the field marginals: when a single field is the only latent and
         # its prior covariance K is available (e.g. an RBF kernel), the posterior covariance
@@ -1223,8 +1503,23 @@ def fit_field(
         if field_only and primary.covariance is not None:
             K = primary.covariance
             M = K @ jac.T  # n_field x n_resid  (= K J^T)
-            C = np.linalg.inv(np.eye(jac.shape[0]) + jac @ M)  # n_resid x n_resid
+            innovation = _validate_symmetric_matrix(
+                np.eye(jac.shape[0]) + jac @ M,
+                jac.shape[0],
+                "Gauss-Newton innovation covariance",
+                positive_definite=True,
+            )
+            C = np.linalg.inv(innovation)  # n_resid x n_resid
+            C = 0.5 * (C + C.T)
             marg_var = np.diag(K) - np.einsum("ij,jk,ik->i", M, C, M)
+            scale = max(float(np.max(np.diag(K))), 1.0)
+            if not np.isfinite(marg_var).all() or np.any(marg_var < -1.0e-10 * scale):
+                raise ValueError("low-rank Gauss-Newton update produced an invalid posterior variance.")
+            rounded = np.abs(marg_var) <= 1.0e-10 * scale
+            marg_var[rounded] = 0.0
+            low_rank_note = "first-order Gauss-Newton; full covariance not materialized"
+            if np.any(rounded):
+                low_rank_note += "; variances within numeric tolerance were reported as zero"
             return FieldPosterior(
                 map_values,
                 np.zeros((0, 0)),
@@ -1232,16 +1527,34 @@ def fit_field(
                 field_name,
                 np.zeros((0, 0)),
                 obj,
+                _field_coordinate_count=n_field,
                 _supports=node_support,
                 _marg_var={field_name: marg_var},
                 _parameter_ids=parameter_ids,
+                converged=True,
+                iterations=iterations,
+                termination_reason=termination_reason,
+                curvature_method="gauss-newton-jtj-woodbury",
+                curvature_rank=pos,
+                curvature_dim=pos,
+                regularization=0.0,
+                uncertainty_status="approximate",
+                approximation=low_rank_note,
             )
 
-        H = jac.T @ jac
-        if n_field:  # add the joint field prior precision (block-diagonal or coregionalized) to J^T J
-            H[:n_field, :n_field] += field_prec_joint
-        H = 0.5 * (H + H.T) + 1e-10 * np.eye(H.shape[0])
+        H = _validate_symmetric_matrix(
+            jac.T @ jac + prior_full,
+            pos,
+            "Gauss-Newton posterior curvature",
+            positive_definite=True,
+        )
+        curvature_rank = int(np.linalg.matrix_rank(H))
+        if curvature_rank != pos:
+            raise ValueError(
+                f"Gauss-Newton posterior is unidentifiable (curvature rank {curvature_rank} of {pos})."
+            )
         cov = np.linalg.inv(H)
+        cov = 0.5 * (cov + cov.T)
         return FieldPosterior(
             map_values,
             cov,
@@ -1249,39 +1562,81 @@ def fit_field(
             field_name,
             H,
             obj,
-            _field_prior=primary.precision,
+            _field_prior=prior_full,
+            _field_coordinate_count=n_field,
             _supports=node_support,
             _parameter_ids=parameter_ids,
+            converged=True,
+            iterations=iterations,
+            termination_reason=termination_reason,
+            curvature_method="gauss-newton-jtj",
+            curvature_rank=curvature_rank,
+            curvature_dim=pos,
+            regularization=0.0,
+            uncertainty_status="approximate",
+            approximation="first-order Gauss-Newton",
         )
 
     if how == "vi":
         # Mean-field Gaussian variational posterior over the unconstrained vector, by reparameterized ADVI
         # (initialized at the MAP). First-order only, so it works through the sparse solve, and -- unlike
         # Laplace -- it is a genuine variational fit for non-Gaussian posteriors (e.g. TV / Potts priors).
+        # neg_log_post scores the density in natural coordinates, so the support-transform Jacobian is
+        # included when evaluating that density in the unconstrained variational coordinates.
         n_u = u0.shape[0]
+        if not n_u:
+            raise ValueError("how='vi' needs at least one free coordinate.")
         mu = u.detach().clone().requires_grad_(True)
         log_sigma = torch.full((n_u,), -2.0, dtype=torch.double, requires_grad=True)
         opt2 = torch.optim.Adam([mu, log_sigma], lr=vi_lr)
+        positive_pos = torch.as_tensor([s == "positive" for s in supports_arr], dtype=torch.bool)
+        last_loss = None
         for _ in range(vi_steps):
             opt2.zero_grad()
             sigma = torch.exp(log_sigma)
             neg = 0.0
             for _ in range(vi_samples):
-                neg = neg + neg_log_post(mu + sigma * torch.randn(n_u, dtype=torch.double))
+                eps = torch.as_tensor(rng.standard_normal(n_u), dtype=torch.double)
+                sample_u = mu + sigma * eps
+                # p_u(u) = p_natural(transform(u)) * |d transform / du|; log-Jacobian is u for exp.
+                neg = neg + neg_log_post(sample_u) - sample_u[positive_pos].sum()
             loss = neg / vi_samples - log_sigma.sum()  # -ELBO = E_q[neg_log_post] - entropy(q)
+            if not bool(torch.isfinite(loss)):
+                raise FloatingPointError("variational field objective became non-finite.")
             loss.backward()
+            if (
+                mu.grad is None
+                or log_sigma.grad is None
+                or not bool(torch.isfinite(mu.grad).all())
+                or not bool(torch.isfinite(log_sigma.grad).all())
+            ):
+                raise FloatingPointError("variational field gradient became non-finite.")
             opt2.step()
+            last_loss = float(loss.detach())
+        if (
+            last_loss is None
+            or not bool(torch.isfinite(mu).all())
+            or not bool(torch.isfinite(log_sigma).all())
+        ):
+            raise FloatingPointError("variational field fit did not produce finite parameters.")
         mu_np = mu.detach().numpy()
         var_np = np.exp(2.0 * log_sigma.detach().numpy())
         vi_values: dict[str, np.ndarray] = {}
         vi_marg: dict[str, np.ndarray] = {}
+        vi_params: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for name, (lo, hi) in layout.items():
-            seg = mu_np[lo:hi]
+            mean_u = mu_np[lo:hi]
+            variance_u = var_np[lo:hi]
             if hi > lo and supports_arr[lo] == "positive":
-                seg = np.exp(seg)
+                seg = np.exp(mean_u + 0.5 * variance_u)
+                variance_natural = np.expm1(variance_u) * np.exp(2.0 * mean_u + variance_u)
+            else:
+                seg = mean_u
+                variance_natural = variance_u
             vi_values[name] = seg if (hi - lo) != 1 else float(seg[0])
             if hi > lo:
-                vi_marg[name] = var_np[lo:hi]
+                vi_marg[name] = variance_natural
+                vi_params[name] = (mean_u, variance_u)
         return FieldPosterior(
             vi_values,
             np.zeros((0, 0)),
@@ -1289,17 +1644,23 @@ def fit_field(
             field_name,
             np.zeros((0, 0)),
             float(neg_log_post(mu).detach()),
+            _field_coordinate_count=n_field,
             _supports=node_support,
             _marg_var=vi_marg,
+            _variational_params=vi_params,
             _parameter_ids=parameter_ids,
+            converged=False,
+            iterations=vi_steps,
+            termination_reason="completed-fixed-steps; convergence-not-certified",
+            curvature_method="mean-field-variational",
+            curvature_rank=n_u,
+            curvature_dim=n_u,
+            regularization=0.0,
+            uncertainty_status="approximate",
+            approximation="mean-field ADVI in unconstrained coordinates",
         )
 
-    # ----- per-proxy field Fisher information at the MAP (information is additive across proxies) -----
-    map_t = {
-        name: torch.as_tensor(np.atleast_1d(np.asarray(val, dtype=float)).ravel() if np.ndim(val) else float(val))
-        for name, val in map_values.items()
-    }
-    f_star = torch.as_tensor(np.atleast_1d(map_values[field_name]).astype(float))
+    # ----- per-proxy full observed curvature at the MAP (curvature is additive across proxies) -----
     proxy_info: dict[str, np.ndarray] = {}
     labels_seen: dict[str, int] = {}
 
@@ -1310,23 +1671,25 @@ def fit_field(
 
     for px in proxies:
         label = _proxy_label(px)
-        # Attribute information only for proxies on the primary field (the field_posterior(include=)
-        # ablation decomposes that field's precision). Proxies on other fields don't sharpen it.
-        if field_dim.get(field_name, 0) == 0 or _proxy_field(px) != field_name:
-            continue
 
-        def negll(fv, _px=px):
-            vals = dict(map_t)
-            vals[field_name] = fv
-            return -_px.loglik(fv, vals, torch)
+        def negll(u_t, _px=px):
+            vals = unpack(u_t)
+            contribution = _px.loglik(vals[_proxy_field(_px)], vals, torch)
+            if not torch.is_tensor(contribution):
+                contribution = torch.as_tensor(contribution, dtype=torch.double)
+            if contribution.ndim != 0 or not bool(torch.isfinite(contribution)):
+                raise ValueError(f"{type(_px).__name__}.loglik must return one finite scalar value.")
+            return -contribution
 
         try:
-            Hk = torch.autograd.functional.hessian(negll, f_star).detach().numpy()
+            Hk = torch.autograd.functional.hessian(negll, u.detach().clone().requires_grad_(True)).detach().numpy()
         except RuntimeError as e:
             raise ValueError(
                 "how='laplace' needs a twice-differentiable forward model; the adjoint sparse solve does "
                 "not qualify. Use how='map' for sparse forward models."
             ) from e
+        if Hk.shape != (pos, pos) or not np.isfinite(Hk).all():
+            raise FloatingPointError(f"proxy {label!r} produced malformed or non-finite observed curvature.")
         proxy_info[label] = 0.5 * (Hk + Hk.T)
 
     # ----- joint Laplace covariance: invert the full negative-log-posterior Hessian at the MAP -----
@@ -1338,8 +1701,12 @@ def fit_field(
             "how='laplace' needs a twice-differentiable forward model (dense solves and ODE integration "
             "qualify); the adjoint sparse solve does not. Use how='map' for sparse forward models."
         ) from e
-    H = 0.5 * (H + H.T)
-    cov = np.linalg.inv(H + 1e-10 * np.eye(H.shape[0]))
+    H = _validate_symmetric_matrix(H, pos, "Laplace posterior curvature", positive_definite=True)
+    curvature_rank = int(np.linalg.matrix_rank(H))
+    if curvature_rank != pos:
+        raise ValueError(f"Laplace posterior is unidentifiable (curvature rank {curvature_rank} of {pos}).")
+    cov = np.linalg.inv(H)
+    cov = 0.5 * (cov + cov.T)
     return FieldPosterior(
         map_values,
         cov,
@@ -1347,10 +1714,20 @@ def fit_field(
         field_name,
         H,
         obj,
-        _field_prior=primary.precision,
+        _field_prior=prior_full,
         _proxy_info=proxy_info,
+        _field_coordinate_count=n_field,
         _supports=node_support,
         _parameter_ids=parameter_ids,
+        converged=True,
+        iterations=iterations,
+        termination_reason=termination_reason,
+        curvature_method="observed-negative-log-posterior-hessian",
+        curvature_rank=curvature_rank,
+        curvature_dim=pos,
+        regularization=0.0,
+        uncertainty_status="local-laplace",
+        approximation="Laplace local Gaussian approximation",
     )
 
 
@@ -1486,18 +1863,36 @@ def joint(observations: Sequence[tuple]) -> FieldModel:
     :func:`mixle.ppl.Differential`. Observations sharing a field must name the same one (this surface targets
     one shared field); field-free observations (a pure-parameter ODE inverse problem) are allowed.
     """
+    try:
+        observations = list(observations)
+    except TypeError as exc:
+        raise TypeError("joint() observations must be an iterable of (field, proxy) pairs.") from exc
     if not observations:
         raise ValueError("joint() needs at least one observation.")
     fields = {}
-    for f, _ in observations:
+    proxies = []
+    for item in observations:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            raise ValueError("each joint() observation must be one (field, proxy) pair.")
+        f, proxy = item
+        if not isinstance(proxy, Proxy):
+            raise TypeError("each joint() observation must contain a Proxy.")
+        proxies.append(proxy)
         if f is None:
             continue
         gf = f.field if hasattr(f, "field") else f  # accept a GP (has .field) or a GaussianField directly
+        if not isinstance(gf, GaussianField):
+            raise TypeError("joint() fields must be GP or GaussianField objects.")
+        if gf.name in fields and fields[gf.name] is not gf:
+            raise ValueError(
+                f"joint() received distinct field objects sharing name {gf.name!r}; "
+                "reuse one field object so observations cannot be silently aliased."
+            )
         fields[gf.name] = gf
     if len(fields) > 1:
         raise ValueError(f"joint() targets one shared field; saw {sorted(fields)}. Use fit_field for several.")
     field = next(iter(fields.values())) if fields else None
-    return FieldModel(field, [proxy for _, proxy in observations])
+    return FieldModel(field, proxies)
 
 
 def multistart(model: FieldModel, inits: Sequence[dict], *, how: str = "map", **kw) -> FieldPosterior:
@@ -1508,11 +1903,44 @@ def multistart(model: FieldModel, inits: Sequence[dict], *, how: str = "map", **
     the fit with the smallest ``objective`` is returned. (Frequency continuation -- fit a coarse/low-
     frequency model, then seed a finer one via ``fit(init=...)`` -- is the complementary strategy.)
     """
+    if not isinstance(model, FieldModel):
+        raise TypeError("multistart model must be a FieldModel.")
+    try:
+        inits = list(inits)
+    except TypeError as exc:
+        raise TypeError("multistart inits must be an iterable of initialization mappings.") from exc
+    if not inits:
+        raise ValueError("multistart needs at least one initialization.")
     best = None
-    for init in inits:
-        post = model.fit(how=how, init=init, **kw)
+    receipts = []
+    for index, init in enumerate(inits):
+        if not isinstance(init, dict):
+            receipts.append(
+                {"index": index, "success": False, "error_type": "TypeError", "message": "init is not a mapping"}
+            )
+            continue
+        try:
+            post = model.fit(how=how, init=init, **kw)
+            if not post.converged or not np.isfinite(post.objective):
+                raise RuntimeError("fit did not return a converged finite result.")
+        except (RuntimeError, ValueError, TypeError, ArithmeticError, np.linalg.LinAlgError) as exc:
+            receipts.append(
+                {"index": index, "success": False, "error_type": type(exc).__name__, "message": str(exc)}
+            )
+            continue
+        receipts.append(
+            {
+                "index": index,
+                "success": True,
+                "objective": float(post.objective),
+                "iterations": int(post.iterations),
+                "termination_reason": post.termination_reason,
+            }
+        )
         if best is None or post.objective < best.objective:
             best = post
     if best is None:
-        raise ValueError("multistart needs at least one initialization.")
+        failures = "; ".join(f"start {r['index']}: {r.get('error_type')}: {r.get('message')}" for r in receipts)
+        raise RuntimeError(f"all multistart fits failed; {failures}")
+    best.multistart_receipt = tuple(receipts)
     return best

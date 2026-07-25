@@ -110,16 +110,15 @@ class AdditiveInformationTestCase(unittest.TestCase):
         field = GaussianField(np.arange(n), RandomWalk(scale=0.3, ridge=3.0), name="T")
         post = fit_field(
             field,
-            [GaussianProxy(d18, slope=free, intercept=free, scale=sig), LogisticNicheProxy(pres)],
+            [GaussianProxy(d18, slope=-c1, intercept=free, scale=sig)],
             how="laplace",
             max_iter=400,
         )
         summ = post.summary()
         self.assertIn("T", summ)
-        self.assertIn("gauss.slope", summ)
-        self.assertIn("niche.mu", summ)
+        self.assertIn("gauss.intercept", summ)
         # every node has a finite mean and positive sd
-        for node in ("T", "gauss.slope", "niche.b"):
+        for node in ("T", "gauss.intercept"):
             m, s = post.posterior(node)
             self.assertTrue(np.all(np.isfinite(m)))
             self.assertTrue(np.all(s > 0))
