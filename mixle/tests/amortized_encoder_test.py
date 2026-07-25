@@ -107,6 +107,117 @@ class AmortizedEncoderTest(unittest.TestCase):
         ans = reason(Latent.vector(3, var=10.0), [ev])
         self.assertEqual(np.size(ans.mean), 3)
 
+    # -- MXR-080-0280: empty/malformed/untrained fits must raise, not be silently certified --------
+
+    def test_zero_or_negative_epochs_raises_instead_of_certifying_random_weights(self):
+        # epochs<=0 used to still set _fitted=True with the network at its random initialization --
+        # the training loop (`for _ in range(int(epochs))`) simply never ran. fit() must now require
+        # a genuine positive epoch count, so at least one optimizer step always runs before a network
+        # is certified fitted.
+        from mixle.reason import AmortizedEncoder
+
+        rng = np.random.RandomState(10)
+        X = rng.normal(size=(20, 3))
+        Z = rng.normal(size=(20, 2))
+        for bad_epochs in (0, -5):
+            enc = AmortizedEncoder(in_dim=3, latent_dim=2, seed=0)
+            with self.assertRaises(ValueError):
+                enc.fit(X, Z, epochs=bad_epochs)
+            # must NOT be silently certified fitted -- encode still refuses to run on an untrained net.
+            with self.assertRaises(RuntimeError):
+                enc.encode(X[0])
+
+    def test_empty_data_raises_instead_of_storing_nan_stats(self):
+        # Zero rows used to silently store NaN standardization stats (mean/std of an empty slice)
+        # via a bare np.atleast_2d(...) and still mark the encoder fitted.
+        from mixle.reason import AmortizedEncoder
+
+        enc = AmortizedEncoder(in_dim=3, latent_dim=2, seed=0)
+        with self.assertRaises(ValueError):
+            enc.fit(np.empty((0, 3)), np.empty((0, 2)), epochs=5)
+        with self.assertRaises(RuntimeError):
+            enc.encode(np.zeros(3))
+
+    def test_fractional_dimension_raises_instead_of_truncating(self):
+        # A bare int(in_dim) used to silently truncate 2.7 -> 2 instead of rejecting the fractional
+        # value outright.
+        from mixle.reason import AmortizedEncoder
+
+        with self.assertRaises(TypeError):
+            AmortizedEncoder(in_dim=2.7, latent_dim=2, seed=0)
+        with self.assertRaises(TypeError):
+            AmortizedEncoder(in_dim=2, latent_dim=3.9, seed=0)
+        with self.assertRaises(TypeError):
+            AmortizedEncoder(in_dim=True, latent_dim=2, seed=0)  # bool masquerading as int
+
+    def test_feature_width_mismatch_raises(self):
+        from mixle.reason import AmortizedEncoder
+
+        rng = np.random.RandomState(11)
+        # X narrower than the declared in_dim.
+        enc = AmortizedEncoder(in_dim=5, latent_dim=2, seed=0)
+        with self.assertRaises(ValueError):
+            enc.fit(rng.normal(size=(20, 3)), rng.normal(size=(20, 2)), epochs=5)
+        # Z narrower than the declared latent_dim: this used to broadcast silently (a width-1 Z
+        # against a latent_dim=3 target) instead of raising -- the encoder trained against the wrong
+        # target shape without complaint.
+        enc2 = AmortizedEncoder(in_dim=3, latent_dim=3, seed=0)
+        with self.assertRaises(ValueError):
+            enc2.fit(rng.normal(size=(20, 3)), rng.normal(size=(20, 1)), epochs=5)
+
+    def test_non_finite_data_raises(self):
+        from mixle.reason import AmortizedEncoder
+
+        rng = np.random.RandomState(12)
+        X = rng.normal(size=(20, 2))
+        Z = rng.normal(size=(20, 1))
+        X_bad = X.copy()
+        X_bad[0, 0] = np.nan
+        with self.assertRaises(ValueError):
+            AmortizedEncoder(in_dim=2, latent_dim=1, seed=0).fit(X_bad, Z, epochs=5)
+        Z_bad = Z.copy()
+        Z_bad[0, 0] = np.inf
+        with self.assertRaises(ValueError):
+            AmortizedEncoder(in_dim=2, latent_dim=1, seed=0).fit(X, Z_bad, epochs=5)
+
+    def test_invalid_min_sd_raises(self):
+        # min_sd floors the predicted sd (see _forward_std); zero or negative defeats its documented
+        # purpose of preventing an over-confident zero-variance expert.
+        from mixle.reason import AmortizedEncoder
+
+        with self.assertRaises(ValueError):
+            AmortizedEncoder(in_dim=2, latent_dim=1, min_sd=0.0, seed=0)
+        with self.assertRaises(ValueError):
+            AmortizedEncoder(in_dim=2, latent_dim=1, min_sd=-1e-3, seed=0)
+
+    def test_invalid_lr_and_weight_decay_raise(self):
+        from mixle.reason import AmortizedEncoder
+
+        rng = np.random.RandomState(13)
+        X = rng.normal(size=(20, 2))
+        Z = rng.normal(size=(20, 1))
+        with self.assertRaises(ValueError):
+            AmortizedEncoder(in_dim=2, latent_dim=1, seed=0).fit(X, Z, epochs=5, lr=0.0)
+        with self.assertRaises(ValueError):
+            AmortizedEncoder(in_dim=2, latent_dim=1, seed=0).fit(X, Z, epochs=5, lr=-0.1)
+        with self.assertRaises(ValueError):
+            AmortizedEncoder(in_dim=2, latent_dim=1, seed=0).fit(X, Z, epochs=5, weight_decay=-0.1)
+
+    def test_onto_shape_inconsistent_with_latent_dim_raises(self):
+        # onto's row count must equal latent_dim (H's rows must match mu's length for y = H z to be
+        # well-formed evidence); this used to be accepted unchecked and only surface, if at all, deep
+        # inside belief assimilation.
+        from mixle.reason import AmortizedEncoder
+
+        rng = np.random.RandomState(14)
+        X = rng.normal(size=(30, 2))
+        Z = rng.normal(size=(30, 1))
+        enc = AmortizedEncoder(in_dim=2, latent_dim=1, seed=0).fit(X, Z, epochs=20)
+        with self.assertRaises(ValueError):
+            enc.evidence(X[0], onto=np.zeros((7, 4)))  # 7 rows != latent_dim=1
+        with self.assertRaises(ValueError):
+            enc.evidence(X[0], onto=np.full((1, 3), np.nan))  # non-finite
+
 
 if __name__ == "__main__":
     unittest.main()

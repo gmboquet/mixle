@@ -29,6 +29,63 @@ def _torch() -> Any:
     return torch
 
 
+def _require_positive_int(value: Any, name: str) -> int:
+    """Validate ``value`` is an exact positive ``int`` (MXR-080-0280).
+
+    A bare ``int(value)`` silently truncates a fractional width/dimension (``2.7`` quietly becomes
+    ``2``) and accepts ``bool``; this rejects both, and any non-positive count.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an int, got {type(value).__name__}: {value!r}")
+    ivalue = int(value)
+    if ivalue < 1:
+        raise ValueError(f"{name} must be a positive int (>= 1), got {ivalue!r}")
+    return ivalue
+
+
+def _require_finite_positive_float(value: Any, name: str) -> float:
+    """Validate ``value`` is a finite, strictly positive real number (MXR-080-0280)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise TypeError(f"{name} must be a real number, got {type(value).__name__}: {value!r}")
+    fvalue = float(value)
+    if not np.isfinite(fvalue):
+        raise ValueError(f"{name} must be finite, got {fvalue!r}")
+    if fvalue <= 0:
+        raise ValueError(f"{name} must be positive, got {fvalue!r}")
+    return fvalue
+
+
+def _require_finite_nonnegative_float(value: Any, name: str) -> float:
+    """Validate ``value`` is a finite, non-negative real number (MXR-080-0280)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise TypeError(f"{name} must be a real number, got {type(value).__name__}: {value!r}")
+    fvalue = float(value)
+    if not np.isfinite(fvalue):
+        raise ValueError(f"{name} must be finite, got {fvalue!r}")
+    if fvalue < 0:
+        raise ValueError(f"{name} must be non-negative, got {fvalue!r}")
+    return fvalue
+
+
+def _require_2d_finite(X: Any, name: str, width: int) -> np.ndarray:
+    """Validate ``X`` is a non-empty, finite, exactly ``width``-wide 2-D array (MXR-080-0280).
+
+    Before this check, a bare ``np.atleast_2d(np.asarray(X, dtype=float))`` accepted anything: zero
+    rows silently produced NaN standardization statistics (mean/std of an empty slice) instead of
+    raising, a feature width that did not match the declared architecture blew up deep inside the
+    network with a cryptic torch shape-mismatch error instead of a clear one, and NaN/inf entries
+    silently propagated into NaN losses and NaN-corrupted weights instead of raising up front.
+    """
+    arr = np.atleast_2d(np.asarray(X, dtype=float))
+    if arr.shape[0] == 0:
+        raise ValueError(f"{name} must be non-empty, got shape {arr.shape}")
+    if arr.shape[1] != width:
+        raise ValueError(f"{name} has width {arr.shape[1]}, expected {width}")
+    if not np.isfinite(arr).all():
+        raise ValueError(f"{name} must be finite (no NaN or inf)")
+    return arr
+
+
 class ScaledEmbedding:
     """A beta-VAE-style common embedding with an ARD gate giving a data-dependent active dimension.
 
@@ -36,8 +93,10 @@ class ScaledEmbedding:
         in_dim: input feature width.
         max_dim: the embedding's maximum width (upper bound on active dimension).
         hidden: hidden widths shared by the encoder and decoder trunks.
-        beta: rate weight in the ELBO (larger -> tighter rate budget -> fewer active dims).
-        kl_tau: per-coordinate KL threshold (nats) above which a coordinate counts as active.
+        beta: rate weight in the ELBO (larger -> tighter rate budget -> fewer active dims). Must be
+            finite and non-negative.
+        kl_tau: per-coordinate KL threshold (nats) above which a coordinate counts as active. Must be
+            finite and non-negative.
         seed: torch RNG seed.
     """
 
@@ -51,12 +110,16 @@ class ScaledEmbedding:
         kl_tau: float = 1e-2,
         seed: int = 0,
     ) -> None:
+        in_dim = _require_positive_int(in_dim, "in_dim")
+        max_dim = _require_positive_int(max_dim, "max_dim")
+        beta = _require_finite_nonnegative_float(beta, "beta")
+        kl_tau = _require_finite_nonnegative_float(kl_tau, "kl_tau")
         torch = _torch()
         torch.manual_seed(int(seed))
-        self.in_dim = int(in_dim)
-        self.max_dim = int(max_dim)
-        self.beta = float(beta)
-        self.kl_tau = float(kl_tau)
+        self.in_dim = in_dim
+        self.max_dim = max_dim
+        self.beta = beta
+        self.kl_tau = kl_tau
 
         def mlp(sizes: list[int]) -> Any:
             layers: list[Any] = []
@@ -88,15 +151,23 @@ class ScaledEmbedding:
 
     # -- training -----------------------------------------------------------------------------
     def fit(self, X: Any, *, epochs: int = 400, lr: float = 3e-3, weight_decay: float = 0.0) -> ScaledEmbedding:
-        """Train the embedding on unlabeled inputs ``X`` (``(n, in_dim)``) by the beta-VAE ELBO."""
+        """Train the embedding on unlabeled inputs ``X`` (``(n, in_dim)``) by the beta-VAE ELBO.
+
+        ``X`` must be non-empty, finite, and exactly ``in_dim`` wide (MXR-080-0280). ``epochs`` must
+        be a positive int: at least one optimizer step must run before the network's (otherwise still
+        at its random initialization) weights are certified ``fitted``.
+        """
         torch = _torch()
-        X = np.atleast_2d(np.asarray(X, dtype=float))
+        X = _require_2d_finite(X, "X", self.in_dim)
+        epochs = _require_positive_int(epochs, "epochs")
+        lr = _require_finite_positive_float(lr, "lr")
+        weight_decay = _require_finite_nonnegative_float(weight_decay, "weight_decay")
         self._x_mean = X.mean(axis=0)
         self._x_scale = X.std(axis=0) + 1e-8
         xt = torch.as_tensor((X - self._x_mean) / self._x_scale, dtype=torch.float64)
         params = list(self._enc.parameters()) + list(self._dec.parameters())
-        opt = torch.optim.Adam(params, lr=float(lr), weight_decay=float(weight_decay))
-        for _ in range(int(epochs)):
+        opt = torch.optim.Adam(params, lr=lr, weight_decay=weight_decay)
+        for _ in range(epochs):
             opt.zero_grad()
             mu, logvar = self._encode_std(xt)
             eps = torch.randn_like(mu)
