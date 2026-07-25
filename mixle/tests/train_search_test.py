@@ -16,6 +16,30 @@ from mixle.models.train_search import (
 
 
 class MultiFidelitySearchTest(unittest.TestCase):
+    def test_space_rejects_invalid_schema_and_points(self):
+        invalid_spaces = (
+            {"d_model_choices": []},
+            {"d_model_choices": [64, 64]},
+            {"batch_choices": [0]},
+            {"n_layer_range": (4, 2)},
+            {"n_layer_range": (2.5, 4)},
+            {"log10_lr_range": (np.nan, -2.0)},
+        )
+        for kwargs in invalid_spaces:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                TrainingSpace(**kwargs)
+
+        space = TrainingSpace()
+        for point in (
+            [0.5, 0.5, 0.5],
+            [0.5] * 5,
+            [0.5, np.nan, 0.5, 0.5],
+            [-0.1, 0.5, 0.5, 0.5],
+            [1.1, 0.5, 0.5, 0.5],
+        ):
+            with self.subTest(point=point), self.assertRaises(ValueError):
+                space.decode(point)
+
     def test_finds_good_recipe_using_both_fidelities(self):
         # surrogate: optimum near d_model=256, n_layer=6, lr=1e-3; cheap fidelity is noisier
         def train(recipe, budget):
@@ -60,11 +84,33 @@ class LearningCurveTest(unittest.TestCase):
         pred = extrapolate_learning_curve(t, y, at=64)
         self.assertAlmostEqual(pred, 0.5 + 4.0 * 64**-0.6, places=2)
 
-    def test_too_few_points_falls_back(self):
-        self.assertEqual(extrapolate_learning_curve([1, 2], [3.0, 2.0], at=10), 2.0)
+    def test_invalid_or_inconclusive_curves_fail_explicitly(self):
+        invalid = (
+            ([], [], 10),
+            ([1, 2], [3.0], 10),
+            ([1, 2], [3.0, 2.0], 10),
+            ([1, 1, 2], [3.0, 2.5, 2.0], 10),
+            ([0, 1, 2], [3.0, 2.5, 2.0], 10),
+            ([1, 2, 3], [3.0, np.nan, 2.0], 10),
+            ([1, 2, 3], [3.0, 2.5, 2.0], 3),
+        )
+        for steps, losses, at in invalid:
+            with self.subTest(steps=steps, losses=losses, at=at), self.assertRaises(ValueError):
+                extrapolate_learning_curve(steps, losses, at=at)
 
 
 class RealLMCouplingTest(unittest.TestCase):
+    def test_lm_train_fn_rejects_invalid_budgets_before_training(self):
+        import pytest
+
+        pytest.importorskip("torch")
+        from mixle.models.train_search import lm_train_fn
+
+        train = lm_train_fn([0, 1, 0, 1], [0, 1], vocab=2, block=2, max_epochs=2)
+        for budget in (0, -0.5, 1.1, np.nan, np.inf, True):
+            with self.subTest(budget=budget), self.assertRaises(ValueError):
+                train({}, budget)
+
     def test_lm_train_fn_trains_a_real_lm(self):
         import pytest
 
