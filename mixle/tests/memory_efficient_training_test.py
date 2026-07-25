@@ -24,6 +24,7 @@ torch = pytest.importorskip("torch")
 
 from mixle.models.memory_efficient_training import (  # noqa: E402
     CompressedAdam,
+    CompressedMomentEncoding,
     CompressedOptimizerState,
     RecomputeDecision,
     SelectiveRecomputePolicy,
@@ -325,6 +326,128 @@ class Int8BlockwiseUnitTest(unittest.TestCase):
         recon = dequantize_int8_blockwise(codes, scales, block_size=512)
         rel_err = np.linalg.norm(recon - flat) / np.linalg.norm(flat)
         self.assertLess(rel_err, 0.02)  # 8-bit blockwise quantization is a tight fit for smooth data
+
+
+class CompressionContractTest(unittest.TestCase):
+    def test_fp8_contract_rejects_unknown_formats_fallbacks_and_thresholds(self):
+        tensor = torch.ones(4)
+        with self.assertRaises(ValueError):
+            fp8_cast_with_guard(tensor, fp8_dtype="float32")
+        with self.assertRaises(ValueError):
+            fp8_cast_with_guard(tensor, fallback_dtype=torch.int32)
+        for threshold in (-0.1, 1.1, np.nan, np.inf):
+            with self.assertRaises(ValueError):
+                fp8_cast_with_guard(tensor, underflow_fraction_threshold=threshold)
+        with self.assertRaises(TypeError):
+            fp8_cast_with_guard(np.ones(4))
+
+    def test_int8_payload_rejects_nonfinite_incomplete_and_mistyped_data(self):
+        with self.assertRaises(ValueError):
+            quantize_int8_blockwise(np.array([1.0, np.nan]))
+        for block_size in (0, -1):
+            with self.assertRaises(ValueError):
+                quantize_int8_blockwise(np.ones(2), block_size=block_size)
+        codes = np.array([1, 2, 3], dtype=np.int8)
+        with self.assertRaises(ValueError):
+            dequantize_int8_blockwise(codes.astype(np.int16), np.ones(1), block_size=3)
+        with self.assertRaises(ValueError):
+            dequantize_int8_blockwise(codes, np.array([], dtype=np.float32), block_size=3)
+        with self.assertRaises(ValueError):
+            dequantize_int8_blockwise(codes, np.array([np.nan]), block_size=3)
+
+        malformed = CompressedMomentEncoding(
+            method="int8",
+            shape=(4,),
+            int8_codes=codes,
+            int8_scales=np.ones(1, dtype=np.float32),
+            int8_block_size=3,
+        )
+        with self.assertRaisesRegex(ValueError, "requires 4"):
+            decompress_moment(malformed)
+
+    def test_unknown_method_is_rejected_and_fallback_reason_is_explicit(self):
+        with self.assertRaises(ValueError):
+            compress_moment(np.ones(4, dtype=np.float32), method="innt8")
+        hostile = np.full(256, 1.0e-6, dtype=np.float32)
+        hostile[0] = 1.0e6
+        encoding = compress_moment(hostile, method="int8", int8_block_size=256)
+        self.assertEqual(encoding.requested_method, "int8")
+        self.assertEqual(encoding.method, "dense")
+        self.assertIsNotNone(encoding.fallback_reason)
+
+    def test_dense_encoding_preserves_float64_exactly(self):
+        value = np.array([1.0 + 2.0**-40], dtype=np.float64)
+        encoding = compress_moment(value, method="dense")
+        self.assertEqual(encoding.source_dtype, np.dtype(np.float64).str)
+        restored = decompress_moment(encoding)
+        self.assertEqual(restored.dtype, np.float64)
+        np.testing.assert_array_equal(restored, value)
+
+    def test_g4_encoding_round_trips_through_tensor_only_schema(self):
+        values = np.random.RandomState(9).normal(size=4096).astype(np.float32)
+        encoding = compress_moment(values, method="g4", min_size_for_g4=1)
+        self.assertEqual(encoding.method, "g4")
+        rebuilt = CompressedMomentEncoding.from_tensor_state(encoding.to_tensor_state())
+        np.testing.assert_array_equal(decompress_moment(rebuilt), decompress_moment(encoding))
+
+    def test_compressed_adam_uses_declared_stable_state_precision(self):
+        parameter = torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float16))
+        optimizer = CompressedAdam([parameter], lr=1.0e-2, compression_method="dense")
+        parameter.grad = torch.tensor([0.5], dtype=torch.float16)
+        optimizer.step()
+        compressed = optimizer.state[parameter]["compressed"]
+        m, v = compressed.get()
+        self.assertEqual(m.dtype, torch.float32)
+        self.assertEqual(v.dtype, torch.float32)
+
+    def test_compressed_adam_validates_controls_and_gradients(self):
+        parameter = torch.nn.Parameter(torch.ones(2))
+        for kwargs in (
+            {"lr": np.nan},
+            {"eps": 0.0},
+            {"weight_decay": -1.0},
+            {"betas": (1.0, 0.9)},
+            {"compression_method": "innt8"},
+            {"state_dtype": torch.float16},
+        ):
+            with self.assertRaises((TypeError, ValueError)):
+                CompressedAdam([parameter], **kwargs)
+
+        optimizer = CompressedAdam([parameter])
+        parameter.grad = torch.tensor([1.0, np.nan])
+        with self.assertRaises(FloatingPointError):
+            optimizer.step()
+
+        embedding = torch.nn.Embedding(5, 2, sparse=True)
+        sparse_optimizer = CompressedAdam(embedding.parameters())
+        embedding(torch.tensor([1, 2])).sum().backward()
+        with self.assertRaisesRegex(RuntimeError, "sparse"):
+            sparse_optimizer.step()
+
+    def test_optimizer_checkpoint_is_tensor_only_and_resumable(self):
+        first = torch.nn.Parameter(torch.tensor([1.0, -1.0]))
+        optimizer = CompressedAdam([first], lr=1.0e-2, compression_method="dense")
+        first.grad = torch.tensor([0.25, -0.5])
+        optimizer.step()
+        checkpoint = optimizer.state_dict()
+        tensor_state = next(iter(checkpoint["state"].values()))["compressed_tensor_state"]
+
+        def assert_tensor_tree(value):
+            if isinstance(value, dict):
+                for child in value.values():
+                    assert_tensor_tree(child)
+            else:
+                self.assertIsInstance(value, torch.Tensor)
+
+        assert_tensor_tree(tensor_state)
+        second = torch.nn.Parameter(first.detach().clone())
+        resumed = CompressedAdam([second], lr=1.0e-2, compression_method="dense")
+        resumed.load_state_dict(checkpoint)
+        first.grad = torch.tensor([-0.1, 0.2])
+        second.grad = first.grad.clone()
+        optimizer.step()
+        resumed.step()
+        torch.testing.assert_close(second, first)
 
 
 if __name__ == "__main__":
