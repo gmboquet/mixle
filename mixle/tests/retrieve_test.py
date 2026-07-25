@@ -228,5 +228,55 @@ class RetrievalConstructionTest(unittest.TestCase):
         self.assertEqual(len(r.provenance()), 2)  # zip() can no longer silently drop a tail
 
 
+class ToContextPreservesRetrievalTest(unittest.TestCase):
+    """MXR-080-0249: to_context() budgets THIS retrieval's own order/scores/weights directly, instead
+    of copying items into a throwaway substrate and running a fresh, unweighted search."""
+
+    def test_weighted_order_and_scores_survive_to_context(self):
+        """The audit's own scenario: a weighted retrieval ranked an artifact above a text item with
+        scores 50 and 1; to_context() used to run a fresh unweighted search over a throwaway shard and
+        come back with text before artifact, rescored 1 and 0.5 -- the weighting silently vanished."""
+        s = Substrate()
+        art_id = s.add(
+            "artifact",
+            "deployable refund-router classifier artifact",
+            payload={"ref": "/reg/rr"},
+            provenance={"source": "registry"},
+        )
+        txt_id = s.add("text", "a short text note about the refund router", tags=["note"])
+        art_item, txt_item = s.get(art_id), s.get(txt_id)
+
+        r = Retrieval(query="refund router", items=[art_item, txt_item], scores=[50.0, 1.0])
+        pkt = r.to_context(budget=ContextBudget(max_chars=2000))
+
+        self.assertEqual([i.kind for i in pkt.items], ["artifact", "text"])
+        self.assertEqual(list(pkt.scores), [50.0, 1.0])
+
+    def test_to_context_still_respects_char_budget(self):
+        s = _mixed_shard()
+        r = retrieve(s, "how do we handle refunds", k=4)
+        pkt = r.to_context(budget=ContextBudget(max_chars=300))
+        self.assertGreaterEqual(len(pkt), 1)
+        self.assertLessEqual(pkt.used_chars, 300)
+
+    def test_to_context_compress_respects_a_tight_budget(self):
+        s = Substrate()
+        s.add("text", "refund policy: " + ("word " * 200), tags=["policy"])
+        r = retrieve(s, "refund policy", k=1)
+        pkt = r.to_context(budget=ContextBudget(max_chars=120), compress=True)
+        self.assertLessEqual(pkt.used_chars, 120)
+        self.assertGreaterEqual(len(pkt), 1)
+
+    def test_to_context_rejects_stale_kind_and_scope_kwargs(self):
+        # kind=/scope= filtered assemble_context's fresh search; there is no fresh search left to
+        # filter now that to_context() budgets this retrieval's own hits directly.
+        s = _mixed_shard()
+        r = retrieve(s, "refund", k=4)
+        with self.assertRaises(TypeError):
+            r.to_context(kind="text")
+        with self.assertRaises(TypeError):
+            r.to_context(scope="local")
+
+
 if __name__ == "__main__":
     unittest.main()
