@@ -175,10 +175,24 @@ class ReasonedAnswer:
     aleatoric (observation noise) via the law of total variance.
     """
 
-    def __init__(self, belief: BeliefState, prior_entropy: float, contributions: dict[str, float]) -> None:
+    def __init__(self, belief: BeliefState, prior: BeliefState, trace: list[tuple[str, BeliefState]]) -> None:
         self.belief = belief
-        self._prior_entropy = float(prior_entropy)
-        self._contributions = dict(contributions)
+        # The prior belief IN THIS ANSWER'S OWN COORDINATE SPACE: the full prior for an unqueried
+        # answer, or that same prior's matching marginal after :meth:`marginal` (MXR-080-0272). Every
+        # entropy this class reports is computed from `self._prior` and `self.belief`/`self._trace`
+        # together -- never a full-state entropy mixed against a lower-dimensional marginal's.
+        self._prior = prior
+        # (name, belief-after-this-fold) for every evidence item, in fold order, ALSO projected into
+        # this answer's own coordinate space -- lets attribution() recompute each source's nats
+        # entirely within the queried subspace instead of reusing the full-state gain.
+        self._trace = list(trace)
+        contributions: dict[str, float] = {}
+        before = self._prior
+        for name, after in self._trace:
+            gain = before.entropy() - after.entropy()
+            contributions[name] = contributions.get(name, 0.0) + gain
+            before = after
+        self._contributions = contributions
 
     @property
     def mean(self) -> np.ndarray:
@@ -202,8 +216,14 @@ class ReasonedAnswer:
         return self.belief.interval(level)
 
     def information_gain(self) -> float:
-        """Total nats of uncertainty the evidence removed from the prior (``H[prior] - H[posterior]``)."""
-        return self._prior_entropy - self.belief.entropy()
+        """Total nats of uncertainty the evidence removed from the prior (``H[prior] - H[posterior]``).
+
+        Both entropies are always taken from this answer's OWN coordinate space -- the full prior for
+        an unqueried answer, or that prior's matching marginal after :meth:`marginal` -- so querying a
+        coordinate the evidence never touched correctly reports zero gain (MXR-080-0272), rather than
+        a full-state prior entropy mixed against a lower-dimensional posterior marginal's.
+        """
+        return self._prior.entropy() - self.belief.entropy()
 
     def attribution(self, *, normalize: bool = False) -> dict[str, float]:
         """Per-modality information gain in nats -- which modality sharpened the belief, and by how much.
@@ -240,9 +260,19 @@ class ReasonedAnswer:
         return UncertaintyDecomposition(total, aleatoric, epistemic, "variance")
 
     def marginal(self, indices: Any) -> ReasonedAnswer:
-        """Restrict the answer to a subset of latent coordinates (query a specific variable)."""
-        sub = self.belief.marginal(indices)
-        return ReasonedAnswer(sub, self._prior_entropy, self._contributions)
+        """Restrict the answer to a subset of latent coordinates (query a specific variable).
+
+        The prior and every fold step's before/after belief are re-marginalized to the SAME
+        coordinates as the posterior (MXR-080-0272), so :meth:`information_gain` and the default
+        :meth:`attribution` on the result are computed entirely within the queried subspace -- a
+        coordinate the evidence never touched now correctly reports zero gain instead of leaking in
+        the full-state prior entropy.
+        """
+        idx = np.atleast_1d(np.asarray(indices, dtype=int))
+        sub_belief = self.belief.marginal(idx)
+        sub_prior = self._prior.marginal(idx)
+        sub_trace = [(name, after.marginal(idx)) for name, after in self._trace]
+        return ReasonedAnswer(sub_belief, sub_prior, sub_trace)
 
     def __repr__(self) -> str:
         return (
@@ -299,18 +329,16 @@ def reason(prior: Any, evidence: Any, *, query: Any = None) -> ReasonedAnswer:
             stacklevel=2,
         )
     belief = _to_belief(prior)
-    prior_entropy = belief.entropy()
-    contributions: dict[str, float] = {}
+    prior_belief = belief
+    trace: list[tuple[str, GaussianBelief]] = []
     for i, e in enumerate(evidence):
         name = e.name or f"evidence[{i}]"
-        before = belief.entropy()
         if isinstance(e, NonlinearEvidence):
             belief = _assimilate_nonlinear(belief, e)
         else:
             belief = belief.update(e.H, e.y, e.R)
-        gain = before - belief.entropy()
-        contributions[name] = contributions.get(name, 0.0) + gain
-    answer = ReasonedAnswer(belief, prior_entropy, contributions)
+        trace.append((name, belief))
+    answer = ReasonedAnswer(belief, prior_belief, trace)
     if query is not None:
         answer = answer.marginal(query)
     return answer
