@@ -180,6 +180,14 @@ class Claim:
     hi: float
     probe: tuple[float, ...] = field(default=(), compare=False)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.field, str) or not self.field:
+            raise ValueError(f"Claim.field must be a non-empty str, got {self.field!r}")
+        if not (np.isfinite(self.lo) and np.isfinite(self.hi)):
+            raise ValueError(f"Claim bounds must be finite, got lo={self.lo!r}, hi={self.hi!r}")
+        if self.hi < self.lo:
+            raise ValueError(f"Claim bounds must satisfy lo <= hi, got lo={self.lo!r}, hi={self.hi!r}")
+
     @property
     def width(self) -> float:
         return self.hi - self.lo
@@ -194,17 +202,52 @@ class Claim:
         return f"{self.field} is between {self.lo:.4g} and {self.hi:.4g}"
 
 
+def _validate_n_samples(n: int) -> None:
+    if isinstance(n, bool) or not isinstance(n, (int, np.integer)) or n < 1:
+        raise ValueError(f"n_samples must be a positive integer, got {n!r}")
+
+
+def _coerce_scalar_draws(draws: Sequence[Any]) -> np.ndarray:
+    """The ONE validated path every draw source funnels through, whether the batch came from a live
+    posterior's ``.sample()``, a plain sequence passed straight through, or a 1-D array passed straight
+    through: each draw must already be a scalar or a length-1 scalar container -- exactly
+    ``_sample_scalar``'s documented scope limit, now actually enforced identically for all three
+    sources instead of ndarrays and sequences silently taking their own, unvalidated shortcuts. An
+    empty batch is rejected outright rather than left to produce NaN "support" downstream (``np.mean``
+    of an empty array)."""
+    draws = list(draws)
+    if not draws:
+        raise ValueError("_sample_scalar received zero draws (empty posterior/array/sequence)")
+    out = []
+    for d in draws:
+        if isinstance(d, (int, float, np.floating, np.integer)) and not isinstance(d, bool):
+            out.append(float(d))
+        elif isinstance(d, (tuple, list, np.ndarray)) and len(d) == 1:
+            out.append(float(d[0]))
+        else:
+            raise ValueError(f"expected a scalar or single-field draw, got {d!r}")
+    return np.asarray(out, dtype=float)
+
+
 def _sample_scalar(posterior: Any, n: int, seed: int | None) -> np.ndarray:
     """Extract ``n`` scalar draws of a single field from any M0/L2/M5 posterior-like object, or pass a
     plain array/sequence of scalars through unchanged. A real, documented scope limit (not silently
     wrong for other shapes): this only handles objects whose draws are already scalars or 1-tuples --
     exactly what a single-field :class:`~mixle.reason.inference_program.ProgramPosterior` or a
     single-target :class:`~mixle.stats.latent.mixture.MixtureDistribution`
-    (``CrossModalJoint.infer(..., [field])``) produce."""
+    (``CrossModalJoint.infer(..., [field])``) produce. A multi-dimensional array is a shape violation,
+    not a batch to flatten -- rejected outright rather than silently averaged over via boolean
+    broadcasting downstream."""
+    _validate_n_samples(n)
     if isinstance(posterior, np.ndarray):
-        return posterior.astype(float)
-    if isinstance(posterior, Sequence) and posterior and isinstance(posterior[0], (int, float, np.floating)):
-        return np.asarray(posterior, dtype=float)
+        if posterior.ndim != 1:
+            raise ValueError(
+                f"_sample_scalar only accepts a 1-D array of scalar draws, got shape {posterior.shape}; "
+                "a multi-dimensional array is not silently flattened into a scalar batch"
+            )
+        return _coerce_scalar_draws(posterior.tolist())
+    if isinstance(posterior, Sequence) and not isinstance(posterior, (str, bytes)):
+        return _coerce_scalar_draws(posterior)
     if hasattr(posterior, "sample"):
         if accepts_call(posterior.sample, n, seed=seed):
             draws = posterior.sample(n, seed=seed)
@@ -214,15 +257,7 @@ def _sample_scalar(posterior: Any, n: int, seed: int | None) -> np.ndarray:
         draws = posterior.sampler(seed=seed).sample(n)
     else:
         raise TypeError(f"do not know how to sample a field from {type(posterior).__name__}")
-    out = []
-    for d in draws:
-        if isinstance(d, (int, float, np.floating, np.integer)):
-            out.append(float(d))
-        elif isinstance(d, (tuple, list, np.ndarray)) and len(d) == 1:
-            out.append(float(d[0]))
-        else:
-            raise ValueError(f"expected a scalar or single-field draw, got {d!r}")
-    return np.asarray(out, dtype=float)
+    return _coerce_scalar_draws(draws)
 
 
 def claim_score(claim: Claim, posterior: Any = None, *, n_samples: int = 200, seed: int | None = 0) -> float:

@@ -151,6 +151,40 @@ class EvidenceSchemaValidationTest(unittest.TestCase):
             SchemaField(kind="numeric", categories=frozenset({"a"}))
 
 
+class ClaimValidationTest(unittest.TestCase):
+    """Regression coverage for MXR-080-0290: ``Claim`` previously permitted NaN/infinite bounds and
+    ``hi < lo`` (a reversed interval), so a "validated" claim could be semantically meaningless."""
+
+    def test_nan_lo_rejected(self):
+        with self.assertRaises(ValueError):
+            Claim(field="x", lo=float("nan"), hi=1.0)
+
+    def test_nan_hi_rejected(self):
+        with self.assertRaises(ValueError):
+            Claim(field="x", lo=0.0, hi=float("nan"))
+
+    def test_infinite_bounds_rejected(self):
+        with self.assertRaises(ValueError):
+            Claim(field="x", lo=float("-inf"), hi=1.0)
+        with self.assertRaises(ValueError):
+            Claim(field="x", lo=0.0, hi=float("inf"))
+
+    def test_hi_less_than_lo_rejected(self):
+        with self.assertRaises(ValueError):
+            Claim(field="x", lo=5.0, hi=1.0)
+
+    def test_empty_field_name_rejected(self):
+        with self.assertRaises(ValueError):
+            Claim(field="", lo=0.0, hi=1.0)
+
+    def test_zero_width_point_interval_is_allowed(self):
+        # lo == hi is a degenerate but legitimate interval (Claim.text() even special-cases it as
+        # "approximately X") -- only hi < lo and non-finite bounds are rejected.
+        claim = Claim(field="x", lo=5.0, hi=5.0)
+        self.assertEqual(claim.width, 0.0)
+        self.assertTrue(claim.contains(5.0))
+
+
 class ClaimScoreStandaloneTest(unittest.TestCase):
     """``claim_score`` is a reusable primitive independent of ``PosteriorDescriber`` -- the shape B2's
     claim-checking needs: score an already-emitted claim against the posterior it describes."""
@@ -198,6 +232,47 @@ class SampleScalarTest(unittest.TestCase):
 
         out = _sample_scalar(LegacyPosterior(), 4, seed=3)
         np.testing.assert_allclose(out, [0.0, 1.0, 2.0, 3.0])
+
+    def test_multidimensional_array_rejected_not_silently_flattened(self):
+        # MXR-080-0290: a matrix must not be silently averaged over via boolean broadcasting
+        # downstream (claim_score's np.mean over a 2D boolean array) -- it is a shape violation.
+        matrix = np.array([[1.0, 2.0], [3.0, 4.0]])
+        with self.assertRaises(ValueError):
+            _sample_scalar(matrix, 5, None)
+
+    def test_empty_array_rejected_not_left_to_produce_nan_support(self):
+        with self.assertRaises(ValueError):
+            _sample_scalar(np.array([]), 5, None)
+
+    def test_empty_sequence_rejected(self):
+        with self.assertRaises(ValueError):
+            _sample_scalar([], 5, None)
+
+    def test_1d_array_and_plain_sequence_agree_via_the_same_validated_path(self):
+        arr_out = _sample_scalar(np.array([1.0, 2.0, 3.0]), 5, None)
+        seq_out = _sample_scalar([1.0, 2.0, 3.0], 5, None)
+        np.testing.assert_allclose(arr_out, seq_out)
+
+    def test_sequence_with_a_non_scalar_non_singleton_element_rejected(self):
+        # a plain pass-through sequence must be rejected by the SAME per-element scalar-or-1-tuple
+        # rule a live posterior's .sample() output is held to -- not silently accepted, and not
+        # misrouted into "do not know how to sample from a list".
+        with self.assertRaises(ValueError):
+            _sample_scalar([1.0, (2.0, 3.0), 4.0], 5, None)
+
+    def test_n_samples_zero_rejected(self):
+        with self.assertRaises(ValueError):
+            _sample_scalar(np.array([1.0, 2.0]), 0, None)
+
+    def test_n_samples_negative_rejected(self):
+        with self.assertRaises(ValueError):
+            _sample_scalar(np.array([1.0, 2.0]), -3, None)
+
+    def test_claim_score_propagates_n_samples_validation(self):
+        posterior = GaussianDistribution(mu=0.0, sigma2=1.0)
+        claim = Claim(field="x", lo=-1.0, hi=1.0)
+        with self.assertRaises(ValueError):
+            claim_score(claim, posterior, n_samples=0)
 
 
 class PosteriorDescriberTest(unittest.TestCase):
