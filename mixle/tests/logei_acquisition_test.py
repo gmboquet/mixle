@@ -36,7 +36,14 @@ class LogEITest(unittest.TestCase):
         self.assertAlmostEqual(great, np.log(50.0), delta=0.1)  # h(z) ~ z for large z
 
     def test_zero_std_is_neg_inf(self):
-        self.assertEqual(log_expected_improvement(np.array([0.5]), np.array([0.0]), 1.0)[0], -np.inf)
+        # minimization: improve = best - mean = 1.0 - 1.5 = -0.5 <= 0 -> no guaranteed improvement
+        self.assertEqual(log_expected_improvement(np.array([1.5]), np.array([0.0]), 1.0)[0], -np.inf)
+
+    def test_zero_std_returns_log_guaranteed_improvement(self):
+        # minimization: improve = best - mean = 1.0 - 0.5 = 0.5 > 0 -> deterministic limit is
+        # log(max(improve, 0)), not -inf (this input used to be misassigned to the -inf test above).
+        got = log_expected_improvement(np.array([0.5]), np.array([0.0]), 1.0)[0]
+        self.assertAlmostEqual(got, np.log(0.5))
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_usable_in_propose_next(self):
