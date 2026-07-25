@@ -1211,9 +1211,11 @@ def _joint_bucket_histogram(components, quantizer, max_fine_bucket, max_leaf_sup
     which is exactly what stands between this function and hanging forever on an infinite-support leaf
     (e.g. a Poisson/geometric component) or burning unbounded time on a merely huge one.
 
-    Returns ``{(b_1, ..., b_K): count}``. Raises EnumerationError for component structures not handled
-    here (only Composite and atomic/enumerable leaves are supported), for a leaf with unknown/infinite
-    support (``support_size()`` is ``None``), or for a leaf whose support exceeds ``max_leaf_support``.
+    Returns ``(histogram, total_support_count)``. The second value includes support combinations omitted
+    by ``max_fine_bucket`` so the caller can expose truncation instead of silently under-counting.
+    Raises EnumerationError for component structures not handled here (only Composite and
+    atomic/enumerable leaves are supported), for a leaf with unknown/infinite support
+    (``support_size()`` is ``None``), or for a leaf whose support exceeds ``max_leaf_support``.
     """
     from mixle.enumeration.streams import freeze
     from mixle.stats.combinator.composite import CompositeDistribution
@@ -1223,10 +1225,12 @@ def _joint_bucket_histogram(components, quantizer, max_fine_bucket, max_leaf_sup
     if isinstance(head, CompositeDistribution):
         arity = head.count
         joint = {(0,) * len(components): 1}
+        total_support = 1
         for f in range(arity):
-            field = _joint_bucket_histogram(
+            field, field_total = _joint_bucket_histogram(
                 [c.dists[f] for c in components], quantizer, max_fine_bucket, max_leaf_support
             )
+            total_support *= field_total
             nxt: dict[tuple[int, ...], int] = {}
             for ka, ca in joint.items():
                 for kb, cb in field.items():
@@ -1234,7 +1238,7 @@ def _joint_bucket_histogram(components, quantizer, max_fine_bucket, max_leaf_sup
                     if max(key) <= max_fine_bucket:
                         nxt[key] = nxt.get(key, 0) + ca * cb
             joint = nxt
-        return joint
+        return joint, total_support
     # Leaf: enumerate the union of component supports, key by the per-component bucket tuple. Each
     # component's support must be finite and bounded BEFORE enumerating it -- support_size() is the
     # cheap, non-enumerating cardinality primitive this module already uses for the same purpose in
@@ -1273,7 +1277,28 @@ def _joint_bucket_histogram(components, quantizer, max_fine_bucket, max_leaf_sup
         key = tuple(quantizer.fine_bucket(float(c.log_density(v))) for c in components)
         if all(b <= max_fine_bucket for b in key):
             hist[key] = hist.get(key, 0) + 1
-    return hist
+    return hist, len(values)
+
+
+@dataclass(frozen=True)
+class MixtureCrossRankResult:
+    """Quantized mixture cross-rank estimate with an honest support-count bracket.
+
+    ``rank_lower`` counts only bins whose least-probable corner is still strictly
+    above the query. ``rank_upper`` also includes every threshold-straddling bin
+    and every support item omitted by ``depth_bits``. The estimate uses bucket
+    midpoints and is never presented as an exact scalar unless the bracket
+    collapses without truncation.
+    """
+
+    rank: int
+    rank_lower: int
+    rank_upper: int
+    exact: bool
+    truncated: bool
+    oversample: int
+    bin_width_bits: float
+    depth_bits: float
 
 
 def mixture_cross_rank(
@@ -1293,10 +1318,12 @@ def mixture_cross_rank(
     JOINT/cross-component support -- see :func:`_joint_bucket_histogram`) and counting joint bins whose
     representative marginal probability exceeds ``p(value)``.
 
-    Quantization-approximate: a joint bin's marginal probability is evaluated at the bucket midpoints,
-    so bins straddling the threshold may be mis-counted; the error shrinks as ``oversample`` grows. The
-    returned rank carries no explicit quantization-error or truncation metadata beyond that -- treat it
-    as an approximate count, tightened by raising ``oversample``, not as a certified bound.
+    Returns a :class:`MixtureCrossRankResult`, not an uncertified scalar. A joint bin's mixture
+    probability is bounded using both probability corners implied by its component buckets. Bins
+    certainly above the query contribute to ``rank_lower``; threshold-straddling bins contribute only
+    to ``rank_upper``. Support omitted by ``depth_bits`` is also included conservatively in the upper
+    bound and sets ``truncated=True``. The midpoint-based ``rank`` is an estimate within that bracket;
+    ``exact=True`` only when the bracket collapses without truncation.
 
     Cost is EXPONENTIAL in the number of components K (the histogram is K-dimensional), so this is for
     SMALL-K mixtures (a few components); it needs no enumeration of the joint support, so it scales to
@@ -1314,15 +1341,42 @@ def mixture_cross_rank(
     log_w = [float(lw) for lw, w in zip(mixture.log_w, mixture.w, strict=False) if w > 0.0]
     q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample)
     max_fb = int(math.ceil(depth_bits * oversample / bin_width_bits))
-    joint = _joint_bucket_histogram(comps, q, max_fb, max_leaf_support)
+    joint, total_support = _joint_bucket_histogram(comps, q, max_fb, max_leaf_support)
 
     t = float(mixture.log_density(value))
     px = math.exp(t)
     bits_per_bucket = bin_width_bits / oversample
     rank = 0
+    rank_lower = 0
+    rank_upper = 0
     for key, cnt in joint.items():
-        # representative marginal probability of this joint bin (per-component bucket midpoints)
-        p = sum(math.exp(lw) * 2.0 ** (-(key[j] + 0.5) * bits_per_bucket) for j, lw in enumerate(log_w))
-        if p > px * (1.0 + 1.0e-9):
+        # Each component bucket b means bits in [b*delta, (b+1)*delta). Evaluating both
+        # corners gives a valid mixture-probability interval for every value in the joint bin.
+        p_lower = sum(math.exp(lw) * 2.0 ** (-(key[j] + 1.0) * bits_per_bucket) for j, lw in enumerate(log_w))
+        p_upper = sum(math.exp(lw) * 2.0 ** (-key[j] * bits_per_bucket) for j, lw in enumerate(log_w))
+        p_mid = sum(math.exp(lw) * 2.0 ** (-(key[j] + 0.5) * bits_per_bucket) for j, lw in enumerate(log_w))
+        threshold = px * (1.0 + 1.0e-9)
+        if p_lower > threshold:
+            rank_lower += cnt
+            rank_upper += cnt
+        elif p_upper > threshold:
+            rank_upper += cnt
+        if p_mid > threshold:
             rank += cnt
-    return rank
+    represented = sum(joint.values())
+    omitted = total_support - represented
+    if omitted < 0:
+        raise RuntimeError("mixture cross-rank histogram exceeds its declared support count")
+    rank_upper += omitted
+    truncated = omitted > 0
+    rank = max(rank_lower, min(rank, rank_upper))
+    return MixtureCrossRankResult(
+        rank=rank,
+        rank_lower=rank_lower,
+        rank_upper=rank_upper,
+        exact=not truncated and rank_lower == rank_upper,
+        truncated=truncated,
+        oversample=q.oversample,
+        bin_width_bits=q.bin_width_bits,
+        depth_bits=float(depth_bits),
+    )

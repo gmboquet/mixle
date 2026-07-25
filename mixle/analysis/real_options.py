@@ -20,8 +20,10 @@ more is known?" Two tools close that gap:
     for free, and ``abandon`` recovers an optional ``salvage_value`` instead of assuming a total write-off.
   * :func:`voi_dollars` -- the dollar value of a piece of information (e.g. a delineation drillhole): the
     expected value of the best decision *with* that information, minus the expected value of the best
-    decision *without* it. By default this is a Gaussian-dispersion HEURISTIC approximation, not the
-    textbook expected value of sample information (EVSI): a hypothetical drillhole's effect on the
+    decision *without* it. A declared ``observation_model`` is required by default so this is a real
+    expected value of sample information (EVSI). A Gaussian-dispersion HEURISTIC remains available only
+    through the explicit ``drill_info["method"] = "variance_rescaling_heuristic"`` opt-in: a
+    hypothetical drillhole's effect on the
     posterior is summarized as a fractional variance reduction (either supplied directly via
     ``drill_info["variance_reduction"]``, or -- when available -- via C8's
     ``mixle_pde.voi.expected_variance_reduction`` hook), and the pre-posterior simulation invents
@@ -308,8 +310,8 @@ class VoiEstimate(NamedTuple):
     ``ci_low <= 0 <= ci_high``, ``value`` is statistically indistinguishable from "no additional value" --
     a more honest read than a bare point estimate that happens to be (noisily) positive or negative.
 
-    ``method`` names which computation produced the estimate: ``"variance_rescaling_heuristic"`` (the
-    default, always available -- a Gaussian-dispersion approximation, exact only when the posterior is
+    ``method`` names which computation produced the estimate: ``"variance_rescaling_heuristic"`` (an
+    explicit opt-in Gaussian-dispersion approximation, exact only when the posterior is
     close to Gaussian, unimodal, and unconstrained) or ``"gaussian_conjugate_evsi"`` (a genuine
     sample-then-condition preposterior computation under a declared linear-Gaussian ``observation_model``).
     """
@@ -339,7 +341,7 @@ class GaussianObservationModel(NamedTuple):
     """A declared linear-Gaussian observation model: ``y = obs_matrix @ theta + noise``, ``noise ~
     N(0, obs_cov)``, for a latent ``theta`` distributed as the current posterior's ``(mean, cov)``.
 
-    MXR-080-0109: the default heuristic invents future-posterior centers/spreads by rescaling draws from
+    MXR-080-0109: the opt-in heuristic invents future-posterior centers/spreads by rescaling draws from
     the CURRENT posterior; it never samples an observation from a likelihood/forward model and conditions
     on it, so it is not a real Bayesian preposterior for non-Gaussian, multimodal, or constrained beliefs.
     This is the simplest well-defined experiment likelihood for which the preposterior -- the distribution
@@ -348,7 +350,7 @@ class GaussianObservationModel(NamedTuple):
     ``observation_model=``) is what makes them compute a genuine expected value of sample information
     (EVSI): simulate a hypothetical ``y`` from theta's actual prior-predictive marginal, analytically
     condition the CURRENT posterior on that ``y`` to get a real future posterior, decide against it, and
-    average over many simulated ``y`` -- rather than the default heuristic's rescaling of today's draws
+    average over many simulated ``y`` -- rather than the opt-in heuristic's rescaling of today's draws
     (see :func:`voi_estimate`'s docstring for why that heuristic is not a real preposterior in general).
 
     ``obs_matrix`` (``H``, shape ``(k, d)``) and ``obs_cov`` (``R``, shape ``(k, k)``, symmetric positive
@@ -375,7 +377,7 @@ def _warn_if_not_gaussian_like(posterior: Posterior, rng: np.random.Generator, *
     Not a proof: a finite probe sample can miss subtle non-Gaussianity, or (rarely) flag a legitimate
     Gaussian draw on an unlucky sample. It is a fast, honest diagnostic so a caller silently outside the
     assumed regime (multimodal, heavily skewed, bounded/constrained posteriors) gets a warning instead of
-    a silently over-claimed textbook VOI number: both the default variance-rescaling heuristic and the
+    a silently over-claimed textbook VOI number: both the opt-in variance-rescaling heuristic and the
     Gaussian-conjugate ``observation_model`` path assume the posterior's mean/cov fully characterize its
     shape, which is only true for a genuinely Gaussian belief. Thresholds are generous (roughly 7 standard
     errors at ``n_probe=512`` for true Gaussian data) to keep the false-positive rate low.
@@ -407,7 +409,7 @@ def _require_dense_finite_matrix(value: Any, name: str) -> np.ndarray:
         raise TypeError(
             f"voi_dollars: {name} must be a dense array for the observation_model path (got a matrix-free "
             "LinearOperator) -- survey-scale field posteriors aren't supported by the closed-form "
-            "Gaussian-conjugate path; use the default variance-rescaling heuristic instead."
+            "Gaussian-conjugate path; use the explicitly opted-in variance-rescaling heuristic instead."
         )
     arr = np.asarray(value, dtype=np.float64)
     if not np.all(np.isfinite(arr)):
@@ -506,9 +508,10 @@ def voi_estimate(
     assumes the realization is already known, which is exactly the perfect-information case this function
     is pricing the *gap* to, not the belief itself.
 
-    Two methods are available, controlled by ``observation_model``:
+    Two methods are available:
 
-    * ``observation_model=None`` (the default, ``method="variance_rescaling_heuristic"``): a pre-posterior
+    * ``observation_model=None`` together with explicit
+      ``drill_info["method"] == "variance_rescaling_heuristic"``: a pre-posterior
       Monte Carlo built on the law of total variance, NOT real Bayesian conditioning on a simulated
       observation. Today's posterior variance splits into "where the post-drill posterior will be
       centered" (unknown until the drillhole is actually put in) and "how much spread remains once it
@@ -549,7 +552,9 @@ def voi_estimate(
     Args:
         posterior: the current (pre-drill) belief, satisfying IC-1's ``Posterior`` protocol.
         decision_fn: belief state (``(n, d)`` draws) -> expected dollar value of the best decision.
-        drill_info: describes the hypothetical drillhole. Recognized keys: ``variance_reduction`` (direct
+        drill_info: describes the hypothetical drillhole. Recognized keys: ``method`` (must explicitly be
+            ``"variance_rescaling_heuristic"`` when no ``observation_model`` is supplied),
+            ``variance_reduction`` (direct
             fractional variance reduction, default ``0.5``), or ``candidate_geometry`` + ``forward_op``
             (+ optional ``region`` / ``cell_volumes``) to route through the C8 VOI hook when available;
             ``n_outer_samples`` / ``n_inner_samples`` override the Monte Carlo sample counts. Ignored
@@ -558,7 +563,7 @@ def voi_estimate(
         n_outer: number of hypothetical-information replicates (overridden by ``drill_info``).
         n_inner: posterior draws per replicate (overridden by ``drill_info``).
         observation_model: when given, a declared :class:`GaussianObservationModel` routes the computation
-            through the genuine ``"gaussian_conjugate_evsi"`` path instead of the default heuristic; see
+            through the genuine ``"gaussian_conjugate_evsi"`` path instead of the opt-in heuristic; see
             above. Requires a dense (non-``LinearOperator``) ``posterior.cov``.
 
     Returns:
@@ -576,7 +581,13 @@ def voi_estimate(
             posterior, decision_fn, observation_model, rng=rng, n_outer=n_outer, n_inner=n_inner
         )
 
-    method = "variance_rescaling_heuristic"
+    method = drill_info.get("method")
+    if method != "variance_rescaling_heuristic":
+        raise ValueError(
+            "voi_dollars: a declared observation_model is required for Bayesian EVSI; "
+            "the approximation is available only by explicitly setting "
+            "drill_info['method']='variance_rescaling_heuristic'"
+        )
     reduction = _variance_reduction(posterior, drill_info)
     if reduction == 0.0:
         # Analytic equality at exactly zero reduction, not just an empirically-near-zero estimate: by
@@ -618,7 +629,7 @@ def voi_dollars(
     """The value-of-information point estimate, in dollars: ``E[value | info] - E[value | no info]``.
 
     A thin convenience wrapper around :func:`voi_estimate` for callers that only want the point estimate;
-    see its docstring for the full method (the default heuristic vs. the genuine ``observation_model``
+    see its docstring for the full method (the opt-in heuristic vs. the genuine ``observation_model``
     EVSI path, common random numbers, the zero-information analytic equality, and what ``method`` the
     estimate used) and for how to also get the Monte Carlo standard error / CI.
 

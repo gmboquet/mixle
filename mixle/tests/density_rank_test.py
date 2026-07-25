@@ -366,13 +366,13 @@ class MixtureCrossRankTestCase(unittest.TestCase):
         def brute(x):
             return sum(1 for y in support if lp[tuple(y)] > lp[tuple(x)] + 1e-9)
 
-        cross_err = max(abs(mixture_cross_rank(mix, x, oversample=128) - brute(x)) for x in support)
+        cross_err = max(abs(mixture_cross_rank(mix, x, oversample=128).rank - brute(x)) for x in support)
         self.assertLessEqual(cross_err, 6)  # true-marginal rank, only small quantization error
         # On the worst value the tropical count_dp_rank bracket is wide, while cross-rank stays close.
         worst = max(support, key=lambda x: count_dp_rank(mix, x, oversample=64).window_upper)
         cr = count_dp_rank(mix, worst, oversample=64)
         self.assertGreater(cr.window_upper - cr.window_lower, 6)  # tropical can't pin the rank
-        self.assertLessEqual(abs(mixture_cross_rank(mix, worst, oversample=128) - brute(worst)), 6)
+        self.assertLessEqual(abs(mixture_cross_rank(mix, worst, oversample=128).rank - brute(worst)), 6)
 
     def test_leaf_mixture_true_rank(self):
         from mixle.enumeration.density_rank import mixture_cross_rank
@@ -386,7 +386,7 @@ class MixtureCrossRankTestCase(unittest.TestCase):
         def brute(y):
             return sum(1 for z in range(12) if lp[z] > lp[y] + 1e-9)
 
-        errs = [abs(mixture_cross_rank(mix, y, oversample=128) - brute(y)) for y in range(12)]
+        errs = [abs(mixture_cross_rank(mix, y, oversample=128).rank - brute(y)) for y in range(12)]
         self.assertLessEqual(max(errs), 2)
 
     def test_infinite_support_leaf_raises_instead_of_hanging(self):
@@ -423,8 +423,28 @@ class MixtureCrossRankTestCase(unittest.TestCase):
             [IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(12)))) for _ in range(2)], [0.6, 0.4]
         )
         r = mixture_cross_rank(mix, 0, oversample=64, max_leaf_support=100)
-        self.assertIsInstance(r, int)
-        self.assertGreaterEqual(r, 0)
+        self.assertGreaterEqual(r.rank, 0)
+        self.assertLessEqual(r.rank_lower, r.rank)
+        self.assertLessEqual(r.rank, r.rank_upper)
+        self.assertEqual(r.oversample, 64)
+
+    def test_result_exposes_quantization_and_depth_uncertainty(self):
+        from mixle.enumeration.density_rank import MixtureCrossRankResult, mixture_cross_rank
+
+        mix = MixtureDistribution(
+            [
+                IntegerCategoricalDistribution(0, [0.9, 0.1]),
+                IntegerCategoricalDistribution(0, [0.1, 0.9]),
+            ],
+            [0.5, 0.5],
+        )
+        result = mixture_cross_rank(mix, 0, oversample=2, depth_bits=0.1)
+        self.assertIsInstance(result, MixtureCrossRankResult)
+        self.assertTrue(result.truncated)
+        self.assertFalse(result.exact)
+        self.assertLessEqual(result.rank_lower, result.rank)
+        self.assertLessEqual(result.rank, result.rank_upper)
+        self.assertGreater(result.rank_upper, result.rank_lower)
 
 
 class CumulativeProbabilityTestCase(unittest.TestCase):
