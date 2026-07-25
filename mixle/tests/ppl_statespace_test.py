@@ -60,6 +60,56 @@ class StateSpaceTestCase(unittest.TestCase):
         self.assertTrue(np.allclose(res.smoothed, xs))
         self.assertTrue(np.allclose(res.smoothed_sd**2, ps))
 
+    def test_fit_controls_and_termination_receipt(self):
+        y = [0.1, -0.2, 0.3, 0.0]
+        for kwargs, error in [
+            ({"max_its": 0}, ValueError),
+            ({"max_its": 1.5}, TypeError),
+            ({"delta": -1.0}, ValueError),
+            ({"delta": np.nan}, ValueError),
+            ({"tol": np.inf}, ValueError),
+        ]:
+            with self.subTest(kwargs=kwargs), self.assertRaises(error):
+                AR1().fit(y, **kwargs)
+
+        limited = AR1().fit(y, max_its=2, delta=0.0).result
+        self.assertFalse(limited.converged)
+        self.assertEqual(limited.iterations, 2)
+        self.assertEqual(limited.termination_reason, "iteration_limit")
+        self.assertEqual(len(limited.objective_trace), 3)
+        self.assertEqual(limited.loglik, limited.objective_trace[-1])
+        self.assertEqual(limited.termination["objective"], limited.loglik)
+
+        converged = AR1().fit(y, max_its=2, delta=1e9).result
+        self.assertTrue(converged.converged)
+        self.assertEqual(converged.iterations, 1)
+        self.assertEqual(converged.termination_reason, "objective_tolerance")
+
+    def test_input_and_missing_data_policy(self):
+        with self.assertRaises(ValueError):
+            AR1().fit([0.0, np.nan, 1.0])
+        with self.assertRaises(ValueError):
+            AR1().fit([0.0, np.inf, 1.0], missing="marginalize")
+        with self.assertRaises(ValueError):
+            AR1().fit([[0.0], [1.0]])
+        with self.assertRaises(ValueError):
+            AR1().fit([np.nan, np.nan], missing="marginalize")
+
+        result = AR1().fit(
+            [np.nan, 0.0, 0.2, np.nan, -0.1],
+            missing="marginalize",
+            max_its=2,
+            delta=0.0,
+        ).result
+        self.assertEqual(result.smoothed.shape, (5,))
+        self.assertTrue(np.all(np.isfinite(result.smoothed)))
+
+    def test_forecast_requires_a_positive_integer_horizon(self):
+        result = LocalLevel().fit([0.0, 0.1], max_its=1, delta=0.0).result
+        for horizon, error in [(0, ValueError), (-1, ValueError), (1.5, TypeError), (True, TypeError)]:
+            with self.subTest(horizon=horizon), self.assertRaises(error):
+                result.forecast(horizon)
+
 
 if __name__ == "__main__":
     unittest.main()
