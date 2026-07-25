@@ -32,6 +32,16 @@ class MCMCResult:
     accepted: np.ndarray
     transition_labels: tuple[str, ...] | None = None
 
+    def __post_init__(self) -> None:
+        log_probs = np.asarray(self.log_probs)
+        accepted = np.asarray(self.accepted)
+        if log_probs.ndim != 1 or len(log_probs) != len(self.samples) or not np.all(np.isfinite(log_probs)):
+            raise ValueError("log_probs must contain one finite value per retained sample.")
+        if accepted.ndim != 1 or accepted.dtype.kind != "b":
+            raise ValueError("accepted must be a one-dimensional boolean transition record.")
+        if self.transition_labels is not None and len(self.transition_labels) != len(accepted):
+            raise ValueError("transition label count does not match accepted count.")
+
     @property
     def acceptance_rate(self) -> float:
         """Return the overall fraction of accepted transitions."""
@@ -72,16 +82,25 @@ class MCMCResult:
         n = int(arr.shape[0])
         if n <= 1:
             return float(n)
+        if isinstance(max_lag, (bool, np.bool_)) or (
+            max_lag is not None and (not isinstance(max_lag, (int, np.integer)) or int(max_lag) < 0)
+        ):
+            raise ValueError("max_lag must be a non-negative integer or None.")
         flat = arr.reshape((n, -1))
         centered = flat - flat.mean(axis=0, keepdims=True)
-        var = np.mean(centered * centered, axis=0)
-        positive_var = var > 0.0
+        within_var = np.var(flat, axis=0, ddof=1)
+        positive_var = within_var > 0.0
         ess = np.full(flat.shape[1], float(n), dtype=float)
         if not np.any(positive_var):
             return float(ess[0]) if arr.ndim == 1 else ess.reshape(arr.shape[1:])
 
         lag_limit = n - 1 if max_lag is None else min(int(max_lag), n - 1)
-        tau = _geyer_tau(centered[None, :, positive_var], var[positive_var], lag_limit)
+        tau = _geyer_tau(
+            centered[None, :, positive_var],
+            within_var[positive_var],
+            within_var[positive_var],
+            lag_limit,
+        )
         ess[positive_var] = np.maximum(1.0, n / tau)
         return float(ess[0]) if arr.ndim == 1 else ess.reshape(arr.shape[1:])
 
@@ -119,6 +138,28 @@ def distribution_log_target(dist: Any, evidence: Callable[[Any], float] | None =
     return lambda x: float(dist.log_density(x)) + float(evidence(x))
 
 
+def _nonnegative_int(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or int(value) < 0:
+        raise ValueError(f"{name} must be a non-negative integer.")
+    return int(value)
+
+
+def _positive_int(value: Any, name: str) -> int:
+    result = _nonnegative_int(value, name)
+    if result == 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return result
+
+
+def _finite_positive(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError(f"{name} must be finite and positive.")
+    result = float(value)
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be finite and positive.")
+    return result
+
+
 # --- MCMC samplers (MH / ensemble / Gibbs / HMC / reflective / dense / NUTS) -
 def metropolis_hastings(
     log_target: LogTarget,
@@ -145,12 +186,9 @@ def metropolis_hastings(
         MCMCResult with retained samples, retained log probabilities, and the
         accept/reject indicator for every transition.
     """
-    if num_samples < 0:
-        raise ValueError("num_samples must be non-negative.")
-    if burn_in < 0:
-        raise ValueError("burn_in must be non-negative.")
-    if thin <= 0:
-        raise ValueError("thin must be positive.")
+    num_samples = _nonnegative_int(num_samples, "num_samples")
+    burn_in = _nonnegative_int(burn_in, "burn_in")
+    thin = _positive_int(thin, "thin")
 
     rng = np.random.RandomState() if rng is None else rng
     current = initial
@@ -219,15 +257,23 @@ def affine_invariant_ensemble(
         MCMCResult whose ``samples`` are the pooled walker states (sweep-major), so its
         diagnostics see ``W * num_samples / thin`` draws.
     """
-    if a <= 1.0:
+    num_samples = _nonnegative_int(num_samples, "num_samples")
+    burn_in = _nonnegative_int(burn_in, "burn_in")
+    thin = _positive_int(thin, "thin")
+    if isinstance(a, (bool, np.bool_)) or not isinstance(a, (int, float, np.integer, np.floating)):
         raise ValueError("stretch scale a must be > 1.")
-    if thin <= 0:
-        raise ValueError("thin must be positive.")
+    a = float(a)
+    if not np.isfinite(a) or a <= 1.0:
+        raise ValueError("stretch scale a must be finite and > 1.")
     rng = np.random.RandomState() if rng is None else rng
     p = np.array(p0, dtype=float)
-    if p.ndim != 2 or p.shape[0] < 2 or p.shape[0] % 2 != 0:
-        raise ValueError("p0 must be (W, d) with W even and >= 2.")
+    if p.ndim != 2 or p.shape[1] == 0 or p.shape[0] % 2 != 0:
+        raise ValueError("p0 must be a finite (W, d) array with positive d and even W.")
     nwalkers, d = p.shape
+    if nwalkers < 2 * d + 2:
+        raise ValueError(f"p0 requires W >= 2*d + 2 walkers; got W={nwalkers}, d={d}.")
+    if not np.all(np.isfinite(p)):
+        raise ValueError("p0 walkers must be finite.")
     lp = np.array([float(log_target(p[k])) for k in range(nwalkers)])
     if not np.all(np.isfinite(lp)):
         raise ValueError("some initial walkers have non-finite log target.")
@@ -284,12 +330,9 @@ def metropolis_within_gibbs(
     or a small block while the full joint log target still owns all model math.
     Retained samples are recorded after complete sweeps through all proposals.
     """
-    if num_samples < 0:
-        raise ValueError("num_samples must be non-negative.")
-    if burn_in < 0:
-        raise ValueError("burn_in must be non-negative.")
-    if thin <= 0:
-        raise ValueError("thin must be positive.")
+    num_samples = _nonnegative_int(num_samples, "num_samples")
+    burn_in = _nonnegative_int(burn_in, "burn_in")
+    thin = _positive_int(thin, "thin")
 
     kernels = _normalize_transition_proposals(proposals)
     rng = np.random.RandomState() if rng is None else rng
@@ -355,16 +398,11 @@ def hamiltonian_monte_carlo(
     callables stay user/model-owned; this utility only owns the transition
     mechanics.
     """
-    if num_samples < 0:
-        raise ValueError("num_samples must be non-negative.")
-    if burn_in < 0:
-        raise ValueError("burn_in must be non-negative.")
-    if thin <= 0:
-        raise ValueError("thin must be positive.")
-    if step_size <= 0.0 or not np.isfinite(step_size):
-        raise ValueError("step_size must be finite and positive.")
-    if num_steps <= 0:
-        raise ValueError("num_steps must be positive.")
+    num_samples = _nonnegative_int(num_samples, "num_samples")
+    burn_in = _nonnegative_int(burn_in, "burn_in")
+    thin = _positive_int(thin, "thin")
+    step_size = _finite_positive(step_size, "step_size")
+    num_steps = _positive_int(num_steps, "num_steps")
 
     rng = np.random.RandomState() if rng is None else rng
     current = _numeric_state(initial)
@@ -449,17 +487,18 @@ def reflective_hmc(
     ``lower``/``upper`` broadcast to the state shape. Returns an :class:`MCMCResult` whose samples all lie
     in the box -- the constrained-HMC answer for box/simplex-style bounds (WS-1 constraints).
     """
-    if step_size <= 0.0 or not np.isfinite(step_size):
-        raise ValueError("step_size must be finite and positive.")
-    if num_steps <= 0:
-        raise ValueError("num_steps must be positive.")
-    if thin <= 0:
-        raise ValueError("thin must be positive.")
+    num_samples = _nonnegative_int(num_samples, "num_samples")
+    burn_in = _nonnegative_int(burn_in, "burn_in")
+    thin = _positive_int(thin, "thin")
+    step_size = _finite_positive(step_size, "step_size")
+    num_steps = _positive_int(num_steps, "num_steps")
     rng = np.random.RandomState() if rng is None else rng
     current = _numeric_state(initial)
     shape = current.shape
     lo = np.broadcast_to(np.asarray(lower, dtype=float), shape).astype(float)
     hi = np.broadcast_to(np.asarray(upper, dtype=float), shape).astype(float)
+    if not np.all(np.isfinite(lo)) or not np.all(np.isfinite(hi)) or np.any(lo >= hi):
+        raise ValueError("lower and upper bounds must be finite with lower < upper.")
     if np.any(current < lo) or np.any(current > hi):
         raise ValueError("initial state is outside the box [lower, upper].")
     mass_arr = _numeric_mass(mass, shape)
@@ -526,18 +565,36 @@ def particle_filter(
     marginal log-likelihood ``log p(y_1:T)`` (an unbiased evidence estimate, usable for parameter
     inference). For a linear-Gaussian model it converges to the exact Kalman filter as ``N -> infinity``.
     """
+    if not isinstance(resample, (bool, np.bool_)):
+        raise ValueError("resample must be boolean.")
     rng = np.random.RandomState() if rng is None else rng
     particles = np.array(initial_particles, dtype=np.float64)
+    if particles.ndim != 2 or particles.shape[0] == 0 or particles.shape[1] == 0:
+        raise ValueError("initial_particles must have non-empty shape (N, d).")
+    if not np.all(np.isfinite(particles)):
+        raise ValueError("initial_particles must be finite.")
     n = particles.shape[0]
     means: list[np.ndarray] = []
     log_lik = 0.0
     log_w_cum = np.zeros(n)  # carried log-weights (uniform again after every resample)
-    for y in observations:
-        particles = np.asarray(propagate(particles, rng), dtype=np.float64)
-        log_w_cum = log_w_cum + np.asarray(log_likelihood(particles, y), dtype=np.float64)
+    for observation_index, y in enumerate(observations):
+        propagated = np.asarray(propagate(particles, rng), dtype=np.float64)
+        if propagated.shape != particles.shape or not np.all(np.isfinite(propagated)):
+            raise ValueError("propagate must return one finite state with the same shape for every particle.")
+        particles = propagated
+        increment = np.asarray(log_likelihood(particles, y), dtype=np.float64)
+        if increment.shape != (n,):
+            raise ValueError(f"log_likelihood must return shape ({n},), got {increment.shape}.")
+        if np.any(np.isnan(increment)) or np.any(np.isposinf(increment)):
+            raise ValueError("log_likelihood must return finite values or -inf for impossible particles.")
+        log_w_cum = log_w_cum + increment
+        if not np.any(np.isfinite(log_w_cum)):
+            raise ValueError(f"observation {observation_index} has zero probability under every particle.")
         max_lw = float(np.max(log_w_cum))
         weights = np.exp(log_w_cum - max_lw)
         w_sum = float(weights.sum())
+        if not np.isfinite(w_sum) or w_sum <= 0.0:
+            raise ValueError(f"observation {observation_index} produced invalid particle weights.")
         weights = weights / w_sum
         means.append(weights @ particles)
         if resample:
@@ -548,16 +605,21 @@ def particle_filter(
         else:
             # pure SIS: the evidence estimate is the mean carried weight, log p(y_1:t) ~= log mean_i w_t^i
             log_lik = max_lw + np.log(w_sum / n)
-    return np.array(means), log_lik
+    mean_array = np.asarray(means, dtype=float)
+    if not means:
+        mean_array = np.empty((0, particles.shape[1]), dtype=float)
+    return mean_array, float(log_lik)
 
 
 def _dense_hmc_run(lp, grad, x0, num, step, n_leap, m_inv, m_chol, rng):
-    """Run HMC for ``num`` samples with a (dense) mass metric; returns ``(samples, n_accepted)``."""
+    """Run HMC and retain the exact accept/reject decision for each transition."""
     d = x0.size
     x = x0.copy()
     cur_lp = lp(x)
+    if not np.isfinite(cur_lp):
+        raise ValueError("initial state has non-finite log target.")
     out = np.empty((num, d))
-    accepted = 0
+    accepted = np.zeros(num, dtype=bool)
     for it in range(num):
         p0 = m_chol @ rng.standard_normal(d)
         xn, pn = x.copy(), p0.copy()
@@ -570,9 +632,10 @@ def _dense_hmc_run(lp, grad, x0, num, step, n_leap, m_inv, m_chol, rng):
         prop_lp = lp(xn)
         ham0 = -cur_lp + 0.5 * p0 @ (m_inv @ p0)
         ham1 = -prop_lp + 0.5 * pn @ (m_inv @ pn)
-        if np.isfinite(prop_lp) and np.log(rng.rand()) < ham0 - ham1:
+        accept = bool(np.isfinite(prop_lp) and np.log(rng.rand()) < ham0 - ham1)
+        if accept:
             x, cur_lp = xn, prop_lp
-            accepted += 1
+        accepted[it] = accept
         out[it] = x
     return out, accepted
 
@@ -596,6 +659,10 @@ def dense_mass_hmc(
     fix that makes HMC competitive on realistic posteriors. ``log_target`` may be unnormalized;
     ``grad_log_target`` returns its gradient. Returns an :class:`MCMCResult` from the sampling phase.
     """
+    num_samples = _nonnegative_int(num_samples, "num_samples")
+    warmup = _nonnegative_int(warmup, "warmup")
+    step_size = _finite_positive(step_size, "step_size")
+    num_steps = _positive_int(num_steps, "num_steps")
     rng = np.random.RandomState() if rng is None else rng
     x0 = _numeric_state(initial)
     shape = x0.shape
@@ -609,7 +676,7 @@ def dense_mass_hmc(
 
     flat0 = x0.ravel().astype(float)
     eye = np.eye(d)
-    warm_samples, _ = _dense_hmc_run(lp, grad, flat0, max(warmup, 0), step_size, num_steps, eye, eye, rng)
+    warm_samples, _ = _dense_hmc_run(lp, grad, flat0, warmup, step_size, num_steps, eye, eye, rng)
     if warm_samples.shape[0] > d + 1:  # enough warmup draws to estimate a covariance
         cov = np.cov(warm_samples[warm_samples.shape[0] // 2 :].T)
         cov = np.atleast_2d(cov) + 1.0e-8 * eye
@@ -623,7 +690,7 @@ def dense_mass_hmc(
     return MCMCResult(
         samples=[_restore_numeric_state(s.reshape(shape)) for s in samples],
         log_probs=np.asarray([lp(s) for s in samples], dtype=float),
-        accepted=np.concatenate([np.ones(accepted, bool), np.zeros(num_samples - accepted, bool)]),
+        accepted=accepted,
         transition_labels=tuple("dense_mass_hmc" for _ in range(num_samples)),
     )
 
@@ -661,8 +728,20 @@ def nuts(
       ``(logp, grad)`` at every trajectory endpoint so shared leapfrog/tree nodes are never
       re-evaluated — typically ~2-3x fewer target evaluations than the split path.
     """
-    if num_samples < 0 or warmup < 0 or thin <= 0:
-        raise ValueError("require num_samples>=0, warmup>=0, thin>0.")
+    num_samples = _nonnegative_int(num_samples, "num_samples")
+    warmup = _nonnegative_int(warmup, "warmup")
+    thin = _positive_int(thin, "thin")
+    max_tree_depth = _positive_int(max_tree_depth, "max_tree_depth")
+    if (
+        isinstance(target_accept, (bool, np.bool_))
+        or not isinstance(target_accept, (int, float, np.integer, np.floating))
+        or not np.isfinite(target_accept)
+        or not 0.0 < float(target_accept) < 1.0
+    ):
+        raise ValueError("target_accept must be finite and strictly between zero and one.")
+    target_accept = float(target_accept)
+    if not isinstance(adapt_mass, (bool, np.bool_)):
+        raise ValueError("adapt_mass must be boolean.")
     if value_and_grad is not None:
         if log_target is not None or grad_log_target is not None:
             raise ValueError("pass either value_and_grad or (log_target, grad_log_target), not both.")
@@ -694,6 +773,10 @@ def nuts(
         grad = np.asarray(g, dtype=float)
         if grad.shape != shape:
             raise ValueError("gradient shape %s does not match state shape %s." % (grad.shape, shape))
+        if np.isfinite(lp) and not np.all(np.isfinite(grad)):
+            raise ValueError("gradient contains non-finite values at a finite target state.")
+        if not np.isfinite(lp):
+            grad = np.zeros(shape, dtype=float)
         return lp, grad
 
     def kinetic(r):
