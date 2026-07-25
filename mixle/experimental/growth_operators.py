@@ -119,9 +119,19 @@ def verify_output_parity(
     """
     if not _HAS_TORCH:
         raise RuntimeError("verify_output_parity requires torch.")
+    if not isinstance(model_before, nn.Module) or not isinstance(model_after, nn.Module):
+        raise TypeError("model_before and model_after must be torch modules.")
+    if not torch.is_tensor(batch) or batch.numel() == 0:
+        raise TypeError("batch must be a non-empty torch tensor.")
+    if (
+        isinstance(tolerance, bool)
+        or not isinstance(tolerance, (int, float))
+        or not np.isfinite(tolerance)
+        or float(tolerance) < 0.0
+    ):
+        raise ValueError("tolerance must be finite and non-negative.")
 
-    was_training_before = model_before.training
-    was_training_after = model_after.training
+    training_states = _snapshot_training_states(model_before, model_after)
     model_before.eval()
     model_after.eval()
     try:
@@ -129,8 +139,16 @@ def verify_output_parity(
             out_before = model_before(batch)
             out_after = model_after(batch)
     finally:
-        model_before.train(was_training_before)
-        model_after.train(was_training_after)
+        _restore_training_states(training_states)
+
+    if not torch.is_tensor(out_before) or not torch.is_tensor(out_after):
+        raise TypeError("parity verification requires tensor-valued model outputs.")
+    if out_before.shape != out_after.shape or out_before.numel() == 0:
+        raise ValueError("parity outputs must be non-empty tensors with matching shapes.")
+    if out_before.device != out_after.device:
+        raise ValueError("parity outputs must be on the same device.")
+    if not torch.all(torch.isfinite(out_before)) or not torch.all(torch.isfinite(out_after)):
+        raise ValueError("parity outputs must be finite.")
 
     diff = (out_after - out_before).abs()
     max_abs_diff = float(diff.max().item())
@@ -146,6 +164,20 @@ def verify_output_parity(
     )
 
 
+def _snapshot_training_states(*models: Any) -> list[tuple[Any, bool]]:
+    """Capture every unique module's local training flag, including shared submodules."""
+    states: dict[int, tuple[Any, bool]] = {}
+    for model in models:
+        for module in model.modules():
+            states.setdefault(id(module), (module, bool(module.training)))
+    return list(states.values())
+
+
+def _restore_training_states(states: list[tuple[Any, bool]]) -> None:
+    for module, training in states:
+        module.training = training
+
+
 # --------------------------------------------------------------------------------------------------------
 # 1. net2net widening -- the real Net2WiderNet duplication rule
 # --------------------------------------------------------------------------------------------------------
@@ -159,6 +191,18 @@ def _duplication_mapping(old_width: int, new_width: int, rng: np.random.Generato
     at random via ``rng`` -- Net2Net's own paper notes either choice preserves the function exactly, since
     what matters for exactness is only the DIVISION step below, not which columns get duplicated.
     """
+    if (
+        isinstance(old_width, (bool, np.bool_))
+        or not isinstance(old_width, (int, np.integer))
+        or int(old_width) <= 0
+        or isinstance(new_width, (bool, np.bool_))
+        or not isinstance(new_width, (int, np.integer))
+        or int(new_width) <= 0
+    ):
+        raise ValueError("old_width and new_width must be positive integers.")
+    old_width, new_width = int(old_width), int(new_width)
+    if not isinstance(systematic, (bool, np.bool_)):
+        raise ValueError("systematic must be boolean.")
     if new_width < old_width:
         raise ValueError(f"net2net widening requires new_width >= old_width; got {new_width} < {old_width}")
     n_new = new_width - old_width
@@ -194,6 +238,14 @@ def net2net_widen(
     """
     if not _HAS_TORCH:
         raise RuntimeError("net2net_widen requires torch.")
+    if not isinstance(linear_in, nn.Linear) or not isinstance(linear_out, nn.Linear):
+        raise TypeError("linear_in and linear_out must be torch.nn.Linear modules.")
+    if isinstance(new_width, bool) or not isinstance(new_width, int) or new_width <= 0:
+        raise ValueError("new_width must be a positive integer.")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed must be an integer.")
+    if not isinstance(systematic, bool):
+        raise ValueError("systematic must be boolean.")
 
     old_width = linear_in.out_features
     if linear_out.in_features != old_width:
@@ -202,6 +254,8 @@ def net2net_widen(
         )
     if new_width < old_width:
         raise ValueError(f"net2net_widen only grows width; got new_width={new_width} < old_width={old_width}")
+    if linear_in.weight.device != linear_out.weight.device or linear_in.weight.dtype != linear_out.weight.dtype:
+        raise ValueError("linear_in and linear_out must share device and dtype.")
 
     rng = np.random.default_rng(seed)
     mapping = _duplication_mapping(old_width, new_width, rng, systematic=systematic)
@@ -215,20 +269,32 @@ def net2net_widen(
         map_idx = torch.as_tensor(mapping, device=device, dtype=torch.long)
 
         d_in = linear_in.in_features
-        new_linear_in = nn.Linear(d_in, new_width, bias=linear_in.bias is not None)
+        new_linear_in = nn.Linear(
+            d_in,
+            new_width,
+            bias=linear_in.bias is not None,
+            device=device,
+            dtype=dtype,
+        )
         new_linear_in.weight.copy_(linear_in.weight[map_idx, :])
         if linear_in.bias is not None:
             new_linear_in.bias.copy_(linear_in.bias[map_idx])
-        new_linear_in.to(device=device, dtype=dtype)
 
         d_out = linear_out.out_features
         divisor = torch.as_tensor(replication_count[mapping], device=device, dtype=dtype)
-        new_linear_out = nn.Linear(new_width, d_out, bias=linear_out.bias is not None)
+        new_linear_out = nn.Linear(
+            new_width,
+            d_out,
+            bias=linear_out.bias is not None,
+            device=device,
+            dtype=dtype,
+        )
         new_col = linear_out.weight[:, map_idx] / divisor[None, :]
         new_linear_out.weight.copy_(new_col)
         if linear_out.bias is not None:
             new_linear_out.bias.copy_(linear_out.bias)  # bias is unaffected: it's added once, not summed over h
-        new_linear_out.to(device=device, dtype=dtype)
+        new_linear_in.train(linear_in.training)
+        new_linear_out.train(linear_out.training)
 
     receipt = GrowthReceipt(name=f"net2net_widen[{old_width}->{new_width}]")
     return new_linear_in, new_linear_out, receipt
@@ -286,7 +352,7 @@ def _widen_attention(attn: Any, new_d: int, mapping: np.ndarray, r: int) -> Any:
         map_idx = torch.as_tensor(mapping, device=device, dtype=torch.long)
         sqrt_r = float(np.sqrt(r))
 
-        new_attn = CausalAttention(new_d, attn.h)
+        new_attn = CausalAttention(new_d, attn.h).to(device=device, dtype=dtype)
 
         old_qkv_w = attn.qkv.weight.view(3, old_d, old_d)  # (qkv, out=d, in=d)
         old_qkv_b = attn.qkv.bias.view(3, old_d)
@@ -306,7 +372,7 @@ def _widen_attention(attn: Any, new_d: int, mapping: np.ndarray, r: int) -> Any:
         new_attn.proj.weight.copy_(new_proj_w)
         new_attn.proj.bias.copy_(attn.proj.bias[map_idx])
 
-        new_attn.to(device=device, dtype=dtype)
+        new_attn.train(attn.training)
     return new_attn
 
 
@@ -344,10 +410,20 @@ def widen_block(block: Any, new_d_model: int, seed: int = 0, systematic: bool = 
 
     from mixle.models.transformer import Block
 
+    if not isinstance(block, Block):
+        raise TypeError("block must be a mixle.models.transformer.Block.")
+    if isinstance(new_d_model, bool) or not isinstance(new_d_model, int) or new_d_model <= 0:
+        raise ValueError("new_d_model must be a positive integer.")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed must be an integer.")
+    if not isinstance(systematic, bool):
+        raise ValueError("systematic must be boolean.")
     old_d = block.ln1.weight.shape[0]
     if new_d_model < old_d:
         raise ValueError(f"widen_block only grows width; got new_d_model={new_d_model} < old d_model={old_d}")
     n_head = block.attn.h
+    if old_d % n_head != 0:
+        raise ValueError(f"existing d_model={old_d} must be divisible by n_head={n_head}.")
     if new_d_model % n_head != 0:
         raise ValueError(f"new_d_model={new_d_model} must be divisible by n_head={n_head}")
     if new_d_model % old_d != 0:
@@ -361,11 +437,11 @@ def widen_block(block: Any, new_d_model: int, seed: int = 0, systematic: bool = 
     rng = np.random.default_rng(seed)
     mapping = _residual_widen_mapping(old_d, n_head, r)
 
-    new_block = Block(new_d_model, n_head)
+    device = block.ln1.weight.device
+    dtype = block.ln1.weight.dtype
+    new_block = Block(new_d_model, n_head).to(device=device, dtype=dtype)
 
     with torch.no_grad():
-        device = block.ln1.weight.device
-        dtype = block.ln1.weight.dtype
         map_idx = torch.as_tensor(mapping, device=device, dtype=torch.long)
 
         # LayerNorms: plain coordinate-duplicate weight/bias -- exact given the uniform-r duplication (see
@@ -393,23 +469,22 @@ def widen_block(block: Any, new_d_model: int, seed: int = 0, systematic: bool = 
         hidden_divisor = torch.as_tensor(hidden_replication[hidden_mapping], device=device, dtype=dtype)
 
         lin1 = block.mlp[0]
-        new_lin1 = nn.Linear(new_d_model, new_hidden)
+        new_lin1 = nn.Linear(new_d_model, new_hidden, device=device, dtype=dtype)
         new_lin1.weight.copy_(lin1.weight[hidden_map_idx, :][:, map_idx] / r)
         new_lin1.bias.copy_(lin1.bias[hidden_map_idx])
 
         lin2 = block.mlp[2]
-        new_lin2 = nn.Linear(new_hidden, new_d_model)
+        new_lin2 = nn.Linear(new_hidden, new_d_model, device=device, dtype=dtype)
         new_col = lin2.weight[:, hidden_map_idx] / hidden_divisor[None, :]
         new_lin2.weight.copy_(new_col[map_idx, :])
         new_lin2.bias.copy_(lin2.bias[map_idx])
 
-        new_block.mlp[0] = new_lin1.to(device=device, dtype=dtype)
-        new_block.mlp[2] = new_lin2.to(device=device, dtype=dtype)
+        new_block.mlp[0] = new_lin1
+        new_block.mlp[2] = new_lin2
 
-        new_block.to(device=device, dtype=dtype)
-
+    new_block.train(block.training)
     receipt = GrowthReceipt(name=f"widen_block[{old_d}->{new_d_model}]")
-    batch = torch.randn(2, 5, old_d)
+    batch = torch.as_tensor(rng.standard_normal((2, 5, old_d)), device=device, dtype=dtype)
     receipt.parity = _verify_widen_parity(block, new_block, mapping, batch, tolerance=1e-4)
     return new_block, receipt
 
@@ -428,9 +503,17 @@ def _verify_widen_parity(
     (both ``new_d_model``-wide) -- a genuine per-element check across every widened output coordinate, not
     just the pre-existing ones.
     """
+    if not torch.is_tensor(batch) or batch.numel() == 0:
+        raise TypeError("batch must be a non-empty tensor.")
+    if (
+        isinstance(tolerance, bool)
+        or not isinstance(tolerance, (int, float))
+        or not np.isfinite(tolerance)
+        or float(tolerance) < 0.0
+    ):
+        raise ValueError("tolerance must be finite and non-negative.")
     map_idx = torch.as_tensor(mapping, device=batch.device, dtype=torch.long)
-    was_training_before = block.training
-    was_training_after = new_block.training
+    training_states = _snapshot_training_states(block, new_block)
     block.eval()
     new_block.eval()
     try:
@@ -438,10 +521,13 @@ def _verify_widen_parity(
             y_old = block(batch)
             y_new = new_block(batch[..., map_idx])
     finally:
-        block.train(was_training_before)
-        new_block.train(was_training_after)
+        _restore_training_states(training_states)
 
     expected = y_old[..., map_idx]
+    if not torch.is_tensor(y_old) or not torch.is_tensor(y_new) or y_new.shape != expected.shape or y_new.numel() == 0:
+        raise TypeError("widen parity requires non-empty aligned tensor outputs.")
+    if not torch.all(torch.isfinite(expected)) or not torch.all(torch.isfinite(y_new)):
+        raise ValueError("widen parity outputs must be finite.")
     diff = (y_new - expected).abs()
     max_abs_diff = float(diff.max().item())
     denom = expected.abs().clamp_min(1e-8)
@@ -490,6 +576,13 @@ def insert_block(model: Any, position: int, seed: int = 0) -> tuple[Any, GrowthR
 
     from mixle.models.transformer import Block
 
+    required_attributes = ("blocks", "d_model", "n_head", "tok", "block", "vocab")
+    if not isinstance(model, nn.Module) or any(not hasattr(model, name) for name in required_attributes):
+        raise TypeError("model must be a transformer language model with blocks and model metadata.")
+    if isinstance(position, bool) or not isinstance(position, int):
+        raise ValueError("position must be an integer.")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed must be an integer.")
     n_blocks = len(model.blocks)
     if not (0 <= position <= n_blocks):
         raise ValueError(f"position must be in [0, {n_blocks}]; got {position}")
@@ -497,7 +590,9 @@ def insert_block(model: Any, position: int, seed: int = 0) -> tuple[Any, GrowthR
     d_model = model.d_model
     n_head = model.blocks[0].attn.h if n_blocks > 0 else model.n_head
 
-    new_block = Block(d_model, n_head)
+    device = model.tok.weight.device
+    dtype = model.tok.weight.dtype
+    new_block = Block(d_model, n_head).to(device=device, dtype=dtype)
     with torch.no_grad():
         # A Block has TWO separate residual adds -- x = x + attn(ln1(x)); x = x + mlp(ln2(x)) -- so BOTH
         # branches' final linear (the thing actually summed back onto x) must be zeroed for the whole
@@ -506,19 +601,22 @@ def insert_block(model: Any, position: int, seed: int = 0) -> tuple[Any, GrowthR
         new_block.attn.proj.bias.zero_()
         new_block.mlp[2].weight.zero_()
         new_block.mlp[2].bias.zero_()
-    new_block.to(device=model.tok.weight.device, dtype=model.tok.weight.dtype)
+    new_block.train(model.training)
 
     blocks = list(model.blocks)
     blocks.insert(position, new_block)
 
     new_model = _StackedLM(model, blocks)
+    # Set only the new wrapper's local flag: recursively calling train() here would overwrite the
+    # exact mixed train/eval state of the shared modules inherited from `model`.
+    new_model.training = model.training
 
     receipt = GrowthReceipt(name=f"insert_block[pos={position}]")
     rng = np.random.default_rng(seed)
     block_size = model.block
     vocab = model.vocab
     ids = rng.integers(0, vocab, size=(2, min(5, block_size)))
-    batch = torch.as_tensor(ids, device=model.tok.weight.device, dtype=torch.float32)
+    batch = torch.as_tensor(ids, device=device, dtype=torch.long)
     receipt.parity = verify_output_parity(model, new_model, batch, tolerance=1e-5)
     return new_model, receipt
 
