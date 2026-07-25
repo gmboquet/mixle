@@ -189,7 +189,7 @@ class ProbabilisticCircuitDistribution(SequenceEncodableProbabilityDistribution)
             elif node[0] == "product":
                 acc = vals[node[1][0]].copy()
                 for c in node[1][1:]:
-                    acc = acc + vals[c]
+                    acc = lns.multiply(acc, vals[c])  # MXR-080-0138: safe LNS product (was raw `+`)
                 vals[i] = acc
             else:  # sum
                 wk = lns.quantize(np.asarray(node[2]))

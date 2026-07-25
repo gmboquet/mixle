@@ -9,6 +9,7 @@ import unittest
 import numpy as np
 
 import mixle.stats as st
+from mixle.engines.lns import LogNumberSystem
 from mixle.inference import optimize
 from mixle.stats.latent.probabilistic_circuit import (
     ProbabilisticCircuitDistribution as PC,
@@ -59,6 +60,81 @@ class ForwardTest(unittest.TestCase):
         rows = pc.sampler(1).sample(400)
         enc = pc.dist_to_encoder().seq_encode(rows)
         self.assertLess(float(np.max(np.abs(pc_lns.seq_log_density(enc) - pc.seq_log_density(enc)))), 0.05)
+
+
+class LnsProductZeroTest(unittest.TestCase):
+    """MXR-080-0138 follow-up: ``_seq_log_density_lns``'s "product" branch must combine LNS codes via
+    ``LogNumberSystem.multiply()``, not raw int64 ``+`` -- a categorical leaf scoring an unseen label
+    (the default, unsmoothed ``CategoricalDistribution`` configuration -- not an adversarial setup) is
+    a realistic ``log(0) = -inf`` leaf that quantizes to ``LOG_ZERO_CODE``. Raw-adding that sentinel to
+    an ordinary sibling code (virtually always negative, since real log-densities are <= 0) silently
+    overflows int64 instead of propagating "impossible observation"; confirmed pre-fix this returned a
+    spurious ~9.2e16 log-density (i.e. the single MOST likely row) for what is actually a zero-probability
+    observation -- see the negative-control run in this task's investigation, not just a lost-precision bug.
+    """
+
+    def _gauss_cat_circuit(self, num_vars: int = 2) -> PC:
+        return PC(
+            prod(
+                [
+                    leaf(0, st.GaussianDistribution(0.0, 1.0)),
+                    leaf(1, st.CategoricalDistribution({"a": 0.5, "b": 0.5})),
+                ]
+            ),
+            num_vars=num_vars,
+            lns_step=0.01,
+        )
+
+    def test_product_with_unseen_categorical_leaf_is_log_zero_not_overflow(self):
+        pc = self._gauss_cat_circuit()
+        # row 0's category "z" is out-of-vocab -> leaf log-density -inf -> LOG_ZERO_CODE at the product.
+        rows = [[0.0, "z"], [0.2, "a"], [-0.3, "b"]]
+        enc = pc.dist_to_encoder().seq_encode(rows)
+        ref = pc._node_values(enc)[-1]  # float64 reference forward pass (unaffected by this bug)
+        got = pc._seq_log_density_lns(enc)
+
+        self.assertTrue(np.isneginf(ref[0]))  # sanity: the reference agrees row 0 is impossible
+        self.assertTrue(np.isneginf(got[0]), f"expected exactly -inf for the LOG_ZERO leaf row, got {got[0]!r}")
+        for i in (1, 2):  # ordinary rows must still score within the usual certified LNS bound
+            self.assertLess(abs(float(got[i]) - float(ref[i])), 0.05)
+
+    def test_product_lns_codes_match_logsystem_multiply_directly(self):
+        # cross-check against LogNumberSystem.multiply() itself, not just the dequantized outcome, so
+        # this fails if the product branch ever goes back to raw `+` even in a way that happens not to
+        # move the final dequantized value for this particular fixture.
+        lns = LogNumberSystem(step=0.01)
+        pc = self._gauss_cat_circuit()
+        rows = [[0.0, "z"], [0.2, "a"]]
+        enc = pc.dist_to_encoder().seq_encode(rows)
+        got = pc._seq_log_density_lns(enc)
+
+        g_logp = pc.leaf_dists[0].seq_log_density(enc[0])
+        c_logp = pc.leaf_dists[1].seq_log_density(enc[1])
+        expect = lns.dequantize(lns.multiply(lns.quantize(g_logp), lns.quantize(c_logp)))
+        self.assertTrue(np.array_equal(got, expect))
+
+    def test_three_way_product_chain_with_log_zero_leaf(self):
+        # a longer chain (3 children -> 2 chained multiply() calls), zero in the middle position, so
+        # both the seed accumulator and a later step touch LOG_ZERO_CODE.
+        pc = PC(
+            prod(
+                [
+                    leaf(0, st.GaussianDistribution(0.0, 1.0)),
+                    leaf(1, st.CategoricalDistribution({"a": 0.5, "b": 0.5})),
+                    leaf(2, st.GaussianDistribution(1.0, 1.0)),
+                ]
+            ),
+            num_vars=3,
+            lns_step=0.01,
+        )
+        rows = [[0.0, "z", 1.0], [0.2, "a", 0.5]]
+        enc = pc.dist_to_encoder().seq_encode(rows)
+        ref = pc._node_values(enc)[-1]
+        got = pc._seq_log_density_lns(enc)
+
+        self.assertTrue(np.isneginf(ref[0]))
+        self.assertTrue(np.isneginf(got[0]))
+        self.assertLess(abs(float(got[1]) - float(ref[1])), 0.05)
 
 
 class ValidityTest(unittest.TestCase):
