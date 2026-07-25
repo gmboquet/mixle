@@ -11,11 +11,12 @@ Three pieces, in dependency order:
    for complex/high-dimensional numeric payloads, or a graph model / sequence model when the data
    carries that structure.
 
-2. :func:`resonance_embedding` scores a brand-new-modality sample against an existing, already-
-   fitted model zoo -- one generic "typicality" coordinate per zoo model, read off each model's own
-   capability surface (:mod:`mixle.capability`'s ``HasCDF``/``HasMoments``): where does a generic
-   scalar reduction of the new sample fall relative to THIS model's own typical range? Evaluation
-   only -- no gradient steps, no fitting -- hence "zero training."
+2. :func:`resonance_embedding` scores a scalar brand-new-modality sample against an existing,
+   already-fitted model zoo -- one generic "typicality" coordinate per zoo model, read off each
+   model's own capability surface (:mod:`mixle.capability`'s ``HasCDF``/``HasMoments``). Structured
+   modalities must supply an explicit deterministic ``reduction=`` contract; unsupported or broken
+   model capabilities fail visibly rather than becoming neutral evidence. Evaluation only -- no
+   gradient steps, no fitting -- hence "zero training."
 
 3. :func:`resonance_adequacy_gate` reuses the separation statistic behind
    :func:`mixle.utils.hvis.topology.model_fit_health`'s merged-regime detector (a deterministic
@@ -25,7 +26,7 @@ Three pieces, in dependency order:
    GRADUATE to a real native leaf (piece 1)?
 
 :func:`add_modality_to_joint` plugs a new per-regime leaf (a native induced leaf, or a lightweight
-fit over resonance coordinates) into an existing :class:`~mixle.reason.cross_modal.CrossModalJoint`
+    fit over resonance coordinates) into an existing :class:`~mixle.reason.cross_modal.CrossModalJoint`
 by rebuilding each regime's :class:`~mixle.stats.combinator.composite.CompositeDistribution` with
 the OLD per-modality distributions reused BY REFERENCE (never refit, never copied) plus the one new
 field -- so every other modality's fitted parameters are bitwise identical before and after.
@@ -33,7 +34,6 @@ field -- so every other modality's fitted parameters are bitwise identical befor
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Sequence
 from typing import Any
@@ -84,21 +84,24 @@ def induce_leaf_for_unseen_type(
     if len(rows) == 0:
         raise ValueError("induce_leaf_for_unseen_type requires at least one sample")
 
-    leaf = _try_automatic_profiler(rows, rng=rng, max_its=max_its)
-    if leaf is not None:
-        return leaf
-
-    numeric = _coerce_numeric_matrix(rows)
-    if numeric is not None:
-        return _fit_numeric_fallback(numeric, rng=rng, max_its=max_its)
-
+    # Explicit graph structure outranks generic numeric/image profiling. A square adjacency matrix is
+    # numerically coercible, but flattening it destroys its edge semantics.
     graph_rows = _coerce_graph_rows(rows)
     if graph_rows is not None:
         return _fit_graph_fallback(graph_rows, max_its=max_its)
 
-    sequence_elems = _coerce_sequence_elements(rows)
-    if sequence_elems is not None:
-        return _fit_sequence_fallback(rows, sequence_elems, rng=rng, max_its=max_its)
+    leaf = _try_automatic_profiler(rows, rng=rng, max_its=max_its)
+    if leaf is not None:
+        return leaf
+
+    sequence_rows = _coerce_sequence_rows(rows)
+    if sequence_rows is not None:
+        sequence_elems = [item for row in sequence_rows for item in row]
+        return _fit_sequence_fallback(sequence_rows, sequence_elems, rng=rng, max_its=max_its)
+
+    numeric = _coerce_numeric_matrix(rows)
+    if numeric is not None:
+        return _fit_numeric_fallback(numeric, rng=rng, max_its=max_its)
 
     raise TypeError(
         "induce_leaf_for_unseen_type: samples are neither profiler-recognized, numeric-coercible, "
@@ -111,11 +114,8 @@ def _try_automatic_profiler(rows, *, rng, max_its):
     from mixle.stats.combinator.ignored import IgnoredDistribution
     from mixle.utils.automatic.profiling import get_prototype
 
-    try:
-        prototype = get_prototype(rows, seed=0)
-        fitted = optimize(rows, prototype, max_its=max_its, rng=rng)
-    except Exception:  # noqa: BLE001
-        return None
+    prototype = get_prototype(rows, seed=0)
+    fitted = optimize(rows, prototype, max_its=max_its, rng=rng)
     if isinstance(fitted, IgnoredDistribution):
         return None
     return fitted
@@ -276,23 +276,23 @@ def _fit_graph_fallback(graph_rows: list[Any], *, max_its: int):
     return optimize(graph_rows, ErdosRenyiGraphEstimator(), max_its=max_its)
 
 
-def _coerce_sequence_elements(rows: Sequence[Any]) -> list[Any] | None:
+def _coerce_sequence_rows(rows: Sequence[Any]) -> list[tuple[Any, ...]] | None:
     """A variable-length (or genuinely heterogeneous) collection of elements the profiler could not
-    place; flatten to the pooled element stream so the caller can induce a leaf for the element type
-    and wrap it as a sequence."""
-    elems: list[Any] = []
+    place; snapshot every nested row exactly once so the caller can induce a leaf from the pooled
+    elements and fit the sequence model against those same observations."""
+    materialized: list[tuple[Any, ...]] = []
     saw_iterable = False
     for row in rows:
         if isinstance(row, (str, bytes, dict, set, frozenset, np.ndarray)) or not hasattr(row, "__iter__"):
             return None
-        items = list(row)
+        items = tuple(row)
+        materialized.append(items)
         if len(items) == 0:
             continue
         saw_iterable = True
-        elems.extend(items)
-    if not saw_iterable or not elems:
+    if not saw_iterable or not any(materialized):
         return None
-    return elems
+    return materialized
 
 
 def _fit_sequence_fallback(rows, elems, *, rng, max_its):
@@ -302,10 +302,10 @@ def _fit_sequence_fallback(rows, elems, *, rng, max_its):
     child_leaf = induce_leaf_for_unseen_type(elems, rng=rng, max_its=max_its)
     len_dict: dict[int, int] = {}
     for row in rows:
-        length = len(list(row))
+        length = len(row)
         len_dict[length] = len_dict.get(length, 0) + 1
     seq_est = get_sequence_estimator(child_leaf.estimator(), len_dict=len_dict)
-    return optimize(list(rows), seq_est, max_its=max_its, rng=rng)
+    return optimize(rows, seq_est, max_its=max_its, rng=rng)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -315,12 +315,23 @@ def _fit_sequence_fallback(rows, elems, *, rng, max_its):
 
 def _generic_scalar_reduction(sample: Any) -> float:
     """A model-agnostic scalar summary of an arbitrary (possibly brand-new-modality) sample: the
-    mean of its extracted numeric payload, or its own hash-derived pseudo-magnitude when no numeric
-    payload can be extracted at all (still deterministic, still comparable across samples)."""
+    mean of its extracted numeric payload, or a digest of the serializer's canonical representation.
+    Objects without a canonical representation are rejected instead of hashing ``repr`` (which may
+    contain a process-specific address)."""
     vec = _extract_numeric_vector(sample)
     if vec is not None and vec.size:
         return float(np.mean(vec))
-    digest = hashlib.sha256(repr(sample).encode("utf-8")).digest()
+    from mixle.utils.serialization import SerializationError, to_json
+
+    try:
+        canonical = to_json(sample)
+    except SerializationError as exc:
+        raise TypeError(
+            "resonance samples without numeric content must provide a canonical serializable representation"
+        ) from exc
+    import hashlib
+
+    digest = hashlib.sha256(canonical.encode("utf-8")).digest()
     return float(int.from_bytes(digest[:8], "big") % 1000) / 1000.0
 
 
@@ -330,40 +341,52 @@ def _model_typicality(model: Any, value: float) -> float:
     gradients. Returns 0.0 for a value squarely at the model's center and approaches 1.0 the more
     atypical/extreme the value looks under that model's reference scale."""
     if supports(model, HasCDF):
-        try:
-            u = float(model.cdf(value))
-            if math.isfinite(u):
-                return float(2.0 * abs(min(max(u, 0.0), 1.0) - 0.5))
-        except Exception:  # noqa: BLE001
-            pass
+        u = float(model.cdf(value))
+        if not math.isfinite(u) or not 0.0 <= u <= 1.0:
+            raise ValueError(f"{type(model).__name__}.cdf returned an invalid probability {u!r}.")
+        return float(2.0 * abs(u - 0.5))
     if supports(model, HasMoments):
-        try:
-            mean = float(model.mean())
-            std = float(model.variance()) ** 0.5
-            z = abs(value - mean) / max(std, 1.0e-9)
-            return float(z / (1.0 + z))
-        except Exception:  # noqa: BLE001
-            pass
-    return 0.5
+        mean = float(model.mean())
+        variance = float(model.variance())
+        if not math.isfinite(mean) or not math.isfinite(variance) or variance <= 0.0:
+            raise ValueError(f"{type(model).__name__} returned invalid moment coordinates.")
+        z = abs(value - mean) / math.sqrt(variance)
+        return float(z / (1.0 + z))
+    raise TypeError(f"{type(model).__name__} exposes no supported resonance probe capability.")
 
 
 def resonance_embedding(
     new_modality_samples: Sequence[Any],
     model_zoo: Sequence[SequenceEncodableProbabilityDistribution],
+    *,
+    reduction: Any | None = None,
 ) -> np.ndarray:
     """K-dim (K = ``len(model_zoo)``) embedding of each brand-new-modality sample, obtained by
-    EVALUATION ONLY against every existing, already-fitted zoo model (regardless of the modality it
-    was originally fitted to): coordinate ``k`` is how atypical a generic scalar reduction of the
-    sample looks under zoo model ``k``'s own closed-form typical range (its CDF/quantile position, or
-    a moment-normalized z-score when no CDF is exposed). No gradient steps, no fitting -- "zero
-    training."
+    EVALUATION ONLY against every existing, already-fitted zoo model: coordinate ``k`` is how
+    atypical a scalar probe looks under zoo model ``k``'s own closed-form typical range. Samples
+    must already be scalar or provide a deterministic ``reduction=`` callable; the function never
+    silently averages away structure. Every zoo model must expose a working CDF or moment contract.
+    No gradient steps or fitting occur.
     """
     if len(model_zoo) == 0:
         raise ValueError("resonance_embedding requires a non-empty model_zoo")
     rows = []
     for sample in new_modality_samples:
-        value = _generic_scalar_reduction(sample)
+        if reduction is None:
+            vector = _extract_numeric_vector(sample)
+            if vector is None or vector.size != 1 or not np.isfinite(vector[0]):
+                raise TypeError(
+                    "non-scalar modalities require an explicit, deterministic reduction= contract; "
+                    "silently averaging structure is not a valid cross-modal probe"
+                )
+            value = float(vector[0])
+        else:
+            value = float(reduction(sample))
+            if not math.isfinite(value):
+                raise ValueError("resonance reduction returned a non-finite coordinate.")
         rows.append([_model_typicality(model, value) for model in model_zoo])
+    if not rows:
+        raise ValueError("resonance_embedding requires at least one sample.")
     return np.asarray(rows, dtype=float)
 
 
@@ -418,43 +441,45 @@ def resonance_adequacy_gate(
     indefinitely (``True``), or whether the modality should GRADUATE to a real native leaf
     (``False``).
 
-    ``labels_or_structure``, when given, is the known class/cluster label per embedding row; the
+    ``labels_or_structure`` is independent known task/structure evidence per embedding row; the
     worst (minimum) pairwise separation across classes is compared against the SAME finite-sample
     threshold ``model_fit_health`` uses for its own merged/unmerged call:
     ``2.65 + 6/sqrt(n)`` (population value ~2.65 for a unimodal normal, inflated at small n).
-    Without labels, the same deterministic 2-means split ``model_fit_health`` runs internally is used
-    to discover a candidate 2-way structure and test whether IT is well separated.
+    The evidence is required: clustering the embedding and then using that same optimized split as
+    proof of embedding adequacy would be circular.
     """
-    z = np.atleast_2d(np.asarray(embedding_samples, dtype=float))
+    z = np.asarray(embedding_samples, dtype=float)
+    if z.ndim != 2 or z.shape[1] == 0 or not np.isfinite(z).all():
+        raise ValueError("embedding_samples must be a finite two-dimensional (n, d) matrix.")
     n = z.shape[0]
     if n < 4:
         return False  # too little evidence to trust the proxy -- graduate.
 
     proj = _top_pc_projection(z)
     thr = threshold if threshold is not None else 2.65 + 6.0 / math.sqrt(float(n))
+    if not isinstance(thr, (int, float, np.integer, np.floating)) or not math.isfinite(float(thr)) or thr <= 0:
+        raise ValueError("threshold must be finite and positive.")
 
-    if labels_or_structure is not None:
-        labels = np.asarray(list(labels_or_structure))
-        if labels.shape[0] != n:
-            raise ValueError("labels_or_structure must have one entry per embedding row")
-        uniq = np.unique(labels)
-        if uniq.size < 2:
-            return False
-        seps = []
-        for i, a in enumerate(uniq):
-            for b in uniq[i + 1 :]:
-                sep = _separation_ratio(proj, labels == a, labels == b)
-                if sep is not None:
-                    seps.append(sep)
-        if not seps:
-            return False
-        return min(seps) > thr
-
-    assign = _deterministic_two_means_split(proj)
-    if assign.all() or (~assign).all():
-        return False  # no structure at all was found -- nothing to be confident about.
-    sep = _separation_ratio(proj, assign, ~assign)
-    return sep is not None and sep > thr
+    if labels_or_structure is None:
+        raise ValueError(
+            "labels_or_structure is required; a clustering cannot serve as independent evidence "
+            "for the adequacy of the representation that produced it."
+        )
+    labels = np.asarray(list(labels_or_structure))
+    if labels.ndim != 1 or labels.shape[0] != n:
+        raise ValueError("labels_or_structure must have one entry per embedding row")
+    uniq = np.unique(labels)
+    if uniq.size < 2:
+        return False
+    seps = []
+    for i, a in enumerate(uniq):
+        for b in uniq[i + 1 :]:
+            sep = _separation_ratio(proj, labels == a, labels == b)
+            if sep is not None:
+                seps.append(sep)
+    if not seps:
+        return False
+    return min(seps) > thr
 
 
 # ---------------------------------------------------------------------------------------------
@@ -478,11 +503,18 @@ def add_modality_to_joint(
     :func:`fit_resonance_leaves`) -- either way, this function itself performs no fitting at all.
     """
     components = joint.joint.components
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name must be a non-empty modality name.")
+    if name in joint.names:
+        raise ValueError(f"modality {name!r} already exists in the joint.")
     if len(per_regime_leaves) != len(components):
         raise ValueError(
             f"per_regime_leaves must supply one distribution per existing regime "
             f"({len(components)} regimes), got {len(per_regime_leaves)}"
         )
+    for index, leaf in enumerate(per_regime_leaves):
+        if not isinstance(leaf, SequenceEncodableProbabilityDistribution):
+            raise TypeError(f"per_regime_leaves[{index}] is not a probability distribution.")
     new_components = [
         CompositeDistribution(list(component.dists) + [leaf]) for component, leaf in zip(components, per_regime_leaves)
     ]
@@ -506,14 +538,31 @@ def fit_resonance_leaves(
     from mixle.inference.estimation import optimize
     from mixle.stats.univariate.continuous.gaussian import GaussianEstimator
 
-    z = np.atleast_2d(np.asarray(resonance_embeddings, dtype=float))
+    z = np.asarray(resonance_embeddings, dtype=float)
+    if z.ndim != 2 or z.shape[0] == 0 or z.shape[1] == 0 or not np.isfinite(z).all():
+        raise ValueError("resonance_embeddings must be a non-empty finite two-dimensional matrix.")
     labels = np.asarray(list(regime_labels))
+    if isinstance(num_regimes, (bool, np.bool_)) or not isinstance(num_regimes, (int, np.integer)):
+        raise ValueError("num_regimes must be an exact positive integer.")
+    num_regimes = int(num_regimes)
+    if num_regimes <= 0:
+        raise ValueError("num_regimes must be an exact positive integer.")
+    if labels.ndim != 1 or labels.shape[0] != z.shape[0]:
+        raise ValueError("regime_labels must contain exactly one label per embedding row.")
+    if (
+        np.issubdtype(labels.dtype, np.bool_)
+        or not np.issubdtype(labels.dtype, np.integer)
+        or np.any(labels < 0)
+        or np.any(labels >= num_regimes)
+    ):
+        raise ValueError(f"regime_labels must be exact integers in [0, {num_regimes}).")
+    missing = sorted(set(range(num_regimes)) - set(int(value) for value in labels))
+    if missing:
+        raise ValueError(f"every regime requires observed evidence; missing regimes {missing!r}.")
     dim = z.shape[1]
     leaves: list[SequenceEncodableProbabilityDistribution] = []
     for k in range(num_regimes):
         rows = z[labels == k]
-        if rows.shape[0] == 0:
-            rows = z  # no assigned samples for this regime -- fall back to the pooled fit.
         if dim == 1:
             leaves.append(optimize([float(v) for v in rows[:, 0]], GaussianEstimator(), max_its=10))
         else:
