@@ -59,6 +59,44 @@ class RecommendPrecisionTest(unittest.TestCase):
         plan = recommend_compute_precision(m, data)
         self.assertEqual(np.dtype(plan.compute_dtype), np.float64)
 
+    def test_nan_in_data_falls_back_to_float64(self):
+        # Regression (MXR-080-0145 sibling): NaN in the sample makes np.max return NaN, and IEEE-754
+        # defines every comparison against NaN as False -- so `amax > max_magnitude` was False and the
+        # risk check fell through to the OPTIMISTIC float32 branch instead of the safe fallback. A
+        # single NaN amid otherwise well-conditioned data must still route to float64, not float32.
+        m, data = _well_conditioned()
+        data = list(data)
+        data[0] = (float("nan"),) + tuple(data[0][1:])
+        plan = recommend_compute_precision(m, data)
+        self.assertEqual(np.dtype(plan.compute_dtype), np.float64)
+        self.assertIn("non-finite", plan.rationale)
+
+    def test_all_nan_data_falls_back_to_float64(self):
+        m, data = _well_conditioned()
+        nan_data = [(float("nan"),) * len(data[0])] * len(data)
+        plan = recommend_compute_precision(m, nan_data)
+        self.assertEqual(np.dtype(plan.compute_dtype), np.float64)
+
+    def test_inf_in_data_falls_back_to_float64(self):
+        # Analogous to the NaN case above. +inf/-inf happen to already be caught by the `amax`
+        # magnitude check (abs(inf) > 1e6 is True), but the guard must be explicit rather than relying
+        # on that incidental comparison behavior.
+        m, data = _well_conditioned()
+        pos_inf = list(data)
+        pos_inf[0] = (float("inf"),) + tuple(pos_inf[0][1:])
+        self.assertEqual(np.dtype(recommend_compute_precision(m, pos_inf).compute_dtype), np.float64)
+
+        neg_inf = list(data)
+        neg_inf[0] = (float("-inf"),) + tuple(neg_inf[0][1:])
+        self.assertEqual(np.dtype(recommend_compute_precision(m, neg_inf).compute_dtype), np.float64)
+
+    def test_finite_well_conditioned_data_unaffected_by_nonfinite_guard(self):
+        # Negative control for the NaN/Inf guard (paired with test_well_conditioned_picks_float32
+        # above): finite, well-conditioned data must be unaffected by the isfinite check.
+        m, data = _well_conditioned()
+        plan = recommend_compute_precision(m, data)
+        self.assertEqual(np.dtype(plan.compute_dtype), np.float32)
+
     def test_non_fusible_model_stays_float64(self):
         m = st.MixtureDistribution([st.LaplaceDistribution(0.0, 1.0), st.LaplaceDistribution(3.0, 1.0)], [0.5, 0.5])
         plan = recommend_compute_precision(m, m.sampler(4).sample(2000))
