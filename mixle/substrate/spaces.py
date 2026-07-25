@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from mixle.substrate.context import _canonicalize
 from mixle.substrate.core import Substrate, SubstrateItem
 
 PUBLIC = "public"
@@ -129,9 +130,11 @@ def visible_scopes(team: str, *, shared: tuple[str, ...] = (PUBLIC,)) -> set[str
 
 
 def _canonical_json(obj: Any) -> str:
-    """A stable JSON encoding (sorted keys, no incidental whitespace), matching the canonicalization
-    :mod:`mixle.substrate.context` uses for its IC-13 content hashes, so equal content hashes equal."""
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
+    """A stable JSON encoding (sorted keys, no incidental whitespace), sharing
+    :func:`mixle.substrate.context._canonicalize`'s closed-schema validation so equal content hashes
+    equal -- and so the same non-canonical inputs (arbitrary objects, sets, NaN/inf) that would corrupt
+    a content hash there are rejected here too, instead of silently stringified via ``default=str``."""
+    return json.dumps(_canonicalize(obj), sort_keys=True, separators=(",", ":"))
 
 
 def _item_digest(item: SubstrateItem) -> str:

@@ -342,6 +342,47 @@ class RevisionTest(unittest.TestCase):
         self.assertEqual(revision(s, digest)["text"], "v0")
 
 
+class CanonicalDigestTest(unittest.TestCase):
+    """The revision digest's JSON encoding shares context.py's closed-schema canonicalization
+    (MXR-080-0238) instead of its own weaker ``default=str`` fallback, so a payload value that would
+    corrupt a content hash there is rejected here too, not silently stringified into a
+    process-unstable digest."""
+
+    def _publish_with_payload(self, payload):
+        s = Substrate()
+        iid = s.add(kind="text", text="t", payload=payload, scope="teamA")
+        publish(s, [iid], to=PUBLIC, by="alice", policy=_staffed_policy())
+
+    def test_a_set_in_the_payload_is_rejected_not_stringified(self):
+        """A set has no canonical order -- default=str previously ran it through repr(), stable only
+        within one process (Python randomizes string hashing per process by default)."""
+        with self.assertRaises(TypeError):
+            self._publish_with_payload({"tags": {"a", "b", "c"}})
+
+    def test_a_plain_object_in_the_payload_is_rejected_not_stringified(self):
+        """default=str on a plain object with no custom __repr__ embeds a process-specific memory
+        address -- two semantically-identical instances would hash differently."""
+
+        class Blob:
+            pass
+
+        with self.assertRaises(TypeError):
+            self._publish_with_payload({"v": Blob()})
+
+    def test_non_finite_float_in_the_payload_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._publish_with_payload({"v": float("nan")})
+
+    def test_json_native_payloads_still_publish_cleanly(self):
+        """Positive control: ordinary JSON-native payloads (the only kind any current call site in this
+        codebase actually constructs) are unaffected by the stricter validation."""
+        s = Substrate()
+        iid = s.add(kind="text", text="t", payload={"a": [1, 2, "x"], "b": None, "c": True}, scope="teamA")
+        publish(s, [iid], to=PUBLIC, by="alice", policy=_staffed_policy())
+        digest = history(s, iid)[0]["revision"]
+        self.assertEqual(len(digest), 64)  # sha256 hex
+
+
 class VersioningTest(unittest.TestCase):
     def test_each_publish_bumps_version_and_records_history(self):
         s, ids = _shared_store()
