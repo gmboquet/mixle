@@ -14,6 +14,7 @@ import unittest
 
 import numpy as np
 
+from mixle.engines.numpy_engine import NumpyEngine
 from mixle.inference.backend_respecialization import (
     DensityTable,
     NodeBackend,
@@ -67,7 +68,12 @@ class ToleranceEqualAcrossSwapTest(unittest.TestCase):
 
     def test_node_backend_output_identical_before_and_after_apply(self):
         dist, engine, enc, forward = _hot_mixture_and_forward(n_components=8, n_obs=2000)
-        backend = NodeBackend(dist, forward=forward, engine=engine)
+        backend = NodeBackend(
+            dist,
+            forward=forward,
+            engine=engine,
+            state_token=lambda: (repr(engine.dtype), repr(engine.device)),
+        )
         before = backend(enc)
 
         report = node_report(dist, field_path="root", nobs=float(2000))
@@ -87,7 +93,7 @@ class ToleranceEqualAcrossSwapTest(unittest.TestCase):
             return dist.log_density(x)
 
         seed_points = [0.1, 0.5, 1.0, 2.0, 3.5]
-        table = DensityTable(forward, seed_points)
+        table = DensityTable(forward, seed_points, state_token=lambda: dist.beta)
         for x in seed_points + [0.1, 1.0]:  # repeat two points to exercise real cache hits
             direct = forward(x)
             cached = table.lookup(x)
@@ -97,6 +103,64 @@ class ToleranceEqualAcrossSwapTest(unittest.TestCase):
         table.lookup(9.0)
         self.assertEqual(len(table), len(seed_points) + 1)
         self.assertAlmostEqual(table.lookup(9.0), forward(9.0), places=12)
+
+
+class DensityTableExactnessTest(unittest.TestCase):
+    def test_shape_and_dtype_are_part_of_the_exact_cache_key(self):
+        calls = []
+
+        def forward(x):
+            arr = np.asarray(x)
+            calls.append((arr.shape, arr.dtype.str))
+            return arr.shape, arr.dtype.str
+
+        table = DensityTable(forward, state_token=lambda: 0)
+        vector = np.asarray([1.0, 2.0], dtype=np.float64)
+        matrix = vector.reshape(1, 2)
+        float32_vector = vector.astype(np.float32)
+
+        self.assertNotEqual(table.lookup(vector), table.lookup(matrix))
+        self.assertNotEqual(table.lookup(vector), table.lookup(float32_vector))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(table), 3)
+
+    def test_nearby_values_do_not_alias_and_quantization_is_rejected(self):
+        calls = []
+
+        def forward(x):
+            calls.append(float(x))
+            return float(x)
+
+        table = DensityTable(forward, state_token=lambda: 0)
+        self.assertNotEqual(table.lookup(1.0), table.lookup(1.0 + 1.0e-12))
+        self.assertEqual(len(calls), 2)
+        with self.assertRaisesRegex(ValueError, "no longer supported"):
+            DensityTable(forward, quantum=1.0e-9, state_token=lambda: 0)
+
+    def test_state_change_invalidates_stale_values(self):
+        state = {"scale": 2.0, "version": 0}
+        calls = 0
+
+        def forward(x):
+            nonlocal calls
+            calls += 1
+            return state["scale"] * float(x)
+
+        table = DensityTable(forward, state_token=lambda: state["version"])
+        self.assertEqual(table.lookup(3.0), 6.0)
+        self.assertEqual(table.lookup(3.0), 6.0)
+        self.assertEqual(calls, 1)
+
+        state.update(scale=5.0, version=1)
+        self.assertEqual(table.lookup(3.0), 15.0)
+        self.assertEqual(calls, 2)
+        self.assertEqual(len(table), 1)
+
+    def test_callers_cannot_mutate_the_cached_snapshot(self):
+        table = DensityTable(lambda x: np.asarray(x, dtype=np.float64) * 2.0, state_token=lambda: 0)
+        first = table.lookup([1.0, 2.0])
+        first[0] = -999.0
+        np.testing.assert_array_equal(table.lookup([1.0, 2.0]), [2.0, 4.0])
 
 
 @unittest.skipUnless(HAS_TORCH, "torch is not installed")
@@ -205,32 +269,51 @@ class FrozenPrecisionDropTest(unittest.TestCase):
         from mixle.stats import NullDistribution
 
         report = node_report(NullDistribution(), field_path="root")
-        decision = decide_frozen_precision_drop(report)
+        decision = decide_frozen_precision_drop(report, validated_abs_error_bound=0.0)
         self.assertEqual(decision.action, RespecializationAction.REDUCE_PRECISION)
 
     def test_converged_q_gain_recommends_reduced_precision(self):
         dist = GaussianDistribution(0.0, 1.0)
-        report = node_report(dist, field_path="root", prev_residual=None)
-        # Manually construct a converged report: q_gain within tolerance of zero.
-        import dataclasses
-
-        converged = dataclasses.replace(report, update_kind="closed_form", q_gain=1.0e-9)
-        decision = decide_frozen_precision_drop(converged, q_gain_tol=1.0e-6)
+        converged = node_report(
+            dist,
+            field_path="root",
+            objective_residual=1.0,
+            prev_residual=1.0 + 1.0e-9,
+        )
+        decision = decide_frozen_precision_drop(
+            converged,
+            q_gain_tol=1.0e-6,
+            validated_abs_error_bound=1.0e-5,
+        )
         self.assertEqual(decision.action, RespecializationAction.REDUCE_PRECISION)
 
     def test_still_moving_node_keeps_full_precision(self):
         dist = GaussianDistribution(0.0, 1.0)
-        report = node_report(dist, field_path="root")
-        import dataclasses
-
-        moving = dataclasses.replace(report, update_kind="closed_form", q_gain=5.0)
-        decision = decide_frozen_precision_drop(moving, q_gain_tol=1.0e-6)
+        moving = node_report(
+            dist,
+            field_path="root",
+            objective_residual=1.0,
+            prev_residual=6.0,
+        )
+        decision = decide_frozen_precision_drop(
+            moving,
+            q_gain_tol=1.0e-6,
+            validated_abs_error_bound=1.0e-5,
+        )
         self.assertEqual(decision.action, RespecializationAction.NONE)
 
     def test_already_reduced_is_left_alone(self):
         report = node_report(GaussianDistribution(0.0, 1.0), field_path="root")
         decision = decide_frozen_precision_drop(report, already_reduced=True)
         self.assertEqual(decision.action, RespecializationAction.NONE)
+
+    def test_frozen_status_without_numeric_evidence_does_not_reduce_precision(self):
+        from mixle.stats import NullDistribution
+
+        report = node_report(NullDistribution(), field_path="root")
+        decision = decide_frozen_precision_drop(report)
+        self.assertEqual(decision.action, RespecializationAction.NONE)
+        self.assertIn("no validated absolute error bound", decision.rationale)
 
 
 class DensityTableDecisionTest(unittest.TestCase):
@@ -273,7 +356,11 @@ class NodeBackendMechanismTest(unittest.TestCase):
 
     def test_density_table_backend_swap_matches_eager_and_populates_cache(self):
         dist = ExponentialDistribution(1.5)
-        backend = NodeBackend(dist, forward=lambda x: dist.log_density(x))
+        backend = NodeBackend(
+            dist,
+            forward=lambda x: dist.log_density(x),
+            state_token=lambda: dist.beta,
+        )
         query_points = [0.1, 0.5, 1.0, 2.0]
         before = [backend(x) for x in query_points]
 
@@ -293,6 +380,14 @@ class NodeBackendMechanismTest(unittest.TestCase):
         backend(query_points[0])
         self.assertEqual(len(backend._table), table_len_before)
 
+        before_mutation = backend(1.0)
+        dist.beta = 3.0
+        dist.log_beta = np.log(dist.beta)
+        after_mutation = backend(1.0)
+        self.assertNotEqual(before_mutation, after_mutation)
+        self.assertAlmostEqual(after_mutation, dist.log_density(1.0), places=12)
+        self.assertEqual(len(backend._table), 1, "model mutation must invalidate all stale table entries")
+
     def test_none_action_leaves_backend_eager(self):
         dist = ExponentialDistribution(1.5)
         backend = NodeBackend(dist, forward=lambda x: dist.log_density(x))
@@ -302,6 +397,41 @@ class NodeBackendMechanismTest(unittest.TestCase):
         self.assertEqual(backend.action, RespecializationAction.NONE)
         self.assertAlmostEqual(backend(1.0), dist.log_density(1.0), places=12)
 
+    def test_reduced_precision_action_is_executed_by_an_engine_aware_backend(self):
+        dist = GaussianDistribution(0.0, 1.0)
+        engine = NumpyEngine(dtype=np.float64)
+        data = np.linspace(-2.0, 2.0, 21)
+        enc = dist.dist_to_encoder().seq_encode(data)
+        backend = NodeBackend(dist, engine=engine)
+        before = np.asarray(backend(enc), dtype=np.float64)
+        report = node_report(
+            dist,
+            field_path="root",
+            objective_residual=1.0,
+            prev_residual=1.0,
+        )
+        decision = decide_frozen_precision_drop(report, validated_abs_error_bound=1.0e-5)
+        self.assertEqual(decision.action, RespecializationAction.REDUCE_PRECISION)
+
+        backend.apply(decision)
+
+        self.assertEqual(backend.action, RespecializationAction.REDUCE_PRECISION)
+        self.assertEqual(np.dtype(backend.engine.dtype), np.dtype(np.float32))
+        np.testing.assert_allclose(backend(enc), before, atol=decision.validated_abs_error_bound, rtol=0.0)
+
+    def test_unsupported_fusion_is_rejected_and_not_recorded_as_applied(self):
+        import dataclasses
+
+        dist = ExponentialDistribution(1.5)
+        backend = NodeBackend(dist, forward=lambda x: dist.log_density(x))
+        report = node_report(dist, field_path="root", nobs=1.0)
+        decision = decide_hot_compile(report, activation_ratio=0.0, expected_remaining_calls=1.0)
+        fusion = dataclasses.replace(decision, action=RespecializationAction.FUSE)
+
+        with self.assertRaisesRegex(NotImplementedError, "cannot fuse"):
+            backend.apply(fusion)
+        self.assertEqual(backend.action, RespecializationAction.NONE)
+
     def test_compile_decision_on_a_non_compile_capable_engine_reports_none_not_compile(self):
         # apply() used to set action=COMPILE unconditionally whenever the DECISION requested it,
         # even when compile_forward silently no-op'd (no compile-enabled engine, or torch lacks
@@ -310,7 +440,12 @@ class NodeBackendMechanismTest(unittest.TestCase):
         # signal. `engine=object()` has no .compile attribute at all, forcing the no-op path
         # regardless of whether torch happens to be installed in this environment.
         dist = ExponentialDistribution(1.5)
-        backend = NodeBackend(dist, forward=lambda x: dist.log_density(x), engine=object())
+        backend = NodeBackend(
+            dist,
+            forward=lambda x: dist.log_density(x),
+            engine=object(),
+            state_token=lambda: dist.beta,
+        )
         report = node_report(dist, field_path="root", nobs=2000.0)
         decision = decide_hot_compile(report, activation_ratio=1.0, expected_remaining_calls=1000.0)
         self.assertEqual(decision.action, RespecializationAction.COMPILE)  # the decision DID request it
