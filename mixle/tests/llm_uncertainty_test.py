@@ -6,6 +6,7 @@ import numpy as np
 
 from mixle.inference import cluster_samples, semantic_entropy
 from mixle.reason import LLMUncertainty
+from mixle.reason.llm import Generation, _coerce_generation, _require_positive_n  # white-box: MXR-080-0296
 
 
 class MockLLM:
@@ -104,6 +105,107 @@ class LLMUncertaintyTest(unittest.TestCase):
         self.assertLessEqual(errors / answered, alpha + 0.12)
         # and it abstains on at least some of the questions it cannot know
         self.assertGreater(abstained_hard, 0)
+
+
+class GenerationNormalizationTest(unittest.TestCase):
+    """White-box coverage for MXR-080-0296's sample()-boundary normalization."""
+
+    def test_plain_string_and_tuple_generations_coerce(self):
+        self.assertEqual(_coerce_generation("paris"), Generation(text="paris"))
+        g = _coerce_generation(("paris", -0.5))
+        self.assertEqual(g.text, "paris")
+        self.assertAlmostEqual(g.logprob, -0.5)
+
+    def test_generation_rejects_non_finite_logprob(self):
+        with self.assertRaises(ValueError):
+            Generation(text="x", logprob=float("nan"))
+        with self.assertRaises(ValueError):
+            Generation(text="x", logprob=float("inf"))
+
+    def test_coerce_generation_rejects_wrong_arity_tuple(self):
+        with self.assertRaises(ValueError):
+            _coerce_generation(("paris", -0.5, "extra"))
+
+    def test_sample_rejects_mixed_tuple_and_plain_shapes(self):
+        calls = iter(["paris", ("lyon", -0.2)])
+        uq = LLMUncertainty(lambda p: next(calls), n=2)
+        with self.assertRaises(ValueError):
+            uq.sample("q")
+
+    def test_sample_returns_generation_records(self):
+        uq = LLMUncertainty(lambda p: ("paris", -0.3), n=3)
+        samples = uq.sample("q")
+        self.assertEqual(len(samples), 3)
+        self.assertTrue(all(isinstance(s, Generation) for s in samples))
+        self.assertTrue(all(s.text == "paris" and s.logprob == -0.3 for s in samples))
+
+    def test_decompose_clusters_generator_text_not_raw_tuples(self):
+        # MXR-080-0296: a (text, logprob) generator used to have its raw tuples clustered (every
+        # logprob differs, so every draw looked like its own distinct "meaning"). With only 2 distinct
+        # underlying texts, clustering on text must collapse to (at most) 2 clusters, giving the SAME
+        # total entropy as an equivalent plain-string generator -- not ln(n_samples).
+        counter = {"i": 0}
+
+        def tuple_gen(prompt):
+            counter["i"] += 1
+            text = "paris" if counter["i"] % 2 == 0 else "lyon"
+            return (text, -0.01 * counter["i"])  # logprob is unique on every call
+
+        def plain_gen(prompt):
+            counter["i"] += 1
+            return "paris" if counter["i"] % 2 == 0 else "lyon"
+
+        uq_tuple = LLMUncertainty(tuple_gen, n=8)
+        d_tuple = uq_tuple.decompose(["q", "q"])
+        counter["i"] = 0
+        uq_plain = LLMUncertainty(plain_gen, n=8)
+        d_plain = uq_plain.decompose(["q", "q"])
+        self.assertAlmostEqual(d_tuple.total, d_plain.total, places=9)
+        self.assertLess(d_tuple.total, np.log(16))  # nowhere near "every draw is its own cluster"
+
+
+class PositiveSampleCountTest(unittest.TestCase):
+    """White-box + behavioral coverage for MXR-080-0296's sample-count validation."""
+
+    def test_require_positive_n_accepts_positive_int(self):
+        self.assertEqual(_require_positive_n(5), 5)
+        self.assertEqual(_require_positive_n(np.int64(3)), 3)
+
+    def test_require_positive_n_rejects_zero(self):
+        # 0 used to silently mean "use the default" (`n or self.n`, and 0 is falsy).
+        with self.assertRaises(ValueError):
+            _require_positive_n(0)
+
+    def test_require_positive_n_rejects_negative(self):
+        # a negative n used to silently produce zero samples (range(negative) is empty).
+        with self.assertRaises(ValueError):
+            _require_positive_n(-3)
+
+    def test_require_positive_n_rejects_bool_and_non_int(self):
+        with self.assertRaises(TypeError):
+            _require_positive_n(True)
+        with self.assertRaises(TypeError):
+            _require_positive_n(2.5)
+
+    def test_constructor_rejects_non_positive_n(self):
+        with self.assertRaises(ValueError):
+            LLMUncertainty(lambda p: "x", n=0)
+        with self.assertRaises(ValueError):
+            LLMUncertainty(lambda p: "x", n=-1)
+
+    def test_sample_n_zero_raises_instead_of_defaulting(self):
+        uq = LLMUncertainty(lambda p: "x", n=10)
+        with self.assertRaises(ValueError):
+            uq.sample("q", n=0)
+
+    def test_sample_negative_n_raises_instead_of_returning_empty(self):
+        uq = LLMUncertainty(lambda p: "x", n=10)
+        with self.assertRaises(ValueError):
+            uq.sample("q", n=-3)
+
+    def test_sample_none_n_uses_constructor_default(self):
+        uq = LLMUncertainty(lambda p: "x", n=4)
+        self.assertEqual(len(uq.sample("q", None)), 4)
 
 
 if __name__ == "__main__":

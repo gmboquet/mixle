@@ -79,5 +79,17 @@ class ClaimUQTest(unittest.TestCase):
         self.assertFalse(d["claim-2"].reliable)
 
 
+class AssessClaimsTupleGenerationTest(unittest.TestCase):  # MXR-080-0296
+    def test_tuple_generations_are_unpacked_before_claim_extraction(self):
+        # A (text, logprob) generator used to hand the raw tuple straight to extract()/corroborates(),
+        # producing garbage claims from the tuple's str() repr instead of the actual sentences.
+        text = "The tower is 300 meters tall. It was built in 1889."
+        uq = LLMUncertainty(lambda p: (text, -0.25), n=3)
+        info = uq.assess_claims("about the tower")
+        claims = [c.claim for c in info.claims]
+        self.assertEqual(claims, ["The tower is 300 meters tall.", "It was built in 1889."])
+        self.assertTrue(all("(" not in c and "-0.25" not in c for c in claims))
+
+
 if __name__ == "__main__":
     unittest.main()
