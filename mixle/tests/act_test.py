@@ -307,5 +307,92 @@ class EarnedConfidenceTest(unittest.TestCase):
         self.assertGreater(score_action(r, "anything at all"), 0.0)
 
 
+class TraceIntegrityTest(unittest.TestCase):
+    """MXR-080-0256: the scorer used to be evaluated once for sorting and again for execution, so a
+    stateful/stochastic policy could fire in an order inconsistent with its own recorded score; action
+    exceptions were coerced into empty "successful" steps; answerer exceptions left no Investigation
+    at all. All three are now explicit."""
+
+    def test_scorer_is_evaluated_exactly_once_per_action(self):
+        calls = []
+
+        def counting_scorer(action, question):
+            calls.append(action.name)
+            return score_action(action, question)
+
+        a = Action("a", "compute", run=lambda q: ["x"], cost=1.0, description="answer the question")
+        b = Action("b", "compute", run=lambda q: ["y"], cost=2.0, description="answer the question")
+        investigate("answer the question", [a, b], _echo, scorer=counting_scorer, min_confidence=0.0, min_evidence=2)
+        self.assertEqual(sorted(calls), ["a", "b"])  # each action scored once, not twice
+
+    def test_stateful_scorer_cannot_diverge_between_sort_and_execution(self):
+        # a scorer whose return value changes on every call would, under double-invocation, sort by one
+        # pass of values and then re-score (filter + record) by a DIFFERENT pass -- inconsistent with
+        # what was recorded. With single evaluation, the recorded Step.score is exactly what ranked it.
+        call_n = {"n": 0}
+        returns = [10.0, 1.0, 9.0, 2.0]  # a second pass would hand out different values entirely
+
+        def flaky_scorer(action, question):
+            v = returns[call_n["n"] % len(returns)]
+            call_n["n"] += 1
+            return v
+
+        a = Action("a", "compute", run=lambda q: ["x"], cost=1.0, description="d")
+        b = Action("b", "compute", run=lambda q: ["y"], cost=1.0, description="d")
+        inv = investigate("d", [a, b], _echo, scorer=flaky_scorer, min_confidence=0.0, min_evidence=2)
+        self.assertEqual(call_n["n"], 2)  # exactly one call per action, not one for sort + one for execution
+        # the recorded scores are exactly the single pass's first two values, unperturbed by a phantom re-score
+        self.assertEqual({s.action: s.score for s in inv.steps}, {"a": 10.0, "b": 1.0})
+
+    def test_action_exception_is_recorded_as_an_explicit_failed_step(self):
+        def _boom(q):
+            raise RuntimeError("boom detail")
+
+        boom = Action("boom", "compute", run=_boom, cost=1.0, description="answer the question")
+        ok = Action("ok", "compute", run=lambda q: ["fine"], cost=1.0, description="answer the question")
+        inv = investigate("answer the question", [boom, ok], _echo)
+
+        boom_step = next(s for s in inv.steps if s.action == "boom")
+        self.assertTrue(boom_step.failed)
+        self.assertIn("RuntimeError", boom_step.error)
+        self.assertIn("boom detail", boom_step.error)
+        self.assertEqual(boom_step.fragments, [])
+
+        ok_step = next(s for s in inv.steps if s.action == "ok")
+        self.assertFalse(ok_step.failed)
+        self.assertEqual(ok_step.error, "")
+
+        # the trace() dict view surfaces the failure too, not just the Step object
+        trace_row = next(t for t in inv.trace() if t["action"] == "boom")
+        self.assertTrue(trace_row["failed"])
+        self.assertIn("RuntimeError", trace_row["error"])
+
+    def test_broken_action_still_does_not_sink_the_investigation(self):
+        # the pre-existing guarantee (see InvestigateTest) must survive: a failed action is recorded,
+        # not swallowed, but the investigation still proceeds on the actions that succeeded.
+        def _boom(q):
+            raise RuntimeError("nope")
+
+        s = Substrate()
+        s.add(kind="text", text="refunds within 30 days")
+        acts = [Action("boom", "compute", run=_boom, cost=1.0, description="refunds policy"), retrieve_action(s)]
+        inv = investigate("refunds policy", acts, _echo)
+        self.assertFalse(inv.abstained)
+
+    def test_answerer_failure_produces_an_explicit_failed_investigation(self):
+        def _boom_answerer(q, ctx):
+            raise RuntimeError("answerer exploded")
+
+        act = Action("a", "compute", run=lambda q: ["evidence"], cost=1.0, description="answer the question")
+        inv = investigate("answer the question", [act], _boom_answerer, min_confidence=0.0)
+
+        self.assertIsInstance(inv, Investigation)  # did not propagate -- a record came back instead
+        self.assertIsNone(inv.answer)
+        self.assertTrue(inv.abstained)
+        self.assertTrue(inv.failed)
+        self.assertIn("RuntimeError", inv.error)
+        self.assertIn("answerer exploded", inv.error)
+
+
 if __name__ == "__main__":
     unittest.main()
