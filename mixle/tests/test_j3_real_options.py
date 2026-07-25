@@ -290,18 +290,32 @@ def _decision_value(samples: np.ndarray) -> float:
     return float(max(np.mean(samples[:, 0]), 0.0))
 
 
+def _heuristic_info(**values):
+    return {"method": "variance_rescaling_heuristic", **values}
+
+
+def test_voi_requires_an_observation_model_by_default():
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    with pytest.raises(ValueError, match="observation_model"):
+        voi_dollars(posterior, _decision_value, {"variance_reduction": 0.7}, rng=np.random.default_rng(0))
+
+
 def test_voi_dollars_is_non_negative():
     posterior = _ToyPosterior(mean=1.0, std=5.0)
     rng = np.random.default_rng(0)
-    voi = voi_dollars(posterior, _decision_value, {"variance_reduction": 0.7}, rng=rng)
+    voi = voi_dollars(posterior, _decision_value, _heuristic_info(variance_reduction=0.7), rng=rng)
     assert voi >= 0.0
 
 
 def test_voi_dollars_grows_with_variance_reduction():
     rng = np.random.default_rng(0)
     posterior = _ToyPosterior(mean=1.0, std=5.0)
-    voi_small = voi_dollars(posterior, _decision_value, {"variance_reduction": 0.1}, rng=np.random.default_rng(1))
-    voi_large = voi_dollars(posterior, _decision_value, {"variance_reduction": 0.9}, rng=np.random.default_rng(1))
+    voi_small = voi_dollars(
+        posterior, _decision_value, _heuristic_info(variance_reduction=0.1), rng=np.random.default_rng(1)
+    )
+    voi_large = voi_dollars(
+        posterior, _decision_value, _heuristic_info(variance_reduction=0.9), rng=np.random.default_rng(1)
+    )
     assert voi_large >= voi_small
 
 
@@ -315,7 +329,7 @@ def test_zero_information_voi_is_exactly_zero_across_seeds():
     posterior = _ToyPosterior(mean=0.0, std=1.0)
     for seed in range(20):
         rng = np.random.default_rng(seed)
-        voi = voi_dollars(posterior, _decision_value, {"variance_reduction": 0.0}, rng=rng)
+        voi = voi_dollars(posterior, _decision_value, _heuristic_info(variance_reduction=0.0), rng=rng)
         assert voi == 0.0, f"seed={seed}: expected exactly 0.0 at zero information, got {voi!r}"
 
 
@@ -326,7 +340,12 @@ def test_voi_dollars_is_no_longer_upward_biased_near_zero_information():
     every seed still came back >= 0.0, that would mean some upward bias is still silently in effect."""
     posterior = _ToyPosterior(mean=0.0, std=1.0)
     values = [
-        voi_dollars(posterior, _decision_value, {"variance_reduction": 1e-6}, rng=np.random.default_rng(seed))
+        voi_dollars(
+            posterior,
+            _decision_value,
+            _heuristic_info(variance_reduction=1e-6),
+            rng=np.random.default_rng(seed),
+        )
         for seed in range(40)
     ]
     assert any(v < 0.0 for v in values), f"expected at least one negative estimate, got {values!r}"
@@ -336,7 +355,7 @@ def test_voi_dollars_is_no_longer_upward_biased_near_zero_information():
 def test_voi_estimate_at_zero_information_has_zero_uncertainty_too():
     posterior = _ToyPosterior(mean=0.0, std=1.0)
     rng = np.random.default_rng(0)
-    est = voi_estimate(posterior, _decision_value, {"variance_reduction": 0.0}, rng=rng)
+    est = voi_estimate(posterior, _decision_value, _heuristic_info(variance_reduction=0.0), rng=rng)
     assert isinstance(est, VoiEstimate)
     assert (est.value, est.standard_error, est.ci_low, est.ci_high) == (0.0, 0.0, 0.0, 0.0)
     assert est.method == "variance_rescaling_heuristic"
@@ -349,7 +368,7 @@ def test_voi_estimate_reports_monte_carlo_uncertainty_away_from_zero_information
     instead of trusting a single (previously upward-biased) number."""
     posterior = _ToyPosterior(mean=1.0, std=5.0)
     rng = np.random.default_rng(0)
-    est = voi_estimate(posterior, _decision_value, {"variance_reduction": 0.7}, rng=rng)
+    est = voi_estimate(posterior, _decision_value, _heuristic_info(variance_reduction=0.7), rng=rng)
     assert est.standard_error > 0.0
     assert est.ci_low == pytest.approx(est.value - 1.959963984540054 * est.standard_error)
     assert est.ci_high == pytest.approx(est.value + 1.959963984540054 * est.standard_error)
@@ -361,7 +380,7 @@ def test_voi_estimate_reports_monte_carlo_uncertainty_away_from_zero_information
 def test_voi_dollars_matches_voi_estimate_value():
     """voi_dollars must not silently compute something different from voi_estimate's point estimate."""
     posterior = _ToyPosterior(mean=1.0, std=5.0)
-    drill_info = {"variance_reduction": 0.4}
+    drill_info = _heuristic_info(variance_reduction=0.4)
     direct = voi_dollars(posterior, _decision_value, drill_info, rng=np.random.default_rng(3))
     est = voi_estimate(posterior, _decision_value, drill_info, rng=np.random.default_rng(3))
     assert direct == est.value
@@ -481,7 +500,9 @@ def test_observation_model_rejects_matrix_free_covariance():
 def test_heuristic_warns_on_a_clearly_non_gaussian_posterior():
     posterior = _BimodalToyPosterior()
     with pytest.warns(UserWarning, match="non-Gaussian"):
-        voi_dollars(posterior, _decision_value, {"variance_reduction": 0.5}, rng=np.random.default_rng(0))
+        voi_dollars(
+            posterior, _decision_value, _heuristic_info(variance_reduction=0.5), rng=np.random.default_rng(0)
+        )
 
 
 def test_observation_model_warns_on_a_clearly_non_gaussian_posterior():
@@ -498,7 +519,12 @@ def test_heuristic_does_not_warn_on_a_genuinely_gaussian_posterior():
     for seed in range(10):
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
-            voi_dollars(posterior, _decision_value, {"variance_reduction": 0.5}, rng=np.random.default_rng(seed))
+            voi_dollars(
+                posterior,
+                _decision_value,
+                _heuristic_info(variance_reduction=0.5),
+                rng=np.random.default_rng(seed),
+            )
 
 
 def test_real_option_value_type_hints_are_resolvable():
@@ -524,7 +550,7 @@ def test_voi_stopping_decision_says_keep_sampling_when_voi_exceeds_a_cheap_cost(
     decision = voi_stopping_decision(
         posterior,
         _decision_value,
-        {"variance_reduction": 0.8},
+        _heuristic_info(variance_reduction=0.8),
         sample_cost=0.01,
         rng=rng,
     )
@@ -541,7 +567,7 @@ def test_voi_stopping_decision_says_stop_when_the_sample_costs_more_than_it_is_w
     decision = voi_stopping_decision(
         posterior,
         _decision_value,
-        {"variance_reduction": 0.05},
+        _heuristic_info(variance_reduction=0.05),
         sample_cost=1_000_000.0,
         rng=rng,
     )
@@ -552,7 +578,7 @@ def test_voi_stopping_decision_says_stop_when_the_sample_costs_more_than_it_is_w
 def test_voi_stopping_decision_is_consistent_with_voi_dollars_directly():
     """The wrapper must not silently compute something different from voi_dollars itself."""
     posterior = _ToyPosterior(mean=1.0, std=5.0)
-    drill_info = {"variance_reduction": 0.6}
+    drill_info = _heuristic_info(variance_reduction=0.6)
     direct = voi_dollars(posterior, _decision_value, drill_info, rng=np.random.default_rng(7))
     decision = voi_stopping_decision(
         posterior, _decision_value, drill_info, sample_cost=0.0, rng=np.random.default_rng(7)
@@ -570,7 +596,7 @@ def test_voi_stopping_decision_rejects_non_finite_sample_cost(bad_sample_cost):
         voi_stopping_decision(
             posterior,
             _decision_value,
-            {"variance_reduction": 0.5},
+            _heuristic_info(variance_reduction=0.5),
             sample_cost=bad_sample_cost,
             rng=np.random.default_rng(0),
         )
@@ -581,7 +607,11 @@ def test_voi_stopping_decision_reports_standard_error():
     a real decision, now carrying the VOI estimate's own Monte Carlo standard error."""
     posterior = _ToyPosterior(mean=1.0, std=5.0)
     decision = voi_stopping_decision(
-        posterior, _decision_value, {"variance_reduction": 0.5}, sample_cost=0.01, rng=np.random.default_rng(0)
+        posterior,
+        _decision_value,
+        _heuristic_info(variance_reduction=0.5),
+        sample_cost=0.01,
+        rng=np.random.default_rng(0),
     )
     assert decision.standard_error > 0.0
     assert np.isfinite(decision.voi_dollars)

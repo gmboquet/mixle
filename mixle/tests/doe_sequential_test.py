@@ -166,7 +166,7 @@ def test_composes_with_the_real_voi_stopping_decision_rule():
         decision = voi_stopping_decision(
             state,
             _decision_value,
-            {"variance_reduction": 0.5},
+            {"method": "variance_rescaling_heuristic", "variance_reduction": 0.5},
             sample_cost=0.05,
             rng=rng,
         )
