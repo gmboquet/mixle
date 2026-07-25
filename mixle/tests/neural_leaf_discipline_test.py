@@ -165,6 +165,86 @@ class NeuralCategoricalScoringPurityTest(unittest.TestCase):
             logp = torch.log_softmax(module(torch.as_tensor(x, dtype=torch.float32)), dim=1).numpy()
         np.testing.assert_allclose(scored, logp[np.arange(len(c)), c], rtol=1e-6, atol=1e-6)
 
+    def test_labels_rows_and_logits_are_validated_without_broadcasting(self):
+        leaf = NeuralCategorical(torch.nn.Linear(2, 3))
+        x = np.zeros((3, 2))
+        for labels in ([-1, 0, 1], [0, 1, 3], [0.0, 1.0, 2.0], [0, 1]):
+            with self.subTest(labels=labels), self.assertRaises(ValueError):
+                leaf.seq_log_density((x, labels))
+        self.assertEqual(leaf.seq_log_density((np.zeros((0, 2)), np.zeros(0, dtype=int))).shape, (0,))
+
+        class _FlatOutput(torch.nn.Module):
+            def forward(self, value):
+                return value[:, 0]
+
+        with self.assertRaisesRegex(ValueError, "shape"):
+            NeuralCategorical(_FlatOutput()).seq_log_density((x, [0, 0, 0]))
+
+        class _NonFiniteOutput(torch.nn.Module):
+            def forward(self, value):
+                return torch.full((len(value), 2), float("nan"))
+
+        with self.assertRaisesRegex(ValueError, "finite"):
+            NeuralCategorical(_NonFiniteOutput()).seq_log_density((x, [0, 0, 0]))
+
+    def test_controls_weights_and_ewc_geometry_are_validated(self):
+        module = torch.nn.Linear(2, 3)
+        for kwargs in (
+            {"lr": 0.0},
+            {"lr": np.nan},
+            {"m_steps": 1.5},
+            {"batch_size": True},
+            {"max_optimizer_steps": 0},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                NeuralCategorical(module, **kwargs)
+
+        leaf = NeuralCategorical(module, m_steps=1)
+        accumulator = leaf.estimator().accumulator_factory().make()
+        x = np.zeros((3, 2))
+        y = np.array([0, 1, 2])
+        for weights in (np.ones(2), np.ones((3, 1)), [1.0, -1.0, 1.0], [1.0, np.nan, 1.0]):
+            with self.subTest(weights=np.asarray(weights).shape), self.assertRaises(ValueError):
+                accumulator.seq_update((x, y), weights, leaf)
+        with self.assertRaisesRegex(ValueError, "positive effective weight"):
+            leaf.estimator().estimate(None, (x, y, np.zeros(3)))
+
+        parameters = list(module.parameters())
+        bad_anchor = [torch.zeros_like(parameters[0])]
+        bad_fisher = [torch.zeros_like(parameters[0])]
+        with self.assertRaisesRegex(ValueError, "every module parameter"):
+            from mixle.models.softmax_leaf import NeuralCategoricalEstimator
+
+            NeuralCategoricalEstimator(module, ewc=(bad_anchor, bad_fisher, 1.0))
+
+    def test_conditional_sampling_preserves_batch_rows(self):
+        leaf = NeuralCategorical(torch.nn.Linear(2, 3))
+        sampler = leaf.sampler(seed=4)
+        self.assertIsInstance(sampler.sample_given(np.zeros(2)), int)
+        self.assertEqual(sampler.sample_given(np.zeros((5, 2))).shape, (5,))
+
+    def test_optimizer_state_continues_across_m_steps(self):
+        torch.manual_seed(23)
+        staged_module = torch.nn.Linear(2, 3)
+        uninterrupted_module = torch.nn.Linear(2, 3)
+        uninterrupted_module.load_state_dict(staged_module.state_dict())
+        x, labels = _xc(n=12, classes=3, seed=12)
+        weights = np.ones(len(x))
+
+        staged = NeuralCategorical(staged_module, m_steps=1, lr=0.01).estimator().estimate(
+            None, (x, labels, weights)
+        )
+        staged = staged.estimator().estimate(None, (x, labels, weights))
+        uninterrupted = NeuralCategorical(uninterrupted_module, m_steps=2, lr=0.01).estimator().estimate(
+            None, (x, labels, weights)
+        )
+
+        self.assertIsInstance(staged.optimizer_state, dict)
+        for staged_parameter, uninterrupted_parameter in zip(
+            staged.module.parameters(), uninterrupted.module.parameters()
+        ):
+            torch.testing.assert_close(staged_parameter, uninterrupted_parameter, rtol=0.0, atol=0.0)
+
 
 class SiblingLeafScoringPurityTest(unittest.TestCase):
     """G-1: the streaming-transformer and DPO scoring paths share the same eval discipline."""

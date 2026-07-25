@@ -88,9 +88,15 @@ def neural_fit(
     if fam == "Categorical":
         from mixle.models.softmax_leaf import SoftmaxNeuralLeafEstimator
 
-        y = np.asarray(data, dtype=int).reshape(-1)
+        y = np.asarray(data).reshape(-1)
         est = SoftmaxNeuralLeafEstimator(
-            module, m_steps=int(epochs), lr=float(lr), batch_size=batch_size, device=device, ewc=ewc
+            module,
+            m_steps=epochs,
+            lr=lr,
+            batch_size=batch_size,
+            device=device,
+            ewc=ewc,
+            optimizer_state=None if init is None else getattr(init.dist, "optimizer_state", None),
         )
         if weights is None and ewc is None:
             fitted = estimate(list(zip(x, y)), est)
