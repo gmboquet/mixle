@@ -10,6 +10,7 @@ import unittest
 import numpy as np
 
 from mixle.inference.estimation import optimize
+from mixle.models._forest import NativeRandomForest
 from mixle.models.random_forest import (
     RandomForestAccumulatorFactory,
     RandomForestConditional,
@@ -78,9 +79,18 @@ class RandomForestLeafTestCase(unittest.TestCase):
         self.assertEqual(len(y), len(tr))
         self.assertEqual(X.shape, (len(tr), 5))
 
-    def test_auto_task_inference(self):
+    def test_task_must_be_explicit_even_for_float_targets(self):
         tr, _ = _regression_data()
-        model = optimize(tr, RandomForestEstimator(task="auto", n_estimators=40, random_state=0), max_its=1, out=None)
+        with self.assertRaisesRegex(ValueError, "explicitly"):
+            RandomForestEstimator()
+        with self.assertRaisesRegex(ValueError, "automatic dtype inference"):
+            RandomForestEstimator(task="auto")
+        model = optimize(
+            tr,
+            RandomForestEstimator(task="regression", n_estimators=40, random_state=0),
+            max_its=1,
+            out=None,
+        )
         self.assertEqual(model.task, "regression")
         self.assertIsNotNone(model.sigma)
 
@@ -96,6 +106,71 @@ class RandomForestLeafTestCase(unittest.TestCase):
         self.assertGreater(r2, 0.8)
         ld = log_density(te, model)
         self.assertTrue(np.isfinite(ld).all())
+        oob = np.asarray(model.forest.oob_prediction_)
+        covered = np.isfinite(oob)
+        expected_sigma = np.sqrt(np.mean((np.asarray([y for _, y in tr])[covered] - oob[covered]) ** 2))
+        self.assertAlmostEqual(model.sigma, max(expected_sigma, 1.0e-3))
+
+    def test_reestimation_preserves_full_model_specification(self):
+        tr, _ = _regression_data()
+        expected = {
+            "n_estimators": 17,
+            "max_depth": 7,
+            "min_samples_split": 5,
+            "min_samples_leaf": 2,
+            "max_features": "sqrt",
+            "random_state": 31,
+            "min_sigma": 0.05,
+            "n_features": 5,
+        }
+        model = optimize(
+            tr,
+            RandomForestEstimator(task="regression", **expected),
+            max_its=1,
+            out=None,
+        )
+        estimator = model.estimator()
+        self.assertEqual(
+            {
+                "n_estimators": estimator.n_estimators,
+                "max_depth": estimator.max_depth,
+                "min_samples_split": estimator.min_samples_split,
+                "min_samples_leaf": estimator.min_samples_leaf,
+                "max_features": estimator.max_features,
+                "random_state": estimator.random_state,
+                "min_sigma": estimator.min_sigma,
+                "n_features": estimator.n_features,
+            },
+            expected,
+        )
+
+    def test_invalid_forest_contracts_fail_before_training_or_prediction(self):
+        X = np.ones((4, 2))
+        y = np.arange(4.0)
+        invalid_estimators = [
+            {"n_estimators": 0},
+            {"max_depth": 0},
+            {"min_samples_split": 1},
+            {"min_samples_leaf": 0},
+            {"max_features": 0},
+            {"min_sigma": 0.0},
+        ]
+        for controls in invalid_estimators:
+            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError)):
+                RandomForestEstimator(task="regression", **controls)
+        forest = NativeRandomForest(task="regression", n_estimators=2, random_state=0)
+        with self.assertRaisesRegex(RuntimeError, "fitted"):
+            forest.predict(X)
+        for bad_X, bad_y, bad_w in [
+            (np.ones((0, 2)), np.zeros(0), np.zeros(0)),
+            (np.array([[1.0, np.nan]]), np.array([1.0]), np.array([1.0])),
+            (X, y[:-1], np.ones(4)),
+            (X, y, np.array([1.0, -1.0, 1.0, 1.0])),
+            (X, y, np.array([1.0, np.inf, 1.0, 1.0])),
+            (X, y, np.zeros(4)),
+        ]:
+            with self.subTest(X=bad_X, y=bad_y, w=bad_w), self.assertRaises((TypeError, ValueError)):
+                forest.fit(bad_X, bad_y, bad_w)
 
     def test_conditional_sampler(self):
         tr, te = _classification_data()

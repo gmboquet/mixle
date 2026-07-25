@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-_MAX_DEPTH = 1 << 20
+_VALID_TASKS = frozenset({"classification", "regression"})
 
 
 class _Node:
@@ -27,6 +27,8 @@ class _Node:
 
 
 def _resolve_max_features(max_features: Any, n_features: int, task: str) -> int:
+    if n_features <= 0:
+        raise ValueError("n_features must be positive")
     if max_features is None:
         return n_features
     if isinstance(max_features, str):
@@ -38,8 +40,39 @@ def _resolve_max_features(max_features: Any, n_features: int, task: str) -> int:
             return max(1, n_features // 3)
         raise ValueError("unknown max_features %r" % (max_features,))
     if isinstance(max_features, float):
+        if not np.isfinite(max_features) or not 0.0 < max_features <= 1.0:
+            raise ValueError("float max_features must be finite and in (0, 1]")
         return max(1, int(max_features * n_features))
-    return max(1, min(int(max_features), n_features))
+    if isinstance(max_features, (bool, np.bool_)) or not isinstance(max_features, (int, np.integer)):
+        raise TypeError("max_features must be None, a supported string, a float in (0, 1], or a positive integer")
+    if int(max_features) <= 0:
+        raise ValueError("integer max_features must be positive")
+    return min(int(max_features), n_features)
+
+
+def _positive_int(value: Any, name: str, *, minimum: int = 1) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return result
+
+
+def _validated_design(X: Any, *, n_features: int | None = None) -> np.ndarray:
+    try:
+        design = np.asarray(X, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("X must be a numeric two-dimensional design matrix") from exc
+    if design.ndim != 2:
+        raise ValueError("X must be a two-dimensional design matrix")
+    if design.shape[1] == 0:
+        raise ValueError("X must contain at least one feature")
+    if n_features is not None and design.shape[1] != n_features:
+        raise ValueError(f"X must contain exactly {n_features} features, got {design.shape[1]}")
+    if not np.all(np.isfinite(design)):
+        raise ValueError("X must contain only finite feature values")
+    return design
 
 
 class _DecisionTree:
@@ -56,7 +89,38 @@ class _DecisionTree:
         self.root: _Node | None = None
 
     def fit(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> _DecisionTree:
-        self.root = self._build(X, y, w, 0)
+        stack: list[tuple[_Node | None, str | None, np.ndarray, np.ndarray, np.ndarray, int]] = [
+            (None, None, X, y, w, 0)
+        ]
+        while stack:
+            parent, side, node_X, node_y, node_w, depth = stack.pop()
+            n = len(node_y)
+            pure = (self.task == "classification" and len(np.unique(node_y)) <= 1) or (
+                self.task == "regression" and np.ptp(node_y) == 0.0
+            )
+            if (
+                depth >= self.max_depth
+                or n < self.min_samples_split
+                or n < 2 * self.min_samples_leaf
+                or pure
+                or node_w.sum() <= 0.0
+            ):
+                node = self._leaf(node_y, node_w)
+            else:
+                feature, threshold = self._best_split(node_X, node_y, node_w)
+                if feature < 0:
+                    node = self._leaf(node_y, node_w)
+                else:
+                    node = _Node(feature=feature, threshold=threshold, left=_Node(), right=_Node())
+                    mask = node_X[:, feature] <= threshold
+                    stack.append((node, "right", node_X[~mask], node_y[~mask], node_w[~mask], depth + 1))
+                    stack.append((node, "left", node_X[mask], node_y[mask], node_w[mask], depth + 1))
+            if parent is None:
+                self.root = node
+            else:
+                setattr(parent, side, node)
+        if self.root is None:  # defensive: validated fitting always visits at least one node
+            raise RuntimeError("tree fitting did not produce a root node")
         return self
 
     def _leaf(self, y: np.ndarray, w: np.ndarray) -> _Node:
@@ -68,29 +132,6 @@ class _DecisionTree:
         ws = w.sum()
         mean = float(np.dot(w, y) / ws) if ws > 0 else float(np.mean(y))
         return _Node(value=np.array([mean]))
-
-    def _build(self, X: np.ndarray, y: np.ndarray, w: np.ndarray, depth: int) -> _Node:
-        n = len(y)
-        pure = (self.task == "classification" and len(np.unique(y)) <= 1) or (
-            self.task == "regression" and np.ptp(y) == 0.0
-        )
-        # an all-zero-weight node (e.g. EM responsibilities -> 0) gives 0/0 NaN gains in _best_split; stop here
-        if (
-            depth >= self.max_depth
-            or n < self.min_samples_split
-            or n < 2 * self.min_samples_leaf
-            or pure
-            or w.sum() <= 0.0
-        ):
-            return self._leaf(y, w)
-
-        feat, thr = self._best_split(X, y, w)
-        if feat < 0:
-            return self._leaf(y, w)
-        mask = X[:, feat] <= thr
-        left = self._build(X[mask], y[mask], w[mask], depth + 1)
-        right = self._build(X[~mask], y[~mask], w[~mask], depth + 1)
-        return _Node(feature=feat, threshold=thr, left=left, right=right)
 
     def _best_split(self, X: np.ndarray, y: np.ndarray, w: np.ndarray) -> tuple[int, float]:
         n, d = X.shape
@@ -159,15 +200,19 @@ class _DecisionTree:
         return best_feat, best_thr
 
     def _apply(self, X: np.ndarray, out: np.ndarray) -> None:
-        def rec(node: _Node, idx: np.ndarray) -> None:
+        if self.root is None:
+            raise RuntimeError("tree must be fitted before prediction")
+        stack = [(self.root, np.arange(len(X)))]
+        while stack:
+            node, idx = stack.pop()
+            if len(idx) == 0:
+                continue
             if node.left is None:
                 out[idx] = node.value
-                return
+                continue
             go_left = X[idx, node.feature] <= node.threshold
-            rec(node.left, idx[go_left])
-            rec(node.right, idx[~go_left])
-
-        rec(self.root, np.arange(len(X)))
+            stack.append((node.right, idx[~go_left]))
+            stack.append((node.left, idx[go_left]))
 
 
 class NativeRandomForest:
@@ -183,46 +228,105 @@ class NativeRandomForest:
         max_features: Any = "auto",
         random_state: int | None = None,
     ) -> None:
+        if task not in _VALID_TASKS:
+            raise ValueError(f"task must be one of {sorted(_VALID_TASKS)}, got {task!r}")
         self.task = task
-        self.n_estimators = n_estimators
-        self.max_depth = _MAX_DEPTH if max_depth is None else max_depth
-        self.min_samples_split = min_samples_split
-        self.min_samples_leaf = min_samples_leaf
+        self.n_estimators = _positive_int(n_estimators, "n_estimators")
+        self.max_depth = None if max_depth is None else _positive_int(max_depth, "max_depth")
+        self.min_samples_split = _positive_int(min_samples_split, "min_samples_split", minimum=2)
+        self.min_samples_leaf = _positive_int(min_samples_leaf, "min_samples_leaf")
+        _resolve_max_features(max_features, 1, task)
         self.max_features = max_features
+        if random_state is not None and (
+            isinstance(random_state, (bool, np.bool_)) or not isinstance(random_state, (int, np.integer))
+        ):
+            raise TypeError("random_state must be an integer or None")
         self.random_state = random_state
         self.trees: list[_DecisionTree] = []
         self.classes_: np.ndarray | None = None
+        self.n_features_in_: int | None = None
+        self.oob_prediction_: np.ndarray | None = None
+        self.oob_count_: np.ndarray | None = None
 
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> NativeRandomForest:
         """Fit the bagged tree ensemble from a weighted design matrix and target vector."""
-        X = np.asarray(X, dtype=float)
+        X = _validated_design(X)
         n, d = X.shape
+        if n == 0:
+            raise ValueError("X and y must contain at least one observation")
+        y = np.asarray(y)
+        if y.ndim != 1 or len(y) != n:
+            raise ValueError(f"y must be a one-dimensional vector with {n} rows")
         w = np.ones(n) if sample_weight is None else np.asarray(sample_weight, dtype=float)
+        if w.ndim != 1 or len(w) != n:
+            raise ValueError(f"sample_weight must be a one-dimensional vector with {n} rows")
+        if not np.all(np.isfinite(w)) or np.any(w < 0.0):
+            raise ValueError("sample_weight must contain only finite, non-negative values")
+        if not np.any(w > 0.0):
+            raise ValueError("sample_weight must contain at least one positive value")
         rng = np.random.RandomState(self.random_state)
         mf = _resolve_max_features(self.max_features, d, self.task)
+        max_depth = n if self.max_depth is None else self.max_depth
 
         if self.task == "classification":
-            self.classes_, codes = np.unique(y, return_inverse=True)
+            if y.dtype.kind in {"f", "c"} and not np.all(np.isfinite(y)):
+                raise ValueError("classification labels must be finite")
+            if y.dtype.kind == "O" and any(label is None for label in y):
+                raise ValueError("classification labels must not be None")
+            try:
+                self.classes_, codes = np.unique(y, return_inverse=True)
+            except TypeError as exc:
+                raise ValueError("classification labels must be mutually comparable scalar values") from exc
             n_classes = len(self.classes_)
             yfit = codes
         else:
             n_classes = 0
-            yfit = np.asarray(y, dtype=float)
+            try:
+                yfit = np.asarray(y, dtype=float)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("regression targets must be numeric") from exc
+            if not np.all(np.isfinite(yfit)):
+                raise ValueError("regression targets must be finite")
 
         self.trees = []
+        oob_shape = (n, n_classes) if self.task == "classification" else (n, 1)
+        oob_sum = np.zeros(oob_shape, dtype=float)
+        oob_count = np.zeros(n, dtype=int)
         for _ in range(self.n_estimators):
             tree_rng = np.random.RandomState(rng.randint(0, 2**31 - 1))
             boot = tree_rng.randint(0, n, n)  # bootstrap sample (with replacement)
             tree = _DecisionTree(
-                self.task, n_classes, self.max_depth, self.min_samples_split, self.min_samples_leaf, mf, tree_rng
+                self.task, n_classes, max_depth, self.min_samples_split, self.min_samples_leaf, mf, tree_rng
             )
             tree.fit(X[boot], yfit[boot], w[boot])
             self.trees.append(tree)
+            in_bag = np.zeros(n, dtype=bool)
+            in_bag[boot] = True
+            oob_rows = np.flatnonzero(~in_bag)
+            if len(oob_rows):
+                tree_out = np.zeros((len(oob_rows), oob_shape[1]), dtype=float)
+                tree._apply(X[oob_rows], tree_out)
+                oob_sum[oob_rows] += tree_out
+                oob_count[oob_rows] += 1
+        self.n_features_in_ = d
+        self.oob_count_ = oob_count
+        self.oob_prediction_ = np.full(oob_shape, np.nan, dtype=float)
+        covered = oob_count > 0
+        self.oob_prediction_[covered] = oob_sum[covered] / oob_count[covered, None]
+        if self.task == "regression":
+            self.oob_prediction_ = self.oob_prediction_.ravel()
         return self
+
+    def _prediction_design(self, X: Any) -> np.ndarray:
+        if not self.trees or self.n_features_in_ is None:
+            raise RuntimeError("forest must be fitted before prediction")
+        return _validated_design(X, n_features=self.n_features_in_)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         """Return class probabilities averaged over all fitted trees."""
-        X = np.asarray(X, dtype=float)
+        if self.task != "classification":
+            raise ValueError("predict_proba is available only for classification forests")
+        X = self._prediction_design(X)
         acc = np.zeros((len(X), len(self.classes_)))
         buf = np.zeros((len(X), len(self.classes_)))
         for tree in self.trees:
@@ -238,7 +342,7 @@ class NativeRandomForest:
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Return class labels for classification or mean predictions for regression."""
-        X = np.asarray(X, dtype=float)
+        X = self._prediction_design(X)
         if self.task == "classification":
             return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
         acc = np.zeros((len(X), 1))

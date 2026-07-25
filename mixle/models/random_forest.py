@@ -33,6 +33,32 @@ from mixle.stats.compute.pdist import (
 )
 
 LOG_2PI = float(np.log(2.0 * np.pi))
+_VALID_TASKS = frozenset({"classification", "regression"})
+
+
+def _validated_features(x: Any, *, n_features: int | None = None) -> np.ndarray:
+    try:
+        X = np.asarray(x, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("features must be a numeric two-dimensional matrix") from exc
+    if X.ndim != 2:
+        raise ValueError("features must be a two-dimensional matrix")
+    if X.shape[1] == 0:
+        raise ValueError("features must contain at least one column")
+    if n_features is not None and X.shape[1] != n_features:
+        raise ValueError(f"features must contain exactly {n_features} columns, got {X.shape[1]}")
+    if not np.all(np.isfinite(X)):
+        raise ValueError("features must contain only finite values")
+    return X
+
+
+def _validated_weights(weights: Any, n_rows: int) -> np.ndarray:
+    w = np.asarray(weights, dtype=float)
+    if w.ndim != 1 or len(w) != n_rows:
+        raise ValueError(f"weights must be a one-dimensional vector with {n_rows} rows")
+    if not np.all(np.isfinite(w)) or np.any(w < 0.0):
+        raise ValueError("weights must contain only finite, non-negative values")
+    return w
 
 
 class RandomForestConditionalSampler(DistributionSampler):
@@ -67,14 +93,39 @@ class RandomForestConditional(SequenceEncodableProbabilityDistribution):
         n_features: int | None = None,
         name: str | None = None,
         keys: str | None = None,
+        forest_spec: dict[str, Any] | None = None,
     ) -> None:
+        if task not in _VALID_TASKS:
+            raise ValueError(f"task must be one of {sorted(_VALID_TASKS)}, got {task!r}")
+        if not getattr(forest, "trees", None):
+            raise ValueError("forest must be fitted and contain at least one tree")
+        if n_features is None:
+            n_features = getattr(forest, "n_features_in_", None)
+        if isinstance(n_features, bool) or not isinstance(n_features, (int, np.integer)) or int(n_features) <= 0:
+            raise ValueError("n_features must be a positive integer")
+        if task == "regression" and (
+            sigma is None or not np.isfinite(float(sigma)) or float(sigma) <= 0.0
+        ):
+            raise ValueError("regression sigma must be finite and positive")
         self.forest = forest
         self.task = task
         self.sigma = float(sigma) if sigma is not None else None
         self.sigma2 = self.sigma * self.sigma if self.sigma is not None else None
-        self.n_features = n_features
+        self.n_features = int(n_features)
         self.name = name
         self.keys = keys
+        if forest_spec is None:
+            forest_spec = {
+                "n_estimators": forest.n_estimators,
+                "max_depth": forest.max_depth,
+                "min_samples_split": forest.min_samples_split,
+                "min_samples_leaf": forest.min_samples_leaf,
+                "max_features": forest.max_features,
+                "random_state": forest.random_state,
+                "min_sigma": self.sigma if self.sigma is not None else 1.0e-3,
+                "n_features": self.n_features,
+            }
+        self.forest_spec = dict(forest_spec)
         if task == "classification":
             self._class_pos = {c: i for i, c in enumerate(forest.classes_)}
 
@@ -97,6 +148,10 @@ class RandomForestConditional(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
         """Return per-row conditional log densities for encoded ``(X, y)`` data."""
         X, y = x
+        X = _validated_features(X, n_features=self.n_features)
+        y = np.asarray(y)
+        if y.ndim != 1 or len(y) != len(X):
+            raise ValueError(f"targets must be a one-dimensional vector with {len(X)} rows")
         if len(y) == 0:
             return np.zeros(0)
         if self.task == "classification":
@@ -115,7 +170,7 @@ class RandomForestConditional(SequenceEncodableProbabilityDistribution):
 
     def sample_y(self, x: Any, rng: np.random.RandomState) -> np.ndarray:
         """Draw target values from the fitted conditional forest at feature rows ``x``."""
-        X = np.asarray(x, dtype=float)
+        X = _validated_features(x, n_features=self.n_features)
         if self.task == "classification":
             proba = np.asarray(self.forest.predict_proba(X))
             classes = self.forest.classes_
@@ -128,21 +183,24 @@ class RandomForestConditional(SequenceEncodableProbabilityDistribution):
         return RandomForestConditionalSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> RandomForestEstimator:
-        """Return a fresh estimator with the same task, name, and keyed-accumulation settings."""
-        return RandomForestEstimator(task=self.task, name=self.name, keys=self.keys)
+        """Return an estimator preserving the fitted model's complete specification."""
+        return RandomForestEstimator(task=self.task, name=self.name, keys=self.keys, **self.forest_spec)
 
     def dist_to_encoder(self) -> RandomForestEncoder:
         """Return the encoder for feature/target observation pairs."""
-        return RandomForestEncoder()
+        return RandomForestEncoder(self.n_features)
 
 
 class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
     """Buffers the weighted (x, y) design matrix; combine() concatenates partition buffers into the full training
     set that estimate() fits the forest on."""
 
-    def __init__(self, keys: str | None = None, name: str | None = None) -> None:
+    def __init__(
+        self, keys: str | None = None, name: str | None = None, n_features: int | None = None
+    ) -> None:
         self.keys = keys
         self.name = name
+        self.n_features = n_features
         self._X: list[np.ndarray] = []
         self._y: list[np.ndarray] = []
         self._w: list[np.ndarray] = []
@@ -150,9 +208,13 @@ class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
     def update(self, x: tuple[Any, Any], weight: float, estimate: RandomForestConditional | None) -> None:
         """Add one weighted feature/target observation to the training buffer."""
         feat, target = x
-        self._X.append(np.asarray([np.asarray(feat, dtype=float)]))
+        X = _validated_features([feat], n_features=self.n_features)
+        if self.n_features is None:
+            self.n_features = X.shape[1]
+        w = _validated_weights([weight], 1)
+        self._X.append(X)
         self._y.append(np.asarray([target]))
-        self._w.append(np.asarray([weight], dtype=float))
+        self._w.append(w)
 
     def initialize(self, x: tuple[Any, Any], weight: float, rng: np.random.RandomState | None) -> None:
         """Initialize from one observation using the ordinary update path."""
@@ -163,11 +225,28 @@ class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> None:
         """Add an encoded batch and weights to the training buffer."""
         X, y = x
-        if len(y) == 0:
+        y = np.asarray(y)
+        raw_X = np.asarray(X)
+        if y.ndim != 1:
+            raise ValueError("targets must be a one-dimensional vector")
+        if y.size == 0:
+            if raw_X.ndim != 2 or raw_X.shape[0] != 0:
+                raise ValueError("empty batches must contain an empty two-dimensional feature matrix and target vector")
+            if self.n_features is not None and raw_X.shape[1] != self.n_features:
+                raise ValueError(
+                    f"features must contain exactly {self.n_features} columns, got {raw_X.shape[1]}"
+                )
+            _validated_weights(weights, 0)
             return
-        self._X.append(np.asarray(X, dtype=float))
-        self._y.append(np.asarray(y))
-        self._w.append(np.asarray(weights, dtype=float))
+        X = _validated_features(X, n_features=self.n_features)
+        if y.ndim != 1 or len(y) != len(X):
+            raise ValueError(f"targets must be a one-dimensional vector with {len(X)} rows")
+        weights = _validated_weights(weights, len(X))
+        if self.n_features is None:
+            self.n_features = X.shape[1]
+        self._X.append(X)
+        self._y.append(y)
+        self._w.append(weights)
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: Any) -> None:
         """Initialize from an encoded batch using the ordinary batch update path."""
@@ -178,9 +257,7 @@ class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
         if suff_stat is not None:
             X, y, w = suff_stat
             if len(y) > 0:
-                self._X.append(np.asarray(X, dtype=float))
-                self._y.append(np.asarray(y))
-                self._w.append(np.asarray(w, dtype=float))
+                self.seq_update((X, y), w, None)
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
@@ -195,7 +272,8 @@ class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
             self._X, self._y, self._w = [], [], []
         else:
             X, y, w = x
-            self._X, self._y, self._w = [np.asarray(X, dtype=float)], [np.asarray(y)], [np.asarray(w, dtype=float)]
+            self._X, self._y, self._w = [], [], []
+            self.seq_update((X, y), w, None)
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -212,25 +290,29 @@ class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
 
     def acc_to_encoder(self) -> RandomForestEncoder:
         """Return the encoder expected by this accumulator."""
-        return RandomForestEncoder()
+        return RandomForestEncoder(self.n_features)
 
 
 class RandomForestAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for random-forest accumulators."""
 
-    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self, name: str | None = None, keys: str | None = None, n_features: int | None = None
+    ) -> None:
         self.name = name
         self.keys = keys
+        self.n_features = n_features
 
     def make(self) -> RandomForestAccumulator:
         """Create a fresh random-forest accumulator."""
-        return RandomForestAccumulator(name=self.name, keys=self.keys)
+        return RandomForestAccumulator(name=self.name, keys=self.keys, n_features=self.n_features)
 
 
 class RandomForestEstimator(ParameterEstimator):
     """Estimator that fits a native (numpy) random forest as a conditional leaf.
 
-    task is 'classification', 'regression', or 'auto' (inferred from the dtype of y). The forest hyperparameters
+    task is explicitly 'classification' or 'regression'; target dtype is never used to guess semantics. The forest
+    hyperparameters
     (n_estimators, max_depth, min_samples_split, min_samples_leaf, max_features, random_state) are passed straight
     to the native ensemble. estimate() trains in one pass on the accumulated weighted data; there is no EM
     iteration, so drive it with optimize(max_its=1) or call the seq_encode / accumulate / estimate path directly.
@@ -238,7 +320,7 @@ class RandomForestEstimator(ParameterEstimator):
 
     def __init__(
         self,
-        task: str = "auto",
+        task: str | None = None,
         n_estimators: int = 100,
         max_depth: int | None = None,
         min_samples_split: int = 2,
@@ -248,26 +330,56 @@ class RandomForestEstimator(ParameterEstimator):
         min_sigma: float = 1.0e-3,
         name: str | None = None,
         keys: str | None = None,
+        n_features: int | None = None,
     ) -> None:
+        if task not in _VALID_TASKS:
+            raise ValueError(
+                f"task must be explicitly one of {sorted(_VALID_TASKS)}; automatic dtype inference is unsafe"
+            )
+        validated = NativeRandomForest(
+            task=task,
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            min_samples_split=min_samples_split,
+            min_samples_leaf=min_samples_leaf,
+            max_features=max_features,
+            random_state=random_state,
+        )
+        if not np.isfinite(float(min_sigma)) or float(min_sigma) <= 0.0:
+            raise ValueError("min_sigma must be finite and positive")
+        if n_features is not None and (
+            isinstance(n_features, bool)
+            or not isinstance(n_features, (int, np.integer))
+            or int(n_features) <= 0
+        ):
+            raise ValueError("n_features must be a positive integer or None")
         self.task = task
-        self.n_estimators = n_estimators
-        self.max_depth = max_depth
-        self.min_samples_split = min_samples_split
-        self.min_samples_leaf = min_samples_leaf
-        self.max_features = max_features
-        self.random_state = random_state
+        self.n_estimators = validated.n_estimators
+        self.max_depth = validated.max_depth
+        self.min_samples_split = validated.min_samples_split
+        self.min_samples_leaf = validated.min_samples_leaf
+        self.max_features = validated.max_features
+        self.random_state = validated.random_state
         self.min_sigma = float(min_sigma)
         self.name = name
         self.keys = keys
+        self.n_features = None if n_features is None else int(n_features)
 
     def accumulator_factory(self) -> RandomForestAccumulatorFactory:
         """Return an accumulator factory for weighted feature/target buffers."""
-        return RandomForestAccumulatorFactory(self.name, self.keys)
+        return RandomForestAccumulatorFactory(self.name, self.keys, self.n_features)
 
-    def _resolve_task(self, y: np.ndarray) -> str:
-        if self.task != "auto":
-            return self.task
-        return "regression" if np.asarray(y).dtype.kind == "f" else "classification"
+    def _forest_spec(self, n_features: int) -> dict[str, Any]:
+        return {
+            "n_estimators": self.n_estimators,
+            "max_depth": self.max_depth,
+            "min_samples_split": self.min_samples_split,
+            "min_samples_leaf": self.min_samples_leaf,
+            "max_features": self.max_features,
+            "random_state": self.random_state,
+            "min_sigma": self.min_sigma,
+            "n_features": n_features,
+        }
 
     def _make_forest(self, task: str) -> NativeRandomForest:
         return NativeRandomForest(
@@ -284,42 +396,78 @@ class RandomForestEstimator(ParameterEstimator):
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray] | None
     ) -> RandomForestConditional:
         """Fit the native forest from buffered data and return it as a conditional leaf."""
-        if suff_stat is None or len(suff_stat[1]) == 0:
+        if suff_stat is None:
             raise ValueError("RandomForestEstimator.estimate requires at least one (x, y) observation.")
+        if not isinstance(suff_stat, tuple) or len(suff_stat) != 3:
+            raise ValueError("random-forest sufficient statistics must be an (X, y, weights) tuple")
         X, y, w = suff_stat
-        X = np.asarray(X, dtype=float)
-        task = self._resolve_task(y)
+        X = _validated_features(X, n_features=self.n_features)
+        y = np.asarray(y)
+        if y.ndim != 1 or len(y) != len(X):
+            raise ValueError(f"targets must be a one-dimensional vector with {len(X)} rows")
+        if len(y) == 0:
+            raise ValueError("RandomForestEstimator.estimate requires at least one (x, y) observation.")
+        w = _validated_weights(w, len(X))
+        if not np.any(w > 0.0):
+            raise ValueError("weights must contain at least one positive value")
+        spec = self._forest_spec(X.shape[1])
 
-        if task == "classification":
+        if self.task == "classification":
             forest = self._make_forest("classification").fit(X, y, sample_weight=w)
             return RandomForestConditional(
-                forest, "classification", n_features=X.shape[1], name=self.name, keys=self.keys
+                forest,
+                "classification",
+                n_features=X.shape[1],
+                name=self.name,
+                keys=self.keys,
+                forest_spec=spec,
             )
 
-        y = np.asarray(y, dtype=float)
+        try:
+            y = np.asarray(y, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("regression targets must be numeric") from exc
+        if not np.all(np.isfinite(y)):
+            raise ValueError("regression targets must be finite")
         forest = self._make_forest("regression").fit(X, y, sample_weight=w)
-        resid = y - forest.predict(X)
-        wsum = float(np.sum(w))
-        var = float(np.sum(w * resid * resid) / wsum) if wsum > 0 else float(np.mean(resid * resid))
+        oob_prediction = np.asarray(forest.oob_prediction_, dtype=float)
+        calibrated = np.isfinite(oob_prediction) & (w > 0.0)
+        if np.count_nonzero(calibrated) < 2:
+            raise ValueError(
+                "regression uncertainty calibration requires at least two positive-weight observations "
+                "with out-of-bag predictions; increase n_estimators or provide more data"
+            )
+        resid = y[calibrated] - oob_prediction[calibrated]
+        calibration_weights = w[calibrated]
+        var = float(np.sum(calibration_weights * resid * resid) / np.sum(calibration_weights))
         sigma = max(np.sqrt(var), self.min_sigma)
         return RandomForestConditional(
-            forest, "regression", sigma=sigma, n_features=X.shape[1], name=self.name, keys=self.keys
+            forest,
+            "regression",
+            sigma=sigma,
+            n_features=X.shape[1],
+            name=self.name,
+            keys=self.keys,
+            forest_spec=spec,
         )
 
 
 class RandomForestEncoder(DataSequenceEncoder):
     """Encodes a sequence of (x, y) observations into a (design-matrix, target-vector) pair."""
 
+    def __init__(self, n_features: int | None = None) -> None:
+        self.n_features = n_features
+
     def __str__(self) -> str:
-        return "RandomForestEncoder"
+        return f"RandomForestEncoder(n_features={self.n_features!r})"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, RandomForestEncoder)
+        return isinstance(other, RandomForestEncoder) and self.n_features == other.n_features
 
     def seq_encode(self, x: list[tuple[Any, Any]]) -> tuple[np.ndarray, np.ndarray]:
         """Convert feature/target pairs into a design matrix and target vector."""
         if len(x) == 0:
-            return (np.zeros((0, 0)), np.zeros(0))
-        X = np.asarray([np.asarray(feat, dtype=float) for feat, _ in x], dtype=float)
+            return (np.zeros((0, self.n_features or 0)), np.zeros(0))
+        X = _validated_features([feat for feat, _ in x], n_features=self.n_features)
         y = np.asarray([target for _, target in x])
         return (X, y)
