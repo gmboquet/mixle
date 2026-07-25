@@ -83,6 +83,22 @@ def _aleatoric_from_noise(R: Any, k: int) -> np.ndarray:
     return np.diag(_validated_covariance(Rm, k, "R")).copy()
 
 
+def _exact_int(value: Any, name: str) -> int:
+    """Return ``value`` as an exact integer, rejecting fractional input (no silent ``int()`` truncation)."""
+    f = float(value)
+    if not np.isfinite(f) or f != int(f):
+        raise ValueError(f"{name} must be an integer; got {value!r}")
+    return int(f)
+
+
+def _positive_int(value: Any, name: str) -> int:
+    """Return ``value`` as an exact positive integer (``>= 1``), rejecting fractional or non-positive input."""
+    n = _exact_int(value, name)
+    if n < 1:
+        raise ValueError(f"{name} must be a positive integer; got {value!r}")
+    return n
+
+
 class Latent:
     """Factories for the shared latent prior used at the start of assimilation."""
 
@@ -93,8 +109,14 @@ class Latent:
 
     @staticmethod
     def vector(dim: int, *, mean: float = 0.0, var: float = 1.0) -> GaussianBelief:
-        """An isotropic Gaussian prior over a ``dim``-vector latent: ``N(mean*1, var*I)``."""
-        return GaussianBelief(np.full(int(dim), float(mean)), np.eye(int(dim)) * float(var))
+        """An isotropic Gaussian prior over a ``dim``-vector latent: ``N(mean*1, var*I)``.
+
+        Raises:
+            ValueError: if ``dim`` is not an exact positive integer (MXR-080-0274) -- a fractional
+                ``dim`` used to be silently truncated with ``int()`` rather than rejected.
+        """
+        d = _positive_int(dim, "dim")
+        return GaussianBelief(np.full(d, float(mean)), np.eye(d) * float(var))
 
     @staticmethod
     def mechanistic(
@@ -120,17 +142,27 @@ class Latent:
             x0_mean: mean of ``z_0`` (default zeros).
             x0_cov: covariance of ``z_0`` (default identity).
             process_cov: process-noise covariance ``Q`` (default zeros -- deterministic dynamics).
+
+        Raises:
+            ValueError: if ``steps`` is not an exact positive integer; if ``x0_mean`` doesn't have
+                shape ``(d,)`` or isn't finite; or if ``x0_cov`` / ``process_cov`` isn't a finite,
+                symmetric, positive-semidefinite ``(d, d)`` covariance (MXR-080-0274) -- previously
+                ``steps`` was silently truncated with ``int()`` and the covariances were never
+                validated at all, so a malformed one either propagated silently into the joint prior
+                or surfaced only as a confusing low-level error far from its actual cause.
         """
         A = np.atleast_2d(np.asarray(A, dtype=float))
         d = A.shape[0]
         if A.shape != (d, d):
             raise ValueError(f"A must be square (d, d); got {A.shape}")
-        T = int(steps)
-        if T < 1:
-            raise ValueError("steps must be >= 1")
+        T = _positive_int(steps, "steps")
         m0 = np.zeros(d) if x0_mean is None else np.atleast_1d(np.asarray(x0_mean, dtype=float))
-        P0 = np.eye(d) if x0_cov is None else np.atleast_2d(np.asarray(x0_cov, dtype=float))
-        Q = np.zeros((d, d)) if process_cov is None else np.atleast_2d(np.asarray(process_cov, dtype=float))
+        if m0.shape != (d,):
+            raise ValueError(f"x0_mean must have shape ({d},) to match A; got {m0.shape}")
+        if not np.isfinite(m0).all():
+            raise ValueError("x0_mean must be finite (no NaN or inf)")
+        P0 = np.eye(d) if x0_cov is None else _validated_covariance(x0_cov, d, "x0_cov")
+        Q = np.zeros((d, d)) if process_cov is None else _validated_covariance(process_cov, d, "process_cov")
 
         # forward marginals: mean_{t+1} = A mean_t, P_{t+1} = A P_t Aᵀ + Q
         means = [m0]
@@ -224,8 +256,23 @@ def block_selector(step: int, n_blocks: int, block_dim: int, within: Any = None)
     ``H`` selecting block ``step`` -- use it to build :class:`LinearGaussianEvidence` for an
     observation at that time. ``within`` optionally reads only part of the block (a
     ``(k, block_dim)`` local readout); by default the whole block is read (identity).
+
+    Raises:
+        ValueError: if ``n_blocks`` / ``block_dim`` is not an exact positive integer; if ``step`` is
+            not an exact integer or falls outside ``[0, n_blocks)``; or if ``within`` doesn't have
+            ``block_dim`` columns (MXR-080-0274). ``step`` used to accept Python-style negative
+            indexing by accident (silently selecting a DIFFERENT, in-range block with no signal that
+            anything unusual happened) while a step at or beyond ``n_blocks`` fell through to a
+            confusing low-level "could not broadcast" error instead of a clear one.
     """
+    n_blocks = _positive_int(n_blocks, "n_blocks")
+    block_dim = _positive_int(block_dim, "block_dim")
+    step = _exact_int(step, "step")
+    if not (0 <= step < n_blocks):
+        raise ValueError(f"step must be in [0, {n_blocks}); got {step}")
     local = np.eye(block_dim) if within is None else np.atleast_2d(np.asarray(within, dtype=float))
+    if local.shape[1] != block_dim:
+        raise ValueError(f"within must have {block_dim} columns to match block_dim; got shape {local.shape}")
     H = np.zeros((local.shape[0], n_blocks * block_dim))
     H[:, step * block_dim : (step + 1) * block_dim] = local
     return H

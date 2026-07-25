@@ -11,7 +11,7 @@ import unittest
 import numpy as np
 
 from mixle.inference.belief import GaussianBelief
-from mixle.reason.core import Latent, reason
+from mixle.reason.core import Latent, block_selector, reason
 from mixle.reason.core import LinearGaussianEvidence as Evidence
 
 
@@ -176,6 +176,89 @@ class Mxr0273PredictValidationTest(unittest.TestCase):
         dec2 = self.ans.predict(H=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], R=[[0.3, 0.1], [0.1, 0.3]])
         np.testing.assert_allclose(dec2.aleatoric, [0.3, 0.3])
         np.testing.assert_allclose(dec2.total, dec2.epistemic + dec2.aleatoric)
+
+
+class Mxr0274FactoryValidationTest(unittest.TestCase):
+    """``Latent.vector``/``Latent.mechanistic`` silently truncated a fractional dimension or step
+    count with ``int()``, ``mechanistic()`` never validated its ``x0_cov``/``process_cov`` arguments
+    at all, and ``block_selector()`` accepted a negative step (silently selecting a DIFFERENT,
+    in-range block via Python-style wraparound with no signal) or an out-of-range one (falling
+    through to a confusing low-level numpy broadcast error instead of a clear validation message).
+    """
+
+    def test_fractional_vector_dimension_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "dim must be an integer"):
+            Latent.vector(2.9, var=1.0)
+
+    def test_nonpositive_vector_dimension_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            Latent.vector(0, var=1.0)
+
+    def test_fractional_mechanistic_steps_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "steps must be an integer"):
+            Latent.mechanistic(np.array([[1.0]]), steps=3.7)
+
+    def test_mechanistic_rejects_negative_variance_x0_cov(self):
+        with self.assertRaisesRegex(ValueError, "x0_cov must be positive semi-definite"):
+            Latent.mechanistic(np.array([[1.0]]), steps=3, x0_cov=[[-1.0]])
+
+    def test_mechanistic_rejects_indefinite_process_cov(self):
+        # eigenvalues 3 and -1: not a covariance matrix at all.
+        A = np.eye(2)
+        with self.assertRaisesRegex(ValueError, "process_cov must be positive semi-definite"):
+            Latent.mechanistic(A, steps=3, process_cov=[[1.0, 2.0], [2.0, 1.0]])
+
+    def test_mechanistic_rejects_non_finite_covariance(self):
+        with self.assertRaisesRegex(ValueError, "x0_cov must be finite"):
+            Latent.mechanistic(np.array([[1.0]]), steps=3, x0_cov=[[float("nan")]])
+
+    def test_mechanistic_rejects_wrong_shape_covariance(self):
+        with self.assertRaisesRegex(ValueError, r"x0_cov must have shape \(1, 1\)"):
+            Latent.mechanistic(np.array([[1.0]]), steps=3, x0_cov=[[1.0, 0.0], [0.0, 1.0]])
+
+    def test_mechanistic_rejects_wrong_shape_x0_mean(self):
+        with self.assertRaisesRegex(ValueError, r"x0_mean must have shape \(2,\)"):
+            Latent.mechanistic(np.eye(2), steps=3, x0_mean=[1.0, 2.0, 3.0])
+
+    def test_mechanistic_still_builds_a_valid_prior_for_good_input(self):
+        # Negative control, reusing mechanistic_latent_test.py's own valid parameters.
+        A = np.array([[0.9, 0.1], [0.0, 0.8]])
+        P0 = np.eye(2) * 2.0
+        Q = np.eye(2) * 0.1
+        prior = Latent.mechanistic(A, steps=5, x0_mean=[1.0, -1.0], x0_cov=P0, process_cov=Q)
+        self.assertEqual(np.size(prior.mean()), 10)
+        evals = np.linalg.eigvalsh(prior.cov())
+        self.assertGreaterEqual(evals.min(), -1e-9)
+
+    def test_block_selector_rejects_negative_step_instead_of_silently_wrapping(self):
+        # Pre-fix, step=-2 against n_blocks=4 silently selected block 2 (Python-style wraparound)
+        # with no error at all -- confirmed by direct reproduction against the pre-fix code.
+        for step in (-1, -2, -3, -4, -5):
+            with self.assertRaisesRegex(ValueError, r"step must be in \[0, 4\)"):
+                block_selector(step, n_blocks=4, block_dim=3)
+
+    def test_block_selector_rejects_out_of_range_step(self):
+        for step in (4, 5, 100):
+            with self.assertRaisesRegex(ValueError, r"step must be in \[0, 4\)"):
+                block_selector(step, n_blocks=4, block_dim=3)
+
+    def test_block_selector_rejects_wrong_width_within(self):
+        with self.assertRaisesRegex(ValueError, "within must have 3 columns"):
+            block_selector(0, n_blocks=4, block_dim=3, within=[[1.0, 1.0]])
+
+    def test_block_selector_rejects_fractional_or_nonpositive_dims(self):
+        with self.assertRaisesRegex(ValueError, "block_dim must be an integer"):
+            block_selector(0, n_blocks=4, block_dim=3.5)
+        with self.assertRaisesRegex(ValueError, "n_blocks must be a positive integer"):
+            block_selector(0, n_blocks=0, block_dim=3)
+
+    def test_block_selector_still_selects_the_correct_block_for_valid_input(self):
+        # Negative control, matching mechanistic_latent_test.py's own assertions.
+        H = block_selector(2, n_blocks=4, block_dim=3)
+        self.assertEqual(H.shape, (3, 12))
+        self.assertTrue(np.allclose(H[:, 6:9], np.eye(3)))
+        self.assertEqual(H[:, :6].sum(), 0.0)
+        self.assertEqual(H[:, 9:].sum(), 0.0)
 
 
 if __name__ == "__main__":
