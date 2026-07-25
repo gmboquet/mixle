@@ -15,11 +15,45 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from mixle.substrate.core import _require_count
+
 _WORD = re.compile(r"[a-z0-9]+")
 
 
 def _norm(text: str) -> str:
     return " ".join(_WORD.findall(text.lower()))
+
+
+def _materialize_triples(triples: Any) -> tuple[tuple[Any, Any, Any], ...]:
+    """Consume ``triples`` exactly once into an immutable tuple of validated 3-tuples (MXR-080-0253).
+
+    ``triples`` can be any iterable, including a one-shot generator. :func:`kg_action` used to walk
+    it more than once -- once (twice, in fact: a head-entity pass and a separate tail-entity pass) to
+    advertise an entity inventory at construction, again later inside ``_run`` to actually answer a
+    question -- and :func:`retrieve_triples` re-walked whatever it was handed on every call too. A
+    generator is exhausted by its first pass, so a reproduced action built from one advertised an
+    entity (from whichever pass got there first) and then returned no fact for it, ever: not stale
+    data, a structural guarantee that was never met. Materializing once, here, at the single point
+    every consumer passes through, makes every later iteration -- however many, from however many call
+    sites -- replay the same fixed data.
+
+    Arity is validated in the same pass: before this check, a short entry (e.g. a 2-tuple) raised an
+    opaque ``IndexError`` wherever its missing slot was first read -- often nowhere near construction,
+    with no indication which entry was at fault -- and a long one (e.g. a 4-tuple) was silently
+    accepted by the entities-only code (inventory building, hit filtering) and only failed later, and
+    inconsistently, wherever something finally unpacked all of it (``for h, r, t in ...``, or
+    :meth:`~mixle.reason.ontology.Ontology.filter_triples`'s ``check_triple(*tr, types)``). Both are
+    rejected here, loudly and at the boundary, instead.
+    """
+    out: list[tuple[Any, Any, Any]] = []
+    for i, t in enumerate(triples):
+        tup = tuple(t)
+        if len(tup) != 3:
+            raise ValueError(
+                f"triples[{i}] must be a 3-tuple (subject, relation, object); got {len(tup)} element(s): {tup!r}"
+            )
+        out.append(tup)
+    return tuple(out)
 
 
 def link_entities(question: str, entities: Any) -> list[str]:
@@ -55,8 +89,16 @@ def retrieve_triples(
     Returns ``{entities, facts, rejected}`` -- ``facts`` are the triples touching a linked entity (head
     or tail), at most ``k``; when an ``ontology`` (+ entity ``types``) is supplied, schema-violating
     triples are excluded and reported under ``rejected`` with named reasons, so an unvalidated store cannot
-    inject a type-invalid fact as evidence."""
-    triple_list = [tuple(t) for t in triples]
+    inject a type-invalid fact as evidence.
+
+    ``k`` must be an exact, non-negative :class:`int` (MXR-080-0253, see
+    :func:`~mixle.substrate.core._require_count`) -- a negative ``k`` used to fall through to ordinary
+    Python slicing (``hits[:-1]`` silently drops just the last hit) instead of being rejected.
+    ``triples`` is materialized once, validated, into an immutable structure before any lookup runs
+    (MXR-080-0253, see :func:`_materialize_triples`) -- safe no matter how many times ``triples`` is a
+    one-shot iterable and no matter how many times this function is called with it."""
+    k = _require_count(k, "k")
+    triple_list = _materialize_triples(triples)
     inventory = {t[0] for t in triple_list} | {t[2] for t in triple_list}
     linked = link_entities(question, inventory)
     linked_set = set(linked)
@@ -66,7 +108,7 @@ def retrieve_triples(
     if ontology is not None:
         kept, rejected = ontology.filter_triples(hits, types or {})
         hits = kept
-    return {"entities": linked, "facts": hits[: int(k)], "rejected": rejected}
+    return {"entities": linked, "facts": hits[:k], "rejected": rejected}
 
 
 def kg_action(
@@ -83,10 +125,19 @@ def kg_action(
 
     Contributes one fragment per fact (``head relation tail``); nothing links -> no evidence, so the
     reasoner falls through honestly instead of forcing a match. Relevance comes from the action's
-    ``description`` plus the KG's own entity inventory (queries naming a known entity score)."""
+    ``description`` plus the KG's own entity inventory (queries naming a known entity score).
+
+    ``triples`` is materialized exactly once, here, into an immutable, arity-validated structure
+    (MXR-080-0253, see :func:`_materialize_triples`) -- both the inventory built below and every later
+    ``_run`` call read from that same materialized data, so a one-shot ``triples`` generator can no
+    longer be exhausted by the inventory pass and come up empty when the action actually runs.
+    ``k`` shares :func:`retrieve_triples`'s exact-non-negative-integer contract, checked up front so a
+    bad ``k`` fails at construction rather than silently inside a fired action."""
     from mixle.substrate.act import Action
 
-    inventory = sorted({str(t[0]) for t in (tuple(x) for x in triples)} | {str(tuple(x)[2]) for x in triples})
+    k = _require_count(k, "k")
+    triples = _materialize_triples(triples)
+    inventory = sorted({str(t[0]) for t in triples} | {str(t[2]) for t in triples})
     desc = description or ("knowledge graph facts about " + " ".join(inventory[:20]))
 
     def _run(question: str) -> list[str]:
