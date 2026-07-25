@@ -1,11 +1,15 @@
 """The *measure* contract for self-improvement: a model-agnostic fitness.
 
-An :class:`Objective` turns ``(model, data)`` into a single comparable scalar **and**, when it can, an
+An :class:`Objective` turns ``(model, data)`` into a single comparable scalar **and**, when it can, a
 per-observation paired vector. The paired vector is what lets the verify gate
 (:mod:`mixle.evolve.verify`) run a *paired* significance test instead of comparing two bare score
 totals. Objectives that cannot produce a paired vector (a pure summary like a calibration-error
-scalar) set ``pointwise`` to return ``None``; the gate then falls back to a CI-exclusion check on the
-bootstrapped scalar.
+scalar) set ``pointwise`` to return ``None``; the gate then falls back to a bare scalar-delta-vs-
+``min_effect`` comparison, with ``p_value``/``ci`` set to the explicit ``nan`` "not applicable"
+sentinel -- no bootstrap, replication, or other resampling evidence backs a raw scalar delta, so a
+scalar-only verdict is reported for a human to review but can never auto-promote on its own (see
+:mod:`mixle.evolve.verify` module docstring point 8 and
+:attr:`~mixle.evolve.verify.Verdict.has_statistical_evidence`).
 
 Every builder here is a thin adapter over an existing, verified scorer:
 
@@ -179,8 +183,9 @@ def calibration_objective(*, ensemble: int = 256, seed: int = 0, bins: int = 10)
     Uses the rank-based Probability Integral Transform of a sampled ensemble: under a calibrated
     continuous forecast the PIT values are Uniform(0, 1), and ``pit_calibration_error`` measures the
     histogram's mean absolute deviation from uniform. There is no per-observation paired vector
-    for a histogram statistic, so ``pointwise`` returns ``None`` and the verify gate scores this on the
-    bootstrapped scalar.
+    for a histogram statistic, so ``pointwise`` returns ``None`` and the verify gate falls back to a
+    bare scalar comparison with no p-value or CI, reported for human review only -- see this module's
+    docstring and :mod:`mixle.evolve.verify` module docstring point 8.
 
     (For *classification* models the natural calibration scalar is
     :func:`mixle.inference.calibration.expected_calibration_error`; this builder targets the
