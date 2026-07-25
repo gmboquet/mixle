@@ -147,7 +147,7 @@ from mixle.inference.glm import (
     ridge_regression,
     robust_regression,
 )
-from mixle.inference.jit import JittedScorer, jit_em_mixture, jit_seq_log_density
+from mixle.inference.jit import JITExecutionResult, JittedScorer, jit_em_mixture, jit_seq_log_density
 
 # model comparison: paired score differences + non-nested (Vuong/Clarke) tests
 from mixle.inference.model_comparison import (
@@ -414,6 +414,7 @@ __all__ = [
     "optimize",
     "jit_seq_log_density",
     "jit_em_mixture",
+    "JITExecutionResult",
     "JittedScorer",
     "laplace_posterior",
     "LaplacePosterior",

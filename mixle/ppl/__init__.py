@@ -14,8 +14,10 @@ dialect over the existing model, estimator, and inference contracts.
 Layout: the modeling surface and constraints are in :mod:`mixle.ppl.core`; the dialect
 constructors (``Normal``/``Gamma``/``Markov``/…) in :mod:`mixle.ppl.distributions`; the
 family/composite lowering registry in :mod:`mixle.ppl._lowering` (imported for its
-registration side effects); fields/regression/conformal and the PDE-inverse stack in
-their own modules. This package init only re-exports.
+registration side effects); and fields, regression, conformal prediction, survival,
+diagnostics, and experimental scaling-law research in their own modules. Physics,
+simulation, and PDE-inverse systems are intentionally outside the Mixle Core PPL
+boundary. This package init only re-exports and labels stable versus experimental APIs.
 """
 
 from __future__ import annotations
@@ -78,7 +80,17 @@ from mixle.ppl.density import (
     DiscreteAR,
     Flow,
 )
-from mixle.ppl.diagnostics import loo, loo_stack, loo_stacking_weights, waic
+from mixle.ppl.diagnostics import (
+    bulk_ess,
+    convergence_diagnostics,
+    loo,
+    loo_stack,
+    loo_stacking_weights,
+    psis_loo,
+    split_rhat,
+    tail_ess,
+    waic,
+)
 from mixle.ppl.distributions import (
     AR1,
     EMG,
@@ -159,6 +171,15 @@ from mixle.ppl.predictive import (
 )
 from mixle.ppl.priors import Potts, TotalVariation
 from mixle.ppl.provenance import PPLFitResult, fit_with_provenance
+from mixle.ppl.scaling_laws import (
+    ScalingLawAllocationController,
+    ScalingLawDiagnostics,
+    ScalingLawFit,
+    allocate_compute,
+    allocate_compute_learned,
+    fit_scaling_law,
+    generate_synthetic_chinchilla_data,
+)
 from mixle.ppl.summarize import hdi, posterior_summary
 from mixle.ppl.survival import censored_loglik, fit_censored, kaplan_meier
 
@@ -290,12 +311,41 @@ __all__ = [
     "conformal",
     "waic",
     "loo",
+    "psis_loo",
     "loo_stack",
     "loo_stacking_weights",
+    "split_rhat",
+    "bulk_ess",
+    "tail_ess",
+    "convergence_diagnostics",
     "ConformalRegressor",
     "ConformalClassifier",
     "ConformalQuantileRegressor",
     "ConformalStructure",
     "ConformalLinkPredictor",
     "ConformalKnowledgeGraph",
+    "ScalingLawDiagnostics",
+    "ScalingLawFit",
+    "fit_scaling_law",
+    "generate_synthetic_chinchilla_data",
+    "allocate_compute",
+    "ScalingLawAllocationController",
+    "allocate_compute_learned",
+    "STABLE_EXPORTS",
+    "EXPERIMENTAL_EXPORTS",
 ]
+
+# Public maturity boundary for the 0.8.0 release. Experimental names are importable so research
+# artifacts remain reproducible, but they carry no compatibility promise until promoted explicitly.
+EXPERIMENTAL_EXPORTS = frozenset(
+    {
+        "ScalingLawDiagnostics",
+        "ScalingLawFit",
+        "fit_scaling_law",
+        "generate_synthetic_chinchilla_data",
+        "allocate_compute",
+        "ScalingLawAllocationController",
+        "allocate_compute_learned",
+    }
+)
+STABLE_EXPORTS = frozenset(__all__) - EXPERIMENTAL_EXPORTS - {"STABLE_EXPORTS", "EXPERIMENTAL_EXPORTS"}

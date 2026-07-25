@@ -121,6 +121,7 @@ class DriftReport:
     score: dict
     per_feature: dict = field(default_factory=dict)
     thresholds: dict = field(default_factory=dict)
+    processed_count: int = 0
 
     def __str__(self) -> str:
         flag = "DRIFT" if self.drift else "ok"
@@ -164,6 +165,12 @@ def detect_drift(
     ``drift`` is flagged if the score-distribution KS exceeds ``ks_threshold``, OR the mean log-likelihood
     drops by more than ``-loglik_shift_threshold`` (i.e. ``mean_loglik_shift < loglik_shift_threshold``),
     OR any feature's PSI exceeds ``psi_threshold``."""
+    reference = list(reference)
+    current = list(current)
+    if not reference:
+        raise ValueError("drift detection requires a non-empty reference dataset")
+    if not current:
+        raise ValueError("drift detection requires a non-empty current dataset")
     score = score_drift(model, reference, current)
     flagged = score["ks"] > ks_threshold or score["mean_loglik_shift"] < loglik_shift_threshold
 
@@ -189,4 +196,5 @@ def detect_drift(
         score=score,
         per_feature=feats,
         thresholds={"psi": psi_threshold, "ks": ks_threshold, "loglik_shift": loglik_shift_threshold},
+        processed_count=len(current),
     )

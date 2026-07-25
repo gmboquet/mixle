@@ -9,7 +9,9 @@ drive *where to collect new data* -- space-filling by default, or active-learnin
 
 from __future__ import annotations
 
+import math
 import time
+from numbers import Real
 from typing import Any
 
 from mixle.inference.production.drift import DriftReport, detect_drift
@@ -29,30 +31,52 @@ class Monitor:
         ks_threshold: float = 0.2,
         loglik_shift_threshold: float = -0.5,
     ) -> None:
+        def threshold(value: Any, name: str, *, unit: bool = False) -> float:
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise TypeError(f"{name} must be a finite real number")
+            value = float(value)
+            if not math.isfinite(value) or (unit and not 0.0 <= value <= 1.0):
+                domain = " in [0, 1]" if unit else ""
+                raise ValueError(f"{name} must be a finite real number{domain}")
+            return value
+
         self.model = model
         self.estimator = estimator
-        self.reference = list(reference)
+        self.reference = self._materialize(reference, "reference")
         self.thresholds = {
-            "psi_threshold": psi_threshold,
-            "ks_threshold": ks_threshold,
-            "loglik_shift_threshold": loglik_shift_threshold,
+            "psi_threshold": threshold(psi_threshold, "psi_threshold"),
+            "ks_threshold": threshold(ks_threshold, "ks_threshold", unit=True),
+            "loglik_shift_threshold": threshold(loglik_shift_threshold, "loglik_shift_threshold"),
         }
         self.history: list[dict] = []
         self.header: Header | None = getattr(model, "header", None)
 
+    @staticmethod
+    def _materialize(data: Any, name: str) -> list:
+        records = getattr(data, "records", None)
+        source = records() if callable(records) else data
+        batch = list(source)
+        if not batch:
+            raise ValueError(f"{name} data must contain at least one observation")
+        return batch
+
     def check(self, current: Any) -> DriftReport:
         """Drift report of ``current`` (production) data against the reference under the current model."""
-        return detect_drift(self.model, self.reference, current, **self.thresholds)
+        batch = self._materialize(current, "current")
+        return detect_drift(self.model, self.reference, batch, **self.thresholds)
 
     def update(self, current: Any, *, retrain: bool = True, combine_reference: bool = True, **fit_kw: Any) -> dict:
         """Check drift on ``current`` and, if drift is flagged and ``retrain``, fit a fresh model (with a
         new provenance header) and swap it in. Returns ``{report, action, model, header}`` and appends to
         :attr:`history`. ``combine_reference`` retrains on reference + current (else current only)."""
-        report = self.check(current)
+        if not isinstance(retrain, bool) or not isinstance(combine_reference, bool):
+            raise TypeError("retrain and combine_reference must be booleans")
+        batch = self._materialize(current, "current")
+        report = detect_drift(self.model, self.reference, batch, **self.thresholds)
         action = "none"
         header = self.header
         if report.drift and retrain:
-            train = (self.reference + list(current)) if combine_reference else list(current)
+            train = (self.reference + batch) if combine_reference else batch
             new_model, header = fit_with_provenance(train, self.estimator, **fit_kw)
             self.model = new_model
             self.reference = train
@@ -60,13 +84,19 @@ class Monitor:
             action = "retrained"
         entry = {
             "time": time.time(),
-            "n_current": len(list(current)) if hasattr(current, "__len__") else None,
+            "n_current": len(batch),
             "drift": report.drift,
             "score": report.score,
             "action": action,
         }
         self.history.append(entry)
-        return {"report": report, "action": action, "model": self.model, "header": header}
+        return {
+            "report": report,
+            "action": action,
+            "model": self.model,
+            "header": header,
+            "processed_count": len(batch),
+        }
 
     def suggest_samples(
         self, bounds: Any, n: int = 10, *, method: str = "lhs", objective: Any = None, seed: int | None = None

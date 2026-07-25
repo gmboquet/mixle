@@ -13,7 +13,11 @@ all-local.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from dataclasses import dataclass, field
+from numbers import Real
 from typing import Any
 
 from mixle.inference.planning import BlockPlan, EstimationCertificate
@@ -35,6 +39,20 @@ class PoolSpec:
     flop_threshold_tflop: float = 1.0  # below this, keep it local (round-trip not worth it)
     pool_speedup: float = 10.0  # how much faster the pool is than local for an eligible block
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.available, bool):
+            raise TypeError("pool available must be a boolean")
+        for name, value, allow_zero in (
+            ("cost_per_hour", self.cost_per_hour, True),
+            ("flop_threshold_tflop", self.flop_threshold_tflop, True),
+            ("pool_speedup", self.pool_speedup, False),
+        ):
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise TypeError(f"{name} must be a finite real number")
+            if not math.isfinite(float(value)) or (float(value) < 0.0 if allow_zero else float(value) <= 0.0):
+                domain = "non-negative" if allow_zero else "strictly positive"
+                raise ValueError(f"{name} must be finite and {domain}")
+
 
 @dataclass
 class BlockPlacement:
@@ -46,6 +64,9 @@ class BlockPlacement:
     reason: str
     est_tflop: float = 0.0
     est_cost: float = 0.0
+    estimate_source: str = "none"
+    execution_status: str = "not_executed"
+    observed_placement: str | None = None
 
     def __str__(self) -> str:
         c = f", ~${self.est_cost:.2f}" if self.placement == "pool" else ""
@@ -54,10 +75,13 @@ class BlockPlacement:
 
 @dataclass
 class PlacementPlan:
-    """The full local-vs-pool plan for a model's blocks, derived from its certificate + a PoolSpec."""
+    """An unexecuted local-vs-pool plan, never an execution receipt."""
 
     placements: list[BlockPlacement] = field(default_factory=list)
     pool_spec: PoolSpec | None = None
+    context_digest: str | None = None
+    bindings: dict[str, str | None] = field(default_factory=dict)
+    execution_status: str = "not_executed"
 
     @property
     def pool_blocks(self) -> list[BlockPlacement]:
@@ -80,6 +104,9 @@ class PlacementPlan:
             "n_blocks": len(self.placements),
             "n_pool": len(self.pool_blocks),
             "est_pool_cost": self.est_pool_cost,
+            "context_digest": self.context_digest,
+            "bindings": dict(self.bindings),
+            "execution_status": self.execution_status,
             "placements": [
                 {
                     "name": p.name,
@@ -88,6 +115,9 @@ class PlacementPlan:
                     "reason": p.reason,
                     "est_tflop": p.est_tflop,
                     "est_cost": p.est_cost,
+                    "estimate_source": p.estimate_source,
+                    "execution_status": p.execution_status,
+                    "observed_placement": p.observed_placement,
                 }
                 for p in self.placements
             ],
@@ -105,7 +135,7 @@ class PlacementPlan:
         return self.report()
 
 
-def _est_tflop(block: BlockPlan) -> float:
+def _est_tflop(block: BlockPlan) -> float | None:
     """A coarse TFLOP estimate for a gradient block from its resource profile, if any.
 
     Reads an ``est_tflop`` hint from the block reason or metadata when present;
@@ -124,7 +154,7 @@ def _est_tflop(block: BlockPlan) -> float:
                 return float(toks[i - 1])
             except ValueError:
                 pass
-    return 2.0  # a gradient block with no profile: assume it clears a 1-TFLOP threshold by default
+    return None
 
 
 def plan_placement(
@@ -132,6 +162,9 @@ def plan_placement(
     pool: PoolSpec | None = None,
     *,
     telemetry: Any = None,
+    model_digest: str | None = None,
+    data_digest: str | None = None,
+    version_digest: str | None = None,
 ) -> PlacementPlan:
     """Decide local vs pool for every block of a certified fit (see module docstring).
 
@@ -141,6 +174,33 @@ def plan_placement(
     ``placement`` telemetry event is emitted per block.
     """
     pool = pool or PoolSpec(available=False)
+    bindings = {
+        "model": model_digest,
+        "data": data_digest,
+        "version": version_digest,
+    }
+    digest_payload = {
+        "blocks": [
+            {
+                "name": block.name,
+                "kind": block.kind,
+                "method": block.method,
+                "placement": block.placement,
+                "reason": block.reason,
+            }
+            for block in certificate.blocks
+        ],
+        "pool": {
+            "available": pool.available,
+            "cost_per_hour": pool.cost_per_hour,
+            "flop_threshold_tflop": pool.flop_threshold_tflop,
+            "pool_speedup": pool.pool_speedup,
+        },
+        "bindings": bindings,
+    }
+    context_digest = hashlib.sha256(
+        json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     placements: list[BlockPlacement] = []
     for b in certificate.blocks:
         if b.placement != "pool_eligible":
@@ -149,9 +209,27 @@ def plan_placement(
             )
             continue
         tflop = _est_tflop(b)
+        if tflop is None:
+            placements.append(
+                BlockPlacement(
+                    b.name,
+                    b.kind,
+                    "local",
+                    "gradient block has no measured work estimate -- keep local",
+                    estimate_source="unavailable",
+                )
+            )
+            continue
         if not pool.available:
             placements.append(
-                BlockPlacement(b.name, b.kind, "local", "gradient block, but no pool configured -- runs local", tflop)
+                BlockPlacement(
+                    b.name,
+                    b.kind,
+                    "local",
+                    "gradient block, but no pool configured -- plan local",
+                    tflop,
+                    estimate_source="block_reason_hint",
+                )
             )
         elif tflop < pool.flop_threshold_tflop:
             placements.append(
@@ -161,6 +239,7 @@ def plan_placement(
                     "local",
                     f"gradient block ~{tflop:.1f} TFLOP below the {pool.flop_threshold_tflop} threshold -- local",
                     tflop,
+                    estimate_source="block_reason_hint",
                 )
             )
         else:
@@ -171,12 +250,19 @@ def plan_placement(
                     b.name,
                     b.kind,
                     "pool",
-                    f"gradient residual ~{tflop:.1f} TFLOP -- offload (pool {pool.pool_speedup:.0f}x faster)",
+                    f"gradient residual ~{tflop:.1f} TFLOP -- plan pool "
+                    f"(assumed {pool.pool_speedup:.0f}x speedup)",
                     tflop,
                     round(cost, 4),
+                    estimate_source="block_reason_hint",
                 )
             )
-    plan = PlacementPlan(placements=placements, pool_spec=pool)
+    plan = PlacementPlan(
+        placements=placements,
+        pool_spec=pool,
+        context_digest=context_digest,
+        bindings=bindings,
+    )
     _emit(telemetry, plan)
     return plan
 
@@ -191,7 +277,11 @@ def _emit(telemetry: Any, plan: PlacementPlan) -> None:
                 "placement",
                 features={"kind": p.kind, "est_tflop": p.est_tflop, "has_pool": plan.pool_spec.available},
                 choice=p.placement,
-                outcome={"est_cost": p.est_cost},
+                outcome={
+                    "est_cost": p.est_cost,
+                    "execution_status": "not_executed",
+                    "context_digest": plan.context_digest,
+                },
             )
     except Exception:  # noqa: BLE001 - telemetry must never break planning
         pass

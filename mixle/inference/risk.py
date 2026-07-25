@@ -18,6 +18,7 @@ CVaR come back as positive numbers when the distribution has meaningful downside
 
 from __future__ import annotations
 
+from numbers import Integral
 from typing import Any
 
 import numpy as np
@@ -74,19 +75,31 @@ def conditional_value_at_risk(samples: Any, alpha: float = 0.95, *, min_tail: in
     Returns:
         The CVaR as a loss; always ``>= value_at_risk(samples, alpha)``.
     """
+    if isinstance(min_tail, bool) or not isinstance(min_tail, Integral):
+        raise TypeError("min_tail must be a positive integer")
+    min_tail = int(min_tail)
+    if min_tail < 1:
+        raise ValueError("min_tail must be a positive integer")
     x = _as_samples(samples)
     var = value_at_risk(x, alpha)
-    tail = x[x <= -var]
-    if tail.size == 0:
-        tail = np.array([x.min()])
-    raw_cvar = float(-tail.mean())
-    if tail.size < min_tail:
+    losses = np.sort(-x)[::-1]
+    # Exact empirical expected shortfall is the average over the worst ``1-alpha`` probability mass.
+    # When that mass cuts through observations tied at VaR, include only the fractional boundary mass
+    # required instead of overweighting every tied row.
+    tail_mass = len(losses) * (1.0 - alpha)
+    full = int(np.floor(tail_mass))
+    fraction = tail_mass - full
+    weighted_loss = float(np.sum(losses[:full]))
+    if fraction > 0.0:
+        weighted_loss += fraction * float(losses[full])
+    raw_cvar = weighted_loss / tail_mass
+    empirical_tail_count = int(np.ceil(tail_mass))
+    if empirical_tail_count < min_tail:
         # Import lazily: importing a submodule executes ``mixle.analysis``'s
         # package initializer, which itself reaches inference through valuation.
         # Risk is re-exported while Dirichlet may still be initializing.
         from mixle.analysis.extreme import peaks_over_threshold
 
-        losses = -x
         try:
             fit = peaks_over_threshold(losses, threshold=var)
         except ValueError:
