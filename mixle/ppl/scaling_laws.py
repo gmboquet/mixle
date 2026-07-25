@@ -48,7 +48,9 @@ import upward from the optional, torch-backed PPL layer. ``mixle.ppl`` importing
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -65,13 +67,17 @@ __all__ = [
     "CHINCHILLA_B",
     "CHINCHILLA_ALPHA",
     "CHINCHILLA_BETA",
+    "SyntheticScalingRecords",
     "generate_synthetic_chinchilla_data",
+    "ScalingLawDiagnostics",
     "ScalingLawFit",
     "fit_scaling_law",
     "allocate_compute",
     "allocate_fixed_heuristic",
     "ScalingLawState",
     "AllocationAction",
+    "AllocationProposal",
+    "AllocationObservationReceipt",
     "ScalingLawAllocationController",
     "allocate_compute_learned",
 ]
@@ -91,6 +97,52 @@ CHINCHILLA_ALPHA = 0.34
 CHINCHILLA_BETA = 0.28
 
 
+def _exact_integer(value: Any, label: str, *, minimum: int = 0) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise ValueError(f"{label} must be an exact integer, got {value!r}.")
+    value = int(value)
+    if value < minimum:
+        raise ValueError(f"{label} must be >= {minimum}, got {value}.")
+    return value
+
+
+def _finite_scalar(value: Any, label: str, *, positive: bool = False, nonnegative: bool = False) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise ValueError(f"{label} must be a finite numeric scalar, got {value!r}.")
+    value = float(value)
+    if not np.isfinite(value):
+        raise ValueError(f"{label} must be finite, got {value!r}.")
+    if positive and value <= 0.0:
+        raise ValueError(f"{label} must be strictly positive, got {value!r}.")
+    if nonnegative and value < 0.0:
+        raise ValueError(f"{label} must be non-negative, got {value!r}.")
+    return value
+
+
+def _positive_bounds(bounds: Any, label: str) -> tuple[float, float]:
+    if not isinstance(bounds, (tuple, list)) or len(bounds) != 2:
+        raise ValueError(f"{label} must be a (low, high) pair.")
+    low = _finite_scalar(bounds[0], f"{label}[0]", positive=True)
+    high = _finite_scalar(bounds[1], f"{label}[1]", positive=True)
+    if not low < high:
+        raise ValueError(f"{label} must satisfy 0 < low < high.")
+    return low, high
+
+
+class SyntheticScalingRecords(list):
+    """List-compatible synthetic records with a copy-on-read generator configuration receipt."""
+
+    __slots__ = ("_configuration",)
+
+    def __init__(self, records, configuration):
+        super().__init__(records)
+        self._configuration = dict(configuration)
+
+    @property
+    def configuration(self) -> dict[str, Any]:
+        return dict(self._configuration)
+
+
 def generate_synthetic_chinchilla_data(
     n_points: int = 60,
     *,
@@ -103,7 +155,7 @@ def generate_synthetic_chinchilla_data(
     b: float = CHINCHILLA_B,
     alpha: float = CHINCHILLA_ALPHA,
     beta: float = CHINCHILLA_BETA,
-) -> list[tuple[float, float, float]]:
+) -> SyntheticScalingRecords:
     """SYNTHETIC ``(N, D, loss)`` triples generated from the published Chinchilla functional form.
 
     ``N``/``D`` are drawn log-uniformly over ``n_range``/``d_range`` (spanning several orders of
@@ -113,14 +165,39 @@ def generate_synthetic_chinchilla_data(
     module docstring for why this is synthetic-from-known-exponents rather than a real published
     per-run table (no network access in this environment).
     """
+    n_points = _exact_integer(n_points, "n_points", minimum=1)
+    seed = _exact_integer(seed, "seed")
+    noise_sd = _finite_scalar(noise_sd, "noise_sd", nonnegative=True)
+    n_range = _positive_bounds(n_range, "n_range")
+    d_range = _positive_bounds(d_range, "d_range")
+    e = _finite_scalar(e, "e", nonnegative=True)
+    a = _finite_scalar(a, "a", positive=True)
+    b = _finite_scalar(b, "b", positive=True)
+    alpha = _finite_scalar(alpha, "alpha", positive=True)
+    beta = _finite_scalar(beta, "beta", positive=True)
+    configuration = {
+        "n_points": n_points,
+        "seed": seed,
+        "noise_sd": noise_sd,
+        "n_range": n_range,
+        "d_range": d_range,
+        "e": e,
+        "a": a,
+        "b": b,
+        "alpha": alpha,
+        "beta": beta,
+    }
     rng = np.random.RandomState(seed)
-    log_n = rng.uniform(np.log10(n_range[0]), np.log10(n_range[1]), int(n_points))
-    log_d = rng.uniform(np.log10(d_range[0]), np.log10(d_range[1]), int(n_points))
+    log_n = rng.uniform(np.log10(n_range[0]), np.log10(n_range[1]), n_points)
+    log_d = rng.uniform(np.log10(d_range[0]), np.log10(d_range[1]), n_points)
     n = 10.0**log_n
     d = 10.0**log_d
     mean_loss = e + a / n**alpha + b / d**beta
-    loss = mean_loss + rng.normal(0.0, noise_sd, int(n_points))
-    return [(float(ni), float(di), float(li)) for ni, di, li in zip(n, d, loss)]
+    loss = mean_loss + rng.normal(0.0, noise_sd, n_points)
+    records = [(float(ni), float(di), float(li)) for ni, di, li in zip(n, d, loss)]
+    if not np.isfinite(np.asarray(records, dtype=float)).all():
+        raise RuntimeError("synthetic scaling-law generation produced a non-finite record.")
+    return SyntheticScalingRecords(records, configuration)
 
 
 # --- the fitted scaling law ------------------------------------------------------------------
@@ -138,6 +215,20 @@ _LOG_PARAMS = {
 
 
 @dataclass(frozen=True)
+class ScalingLawDiagnostics:
+    """Quality receipt required before a fitted law may drive an allocation."""
+
+    usable: bool
+    status: str
+    acceptance_rate: float
+    posterior_draws: int
+    burn: int
+    n_chains: int
+    posterior_finite: bool
+    caveats: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ScalingLawFit:
     """A fitted ``loss = E + A/N**alpha + B/D**beta`` scaling law with a genuine posterior.
 
@@ -150,12 +241,18 @@ class ScalingLawFit:
     fitted: Any
     n0: float
     d0: float
+    diagnostics: ScalingLawDiagnostics | None = None
 
     def samples(self, name: str) -> np.ndarray:
         """Posterior draws for parameter ``name`` (one of ``E, A, alpha, B, beta, sigma``)."""
+        if name not in {"E", "A", "alpha", "B", "beta", "sigma"}:
+            raise ValueError(f"unknown scaling-law parameter {name!r}.")
         internal = _LOG_PARAMS.get(name, name)
         raw = np.asarray(self.fitted.posterior(internal), dtype=float).ravel()
-        return np.exp(raw) if internal in _LOG_PARAMS.values() else raw
+        values = np.exp(raw) if internal in _LOG_PARAMS.values() else raw
+        if values.size == 0 or not np.isfinite(values).all():
+            raise RuntimeError(f"posterior draws for {name} are empty or non-finite.")
+        return values
 
     def mean(self, name: str) -> float:
         return float(self.samples(name).mean())
@@ -171,19 +268,25 @@ class ScalingLawFit:
             out[name] = {"mean": self.mean(name), "hdi90_low": lo, "hdi90_high": hi}
         return out
 
+    def require_usable(self) -> None:
+        """Refuse scientific decisions from a fit that lacks a passing quality receipt."""
+        if self.diagnostics is None or not self.diagnostics.usable:
+            status = "missing" if self.diagnostics is None else self.diagnostics.status
+            raise RuntimeError(f"scaling-law fit is not usable for allocation (diagnostic status: {status}).")
+
     def predict_mean(self, n: float, d: float) -> float:
-        """Posterior-mean predicted loss at model size ``n`` (params) and token count ``d``."""
-        nn = np.asarray(n, dtype=float) / self.n0
-        dd = np.asarray(d, dtype=float) / self.d0
-        return float(
-            self.mean("E") + self.mean("A") * nn ** (-self.mean("alpha")) + self.mean("B") * dd ** (-self.mean("beta"))
-        )
+        """Posterior expectation of mean loss, computed from correlated joint draws."""
+        return float(np.mean(self.predict_samples(n, d)))
 
     def predict_samples(self, n: float, d: float) -> np.ndarray:
         """Posterior-predictive DRAWS of the mean loss at ``(n, d)`` -- integrates over parameter
         uncertainty (no observation noise added), for building a predictive credible interval."""
-        nn = np.asarray(n, dtype=float) / self.n0
-        dd = np.asarray(d, dtype=float) / self.d0
+        n = _finite_scalar(n, "n", positive=True)
+        d = _finite_scalar(d, "d", positive=True)
+        n0 = _finite_scalar(self.n0, "fit.n0", positive=True)
+        d0 = _finite_scalar(self.d0, "fit.d0", positive=True)
+        nn = n / n0
+        dd = d / d0
         e_s, a_s, alpha_s, b_s, beta_s = (
             self.samples("E"),
             self.samples("A"),
@@ -191,16 +294,22 @@ class ScalingLawFit:
             self.samples("B"),
             self.samples("beta"),
         )
-        return e_s + a_s * nn ** (-alpha_s) + b_s * dd ** (-beta_s)
+        sizes = {len(values) for values in (e_s, a_s, alpha_s, b_s, beta_s)}
+        if len(sizes) != 1:
+            raise RuntimeError("scaling-law posterior parameters do not have aligned joint draws.")
+        result = e_s + a_s * nn ** (-alpha_s) + b_s * dd ** (-beta_s)
+        if not np.isfinite(result).all():
+            raise RuntimeError("scaling-law prediction produced non-finite posterior draws.")
+        return result
 
 
 def fit_scaling_law(
-    records: list[tuple[float, float, float]],
+    records: Sequence[tuple[float, float, float]],
     *,
     draws: int = 4000,
     burn: int = 4000,
     scale: float | None = 0.02,
-    seed: int = 0,
+    seed: int | None = None,
     rng: np.random.RandomState | None = None,
 ) -> ScalingLawFit:
     """Fit ``loss = E + A/N**alpha + B/D**beta`` to ``records`` (a list of ``(N, D, loss)``).
@@ -223,13 +332,36 @@ def fit_scaling_law(
     posterior widths, ~1e-2 on the log-parameter scale) restores good mixing (~15-25% acceptance)
     at the ``draws``/``burn`` defaults below.
     """
+    if isinstance(records, (str, bytes)) or not isinstance(records, Sequence):
+        raise ValueError("records must be a sequence of (N, D, loss) triples.")
     if len(records) < 6:
         raise ValueError("fit_scaling_law needs at least 6 (N, D, loss) observations.")
-    n_arr = np.array([float(r[0]) for r in records], dtype=float)
-    d_arr = np.array([float(r[1]) for r in records], dtype=float)
-    loss = np.array([float(r[2]) for r in records], dtype=float)
-    if np.any(n_arr <= 0) or np.any(d_arr <= 0):
-        raise ValueError("N and D must be positive.")
+    rows = []
+    for index, record in enumerate(records):
+        if not isinstance(record, (tuple, list, np.ndarray)) or len(record) != 3:
+            raise ValueError(f"records[{index}] must be exactly one (N, D, loss) triple.")
+        try:
+            row = tuple(float(value) for value in record)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"records[{index}] must contain numeric N, D, and loss values.") from error
+        if not np.isfinite(row).all():
+            raise ValueError(f"records[{index}] must contain only finite values.")
+        if row[0] <= 0.0 or row[1] <= 0.0 or row[2] < 0.0:
+            raise ValueError(f"records[{index}] requires N > 0, D > 0, and loss >= 0.")
+        rows.append(row)
+    draws = _exact_integer(draws, "draws", minimum=20)
+    burn = _exact_integer(burn, "burn", minimum=20)
+    if scale is not None:
+        scale = _finite_scalar(scale, "scale", positive=True)
+    if seed is not None:
+        seed = _exact_integer(seed, "seed")
+    if rng is not None and seed is not None:
+        raise ValueError("pass either seed or rng to fit_scaling_law, not both.")
+    if rng is not None and not isinstance(rng, np.random.RandomState):
+        raise ValueError("rng must be a numpy.random.RandomState.")
+    n_arr = np.array([row[0] for row in rows], dtype=float)
+    d_arr = np.array([row[1] for row in rows], dtype=float)
+    loss = np.array([row[2] for row in rows], dtype=float)
     n0 = float(np.median(n_arr))
     d0 = float(np.median(d_arr))
     n = n_arr / n0
@@ -264,17 +396,42 @@ def fit_scaling_law(
         ll = physics_ll(e_v, log_a_v, log_alpha_v, log_b_v, log_beta_v, log_sigma_v)
         return ll + 0.5 * (carrier_obs - e_v) ** 2 / (carrier_sd * carrier_sd)
 
-    fit_rng = np.random.RandomState(seed) if rng is None else rng
+    fit_rng = np.random.RandomState(0 if seed is None else seed) if rng is None else rng
     fitted = Normal(e_rv, carrier_sd).fit(  # carrier observation; its E-factor is cancelled in evidence_ll
         [carrier_obs],
         how="mcmc",
         potentials=potential(evidence_ll, e_rv, log_a, log_alpha, log_b, log_beta, log_sigma),
-        draws=int(draws),
-        burn=int(burn),
+        draws=draws,
+        burn=burn,
         scale=scale,
         rng=fit_rng,
     )
-    return ScalingLawFit(fitted=fitted, n0=n0, d0=d0)
+    sample_columns = [
+        np.asarray(fitted.posterior(name), dtype=float).ravel()
+        for name in ("E", "log_A", "log_alpha", "log_B", "log_beta", "log_sigma")
+    ]
+    posterior_finite = bool(sample_columns and all(col.size == draws and np.isfinite(col).all() for col in sample_columns))
+    acceptance_rate = float(getattr(fitted.result, "acceptance_rate", float("nan")))
+    n_chains = int(getattr(fitted.result, "n_chains", 1))
+    if not posterior_finite:
+        raise RuntimeError("scaling-law MCMC returned empty, misaligned, or non-finite posterior draws.")
+    if not np.isfinite(acceptance_rate) or not 0.05 <= acceptance_rate <= 0.95:
+        raise RuntimeError(
+            "scaling-law MCMC failed its acceptance-rate quality gate "
+            f"(required 0.05 <= rate <= 0.95, got {acceptance_rate!r})."
+        )
+    caveats = ("single_chain_no_between_chain_rhat",) if n_chains < 2 else ()
+    diagnostics = ScalingLawDiagnostics(
+        usable=True,
+        status="usable_with_caveat" if caveats else "usable",
+        acceptance_rate=acceptance_rate,
+        posterior_draws=draws,
+        burn=burn,
+        n_chains=n_chains,
+        posterior_finite=posterior_finite,
+        caveats=caveats,
+    )
+    return ScalingLawFit(fitted=fitted, n0=n0, d0=d0, diagnostics=diagnostics)
 
 
 # --- compute allocation via mixle.doe -------------------------------------------------------------
@@ -300,9 +457,17 @@ def allocate_compute(
     candidate ``N``, ``D`` is set to exactly satisfy the constraint, collapsing the 2-D allocation
     problem to a 1-D search over ``log10(N)`` that ``bayesopt.minimize`` drives directly.
     """
-    c = float(compute_budget)
-    if c <= 0:
-        raise ValueError("compute_budget must be positive.")
+    if not isinstance(fit, ScalingLawFit):
+        raise ValueError("fit must be a ScalingLawFit.")
+    fit.require_usable()
+    c = _finite_scalar(compute_budget, "compute_budget", positive=True)
+    flops_per_token_param = _finite_scalar(
+        flops_per_token_param, "flops_per_token_param", positive=True
+    )
+    n_bounds = _positive_bounds(n_bounds, "n_bounds")
+    n_init = _exact_integer(n_init, "n_init", minimum=1)
+    n_iter = _exact_integer(n_iter, "n_iter", minimum=1)
+    seed = _exact_integer(seed, "seed")
     lo = float(np.log10(n_bounds[0]))
     hi = float(np.log10(n_bounds[1]))
     hi = min(hi, np.log10(c / flops_per_token_param) - 1.0e-6)  # keep D >= ~1 token
@@ -317,6 +482,8 @@ def allocate_compute(
     result = bayesopt.minimize(objective, [(lo, hi)], n_init=n_init, n_iter=n_iter, seed=seed, maximize=False)
     n_star = 10.0 ** float(result.best_x[0])
     d_star = c / (flops_per_token_param * n_star)
+    if not np.isfinite((n_star, d_star)).all() or n_star <= 0.0 or d_star <= 0.0:
+        raise RuntimeError("compute allocation produced a non-finite or non-positive design.")
     return n_star, d_star
 
 
@@ -331,11 +498,15 @@ def allocate_fixed_heuristic(
     used here purely as the FIXED baseline the DOE allocator is compared against -- it ignores the
     fitted scaling law entirely.
     """
-    c = float(compute_budget)
-    if c <= 0:
-        raise ValueError("compute_budget must be positive.")
+    c = _finite_scalar(compute_budget, "compute_budget", positive=True)
+    ratio = _finite_scalar(ratio, "ratio", positive=True)
+    flops_per_token_param = _finite_scalar(
+        flops_per_token_param, "flops_per_token_param", positive=True
+    )
     n_val = float(np.sqrt(c / (flops_per_token_param * ratio)))
-    d_val = float(ratio) * n_val
+    d_val = ratio * n_val
+    if not np.isfinite((n_val, d_val)).all() or n_val <= 0.0 or d_val <= 0.0:
+        raise RuntimeError("fixed compute allocation produced a non-finite or non-positive design.")
     return n_val, d_val
 
 
@@ -357,12 +528,20 @@ class ScalingLawState:
 
     @classmethod
     def from_fit(cls, fit: ScalingLawFit, compute_budget: float) -> ScalingLawState:
+        if not isinstance(fit, ScalingLawFit):
+            raise ValueError("fit must be a ScalingLawFit.")
+        fit.require_usable()
+        compute_budget = _finite_scalar(compute_budget, "compute_budget", positive=True)
+        means = {
+            name: _finite_scalar(fit.mean(name), f"fit mean {name}", positive=True)
+            for name in ("E", "A", "alpha", "B", "beta")
+        }
         return cls(
-            log_e=float(np.log(max(fit.mean("E"), 1.0e-6))),
-            log_a=float(np.log(fit.mean("A"))),
-            log_alpha=float(np.log(fit.mean("alpha"))),
-            log_b=float(np.log(fit.mean("B"))),
-            log_beta=float(np.log(fit.mean("beta"))),
+            log_e=float(np.log(means["E"])),
+            log_a=float(np.log(means["A"])),
+            log_alpha=float(np.log(means["alpha"])),
+            log_b=float(np.log(means["B"])),
+            log_beta=float(np.log(means["beta"])),
             log_budget=float(np.log10(compute_budget)),
         )
 
@@ -375,6 +554,37 @@ class AllocationAction:
     """One controller decision: ``log10(N)`` (``D`` follows from the ``C = 6*N*D`` constraint)."""
 
     log_n: float
+
+
+@dataclass(frozen=True)
+class AllocationProposal:
+    """Pending learned allocation; predicted quantities are not measured outcomes."""
+
+    proposal_id: str
+    state: ScalingLawState
+    action: AllocationAction
+    n_params: float
+    n_tokens: float
+    compute_budget: float
+    flops_per_token_param: float
+    predicted_loss: float
+    heuristic_predicted_loss: float
+    predicted_gain: float
+    status: str = "pending_measurement"
+
+
+@dataclass(frozen=True)
+class AllocationObservationReceipt:
+    """Auditable acceptance or rejection of one measured controller outcome."""
+
+    accepted: bool
+    proposal_id: str | None
+    realized_gain: float | None
+    realized_cost: float | None
+    provenance: str | None
+    reason: str
+    submitted_gain: str
+    submitted_cost: str
 
 
 class ScalingLawAllocationController:
@@ -404,9 +614,9 @@ class ScalingLawAllocationController:
     is deliberately identical to it so the substitutability the roadmap asks for ("shares the
     controller brain with D5") is structural, not merely nominal.
 
-    Use :func:`allocate_compute_learned` for the common case (propose once from a fresh or
-    warm-started controller); construct this directly to accumulate logged rows across many
-    budgets/fits via repeated :meth:`update` calls (the warm-start path).
+    Use :func:`allocate_compute_learned` to create a pending proposal, then call
+    :meth:`record_outcome` with a measured gain, measured cost, and provenance. Only accepted
+    measured outcomes enter the warm-start design history.
     """
 
     def __init__(
@@ -416,17 +626,23 @@ class ScalingLawAllocationController:
         design: Any = None,
         seed: int | None = None,
     ) -> None:
-        from mixle.task.edge import DesignModel
-
+        n_bounds = _positive_bounds(n_bounds, "n_bounds")
+        if seed is not None:
+            seed = _exact_integer(seed, "seed")
         self.n_bounds = (float(np.log10(n_bounds[0])), float(np.log10(n_bounds[1])))
-        self.design = (
-            design
-            if design is not None
-            else DesignModel(signature="f5-compute-allocator", n_constraints=0, n_fingerprint=6)
-        )
+        if design is None:
+            from mixle.task.edge import DesignModel
+
+            design = DesignModel(signature="f5-compute-allocator", n_constraints=0, n_fingerprint=6)
+        self.design = design
         self.seed = seed
+        self.pending: dict[str, AllocationProposal] = {}
+        self.observation_receipts: list[AllocationObservationReceipt] = []
+        self._proposal_counter = 0
 
     def select_action(self, state: ScalingLawState) -> AllocationAction:
+        if not isinstance(state, ScalingLawState) or not np.isfinite(state.as_vector()).all():
+            raise ValueError("state must be a finite ScalingLawState.")
         fingerprint = state.as_vector()
         if len(self.design) < 2:  # honest cold-start fallback, exactly D5's DesignModelController shape
             mid = 0.5 * (self.n_bounds[0] + self.n_bounds[1])
@@ -435,11 +651,125 @@ class ScalingLawAllocationController:
         log_n = float(np.clip(point[0], self.n_bounds[0], self.n_bounds[1]))
         return AllocationAction(log_n=log_n)
 
+    def register_proposal(
+        self,
+        state: ScalingLawState,
+        action: AllocationAction,
+        *,
+        n_params: float,
+        n_tokens: float,
+        compute_budget: float,
+        flops_per_token_param: float,
+        predicted_loss: float,
+        heuristic_predicted_loss: float,
+    ) -> AllocationProposal:
+        self._proposal_counter += 1
+        proposal_id = f"scaling-allocation-{self._proposal_counter:08d}"
+        predicted_loss = _finite_scalar(predicted_loss, "predicted_loss")
+        heuristic_predicted_loss = _finite_scalar(heuristic_predicted_loss, "heuristic_predicted_loss")
+        proposal = AllocationProposal(
+            proposal_id=proposal_id,
+            state=state,
+            action=action,
+            n_params=_finite_scalar(n_params, "n_params", positive=True),
+            n_tokens=_finite_scalar(n_tokens, "n_tokens", positive=True),
+            compute_budget=_finite_scalar(compute_budget, "compute_budget", positive=True),
+            flops_per_token_param=_finite_scalar(
+                flops_per_token_param, "flops_per_token_param", positive=True
+            ),
+            predicted_loss=predicted_loss,
+            heuristic_predicted_loss=heuristic_predicted_loss,
+            predicted_gain=heuristic_predicted_loss - predicted_loss,
+        )
+        self.pending[proposal_id] = proposal
+        return proposal
+
     def update(
-        self, state: ScalingLawState, action: AllocationAction, realized_gain: float, realized_cost: float
-    ) -> None:
-        reward = float(realized_gain) / max(float(realized_cost), 1.0e-12)
+        self,
+        state: ScalingLawState,
+        action: AllocationAction,
+        realized_gain: float,
+        realized_cost: float,
+        *,
+        provenance: str,
+        proposal_id: str | None = None,
+    ) -> AllocationObservationReceipt:
+        reason = "accepted"
+        gain = cost = None
+        provenance_value = provenance if isinstance(provenance, str) and provenance.strip() else None
+        try:
+            if not isinstance(state, ScalingLawState) or not np.isfinite(state.as_vector()).all():
+                raise ValueError("state is not finite.")
+            if not isinstance(action, AllocationAction) or not np.isfinite(action.log_n):
+                raise ValueError("action is not finite.")
+            gain = _finite_scalar(realized_gain, "realized_gain")
+            cost = _finite_scalar(realized_cost, "realized_cost", positive=True)
+            if provenance_value is None:
+                raise ValueError("measured outcomes require non-empty provenance.")
+        except ValueError as error:
+            reason = str(error)
+            receipt = AllocationObservationReceipt(
+                accepted=False,
+                proposal_id=proposal_id,
+                realized_gain=gain,
+                realized_cost=cost,
+                provenance=provenance_value,
+                reason=reason,
+                submitted_gain=repr(realized_gain),
+                submitted_cost=repr(realized_cost),
+            )
+            self.observation_receipts.append(receipt)
+            return receipt
+
+        reward = gain / cost
         self.design.add([action.log_n], reward, [], fingerprint=list(state.as_vector()))
+        receipt = AllocationObservationReceipt(
+            accepted=True,
+            proposal_id=proposal_id,
+            realized_gain=gain,
+            realized_cost=cost,
+            provenance=provenance_value,
+            reason=reason,
+            submitted_gain=repr(realized_gain),
+            submitted_cost=repr(realized_cost),
+        )
+        self.observation_receipts.append(receipt)
+        return receipt
+
+    def record_outcome(
+        self,
+        proposal: AllocationProposal,
+        *,
+        realized_gain: float,
+        realized_cost: float,
+        provenance: str,
+    ) -> AllocationObservationReceipt:
+        """Attach one measured outcome to a pending proposal exactly once."""
+        pending = self.pending.get(getattr(proposal, "proposal_id", None))
+        if pending is None or pending != proposal:
+            receipt = AllocationObservationReceipt(
+                accepted=False,
+                proposal_id=getattr(proposal, "proposal_id", None),
+                realized_gain=None,
+                realized_cost=None,
+                provenance=provenance if isinstance(provenance, str) else None,
+                reason="proposal is unknown, altered, or already resolved.",
+                submitted_gain=repr(realized_gain),
+                submitted_cost=repr(realized_cost),
+            )
+            self.observation_receipts.append(receipt)
+            return receipt
+        receipt = self.update(
+            proposal.state,
+            proposal.action,
+            realized_gain,
+            realized_cost,
+            provenance=provenance,
+            proposal_id=proposal.proposal_id,
+        )
+        if receipt.accepted:
+            del self.pending[proposal.proposal_id]
+        return receipt
 
 
 def allocate_compute_learned(
@@ -448,10 +778,8 @@ def allocate_compute_learned(
     *,
     controller: ScalingLawAllocationController | None = None,
     flops_per_token_param: float = FLOPS_PER_TOKEN_PARAM,
-) -> tuple[float, float, ScalingLawAllocationController]:
-    """Propose ``(N, D)`` via the D5-pattern :class:`ScalingLawAllocationController`, then log the
-    realized outcome back into it (so a caller reusing the returned controller across several
-    budgets warm-starts it, exactly D5's cross-task ``DesignModel`` warm-start story).
+) -> tuple[float, float, ScalingLawAllocationController, AllocationProposal]:
+    """Propose ``(N, D)`` and return a pending receipt without fabricating an outcome.
 
     This is the OPTIONAL learned path (see the roadmap item's "optionally wire in D5's
     LearnedController pattern"); :func:`allocate_compute` (plain GP-BO via ``mixle.doe.bayesopt``)
@@ -461,14 +789,31 @@ def allocate_compute_learned(
     payoff is warm-starting across many allocation decisions, the same story as D5's
     ``DesignModelController``.
     """
+    if not isinstance(fit, ScalingLawFit):
+        raise ValueError("fit must be a ScalingLawFit.")
+    fit.require_usable()
+    compute_budget = _finite_scalar(compute_budget, "compute_budget", positive=True)
+    flops_per_token_param = _finite_scalar(
+        flops_per_token_param, "flops_per_token_param", positive=True
+    )
+    if controller is not None and not isinstance(controller, ScalingLawAllocationController):
+        raise ValueError("controller must be a ScalingLawAllocationController.")
     controller = controller if controller is not None else ScalingLawAllocationController()
     state = ScalingLawState.from_fit(fit, compute_budget)
     action = controller.select_action(state)
     n_star = 10.0**action.log_n
-    d_star = float(compute_budget) / (flops_per_token_param * n_star)
+    d_star = compute_budget / (flops_per_token_param * n_star)
     predicted_loss = fit.predict_mean(n_star, d_star)
     heuristic_n, heuristic_d = allocate_fixed_heuristic(compute_budget, flops_per_token_param=flops_per_token_param)
     heuristic_loss = fit.predict_mean(heuristic_n, heuristic_d)
-    gain = heuristic_loss - predicted_loss  # positive when the proposal beats the heuristic reference
-    controller.update(state, action, realized_gain=gain, realized_cost=1.0)
-    return n_star, d_star, controller
+    proposal = controller.register_proposal(
+        state,
+        action,
+        n_params=n_star,
+        n_tokens=d_star,
+        compute_budget=compute_budget,
+        flops_per_token_param=flops_per_token_param,
+        predicted_loss=predicted_loss,
+        heuristic_predicted_loss=heuristic_loss,
+    )
+    return n_star, d_star, controller, proposal
