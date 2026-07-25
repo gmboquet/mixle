@@ -23,7 +23,10 @@ from contextlib import contextmanager
 from numbers import Number
 from typing import Any
 
-from mixle.engines import NUMPY_ENGINE, SYMBOLIC_ENGINE, ComputeEngine, engine_of
+# _contains_engine_value is private, and is reused here (not reimplemented) as the leaf-ownership
+# test mixle.engines.to_numpy's own recursive fix (MXR-080-0123) relies on -- see to_numpy's
+# docstring below for why this module needs its own recursive to_numpy rather than aliasing that one.
+from mixle.engines import NUMPY_ENGINE, SYMBOLIC_ENGINE, ComputeEngine, _contains_engine_value, engine_of
 
 __all__ = [
     "asarray",
@@ -154,7 +157,40 @@ asarray = _dispatch("asarray")
 zeros = _dispatch("zeros")
 empty = _dispatch("empty")
 arange = _dispatch("arange")
-to_numpy = _dispatch("to_numpy")
+
+
+def to_numpy(x: Any) -> Any:
+    """Convert an engine array/tensor payload to NumPy at an explicit boundary.
+
+    Deliberately NOT built via :func:`_dispatch` like the other allocation wrappers above: ``_dispatch``
+    resolves ONE engine for the whole payload (correctly, recursing through
+    :func:`~mixle.engines.engine_of`) but then hands that single engine the ORIGINAL, unconverted
+    container -- which fails to stack a ragged list of arrays, leaves dict values unconverted
+    (``NumpyEngine.to_numpy`` -> ``np.asarray`` on a dict wraps it in a useless 0-d object array
+    instead of touching its values), and can hand a device tensor to a host conversion without
+    transferring it first. This is exactly the bug :func:`mixle.engines.to_numpy` was fixed for
+    (MXR-080-0123): a dict/list/tuple that CONTAINS an engine-owned value is converted leaf by leaf
+    here too, preserving container structure and resolving each leaf's own owning engine independently.
+
+    This is intentionally NOT a direct alias of the now-fixed :func:`mixle.engines.to_numpy` --
+    there is no import-cycle reason to avoid that (``mixle.engines`` does not import this module at
+    all, only the reverse). That free function's "no engine-owned value anywhere" fallback is
+    hardcoded to ``NUMPY_ENGINE``, while this whole module's documented purpose (see the module
+    docstring) is resolving exactly that fallback against the ACTIVE engine (``_DEFAULT_ENGINE``,
+    e.g. a caller inside ``using_engine("symbolic")``) -- aliasing the package-level function
+    directly would silently drop that contract for plain, non-engine-owned data. The container-
+    walking shape below is intentionally the same recursion as :func:`mixle.engines.to_numpy`
+    (reusing its private ``_contains_engine_value`` leaf-ownership test rather than re-deriving it,
+    so this stays in sync with any future fix to engine-ownership detection there); only the final
+    leaf's fallback engine differs.
+    """
+    if isinstance(x, dict) and _contains_engine_value(x):
+        return {k: to_numpy(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)) and _contains_engine_value(x):
+        converted = [to_numpy(v) for v in x]
+        return tuple(converted) if isinstance(x, tuple) else converted
+    return engine_of(x, default=_DEFAULT_ENGINE.get()).to_numpy(x)
+
 
 log = _dispatch("log")
 exp = _dispatch("exp")
