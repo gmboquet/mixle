@@ -8,11 +8,119 @@ handling, and prediction helpers.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
 
 from mixle.inference.objectives import optimize_torch_objective
+from mixle.models.grad_leaf import _module_mode
+
+try:
+    import torch as _TORCH
+except ImportError:  # pragma: no cover - Torch remains optional
+    _TORCH = None
+
+_ModuleBase = object if _TORCH is None else _TORCH.nn.Module
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a positive finite real number")
+    result = float(value)
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a positive finite real number")
+    return result
+
+
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a positive integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
+
+
+def _module_output(module: Any, x: Any, rows: int, where: str) -> Any:
+    value = module(x)
+    if not isinstance(value, _TORCH.Tensor) or value.ndim != 2 or value.shape[0] != rows or value.shape[1] == 0:
+        actual = getattr(value, "shape", None)
+        raise ValueError(f"{where} module output must have shape (rows, outputs); got {actual}")
+    if not bool(_TORCH.isfinite(value).all()):
+        raise ValueError(f"{where} module output must be finite")
+    return value
+
+
+class NonNegativeLinear(_ModuleBase):
+    """Pickle-stable linear layer with softplus-constrained non-negative weights."""
+
+    def __init__(self, in_features: int, out_features: int) -> None:
+        if _TORCH is None:  # pragma: no cover
+            raise ImportError("NonNegativeLinear requires torch")
+        super().__init__()
+        self.in_features = _positive_int(in_features, "in_features")
+        self.out_features = _positive_int(out_features, "out_features")
+        target = _TORCH.empty(self.out_features, self.in_features).uniform_(1e-3, 1.0 / self.in_features**0.5)
+        self.raw_weight = _TORCH.nn.Parameter(target + _TORCH.log(-_TORCH.expm1(-target)))
+        self.bias = _TORCH.nn.Parameter(_TORCH.zeros(self.out_features))
+
+    def forward(self, x: Any) -> Any:
+        weight = _TORCH.nn.functional.softplus(self.raw_weight)
+        return _TORCH.nn.functional.linear(x, weight, self.bias)
+
+
+class NegateOutput(_ModuleBase):
+    """Pickle-stable sign wrapper for decreasing monotone networks."""
+
+    def __init__(self, module: Any) -> None:
+        if _TORCH is None:  # pragma: no cover
+            raise ImportError("NegateOutput requires torch")
+        super().__init__()
+        if not isinstance(module, _TORCH.nn.Module):
+            raise TypeError("module must be a torch.nn.Module")
+        self.module = module
+
+    def forward(self, x: Any) -> Any:
+        return -self.module(x)
+
+
+class DeepSetNetwork(_ModuleBase):
+    """Pickle-stable permutation-invariant network with validated set geometry."""
+
+    def __init__(self, phi: Any, rho: Any, pooling: str, element_dim: int) -> None:
+        if _TORCH is None:  # pragma: no cover
+            raise ImportError("DeepSetNetwork requires torch")
+        super().__init__()
+        if not isinstance(phi, _TORCH.nn.Module) or not isinstance(rho, _TORCH.nn.Module):
+            raise TypeError("phi and rho must be torch modules")
+        if pooling not in ("mean", "sum", "max"):
+            raise ValueError("pooling must be 'mean', 'sum', or 'max'")
+        self.phi = phi
+        self.rho = rho
+        self.pooling = pooling
+        self.element_dim = _positive_int(element_dim, "element_dim")
+
+    def forward(self, x: Any) -> Any:
+        if not isinstance(x, _TORCH.Tensor) or x.ndim < 2:
+            raise ValueError("DeepSetNetwork input must have shape (..., set_size, element_dim)")
+        if x.shape[-2] == 0 or x.shape[-1] != self.element_dim:
+            raise ValueError(
+                f"DeepSetNetwork requires non-empty sets with element_dim={self.element_dim}; got {tuple(x.shape)}"
+            )
+        if not bool(_TORCH.isfinite(x).all()):
+            raise ValueError("DeepSetNetwork input must be finite")
+        codes = self.phi(x)
+        if self.pooling == "mean":
+            pooled = codes.mean(dim=-2)
+        elif self.pooling == "sum":
+            pooled = codes.sum(dim=-2)
+        else:
+            pooled = codes.max(dim=-2).values
+        result = self.rho(pooled)
+        if not bool(_TORCH.isfinite(result).all()):
+            raise ValueError("DeepSetNetwork output must be finite")
+        return result
 
 
 class GaussianRegressionNeuralNetwork:
@@ -27,10 +135,13 @@ class GaussianRegressionNeuralNetwork:
         self, module: Any, noise: float = 1.0, engine: Any | None = None, precision: Any | None = None
     ) -> None:
         torch, engine = _torch_engine(engine, precision=precision, owner="GaussianRegressionNeuralNetwork")
+        if not isinstance(module, torch.nn.Module):
+            raise TypeError("module must be a torch.nn.Module")
+        noise = _positive_finite(noise, "noise")
         self.torch = torch
         self.engine = engine
         self.module = module.to(device=engine.device, dtype=engine.dtype)
-        self.log_noise = torch.log(engine.asarray(float(noise))).clone().detach().requires_grad_(True)
+        self.log_noise = torch.log(engine.asarray(noise)).clone().detach().requires_grad_(True)
 
     def parameters(self) -> Iterable[Any]:
         """Return trainable module parameters plus the raw noise parameter."""
@@ -48,6 +159,12 @@ class GaussianRegressionNeuralNetwork:
             xx = xx[:, None]
         if len(yy.shape) == 1:
             yy = yy[:, None]
+        if len(xx.shape) != 2 or len(yy.shape) != 2 or xx.shape[0] == 0 or xx.shape[1] == 0 or yy.shape[1] == 0:
+            raise ValueError("Gaussian regression x and y must be non-empty two-dimensional matrices")
+        if xx.shape[0] != yy.shape[0]:
+            raise ValueError("Gaussian regression x and y must have identical row counts")
+        if not bool(self.torch.isfinite(xx).all()) or not bool(self.torch.isfinite(yy).all()):
+            raise ValueError("Gaussian regression x and y must be finite")
         return xx, yy
 
     def predict_tensor(self, x: Any) -> Any:
@@ -55,16 +172,32 @@ class GaussianRegressionNeuralNetwork:
         xx = self.engine.asarray(x)
         if len(xx.shape) == 1:
             xx = xx[:, None]
-        return self.module(xx)
+        if len(xx.shape) != 2 or xx.shape[0] == 0 or xx.shape[1] == 0 or not bool(self.torch.isfinite(xx).all()):
+            raise ValueError("Gaussian regression x must be a non-empty finite matrix")
+        with _module_mode(self.module, train=False), self.torch.no_grad():
+            return _module_output(self.module, xx, xx.shape[0], "Gaussian regression")
+
+    def _objective(self, x: Any, y: Any) -> Any:
+        torch = self.torch
+        xx, yy = self._xy(x, y)
+        pred = _module_output(self.module, xx, xx.shape[0], "Gaussian regression")
+        if tuple(pred.shape) != tuple(yy.shape):
+            raise ValueError(
+                f"Gaussian target shape must exactly match predictions; got {tuple(yy.shape)} and {tuple(pred.shape)}"
+            )
+        noise2 = self.log_noise.exp() ** 2
+        if not bool(torch.isfinite(noise2)) or bool(noise2 <= 0.0):
+            raise ValueError("Gaussian regression noise must remain positive and finite")
+        resid = yy - pred
+        result = -0.5 * torch.sum(resid * resid / noise2 + torch.log(2.0 * torch.pi * noise2))
+        if not bool(torch.isfinite(result)):
+            raise ValueError("Gaussian regression log likelihood became non-finite")
+        return result
 
     def log_likelihood(self, x: Any, y: Any) -> Any:
         """Return the summed Gaussian regression log likelihood."""
-        torch = self.torch
-        xx, yy = self._xy(x, y)
-        pred = self.module(xx)
-        noise2 = self.log_noise.exp() ** 2
-        resid = yy - pred
-        return -0.5 * torch.sum(resid * resid / noise2 + torch.log(2.0 * torch.pi * noise2))
+        with _module_mode(self.module, train=False):
+            return self._objective(x, y)
 
     def fit(
         self,
@@ -84,25 +217,25 @@ class GaussianRegressionNeuralNetwork:
         The default return shape is the historical ``(value, iterations)``
         tuple.  Set ``return_result=True`` for the full objective diagnostics.
         """
-        return optimize_torch_objective(
-            self.parameters(),
-            lambda: self.log_likelihood(x, y),
-            engine=self.engine,
-            max_its=max_its,
-            lr=lr,
-            optimizer=optimizer,
-            tol=tol,
-            maximize=True,
-            out=out,
-            print_iter=print_iter,
-            return_result=return_result,
-            restore_best=restore_best,
-        )
+        with _module_mode(self.module, train=True):
+            return optimize_torch_objective(
+                self.parameters(),
+                lambda: self._objective(x, y),
+                engine=self.engine,
+                max_its=max_its,
+                lr=lr,
+                optimizer=optimizer,
+                tol=tol,
+                maximize=True,
+                out=out,
+                print_iter=print_iter,
+                return_result=return_result,
+                restore_best=restore_best,
+            )
 
     def predict(self, x: Any) -> np.ndarray:
         """Return mean predictions as a NumPy array."""
-        with self.torch.no_grad():
-            return self.predict_tensor(x).detach().cpu().numpy()
+        return self.predict_tensor(x).detach().cpu().numpy()
 
 
 class CategoricalClassificationNeuralNetwork:
@@ -116,6 +249,8 @@ class CategoricalClassificationNeuralNetwork:
 
     def __init__(self, module: Any, engine: Any | None = None, precision: Any | None = None) -> None:
         torch, engine = _torch_engine(engine, precision=precision, owner="CategoricalClassificationNeuralNetwork")
+        if not isinstance(module, torch.nn.Module):
+            raise TypeError("module must be a torch.nn.Module")
         self.torch = torch
         self.engine = engine
         self.module = module.to(device=engine.device, dtype=engine.dtype)
@@ -128,27 +263,37 @@ class CategoricalClassificationNeuralNetwork:
         xx = self.engine.asarray(x)
         if len(xx.shape) == 1:
             xx = xx[:, None]
+        if len(xx.shape) != 2 or xx.shape[0] == 0 or xx.shape[1] == 0 or not bool(self.torch.isfinite(xx).all()):
+            raise ValueError("classification x must be a non-empty finite matrix")
         return xx
 
-    def _labels(self, y: Any) -> Any:
-        labels = self.engine.asarray(y, dtype=self.torch.long)
-        if len(labels.shape) != 1:
-            labels = labels.reshape(-1)
-        return labels
+    def _labels(self, y: Any, rows: int, classes: int) -> Any:
+        raw = y.detach().cpu().numpy() if isinstance(y, self.torch.Tensor) else np.asarray(y)
+        if raw.ndim != 1 or raw.shape != (rows,) or raw.dtype.kind not in {"i", "u"}:
+            raise ValueError(f"classification labels must be {rows} exact integer class indices")
+        if np.any(raw < 0) or np.any(raw >= classes):
+            raise ValueError(f"classification labels must be in [0, {classes})")
+        return self.engine.asarray(raw.astype(np.int64, copy=False), dtype=self.torch.long)
 
     def logits_tensor(self, x: Any) -> Any:
         """Return raw class logits for ``x`` as a Torch tensor."""
-        return self.module(self._x(x))
+        xx = self._x(x)
+        with _module_mode(self.module, train=False), self.torch.no_grad():
+            return _module_output(self.module, xx, xx.shape[0], "classification")
+
+    def _objective(self, x: Any, y: Any) -> Any:
+        xx = self._x(x)
+        logits = _module_output(self.module, xx, xx.shape[0], "classification")
+        labels = self._labels(y, logits.shape[0], logits.shape[1])
+        result = -self.torch.nn.functional.cross_entropy(logits, labels, reduction="sum")
+        if not bool(self.torch.isfinite(result)):
+            raise ValueError("classification log likelihood became non-finite")
+        return result
 
     def log_likelihood(self, x: Any, y: Any) -> Any:
         """Return the summed categorical log likelihood for integer labels."""
-        logits = self.logits_tensor(x)
-        labels = self._labels(y)
-        if len(logits.shape) != 2:
-            raise ValueError("classification module must return a (n, classes) logits matrix.")
-        if logits.shape[0] != labels.shape[0]:
-            raise ValueError("classification labels must match row count.")
-        return -self.torch.nn.functional.cross_entropy(logits, labels, reduction="sum")
+        with _module_mode(self.module, train=False):
+            return self._objective(x, y)
 
     def fit(
         self,
@@ -164,32 +309,33 @@ class CategoricalClassificationNeuralNetwork:
         restore_best: bool = True,
     ) -> Any:
         """Maximize the categorical classification log likelihood."""
-        return optimize_torch_objective(
-            self.parameters(),
-            lambda: self.log_likelihood(x, y),
-            engine=self.engine,
-            max_its=max_its,
-            lr=lr,
-            optimizer=optimizer,
-            tol=tol,
-            maximize=True,
-            out=out,
-            print_iter=print_iter,
-            return_result=return_result,
-            restore_best=restore_best,
-        )
+        with _module_mode(self.module, train=True):
+            return optimize_torch_objective(
+                self.parameters(),
+                lambda: self._objective(x, y),
+                engine=self.engine,
+                max_its=max_its,
+                lr=lr,
+                optimizer=optimizer,
+                tol=tol,
+                maximize=True,
+                out=out,
+                print_iter=print_iter,
+                return_result=return_result,
+                restore_best=restore_best,
+            )
 
     def predict_proba_tensor(self, x: Any) -> Any:
         """Return class probabilities for ``x`` as a Torch tensor."""
         logits = self.logits_tensor(x)
-        if len(logits.shape) != 2:
-            raise ValueError("classification module must return a (n, classes) logits matrix.")
-        return self.torch.softmax(logits, dim=1)
+        probabilities = self.torch.softmax(logits, dim=1)
+        if not bool(self.torch.isfinite(probabilities).all()):
+            raise ValueError("classification probabilities became non-finite")
+        return probabilities
 
     def predict_proba(self, x: Any) -> np.ndarray:
         """Return class probabilities for ``x`` as a NumPy array."""
-        with self.torch.no_grad():
-            return self.predict_proba_tensor(x).detach().cpu().numpy()
+        return self.predict_proba_tensor(x).detach().cpu().numpy()
 
     def predict(self, x: Any) -> np.ndarray:
         """Return maximum-probability class labels for ``x``."""
@@ -206,6 +352,8 @@ class PoissonRegressionNeuralNetwork:
 
     def __init__(self, module: Any, engine: Any | None = None, precision: Any | None = None) -> None:
         torch, engine = _torch_engine(engine, precision=precision, owner="PoissonRegressionNeuralNetwork")
+        if not isinstance(module, torch.nn.Module):
+            raise TypeError("module must be a torch.nn.Module")
         self.torch = torch
         self.engine = engine
         self.module = module.to(device=engine.device, dtype=engine.dtype)
@@ -218,6 +366,8 @@ class PoissonRegressionNeuralNetwork:
         xx = self.engine.asarray(x)
         if len(xx.shape) == 1:
             xx = xx[:, None]
+        if len(xx.shape) != 2 or xx.shape[0] == 0 or xx.shape[1] == 0 or not bool(self.torch.isfinite(xx).all()):
+            raise ValueError("Poisson regression x must be a non-empty finite matrix")
         return xx
 
     def _counts_like(self, y: Any, log_rate: Any) -> Any:
@@ -226,20 +376,34 @@ class PoissonRegressionNeuralNetwork:
             counts = counts[:, None]
         if tuple(counts.shape) != tuple(log_rate.shape):
             raise ValueError("Poisson counts must match the module log-rate shape.")
-        if bool(self.torch.any(counts < 0).detach().cpu().item()):
-            raise ValueError("Poisson counts must be non-negative.")
+        if not bool(self.torch.isfinite(counts).all()):
+            raise ValueError("Poisson counts must be finite")
+        if bool(self.torch.any(counts < 0).detach().cpu().item()) or not bool(
+            self.torch.all(counts == self.torch.round(counts))
+        ):
+            raise ValueError("Poisson counts must be non-negative integers.")
         return counts
 
     def log_rate_tensor(self, x: Any) -> Any:
         """Return predicted log rates as a Torch tensor."""
-        return self.module(self._x(x))
+        xx = self._x(x)
+        with _module_mode(self.module, train=False), self.torch.no_grad():
+            return _module_output(self.module, xx, xx.shape[0], "Poisson regression")
+
+    def _objective(self, x: Any, y: Any) -> Any:
+        torch = self.torch
+        xx = self._x(x)
+        log_rate = _module_output(self.module, xx, xx.shape[0], "Poisson regression")
+        counts = self._counts_like(y, log_rate)
+        result = torch.sum(counts * log_rate - torch.exp(log_rate) - torch.lgamma(counts + 1.0))
+        if not bool(torch.isfinite(result)):
+            raise ValueError("Poisson log likelihood became non-finite")
+        return result
 
     def log_likelihood(self, x: Any, y: Any) -> Any:
         """Return the summed Poisson count log likelihood."""
-        torch = self.torch
-        log_rate = self.log_rate_tensor(x)
-        counts = self._counts_like(y, log_rate)
-        return torch.sum(counts * log_rate - torch.exp(log_rate) - torch.lgamma(counts + 1.0))
+        with _module_mode(self.module, train=False):
+            return self._objective(x, y)
 
     def fit(
         self,
@@ -255,29 +419,32 @@ class PoissonRegressionNeuralNetwork:
         restore_best: bool = True,
     ) -> Any:
         """Maximize the Poisson count log likelihood."""
-        return optimize_torch_objective(
-            self.parameters(),
-            lambda: self.log_likelihood(x, y),
-            engine=self.engine,
-            max_its=max_its,
-            lr=lr,
-            optimizer=optimizer,
-            tol=tol,
-            maximize=True,
-            out=out,
-            print_iter=print_iter,
-            return_result=return_result,
-            restore_best=restore_best,
-        )
+        with _module_mode(self.module, train=True):
+            return optimize_torch_objective(
+                self.parameters(),
+                lambda: self._objective(x, y),
+                engine=self.engine,
+                max_its=max_its,
+                lr=lr,
+                optimizer=optimizer,
+                tol=tol,
+                maximize=True,
+                out=out,
+                print_iter=print_iter,
+                return_result=return_result,
+                restore_best=restore_best,
+            )
 
     def predict_rate_tensor(self, x: Any) -> Any:
         """Return predicted Poisson rates as a Torch tensor."""
-        return self.torch.exp(self.log_rate_tensor(x))
+        rates = self.torch.exp(self.log_rate_tensor(x))
+        if not bool(self.torch.isfinite(rates).all()):
+            raise ValueError("Poisson prediction produced a non-finite rate")
+        return rates
 
     def predict_rate(self, x: Any) -> np.ndarray:
         """Return predicted Poisson rates as a NumPy array."""
-        with self.torch.no_grad():
-            return self.predict_rate_tensor(x).detach().cpu().numpy()
+        return self.predict_rate_tensor(x).detach().cpu().numpy()
 
     def predict(self, x: Any) -> np.ndarray:
         """Return rounded count predictions as integer NumPy values."""
@@ -298,12 +465,12 @@ def make_mlp(input_dim: int, hidden_dims: Sequence[int], output_dim: int = 1, ac
     }
     if activation not in activations:
         raise ValueError("Unknown activation %s. Expected one of %s." % (activation, ", ".join(sorted(activations))))
-    if int(input_dim) <= 0 or int(output_dim) <= 0 or any(int(h) <= 0 for h in hidden_dims):
-        raise ValueError(
-            "make_mlp dims must be positive; got input_dim=%r hidden_dims=%r output_dim=%r"
-            % (input_dim, list(hidden_dims), output_dim)
-        )
-    dims = [int(input_dim)] + [int(h) for h in hidden_dims] + [int(output_dim)]
+    input_dim = _positive_int(input_dim, "input_dim")
+    output_dim = _positive_int(output_dim, "output_dim")
+    if not isinstance(hidden_dims, Sequence):
+        raise TypeError("hidden_dims must be a sequence of positive integers")
+    hidden_dims = [_positive_int(value, f"hidden_dims[{index}]") for index, value in enumerate(hidden_dims)]
+    dims = [input_dim] + hidden_dims + [output_dim]
     layers = []
     for i in range(len(dims) - 1):
         layers.append(torch.nn.Linear(dims[i], dims[i + 1]))
@@ -335,43 +502,21 @@ def make_monotonic_mlp(
         import torch
     except ImportError as e:  # pragma: no cover
         raise ImportError("make_monotonic_mlp requires torch.") from e
-    if int(input_dim) <= 0 or int(output_dim) <= 0 or any(int(h) <= 0 for h in hidden_dims):
-        raise ValueError(
-            "make_monotonic_mlp dims must be positive; got input_dim=%r hidden_dims=%r output_dim=%r"
-            % (input_dim, list(hidden_dims), output_dim)
-        )
-
-    class _NonNegativeLinear(torch.nn.Module):
-        def __init__(self, in_features: int, out_features: int) -> None:
-            super().__init__()
-            # softplus(0) = log(2) =~ 0.69, not ~0. A naive small-mean raw_weight init would put every
-            # effective weight near 0.69 rather than near 0, exploding the signal through depth. Instead
-            # initialize the effective weight at a normal fan-in scale, then invert softplus to get raw_weight.
-            fan_in = max(in_features, 1)
-            target = torch.empty(out_features, in_features).uniform_(1e-3, 1.0 / fan_in**0.5)
-            self.raw_weight = torch.nn.Parameter(target + torch.log(-torch.expm1(-target)))  # softplus^-1
-            self.bias = torch.nn.Parameter(torch.zeros(out_features))
-
-        def forward(self, x: Any) -> Any:
-            weight = torch.nn.functional.softplus(self.raw_weight)
-            return torch.nn.functional.linear(x, weight, self.bias)
-
-    class _NegateOutput(torch.nn.Module):
-        def __init__(self, module: Any) -> None:
-            super().__init__()
-            self.module = module
-
-        def forward(self, x: Any) -> Any:
-            return -self.module(x)
-
-    dims = [int(input_dim)] + [int(h) for h in hidden_dims] + [int(output_dim)]
+    input_dim = _positive_int(input_dim, "input_dim")
+    output_dim = _positive_int(output_dim, "output_dim")
+    if not isinstance(hidden_dims, Sequence):
+        raise TypeError("hidden_dims must be a sequence of positive integers")
+    hidden_dims = [_positive_int(value, f"hidden_dims[{index}]") for index, value in enumerate(hidden_dims)]
+    if not isinstance(increasing, (bool, np.bool_)):
+        raise TypeError("increasing must be a boolean")
+    dims = [input_dim] + hidden_dims + [output_dim]
     layers: list[Any] = []
     for i in range(len(dims) - 1):
-        layers.append(_NonNegativeLinear(dims[i], dims[i + 1]))
+        layers.append(NonNegativeLinear(dims[i], dims[i + 1]))
         if i < len(dims) - 2:
             layers.append(torch.nn.Softplus())
     module = torch.nn.Sequential(*layers)
-    return module if increasing else _NegateOutput(module)
+    return module if increasing else NegateOutput(module)
 
 
 def make_deep_set(
@@ -401,38 +546,17 @@ def make_deep_set(
     :func:`make_mlp`/:func:`make_monotonic_mlp` are for flat feature vectors. Use this module directly with
     a custom training loop (or through a wrapper that preserves the set axis) for a fixed set size.
     """
-    try:
-        import torch
-    except ImportError as e:  # pragma: no cover
-        raise ImportError("make_deep_set requires torch.") from e
+    if _TORCH is None:  # pragma: no cover
+        raise ImportError("make_deep_set requires torch.")
     if pooling not in ("mean", "sum", "max"):
         raise ValueError('pooling must be one of "mean", "sum", "max"; got %r' % (pooling,))
-    if int(element_dim) <= 0 or int(latent_dim) <= 0 or int(output_dim) <= 0:
-        raise ValueError(
-            "make_deep_set dims must be positive; got element_dim=%r latent_dim=%r output_dim=%r"
-            % (element_dim, latent_dim, output_dim)
-        )
+    element_dim = _positive_int(element_dim, "element_dim")
+    latent_dim = _positive_int(latent_dim, "latent_dim")
+    output_dim = _positive_int(output_dim, "output_dim")
     phi = make_mlp(element_dim, phi_hidden, latent_dim, activation="relu")
     rho = make_mlp(latent_dim, rho_hidden, output_dim, activation="relu")
 
-    class _DeepSet(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.phi = phi
-            self.rho = rho
-            self.pooling = pooling
-
-        def forward(self, x: Any) -> Any:
-            codes = self.phi(x)  # (..., set_size, latent_dim); phi is shared/identical across the set axis
-            if self.pooling == "mean":
-                pooled = codes.mean(dim=-2)
-            elif self.pooling == "sum":
-                pooled = codes.sum(dim=-2)
-            else:
-                pooled = codes.max(dim=-2).values
-            return self.rho(pooled)
-
-    return _DeepSet()
+    return DeepSetNetwork(phi, rho, pooling, element_dim)
 
 
 def _torch_engine(
