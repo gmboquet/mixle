@@ -54,6 +54,19 @@ class MarginalizationTest(unittest.TestCase):
         self.assertEqual(g, canonical_graph(GA))
         self.assertAlmostEqual(p, 0.7, places=10)
 
+    def test_multivalued_query_returns_fact_marginals_not_fake_categories(self):
+        graph = canonical_graph([("subject", "relation", "a"), ("subject", "relation", "b")])
+        distribution = GraphDistribution([graph], np.array([1.0]))
+        self.assertEqual(dict(distribution.query("subject", "relation")), {"a": 1.0, "b": 1.0})
+        with self.assertRaisesRegex(ValueError, "not functional"):
+            distribution.functional_query("subject", "relation")
+
+    def test_functional_query_retains_no_assertion_mass(self):
+        asserted = canonical_graph([("subject", "relation", "a")])
+        missing = canonical_graph([])
+        distribution = GraphDistribution([asserted, missing], np.array([0.6, 0.4]))
+        self.assertEqual(dict(distribution.functional_query("subject", "relation")), {"a": 0.6, None: 0.4})
+
 
 class GraphLLMTest(unittest.TestCase):
     def _kg_llm(self, city_prob_paris, seed=0):
@@ -96,13 +109,56 @@ class LogProbMarginalizationTest(unittest.TestCase):
         self.assertAlmostEqual(pA_count, 2 / 3, places=6)
 
         log_probs = [np.log(0.01), np.log(0.01), np.log(0.5)]  # B string is far more likely
-        d_lp = GraphLLM(lambda p: "", lambda t: []).distribution("q", graphs=gs, log_probs=log_probs)
+        d_lp = GraphLLM(lambda p: "", lambda t: []).distribution(
+            "q",
+            graphs=gs,
+            strings=["a-first", "a-second", "b"],
+            log_probs=log_probs,
+        )
         pA_lp = d_lp.fact_probability(("eiffel", "city", "paris"))
         pB_lp = d_lp.fact_probability(("eiffel", "city", "lyon"))
         # marginalizing over the actual string probabilities makes B dominant, unlike counting
         self.assertLess(pA_lp, 0.1)
         self.assertGreater(pB_lp, 0.9)
         self.assertAlmostEqual(pA_lp + pB_lp, 1.0, places=10)
+
+    def test_duplicate_string_is_not_counted_twice(self):
+        gs = [canonical_graph(GA), canonical_graph(GA), canonical_graph(GB)]
+        distribution = GraphLLM(lambda p: "", lambda t: []).distribution(
+            "q",
+            graphs=gs,
+            strings=["same-a", "same-a", "b"],
+            log_probs=[np.log(0.2), np.log(0.2), np.log(0.6)],
+        )
+        self.assertAlmostEqual(distribution.fact_probability(("eiffel", "city", "paris")), 0.25)
+
+    def test_log_probabilities_require_sequence_identity_and_valid_mass(self):
+        gs = [canonical_graph(GA), canonical_graph(GB)]
+        llm = GraphLLM(lambda p: "", lambda t: [])
+        with self.assertRaisesRegex(ValueError, "strings are required"):
+            llm.distribution("q", graphs=gs, log_probs=[-1.0, -2.0])
+        with self.assertRaisesRegex(ValueError, "all -inf"):
+            llm.distribution("q", graphs=gs, strings=["a", "b"], log_probs=[-np.inf, -np.inf])
+
+
+class GraphDistributionInvariantTest(unittest.TestCase):
+    def test_graph_distribution_requires_an_aligned_probability_simplex(self):
+        graph = canonical_graph(GA)
+        with self.assertRaisesRegex(ValueError, "one probability"):
+            GraphDistribution([graph], np.array([0.5, 0.5]))
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            GraphDistribution([graph], np.array([np.nan]))
+        with self.assertRaisesRegex(ValueError, "sum to one"):
+            GraphDistribution([graph], np.array([2.0]))
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            GraphDistribution([], np.array([]))
+
+    def test_graph_llm_rejects_nonintegral_or_nonpositive_sample_counts(self):
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            GraphLLM(lambda prompt: prompt, lambda text: [], n=1.5)
+        llm = GraphLLM(lambda prompt: prompt, lambda text: [])
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            llm.sample_graphs("q", n=0)
 
 
 if __name__ == "__main__":
