@@ -5,8 +5,8 @@ registry and explicitly left ``STRUCTURE_EDIT`` as a documented EXTENSION POINT,
 (see its module docstring and :data:`~mixle.inference.conditional_jit_controller.ACTION_TYPE_REGISTRY`).
 This module is that wiring: a real action space of architecture edits --
 
-* **grow** (H1, :mod:`mixle.experimental.growth_operators`) -- ``net2net_widen``/``widen_block``
-  (width) and ``insert_block`` (depth);
+* **grow** (H1, :mod:`mixle.experimental.growth_operators`) -- ``insert_block`` (depth); block-only
+  ``widen_block`` is deliberately unavailable here until a verified whole-model width edit exists;
 * **prune / depth-merge** (G3, :mod:`mixle.models.coarsening`) -- ``depth_merge``;
 * **rank change** (G2, :mod:`mixle.models.sigma_weighted_projection`) -- ``sigma_weighted_low_rank``;
 * **2:4 sparsity** (I4 -- no standalone I4 PR had landed when this module was built; the underlying
@@ -39,6 +39,7 @@ replacement for D5's coarser action-type-level registry.
 from __future__ import annotations
 
 import copy
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,7 +50,6 @@ from mixle.experimental.growth_operators import (
     ParityReceipt,
     insert_block,
     verify_output_parity,
-    widen_block,
 )
 from mixle.inference.conditional_jit_controller import (
     ActionType,
@@ -97,12 +97,11 @@ STRUCTURE_EDIT_REGISTRY: dict[str, str] = {
         "tok/pos/head-safe."
     ),
     "grow_widen_block": (
-        "IMPLEMENTED, block-scoped only. Wraps H1's growth_operators.widen_block: widens a single "
-        "Block's d_model exactly (net2net-style). Does NOT widen the shared tok/pos/head embedding "
-        "(H1 does not build that machinery), so the returned object is the new Block alone, not a "
-        "runnable whole-model CausalLM -- callers needing a whole-model width grow must widen "
-        "every Block plus the embedding/head consistently themselves; this is a documented gap, "
-        "not attempted here."
+        "UNAVAILABLE, fail-closed. H1's growth_operators.widen_block widens only one internal Block; "
+        "it cannot be substituted for a whole language model. This scheduler requires every accepted "
+        "edit to return a complete model, so width growth remains unavailable until embeddings, every "
+        "block, normalization, tied output head, metadata, and optimizer-state migration are widened "
+        "under one verified whole-model operation."
     ),
     "prune_depth_merge": (
         "IMPLEMENTED. Wraps G3's mixle.models.coarsening.depth_merge: folds two adjacent Blocks "
@@ -154,12 +153,57 @@ class StructureEditReceipt:
     edit_type: str
     parity: ParityReceipt | None
     detail: Any = None
+    candidate_kind: str = "whole_model"
 
 
 def _random_batch(model: Any, n: int = 4, seed: int = 0) -> Any:
     rng = np.random.default_rng(seed)
     ids = rng.integers(0, model.vocab, size=(n, model.block))
-    return torch.as_tensor(ids, dtype=torch.float32)
+    return torch.as_tensor(ids, device=model.tok.weight.device, dtype=torch.long)
+
+
+def _require_whole_model_candidate(model_before: Any, candidate: Any) -> None:
+    """Reject edit results that cannot safely replace the complete training model."""
+    if not isinstance(model_before, torch.nn.Module) or not isinstance(candidate, torch.nn.Module):
+        raise TypeError("structure edits must replace a torch module with a complete torch module.")
+    required = ("blocks", "vocab", "block", "n_layer", "parameters")
+    if any(not hasattr(candidate, name) for name in required):
+        raise TypeError("structure-edit candidate is not a complete model.")
+    if any(candidate is block for block in model_before.blocks):
+        raise TypeError("structure-edit candidate is an internal block, not a complete model.")
+    if not isinstance(candidate.blocks, torch.nn.ModuleList) or candidate.n_layer != len(candidate.blocks):
+        raise TypeError("structure-edit candidate has inconsistent model/block metadata.")
+    before_parameter = next(model_before.parameters(), None)
+    candidate_parameter = next(candidate.parameters(), None)
+    if before_parameter is None or candidate_parameter is None:
+        raise TypeError("structure-edit models must contain trainable parameters.")
+    if candidate_parameter.device != before_parameter.device:
+        raise ValueError("structure-edit candidate must remain on the source model's device.")
+
+
+def _finalize_candidate(
+    model: Any,
+    candidate: Any,
+    edit_type: str,
+    detail: Any,
+    params: dict[str, Any],
+    *,
+    seed: int,
+) -> tuple[Any, StructureEditReceipt]:
+    _require_whole_model_candidate(model, candidate)
+    batch = params.get("parity_batch")
+    if batch is None:
+        batch = _random_batch(model, seed=seed)
+    tolerance = params.get("tolerance", 1e-5)
+    parity = verify_output_parity(model, candidate, batch, tolerance=tolerance)
+    if hasattr(detail, "parity"):
+        detail.parity = parity
+    return candidate, StructureEditReceipt(
+        edit_type=edit_type,
+        parity=parity,
+        detail=detail,
+        candidate_kind="whole_model",
+    )
 
 
 def apply_structure_edit(
@@ -169,11 +213,12 @@ def apply_structure_edit(
     interface every ``STRUCTURE_EDIT`` action funnels through, wrapping H1/G3/G2's real ops (see
     :data:`STRUCTURE_EDIT_REGISTRY` for exactly what each ``edit_type`` does and does not cover).
 
-    Every edit type except ``"grow_widen_block"`` (block-scoped, see the registry note) returns a
-    full, forward-passable model and a real forward-pass :class:`ParityReceipt` (computed via
+    Every implemented edit type returns a complete, forward-passable model and a real forward-pass
+    :class:`ParityReceipt` (computed via
     :func:`~mixle.experimental.growth_operators.verify_output_parity` on the SAME random batch, or
     ``params["parity_batch"]`` if supplied) -- the function-preservation half of
-    :func:`should_apply_edit`'s gate.
+    :func:`should_apply_edit`'s gate. Block-only width growth is rejected rather than returned as if it
+    were a replacement model.
     """
     if not _HAS_TORCH:
         raise RuntimeError("apply_structure_edit requires torch.")
@@ -183,15 +228,10 @@ def apply_structure_edit(
         position = int(params.get("position", len(model.blocks)))
         seed = int(params.get("seed", 0))
         new_model, growth_receipt = insert_block(model, position=position, seed=seed)
-        return new_model, StructureEditReceipt(edit_type=edit_type, parity=growth_receipt.parity, detail=growth_receipt)
+        return _finalize_candidate(model, new_model, edit_type, growth_receipt, params, seed=seed)
 
     if edit_type == "grow_widen_block":
-        block_index = int(params.get("block_index", 0))
-        new_width = int(params["new_width"])
-        seed = int(params.get("seed", 0))
-        block = model.blocks[block_index]
-        new_block, growth_receipt = widen_block(block, new_d_model=new_width, seed=seed)
-        return new_block, StructureEditReceipt(edit_type=edit_type, parity=growth_receipt.parity, detail=growth_receipt)
+        raise NotImplementedError(STRUCTURE_EDIT_REGISTRY["grow_widen_block"])
 
     if edit_type == "prune_depth_merge":
         position = int(params.get("position", 0))
@@ -207,12 +247,7 @@ def apply_structure_edit(
         merged, scale_receipt = depth_merge(blocks[position], blocks[position + 1], input_law, n_mc=n_mc, seed=seed)
         new_blocks = blocks[:position] + [merged] + blocks[position + 2 :]
         new_model = CoarsenedLM(model, new_blocks)
-        batch = params.get("parity_batch")
-        if batch is None:
-            batch = _random_batch(model, seed=seed)
-        tolerance = float(params.get("tolerance", 1e-5))
-        parity = verify_output_parity(model, new_model, batch, tolerance=tolerance)
-        return new_model, StructureEditReceipt(edit_type=edit_type, parity=parity, detail=scale_receipt)
+        return _finalize_candidate(model, new_model, edit_type, scale_receipt, params, seed=seed)
 
     if edit_type == "rank_reduce":
         select_linear: Callable[[Any], Any] = params["select_linear"]
@@ -226,13 +261,8 @@ def apply_structure_edit(
         err = sigma_weighted_error(w, w_hat, sigma)
         with torch.no_grad():
             linear.weight.copy_(torch.as_tensor(w_hat, dtype=linear.weight.dtype, device=linear.weight.device))
-        batch = params.get("parity_batch")
-        if batch is None:
-            batch = _random_batch(model, seed=seed)
-        tolerance = float(params.get("tolerance", 1e-5))
-        parity = verify_output_parity(model, new_model, batch, tolerance=tolerance)
         detail = ProjectionReceipt(name=f"rank_reduce[rank={rank}]", mode="low_rank", sigma_weighted_error=err)
-        return new_model, StructureEditReceipt(edit_type=edit_type, parity=parity, detail=detail)
+        return _finalize_candidate(model, new_model, edit_type, detail, params, seed=seed)
 
     if edit_type == "sparsity_2_4":
         select_linear = params["select_linear"]
@@ -245,13 +275,8 @@ def apply_structure_edit(
         err = sigma_weighted_error(w, w_hat, sigma)
         with torch.no_grad():
             linear.weight.copy_(torch.as_tensor(w_hat, dtype=linear.weight.dtype, device=linear.weight.device))
-        batch = params.get("parity_batch")
-        if batch is None:
-            batch = _random_batch(model, seed=seed)
-        tolerance = float(params.get("tolerance", 1e-5))
-        parity = verify_output_parity(model, new_model, batch, tolerance=tolerance)
         detail = ProjectionReceipt(name="sparsity_2_4", mode="block_sparse", sigma_weighted_error=err)
-        return new_model, StructureEditReceipt(edit_type=edit_type, parity=parity, detail=detail)
+        return _finalize_candidate(model, new_model, edit_type, detail, params, seed=seed)
 
     if edit_type == "moe_expert_add":
         raise NotImplementedError(STRUCTURE_EDIT_REGISTRY["moe_expert_add"])
@@ -393,7 +418,48 @@ class AdaptiveTrainingResult:
     reached_target: bool
     edits_applied: list[tuple[int, str]] = field(default_factory=list)
     edits_rejected: list[tuple[int, str, str]] = field(default_factory=list)
+    optimizer_state_transfers: list[tuple[int, int]] = field(default_factory=list)
+    controller_outcomes: list[tuple[int, str, float, float]] = field(default_factory=list)
     health_report: dict[str, Any] = field(default_factory=dict)
+
+
+def _copy_optimizer_value(value: Any, parameter: Any) -> Any:
+    if torch.is_tensor(value):
+        return value.detach().clone().to(device=parameter.device)
+    return copy.deepcopy(value)
+
+
+def _rebuild_optimizer_preserving_state(
+    optimizer: Any,
+    model_before: Any,
+    model_after: Any,
+) -> tuple[Any, int]:
+    """Rebuild the scheduler-owned optimizer and retain state only for unchanged parameters."""
+    if not isinstance(optimizer, torch.optim.AdamW):
+        raise TypeError("adaptive structure training currently owns and migrates a torch.optim.AdamW optimizer.")
+    accepted_options = inspect.signature(torch.optim.AdamW).parameters
+    optimizer_options = {
+        key: value for key, value in optimizer.defaults.items() if key != "params" and key in accepted_options
+    }
+    new_optimizer = torch.optim.AdamW(model_after.parameters(), **optimizer_options)
+    old_by_name = dict(model_before.named_parameters())
+    transferred = 0
+    for name, parameter in model_after.named_parameters():
+        old_parameter = old_by_name.get(name)
+        same_object = parameter in optimizer.state
+        same_value = (
+            old_parameter is not None
+            and old_parameter.shape == parameter.shape
+            and torch.equal(old_parameter.detach(), parameter.detach())
+        )
+        source = parameter if same_object else old_parameter if same_value else None
+        if source is None or source not in optimizer.state or source.shape != parameter.shape:
+            continue
+        new_optimizer.state[parameter] = {
+            key: _copy_optimizer_value(value, parameter) for key, value in optimizer.state[source].items()
+        }
+        transferred += 1
+    return new_optimizer, transferred
 
 
 def train_with_adaptive_structure(
@@ -417,8 +483,9 @@ def train_with_adaptive_structure(
     :class:`StructureEditController` decide when/how to grow structure as training proceeds.
 
     Each step: one AdamW step on a batch from ``make_batch(batch_size, rng)`` (real cross-entropy
-    loss, real backward pass), fed into a real F4 :class:`~mixle.utils.parallel.training_health.TrainingHealthMonitor`
-    (loss, grad-norm). A loss-EMA PLATEAU DETECTOR (no improvement over the last ``plateau_window``
+    loss, real backward pass), fed into a real F4
+    :class:`~mixle.utils.parallel.training_health.TrainingHealthMonitor` (loss, grad-norm). A loss-EMA
+    PLATEAU DETECTOR (no improvement over the last ``plateau_window``
     steps, past ``min_steps_before_edit`` steps since the last edit, and below ``max_layer``) is what
     decides WHEN to even consider a structure edit -- the controller is consulted only at plateau
     moments, mirroring how a real scheduler would not burn an edit decision every single step. When
@@ -426,6 +493,9 @@ def train_with_adaptive_structure(
     :func:`should_apply_edit` (a real F4 health check plus the edit's own real output-parity receipt)
     before being committed -- a rejected edit is simply skipped, the run keeps training the unedited
     model, and the plateau window resets so a fresh signal is required before trying again.
+    An accepted edit retains AdamW state for parameters proven unchanged. Its controller reward is
+    delayed until a subsequent training interval and uses measured EMA improvement divided by only
+    that interval's FLOPs; acceptance itself is never treated as a fabricated unit gain.
 
     Stops as soon as the loss EMA drops below ``target_loss`` (after a short warmup), or at
     ``max_steps``. Returns an :class:`AdaptiveTrainingResult` with the REAL measured total compute.
@@ -445,8 +515,31 @@ def train_with_adaptive_structure(
     steps_since_edit = 0
     edits_applied: list[tuple[int, str]] = []
     edits_rejected: list[tuple[int, str, str]] = []
+    optimizer_state_transfers: list[tuple[int, int]] = []
+    controller_outcomes: list[tuple[int, str, float, float]] = []
+    pending_evaluation: tuple[StructureEditState, ControllerAction, str, float, float] | None = None
+    last_decision_flops = 0.0
     step = 0
     reached_target = False
+
+    def settle_pending_evaluation(current_ema: float, current_flops: float) -> None:
+        nonlocal pending_evaluation, last_decision_flops
+        if pending_evaluation is None:
+            return
+        prior_state, prior_action, prior_edit_type, baseline_ema, start_flops = pending_evaluation
+        incremental_flops = current_flops - start_flops
+        if incremental_flops <= 0.0:
+            return
+        measured_gain = max(baseline_ema - current_ema, 0.0)
+        controller.update(
+            prior_state,
+            prior_action,
+            realized_gain=measured_gain,
+            realized_cost=incremental_flops,
+        )
+        controller_outcomes.append((prior_state.round_index, prior_edit_type, measured_gain, incremental_flops))
+        last_decision_flops = current_flops
+        pending_evaluation = None
 
     for step in range(max_steps):
         x, y = make_batch(batch_size, rng)
@@ -467,15 +560,18 @@ def train_with_adaptive_structure(
         steps_since_edit += 1
 
         if ema < target_loss and step > 30:
+            settle_pending_evaluation(ema, total_flops)
             reached_target = True
             break
 
-        plateaued = (
-            model.n_layer < max_layer
-            and steps_since_edit > min_steps_before_edit
+        evaluation_ready = (
+            steps_since_edit > min_steps_before_edit
             and len(ema_hist) > plateau_window
             and (ema_hist[-1] - ema_hist[-plateau_window]) > -plateau_eps
         )
+        if evaluation_ready:
+            settle_pending_evaluation(ema, total_flops)
+        plateaued = model.n_layer < max_layer and evaluation_ready
         if plateaued:
             state = StructureEditState(
                 round_index=step,
@@ -490,24 +586,45 @@ def train_with_adaptive_structure(
                 # a real bandit pull, not a no-op skip: feed back a reward so this arm's pull count
                 # advances and UCB1 moves on to explore the next arm next time, rather than getting
                 # stuck re-selecting an unplayed "none" forever (see UCB1.select's unplayed-first rule).
-                controller.update(state, action, realized_gain=0.0, realized_cost=total_flops)
+                incremental_flops = total_flops - last_decision_flops
+                controller.update(state, action, realized_gain=0.0, realized_cost=incremental_flops)
+                controller_outcomes.append((step, edit_type, 0.0, incremental_flops))
+                last_decision_flops = total_flops
             else:
+                edit_params = {key: value for key, value in action.payload.items() if key not in {"arm", "edit_type"}}
+                edit_params.setdefault("position", 0)
+                edit_params.setdefault("seed", step)
+                edit_params.setdefault("tolerance", parity_tolerance)
+                edit_params.setdefault("parity_batch", x.detach())
                 candidate_model, receipt = apply_structure_edit(
-                    model, edit_type, {"position": 0, "seed": step, "tolerance": parity_tolerance}
+                    model,
+                    edit_type,
+                    edit_params,
                 )
                 health = health_report_from_monitor(monitor, lookback=health_lookback)
                 if should_apply_edit(health, receipt.parity):
+                    if receipt.candidate_kind != "whole_model":
+                        raise TypeError("accepted structure edits must identify a complete replacement model.")
+                    _require_whole_model_candidate(model, candidate_model)
+                    previous_model = model
+                    opt, transferred = _rebuild_optimizer_preserving_state(opt, previous_model, candidate_model)
                     model = candidate_model
-                    opt = torch.optim.AdamW(model.parameters(), lr=lr)
                     edits_applied.append((step, edit_type))
-                    controller.update(state, action, realized_gain=1.0, realized_cost=total_flops)
+                    optimizer_state_transfers.append((step, transferred))
+                    pending_evaluation = (state, action, edit_type, float(ema), total_flops)
                     steps_since_edit = 0
                     ema_hist = []
                 else:
                     reason = "unhealthy" if not health["healthy"] else "parity_out_of_tolerance"
                     edits_rejected.append((step, edit_type, reason))
-                    controller.update(state, action, realized_gain=0.0, realized_cost=total_flops)
+                    incremental_flops = total_flops - last_decision_flops
+                    controller.update(state, action, realized_gain=0.0, realized_cost=incremental_flops)
+                    controller_outcomes.append((step, edit_type, 0.0, incremental_flops))
+                    last_decision_flops = total_flops
                     steps_since_edit = 0  # require a fresh plateau signal before trying again
+
+    if ema is not None:
+        settle_pending_evaluation(ema, total_flops)
 
     return AdaptiveTrainingResult(
         model=model,
@@ -517,5 +634,7 @@ def train_with_adaptive_structure(
         reached_target=reached_target,
         edits_applied=edits_applied,
         edits_rejected=edits_rejected,
+        optimizer_state_transfers=optimizer_state_transfers,
+        controller_outcomes=controller_outcomes,
         health_report=monitor.report(),
     )

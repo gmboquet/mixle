@@ -21,6 +21,7 @@ import torch.nn.functional as F  # noqa: E402
 
 from mixle.experimental.structure_edit_schedule import (  # noqa: E402
     STRUCTURE_EDIT_REGISTRY,
+    _rebuild_optimizer_preserving_state,
     apply_structure_edit,
     health_report_from_monitor,
     should_apply_edit,
@@ -109,16 +110,39 @@ class ApplyStructureEditWrappersTest(unittest.TestCase):
 
     def test_grow_insert_produces_a_deeper_real_model_with_a_receipt(self):
         model = _build(n_layer=2, seed=1)
-        new_model, receipt = apply_structure_edit(model, "grow_insert", {"position": 1, "seed": 0})
+        parity_batch = torch.tensor([[1, 2, 3], [3, 2, 1]], dtype=torch.long)
+        new_model, receipt = apply_structure_edit(
+            model,
+            "grow_insert",
+            {
+                "position": 1,
+                "seed": 0,
+                "parity_batch": parity_batch,
+                "tolerance": 0.0,
+            },
+        )
         self.assertEqual(new_model.n_layer, 3)
         self.assertEqual(receipt.edit_type, "grow_insert")
+        self.assertEqual(receipt.candidate_kind, "whole_model")
         self.assertIsNotNone(receipt.parity)
         self.assertTrue(receipt.parity.within_tolerance)
+        self.assertEqual(receipt.parity.batch_shape, tuple(parity_batch.shape))
+        self.assertEqual(receipt.parity.tolerance, 0.0)
         # a real, usable model: forward pass returns real (batch, vocab) logits.
         rng = np.random.default_rng(0)
         x, _y = _make_batch(8, rng)
         logits = new_model(x)
         self.assertEqual(tuple(logits.shape), (8, VOCAB))
+
+    def test_block_only_width_growth_fails_closed(self):
+        model = _build(n_layer=2, seed=1)
+        self.assertIn("fail-closed", STRUCTURE_EDIT_REGISTRY["grow_widen_block"])
+        with self.assertRaises(NotImplementedError):
+            apply_structure_edit(
+                model,
+                "grow_widen_block",
+                {"block_index": 0, "new_width": 2 * D_MODEL},
+            )
 
     def test_prune_depth_merge_produces_a_shallower_real_model_with_a_receipt(self):
         model = _build(n_layer=3, seed=1)
@@ -147,6 +171,62 @@ class ApplyStructureEditWrappersTest(unittest.TestCase):
         model = _build(n_layer=1, seed=0)
         with self.assertRaises(NotImplementedError):
             apply_structure_edit(model, "moe_expert_add", {})
+
+
+class AdaptiveControllerAccountingTest(unittest.TestCase):
+    def test_optimizer_migration_copies_unchanged_parameter_moments(self):
+        model = _build(n_layer=1, seed=7)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        x, y = _make_batch(4, np.random.default_rng(7))
+        loss = F.cross_entropy(model(x), y)
+        loss.backward()
+        optimizer.step()
+
+        grown, _receipt = apply_structure_edit(
+            model,
+            "grow_insert",
+            {"position": 0, "parity_batch": x, "tolerance": 0.0},
+        )
+        token_parameter = model.tok.weight
+        old_average = optimizer.state[token_parameter]["exp_avg"].clone()
+        migrated, transferred = _rebuild_optimizer_preserving_state(
+            optimizer,
+            model,
+            grown,
+        )
+
+        self.assertGreater(transferred, 0)
+        self.assertIn(grown.tok.weight, migrated.state)
+        torch.testing.assert_close(migrated.state[grown.tok.weight]["exp_avg"], old_average)
+
+    def test_accepted_edit_preserves_optimizer_state_and_uses_measured_incremental_reward(self):
+        model = _build(n_layer=1, seed=8)
+        result = train_with_adaptive_structure(
+            model,
+            _make_batch,
+            target_loss=-1.0,
+            max_steps=5,
+            max_layer=2,
+            batch_size=4,
+            lr=1e-3,
+            min_steps_before_edit=0,
+            plateau_window=1,
+            plateau_eps=1e9,
+            seed=8,
+        )
+
+        self.assertEqual([name for _step, name in result.edits_applied], ["grow_insert"])
+        self.assertEqual(len(result.optimizer_state_transfers), 1)
+        self.assertGreater(result.optimizer_state_transfers[0][1], 0)
+        insert_outcomes = [
+            (gain, cost) for _step, edit_type, gain, cost in result.controller_outcomes if edit_type == "grow_insert"
+        ]
+        self.assertEqual(len(insert_outcomes), 1)
+        gain, incremental_cost = insert_outcomes[0]
+        self.assertGreaterEqual(gain, 0.0)
+        self.assertNotEqual(gain, 1.0)
+        self.assertGreater(incremental_cost, 0.0)
+        self.assertLess(incremental_cost, result.total_flops)
 
 
 class DepthPlateauSanityTest(unittest.TestCase):
