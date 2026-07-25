@@ -367,5 +367,68 @@ class CrossTripleConflictResolutionTest(unittest.TestCase):
         self.assertTrue(any(r["triple"] == ("ada", "lives_in", "london") for r in dec.rejected))
 
 
+class CompletionMaskTest(unittest.TestCase):
+    """MXR-080-0299: KG completion must mask the FULL triple contract, not range alone."""
+
+    class _FixedScoreKG:
+        """A deterministic fake KG: hands back a hand-chosen log-posterior vector."""
+
+        def __init__(self, raw_scores):
+            raw = np.asarray(raw_scores, dtype=float)
+            self._lp = raw - np.log(np.sum(np.exp(raw)))  # a genuine log-softmax
+
+        def tail_log_posterior(self, h, r):
+            return self._lp
+
+    def test_irreflexive_self_completion_gets_zero_mass_not_the_max(self):
+        # The audit's own reproduction: for an irreflexive `knows` relation, completing head `a`
+        # with candidate `a` was assigned the LARGEST probability of any candidate (0.6652 in the
+        # audit's run) because only the candidate's range class was checked. Self-completion must
+        # instead receive NO mass at all.
+        ont = Ontology().add_class("Person").add_relation("knows", "Person", "Person", "irreflexive")
+        types = {"a": "Person", "b": "Person", "c": "Person"}
+        # deliberately give the self-candidate ('a', index 0) the HIGHEST raw score, so an unmasked
+        # softmax would make it the argmax -- reproducing the audit's "assigned the largest
+        # probability" shape without depending on a specific fitted model's exact numbers.
+        kg = self._FixedScoreKG([2.0, 0.5, 0.3])
+        unmasked = np.exp(kg._lp) / np.exp(kg._lp).sum()
+        self.assertEqual(np.argmax(unmasked), 0)  # sanity: 'a' (self) WOULD be the argmax if unmasked
+
+        ckg = OntologyConstrainedKG(kg, ont, entities=["a", "b", "c"], relations=["knows"], types=types)
+        post = ckg.tail_posterior("a", "knows")
+        self.assertNotIn("a", post)  # zero (i.e. absent) mass, not merely "not the max"
+        self.assertEqual(set(post), {"b", "c"})
+        self.assertAlmostEqual(sum(post.values()), 1.0, places=9)
+
+    def test_head_domain_violation_yields_empty_posterior(self):
+        ont = Ontology().add_class("Person").add_class("Organization").add_relation("employs", "Organization", "Person")
+        types = {"ada": "Person", "bob": "Person", "acme": "Organization"}
+        kg = self._FixedScoreKG([0.1, 0.2, 0.3])
+        # 'ada' is a Person, but `employs` requires an Organization head -- no tail should be
+        # proposed no matter how the range mask alone would have scored it.
+        ckg = OntologyConstrainedKG(kg, ont, entities=["ada", "bob", "acme"], relations=["employs"], types=types)
+        self.assertEqual(ckg.tail_posterior("ada", "employs"), {})
+
+    def test_disjoint_candidate_excluded_even_when_range_conforming(self):
+        # A pathological but legal schema: Organization is declared disjoint with its OWN ancestor
+        # Agent, so every Organization instance is simultaneously both halves of that pair. The
+        # head (a Person, uninvolved in the disjoint pair) is fine; the completion mask must still
+        # exclude the Organization CANDIDATE even though it range-conforms (controls: Agent -> Agent).
+        ont = (
+            Ontology()
+            .add_class("Agent")
+            .add_class("Person", "Agent")
+            .add_class("Organization", "Agent")
+            .add_relation("controls", "Agent", "Agent")
+            .add_disjoint("Agent", "Organization")
+        )
+        types = {"ada": "Person", "bob": "Person", "acme": "Organization"}
+        kg = self._FixedScoreKG([0.1, 0.2, 0.9])  # acme (index 2) would win an unmasked softmax
+        ckg = OntologyConstrainedKG(kg, ont, entities=["ada", "bob", "acme"], relations=["controls"], types=types)
+        post = ckg.tail_posterior("ada", "controls")
+        self.assertIn("bob", post)
+        self.assertNotIn("acme", post)  # Organization is disjoint-excluded despite range-conforming
+
+
 if __name__ == "__main__":
     unittest.main()
