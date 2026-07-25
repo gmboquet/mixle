@@ -31,7 +31,10 @@ move requires only mixle estimators.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
+from numbers import Integral, Real
 from typing import Any
 
 
@@ -69,6 +72,11 @@ class LoRALinear:
 
     def __new__(cls, base: Any, rank: int, alpha: float) -> Any:
         torch = _torch()
+        if isinstance(rank, bool) or not isinstance(rank, Integral) or int(rank) <= 0:
+            raise ValueError("rank must be a positive exact integer")
+        if isinstance(alpha, bool) or not isinstance(alpha, Real) or not math.isfinite(float(alpha)):
+            raise ValueError("alpha must be a finite real number")
+        rank = int(rank)
 
         class _LoRALinear(torch.nn.Module):
             def __init__(self) -> None:
@@ -76,8 +84,9 @@ class LoRALinear:
                 self.base = base
                 for p in base.parameters():
                     p.requires_grad_(False)
-                self.A = torch.nn.Parameter(torch.randn(base.in_features, rank) * (1.0 / rank**0.5))
-                self.B = torch.nn.Parameter(torch.zeros(rank, base.out_features))
+                self.A = torch.nn.Parameter(base.weight.new_empty(base.in_features, rank))
+                torch.nn.init.normal_(self.A, std=1.0 / rank**0.5)
+                self.B = torch.nn.Parameter(base.weight.new_zeros(rank, base.out_features))
                 self.scaling = float(alpha) / float(rank)
 
             def forward(self, x: Any) -> Any:
@@ -105,6 +114,8 @@ def lora(module: Any, rank: int = 8, alpha: float = 16.0) -> list:
                 replace(child)
 
     replace(module)
+    if not adapters:
+        raise ValueError("lora requires a module containing at least one torch.nn.Linear layer")
     return [p for a in adapters for p in (a.A, a.B)]
 
 
@@ -115,14 +126,26 @@ class Move:
     """Minimize (``sign=+1``) or maximize (``sign=-1``) ``objective()`` over ``params`` (a list of tensors)."""
 
     def __init__(self, objective: Callable[[], Any], params: Iterable, sign: float, lr: float | None = None) -> None:
+        if not callable(objective):
+            raise TypeError("objective must be callable")
         self.objective = objective
         self.params = list(params)
+        if not self.params:
+            raise ValueError("gradient moves require at least one parameter")
         self.sign = float(sign)
         self.lr = lr
 
     def _step(self, optimizer: Any) -> float:
         optimizer.zero_grad()
         loss = self.sign * self.objective()
+        if not hasattr(loss, "backward"):
+            raise TypeError("a gradient objective must return a differentiable scalar tensor")
+        if loss.numel() != 1:
+            raise ValueError("a gradient objective must return a scalar tensor")
+        if not bool(_torch().isfinite(loss.detach()).item()):
+            raise ValueError("a gradient objective must return a finite scalar")
+        if not loss.requires_grad:
+            raise ValueError("a gradient objective must depend on at least one trainable parameter")
         loss.backward()
         optimizer.step()
         return float(loss.detach())
@@ -179,6 +202,7 @@ class Program:
 
     def __init__(self, moves: Sequence) -> None:
         self.moves = list(moves)
+        self.constraint_state: ConstraintState | None = None
 
 
 def _as_program(p: Any) -> Program:
@@ -202,6 +226,13 @@ def alternate(*items: Any) -> Program:
 def weighted(terms: Sequence[tuple], over: Iterable) -> Program:
     """A single move minimizing ``sum(w * objective() for objective, w in terms)`` -- cooperative multi-objective."""
     term_list = list(terms)
+    if not term_list:
+        raise ValueError("weighted requires at least one (objective, weight) term")
+    for objective, weight in term_list:
+        if not callable(objective):
+            raise TypeError("every weighted objective must be callable")
+        if isinstance(weight, bool) or not isinstance(weight, Real) or not math.isfinite(float(weight)):
+            raise ValueError("every weighted objective weight must be a finite real number")
 
     def combined() -> Any:
         total = None
@@ -220,8 +251,12 @@ class Constraint:
     """Scalar inequality constraint represented for primal-dual optimization."""
 
     def __init__(self, g: Callable[[], Any], bound: float = 0.0, kind: str = "<=") -> None:
+        if not callable(g):
+            raise TypeError("constraint function must be callable")
         if kind not in ("<=", ">="):
             raise ValueError("constraint kind must be '<=' or '>='")
+        if isinstance(bound, bool) or not isinstance(bound, Real) or not math.isfinite(float(bound)):
+            raise ValueError("constraint bound must be a finite real number")
         self.g = g
         self.bound = float(bound)
         self.kind = kind
@@ -236,24 +271,91 @@ def constrain(g: Callable[[], Any], bound: float = 0.0, kind: str = "<=") -> Con
     return Constraint(g, bound, kind)
 
 
-def _augment_with_constraints(moves: list, constraints: Sequence[Constraint], torch: Any) -> list:
-    """Augment the primal (first) move with ``Σ λ·violation`` and return one maximizing dual move per λ."""
-    softplus = torch.nn.functional.softplus
-    primal = moves[0]
-    lams = [(torch.zeros((), requires_grad=True), c) for c in constraints]
-    orig = primal.objective
+@dataclass(frozen=True)
+class ConstraintState:
+    """Observable state for one constrained :func:`fit` invocation."""
+
+    constraints: tuple[Constraint, ...]
+    multipliers: tuple[Any, ...]
+    primal_move_index: int
+
+    def multiplier_values(self) -> tuple[float, ...]:
+        """Return a detached snapshot of the non-negative Lagrange multipliers."""
+        return tuple(float(multiplier.detach().item()) for multiplier in self.multipliers)
+
+
+def _constraint_value(constraint: Constraint, reference: Any, torch: Any) -> Any:
+    value = constraint.violation()
+    if not torch.is_tensor(value):
+        value = reference.new_tensor(value)
+    else:
+        value = value.to(device=reference.device, dtype=reference.dtype)
+    if value.numel() != 1:
+        raise ValueError("constraint functions must return scalar values")
+    if not bool(torch.isfinite(value.detach()).item()):
+        raise ValueError("constraint functions must return finite values")
+    return value.reshape(())
+
+
+class _DualConstraintMove(Move):
+    def __init__(self, multiplier: Any, constraint: Constraint, reference: Any) -> None:
+        self.constraint = constraint
+        self.reference = reference
+        super().__init__(lambda: multiplier, [multiplier], -1.0)
+
+    def _step(self, optimizer: Any) -> float:
+        torch = _torch()
+        optimizer.zero_grad()
+        violation = _constraint_value(self.constraint, self.reference, torch).detach()
+        loss = -self.params[0] * violation
+        loss.backward()
+        optimizer.step()
+        with torch.no_grad():
+            self.params[0].clamp_(min=0.0)
+        return float(loss.detach())
+
+
+def _augment_with_constraints(
+    moves: list, constraints: Sequence[Constraint], torch: Any
+) -> tuple[list, ConstraintState]:
+    """Build an ephemeral sign-correct primal/dual game without mutating caller moves."""
+    constraint_list = tuple(constraints)
+    if not constraint_list:
+        raise ValueError("constraints must contain at least one Constraint")
+    if any(not isinstance(constraint, Constraint) for constraint in constraint_list):
+        raise TypeError("constraints must contain only Constraint instances")
+    try:
+        primal_index, primal = next(
+            (index, move) for index, move in enumerate(moves) if type(move) is Move and move.params
+        )
+    except StopIteration as exc:
+        raise ValueError("constraints require at least one scalar gradient Move with parameters") from exc
+    reference = primal.params[0]
+    if not torch.is_tensor(reference) or not (reference.is_floating_point() or reference.is_complex()):
+        raise TypeError("constrained primal parameters must be floating-point or complex tensors")
+    if reference.is_complex():
+        raise TypeError("constrained optimization does not support complex parameters")
+    multipliers = tuple(reference.new_zeros((), requires_grad=True) for _ in constraint_list)
+    original_objective = primal.objective
 
     def augmented() -> Any:
-        v = orig()
-        for raw, c in lams:
-            v = v + softplus(raw).detach() * c.violation()
-        return v
+        objective = original_objective()
+        penalty = reference.new_zeros(())
+        for multiplier, constraint in zip(multipliers, constraint_list):
+            penalty = penalty + multiplier.detach() * _constraint_value(constraint, reference, torch)
+        # Move._step minimizes sign*objective. This makes that optimizer loss
+        # sign*original + penalty for both minimization and maximization.
+        return objective + primal.sign * penalty
 
-    primal.objective = augmented
-    duals = []
-    for raw, c in lams:
-        duals.append(Move(lambda raw=raw, c=c: softplus(raw) * c.violation().detach(), [raw], -1.0))
-    return duals
+    constrained_primal = Move(augmented, primal.params, primal.sign, primal.lr)
+    augmented_moves = list(moves)
+    augmented_moves[primal_index] = constrained_primal
+    augmented_moves.extend(
+        _DualConstraintMove(multiplier, constraint, reference)
+        for multiplier, constraint in zip(multipliers, constraint_list)
+    )
+    state = ConstraintState(constraint_list, multipliers, primal_index)
+    return augmented_moves, state
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -298,9 +400,12 @@ def fit(
     """
     prog = _as_program(program)
     moves = list(prog.moves)
-    if constraints:
+    if not moves:
+        raise ValueError("fit requires a program containing at least one move")
+    prog.constraint_state = None
+    if constraints is not None:
         torch = _torch()
-        moves = moves + _augment_with_constraints(moves, constraints, torch)
+        moves, prog.constraint_state = _augment_with_constraints(moves, constraints, torch)
     grad_moves = [m for m in moves if isinstance(m, Move) and m.params]
     optimizers = {}
     if grad_moves:
@@ -386,7 +491,7 @@ def replay(loss_fn: Callable[[Any], Any], buffer: ReplayBuffer) -> Callable[[], 
     def obj() -> Any:
         chunks = buffer.all()
         if not chunks:
-            return _torch().zeros(())
+            raise ValueError("cannot evaluate a replay objective with an empty buffer")
         total = None
         for c in chunks:
             v = loss_fn(c)
@@ -409,9 +514,18 @@ def ewc(params: Iterable, fisher: Sequence, anchor: Sequence, weight: float = 1.
     """Elastic Weight Consolidation penalty ``weight · Σ Fᵢ (θᵢ - anchorᵢ)²`` -- anchors params important to the
     old task. Pair with :func:`fisher_diagonal` (a torch net) or a mixle leaf's ``to_fisher``."""
     plist = list(params)
+    fisher_list = list(fisher)
+    anchor_list = list(anchor)
+    if not plist:
+        raise ValueError("ewc requires at least one parameter")
+    if len(fisher_list) != len(plist) or len(anchor_list) != len(plist):
+        raise ValueError("params, fisher, and anchor must have equal non-zero lengths")
 
     def obj() -> Any:
-        return float(weight) * sum((f * (p - a) ** 2).sum() for f, p, a in zip(fisher, plist, anchor))
+        total = plist[0].new_zeros(())
+        for f, p, a in zip(fisher_list, plist, anchor_list):
+            total = total + (f * (p - a) ** 2).sum()
+        return float(weight) * total
 
     return obj
 
@@ -424,7 +538,11 @@ def fisher_diagonal(net: Any, batches: Iterable, kind: str = "classification") -
     sampling the label from the model is what makes EWC actually anchor.)
     """
     torch = _torch()
+    if kind not in {"classification", "regression"}:
+        raise ValueError("kind must be 'classification' or 'regression'")
     params = [p for p in net.parameters() if p.requires_grad]
+    if not params:
+        raise ValueError("fisher_diagonal requires at least one trainable parameter")
     fisher = [torch.zeros_like(p) for p in params]
     n = 0
     for x in batches:
@@ -438,9 +556,12 @@ def fisher_diagonal(net: Any, batches: Iterable, kind: str = "classification") -
         net.zero_grad()
         ll.backward()
         for f, p in zip(fisher, params):
-            f += p.grad.detach() ** 2
+            if p.grad is not None:
+                f += p.grad.detach() ** 2
         n += int(out.shape[0]) if hasattr(out, "shape") and out.dim() > 0 else 1
-    return [f / max(n, 1) for f in fisher]
+    if n == 0:
+        raise ValueError("fisher_diagonal requires at least one non-empty batch")
+    return [f / n for f in fisher]
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -480,7 +601,9 @@ def bilevel(
             q = outer_loss(lambda x, a=adapted: functional_call(model, a, x), query)
             total = q if total is None else total + q
             count += 1
-        return total / max(count, 1)
+        if count == 0:
+            raise ValueError("sample_tasks must yield at least one (support, query) task")
+        return total / count
 
     return minimize(outer_objective, over=trainable(model))
 
@@ -488,25 +611,27 @@ def bilevel(
 # ---------------------------------------------------------------------------------------------------------
 # True multi-objective: MGDA -- step along the minimum-norm common-descent direction (Pareto).
 # ---------------------------------------------------------------------------------------------------------
-def _mgda_weights(grads: list, torch: Any) -> list:
+def _mgda_weights(grads: list, torch: Any) -> Any:
     """Frank-Wolfe for the min-norm point in the convex hull of the per-objective gradients (MGDA)."""
     n = len(grads)
+    if n == 0:
+        raise ValueError("MGDA requires at least one objective")
     if n == 1:
-        return [1.0]
+        return grads[0][0].new_ones(1)
     flat = [torch.cat([g.flatten() for g in gi]) for gi in grads]
     gram = torch.stack([torch.stack([(a * b).sum() for b in flat]) for a in flat])  # (n, n)
-    alpha = torch.ones(n) / n
+    alpha = gram.new_full((n,), 1.0 / n)
     for _ in range(50):
-        t = int(torch.argmin(gram @ alpha))  # vertex with steepest descent of alpha^T M alpha
-        e = torch.zeros(n)
+        t = int(torch.argmin(gram @ alpha).item())  # vertex with steepest descent of alpha^T M alpha
+        e = torch.zeros_like(alpha)
         e[t] = 1.0
         d = e - alpha
-        denom = float(d @ gram @ d)
-        gamma = float(torch.clamp(-(alpha @ gram @ d) / (denom + 1e-12), 0.0, 1.0)) if denom > 1e-12 else 0.0
+        denom = float((d @ gram @ d).item())
+        gamma = float(torch.clamp(-(alpha @ gram @ d) / (denom + 1e-12), 0.0, 1.0).item()) if denom > 1e-12 else 0.0
         if gamma <= 1e-9:
             break
         alpha = alpha + gamma * d
-    return [float(a) for a in alpha]
+    return alpha
 
 
 class ParetoMove(Move):
@@ -515,6 +640,10 @@ class ParetoMove(Move):
     def __init__(self, objectives: Sequence[Callable[[], Any]], params: Iterable, lr: float | None = None) -> None:
         super().__init__(objective=lambda: None, params=params, sign=+1.0, lr=lr)
         self.objectives = list(objectives)
+        if not self.objectives:
+            raise ValueError("pareto requires at least one objective")
+        if any(not callable(objective) for objective in self.objectives):
+            raise TypeError("every Pareto objective must be callable")
 
     def _step(self, optimizer: Any) -> float:
         torch = _torch()
@@ -528,7 +657,7 @@ class ParetoMove(Move):
         alpha = _mgda_weights(grads, torch)
         optimizer.zero_grad()
         for j, p in enumerate(self.params):
-            p.grad = sum(alpha[i] * grads[i][j] for i in range(len(grads)))
+            p.grad = torch.stack([alpha[i] * grads[i][j] for i in range(len(grads))]).sum(dim=0)
         optimizer.step()
         return 0.0
 
