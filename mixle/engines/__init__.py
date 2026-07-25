@@ -153,7 +153,13 @@ def _direct_engine(x: Any) -> ComputeEngine | None:
         dt = x.dtype if x.dtype.is_floating_point else None
         return TorchEngine(device=str(local.device), dtype=dt, mesh=x.device_mesh)
     if _jax is not None and cls is _jax.Array and isinstance(engine, JaxEngine):
-        return JaxEngine(dtype=x.dtype)
+        # A JAX array's own storage dtype is only a meaningful *floating-point policy* when it
+        # actually is floating -- forwarding an integer/Boolean dtype as the engine's float policy
+        # makes JaxEngine's constructor reject it outright (via normalize_numpy_dtype), so fall back
+        # to the engine's default float policy for those instead of failing discovery. Mirrors the
+        # torch.Tensor/DTensor branches above (MXR-080-0122).
+        dt = x.dtype if np.issubdtype(x.dtype, np.floating) else None
+        return JaxEngine(dtype=dt)
     return engine
 
 
@@ -173,13 +179,13 @@ def _engines_compatible(a: ComputeEngine, b: ComputeEngine) -> bool:
     comparing the Python class alone lets, e.g., a ``cuda:0`` Torch tensor and
     a ``cuda:1`` Torch tensor pass as "homogeneous". Dtype/precision policy is
     compared too, but only when BOTH engines carry an explicit, caller-chosen
-    policy (``dtype_explicit``, currently set by :class:`TorchEngine`): an
-    engine discovered from a non-floating leaf (an integer index or Boolean
-    mask tensor, say) has no real precision opinion of its own and must not
-    conflict with a genuinely floating sibling leaf purely because of its
-    filled-in default dtype. Engines that don't declare ``dtype_explicit``
-    (NumPy, symbolic, JAX) default to "always opinionated", preserving a
-    strict dtype comparison for them.
+    policy (``dtype_explicit``, set by :class:`TorchEngine` and
+    :class:`JaxEngine`): an engine discovered from a non-floating leaf (an
+    integer index or Boolean mask tensor/array, say) has no real precision
+    opinion of its own and must not conflict with a genuinely floating
+    sibling leaf purely because of its filled-in default dtype. Engines that
+    don't declare ``dtype_explicit`` (NumPy, symbolic) default to "always
+    opinionated", preserving a strict dtype comparison for them.
     """
     if type(a) is not type(b):
         return False
