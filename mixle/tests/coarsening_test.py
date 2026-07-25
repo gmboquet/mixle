@@ -18,6 +18,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from mixle.models.coarsening import (
+    CoarsenedLM,
     MergedBlock,
     coarsen,
     depth_merge,
@@ -96,6 +97,48 @@ class MergedBlockDerivativeTest(unittest.TestCase):
         merged = MergedBlock(block, _PointwiseBranch(2), fd_eps=0.0)
         with self.assertRaisesRegex(ValueError, "positive finite"):
             merged(torch.randn(1, 2, 2))
+
+
+class CoarsenedLMContractTest(unittest.TestCase):
+    def test_causal_lm_forward_controls_and_metadata_are_preserved(self):
+        torch.manual_seed(2)
+        source = build_causal_lm(vocab=11, d_model=8, n_layer=2, n_head=2, block=6)
+        source.gradient_checkpointing = [False, True]
+        coarsened = CoarsenedLM(source, list(source.blocks))
+        tokens = torch.tensor([[1, 2], [3, 4]])
+        positions = torch.tensor([[2, 3], [1, 4]])
+
+        self.assertEqual(coarsened.n_head, source.n_head)
+        self.assertEqual(coarsened.gradient_checkpointing, [False, True])
+        self.assertEqual(coarsened(tokens, position_ids=positions).shape, (2, 11))
+        self.assertEqual(
+            coarsened(tokens, position_ids=positions, return_all_logits=True).shape,
+            (2, 2, 11),
+        )
+
+    def test_source_and_coarsened_model_have_independent_parameters(self):
+        torch.manual_seed(3)
+        source = build_causal_lm(vocab=11, d_model=8, n_layer=2, n_head=2, block=4)
+        coarsened = CoarsenedLM(source, list(source.blocks))
+        self.assertEqual(coarsened.tok.weight.data_ptr(), coarsened.head.weight.data_ptr())
+        self.assertNotEqual(coarsened.tok.weight.data_ptr(), source.tok.weight.data_ptr())
+        self.assertNotEqual(
+            next(coarsened.blocks[0].parameters()).data_ptr(),
+            next(source.blocks[0].parameters()).data_ptr(),
+        )
+
+        before = source.tok.weight.detach().clone()
+        with torch.no_grad():
+            coarsened.tok.weight.add_(1.0)
+            next(coarsened.blocks[0].parameters()).zero_()
+        torch.testing.assert_close(source.tok.weight, before)
+
+    def test_checkpoint_manifest_is_bound_to_actual_entries(self):
+        source = build_causal_lm(vocab=11, d_model=8, n_layer=2, n_head=2, block=4)
+        source.gradient_checkpointing = [False, True]
+        coarsened = CoarsenedLM(source, [source.blocks[0]])
+        with self.assertRaisesRegex(ValueError, "expected 1"):
+            coarsened(torch.tensor([[1, 2]]))
 
 
 class DepthCutAcceptanceTest(unittest.TestCase):
