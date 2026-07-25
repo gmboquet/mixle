@@ -67,8 +67,43 @@ def fit_induced_pcfg(
     name: str | None = None,
 ) -> GrammarLearningResult:
     """Fit an induced heterogeneous PCFG and track train/validation likelihoods."""
-    if len(data) == 0:
-        raise ValueError("fit_induced_pcfg requires at least one sequence.")
+    data = _validated_sequences(data, "data")
+    vdata = None if vdata is None else _validated_sequences(vdata, "vdata")
+    max_nonterminals = _positive_int(max_nonterminals, "max_nonterminals")
+    max_its = _positive_int(max_its, "max_its")
+    init_p = _finite_scalar(init_p, "init_p")
+    if not 0.0 < init_p <= 1.0:
+        raise ValueError("init_p must lie in (0, 1]")
+    terminal_rule_mass = _finite_scalar(terminal_rule_mass, "terminal_rule_mass")
+    if not 0.0 < terminal_rule_mass <= 1.0:
+        raise ValueError("terminal_rule_mass must lie in (0, 1]")
+    if terminal_rule_mass == 1.0 and any(len(sequence) > 1 for sequence in data):
+        raise ValueError("terminal_rule_mass=1 creates no binary rules and cannot model multi-token sequences")
+    rule_pseudo_count = _optional_nonnegative(rule_pseudo_count, "rule_pseudo_count")
+    prune_threshold = _nonnegative_finite(prune_threshold, "prune_threshold")
+    min_rule_prob = _nonnegative_finite(min_rule_prob, "min_rule_prob")
+    if min_rule_prob >= 1.0:
+        raise ValueError("min_rule_prob must be less than 1")
+    if not isinstance(terminal_estimators, Sequence) or isinstance(terminal_estimators, (str, bytes)):
+        raise ValueError("terminal_estimators must be a non-empty sequence of ParameterEstimator objects")
+    terminal_estimators = tuple(terminal_estimators)
+    if not terminal_estimators:
+        raise ValueError("terminal_estimators must be a non-empty sequence of ParameterEstimator objects")
+    if any(not isinstance(estimator, ParameterEstimator) for estimator in terminal_estimators):
+        raise TypeError("every terminal_estimators entry must be a ParameterEstimator")
+    if name is not None and not isinstance(name, str):
+        raise ValueError("name must be a string or None")
+    try:
+        hash(start)
+    except TypeError as exc:
+        raise ValueError("start must be hashable") from exc
+    if seed is not None:
+        if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer)):
+            raise ValueError("seed must be None or an integer from 0 through 2**32 - 1")
+        seed = int(seed)
+        if not 0 <= seed <= np.iinfo(np.uint32).max:
+            raise ValueError("seed must be None or an integer from 0 through 2**32 - 1")
+
     estimator = InducedHeterogeneousPCFGEstimator(
         max_nonterminals=max_nonterminals,
         terminal_estimators=terminal_estimators,
@@ -81,20 +116,42 @@ def fit_induced_pcfg(
     )
     rng = np.random.RandomState(seed)
     if initial_model is None:
-        enc_data = seq_encode(data, estimator=estimator)
-        model = seq_initialize(enc_data, estimator, rng, p=init_p)
+        try:
+            enc_data = seq_encode(data, estimator=estimator)
+            model = seq_initialize(enc_data, estimator, rng, p=init_p)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("data is incompatible with the supplied terminal estimators") from exc
     else:
+        _validate_initial_model(initial_model, estimator)
         model = initial_model
-        enc_data = seq_encode(data, model=model)
-    enc_vdata = None if vdata is None else seq_encode(vdata, model=model)
+        try:
+            enc_data = seq_encode(data, model=model)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("data is incompatible with initial_model's terminal schema") from exc
+    try:
+        enc_vdata = None if vdata is None else seq_encode(vdata, model=model)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("vdata is incompatible with the fitted grammar terminal schema") from exc
     history = [pcfg_log_likelihood(model, data)]
     validation_history = None if vdata is None else [pcfg_log_likelihood(model, vdata)]
+    if not np.isfinite(history[0]):
+        raise ValueError("the initial grammar assigns non-finite total log likelihood to data")
+    if validation_history is not None and not np.isfinite(validation_history[0]):
+        raise ValueError("the initial grammar assigns non-finite total log likelihood to vdata")
 
-    for _ in range(max(1, int(max_its))):
+    for iteration in range(max_its):
         model = seq_estimate(enc_data, estimator, model)
-        history.append(pcfg_log_likelihood(model, data))
+        train_likelihood = pcfg_log_likelihood(model, data)
+        if not np.isfinite(train_likelihood):
+            raise RuntimeError(f"grammar fit produced non-finite training likelihood at iteration {iteration + 1}")
+        history.append(train_likelihood)
         if enc_vdata is not None:
-            validation_history.append(float(np.sum(model.seq_log_density(enc_vdata[0][1]))))
+            validation_likelihood = float(np.sum(model.seq_log_density(enc_vdata[0][1])))
+            if not np.isfinite(validation_likelihood):
+                raise RuntimeError(
+                    f"grammar fit produced non-finite validation likelihood at iteration {iteration + 1}"
+                )
+            validation_history.append(validation_likelihood)
     return GrammarLearningResult(model, history, validation_history)
 
 
@@ -199,3 +256,71 @@ def _build_parse_node(
         rule_type="binary",
         children=(left_node, right_node),
     )
+
+
+def _validated_sequences(data: Any, name: str) -> tuple[tuple[Any, ...], ...]:
+    if not isinstance(data, Sequence) or isinstance(data, (str, bytes)) or len(data) == 0:
+        raise ValueError(f"{name} must be a non-empty sequence of non-empty token sequences")
+    result = []
+    for index, sequence in enumerate(data):
+        if not isinstance(sequence, Sequence) or isinstance(sequence, (str, bytes)) or len(sequence) == 0:
+            raise ValueError(f"{name}[{index}] must be a non-empty token sequence")
+        result.append(tuple(sequence))
+    return tuple(result)
+
+
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be a positive integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
+
+
+def _finite_scalar(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a finite scalar")
+    array = np.asarray(value)
+    if array.ndim != 0:
+        raise ValueError(f"{name} must be a finite scalar")
+    try:
+        result = float(array)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite scalar") from exc
+    if not np.isfinite(result):
+        raise ValueError(f"{name} must be a finite scalar")
+    return result
+
+
+def _nonnegative_finite(value: Any, name: str) -> float:
+    result = _finite_scalar(value, name)
+    if result < 0.0:
+        raise ValueError(f"{name} must be non-negative")
+    return result
+
+
+def _optional_nonnegative(value: Any, name: str) -> float | None:
+    return None if value is None else _nonnegative_finite(value, name)
+
+
+def _validate_initial_model(
+    model: Any,
+    estimator: InducedHeterogeneousPCFGEstimator,
+) -> None:
+    if not isinstance(model, HeterogeneousPCFGDistribution):
+        raise TypeError("initial_model must be a HeterogeneousPCFGDistribution")
+    prior = estimator._prior
+    structural_pairs = (
+        ("nonterminals", list(model.nonterminals), list(prior.nonterminals)),
+        ("binary parents", model.binary_parents.tolist(), prior.binary_parents.tolist()),
+        ("binary left children", model.binary_left.tolist(), prior.binary_left.tolist()),
+        ("binary right children", model.binary_right.tolist(), prior.binary_right.tolist()),
+        ("terminal parents", model.terminal_parents.tolist(), prior.terminal_parents.tolist()),
+    )
+    for label, actual, expected in structural_pairs:
+        if actual != expected:
+            raise ValueError(f"initial_model {label} do not match the induced grammar skeleton")
+    expected_encoder = estimator.accumulator_factory().make().acc_to_encoder()
+    if model.dist_to_encoder() != expected_encoder:
+        raise ValueError("initial_model terminal encoders do not match terminal_estimators")

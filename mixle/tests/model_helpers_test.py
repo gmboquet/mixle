@@ -184,6 +184,31 @@ class GrammarLearningHelpersTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(result.history)))
         self.assertGreater(pcfg_log_likelihood(result.model, [list("ab")]), -np.inf)
 
+    def test_fit_rejects_invalid_budget_data_and_schema(self):
+        estimator = CategoricalDistribution({"a": 0.5, "b": 0.5}).estimator(pseudo_count=1.0)
+        for max_its in (0, -1, 1.5, True):
+            with self.subTest(max_its=max_its), self.assertRaises(ValueError):
+                fit_induced_pcfg([["a"]], [estimator], 2, max_its=max_its)
+        for data in ([], [[]], ["ab"]):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                fit_induced_pcfg(data, [estimator], 2)
+        with self.assertRaises(TypeError):
+            fit_induced_pcfg([["a"]], [object()], 2)
+        with self.assertRaises(ValueError):
+            fit_induced_pcfg([["a"]], [estimator], 2, init_p=0)
+        with self.assertRaises(ValueError):
+            fit_induced_pcfg([["a", "b"]], [estimator], 2, terminal_rule_mass=1)
+
+    def test_fit_rejects_incompatible_initial_grammar(self):
+        estimator = CategoricalDistribution({"a": 0.5, "b": 0.5}).estimator(pseudo_count=1.0)
+        incompatible = HeterogeneousPCFGDistribution(
+            binary_rules={"S": [("A", "A", 0.5)]},
+            terminal_rules={"S": [(CategoricalDistribution({"a": 1.0}), 0.5)]},
+            start="S",
+        )
+        with self.assertRaisesRegex(ValueError, "induced grammar skeleton"):
+            fit_induced_pcfg([["a"]], [estimator], 2, initial_model=incompatible)
+
 
 class DependenceAndCausalityHelpersTestCase(unittest.TestCase):
     def test_discrete_conditional_mutual_information_detects_dependence(self):
