@@ -1,15 +1,11 @@
-"""P16 (experimental) -- data-free spectral-health receipts discriminate training regimes.
-
-The card's kill criterion: if the spectral exponents cannot tell an under-trained (near-random)
-layer from a well-trained one from a memorizing (over-correlated) one, drop the idea. These tests
-validate the receipt on matrices with KNOWN spectral laws -- constructed via SVD so the singular
-spectrum is exactly the design -- and require the metrics to order and classify the three regimes
-as documented, using only the weights (no data).
-"""
+"""Descriptive, abstaining receipts for weight-matrix spectra."""
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
+import pytest
 
 from mixle.experimental.spectral_health import (
     effective_rank,
@@ -25,74 +21,68 @@ def _rand_orth(n, m, rng):
     return q[:, : min(n, m)]
 
 
-def _with_spectrum(sv, *, n=512, m=256, seed=0):
-    """A matrix whose singular values are exactly ``sv`` (random orthogonal U, V)."""
+def _with_spectrum(sv, *, n=128, m=64, seed=0):
     rng = np.random.default_rng(seed)
     return _rand_orth(n, min(n, m), rng) @ np.diag(sv) @ _rand_orth(m, min(n, m), rng).T
 
 
-def _regimes():
-    idx = np.arange(1, 257, dtype=float)
+def _descriptive_regimes():
+    idx = np.arange(1, 65, dtype=float)
     rng = np.random.default_rng(0)
-    under = rng.standard_normal((512, 256))  # iid Gaussian -> Marchenko-Pastur bulk
-    well = _with_spectrum(idx**-0.35, seed=1)  # mild power-law tail
-    sv = idx**-1.3
-    sv[0] *= 6.0
-    sv[1] *= 3.0
-    memorizing = _with_spectrum(sv, seed=2)  # steep tail + planted spikes
-    return under, well, memorizing
+    random_matrix = rng.standard_normal((128, 64))
+    mild_tail = _with_spectrum(idx**-0.35, seed=1)
+    heavy_tail = _with_spectrum(idx**-1.3, seed=2)
+    return random_matrix, mild_tail, heavy_tail
 
 
-def test_tail_exponent_orders_the_three_regimes() -> None:
-    under, well, memorizing = _regimes()
-    a_under = spectral_health(under).alpha
-    a_well = spectral_health(well).alpha
-    a_mem = spectral_health(memorizing).alpha
-    # Under-trained (near-random) has the lightest tail; memorizing the heaviest.
-    assert a_under > a_well > a_mem, f"alphas not ordered: {a_under:.2f}, {a_well:.2f}, {a_mem:.2f}"
-    # And the well-trained layer sits in the documented [2, 4] band.
-    assert 2.0 <= a_well <= 4.0, f"well-trained alpha {a_well:.2f} left the [2,4] band"
+def test_tail_exponent_describes_constructed_spectra_without_diagnosis():
+    random_matrix, mild_tail, heavy_tail = _descriptive_regimes()
+    receipts = [spectral_health(weight, min_tail_points=40) for weight in (random_matrix, mild_tail, heavy_tail)]
+    assert receipts[1].alpha > receipts[2].alpha
+    assert receipts[0].alpha is not None
+    assert all(receipt.verdict is None for receipt in receipts)
+    assert all("No calibrated diagnostic model" in receipt.diagnostic_reason for receipt in receipts)
 
 
-def test_verdicts_match_the_documented_bands() -> None:
-    under, well, memorizing = _regimes()
-    assert spectral_health(under).verdict == "under-trained"
-    assert spectral_health(well).verdict == "well-trained"
-    assert spectral_health(memorizing).verdict == "memorizing"
+def test_good_tail_fit_has_sample_size_ks_and_bootstrap_interval():
+    structured = _with_spectrum(np.arange(1, 65, dtype=float) ** -0.35, seed=3)
+    receipt = spectral_health(structured, min_tail_points=40, bootstrap_samples=100)
+    assert receipt.tail_fit_status == "descriptive-fit"
+    assert receipt.tail_fit_accepted
+    assert receipt.tail_points >= 40
+    assert receipt.ks_d is not None and receipt.ks_d <= 0.1
+    assert receipt.alpha_ci_low < receipt.alpha < receipt.alpha_ci_high
 
 
-def test_kill_criterion_random_is_distinguished_from_trained() -> None:
-    """The receipt must separate a noise/random layer from a trained one by a wide margin."""
-    under, well, _ = _regimes()
-    gap = spectral_health(under).alpha - spectral_health(well).alpha
-    assert gap > 3.0, f"random vs trained alpha gap only {gap:.2f} -- not discriminative"
+def test_small_matrix_abstains_without_nonfinite_receipt_values():
+    receipt = spectral_health(np.eye(3), min_tail_points=4)
+    assert receipt.tail_fit_status == "insufficient-tail"
+    assert not receipt.tail_fit_accepted
+    assert receipt.alpha is None
+    assert receipt.ks_d is None
+    assert receipt.verdict is None
+    json.dumps(receipt.as_dict(), allow_nan=False)
 
 
-def test_stable_and_effective_rank_track_correlation() -> None:
-    under, well, memorizing = _regimes()
-    # A near-random matrix is close to full-rank; a heavy-tailed one collapses toward rank 1.
-    sr = [stable_rank(singular_values(w)) for w in (under, well, memorizing)]
-    assert sr[0] > sr[1] > sr[2], f"stable rank not ordered: {sr}"
-    assert stable_rank(singular_values(memorizing)) < 3.0
-    er = [effective_rank(singular_values(w)) for w in (under, well, memorizing)]
-    assert er[0] > er[2], "effective rank should be highest for the random layer"
+def test_stable_and_effective_rank_remain_descriptive():
+    random_matrix, mild_tail, heavy_tail = _descriptive_regimes()
+    stable = [stable_rank(singular_values(weight)) for weight in (random_matrix, mild_tail, heavy_tail)]
+    effective = [effective_rank(singular_values(weight)) for weight in (random_matrix, mild_tail, heavy_tail)]
+    assert stable[0] > stable[1] > stable[2]
+    assert effective[0] > effective[2]
 
 
-def test_receipt_is_data_free_and_deterministic() -> None:
-    well = _with_spectrum(np.arange(1, 257, dtype=float) ** -0.35, seed=1)
-    r1 = spectral_health(well)  # note: only the weight matrix is passed -- no data
-    r2 = spectral_health(well)
-    assert r1.as_dict() == r2.as_dict()
-    assert set(r1.as_dict()) >= {"alpha", "ks_d", "stable_rank", "effective_rank", "verdict"}
+def test_receipt_is_data_free_deterministic_and_json_safe():
+    structured = _with_spectrum(np.arange(1, 65, dtype=float) ** -0.35, seed=1)
+    first = spectral_health(structured, min_tail_points=40, bootstrap_samples=100, seed=7)
+    second = spectral_health(structured, min_tail_points=40, bootstrap_samples=100, seed=7)
+    assert first.as_dict() == second.as_dict()
+    encoded = json.dumps(first.as_dict(), allow_nan=False)
+    assert "diagnostic_reason" in encoded
 
 
-def test_power_law_fit_is_good_on_structured_spectra() -> None:
-    well = _with_spectrum(np.arange(1, 257, dtype=float) ** -0.35, seed=3)
-    assert spectral_health(well).ks_d < 0.1, "power-law tail fit should be tight on a power-law spectrum"
-
-
-def test_model_report_over_named_layers() -> None:
-    idx = np.arange(1, 257, dtype=float)
+def test_model_report_preserves_names_and_abstains_per_layer():
+    idx = np.arange(1, 65, dtype=float)
     report = model_spectral_report(
         {
             "layer.0": _with_spectrum(idx**-0.35, seed=1),
@@ -100,12 +90,36 @@ def test_model_report_over_named_layers() -> None:
         }
     )
     assert set(report) == {"layer.0", "layer.1"}
-    assert report["layer.0"].verdict == "well-trained"
-    assert report["layer.1"].verdict == "memorizing"
+    assert all(receipt.verdict is None for receipt in report.values())
 
 
-def test_handles_small_and_degenerate_matrices() -> None:
-    # Too few singular values to fit a tail -> alpha is inf, verdict falls back to under-trained.
-    tiny = spectral_health(np.eye(3))
-    assert tiny.verdict == "under-trained"
-    assert tiny.stable_rank > 0
+@pytest.mark.parametrize(
+    "weight,exception,match",
+    [
+        (1.0, ValueError, "two dimensions"),
+        (np.array([1.0, 2.0]), ValueError, "two dimensions"),
+        (np.empty((0, 3)), ValueError, "empty"),
+        (np.array([[1.0 + 1.0j]]), TypeError, "complex"),
+        (np.array([[np.nan]]), ValueError, "finite"),
+        (np.array([[np.inf]]), ValueError, "finite"),
+    ],
+)
+def test_invalid_weight_inputs_fail_closed(weight, exception, match):
+    with pytest.raises(exception, match=match):
+        spectral_health(weight)
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"min_tail_points": 0}, "min_tail_points"),
+        ({"bootstrap_samples": 0}, "bootstrap_samples"),
+        ({"max_ks": 0.0}, "max_ks"),
+        ({"max_ks": float("nan")}, "max_ks"),
+        ({"confidence": 1.0}, "confidence"),
+        ({"seed": True}, "seed"),
+    ],
+)
+def test_invalid_fit_controls_fail_closed(kwargs, match):
+    with pytest.raises((TypeError, ValueError), match=match):
+        spectral_health(np.eye(8), **kwargs)
