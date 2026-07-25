@@ -23,7 +23,11 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from mixle.experimental.context_spine import ContextMechanism, SlidingWindowSpine, train_tbptt  # noqa: E402
-from mixle.experimental.graduation import ExperimentalMechanism  # noqa: E402
+from mixle.experimental.graduation import (  # noqa: E402
+    BaselineComparisonReceipt,
+    ExperimentalMechanism,
+    MisfitReceipt,
+)
 from mixle.experimental.long_context_eval import comparison_table, evaluate  # noqa: E402
 from mixle.experimental.sketch_state_attention import (  # noqa: E402
     E3_UNAVAILABLE_COMPARISONS,
@@ -311,10 +315,30 @@ def test_fd_misfit_receipt_shape_and_graduation_bookkeeping():
     assert receipt["bound"] > 0.0
     assert receipt["realized_error"] <= receipt["bound"] * (1.0 + 1e-6)
 
-    entry = ExperimentalMechanism(name="sketch_state_attention_fd", misfit_receipt=receipt)
-    assert entry.misfit_receipt is receipt
+    name = "sketch_state_attention_fd"
+    verified_misfit = MisfitReceipt.create(
+        mechanism_name=name,
+        metric="spectral_error",
+        value=receipt["realized_error"],
+        threshold=receipt["bound"] * (1.0 + 1e-6),
+        observed_at="2026-07-25T00:00:00Z",
+        producer="sketch-state-attention-test",
+        artifact_ref="memory://fd-misfit",
+    )
+    entry = ExperimentalMechanism(name=name, misfit_receipt=verified_misfit)
+    assert entry.misfit_receipt is verified_misfit
     assert not entry.is_eligible()  # baseline_receipt still missing -- bookkeeping, not fabrication
-    entry.baseline_receipt = {"metric": "bpb", "mechanism": 1.0, "baseline": 1.0, "flops": 0.0}
+    entry.baseline_receipt = BaselineComparisonReceipt.create(
+        mechanism_name=name,
+        metric="bpb",
+        mechanism_value=1.0,
+        baseline_value=1.01,
+        matched_flops=1.0,
+        lower_is_better=True,
+        observed_at="2026-07-25T00:00:00Z",
+        producer="sketch-state-attention-test",
+        artifact_ref="memory://fd-baseline",
+    )
     assert entry.is_eligible()
     print(f"[E3 receipt] FD misfit receipt -> graduation bookkeeping: {receipt}")
 
@@ -328,9 +352,29 @@ def test_tensor_sketch_misfit_receipt_shape_and_graduation_bookkeeping():
     assert receipt["trials"] == 200.0
     assert receipt["empirical_variance"] >= 0.0
 
-    entry = ExperimentalMechanism(name="sketch_state_attention_tensor_sketch", misfit_receipt=receipt)
+    name = "sketch_state_attention_tensor_sketch"
+    verified_misfit = MisfitReceipt.create(
+        mechanism_name=name,
+        metric="empirical_variance",
+        value=receipt["empirical_variance"],
+        threshold=max(receipt["empirical_variance"], 1e-12),
+        observed_at="2026-07-25T00:00:00Z",
+        producer="sketch-state-attention-test",
+        artifact_ref="memory://tensor-sketch-misfit",
+    )
+    entry = ExperimentalMechanism(name=name, misfit_receipt=verified_misfit)
     assert not entry.is_eligible()
-    entry.baseline_receipt = {"metric": "bpb", "mechanism": 1.0, "baseline": 1.0, "flops": 0.0}
+    entry.baseline_receipt = BaselineComparisonReceipt.create(
+        mechanism_name=name,
+        metric="bpb",
+        mechanism_value=1.0,
+        baseline_value=1.01,
+        matched_flops=1.0,
+        lower_is_better=True,
+        observed_at="2026-07-25T00:00:00Z",
+        producer="sketch-state-attention-test",
+        artifact_ref="memory://tensor-sketch-baseline",
+    )
     assert entry.is_eligible()
     print(f"[E3 receipt] tensor sketch misfit receipt -> graduation bookkeeping: {receipt}")
 
