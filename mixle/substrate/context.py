@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -58,9 +59,54 @@ _RESOURCE_KIND_BY_SUBSTRATE_KIND: dict[str, tuple[str, str]] = {
 }
 
 
+# The closed canonical wire schema (MXR-080-0238): the only types a content hash may traverse.
+# ``bool``/``None``/``str``/``int``/finite ``float`` are JSON scalars; ``list``/``tuple`` become a JSON
+# array; ``dict`` with ``str`` keys becomes a JSON object. Nothing else -- a ``set`` has no canonical
+# order, a ``Path`` (or any other stringifiable-but-not-string object) collides with a plain ``str`` of
+# the same text, and a plain object's default ``repr()`` embeds a process-specific memory address that
+# makes two semantically-identical instances hash differently. Every call site in this codebase that
+# feeds this hasher already normalizes its input to these types before calling (e.g. ``str(path)`` at
+# the ingestion boundary); this closes the door on anything that doesn't.
+
+
+def _canonicalize(value: Any, *, _path: str = "$") -> Any:
+    """Recursively validate ``value`` against the closed canonical wire schema and return an equivalent
+    structure of plain ``str``/``int``/``float``/``bool``/``None``/``list``/``dict`` -- ready for
+    ``json.dumps`` with no ``default=`` fallback. Raises :class:`TypeError`/:class:`ValueError` (never
+    silently stringifies) for anything outside the schema, naming the offending path so the caller can
+    find and fix the non-canonical value at its source."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, str):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{_path}: non-finite float {value!r} has no canonical JSON encoding")
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize(v, _path=f"{_path}[{i}]") for i, v in enumerate(value)]
+    if isinstance(value, dict):
+        canonical: dict[str, Any] = {}
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise TypeError(f"{_path}: canonical JSON dict keys must be str, got {k!r} ({type(k).__name__})")
+            canonical[k] = _canonicalize(v, _path=f"{_path}.{k}")
+        return canonical
+    raise TypeError(
+        f"{_path}: {type(value).__name__} has no canonical JSON encoding (value={value!r}); convert it "
+        "explicitly to str/int/float/bool/None/list/dict before hashing -- e.g. a set -> a sorted list, "
+        "a Path -> str(path), a custom object -> its own JSON-native dict"
+    )
+
+
 def _canonical_json(obj: Any) -> str:
-    """A stable JSON encoding (sorted keys, no incidental whitespace) so equal content hashes equal."""
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
+    """A stable, type-aware JSON encoding (sorted keys, no incidental whitespace, closed schema --
+    see :func:`_canonicalize`) so equal content hashes equal and unequal content never collides.
+    Unlike the previous ``default=str`` fallback, this never guesses a string form for a value outside
+    the schema; it raises instead (MXR-080-0238)."""
+    return json.dumps(_canonicalize(obj), sort_keys=True, separators=(",", ":"))
 
 
 def _canonical_item_hash(

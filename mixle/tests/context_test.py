@@ -1,16 +1,19 @@
 """ContextPacket + assembly-on-route (O2): budgeted, provenanced views of the substrate."""
 
 import unittest
+from pathlib import Path
 
 from mixle.substrate import (
     ContextBudget,
     ReceiverProfile,
     Substrate,
+    SubstrateItem,
     assemble_context,
     assemble_for_receivers,
     compress_text,
     ingest_documents,
 )
+from mixle.substrate.context import substrate_item_to_knowledge_dict
 from mixle.telemetry import Telemetry
 
 try:
@@ -319,6 +322,68 @@ class ReceiverConditionedCompressionTest(unittest.TestCase):
         self.assertEqual(budget.max_chars, 123)
         self.assertEqual(budget.max_items, 7)
         self.assertEqual(budget.shape, "brief")
+
+
+class CanonicalHashTest(unittest.TestCase):
+    """MXR-080-0238: the content-hash envelope's JSON encoding rejects anything outside a closed,
+    type-aware canonical schema instead of silently stringifying it via ``default=str``."""
+
+    def _item(self, payload):
+        return SubstrateItem(id="x", kind="text", text="t", payload=payload)
+
+    def test_a_set_in_the_payload_is_rejected_not_stringified(self):
+        """A set has no canonical order -- default=str previously ran it through repr(), which is
+        stable only within one process (Python randomizes string hashing per process by default, so
+        the SAME logical set's iteration order -- and therefore its hash -- can differ run to run)."""
+        with self.assertRaises(TypeError):
+            substrate_item_to_knowledge_dict(self._item({"tags": {"a", "b", "c"}}))
+
+    def test_a_path_in_the_payload_is_rejected_not_silently_treated_as_a_string(self):
+        """default=str made a Path and the equivalent plain str hash identically, masking a real type
+        distinction; the fix requires the caller to convert explicitly (str(path)), as ingest.py
+        already does at its own payload-construction boundary. (Not the "ref"/"path" payload KEY,
+        which substrate_item_to_knowledge_dict already explicitly str()-converts on its own via
+        _as_artifact_ref before this ever runs -- a Path value under any OTHER key.)"""
+        with self.assertRaises(TypeError):
+            substrate_item_to_knowledge_dict(self._item({"source_file": Path("/data/a.csv")}))
+
+    def test_a_plain_object_in_the_payload_is_rejected_not_stringified(self):
+        """default=str on a plain object with no custom __repr__ embeds a process-specific memory
+        address -- two semantically-identical (empty) instances would hash differently."""
+
+        class Blob:
+            pass
+
+        with self.assertRaises(TypeError):
+            substrate_item_to_knowledge_dict(self._item({"v": Blob()}))
+
+    def test_non_finite_float_in_the_payload_is_rejected(self):
+        with self.assertRaises(ValueError):
+            substrate_item_to_knowledge_dict(self._item({"v": float("nan")}))
+        with self.assertRaises(ValueError):
+            substrate_item_to_knowledge_dict(self._item({"v": float("inf")}))
+
+    def test_json_native_payloads_still_hash_deterministically(self):
+        """Positive control: ordinary JSON-native payloads (the only kind any current call site in
+        this codebase actually constructs) are unaffected -- same content, same hash, every time."""
+        payload = {"a": [1, 2, "x"], "b": None, "c": True, "d": {"nested": 1.5}}
+        d1 = substrate_item_to_knowledge_dict(self._item(dict(payload)))
+        d2 = substrate_item_to_knowledge_dict(self._item(dict(payload)))
+        self.assertEqual(d1["content_hash"], d2["content_hash"])
+        self.assertEqual(len(d1["content_hash"]), 64)  # sha256 hex
+
+    def test_key_order_does_not_affect_the_hash(self):
+        """Sorted-keys canonicalization: two dicts with the same content in a different insertion
+        order must hash identically."""
+        d1 = substrate_item_to_knowledge_dict(self._item({"a": 1, "b": 2}))
+        d2 = substrate_item_to_knowledge_dict(self._item({"b": 2, "a": 1}))
+        self.assertEqual(d1["content_hash"], d2["content_hash"])
+
+    def test_non_string_dict_key_is_rejected(self):
+        """JSON object keys are strings; silently coercing an int/float/bool/None key to its string
+        form (as plain json.dumps would) risks two distinct keys colliding after coercion."""
+        with self.assertRaises(TypeError):
+            substrate_item_to_knowledge_dict(self._item({1: "x"}))
 
 
 if __name__ == "__main__":
