@@ -140,6 +140,20 @@ class CoarsenedLMContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expected 1"):
             coarsened(torch.tensor([[1, 2]]))
 
+    def test_coarsening_is_closed_under_a_second_pass(self):
+        torch.manual_seed(4)
+        rng = np.random.default_rng(4)
+        source = build_causal_lm(vocab=11, d_model=8, n_layer=4, n_head=2, block=4)
+        law = _random_law(rng, 8, scale=0.2)
+
+        first = coarsen(source, budget=1e6, trust_region=1e6, input_law=law, n_mc=4)
+        second = coarsen(first.model, budget=1e6, trust_region=1e6, input_law=law, n_mc=4)
+
+        self.assertEqual(first.model.n_layer, 2)
+        self.assertEqual(second.model.n_layer, 2)
+        self.assertTrue(all(np.isfinite(item.kl_divergence) for item in second.receipt_map.values()))
+        self.assertEqual(second.model(torch.tensor([[1, 2]])).shape, (1, 11))
+
 
 class DepthCutAcceptanceTest(unittest.TestCase):
     """Acceptance criterion: "2x depth cut on a small LM within stated held-out budget, data-free"."""
