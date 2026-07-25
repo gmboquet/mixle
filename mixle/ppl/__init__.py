@@ -25,6 +25,14 @@ from mixle.models.embedding import CategoricalEmbedding as Embedding
 # Run the family/composite registrations (import-time side effects) BEFORE the dialect constructors
 # and the dynamics operators (which register after the composites) are pulled in.
 from mixle.ppl import _lowering  # noqa: F401  (imported for its registration side effects)
+from mixle.ppl._result import (
+    PointwiseLogLikelihood,
+    Predictive,
+    ResultCapabilities,
+    Sampleable,
+    Summarizable,
+    result_capabilities,
+)
 from mixle.ppl.conformal import (
     ConformalClassifier,
     ConformalKnowledgeGraph,
@@ -229,6 +237,12 @@ __all__ = [
     "fit_censored",
     "fit_with_provenance",
     "PPLFitResult",
+    "PointwiseLogLikelihood",
+    "Predictive",
+    "ResultCapabilities",
+    "Sampleable",
+    "Summarizable",
+    "result_capabilities",
     "censored_loglik",
     "kaplan_meier",
     "hdi",

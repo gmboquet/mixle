@@ -28,6 +28,16 @@ class HdiTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             hdi([1.0, 2.0, 3.0], prob=1.5)
 
+    def test_rejects_empty_nonfinite_and_multivariate_draws(self):
+        for draws in ([], [0.0, np.nan], [0.0, np.inf]):
+            with self.subTest(draws=draws), self.assertRaises(ValueError):
+                hdi(draws)
+        with self.assertRaisesRegex(ValueError, "select one coordinate"):
+            hdi(np.zeros((2, 3)))
+
+    def test_one_draw_has_a_degenerate_finite_interval(self):
+        self.assertEqual(hdi([2.5]), (2.5, 2.5))
+
 
 class PosteriorSummaryTest(unittest.TestCase):
     def test_table_has_mean_sd_hdi(self):
@@ -42,6 +52,57 @@ class PosteriorSummaryTest(unittest.TestCase):
                 self.assertIn(key, row)
             self.assertLessEqual(row["hdi_low"], row["mean"])
             self.assertLessEqual(row["mean"], row["hdi_high"])
+
+    def test_parameter_ess_is_computed_from_each_parameters_draws(self):
+        rng = np.random.RandomState(10)
+        iid = rng.normal(size=400)
+        sticky = np.repeat(rng.normal(size=20), 20)
+
+        class Fitted:
+            _result = None
+
+            def summary(self):
+                return {
+                    "iid": {"mean": float(iid.mean()), "std": float(iid.std())},
+                    "sticky": {"mean": float(sticky.mean()), "std": float(sticky.std())},
+                }
+
+            def posterior(self, name):
+                return {"iid": iid, "sticky": sticky}[name]
+
+        table = posterior_summary(Fitted())
+        self.assertGreater(table["iid"]["ess"], table["sticky"]["ess"])
+        self.assertEqual(table["iid"]["diagnostic_status"], "ok")
+        self.assertEqual(table["sticky"]["diagnostic_status"], "ok")
+
+    def test_failed_diagnostics_are_explicit_in_fixed_schema(self):
+        class Fitted:
+            _result = None
+
+            def summary(self):
+                return {"theta": {"mean": 1.0, "sd": 0.2}}
+
+            def posterior(self, _name):
+                raise RuntimeError("draw store unavailable")
+
+        row = posterior_summary(Fitted())["theta"]
+        self.assertEqual(
+            set(row),
+            {
+                "mean",
+                "sd",
+                "hdi_low",
+                "hdi_high",
+                "ess",
+                "ess_tail",
+                "r_hat",
+                "diagnostic_status",
+                "diagnostic_error",
+            },
+        )
+        self.assertEqual(row["diagnostic_status"], "failed")
+        self.assertIn("draw store unavailable", row["diagnostic_error"])
+        self.assertIsNone(row["ess"])
 
 
 if __name__ == "__main__":

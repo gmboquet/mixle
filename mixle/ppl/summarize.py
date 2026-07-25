@@ -25,10 +25,22 @@ def hdi(samples: Sequence[float], prob: float = 0.94) -> tuple[float, float]:
     """
     if not 0.0 < prob < 1.0:
         raise ValueError("prob must be in (0, 1).")
-    x = np.sort(np.asarray(samples, dtype=float).ravel())
+    try:
+        x = np.asarray(samples, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise TypeError("samples must be a finite one-dimensional numeric sequence") from error
+    if x.ndim != 1:
+        raise ValueError(
+            "samples must be one-dimensional; select one coordinate before computing a multivariate HDI"
+        )
+    if not np.all(np.isfinite(x)):
+        raise ValueError("samples must contain only finite posterior draws")
+    x = np.sort(x)
     n = x.size
     if n == 0:
         raise ValueError("samples is empty.")
+    if n == 1:
+        return float(x[0]), float(x[0])
     k = int(np.floor(prob * n))
     if k >= n:
         return float(x[0]), float(x[-1])
@@ -41,33 +53,59 @@ def hdi(samples: Sequence[float], prob: float = 0.94) -> tuple[float, float]:
 def posterior_summary(fitted: RandomVariable, *, hdi_prob: float = 0.94) -> dict[str, dict[str, Any]]:
     """Per-parameter posterior summary table for a fitted PPL model (best after ``how='mcmc'``).
 
-    Returns ``{param_name: {'mean', 'sd', 'hdi_low', 'hdi_high', 'ess', 'r_hat'}}``. ``mean``/``sd`` come
+    Returns a fixed per-parameter schema with ``mean``, ``sd``, ``hdi_low``, ``hdi_high``,
+    ``ess``, ``ess_tail``, ``r_hat``, ``diagnostic_status``, and ``diagnostic_error``. ``mean``/``sd`` come
     from the fit's own summary; the HDI is computed from the posterior draws (when the fit exposes them);
     ``ess`` (effective sample size) and ``r_hat`` (Gelman-Rubin, multi-chain) come from the sampler's
     diagnostics when present. A point fit (em/map) yields just ``mean``/``sd``.
     """
     summ = fitted.summary()
     result = getattr(fitted, "_result", None)
-    rhat = getattr(result, "rhat", None) if result is not None else None
-    ess = getattr(result, "ess", None) if result is not None else None
+    rhat = getattr(result, "split_rhat", None) if result is not None else None
+    if not isinstance(rhat, dict):
+        rhat = getattr(result, "rhat", None) if result is not None else None
+    bulk_by_parameter = getattr(result, "bulk_ess", None) if result is not None else None
+    tail_by_parameter = getattr(result, "tail_ess", None) if result is not None else None
     out: dict[str, dict[str, Any]] = {}
     for name, stat in summ.items():
         if name.startswith("_") or not isinstance(stat, dict):
             continue
-        row: dict[str, Any] = {"mean": stat.get("mean"), "sd": stat.get("std", stat.get("sd"))}
-        draws = None
+        row: dict[str, Any] = {
+            "mean": stat.get("mean"),
+            "sd": stat.get("std", stat.get("sd")),
+            "hdi_low": None,
+            "hdi_high": None,
+            "ess": None,
+            "ess_tail": None,
+            "r_hat": None,
+            "diagnostic_status": "unavailable",
+            "diagnostic_error": None,
+        }
         try:
-            draws = np.asarray(fitted.posterior(name), dtype=float).ravel()
-        except Exception:  # noqa: BLE001
-            draws = None
-        if draws is not None and draws.size > 1:
+            draws = np.asarray(fitted.posterior(name), dtype=float)
             lo, hi = hdi(draws, hdi_prob)
-            row["hdi_low"] = lo
-            row["hdi_high"] = hi
+            row["hdi_low"], row["hdi_high"] = lo, hi
+            if isinstance(bulk_by_parameter, dict) and name in bulk_by_parameter:
+                row["ess"] = float(bulk_by_parameter[name])
+            else:
+                from mixle.ppl.diagnostics import bulk_ess
+
+                row["ess"] = float(bulk_ess(draws))
+            if isinstance(tail_by_parameter, dict) and name in tail_by_parameter:
+                row["ess_tail"] = float(tail_by_parameter[name])
+            else:
+                from mixle.ppl.diagnostics import tail_ess
+
+                row["ess_tail"] = float(tail_ess(draws))
+            row["diagnostic_status"] = "ok"
+        except (KeyError, NotImplementedError) as error:
+            row["diagnostic_status"] = "unavailable"
+            row["diagnostic_error"] = f"{type(error).__name__}: {error}"
+        except (TypeError, ValueError, RuntimeError) as error:
+            row["diagnostic_status"] = "failed"
+            row["diagnostic_error"] = f"{type(error).__name__}: {error}"
         if isinstance(rhat, dict) and name in rhat:
             row["r_hat"] = float(rhat[name])
-        if ess is not None and isinstance(ess, (int, float)):
-            row["ess"] = float(ess)
         out[name] = row
     return out
 

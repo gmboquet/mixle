@@ -20,7 +20,7 @@ import numpy as np
 
 from mixle.capability import supports
 from mixle.inference.estimation import optimize
-from mixle.ppl._result import PosteriorResult, Sampleable, Summarizable
+from mixle.ppl._result import PointwiseLogLikelihood, Sampleable, Summarizable
 from mixle.utils.aliasing import coalesce_alias
 
 __all__ = [
@@ -1165,7 +1165,7 @@ class RandomVariable:
         name=None,
         keys=None,
         dist=None,
-        result: PosteriorResult | None = None,
+        result: Any | None = None,
         scope="shared",
         reparam=None,
     ):
@@ -1249,7 +1249,7 @@ class RandomVariable:
         return self._scope
 
     @classmethod
-    def _bound(cls, dist, *, name=None, result: PosteriorResult | None = None) -> RandomVariable:
+    def _bound(cls, dist, *, name=None, result: Any | None = None) -> RandomVariable:
         return cls("bound", dist=dist, name=name or getattr(dist, "name", None), result=result)
 
     @classmethod
@@ -1454,7 +1454,7 @@ class RandomVariable:
         return read_params(d)
 
     @property
-    def result(self) -> PosteriorResult | None:
+    def result(self) -> Any | None:
         """Inference metadata (EM history / MCMC chain) when present; else None."""
         return self._result
 
@@ -1600,7 +1600,11 @@ class RandomVariable:
         data under one posterior draw; for a point-estimate fit it is a single row.
         """
         r = self._result
-        if r is not None and hasattr(r, "pointwise_log_likelihood") and getattr(r, "build", None) is not None:
+        if (
+            r is not None
+            and supports(r, PointwiseLogLikelihood)
+            and getattr(r, "build", None) is not None
+        ):
             return r.pointwise_log_likelihood(data)
         return np.asarray(self.log_prob(list(data)), dtype=float)[None, :]
 
