@@ -63,12 +63,14 @@ class ForwardTest(unittest.TestCase):
 
 
 class LnsProductZeroTest(unittest.TestCase):
-    """MXR-080-0138 follow-up: ``_seq_log_density_lns``'s "product" branch must combine LNS codes via
-    ``LogNumberSystem.multiply()``, not raw int64 ``+`` -- a categorical leaf scoring an unseen label
-    (the default, unsmoothed ``CategoricalDistribution`` configuration -- not an adversarial setup) is
-    a realistic ``log(0) = -inf`` leaf that quantizes to ``LOG_ZERO_CODE``. Raw-adding that sentinel to
-    an ordinary sibling code (virtually always negative, since real log-densities are <= 0) silently
-    overflows int64 instead of propagating "impossible observation"; confirmed pre-fix this returned a
+    """MXR-080-0138 follow-up: ``_seq_log_density_lns``'s "product" AND "sum" branches must combine LNS
+    codes via ``LogNumberSystem.multiply()``, not raw int64 ``+`` -- a categorical leaf scoring an unseen
+    label (the default, unsmoothed ``CategoricalDistribution`` configuration -- not an adversarial setup)
+    is a realistic ``log(0) = -inf`` leaf that quantizes to ``LOG_ZERO_CODE``, and an exactly-zero mixture
+    weight (``log(0) = -inf``) is an equally realistic ``LOG_ZERO_CODE`` on the "sum" branch's weight side.
+    Raw-adding that sentinel to an ordinary sibling code (virtually always negative, since real
+    log-densities are <= 0) silently overflows int64 instead of propagating "impossible observation" (or,
+    for a mixture, the correct finite absorbing result); confirmed pre-fix the product branch returned a
     spurious ~9.2e16 log-density (i.e. the single MOST likely row) for what is actually a zero-probability
     observation -- see the negative-control run in this task's investigation, not just a lost-precision bug.
     """
@@ -135,6 +137,69 @@ class LnsProductZeroTest(unittest.TestCase):
         self.assertTrue(np.isneginf(ref[0]))
         self.assertTrue(np.isneginf(got[0]))
         self.assertLess(abs(float(got[1]) - float(ref[1])), 0.05)
+
+    def _mixed_categorical_circuit(self) -> PC:
+        # branch 0 has NO mass on "b" (default_value=0.0) -> log-density -inf -> LOG_ZERO_CODE child.
+        return PC(
+            summ(
+                [
+                    leaf(0, st.CategoricalDistribution({"a": 1.0})),
+                    leaf(0, st.CategoricalDistribution({"a": 0.3, "b": 0.7})),
+                ],
+                [0.5, 0.5],
+            ),
+            num_vars=1,
+            lns_step=0.01,
+        )
+
+    def test_sum_node_with_log_zero_child_is_finite_not_overflow(self):
+        # a 50/50 mixture of (probability 0) and (probability 0.7) is just 0.5*0.7 -- finite and close
+        # to the float64 reference, not a spuriously huge/corrupted value from raw-add overflow.
+        pc = self._mixed_categorical_circuit()
+        rows = [["b"]]
+        enc = pc.dist_to_encoder().seq_encode(rows)
+        ref = pc._node_values(enc)[-1]
+        got = pc._seq_log_density_lns(enc)
+
+        self.assertTrue(np.isfinite(ref[0]))  # sanity: the reference agrees this is an ordinary density
+        self.assertTrue(np.isfinite(got[0]), f"expected a finite mixture density, got {got[0]!r}")
+        self.assertLess(abs(float(got[0]) - float(ref[0])), 0.05)
+
+    def test_sum_node_with_zero_weight_component_is_finite_not_overflow(self):
+        # component 1's weight is exactly 0.0 -> log(0) = -inf -> LOG_ZERO_CODE weight code. The mixture
+        # value must equal component 0's (weight-1.0) density at every row, not a raw-add overflow artifact.
+        pc = PC(
+            summ(
+                [leaf(0, st.GaussianDistribution(0.0, 1.0)), leaf(0, st.GaussianDistribution(5.0, 1.0))],
+                [1.0, 0.0],
+            ),
+            num_vars=1,
+            lns_step=0.01,
+        )
+        rows = [[0.0], [5.0]]
+        enc = pc.dist_to_encoder().seq_encode(rows)
+        ref = pc._node_values(enc)[-1]
+        got = pc._seq_log_density_lns(enc)
+
+        self.assertTrue(np.all(np.isfinite(got)), f"expected finite densities, got {got!r}")
+        self.assertLess(float(np.max(np.abs(got - ref))), 0.05)
+
+    def test_sum_node_lns_codes_match_logsystem_multiply_directly(self):
+        # cross-check against LogNumberSystem.multiply() itself (the child-code/weight-code product term
+        # feeding logsumexp), not just the dequantized outcome -- fails if the sum branch ever goes back
+        # to raw `+` even in a way that happens not to move the final value for this particular fixture.
+        lns = LogNumberSystem(step=0.01)
+        pc = self._mixed_categorical_circuit()
+        rows = [["b"]]
+        enc = pc.dist_to_encoder().seq_encode(rows)
+        got = pc._seq_log_density_lns(enc)
+
+        c0 = pc.leaf_dists[0].seq_log_density(enc[0])
+        c1 = pc.leaf_dists[1].seq_log_density(enc[1])
+        wk = lns.quantize(np.asarray(pc.nodes[-1][2]))
+        terms = np.stack([lns.multiply(lns.quantize(c0), wk[0]), lns.multiply(lns.quantize(c1), wk[1])], axis=0)
+        expect = lns.dequantize(lns.logsumexp(terms, axis=0))
+        self.assertTrue(np.array_equal(got, expect))
 
 
 class ValidityTest(unittest.TestCase):

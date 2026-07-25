@@ -193,7 +193,11 @@ class ProbabilisticCircuitDistribution(SequenceEncodableProbabilityDistribution)
                 vals[i] = acc
             else:  # sum
                 wk = lns.quantize(np.asarray(node[2]))
-                stack = np.stack([vals[c] + wk[j] for j, c in enumerate(node[1])], axis=0)
+                # each term is log(child_prob * weight) = child_code (+) weight_code -- an LNS product,
+                # so it must go through the same overflow-safe multiply() (MXR-080-0138), not raw `+`:
+                # a child that quantized to LOG_ZERO_CODE, or a component weighted exactly 0 (log(0) =
+                # -inf -> LOG_ZERO_CODE), would otherwise overflow int64 like the product node above.
+                stack = np.stack([lns.multiply(vals[c], wk[j]) for j, c in enumerate(node[1])], axis=0)
                 vals[i] = lns.logsumexp(stack, axis=0)
         return lns.dequantize(vals[-1])
 
