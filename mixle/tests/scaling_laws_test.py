@@ -135,11 +135,19 @@ class LearnedAllocationControllerTest(unittest.TestCase):
         controller = ScalingLawAllocationController(seed=0)
         budgets = [1.0e20, 1.0e21, 1.0e22, 1.0e23, 6.0e21]
         for i, budget in enumerate(budgets):
-            n_val, d_val, controller = allocate_compute_learned(fit, budget, controller=controller)
+            n_val, d_val, controller, proposal = allocate_compute_learned(fit, budget, controller=controller)
             self.assertGreater(n_val, 0.0)
             self.assertGreater(d_val, 0.0)
             self.assertAlmostEqual(6.0 * n_val * d_val / budget, 1.0, delta=1.0e-6)
-            self.assertEqual(len(controller.design), i + 1)  # each call logs exactly one row
+            self.assertEqual(len(controller.design), i)  # predictions are not logged as measured outcomes
+            receipt = controller.record_outcome(
+                proposal,
+                realized_gain=0.1,
+                realized_cost=budget,
+                provenance=f"measured-training-run-{i}",
+            )
+            self.assertTrue(receipt.accepted)
+            self.assertEqual(len(controller.design), i + 1)
 
 
 if __name__ == "__main__":
