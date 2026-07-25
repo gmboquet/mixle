@@ -15,7 +15,7 @@ import numpy as np
 
 import mixle.utils.vector as vec
 from mixle.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
-from mixle.utils.special import digamma
+from mixle.utils.special import digamma, gammaln
 from mixle.utils.special import softmax_rows as _softmax_rows
 
 _EPS = 1.0e-300
@@ -28,6 +28,17 @@ class TruncatedDirichletProcessMixtureFitResult:
     model: TruncatedDirichletProcessMixtureModel
     responsibilities: np.ndarray
     history: list[float]
+    objective_name: str = "truncated_dp_elbo"
+
+
+@dataclass
+class _ComponentSlot:
+    """Identity-preserving component family and its latest effective count."""
+
+    component: SequenceEncodableProbabilityDistribution
+    estimator: ParameterEstimator
+    count: float = 0.0
+    stick_gamma: tuple[float, float] = (1.0, 1.0)
 
 
 class TruncatedDirichletProcessMixtureModel:
@@ -43,11 +54,10 @@ class TruncatedDirichletProcessMixtureModel:
     ) -> None:
         if len(components) == 0:
             raise ValueError("TruncatedDirichletProcessMixtureModel requires at least one component.")
-        if alpha <= 0.0 or not np.isfinite(alpha):
-            raise ValueError("alpha must be finite and positive.")
+        alpha = _positive_finite(alpha, "alpha")
         self.components = list(components)
         self.num_components = len(self.components)
-        self.alpha = float(alpha)
+        self.alpha = alpha
         self.name = name
         if gamma is None:
             self.gamma = np.column_stack(
@@ -78,7 +88,10 @@ class TruncatedDirichletProcessMixtureModel:
 
     def component_log_density(self, x: Any) -> np.ndarray:
         """Return component log densities for one observation."""
-        return np.asarray([d.log_density(x) for d in self.components], dtype=np.float64)
+        scores = np.asarray([d.log_density(x) for d in self.components], dtype=np.float64)
+        if not np.all(np.isfinite(scores)):
+            raise ValueError("every truncated-DPM component log density must be finite")
+        return scores
 
     def log_density(self, x: Any) -> float:
         """Return the finite-truncation mixture log density for one observation."""
@@ -90,6 +103,8 @@ class TruncatedDirichletProcessMixtureModel:
 
     def responsibilities(self, data: Sequence[Any], expected: bool = True) -> np.ndarray:
         """Return posterior component probabilities for observations."""
+        if len(data) == 0:
+            raise ValueError("responsibilities require at least one observation")
         scores = _component_log_density_matrix(self.components, data)
         log_prior = self.expected_log_weights if expected else self.log_weights
         return _softmax_rows(scores + log_prior[None, :])
@@ -167,8 +182,7 @@ def sample_crp_assignments(num_obs: int, alpha: float, seed: int | None = None) 
     """Sample Chinese-restaurant-process assignments and table counts."""
     if num_obs < 0:
         raise ValueError("num_obs must be non-negative.")
-    if alpha <= 0.0 or not np.isfinite(alpha):
-        raise ValueError("alpha must be finite and positive.")
+    alpha = _positive_finite(alpha, "alpha")
     rng = np.random.RandomState(seed)
     assignments = np.empty(int(num_obs), dtype=np.int64)
     counts: list[int] = []
@@ -197,17 +211,25 @@ def fit_truncated_dpm(
     """Fit a truncated DP mixture by coordinate-ascent variational updates.
 
     The component M-steps are delegated to ordinary ``mixle.stats`` estimators.
-    This keeps component likelihood math and sufficient statistics in their
-    distribution modules.
+    Components are point-estimated parameters; ``history`` is the complete
+    truncated-stick ELBO over assignments and Beta sticks conditional on those
+    point estimates (expected likelihood + assignment entropy - stick KL).
     """
     if len(data) == 0:
         raise ValueError("fit_truncated_dpm requires at least one observation.")
     if len(initial_components) == 0:
         raise ValueError("initial_components must not be empty.")
-    if alpha <= 0.0 or not np.isfinite(alpha):
-        raise ValueError("alpha must be finite and positive.")
+    alpha = _positive_finite(alpha, "alpha")
+    max_its = _positive_int(max_its, "max_its")
+    if tol is not None:
+        if isinstance(tol, (bool, np.bool_)):
+            raise TypeError("tol must be a finite non-negative scalar or None")
+        tol = float(tol)
+        if not np.isfinite(tol) or tol < 0.0:
+            raise ValueError("tol must be finite and non-negative or None")
+    if not isinstance(sort_components, (bool, np.bool_)):
+        raise TypeError("sort_components must be a boolean")
     k = len(initial_components)
-    components = list(initial_components)
     estimators = _component_estimators(component_estimator, k)
     gamma = np.column_stack(
         [
@@ -215,29 +237,54 @@ def fit_truncated_dpm(
             np.full(k, float(alpha), dtype=np.float64),
         ]
     )
+    slots = [
+        _ComponentSlot(component, estimator, stick_gamma=tuple(gamma[index]))
+        for index, (component, estimator) in enumerate(zip(initial_components, estimators))
+    ]
     history: list[float] = []
     responsibilities = np.full((len(data), k), 1.0 / k, dtype=np.float64)
 
-    for _ in range(max(1, int(max_its))):
+    for _ in range(max_its):
+        components = [slot.component for slot in slots]
         log_scores = _component_log_density_matrix(components, data)
         responsibilities = _softmax_rows(log_scores + expected_log_stick_weights(gamma)[None, :])
         counts = responsibilities.sum(axis=0)
-        components = _estimate_components(data, components, estimators, responsibilities, counts)
+        fitted_components = _estimate_components(
+            data,
+            components,
+            [slot.estimator for slot in slots],
+            responsibilities,
+            counts,
+        )
+        slots = [
+            _ComponentSlot(component, slot.estimator, float(count), slot.stick_gamma)
+            for component, slot, count in zip(fitted_components, slots, counts)
+        ]
+
+        # Recompute q(z) against the newly fitted component likelihoods before updating q(v).
+        updated_scores = _component_log_density_matrix([slot.component for slot in slots], data)
+        responsibilities = _softmax_rows(updated_scores + expected_log_stick_weights(gamma)[None, :])
+        counts = responsibilities.sum(axis=0)
+        for slot, count in zip(slots, counts):
+            slot.count = float(count)
 
         if sort_components and k > 1:
             order = np.argsort(-counts)
-            components = [components[i] for i in order]
+            slots = [slots[i] for i in order]
             responsibilities = responsibilities[:, order]
             counts = counts[order]
 
         gamma = _posterior_stick_gamma(counts, float(alpha))
+        for slot, stick_gamma in zip(slots, gamma):
+            slot.stick_gamma = tuple(stick_gamma)
+        gamma = np.asarray([slot.stick_gamma for slot in slots], dtype=np.float64)
+        components = [slot.component for slot in slots]
         model = TruncatedDirichletProcessMixtureModel(components, alpha=alpha, gamma=gamma, name=name)
-        objective = _variational_predictive_objective(model, data)
+        objective = _truncated_dpm_elbo(components, data, responsibilities, gamma, float(alpha))
         history.append(objective)
         if len(history) > 1 and tol is not None and abs(history[-1] - history[-2]) < tol:
             break
 
-    responsibilities = model.responsibilities(data, expected=True)
     return TruncatedDirichletProcessMixtureFitResult(model, responsibilities, history)
 
 
@@ -270,16 +317,35 @@ def _component_estimators(
     if isinstance(component_estimator, (list, tuple)):
         if len(component_estimator) != k:
             raise ValueError("component_estimator sequence length must match initial_components.")
-        return list(component_estimator)
-    return [component_estimator for _ in range(k)]
+        estimators = list(component_estimator)
+    else:
+        estimators = [component_estimator for _ in range(k)]
+    for index, estimator in enumerate(estimators):
+        if not callable(getattr(estimator, "accumulator_factory", None)) or not callable(
+            getattr(estimator, "estimate", None)
+        ):
+            raise TypeError(f"component estimator {index} does not implement the estimation contract")
+    return estimators
 
 
 def _component_log_density_matrix(
     components: Sequence[SequenceEncodableProbabilityDistribution], data: Sequence[Any]
 ) -> np.ndarray:
+    if len(components) == 0 or len(data) == 0:
+        raise ValueError("component log-density evaluation requires components and observations")
     rv = np.empty((len(data), len(components)), dtype=np.float64)
     for j, comp in enumerate(components):
-        rv[:, j] = [comp.log_density(x) for x in data]
+        if not callable(getattr(comp, "log_density", None)):
+            raise TypeError(f"component {j} does not implement log_density")
+        try:
+            rv[:, j] = [comp.log_density(x) for x in data]
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"component {j} could not score the supplied observations") from exc
+    if not np.all(np.isfinite(rv)):
+        bad = np.argwhere(~np.isfinite(rv))[0]
+        raise ValueError(
+            f"component log density must be finite; observation {int(bad[0])}, component {int(bad[1])} was not"
+        )
     return rv
 
 
@@ -311,7 +377,62 @@ def _posterior_stick_gamma(counts: np.ndarray, alpha: float) -> np.ndarray:
     return gam
 
 
-def _variational_predictive_objective(model: TruncatedDirichletProcessMixtureModel, data: Sequence[Any]) -> float:
-    log_scores = _component_log_density_matrix(model.components, data)
-    weighted = log_scores + model.expected_log_weights[None, :]
-    return float(np.sum([vec.log_sum(row) for row in weighted]))
+def _truncated_dpm_elbo(
+    components: Sequence[SequenceEncodableProbabilityDistribution],
+    data: Sequence[Any],
+    responsibilities: Any,
+    gamma: Any,
+    alpha: float,
+) -> float:
+    """Return the variational lower bound conditional on point-estimated component parameters."""
+    log_scores = _component_log_density_matrix(components, data)
+    r = np.asarray(responsibilities, dtype=np.float64)
+    if r.shape != log_scores.shape or not np.all(np.isfinite(r)) or np.any(r < 0.0):
+        raise ValueError("responsibilities must be a finite non-negative matrix matching component scores")
+    if not np.allclose(r.sum(axis=1), 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError("every responsibility row must sum to one")
+    gam = _as_gamma(gamma, len(components))
+    expected_log_weights = expected_log_stick_weights(gam)
+    entropy = -float(np.sum(np.where(r > 0.0, r * np.log(np.clip(r, _EPS, 1.0)), 0.0)))
+    expected_complete_log_likelihood = float(
+        np.sum(r * (log_scores + expected_log_weights[None, :]))
+    )
+    stick_kl = sum(_beta_kl(gam[index, 0], gam[index, 1], 1.0, alpha) for index in range(len(gam) - 1))
+    elbo = expected_complete_log_likelihood + entropy - stick_kl
+    if not np.isfinite(elbo):
+        raise RuntimeError("truncated-DPM ELBO became non-finite")
+    return float(elbo)
+
+
+def _beta_kl(a: float, b: float, prior_a: float, prior_b: float) -> float:
+    log_beta_prior = gammaln(prior_a) + gammaln(prior_b) - gammaln(prior_a + prior_b)
+    log_beta_q = gammaln(a) + gammaln(b) - gammaln(a + b)
+    value = (
+        log_beta_prior
+        - log_beta_q
+        + (a - prior_a) * digamma(a)
+        + (b - prior_b) * digamma(b)
+        + (prior_a + prior_b - a - b) * digamma(a + b)
+    )
+    return float(value)
+
+
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a real scalar, not a boolean")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a real scalar") from exc
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be finite and positive")
+    return result
