@@ -6,6 +6,7 @@ MXR-080-0275 (fold-order-dependent linear attribution) each get their own TestCa
 after the finding ID they cover.
 """
 
+import itertools
 import unittest
 
 import numpy as np
@@ -259,6 +260,140 @@ class Mxr0274FactoryValidationTest(unittest.TestCase):
         self.assertTrue(np.allclose(H[:, 6:9], np.eye(3)))
         self.assertEqual(H[:, :6].sum(), 0.0)
         self.assertEqual(H[:, 9:].sum(), 0.0)
+
+
+class Mxr0275AttributionOrderTest(unittest.TestCase):
+    """The default (sequential) ``attribution()`` credits whichever of two REDUNDANT linear-Gaussian
+    sources is folded first with substantially more of the shared information gain, even though the
+    final posterior is identical either way -- module documentation presented the linear path as
+    order-independent without disclosing that this specific credit split is not. ``method="shapley"``
+    provides an order-invariant alternative; the sequential default is unchanged (and must stay that
+    way, since reason_nonlinear_test.py's order-dependence regression test depends on it).
+    """
+
+    def _redundant_sources(self):
+        prior = Latent.vector(1, var=100.0)
+        eA = Evidence(H=[[1.0]], y=[5.0], R=[[1.0]], name="A")
+        eB = Evidence(H=[[1.0]], y=[5.2], R=[[1.0]], name="B")
+        return prior, eA, eB
+
+    def test_sequential_attribution_is_fold_order_dependent_for_redundant_sources(self):
+        prior, eA, eB = self._redundant_sources()
+        ab = reason(prior, [eA, eB])
+        ba = reason(prior, [eB, eA])
+
+        # The audit's own numbers: whichever source is folded FIRST gets the larger share.
+        self.assertAlmostEqual(ab.attribution()["A"], 2.30756025842063, places=9)
+        self.assertAlmostEqual(ab.attribution()["B"], 0.34409219560890825, places=9)
+        self.assertAlmostEqual(ba.attribution()["B"], 2.30756025842063, places=9)
+        self.assertAlmostEqual(ba.attribution()["A"], 0.34409219560890825, places=9)
+
+        # The posteriors themselves agree exactly -- only the credit split disagrees.
+        np.testing.assert_allclose(ab.mean, ba.mean, atol=1e-12)
+        np.testing.assert_allclose(ab.cov(), ba.cov(), atol=1e-12)
+
+    def test_shapley_attribution_is_order_invariant_for_the_same_redundant_sources(self):
+        prior, eA, eB = self._redundant_sources()
+        ab = reason(prior, [eA, eB])
+        ba = reason(prior, [eB, eA])
+
+        shap_ab = ab.attribution(method="shapley")
+        shap_ba = ba.attribution(method="shapley")
+        # Same dict regardless of which order reason() was originally called with.
+        self.assertAlmostEqual(shap_ab["A"], shap_ba["A"], places=9)
+        self.assertAlmostEqual(shap_ab["B"], shap_ba["B"], places=9)
+
+        # For N=2, the exact Shapley value is the average of "credited when first" and "credited
+        # when second" -- hand-derived from the sequential numbers above.
+        expected = 0.5 * (2.30756025842063 + 0.34409219560890825)
+        self.assertAlmostEqual(shap_ab["A"], expected, places=9)
+        self.assertAlmostEqual(shap_ab["B"], expected, places=9)
+
+    def test_shapley_efficiency_sums_to_total_information_gain(self):
+        prior, eA, eB = self._redundant_sources()
+        ans = reason(prior, [eA, eB])
+        shap = ans.attribution(method="shapley")
+        self.assertAlmostEqual(sum(shap.values()), ans.information_gain(), places=9)
+
+    def test_shapley_matches_sequential_for_non_redundant_orthogonal_sources(self):
+        # When sources constrain DISJOINT coordinates, there is no redundancy to allocate: sequential
+        # and Shapley must agree exactly, regardless of fold order.
+        prior = Latent.vector(2, var=8.0)
+        ev = [
+            Evidence([[1.0, 0.0]], [1.0], [[0.5]], "gravity"),
+            Evidence([[0.0, 1.0]], [2.0], [[2.0]], "magnetic"),
+        ]
+        ans = reason(prior, ev)
+        seq = ans.attribution()
+        shap = ans.attribution(method="shapley")
+        self.assertAlmostEqual(seq["gravity"], shap["gravity"], places=9)
+        self.assertAlmostEqual(seq["magnetic"], shap["magnetic"], places=9)
+
+    def test_shapley_exact_matches_brute_force_permutation_average(self):
+        prior = Latent.vector(1, var=50.0)
+        sources = [
+            Evidence(H=[[1.0]], y=[3.0], R=[[1.0]], name="a"),
+            Evidence(H=[[1.0]], y=[3.3], R=[[1.5]], name="b"),
+            Evidence(H=[[1.0]], y=[2.8], R=[[0.8]], name="c"),
+        ]
+        ans = reason(prior, sources)
+        got = ans.attribution(method="shapley")
+
+        names = ["a", "b", "c"]
+        contrib = dict.fromkeys(names, 0.0)
+        permutations = list(itertools.permutations(range(3)))
+        for perm in permutations:
+            belief = prior
+            before = belief.entropy()
+            for i in perm:
+                e = sources[i]
+                belief = belief.update(e.H, e.y, e.R)
+                after = belief.entropy()
+                contrib[names[i]] += before - after
+                before = after
+        expected = {k: v / len(permutations) for k, v in contrib.items()}
+        for name in names:
+            self.assertAlmostEqual(got[name], expected[name], places=9, msg=name)
+
+    def test_shapley_after_marginal_query_stays_order_invariant_and_efficient(self):
+        prior = Latent.vector(2, var=10.0)
+        sA = Evidence(H=[[1.0, 0.0]], y=[3.0], R=[[1.0]], name="A")
+        sB = Evidence(H=[[0.6, 0.4]], y=[2.0], R=[[1.0]], name="B")  # touches both coords
+
+        sub = reason(prior, [sA, sB]).marginal([0])
+        sub_reversed = reason(prior, [sB, sA]).marginal([0])
+
+        shap = sub.attribution(method="shapley")
+        shap_reversed = sub_reversed.attribution(method="shapley")
+        self.assertAlmostEqual(shap["A"], shap_reversed["A"], places=9)
+        self.assertAlmostEqual(shap["B"], shap_reversed["B"], places=9)
+        self.assertAlmostEqual(sum(shap.values()), sub.information_gain(), places=9)
+
+    def test_shapley_sampling_path_for_many_sources_is_deterministic_given_a_seed(self):
+        # Above _SHAPLEY_EXACT_MAX_SOURCES, attribution() falls back to sampled permutations --
+        # still efficient (sums to the total gain, an exact identity for ANY set of permutations,
+        # sampled or not) and reproducible given a fixed rng.
+        prior = Latent.vector(1, var=1000.0)
+        many = [Evidence(H=[[1.0]], y=[float(i)], R=[[1.0]], name=f"s{i}") for i in range(9)]
+        ans = reason(prior, many)
+
+        first = ans.attribution(method="shapley", n_permutations=30, rng=0)
+        second = ans.attribution(method="shapley", n_permutations=30, rng=0)
+        self.assertEqual(first, second)
+        self.assertAlmostEqual(sum(first.values()), ans.information_gain(), places=6)
+
+    def test_unknown_attribution_method_raises(self):
+        prior, eA, eB = self._redundant_sources()
+        ans = reason(prior, [eA, eB])
+        with self.assertRaisesRegex(ValueError, "must be 'sequential' or 'shapley'"):
+            ans.attribution(method="bogus")
+
+    def test_default_attribution_method_is_sequential(self):
+        # Explicit regression guard: reason_nonlinear_test.py's order-dependence test relies on the
+        # DEFAULT staying sequential (order-dependent for redundant/nonlinear evidence), not shapley.
+        prior, eA, eB = self._redundant_sources()
+        ans = reason(prior, [eA, eB])
+        self.assertEqual(ans.attribution(), ans.attribution(method="sequential"))
 
 
 if __name__ == "__main__":
