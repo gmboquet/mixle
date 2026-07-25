@@ -13,13 +13,12 @@ branch) reports when a node's safe compute precision drops. Every one of these i
 the OPTIMAL execution BACKEND for a node -- eager vs. ``torch.compile``-d, full vs. reduced
 precision, computed-on-the-fly vs. table-cached -- might also change.
 
-Correctness backbone (unchanged from the rest of the D-track): re-specialization is a SCHEDULING/
-EXECUTION optimization only. It never changes what a node computes -- :func:`NodeBackend.__call__`
-must return the tolerance-equal value regardless of which backend is currently active (see
-``mixle.tests.backend_respecialization_test``'s tolerance-equal test) -- only how fast it computes
-it. Any interleaving of these backend swaps with the block-EM schedule (D3) or freeze/roll-up
-caching (D2) is still coordinate ascent on the SAME Neal-Hinton free energy F the rest of the
-track climbs; F itself never notices which backend answered a query.
+Correctness backbone (unchanged from the rest of the D-track): compilation and density memoization
+are exact execution optimizations. Reduced precision is different and is exposed only when a
+separate validation supplies a finite absolute error bound. :func:`NodeBackend.apply` records only
+actions it actually executes and rejects unsupported fusion rather than pretending it occurred.
+Any interleaving of exact backend swaps with the block-EM schedule (D3) or freeze/roll-up caching
+(D2) remains coordinate ascent on the same Neal-Hinton free energy F.
 
 Two things live here:
 
@@ -34,15 +33,16 @@ Two things live here:
    ``action`` as a label, without needing to re-derive the economics itself.
 
 2. **Execution** (:class:`NodeBackend`, :class:`DensityTable`, :func:`compile_forward`) -- actually
-   APPLIES a chosen re-specialization: wraps a node's forward call in ``torch.compile`` (reusing
+   APPLIES a supported re-specialization: wraps a node's forward call in ``torch.compile`` (reusing
    :meth:`mixle.engines.torch_engine.TorchEngine.compile`'s exact convention -- the SAME
    ``compile_enabled and hasattr(torch, "compile")`` gate, not a parallel one), or swaps in a
-   precomputed density-table lookup for repeated identical/near-identical queries. This is a real
+   state-aware exact density-table lookup for repeated identical queries. This is a real
    mechanism with a measurable effect, not just a recommendation (see the acceptance tests).
 """
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -102,6 +102,8 @@ class RespecializationDecision:
     estimated_benefit: float
     expected_remaining_calls: float
     rationale: str
+    validated_abs_error_bound: float | None = None
+    target_precision: Any | None = None
 
     @property
     def net_benefit(self) -> float:
@@ -247,27 +249,44 @@ def decide_frozen_precision_drop(
     *,
     q_gain_tol: float = _DEFAULT_STABLE_Q_GAIN_TOL,
     already_reduced: bool = False,
+    validated_abs_error_bound: float | None = None,
+    target_precision: Any = np.float32,
 ) -> RespecializationDecision:
-    """Decide whether a newly-frozen/near-converged node (D2's freeze signal, or D1's own
-    near-zero Q-gain) should drop to reduced precision -- the K1 "precision drops" trigger. Unlike
-    compile/table decisions this one has no amortization term: a frozen node's remaining work is
-    (by definition) near zero, so the ONLY real cost is the negligible act of re-tagging its
-    compute dtype, and the benefit is every future (typically read-only/health-check) touch of the
-    node running cheaper -- so this is a near-free action whenever the trigger fires at all.
+    """Decide whether a frozen/converged node may use an independently validated lower precision.
+
+    Frozen status and small objective gain do not establish numerical safety. The action is
+    therefore emitted only when ``validated_abs_error_bound`` is supplied by an executable
+    precision comparison and is finite and non-negative.
     """
+    if not np.isfinite(q_gain_tol) or q_gain_tol < 0.0:
+        raise ValueError("q_gain_tol must be finite and non-negative")
     is_frozen = report.update_kind == "frozen"
-    is_converged = report.q_gain is not None and abs(report.q_gain) < q_gain_tol
+    is_converged = (
+        report.residual_kind == "observed_objective" and report.q_gain is not None and abs(report.q_gain) < q_gain_tol
+    )
     cost = 1.0  # re-tagging dtype is O(1) -- no graph to retrace, no table to build
     if already_reduced:
         action, rationale = RespecializationAction.NONE, "already at reduced precision"
         benefit = 0.0
+    elif validated_abs_error_bound is None:
+        action, rationale = (
+            RespecializationAction.NONE,
+            "no validated absolute error bound -- frozen/converged status alone cannot justify reduced precision",
+        )
+        benefit = 0.0
+    elif not np.isfinite(validated_abs_error_bound) or validated_abs_error_bound < 0.0:
+        raise ValueError("validated_abs_error_bound must be finite and non-negative")
     elif is_frozen:
-        action, rationale = RespecializationAction.REDUCE_PRECISION, "node is frozen -- safe to drop precision"
+        action, rationale = (
+            RespecializationAction.REDUCE_PRECISION,
+            f"node is frozen and reduced execution has absolute error bound {validated_abs_error_bound:.3g}",
+        )
         benefit = 10.0
     elif is_converged:
         action, rationale = (
             RespecializationAction.REDUCE_PRECISION,
-            "q_gain %.3e < tol %.3e -- converged, safe to drop precision" % (report.q_gain, q_gain_tol),
+            "q_gain %.3e < tol %.3e and reduced execution has absolute error bound %.3g"
+            % (report.q_gain, q_gain_tol, validated_abs_error_bound),
         )
         benefit = 10.0
     else:
@@ -282,6 +301,8 @@ def decide_frozen_precision_drop(
         estimated_benefit=benefit,
         expected_remaining_calls=0.0,
         rationale=rationale,
+        validated_abs_error_bound=validated_abs_error_bound,
+        target_precision=target_precision if action == RespecializationAction.REDUCE_PRECISION else None,
     )
 
 
@@ -373,12 +394,40 @@ def compile_forward(fn: Callable[..., Any], engine: Any | None = None) -> Callab
     return fn
 
 
+def _exact_input_key(x: Any) -> tuple[Any, ...]:
+    """Return a collision-resistant key for the exact represented input value and metadata."""
+    arr = _to_numpy(x)
+    if arr.dtype.hasobject:
+        raise TypeError("density-table inputs with object dtype are not safely cacheable")
+    arr = np.ascontiguousarray(arr)
+    dtype_description = repr(arr.dtype.descr) if arr.dtype.fields is not None else arr.dtype.str
+    input_type = f"{type(x).__module__}.{type(x).__qualname__}"
+    device = str(getattr(x, "device", "host"))
+    requires_grad = bool(getattr(x, "requires_grad", False))
+    if requires_grad:
+        raise ValueError("density-table lookup cannot preserve autograd semantics for requires-grad inputs")
+    return input_type, device, requires_grad, dtype_description, tuple(arr.shape), arr.tobytes()
+
+
+def _snapshot_result(value: Any) -> Any:
+    """Detach cache storage from mutable results returned to callers."""
+    if bool(getattr(value, "requires_grad", False)):
+        raise ValueError("density-table lookup cannot cache outputs that participate in autograd")
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    clone = getattr(value, "clone", None)
+    if callable(clone):
+        return clone()
+    return copy.deepcopy(value)
+
+
 class DensityTable:
-    """A precomputed cache of a closed-form node's density/forward function, keyed by a quantized
-    input -- a real memoization mechanism for repeated identical/near-identical query patterns
-    (see the D6 module docstring). ``quantum`` controls how near "near-identical" is: inputs whose
-    quantized representation matches an existing key are served from the table; anything else
-    falls back to (and populates the table with) the underlying function.
+    """An exact, state-aware memoization table for a closed-form node's forward function.
+
+    Keys contain the input type, device, dtype, shape, and exact bytes; no quantization or
+    near-neighbor approximation is performed. ``state_token`` must return a hashable signature of
+    every mutable value read by ``fn``. A token change clears the cache before lookup, preventing
+    results computed under stale model parameters from being reused.
     """
 
     def __init__(
@@ -386,29 +435,54 @@ class DensityTable:
         fn: Callable[[Any], Any],
         seed_points: list[Any] | None = None,
         *,
-        quantum: float = 1.0e-9,
+        quantum: float | None = None,
+        state_token: Callable[[], Any] | None = None,
     ) -> None:
+        if quantum is not None:
+            raise ValueError(
+                "quantized density lookup is not exact and is no longer supported; "
+                "omit quantum to use exact memoization"
+            )
+        if state_token is None:
+            raise ValueError("DensityTable requires a state_token covering every mutable dependency of fn")
         self._fn = fn
-        self._quantum = float(quantum)
-        self._cache: dict[tuple[int, ...], Any] = {}
+        self._state_token = state_token
+        self._state = self._read_state()
+        self._cache: dict[tuple[Any, ...], Any] = {}
         for point in seed_points or []:
-            self._cache[self._key(point)] = fn(point)
+            self._sync_state()
+            self._cache[_exact_input_key(point)] = _snapshot_result(fn(point))
 
-    def _key(self, x: Any) -> tuple[int, ...]:
-        arr = _to_numpy(x).astype(np.float64, copy=False)
-        return tuple(np.round(arr / self._quantum).astype(np.int64).ravel().tolist())
+    def _read_state(self) -> Any:
+        token = self._state_token()
+        try:
+            hash(token)
+        except TypeError as exc:
+            raise TypeError("DensityTable state_token must return a hashable value") from exc
+        return token
+
+    def _sync_state(self) -> None:
+        state = self._read_state()
+        if state != self._state:
+            self._cache.clear()
+            self._state = state
+
+    def invalidate(self) -> None:
+        """Discard all memoized results explicitly."""
+        self._cache.clear()
+        self._state = self._read_state()
 
     def __len__(self) -> int:
         return len(self._cache)
 
     def lookup(self, x: Any) -> Any:
-        """Return the cached value for ``x`` if a (quantized) match exists, else compute it via
-        the underlying function and cache it for next time."""
-        key = self._key(x)
+        """Return an exact state-matched cache hit, or compute and store a detached snapshot."""
+        self._sync_state()
+        key = _exact_input_key(x)
         if key in self._cache:
-            return self._cache[key]
+            return _snapshot_result(self._cache[key])
         value = self._fn(x)
-        self._cache[key] = value
+        self._cache[key] = _snapshot_result(value)
         return value
 
 
@@ -419,9 +493,8 @@ class NodeBackend:
     engine-aware evaluation kernel the rest of the codebase already uses -- see
     :mod:`mixle.stats.compute.kernel`) and lets :meth:`apply` swap in a compiled or table-cached
     variant per a :class:`RespecializationDecision`, while ``__call__`` always dispatches to
-    whichever backend is currently active. Every backend must return the tolerance-equal value for
-    the same input -- re-specializing changes only HOW the value is computed (see the module
-    docstring's correctness backbone).
+    whichever backend is currently active. Compilation and density-table execution preserve the
+    exact input semantics; reduced precision requires a separately validated error-bound receipt.
     """
 
     def __init__(
@@ -430,11 +503,15 @@ class NodeBackend:
         forward: Callable[[Any], Any] | None = None,
         *,
         engine: Any | None = None,
+        state_token: Callable[[], Any] | None = None,
     ) -> None:
         self.dist = dist
         self.engine = engine
+        self._uses_default_forward = forward is None
         self._eager_forward = forward if forward is not None else self._default_forward
+        self._external_state_token = state_token
         self._compiled_forward: Callable[[Any], Any] | None = None
+        self._compiled_state: Any = None
         self._table: DensityTable | None = None
         self.action: RespecializationAction = RespecializationAction.NONE
         self.decision: RespecializationDecision | None = None
@@ -442,35 +519,94 @@ class NodeBackend:
     def _default_forward(self, enc: Any) -> Any:
         return self.dist.kernel(engine=self.engine).score(enc)
 
-    def apply(self, decision: RespecializationDecision, *, table_seed_points: list[Any] | None = None) -> None:
-        """Apply ``decision``'s chosen action, actually building whatever machinery it implies."""
+    def _execution_state(self) -> tuple[Any, ...]:
+        """Fingerprint mutable model state, engine policy, and caller-declared dependencies."""
+        from mixle.inference.freeze_rollup import _param_signature
+
+        engine_state = (
+            type(self.engine).__module__,
+            type(self.engine).__qualname__,
+            repr(getattr(self.engine, "device", None)),
+            repr(getattr(self.engine, "dtype", None)),
+            bool(getattr(self.engine, "compile_enabled", False)),
+        )
+        external = self._external_state_token() if self._external_state_token is not None else None
+        token = (_param_signature(self.dist), engine_state, external)
+        try:
+            hash(token)
+        except TypeError as exc:
+            raise TypeError("NodeBackend state_token must return a hashable value") from exc
+        return token
+
+    def apply(
+        self,
+        decision: RespecializationDecision,
+        *,
+        table_seed_points: list[Any] | None = None,
+    ) -> None:
+        """Apply a supported decision and record only the backend that actually became active."""
         self.decision = decision
+        self.action = RespecializationAction.NONE
         if decision.action == RespecializationAction.COMPILE:
+            if not self._uses_default_forward and self._external_state_token is None:
+                raise ValueError("a custom forward requires state_token before it can be compiled safely")
             compiled = compile_forward(self._eager_forward, engine=self.engine)
             if compiled is self._eager_forward:
                 # compile_forward silently no-ops (no compile-enabled engine, or torch lacks
                 # .compile) and returns the SAME eager callable -- report the action actually
                 # taken, not the one requested, so a downstream learned controller (D5) does not
                 # train on a false "compile happened, should be faster" signal.
-                self.action = RespecializationAction.NONE
+                return
             else:
+                self._table = None
                 self._compiled_forward = compiled
+                self._compiled_state = self._execution_state()
                 self.action = RespecializationAction.COMPILE
         elif decision.action == RespecializationAction.DENSITY_TABLE:
-            self._table = DensityTable(self._eager_forward, table_seed_points)
+            if not self._uses_default_forward and self._external_state_token is None:
+                raise ValueError("a custom forward requires state_token before it can be density-table cached")
+            self._compiled_forward = None
+            self._compiled_state = None
+            self._table = DensityTable(
+                self._eager_forward,
+                table_seed_points,
+                state_token=self._execution_state,
+            )
             self.action = RespecializationAction.DENSITY_TABLE
-        elif decision.action in (RespecializationAction.FUSE, RespecializationAction.REDUCE_PRECISION):
-            # Recorded as the chosen action for D5's benefit, but re-fusing multiple adjacent
-            # nodes into one compiled unit, and swapping a node's own compute dtype, are both
-            # decisions that must be executed by the CALLER (which owns the tree/estimator and can
-            # rebuild the relevant subtree or hand it a new engine) -- see the module docstring's
-            # "compile economics exposed to D5" note; this class documents rather than hides that.
-            self.action = decision.action
-        else:
-            self.action = RespecializationAction.NONE
+        elif decision.action == RespecializationAction.REDUCE_PRECISION:
+            if (
+                decision.validated_abs_error_bound is None
+                or not np.isfinite(decision.validated_abs_error_bound)
+                or decision.validated_abs_error_bound < 0.0
+            ):
+                raise ValueError("reduced precision requires a validated absolute error bound")
+            if decision.target_precision is None:
+                raise ValueError("reduced precision requires the validated target precision")
+            if not self._uses_default_forward:
+                raise ValueError("reduced precision requires NodeBackend's engine-aware default forward")
+            with_precision = getattr(self.engine, "with_precision", None)
+            if not callable(with_precision):
+                raise ValueError("the current engine cannot execute a precision transition")
+            self.engine = with_precision(decision.target_precision)
+            self._compiled_forward = None
+            self._compiled_state = None
+            self._table = None
+            self.action = RespecializationAction.REDUCE_PRECISION
+        elif decision.action == RespecializationAction.FUSE:
+            raise NotImplementedError("NodeBackend cannot fuse multiple nodes; no fusion action was applied")
 
     def __call__(self, enc: Any) -> Any:
         if self.action == RespecializationAction.COMPILE and self._compiled_forward is not None:
+            current_state = self._execution_state()
+            if current_state != self._compiled_state:
+                compiled = compile_forward(self._eager_forward, engine=self.engine)
+                if compiled is self._eager_forward:
+                    self._compiled_forward = None
+                    self._compiled_state = None
+                    self.action = RespecializationAction.NONE
+                    return self._eager_forward(enc)
+                self._compiled_forward = compiled
+                self._compiled_state = current_state
             return self._compiled_forward(enc)
         if self.action == RespecializationAction.DENSITY_TABLE and self._table is not None:
             return self._table.lookup(enc)
