@@ -62,6 +62,23 @@ def _best_score_gap(x: np.ndarray, y: np.ndarray) -> float:
     return float(np.max(x) - np.max(y))
 
 
+def _genuine_scores(run: DesignRun) -> np.ndarray:
+    """Return ``run``'s oracle scores restricted to genuine (non-abstained) observations.
+
+    Mirrors ``DesignRun.scores()`` but filters through ``genuine_history`` first. ``DesignRun.history``
+    (and ``.scores()``, deliberately -- see its docstring) keep every attempted candidate, abstentions
+    included, for the receipted record. But an abstention's placeholder ``-inf`` (``OracleResult.
+    abstained``; e.g. a timeout) is not a real draw from the oracle's score distribution, and a
+    permutation test assumes its inputs ARE exchangeable draws from "the oracle's score at a proposed
+    candidate" -- feeding it a fabricated ``-inf`` silently changes the pooled sample it resamples from
+    (and hence the resampling null distribution and p-value) exactly whenever a call times out, the same
+    class of contamination MXR-080-0189 fixed for ``optimize_under_oracle``'s GP fit, just one boundary
+    further downstream. ``np.max`` itself ignores a lone ``-inf`` whenever a finite score is also
+    present, which is why this is easy to miss from a single observed statistic value alone.
+    """
+    return np.asarray([c.result.score for c in run.genuine_history], dtype=float)
+
+
 @dataclass
 class StudentTeacher:
     """Captured regression surrogate used to rank follow-up design candidates.
@@ -81,9 +98,27 @@ class StudentTeacher:
 
 
 def fit_student(run: DesignRun, *, degree: int = 2) -> StudentTeacher:
-    """Fit :class:`StudentTeacher` from ``run``'s oracle-verified history."""
-    xs = np.stack([c.x for c in run.history]).astype(np.float64)
-    ys = np.asarray([c.result.score for c in run.history], dtype=np.float64)
+    """Fit :class:`StudentTeacher` from ``run``'s GENUINE (non-abstained) oracle-verified history.
+
+    Fits against ``run.genuine_history``, not ``run.history``: an abstained candidate's placeholder
+    ``-inf`` score (``OracleResult.abstained`` -- e.g. a timeout) is not a real observation of the
+    oracle's objective, and least-squares regression has no tolerance for a non-finite target at all --
+    unlike the permutation test in ``amplify_and_capture``, where a lone ``-inf`` only nudges a p-value,
+    here a SINGLE abstained candidate anywhere in ``run.history`` drives every coefficient in ``coef`` to
+    ``nan`` (confirmed: a clean fit against 8 well-posed genuine points, then adding one abstained
+    candidate to the same history turns the entire coefficient vector to ``nan``), silently turning the
+    captured student that guides round 2's candidate ranking into a useless, uniformly-``nan`` predictor
+    with no visible error at the call site.
+    """
+    genuine = run.genuine_history
+    if not genuine:
+        raise ValueError(
+            f"cannot fit a student: all {len(run.history)} candidate(s) in the run history abstained "
+            "(e.g. every oracle call timed out); there is no genuine, verified observation to fit a "
+            "surrogate to."
+        )
+    xs = np.stack([c.x for c in genuine]).astype(np.float64)
+    ys = np.asarray([c.result.score for c in genuine], dtype=np.float64)
     x_design = _design_matrix(xs, degree)
     coef, *_ = np.linalg.lstsq(x_design, ys, rcond=None)
     return StudentTeacher(coef=coef, degree=degree)
@@ -174,6 +209,10 @@ def amplify_and_capture(
     baseline_xs = random_design(bounds, budget, seed=seed)
     baseline_run = DesignRun(oracle_name=oracle.name, oracle_tier=oracle.tier, oracle_fidelity=oracle.fidelity)
     for x in baseline_xs:
+        # Every draw is recorded, abstained or not (mirrors optimize_under_oracle's own "always record,
+        # selectively use" pattern) -- best_score above already goes through DesignRun.best, which is
+        # abstention-safe; the permutation test below is the other consumer of this run's scores, and is
+        # made abstention-safe via _genuine_scores() rather than here.
         baseline_run.history.append(DesignCandidate(x=x, result=oracle(x)))
     baseline = AmplificationRound(
         run=baseline_run, best_score=float(baseline_run.best.result.score), xs=[c.x for c in baseline_run.history]
@@ -190,8 +229,15 @@ def amplify_and_capture(
     # `significance` rate rather than approaching certainty as `budget` grows -- unlike a bare
     # `round1.best_score > baseline.best_score` check, which is exactly the old, unmatched-budget bug's
     # comparison with none of its calibration.
+    #
+    # Both sides feed _genuine_scores(), not .scores(): an abstained oracle call (e.g. a timeout; see
+    # OracleResult.abstained) is a placeholder -inf, not a real draw from either distribution, and
+    # exchangeability -- the assumption the whole test leans on -- only holds among genuine observations.
+    # run1.history and baseline_run.history both still keep every attempted candidate, abstained or not,
+    # for the receipted record; this simply is not the right input for a test that assumes its inputs are
+    # exchangeable draws from the same distribution.
     permutation = permutation_test(
-        (run1.scores(), baseline_run.scores()),
+        (_genuine_scores(run1), _genuine_scores(baseline_run)),
         _best_score_gap,
         permutation_type="independent",
         alternative="greater",

@@ -12,17 +12,35 @@ contamination, seed 0's round1-best point literally re-selected into round2 with
 Both are fixed in mixle/doe/amplify.py: a budget-matched random baseline plus a one-sided permutation
 test on best-of-budget for the first, and a round-2 pool restricted to fresh candidates for the second.
 See that module's docstrings for the full statistical reasoning.
+
+MXR-080-0189 residual-gap coverage (AmplifyAbstentionHandlingTest): oracle.py's own fix made
+optimize_under_oracle skip an abstained (e.g. timed-out) call's -inf placeholder when fitting its GP, but
+two consumers downstream of that fix, both inside this module, still read raw scores unfiltered --
+the permutation test (fed run1.scores()/baseline_run.scores() directly) and fit_student (fit against
+run.history directly). Neither is exercised by the 0161/0162 tests above, since none of their oracles set
+a timeout. Confirmed pre-fix: an abstained call's -inf measurably shifted the permutation test's p-value,
+and a single abstained candidate anywhere in fit_student's input history drove its entire captured-student
+coefficient vector to nan.
 """
 
+import time
 import unittest
+from unittest import mock
 
 import numpy as np
 import pytest
 
 pytest.importorskip("torch")  # optimize_under_oracle's BayesianOptimizer surrogate needs GaussianProcessRegressor
 
+import mixle.doe.amplify as amplify_module  # noqa: E402
 from mixle.doe.amplify import StudentTeacher, amplify_and_capture, fit_student  # noqa: E402
-from mixle.doe.oracle import OracleResult, VerifiableOracle, optimize_under_oracle  # noqa: E402
+from mixle.doe.oracle import (  # noqa: E402
+    DesignCandidate,
+    DesignRun,
+    OracleResult,
+    VerifiableOracle,
+    optimize_under_oracle,
+)
 
 _BOUNDS = [(-5.0, 5.0), (-5.0, 5.0)]
 
@@ -33,6 +51,24 @@ def _quadratic_bowl_oracle(target, seed=0):
         return OracleResult(score=-d2, receipt={"target_dist2": d2}, cost=1.0)
 
     return VerifiableOracle(name="quadratic_bowl", tier="executable", score_fn=score_fn, fidelity="exact, noiseless")
+
+
+def _flaky_quadratic_bowl_oracle(target, hang_on_calls, timeout=0.1):
+    """Like ``_quadratic_bowl_oracle``, but the given 1-indexed oracle-call numbers hang past
+    ``timeout`` and so abstain deterministically (matching doe_oracle_test.py's counter-based
+    ``every_third_call_hangs`` pattern) -- a call COUNT is deterministic across calls to this oracle even
+    though BayesianOptimizer's proposed x values are not perfectly reproducible from seed alone across
+    process contexts (see test_round2_pool_excludes_round1s_own_points above)."""
+    calls = {"n": 0}
+
+    def score_fn(x):
+        calls["n"] += 1
+        if calls["n"] in hang_on_calls:
+            time.sleep(2.0)
+        d2 = float(np.sum((np.asarray(x, dtype=float) - target) ** 2))
+        return OracleResult(score=-d2, receipt={"target_dist2": d2}, cost=1.0)
+
+    return VerifiableOracle(name="flaky_bowl", tier="executable", score_fn=score_fn, timeout=timeout)
 
 
 def _zero_skill_oracle(replicate_seed):
@@ -215,6 +251,93 @@ class AmplifyAndCaptureTest(unittest.TestCase):
         self.assertIsNone(report.round2)
         self.assertIsNone(report.student)
         self.assertIn("nothing to capture", report.reason)
+
+
+class AmplifyAbstentionHandlingTest(unittest.TestCase):
+    """MXR-080-0189 residual-gap regression coverage (see the module docstring): an abstained oracle
+    call's -inf placeholder must never reach the permutation test or fit_student as if it were a genuine
+    observation, even though run1.history/baseline_run.history still keep it for the receipted record.
+    """
+
+    def test_permutation_test_never_sees_an_abstained_placeholder_score(self):
+        """Direct assertion on the actual mechanism, not just DesignRun's own bookkeeping: spy on the
+        real scipy permutation_test call inside amplify_and_capture and inspect exactly what arrays it
+        was given."""
+        oracle = _flaky_quadratic_bowl_oracle(np.array([2.0, -1.0]), hang_on_calls={2, 6})
+        captured = {}
+        real_permutation_test = amplify_module.permutation_test
+
+        def spy(samples, *args, **kwargs):
+            captured["samples"] = [np.asarray(s, dtype=float) for s in samples]
+            return real_permutation_test(samples, *args, **kwargs)
+
+        with mock.patch("mixle.doe.amplify.permutation_test", side_effect=spy):
+            report = amplify_and_capture(oracle, _BOUNDS, n_init=4, n_iter=0, seed=0)
+
+        # the abstentions really happened and are really kept in the receipted record (not hidden)...
+        self.assertGreaterEqual(sum(1 for c in report.round1.run.history if c.result.abstained), 1)
+        self.assertGreaterEqual(sum(1 for c in report.baseline.run.history if c.result.abstained), 1)
+        self.assertIn(float("-inf"), report.round1.run.scores().tolist())
+        self.assertIn(float("-inf"), report.baseline.run.scores().tolist())
+
+        # ...but neither array actually handed to the permutation test contains a -inf placeholder, and
+        # neither array silently dropped a genuine observation either.
+        run1_fed, baseline_fed = captured["samples"]
+        self.assertTrue(np.all(np.isfinite(run1_fed)))
+        self.assertTrue(np.all(np.isfinite(baseline_fed)))
+        self.assertEqual(len(run1_fed), sum(1 for c in report.round1.run.history if not c.result.abstained))
+        self.assertEqual(len(baseline_fed), sum(1 for c in report.baseline.run.history if not c.result.abstained))
+
+    def test_fit_student_ignores_an_abstained_candidate_and_matches_the_genuine_only_fit(self):
+        rng = np.random.RandomState(0)
+        target = np.array([2.0, -1.0])
+        run = DesignRun(oracle_name="t", oracle_tier="executable", oracle_fidelity=None)
+        for _ in range(8):
+            x = rng.uniform(-5, 5, size=2)
+            d2 = float(np.sum((x - target) ** 2))
+            run.history.append(DesignCandidate(x=x, result=OracleResult(score=-d2, receipt={}, cost=1.0)))
+        genuine_only_student = fit_student(run, degree=2)
+        self.assertTrue(np.all(np.isfinite(genuine_only_student.coef)))
+
+        # Append ONE abstained candidate to the SAME history, exactly as optimize_under_oracle would
+        # after a timeout -- confirmed pre-fix this alone drove the entire coef vector to nan.
+        run.history.append(
+            DesignCandidate(
+                x=rng.uniform(-5, 5, size=2), result=OracleResult(score=float("-inf"), abstained=True, cost=0.0)
+            )
+        )
+        student_with_abstention_present = fit_student(run, degree=2)
+
+        np.testing.assert_allclose(genuine_only_student.coef, student_with_abstention_present.coef)
+        self.assertTrue(np.all(np.isfinite(student_with_abstention_present.coef)))
+
+    def test_fit_student_raises_a_specific_error_when_every_candidate_abstained(self):
+        run = DesignRun(oracle_name="t", oracle_tier="executable", oracle_fidelity=None)
+        run.history.append(
+            DesignCandidate(x=np.array([0.0, 0.0]), result=OracleResult(score=float("-inf"), abstained=True, cost=0.0))
+        )
+        with self.assertRaises(ValueError) as ctx:
+            fit_student(run, degree=2)
+        self.assertIn("abstained", str(ctx.exception))
+
+    def test_end_to_end_amplify_and_capture_survives_abstentions_with_a_finite_student(self):
+        """Integration-level negative control: a full amplify_and_capture run against a flaky oracle
+        must still produce a computed p-value and a finite-coefficient student, never a nan student or a
+        crash, even though part of the spent budget abstained. n_init=4/n_iter=8/seed=0 is the same
+        reliable-pass configuration test_round1_beats_a_budget_matched_random_baseline above uses (a
+        real Bayesian-optimization search, not just a random initial design), so beats_baseline and
+        hence student are deterministically non-None here -- this assertion is not conditional on the
+        gate happening to clear, unlike a weaker n_iter=0 setup where it would be only vacuously true
+        whenever the gate did not clear."""
+        oracle = _flaky_quadratic_bowl_oracle(np.array([2.0, -1.0]), hang_on_calls={5, 18})
+        report = amplify_and_capture(oracle, _BOUNDS, n_init=4, n_iter=8, seed=0)
+
+        self.assertGreaterEqual(sum(1 for c in report.round1.run.history if c.result.abstained), 1)
+        self.assertGreaterEqual(sum(1 for c in report.baseline.run.history if c.result.abstained), 1)
+        self.assertTrue(np.isfinite(report.baseline_p_value))
+        self.assertTrue(report.beats_baseline)
+        self.assertIsNotNone(report.student)
+        self.assertTrue(np.all(np.isfinite(report.student.coef)))
 
 
 if __name__ == "__main__":
