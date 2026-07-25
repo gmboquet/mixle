@@ -54,6 +54,10 @@ class ParameterPosteriorConjugateTest(unittest.TestCase):
         self.assertIsInstance(ci, dict)
         for lo_hi in ci.values():
             self.assertEqual(np.asarray(lo_hi).shape[0], 2)  # [lo, hi]
+        with self.assertRaises(ValueError):
+            self.post.interval(1.0)
+        with self.assertRaises(ValueError):
+            self.post.samples(0)
 
     def test_auto_picks_conjugate(self):
         self.assertEqual(posterior(BernoulliDistribution(0.5), self.data, over="params").kind, "conjugate")

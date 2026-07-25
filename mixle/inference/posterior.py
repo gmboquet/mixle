@@ -38,6 +38,12 @@ def _seed_from(rng: Any) -> int:
     return int(_as_rng(rng).randint(maxrandint))
 
 
+def _positive_count(n: int) -> int:
+    if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 1:
+        raise ValueError("n must be a positive integer")
+    return int(n)
+
+
 def _params_to_dataframe(draws: Any) -> Any:
     """Tabulate a batch of parameter draws (whatever :meth:`ParameterPosterior.samples` returned).
 
@@ -115,12 +121,14 @@ class ParameterPosterior(Posterior):
             chain = np.asarray(samples, dtype=float)  # (n_samples, dim) parameter-space chain
         except (ValueError, TypeError):
             chain = None  # non-numeric samples (e.g. rebuilt distributions): summaries unavailable
+        if chain is not None and (chain.ndim < 1 or not np.all(np.isfinite(chain))):
+            raise ValueError("numeric MCMC samples must be finite")
 
         def one(rng: Any) -> Any:
             return samples[_as_rng(rng).randint(len(samples))]
 
         def many(n: int, rng: Any) -> Any:
-            idx = _as_rng(rng).randint(len(samples), size=int(n))
+            idx = _as_rng(rng).randint(len(samples), size=_positive_count(n))
             return [samples[i] for i in idx]
 
         return cls(one, many, chain=chain, kind="mcmc")
@@ -131,7 +139,7 @@ class ParameterPosterior(Posterior):
 
     def samples(self, n: int, rng: Any = None) -> Any:
         """``n`` parameter draws (a dict of length-``n`` arrays for conjugate; a list for MCMC)."""
-        return self._draw_many(n, rng)
+        return self._draw_many(_positive_count(n), rng)
 
     def mean(self) -> Any:
         """The posterior mean of the parameters."""
@@ -143,6 +151,8 @@ class ParameterPosterior(Posterior):
 
     def interval(self, level: float = 0.9) -> Any:
         """Central credible interval at ``level`` -- ``[lo, hi]`` over the chain (MCMC) or 2000 draws."""
+        if not np.isfinite(level) or not 0 < level < 1:
+            raise ValueError("level must be finite and strictly between 0 and 1")
         lo, hi = (1.0 - level) / 2.0, 1.0 - (1.0 - level) / 2.0
         if self._chain is not None:
             return np.quantile(self._chain, [lo, hi], axis=0)
@@ -216,7 +226,7 @@ class PredictivePosterior(Posterior):
 
         def many(n: int, rng: Any) -> Any:
             r = _as_rng(rng)
-            return [one(r) for _ in range(int(n))]
+            return [one(r) for _ in range(_positive_count(n))]
 
         return cls(one, many)
 
@@ -226,7 +236,7 @@ class PredictivePosterior(Posterior):
 
     def samples(self, n: int, rng: Any = None) -> Any:
         """``n`` predictive draws of new data."""
-        return self._draw_many(n, rng)
+        return self._draw_many(_positive_count(n), rng)
 
 
 def posterior(
