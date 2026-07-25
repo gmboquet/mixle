@@ -196,6 +196,75 @@ class CrossModalModelTest(unittest.TestCase):
         m.fit({"A": xA, "B": xB}, epochs=5)
         m.belief({"A": xA[0]})  # no longer raises
 
+    # -- MXR-080-0276: modality replacement must not strand stale fitted/calibration state --------
+    def test_add_modality_rejects_duplicate_name(self):
+        # Silently replacing a registered modality's encoder/decoder (the pre-fix behavior) let a
+        # fresh, untrained replacement hide behind calibration computed against the OLD one.
+        # add_modality() now rejects the duplicate outright; replace_modality() is the deliberate,
+        # differently-named escape hatch, and it refuses a name that ISN'T already registered.
+        from mixle.reason import CrossModalModel
+
+        m = CrossModalModel(latent_dim=3, seed=0)
+        m.add_modality("A", 4)
+        with self.assertRaises(ValueError):
+            m.add_modality("A", 4)
+        with self.assertRaises(KeyError):
+            m.replace_modality("nope", 4)
+
+    def test_replace_modality_invalidates_fitted_and_calibration_state(self):
+        # MXR-080-0276's own reproduction: fit, calibrate, then deliberately replace a modality's
+        # encoder/decoder with a fresh, untrained pair. Pre-fix, _fitted and the stored conformal
+        # radius survived the replacement, so predict_interval() kept advertising calibrated
+        # coverage for a target whose predictions now depended on an untrained "A".
+        from mixle.reason import CrossModalModel
+
+        rng = np.random.RandomState(20)
+        _, xA, xB = _two_view_data(rng, 300, k=2, dA=4, dB=3)
+        m = CrossModalModel(latent_dim=3, seed=0)
+        m.add_modality("A", 4).add_modality("B", 3)
+        m.fit({"A": xA, "B": xB}, epochs=40, beta=0.3)
+        m.calibrate({"A": xA[:150], "B": xB[:150]}, target="B", alpha=0.1)
+        self.assertTrue(m._fitted)
+        self.assertIn("B", m._conformal)
+
+        m.replace_modality("A", 4)  # fresh, untrained encoder/decoder for "A"
+
+        # none of the stale state may survive a deliberate structural replacement
+        self.assertFalse(m._fitted)
+        self.assertEqual(m._conformal, {})
+        self.assertIsNone(m._n_train)
+        with self.assertRaises(RuntimeError):
+            m.belief({"A": xA[0]})
+        with self.assertRaises(RuntimeError):
+            m.predict_interval({"A": xA[0]}, target="B")
+
+        # re-fitting and re-calibrating from here works normally again
+        m.fit({"A": xA, "B": xB}, epochs=40, beta=0.3)
+        m.calibrate({"A": xA[:150], "B": xB[:150]}, target="B", alpha=0.1)
+        m.belief({"A": xA[0]})
+        m.predict_interval({"A": xA[0]}, target="B")
+
+    def test_add_modality_after_fit_also_invalidates_state(self):
+        # _fitted describes the WHOLE model -- a brand-new (non-duplicate) modality registered
+        # after fit() was never part of that joint training either, so adding structure invalidates
+        # fitted/calibration state exactly like an explicit replace_modality() call does.
+        from mixle.reason import CrossModalModel
+
+        rng = np.random.RandomState(21)
+        _, xA, xB = _two_view_data(rng, 200, k=2, dA=4, dB=3)
+        m = CrossModalModel(latent_dim=3, seed=0)
+        m.add_modality("A", 4).add_modality("B", 3)
+        m.fit({"A": xA, "B": xB}, epochs=40, beta=0.3)
+        m.calibrate({"A": xA[:100], "B": xB[:100]}, target="B", alpha=0.1)
+        self.assertTrue(m._fitted)
+
+        m.add_modality("C", 2)  # a genuinely new modality, not a duplicate
+
+        self.assertFalse(m._fitted)
+        self.assertEqual(m._conformal, {})
+        with self.assertRaises(RuntimeError):
+            m.belief({"A": xA[0]})
+
 
 if __name__ == "__main__":
     unittest.main()
