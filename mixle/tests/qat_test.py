@@ -66,6 +66,15 @@ class STECorrectnessTest(unittest.TestCase):
         loss.backward()
         self.assertTrue(torch.all(x.grad == 1.0))  # d(sum)/d(x_i) = 1 for every element, unchanged by STE
 
+    def test_float64_stays_finite_and_on_declared_dtype_and_device(self):
+        x = torch.tensor([1.0e40, 0.5e40, -0.25e40], dtype=torch.float64, requires_grad=True)
+        result = fake_quantize_int4(x)
+        self.assertEqual(result.dtype, torch.float64)
+        self.assertEqual(result.device, x.device)
+        self.assertTrue(torch.isfinite(result).all())
+        result.sum().backward()
+        self.assertTrue(torch.equal(x.grad, torch.ones_like(x)))
+
 
 class QATWrapperTest(unittest.TestCase):
     """apply_qat / QATWrapper: composition mechanics -- weight shape, real quantization, toggling."""
@@ -110,6 +119,22 @@ class QATWrapperTest(unittest.TestCase):
         model = build_causal_lm(vocab=13, d_model=16, n_layer=1, n_head=2, block=8)
         apply_qat(model)
         self.assertEqual(type(model.tok).__name__, "Embedding")  # untouched -- QAT here targets Linear only
+
+    def test_apply_qat_is_idempotent_and_reconfiguration_is_explicit(self):
+        model = build_causal_lm(vocab=13, d_model=16, n_layer=1, n_head=2, block=8)
+        apply_qat(model, bits=4)
+        wrapper_ids = [id(module) for module in model.modules() if isinstance(module, QATWrapper)]
+        state_keys = tuple(model.state_dict())
+
+        apply_qat(model, bits=4)
+        self.assertEqual([id(module) for module in model.modules() if isinstance(module, QATWrapper)], wrapper_ids)
+        self.assertEqual(tuple(model.state_dict()), state_keys)
+        self.assertFalse(any(isinstance(module.base, QATWrapper) for module in model.modules() if isinstance(module, QATWrapper)))
+
+        with self.assertRaisesRegex(ValueError, "reconfigure=True"):
+            apply_qat(model, bits=8)
+        apply_qat(model, bits=8, reconfigure=True)
+        self.assertTrue(all(module.bits == 8 for module in model.modules() if isinstance(module, QATWrapper)))
 
 
 def _corpus(block: int):
