@@ -39,14 +39,93 @@ class Ontology:
 
     # -- construction (chainable) ------------------------------------------------------------------
     def add_class(self, name: str, parent: str | None = None) -> Ontology:
-        """Add an ontology class, optionally under a known parent."""
+        """Add a NEW ontology class, optionally under a known parent.
+
+        MXR-080-0297: a duplicate ``name`` is rejected rather than silently overwriting the
+        existing class's parent -- the prior behavior let a second, differently-parented
+        ``add_class(name, other_parent)`` retroactively change what every relation/disjointness
+        declaration mentioning ``name`` means, with no trace that a redefinition happened. Use
+        :meth:`replace_class` to deliberately reparent an existing class.
+
+        Raises:
+            ValueError: ``name`` is already registered, or ``parent`` is not a known class.
+        """
+        if name in self.classes:
+            raise ValueError(
+                f"class {name!r} is already registered (parent={self.classes[name]!r}); "
+                f"use replace_class({name!r}, ...) to deliberately reparent it"
+            )
         if parent is not None and parent not in self.classes:
             raise ValueError(f"unknown parent class {parent!r}")
         self.classes[name] = parent
         return self
 
+    def replace_class(self, name: str, parent: str | None = None) -> Ontology:
+        """Deliberately reparent an existing class.
+
+        MXR-080-0297: unlike :meth:`add_class` (which rejects a duplicate name outright), this
+        exists specifically to allow redefining an existing class's parent -- but a ``parent`` that
+        IS ``name``, or that is already a descendant of ``name`` in the CURRENT hierarchy, is
+        rejected here, before the mutation, rather than silently installed and merely limped around
+        later by :meth:`is_a`'s cycle guard (a partial-answer, quietly-wrong result).
+
+        Raises:
+            KeyError: ``name`` is not already registered.
+            ValueError: ``parent`` is not a known class, or reparenting would create a self-loop or
+                a cycle.
+        """
+        if name not in self.classes:
+            raise KeyError(f"class {name!r} is not registered; use add_class({name!r}, ...) instead")
+        if parent is not None:
+            if parent not in self.classes:
+                raise ValueError(f"unknown parent class {parent!r}")
+            if parent == name or self.is_a(parent, name):
+                raise ValueError(
+                    f"reparenting {name!r} under {parent!r} would create a cycle "
+                    f"({parent!r} is {name!r} or already a descendant of it)"
+                )
+        self.classes[name] = parent
+        return self
+
     def add_relation(self, name: str, domain: str, range_: str, *axioms: str) -> Ontology:
-        """Add a relation with domain, range, and optional ontology axioms."""
+        """Add a NEW relation with domain, range, and optional ontology axioms.
+
+        MXR-080-0297: a duplicate ``name`` is rejected rather than silently overwriting the
+        existing relation's signature and axioms. Use :meth:`replace_relation` to deliberately
+        redefine an existing one.
+
+        Raises:
+            ValueError: ``name`` is already registered, ``domain``/``range_`` is not a known class,
+                or an axiom is not one of :data:`AXIOMS`.
+        """
+        if name in self.relations:
+            raise ValueError(
+                f"relation {name!r} is already registered (signature={self.relations[name]!r}); "
+                f"use replace_relation({name!r}, ...) to deliberately redefine it"
+            )
+        for c in (domain, range_):
+            if c not in self.classes:
+                raise ValueError(f"unknown class {c!r}; add_class it first")
+        bad = [a for a in axioms if a not in AXIOMS]
+        if bad:
+            raise ValueError(f"unknown axiom(s) {bad}; known: {AXIOMS}")
+        self.relations[name] = (domain, range_)
+        self.axioms[name] = set(axioms)
+        return self
+
+    def replace_relation(self, name: str, domain: str, range_: str, *axioms: str) -> Ontology:
+        """Deliberately redefine an existing relation's domain, range, and/or axioms.
+
+        MXR-080-0297: the explicit, differently-named counterpart to :meth:`add_relation`'s
+        reject-on-duplicate.
+
+        Raises:
+            KeyError: ``name`` is not already registered.
+            ValueError: ``domain``/``range_`` is not a known class, or an axiom is not one of
+                :data:`AXIOMS`.
+        """
+        if name not in self.relations:
+            raise KeyError(f"relation {name!r} is not registered; use add_relation({name!r}, ...) instead")
         for c in (domain, range_):
             if c not in self.classes:
                 raise ValueError(f"unknown class {c!r}; add_class it first")
@@ -58,18 +137,46 @@ class Ontology:
         return self
 
     def add_disjoint(self, a: str, b: str) -> Ontology:
-        """Declare two classes mutually exclusive."""
+        """Declare two classes mutually exclusive.
+
+        MXR-080-0297: an unknown class reference, or declaring a class disjoint with ITSELF, is
+        rejected rather than silently accepted -- ``add_disjoint(x, x)`` previously made
+        :meth:`check_triple` flag every single instance of ``x`` as violating disjointness against
+        itself, and an unknown class reference could never match any real entity, silently
+        defeating the declaration instead of failing loudly at the typo.
+
+        Raises:
+            ValueError: ``a`` or ``b`` is not a known class, or ``a == b``.
+        """
+        for c in (a, b):
+            if c not in self.classes:
+                raise ValueError(f"unknown class {c!r}; add_class it first")
+        if a == b:
+            raise ValueError(f"a class cannot be declared disjoint with itself ({a!r})")
         self.disjoint.append((a, b))
         return self
 
     # -- the hierarchy -----------------------------------------------------------------------------
     def is_a(self, cls: str, ancestor: str) -> bool:
-        """Whether ``cls`` is ``ancestor`` or a descendant of it (walks the parent chain)."""
+        """Whether ``cls`` is ``ancestor`` or a descendant of it (walks the parent chain).
+
+        MXR-080-0297: construction (:meth:`add_class`/:meth:`replace_class`) now rejects every path
+        that could install a cycle, so this walk should never see one. As a defense-in-depth check
+        (e.g. against ``.classes`` being mutated directly, bypassing the API) this RAISES if a cycle
+        is nonetheless encountered, rather than silently stopping and returning a partial, possibly
+        wrong answer -- a malformed schema must never look like an ordinary "not an ancestor".
+        """
         cur: str | None = cls
         seen: set[str] = set()
-        while cur is not None and cur not in seen:
+        while cur is not None:
             if cur == ancestor:
                 return True
+            if cur in seen:
+                raise RuntimeError(
+                    f"cycle detected in class hierarchy while walking from {cls!r} toward {ancestor!r} "
+                    f"({cur!r} is its own ancestor); the schema is malformed -- this should be "
+                    f"unreachable when classes are only ever added via add_class/replace_class"
+                )
             seen.add(cur)
             cur = self.classes.get(cur)
         return False
