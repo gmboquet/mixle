@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
 import pytest
 
@@ -9,7 +11,13 @@ torch = pytest.importorskip("torch")
 
 from mixle.inference.estimation import optimize
 from mixle.models import GradLeaf
-from mixle.models.optimizer_routing import build_auto_optimizer, plan_neural_optimizer
+from mixle.models.optimizer_routing import (
+    NeuralOptimizerPlan,
+    RoutedNeuralOptimizer,
+    build_auto_optimizer,
+    build_routed_optimizer,
+    plan_neural_optimizer,
+)
 
 
 class _RoutedModule(torch.nn.Module):
@@ -90,3 +98,53 @@ def test_adam_remains_an_explicit_last_resort():
     )
     assert fitted.fit_receipt["optimizer"] == "adam"
     assert fitted.fit_receipt["optimizer_plan"] is None
+
+
+def test_routed_plan_requires_one_route_per_trainable_parameter():
+    module = _RoutedModule()
+    plan = plan_neural_optimizer(module)
+    with pytest.raises(ValueError, match="more than once"):
+        build_routed_optimizer(module, NeuralOptimizerPlan(plan.routes + (plan.routes[0],)))
+    with pytest.raises(ValueError, match="every trainable parameter"):
+        build_routed_optimizer(module, NeuralOptimizerPlan(plan.routes[:-1]))
+
+
+@pytest.mark.parametrize(
+    "controls",
+    [
+        {"lr": np.nan},
+        {"lr": 0.0},
+        {"eps": np.inf},
+        {"weight_decay": np.nan},
+        {"weight_decay": -1.0},
+        {"betas": (np.nan, 0.9)},
+        {"betas": (0.9, 1.0)},
+        {"precondition_frequency": 1.5},
+        {"precondition_frequency": 0},
+        {"muon_steps": True},
+    ],
+)
+def test_routed_optimizer_controls_must_be_exact_and_finite(controls):
+    module = _RoutedModule()
+    with pytest.raises((TypeError, ValueError)):
+        build_routed_optimizer(module, plan_neural_optimizer(module), **controls)
+
+
+def test_mixed_routed_optimizer_full_object_and_state_checkpoints_round_trip():
+    module = _RoutedModule()
+    optimizer = build_auto_optimizer(module, lr=0.01)
+    assert isinstance(optimizer, RoutedNeuralOptimizer)
+
+    for parameter in module.parameters():
+        parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    state = optimizer.state_dict()
+
+    restored_object = pickle.loads(pickle.dumps(optimizer))
+    assert isinstance(restored_object, RoutedNeuralOptimizer)
+    assert restored_object.state_dict()["param_groups"] == state["param_groups"]
+
+    clone = _RoutedModule()
+    restored_state = build_auto_optimizer(clone, lr=0.01)
+    restored_state.load_state_dict(state)
+    assert restored_state.state_dict()["param_groups"] == state["param_groups"]
