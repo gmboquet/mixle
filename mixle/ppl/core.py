@@ -2047,7 +2047,10 @@ class RandomVariable:
         if self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
             from mixle.ppl import regression as _reg
 
-            return _stash_explanation(_reg.regression_fit(self, data, **kw))
+            regression_options = dict(kw)
+            regression_options.setdefault("max_iter", max_its)
+            regression_options.setdefault("tol", delta)
+            return _stash_explanation(_reg.regression_fit(self, data, how=how, **regression_options))
 
         # neural conditional: a Net/Conv (nonlinear predictor) in a parameter slot -> a neural-headed leaf
         if self._kind == "sample" and any(isinstance(a, _NeuralPredictor) for a in self._args):
