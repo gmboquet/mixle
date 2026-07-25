@@ -45,12 +45,79 @@ class BudgetTest(unittest.TestCase):
         self.assertGreaterEqual(len(pkt), 1)
         self.assertIn("beta", pkt.items[0].text)  # the most relevant item leads
 
-    def test_tiny_budget_keeps_at_least_one_item(self):
+    def test_a_budget_too_small_even_for_the_header_is_rejected(self):
+        """Regression (MXR-080-0239): this budget used to still silently return a 1-item packet whose
+        actual rendering (header included) was many times over max_chars -- the "always keep >= 1
+        item" guarantee previously overrode the hard budget instead of respecting it. No selection can
+        make an arbitrarily long task string fit inside a 5-character budget, so this now raises
+        immediately instead of doing retrieval work for a budget nothing could ever satisfy."""
         s = Substrate()
         s.add("text", "a very long document that easily exceeds a tiny character budget on its own")
         s.add("text", "another document about something else entirely unrelated here")
-        pkt = assemble_context(s, "long document", budget=ContextBudget(max_chars=5))
-        self.assertEqual(len(pkt), 1)  # always at least the single best item
+        with self.assertRaises(ValueError):
+            assemble_context(s, "long document", budget=ContextBudget(max_chars=5))
+
+    def test_tiny_but_feasible_budget_keeps_one_genuinely_truncated_item(self):
+        """Once max_chars covers the header and the item's mandatory [kind:id] tag, assembly still
+        yields the single most relevant item -- exactly as before -- but now genuinely shrunk to fit
+        rather than included at full (possibly overflowing) length."""
+        s = Substrate()
+        s.add("text", "a very long document that easily exceeds a tiny character budget on its own")
+        s.add("text", "another document about something else entirely unrelated here")
+        pkt = assemble_context(s, "doc", budget=ContextBudget(max_chars=50))
+        self.assertEqual(len(pkt), 1)  # always at least the single best item, whenever at all feasible
+        self.assertEqual(pkt.used_chars, len(pkt.render()))  # derived, never an estimate
+        self.assertLessEqual(pkt.used_chars, 50)
+        # the TEXT USED in the packet is genuinely truncated -- item.text itself (the item's own,
+        # untouched full surface) is naturally unaffected and stays long.
+        self.assertLess(len(pkt.texts[0]), len(pkt.items[0].text))
+
+    def test_max_chars_must_be_a_positive_whole_number(self):
+        """Regression (MXR-080-0239): only max_items was validated -- negative, zero, fractional, and
+        non-finite max_chars all sailed through construction and were only discovered (if at all) as a
+        silently-overflowing rendering several calls later. bool is technically an int subclass in
+        Python but is never a meaningful character budget either."""
+        for bad in (-5, 0, 2.5, float("inf"), float("-inf"), float("nan"), True, "100"):
+            with self.assertRaises((TypeError, ValueError)):
+                ContextBudget(max_chars=bad)
+
+    def test_max_items_must_be_a_whole_number(self):
+        for bad in (2.5, float("inf"), float("nan")):
+            with self.assertRaises((TypeError, ValueError)):
+                ContextBudget(max_items=bad)
+
+    def test_unknown_shape_is_rejected_at_construction(self):
+        """Regression (MXR-080-0239): any shape other than "brief" silently fell through to the
+        passages/features rendering rather than being validated against the documented closed set."""
+        with self.assertRaises(ValueError):
+            ContextBudget(shape="bogus")
+        for ok in ("passages", "brief", "features"):
+            ContextBudget(shape=ok)  # does not raise
+
+    def test_assembled_rendering_always_fits_the_declared_budget(self):
+        """The core MXR-080-0239 guarantee, swept from just-barely-feasible to generous: used_chars
+        never exceeds max_chars, and never disagrees with what render() actually returns."""
+        s = Substrate()
+        s.add("text", "a very long document that easily exceeds a tiny character budget on its own")
+        s.add("text", "another document about something else entirely unrelated here as well")
+        for max_chars in (25, 43, 50, 75, 100, 300, 2000):
+            pkt = assemble_context(s, "doc", budget=ContextBudget(max_chars=max_chars))
+            self.assertEqual(pkt.used_chars, len(pkt.render()))
+            self.assertLessEqual(pkt.used_chars, max_chars)
+
+    def test_compression_per_item_share_is_not_floored_above_a_tight_total_budget(self):
+        """Regression (MXR-080-0239): assemble_context's compress=True path used to floor each item's
+        fair share of the budget at 40 characters even when the true per-item share (from a small
+        overall budget) was smaller -- directly causing the rendering to exceed max_chars. Confirmed
+        against the pre-fix code: this exact scenario (max_chars=80, 3 items, compress=True) reported
+        used_chars=66 while actually rendering 87 characters, silently over budget."""
+        s = Substrate()  # <4 items -> lexical retrieval, deterministic (no embedder)
+        s.add("text", "document number zero about widgets and gadgets and things that are relevant to widgets")
+        s.add("text", "document number one about widgets and gadgets and things that are relevant to widgets too")
+        s.add("text", "document number two about widgets and gadgets and things that are relevant to widgets also")
+        pkt = assemble_context(s, "widgets", budget=ContextBudget(max_chars=80, max_items=3), compress=True)
+        self.assertEqual(pkt.used_chars, len(pkt.render()))
+        self.assertLessEqual(pkt.used_chars, 80)
 
     @unittest.skipUnless(_HAS_TORCH, "10 items crosses into semantic retrieval, which needs the represent embedder")
     def test_item_cap_is_honored(self):
@@ -165,6 +232,32 @@ class CompressionTest(unittest.TestCase):
         out = compress_text(text, "refund policy", max_chars=20)
         self.assertLessEqual(len(out), 20)
         self.assertGreater(len(out), 0)
+
+    def test_max_chars_0_is_rejected_not_silently_over_budget(self):
+        """Regression (MXR-080-0239), the audit's own exact example: compress_text(..., max_chars=0)
+        used to return 2 characters (one kept character plus a mandatory ellipsis) -- silently, and
+        unboundedly relative to the declared budget of 0. Zero is not a positive budget; this must
+        raise, not guess at a 2-character answer nobody asked for."""
+        with self.assertRaises(ValueError):
+            compress_text("The sky is blue. Refunds are given within 30 days. Cats are cute.", "refund policy", 0)
+
+    def test_max_chars_must_be_a_positive_whole_number(self):
+        for bad in (-10, 3.5, float("inf"), float("nan"), True):
+            with self.assertRaises((TypeError, ValueError)):
+                compress_text("some text of no particular importance here", "task", bad)
+
+    def test_max_chars_1_spends_the_whole_budget_on_the_truncation_marker(self):
+        """At the tightest possible positive budget there is no room for the ellipsis AND a kept
+        character, so the whole budget (1 char) goes to the ellipsis alone -- never 2 characters."""
+        out = compress_text("a much longer sentence than the budget allows by a very large margin", "task", 1)
+        self.assertEqual(len(out), 1)
+
+    def test_single_run_on_sentence_with_no_punctuation_still_respects_a_tiny_budget(self):
+        """The len(sentences) <= 1 path (no '.', '!', '?', or newline to split on) had the same
+        max(max_chars - 1, 1) + ellipsis floor as the multi-sentence path -- exercised separately here
+        since it is a distinct branch in _compress."""
+        out = compress_text("a single long run on clause with no terminal punctuation at all", "task", 3)
+        self.assertLessEqual(len(out), 3)
 
 
 @unittest.skipUnless(_HAS_TORCH, "semantic retrieval needs the represent embedder")
