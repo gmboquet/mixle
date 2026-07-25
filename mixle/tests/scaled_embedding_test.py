@@ -1,4 +1,4 @@
-"""Tests for the rate-adaptive common embedding (mixle.reason.embedding)."""
+"""Tests for the rate-adaptive embedding (mixle.reason.embedding)."""
 
 import unittest
 
@@ -177,6 +177,48 @@ class ScaledEmbeddingTest(unittest.TestCase):
             ScaledEmbedding(in_dim=3, max_dim=4, seed=0).fit(X, epochs=5, lr=-0.1)
         with self.assertRaises(ValueError):
             ScaledEmbedding(in_dim=3, max_dim=4, seed=0).fit(X, epochs=5, weight_decay=-0.1)
+
+    # -- MXR-080-0282: independent instances have no cross-modal alignment mechanism ----------------
+
+    def test_independently_fit_instances_have_no_cross_modal_alignment(self):
+        # The documented claim (pre-fix) was that codes "are comparable across modalities (a common
+        # embedding)". Demonstrate that's false: two ScaledEmbedding instances, each fit on its own
+        # linear rendering of the SAME shared underlying factor u (like an "image view" and a "text
+        # view" of the same concept), converge to independent, arbitrary latent rotations. A genuine
+        # common embedding would let a truly-paired sample (same row of u) retrieve as each other's
+        # nearest neighbor far above chance; an unaligned one should not do reliably better than
+        # chance, because nothing ties the two instances' coordinate systems together.
+        from mixle.reason import ScaledEmbedding
+
+        rng = np.random.RandomState(42)
+        n, k, n_test = 600, 3, 100
+        u = rng.normal(size=(n, k))  # the shared underlying factor, paired across modalities by row
+        A = rng.normal(size=(7, k))
+        B = rng.normal(size=(9, k))
+        xA = u @ A.T + rng.normal(0, 0.05, size=(n, 7))  # "modality A" -- 7 raw features
+        xB = u @ B.T + rng.normal(0, 0.05, size=(n, 9))  # "modality B" -- 9 raw features
+
+        emb_a = ScaledEmbedding(in_dim=7, max_dim=5, seed=1).fit(xA, epochs=500)
+        emb_b = ScaledEmbedding(in_dim=9, max_dim=5, seed=2).fit(xB, epochs=500)
+
+        code_a = emb_a.encode(xA[:n_test])
+        code_b = emb_b.encode(xB[:n_test])
+
+        a_norm = code_a / (np.linalg.norm(code_a, axis=1, keepdims=True) + 1e-12)
+        b_norm = code_b / (np.linalg.norm(code_b, axis=1, keepdims=True) + 1e-12)
+        sim = a_norm @ b_norm.T  # (n_test, n_test) cosine similarity, true pairs on the diagonal
+
+        nn_idx = np.argmax(sim, axis=1)
+        top1_acc = float(np.mean(nn_idx == np.arange(n_test)))
+        chance = 1.0 / n_test
+        # A genuine common embedding retrieves true pairs far above chance; an arbitrary independent
+        # rotation should not clear a generous multiple of chance.
+        self.assertLess(top1_acc, 10 * chance)
+
+        matched_sim = np.diag(sim).mean()
+        unmatched_sim = (sim.sum() - np.diag(sim).sum()) / (n_test * n_test - n_test)
+        # No meaningful similarity advantage for genuinely-paired samples over mismatched ones.
+        self.assertLess(matched_sim - unmatched_sim, 0.15)
 
 
 if __name__ == "__main__":
