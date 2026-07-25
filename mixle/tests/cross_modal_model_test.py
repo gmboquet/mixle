@@ -265,6 +265,47 @@ class CrossModalModelTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             m.belief({"A": xA[0]})
 
+    # -- MXR-080-0277: fit() must validate the complete aligned training table --------------------
+    def test_fit_rejects_misaligned_training_table_and_bad_epochs(self):
+        from mixle.reason import CrossModalModel
+
+        rng = np.random.RandomState(22)
+        _, xA, xB = _two_view_data(rng, 200, k=2, dA=4, dB=3)
+
+        def fresh():
+            m = CrossModalModel(latent_dim=3, seed=0)
+            return m.add_modality("A", 4).add_modality("B", 3)
+
+        with self.assertRaises(ValueError):  # unequal row counts: A has 200, B has 50
+            fresh().fit({"A": xA, "B": xB[:50]}, epochs=5)
+        with self.assertRaises(ValueError):  # declared in_dim=4 for A but data has width 6
+            fresh().fit({"A": rng.normal(size=(200, 6)), "B": xB}, epochs=5)
+        with self.assertRaises(ValueError):  # empty training data
+            fresh().fit({"A": xA[:0], "B": xB[:0]}, epochs=5)
+        with self.assertRaises(ValueError):  # non-finite training data
+            bad = xA.copy()
+            bad[0, 0] = np.nan
+            fresh().fit({"A": bad, "B": xB}, epochs=5)
+        with self.assertRaises(ValueError):  # epochs=0 must not mark a random-init model fitted
+            fresh().fit({"A": xA, "B": xB}, epochs=0)
+        with self.assertRaises(ValueError):  # negative epochs
+            fresh().fit({"A": xA, "B": xB}, epochs=-1)
+        with self.assertRaises(TypeError):  # epochs must be a genuine int, not a float
+            fresh().fit({"A": xA, "B": xB}, epochs=3.0)
+        with self.assertRaises(TypeError):  # epochs must not be a bool (an int subclass)
+            fresh().fit({"A": xA, "B": xB}, epochs=True)
+
+    def test_fit_with_valid_aligned_table_still_succeeds(self):
+        from mixle.reason import CrossModalModel
+
+        rng = np.random.RandomState(23)
+        _, xA, xB = _two_view_data(rng, 200, k=2, dA=4, dB=3)
+        m = CrossModalModel(latent_dim=3, seed=0)
+        m.add_modality("A", 4).add_modality("B", 3)
+        m.fit({"A": xA, "B": xB}, epochs=5)
+        self.assertTrue(m._fitted)
+        self.assertEqual(m._n_train, 200)
+
 
 if __name__ == "__main__":
     unittest.main()
