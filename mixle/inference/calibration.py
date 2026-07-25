@@ -32,6 +32,55 @@ import numpy as np
 from numpy.random import RandomState
 
 
+def _positive_int(name: str, value: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return int(value)
+
+
+def _vector(name: str, values: Any) -> np.ndarray:
+    try:
+        array = np.asarray(values, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a non-empty finite numeric vector") from exc
+    if array.ndim != 1 or array.size == 0:
+        raise ValueError(f"{name} must be a non-empty one-dimensional array")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values")
+    return array
+
+
+def _probability_outcomes(prob: Any, outcome: Any) -> tuple[np.ndarray, np.ndarray]:
+    p = _vector("prob", prob)
+    y = _vector("outcome", outcome)
+    if p.shape != y.shape:
+        raise ValueError("prob and outcome must have matching shapes")
+    if np.any((p < 0.0) | (p > 1.0)):
+        raise ValueError("prob must contain probabilities in [0, 1]")
+    if np.any((y != 0.0) & (y != 1.0)):
+        raise ValueError("outcome must contain binary 0/1 values")
+    return p, y
+
+
+def _pit_vector(values: Any) -> np.ndarray:
+    pit = _vector("pit", values)
+    if np.any((pit < 0.0) | (pit > 1.0)):
+        raise ValueError("PIT/CDF values must lie in [0, 1]")
+    return pit
+
+
+def _bootstrap_controls(n_boot: int, ci_level: float) -> tuple[int, float]:
+    n_boot = _positive_int("n_boot", n_boot)
+    if (
+        isinstance(ci_level, (bool, np.bool_))
+        or not isinstance(ci_level, (int, float, np.integer, np.floating))
+        or not np.isfinite(ci_level)
+        or not 0.0 < float(ci_level) < 1.0
+    ):
+        raise ValueError("ci_level must be a finite number strictly between 0 and 1")
+    return n_boot, float(ci_level)
+
+
 def _as_rng(seed: int | RandomState | None) -> RandomState:
     """Return a ``RandomState`` from an int seed, an existing ``RandomState``, or ``None``."""
     if isinstance(seed, RandomState):
@@ -41,6 +90,7 @@ def _as_rng(seed: int | RandomState | None) -> RandomState:
 
 def _bin_edges(prob: np.ndarray, bins: int, strategy: str) -> np.ndarray:
     """Equal-width (``"uniform"``) or equal-count (``"quantile"``) bin edges on ``[0, 1]``."""
+    bins = _positive_int("bins", bins)
     if strategy == "uniform":
         return np.linspace(0.0, 1.0, bins + 1)
     if strategy == "quantile":
@@ -80,8 +130,9 @@ def reliability_curve(
         ``{'mean_pred', 'obs_freq', 'count', 'bin_edges'}`` (one entry per non-empty bin), plus
         ``'obs_lo'`` / ``'obs_hi'`` when ``ci`` is True.
     """
-    p = np.asarray(prob, dtype=float)
-    y = np.asarray(outcome, dtype=float)
+    p, y = _probability_outcomes(prob, outcome)
+    if ci:
+        n_boot, ci_level = _bootstrap_controls(n_boot, ci_level)
     edges = _bin_edges(p, bins, strategy)
     nb = len(edges) - 1
     idx = np.clip(np.digitize(p, edges[1:-1], right=False), 0, nb - 1)
@@ -172,8 +223,11 @@ def expected_calibration_error(
             raise ValueError("norm must be 'l1' or 'l2'.")
         return float(total)
 
-    p = np.asarray(prob, dtype=float)
-    y = np.asarray(outcome, dtype=float)
+    p, y = _probability_outcomes(prob, outcome)
+    if norm not in ("l1", "l2"):
+        raise ValueError("norm must be 'l1' or 'l2'.")
+    if ci:
+        n_boot, ci_level = _bootstrap_controls(n_boot, ci_level)
     point = _ece(p, y)
     if not ci:
         return point
@@ -195,8 +249,7 @@ def maximum_calibration_error(
     Unlike :func:`expected_calibration_error` this is not count-weighted, so it surfaces a small but
     badly-miscalibrated region that the average would hide.
     """
-    p = np.asarray(prob, dtype=float)
-    y = np.asarray(outcome, dtype=float)
+    p, y = _probability_outcomes(prob, outcome)
     edges = _bin_edges(p, bins, strategy)
     nb = len(edges) - 1
     idx = np.clip(np.digitize(p, edges[1:-1], right=False), 0, nb - 1)
@@ -221,7 +274,24 @@ def top_label_confidence(prob: np.ndarray, labels: np.ndarray) -> tuple[np.ndarr
         :func:`expected_calibration_error`.
     """
     p = np.asarray(prob, dtype=float)
-    y = np.asarray(labels).astype(int)
+    labels_array = np.asarray(labels)
+    if p.ndim != 2 or p.shape[0] == 0 or p.shape[1] < 2:
+        raise ValueError("prob must have shape (n, K) with n >= 1 and K >= 2")
+    if not np.all(np.isfinite(p)) or np.any((p < 0.0) | (p > 1.0)):
+        raise ValueError("prob must contain finite probabilities in [0, 1]")
+    if not np.allclose(p.sum(axis=1), 1.0, rtol=1e-7, atol=1e-9):
+        raise ValueError("each prob row must sum to 1")
+    if labels_array.ndim != 1 or labels_array.shape[0] != p.shape[0]:
+        raise ValueError("labels must be one-dimensional and match the probability rows")
+    try:
+        labels_float = labels_array.astype(float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("labels must contain finite integer class indices") from exc
+    if not np.all(np.isfinite(labels_float)) or np.any(labels_float != np.round(labels_float)):
+        raise ValueError("labels must contain finite integer class indices")
+    y = labels_float.astype(int)
+    if np.any((y < 0) | (y >= p.shape[1])):
+        raise ValueError(f"labels must lie in [0, {p.shape[1]})")
     pred = np.argmax(p, axis=1)
     confidence = p[np.arange(p.shape[0]), pred]
     correct = (pred == y).astype(float)
@@ -239,11 +309,16 @@ def pit_values(y: np.ndarray, cdf: np.ndarray | Callable[[np.ndarray], np.ndarra
         cdf: ``(n,)`` precomputed predictive-CDF values at ``y``, or a callable applied to ``y``.
 
     Returns:
-        ``(n,)`` PIT values, clipped to ``[0, 1]``.
+        ``(n,)`` PIT values in ``[0, 1]``. Invalid CDF values raise rather than being clipped.
     """
-    y = np.asarray(y, dtype=float)
-    u = cdf(y) if callable(cdf) else np.asarray(cdf, dtype=float)
-    return np.clip(u, 0.0, 1.0)
+    y = _vector("y", y)
+    try:
+        u = np.asarray(cdf(y) if callable(cdf) else cdf, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("cdf must return finite values matching y") from exc
+    if u.shape != y.shape:
+        raise ValueError("cdf values must have the same one-dimensional shape as y")
+    return _pit_vector(u)
 
 
 def pit_ensemble(
@@ -264,8 +339,12 @@ def pit_ensemble(
     Returns:
         ``(n,)`` PIT values in ``[0, 1]``.
     """
-    y = np.asarray(y, dtype=float)
+    y = _vector("y", y)
     f = np.asarray(forecasts, dtype=float)
+    if f.ndim != 2 or f.shape[0] != len(y):
+        raise ValueError("forecasts must have shape (len(y), n_members)")
+    if not np.all(np.isfinite(f)):
+        raise ValueError("forecasts must contain only finite values")
     m = f.shape[1]
     if m == 0:
         # unguarded, this returned fabricated-looking Uniform(0,1) noise when randomize=True (u
@@ -280,7 +359,7 @@ def pit_ensemble(
         u = (below + v * (equal + 1)) / (m + 1)
     else:
         u = (below + 0.5 * equal) / m
-    return np.clip(u, 0.0, 1.0)
+    return u
 
 
 def pit_histogram(pit: np.ndarray, *, bins: int = 10) -> dict[str, np.ndarray]:
@@ -294,7 +373,8 @@ def pit_histogram(pit: np.ndarray, *, bins: int = 10) -> dict[str, np.ndarray]:
         ``{'counts', 'density', 'edges', 'uniform'}`` where ``density`` integrates to 1 and
         ``uniform`` is the flat reference density (``1.0``) a calibrated forecast would match.
     """
-    u = np.asarray(pit, dtype=float)
+    u = _pit_vector(pit)
+    bins = _positive_int("bins", bins)
     counts, edges = np.histogram(u, bins=bins, range=(0.0, 1.0))
     density = counts / (counts.sum() * (edges[1] - edges[0]))
     return {"counts": counts, "density": density, "edges": edges, "uniform": np.ones(bins)}
@@ -306,7 +386,8 @@ def pit_calibration_error(pit: np.ndarray, *, bins: int = 10) -> float:
     ``sum_b |count_b/n - 1/bins|`` -- 0 when the PIT histogram is perfectly flat (calibrated), larger
     when it is U-shaped (under-dispersed) or humped (over-dispersed).
     """
-    u = np.asarray(pit, dtype=float)
+    u = _pit_vector(pit)
+    bins = _positive_int("bins", bins)
     counts, _ = np.histogram(u, bins=bins, range=(0.0, 1.0))
     freq = counts / counts.sum()
     return float(np.sum(np.abs(freq - 1.0 / bins)))
@@ -324,9 +405,13 @@ def interval_coverage(lower: np.ndarray, upper: np.ndarray, y: np.ndarray) -> di
         ``{'coverage', 'mean_width'}`` -- the fraction of ``y`` inside ``[lower, upper]`` and the mean
         interval width. Compare ``coverage`` to the nominal level the interval was built for.
     """
-    lo = np.asarray(lower, dtype=float)
-    hi = np.asarray(upper, dtype=float)
-    y = np.asarray(y, dtype=float)
+    lo = _vector("lower", lower)
+    hi = _vector("upper", upper)
+    y = _vector("y", y)
+    if lo.shape != hi.shape or lo.shape != y.shape:
+        raise ValueError("lower, upper, and y must have matching shapes")
+    if np.any(lo > hi):
+        raise ValueError("each interval must satisfy lower <= upper")
     covered = (y >= lo) & (y <= hi)
     return {"coverage": float(covered.mean()), "mean_width": float((hi - lo).mean())}
 
@@ -348,10 +433,16 @@ def coverage_curve(forecasts: np.ndarray, y: np.ndarray, *, levels: np.ndarray |
         ``{'nominal', 'empirical'}`` arrays of equal length.
     """
     f = np.asarray(forecasts, dtype=float)
-    y = np.asarray(y, dtype=float)
+    y = _vector("y", y)
+    if f.ndim != 2 or f.shape[0] != len(y) or f.shape[1] == 0:
+        raise ValueError("forecasts must have non-empty shape (len(y), n_members)")
+    if not np.all(np.isfinite(f)):
+        raise ValueError("forecasts must contain only finite values")
     if levels is None:
         levels = np.arange(0.05, 1.0, 0.05)
-    levels = np.asarray(levels, dtype=float)
+    levels = _vector("levels", levels)
+    if np.any((levels <= 0.0) | (levels >= 1.0)):
+        raise ValueError("levels must lie strictly between 0 and 1")
     emp = np.empty_like(levels)
     for i, c in enumerate(levels):
         lo = np.quantile(f, (1.0 - c) / 2.0, axis=1)
@@ -360,22 +451,27 @@ def coverage_curve(forecasts: np.ndarray, y: np.ndarray, *, levels: np.ndarray |
     return {"nominal": levels, "empirical": emp}
 
 
-def _pava(y: np.ndarray) -> np.ndarray:
-    """Pool-adjacent-violators: the non-decreasing least-squares fit to ``y`` (in order)."""
-    blocks: list[list[float]] = []  # each block is [sum, count]
-    for yi in y:
-        cur = [float(yi), 1.0]
-        while blocks and blocks[-1][0] / blocks[-1][1] >= cur[0] / cur[1]:
-            s, c = blocks.pop()
-            cur[0] += s
-            cur[1] += c
+def _pava(y: np.ndarray, weights: np.ndarray | None = None) -> np.ndarray:
+    """Weighted non-decreasing least-squares fit, one fitted value per input location."""
+    y = _vector("PAVA outcomes", y)
+    w = np.ones_like(y) if weights is None else _vector("PAVA weights", weights)
+    if w.shape != y.shape or np.any(w <= 0.0):
+        raise ValueError("PAVA weights must match outcomes and be strictly positive")
+    blocks: list[list[float]] = []  # [weighted sum, weight, start, end]
+    for index, (yi, wi) in enumerate(zip(y, w)):
+        cur = [float(yi * wi), float(wi), float(index), float(index + 1)]
+        while blocks and blocks[-1][0] / blocks[-1][1] > cur[0] / cur[1]:
+            previous = blocks.pop()
+            cur = [
+                previous[0] + cur[0],
+                previous[1] + cur[1],
+                previous[2],
+                cur[3],
+            ]
         blocks.append(cur)
-    out = np.empty(len(y))
-    i = 0
-    for s, c in blocks:
-        k = int(round(c))
-        out[i : i + k] = s / c
-        i += k
+    out = np.empty(len(y), dtype=float)
+    for total, weight, start, end in blocks:
+        out[int(start) : int(end)] = total / weight
     return out
 
 
@@ -404,12 +500,14 @@ class ProbabilityCalibrator:
 
     def fit(self, scores: Any, outcomes: Any) -> ProbabilityCalibrator:
         """Fit the score->probability map on ``scores`` with binary ``outcomes`` (0/1)."""
-        s = np.asarray(scores, dtype=float).reshape(-1)
-        y = np.asarray(outcomes, dtype=float).reshape(-1)
+        s = _vector("scores", scores)
+        y = _vector("outcomes", outcomes)
         if s.shape != y.shape:
             raise ValueError("scores and outcomes must have the same length")
         if s.size < 2:
             raise ValueError("need at least two calibration points")
+        if np.any((y != 0.0) & (y != 1.0)):
+            raise ValueError("outcomes must contain binary 0/1 values")
         if self.method == "isotonic":
             order = np.argsort(s, kind="mergesort")
             xs = s[order]
@@ -428,7 +526,7 @@ class ProbabilityCalibrator:
             group_sum = np.zeros(uniq.shape[0])
             np.add.at(group_sum, inverse, ys)
             group_mean = group_sum / counts
-            fit = np.clip(_pava(group_mean), 0.0, 1.0)
+            fit = np.clip(_pava(group_mean, counts.astype(float)), 0.0, 1.0)
             self._x = uniq
             self._y = np.maximum.accumulate(fit)
         else:  # platt
@@ -444,6 +542,8 @@ class ProbabilityCalibrator:
                 return float(np.mean(np.logaddexp(0.0, logits) - y * logits))
 
             res = minimize(nll, np.array([1.0, 0.0]), method="BFGS")
+            if not res.success or not np.all(np.isfinite(res.x)):
+                raise RuntimeError(f"Platt calibration failed to converge: {res.message}")
             self._a, self._b, self._sm, self._ss = res.x[0], res.x[1], sm, ss
         self._fitted = True
         return self
@@ -452,7 +552,7 @@ class ProbabilityCalibrator:
         """Calibrated probabilities for ``scores`` (clamped to ``[0, 1]``)."""
         if not self._fitted:
             raise RuntimeError("call fit(...) before predict(...)")
-        s = np.asarray(scores, dtype=float).reshape(-1)
+        s = _vector("scores", scores)
         if self.method == "isotonic":
             return np.clip(np.interp(s, self._x, self._y), 0.0, 1.0)
         z = (s - self._sm) / self._ss

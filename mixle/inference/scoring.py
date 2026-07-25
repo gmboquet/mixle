@@ -36,7 +36,24 @@ _SQRT_PI = float(np.sqrt(np.pi))
 def _reduce(values: np.ndarray, mean: bool) -> np.ndarray | float:
     """Return the per-observation array or its mean."""
     values = np.asarray(values, dtype=float)
+    if values.size == 0:
+        raise ValueError("a scoring rule requires at least one observation")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("a scoring rule produced a non-finite value from its inputs")
     return float(values.mean()) if mean else values
+
+
+def _positive_int(name: str, value: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return int(value)
+
+
+def _finite_vector(name: str, values: np.ndarray) -> np.ndarray:
+    array = np.asarray(values, dtype=float)
+    if array.ndim != 1 or array.size == 0 or not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must be a non-empty finite one-dimensional array")
+    return array
 
 
 def log_score(prob: np.ndarray, *, mean: bool = True) -> np.ndarray | float:
@@ -64,6 +81,8 @@ def log_score(prob: np.ndarray, *, mean: bool = True) -> np.ndarray | float:
             density silently win any comparison instead of being rejected.
     """
     p = np.asarray(prob, dtype=float)
+    if p.ndim not in (1, 2) or p.size == 0:
+        raise ValueError("brier_score requires a non-empty one- or two-dimensional prob array")
     if not np.isfinite(p).all():
         raise ValueError("log_score requires prob to be finite (no NaN/Inf).")
     if np.any(p < 0.0):
@@ -108,18 +127,28 @@ def brier_score(prob: np.ndarray, outcome: np.ndarray, *, mean: bool = True) -> 
     if not np.isfinite(y).all():
         raise ValueError("brier_score requires outcome to be finite (no NaN/Inf).")
     if p.ndim == 1:
+        if y.ndim != 1 or y.shape != p.shape:
+            raise ValueError("binary outcome must have the same one-dimensional shape as prob")
         if np.any((y != 0.0) & (y != 1.0)):
             raise ValueError("brier_score requires a binary 0/1 outcome to match a 1-D prob.")
         return _reduce((p - y) ** 2, mean)
     n, k = p.shape
+    if k < 2 or not np.allclose(p.sum(axis=1), 1.0, rtol=1e-7, atol=1e-9):
+        raise ValueError("multiclass prob rows must contain at least two classes and sum to 1")
     if y.ndim == 1:
+        if len(y) != n:
+            raise ValueError("outcome labels must match the number of probability rows")
         if np.any((y != np.round(y)) | (y < 0) | (y >= k)):
             raise ValueError(f"brier_score requires integer outcome labels in [0, {k}).")
         onehot = np.zeros((n, k), dtype=float)
         onehot[np.arange(n), y.astype(int)] = 1.0
     else:
+        if y.shape != p.shape:
+            raise ValueError("one-hot outcome must have the same shape as prob")
         if np.any((y != 0.0) & (y != 1.0)):
             raise ValueError("brier_score requires a 0/1 one-hot outcome matrix.")
+        if not np.all(y.sum(axis=1) == 1.0):
+            raise ValueError("each one-hot outcome row must contain exactly one positive class")
         onehot = y
     return _reduce(np.sum((p - onehot) ** 2, axis=1), mean)
 
@@ -153,8 +182,10 @@ def brier_decomposition(prob: np.ndarray, outcome: np.ndarray, *, bins: int = 10
             pair can silently produce a mathematically impossible negative "brier" value instead of
             raising (e.g. ``brier_decomposition([-1, 2], [-1, 2])`` returns ``brier == -2.0``).
     """
-    p = np.asarray(prob, dtype=float)
-    y = np.asarray(outcome, dtype=float)
+    p = _finite_vector("prob", prob)
+    y = _finite_vector("outcome", outcome)
+    if p.shape != y.shape:
+        raise ValueError("prob and outcome must have matching shapes")
     if not np.isfinite(p).all():
         raise ValueError("brier_decomposition requires prob to be finite (no NaN/Inf).")
     if np.any((p < 0.0) | (p > 1.0)):
@@ -163,6 +194,7 @@ def brier_decomposition(prob: np.ndarray, outcome: np.ndarray, *, bins: int = 10
         raise ValueError("brier_decomposition requires outcome to be finite (no NaN/Inf).")
     if np.any((y != 0.0) & (y != 1.0)):
         raise ValueError("brier_decomposition requires a binary 0/1 outcome.")
+    bins = _positive_int("bins", bins)
     n = p.shape[0]
     p_bar = float(y.mean())
     edges = np.linspace(0.0, 1.0, bins + 1)
@@ -222,9 +254,18 @@ def crps_ensemble(forecasts: np.ndarray, y: np.ndarray, *, fair: bool = False, m
     f = np.asarray(forecasts, dtype=float)
     if f.ndim == 1:
         f = f[None, :]
-        y = np.asarray([y], dtype=float)
+        y_array = np.asarray(y, dtype=float)
+        if y_array.size != 1:
+            raise ValueError("one-dimensional forecasts describe one observation and require scalar y")
+        y = y_array.reshape(1)
     else:
-        y = np.asarray(y, dtype=float)
+        y = _finite_vector("y", y)
+    if f.ndim != 2 or f.shape[0] == 0 or f.shape[1] == 0:
+        raise ValueError("forecasts must have non-empty shape (n_observations, n_members)")
+    if not np.all(np.isfinite(f)) or not np.all(np.isfinite(y)):
+        raise ValueError("forecasts and y must contain only finite values")
+    if len(y) != f.shape[0]:
+        raise ValueError("y must match the number of forecast rows")
     if f.shape[1] < 2 and fair:
         raise ValueError("fair CRPS needs at least two ensemble members.")
     out = np.empty(f.shape[0], dtype=float)
@@ -248,9 +289,16 @@ def crps_gaussian(mu: np.ndarray, sigma: np.ndarray, y: np.ndarray, *, mean: boo
     Returns:
         Mean CRPS (float) or the per-observation array.
     """
-    mu = np.asarray(mu, dtype=float)
-    sigma = np.asarray(sigma, dtype=float)
-    y = np.asarray(y, dtype=float)
+    try:
+        mu, sigma, y = np.broadcast_arrays(
+            np.asarray(mu, dtype=float),
+            np.asarray(sigma, dtype=float),
+            np.asarray(y, dtype=float),
+        )
+    except ValueError as exc:
+        raise ValueError("mu, sigma, and y must be broadcast-compatible") from exc
+    if mu.size == 0 or not np.all(np.isfinite(mu)) or not np.all(np.isfinite(sigma)) or not np.all(np.isfinite(y)):
+        raise ValueError("mu, sigma, and y must be non-empty and finite")
     if np.any(sigma <= 0):
         raise ValueError("sigma must be positive.")
     z = (y - mu) / sigma
@@ -278,11 +326,20 @@ def interval_score(
     Returns:
         Mean interval score (float) or the per-observation array.
     """
-    if not 0.0 < alpha < 1.0:
+    if (
+        isinstance(alpha, (bool, np.bool_))
+        or not isinstance(alpha, (int, float, np.integer, np.floating))
+        or not np.isfinite(alpha)
+        or not 0.0 < float(alpha) < 1.0
+    ):
         raise ValueError("alpha must be in (0, 1).")
-    lo = np.asarray(lower, dtype=float)
-    hi = np.asarray(upper, dtype=float)
-    y = np.asarray(y, dtype=float)
+    lo = _finite_vector("lower", lower)
+    hi = _finite_vector("upper", upper)
+    y = _finite_vector("y", y)
+    if lo.shape != hi.shape or lo.shape != y.shape:
+        raise ValueError("lower, upper, and y must have matching shapes")
+    if np.any(lo > hi):
+        raise ValueError("each interval must satisfy lower <= upper")
     width = hi - lo
     below = np.where(y < lo, lo - y, 0.0)
     above = np.where(y > hi, y - hi, 0.0)
@@ -317,13 +374,19 @@ def pinball_loss(pred: np.ndarray, y: np.ndarray, tau: float | np.ndarray, *, me
         Mean pinball loss (float) or the per-observation array.
     """
     p = np.asarray(pred, dtype=float)
-    y = np.asarray(y, dtype=float)
+    y = _finite_vector("y", y)
     tau_arr = np.asarray(tau, dtype=float)
-    if np.any((tau_arr <= 0.0) | (tau_arr >= 1.0)):
+    if p.ndim not in (1, 2) or p.size == 0 or not np.all(np.isfinite(p)):
+        raise ValueError("pred must be a non-empty finite one- or two-dimensional array")
+    if tau_arr.size == 0 or not np.all(np.isfinite(tau_arr)) or np.any((tau_arr <= 0.0) | (tau_arr >= 1.0)):
         raise ValueError("tau must be in (0, 1).")
     if p.ndim == 1:
+        if p.shape != y.shape or tau_arr.ndim != 0:
+            raise ValueError("one-dimensional pred requires matching y and a scalar tau")
         u = y - p
     else:
+        if p.shape[0] != len(y) or tau_arr.ndim != 1 or p.shape[1] != len(tau_arr):
+            raise ValueError("two-dimensional pred requires matching y rows and one tau per column")
         u = y[:, None] - p
     loss = np.maximum(tau_arr * u, (tau_arr - 1.0) * u)
     return _reduce(loss, mean)
@@ -346,10 +409,20 @@ def energy_score(forecasts: np.ndarray, y: np.ndarray, *, fair: bool = False, me
         Mean energy score (float) or the per-observation array.
     """
     f = np.asarray(forecasts, dtype=float)
-    y = np.asarray(y, dtype=float)
     if f.ndim == 2:
         f = f[None, :, :]
+        y = np.asarray(y, dtype=float)
+        if y.ndim != 1:
+            raise ValueError("a two-dimensional forecast ensemble requires a one-dimensional y vector")
         y = y[None, :]
+    else:
+        y = np.asarray(y, dtype=float)
+    if f.ndim != 3 or 0 in f.shape:
+        raise ValueError("forecasts must have non-empty shape (n, m, d) or (m, d)")
+    if y.shape != (f.shape[0], f.shape[2]):
+        raise ValueError("y must have shape (n, d) matching the forecast ensemble")
+    if not np.all(np.isfinite(f)) or not np.all(np.isfinite(y)):
+        raise ValueError("forecasts and y must contain only finite values")
     n, m, _ = f.shape
     if m < 2 and fair:
         raise ValueError("fair energy score needs at least two ensemble members.")
@@ -379,9 +452,12 @@ def skill_score(score: float, reference: float, *, perfect: float = 0.0) -> floa
     Returns:
         The skill score (float); ``nan`` if the reference already equals the perfect score.
     """
+    values = np.asarray([score, reference, perfect], dtype=float)
+    if not np.all(np.isfinite(values)):
+        raise ValueError("score, reference, and perfect must be finite")
     denom = reference - perfect
     if denom == 0.0:
-        return float("nan")
+        raise ValueError("skill score is undefined when reference equals perfect")
     return float((reference - score) / denom)
 
 
