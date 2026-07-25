@@ -146,6 +146,37 @@ class KnowledgeGraphHelpersTestCase(unittest.TestCase):
         self.assertLessEqual(result.history[-1], result.history[0])
         self.assertGreater(np.mean(model.score_triples(positives)), np.mean(model.score_triples(negatives)))
 
+    def test_identities_embeddings_and_fit_controls_are_validated(self):
+        with self.assertRaisesRegex(ValueError, "unique identities"):
+            TransEKnowledgeGraphModel(np.zeros((2, 2)), np.zeros((1, 2)), entity_names=["a", "a"])
+        with self.assertRaisesRegex(ValueError, "finite"):
+            TransEKnowledgeGraphModel([[0.0, np.nan]], [[0.0, 0.0]])
+        for kwargs in (
+            {"num_entities": 1.5, "num_relations": 1},
+            {"num_entities": 2, "num_relations": 1, "scale": 0},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                TransEKnowledgeGraphModel.random(**kwargs)
+
+        model = TransEKnowledgeGraphModel.random(3, 1, entity_names=["a", "b", "c"], relation_names=["r"])
+        for kwargs in ({"margin": 0}, {"lr": np.nan}, {"max_its": 1.5}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                model.fit_margin([("a", "r", "b")], **kwargs)
+
+    def test_negative_sampling_filters_all_known_truths(self):
+        model = TransEKnowledgeGraphModel.random(3, 1, entity_names=["a", "b", "c"], relation_names=["r"])
+        positives = [("a", "r", "b"), ("a", "r", "c"), ("b", "r", "c")]
+        negatives = model.negative_sample(positives, seed=3, corrupt="both")
+        self.assertEqual(len(negatives), len(positives))
+        self.assertTrue(set(negatives).isdisjoint(positives))
+        self.assertTrue(all(negative != positive for positive, negative in zip(positives, negatives, strict=True)))
+
+    def test_fit_rejects_a_known_truth_as_explicit_negative(self):
+        model = TransEKnowledgeGraphModel.random(3, 1, entity_names=["a", "b", "c"], relation_names=["r"])
+        positives = [("a", "r", "b"), ("b", "r", "c")]
+        with self.assertRaisesRegex(ValueError, "known positive"):
+            model.fit_margin(positives, negative_triples=[("b", "r", "c"), ("a", "r", "c")])
+
 
 class GrammarLearningHelpersTestCase(unittest.TestCase):
     def test_viterbi_parse_matches_unambiguous_pcfg_log_density(self):
