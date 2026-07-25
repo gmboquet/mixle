@@ -1,8 +1,7 @@
-"""``forecast_price`` -- commodity-price / cost forecasting with conformally-calibrated intervals.
+"""``forecast_price`` -- commodity-price / cost forecasting with horizon-matched conformal intervals.
 
 Wraps the generic HMM front door (:func:`mixle.inference.forecast.forecast`) with a
-recalibration pass so the reported ``[lo, hi]`` band achieves nominal coverage on *real* held-out
-data, not just the model's own (possibly misspecified) predictive shape::
+recalibration pass so each reported ``[lo, hi]`` lead uses held-out residuals from that same lead::
 
     pf = forecast_price(model, price_history, horizon=12, level=0.9)
     pf.mean, pf.lo, pf.hi   # (horizon,) point forecast + calibrated band
@@ -17,12 +16,15 @@ is about to receive, scoring each origin's forecast against what actually happen
 sample of real ``horizon``-step-ahead residuals at the depth that matters (rather than mixing in
 easier short-horizon or harder long-horizon errors), which recalibrates the requested band via
 split conformal (:func:`mixle.inference.conformal.split_conformal`). This is what makes the band
-honest on real commodity series, where the emission family is only ever an approximation of the
-true price process.
+eligible for marginal coverage under the usual held-out exchangeability assumption. Time-series
+dependence or distribution shift can violate that assumption, so the result records the calibration
+count and assumptions rather than claiming unconditional real-world coverage.
 """
 
 from __future__ import annotations
 
+import math
+from numbers import Integral, Real
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -32,13 +34,16 @@ from mixle.inference.forecast import forecast
 
 
 class PriceForecast(NamedTuple):
-    """A calibrated price/cost forecast: point path, band, and the raw scenario draws."""
+    """A price/cost forecast with a horizon-matched interval calibration receipt."""
 
     mean: np.ndarray
     lo: np.ndarray
     hi: np.ndarray
     paths: np.ndarray
     level: float
+    calibration_count: int = 0
+    interval_method: str = "horizon_matched_split_conformal"
+    coverage_assumptions: tuple[str, ...] = ("held_out_exchangeability", "stable_data_generating_process")
 
 
 def forecast_price(
@@ -68,12 +73,30 @@ def forecast_price(
         ``mean``, the raw per-step predictive draws ``paths`` (for Monte-Carlo DCF scenario
         analysis downstream), and ``level``.
     """
+    if isinstance(horizon, bool) or not isinstance(horizon, Integral):
+        raise TypeError("horizon must be a positive integer")
+    horizon = int(horizon)
     if horizon < 1:
-        raise ValueError("horizon must be >= 1")
+        raise ValueError("horizon must be a positive integer")
+    if isinstance(level, bool) or not isinstance(level, Real) or not math.isfinite(float(level)):
+        raise TypeError("level must be a finite real number in (0, 1)")
+    level = float(level)
+    if not 0.0 < level < 1.0:
+        raise ValueError("level must be in (0, 1)")
+    if isinstance(cal_frac, bool) or not isinstance(cal_frac, Real) or not math.isfinite(float(cal_frac)):
+        raise TypeError("cal_frac must be a finite real number in (0, 1)")
+    cal_frac = float(cal_frac)
     if not 0.0 < cal_frac < 1.0:
         raise ValueError(f"cal_frac must be in (0.0, 1.0), got {cal_frac!r}.")
+    if isinstance(seed, bool) or not isinstance(seed, Integral):
+        raise TypeError("seed must be a non-negative integer")
+    seed = int(seed)
+    if seed < 0:
+        raise ValueError("seed must be a non-negative integer")
 
-    hist = np.asarray(list(history), dtype=np.float64).ravel()
+    hist = np.asarray(list(history), dtype=np.float64)
+    if hist.ndim != 1 or hist.size == 0 or not np.all(np.isfinite(hist)):
+        raise ValueError("history must be a non-empty finite one-dimensional series")
     n_hist = hist.shape[0]
     n_cal_window = max(int(round(n_hist * cal_frac)), horizon + 1)
     if n_cal_window >= n_hist:
@@ -87,19 +110,42 @@ def forecast_price(
     cal_y = []
     for origin in range(cal_start, n_hist - horizon):
         cf = forecast(model, hist[:origin].tolist(), horizon=horizon, level=level, seed=seed, keep_samples=False)
-        cal_pred.append(float(np.asarray(cf.mean)[-1]))
-        cal_y.append(float(hist[origin + horizon - 1]))
+        prediction = np.asarray(cf.mean, dtype=np.float64)
+        if prediction.shape != (horizon,) or not np.all(np.isfinite(prediction)):
+            raise RuntimeError("calibration forecast returned an invalid horizon path")
+        cal_pred.append(prediction)
+        cal_y.append(hist[origin : origin + horizon])
     cal_pred = np.asarray(cal_pred, dtype=np.float64)
     cal_y = np.asarray(cal_y, dtype=np.float64)
+    if cal_pred.ndim != 2 or cal_pred.shape[0] == 0 or cal_pred.shape != cal_y.shape:
+        raise ValueError("history does not provide a valid horizon-matched calibration set")
 
     # The forecast actually being delivered, drawn from the full history.
     f = forecast(model, hist.tolist(), horizon, level=level, keep_samples=True, seed=seed)
     test_pred = np.asarray(f.mean, dtype=np.float64)
 
-    lo, hi = split_conformal(cal_pred, cal_y, test_pred, alpha=1.0 - level, side="two-sided")
+    bounds = [
+        split_conformal(
+            cal_pred[:, lead],
+            cal_y[:, lead],
+            test_pred[lead : lead + 1],
+            alpha=1.0 - level,
+            side="two-sided",
+        )
+        for lead in range(horizon)
+    ]
+    lo = np.asarray([bound[0][0] for bound in bounds], dtype=np.float64)
+    hi = np.asarray([bound[1][0] for bound in bounds], dtype=np.float64)
 
     paths = f.samples if f.samples is not None else np.asarray([])
-    return PriceForecast(mean=test_pred, lo=lo, hi=hi, paths=paths, level=level)
+    return PriceForecast(
+        mean=test_pred,
+        lo=lo,
+        hi=hi,
+        paths=paths,
+        level=level,
+        calibration_count=int(cal_pred.shape[0]),
+    )
 
 
 __all__ = ["PriceForecast", "forecast_price"]

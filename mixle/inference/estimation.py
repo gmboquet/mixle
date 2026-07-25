@@ -1068,11 +1068,18 @@ def optimize(
             from mixle.inference.precision_plan import recommend_compute_precision
 
             plan = recommend_compute_precision(prev_estimate, data)
-            _record_precision_plan(estimator, plan, out)
             if plan.reduced() and engine is None:
                 from mixle.engines import NumpyEngine
 
                 engine = NumpyEngine(dtype=plan.compute_dtype, prefer_fused=True)
+            actual_dtype = np.float64 if engine is None else getattr(engine, "dtype", np.float64)
+            fallback = (
+                "explicit_engine_override"
+                if engine is not None and np.dtype(actual_dtype) != np.dtype(plan.compute_dtype)
+                else None
+            )
+            plan.record_execution(actual_dtype, fallback=fallback)
+            _record_precision_plan(estimator, plan, out)
         else:
             minimal_precision_pending = True
         precision = None  # carried by the explicit engine (or the default float64 host path)
@@ -1158,11 +1165,18 @@ def optimize(
                 plan = recommend_compute_precision(mm, data)
             else:
                 plan = PrecisionPlan(np.float64, "minimal: non-local backend or engine already supplied -> float64")
-            _record_precision_plan(estimator, plan, out)
             if plan.reduced() and engine is None:
                 from mixle.engines import NumpyEngine
 
                 engine = NumpyEngine(dtype=plan.compute_dtype, prefer_fused=True)
+            actual_dtype = np.float64 if engine is None else getattr(engine, "dtype", np.float64)
+            fallback = (
+                "explicit_engine_override"
+                if engine is not None and np.dtype(actual_dtype) != np.dtype(plan.compute_dtype)
+                else None
+            )
+            plan.record_execution(actual_dtype, fallback=fallback)
+            _record_precision_plan(estimator, plan, out)
 
         if enc_vdata is None and vdata is not None:
             vdata_for_encoding = _data_records_for_encoding(vdata, fields, est, mm)

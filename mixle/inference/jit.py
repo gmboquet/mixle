@@ -21,9 +21,24 @@ is the next increment and is not done here.
 
 from __future__ import annotations
 
+import hashlib
+from dataclasses import dataclass
+from numbers import Integral
 from typing import Any
 
 import numpy as np
+
+
+def _content_digest(value: Any) -> str:
+    return hashlib.sha256(repr(value).encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class JITExecutionResult:
+    """A fitted model paired with evidence of the JIT execution that actually ran."""
+
+    model: Any
+    receipt: dict[str, Any]
 
 
 class JittedScorer:
@@ -41,6 +56,13 @@ class JittedScorer:
         self.engine = engine if engine is not None else JaxEngine()
         self._encoder = model.dist_to_encoder()
         self._fn = None  # the jitted callable (built lazily on first call)
+        self.receipt = {
+            "requested_action": "jax_jit_whole_tree_log_density",
+            "model_digest": _content_digest(model),
+            "execution_status": "not_executed",
+            "compiled": False,
+            "fallback": None,
+        }
 
     def _compile(self):
         import jax
@@ -54,12 +76,43 @@ class JittedScorer:
         import jax
         import jax.numpy as jnp
 
-        enc = self._encoder.seq_encode(data)
-        payload = getattr(enc, "engine_payload", enc)
-        jpayload = jax.tree_util.tree_map(lambda a: jnp.asarray(a), payload)
-        if self._fn is None:
-            self._fn = self._compile()
-        return np.asarray(self._fn(jpayload))
+        try:
+            enc = self._encoder.seq_encode(data)
+            payload = getattr(enc, "engine_payload", enc)
+            jpayload = jax.tree_util.tree_map(lambda a: jnp.asarray(a), payload)
+            if self._fn is None:
+                self._fn = self._compile()
+            result = np.asarray(self._fn(jpayload))
+            if result.size == 0 or not np.all(np.isfinite(result)):
+                raise RuntimeError("JIT scorer returned empty or non-finite log densities")
+        except Exception as error:
+            self.receipt.update(
+                {
+                    "execution_status": "failed",
+                    "compiled": self._fn is not None,
+                    "failure": type(error).__name__,
+                }
+            )
+            raise
+        leaves = [np.asarray(leaf) for leaf in jax.tree_util.tree_leaves(jpayload)]
+        payload_signature = [
+            (str(leaf.dtype), tuple(int(size) for size in leaf.shape), hashlib.sha256(leaf.tobytes()).hexdigest())
+            for leaf in leaves
+        ]
+        self.receipt.update(
+            {
+                "execution_status": "executed",
+                "compiled": True,
+                "backend": jax.default_backend(),
+                "engine": type(self.engine).__name__,
+                "input_digest": _content_digest(payload_signature),
+                "input_dtypes": tuple(sorted({str(leaf.dtype) for leaf in leaves})),
+                "output_dtype": str(result.dtype),
+                "output_count": int(result.size),
+                "fallback": None,
+            }
+        )
+        return result
 
 
 def jit_seq_log_density(model: Any, engine: Any = None) -> JittedScorer:
@@ -141,7 +194,14 @@ def _mixture_em_family(leaf, jnp):
     return None
 
 
-def jit_em_mixture(model: Any, data: Any, *, max_its: int = 100, engine: Any = None):
+def jit_em_mixture(
+    model: Any,
+    data: Any,
+    *,
+    max_its: int = 100,
+    engine: Any = None,
+    return_receipt: bool = False,
+):
     """Fit a finite mixture of same-family scalar exponential-family leaves by EM, with the ENTIRE EM loop
     (every E-step + closed-form weighted M-step iteration) compiled to ONE ``jax.jit`` XLA program via
     ``lax.scan`` -- the parameters are traced inputs threaded through the loop on-device, so there is no
@@ -163,6 +223,14 @@ def jit_em_mixture(model: Any, data: Any, *, max_its: int = 100, engine: Any = N
     version-pinned -- the GPU result above used Python 3.11 + jax/jaxlib 0.4.34 + jax-metal 0.1.1; newer
     jaxlib emits StableHLO that jax-metal 0.1.1 cannot compile.
     """
+    if isinstance(max_its, bool) or not isinstance(max_its, Integral):
+        raise TypeError("max_its must be a positive integer")
+    max_its = int(max_its)
+    if max_its < 1:
+        raise ValueError("max_its must be a positive integer")
+    if not isinstance(return_receipt, bool):
+        raise TypeError("return_receipt must be a boolean")
+
     import jax
     import jax.numpy as jnp
 
@@ -180,13 +248,24 @@ def jit_em_mixture(model: Any, data: Any, *, max_its: int = 100, engine: Any = N
         raise NotImplementedError(f"jit_em_mixture does not support a mixture of {type(comps[0]).__name__}.")
 
     K = len(comps)
-    x = jnp.asarray(np.asarray(data, dtype=float))
+    observed = np.asarray(data, dtype=float)
+    if observed.ndim != 1 or observed.size == 0 or not np.all(np.isfinite(observed)):
+        raise ValueError("jit_em_mixture data must be a non-empty finite one-dimensional sequence")
+    weights = np.asarray(model.w, dtype=float)
+    if (
+        weights.shape != (K,)
+        or not np.all(np.isfinite(weights))
+        or np.any(weights < 0.0)
+        or not np.isclose(weights.sum(), 1.0)
+    ):
+        raise ValueError("jit_em_mixture weights must be one finite normalized probability vector")
+    x = jnp.asarray(observed)
     extra = jax.scipy.special.gammaln(x + 1.0) if fam["extra"] == "log_factorial" else None
     # stack each component's params into per-parameter arrays of length K (traced inputs)
     p0 = [fam["unpack"](c) for c in comps]
     n_par = len(p0[0])
     params0 = tuple(jnp.asarray([p0[k][j] for k in range(K)]) for j in range(n_par))
-    log_w0 = jnp.log(jnp.asarray(np.asarray(model.w, dtype=float)))
+    log_w0 = jnp.log(jnp.asarray(weights))
 
     def em_step(carry, _i):
         params, log_w = carry
@@ -206,11 +285,30 @@ def jit_em_mixture(model: Any, data: Any, *, max_its: int = 100, engine: Any = N
     # per-iteration host sync, the move that makes a jitted EM actually fast).
     @jax.jit
     def run(params, log_w):
-        (params, log_w), lls = jax.lax.scan(em_step, (params, log_w), xs=None, length=int(max_its))
+        (params, log_w), lls = jax.lax.scan(em_step, (params, log_w), xs=None, length=max_its)
         return params, log_w, lls
 
     params, log_w, _lls = run(params0, log_w0)
     params_np = [np.asarray(eng.to_numpy(p)) for p in params]
     w = np.asarray(eng.to_numpy(jnp.exp(log_w)))
+    if not np.all(np.isfinite(w)) or np.any(w < 0.0) or not np.isclose(w.sum(), 1.0, atol=1.0e-6):
+        raise RuntimeError("JIT EM produced invalid mixture weights")
     fitted = [fam["make"](tuple(params_np[j][k] for j in range(n_par))) for k in range(K)]
-    return MixtureDistribution(fitted, list(w))
+    result = MixtureDistribution(fitted, list(w))
+    receipt = {
+        "requested_action": "jax_jit_full_em_loop",
+        "execution_status": "executed",
+        "compiled": True,
+        "backend": jax.default_backend(),
+        "engine": type(eng).__name__,
+        "model_digest": _content_digest(model),
+        "data_digest": hashlib.sha256(observed.tobytes()).hexdigest(),
+        "input_dtype": str(x.dtype),
+        "output_weight_dtype": str(w.dtype),
+        "iterations": max_its,
+        "observations": int(observed.size),
+        "component_count": K,
+        "target_evaluations": int(max_its * observed.size * K),
+        "fallback": None,
+    }
+    return JITExecutionResult(result, receipt) if return_receipt else result
