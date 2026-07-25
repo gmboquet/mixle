@@ -25,6 +25,47 @@ from mixle.stats import CategoricalDistribution, HeterogeneousPCFGDistribution
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution, GaussianEstimator
 
 
+class _TaggedComponent:
+    def __init__(self, tag):
+        self.tag = tag
+
+    def log_density(self, x):
+        return 0.0 if self.tag == "popular" else -8.0
+
+
+class _TaggedAccumulator:
+    def __init__(self, tag):
+        self.tag = tag
+        self.total = 0.0
+
+    def update(self, x, weight, estimate):
+        if estimate.tag != self.tag:
+            raise AssertionError(f"estimator {self.tag} was detached from component {estimate.tag}")
+        self.total += weight
+
+    def value(self):
+        return self.total
+
+
+class _TaggedFactory:
+    def __init__(self, tag):
+        self.tag = tag
+
+    def make(self):
+        return _TaggedAccumulator(self.tag)
+
+
+class _TaggedEstimator:
+    def __init__(self, tag):
+        self.tag = tag
+
+    def accumulator_factory(self):
+        return _TaggedFactory(self.tag)
+
+    def estimate(self, nobs, suff_stat):
+        return _TaggedComponent(self.tag)
+
+
 class DPMModelHelpersTestCase(unittest.TestCase):
     def test_stick_breaking_and_crp_utilities(self):
         weights = stick_breaking_weights([0.5, 0.25])
@@ -59,6 +100,70 @@ class DPMModelHelpersTestCase(unittest.TestCase):
         np.testing.assert_allclose(result.responsibilities.sum(axis=1), np.ones(len(data)))
         self.assertLess(means[0], -1.5)
         self.assertGreater(means[-1], 1.5)
+
+    def test_component_sorting_preserves_heterogeneous_estimator_identity(self):
+        initial = [_TaggedComponent("rare"), _TaggedComponent("popular")]
+        estimators = [_TaggedEstimator("rare"), _TaggedEstimator("popular")]
+        result = fit_truncated_dpm(
+            [0.0, 1.0, 2.0],
+            initial,
+            estimators,
+            max_its=2,
+            tol=None,
+            sort_components=True,
+        )
+        self.assertEqual([component.tag for component in result.model.components], ["popular", "rare"])
+        self.assertEqual(result.objective_name, "truncated_dp_elbo")
+        self.assertEqual(len(result.history), 2)
+        self.assertTrue(np.all(np.isfinite(result.history)))
+
+    def test_elbo_contains_assignment_entropy_and_rejects_nonfinite_scores(self):
+        from mixle.models.dirichlet_process_mixture import _truncated_dpm_elbo
+
+        components = [_TaggedComponent("popular"), _TaggedComponent("popular")]
+        gamma = np.ones((2, 2))
+        deterministic = _truncated_dpm_elbo(
+            components,
+            [0.0],
+            np.array([[1.0, 0.0]]),
+            gamma,
+            alpha=1.0,
+        )
+        uniform = _truncated_dpm_elbo(
+            components,
+            [0.0],
+            np.array([[0.5, 0.5]]),
+            gamma,
+            alpha=1.0,
+        )
+        self.assertAlmostEqual(uniform - deterministic, np.log(2.0))
+
+        class _NonFiniteComponent:
+            @staticmethod
+            def log_density(x):
+                return np.nan
+
+        with self.assertRaisesRegex(ValueError, "finite"):
+            fit_truncated_dpm(
+                [0.0],
+                [_NonFiniteComponent()],
+                _TaggedEstimator("bad"),
+                max_its=1,
+            )
+
+    def test_invalid_variational_controls_are_not_coerced(self):
+        component = GaussianDistribution(0.0, 1.0)
+        for controls in (
+            {"max_its": 0},
+            {"max_its": 1.5},
+            {"max_its": True},
+            {"tol": -1.0},
+            {"tol": np.nan},
+            {"sort_components": 1},
+            {"alpha": True},
+        ):
+            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError)):
+                fit_truncated_dpm([0.0], [component], GaussianEstimator(), **controls)
 
 
 class PartiallyObservableMarkovDecisionProcessModelHelpersTestCase(unittest.TestCase):
