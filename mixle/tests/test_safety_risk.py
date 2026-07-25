@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from mixle.analysis.health_risk import incident_probability, safety_risk_surface
+from mixle.analysis.health_risk import _DeterministicRisk, incident_probability, safety_risk_surface
 from mixle.reason.posterior_protocol import DerivedQuantity, Posterior
 
 
@@ -209,3 +209,24 @@ def test_safety_risk_surface_valid_gradient_limit_unchanged():
     flat = np.zeros((rows, cols))
     dq_zero_limit = safety_risk_surface(flat, gradient_limit=0.0)
     assert np.asarray(dq_zero_limit.samples).sum() == 0.0  # a flat field has zero gradient everywhere
+
+
+def test_deterministic_risk_rejects_empty_or_non_finite_samples():
+    """`_DeterministicRisk` (the ndarray-deformation carrier `safety_risk_surface` returns) had no
+    construction-time validation: empty or NaN/Inf samples were silently accepted, unlike its sibling
+    `_SampleDerivedQuantity` in the same module. Defense-in-depth so invalid state can never flow
+    downstream even if some upstream pushforward fails to validate its own inputs."""
+    with pytest.raises(ValueError):
+        _DeterministicRisk(samples=np.zeros((1, 0)), grid_shape=(0,))
+    with pytest.raises(ValueError):
+        _DeterministicRisk(samples=np.array([[1.0, np.nan]]), grid_shape=(2,))
+    with pytest.raises(ValueError):
+        _DeterministicRisk(samples=np.array([[1.0, np.inf]]), grid_shape=(2,))
+
+
+def test_deterministic_risk_accepts_valid_samples():
+    """Negative control: a legitimate, non-empty, finite exceedance-indicator array still constructs
+    cleanly and behaves as documented (credible interval collapses to a point)."""
+    risk = _DeterministicRisk(samples=np.array([[0.0, 1.0, 1.0, 0.0]]), grid_shape=(2, 2))
+    lo, hi = risk.credible_interval(0.9)
+    assert np.array_equal(lo, hi)
