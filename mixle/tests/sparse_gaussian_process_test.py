@@ -2,6 +2,8 @@
 
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -65,6 +67,63 @@ class SparseGPTest(unittest.TestCase):
     def test_predict_before_fit_raises(self):
         with self.assertRaises(RuntimeError):
             SGPR().predict(np.array([0.0]))
+
+    def test_rejects_invalid_problem_and_configuration(self):
+        for kwargs in (
+            {"lengthscale": 0},
+            {"amplitude": np.inf},
+            {"noise": np.nan},
+            {"jitter": -1},
+            {"n_inducing": 1.5},
+            {"kernel": "unknown"},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                SGPR(**kwargs)
+
+        gp = SGPR()
+        invalid_problems = (
+            ([], []),
+            ([0.0, 1.0], [0.0]),
+            ([0.0, np.nan], [0.0, 1.0]),
+            ([0.0, 1.0], [0.0, np.inf]),
+            ([0.0, 1.0], [[0.0], [1.0]]),
+        )
+        for x, y in invalid_problems:
+            with self.subTest(x=x, y=y), self.assertRaises(ValueError):
+                gp.fit(x, y, optimize=False)
+        with self.assertRaisesRegex(ValueError, "max_iter"):
+            gp.fit([0.0], [0.0], max_iter=0)
+
+    def test_inducing_points_are_unique_and_receipted(self):
+        x = np.array([0.0, 0.0, 1.0, 1.0, 2.0])
+        gp = SGPR(n_inducing=5).fit(x, x, optimize=False, seed=4)
+        self.assertEqual(gp.Z.shape, (3, 1))
+        self.assertEqual(len(np.unique(gp.Z, axis=0)), 3)
+        self.assertEqual(gp.fit_receipt["unique_training_rows"], 3)
+        self.assertEqual(gp.fit_receipt["inducing_rows"], 3)
+
+    def test_optimizer_failure_is_explicit_and_does_not_publish_fit(self):
+        failed = SimpleNamespace(
+            success=False,
+            status=2,
+            message="budget exhausted",
+            nit=1,
+            fun=10.0,
+            x=np.zeros(3),
+        )
+        gp = SGPR(n_inducing=2)
+        with patch("mixle.models.sparse_gaussian_process.minimize", return_value=failed):
+            with self.assertRaisesRegex(RuntimeError, "optimization failed"):
+                gp.fit([0.0, 1.0], [0.0, 1.0], max_iter=1)
+        self.assertIsNone(gp.Z)
+        self.assertIsNone(gp.fit_receipt)
+
+    def test_factorization_failure_is_explicit_and_does_not_publish_fit(self):
+        gp = SGPR(n_inducing=2)
+        with patch("mixle.models.sparse_gaussian_process.np.linalg.cholesky", side_effect=np.linalg.LinAlgError):
+            with self.assertRaisesRegex(RuntimeError, "final factorization failed"):
+                gp.fit([0.0, 1.0], [0.0, 1.0], optimize=False)
+        self.assertIsNone(gp.Z)
 
 
 if __name__ == "__main__":
