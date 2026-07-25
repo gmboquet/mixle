@@ -3,7 +3,8 @@
 ``skill`` wraps a model, subgraph, or plain callable as a named
 :class:`Skill` and stores it in a :class:`SkillRegistry`. Skills carry
 description, tags, provenance, and any estimation certificate inherited from
-the wrapped object, so reuse remains auditable.
+the wrapped object. Each skill is bound to stable implementation, artifact-state, and descriptor
+digests; registries reject a skill whose executable or bound state has drifted.
 
 ``find(query)`` ranks skills by lexical overlap against the skill name,
 description, and tags. :meth:`SkillRegistry.index` can also mirror skills into a
@@ -20,6 +21,9 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+from mixle.inference.integrity import canonical_digest, object_state_digest
+from mixle.inference.integrity import implementation_digest as digest_implementation
 
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -38,6 +42,30 @@ class Skill:
     tags: tuple[str, ...] = ()
     certificate: Any | None = None
     provenance: dict[str, Any] = field(default_factory=dict)
+    implementation_digest: str = ""
+    artifact_digest: str = ""
+    descriptor_digest: str = ""
+    _artifact: Any = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Bind the skill record to the executable and artifact state it actually exposes."""
+        if not self.implementation_digest:
+            self.implementation_digest = digest_implementation(self.call)
+        if not self.artifact_digest:
+            self.artifact_digest = object_state_digest(self.call if self._artifact is None else self._artifact)
+        expected_descriptor = canonical_digest(
+            {
+                "schema": "mixle-skill-v1",
+                "name": self.name,
+                "description": self.description,
+                "tags": self.tags,
+                "provenance": self.provenance,
+                "implementation_digest": self.implementation_digest,
+                "artifact_digest": self.artifact_digest,
+            }
+        )
+        if not self.descriptor_digest:
+            self.descriptor_digest = expected_descriptor
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.call(*args, **kwargs)
@@ -56,6 +84,27 @@ class Skill:
         if not q:
             return 0.0
         return len(q & self._haystack()) / len(q)
+
+    def verify_identity(self) -> bool:
+        """Whether executable code, bound state, and descriptive policy still match this skill."""
+        try:
+            implementation_matches = digest_implementation(self.call) == self.implementation_digest
+            artifact = self.call if self._artifact is None else self._artifact
+            artifact_matches = object_state_digest(artifact) == self.artifact_digest
+            descriptor = canonical_digest(
+                {
+                    "schema": "mixle-skill-v1",
+                    "name": self.name,
+                    "description": self.description,
+                    "tags": self.tags,
+                    "provenance": self.provenance,
+                    "implementation_digest": self.implementation_digest,
+                    "artifact_digest": self.artifact_digest,
+                }
+            )
+        except (TypeError, ValueError):
+            return False
+        return implementation_matches and artifact_matches and descriptor == self.descriptor_digest
 
 
 def _resolve_call(obj: Any, call: Callable[..., Any] | None) -> Callable[..., Any]:
@@ -84,6 +133,8 @@ class SkillRegistry:
 
     def add(self, sk: Skill) -> Skill:
         """Register a skill and return it for chaining."""
+        if not sk.verify_identity():
+            raise ValueError(f"skill {sk.name!r} no longer matches its authenticated implementation")
         self._skills[sk.name] = sk
         return sk
 
@@ -124,7 +175,13 @@ class SkillRegistry:
             item_id = substrate.add(
                 text=text,
                 kind="artifact",
-                payload={"skill": sk.name, "tags": list(sk.tags)},
+                payload={
+                    "skill": sk.name,
+                    "tags": list(sk.tags),
+                    "implementation_digest": sk.implementation_digest,
+                    "artifact_digest": sk.artifact_digest,
+                    "descriptor_digest": sk.descriptor_digest,
+                },
                 provenance={"origin": "skill", **sk.provenance},
             )
             ids.append(item_id)
@@ -162,13 +219,17 @@ def skill(
     if hasattr(obj, "provenance") and isinstance(obj.provenance, dict):
         prov = {**obj.provenance, **prov}
     target = getattr(obj, "model", obj)  # a CreatedModel wraps the fitted model in .model
+    resolved_call = _resolve_call(target, call)
     sk = Skill(
         name=name,
-        call=_resolve_call(target, call),
+        call=resolved_call,
         description=description,
         tags=tuple(tags),
         certificate=cert,
         provenance=prov,
+        implementation_digest=digest_implementation(resolved_call),
+        artifact_digest=object_state_digest(target),
+        _artifact=target,
     )
     (registry if registry is not None else _DEFAULT_REGISTRY).add(sk)
     return sk

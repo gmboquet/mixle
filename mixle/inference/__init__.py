@@ -249,6 +249,7 @@ from mixle.inference.refine import (
 from mixle.inference.reproduce import (
     ReproReceipt,
     data_fingerprint,
+    fit_and_record,
     param_fingerprint,
     record_fit,
     verify_reproducible,
@@ -534,6 +535,7 @@ __all__ = [
     "directed_correction",
     "held_out_log_likelihood",
     # reproducibility receipts -- record a fit, replay it, check it comes out bit-for-bit
+    "fit_and_record",
     "record_fit",
     "verify_reproducible",
     "ReproReceipt",

@@ -7,6 +7,7 @@ import unittest
 import numpy as np
 
 from mixle.inference.explain import explain
+from mixle.inference.integrity import canonical_digest, implementation_digest
 from mixle.inference.receipt import Receipt, verify_receipt
 from mixle.stats import CategoricalDistribution, CompositeDistribution, GaussianDistribution
 from mixle.task.replay import ExecutionTrace, record_step
@@ -17,6 +18,28 @@ def _draw_normal(n: int, seed: int) -> list[float]:
 
 
 _TOOLS = {"draw_normal": _draw_normal}
+_SOURCE = {"text": "The measured source observation.", "revision": 1}
+
+
+def _observed_calibration():
+    observations = {"ranks": [0.1, 0.4, 0.8], "coverage": 0.9}
+    return {
+        "alpha": 0.1,
+        "qhat": 0.83,
+        "observations": observations,
+        "evidence_digest": canonical_digest(observations),
+    }
+
+
+def _observed_provenance():
+    return {
+        "sources": [
+            {
+                "id": "corpus-42",
+                "digest": canonical_digest(_SOURCE),
+            }
+        ]
+    }
 
 
 def _build_ledger():
@@ -36,21 +59,27 @@ class ReceiptVerifyTest(unittest.TestCase):
             produced_by="student-v1",
             ledger=_build_ledger(),
             trace=_build_trace(),
-            calibration={"alpha": 0.1, "qhat": 0.83},
-            provenance={"source_id": "corpus-42"},
+            calibration=_observed_calibration(),
+            provenance=_observed_provenance(),
+            executables={"draw_normal": implementation_digest(_draw_normal)},
         )
-        report = verify_receipt(receipt, tools=_TOOLS)
+        report = verify_receipt(receipt, tools=_TOOLS, evidence={"corpus-42": _SOURCE})
         self.assertTrue(report.passed)
+        self.assertEqual(report.checks["receipt_integrity"], "pass")
         self.assertEqual(report.checks["ledger_exact"], "pass")
         self.assertEqual(report.checks["trace_replayable"], "pass")
+        self.assertEqual(report.checks["executables_match"], "pass")
         self.assertEqual(report.checks["calibration_named"], "pass")
+        self.assertEqual(report.checks["calibration_observed"], "pass")
         self.assertEqual(report.checks["provenance_present"], "pass")
+        self.assertEqual(report.checks["provenance_observed"], "pass")
 
-    def test_a_thin_shell_receipt_with_no_claims_has_no_failures(self):
+    def test_a_thin_shell_receipt_with_no_evidence_cannot_pass(self):
         receipt = Receipt(answer="hi", produced_by="teacher")
         report = verify_receipt(receipt)
-        self.assertTrue(report.passed)  # absent claims are honest, not failures
-        self.assertEqual(set(report.checks.values()), {"absent"})
+        self.assertFalse(report.passed)
+        self.assertEqual(report.checks["receipt_integrity"], "pass")
+        self.assertNotIn("fail", report.checks.values())
 
     def test_a_tampered_ledger_fails_verification(self):
         ledger = _build_ledger()
@@ -73,8 +102,29 @@ class ReceiptVerifyTest(unittest.TestCase):
     def test_trace_without_tools_is_reported_absent_not_a_false_pass(self):
         receipt = Receipt(answer="x", trace=_build_trace(), provenance={"source_id": "x"})
         report = verify_receipt(receipt)  # no tools supplied
-        self.assertEqual(report.checks["trace_replayable"], "absent")
-        self.assertTrue(report.passed)
+        self.assertEqual(report.checks["trace_replayable"], "unobserved")
+        self.assertFalse(report.passed)
+
+    def test_same_output_from_different_tool_implementation_does_not_verify(self):
+        receipt = Receipt(
+            answer="x",
+            trace=_build_trace(),
+            executables={"draw_normal": implementation_digest(_draw_normal)},
+        )
+
+        def replacement(n, seed):
+            return list(_draw_normal(n, seed))
+
+        report = verify_receipt(receipt, tools={"draw_normal": replacement})
+        self.assertEqual(report.checks["executables_match"], "fail")
+        self.assertFalse(report.passed)
+
+    def test_mutating_a_bound_answer_breaks_receipt_integrity(self):
+        receipt = Receipt(answer={"value": 1}, ledger=_build_ledger())
+        receipt.answer["value"] = 2
+        report = verify_receipt(receipt)
+        self.assertEqual(report.checks["receipt_integrity"], "fail")
+        self.assertFalse(report.passed)
 
     def test_calibration_missing_qhat_or_gate_fails_named_check(self):
         receipt = Receipt(answer="x", calibration={"alpha": 0.1}, provenance={"source_id": "x"})
@@ -88,14 +138,17 @@ class ReceiptVerifyTest(unittest.TestCase):
             produced_by="student-v1",
             ledger=_build_ledger(),
             trace=_build_trace(),
-            calibration={"alpha": 0.1, "qhat": 0.83},
-            provenance={"source_id": "corpus-42"},
+            calibration=_observed_calibration(),
+            provenance=_observed_provenance(),
+            executables={"draw_normal": implementation_digest(_draw_normal)},
         )
         blob = receipt.to_json()
         self.assertEqual(blob["answer"], "a")
-        self.assertEqual(blob["provenance"], {"source_id": "corpus-42"})
+        self.assertEqual(blob["provenance"], _observed_provenance())
         self.assertIn("parts", blob["ledger"])
         self.assertIn("steps", blob["trace"])
+        self.assertEqual(len(blob["receipt_digest"]), 64)
+        self.assertIn("executables", blob["bindings"])
 
 
 class KnowledgeReceiptTransferTest(unittest.TestCase):

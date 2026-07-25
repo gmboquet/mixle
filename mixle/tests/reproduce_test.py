@@ -9,6 +9,7 @@ from mixle.inference import optimize
 from mixle.inference.reproduce import (
     ReproReceipt,
     data_fingerprint,
+    fit_and_record,
     param_fingerprint,
     record_fit,
     verify_reproducible,
@@ -109,6 +110,47 @@ class RecordAndVerifyTest(unittest.TestCase):
         self.assertTrue(rec.matches_model(m))
         self.assertEqual(rec.n, len(d))
         self.assertIn("data_fingerprint", rec.as_dict())
+        self.assertEqual(len(rec.data_digest), 64)
+        self.assertEqual(len(rec.model_digest), 64)
+        self.assertEqual(len(rec.estimator_implementation_digest), 64)
+        self.assertEqual(len(rec.optimizer_implementation_digest), 64)
+        self.assertEqual(len(rec.dependency_digest), 64)
+        self.assertEqual(len(rec.fit_policy_digest), 64)
+        self.assertEqual(len(rec.execution_digest), 64)
+        self.assertEqual(len(rec.receipt_digest), 64)
+
+    def test_fit_and_record_materializes_one_shot_data_and_observes_complete_contract(self):
+        consumed = []
+
+        def rows():
+            for value in _gauss_data(n=20):
+                consumed.append(value)
+                yield value
+
+        model, rec = fit_and_record(rows(), st.GaussianEstimator(), seed=3)
+        self.assertEqual(len(consumed), 20)
+        self.assertTrue(rec.matches_model(model))
+        report = verify_reproducible(st.GaussianEstimator(), list(consumed), rec)
+        self.assertTrue(report["reproducible"])
+        self.assertTrue(report["observed_execution"])
+        self.assertTrue(all(report["checks"].values()))
+
+    def test_receipt_tamper_and_estimator_state_drift_are_explicit_failures(self):
+        d = _gauss_data()
+        est = st.GaussianEstimator()
+        model, rec = fit_and_record(d, est, seed=4)
+        self.assertTrue(rec.matches_model(model))
+        rec.seed = 9
+        tampered = verify_reproducible(st.GaussianEstimator(), d, rec)
+        self.assertFalse(tampered["checks"]["receipt_integrity"])
+        self.assertFalse(tampered["reproducible"])
+
+        clean_model, clean = fit_and_record(d, st.GaussianEstimator(), seed=4)
+        self.assertTrue(clean.matches_model(clean_model))
+        changed = st.GaussianEstimator(name="different")
+        drifted = verify_reproducible(changed, d, clean)
+        self.assertFalse(drifted["checks"]["estimator_state_matches"])
+        self.assertFalse(drifted["reproducible"])
 
 
 if __name__ == "__main__":
