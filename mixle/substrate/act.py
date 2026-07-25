@@ -78,6 +78,11 @@ class Step:
     cost: float
     score: float  # ordering priority: relevance / cost (why this action was tried when)
     relevance: float = 0.0  # on-topic-ness independent of cost (what confidence is earned from)
+    failed: bool = False
+    # True when action.run() raised -- fragments is [] either way (a legitimate "found nothing" also
+    # leaves fragments empty), so `failed` is what actually distinguishes them, and `error` carries the
+    # exception's "Type: message" when failed, else "" (MXR-080-0256).
+    error: str = ""
 
 
 @dataclass
@@ -92,6 +97,11 @@ class Investigation:
     note: str = ""
     factuality: Any = None  # optional FactualityReceipt when the answer was verified against a substrate
     proposal: Any = None  # optional ResearchProposal attached to an abstention ("here is how to find out")
+    failed: bool = False
+    # True when the ANSWERER itself raised (implies abstained=True) -- an operational failure, not an
+    # epistemic "evidence was too thin" abstention. `error` carries the exception's "Type: message" when
+    # failed, else "" (MXR-080-0256).
+    error: str = ""
 
     @property
     def evidence(self) -> list[str]:
@@ -104,8 +114,15 @@ class Investigation:
         return sum(s.cost for s in self.steps)
 
     def trace(self) -> list[dict[str, Any]]:
-        """The actions taken, in order -- the provenance the answer must be checkable against."""
-        return [{"action": s.action, "kind": s.kind, "n_fragments": len(s.fragments)} for s in self.steps]
+        """The actions taken, in order -- the provenance the answer must be checkable against.
+
+        Each entry's ``failed``/``error`` distinguish "ran, found nothing" from "raised" -- collapsing
+        those into the same bare ``n_fragments: 0`` is exactly how an action failure used to disappear
+        from the trace (MXR-080-0256)."""
+        return [
+            {"action": s.action, "kind": s.kind, "n_fragments": len(s.fragments), "failed": s.failed, "error": s.error}
+            for s in self.steps
+        ]
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable investigation summary."""
@@ -116,6 +133,8 @@ class Investigation:
             "confidence": round(self.confidence, 4),
             "note": self.note,
             "trace": self.trace(),
+            "failed": self.failed,
+            "error": self.error,
         }
 
 
@@ -210,32 +229,43 @@ def investigate(
     :func:`mixle.inference.learn_action_policy`. The ``answerer`` is called only
     when the evidence clears the bar. The returned :class:`Investigation`
     carries the ordered action trace as provenance, and each fired action can
-    emit telemetry for later policy learning.
+    emit telemetry for later policy learning. Each action's score is evaluated exactly once -- up front,
+    cached, and reused for both the ordering and the fire/skip decision -- so a stateful or stochastic
+    ``scorer`` can never produce a fired order inconsistent with the score recorded on its Step
+    (MXR-080-0256).
 
     Every action's cost is validated (finite, non-negative) up front, before any ranking or accounting
-    runs (MXR-080-0254).
+    runs (MXR-080-0254). An action that raises during ``run()`` is recorded as an explicit failed
+    :class:`Step` (empty fragments, ``failed=True``, the exception on ``error``) instead of being
+    silently coerced into an empty success; an ``answerer`` that raises is likewise recorded on the
+    returned :class:`Investigation` (``abstained=True``, ``failed=True``, ``error`` set) instead of
+    propagating with no investigation record at all (MXR-080-0256).
     """
     for action in actions:
         _validate_cost(action)
 
     score = scorer or score_action
     stop_at = target_confidence if target_confidence is not None else min_confidence
-    ranked = sorted(actions, key=lambda a: score(a, question), reverse=True)
+    # score every action exactly once: this (action, score) pairing drives both the ordering below and
+    # the fire/skip decision in the loop, so a stateful/stochastic scorer can't disagree with itself
+    # between "the order it ranked things" and "the score it recorded" (MXR-080-0256).
+    scored = sorted(((score(a, question), a) for a in actions), key=lambda pair: pair[0], reverse=True)
     if max_actions is not None:
-        ranked = ranked[:max_actions]
+        scored = scored[:max_actions]
 
     steps: list[Step] = []
     spent = 0.0
-    for action in ranked:
+    for sc, action in scored:
         if budget_cost is not None and spent + action.cost > budget_cost:
             continue
-        sc = score(action, question)
         if sc <= 0.0:
             continue
         try:
             fragments = [str(f) for f in action.run(question) if str(f).strip()]
-        except Exception:  # noqa: BLE001 - one failed action must not stop the whole investigation
+            failed, error = False, ""
+        except Exception as exc:  # noqa: BLE001 - record the failure explicitly, don't sink the investigation
             fragments = []
+            failed, error = True, f"{type(exc).__name__}: {exc}"
         spent += action.cost
         steps.append(
             Step(
@@ -244,7 +274,9 @@ def investigate(
                 fragments=fragments,
                 cost=action.cost,
                 score=sc,
-                relevance=_relevance_for(action, question),
+                relevance=0.0 if failed else _relevance_for(action, question),
+                failed=failed,
+                error=error,
             )
         )
         _emit_route(telemetry, question, action, fragments)
@@ -270,7 +302,22 @@ def investigate(
         _emit(telemetry, inv)
         return inv
 
-    text = answerer(question, "\n".join(evidence))
+    try:
+        text = answerer(question, "\n".join(evidence))
+    except Exception as exc:  # noqa: BLE001 - record the failure explicitly, not a bare crash with no trace
+        inv = Investigation(
+            question=question,
+            answer=None,
+            abstained=True,
+            confidence=confidence,
+            steps=steps,
+            note=f"answerer failed: {type(exc).__name__}: {exc} -- escalate rather than guess",
+            failed=True,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        _emit(telemetry, inv)
+        return inv
+
     inv = Investigation(
         question=question,
         answer=text,
