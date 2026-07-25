@@ -185,11 +185,19 @@ def _validate_mvn_args(args):
     dim, mean, cov = args
     if isinstance(dim, (bool, np.bool_)) or not isinstance(dim, (int, np.integer)) or dim <= 0:
         raise ValueError("MVN dim must be an exact positive integer.")
-    if mean is not None and not isinstance(mean, (_VectorSpec, _OrderedSpec)):
+    if isinstance(mean, RandomVariable) and mean._kind == "param":
+        spec = mean._args[0]
+        if not isinstance(spec, (_VectorSpec, _OrderedSpec)) or spec.dim != dim:
+            raise ValueError(f"MVN mean parameter handle must declare a length-{dim} vector.")
+    elif mean is not None and not isinstance(mean, (_VectorSpec, _OrderedSpec)):
         arr = np.asarray(mean, dtype=float)
         if arr.shape != (dim,) or not np.isfinite(arr).all():
             raise ValueError(f"MVN mean must be finite with shape ({dim},).")
-    if cov is not None and not isinstance(cov, _CholeskySpec):
+    if isinstance(cov, RandomVariable) and cov._kind == "param":
+        spec = cov._args[0]
+        if not isinstance(spec, _CholeskySpec) or spec.dim != dim:
+            raise ValueError(f"MVN cov parameter handle must declare a {dim}-dimensional Cholesky parameter.")
+    elif cov is not None and not isinstance(cov, _CholeskySpec):
         arr = np.asarray(cov, dtype=float)
         if arr.shape != (dim, dim) or not np.isfinite(arr).all() or not np.allclose(arr, arr.T):
             raise ValueError(f"MVN cov must be a finite symmetric ({dim}, {dim}) matrix.")
@@ -203,11 +211,19 @@ def _validate_diag_args(args):
     dim, mean, var = args
     if isinstance(dim, (bool, np.bool_)) or not isinstance(dim, (int, np.integer)) or dim <= 0:
         raise ValueError("DiagGaussian dim must be an exact positive integer.")
-    if mean is not None and not isinstance(mean, (_VectorSpec, _OrderedSpec)):
+    if isinstance(mean, RandomVariable) and mean._kind == "param":
+        spec = mean._args[0]
+        if not isinstance(spec, (_VectorSpec, _OrderedSpec)) or spec.dim != dim:
+            raise ValueError(f"DiagGaussian mean parameter handle must declare a length-{dim} vector.")
+    elif mean is not None and not isinstance(mean, (_VectorSpec, _OrderedSpec)):
         arr = np.asarray(mean, dtype=float)
         if arr.shape != (dim,) or not np.isfinite(arr).all():
             raise ValueError(f"DiagGaussian mean must be finite with shape ({dim},).")
-    if var is not None and not isinstance(var, _VectorSpec):
+    if isinstance(var, RandomVariable) and var._kind == "param":
+        spec = var._args[0]
+        if not isinstance(spec, _VectorSpec) or spec.dim != dim or spec.support != "positive":
+            raise ValueError(f"DiagGaussian var parameter handle must declare a positive length-{dim} vector.")
+    elif var is not None and not isinstance(var, _VectorSpec):
         arr = np.asarray(var, dtype=float)
         if arr.shape != (dim,) or not np.isfinite(arr).all() or np.any(arr <= 0.0):
             raise ValueError(f"DiagGaussian var must be finite and positive with shape ({dim},).")

@@ -62,6 +62,10 @@ def _is_det_expr(a: Any) -> bool:
 _NEG_INF = -1e300
 
 
+class _ParameterDomainError(ValueError):
+    """An expected proposal outside a parameter transform's mathematical domain."""
+
+
 @dataclass
 class _Slot:
     index: int  # position in the family's argument tuple
@@ -74,26 +78,50 @@ class _Slot:
     role: str = "param"  # 'param' (a component's parameter) | 'weight' (its mixture weight)
     parent_args: dict[int, int] | None = None  # hierarchical prior: {prior-arg position -> child slot index}
     reparam: str | None = None  # 'loc_scale' -> sample z~N(0,1), value = loc + scale*z (non-centered)
+    structure: Any = None  # vector/simplex/ordered/Cholesky declaration shared by a public handle
+    aliases: tuple[int, ...] = ()  # flat-family argument positions supplied by this canonical slot
 
 
 def _to_value(support: str, u: float):
     """Map an unconstrained scalar to the constrained parameter, with the log|Jacobian|."""
+    u = float(u)
+    if not math.isfinite(u):
+        raise _ParameterDomainError(f"unconstrained {support} coordinate must be finite, got {u!r}")
     if support == "positive":
-        return math.exp(u), float(u)
+        if u > math.log(np.finfo(float).max):
+            raise _ParameterDomainError(f"positive transform overflowed at unconstrained coordinate {u!r}")
+        return math.exp(u), u
     if support == "unit":
-        v = 1.0 / (1.0 + math.exp(-u))
-        return v, math.log(v) + math.log1p(-v)  # d sigmoid/du = v(1-v)
-    return float(u), 0.0
+        if u >= 0.0:
+            z = math.exp(-u)
+            v = 1.0 / (1.0 + z)
+        else:
+            z = math.exp(u)
+            v = z / (1.0 + z)
+        v = min(max(v, np.nextafter(0.0, 1.0)), np.nextafter(1.0, 0.0))
+        logj = -float(np.logaddexp(0.0, -u)) - float(np.logaddexp(0.0, u))
+        return v, logj
+    if support != "real":
+        raise _ParameterDomainError(f"unknown parameter support {support!r}")
+    return u, 0.0
 
 
 def _to_u(support: str, val: float) -> float:
     """Inverse of :func:`_to_value` (constrained value -> unconstrained)."""
+    val = float(val)
+    if not math.isfinite(val):
+        raise _ParameterDomainError(f"{support} parameter value must be finite, got {val!r}")
     if support == "positive":
-        return math.log(max(float(val), 1e-12))
+        if val <= 0.0:
+            raise _ParameterDomainError(f"positive parameter value must be > 0, got {val!r}")
+        return math.log(val)
     if support == "unit":
-        p = min(max(float(val), 1e-6), 1.0 - 1e-6)
-        return math.log(p / (1.0 - p))
-    return float(val)
+        if not 0.0 < val < 1.0:
+            raise _ParameterDomainError(f"unit parameter value must lie strictly inside (0, 1), got {val!r}")
+        return math.log(val) - math.log1p(-val)
+    if support != "real":
+        raise _ParameterDomainError(f"unknown parameter support {support!r}")
+    return val
 
 
 def _loc_scale(s: _Slot, vals: dict):
@@ -145,17 +173,34 @@ class Posterior:
             rows.append(np.asarray(d.seq_log_density(enc), dtype=float))
         return np.asarray(rows)
 
-    def _col(self, param) -> int:
-        for k, s in enumerate(self._slots):
-            if param is s.handle or param == s.name or param == s.index:
-                return k
+    def _columns(self, param) -> tuple[list[int], Any]:
+        handle_matches = [k for k, slot in enumerate(self._slots) if param is slot.handle]
+        if not handle_matches and isinstance(param, str):
+            handle_matches = [
+                k
+                for k, slot in enumerate(self._slots)
+                if slot.handle is not None
+                and slot.structure is not None
+                and getattr(slot.structure, "name", None) == param
+            ]
+        if handle_matches:
+            structure = self._slots[handle_matches[0]].structure
+            if any(self._slots[k].structure is not structure for k in handle_matches):
+                raise RuntimeError("one posterior handle is associated with inconsistent structural declarations")
+            return handle_matches, structure
+        for k, slot in enumerate(self._slots):
+            if param == slot.name or param == slot.index:
+                return [k], None
         raise KeyError(f"no sampled parameter matching {param!r}")
 
     def samples(self, param=None) -> np.ndarray:
         """Return posterior samples for all parameters or one selected parameter."""
         if param is None:
             return self._samples
-        return self._samples[:, self._col(param)]
+        columns, structure = self._columns(param)
+        if structure is None:
+            return self._samples[:, columns[0]]
+        return np.stack([_spec_assemble(structure, row) for row in self._samples[:, columns]], axis=0)
 
     def mean(self, param=None):
         """Return posterior means for all parameters or one selected parameter."""
@@ -198,6 +243,27 @@ class Posterior:
         return out
 
 
+class MultiChainResult:
+    """Complete raw result for a multi-chain fit without pretending the first chain is the whole run."""
+
+    def __init__(self, chain_results, chain_samples) -> None:
+        self.chains = tuple(chain_results)
+        self.chain_samples = tuple(np.asarray(samples, dtype=float) for samples in chain_samples)
+        self.samples = np.concatenate(self.chain_samples, axis=0)
+        accepted = [np.asarray(getattr(result, "accepted", []), dtype=bool) for result in self.chains]
+        self.accepted = np.concatenate(accepted) if accepted else np.zeros(0, dtype=bool)
+        log_probs = [np.asarray(getattr(result, "log_probs", []), dtype=float) for result in self.chains]
+        self.log_probs = np.concatenate(log_probs) if log_probs else np.zeros(0, dtype=float)
+
+    @property
+    def acceptance_rate(self) -> float:
+        return float(np.mean(self.accepted)) if self.accepted.size else 0.0
+
+    def effective_sample_size(self):
+        values = [np.atleast_1d(result.effective_sample_size()).astype(float) for result in self.chains]
+        return np.sum(np.stack(values, axis=0), axis=0)
+
+
 # --------------------------------------------------------------------------- core
 def _require_flat(rv: RandomVariable):
     # Composites are handled by _composite_target_parts before this is reached; this guards
@@ -225,9 +291,25 @@ def _slots_of(rv: RandomVariable, fam, extra_latents=()) -> tuple[list[_Slot], d
     slots: list[_Slot] = []
     nested = [len(rv._args)]  # synthetic, build-ignored indices for hierarchical hyperparameters
     leaf_slot: dict[int, int] = {}  # id(leaf RV) -> slot index, dedups a latent shared across expressions
+    prior_slot: dict[int, int] = {}  # id(prior RV) -> canonical slot index across every occurrence
+    slot_by_index: dict[int, _Slot] = {}
     det_bindings: dict[int, tuple] = {}
 
-    def add_prior(handle: RandomVariable, index: int, support: str) -> None:
+    def merge_support(slot: _Slot, support: str) -> None:
+        order = {"real": 0, "positive": 1, "unit": 2}
+        if slot.reparam == "loc_scale" and support != "real":
+            raise ValueError("a non-centered parameter cannot be shared with a positive/unit model slot")
+        if support not in order or slot.support not in order:
+            raise ValueError(f"cannot share a parameter across unsupported domains {slot.support!r} and {support!r}")
+        selected = max((slot.support, support), key=order.__getitem__)
+        slot.support = selected
+        slot.positive = selected == "positive"
+
+    def append_slot(slot: _Slot) -> None:
+        slots.append(slot)
+        slot_by_index[slot.index] = slot
+
+    def add_prior(handle: RandomVariable, index: int, support: str) -> int:
         """Add a slot for prior RV ``handle`` at ``index``; recurse into any random hyperparameters.
 
         A flat prior (constant hyperparameters) lowers to a fixed distribution. A *hierarchical* prior
@@ -235,23 +317,34 @@ def _slots_of(rv: RandomVariable, fam, extra_latents=()) -> tuple[list[_Slot], d
         estimated -- instead gets each random hyperparameter its own (build-ignored) slot, and records
         the ``prior-arg -> child-slot`` map so the prior log-density is scored as a function of them.
         """
+        key = id(handle)
+        if key in prior_slot:
+            canonical = prior_slot[key]
+            merge_support(slot_by_index[canonical], support)
+            return canonical
         pfam = handle._family
         parent_args: dict[int, int] = {}
         for j, arg in enumerate(handle._args):
             if isinstance(arg, RandomVariable):
                 child = nested[0]
                 nested[0] += 1
-                parent_args[j] = child
-                add_prior(arg, child, pfam.support[j])  # hyperparameter sits on the parent family's support
+                parent_args[j] = add_prior(
+                    arg, child, pfam.support[j]
+                )  # hyperparameter sits on the parent family's support
         nm = handle.name or f"arg{index}"
         if handle._reparam == "loc_scale":
             # Non-centered: sample z ~ N(0,1) (real) and set value = loc + scale*z. The slot is real
             # regardless of the model's support, and carries parent_args so loc/scale resolve at eval.
-            slots.append(_Slot(index, None, False, nm, handle, "real", parent_args=parent_args, reparam="loc_scale"))
+            slot = _Slot(
+                index, None, False, nm, handle, "real", parent_args=parent_args, reparam="loc_scale"
+            )
         elif parent_args:
-            slots.append(_Slot(index, None, support == "positive", nm, handle, support, parent_args=parent_args))
+            slot = _Slot(index, None, support == "positive", nm, handle, support, parent_args=parent_args)
         else:
-            slots.append(_Slot(index, lower(handle, target="dist"), support == "positive", nm, handle, support))
+            slot = _Slot(index, lower(handle, target="dist"), support == "positive", nm, handle, support)
+        append_slot(slot)
+        prior_slot[key] = index
+        return index
 
     def add_leaf(leaf: Any, support: str) -> int:
         """Register one latent leaf of a deterministic expression (deduped by identity); return its slot index."""
@@ -261,11 +354,11 @@ def _slots_of(rv: RandomVariable, fam, extra_latents=()) -> tuple[list[_Slot], d
         idx = nested[0]
         nested[0] += 1
         if leaf is free:
-            slots.append(_Slot(idx, None, False, f"arg{idx}", None, support))
+            append_slot(_Slot(idx, None, False, f"arg{idx}", None, support))
         elif isinstance(leaf, RandomVariable) and leaf._kind == "sample":
-            add_prior(leaf, idx, support)  # a prior leaf (possibly itself hierarchical)
+            idx = add_prior(leaf, idx, support)  # a prior leaf (possibly itself hierarchical)
         else:
-            slots.append(_Slot(idx, None, False, getattr(leaf, "name", None) or f"arg{idx}", leaf, support))
+            append_slot(_Slot(idx, None, False, getattr(leaf, "name", None) or f"arg{idx}", leaf, support))
         leaf_slot[key] = idx
         return idx
 
@@ -274,9 +367,11 @@ def _slots_of(rv: RandomVariable, fam, extra_latents=()) -> tuple[list[_Slot], d
             binding = [(leaf, add_leaf(leaf, fam.support[i])) for leaf in _expr_leaves(a)]
             det_bindings[i] = (a, binding)
         elif isinstance(a, RandomVariable):
-            add_prior(a, i, fam.support[i])
+            canonical = add_prior(a, i, fam.support[i])
+            slot = slot_by_index[canonical]
+            slot.aliases = (*slot.aliases, i)
         elif a is free:
-            slots.append(_Slot(i, None, fam.positive[i], f"arg{i}", None, fam.support[i]))
+            append_slot(_Slot(i, None, fam.positive[i], f"arg{i}", None, fam.support[i]))
     # Auxiliary latents that enter only through a custom potential: add any not already a slot handle.
     present = {id(s.handle) for s in slots if s.handle is not None}
     for lv in extra_latents:
@@ -323,7 +418,9 @@ def _spec_of(a):
 
 def _handle_of(a):
     """The referenceable handle for a structural parameter (a ``param(...)`` RV), else ``None``."""
-    return a if (isinstance(a, RandomVariable) and a._kind == "param") else None
+    if isinstance(a, RandomVariable) and (a._kind == "param" or _is_dirichlet_rv(a)):
+        return a
+    return None
 
 
 def _is_struct_spec(a) -> bool:
@@ -415,14 +512,27 @@ def _collect_composite(rv: RandomVariable):
     / R-hat (all keyed by name) silently drop all but one. User-chosen names and any names in a
     single-component list are kept as-is."""
     slots: list[_Slot] = []
+    bindings: dict[tuple[int, int], tuple[int, ...]] = {}
+    prior_slots: dict[int, int] = {}
+    structural_slots: dict[int, tuple[Any, tuple[int, ...]]] = {}
+
+    def merge_support(slot: _Slot, support: str) -> None:
+        order = {"real": 0, "positive": 1, "unit": 2}
+        if slot.reparam == "loc_scale" and support != "real":
+            raise ValueError("a non-centered parameter cannot be shared with a positive/unit model slot")
+        if support not in order or slot.support not in order:
+            raise ValueError(f"cannot share a parameter across unsupported domains {slot.support!r} and {support!r}")
+        selected = max((slot.support, support), key=order.__getitem__)
+        slot.support = selected
+        slot.positive = selected == "positive"
 
     def collect_prior(handle: RandomVariable, support: str, name: str) -> int:
-        """Collect a scalar leaf prior and any random hyperparameters before it.
-
-        Composite targets use sequential synthetic indices rather than the leaf
-        family's argument positions.  Returning the child index lets the prior
-        record exactly which earlier slots supply its hierarchical arguments.
-        """
+        """Collect one identity-preserving prior node and its unique hyperparameter parents."""
+        key = id(handle)
+        if key in prior_slots:
+            index = prior_slots[key]
+            merge_support(slots[index], support)
+            return index
         parent_args: dict[int, int] = {}
         for j, arg in enumerate(handle._args):
             if isinstance(arg, RandomVariable):
@@ -430,139 +540,153 @@ def _collect_composite(rv: RandomVariable):
                 parent_args[j] = collect_prior(arg, handle._family.support[j], parent_name)
         index = len(slots)
         if handle._reparam == "loc_scale":
-            slots.append(
-                _Slot(
-                    index,
-                    None,
-                    False,
-                    handle.name or name,
-                    handle,
-                    "real",
-                    parent_args=parent_args,
-                    reparam="loc_scale",
-                )
+            slot = _Slot(
+                index,
+                None,
+                False,
+                handle.name or name,
+                handle,
+                "real",
+                parent_args=parent_args,
+                reparam="loc_scale",
             )
         elif parent_args:
-            slots.append(
-                _Slot(
-                    index,
-                    None,
-                    support == "positive",
-                    handle.name or name,
-                    handle,
-                    support,
-                    parent_args=parent_args,
-                )
+            slot = _Slot(
+                index,
+                None,
+                support == "positive",
+                handle.name or name,
+                handle,
+                support,
+                parent_args=parent_args,
             )
         else:
-            slots.append(
-                _Slot(
-                    index,
-                    lower(handle, target="dist"),
-                    support == "positive",
-                    handle.name or name,
-                    handle,
-                    support,
-                )
+            slot = _Slot(
+                index,
+                lower(handle, target="dist"),
+                support == "positive",
+                handle.name or name,
+                handle,
+                support,
             )
+        slots.append(slot)
+        prior_slots[key] = index
         return index
+
+    def bind_structure(node, position, argument, spec, prefix, exchangeable):
+        binding_key = (id(node), position)
+        if binding_key in bindings:
+            return bindings[binding_key]
+        handle = _handle_of(argument)
+        handle_key = None if handle is None else id(handle)
+        if handle_key is not None and handle_key in structural_slots:
+            declared, indices = structural_slots[handle_key]
+            if type(declared) is not type(spec) or len(_spec_slot_defs(declared)) != len(_spec_slot_defs(spec)):
+                raise ValueError("one structural parameter handle was reused with incompatible declarations")
+            bindings[binding_key] = indices
+            return indices
+        named = bool(getattr(spec, "name", None))
+        indices = []
+        for group, (prior, support, name) in enumerate(_spec_slot_defs(spec)):
+            name = name if named else f"{prefix}{name}"
+            slot = _Slot(
+                len(slots),
+                prior,
+                support == "positive",
+                name,
+                handle,
+                support,
+                structure=spec if handle is not None else None,
+            )
+            if exchangeable:
+                slot.group, slot.role = group, "weight"
+            slots.append(slot)
+            indices.append(slot.index)
+        result = tuple(indices)
+        bindings[binding_key] = result
+        if handle_key is not None:
+            structural_slots[handle_key] = (spec, result)
+        return result
 
     def collect(node: RandomVariable, prefix: str = ""):
         fam = node._family
         if isinstance(fam, CompositeFamily):
-            # Components of a finite mixture are exchangeable -> tag their slots with the component
-            # index so parallel chains can be relabeled (label-switching) before pooling / R-hat.
-            exch = fam.name in ("Mixture", "SemiMix")
-            for a in node._args:
-                if isinstance(a, (list, tuple)):
-                    multi = sum(1 for c in a if isinstance(c, RandomVariable)) > 1
-                    for gi, c in enumerate(a):
-                        if isinstance(c, RandomVariable):
+            exchangeable = fam.name in ("Mixture", "SemiMix")
+            for position, argument in enumerate(node._args):
+                if isinstance(argument, (list, tuple)):
+                    multi = sum(isinstance(child, RandomVariable) for child in argument) > 1
+                    for group, child in enumerate(argument):
+                        if isinstance(child, RandomVariable):
                             before = len(slots)
-                            collect(c, f"{prefix}comp{gi}." if multi else prefix)
-                            if exch:  # tag only the outermost exchangeable level (nested groups keep theirs)
-                                for s in slots[before:]:
-                                    if s.group is None:
-                                        s.group = gi
+                            collect(child, f"{prefix}comp{group}." if multi else prefix)
+                            if exchangeable:
+                                for slot in slots[before:]:
+                                    if slot.group is None:
+                                        slot.group = group
                     continue
-                spec = _struct_spec_for(node, a)
-                if spec is not None:  # structural vector/matrix parameter -> scalar slots
-                    handle = _handle_of(a)  # a param(...) handle is referenceable in constraints
-                    named = bool(getattr(spec, "name", None))  # user-chosen spec names stay unqualified
-                    for gi, (prior, support, nm) in enumerate(_spec_slot_defs(spec)):
-                        nm = nm if named else f"{prefix}{nm}"
-                        s = _Slot(len(slots), prior, support == "positive", nm, handle, support)
-                        if exch:  # mixture weights: weight j pairs with component j -> permute together
-                            s.group, s.role = gi, "weight"
-                        slots.append(s)
-                elif isinstance(a, RandomVariable):
-                    collect(a, prefix)  # child model
+                spec = _struct_spec_for(node, argument)
+                if spec is not None:
+                    bind_structure(node, position, argument, spec, prefix, exchangeable)
+                elif isinstance(argument, RandomVariable):
+                    collect(argument, prefix)
             return
-        for i, a in enumerate(node._args):
-            if _spec_of(a) is not None:  # a vector/matrix leaf parameter (Dirichlet alpha, Categorical probs)
-                handle = _handle_of(a)
-                spec = _spec_of(a)
-                named = bool(getattr(spec, "name", None))
-                for prior, support, nm in _spec_slot_defs(spec):
-                    nm = nm if named else f"{prefix}{nm}"
-                    slots.append(_Slot(len(slots), prior, support == "positive", nm, handle, support))
-            elif isinstance(a, RandomVariable):
-                nm = a.name or f"{prefix}arg{i}"
-                collect_prior(a, fam.support[i], nm)
-            elif a is free:
-                slots.append(_Slot(len(slots), None, fam.positive[i], f"{prefix}arg{i}", None, fam.support[i]))
+        for position, argument in enumerate(node._args):
+            binding_key = (id(node), position)
+            spec = _spec_of(argument)
+            if spec is not None:
+                bind_structure(node, position, argument, spec, prefix, False)
+            elif isinstance(argument, RandomVariable):
+                name = argument.name or f"{prefix}arg{position}"
+                bindings.setdefault(binding_key, (collect_prior(argument, fam.support[position], name),))
+            elif argument is free and binding_key not in bindings:
+                slot = _Slot(
+                    len(slots),
+                    None,
+                    fam.positive[position],
+                    f"{prefix}arg{position}",
+                    None,
+                    fam.support[position],
+                )
+                slots.append(slot)
+                bindings[binding_key] = (slot.index,)
 
     collect(rv)
     if not slots:
         raise ValueError("model has no `free`/prior parameters to infer.")
 
     def rebuild(vals):
-        counter = [0]
-
-        def take(n):
-            out = [vals[counter[0] + j] for j in range(n)]
-            counter[0] += n
-            return out
-
-        def consume_prior(handle: RandomVariable):
-            # Collection is depth-first: random hyperparameters precede the
-            # parameter they govern.  Consume those bookkeeping slots before
-            # returning the concrete value used by the leaf likelihood.
-            for arg in handle._args:
-                if isinstance(arg, RandomVariable):
-                    consume_prior(arg)
-            return take(1)[0]
+        def assembled(node, position, spec):
+            return _spec_assemble(spec, [vals[index] for index in bindings[(id(node), position)]])
 
         def build_node(node: RandomVariable):
             fam = node._family
             if isinstance(fam, CompositeFamily):
                 new_args = []
-                for a in node._args:
-                    if isinstance(a, (list, tuple)):
-                        new_args.append(tuple(build_node(c) if isinstance(c, RandomVariable) else c for c in a))
+                for position, argument in enumerate(node._args):
+                    if isinstance(argument, (list, tuple)):
+                        new_args.append(
+                            tuple(build_node(child) if isinstance(child, RandomVariable) else child for child in argument)
+                        )
                         continue
-                    spec = _struct_spec_for(node, a)
-                    if spec is not None:  # assemble scalar draws into the vector/matrix value
-                        n_slots = len(_spec_slot_defs(spec))
-                        new_args.append(_spec_assemble(spec, take(n_slots)))
-                    elif isinstance(a, RandomVariable):
-                        new_args.append(build_node(a))
+                    spec = _struct_spec_for(node, argument)
+                    if spec is not None:
+                        new_args.append(assembled(node, position, spec))
+                    elif isinstance(argument, RandomVariable):
+                        new_args.append(build_node(argument))
                     else:
-                        new_args.append(a)
+                        new_args.append(argument)
                 return RandomVariable._sample(
                     fam.name, tuple(new_args), name=node._name, keys=node._keys, scope=node._scope
                 )
             new_args = []
-            for a in node._args:
-                spec = _spec_of(a)
+            for position, argument in enumerate(node._args):
+                spec = _spec_of(argument)
                 if spec is not None:
-                    new_args.append(_spec_assemble(spec, take(len(_spec_slot_defs(spec)))))
-                elif a is free:
-                    new_args.append(take(1)[0])
-                elif isinstance(a, RandomVariable):
-                    new_args.append(consume_prior(a))
+                    new_args.append(assembled(node, position, spec))
+                elif argument is free or isinstance(argument, RandomVariable):
+                    new_args.append(vals[bindings[(id(node), position)][0]])
                 else:
-                    new_args.append(a)
+                    new_args.append(argument)
             return RandomVariable._sample(
                 fam.name, tuple(new_args), name=node._name, keys=node._keys, scope=node._scope
             )
@@ -628,6 +752,7 @@ def _target_parts(rv: RandomVariable, data, extra_latents=()):
         return _composite_target_parts(rv, data)
     fam = _require_flat(rv)
     slots, det_bindings = _slots_of(rv, fam, extra_latents)
+    arg_aliases = {position: slot.index for slot in slots for position in slot.aliases}
     arr = np.asarray(data, dtype=float)
     _fin = arr[np.isfinite(arr)]  # ignore NaN (missing) when seeding the init point
     dmean = float(_fin.mean()) if _fin.size else 0.0
@@ -651,7 +776,7 @@ def _target_parts(rv: RandomVariable, data, extra_latents=()):
                 expr, binding = det_bindings[i]
                 args.append(_eval_expr(expr, {leaf: vals[sidx] for leaf, sidx in binding}))
             else:
-                args.append(vals.get(i, rv._args[i]))
+                args.append(vals.get(arg_aliases.get(i, i), rv._args[i]))
         return fam.make_dist(tuple(args), rv._name)
 
     return fam, slots, build, unpack, (dmean, dstd)
@@ -672,33 +797,61 @@ def _build_target(rv: RandomVariable, data, extra_latents=(), jacobian: bool = T
         enc = build(v0).dist_to_encoder().seq_encode(list(data))
 
     def log_target(u):
-        vals, logj = unpack(u)
+        try:
+            vals, logj = unpack(u)
+        except _ParameterDomainError:
+            return _NEG_INF
         try:
             d = build(vals)
             ll = float(np.sum(d.seq_log_density(enc)))
-        except Exception:  # noqa: BLE001
+        except Exception as error:
+            coordinates = np.asarray(u, dtype=float).tolist()
+            raise RuntimeError(
+                f"inference model construction or likelihood evaluation failed at unconstrained coordinates "
+                f"{coordinates!r}"
+            ) from error
+        if ll == -math.inf:
             return _NEG_INF
         if not math.isfinite(ll):
-            return _NEG_INF
+            raise FloatingPointError(f"inference likelihood returned invalid value {ll!r}")
         plp = 0.0
         for s in slots:
             if s.reparam == "loc_scale":  # prior is N(0,1) on the latent z = (value - loc) / scale
                 loc, scale = _loc_scale(s, vals)
+                if not math.isfinite(scale) or scale <= 0.0:
+                    return _NEG_INF
                 z = (vals[s.index] - loc) / scale
-                plp += -0.5 * z * z - 0.5 * math.log(2.0 * math.pi)
+                contribution = -0.5 * z * z - 0.5 * math.log(2.0 * math.pi)
                 if not jacobian:
                     # MAP is defined by the density in constrained parameter
                     # coordinates.  N(value | loc, scale) contributes
                     # phi(z) / scale; only an unconstrained sampling target
                     # cancels that scale through d(value)/dz.
-                    plp -= math.log(scale)
+                    contribution -= math.log(scale)
             elif s.parent_args:  # hierarchical prior: rebuild it with the sampled hyperparameter values
                 pargs = list(s.handle._args)
                 for j, child in s.parent_args.items():
                     pargs[j] = vals[child]
-                plp += float(s.handle._family.make_dist(tuple(pargs), s.handle._name).log_density(vals[s.index]))
+                try:
+                    contribution = float(
+                        s.handle._family.make_dist(tuple(pargs), s.handle._name).log_density(vals[s.index])
+                    )
+                except Exception as error:
+                    raise RuntimeError(f"inference prior evaluation failed for parameter {s.name!r}") from error
             elif s.prior is not None:
-                plp += float(s.prior.log_density(vals[s.index]))
+                try:
+                    contribution = float(s.prior.log_density(vals[s.index]))
+                except Exception as error:
+                    raise RuntimeError(f"inference prior evaluation failed for parameter {s.name!r}") from error
+            else:
+                continue
+            if contribution == -math.inf:
+                return _NEG_INF
+            if not math.isfinite(contribution):
+                raise FloatingPointError(
+                    f"inference prior for parameter {s.name!r} returned invalid value {contribution!r}"
+                )
+            plp += contribution
         return ll + plp + (logj if jacobian else 0.0)
 
     return log_target, slots, fam, build, unpack, (dmean, dstd)
@@ -741,12 +894,13 @@ def _u_to_vals(slots, u) -> np.ndarray:
             loc = vals[:, idx_to_col[pa[0]]] if 0 in pa else float(s.handle._args[0])
             scale = vals[:, idx_to_col[pa[1]]] if 1 in pa else float(s.handle._args[1])
             vals[:, k] = loc + scale * u[:, k]
-        elif s.support == "positive":
-            vals[:, k] = np.exp(u[:, k])
-        elif s.support == "unit":
-            vals[:, k] = 1.0 / (1.0 + np.exp(-u[:, k]))
         else:
-            vals[:, k] = u[:, k]
+            try:
+                vals[:, k] = [_to_value(s.support, value)[0] for value in u[:, k]]
+            except _ParameterDomainError as error:
+                raise RuntimeError(f"posterior draws for parameter {s.name!r} left its declared support") from error
+        if not np.all(np.isfinite(vals[:, k])):
+            raise RuntimeError(f"posterior draws for parameter {s.name!r} are non-finite after transformation")
     return vals
 
 
@@ -856,7 +1010,9 @@ def _mcmc_worker(seed, rv, data, kw):
     """Module-level (picklable) single RW-Metropolis chain (parallel path: no constraints)."""
     from mixle.inference.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
-    log_target, _grad, slots, _build, dmean, dstd, _f = _prepare_target(rv, data, None, None, want_grad=False)
+    log_target, _grad, slots, _build, dmean, dstd, _f = _prepare_target(
+        rv, data, None, None, want_grad=False, missing=kw["missing"]
+    )
     u0 = _init_u(slots, dmean, dstd)
     scale = kw.get("scale")
     init_scale = (scale * np.ones(len(u0))) if scale is not None else _init_scale(slots, dstd, len(data))
@@ -875,7 +1031,9 @@ def _hmc_worker(seed, rv, data, kw):
     """Module-level (picklable) single HMC chain (parallel path: no constraints)."""
     from mixle.inference.mcmc import hamiltonian_monte_carlo
 
-    log_target, grad, slots, _build, dmean, dstd, _f = _prepare_target(rv, data, None, None, want_grad=True)
+    log_target, grad, slots, _build, dmean, dstd, _f = _prepare_target(
+        rv, data, None, None, want_grad=True, missing=kw["missing"]
+    )
     u0 = _init_u(slots, dmean, dstd)
     mass = 1.0 / (_init_scale(slots, dstd, len(data)) ** 2)
     step_size = kw["step_size"] if kw["step_size"] is not None else 2.5 / kw["num_steps"]
@@ -897,7 +1055,9 @@ def _nuts_worker(seed, rv, data, kw):
     """Module-level (picklable) single NUTS chain (parallel path: no constraints)."""
     from mixle.inference.mcmc import nuts
 
-    log_target, grad, slots, _build, dmean, dstd, _f = _prepare_target(rv, data, None, None, want_grad=True)
+    log_target, grad, slots, _build, dmean, dstd, _f = _prepare_target(
+        rv, data, None, None, want_grad=True, missing=kw["missing"]
+    )
     u0 = _init_u(slots, dmean, dstd)
     mass = 1.0 / (_init_scale(slots, dstd, len(data)) ** 2)
     return nuts(
@@ -930,7 +1090,7 @@ def _ensemble_worker(seed, rv, data, kw):
     from mixle.inference.mcmc import affine_invariant_ensemble
 
     log_target, _grad, slots, _build, dmean, dstd, _f = _prepare_target(
-        rv, data, None, None, want_grad=False, numpy_only=True
+        rv, data, None, None, want_grad=False, numpy_only=True, missing=kw["missing"]
     )
     rng = np.random.RandomState(seed)
     p0 = _ensemble_p0(slots, dmean, dstd, len(data), kw["walkers"], rng)
@@ -978,13 +1138,18 @@ def _finalize_chains(rv, slots, results, build) -> RandomVariable:
     rhat = _gelman_rubin(np.stack([u[:n] for u in us], axis=0))
     vals = _u_to_vals(slots, np.concatenate(us, axis=0))
     mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
-    post = Posterior(slots, vals, results[0])
+    raw = MultiChainResult(results, us)
+    post = Posterior(slots, vals, raw)
     post.n_chains = len(results)
+    post.chain_results = tuple(results)
     post.rhat = {s.name: float(rhat[k]) for k, s in enumerate(slots)}
     try:
-        post.ess = float(sum(np.atleast_1d(r.effective_sample_size()).min() for r in results))
+        ess = np.asarray(raw.effective_sample_size(), dtype=float)
+        post.ess = float(np.min(ess))
+        post.ess_by_parameter = {slot.name: float(ess[k]) for k, slot in enumerate(slots)}
     except Exception:  # noqa: BLE001
         post.ess = None
+        post.ess_by_parameter = None
     _attach_convergence(post, slots, np.stack([u[:n] for u in us], axis=0), results)
 
     def predictive(n_, rng_):
@@ -1004,28 +1169,33 @@ def _finalize_chains(rv, slots, results, build) -> RandomVariable:
 def _vals_from_u(slots, u) -> dict:
     """Constrained parameter values keyed by slot index, from one unconstrained vector ``u``.
 
-    The exp / logit links are clamped so a wide derivative-free or penalized excursion in ``u`` cannot
-    overflow (it saturates the constrained value instead of raising).
+    Non-centered slots are reconstructed to their declared value-space parameter rather than exposing
+    the auxiliary standard-normal coordinate to constraints and custom potentials.
     """
     vals = {}
     for k, s in enumerate(slots):
-        uk = float(u[k])
-        if s.support == "positive":
-            vals[s.index] = math.exp(min(uk, 700.0))
-        elif s.support == "unit":
-            vals[s.index] = 1.0 / (1.0 + math.exp(-max(min(uk, 700.0), -700.0)))
-        else:
-            vals[s.index] = uk
+        value, _ = _to_value(s.support, u[k])
+        if s.reparam == "loc_scale":
+            loc, scale = _loc_scale(s, vals)
+            if not math.isfinite(scale) or scale <= 0.0:
+                raise _ParameterDomainError(f"non-centered scale for parameter {s.name!r} must be finite and > 0")
+            value = loc + scale * value
+        vals[s.index] = value
     return vals
 
 
 def _handle_groups(slots):
-    """Map ``id(handle) -> (handle, [slot indices in spec order])`` for every constrained handle.
+    """Map ``id(handle) -> (handle, [slot indices], structure)`` for every constrained handle.
     A scalar prior RV owns one slot; a ``param(...)`` vector/matrix handle owns several."""
     groups: dict = {}
     for s in slots:
         if s.handle is not None:
-            groups.setdefault(id(s.handle), (s.handle, []))[1].append(s.index)
+            entry = groups.setdefault(id(s.handle), [s.handle, [], s.structure])
+            if entry[2] is not s.structure and entry[2] is not None and s.structure is not None:
+                raise RuntimeError("one constrained handle has inconsistent structural declarations")
+            if entry[2] is None:
+                entry[2] = s.structure
+            entry[1].append(s.index)
     return groups
 
 
@@ -1048,8 +1218,8 @@ def _constraint_env(constraints, groups, vals):
         for lv in c.leaves:
             if lv in env:
                 continue
-            handle, idxs = groups[id(lv)]
-            spec = _spec_of(handle)
+            handle, idxs, declared_structure = groups[id(lv)]
+            spec = declared_structure or _spec_of(handle)
             env[lv] = _spec_assemble(spec, [vals[i] for i in idxs]) if spec is not None else vals[idxs[0]]
     return env
 
@@ -1068,7 +1238,11 @@ def _feasibility(constraints, slots):
     _check_constraint_handles(constraints, groups)
 
     def feasible(u):
-        env = _constraint_env(constraints, groups, _vals_from_u(slots, u))
+        try:
+            vals = _vals_from_u(slots, u)
+        except _ParameterDomainError:
+            return False
+        env = _constraint_env(constraints, groups, vals)
         return all(bool(np.all(_row_mask(c.eval(env)))) for c in constraints)
 
     return feasible
@@ -1104,6 +1278,27 @@ def _constrain_target(log_target, feasible):
 _DEFAULT_PENALTY = 1000.0  # tight enough that an auto-penalized equality is effectively enforced
 
 
+def _split_constraints(constraints) -> tuple[list[Constraint], list[Constraint]]:
+    """Return hard and soft constraints without weakening either policy because the other is present."""
+    if constraints is None:
+        return [], []
+    values = [constraints] if isinstance(constraints, Constraint) else list(constraints)
+    if any(not isinstance(value, Constraint) for value in values):
+        raise TypeError("constraints must contain only Constraint objects")
+    return (
+        [value for value in values if not getattr(value, "soft", False)],
+        [value for value in values if getattr(value, "soft", False)],
+    )
+
+
+def _constraint_policy(constraints, penalty) -> tuple[list[Constraint], list[Constraint]]:
+    """Resolve explicit softening separately from automatic equality handling."""
+    hard, soft = _split_constraints(constraints)
+    if penalty is not None:
+        return [], [*hard, *soft]
+    return hard, soft
+
+
 def _auto_penalty(constraints, penalty):
     """Effective penalty weight: the user's ``penalty`` if given, else a default when any
     constraint is *soft* (equality / ODE residual — measure-zero, so rejection can't honor it),
@@ -1113,8 +1308,8 @@ def _auto_penalty(constraints, penalty):
         return penalty
     if constraints is None:
         return None
-    cs = [constraints] if isinstance(constraints, Constraint) else list(constraints)
-    return _DEFAULT_PENALTY if any(getattr(c, "soft", False) for c in cs) else None
+    _hard, soft = _split_constraints(constraints)
+    return _DEFAULT_PENALTY if soft else None
 
 
 def _soft_penalty(constraints, slots, weight):
@@ -1186,8 +1381,8 @@ def _potential_term(potentials, slots):
         for p in potentials:
             args = []
             for v in p.vars:
-                handle, idxs = groups[id(v)]
-                spec = _spec_of(handle)
+                handle, idxs, declared_structure = groups[id(v)]
+                spec = declared_structure or _spec_of(handle)
                 args.append(_spec_assemble(spec, [vals[i] for i in idxs]) if spec is not None else vals[idxs[0]])
             total += float(p.fn(*args))
         return total
@@ -1201,7 +1396,13 @@ def _penalize_target(log_target, penalty):
         return log_target
 
     def plt(u):
-        return log_target(u) + penalty(u)
+        base = log_target(u)
+        if not math.isfinite(base) or base <= _NEG_INF:
+            return base
+        try:
+            return base + penalty(u)
+        except _ParameterDomainError:
+            return _NEG_INF
 
     return plt
 
@@ -1247,14 +1448,14 @@ def _lp_exponential(x, rate, xp):
 
 _HYPER_LP = {  # prior family name -> log-density(value, const-args, xp)
     "Normal": lambda v, a, xp: _lp_normal(v, a[0], a[1], xp),
-    "Gamma": lambda v, a, xp: _lp_gamma(v, a[0], a[1], xp),
+    "Gamma": lambda v, a, xp: _lp_gamma(v, a[0], 1.0 / a[1], xp),
     "HalfNormal": lambda v, a, xp: _lp_halfnormal(v, a[0], xp),
     "Exponential": lambda v, a, xp: _lp_exponential(v, a[0], xp),
     "InverseGamma": lambda v, a, xp: _lp_gamma(1.0 / v, a[0], 1.0 / a[1], xp) - 2.0 * _xlog(v, xp),
 }
 
 
-def _grouped_target(rv: RandomVariable, data, want_grad: bool):
+def _grouped_target(rv: RandomVariable, data, want_grad: bool, *, jacobian: bool = True):
     """Build the joint NUTS/HMC/ensemble target for a Normal-Normal random-intercept model.
 
     ``y_gi ~ Normal(theta_g, sigma)``, ``theta_g ~ Normal(mu, tau)``, with ``mu``/``tau``/``sigma`` each a
@@ -1269,7 +1470,7 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
     if prior._family.name != "Normal":
         raise NotImplementedError("grouped NUTS currently supports a Normal group prior.")
     noncentered = prior._reparam == "loc_scale"
-    groups = [np.asarray(g, dtype=float) for g in data]
+    groups = [_conjugate_observations(rv, group) for group in data]
     G = len(groups)
     if G < 1:
         raise ValueError("grouped model needs at least one group of observations.")
@@ -1309,8 +1510,9 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
         pa[0] = hyper_cols["mu"]
     if hyper_cols["tau"] >= 0:
         pa[1] = hyper_cols["tau"]
+    group_structure = _VectorSpec(G, support="real", name=prior.name or "theta")
     for g in range(G):
-        if noncentered:
+        if noncentered and jacobian:
             slots.append(
                 _Slot(
                     n_hyper + g,
@@ -1321,10 +1523,21 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
                     "real",
                     parent_args=dict(pa),
                     reparam="loc_scale",
+                    structure=group_structure,
                 )
             )
         else:
-            slots.append(_Slot(n_hyper + g, None, False, f"{prior.name or 'theta'}[{g}]", None, "real"))
+            slots.append(
+                _Slot(
+                    n_hyper + g,
+                    None,
+                    False,
+                    f"{prior.name or 'theta'}[{g}]",
+                    prior,
+                    "real",
+                    structure=group_structure,
+                )
+            )
 
     def _eval(u, xp):
         # hyperparameters (unconstrained -> constrained, with Jacobian for the positive ones)
@@ -1336,7 +1549,8 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
                 h[nm] = const[nm]
             elif support == "positive":
                 h[nm] = xp.exp(u[c])
-                logj = logj + u[c]
+                if jacobian:
+                    logj = logj + u[c]
             else:
                 h[nm] = u[c]
         mu, tau, sigma = h["mu"], h["tau"], h["sigma"]
@@ -1346,16 +1560,20 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
             if isinstance(arg, RandomVariable):
                 lp = lp + _HYPER_LP[arg._family.name](h[nm], [float(z) for z in arg._args], xp)
         # per-group latents + likelihood (vectorized over groups)
-        z = u[n_hyper : n_hyper + G]
-        theta = mu + tau * z if noncentered else z
-        cnt = xp.asarray(counts) if xp is np else z.new_tensor(counts)
-        sm = xp.asarray(sums) if xp is np else z.new_tensor(sums)
-        ssq = xp.asarray(sumsq) if xp is np else z.new_tensor(sumsq)
+        latent = u[n_hyper : n_hyper + G]
+        theta = mu + tau * latent if noncentered and jacobian else latent
+        cnt = xp.asarray(counts) if xp is np else latent.new_tensor(counts)
+        sm = xp.asarray(sums) if xp is np else latent.new_tensor(sums)
+        ssq = xp.asarray(sumsq) if xp is np else latent.new_tensor(sumsq)
         # sum_i (y - theta)^2 = sumsq - 2 theta sum + count theta^2
         sse = ssq - 2.0 * theta * sm + cnt * theta * theta
         ll = xp.sum(-0.5 * cnt * 1.8378770664093453 - cnt * _xlog(sigma, xp) - 0.5 * sse / (sigma * sigma))
-        prior_z = xp.sum(_lp_normal(z, 0.0, 1.0, xp)) if noncentered else xp.sum(_lp_normal(theta, mu, tau, xp))
-        return lp + ll + prior_z
+        prior_latent = (
+            xp.sum(_lp_normal(latent, 0.0, 1.0, xp))
+            if noncentered and jacobian
+            else xp.sum(_lp_normal(theta, mu, tau, xp))
+        )
+        return lp + ll + prior_latent
 
     def log_target(u):
         v = float(_eval(np.asarray(u, dtype=float), np))
@@ -1383,7 +1601,18 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
 
 
 # ----------------------------- sampler setup + the general how= drivers (MCMC, MAP, VI)
-def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=False, missing="error", potentials=None):
+def _prepare_target(
+    rv,
+    data,
+    constraints,
+    penalty,
+    *,
+    want_grad,
+    numpy_only=False,
+    missing="error",
+    potentials=None,
+    jacobian=True,
+):
     """Shared sampler setup: build the joint log-target (analytic-Torch when available, else the
     numeric encoder target), optionally its gradient, then layer on constraints/penalty.
 
@@ -1393,21 +1622,40 @@ def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=Fal
     is for HMC/NUTS. Used by every sampler fit and its parallel worker — one place, no duplication."""
     from mixle.ppl import autograd as _ag
 
-    eff = _auto_penalty(constraints, penalty)
+    hard_constraints, soft_constraints = _constraint_policy(constraints, penalty)
+    eff = _auto_penalty(soft_constraints, penalty)
     if _is_grouped(rv):  # random-intercept / plate model: per-group latents + shared hyperparameters
-        log_target, grad, slots, build, dmean, dstd = _grouped_target(rv, data, want_grad=want_grad)
-        soft = _soft_penalty(constraints, slots, eff)
-        feasible = None if soft is not None else _feasibility(constraints, slots)
+        if missing != "error":
+            raise NotImplementedError("grouped inference does not support missing='marginalize'")
+        log_target, grad, slots, build, dmean, dstd = _grouped_target(
+            rv, data, want_grad=want_grad, jacobian=jacobian
+        )
+        soft = _soft_penalty(soft_constraints, slots, eff)
+        feasible = _feasibility(hard_constraints, slots)
         log_target = _constrain_target(log_target, feasible)
         log_target = _penalize_target(log_target, soft)
-        log_target = _penalize_target(log_target, _potential_term(potentials, slots))
+        potential = _potential_term(potentials, slots)
+        log_target = _penalize_target(log_target, potential)
+        if want_grad and (soft is not None or potential is not None):
+            eps = 1e-5 * np.maximum(np.abs(_init_u(slots, dmean, dstd)), 1.0)
+
+            def grad(u):  # noqa: F811
+                u = np.asarray(u, dtype=float)
+                result = np.empty(len(u))
+                for i in range(len(u)):
+                    up, down = u.copy(), u.copy()
+                    up[i] += eps[i]
+                    down[i] -= eps[i]
+                    result[i] = (log_target(up) - log_target(down)) / (2.0 * eps[i])
+                return result
+
         return log_target, grad, slots, build, dmean, dstd, feasible
     # A custom potential is scored on the numerical target (no autograd graph for an arbitrary fn), so
     # force the encoder target when one is present -- exactly as a soft penalty does.
     ag = (
         None
         if (numpy_only or eff is not None or potentials is not None)
-        else _ag.grad_target(rv, data, missing=missing)
+        else _ag.grad_target(rv, data, missing=missing, jacobian=jacobian)
     )
     if ag is None and missing == "marginalize":
         raise NotImplementedError(
@@ -1419,7 +1667,12 @@ def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=Fal
         log_target = ag.log_target
         grad = ag.grad if want_grad else None
     else:
-        log_target, slots, _fam, build, _unpack, (dmean, dstd) = _build_target(rv, data, _potential_latents(potentials))
+        log_target, slots, _fam, build, _unpack, (dmean, dstd) = _build_target(
+            rv,
+            data,
+            _potential_latents(potentials),
+            jacobian=jacobian,
+        )
         grad = None
         if want_grad:
             eps = 1e-5 * np.maximum(np.abs(_init_u(slots, dmean, dstd)), 1.0)
@@ -1435,12 +1688,49 @@ def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=Fal
                     g[i] = (log_target(up) - log_target(um)) / (2.0 * eps[i])
                 return g
 
-    soft = _soft_penalty(constraints, slots, eff)
-    feasible = None if soft is not None else _feasibility(constraints, slots)
+    soft = _soft_penalty(soft_constraints, slots, eff)
+    feasible = _feasibility(hard_constraints, slots)
     log_target = _constrain_target(log_target, feasible)
     log_target = _penalize_target(log_target, soft)
     log_target = _penalize_target(log_target, _potential_term(potentials, slots))
     return log_target, grad, slots, build, dmean, dstd, feasible
+
+
+def _exact_int_control(value, name: str, *, minimum: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer >= {minimum}")
+    value = int(value)
+    if value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return value
+
+
+def _finite_control(value, name: str, *, lower: float, strict: bool = False) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
+        relation = ">" if strict else ">="
+        raise TypeError(f"{name} must be a finite real number {relation} {lower}")
+    value = float(value)
+    valid = value > lower if strict else value >= lower
+    if not math.isfinite(value) or not valid:
+        relation = ">" if strict else ">="
+        raise ValueError(f"{name} must be a finite real number {relation} {lower}")
+    return value
+
+
+def _sampler_controls(draws, burn, thin, chains, parallel, rng):
+    draws = _exact_int_control(draws, "draws", minimum=1)
+    burn = _exact_int_control(burn, "burn", minimum=0)
+    thin = _exact_int_control(thin, "thin", minimum=1)
+    chains = _exact_int_control(chains, "chains", minimum=1)
+    if not isinstance(parallel, (bool, str)):
+        raise TypeError("parallel must be False, True, 'process', or 'thread'")
+    if parallel not in {False, True, "process", "thread"}:
+        raise ValueError("parallel must be False, True, 'process', or 'thread'")
+    if rng is None:
+        rng = np.random.RandomState()
+    if not isinstance(rng, np.random.RandomState):
+        raise TypeError("rng must be a numpy.random.RandomState")
+    return draws, burn, thin, chains, parallel, rng
 
 
 def ensemble_fit(
@@ -1470,16 +1760,23 @@ def ensemble_fit(
     spreads them over a process pool)."""
     from mixle.inference.mcmc import affine_invariant_ensemble
 
-    if rng is None:
-        rng = np.random.RandomState()
+    draws, burn, thin, chains, parallel, rng = _sampler_controls(draws, burn, thin, chains, parallel, rng)
     log_target, _grad, slots, build, dmean, dstd, feasible = _prepare_target(
-        rv, data, constraints, penalty, want_grad=False, numpy_only=True, potentials=potentials
+        rv,
+        data,
+        constraints,
+        penalty,
+        want_grad=False,
+        numpy_only=True,
+        missing=missing,
+        potentials=potentials,
     )
     d = len(slots)
     if walkers is None:
         walkers = max(2 * (d + 1), 8)
+    walkers = _exact_int_control(walkers, "walkers", minimum=max(2 * (d + 1), 4))
     if walkers % 2:
-        walkers += 1
+        raise ValueError("walkers must be even")
     if constraints is not None or potentials is not None:
         parallel = False  # process workers rebuild the target without the constraint/penalty/potential closure
 
@@ -1495,7 +1792,7 @@ def ensemble_fit(
 
     if chains == 1:
         return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
-    kw = {"draws": draws, "burn": burn, "thin": thin, "walkers": walkers}
+    kw = {"draws": draws, "burn": burn, "thin": thin, "walkers": walkers, "missing": missing}
     results = _run_chains(run_one, _ensemble_worker, (rv, data, kw), chains, parallel, rng)
     return _finalize_chains(rv, slots, results, build)
 
@@ -1519,8 +1816,9 @@ def mcmc_fit(
     """Fit a PPL model with adaptive random-walk Metropolis-Hastings."""
     from mixle.inference.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
-    if rng is None:
-        rng = np.random.RandomState()
+    draws, burn, thin, chains, parallel, rng = _sampler_controls(draws, burn, thin, chains, parallel, rng)
+    if scale is not None:
+        scale = _finite_control(scale, "scale", lower=0.0, strict=True)
     log_target, _grad, slots, build, dmean, dstd, feasible = _prepare_target(
         rv, data, constraints, penalty, want_grad=False, missing=missing, potentials=potentials
     )
@@ -1539,7 +1837,7 @@ def mcmc_fit(
 
     if chains == 1:
         return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
-    kw = {"draws": draws, "burn": burn, "thin": thin, "scale": scale}
+    kw = {"draws": draws, "burn": burn, "thin": thin, "scale": scale, "missing": missing}
     results = _run_chains(run_one, _mcmc_worker, (rv, data, kw), chains, parallel, rng)
     return _finalize_chains(rv, slots, results, build)
 
@@ -1571,8 +1869,10 @@ def hmc_fit(
     """
     from mixle.inference.mcmc import hamiltonian_monte_carlo
 
-    if rng is None:
-        rng = np.random.RandomState()
+    draws, burn, thin, chains, parallel, rng = _sampler_controls(draws, burn, thin, chains, parallel, rng)
+    num_steps = _exact_int_control(num_steps, "num_steps", minimum=1)
+    if step_size is not None:
+        step_size = _finite_control(step_size, "step_size", lower=0.0, strict=True)
     log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
         rv, data, constraints, penalty, want_grad=True, missing=missing, potentials=potentials
     )
@@ -1601,7 +1901,14 @@ def hmc_fit(
 
     if chains == 1:
         return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
-    kw = {"draws": draws, "burn": burn, "thin": thin, "step_size": step_size, "num_steps": num_steps}
+    kw = {
+        "draws": draws,
+        "burn": burn,
+        "thin": thin,
+        "step_size": step_size,
+        "num_steps": num_steps,
+        "missing": missing,
+    }
     results = _run_chains(run_one, _hmc_worker, (rv, data, kw), chains, parallel, rng)
     return _finalize_chains(rv, slots, results, build)
 
@@ -1632,8 +1939,11 @@ def nuts_fit(
     smooth penalty (which enters the gradient via the numeric-gradient path)."""
     from mixle.inference.mcmc import nuts
 
-    if rng is None:
-        rng = np.random.RandomState()
+    draws, burn, thin, chains, parallel, rng = _sampler_controls(draws, burn, thin, chains, parallel, rng)
+    target_accept = _finite_control(target_accept, "target_accept", lower=0.0, strict=True)
+    if target_accept >= 1.0:
+        raise ValueError("target_accept must lie strictly inside (0, 1)")
+    max_tree_depth = _exact_int_control(max_tree_depth, "max_tree_depth", minimum=1)
     log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
         rv, data, constraints, penalty, want_grad=True, missing=missing, potentials=potentials
     )
@@ -1660,7 +1970,14 @@ def nuts_fit(
 
     if chains == 1:
         return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
-    kw = {"draws": draws, "burn": burn, "thin": thin, "target_accept": target_accept, "max_tree_depth": max_tree_depth}
+    kw = {
+        "draws": draws,
+        "burn": burn,
+        "thin": thin,
+        "target_accept": target_accept,
+        "max_tree_depth": max_tree_depth,
+        "missing": missing,
+    }
     results = _run_chains(run_one, _nuts_worker, (rv, data, kw), chains, parallel, rng)
     return _finalize_chains(rv, slots, results, build)
 
@@ -1679,7 +1996,16 @@ def sample_fit(rv: RandomVariable, data, **kw) -> RandomVariable:
 
 
 def map_fit(
-    rv: RandomVariable, data, *, rng=None, constraints=None, penalty=None, potentials=None, missing="error"
+    rv: RandomVariable,
+    data,
+    *,
+    rng=None,
+    constraints=None,
+    penalty=None,
+    potentials=None,
+    missing="error",
+    max_iter: int = 5000,
+    tol: float = 1e-8,
 ) -> RandomVariable:
     """Fit a PPL model by maximum a posteriori optimization.
 
@@ -1691,6 +2017,75 @@ def map_fit(
     from scipy.optimize import minimize
 
     from mixle.ppl import autograd as _ag
+
+    max_iter = _exact_int_control(max_iter, "max_iter", minimum=1)
+    tol = _finite_control(tol, "tol", lower=0.0)
+    if rng is not None and not isinstance(rng, np.random.RandomState):
+        raise TypeError("rng must be a numpy.random.RandomState")
+    if _is_grouped(rv):
+        log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
+            rv,
+            data,
+            constraints,
+            penalty,
+            want_grad=True,
+            missing=missing,
+            potentials=potentials,
+            jacobian=False,
+        )
+        u0 = _init_u(slots, dmean, dstd)
+        if feasible is not None:
+            u0 = _project_init(u0, feasible, np.random.RandomState() if rng is None else rng)
+
+        def grouped_objective(u):
+            if feasible is not None and not feasible(u):
+                return 1e18
+            return -log_target(u)
+
+        clean_gradient = grad is not None and constraints is None and penalty is None and potentials is None
+        grouped_result = minimize(
+            grouped_objective,
+            u0,
+            jac=(lambda u: -grad(u)) if clean_gradient else None,
+            method="L-BFGS-B" if clean_gradient else "Nelder-Mead",
+            options=(
+                {"maxiter": max_iter, "ftol": tol, "gtol": tol}
+                if clean_gradient
+                else {"maxiter": max_iter, "xatol": tol, "fatol": tol}
+            ),
+        )
+        if (
+            not bool(grouped_result.success)
+            or not np.isfinite(grouped_result.fun)
+            or not np.all(np.isfinite(grouped_result.x))
+        ):
+            raise RuntimeError(f"grouped MAP optimization failed: {grouped_result.message}")
+        value_row = _u_to_vals(slots, np.asarray(grouped_result.x, dtype=float)[None, :])[0]
+        values = {slot.index: float(value_row[k]) for k, slot in enumerate(slots)}
+        group_prior = rv._args[0]
+        group_values = np.asarray(
+            [value_row[k] for k, slot in enumerate(slots) if slot.handle is group_prior],
+            dtype=float,
+        )
+        scalar_values = {
+            slot.name: float(value_row[k])
+            for k, slot in enumerate(slots)
+            if slot.handle is not group_prior
+        }
+        optimizer = {
+            "algorithm": "L-BFGS-B" if clean_gradient else "Nelder-Mead",
+            "success": True,
+            "iterations": int(getattr(grouped_result, "nit", 0)),
+            "message": str(grouped_result.message),
+            "objective": float(grouped_result.fun),
+        }
+        result = IndexedPosterior(
+            [(group_prior, group_prior.name or "theta", group_values)],
+            scalar_values,
+            {},
+            optimizer,
+        )
+        return RandomVariable._bound(build(values), name=rv._name, result=result)
 
     g = None if potentials is not None else _ag.grad_target(rv, data, missing=missing, jacobian=False)
     if g is None and constraints is None and penalty is None and potentials is None and not _ag.torch_available():
@@ -1717,7 +2112,15 @@ def map_fit(
             v, gr = g.value_and_grad(u)
             return -v, -gr
 
-        res = minimize(neg, u0, jac=True, method="L-BFGS-B", options={"maxiter": 1000})
+        res = minimize(
+            neg,
+            u0,
+            jac=True,
+            method="L-BFGS-B",
+            options={"maxiter": max_iter, "ftol": tol, "gtol": tol},
+        )
+        if not bool(res.success) or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x)):
+            raise RuntimeError(f"MAP optimization failed: {res.message}")
         vals, _ = g.unpack(res.x)
         return RandomVariable._bound(g.build(vals), name=rv._name)
 
@@ -1725,9 +2128,10 @@ def map_fit(
     log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(
         rv, data, _potential_latents(potentials), jacobian=False
     )
-    soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
-    # penalty=... enforces the constraints softly (a log-joint term), so it replaces hard rejection.
-    feasible = None if soft is not None else _feasibility(constraints, slots)
+    hard_constraints, soft_constraints = _constraint_policy(constraints, penalty)
+    soft = _soft_penalty(soft_constraints, slots, _auto_penalty(soft_constraints, penalty))
+    feasible = _feasibility(hard_constraints, slots)
+    log_target = _constrain_target(log_target, feasible)
     log_target = _penalize_target(log_target, soft)
     log_target = _penalize_target(log_target, _potential_term(potentials, slots))
     u0 = _init_u(slots, dmean, dstd)
@@ -1739,7 +2143,14 @@ def map_fit(
             return 1e18  # keep the constrained MAP inside the feasible region
         return -log_target(u)
 
-    res = minimize(objective, u0, method="Nelder-Mead", options={"xatol": 1e-6, "fatol": 1e-6, "maxiter": 5000})
+    res = minimize(
+        objective,
+        u0,
+        method="Nelder-Mead",
+        options={"xatol": tol, "fatol": tol, "maxiter": max_iter},
+    )
+    if not bool(res.success) or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x)):
+        raise RuntimeError(f"MAP optimization failed: {res.message}")
     vals, _ = unpack(res.x)
     return RandomVariable._bound(build(vals), name=rv._name)
 
@@ -1748,10 +2159,12 @@ def map_fit(
 class _LaplaceRaw:
     """Minimal raw-result holder so a Laplace fit flows through the shared :func:`_finalize` path."""
 
-    def __init__(self, samples):
+    def __init__(self, samples, *, optimizer, hessian):
         self.samples = samples  # (draws, d) unconstrained
         self.acceptance_rate = None
         self.num_divergences = 0
+        self.optimizer = dict(optimizer)
+        self.hessian = dict(hessian)
 
 
 def _fd_hessian(f, x, eps=1.0e-4):
@@ -1775,21 +2188,45 @@ def _fd_hessian(f, x, eps=1.0e-4):
     return H
 
 
-def _psd_cov(prec):
-    """Invert a (negative-log-posterior) precision into a PSD covariance, robust to finite-diff noise."""
-    d = prec.shape[0]
-    prec = 0.5 * (prec + prec.T) + 1.0e-8 * np.eye(d)
-    try:
-        cov = np.linalg.inv(prec)
-    except np.linalg.LinAlgError:
-        cov = np.linalg.pinv(prec)
-    cov = 0.5 * (cov + cov.T)
-    w, V = np.linalg.eigh(cov)  # clip to PSD so sampling is well-defined
-    w = np.clip(w, 1.0e-12, None)
-    return (V * w) @ V.T
+def _laplace_covariance(precision):
+    """Invert a finite positive-definite Hessian and return an explicit rank/conditioning receipt."""
+    precision = np.asarray(precision, dtype=float)
+    if precision.ndim != 2 or precision.shape[0] != precision.shape[1] or not np.all(np.isfinite(precision)):
+        raise RuntimeError("Laplace Hessian must be a finite square matrix")
+    precision = 0.5 * (precision + precision.T)
+    eigenvalues = np.linalg.eigvalsh(precision)
+    scale = max(float(np.max(np.abs(eigenvalues))), 1.0)
+    threshold = np.finfo(float).eps * precision.shape[0] * scale
+    rank = int(np.sum(eigenvalues > threshold))
+    if rank != precision.shape[0] or np.any(eigenvalues <= 0.0):
+        raise RuntimeError(
+            f"Laplace Hessian is not positive definite (rank={rank}/{precision.shape[0]}, "
+            f"min_eigenvalue={float(eigenvalues.min()):.6g}); the mode is non-identifiable or not locally Gaussian"
+        )
+    covariance = np.linalg.inv(precision)
+    return covariance, {
+        "rank": rank,
+        "dimension": int(precision.shape[0]),
+        "min_eigenvalue": float(eigenvalues.min()),
+        "max_eigenvalue": float(eigenvalues.max()),
+        "condition_number": float(eigenvalues.max() / eigenvalues.min()),
+        "regularization": 0.0,
+    }
 
 
-def laplace_fit(rv: RandomVariable, data, *, rng=None, draws: int = 2000, missing="error", **_) -> RandomVariable:
+def laplace_fit(
+    rv: RandomVariable,
+    data,
+    *,
+    rng=None,
+    draws: int = 2000,
+    missing="error",
+    constraints=None,
+    penalty=None,
+    potentials=None,
+    max_iter: int = 5000,
+    tol: float = 1e-8,
+) -> RandomVariable:
     """Gaussian (Laplace) posterior approximation at the MAP.
 
     Finds the posterior mode, takes the Gaussian whose precision is the Hessian of the negative joint
@@ -1799,21 +2236,67 @@ def laplace_fit(rv: RandomVariable, data, *, rng=None, draws: int = 2000, missin
     """
     from scipy.optimize import minimize
 
-    rng = np.random.RandomState() if rng is None else rng
-    log_target, slots, _fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+    draws = _exact_int_control(draws, "draws", minimum=2)
+    max_iter = _exact_int_control(max_iter, "max_iter", minimum=1)
+    tol = _finite_control(tol, "tol", lower=0.0)
+    if rng is None:
+        rng = np.random.RandomState()
+    elif not isinstance(rng, np.random.RandomState):
+        raise TypeError("rng must be a numpy.random.RandomState")
+    hard_constraints, _soft_constraints = _constraint_policy(constraints, penalty)
+    if hard_constraints:
+        raise NotImplementedError(
+            "Laplace inference does not approximate a hard-truncated posterior; use MCMC/ensemble or "
+            "supply an explicit penalty to request a soft surrogate"
+        )
+    log_target, _grad, slots, build, dmean, dstd, _feasible = _prepare_target(
+        rv,
+        data,
+        constraints,
+        penalty,
+        want_grad=False,
+        missing=missing,
+        potentials=potentials,
+    )
     neg = lambda u: -log_target(u)  # noqa: E731
     u0 = _init_u(slots, dmean, dstd)
-    res = minimize(neg, u0, method="L-BFGS-B", options={"maxiter": 2000})
+    res = minimize(
+        neg,
+        u0,
+        method="L-BFGS-B",
+        options={"maxiter": max_iter, "ftol": tol, "gtol": tol},
+    )
+    if not bool(res.success) or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x)):
+        raise RuntimeError(f"Laplace mode optimization failed: {res.message}")
     u_star = np.asarray(res.x, dtype=float)
-    cov = _psd_cov(_fd_hessian(neg, u_star))
-    Z = rng.multivariate_normal(u_star, cov, size=int(draws))
-    return _finalize(rv, slots, _LaplaceRaw(Z), build)
+    cov, hessian = _laplace_covariance(_fd_hessian(neg, u_star))
+    Z = rng.multivariate_normal(u_star, cov, size=draws, check_valid="raise")
+    optimizer = {
+        "success": True,
+        "iterations": int(getattr(res, "nit", 0)),
+        "objective": float(res.fun),
+        "message": str(res.message),
+    }
+    return _finalize(rv, slots, _LaplaceRaw(Z, optimizer=optimizer, hessian=hessian), build)
 
 
 class _VIResult:
     """Lightweight raw-result holder for a variational fit (mirrors MCMCResult's role)."""
 
-    def __init__(self, elbo, mean, std, objective_kind="kl_elbo", alpha=1.0, family="meanfield", batch_size=None):
+    def __init__(
+        self,
+        elbo,
+        mean,
+        std,
+        objective_kind="kl_elbo",
+        alpha=1.0,
+        family="meanfield",
+        batch_size=None,
+        *,
+        algorithm,
+        iterations,
+        termination_reason,
+    ):
         self.elbo = float(elbo)
         self.objective = float(elbo)  # alias; for alpha != 1 this is the tilted Renyi bound, not the ELBO
         self.objective_kind = objective_kind
@@ -1823,6 +2306,10 @@ class _VIResult:
         self.variational_mean = mean
         self.variational_std = std
         self.acceptance_rate = None
+        self.algorithm = str(algorithm)
+        self.iterations = int(iterations)
+        self.termination_reason = str(termination_reason)
+        self.completed = True
 
 
 def vi_fit(
@@ -1854,8 +2341,30 @@ def vi_fit(
     """
     from mixle.ppl import autograd as _ag
 
+    samples = _exact_int_control(samples, "samples", minimum=2)
+    mc = _exact_int_control(mc, "mc", minimum=1)
+    max_iter = _exact_int_control(max_iter, "max_iter", minimum=1)
+    steps = _exact_int_control(steps, "steps", minimum=1)
+    lr = _finite_control(lr, "lr", lower=0.0, strict=True)
+    if family not in {"meanfield", "fullrank"}:
+        raise ValueError("family must be 'meanfield' or 'fullrank'")
+    alpha = _finite_control(alpha, "alpha", lower=0.0)
+    if alpha > 1.0:
+        raise ValueError("alpha must lie in [0, 1]")
+    if batch_size is not None:
+        batch_size = _exact_int_control(batch_size, "batch_size", minimum=1)
+        if batch_size >= len(data):
+            raise ValueError("batch_size must be smaller than the dataset; use None for full-batch VI")
+    if seed is not None:
+        seed = _exact_int_control(seed, "seed", minimum=0)
+        if seed >= 2**32:
+            raise ValueError("seed must lie in [0, 2**32)")
+    if rng is not None and seed is not None:
+        raise ValueError("pass at most one of rng and seed")
     if rng is None:
         rng = np.random.RandomState(seed)
+    elif not isinstance(rng, np.random.RandomState):
+        raise TypeError("rng must be a numpy.random.RandomState")
 
     ag = _ag.grad_target(rv, data, missing=missing)
     if ag is None and missing == "marginalize":
@@ -1864,6 +2373,7 @@ def vi_fit(
             "with mixle.stats.marginalized() leaves."
         )
     if ag is not None:
+        vi_steps = min(steps, max_iter)
         slots, build = ag.slots, ag.build
         u0 = _init_u(slots, ag.dmean, ag.dstd)
         s0 = _init_scale(slots, ag.dstd, len(data))
@@ -1872,7 +2382,7 @@ def vi_fit(
             s0,
             samples=samples,
             mc=mc,
-            steps=steps,
+            steps=vi_steps,
             lr=lr,
             rng=rng,
             batch_size=batch_size,
@@ -1880,9 +2390,17 @@ def vi_fit(
             alpha=alpha,
         )
         objective_kind = "kl_elbo" if alpha == 1.0 else "renyi_tilted"
+        algorithm = f"advi_{family}"
+        executed_iterations = vi_steps
+        termination_reason = "fixed_steps_completed"
     else:
         from scipy.optimize import minimize
 
+        if family != "meanfield" or alpha != 1.0 or batch_size is not None:
+            raise NotImplementedError(
+                "the derivative-free VI backend implements only full-batch meanfield KL; "
+                "fullrank, tilted alpha, and minibatch requests require the autograd backend"
+            )
         log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
         d = len(slots)
         u0 = _init_u(slots, dmean, dstd)
@@ -1901,8 +2419,10 @@ def vi_fit(
             neg_elbo,
             np.concatenate([u0, np.log(s0)]),
             method="Nelder-Mead",
-            options={"maxiter": max_iter, "xatol": 1e-5, "fatol": 1e-5},
+            options={"maxiter": min(max_iter, steps), "xatol": 1e-5, "fatol": 1e-5},
         )
+        if not bool(res.success) or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x)):
+            raise RuntimeError(f"variational optimization failed: {res.message}")
         mean, std = res.x[:d], np.exp(res.x[d:])
         Z = rng.standard_normal((samples, d))
         U = mean + std * Z
@@ -1911,13 +2431,28 @@ def vi_fit(
         vals = _u_to_vals(slots, U)
         objective = -float(res.fun)  # neg_elbo was minimized; the ELBO is its negation
         objective_kind = "kl_elbo_common_random"
+        algorithm = "derivative_free_meanfield_common_random"
+        executed_iterations = int(getattr(res, "nit", min(max_iter, steps)))
+        termination_reason = str(res.message)
+
+    if not np.isfinite(objective) or not np.all(np.isfinite(vals)):
+        raise RuntimeError("variational inference produced a non-finite objective or posterior draw")
 
     mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
     post = Posterior(
         slots,
         vals,
         _VIResult(
-            objective, mean, std, objective_kind=objective_kind, alpha=alpha, family=family, batch_size=batch_size
+            objective,
+            mean,
+            std,
+            objective_kind=objective_kind,
+            alpha=alpha,
+            family=family,
+            batch_size=batch_size,
+            algorithm=algorithm,
+            iterations=executed_iterations,
+            termination_reason=termination_reason,
         ),
     )
 
@@ -2035,7 +2570,7 @@ def _conj_categorical_dirichlet(prior_args, fixed, stats, handle, index):
     # Dirichlet(alpha + counts). Returns the posterior-mean probability vector (not a scalar).
     alpha = np.asarray(prior_args[0], dtype=float).reshape(-1)
     K = alpha.size
-    labels = np.asarray(stats["data"]).round().astype(int)
+    labels = np.asarray(stats["data"], dtype=int)
     if labels.size and (labels.min() < 0 or labels.max() >= K):
         raise ValueError(
             f"Categorical-Dirichlet conjugacy expects integer categories in [0, {K}); got values outside that "
@@ -2166,18 +2701,61 @@ def _is_all_free_normal(rv: RandomVariable) -> bool:
     )
 
 
-def _nig_conjugate_fit(rv, data, *, mu0=0.0, kappa=0.0, alpha=1.0, beta=0.0) -> RandomVariable:
+def _conjugate_observations(rv: RandomVariable, data) -> np.ndarray:
+    """Validate exact likelihood support before constructing any conjugate sufficient statistic."""
+    try:
+        raw = np.asarray(data)
+        values = raw.astype(float, copy=False)
+    except (TypeError, ValueError) as error:
+        raise TypeError("conjugate observations must be a numeric one-dimensional sequence") from error
+    if values.ndim != 1 or values.size == 0 or not np.all(np.isfinite(values)):
+        raise ValueError("conjugate observations must be a non-empty finite one-dimensional sequence")
+    family = rv._family.name
+    integral = np.equal(values, np.floor(values))
+    if family in {"Poisson", "NegativeBinomial"} and (np.any(values < 0.0) or not np.all(integral)):
+        raise ValueError(f"{family} conjugacy requires exact non-negative integer observations")
+    if family == "Geometric" and (np.any(values < 1.0) or not np.all(integral)):
+        raise ValueError("Geometric conjugacy requires exact integer observations >= 1")
+    if family == "Bernoulli" and not np.all(np.isin(values, [0.0, 1.0])):
+        raise ValueError("Bernoulli conjugacy requires observations exactly equal to 0 or 1")
+    if family == "Binomial":
+        trials = float(rv._args[0])
+        if not trials.is_integer() or trials < 0.0 or not np.all(integral) or np.any((values < 0) | (values > trials)):
+            raise ValueError(f"Binomial conjugacy requires exact integer observations in [0, {trials:g}]")
+    if family == "Categorical":
+        prior = rv._args[0]
+        if isinstance(prior, RandomVariable) and isinstance(prior._family, CompositeFamily):
+            components = prior._args[0]
+            if not components:
+                raise ValueError("Categorical conjugate mixture prior must contain at least one component")
+            prior = components[0]
+        categories = len(np.asarray(prior._args[0]).reshape(-1))
+        if not np.all(integral) or np.any((values < 0) | (values >= categories)):
+            raise ValueError(
+                f"Categorical conjugacy requires exact integer observations in [0, {categories})"
+            )
+    if family in {"Exponential", "Gamma"} and np.any(values <= 0.0):
+        raise ValueError(f"{family} conjugacy requires strictly positive observations")
+    return np.asarray(values, dtype=float)
+
+
+def _nig_conjugate_fit(rv, data, *, mu0=0.0, kappa=1.0e-6, alpha=2.0, beta=1.0) -> RandomVariable:
     """Closed-form Normal-Inverse-Gamma (NormalGamma) posterior for ``Normal(free, free)`` -- the most
     common Bayesian model: unknown mean AND variance, jointly conjugate.
 
-    Prior ``(mu, tau) ~ NormalGamma(mu0, kappa, alpha, beta)`` (default weakly-informative); the posterior
+    Prior ``(mu, tau) ~ NormalGamma(mu0, kappa, alpha, beta)`` uses a proper default
+    ``(0, 1e-6, 2, 1)``; the posterior
     is exact in one pass. Returns a Gaussian at the posterior mean with a :class:`ConjugatePosterior`
     exposing the joint posterior over ``mu`` and ``sigma`` (sampled from the NIG).
     """
     from mixle.stats import GaussianDistribution
     from mixle.stats.bayes.normal_gamma import NormalGammaDistribution
 
-    arr = np.asarray(data, dtype=float)
+    mu0 = _finite_control(mu0, "mu0", lower=-math.inf)
+    kappa = _finite_control(kappa, "kappa", lower=0.0, strict=True)
+    alpha = _finite_control(alpha, "alpha", lower=0.0, strict=True)
+    beta = _finite_control(beta, "beta", lower=0.0, strict=True)
+    arr = _conjugate_observations(rv, data)
     n = float(arr.size)
     xbar = float(arr.mean()) if n else 0.0
     S = float(((arr - xbar) ** 2).sum())
@@ -2218,6 +2796,14 @@ def _nig_conjugate_fit(rv, data, *, mu0=0.0, kappa=0.0, alpha=1.0, beta=0.0) -> 
     }
     fitted = GaussianDistribution(mu_n, mean_sigma2)
     cpost = ConjugatePosterior(entries)
+    cpost.prior = {
+        "family": "NormalGamma",
+        "mu0": mu0,
+        "kappa": kappa,
+        "alpha": alpha,
+        "beta": beta,
+        "proper": True,
+    }
 
     def predictive(k, rng):  # posterior predictive: draw (mu, tau) then x ~ Normal(mu, 1/tau)
         draws = _draw(k, rng)
@@ -2325,7 +2911,7 @@ def _stats_conjugate_fit(rv: RandomVariable, data, *, prior_override=None):
     from mixle.stats.bayes.conjugate import conjugate_posterior
 
     prior_dict = prior_override if prior_override else _prior_to_dict(prior_rv)
-    arr = np.asarray(data, dtype=float)
+    arr = _conjugate_observations(rv, data)
     try:
         sp = conjugate_posterior(stats_dist, arr, prior=prior_dict)
         mean_dict = sp.mean()
@@ -2372,7 +2958,7 @@ def conjugate_fit(rv: RandomVariable, data, *, prior=None, **_) -> RandomVariabl
         raise NotImplementedError("model is not a registered conjugate pair.")
     builder, idx, prior_rv = spec
     fam = rv._family
-    arr = np.asarray(data, dtype=float)
+    arr = _conjugate_observations(rv, data)
     # n/sum/sum2 serve the continuous scalar pairs; `data` lets a discrete builder (Categorical-Dirichlet)
     # take per-category counts. A vector posterior parameter (a Dirichlet probs slot) is supported below.
     stats = {"n": float(arr.size), "sum": float(arr.sum()), "sum2": float((arr * arr).sum()), "data": arr}
@@ -2540,7 +3126,7 @@ def conjugate_mixture_fit(rv: RandomVariable, data) -> RandomVariable:
         raise NotImplementedError("model is not a mixture of registered conjugate priors.")
     builder, logm, idx, comps, w = spec
     fam = rv._family
-    arr = np.asarray(data, dtype=float)
+    arr = _conjugate_observations(rv, data)
     stats = {"n": float(arr.size), "sum": float(arr.sum()), "sum2": float((arr * arr).sum())}
     fixed = {j: rv._args[j] for j in range(len(rv._args)) if j != idx}
 
@@ -2573,20 +3159,40 @@ class HierarchicalPosterior:
     fitted hyperparameters of a Normal-Normal random-effects model.
     """
 
-    def __init__(self, group_means, group_vars, hyper):
+    def __init__(self, group_means, group_vars, hyper, posterior_family):
         self.group_means = np.asarray(group_means)
         self.group_vars = np.asarray(group_vars)
         self.hyper = hyper  # {'m':..., 'tau':..., 'sigma':...}
+        self.posterior_family = str(posterior_family)
         self.acceptance_rate = None
 
-    def samples(self, param=None):
-        """Return the per-group posterior means for the random effects."""
-        # per-group posterior mean (the random effects)
-        return self.group_means
+    def samples(self, param=None, n: int = 4000, rng=None):
+        """Draw group effects from the declared conditional posterior."""
+        n = _exact_int_control(n, "hierarchical posterior draws", minimum=1)
+        rng = np.random.RandomState() if rng is None else rng
+        if not isinstance(rng, np.random.RandomState):
+            raise TypeError("rng must be a numpy.random.RandomState")
+        if self.posterior_family == "Normal":
+            return rng.normal(self.group_means, np.sqrt(self.group_vars), size=(n, self.group_means.size))
+        if self.posterior_family == "Gamma":
+            shape = self.group_means**2 / self.group_vars
+            scale = self.group_vars / self.group_means
+            return rng.gamma(shape, scale, size=(n, self.group_means.size))
+        if self.posterior_family == "Beta":
+            concentration = self.group_means * (1.0 - self.group_means) / self.group_vars - 1.0
+            a = self.group_means * concentration
+            b = (1.0 - self.group_means) * concentration
+            return rng.beta(a, b, size=(n, self.group_means.size))
+        raise RuntimeError(f"unknown hierarchical posterior family {self.posterior_family!r}")
 
     def summary(self) -> dict:
         """Return fitted hyperparameters and per-group posterior means."""
-        return {"hyper": self.hyper, "n_groups": int(self.group_means.size), "group_means": self.group_means}
+        return {
+            "hyper": self.hyper,
+            "n_groups": int(self.group_means.size),
+            "group_means": self.group_means,
+            "posterior_family": self.posterior_family,
+        }
 
 
 def _group_stats(data):
@@ -2598,17 +3204,42 @@ def _group_stats(data):
 
 
 def _hier_normal_normal(rv, n_i, sum_i, sumsq_i, max_its, tol):
-    """mu_i ~ Normal(m, tau^2); y_ij ~ Normal(mu_i, sigma^2). Exact conjugate EM."""
+    """Normal random effects by empirical Bayes with exact conditional group posteriors."""
     from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 
+    prior = rv._args[0]
     N = float(n_i.sum())
-    gbar = sum_i / np.maximum(n_i, 1.0)
-    m, tau2 = float(gbar.mean()), float(gbar.var()) or 1.0
+    group_average = sum_i / n_i
+    declared = tuple(prior._args)
+    if all(isinstance(arg, (int, float, np.integer, np.floating)) for arg in declared):
+        m = _finite_control(declared[0], "population initial location", lower=-math.inf)
+        tau = _finite_control(declared[1], "population initial scale", lower=0.0, strict=True)
+        tau2 = tau * tau
+        initialization = {"location": m, "scale": tau, "source": "declared_population"}
+    else:
+        m = float(group_average.mean())
+        tau2 = max(float(group_average.var()), 1.0e-8)
+        initialization = {
+            "location": m,
+            "scale": math.sqrt(tau2),
+            "source": "group_moments",
+        }
     sigma_arg = rv._args[1]
-    sigma_fixed = not (sigma_arg is free or isinstance(sigma_arg, RandomVariable))
-    sigma2 = float(sigma_arg) ** 2 if sigma_fixed else max(float((sumsq_i.sum() / N) - (sum_i.sum() / N) ** 2), 1e-3)
+    if isinstance(sigma_arg, RandomVariable):
+        raise NotImplementedError(
+            "empirical-Bayes hierarchical fitting cannot honor a prior on the observation scale; "
+            "use a posterior sampler"
+        )
+    sigma_fixed = sigma_arg is not free
+    sigma2 = (
+        _finite_control(sigma_arg, "observation scale", lower=0.0, strict=True) ** 2
+        if sigma_fixed
+        else max(float((sumsq_i.sum() / N) - (sum_i.sum() / N) ** 2), 1e-3)
+    )
     prev = None
-    for _ in range(max_its):
+    converged = False
+    iterations = 0
+    for iterations in range(1, max_its + 1):
         v_i = 1.0 / (1.0 / tau2 + n_i / sigma2)
         mhat = (m / tau2 + sum_i / sigma2) * v_i
         m = float(mhat.mean())
@@ -2618,67 +3249,118 @@ def _hier_normal_normal(rv, n_i, sum_i, sumsq_i, max_its, tol):
             sigma2 = max(float(resid.sum() / N), 1e-8)
         cur = (m, tau2, sigma2)
         if prev is not None and max(abs(a - b) for a, b in zip(cur, prev)) < tol:
+            converged = True
             break
         prev = cur
     pop = GaussianDistribution(mu=m, sigma2=tau2, name=rv._name)
-    hyper = {"m": m, "tau": math.sqrt(tau2), "sigma": math.sqrt(sigma2)}
-    return pop, mhat, v_i, hyper
+    hyper = {
+        "m": m,
+        "tau": math.sqrt(tau2),
+        "sigma": math.sqrt(sigma2),
+        "procedure": "empirical_bayes_em",
+        "initialization": initialization,
+        "iterations": iterations,
+        "converged": converged,
+        "conditional_group_posterior": True,
+        "includes_hyperparameter_uncertainty": False,
+    }
+    return pop, mhat, v_i, hyper, "Normal"
 
 
 def _hier_gamma_poisson(rv, n_i, sum_i, sumsq_i, max_its, tol):
-    """lambda_i ~ Gamma(a, b); y_ij ~ Poisson(lambda_i). Conjugate E-step +
-    moment-matched population M-step (law of total variance)."""
+    """Gamma-Poisson moment-matched empirical Bayes with conditional group posteriors."""
     from mixle.stats.univariate.continuous.gamma import GammaDistribution
 
-    gm = sum_i / np.maximum(n_i, 1.0)
-    m = float(gm.mean())
-    v = float(gm.var()) or m
-    b = m / max(v, 1e-6)
-    a = m * b
+    prior = rv._args[0]
+    declared = tuple(prior._args)
+    if all(isinstance(arg, (int, float, np.integer, np.floating)) for arg in declared):
+        a = _finite_control(declared[0], "population initial shape", lower=0.0, strict=True)
+        b = _finite_control(declared[1], "population initial rate", lower=0.0, strict=True)
+        initialization = {"shape": a, "rate": b, "source": "declared_population"}
+    else:
+        group_mean = sum_i / n_i
+        mean = max(float(group_mean.mean()), 1.0e-8)
+        variance = max(float(group_mean.var()), mean * 1.0e-6)
+        b = mean / variance
+        a = mean * b
+        initialization = {"shape": a, "rate": b, "source": "group_moments"}
     prev = None
-    for _ in range(max_its):
-        A, B = a + sum_i, b + n_i  # posterior Gamma(A_i, B_i) per group
+    converged = False
+    iterations = 0
+    for iterations in range(1, max_its + 1):
+        A, B = a + sum_i, b + n_i
         Elam, Vlam = A / B, A / (B * B)
-        m = float(Elam.mean())
-        v = float(np.var(Elam) + Vlam.mean())  # total variance
-        b = m / max(v, 1e-8)
-        a = m * b
-        cur = (a, b)
-        if prev is not None and max(abs(x - y) for x, y in zip(cur, prev)) < tol:
+        mean = max(float(Elam.mean()), 1.0e-12)
+        variance = max(float(np.var(Elam) + Vlam.mean()), 1.0e-12)
+        b = max(mean / variance, 1.0e-12)
+        a = max(mean * b, 1.0e-12)
+        current = (a, b)
+        if prev is not None and max(abs(x - y) for x, y in zip(current, prev)) < tol:
+            converged = True
             break
-        prev = cur
+        prev = current
     pop = GammaDistribution(k=a, theta=1.0 / b, name=rv._name)  # population over rates
-    hyper = {"shape": a, "rate": b, "mean": a / b}
-    return pop, Elam, Vlam, hyper
+    hyper = {
+        "shape": a,
+        "rate": b,
+        "mean": a / b,
+        "procedure": "moment_matched_empirical_bayes",
+        "initialization": initialization,
+        "iterations": iterations,
+        "converged": converged,
+        "conditional_group_posterior": True,
+        "includes_hyperparameter_uncertainty": False,
+    }
+    return pop, Elam, Vlam, hyper, "Gamma"
 
 
 def _hier_beta_bernoulli(rv, n_i, sum_i, sumsq_i, max_its, tol):
-    """p_i ~ Beta(a, b); y_ij ~ Bernoulli(p_i). Conjugate E-step + moment-matched M-step."""
+    """Beta-Bernoulli moment-matched empirical Bayes with conditional group posteriors."""
     from mixle.stats.univariate.continuous.beta import BetaDistribution
 
-    gp = sum_i / np.maximum(n_i, 1.0)
-    m = float(gp.mean())
-    v = float(gp.var()) or (m * (1 - m))
-    s = max(m * (1 - m) / max(v, 1e-6) - 1, 1e-3)
-    a = m * s
-    b = (1 - m) * s
+    prior = rv._args[0]
+    declared = tuple(prior._args)
+    if all(isinstance(arg, (int, float, np.integer, np.floating)) for arg in declared):
+        a = _finite_control(declared[0], "population initial alpha", lower=0.0, strict=True)
+        b = _finite_control(declared[1], "population initial beta", lower=0.0, strict=True)
+        initialization = {"alpha": a, "beta": b, "source": "declared_population"}
+    else:
+        group_probability = sum_i / n_i
+        mean = float(np.clip(group_probability.mean(), 1.0e-8, 1.0 - 1.0e-8))
+        variance = max(float(group_probability.var()), 1.0e-12)
+        concentration = max(mean * (1.0 - mean) / variance - 1.0, 1.0e-6)
+        a, b = mean * concentration, (1.0 - mean) * concentration
+        initialization = {"alpha": a, "beta": b, "source": "group_moments"}
     prev = None
-    for _ in range(max_its):
-        A, B = a + sum_i, b + (n_i - sum_i)  # posterior Beta(A_i, B_i)
+    converged = False
+    iterations = 0
+    for iterations in range(1, max_its + 1):
+        A, B = a + sum_i, b + (n_i - sum_i)
         Ep = A / (A + B)
-        Vp = A * B / ((A + B) ** 2 * (A + B + 1))
-        m = float(Ep.mean())
-        v = float(np.var(Ep) + Vp.mean())
-        s = max(m * (1 - m) / max(v, 1e-8) - 1, 1e-3)
-        a = m * s
-        b = (1 - m) * s
-        cur = (a, b)
-        if prev is not None and max(abs(x - y) for x, y in zip(cur, prev)) < tol:
+        Vp = A * B / ((A + B) ** 2 * (A + B + 1.0))
+        mean = float(np.clip(Ep.mean(), 1.0e-10, 1.0 - 1.0e-10))
+        variance = max(float(np.var(Ep) + Vp.mean()), 1.0e-12)
+        concentration = max(mean * (1.0 - mean) / variance - 1.0, 1.0e-6)
+        a = max(mean * concentration, 1.0e-12)
+        b = max((1.0 - mean) * concentration, 1.0e-12)
+        current = (a, b)
+        if prev is not None and max(abs(x - y) for x, y in zip(current, prev)) < tol:
+            converged = True
             break
-        prev = cur
+        prev = current
     pop = BetaDistribution(a, b, name=rv._name)
-    hyper = {"a": a, "b": b, "mean": a / (a + b)}
-    return pop, Ep, Vp, hyper
+    hyper = {
+        "a": a,
+        "b": b,
+        "mean": a / (a + b),
+        "procedure": "moment_matched_empirical_bayes",
+        "initialization": initialization,
+        "iterations": iterations,
+        "converged": converged,
+        "conditional_group_posterior": True,
+        "includes_hyperparameter_uncertainty": False,
+    }
+    return pop, Ep, Vp, hyper, "Beta"
 
 
 # (likelihood family, prior family) -> hierarchical conjugate EM
@@ -2690,10 +3372,12 @@ _HIERARCHICAL = {
 
 
 def hierarchical_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float = 1e-8) -> RandomVariable:
-    """Conjugate hierarchical (random-effects) EM, dispatched by conjugate pair.
+    """Empirical-Bayes random-effects fitting with conditional conjugate group posteriors.
 
     Supports Normal-Normal (exact), Gamma-Poisson, and Beta-Bernoulli. ``data`` is a list
-    of groups; returns the fitted population distribution plus per-group posteriors.
+    of groups. Declared population parameters initialize the hyperparameter optimization; returned
+    group posterior draws condition on the fitted plug-in hyperparameters and do not include their
+    uncertainty. The result receipt states those semantics explicitly.
     """
     fam = rv._family
     prior = rv._args[0]
@@ -2703,9 +3387,15 @@ def hierarchical_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float
     impl = _HIERARCHICAL.get(key)
     if impl is None:
         raise NotImplementedError(f"hierarchical pair {key} not supported; have {sorted(_HIERARCHICAL)}.")
-    n_i, sum_i, sumsq_i = _group_stats(data)
-    pop, group_means, group_vars, hyper = impl(rv, n_i, sum_i, sumsq_i, max_its, tol)
-    post = HierarchicalPosterior(group_means, group_vars, hyper)
+    max_its = _exact_int_control(max_its, "max_its", minimum=1)
+    tol = _finite_control(tol, "tol", lower=0.0)
+    groups = list(data)
+    if not groups:
+        raise ValueError("hierarchical fitting needs at least one group")
+    validated = [_conjugate_observations(rv, group) for group in groups]
+    n_i, sum_i, sumsq_i = _group_stats(validated)
+    pop, group_means, group_vars, hyper, posterior_family = impl(rv, n_i, sum_i, sumsq_i, max_its, tol)
+    post = HierarchicalPosterior(group_means, group_vars, hyper, posterior_family)
     return RandomVariable._bound(pop, name=rv._name, result=post)
 
 
@@ -2724,26 +3414,60 @@ class _NPShim:
 
 
 class IndexedPosterior:
-    """Result of an indexed-latent fit: the fitted latent vector(s) and scalar parameters.
+    """Point-estimate result for an indexed-latent MAP fit.
 
-    ``latents`` maps each ``free(K)`` vector's name to its fitted ``K``-vector; ``group_means`` aliases
-    the single-vector case (mirrors :class:`HierarchicalPosterior`).
+    ``latents`` preserves the historical name-to-vector mapping. :meth:`estimate` additionally accepts
+    the original ``free(K)`` handle, avoiding ambiguity when a caller keeps structural parameter objects.
+    Original field labels and their exact vector positions are retained in ``index_labels`` and
+    ``index_map``. ``group_means`` remains the single-vector compatibility alias.
     """
 
-    def __init__(self, latents: dict, scalars: dict):
-        self.latents = {k: np.asarray(v) for k, v in latents.items()}
-        self.scalars = scalars
+    def __init__(self, latent_entries, scalars: dict, field_layouts: dict, optimizer: dict):
+        self._latent_entries = tuple(
+            (handle, name, np.asarray(value, dtype=float)) for handle, name, value in latent_entries
+        )
+        self.latents = {name: value for _handle, name, value in self._latent_entries}
+        self.scalars = dict(scalars)
+        self.index_labels = {field: tuple(layout[0]) for field, layout in field_layouts.items()}
+        self.index_map = {field: dict(layout[1]) for field, layout in field_layouts.items()}
+        self.optimizer = dict(optimizer)
         vecs = list(self.latents.values())
         self.group_means = vecs[0] if len(vecs) == 1 else None
+        if len(self.index_labels) == 1:
+            field = next(iter(self.index_labels))
+            self.group_labels = self.index_labels[field]
+            self.group_index = self.index_map[field]
+        else:
+            self.group_labels = None
+            self.group_index = None
         self.acceptance_rate = None
 
+    def estimate(self, param=None):
+        """Return one fitted point estimate by original handle, vector name, or scalar name."""
+        if param is None:
+            if self.group_means is None:
+                raise ValueError("param is required when an indexed model has multiple latent vectors")
+            return self.group_means
+        for handle, name, value in self._latent_entries:
+            if param is handle or (isinstance(param, str) and param == name):
+                return value
+        if isinstance(param, str) and param in self.scalars:
+            return self.scalars[param]
+        raise KeyError(f"no fitted indexed parameter matching {param!r}")
+
     def samples(self, param=None):
-        """Return the fitted latent vector for the indexed-latent result."""
-        return self.group_means
+        """Reject a posterior-sample request on a MAP point estimate."""
+        raise NotImplementedError("indexed MAP produces point estimates; use estimate(), or fit with how='mcmc'")
 
     def summary(self) -> dict:
-        """Return fitted latent vectors and scalar parameter estimates."""
-        out = {"latents": self.latents, "scalars": self.scalars}
+        """Return fitted parameters, label identity, and optimizer termination evidence."""
+        out = {
+            "latents": self.latents,
+            "scalars": self.scalars,
+            "index_labels": self.index_labels,
+            "index_map": self.index_map,
+            "optimizer": self.optimizer,
+        }
         if self.group_means is not None:
             out["group_means"] = self.group_means
             out["n_groups"] = int(self.group_means.size)
@@ -2777,13 +3501,116 @@ def _rep_eval(node, means: dict) -> float:
     return 0.0
 
 
-def _indexed_target(rv: RandomVariable, data, given: dict):
+def _indexed_label_layout(labels, expected_rows: int, dim: int, field: str):
+    """Validate an indexed field without coercion and preserve exact latent-vector positions.
+
+    Numeric labels are zero-based vector indices and must be exact integers in ``[0, dim)``.
+    Non-numeric homogeneous/hashable labels use stable first-observation order and must name every
+    vector entry; accepting fewer would leave anonymous, unidentifiable coordinates.
+    """
+    raw = np.asarray(labels, dtype=object)
+    if raw.ndim != 1 or raw.size != expected_rows:
+        raise ValueError(
+            f"given[{field!r}] must be one-dimensional with {expected_rows} rows; got shape {raw.shape}."
+        )
+    values = []
+    for row, value in enumerate(raw.tolist()):
+        if isinstance(value, np.generic):
+            value = value.item()
+        if value is None or isinstance(value, (bool, np.bool_)):
+            raise ValueError(f"given[{field!r}] label at row {row} must be a non-null index or label.")
+        try:
+            hash(value)
+        except TypeError as error:
+            raise TypeError(f"given[{field!r}] label at row {row} is not hashable.") from error
+        values.append(value)
+
+    numeric = [isinstance(value, (int, float, np.integer, np.floating)) for value in values]
+    if any(numeric):
+        if not all(numeric):
+            raise TypeError(f"given[{field!r}] labels must not mix numeric indices with symbolic labels.")
+        indices = np.empty(expected_rows, dtype=int)
+        for row, value in enumerate(values):
+            number = float(value)
+            if not math.isfinite(number) or not number.is_integer():
+                raise ValueError(f"given[{field!r}] numeric label at row {row} must be an exact integer index.")
+            index = int(number)
+            if index < 0 or index >= dim:
+                raise ValueError(f"given[{field!r}] index {index} at row {row} is outside [0, {dim}).")
+            indices[row] = index
+        ordered = tuple(range(dim))
+        return indices, ordered, {label: label for label in ordered}
+
+    label_type = type(values[0]) if values else None
+    ordered = []
+    mapping = {}
+    indices = np.empty(expected_rows, dtype=int)
+    for value in values:
+        if type(value) is not label_type:
+            raise TypeError(
+                f"given[{field!r}] labels must have one homogeneous type; "
+                f"saw {label_type.__name__} and {type(value).__name__}."
+            )
+        if value not in mapping:
+            mapping[value] = len(ordered)
+            ordered.append(value)
+    for row, value in enumerate(values):
+        indices[row] = mapping[value]
+    if len(ordered) != dim:
+        raise ValueError(
+            f"given[{field!r}] has {len(ordered)} distinct symbolic labels, "
+            f"but the indexed latent has dimension {dim}."
+        )
+    return indices, tuple(ordered), dict(mapping)
+
+
+def _indexed_observations(rv: RandomVariable, data) -> np.ndarray:
+    """Validate exact observation support for the numpy indexed-likelihood scorers."""
+    try:
+        values = np.asarray(data, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise TypeError("indexed observations must be numeric scalar values") from error
+    if values.ndim != 1 or values.size == 0 or not np.all(np.isfinite(values)):
+        raise ValueError("indexed observations must be a non-empty finite one-dimensional sequence")
+    family = rv._family.name
+    integral = np.equal(values, np.floor(values))
+    if family in {"Poisson", "NegativeBinomial"} and (np.any(values < 0.0) or not np.all(integral)):
+        raise ValueError(f"{family} indexed fitting requires exact non-negative integer observations")
+    if family == "Geometric" and (np.any(values < 1.0) or not np.all(integral)):
+        raise ValueError("Geometric indexed fitting requires exact integer observations >= 1")
+    if family == "Bernoulli" and not np.all(np.isin(values, [0.0, 1.0])):
+        raise ValueError("Bernoulli indexed fitting requires observations exactly equal to 0 or 1")
+    if family == "Binomial":
+        trials = rv._args[0]
+        if not isinstance(trials, (int, float, np.integer, np.floating)):
+            raise NotImplementedError("indexed Binomial fitting requires a fixed numeric trial count")
+        trials = float(trials)
+        if (
+            not trials.is_integer()
+            or trials < 0.0
+            or not np.all(integral)
+            or np.any((values < 0) | (values > trials))
+        ):
+            raise ValueError(
+                f"Binomial indexed fitting requires exact integer observations in [0, {trials:g}]"
+            )
+    if family == "Beta" and np.any((values <= 0.0) | (values >= 1.0)):
+        raise ValueError("Beta indexed fitting requires observations strictly inside (0, 1)")
+    if family in {"LogNormal", "Gamma", "Weibull", "Rayleigh"} and np.any(values <= 0.0):
+        raise ValueError(f"{family} indexed fitting requires strictly positive observations")
+    if family == "Exponential" and np.any(values < 0.0):
+        raise ValueError("Exponential indexed fitting requires non-negative observations")
+    return values
+
+
+def _indexed_target(rv: RandomVariable, data, given: dict, *, jacobian: bool):
     """Per-observation numerical target for a flat model with a data-indexed latent vector.
 
     Each observation ``i`` is scored against its own parameters, where a gathered latent contributes
     ``theta[g[i]]``. Latent vectors are ``free(K)`` handles (entries on the vector's support); other slots
     are ``free`` tokens or constants (scalar priors / hierarchical priors on the vector are a later step).
-    Reuses the autograd ``_scorers`` with the numpy engine. Returns ``(log_target, slots, extract, rep)``.
+    Reuses the autograd ``_scorers`` with the numpy engine. ``jacobian`` distinguishes an
+    unconstrained sampling density from the constrained-coordinate MAP objective.
     """
     from mixle.engines import NumpyEngine
     from mixle.ppl.autograd import _scorers
@@ -2797,11 +3624,12 @@ def _indexed_target(rv: RandomVariable, data, given: dict):
         raise NotImplementedError(f"data-indexed fitting needs a Torch/numpy scorer for {fam.name!r}.")
     eng = NumpyEngine()
     given = given or {}
-    y = np.asarray(data, dtype=float).reshape(-1)
+    y = _indexed_observations(rv, data)
 
     # discover latent vectors (the bases of gather nodes) and validate their index covariates
     vec_handles: dict = {}  # id -> (handle, spec)
-    field_names: set = set()
+    field_names: list[str] = []
+    field_dims: dict[str, int] = {}
 
     def _scan(node):
         if not isinstance(node, RandomVariable):
@@ -2813,10 +3641,16 @@ def _indexed_target(rv: RandomVariable, data, given: dict):
                 raise NotImplementedError("a data-indexed gather requires a free(K) vector latent.")
             if field.name not in given:
                 raise ValueError(f"data-indexed latent needs the index covariate: given={{{field.name!r}: labels}}.")
-            if len(np.asarray(given[field.name]).reshape(-1)) != len(y):
-                raise ValueError(f"given[{field.name!r}] length must match the data ({len(y)}).")
+            previous_dim = field_dims.get(field.name)
+            if previous_dim is not None and previous_dim != spec.dim:
+                raise ValueError(
+                    f"given[{field.name!r}] indexes latent vectors with inconsistent dimensions "
+                    f"{previous_dim} and {spec.dim}."
+                )
             vec_handles[id(base)] = (base, spec)
-            field_names.add(field.name)
+            field_dims[field.name] = spec.dim
+            if field.name not in field_names:
+                field_names.append(field.name)
             return
         for a in node._args:
             _scan(a)
@@ -2839,16 +3673,27 @@ def _indexed_target(rv: RandomVariable, data, given: dict):
     # slots: vector entries, then free-token positional slots
     slots: list[_Slot] = []
     meta: list = []  # parallel: ('vec', id(handle), j) | ('free', position)
-    vec_cols: dict = {}
-    for hid, (h, spec) in vec_handles.items():
-        cols = []
+    vector_entries = []
+    used_names: dict[str, int] = {}
+    for ordinal, (hid, (h, spec)) in enumerate(vec_handles.items()):
+        base_name = h.name or f"theta{ordinal}"
+        occurrence = used_names.get(base_name, 0) + 1
+        used_names[base_name] = occurrence
+        display_name = base_name if occurrence == 1 else f"{base_name}#{occurrence}"
         for j in range(spec.dim):
             slots.append(
-                _Slot(len(slots), None, spec.support == "positive", f"{h.name or 'theta'}[{j}]", None, spec.support)
+                _Slot(
+                    len(slots),
+                    None,
+                    spec.support == "positive",
+                    f"{display_name}[{j}]",
+                    h,
+                    spec.support,
+                    structure=spec,
+                )
             )
             meta.append(("vec", hid, j))
-            cols.append(len(slots) - 1)
-        vec_cols[hid] = cols
+        vector_entries.append((hid, h, display_name))
     for i, a in enumerate(rv._args):
         if a is free:
             slots.append(_Slot(len(slots), None, fam.positive[i], f"arg{i}", None, fam.support[i]))
@@ -2859,7 +3704,12 @@ def _indexed_target(rv: RandomVariable, data, given: dict):
     fin = y[np.isfinite(y)]
     dmean = float(fin.mean()) if fin.size else 0.0
     dstd = float(fin.std() or 1.0) if fin.size else 1.0
-    fields = {nm: np.asarray(given[nm]).reshape(-1).astype(int) for nm in field_names}
+    field_layouts = {}
+    fields = {}
+    for name in field_names:
+        indices, labels, mapping = _indexed_label_layout(given[name], len(y), field_dims[name], name)
+        fields[name] = indices
+        field_layouts[name] = (labels, mapping)
 
     def _unpack(u):
         theta = {hid: np.empty(spec.dim) for hid, (h, spec) in vec_handles.items()}
@@ -2889,15 +3739,29 @@ def _indexed_target(rv: RandomVariable, data, given: dict):
         return out
 
     def log_target(u):
-        theta, pos, logj = _unpack(u)
-        args = _args_for(theta, pos, _eval_expr)
-        lp = apply(args, data_terms, y, eng)
+        try:
+            theta, pos, logj = _unpack(u)
+        except _ParameterDomainError:
+            return _NEG_INF
+        try:
+            args = _args_for(theta, pos, _eval_expr)
+            lp = apply(args, data_terms, y, eng)
+        except Exception as error:
+            coordinates = np.asarray(u, dtype=float).tolist()
+            raise RuntimeError(
+                "indexed model construction or likelihood evaluation failed at unconstrained "
+                f"coordinates {coordinates!r}"
+            ) from error
         rv_sum = float(np.sum(lp))
-        return rv_sum + logj if math.isfinite(rv_sum) else _NEG_INF
+        if rv_sum == -math.inf:
+            return _NEG_INF
+        if not math.isfinite(rv_sum):
+            raise FloatingPointError(f"indexed likelihood returned invalid value {rv_sum!r}")
+        return rv_sum + (logj if jacobian else 0.0)
 
     def extract(u):
         theta, pos, _ = _unpack(u)
-        latents = {(h.name or f"theta{n}"): theta[hid] for n, (hid, (h, _s)) in enumerate(vec_handles.items())}
+        latents = [(handle, name, theta[hid]) for hid, handle, name in vector_entries]
         scalars = {f"arg{i}": pos[i] for i in pos}
         return latents, scalars
 
@@ -2909,7 +3773,7 @@ def _indexed_target(rv: RandomVariable, data, given: dict):
             out.append(pos[i] if a is free else (_rep_eval(a, means) if isinstance(a, RandomVariable) else float(a)))
         return out
 
-    return log_target, slots, extract, rep, (dmean, dstd)
+    return log_target, slots, extract, rep, (dmean, dstd), field_layouts
 
 
 def indexed_fit(
@@ -2922,6 +3786,9 @@ def indexed_fit(
     draws=2000,
     burn=1000,
     thin=1,
+    constraints=None,
+    penalty=None,
+    potentials=None,
     max_iter=2000,
     tol=1e-8,
 ) -> RandomVariable:
@@ -2932,24 +3799,38 @@ def indexed_fit(
     Metropolis and returns a full :class:`Posterior` (per-latent summary / credible intervals). Other
     ``how`` values (hmc/nuts) are not yet wired for the indexed target.
     """
-    if isinstance(max_iter, (bool, np.bool_)) or not isinstance(max_iter, (int, np.integer)):
-        raise TypeError("indexed max_iter must be a positive integer")
-    max_iter = int(max_iter)
-    if max_iter <= 0:
-        raise ValueError("indexed max_iter must be a positive integer")
-    if isinstance(tol, (bool, np.bool_)) or not isinstance(tol, (int, float, np.integer, np.floating)):
-        raise TypeError("indexed tol must be a finite non-negative real number")
-    tol = float(tol)
-    if not np.isfinite(tol) or tol < 0.0:
-        raise ValueError("indexed tol must be a finite non-negative real number")
+    if how not in ("map", "auto", "mcmc"):
+        raise NotImplementedError(f"data-indexed latents support how='map'/'mcmc' (got {how!r}).")
+    is_sampler = how == "mcmc"
+    if is_sampler:
+        draws, burn, thin, _chains, _parallel, rng = _sampler_controls(
+            draws, burn, thin, 1, False, rng
+        )
+    else:
+        max_iter = _exact_int_control(max_iter, "indexed max_iter", minimum=1)
+        tol = _finite_control(tol, "indexed tol", lower=0.0)
+        if rng is not None and not isinstance(rng, np.random.RandomState):
+            raise TypeError("rng must be a numpy.random.RandomState")
 
-    log_target, slots, extract, rep, (dmean, dstd) = _indexed_target(rv, data, given)
+    log_target, slots, extract, rep, (dmean, dstd), field_layouts = _indexed_target(
+        rv, data, given, jacobian=is_sampler
+    )
+    hard_constraints, soft_constraints = _constraint_policy(constraints, penalty)
+    effective_penalty = _auto_penalty(soft_constraints, penalty)
+    feasible = _feasibility(hard_constraints, slots)
+    log_target = _constrain_target(log_target, feasible)
+    log_target = _penalize_target(
+        log_target,
+        _soft_penalty(soft_constraints, slots, effective_penalty),
+    )
+    log_target = _penalize_target(log_target, _potential_term(potentials, slots))
 
-    if how == "mcmc":
+    if is_sampler:
         from mixle.inference.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
-        rng = np.random.RandomState() if rng is None else rng
         u0 = _init_u(slots, dmean, dstd)
+        if feasible is not None:
+            u0 = _project_init(u0, feasible, rng)
         res = metropolis_hastings(
             log_target,
             u0,
@@ -2962,16 +3843,22 @@ def indexed_fit(
         u = np.asarray(res.samples, dtype=float).reshape(len(res.samples), -1)
         vals = _u_to_vals(slots, u)
         post = Posterior(slots, vals, res)
+        post.index_labels = {field: tuple(layout[0]) for field, layout in field_layouts.items()}
+        post.index_map = {field: dict(layout[1]) for field, layout in field_layouts.items()}
+        if len(field_layouts) == 1:
+            field = next(iter(field_layouts))
+            post.group_labels = post.index_labels[field]
+            post.group_index = post.index_map[field]
         _attach_convergence(post, slots, u[None, :, :], [res])
         pop = rv._family.make_dist(tuple(rep(u.mean(axis=0))), rv._name)  # bound at the posterior mean
         return RandomVariable._bound(pop, name=rv._name, result=post)
 
-    if how not in ("map", "auto"):
-        raise NotImplementedError(f"data-indexed latents support how='map'/'mcmc' (got {how!r}).")
-
     from scipy.optimize import minimize
 
+    map_rng = np.random.RandomState() if rng is None else rng
     u0 = _init_u(slots, dmean, dstd)
+    if feasible is not None:
+        u0 = _project_init(u0, feasible, map_rng)
     res = minimize(
         lambda u: -log_target(u),
         u0,
@@ -2980,6 +3867,17 @@ def indexed_fit(
     )
     if not bool(res.success) or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x)):
         raise RuntimeError(f"indexed MAP optimization failed: {res.message}")
-    latents, scalars = extract(res.x)
+    latent_entries, scalars = extract(res.x)
     pop = rv._family.make_dist(tuple(rep(res.x)), rv._name)
-    return RandomVariable._bound(pop, name=rv._name, result=IndexedPosterior(latents, scalars))
+    optimizer = {
+        "algorithm": "L-BFGS-B",
+        "success": True,
+        "iterations": int(getattr(res, "nit", 0)),
+        "message": str(res.message),
+        "objective": float(res.fun),
+    }
+    return RandomVariable._bound(
+        pop,
+        name=rv._name,
+        result=IndexedPosterior(latent_entries, scalars, field_layouts, optimizer),
+    )

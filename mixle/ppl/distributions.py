@@ -54,6 +54,10 @@ def _fixed_simplex(value: Any, size: int, label: str) -> np.ndarray:
     return arr
 
 
+def _is_parameter_handle(value: Any) -> bool:
+    return isinstance(value, RandomVariable) and value._kind == "param"
+
+
 def _mixture_weights(weights: Any, size: int, label: str):
     if weights is None or weights is free:
         return weights
@@ -381,9 +385,9 @@ def MVN(dim: int, *, mean=None, cov=None, name: str | None = None) -> RandomVari
     for identifiability) and/or ``cov=free`` (a full SPD covariance via its Cholesky factor) and
     fit with ``how='mcmc'|'ensemble'|'map'``."""
     dim = _exact_dimension(dim, "MVN dim")
-    if mean is not None and mean is not free and mean is not ordered:
+    if mean is not None and mean is not free and mean is not ordered and not _is_parameter_handle(mean):
         mean = _fixed_array(mean, (dim,), "MVN mean")
-    if cov is not None and cov is not free:
+    if cov is not None and cov is not free and not _is_parameter_handle(cov):
         cov = _fixed_array(cov, (dim, dim), "MVN cov")
         if not np.allclose(cov, cov.T, rtol=1.0e-10, atol=1.0e-12):
             raise ValueError("MVN cov must be symmetric.")
@@ -401,9 +405,9 @@ def DiagGaussian(dim: int, *, mean=None, var=None, name: str | None = None) -> R
     and **diagonal variances** (``var=free``, a positive vector) are also inferable parameters via
     ``how='mcmc'|'ensemble'|'map'``."""
     dim = _exact_dimension(dim, "DiagGaussian dim")
-    if mean is not None and mean is not free and mean is not ordered:
+    if mean is not None and mean is not free and mean is not ordered and not _is_parameter_handle(mean):
         mean = _fixed_array(mean, (dim,), "DiagGaussian mean")
-    if var is not None and var is not free:
+    if var is not None and var is not free and not _is_parameter_handle(var):
         var = _fixed_array(var, (dim,), "DiagGaussian var", positive=True)
     var_spec = _VectorSpec(dim, "positive", name="s2") if var is free else var
     return RandomVariable._sample("DiagGaussian", (dim, _mean_spec(mean, dim), var_spec), name=name)
