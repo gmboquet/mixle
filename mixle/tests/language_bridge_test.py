@@ -23,6 +23,12 @@ from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 SCHEMA = {"text": SchemaField(kind="categorical", required=False), "brightness": "numeric"}
 
 
+def _softmax(x: np.ndarray) -> np.ndarray:
+    x = x - np.max(x)
+    e = np.exp(x)
+    return e / np.sum(e)
+
+
 def _toy_extractor(sentence: str) -> dict:
     """A deliberately simple, deterministic keyword/regex extractor -- stands in for whatever real
     parser (rule-based or a calibrated ``solve_structured`` student) a caller would plug in; this
@@ -281,15 +287,27 @@ class PosteriorDescriberTest(unittest.TestCase):
 
     def setUp(self):
         self.tol = 0.5
-        self.describer = PosteriorDescriber("temperature", tol=self.tol, k=3, alpha=0.2, n_probe=200, seed=0)
+        # alpha=0.02 (not this class's 0.1 default): MXR-080-0291's honest, coverage-based `is_correct`
+        # sums softmax probability over EVERY nested candidate that covers the truth, not just one --
+        # so for k=3 width_multiples=(1, 3, 10), even a maximally-sharp posterior (all 3 candidates
+        # saturate to full coverage) caps the narrowest candidate's OWN softmax share at ~0.52 (it must
+        # still share probability mass with the wider candidates, which are also "correct"). Admitting
+        # that lone candidate as a confident singleton therefore needs a calibrated qhat >= ~0.48,
+        # which -- for this calibration mixture -- only a small alpha (high target coverage) reaches.
+        # This is the honest threshold the old exclusive-band scheme never actually computed: it
+        # arrived at alpha=0.2 only by crediting far fewer calibration rows as "correct" than really
+        # were, inflating qhat well past what a genuine 80%-coverage guarantee requires or supports.
+        self.describer = PosteriorDescriber("temperature", tol=self.tol, k=3, alpha=0.02, n_probe=200, seed=0)
         rng = np.random.RandomState(0)
         # calibration set: a mix of posterior sharpnesses (sigma2 from well-within-tol up to a few
         # multiples of tol) at varied means, each paired with a value REALIZED by an actual draw from
         # that posterior (not its parametric mean) -- the realistic "score a generated answer against
-        # what actually happened" conformal setup, not an estimator-bias check.
+        # what actually happened" conformal setup, not an estimator-bias check. 300 (not 150) rows for
+        # a stable quantile estimate at this small alpha (verified robust across 30 independent
+        # calibration-set draws: qhat cleared the ~0.48 admission ceiling on every one).
         sigmas = [0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.6, 1.0]
         cal = []
-        for _ in range(150):
+        for _ in range(300):
             mu = float(rng.uniform(-20.0, 20.0))
             sigma2 = float(rng.choice(sigmas))
             g = GaussianDistribution(mu=mu, sigma2=sigma2)
@@ -388,6 +406,101 @@ class CalibrationTruthLookupTest(unittest.TestCase):
             _cal_prob_true_for(calibration_set_shared_object, tol=tol),
             _cal_prob_true_for(calibration_set_distinct_objects, tol=tol),
         )
+
+
+class CalibrationCoverageCorrectnessTest(unittest.TestCase):
+    """Regression coverage for MXR-080-0291 (Critical): ``PosteriorDescriber.calibrate``'s
+    correctness oracle previously assigned correctness to a single artificial distance BAND per
+    candidate instead of directly checking coverage. Two concrete failure modes named in the audit:
+
+    1. A truth sitting EXACTLY at the candidates' shared center (distance 0) failed the narrowest
+       band's strict ``0 < dist`` lower bound, and therefore failed every other band too -- so the
+       objectively best-supported truth was scored as covered by NOTHING.
+    2. A wider candidate that genuinely covers the truth was marked wrong whenever a narrower nested
+       candidate also covered it, purely because the narrower band "claimed" that distance range --
+       docking a candidate for a coverage fact about a DIFFERENT candidate.
+
+    The fix makes ``is_correct`` exactly ``claim.contains(true_value)``, independently per candidate.
+    Each test below independently re-derives the mass a CORRECT oracle assigns -- by generating the
+    same candidates, scoring and softmax-normalizing them exactly as ``calibrate()`` does, then summing
+    probability over whichever candidates satisfy ``Claim.contains`` -- and checks the value
+    ``calibrate()`` actually threads into ``conformal_label_threshold`` (via the same spying technique
+    ``_cal_prob_true_for`` above uses) equals that ground truth, not the old banding scheme's answer.
+    """
+
+    def setUp(self):
+        self.tol = 1.0
+        self.posterior = _ConstantPosterior(5.0)  # deterministic mean=5.0 regardless of seed/rng
+        self.describer = PosteriorDescriber("x", tol=self.tol, k=3, alpha=0.3, n_probe=50, seed=0)
+
+    def _candidates(self):
+        # _ConstantPosterior.sample(n, seed=...) ignores seed entirely, so the 3 generated candidates
+        # are 100% deterministic regardless of what rng/seed calibrate() derives internally -- calling
+        # _generate() directly here reproduces EXACTLY what calibrate() sees.
+        return self.describer._generate(self.posterior, self.describer._gen.k, rng=None)
+
+    def _expected_mass(self, true_value: float) -> float:
+        candidates = self._candidates()
+        scores = np.array([self.describer._score(c) for c in candidates])
+        probs = _softmax(scores)
+        return float(sum(p for c, p in zip(candidates, probs) if c.contains(true_value)))
+
+    def _observed_mass(self, true_value: float) -> float:
+        real = calibrated_generator_module.conformal_label_threshold
+        with mock.patch.object(calibrated_generator_module, "conformal_label_threshold", side_effect=real) as spy:
+            self.describer.calibrate([(self.posterior, true_value)], seed=0)
+        return float(spy.call_args[0][0][0])
+
+    def test_candidates_are_nested_around_a_shared_center(self):
+        # sanity check on the fixture itself before trusting the rest of this test class
+        candidates = self._candidates()
+        widths = [c.width for c in candidates]
+        self.assertEqual(widths, sorted(widths))  # narrowest to widest
+        centers = {0.5 * (c.lo + c.hi) for c in candidates}
+        self.assertEqual(len(centers), 1)  # all 3 candidates share exactly one center
+
+    def test_truth_at_exact_shared_center_is_covered_by_every_candidate(self):
+        true_value = 5.0  # exactly the shared center -> distance 0 from every candidate
+        for c in self._candidates():
+            self.assertTrue(c.contains(true_value))  # ground truth: every candidate covers it
+
+        observed = self._observed_mass(true_value)
+        expected = self._expected_mass(true_value)
+        self.assertAlmostEqual(observed, expected, places=6)
+        # every candidate covers -> a correct oracle assigns the FULL probability mass, not zero (the
+        # old `0 < dist` band logic assigned exactly 0.0 here).
+        self.assertAlmostEqual(observed, 1.0, places=6)
+
+    def test_wider_covering_candidate_is_not_penalized_for_a_narrower_one_also_covering(self):
+        # 2*tol from center: outside the narrowest candidate's half-width (1*tol) but inside BOTH the
+        # middle (3*tol) and widest (10*tol) candidates' half-widths -- both genuinely cover it.
+        true_value = 5.0 + 2.0 * self.tol
+        candidates = self._candidates()
+        self.assertFalse(candidates[0].contains(true_value))  # narrowest: does not cover
+        self.assertTrue(candidates[1].contains(true_value))  # middle: covers
+        self.assertTrue(candidates[2].contains(true_value))  # widest: ALSO covers
+
+        observed = self._observed_mass(true_value)
+        expected = self._expected_mass(true_value)
+        self.assertAlmostEqual(observed, expected, places=6)
+
+        # the old scheme credited only the middle candidate's exclusive band and zeroed out the
+        # widest one purely because the middle one already covered the same point -- so its answer
+        # equaled "middle-candidate-probability alone". The correct mass must include the widest
+        # candidate's probability too, and therefore exceed the middle-alone figure.
+        scores = np.array([self.describer._score(c) for c in candidates])
+        probs = _softmax(scores)
+        middle_alone = float(probs[1])
+        self.assertGreater(observed, middle_alone)
+        # and the narrowest candidate genuinely fails to cover, so it must NOT get full mass either
+        self.assertLess(observed, 1.0)
+
+    def test_truth_outside_every_candidate_gets_zero_mass(self):
+        true_value = 5.0 + 1000.0 * self.tol  # far outside even the widest candidate
+        for c in self._candidates():
+            self.assertFalse(c.contains(true_value))
+        observed = self._observed_mass(true_value)
+        self.assertAlmostEqual(observed, 0.0, places=6)
 
 
 if __name__ == "__main__":
