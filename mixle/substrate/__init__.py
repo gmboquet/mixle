@@ -45,7 +45,13 @@ from mixle.substrate.context import (
     compress_text,
 )
 from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
-from mixle.substrate.eig_retrieve import eig_retrieve
+from mixle.substrate.eig_retrieve import (
+    EigRetrieval,
+    EvidenceOutcome,
+    EvidenceOutcomes,
+    SkippedCandidate,
+    eig_retrieve,
+)
 from mixle.substrate.factuality import ClaimVerdict, FactualityReceipt, check_factuality
 from mixle.substrate.freshness import Freshness, check_freshness, content_hash, freshness_report
 from mixle.substrate.governance import (
@@ -119,6 +125,10 @@ __all__ = [
     "retrieve",
     "Retrieval",
     "eig_retrieve",
+    "EigRetrieval",
+    "EvidenceOutcome",
+    "EvidenceOutcomes",
+    "SkippedCandidate",
     "multihop",
     "HopChain",
     "HopStep",
