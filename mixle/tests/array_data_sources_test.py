@@ -165,15 +165,35 @@ class PeakRssPatchStreamingTest(unittest.TestCase):
                 "-- patch sampling may have materialized more than the requested patches"
                 % ((peak_rss - baseline_rss) / 2**20),
             )
-            # Overall ceiling: real measured peak_rss/volume_bytes on this machine is ~0.45 (see
-            # above -- baseline-dominated, not patch-streaming-dominated). 0.55 is a small, honest
-            # safety margin over that real number (not the card's 25%, and not a silent loosening of
-            # the previous, unexplained 50% -- see the design note for why 25% fails and why this
-            # number is the true one). Still fails hard if the source ever approaches materializing
-            # the full ~1010 MiB volume.
+            # Overall ceiling: real measured peak_rss/volume_bytes on this machine was ~0.45 when 0.55
+            # was chosen (see above -- baseline-dominated, not patch-streaming-dominated), as a small,
+            # honest safety margin over that real number (not the card's 25%, and not a silent loosening
+            # of the previous, unexplained 50%). 0.55 held only until a genuine cross-dependency-version
+            # baseline shift outgrew it: the same bound flaked under zarr 2.18.7 (~1/5 runs, once by only
+            # 1384 bytes out of a 604175000-byte threshold -- already sitting right on the line) and then
+            # failed RELIABLY under zarr 3.2.1 (peak ~580-581 MiB against a ~576.2 MiB threshold, ratio
+            # ~0.554) -- a heavier zarr major-version import graph nudging the torch-dominated baseline up
+            # further, the same class of effect the 25%-bar paragraph above already identifies
+            # (`mixle.engines`' import graph sets the floor, not this module), just from a different
+            # dependency. That drift does not reproduce on every machine/run, though: reconfirmed here
+            # immediately before choosing this number (zarr 3.2.1, Python 3.14, macOS arm64), 20/20 runs
+            # measured peak_ratio stably between 0.4653-0.4665 -- so the bound needs headroom over the
+            # worst *documented* ratio (~0.554), not just whatever this run happens to measure.
+            #
+            # A same-process repeat-and-median reading was considered and rejected as the fix: `ru_maxrss`
+            # is a monotonic per-process high-water mark, so repeated sub-trials in one process are not
+            # independent samples to average -- a later trial's reading can only match or exceed an
+            # earlier one, biasing upward, never down. It also would not address the actual noise source:
+            # within-environment run-to-run variance here is already tiny (the 20/20 spread above is
+            # <=0.0012 in ratio terms), while the documented failure is cross-environment/cross-
+            # dependency-version baseline drift, which more same-process sampling cannot absorb. A wider
+            # margin is the right fix. 0.70 gives ~26% relative headroom over the worst documented ratio
+            # (0.70 / 0.554 ~= 1.26) while a genuine "materialized the whole volume" regression would push
+            # peak_ratio toward ~1.4+ (today's ~0.46 baseline plus a full extra volume) -- still a wide,
+            # hard-failing gap for the regression this receipt actually exists to catch.
             self.assertLess(
                 peak_rss,
-                volume_bytes * 0.55,
+                volume_bytes * 0.70,
                 "peak RSS %.1f MiB was not far below the %.1f MiB volume -- patch sampling may have "
                 "materialized the full array" % (peak_rss / 2**20, volume_bytes / 2**20),
             )
