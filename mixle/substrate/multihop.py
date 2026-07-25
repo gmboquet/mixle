@@ -95,6 +95,24 @@ class HopChain:
         return len(self.steps)
 
 
+def _require_count(value: Any, name: str) -> int:
+    """Validate ``value`` is an exact, non-negative :class:`int` count (MXR-080-0252).
+
+    Mirrors :func:`mixle.substrate.core._require_count`'s contract for this module's own "how many"
+    parameters (``max_hops``, ``seeds``, ``branch``, ``max_items``): a plain, non-negative Python
+    ``int``, never a ``bool`` (a ``bool`` is an ``int`` subclass and would otherwise silently mean 0 or
+    1) and never a float (a fractional value would otherwise be silently truncated by a bare ``int()``,
+    and even a whole-valued one like ``2.0`` is not the exact type this module promises callers).
+    Defined locally rather than imported so this module's own input validation does not depend on
+    another module's private helper.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int, got {type(value).__name__}: {value!r}")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative, got {value!r}")
+    return value
+
+
 def multihop(
     substrate: Substrate,
     query: str,
@@ -118,14 +136,34 @@ def multihop(
             to enter the chain (LINK hops are explicit edges and always followed). Keeps a fuzzy
             retriever from chaining on near-zero-similarity noise; raise it for a dense embedder.
         scope: restrict to a team/access scope.
+
+    Raises:
+        TypeError: ``max_hops``/``seeds``/``branch``/``max_items`` is not a plain, exact ``int``
+            (bools and fractional floats included).
+        ValueError: any of them is negative.
     """
+    # MXR-080-0252: max_hops/seeds/branch/max_items are all "how many" counts, and must mean exactly
+    # that -- validated eagerly, at the entry boundary, before ANY search/hop runs. Before this check,
+    # a negative `branch` fed straight into `links[:branch]` and `search(k=branch + len(seen))` below,
+    # getting ordinary (and silent) Python slice/negative-k semantics instead of a rejection, and a
+    # fractional/bool count was silently truncated or coerced (`range(1, True + 1)` == `range(1, 2)`).
+    max_hops = _require_count(max_hops, "max_hops")
+    seeds = _require_count(seeds, "seeds")
+    branch = _require_count(branch, "branch")
+    max_items = _require_count(max_items, "max_items")
+
     chain: list[HopStep] = []
     seen: set[str] = set()
 
+    # MXR-080-0252: the item cap applies to seeding too -- previously unchecked here, so `seeds` alone
+    # could exceed `max_items` before a single hop ran. Gated the same way expansion below gates every
+    # candidate (`... or len(chain) >= max_items: continue`), so a capped seed set and a capped
+    # expansion mean the same thing rather than two different policies for the same budget.
     for it, sc in substrate.search(query, k=seeds, scope=scope):
-        if it.id not in seen and sc > min_score:
-            chain.append(HopStep(it, 0, "seed", None, sc))
-            seen.add(it.id)
+        if it.id in seen or len(chain) >= max_items or sc <= min_score:
+            continue
+        chain.append(HopStep(it, 0, "seed", None, sc))
+        seen.add(it.id)
 
     frontier = list(chain)
     for depth in range(1, max_hops + 1):
