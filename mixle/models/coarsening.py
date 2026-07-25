@@ -119,10 +119,10 @@ if _HAS_TORCH:
         mlp-residual sub-steps together).
 
         The two branches ``f(x)`` and ``g(x)`` are evaluated directly from the SAME input ``x`` (in
-        parallel -- neither reads the other's output), and the correction term ``Dg(x)[f(x)]`` is a real
-        directional derivative of ``g`` at ``x`` in the direction ``f(x)``, computed fresh per input as a
-        CENTRAL-DIFFERENCE numerical JVP (``(g(x+eps*v) - g(x-eps*v)) / (2*eps)`` with ``v = f(x)/||f(x)||``
-        and ``eps`` scaled to the local input magnitude). This sidesteps a genuine PyTorch limitation on
+        parallel -- neither reads the other's output), and the correction term ``Dg(x)[f(x)]`` is a
+        directional derivative of the full tensor-valued branch ``g`` at ``x`` in the full tensor
+        direction ``f(x)``. It is computed fresh per input with one scalar central-difference step:
+        ``(g(x + eps*f(x)) - g(x - eps*f(x))) / (2*eps)``. This sidesteps a genuine PyTorch limitation on
         this stack: ``F.scaled_dot_product_attention`` has neither a CPU double-backward kernel (so
         ``torch.autograd.functional.jvp``'s reverse-over-reverse trick fails) nor forward-mode-AD support
         (so ``torch.func.jvp`` also fails) -- both were tried and both raise ``NotImplementedError`` from
@@ -131,7 +131,9 @@ if _HAS_TORCH:
         what turns two SEQUENTIAL blocks into one block with (at most) two extra forward passes, i.e. a
         genuine depth cut in the sense that matters for the receipt/acceptance story: one entry in
         ``model.blocks`` instead of two, with second-order-accurate behavior and no loss of either branch's
-        own nonlinearity.
+        own nonlinearity. The finite-difference evaluations remain attached to autograd: training
+        differentiates the exact function used by the forward pass, including both component blocks and
+        the correction term.
         """
 
         def __init__(self, block_a: Any, block_b: Any, fd_eps: float = 1e-3) -> None:
@@ -151,20 +153,23 @@ if _HAS_TORCH:
             """Central-difference estimate of ``Dg(x)[f_x]`` -- see the class docstring for why this is a
             numerical (not automatic) directional derivative on this stack.
             """
-            norm = f_x.norm(dim=-1, keepdim=True).clamp_min(1e-8)
-            v = f_x / norm
-            x_scale = x.norm(dim=-1, keepdim=True).clamp_min(1e-3)
-            eps = self.fd_eps * x_scale
-            g_plus = self._branch(self.block_b, x + eps * v)
-            g_minus = self._branch(self.block_b, x - eps * v)
+            if not np.isfinite(self.fd_eps) or self.fd_eps <= 0.0:
+                raise ValueError("fd_eps must be a positive finite scalar")
+            # A directional derivative uses one scalar step for the full input
+            # direction. Per-token normalization/steps would perturb a
+            # different direction and are invalid for attention, where every
+            # output token can depend on every input token.
+            rms = x.detach().double().square().mean().sqrt().clamp_min(1e-3)
+            eps = torch.as_tensor(self.fd_eps, dtype=x.dtype, device=x.device) * rms.to(dtype=x.dtype)
+            g_plus = self._branch(self.block_b, x + eps * f_x)
+            g_minus = self._branch(self.block_b, x - eps * f_x)
             directional = (g_plus - g_minus) / (2.0 * eps)
-            return directional * norm  # un-normalize: Dg(x)[f_x] = ||f_x|| * Dg(x)[v]
+            return directional
 
         def forward(self, x: Any) -> Any:
             f_x = self._branch(self.block_a, x)
             g_x = self._branch(self.block_b, x)
-            with torch.no_grad():
-                jvp_gf = self._directional_derivative(x, f_x)
+            jvp_gf = self._directional_derivative(x, f_x)
             return x + f_x + g_x + jvp_gf
 
     class CoarsenedLM(nn.Module):

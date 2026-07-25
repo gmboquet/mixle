@@ -18,6 +18,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from mixle.models.coarsening import (
+    MergedBlock,
     coarsen,
     depth_merge,
     gaussian_kl,
@@ -45,6 +46,56 @@ def _scale_block_(blk, factor: float) -> None:
             getattr(blk.attn, p_name).weight.mul_(factor)
         blk.mlp[0].weight.mul_(factor)
         blk.mlp[2].weight.mul_(factor)
+
+
+class _PointwiseBranch(torch.nn.Module):
+    """Block-shaped smooth fixture whose JVP has an autograd reference."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.ln1 = torch.nn.Identity()
+        self.ln2 = torch.nn.Identity()
+        self.attn = torch.nn.Sequential(torch.nn.Linear(width, width), torch.nn.Tanh())
+        self.mlp = torch.nn.Sequential(torch.nn.Linear(width, width), torch.nn.Tanh())
+
+
+class MergedBlockDerivativeTest(unittest.TestCase):
+    def test_finite_difference_is_full_input_directional_derivative(self):
+        torch.manual_seed(0)
+        block_a = _PointwiseBranch(3).double()
+        block_b = _PointwiseBranch(3).double()
+        merged = MergedBlock(block_a, block_b, fd_eps=1e-5)
+        x = torch.randn(2, 4, 3, dtype=torch.float64, requires_grad=True)
+        f_x = merged._branch(block_a, x)
+
+        _value, reference = torch.autograd.functional.jvp(
+            lambda value: merged._branch(block_b, value),
+            x,
+            f_x,
+            create_graph=True,
+        )
+        actual = merged._directional_derivative(x, f_x)
+        torch.testing.assert_close(actual, reference, rtol=2e-4, atol=2e-6)
+
+    def test_training_gradient_reaches_both_blocks_and_input(self):
+        torch.manual_seed(1)
+        model = build_causal_lm(vocab=11, d_model=8, n_layer=2, n_head=2, block=4)
+        merged = MergedBlock(model.blocks[0], model.blocks[1])
+        x = torch.randn(2, 4, 8, requires_grad=True)
+        merged(x).square().mean().backward()
+
+        self.assertIsNotNone(x.grad)
+        self.assertTrue(torch.isfinite(x.grad).all())
+        for block in (merged.block_a, merged.block_b):
+            gradients = [parameter.grad for parameter in block.parameters()]
+            self.assertTrue(all(gradient is not None for gradient in gradients))
+            self.assertTrue(all(torch.isfinite(gradient).all() for gradient in gradients))
+
+    def test_invalid_finite_difference_step_is_rejected(self):
+        block = _PointwiseBranch(2)
+        merged = MergedBlock(block, _PointwiseBranch(2), fd_eps=0.0)
+        with self.assertRaisesRegex(ValueError, "positive finite"):
+            merged(torch.randn(1, 2, 2))
 
 
 class DepthCutAcceptanceTest(unittest.TestCase):
