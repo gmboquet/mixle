@@ -24,6 +24,26 @@ These surfaces vary in maturity (see the Project status table in the top-level R
 adapters composable with the stable stats spine, not as the spine itself.
 """
 
+from mixle.models.coarsening import (
+    CoarsenedLM,
+    CoarseningMetrics,
+    CoarsenResult,
+    MergedBlock,
+    ProjectionReceipt,
+    ScaleReceipt,
+    coarsen,
+    depth_merge,
+    experimental_width_merge_representation,
+    gaussian_kl,
+    structure_project,
+)
+from mixle.models.compress import (
+    METHODS,
+    CompressedModel,
+    CompressionReceipt,
+    MethodCandidate,
+    compress,
+)
 from mixle.models.continual import ewc, fisher_diagonal, snapshot
 from mixle.models.dependence import (
     CausalSkeleton,
@@ -53,6 +73,15 @@ from mixle.models.energy import (
     build_energy_net,
     build_product_energy_net,
 )
+from mixle.models.eval_harness import (
+    EvalReport,
+    RegressionFlag,
+    RegressionReport,
+    TaskResult,
+    evaluate_checkpoint,
+    markov_transition_matrix,
+    track_regression,
+)
 from mixle.models.feature_map import FeatureMapDensity, FeatureMapEstimator, feature_fn, register_feature_fn
 from mixle.models.gaussian_process import GaussianProcessRegressor
 from mixle.models.grad_leaf import GradEstimator, GradLeaf
@@ -67,6 +96,24 @@ from mixle.models.grammar import (
 from mixle.models.hamiltonian import HamiltonianNet, leapfrog_rollout
 from mixle.models.knowledge_graph import KnowledgeGraphFitResult, TransEKnowledgeGraphModel
 from mixle.models.language_model import LM, LMFitReceipt
+from mixle.models.memory_efficient_training import (
+    CompressedAdam,
+    CompressedMomentEncoding,
+    CompressedOptimizerState,
+    Fp8CastResult,
+    RecomputeDecision,
+    SelectiveRecomputePolicy,
+    choose_compression_method,
+    compress_moment,
+    decompress_moment,
+    dequantize_int8_blockwise,
+    estimate_block_activation_bytes,
+    estimate_block_recompute_flops,
+    estimate_recompute_benefit,
+    estimate_recompute_cost,
+    fp8_cast_with_guard,
+    quantize_int8_blockwise,
+)
 from mixle.models.mixture_density import (
     NeuralConditionalDensity,
     build_conditional_autoregressive_categorical,
@@ -74,6 +121,17 @@ from mixle.models.mixture_density import (
     build_contrastive_projection,
     build_mdn,
     build_projection_leaf,
+)
+from mixle.models.moment_propagation import (
+    GaussianLaw,
+    GeluCovarianceReceipt,
+    LayerMoments,
+    attention_law,
+    gelu_law,
+    iter_moments,
+    layernorm_law,
+    linear_law,
+    propagate_moments,
 )
 from mixle.models.mup import (
     apply_mup_init,
@@ -108,6 +166,16 @@ from mixle.models.neural_families import (
     Flow,
 )
 from mixle.models.neural_leaf import NeuralGaussian, NeuralLeaf
+from mixle.models.optimizer_routing import (
+    NeuralOptimizerPlan,
+    NeuralOptimizerRoute,
+    RoutedNeuralOptimizer,
+    build_auto_optimizer,
+    build_routed_optimizer,
+    plan_neural_optimizer,
+    resolve_neural_optimizer,
+    shard_safe_neural_optimizer_plan,
+)
 from mixle.models.partially_observable_markov_decision_process import (
     PartiallyObservableMarkovDecisionProcessFilterResult,
     PartiallyObservableMarkovDecisionProcessFitResult,
@@ -133,7 +201,15 @@ from mixle.models.random_graph import (
     fit_stochastic_block_mle,
     hard_em_stochastic_block_model,
 )
+from mixle.models.self_distillation import (
+    EMATeacher,
+    TrainStats,
+    consistency_loss,
+    stochastic_depth_forward,
+    train_with_self_distillation,
+)
 from mixle.models.softmax_leaf import NeuralCategorical, SoftmaxNeuralLeaf
+from mixle.models.sparse_gaussian_process import SparseGaussianProcessRegressor
 from mixle.models.streaming_transformer_leaf import (
     StreamingTransformer,
     StreamingTransformerLeaf,
@@ -149,7 +225,52 @@ from mixle.models.train_search import (
 )
 from mixle.models.transformer import build_causal_lm
 
+SUPPORTED_MODEL_MODULES = (
+    "continual",
+    "dependence",
+    "dirichlet_process_mixture",
+    "dpo_leaf",
+    "embedding",
+    "energy",
+    "feature_map",
+    "gaussian_process",
+    "grad_leaf",
+    "grammar",
+    "hamiltonian",
+    "knowledge_graph",
+    "language_model",
+    "mixture_density",
+    "mup",
+    "neural",
+    "neural_density",
+    "neural_families",
+    "neural_leaf",
+    "partially_observable_markov_decision_process",
+    "pinn",
+    "qat",
+    "random_forest",
+    "random_graph",
+    "softmax_leaf",
+    "streaming_transformer_leaf",
+    "train_search",
+    "transformer",
+)
+
+EXPERIMENTAL_MODEL_MODULES = (
+    "coarsening",
+    "compress",
+    "eval_harness",
+    "memory_efficient_training",
+    "moment_propagation",
+    "optimizer_routing",
+    "self_distillation",
+    "sparse_gaussian_process",
+)
+
 __all__ = [
+    "SUPPORTED_MODEL_MODULES",
+    "EXPERIMENTAL_MODEL_MODULES",
+    "METHODS",
     "LM",
     "LMFitReceipt",
     "CategoricalEmbedding",
@@ -161,6 +282,7 @@ __all__ = [
     "DPOLeaf",
     "ErdosRenyiGraphModel",
     "GaussianProcessRegressor",
+    "SparseGaussianProcessRegressor",
     "GaussianRegressionNeuralNetwork",
     "NeuralCategorical",
     "NeuralConditionalDensity",
@@ -176,6 +298,33 @@ __all__ = [
     "DiscreteAR",
     "DPOModel",
     "EnergyModel",
+    "CoarsenedLM",
+    "CoarseningMetrics",
+    "CoarsenResult",
+    "MergedBlock",
+    "ProjectionReceipt",
+    "ScaleReceipt",
+    "CompressedModel",
+    "CompressionReceipt",
+    "MethodCandidate",
+    "EvalReport",
+    "RegressionFlag",
+    "RegressionReport",
+    "TaskResult",
+    "CompressedAdam",
+    "CompressedMomentEncoding",
+    "CompressedOptimizerState",
+    "Fp8CastResult",
+    "RecomputeDecision",
+    "SelectiveRecomputePolicy",
+    "GaussianLaw",
+    "GeluCovarianceReceipt",
+    "LayerMoments",
+    "NeuralOptimizerPlan",
+    "NeuralOptimizerRoute",
+    "RoutedNeuralOptimizer",
+    "EMATeacher",
+    "TrainStats",
     # frozen-encoder + structured-head composition for modality routing
     "FeatureMapDensity",
     "FeatureMapEstimator",
@@ -190,6 +339,39 @@ __all__ = [
     "TrainingSpace",
     "TransformerLMEstimator",
     "build_causal_lm",
+    "coarsen",
+    "compress",
+    "depth_merge",
+    "experimental_width_merge_representation",
+    "gaussian_kl",
+    "structure_project",
+    "evaluate_checkpoint",
+    "markov_transition_matrix",
+    "track_regression",
+    "choose_compression_method",
+    "compress_moment",
+    "decompress_moment",
+    "dequantize_int8_blockwise",
+    "estimate_block_activation_bytes",
+    "estimate_block_recompute_flops",
+    "estimate_recompute_benefit",
+    "estimate_recompute_cost",
+    "fp8_cast_with_guard",
+    "quantize_int8_blockwise",
+    "attention_law",
+    "gelu_law",
+    "iter_moments",
+    "layernorm_law",
+    "linear_law",
+    "propagate_moments",
+    "build_auto_optimizer",
+    "build_routed_optimizer",
+    "plan_neural_optimizer",
+    "resolve_neural_optimizer",
+    "shard_safe_neural_optimizer_plan",
+    "consistency_loss",
+    "stochastic_depth_forward",
+    "train_with_self_distillation",
     "ewc",
     "extrapolate_learning_curve",
     "fisher_diagonal",

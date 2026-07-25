@@ -12,16 +12,25 @@ structured record. Where a family is supervised, sequential-decision, or causal 
 generative density, it keeps a focused task-appropriate surface instead of forcing the full distribution
 contract.
 
-Maturity varies across this namespace. Treat these as specialist adapters that compose with the stable
-statistics layer, and validate them on the target workflow before making production claims.
+The package-level catalog has two explicit compatibility tiers:
+
+- `SUPPORTED_MODEL_MODULES` are imported from `mixle.models`, covered by
+  package-level import compatibility, and follow the normal deprecation policy.
+- `EXPERIMENTAL_MODEL_MODULES` are also deliberately discoverable from
+  `mixle.models`, but their numerical methods or API may change before the next
+  minor release. Their outputs carry receipts where applicable, and callers
+  should validate them on the target workflow before production use.
+
+Every package-level family belongs to exactly one tier. Private underscore
+modules and implementation-only helpers are not part of either catalog.
 
 ## Families
 
 | Family | Modules | What it gives you |
 | --- | --- | --- |
-| **Neural & deep** | `neural`, `neural_leaf`, `neural_density`, `mixture_density`, `energy`, `softmax_leaf`, `transformer`, `language_model`, `streaming_transformer_leaf`, `embedding`, `dpo_leaf`, `continual`, `train_search`, `eval_harness` | Neural networks as mixle leaves — **adapters** that make a Torch density model a composable `Distribution`. `NeuralGaussian` wraps a Gaussian conditional; `NeuralDensity` wraps unconditional densities such as flows, VAEs, categorical autoregressive models, and energy models; `NeuralConditionalDensity` wraps true per-observation conditional densities such as MDNs, conditional flows, and conditional categorical autoregressive models. These fit jointly with classical families by EM. Batch-dependent objectives stay separate: `build_contrastive_projection` provides an explicitly weighted InfoNCE objective and retrieval ranker, not a probability leaf. The package also includes a causal Transformer LM, embeddings, DPO, continual learning, training search, and evaluation utilities. |
 | **Neural & deep** | `neural`, `neural_leaf`, `neural_density`, `mixture_density`, `energy`, `softmax_leaf`, `transformer`, `language_model`, `streaming_transformer_leaf`, `embedding`, `dpo_leaf`, `continual`, `train_search` | Neural networks as Mixle leaves: adapters that make a torch model a composable `Distribution`. Three axes: `NeuralGaussian` wraps a conditional net as a single-Gaussian `p(y\|x)`; `NeuralDensity` wraps unconditional density modules as `p(x)`; `NeuralConditionalDensity` wraps conditional densities such as MDNs, conditional flows, and autoregressive categorical models. These can fit jointly with classical families through the same EM M-step pattern. The namespace also includes a causal-Transformer LM, shared `CategoricalEmbedding`, DPO, continual-learning utilities, and multi-fidelity DOE over training recipes (`tune_training`). |
 | **Non-parametric** | `gaussian_process`, `sparse_gaussian_process`, `random_forest` | Kernel and ensemble regressors as conditional `p(y \| x)` leaves — a GP (exact and sparse/inducing-point) and a random forest, usable as composite/mixture components. |
+| **Compression & training systems** | `coarsening`, `compress`, `moment_propagation`, `memory_efficient_training`, `optimizer_routing`, `self_distillation`, `eval_harness` | Experimental, receipt-bearing model transformation, evaluation, optimizer, memory, and distillation surfaces. These are intentionally exported for discovery but remain in `EXPERIMENTAL_MODEL_MODULES`. |
 | **Relational / structured** | `knowledge_graph`, `random_graph`, `grammar` | Generative models over *structure*: a TransE knowledge-graph model, random-graph models (Erdős–Rényi / stochastic-block), and induced PCFG grammars whose `log_density` is the parse likelihood. |
 | **Latent-variable** | `dirichlet_process_mixture` | Bayesian-nonparametric mixtures (truncated Dirichlet process) — a mixture whose number of clusters is inferred. |
 | **Decision & control** | `partially_observable_markov_decision_process` | Sequential decision under partial observability: belief filtering and POMDP fitting/solving. |
