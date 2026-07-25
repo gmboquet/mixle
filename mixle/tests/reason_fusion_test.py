@@ -121,5 +121,99 @@ class ProductOfExpertsFusionTest(unittest.TestCase):
         self.assertGreater(hybrid, poe + 0.2)
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class PoEFusionValidationTest(unittest.TestCase):
+    """Regression tests for MXR-080-0288: the torch fusion modules used to accept non-positive/non-finite
+    prior_prec, mismatched mu/log_prec shapes, empty token axes, incompatible head counts, and runtime
+    token counts different from the constructor's positional table -- silently broadcasting into a
+    wrong-shaped or wrong-value product, or dividing by zero, instead of raising."""
+
+    def test_negative_or_non_finite_prior_prec_rejected_at_construction(self):
+        from mixle.reason import ProductOfExpertsFusion
+
+        for bad in (-1.0, float("nan"), float("-inf")):
+            with self.assertRaises(ValueError):
+                ProductOfExpertsFusion(prior_prec=bad)
+
+    def test_zero_prior_prec_still_allowed(self):
+        from mixle.reason import ProductOfExpertsFusion
+
+        ProductOfExpertsFusion(prior_prec=0.0)  # a legitimate "no prior" configuration -- must not raise
+
+    def test_mismatched_mu_log_prec_shapes_rejected(self):
+        import torch
+
+        from mixle.reason import ProductOfExpertsFusion
+
+        f = ProductOfExpertsFusion()
+        with self.assertRaises(ValueError):
+            f(torch.randn(2, 5, 3), torch.randn(2, 7, 3))  # different token counts
+        with self.assertRaises(ValueError):
+            f(torch.randn(2, 1, 3), torch.randn(2, 5, 3))  # broadcast-compatible but semantically wrong
+
+    def test_non_rank_3_inputs_rejected(self):
+        import torch
+
+        from mixle.reason import ProductOfExpertsFusion
+
+        f = ProductOfExpertsFusion()
+        with self.assertRaises(ValueError):
+            f(torch.randn(5, 3), torch.randn(5, 3))  # missing the batch axis
+
+    def test_empty_token_axis_rejected(self):
+        import torch
+
+        from mixle.reason import ProductOfExpertsFusion
+
+        f = ProductOfExpertsFusion()
+        with self.assertRaises(ValueError):
+            f(torch.randn(2, 0, 3), torch.randn(2, 0, 3))
+
+    def test_zero_prior_and_fully_underflowed_precision_raises_not_nan(self):
+        import torch
+
+        from mixle.reason import ProductOfExpertsFusion
+
+        f = ProductOfExpertsFusion(prior_prec=0.0)
+        mu = torch.zeros(1, 3, 2)
+        log_prec = torch.full((1, 3, 2), -1000.0)  # softplus(-1000) underflows to exactly 0.0
+        with self.assertRaises(ValueError):
+            f(mu, log_prec)
+
+    def test_structured_classifier_rejects_non_positive_dimensions(self):
+        from mixle.reason import StructuredFusionClassifier
+
+        with self.assertRaises(ValueError):
+            StructuredFusionClassifier(token_dim=0, latent_dim=4, n_classes=2)
+        with self.assertRaises(ValueError):
+            StructuredFusionClassifier(token_dim=4, latent_dim=-1, n_classes=2)
+        with self.assertRaises(ValueError):
+            StructuredFusionClassifier(token_dim=4, latent_dim=4, n_classes=0)
+
+    def test_hybrid_classifier_rejects_incompatible_head_count(self):
+        from mixle.reason import HybridFusionClassifier
+
+        with self.assertRaises(ValueError):
+            HybridFusionClassifier(token_dim=4, latent_dim=10, n_classes=2, n_tokens=8, heads=3)
+
+    def test_hybrid_classifier_rejects_non_positive_dimensions(self):
+        from mixle.reason import HybridFusionClassifier
+
+        with self.assertRaises(ValueError):
+            HybridFusionClassifier(token_dim=4, latent_dim=8, n_classes=2, n_tokens=0, heads=4)
+        with self.assertRaises(ValueError):
+            HybridFusionClassifier(token_dim=4, latent_dim=8, n_classes=2, n_tokens=8, attn_layers=0)
+
+    def test_hybrid_classifier_rejects_runtime_token_count_mismatch(self):
+        import torch
+
+        from mixle.reason import HybridFusionClassifier
+
+        model = HybridFusionClassifier(token_dim=4, latent_dim=8, n_classes=2, n_tokens=8, heads=4)
+        with self.assertRaises(ValueError):
+            model(torch.randn(2, 3, 4))  # built for n_tokens=8, called with 3
+        model(torch.randn(2, 8, 4))  # the matching count must still work
+
+
 if __name__ == "__main__":
     unittest.main()
