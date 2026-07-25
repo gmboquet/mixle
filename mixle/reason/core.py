@@ -8,6 +8,8 @@ credible intervals, per-modality attribution, and an epistemic/aleatoric split o
 
 from __future__ import annotations
 
+import itertools
+import math
 import warnings
 from dataclasses import dataclass
 from typing import Any
@@ -278,6 +280,21 @@ def block_selector(step: int, n_blocks: int, block_dim: int, within: Any = None)
     return H
 
 
+_SHAPLEY_EXACT_MAX_SOURCES = 7
+"""Above this many evidence items, :meth:`ReasonedAnswer.attribution`'s ``method="shapley"`` switches
+from exact permutation enumeration (``n!`` fold sequences -- 5040 for 7 items, each a handful of cheap
+Kalman updates) to Monte Carlo sampling, since ``n!`` grows too fast to enumerate exactly beyond this.
+Realistic evidence counts in this codebase (per-modality or per-model fusion) are a handful of sources,
+comfortably under this threshold, so exact computation is the common case in practice."""
+
+_SHAPLEY_DEFAULT_SAMPLES = 200
+"""Default number of sampled permutations for ``method="shapley"`` beyond
+:data:`_SHAPLEY_EXACT_MAX_SOURCES` sources -- a standard permutation-sampling Monte Carlo estimator of
+Shapley value, whose standard error shrinks as ``O(1 / sqrt(n_permutations))``. Override via
+``attribution(method="shapley", n_permutations=...)`` for a tighter (more samples) or cheaper (fewer)
+estimate."""
+
+
 class ReasonedAnswer:
     """A posterior belief about a query, with the UQ a scientific answer needs.
 
@@ -287,7 +304,16 @@ class ReasonedAnswer:
     aleatoric (observation noise) via the law of total variance.
     """
 
-    def __init__(self, belief: BeliefState, prior: BeliefState, trace: list[tuple[str, BeliefState]]) -> None:
+    def __init__(
+        self,
+        belief: BeliefState,
+        prior: BeliefState,
+        trace: list[tuple[str, BeliefState]],
+        *,
+        full_prior: BeliefState | None = None,
+        evidence: list[Any] | None = None,
+        query_idx: Any = None,
+    ) -> None:
         self.belief = belief
         # The prior belief IN THIS ANSWER'S OWN COORDINATE SPACE: the full prior for an unqueried
         # answer, or that same prior's matching marginal after :meth:`marginal` (MXR-080-0272). Every
@@ -298,6 +324,16 @@ class ReasonedAnswer:
         # this answer's own coordinate space -- lets attribution() recompute each source's nats
         # entirely within the queried subspace instead of reusing the full-state gain.
         self._trace = list(trace)
+        # The UNTOUCHED original prior and evidence list (always in the FULL latent space -- never
+        # re-marginalized) plus the coordinate indices (into that full space) this answer currently
+        # represents. Retained across repeated :meth:`marginal` calls purely so order-invariant
+        # (Shapley, MXR-080-0275) attribution can still be recomputed exactly in the query's own
+        # subspace by re-folding subsets of the ORIGINAL evidence in a different order -- something
+        # `self._trace` alone (one fixed fold order) cannot answer.
+        self._full_prior = prior if full_prior is None else full_prior
+        self._evidence = [] if evidence is None else list(evidence)
+        full_dim = int(np.size(self._full_prior.mean()))
+        self._query_idx = np.arange(full_dim) if query_idx is None else np.atleast_1d(np.asarray(query_idx, dtype=int))
         contributions: dict[str, float] = {}
         before = self._prior
         for name, after in self._trace:
@@ -337,17 +373,84 @@ class ReasonedAnswer:
         """
         return self._prior.entropy() - self.belief.entropy()
 
-    def attribution(self, *, normalize: bool = False) -> dict[str, float]:
+    def attribution(self, *, normalize: bool = False, method: str = "sequential", **kwargs: Any) -> dict[str, float]:
         """Per-modality information gain in nats -- which modality sharpened the belief, and by how much.
 
-        With ``normalize=True``, values are the fraction of the total gain (they then sum to ~1).
+        Two allocation rules are available, and they generally disagree for REDUNDANT sources (two
+        items that both constrain overlapping coordinates) -- pick deliberately, not by default
+        (MXR-080-0275):
+
+        * ``method="sequential"`` (default): each item's nats are ``H[belief before it] - H[belief
+          after it]``, in the order ``evidence`` was given to :func:`reason`. Cheap (one pass over the
+          fold trace) and always sums exactly to :meth:`information_gain`, but for redundant sources
+          it is a CONDITIONAL, fold-order-dependent credit split, not an intrinsic measure of modality
+          importance: whichever redundant source is folded first is credited with uncertainty a
+          different order would have credited to another source. The FINAL POSTERIOR does not depend
+          on order for linear-Gaussian evidence (sequential exact Kalman assimilation commutes -- see
+          :func:`reason`); this per-source SPLIT of it still does. Treat the result as "credit under
+          the order evidence happened to be listed in," not as "how important is this modality."
+        * ``method="shapley"``: the order-INVARIANT Shapley value -- each source's nats averaged over
+          (up to) every permutation of fold order, satisfying the same efficiency property (values
+          sum to :meth:`information_gain`) without depending on which order the caller listed evidence
+          in. Exact for up to :data:`_SHAPLEY_EXACT_MAX_SOURCES` sources (``O(n!)`` re-folds of the
+          full evidence sequence); beyond that it averages ``n_permutations`` uniformly random
+          permutations instead (``O(n_permutations * n)`` re-folds), a standard permutation-sampling
+          Monte Carlo estimator whose standard error shrinks as ``O(1 / sqrt(n_permutations))``. Pass
+          ``n_permutations=`` / ``rng=`` to control the sampling estimate. Each re-fold repeats the
+          full (possibly nonlinear, possibly expensive) assimilation from the original prior, so this
+          costs ``O(n)`` to ``O(n!)`` times a single :func:`reason` call -- fine for the small modality
+          counts this module is used with, not intended for hundreds of sources.
+
+        With ``normalize=True``, values are the fraction of the total gain (they then sum to ~1),
+        computed after the chosen allocation rule.
         """
-        contrib = dict(self._contributions)
+        if method == "sequential":
+            contrib = dict(self._contributions)
+        elif method == "shapley":
+            contrib = self._shapley_attribution(**kwargs)
+        else:
+            raise ValueError(f"attribution method must be 'sequential' or 'shapley'; got {method!r}")
         if normalize:
             total = sum(contrib.values())
             if total > 0:
                 contrib = {k: v / total for k, v in contrib.items()}
         return contrib
+
+    def _shapley_attribution(self, *, n_permutations: int | None = None, rng: Any = None) -> dict[str, float]:
+        """Order-invariant per-source attribution: nats averaged over permutations of fold order.
+
+        Re-folds the ORIGINAL evidence (never the already-fixed ``self._trace``) from
+        ``self._full_prior``, projecting each intermediate belief to ``self._query_idx`` -- the SAME
+        coordinates :meth:`information_gain` uses -- before taking its entropy, so this is correct
+        for a marginal query too (MXR-080-0272 applies here as well: never a full-state entropy mixed
+        against a marginal one). See :meth:`attribution` for the exactness/cost tradeoff.
+        """
+        n = len(self._evidence)
+        names = [e.name or f"evidence[{i}]" for i, e in enumerate(self._evidence)]
+        contrib = {name: 0.0 for name in names}
+        if n == 0:
+            return contrib
+        prior_entropy = self._full_prior.marginal(self._query_idx).entropy()
+        if n <= _SHAPLEY_EXACT_MAX_SOURCES:
+            perms = itertools.permutations(range(n))
+            count = math.factorial(n)
+        else:
+            rgen = rng if isinstance(rng, np.random.Generator) else np.random.default_rng(rng)
+            count = int(n_permutations) if n_permutations else _SHAPLEY_DEFAULT_SAMPLES
+            perms = (rgen.permutation(n) for _ in range(count))
+        for perm in perms:
+            belief = self._full_prior
+            before_entropy = prior_entropy
+            for i in perm:
+                e = self._evidence[i]
+                if isinstance(e, NonlinearEvidence):
+                    belief = _assimilate_nonlinear(belief, e)
+                else:
+                    belief = belief.update(e.H, e.y, e.R)
+                after_entropy = belief.marginal(self._query_idx).entropy()
+                contrib[names[i]] += before_entropy - after_entropy
+                before_entropy = after_entropy
+        return {name: value / count for name, value in contrib.items()}
 
     def predict(self, H: Any, R: Any = 0.0) -> UncertaintyDecomposition:
         """Split the uncertainty of a new prediction ``y* = H z + noise(R)`` (law of total variance).
@@ -390,13 +493,23 @@ class ReasonedAnswer:
         coordinates as the posterior (MXR-080-0272), so :meth:`information_gain` and the default
         :meth:`attribution` on the result are computed entirely within the queried subspace -- a
         coordinate the evidence never touched now correctly reports zero gain instead of leaking in
-        the full-state prior entropy.
+        the full-state prior entropy. ``indices`` are local to THIS answer's own coordinates (so
+        repeated/nested :meth:`marginal` calls compose correctly); the original full-space prior and
+        evidence are carried through unchanged so ``attribution(method="shapley")`` keeps working
+        after marginalizing.
         """
         idx = np.atleast_1d(np.asarray(indices, dtype=int))
         sub_belief = self.belief.marginal(idx)
         sub_prior = self._prior.marginal(idx)
         sub_trace = [(name, after.marginal(idx)) for name, after in self._trace]
-        return ReasonedAnswer(sub_belief, sub_prior, sub_trace)
+        return ReasonedAnswer(
+            sub_belief,
+            sub_prior,
+            sub_trace,
+            full_prior=self._full_prior,
+            evidence=self._evidence,
+            query_idx=self._query_idx[idx],
+        )
 
     def __repr__(self) -> str:
         return (
@@ -435,6 +548,14 @@ def reason(prior: Any, evidence: Any, *, query: Any = None) -> ReasonedAnswer:
             depend on the order ``evidence`` is given in (a :class:`RuntimeWarning` is raised when
             this applies); pass evidence in a fixed, deliberate order rather than relying on
             permutation invariance.
+
+            **The POSTERIOR's order independence does not extend to** ``attribution()``'s default
+            credit split, even for pure :class:`LinearGaussianEvidence` (MXR-080-0275): two sources
+            that both constrain overlapping coordinates ("redundant" evidence) split their combined
+            information gain differently depending on fold order, because the default allocation is
+            sequential (whichever redundant source is folded first is credited with uncertainty a
+            different order would credit to the other). Use ``attribution(method="shapley")`` for an
+            order-invariant split when that matters more than the cost of recomputing it.
         query: optional latent coordinate indices to restrict the answer to.
 
     Returns:
@@ -462,7 +583,7 @@ def reason(prior: Any, evidence: Any, *, query: Any = None) -> ReasonedAnswer:
         else:
             belief = belief.update(e.H, e.y, e.R)
         trace.append((name, belief))
-    answer = ReasonedAnswer(belief, prior_belief, trace)
+    answer = ReasonedAnswer(belief, prior_belief, trace, full_prior=prior_belief, evidence=evidence)
     if query is not None:
         answer = answer.marginal(query)
     return answer
