@@ -963,7 +963,22 @@ def learn_bayesian_network(
             for q in range(n_fields):
                 if q == c or q in parents[c] or _would_cycle(parents, q, c):
                     continue
-                cand = _fit_factor(c, [*parents[c], q], cols, discrete, levels, templates[c], max_its, w, vec_dims)
+                try:
+                    cand = _fit_factor(
+                        c,
+                        [*parents[c], q],
+                        cols,
+                        discrete,
+                        levels,
+                        templates[c],
+                        max_its,
+                        w,
+                        vec_dims,
+                    )
+                except (FloatingPointError, RuntimeError, ValueError, np.linalg.LinAlgError):
+                    # A candidate edge is optional. Separation, singular design/covariance, invalid support,
+                    # or optimizer failure rejects that candidate; it must not abort the whole DAG search.
+                    continue
                 with np.errstate(all="ignore"):
                     ll = _wsum(cand.seq_log_density(cols))
                 if not np.isfinite(ll):

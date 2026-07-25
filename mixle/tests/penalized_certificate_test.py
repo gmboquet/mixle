@@ -17,19 +17,20 @@ class PenalizedCertifyTest(unittest.TestCase):
 
     def test_penalized_caps_global_unique_at_stationary(self):
         g = self._gaussian()
-        self.assertEqual(certify(g).guarantee, Guarantee.GLOBAL_UNIQUE)
+        self.assertEqual(certify(g).guarantee, Guarantee.UNVERIFIED)
         pen = certify(g, penalized="PINN residual")
-        self.assertEqual(pen.guarantee, Guarantee.STATIONARY)  # no block may claim more than STATIONARY
+        self.assertEqual(pen.guarantee, Guarantee.UNVERIFIED)
+        self.assertEqual(pen.blocks[0].candidate_guarantee, Guarantee.STATIONARY)
         self.assertIn("PINN residual", pen.blocks[0].reason)  # the penalty is NAMED in the downgrade
-        self.assertIn("surrogate, not the likelihood", pen.blocks[0].reason)
+        self.assertIn("surrogate", pen.blocks[0].reason)
 
     def test_penalized_true_uses_the_generic_reason(self):
         pen = certify(self._gaussian(), penalized=True)
-        self.assertEqual(pen.guarantee, Guarantee.STATIONARY)
+        self.assertEqual(pen.guarantee, Guarantee.UNVERIFIED)
         self.assertIn("soft-constraint / residual penalty", pen.blocks[0].reason)
 
     def test_unpenalized_is_unchanged(self):
-        self.assertEqual(certify(self._gaussian()).guarantee, Guarantee.GLOBAL_UNIQUE)
+        self.assertEqual(certify(self._gaussian()).guarantee, Guarantee.UNVERIFIED)
 
 
 class ConstrainedPplFitTest(unittest.TestCase):
@@ -42,8 +43,9 @@ class ConstrainedPplFitTest(unittest.TestCase):
     def test_constrained_fit_attaches_a_downgraded_certificate(self):
         fit = self._fit()
         self.assertIsNotNone(fit.certificate)
-        self.assertEqual(fit.certificate.guarantee, Guarantee.STATIONARY)
-        self.assertIn("DOWNGRADED", fit.certificate.blocks[0].reason)
+        self.assertEqual(fit.certificate.guarantee, Guarantee.UNVERIFIED)
+        self.assertEqual(fit.certificate.blocks[0].candidate_guarantee, Guarantee.STATIONARY)
+        self.assertIn("CANDIDATE CAPPED", fit.certificate.blocks[0].reason)
         self.assertIn("soft constraints", fit.certificate.blocks[0].reason)
 
     def test_unconstrained_fit_attaches_nothing(self):

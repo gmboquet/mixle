@@ -1,36 +1,32 @@
-"""Estimation planning and certificates.
+"""Estimation planning and evidence-backed certificates.
 
-Mixle chooses estimation methods from model structure: exponential-family
-leaves use closed-form MLE when available, conditional-linear-Gaussian factors
-use least squares, GLM factors use IRLS, categorical tables use count updates,
-and non-convex pieces such as mixtures or neural leaves use EM or gradient
-optimization.
-
-This module makes those choices inspectable. It walks a fitted model or
-distribution prototype and returns an :class:`EstimationCertificate` containing
-per-block methods, guarantees, and placement hints. The aggregate guarantee is
-the minimum over all blocks, so a fully observed exponential-family graph can
-certify as ``GLOBAL_UNIQUE`` while a mixture certifies as ``STATIONARY`` even
-when each M-step is closed form.
-
-The guarantee ladder, in ascending strength, is ``HEURISTIC``,
-``STATIONARY``, ``STATIONARY_ESCAPE_TESTED``, ``GLOBAL``, and
-``GLOBAL_UNIQUE``.
+Planning and certification are deliberately different. Model structure can
+suggest an estimator and an *upper bound* on what it could prove, but a class
+name or capability marker cannot prove that a particular fit is identified,
+converged, or globally optimal. A certificate therefore reports both the
+candidate guarantee and the guarantee established by checked conditions or
+explicit verification receipts.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
 
 __all__ = [
     "Guarantee",
+    "ProofObligation",
+    "VerificationReceipt",
     "BlockPlan",
     "EstimationCertificate",
     "EstimationSchedule",
     "SchedulePass",
     "certify",
+    "verify_estimation_conditions",
     "plan_estimation",
     "schedule",
 ]
@@ -39,6 +35,7 @@ __all__ = [
 class Guarantee(IntEnum):
     """How strong the solution to an estimation block is, as an ordered ladder (higher = stronger)."""
 
+    UNVERIFIED = 0
     HEURISTIC = 1
     STATIONARY = 2
     STATIONARY_ESCAPE_TESTED = 3
@@ -51,9 +48,44 @@ class Guarantee(IntEnum):
         return self.name
 
 
+@dataclass(frozen=True)
+class ProofObligation:
+    """A condition that must be evidenced before a block may claim a guarantee."""
+
+    check: str
+    required_for: Guarantee
+    description: str
+
+
+@dataclass(frozen=True)
+class VerificationReceipt:
+    """Evidence that named checks were performed for one estimation block.
+
+    Receipts are explicit audit inputs, not Boolean assertions. ``evidence``
+    must contain the measurements or result metadata supporting the checks.
+    """
+
+    receipt_id: str
+    block: str
+    guarantee: Guarantee
+    checks: tuple[str, ...]
+    source: str
+    evidence: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if not self.receipt_id or not self.block or not self.source:
+            raise ValueError("verification receipts require non-empty receipt_id, block, and source")
+        if self.guarantee <= Guarantee.UNVERIFIED:
+            raise ValueError("verification receipt guarantee must be stronger than UNVERIFIED")
+        if not self.checks or any(not isinstance(check, str) or not check for check in self.checks):
+            raise ValueError("verification receipts require one or more named checks")
+        if not isinstance(self.evidence, dict) or not self.evidence:
+            raise ValueError("verification receipts require non-empty structured evidence")
+
+
 @dataclass
 class BlockPlan:
-    """The estimation plan for one block of a model: which method ran and how strong its guarantee is."""
+    """One estimation block and the distinction between planned and verified strength."""
 
     name: str  # dotted path within the model, e.g. "field[2]" or "component[0].mean"
     kind: str  # the block's distribution/factor type name
@@ -62,10 +94,21 @@ class BlockPlan:
     gradient: bool  # did this block require gradient descent (the ADAM question)
     placement: str  # 'local' | 'pool_eligible'
     reason: str  # human-readable justification
+    candidate_guarantee: Guarantee | None = None
+    proof_obligations: tuple[ProofObligation, ...] = ()
+    verified_checks: tuple[str, ...] = ()
+    receipt_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.candidate_guarantee is None:
+            self.candidate_guarantee = self.guarantee
 
     def __str__(self) -> str:
         tag = " [GRADIENT]" if self.gradient else ""
-        return f"{self.name}: {self.method} -> {self.guarantee.label}{tag}  ({self.reason})"
+        candidate = (
+            f", candidate={self.candidate_guarantee.label}" if self.candidate_guarantee != self.guarantee else ""
+        )
+        return f"{self.name}: {self.method} -> {self.guarantee.label}{candidate}{tag}  ({self.reason})"
 
 
 @dataclass
@@ -104,9 +147,20 @@ class EstimationCertificate:
                     "kind": b.kind,
                     "method": b.method,
                     "guarantee": b.guarantee.label,
+                    "candidate_guarantee": b.candidate_guarantee.label,
                     "gradient": b.gradient,
                     "placement": b.placement,
                     "reason": b.reason,
+                    "proof_obligations": [
+                        {
+                            "check": obligation.check,
+                            "required_for": obligation.required_for.label,
+                            "description": obligation.description,
+                        }
+                        for obligation in b.proof_obligations
+                    ],
+                    "verified_checks": list(b.verified_checks),
+                    "receipt_ids": list(b.receipt_ids),
                 }
                 for b in self.blocks
             ],
@@ -118,8 +172,8 @@ class EstimationCertificate:
         total = len(self.blocks)
         if not grad:
             return (
-                f"No gradient descent was used: all {total} block(s) solved by closed-form / convex / "
-                f"EM methods (aggregate guarantee {self.guarantee.label})."
+                f"No gradient descent is planned for {total} block(s); the planned methods are closed-form, "
+                f"convex, or iterative (verified aggregate {self.guarantee.label})."
             )
         lines = [
             f"{len(grad)} of {total} block(s) required gradient descent; the other "
@@ -173,11 +227,7 @@ def _has_exact_density(obj: Any) -> bool:
 
 
 def _classify_process(obj: Any, name: str) -> BlockPlan | None:
-    """Point-process / temporal families whose estimator is known -> a specific guarantee.
-
-    These do not advertise ExponentialFamily, so without this they fall through to the conservative
-    STATIONARY default -- which UNDER-states the ones with a genuine closed-form MLE and leaves the
-    genuinely non-convex ones unlabeled. Each verdict is grounded in the family's actual estimator."""
+    """Plan a process estimator and its best possible, not yet verified, guarantee."""
     kind = type(obj).__name__
     if kind == "InhomogeneousPoissonProcessDistribution":
         # piecewise-constant intensity: rate[b] = count[b] / (width[b] * n_realizations). The Poisson
@@ -189,7 +239,7 @@ def _classify_process(obj: Any, name: str) -> BlockPlan | None:
             Guarantee.GLOBAL_UNIQUE,
             gradient=False,
             placement="local",
-            reason="inhomogeneous Poisson -- closed-form per-bin rate MLE (Poisson-concave, unique global)",
+            reason="inhomogeneous Poisson count/exposure update; uniqueness requires positive checked exposure",
         )
     if kind == "ContinuousTimeMarkovChainDistribution":
         # q_ij = n_ij / T_i: each off-diagonal rate is an independent closed-form Poisson-rate MLE
@@ -201,7 +251,7 @@ def _classify_process(obj: Any, name: str) -> BlockPlan | None:
             Guarantee.GLOBAL_UNIQUE,
             gradient=False,
             placement="local",
-            reason="CTMC generator -- closed-form q_ij = n_ij / T_i (independent Poisson rates, unique global)",
+            reason="CTMC count/dwell update; uniqueness requires checked positive exposure for every fitted row",
         )
     if kind == "BirthDeathSamplingDistribution":
         # each rate = (event count of that type) / integral_n: a closed-form Poisson-rate MLE per type,
@@ -213,7 +263,7 @@ def _classify_process(obj: Any, name: str) -> BlockPlan | None:
             Guarantee.GLOBAL_UNIQUE,
             gradient=False,
             placement="local",
-            reason="birth-death -- closed-form per-type rate MLE (count / exposure; Poisson-concave, unique)",
+            reason="birth-death count/exposure update; uniqueness requires checked positive population exposure",
         )
     if kind in ("HawkesProcessDistribution", "MultivariateHawkesProcessDistribution", "PowerLawHawkesDistribution"):
         # Veen-Schoenberg / Lewis-Mohler branching EM (ML for the power-law kernel): the self-excitation
@@ -225,7 +275,10 @@ def _classify_process(obj: Any, name: str) -> BlockPlan | None:
             Guarantee.STATIONARY,
             gradient=False,
             placement="local",
-            reason="self-exciting Hawkes -- branching EM/ML; non-convex likelihood (stationary point)",
+            reason=(
+                "self-exciting Hawkes branching EM has a non-convex objective; stationarity requires "
+                "an optimizer-convergence receipt"
+            ),
         )
     if kind == "RenewalProcessDistribution":
         # the M-step feeds the inter-arrival gaps to the inter-arrival family's own estimator (the standard
@@ -233,7 +286,7 @@ def _classify_process(obj: Any, name: str) -> BlockPlan | None:
         # guarantee IS the inter-arrival family's guarantee -- delegate to it honestly.
         inner = getattr(obj, "interarrival", None)
         inner_plan = _classify_leaf(inner, name) if inner is not None else None
-        guarantee = inner_plan.guarantee if inner_plan is not None else Guarantee.STATIONARY
+        guarantee = inner_plan.candidate_guarantee if inner_plan is not None else Guarantee.STATIONARY
         inner_kind = type(inner).__name__ if inner is not None else "unknown"
         return BlockPlan(
             name,
@@ -244,7 +297,7 @@ def _classify_process(obj: Any, name: str) -> BlockPlan | None:
             placement="local",
             reason=(
                 f"renewal process -- M-step is the inter-arrival ({inner_kind}) MLE; boundary term O(1/n); "
-                f"inherits its guarantee"
+                "inherits only its candidate guarantee; censored-boundary and identification checks remain due"
             ),
         )
     return None
@@ -274,7 +327,7 @@ def _classify_leaf(obj: Any, name: str) -> BlockPlan:
             Guarantee.GLOBAL_UNIQUE,
             gradient=False,
             placement="local",
-            reason="exponential family -- MLE is strictly concave in the natural parameters (unique global)",
+            reason="exponential-family capability suggests an analytic MLE; support and identification remain due",
         )
     # a GLM-shaped edge/factor: convex objective, global but not necessarily a closed form
     if hasattr(obj, "family") and hasattr(obj, "beta"):
@@ -285,17 +338,17 @@ def _classify_leaf(obj: Any, name: str) -> BlockPlan:
             Guarantee.GLOBAL,
             gradient=False,
             placement="local",
-            reason="generalized linear model -- convex log-likelihood solved by IRLS (global optimum)",
+            reason="GLM-shaped block suggests IRLS; rank, separation, convergence, and objective checks remain due",
         )
     if _has_exact_density(obj):
         return BlockPlan(
             name,
             kind,
-            "closed_form",
-            Guarantee.GLOBAL,
+            "unspecified_exact_density_estimator",
+            Guarantee.UNVERIFIED,
             gradient=False,
             placement="local",
-            reason="exact-density family with a deterministic closed-form estimate (global for its objective)",
+            reason="exact density supports scoring, not an estimation or optimality guarantee",
         )
     return BlockPlan(
         name,
@@ -304,7 +357,7 @@ def _classify_leaf(obj: Any, name: str) -> BlockPlan:
         Guarantee.STATIONARY,
         gradient=False,
         placement="local",
-        reason="iterative estimator with no declared global guarantee (conservative classification)",
+        reason="iterative estimator; stationarity requires a convergence receipt",
     )
 
 
@@ -321,7 +374,7 @@ def _classify_bn_factor(fac: Any, name: str) -> BlockPlan:
             Guarantee.GLOBAL_UNIQUE,
             gradient=False,
             placement="local",
-            reason="conditional-linear-Gaussian factor -- least squares has a unique closed-form solution",
+            reason="conditional-linear-Gaussian least squares; full-rank design and residual support remain due",
         )
     if kind == "_GLMFactor":
         return BlockPlan(
@@ -331,7 +384,7 @@ def _classify_bn_factor(fac: Any, name: str) -> BlockPlan:
             Guarantee.GLOBAL,
             gradient=False,
             placement="local",
-            reason="GLM factor (logistic/Poisson/softmax) -- convex objective, global optimum via IRLS/L-BFGS",
+            reason="GLM factor; rank, separation, convergence, and objective checks remain due",
         )
     if kind == "_DiscreteConditionalFactor":
         return BlockPlan(
@@ -341,7 +394,7 @@ def _classify_bn_factor(fac: Any, name: str) -> BlockPlan:
             Guarantee.GLOBAL_UNIQUE,
             gradient=False,
             placement="local",
-            reason="discrete conditional table -- closed-form per-configuration counts (unique)",
+            reason="conditional count table; every parent configuration must have checked exposure",
         )
     if kind == "_VectorMarginalFactor":
         return BlockPlan(
@@ -351,7 +404,7 @@ def _classify_bn_factor(fac: Any, name: str) -> BlockPlan:
             Guarantee.GLOBAL_UNIQUE,
             gradient=False,
             placement="local",
-            reason="multivariate-Gaussian marginal -- closed-form mean + covariance (unique)",
+            reason="multivariate-Gaussian moments; full-rank empirical covariance remains due",
         )
     if kind == "_VectorCLGFactor":
         return BlockPlan(
@@ -361,19 +414,19 @@ def _classify_bn_factor(fac: Any, name: str) -> BlockPlan:
             Guarantee.GLOBAL_UNIQUE,
             gradient=False,
             placement="local",
-            reason="multivariate conditional-linear-Gaussian -- multivariate least squares (unique closed form)",
+            reason="multivariate least squares; design and residual covariance ranks remain due",
         )
     return _classify_leaf(fac, name)
 
 
-def _walk(obj: Any, name: str, blocks: list[BlockPlan], escape_tested: bool) -> None:
+def _walk(obj: Any, name: str, blocks: list[BlockPlan]) -> None:
     """Recurse the fitted-model tree, appending a BlockPlan per leaf/factor block."""
     kind = type(obj).__name__
 
     # composite: independent per-field blocks -- the whole thing factorizes, each child is its own fit
     if isinstance(getattr(obj, "dists", None), (list, tuple)):
         for i, child in enumerate(obj.dists):
-            _walk(child, f"{name}field[{i}]" if name else f"field[{i}]", blocks, escape_tested)
+            _walk(child, f"{name}field[{i}]" if name else f"field[{i}]", blocks)
         return
 
     # heterogeneous Bayesian network: a DAG of parametric factors, each solved independently
@@ -386,63 +439,485 @@ def _walk(obj: Any, name: str, blocks: list[BlockPlan], escape_tested: bool) -> 
     # recurse the components to REPORT that their M-steps are closed form (the "no ADAM inside EM" win),
     # but the EM block itself caps the guarantee.
     if isinstance(getattr(obj, "components", None), (list, tuple)):
-        g = Guarantee.STATIONARY_ESCAPE_TESTED if escape_tested else Guarantee.STATIONARY
-        reason = (
-            "latent mixture fit by EM with saddle-escape restarts -- a fixed point, escape-tested"
-            if escape_tested
-            else "latent mixture fit by EM -- a fixed point that may be local (restarts='auto' escape-tests it)"
-        )
         blocks.append(
             BlockPlan(
                 f"{name}mixture" if name else "mixture",
                 kind,
                 "em",
-                g,
+                Guarantee.STATIONARY_ESCAPE_TESTED,
                 gradient=False,
                 placement="local",
-                reason=reason,
+                reason=("latent mixture EM; stationarity and any saddle-escape claim require optimizer receipts"),
             )
         )
         for i, comp in enumerate(obj.components):
-            _walk(comp, f"{name}component[{i}]." if name else f"component[{i}].", blocks, escape_tested)
+            _walk(comp, f"{name}component[{i}]." if name else f"component[{i}].", blocks)
         return
 
     # a single leaf
     blocks.append(_classify_leaf(obj, name.rstrip(".") if name else kind))
 
 
-def certify(model: Any, *, escape_tested: bool = False, penalized: str | bool = False) -> EstimationCertificate:
+def _proof_obligations(block: BlockPlan) -> tuple[ProofObligation, ...]:
+    """Return the evidence required to attain ``block.candidate_guarantee``."""
+    candidate = block.candidate_guarantee
+    if candidate <= Guarantee.HEURISTIC:
+        return ()
+    if candidate == Guarantee.STATIONARY:
+        return (
+            ProofObligation(
+                "optimizer_converged",
+                Guarantee.STATIONARY,
+                "the actual optimizer terminated at a checked stationary point",
+            ),
+        )
+    if candidate == Guarantee.STATIONARY_ESCAPE_TESTED:
+        return (
+            ProofObligation(
+                "optimizer_converged",
+                Guarantee.STATIONARY,
+                "the actual optimizer terminated at a checked stationary point",
+            ),
+            ProofObligation(
+                "saddle_escape_compared",
+                Guarantee.STATIONARY_ESCAPE_TESTED,
+                "independent or symmetry-broken starts were evaluated on the same fitting objective",
+            ),
+        )
+    if candidate == Guarantee.GLOBAL:
+        if block.method == "convex_irls":
+            return (
+                ProofObligation(
+                    "finite_supported_data",
+                    Guarantee.GLOBAL,
+                    "responses, weights, offsets, and design values are finite and in support",
+                ),
+                ProofObligation(
+                    "identified_finite_optimum",
+                    Guarantee.GLOBAL,
+                    "rank and separation checks establish that a finite optimum exists",
+                ),
+                ProofObligation(
+                    "objective_globally_convex",
+                    Guarantee.GLOBAL,
+                    "the fitted objective, including any penalty, is globally convex/concave",
+                ),
+                ProofObligation(
+                    "solver_matches_objective",
+                    Guarantee.GLOBAL,
+                    "a convergence report establishes optimality for that exact objective",
+                ),
+            )
+        return (
+            ProofObligation(
+                "objective_globally_convex",
+                Guarantee.GLOBAL,
+                "the fitted objective is globally convex/concave on the stated parameter domain",
+            ),
+            ProofObligation(
+                "solver_matches_objective",
+                Guarantee.GLOBAL,
+                "the reported parameters solve that exact objective under its constraints",
+            ),
+        )
+    return (
+        ProofObligation(
+            "finite_supported_data",
+            Guarantee.GLOBAL,
+            "all observations and weights are finite and lie in the model support",
+        ),
+        ProofObligation(
+            "solver_matches_objective",
+            Guarantee.GLOBAL,
+            "the reported closed-form parameters solve the stated fitting objective",
+        ),
+        ProofObligation(
+            "identified_parameters",
+            Guarantee.GLOBAL_UNIQUE,
+            "rank, exposure, support, and covariance checks establish parameter identification",
+        ),
+    )
+
+
+def _receipt_for(block: BlockPlan, guarantee: Guarantee, evidence: dict[str, Any]) -> VerificationReceipt:
+    checks = tuple(obligation.check for obligation in block.proof_obligations if obligation.required_for <= guarantee)
+    payload = {
+        "block": block.name,
+        "guarantee": guarantee.label,
+        "checks": checks,
+        "evidence": evidence,
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=repr).encode()).hexdigest()[:20]
+    return VerificationReceipt(
+        receipt_id=f"estimation-{digest}",
+        block=block.name,
+        guarantee=guarantee,
+        checks=checks,
+        source="mixle.inference.planning.verify_estimation_conditions",
+        evidence=evidence,
+    )
+
+
+def _leaf_evidence(obj: Any, data: Sequence[Any]) -> dict[str, Any] | None:
+    """Check identification conditions for the small set of analytic MLEs we can prove locally."""
+    import numpy as np
+
+    kind = type(obj).__name__
+    n = len(data)
+    if n == 0:
+        return None
+    if kind in {"GaussianDistribution", "ExponentialDistribution", "PoissonDistribution", "BernoulliDistribution"}:
+        try:
+            values = np.asarray(data, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError):
+            return None
+        if values.size != n or not np.all(np.isfinite(values)):
+            return None
+        if kind == "GaussianDistribution":
+            variance = float(np.var(values))
+            mean = float(np.mean(values))
+            if (
+                n < 2
+                or not variance > 0.0
+                or not np.isclose(float(obj.mu), mean, rtol=1e-7, atol=1e-10)
+                or not np.isclose(float(obj.sigma2), variance, rtol=1e-7, atol=1e-10)
+            ):
+                return None
+            return {
+                "n": n,
+                "sample_mean": mean,
+                "sample_variance": variance,
+                "parameters_match_mle": True,
+                "objective": "Gaussian log-likelihood",
+            }
+        if kind == "ExponentialDistribution":
+            expected = float(np.mean(values))
+            if (
+                np.any(values < 0.0)
+                or not float(np.sum(values)) > 0.0
+                or not np.isclose(float(obj.beta), expected, rtol=1e-7, atol=1e-10)
+            ):
+                return None
+            return {
+                "n": n,
+                "sum": float(np.sum(values)),
+                "parameters_match_mle": True,
+                "objective": "exponential log-likelihood",
+            }
+        if kind == "PoissonDistribution":
+            expected = float(np.mean(values))
+            if (
+                np.any(values < 0.0)
+                or np.any(values != np.floor(values))
+                or not float(np.sum(values)) > 0.0
+                or not np.isclose(float(obj.lam), expected, rtol=1e-7, atol=1e-10)
+            ):
+                return None
+            return {
+                "n": n,
+                "event_count": int(np.sum(values)),
+                "parameters_match_mle": True,
+                "objective": "Poisson log-likelihood",
+            }
+        levels = set(values.tolist())
+        expected = float(np.mean(values))
+        if (
+            not levels <= {0.0, 1.0}
+            or levels != {0.0, 1.0}
+            or not np.isclose(float(obj.p), expected, rtol=1e-7, atol=1e-10)
+        ):
+            return None
+        return {
+            "n": n,
+            "counts": [int(np.sum(values == 0.0)), int(np.sum(values == 1.0))],
+            "parameters_match_mle": True,
+        }
+
+    if kind == "CategoricalDistribution":
+        try:
+            observed = set(data)
+            fitted = set(obj.pmap)
+        except (AttributeError, TypeError):
+            return None
+        if not fitted or observed != fitted or float(getattr(obj, "default_value", 0.0)) != 0.0:
+            return None
+        counts = {value: sum(item == value for item in data) for value in observed}
+        expected = {value: count / n for value, count in counts.items()}
+        if any(not np.isclose(float(obj.pmap[value]), probability) for value, probability in expected.items()):
+            return None
+        return {
+            "n": n,
+            "observed_levels": sorted(repr(value) for value in observed),
+            "parameters_match_mle": True,
+        }
+
+    if kind in {"DiagonalGaussianDistribution", "MultivariateGaussianDistribution"}:
+        try:
+            values = np.asarray(data, dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+        if values.ndim != 2 or values.shape[0] != n or not np.all(np.isfinite(values)):
+            return None
+        dim = values.shape[1]
+        if (kind == "DiagonalGaussianDistribution" and n < 2) or (
+            kind == "MultivariateGaussianDistribution" and n <= dim
+        ):
+            return None
+        covariance = np.atleast_2d(np.cov(values, rowvar=False, ddof=0))
+        if kind == "DiagonalGaussianDistribution":
+            minimum = float(np.min(np.diag(covariance)))
+            if (
+                not minimum > 0.0
+                or not np.allclose(np.asarray(obj.mu), np.mean(values, axis=0), rtol=1e-7, atol=1e-10)
+                or not np.allclose(np.asarray(obj.covar), np.diag(covariance), rtol=1e-7, atol=1e-10)
+            ):
+                return None
+            return {
+                "n": n,
+                "dimension": dim,
+                "minimum_empirical_variance": minimum,
+                "parameters_match_mle": True,
+            }
+        # Full-covariance fits are regularized by the estimator. Without a declared
+        # regularized objective they cannot be certified as the exact Gaussian MLE.
+        return None
+
+    if kind == "InhomogeneousPoissonProcessDistribution":
+        try:
+            counts = np.zeros(obj.num_bins, dtype=np.int64)
+            for realization in data:
+                times = np.asarray(realization, dtype=np.float64)
+                if times.ndim != 1 or not np.all(np.isfinite(times)):
+                    return None
+                if np.any(times < obj.edges[0]) or np.any(times > obj.edges[-1]):
+                    return None
+                counts += np.histogram(times, bins=obj.edges)[0]
+            exposure = len(data) * np.asarray(obj.widths, dtype=np.float64)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        expected = counts / exposure
+        if not np.all(exposure > 0.0) or not np.allclose(obj.rates, expected, rtol=1e-7, atol=1e-10):
+            return None
+        return {
+            "n_realizations": n,
+            "minimum_bin_exposure": float(np.min(exposure)),
+            "bin_counts": counts.tolist(),
+            "parameters_match_mle": True,
+        }
+
+    if kind == "ContinuousTimeMarkovChainDistribution":
+        try:
+            from mixle.stats.processes.ctmc import _trajectory_stats
+
+            dwell = np.zeros(obj.num_states, dtype=np.float64)
+            transitions = np.zeros((obj.num_states, obj.num_states), dtype=np.float64)
+            for trajectory in data:
+                count, exposure = _trajectory_stats(trajectory, obj.num_states)
+                transitions += count
+                dwell += exposure
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not np.all(np.isfinite(dwell)) or not np.all(dwell > 0.0):
+            return None
+        expected = transitions / dwell[:, None]
+        np.fill_diagonal(expected, 0.0)
+        if not np.allclose(obj.rates, expected, rtol=1e-7, atol=1e-10):
+            return None
+        return {
+            "n_trajectories": n,
+            "minimum_state_exposure": float(np.min(dwell)),
+            "transition_count": int(np.sum(transitions)),
+            "parameters_match_mle": True,
+        }
+
+    if kind == "BirthDeathSamplingDistribution":
+        try:
+            from mixle.stats.processes.birth_death import _trajectory_stats
+
+            statistics = [_trajectory_stats(trajectory) for trajectory in data]
+            exposure = float(sum(item[3] for item in statistics))
+            counts = np.sum(np.asarray([item[:3] for item in statistics], dtype=np.float64), axis=0)
+        except (TypeError, ValueError):
+            return None
+        fitted = np.asarray([obj.birth_rate, obj.death_rate, obj.sampling_rate], dtype=np.float64)
+        if (
+            not np.isfinite(exposure)
+            or not exposure > 0.0
+            or not np.allclose(fitted, counts / exposure, rtol=1e-7, atol=1e-10)
+        ):
+            return None
+        return {"n_trajectories": n, "population_exposure": exposure, "parameters_match_mle": True}
+    return None
+
+
+def _linear_evidence(factor: Any, columns: list[list[Any]]) -> dict[str, Any] | None:
+    import numpy as np
+
+    try:
+        design = np.asarray(factor._design(columns), dtype=np.float64)
+        response = np.asarray(columns[factor.child], dtype=np.float64)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if (
+        design.ndim != 2
+        or design.shape[0] <= design.shape[1]
+        or not np.all(np.isfinite(design))
+        or not np.all(np.isfinite(response))
+        or np.linalg.matrix_rank(design) != design.shape[1]
+    ):
+        return None
+    expected_coef, *_ = np.linalg.lstsq(design, response, rcond=None)
+    if not np.allclose(np.asarray(factor.coef), expected_coef, rtol=1e-7, atol=1e-10):
+        return None
+    residual = response - design @ expected_coef
+    residual_measure = float(np.var(residual))
+    if not residual_measure > 0.0 or not np.isclose(float(factor.sigma) ** 2, residual_measure, rtol=1e-7, atol=1e-10):
+        return None
+    return {
+        "n": int(design.shape[0]),
+        "design_columns": int(design.shape[1]),
+        "design_rank": int(np.linalg.matrix_rank(design)),
+        "minimum_residual_variance": residual_measure,
+    }
+
+
+def verify_estimation_conditions(model: Any, data: Iterable[Any]) -> list[VerificationReceipt]:
+    """Check data-dependent proof obligations for supported analytic estimators.
+
+    Unsupported or iterative estimators produce no receipt rather than a
+    guessed guarantee. The returned receipts can be passed to :func:`certify`.
+    """
+    rows = list(data)
+    if not rows:
+        return []
+    blocks: list[BlockPlan] = []
+    _walk(model, "", blocks)
+    by_name = {block.name: block for block in blocks}
+    for block in blocks:
+        block.candidate_guarantee = block.guarantee
+        block.proof_obligations = _proof_obligations(block)
+    receipts: list[VerificationReceipt] = []
+
+    def add_leaf(obj: Any, values: Sequence[Any], name: str) -> None:
+        block = by_name.get(name)
+        if block is None or block.candidate_guarantee < Guarantee.GLOBAL:
+            return
+        evidence = _leaf_evidence(obj, values)
+        if evidence is not None:
+            receipts.append(_receipt_for(block, block.candidate_guarantee, evidence))
+
+    if isinstance(getattr(model, "dists", None), (list, tuple)):
+        for index, child in enumerate(model.dists):
+            try:
+                values = [row[index] for row in rows]
+            except (IndexError, TypeError):
+                continue
+            add_leaf(child, values, f"field[{index}]")
+        return receipts
+
+    if hasattr(model, "factors") and hasattr(model, "edges"):
+        try:
+            columns = [[row[index] for row in rows] for index in range(len(rows[0]))]
+        except (IndexError, TypeError):
+            return receipts
+        for factor in model.factors:
+            name = f"node[{factor.child}]"
+            block = by_name[name]
+            kind = type(factor).__name__
+            if kind == "_MarginalFactor":
+                add_leaf(factor.dist, columns[factor.child], name)
+            elif kind == "_LinearGaussianFactor":
+                evidence = _linear_evidence(factor, columns)
+                if evidence:
+                    receipts.append(_receipt_for(block, block.candidate_guarantee, evidence))
+            # Vector fits add an undeclared covariance ridge; conditional tables
+            # cannot establish unobserved parent cells from the fitted object;
+            # GLMs require convergence/separation evidence. All remain unverified.
+        return receipts
+
+    # Responsibilities or latent assignments are required to verify mixture component M-steps.
+    if isinstance(getattr(model, "components", None), (list, tuple)):
+        return receipts
+
+    name = blocks[0].name if blocks else type(model).__name__
+    add_leaf(model, rows, name)
+    return receipts
+
+
+def _prepare_blocks(model: Any) -> list[BlockPlan]:
+    blocks: list[BlockPlan] = []
+    _walk(model, "", blocks)
+    if not blocks:
+        blocks.append(_classify_leaf(model, type(model).__name__))
+    for block in blocks:
+        block.candidate_guarantee = block.guarantee
+        block.proof_obligations = _proof_obligations(block)
+        if block.guarantee > Guarantee.HEURISTIC:
+            block.guarantee = Guarantee.UNVERIFIED
+    return blocks
+
+
+def certify(
+    model: Any,
+    *,
+    data: Iterable[Any] | None = None,
+    receipts: Iterable[VerificationReceipt] = (),
+    escape_tested: bool = False,
+    penalized: str | bool = False,
+) -> EstimationCertificate:
     """Return the :class:`EstimationCertificate` for a fitted model (or distribution prototype).
 
-    Walks the model's block structure and classifies each block's estimation method + guarantee from
-    its capability signals -- no fitting is done here, only inspection. Pass ``escape_tested=True``
-    when the fit ran saddle-escape restarts (:meth:`mixle.Model.fit` sets this automatically), which
-    upgrades EM blocks from ``STATIONARY`` to ``STATIONARY_ESCAPE_TESTED``.
+    Model structure supplies only a candidate guarantee. ``data`` is checked by
+    :func:`verify_estimation_conditions`; additional optimizer evidence may be
+    supplied as structured ``receipts``. A bare ``escape_tested=True`` is
+    rejected because a caller assertion is not verification evidence.
 
     Pass ``penalized`` (a reason string, or True) when the fit optimized a penalized objective -- soft
     constraints, conservation/PINN residual factors, potentials (E2). The optimum is then of the
     penalized surrogate, not the likelihood, so no block may claim more than STATIONARY however clean
     its own solver is: every stronger block is downgraded with the penalty named in its reason.
     """
-    blocks: list[BlockPlan] = []
-    _walk(model, "", blocks, escape_tested)
-    if not blocks:  # nothing structural detected -> treat the whole object as one leaf
-        blocks.append(_classify_leaf(model, type(model).__name__))
+    if escape_tested:
+        raise ValueError("escape_tested=True is not evidence; supply a VerificationReceipt")
+    blocks = _prepare_blocks(model)
     if penalized:
         why = penalized if isinstance(penalized, str) else "soft-constraint / residual penalty"
         for b in blocks:
-            if b.guarantee > Guarantee.STATIONARY:
-                b.guarantee = Guarantee.STATIONARY
-                b.reason += (
-                    f" [DOWNGRADED: penalized objective ({why}) -- optimum of the surrogate, not the likelihood]"
-                )
-    aggregate = min((b.guarantee for b in blocks), default=Guarantee.HEURISTIC)
-    return EstimationCertificate(guarantee=aggregate, blocks=blocks, escape_tested=escape_tested)
+            if b.candidate_guarantee > Guarantee.STATIONARY:
+                b.candidate_guarantee = Guarantee.STATIONARY
+                b.proof_obligations = _proof_obligations(b)
+                b.reason += f" [CANDIDATE CAPPED: penalized objective ({why}) -- optimum concerns the surrogate]"
+    supplied = list(receipts)
+    if data is not None:
+        supplied.extend(verify_estimation_conditions(model, data))
+    by_name = {block.name: block for block in blocks}
+    for receipt in supplied:
+        if not isinstance(receipt, VerificationReceipt):
+            raise TypeError("receipts must contain VerificationReceipt instances")
+        block = by_name.get(receipt.block)
+        if block is None:
+            raise ValueError(f"verification receipt names unknown block {receipt.block!r}")
+        established = min(receipt.guarantee, block.candidate_guarantee)
+        required = {
+            obligation.check for obligation in block.proof_obligations if obligation.required_for <= established
+        }
+        if not required.issubset(receipt.checks):
+            continue
+        if established > block.guarantee:
+            block.guarantee = established
+            block.verified_checks = tuple(sorted(required))
+            block.receipt_ids = (receipt.receipt_id,)
+    aggregate = min((b.guarantee for b in blocks), default=Guarantee.UNVERIFIED)
+    mixture_blocks = [block for block in blocks if block.method == "em"]
+    escape_verified = bool(mixture_blocks) and all(
+        block.guarantee >= Guarantee.STATIONARY_ESCAPE_TESTED for block in mixture_blocks
+    )
+    return EstimationCertificate(guarantee=aggregate, blocks=blocks, escape_tested=escape_verified)
 
 
-def plan_estimation(model: Any, *, escape_tested: bool = False) -> EstimationCertificate:
-    """Alias for :func:`certify` -- the pre-fit planning view over a distribution prototype."""
-    return certify(model, escape_tested=escape_tested)
+def plan_estimation(model: Any) -> EstimationCertificate:
+    """Return a pre-fit plan whose guarantees remain explicitly unverified."""
+    return certify(model)
 
 
 @dataclass

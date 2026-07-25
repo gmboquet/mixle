@@ -221,10 +221,13 @@ from mixle.inference.planning import (
     EstimationCertificate,
     EstimationSchedule,
     Guarantee,
+    ProofObligation,
     SchedulePass,
+    VerificationReceipt,
     certify,
     plan_estimation,
     schedule,
+    verify_estimation_conditions,
 )
 from mixle.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
 
@@ -462,6 +465,9 @@ __all__ = [
     "EstimationCertificate",
     "BlockPlan",
     "Guarantee",
+    "ProofObligation",
+    "VerificationReceipt",
+    "verify_estimation_conditions",
     # uq() -- one verb, method auto-selected (Laplace / conformal / semantic entropy)
     "uq",
     "UQResult",

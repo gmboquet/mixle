@@ -88,7 +88,7 @@ def create(
         holdout = [rows[i] for i in hold_idx]
 
     model = optimize(fit_rows, out=None, max_its=max_its, structure=structure, rng=np.random.RandomState(seed))
-    cert = certify(model)
+    cert = certify(model, data=fit_rows)
 
     calibration = None
     if holdout is not None:

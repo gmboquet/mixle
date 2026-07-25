@@ -86,8 +86,9 @@ class CrossModalGraphTest(unittest.TestCase):
         # scores + certifies as the closed-form / convex graph it is (no gradient descent)
         enc = net.dist_to_encoder().seq_encode(test)
         self.assertTrue(np.isfinite(net.seq_log_density(enc)).all())
-        cert = certify(net)
-        self.assertGreaterEqual(cert.guarantee, Guarantee.GLOBAL)  # CLG/GLM/exp-family factors only
+        cert = certify(net, data=train)
+        self.assertEqual(cert.guarantee, Guarantee.UNVERIFIED)
+        self.assertTrue(all(block.candidate_guarantee >= Guarantee.GLOBAL for block in cert.blocks))
         self.assertEqual(cert.gradient_blocks, [])
 
 
