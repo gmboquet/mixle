@@ -253,6 +253,23 @@ def substrate_item_to_knowledge_dict(item: SubstrateItem, *, schema_uri: str | N
     }
 
 
+def _require_positive_int(value: Any, *, label: str) -> int:
+    """Validate ``value`` is a positive (>= 1), non-``bool`` ``int`` -- the shared contract for every
+    budget/count field in this module (:class:`ContextBudget`, :func:`compress_text`). A ``bool`` is
+    technically an ``int`` subtype in Python but is never a meaningful budget. Fractional, negative,
+    zero, non-finite-float, and non-numeric values previously passed through silently and only surfaced
+    as a confusing failure several calls downstream (MXR-080-0239, e.g. a ``ZeroDivisionError`` deep
+    inside assembly); this rejects them immediately, at the boundary, naming the actual mistake."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{label} must be an int, got {value!r} ({type(value).__name__})")
+    if value < 1:
+        raise ValueError(f"{label} must be >= 1, got {value!r}")
+    return value
+
+
+_VALID_SHAPES = frozenset({"passages", "brief", "features"})
+
+
 @dataclass
 class ContextBudget:
     """What a target can take -- the DeviceSpec of context. ``shape`` hints the rendering style."""
@@ -262,12 +279,15 @@ class ContextBudget:
     shape: str = "passages"  # 'passages' (LLM) | 'brief' (human) | 'features' (student)
 
     def __post_init__(self) -> None:
-        # Caught here, not where it would otherwise surface: assemble_context's compress=True path
-        # divides budget.max_chars by min(max_items, len(hits)), so max_items=0 is a ZeroDivisionError
-        # far from this, its actual cause -- and every other max_items use (packing loops, receiver
-        # profiles) presumes "at least one item" is a meaningful budget too.
-        if self.max_items < 1:
-            raise ValueError(f"ContextBudget.max_items must be >= 1, got {self.max_items!r}")
+        # Every max_chars/max_items use downstream (packing loops, the compress=True per-item division,
+        # receiver profiles) presumes a positive, finite, whole budget is a meaningful one -- validated
+        # here, at construction, rather than left to surface as a confusing failure (a ZeroDivisionError,
+        # or a rendering that silently exceeds the caller's declared hard budget) several calls away from
+        # its actual cause (MXR-080-0239).
+        _require_positive_int(self.max_chars, label="ContextBudget.max_chars")
+        _require_positive_int(self.max_items, label="ContextBudget.max_items")
+        if self.shape not in _VALID_SHAPES:
+            raise ValueError(f"ContextBudget.shape must be one of {sorted(_VALID_SHAPES)}, got {self.shape!r}")
 
 
 @dataclass
@@ -295,12 +315,7 @@ class ContextPacket:
 
     def render(self, *, header: bool = True) -> str:
         """The assembled context string the target consumes (respecting the budget shape)."""
-        head = f"# Context for: {self.task}\n" if header else ""
-        if self.budget.shape == "brief":
-            body = "\n".join(f"- {_one_line(t)}" for t in self.texts)
-        else:  # passages / features: full/compressed item surfaces, provenance-tagged
-            body = "\n\n".join(f"[{i.kind}:{i.id}] {t}" for i, t in zip(self.items, self.texts))
-        return head + body
+        return _render_body(self.task, self.items, self.texts, self.budget.shape, header=header)
 
     def preservation(self) -> list[float]:
         """Per item, the fraction of the task's query terms retained in the used text (1.0 = all kept).
@@ -455,9 +470,43 @@ def _one_line(text: str, limit: int = 160) -> str:
     return t if len(t) <= limit else t[: limit - 1] + "…"
 
 
-def _render_len(item: SubstrateItem, shape: str, text: str | None = None) -> int:
-    body = item.text if text is None else text
-    return len(_one_line(body)) if shape == "brief" else len(body) + len(item.kind) + len(item.id) + 6
+def _render_body(
+    task: str, items: Sequence[SubstrateItem], texts: Sequence[str], shape: str, *, header: bool = True
+) -> str:
+    """The exact string :meth:`ContextPacket.render` produces for ``(task, items, texts, shape)``.
+
+    Factored out so assembly can measure the TRUE final serialized length -- header, separators, and
+    provenance tags included -- of a candidate selection before committing to it, rather than an
+    estimate that can silently diverge from what :meth:`~ContextPacket.render` actually returns
+    (MXR-080-0239). ``items`` and ``texts`` must already be equal length; use ``strict=True`` zipping
+    so a caller error here fails loudly rather than quietly dropping evidence.
+    """
+    head = f"# Context for: {task}\n" if header else ""
+    if shape == "brief":
+        body = "\n".join(f"- {_one_line(t)}" for t in texts)
+    else:  # passages / features: full/compressed item surfaces, provenance-tagged
+        body = "\n\n".join(f"[{i.kind}:{i.id}] {t}" for i, t in zip(items, texts, strict=True))
+    return head + body
+
+
+_ELLIPSIS = "…"
+
+
+def _truncate_to_budget(text: str, max_chars: int) -> str:
+    """Hard-truncate ``text`` so its length is guaranteed ``<= max_chars`` (``max_chars >= 0``),
+    appending an ellipsis to mark the cut when ``max_chars`` leaves room for one.
+
+    Replaces the previous ``text[: max(max_chars - 1, 1)] + "…"`` pattern, which floored the kept
+    prefix at 1 character even when the budget had no room for it: with ``max_chars=1`` it returned 2
+    characters (1 kept + the ellipsis), and with ``max_chars=0`` it still returned those same 2
+    characters -- both silently over budget (MXR-080-0239). Here, ``max_chars=1`` spends the entire
+    budget on the ellipsis itself ("…", length 1); ``max_chars=0`` returns "" (length 0), the only
+    string that fits.
+    """
+    if len(text) <= max_chars:
+        return text
+    keep = max(max_chars - len(_ELLIPSIS), 0)
+    return text[:keep] + (_ELLIPSIS if keep < max_chars else "")
 
 
 def _sentences(text: str) -> list[str]:
@@ -502,12 +551,16 @@ def _compress(text: str, task: str, max_chars: int) -> str:
 
     Deterministic and torch-free -- sentences are ranked by query-token overlap, the top ones packed
     until ``max_chars``, then re-emitted in their original order so the summary reads coherently.
+    ``max_chars`` must be a positive int (MXR-080-0239); the returned string's length is always
+    ``<= max_chars`` -- see :func:`_truncate_to_budget` for the exact-fit guarantee, including at the
+    tightest budgets, that the previous ``text[: max(max_chars - 1, 1)] + "…"`` pattern did not provide.
     """
+    _require_positive_int(max_chars, label="max_chars")
     if len(text) <= max_chars:
         return text
     sents = _sentences(text)
     if len(sents) <= 1:
-        return text[: max(max_chars - 1, 1)] + "…"
+        return _truncate_to_budget(text, max_chars)
     q = _q_tokens(task)
     scored = sorted(
         range(len(sents)),
@@ -523,13 +576,10 @@ def _compress(text: str, task: str, max_chars: int) -> str:
         used += add
     summary = " ".join(sents[i] for i in sorted(keep))
     if not summary:
-        return text[: max(max_chars - 1, 1)] + "…"
-    if len(summary) > max_chars:
-        # the "always keep >= 1 sentence" fallback above never caps that first sentence to
-        # max_chars -- when it alone exceeds the budget, truncate rather than returning a summary
-        # far larger than requested.
-        return summary[: max(max_chars - 1, 1)] + "…"
-    return summary
+        return _truncate_to_budget(text, max_chars)
+    # the "always keep >= 1 sentence" loop above never caps that first sentence to max_chars -- when it
+    # alone exceeds the budget, truncate rather than returning a summary larger than requested.
+    return _truncate_to_budget(summary, max_chars)
 
 
 def assemble_context(
@@ -545,54 +595,88 @@ def assemble_context(
     """Assemble the best-affordable :class:`ContextPacket` for ``task`` from ``substrate``.
 
     Retrieves relevant items (:meth:`Substrate.search`), then packs them in descending relevance until
-    the character budget or item cap is reached -- always keeping at least the single most relevant
-    item so a small budget still yields something. With ``compress=True``, an
-    item too large to fit whole is extractively summarized to its query-relevant
-    sentences instead of dropped; ``packet.preservation()`` reports what was
-    kept. Emits a ``context`` event when telemetry is supplied.
+    the character budget or item cap is reached. The packet's default rendering -- header, separators,
+    provenance tags, and all -- is GUARANTEED to fit ``budget.max_chars``: every candidate is checked
+    against its actual rendered length before being kept, not an estimate that can silently diverge
+    from what :meth:`ContextPacket.render` later returns (MXR-080-0239). When even the single most
+    relevant item does not fit whole, its text is shrunk instead of dropped -- extractively with
+    ``compress=True``, by hard truncation otherwise -- so a small-but-feasible budget still yields
+    something, exactly as before, except the result now genuinely fits rather than silently overflowing.
+
+    ``budget.max_chars`` must be enough to hold at least the empty rendering for ``task`` (the header
+    alone); if it cannot, this raises immediately rather than doing retrieval work for a budget no
+    selection could ever satisfy.
+
+    With ``compress=True``, items too large to fit whole are extractively summarized to their
+    query-relevant sentences instead of dropped; ``packet.preservation()`` reports what was kept.
+    Emits a ``context`` event when telemetry is supplied.
     """
     budget = budget or ContextBudget()
+
+    empty_render_len = len(_render_body(task, [], [], budget.shape, header=True))
+    if empty_render_len > budget.max_chars:
+        raise ValueError(
+            f"ContextBudget.max_chars={budget.max_chars} cannot fit even an empty context for this task "
+            f"(the header alone renders to {empty_render_len} characters); use a larger max_chars or a "
+            "shorter task string"
+        )
+
     hits = substrate.search(task, k=max(budget.max_items * 2, 8), kind=kind, scope=scope)
 
     selected: list[SubstrateItem] = []
     scores: list[float] = []
     texts: list[str] = []
-    used = 0
-    overhead = 0 if budget.shape == "brief" else 24  # per-item provenance-tag overhead estimate
+    # A per-item overhead ESTIMATE, used only to divide budget.max_chars fairly across sources when
+    # compressing below -- not the fit guarantee itself, which every candidate is checked against via
+    # its actual _render_body length before being kept.
+    overhead = 0 if budget.shape == "brief" else 24
 
     if compress and hits:
         # give each of up to max_items sources a fair share of the budget and summarize each to fit,
         # so several relevant sources are covered instead of one full document crowding out the rest.
+        # (No artificial floor on that share: a genuinely tight overall budget means a genuinely tight
+        # per-item one -- MXR-080-0239. An item whose fair share leaves no room is simply skipped.)
         n_target = min(budget.max_items, len(hits))
-        per_item = max(budget.max_chars // n_target - overhead, 40)
+        per_item = budget.max_chars // n_target - overhead
         for item, score in hits[:n_target]:
+            if per_item < 1:
+                continue
             summary = _compress(item.text, task, per_item)
-            piece = _render_len(item, budget.shape, text=summary)
-            if selected and used + piece > budget.max_chars:
+            trial_items, trial_texts = [*selected, item], [*texts, summary]
+            if len(_render_body(task, trial_items, trial_texts, budget.shape)) > budget.max_chars:
                 break
-            selected.append(item)
+            selected, texts = trial_items, trial_texts
             scores.append(score)
-            texts.append(summary)
-            used += piece
     else:
         for item, score in hits:
-            piece = _render_len(item, budget.shape)
-            if selected and (used + piece > budget.max_chars or len(selected) >= budget.max_items):
+            if len(selected) >= budget.max_items:
                 break
-            selected.append(item)
+            trial_items, trial_texts = [*selected, item], [*texts, item.text]
+            if len(_render_body(task, trial_items, trial_texts, budget.shape)) > budget.max_chars:
+                break
+            selected, texts = trial_items, trial_texts
             scores.append(score)
-            texts.append(item.text)
-            used += piece
 
+    if not selected and hits:
+        # a small-but-feasible budget still yields the single most relevant item, shrunk to genuinely
+        # fit -- never the full (possibly overflowing) text, and never nothing when something can fit.
+        item, score = hits[0]
+        item_overhead = len(_render_body(task, [item], [""], budget.shape))
+        available = budget.max_chars - item_overhead
+        if available > 0:
+            source = _compress(item.text, task, available) if compress and len(item.text) > available else item.text
+            selected, scores, texts = [item], [score], [_truncate_to_budget(source, available)]
+
+    final_render = _render_body(task, selected, texts, budget.shape)
     packet = ContextPacket(
         task=task,
         items=selected,
         scores=scores,
         budget=budget,
-        used_chars=used,
+        used_chars=len(final_render),
         n_candidates=len(hits),
         texts=texts,
-        compressed=compress and any(len(t) < len(i.text) for i, t in zip(selected, texts)),
+        compressed=compress and any(len(t) < len(i.text) for i, t in zip(selected, texts, strict=True)),
     )
     _emit(telemetry, packet)
     return packet
@@ -600,8 +684,10 @@ def assemble_context(
 
 def compress_text(text: str, task: str, max_chars: int) -> str:
     """Extractive, torch-free summary of ``text`` keeping the sentences most relevant to ``task``,
-    within ``max_chars`` (the standalone compressor used by :func:`assemble_context` with ``compress=True``)."""
-    return _compress(text, task, int(max_chars))
+    within ``max_chars`` (the standalone compressor used by :func:`assemble_context` with
+    ``compress=True``). ``max_chars`` must be a positive int -- raises otherwise; the returned string's
+    length is always ``<= max_chars`` (MXR-080-0239)."""
+    return _compress(text, task, max_chars)
 
 
 @dataclass
