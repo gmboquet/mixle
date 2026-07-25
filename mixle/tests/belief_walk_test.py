@@ -26,6 +26,7 @@ except ImportError:
 
 from mixle.reason.belief_walk import HopTransport, belief_walk, coverage_by_hop_count  # noqa: E402
 from mixle.reason.cycle_consistency import fit_cycle_transport  # noqa: E402
+from mixle.reason.transport_edge import PremiseReceipt, PremiseStatus  # noqa: E402
 
 A_COEF = 0.8
 NOISE_STD = 0.5
@@ -48,7 +49,15 @@ if _HAS_TORCH:
     _x0_train = _rng.normal(0, 1.0, size=(2000, 1))
     _x1_train = _ar1_step(_x0_train, _rng, 2000)
     _HOP_FIT = fit_cycle_transport(_x0_train, _x1_train, k=1, seed=0, max_its=25)
-    _HOP = HopTransport("ar1_step", _HOP_FIT, premise_passed=True)
+    _RECEIPT = PremiseReceipt(
+        edge_name="ar1_step",
+        verifier="analytic-ar1-fixture@1",
+        dataset_digest=f"sha256:{'0' * 64}",
+        metric="analytic-linear-gaussian-calibration",
+        evaluated_at="2026-07-25T00:00:00+00:00",
+        status=PremiseStatus.PASS,
+    )
+    _HOP = HopTransport("ar1_step", _HOP_FIT, _RECEIPT, input_dim=1, output_dim=1)
 
     _rng2 = np.random.RandomState(1)
     _n_test = 200
@@ -96,7 +105,15 @@ class CalibrationByHopCountTest(unittest.TestCase):
             )
 
     def test_refuses_to_compose_an_unverified_hop(self):
-        bad_hop = HopTransport("unverified", _HOP.fit, premise_passed=False)
+        failed_receipt = PremiseReceipt(
+            edge_name="unverified",
+            verifier="analytic-ar1-fixture@1",
+            dataset_digest=f"sha256:{'0' * 64}",
+            metric="analytic-linear-gaussian-calibration",
+            evaluated_at="2026-07-25T00:00:00+00:00",
+            status=PremiseStatus.FAIL,
+        )
+        bad_hop = HopTransport("unverified", _HOP.fit, failed_receipt, input_dim=1, output_dim=1)
         with self.assertRaises(ValueError):
             belief_walk([_HOP, bad_hop], 0.0)
 

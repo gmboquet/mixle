@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+from scipy.stats import norm
 
 from mixle.reason.belief_walk import HopTransport, belief_walk, coverage_by_hop_count
 from mixle.reason.cycle_consistency import cycle_inconsistency, fit_cycle_transport
@@ -89,6 +90,21 @@ def _frontier_baseline(gravity_reading: np.ndarray) -> np.ndarray:
     return _GRAVITY_TO_DENSITY * _DENSITY_TO_GRADE * gravity_reading
 
 
+def _binary_decision_projection_error(components, weights, merged) -> float:
+    """Bound the changed probability of crossing the scout's zero threshold."""
+
+    def positive_probability(component) -> float:
+        mean = float(np.asarray(component.mu).reshape(-1)[0])
+        if hasattr(component, "covar"):
+            variance = float(np.asarray(component.covar)[0, 0])
+        else:
+            variance = float(component.sigma2)
+        return float(norm.cdf(mean / np.sqrt(variance)))
+
+    original = float(sum(float(weight) * positive_probability(component) for weight, component in zip(weights, components)))
+    return abs(original - positive_probability(merged))
+
+
 def run_anchor_harness(*, n_train: int = 2000, n_test: int = 200, seed: int = 0) -> AnchorHarnessReport:
     """Run the cross-modal harness and return the measured report.
 
@@ -123,8 +139,8 @@ def run_anchor_harness(*, n_train: int = 2000, n_test: int = 200, seed: int = 0)
     hop1_verdict = verify_edge_transport("gravity_to_density", hop1_fit.sampler(seed=seed), density_true, gravity_test)
     hop2_verdict = verify_edge_transport("density_to_grade", hop2_fit.sampler(seed=seed + 1), grade_true, density_true)
     hops = [
-        HopTransport("gravity_to_density", hop1_fit, premise_passed=hop1_verdict.usable),
-        HopTransport("density_to_grade", hop2_fit, premise_passed=hop2_verdict.usable),
+        HopTransport("gravity_to_density", hop1_fit, hop1_verdict.receipt, input_dim=1, output_dim=1),
+        HopTransport("density_to_grade", hop2_fit, hop2_verdict.receipt, input_dim=1, output_dim=1),
     ]
 
     # Belief walk composing the two verified hops.
@@ -158,7 +174,12 @@ def run_anchor_harness(*, n_train: int = 2000, n_test: int = 200, seed: int = 0)
     grade_belief = GaussianMixtureDistribution(mu=grade_tier_means, sig2=grade_tier_cov, w=grade_tier_w)
 
     driller_task = TaskReadout("exact_tier", lambda mean: round(float(mean[0]), 1))
-    scout_task = TaskReadout("worth_drilling", lambda mean: bool(mean[0] > 0.0))
+    scout_task = TaskReadout(
+        "worth_drilling",
+        lambda mean: bool(mean[0] > 0.0),
+        projection_error=_binary_decision_projection_error,
+        max_projection_error=0.1,
+    )
 
     driller_view = task_sufficient_projection(grade_belief, driller_task)
     scout_view = task_sufficient_projection(grade_belief, scout_task)

@@ -69,10 +69,10 @@ class AnchorHarnessTest(unittest.TestCase):
         self.assertEqual(r1.walk_mae, r2.walk_mae)
 
     def test_premise_check_is_real_not_assumed(self):
-        """CARD F2-a's contract: a hop's premise_passed must be a COMPUTED verdict, never hardcoded
+        """CARD F2-a's contract: a hop's premise receipt must be a computed verdict, never hardcoded
         True. Too little training data to calibrate must make the harness refuse to compose the hops
         (belief_walk's own guard), not silently produce a full report anyway."""
-        with self.assertRaisesRegex(ValueError, "did not pass their F2 premise check"):
+        with self.assertRaisesRegex(ValueError, "lack an affirmative premise receipt"):
             run_anchor_harness(n_train=8, n_test=20, seed=0)
 
 
