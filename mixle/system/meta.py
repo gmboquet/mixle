@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from mixle.system.core import Query, System
 from mixle.system.scorecard import RegressionReport, SystemScorecard, detect_regression, evaluate
 
+__all__ = ["ImprovementOption", "MetaImprovementReport", "improve_by_regret"]
+
 
 @dataclass
 class ImprovementOption:

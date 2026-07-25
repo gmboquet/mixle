@@ -10,7 +10,9 @@ fingerprint (records are hashed independently and combined commutatively).
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping
+import itertools
+from collections.abc import Iterable, Mapping, Sized
+from copy import copy
 from typing import Any
 
 import numpy as np
@@ -104,15 +106,12 @@ def model_hash(model: Any) -> str:
     ensure_pysp_serialization_registry()
     # a fitted model may carry a non-serializable provenance header (attached post-fit); the fingerprint is
     # of the parameters, so detach it for the canonical serialization (mirrors Registry.register).
-    attached = getattr(model, "header", None)
     had_attr = hasattr(model, "__dict__") and "header" in vars(model)
+    subject = model
     if had_attr:
-        del model.header
-    try:
-        payload = to_serializable(model)
-    finally:
-        if had_attr:
-            model.header = attached
+        subject = copy(model)
+        vars(subject).pop("header", None)
+    payload = to_serializable(subject)
     return hashlib.sha256(_canonical(payload)).hexdigest()
 
 
@@ -129,18 +128,33 @@ def dataset_hash(data: Any, *, sort: bool = False, max_records: int | None = Non
     hashes commutatively for an order-insensitive fingerprint. ``max_records`` truncates (the count *and*
     whether truncation actually happened are both mixed in, so a hash of a truncated prefix never collides
     with a hash of a genuinely complete dataset of that same visible length)."""
+    if isinstance(max_records, bool) or (
+        max_records is not None and (not isinstance(max_records, int) or max_records < 0)
+    ):
+        raise ValueError(f"max_records must be a non-negative integer or None, got {max_records!r}")
     recs = _records(data)
+    original = recs
+    if max_records is None:
+        bounded = recs
+        truncation_marker = b"#"
+    else:
+        bounded = itertools.islice(recs, max_records)
+        if isinstance(original, Sized):
+            truncation_marker = b"T" if len(original) > max_records else b"#"
+        else:
+            # An unsized iterable cannot prove whether an exactly-full prefix was complete without
+            # consuming a record that is not represented in the digest. ``P`` honestly identifies
+            # that bounded-prefix contract; a short prefix is corrected to complete after exhaustion.
+            truncation_marker = b"P"
     if sort:
         acc = 0
         n = 0
-        truncated = False
-        for i, r in enumerate(recs):
-            if max_records is not None and i >= max_records:
-                truncated = True
-                break
+        for r in bounded:
             d = int.from_bytes(hashlib.sha256(_canonical(r)).digest(), "big")
             acc = (acc + d) % (1 << 256)  # commutative -> order-insensitive
             n += 1
+        if max_records is not None and truncation_marker == b"P" and n < max_records:
+            truncation_marker = b"#"
         h = hashlib.sha256()
         h.update(b"sorted")
         h.update(acc.to_bytes(32, "big"))
@@ -148,18 +162,16 @@ def dataset_hash(data: Any, *, sort: bool = False, max_records: int | None = Non
         # hashed -- otherwise dataset_hash([1, 2, 3], max_records=2) and dataset_hash([1, 2]) hash the
         # same records with the same count and collide despite one being a truncated prefix of a larger
         # dataset and the other genuinely complete.
-        h.update(b"T" if truncated else b"#")
+        h.update(truncation_marker)
         h.update(str(n).encode())
         return h.hexdigest()
     h = hashlib.sha256()
     n = 0
-    truncated = False
-    for i, r in enumerate(recs):
-        if max_records is not None and i >= max_records:
-            truncated = True
-            break
+    for r in bounded:
         h.update(_canonical(r))  # self-delimiting (see _canonical) -- no inter-record separator needed
         n += 1
-    h.update(b"T" if truncated else b"#")  # see the sort=True branch above for why this isn't just b"#"
+    if max_records is not None and truncation_marker == b"P" and n < max_records:
+        truncation_marker = b"#"
+    h.update(truncation_marker)
     h.update(str(n).encode())
     return h.hexdigest()

@@ -34,6 +34,9 @@ def read_remote(
     **storage_options: Any,
 ):
     """Read a remote (``s3://`` / ``gcs://`` / ``hdfs://``) file by ``fmt`` via fsspec + the local reader."""
+    from mixle.data.sources.text_source import _validate_columns
+
+    columns = _validate_columns(columns)
     if fmt not in _BINARY and fmt not in _TEXT:
         # Validated upfront, against the same registry that decides open-mode below, rather than
         # falling through to this error deep inside the read (MXR-080-0065): every fmt this function
@@ -45,6 +48,23 @@ def read_remote(
 
         require("fsspec", "hadoop")
     from mixle.data.core import LazySource
+
+    if fmt in _BINARY and schema is None:
+        from mixle.data.sources.arrow_source import _require_arrow, _schema_from_arrow
+
+        _require_arrow()
+        with _fsspec.open(path, "rb", **storage_options) as fh:
+            if fmt == "parquet":
+                import pyarrow.parquet as pq
+
+                arrow_schema = pq.ParquetFile(fh).schema_arrow
+            else:
+                import pyarrow.ipc as ipc
+
+                with ipc.open_file(fh) as reader:
+                    arrow_schema = reader.schema
+        resolved_columns = list(arrow_schema.names) if columns is None else columns
+        schema = _schema_from_arrow(arrow_schema, resolved_columns)
 
     def factory():
         with _fsspec.open(path, "rb" if fmt in _BINARY else "rt", **storage_options) as fh:
@@ -93,7 +113,13 @@ def read_remote(
                 return picked[0] if len(picked) == 1 else tuple(picked)
 
             if fmt == "json":
-                return [_project(obj) for obj in json.load(tmp)]
-            return [_project(json.loads(line)) for line in tmp if line.strip()]
+                payload = json.load(tmp)
+                if not isinstance(payload, list) or any(not isinstance(obj, dict) for obj in payload):
+                    raise ValueError("JSON data must be a top-level array of record objects")
+                return [_project(obj) for obj in payload]
+            payload = [json.loads(line) for line in tmp if line.strip()]
+            if any(not isinstance(obj, dict) for obj in payload):
+                raise ValueError("each JSONL record must be an object")
+            return [_project(obj) for obj in payload]
 
     return LazySource(factory, structure, schema)

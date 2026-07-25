@@ -339,14 +339,15 @@ class EncodedIoTest(unittest.TestCase):
             self.assertEqual(len(digest), 64)
 
     def test_corruption_detected(self):
-        enc = GaussianDistribution(0, 1).dist_to_encoder().seq_encode([1.0, 2.0])
+        encoder = GaussianDistribution(0, 1).dist_to_encoder()
+        enc = encoder.seq_encode([1.0, 2.0])
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "enc.pspenc")
-            save_encoded(enc, path)
+            save_encoded(enc, path, encoder=encoder)
             with open(path, "ab") as f:
                 f.write(b"corrupt")
             with self.assertRaises(ValueError):
-                load_encoded(path)
+                load_encoded(path, encoder=encoder)
 
     def test_header_is_json_not_pickle(self):
         # The header carrying the digest must be plain JSON: parsing it must never itself be able to
@@ -360,26 +361,31 @@ class EncodedIoTest(unittest.TestCase):
             with open(path, "rb") as f:
                 magic = f.read(8)
                 header_line = f.readline()
-            self.assertEqual(magic, b"PSPENC2\n")
+            self.assertEqual(magic, b"PSPENC3\n")
             meta = json.loads(header_line)  # raises if this were pickle bytes, not JSON
             self.assertEqual(len(meta["digest"]), 64)
-            self.assertIn("Gaussian", meta["encoder"])
+            self.assertIn("Gaussian", meta["encoder"]["signature"])
 
     def test_header_digest_mismatch_rejected(self):
         # A header whose digest does not match the body must be rejected, including when the body
         # itself is well-formed pickle -- proving the check gates on the digest, not on a parse error.
-        enc = GaussianDistribution(0, 1).dist_to_encoder().seq_encode([1.0, 2.0])
+        import json
+
+        encoder = GaussianDistribution(0, 1).dist_to_encoder()
+        enc = encoder.seq_encode([1.0, 2.0])
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "enc.pspenc")
-            save_encoded(enc, path)
+            save_encoded(enc, path, encoder=encoder)
             with open(path, "rb") as f:
                 raw = f.read()
             nl = raw.index(b"\n", 8)
-            tampered = raw[: nl + 1].replace(b'"digest": "', b'"digest": "0000000000000000') + raw[nl + 1 :]
+            meta = json.loads(raw[8:nl])
+            meta["digest"] = "0" * 64
+            tampered = raw[:8] + json.dumps(meta, separators=(",", ":")).encode() + b"\n" + raw[nl + 1 :]
             with open(path, "wb") as f:
                 f.write(tampered)
             with self.assertRaises(ValueError):
-                load_encoded(path)
+                load_encoded(path, encoder=encoder)
 
     def test_header_tampering_detected(self):
         # MXR-080-0052: the digest previously covered only the pickle body, so the header's

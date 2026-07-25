@@ -15,6 +15,7 @@ from mixle.data import (
     Real,
     Schema,
     Vector,
+    grouping_policy,
     partially_exchangeable,
 )
 from mixle.data.partition import num_chunks_for, partition_records
@@ -122,20 +123,20 @@ class StructureCapabilityTest(unittest.TestCase):
         hmm = st.HiddenMarkovModelDistribution([st.GaussianDistribution(0, 1)], [1.0], [[1.0]])
         self.assertEqual(supported_structures(hmm.estimator()), frozenset({"sequential"}))
 
-    def test_fit_warns_on_structure_mismatch_but_not_on_default(self):
-        import warnings
-
+    def test_fit_rejects_structure_mismatch_but_not_on_default(self):
         data = list(np.random.RandomState(0).randn(40))
         from mixle.inference.estimation import fit
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
+        with self.assertRaises(ValueError):
             fit(MaterializedSource(data, SEQUENTIAL), st.GaussianDistribution(0, 1).estimator(), max_its=2, out=None)
-            self.assertTrue(any("structure" in str(x.message) for x in w))  # footgun caught
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            fit(data, st.GaussianDistribution(0, 1).estimator(), max_its=2, out=None)  # bare list
-            self.assertFalse(any("structure" in str(x.message) for x in w))  # never on existing calls
+        fit(data, st.GaussianDistribution(0, 1).estimator(), max_its=2, out=None)  # bare list is unchanged
+
+    def test_callable_grouping_requires_stable_policy_identity(self):
+        with self.assertRaises(ValueError):
+            partially_exchangeable(lambda row: row[0])
+        structure = partially_exchangeable(grouping_policy("test.group", "1", lambda row: row[0]))
+        self.assertEqual(structure.group_key(("a", 1)), "a")
+        self.assertNotIn("0x", str(structure))
 
     def test_strict_mode_raises(self):
         from mixle.data.structure import check_model_structure
@@ -177,7 +178,10 @@ class StructureCapabilityTest(unittest.TestCase):
                 self.assertTrue(SampleStructure(kind=kind).strides_records)
 
         recs = [{"g": i % 4, "x": float(i)} for i in range(12)]
-        for label, by in (("string", "g"), ("callable", lambda r: r["g"])):
+        for label, by in (
+            ("string", "g"),
+            ("callable", grouping_policy("test.direct.group", "1", lambda r: r["g"])),
+        ):
             with self.subTest(by=label):
                 structure = SampleStructure(kind="partially_exchangeable", by=by)
                 self.assertFalse(structure.strides_records)

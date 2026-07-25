@@ -36,13 +36,15 @@ class GraphPairTupleVsListConsistencyTest(unittest.TestCase):
 
 
 class MaterializedSourceRequiresReiterableTest(unittest.TestCase):
-    def test_a_one_shot_generator_is_rejected_at_construction(self):
-        with self.assertRaises(TypeError):
-            MaterializedSource(x for x in [1, 2, 3])
+    def test_a_one_shot_generator_is_snapshotted_at_construction(self):
+        src = MaterializedSource(x for x in [1, 2, 3])
+        self.assertEqual(src.materialize(), [1, 2, 3])
+        self.assertEqual(src.materialize(), [1, 2, 3])
 
-    def test_as_source_rejects_a_one_shot_generator_too(self):
-        with self.assertRaises(TypeError):
-            as_source(x for x in [1, 2, 3])
+    def test_as_source_snapshots_a_one_shot_generator_too(self):
+        src = as_source(x for x in [1, 2, 3])
+        self.assertEqual(list(src.records()), [1, 2, 3])
+        self.assertEqual(list(src.records()), [1, 2, 3])
 
     def test_a_list_still_works(self):
         src = MaterializedSource([1, 2, 3])

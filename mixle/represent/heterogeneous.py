@@ -25,7 +25,10 @@ class ModalityEncoder:
     def __init__(self, segmenter: Any, embedding: Any) -> None:
         self.segmenter = segmenter
         self.embedding = embedding
-        self.dim = int(embedding.dim)
+        dim = embedding.dim
+        if isinstance(dim, (bool, np.bool_)) or not isinstance(dim, (int, np.integer)) or dim <= 0:
+            raise ValueError(f"embedding.dim must be a positive integer, got {dim!r}")
+        self.dim = int(dim)
 
     def encode(self, raw: Any) -> Any:
         """Torch tensor ``(n_units, dim)`` -- gradients flow to the embedding (and, via it, train the encoder)."""
@@ -48,6 +51,8 @@ class HeterogeneousEncoder:
     """A registry of per-modality encoders sharing one ``dim`` space, plus a learned modality-type embedding."""
 
     def __init__(self, dim: int) -> None:
+        if isinstance(dim, (bool, np.bool_)) or not isinstance(dim, (int, np.integer)) or dim <= 0:
+            raise ValueError(f"dim must be a positive integer, got {dim!r}")
         self.dim = int(dim)
         self.encoders: dict[str, ModalityEncoder] = {}
         self._modality_ids: dict[str, int] = {}
@@ -65,7 +70,13 @@ class HeterogeneousEncoder:
         genuinely new modality grows the tag embedding by one row, preserving already-learned rows for the
         modalities that were already registered.
         """
-        if int(encoder.dim) != self.dim:
+        if not isinstance(modality, str) or not modality:
+            raise ValueError("modality must be a non-empty string")
+        if (
+            isinstance(encoder.dim, (bool, np.bool_))
+            or not isinstance(encoder.dim, (int, np.integer))
+            or int(encoder.dim) != self.dim
+        ):
             raise ValueError(f"modality {modality!r} dim {encoder.dim} != shared dim {self.dim}")
         self.encoders[modality] = encoder
         is_new_modality = modality not in self._modality_ids
@@ -115,8 +126,19 @@ class HeterogeneousEncoder:
         mod_emb = self._modality_embed().module()
         for modality in self.encoders:  # registration order, independent of record's own key order
             vecs = self.encoders[modality].encode(record[modality])  # (n_units, dim)
+            if not isinstance(vecs, torch.Tensor):
+                raise TypeError(f"modality {modality!r} encoder must return a torch.Tensor")
+            if vecs.ndim != 2 or tuple(vecs.shape)[1:] != (self.dim,) or vecs.shape[0] == 0:
+                raise ValueError(
+                    f"modality {modality!r} encoder must return non-empty shape (n_units, {self.dim}), "
+                    f"got {tuple(vecs.shape)}"
+                )
+            if not vecs.is_floating_point() or not torch.isfinite(vecs).all():
+                raise ValueError(f"modality {modality!r} encoder output must be finite floating-point values")
             mid = self._modality_ids[modality]
-            vecs = vecs + mod_emb(torch.tensor(mid))[None, :]  # add the learned modality tag
+            mod_emb = mod_emb.to(vecs.device)
+            tag = mod_emb(torch.tensor(mid, device=vecs.device)).to(dtype=vecs.dtype)
+            vecs = vecs + tag[None, :]  # add the learned modality tag
             parts.append(vecs)
             tags.extend([mid] * vecs.shape[0])
         stream = torch.cat(parts, dim=0) if parts else torch.zeros((0, self.dim))

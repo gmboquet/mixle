@@ -17,6 +17,7 @@ from mixle.data.schema import (
     Count,
     Field,
     FieldType,
+    Integer,
     Nested,
     Optional,
     Real,
@@ -27,7 +28,15 @@ from mixle.data.schema import (
 )
 from mixle.data.sources import kinds as source_kinds
 from mixle.data.sources import open as open_source
-from mixle.data.structure import EXCHANGEABLE, IID, SEQUENTIAL, SampleStructure, partially_exchangeable
+from mixle.data.structure import (
+    EXCHANGEABLE,
+    IID,
+    SEQUENTIAL,
+    GroupingPolicy,
+    SampleStructure,
+    grouping_policy,
+    partially_exchangeable,
+)
 from mixle.data.validate import DataReport, check_dataset
 
 __all__ = [
@@ -47,6 +56,7 @@ __all__ = [
     "FieldType",
     "Real",
     "Count",
+    "Integer",
     "Categorical",
     "Boolean",
     "Vector",
@@ -56,10 +66,12 @@ __all__ = [
     "Nested",
     # sample structure
     "SampleStructure",
+    "GroupingPolicy",
     "IID",
     "EXCHANGEABLE",
     "SEQUENTIAL",
     "partially_exchangeable",
+    "grouping_policy",
     # reproducibility: hashing, validation, encoded-data serialization
     "dataset_hash",
     "model_hash",

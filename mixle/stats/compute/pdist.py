@@ -1002,6 +1002,8 @@ class ParameterEstimator(ABC, Generic[SS]):
     regularization configured on the estimator) to a new distribution.
     """
 
+    supported_sample_structures = frozenset({"iid", "exchangeable"})
+
     def to_dict(self) -> dict[str, Any]:
         """Return a safe JSON-compatible representation of this estimator."""
         from mixle.utils.serialization import to_serializable

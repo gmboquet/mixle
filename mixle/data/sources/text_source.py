@@ -15,6 +15,17 @@ from mixle.data.schema import Schema
 from mixle.data.structure import EXCHANGEABLE, SampleStructure
 
 
+def _validate_columns(columns: list[Any] | None) -> list[Any] | None:
+    if columns is None:
+        return None
+    resolved = list(columns)
+    if not resolved:
+        raise ValueError("columns must contain at least one unique field")
+    if len(set(resolved)) != len(resolved):
+        raise ValueError(f"columns must be unique, got {resolved!r}")
+    return resolved
+
+
 def _select(values: list[Any], columns: list[int] | None) -> Any:
     picked = values if columns is None else [values[i] for i in columns]
     return picked[0] if len(picked) == 1 else tuple(picked)
@@ -28,6 +39,7 @@ def read_csv(
     schema: Schema | None = None,
 ) -> LazySource:
     """Read a CSV file (header row required) into a lazy DataSource of scalar/tuple records."""
+    columns = _validate_columns(columns)
 
     def factory():
         with open(path, newline="") as fh:
@@ -48,6 +60,7 @@ def read_jsonl(
     schema: Schema | None = None,
 ) -> LazySource:
     """Read NDJSON / JSONL (one JSON object per line) into a lazy DataSource of dict/tuple records."""
+    columns = _validate_columns(columns)
 
     def factory():
         with open(path) as fh:
@@ -56,6 +69,8 @@ def read_jsonl(
                 if not line:
                     continue
                 obj = json.loads(line)
+                if not isinstance(obj, dict):
+                    raise ValueError("each JSONL record must be an object")
                 yield obj if columns is None else _select([obj[c] for c in columns], None)
 
     return LazySource(factory, structure, schema)
@@ -69,10 +84,16 @@ def read_json(
     schema: Schema | None = None,
 ) -> LazySource:
     """Read a JSON file holding an array of record objects into a lazy DataSource."""
+    columns = _validate_columns(columns)
 
     def factory():
         with open(path) as fh:
-            for obj in json.load(fh):
+            payload = json.load(fh)
+            if not isinstance(payload, list):
+                raise ValueError("JSON data must be a top-level array of record objects")
+            for obj in payload:
+                if not isinstance(obj, dict):
+                    raise ValueError("each JSON array record must be an object")
                 yield obj if columns is None else _select([obj[c] for c in columns], None)
 
     return LazySource(factory, structure, schema)

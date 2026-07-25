@@ -36,6 +36,9 @@ class ExchangeabilityReport:
 
     label: str  # 'exchangeable' | 'trend' | 'shift' | 'inconclusive'
     fields: list[dict[str, Any]] = field(default_factory=list)
+    n_examined: int = 0
+    max_records: int | None = None
+    bounded: bool = False
 
     @property
     def exchangeable(self) -> bool:
@@ -49,7 +52,14 @@ class ExchangeabilityReport:
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize the report to a JSON-compatible dictionary."""
-        return {"label": self.label, "exchangeable": self.exchangeable, "fields": self.fields}
+        return {
+            "label": self.label,
+            "exchangeable": self.exchangeable,
+            "fields": self.fields,
+            "n_examined": self.n_examined,
+            "max_records": self.max_records,
+            "bounded": self.bounded,
+        }
 
 
 def _numeric_columns(rows: list[Any]) -> dict[str, np.ndarray]:
@@ -111,7 +121,9 @@ def _halves_shift_pvalue(x: np.ndarray, *, n_perm: int, seed: int) -> tuple[floa
     return observed, hits / (n_perm + 1)
 
 
-def exchangeability_check(data: Any, *, alpha: float = 0.01, n_perm: int = 200, seed: int = 0) -> ExchangeabilityReport:
+def exchangeability_check(
+    data: Any, *, alpha: float = 0.01, n_perm: int = 200, seed: int = 0, max_records: int = 10_000
+) -> ExchangeabilityReport:
     """Test whether row ORDER carries information (see module docstring).
 
     ``alpha`` is deliberately strict (0.01): the check should flag clear violations, not manufacture
@@ -121,12 +133,35 @@ def exchangeability_check(data: Any, *, alpha: float = 0.01, n_perm: int = 200, 
     vacuous "exchangeable". A field containing SOME non-finite values is reported ``invalid`` and
     excluded from testing; any other, clean numeric field in the same record shape is still tested
     normally and can still produce a real verdict."""
-    rows = list(data)
+    import itertools
+
+    if isinstance(alpha, (bool, np.bool_)) or not isinstance(alpha, (int, float, np.integer, np.floating)):
+        raise ValueError(f"alpha must be a finite number in (0, 1), got {alpha!r}")
+    alpha = float(alpha)
+    if not np.isfinite(alpha) or not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be a finite number in (0, 1), got {alpha!r}")
+    if isinstance(n_perm, (bool, np.bool_)) or not isinstance(n_perm, (int, np.integer)) or n_perm < 1:
+        raise ValueError(f"n_perm must be a positive integer, got {n_perm!r}")
+    if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer)) or not 0 <= seed < 2**32:
+        raise ValueError(f"seed must be an integer in [0, 2**32), got {seed!r}")
+    if (
+        isinstance(max_records, (bool, np.bool_))
+        or not isinstance(max_records, (int, np.integer))
+        or max_records < 20
+    ):
+        raise ValueError(f"max_records must be an integer >= 20, got {max_records!r}")
+    source = data.records() if hasattr(data, "records") and callable(data.records) else data
+    rows = list(itertools.islice(source, int(max_records)))
+    receipt = {"n_examined": len(rows), "max_records": int(max_records), "bounded": len(rows) == max_records}
     if len(rows) < 20:
-        return ExchangeabilityReport(label="inconclusive", fields=[{"note": "n < 20: no power to test"}])
+        return ExchangeabilityReport(
+            label="inconclusive", fields=[{"note": "n < 20: no power to test"}], **receipt
+        )
     cols = _numeric_columns(rows)
     if not cols:
-        return ExchangeabilityReport(label="inconclusive", fields=[{"note": "no numeric fields to test"}])
+        return ExchangeabilityReport(
+            label="inconclusive", fields=[{"note": "no numeric fields to test"}], **receipt
+        )
 
     fields: list[dict[str, Any]] = []
     worst = "exchangeable"
@@ -165,4 +200,4 @@ def exchangeability_check(data: Any, *, alpha: float = 0.01, n_perm: int = 200, 
         )
         if verdict == "trend" or (verdict == "shift" and worst == "exchangeable"):
             worst = verdict
-    return ExchangeabilityReport(label=worst if tested_any else "inconclusive", fields=fields)
+    return ExchangeabilityReport(label=worst if tested_any else "inconclusive", fields=fields, **receipt)

@@ -43,9 +43,15 @@ def partition_records(records: Sequence[Any], structure: SampleStructure, n: int
             groups[key] = []
             order.append(key)
         groups[key].append(r)
+    # Deterministic longest-processing-time placement preserves whole groups while bounding the
+    # imbalance to the largest group. Encounter order breaks equal-size/equal-load ties.
     parts: list[list[Any]] = [[] for _ in range(n)]
-    for i, key in enumerate(order):
-        parts[i % n].extend(groups[key])
+    loads = [0] * n
+    ordered_groups = sorted(enumerate(order), key=lambda item: (-len(groups[item[1]]), item[0]))
+    for _, key in ordered_groups:
+        target = min(range(n), key=lambda i: (loads[i], i))
+        parts[target].extend(groups[key])
+        loads[target] += len(groups[key])
     return parts
 
 
@@ -82,4 +88,4 @@ def encode_partitions(
 ) -> list[tuple[int, Any]]:
     """Partition ``records`` by ``structure`` and ``encoder.seq_encode`` each part -> ``[(count, payload)]``."""
     n = num_chunks_for(len(records), num_chunks, chunk_size)
-    return [(len(part), encoder.seq_encode(part)) for part in partition_records(records, structure, n)]
+    return [(len(part), encoder.seq_encode(part)) for part in partition_records(records, structure, n) if part]

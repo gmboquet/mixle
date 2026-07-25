@@ -27,7 +27,7 @@ from mixle.data.partition import partition_records
 from mixle.data.schema import Field, Real, Schema
 from mixle.data.sources import sql_source
 from mixle.data.sources.sql_source import SqlCursorSource, read_sql
-from mixle.data.structure import EXCHANGEABLE, partially_exchangeable
+from mixle.data.structure import EXCHANGEABLE, grouping_policy, partially_exchangeable
 
 _HAS_SQLALCHEMY = getattr(sql_source, "_sa", None) is not None
 if _HAS_SQLALCHEMY:
@@ -354,7 +354,7 @@ class SqlCursorSourceGroupedStreamingTest(unittest.TestCase):
         self.addCleanup(os.unlink, path)
         # SQL rows are tuples, not dicts, so the group key is extracted positionally (row[0] == grp) --
         # a callable `by` is required for tuple rows regardless of this fix (see structure.group_key).
-        structure = partially_exchangeable(lambda row: row[0])
+        structure = partially_exchangeable(grouping_policy("test.sql.group", "1", lambda row: row[0]))
         src = read_sql(f"sqlite:///{path}", "SELECT grp, x FROM g", structure=structure, batch_size=2)
         encoder = _RecordingEncoder([])
 
@@ -375,7 +375,7 @@ class SqlCursorSourceGroupedStreamingTest(unittest.TestCase):
         raw.close()
         self.addCleanup(os.unlink, path)
 
-        structure = partially_exchangeable(lambda row: row[0])
+        structure = partially_exchangeable(grouping_policy("test.sql.group", "1", lambda row: row[0]))
         src = read_sql(f"sqlite:///{path}", "SELECT grp, x FROM g", structure=structure)
         with self.assertRaises(ValueError):
             src.encode(_RecordingEncoder([]), num_chunks=2)
@@ -383,7 +383,7 @@ class SqlCursorSourceGroupedStreamingTest(unittest.TestCase):
     def test_single_group_num_chunks_one(self) -> None:
         path, data = self._make_grouped_db([5])
         self.addCleanup(os.unlink, path)
-        structure = partially_exchangeable(lambda row: row[0])
+        structure = partially_exchangeable(grouping_policy("test.sql.group", "1", lambda row: row[0]))
         src = read_sql(f"sqlite:///{path}", "SELECT grp, x FROM g", structure=structure, batch_size=2)
         result = src.encode(_RecordingEncoder([]), num_chunks=1)
         self.assertEqual(sum(count for count, _ in result), 5)

@@ -27,6 +27,7 @@ from typing import Any, Protocol, runtime_checkable
 
 __all__ = [
     "CapabilityError",
+    "CapabilityUnavailable",
     "Conditionable",
     "Marginalizable",
     "LatentStructured",
@@ -73,6 +74,15 @@ __all__ = [
 
 class CapabilityError(TypeError):
     """Raised by :func:`require` when an object lacks a needed capability."""
+
+
+class CapabilityUnavailable(LookupError):
+    """Typed, intentional decline from a capability implementation.
+
+    Predicate implementations may raise this when the capability is genuinely unavailable. Other
+    exceptions are implementation defects and deliberately propagate instead of being converted into
+    a false "unsupported" answer.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -211,10 +221,9 @@ class Enumerable(PredicateCapability):
         """Return whether ``obj`` exposes a supported enumerator."""
         from mixle.enumeration.algorithms import supports_enumeration
 
-        try:
-            return bool(supports_enumeration(obj))
-        except Exception:  # noqa: BLE001
+        if not callable(getattr(obj, "enumerator", None)):
             return False
+        return bool(supports_enumeration(obj))
 
 
 class FiniteSupport(PredicateCapability):
@@ -226,10 +235,7 @@ class FiniteSupport(PredicateCapability):
         fn = getattr(obj, "support_size", None)
         if not callable(fn):
             return False
-        try:
-            n = fn()
-        except Exception:  # noqa: BLE001
-            return False
+        n = fn()
         return isinstance(n, int) and n >= 0
 
 
@@ -260,10 +266,7 @@ class Shardable(PredicateCapability):
         """Return whether ``obj`` declares a shardable decomposition axis."""
         from mixle.stats.compute.decomposition import decomposition_for
 
-        try:
-            return bool(decomposition_for(obj).is_shardable)
-        except Exception:  # noqa: BLE001
-            return False
+        return bool(decomposition_for(obj).is_shardable)
 
 
 class ExponentialFamily(PredicateCapability):
@@ -291,10 +294,7 @@ class ConjugateUpdatable(PredicateCapability):
         """Return whether ``obj`` has a registered closed-form conjugate update."""
         from mixle.stats.bayes.conjugate import is_conjugate_family
 
-        try:
-            return bool(is_conjugate_family(obj))
-        except Exception:  # noqa: BLE001
-            return False
+        return bool(is_conjugate_family(obj))
 
 
 class ExactDensity(PredicateCapability):
@@ -314,10 +314,7 @@ class ExactDensity(PredicateCapability):
         fn = getattr(obj, "density_semantics", None)
         if not callable(fn):
             return False
-        try:
-            return fn() is DensitySemantics.EXACT
-        except Exception:  # noqa: BLE001
-            return False
+        return fn() is DensitySemantics.EXACT
 
 
 class Neutral(PredicateCapability):
@@ -425,31 +422,7 @@ class Optimizable(PredicateCapability):
 # Capabilities that apply to distributions (iterated by ``capabilities(dist)``). EngineResidentEStep,
 # EncodedDataHandle, EMStrategy and the Transform/backend protocols apply to other object kinds and are
 # queried directly with ``supports(obj, Cap)`` rather than listed here.
-ALL_CAPABILITIES: tuple[type, ...] = (
-    Conditionable,
-    Marginalizable,
-    LatentStructured,
-    PosteriorPredictive,
-    Enumerable,
-    FiniteSupport,
-    RankableByIndex,
-    Shardable,
-    ExponentialFamily,
-    ConjugateUpdatable,
-    ExactDensity,
-    SetValued,
-    HasCDF,
-    HasMoments,
-    HasEntropy,
-    Discrete,
-    Continuous,
-    Fittable,
-    Optimizable,
-    SupportsBackendScoring,
-    SupportsBackendComponentScoring,
-    TemporalPointProcess,
-    Neutral,
-)
+ALL_CAPABILITIES: tuple[type, ...]
 
 # Capabilities a decomposable combinator inherits from ALL of its children (the capability algebra,
 # generalising ``intersect_engine_ready``). Exp-family / conditionable are intentionally absent: a
@@ -462,8 +435,13 @@ FACET_PRESERVING: tuple[type, ...] = (Enumerable, FiniteSupport, RankableByIndex
 # ---------------------------------------------------------------------------
 def supports(obj: Any, capability: type) -> bool:
     """Return whether ``obj`` provides ``capability`` (a Protocol or a PredicateCapability)."""
-    if isinstance(capability, type) and issubclass(capability, PredicateCapability):
-        return bool(capability.check(obj))
+    try:
+        if isinstance(capability, type) and issubclass(capability, PredicateCapability):
+            if isinstance(obj, type):
+                return False
+            return bool(capability.check(obj))
+    except CapabilityUnavailable:
+        return False
     return isinstance(obj, capability)
 
 
@@ -502,6 +480,8 @@ def top_k(dist: Any, k: int) -> list[tuple[Any, float]]:
     """
     from itertools import islice
 
+    if isinstance(k, bool) or not isinstance(k, int) or k < 0:
+        raise ValueError(f"k must be a non-negative integer, got {k!r}")
     require(dist, Enumerable, "top_k")
     return list(islice(dist.enumerator(), k))
 
@@ -695,6 +675,13 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "backend_seq_log_density()",
         "mixle.capability",
     ),
+    CapabilitySpec(
+        "SupportsBackendComponentScoring",
+        "score every latent component directly on the active engine",
+        "distribution facet",
+        "backend_seq_component_log_density()",
+        "mixle.capability",
+    ),
     # --- object contracts (non-distribution roles) ---
     CapabilitySpec(
         "EngineResidentEStep",
@@ -771,7 +758,22 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
     ),
 )
 
+_catalog_names = [spec.name for spec in CAPABILITY_CATALOG]
+if len(set(_catalog_names)) != len(_catalog_names):
+    raise RuntimeError("CAPABILITY_CATALOG contains duplicate names")
 _CATALOG_BY_NAME = {spec.name: spec for spec in CAPABILITY_CATALOG}
+ALL_CAPABILITIES = tuple(
+    globals()[spec.name]
+    for spec in CAPABILITY_CATALOG
+    if spec.kind == "distribution facet" and isinstance(globals().get(spec.name), type)
+)
+_unresolved_distribution_facets = [
+    spec.name
+    for spec in CAPABILITY_CATALOG
+    if spec.kind == "distribution facet" and not isinstance(globals().get(spec.name), type)
+]
+if _unresolved_distribution_facets:
+    raise RuntimeError("CAPABILITY_CATALOG has unresolved distribution facets: %r" % _unresolved_distribution_facets)
 # the "interesting" facets to report as present/absent in describe()
 _HIGHLIGHT = (
     "Enumerable",
@@ -862,7 +864,7 @@ def describe(obj: Any) -> str:
     return "\n".join(lines)
 
 
-def summarize(obj: Any) -> dict[str, float]:
+def summarize(obj: Any) -> dict[str, Any]:
     """Return every closed-form summary statistic ``obj`` exposes, selected by its capabilities.
 
     The numeric companion to :func:`describe` (which says *what* an object can do): mean/variance/std
@@ -870,21 +872,47 @@ def summarize(obj: Any) -> dict[str, float]:
     ``HasEntropy``, and the median for ``HasCDF``. Keys absent from the result are not available in
     closed form for ``obj`` -- so ``summarize`` never raises on a partially-featured distribution.
     """
-    out: dict[str, float] = {}
+    import numpy as np
+
+    out: dict[str, Any] = {}
+    status: dict[str, dict[str, Any]] = {}
+
+    def capture(name: str, operation: Any) -> Any:
+        try:
+            value = operation()
+        except Exception as exc:  # noqa: BLE001 - the report records each broken advertised method
+            status[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            return None
+        array = np.asarray(value)
+        if array.ndim == 0:
+            value = array.item()
+        elif isinstance(value, np.ndarray):
+            value = value.copy()
+        finite = True
+        if np.issubdtype(array.dtype, np.number):
+            finite = bool(np.isfinite(array).all())
+        status[name] = {"status": "available" if finite else "invalid", "shape": list(array.shape)}
+        out[name] = value
+        return value
+
     if supports(obj, HasMoments):
-        out["mean"] = float(obj.mean())
-        out["variance"] = float(obj.variance())
-        out["std"] = float(out["variance"] ** 0.5)
+        capture("mean", obj.mean)
+        variance = capture("variance", obj.variance)
+        if variance is not None:
+            capture("std", lambda: np.sqrt(variance))
+        else:
+            status["std"] = {"status": "unavailable", "reason": "variance failed"}
         if callable(getattr(obj, "skewness", None)):
-            out["skewness"] = float(obj.skewness())
+            capture("skewness", obj.skewness)
         if callable(getattr(obj, "kurtosis", None)):
-            out["kurtosis"] = float(obj.kurtosis())
+            capture("kurtosis", obj.kurtosis)
     if supports(obj, HasEntropy):
-        out["entropy"] = float(obj.entropy())
+        capture("entropy", obj.entropy)
     if supports(obj, HasCDF):
-        out["median"] = float(obj.quantile(0.5))
+        capture("median", lambda: obj.quantile(0.5))
     if callable(getattr(obj, "mode", None)):
-        out["mode"] = float(obj.mode())
+        capture("mode", obj.mode)
+    out["_status"] = status
     return out
 
 
@@ -892,10 +920,7 @@ def _safe_supports(obj: Any, cap_name: str) -> bool:
     cap = globals().get(cap_name)
     if cap is None or not isinstance(cap, type):
         return False
-    try:
-        return supports(obj, cap)
-    except Exception:  # noqa: BLE001
-        return False
+    return supports(obj, cap)
 
 
 def what_supports(capability: type, among: Any) -> list[str]:
@@ -906,11 +931,8 @@ def what_supports(capability: type, among: Any) -> list[str]:
     """
     out = []
     for obj in among:
-        try:
-            if supports(obj, capability):
-                out.append(getattr(obj, "__name__", type(obj).__name__))
-        except Exception:  # noqa: BLE001
-            continue
+        if supports(obj, capability):
+            out.append(getattr(obj, "__name__", type(obj).__name__))
     return out
 
 

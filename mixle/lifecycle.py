@@ -25,6 +25,7 @@ and :func:`mixle.describe`. It adds no new inference -- only one place to stand.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import pickle
 import time
@@ -43,20 +44,31 @@ def saddle_suspect(fitted: Any, data: Any, *, sample: int = 200, tol: float = 0.
     """
     if not (hasattr(fitted, "posterior") and hasattr(fitted, "components")):
         return False
-    rows = list(data)[: int(sample)]
+    if isinstance(sample, (bool, np.bool_)) or not isinstance(sample, (int, np.integer)) or sample < 1:
+        raise ValueError(f"sample must be a positive integer, got {sample!r}")
+    if isinstance(tol, (bool, np.bool_)) or not isinstance(tol, (int, float, np.integer, np.floating)):
+        raise ValueError(f"tol must be a finite number in [0, 1), got {tol!r}")
+    tol = float(tol)
+    if not np.isfinite(tol) or not 0.0 <= tol < 1.0:
+        raise ValueError(f"tol must be a finite number in [0, 1), got {tol!r}")
+    rows = list(itertools.islice(data, int(sample)))
     if not rows:
         return False
     k = len(fitted.components)
     if k < 2:
         return False
-    try:
-        dev = 0.0
-        for x in rows:
-            post = np.asarray(fitted.posterior(x), dtype=np.float64).reshape(-1)
-            dev = max(dev, float(np.max(np.abs(post - 1.0 / k))))
-        return dev < tol
-    except Exception:  # noqa: BLE001 - a family whose posterior we cannot read is not "suspect"
-        return False
+    dev = 0.0
+    for x in rows:
+        post = np.asarray(fitted.posterior(x), dtype=np.float64)
+        if post.shape != (k,):
+            raise ValueError(f"posterior must have shape ({k},), got {post.shape}")
+        if not np.isfinite(post).all() or np.any(post < 0.0):
+            raise ValueError("posterior must contain finite, non-negative probabilities")
+        total = float(post.sum())
+        if not np.isclose(total, 1.0, rtol=1e-7, atol=1e-9):
+            raise ValueError(f"posterior probabilities must sum to one, got {total!r}")
+        dev = max(dev, float(np.max(np.abs(post - 1.0 / k))))
+    return dev < tol
 
 
 class Model:
@@ -90,12 +102,28 @@ class Model:
         from mixle.inference import certify, optimize
 
         optimize_kw.setdefault("out", None)
+        source = data.records() if hasattr(data, "records") and callable(data.records) else data
+        rows = list(source)
+        if not rows:
+            raise ValueError("fit requires at least one training record")
+        if restarts not in ("auto", None) and (
+            isinstance(restarts, (bool, np.bool_))
+            or not isinstance(restarts, (int, np.integer))
+            or int(restarts) < 1
+        ):
+            raise ValueError(f"restarts must be 'auto', None, or a positive integer, got {restarts!r}")
 
-        cal_frac = 0.25 if calibrate is True else float(calibrate or 0.0)
+        if isinstance(calibrate, (bool, np.bool_)):
+            cal_frac = 0.25 if calibrate else 0.0
+        elif isinstance(calibrate, (int, float, np.integer, np.floating)):
+            cal_frac = float(calibrate)
+        else:
+            raise ValueError(f"calibrate must be Boolean or a finite fraction in [0, 1), got {calibrate!r}")
+        if not np.isfinite(cal_frac) or not 0.0 <= cal_frac < 1.0:
+            raise ValueError(f"calibrate must be Boolean or a finite fraction in [0, 1), got {calibrate!r}")
         cal_holdout: list[Any] = []
-        fit_data = data
-        if cal_frac > 0.0 and hasattr(data, "__len__") and len(data) >= 8:
-            rows = list(data)
+        fit_data = rows
+        if cal_frac > 0.0 and len(rows) >= 8:
             rng = optimize_kw.get("rng") or np.random.RandomState(0)
             order = rng.permutation(len(rows))
             n_cal = max(2, int(round(len(rows) * cal_frac)))
@@ -214,9 +242,16 @@ class Model:
     def evaluate(self, data: Any) -> dict[str, Any]:
         """Held-out fit quality: total and mean log-density over ``data``."""
         d = self._require_fitted()
-        enc = d.dist_to_encoder().seq_encode(list(data))
+        rows = list(data)
+        if not rows:
+            raise ValueError("evaluate requires at least one held-out record")
+        enc = d.dist_to_encoder().seq_encode(rows)
         ll = np.asarray(d.seq_log_density(enc), dtype=np.float64)
-        return {"n": int(ll.size), "mean_log_density": float(ll.mean()), "total_log_density": float(ll.sum())}
+        if ll.shape != (len(rows),):
+            raise ValueError(f"scorer returned shape {ll.shape}; expected one score for each of {len(rows)} records")
+        if np.isnan(ll).any() or np.isposinf(ll).any():
+            raise ValueError("scorer returned NaN or positive-infinite log density")
+        return {"n": len(rows), "mean_log_density": float(ll.mean()), "total_log_density": float(ll.sum())}
 
     def sample(self, size: int | None = None, *, seed: int | None = None) -> Any:
         """Draw samples from the fitted distribution."""
@@ -421,14 +456,35 @@ def propose(
     # hatch (see propose_budget_test.py's test_zero_timeout_skips_and_falls_back_to_recommendation) --
     # every skipped candidate is still recorded in notes/frontier ("search budget reached"), so this
     # stays honest about what it did not evaluate rather than needing to be disallowed outright.
-    if max_candidates is not None and max_candidates < 0:
-        raise ValueError(f"max_candidates must be a non-negative integer or None, got {max_candidates}")
-    if timeout is not None and timeout < 0:
-        raise ValueError(f"timeout must be a non-negative number of seconds or None, got {timeout}")
-    if not 0.0 < holdout < 1.0:
-        raise ValueError(f"holdout must be in (0, 1), got {holdout}")
+    if isinstance(max_candidates, (bool, np.bool_)) or (
+        max_candidates is not None
+        and (not isinstance(max_candidates, (int, np.integer)) or int(max_candidates) < 0)
+    ):
+        raise ValueError(f"max_candidates must be a non-negative integer or None, got {max_candidates!r}")
+    if isinstance(timeout, (bool, np.bool_)) or (
+        timeout is not None
+        and (
+            not isinstance(timeout, (int, float, np.integer, np.floating))
+            or not np.isfinite(float(timeout))
+            or float(timeout) < 0.0
+        )
+    ):
+        raise ValueError(f"timeout must be a finite non-negative number of seconds or None, got {timeout!r}")
+    if isinstance(holdout, (bool, np.bool_)) or not isinstance(
+        holdout, (int, float, np.integer, np.floating)
+    ):
+        raise ValueError(f"holdout must be a finite number in (0, 1), got {holdout!r}")
+    holdout = float(holdout)
+    if not np.isfinite(holdout) or not 0.0 < holdout < 1.0:
+        raise ValueError(f"holdout must be a finite number in (0, 1), got {holdout!r}")
+    if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer)) or not 0 <= seed < 2**32:
+        raise ValueError(f"seed must be an integer in [0, 2**32), got {seed!r}")
+    if isinstance(max_its, (bool, np.bool_)) or not isinstance(max_its, (int, np.integer)) or max_its < 1:
+        raise ValueError(f"max_its must be a positive integer, got {max_its!r}")
 
     rows = list(data)
+    if len(rows) < 3:
+        raise ValueError("propose requires at least three records for a non-empty train/holdout split")
     rec = recommend_model(rows, **recommend_kw)
     candidates: list[tuple[str, Any]] = [("recommended", rec.estimator)]
     # optimize()'s own no-estimator auto-structure-search (structure="auto", the default, reached by
@@ -471,7 +527,7 @@ def propose(
     frontier: list[dict[str, Any]] = []
     evaluated = 0
     budget_start = time.monotonic()
-    for name, est in candidates:
+    for candidate_index, (name, est) in enumerate(candidates):
         over_count = max_candidates is not None and evaluated >= max_candidates
         over_time = timeout is not None and (time.monotonic() - budget_start) > timeout
         if over_count or over_time:
@@ -479,16 +535,38 @@ def propose(
             frontier.append({"name": name, "estimator": est, "skipped": f"search budget reached ({reason})"})
             continue
         try:
-            fitted = optimize(train, est, max_its=max_its, out=None)
+            candidate_rng = np.random.RandomState((int(seed) + candidate_index) % (2**32))
+            fitted = optimize(train, est, max_its=int(max_its), rng=candidate_rng, out=None)
             enc = fitted.dist_to_encoder().seq_encode(val)
-            score = float(np.mean(np.asarray(fitted.seq_log_density(enc), dtype=np.float64)))
-            frontier.append({"name": name, "estimator": est, "heldout_mean_log_density": score})
+            scores = np.asarray(fitted.seq_log_density(enc), dtype=np.float64)
+            if scores.shape != (len(val),):
+                raise ValueError(
+                    f"candidate scorer returned shape {scores.shape}; expected one score for each "
+                    f"of {len(val)} held-out records"
+                )
+            if not np.isfinite(scores).all():
+                raise ValueError("candidate scorer returned a non-finite held-out log density")
+            score = float(np.mean(scores))
+            entry = {
+                "name": name,
+                "estimator": est,
+                "heldout_mean_log_density": score,
+                "candidate_index": candidate_index,
+            }
+            try:
+                from mixle.data.hashing import model_hash
+
+                entry["fitted_artifact_hash"] = model_hash(fitted)
+            except Exception:  # noqa: BLE001 - artifact hashing must not discard a valid candidate
+                entry["fitted_artifact_hash"] = None
+            frontier.append(entry)
             evaluated += 1
         except Exception as exc:  # noqa: BLE001 - a failing candidate is reported, never silently dropped
             frontier.append({"name": name, "estimator": est, "error": f"{type(exc).__name__}: {exc}"})
             evaluated += 1
     scored = sorted(
-        (f for f in frontier if "heldout_mean_log_density" in f), key=lambda f: -f["heldout_mean_log_density"]
+        (f for f in frontier if "heldout_mean_log_density" in f),
+        key=lambda f: (-f["heldout_mean_log_density"], f["candidate_index"], f["name"]),
     )
     frontier = scored + [f for f in frontier if "error" in f or "skipped" in f]
     winner = scored[0]["estimator"] if scored else rec.estimator
@@ -518,4 +596,12 @@ def propose(
         notes.append(f"search budget: skipped {len(skipped_names)} candidate(s) unevaluated: {skipped_names}")
     m = Model(winner, notes=notes)
     m.frontier = frontier
-    return m.fit(rows) if fit else m
+    if fit:
+        m.fit(rows, restarts=None, max_its=int(max_its), rng=np.random.RandomState(int(seed)))
+        try:
+            from mixle.data.hashing import model_hash
+
+            m._fit_info["artifact_hash"] = model_hash(m.fitted)
+        except Exception:  # noqa: BLE001 - artifact hashing must not discard a valid final fit
+            m._fit_info["artifact_hash"] = None
+    return m

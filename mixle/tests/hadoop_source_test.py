@@ -188,9 +188,10 @@ def test_csv_columns_empty_list_matches_local_text_source(tmp_path):
     path = tmp_path / "data.csv"
     path.write_text("a,b\n1,x\n2,y\n")
 
-    remote_empty = list(hadoop_source.read_remote(str(path), "csv", columns=[]).records())
-    local_empty = list(text_source.read_csv(str(path), columns=[]).records())
-    assert remote_empty == local_empty == [(), ()]
+    with pytest.raises(ValueError):
+        hadoop_source.read_remote(str(path), "csv", columns=[])
+    with pytest.raises(ValueError):
+        text_source.read_csv(str(path), columns=[])
 
 
 def test_csv_columns_empty_list_differs_from_columns_none(tmp_path):
@@ -200,13 +201,13 @@ def test_csv_columns_empty_list_differs_from_columns_none(tmp_path):
     path = tmp_path / "data.csv"
     path.write_text("a,b\n1,x\n2,y\n")
 
-    remote_empty = list(hadoop_source.read_remote(str(path), "csv", columns=[]).records())
     remote_none = list(hadoop_source.read_remote(str(path), "csv", columns=None).records())
-    local_empty = list(text_source.read_csv(str(path), columns=[]).records())
     local_none = list(text_source.read_csv(str(path), columns=None).records())
 
-    assert remote_empty != remote_none
-    assert local_empty != local_none
+    with pytest.raises(ValueError):
+        hadoop_source.read_remote(str(path), "csv", columns=[])
+    with pytest.raises(ValueError):
+        text_source.read_csv(str(path), columns=[])
     assert remote_none == local_none == [("1", "x"), ("2", "y")]
 
 
@@ -228,10 +229,10 @@ def test_parquet_columns_empty_list_matches_local_text_source(tmp_path):
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("a,b\n1,x\n2,y\n3,z\n")
 
-    remote = list(hadoop_source.read_remote(str(path), "parquet", columns=[]).records())
-    local = list(text_source.read_csv(str(csv_path), columns=[]).records())
-
-    assert remote == local == [(), (), ()]
+    with pytest.raises(ValueError):
+        hadoop_source.read_remote(str(path), "parquet", columns=[])
+    with pytest.raises(ValueError):
+        text_source.read_csv(str(csv_path), columns=[])
 
 
 def test_feather_columns_empty_list_matches_local_text_source(tmp_path):
@@ -243,10 +244,10 @@ def test_feather_columns_empty_list_matches_local_text_source(tmp_path):
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("a,b\n1,x\n2,y\n3,z\n")
 
-    remote = list(hadoop_source.read_remote(str(path), "feather", columns=[]).records())
-    local = list(text_source.read_csv(str(csv_path), columns=[]).records())
-
-    assert remote == local == [(), (), ()]
+    with pytest.raises(ValueError):
+        hadoop_source.read_remote(str(path), "feather", columns=[])
+    with pytest.raises(ValueError):
+        text_source.read_csv(str(csv_path), columns=[])
 
 
 def test_parquet_columns_empty_list_differs_from_columns_none(tmp_path):
@@ -256,11 +257,10 @@ def test_parquet_columns_empty_list_differs_from_columns_none(tmp_path):
     path = tmp_path / "data.parquet"
     _write_parquet(path, _make_table())
 
-    empty = list(hadoop_source.read_remote(str(path), "parquet", columns=[]).records())
     none = list(hadoop_source.read_remote(str(path), "parquet", columns=None).records())
 
-    assert empty != none
-    assert empty == [(), (), ()]
+    with pytest.raises(ValueError):
+        hadoop_source.read_remote(str(path), "parquet", columns=[])
     assert none == [(1, "x"), (2, "y"), (3, "z")]
 
 
@@ -269,11 +269,10 @@ def test_feather_columns_empty_list_differs_from_columns_none(tmp_path):
     path = tmp_path / "data.feather"
     _write_feather(path, _make_table())
 
-    empty = list(hadoop_source.read_remote(str(path), "feather", columns=[]).records())
     none = list(hadoop_source.read_remote(str(path), "feather", columns=None).records())
 
-    assert empty != none
-    assert empty == [(), (), ()]
+    with pytest.raises(ValueError):
+        hadoop_source.read_remote(str(path), "feather", columns=[])
     assert none == [(1, "x"), (2, "y"), (3, "z")]
 
 
