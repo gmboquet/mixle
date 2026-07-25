@@ -49,7 +49,7 @@ def _make_fixture(
     _scale_weights_(model, weight_scale)
     rng = np.random.RandomState(seed)
     calibration_data = torch.as_tensor(rng.randint(0, vocab, size=(96, block)), dtype=torch.long)
-    eval_data = calibration_data[:32]  # measured on a fixed slice shared by every method/fixture in a zoo item
+    eval_data = torch.as_tensor(rng.randint(0, vocab, size=(32, block)), dtype=torch.long)
     return model, calibration_data, eval_data
 
 
@@ -133,7 +133,7 @@ class HybridGapClosureTest(unittest.TestCase):
         rng = np.random.RandomState(seed)
         n_calib = 1000
         calib = torch.as_tensor(rng.randint(0, vocab, size=(n_calib, block)), dtype=torch.long)
-        ev = calib[:256]
+        ev = torch.as_tensor(rng.randint(0, vocab, size=(256, block)), dtype=torch.long)
 
         no_compression_quality = 1.0  # model vs. itself, trivially perfect agreement
 
