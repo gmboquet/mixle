@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy import stats
+from scipy import optimize, special, stats
 
 from mixle.inference.glm import glm
 
@@ -111,8 +111,13 @@ class CoxResult:
         se: ``(p,)`` standard errors (inverse observed information).
         cov: ``(p, p)`` covariance.
         loglik: maximised partial log-likelihood.
-        baseline_time / baseline_cumhaz: Breslow baseline cumulative hazard.
-        concordance: Harrell's C-index.
+        baseline_time / baseline_cumhaz: Breslow baseline cumulative hazard for
+            an unstratified fit. These arrays are empty for a multi-stratum fit.
+        baseline_by_stratum: mapping from each stratum label to its own
+            ``time`` and ``cumhaz`` arrays.
+        concordance: Harrell's C-index, evaluated only within strata. This is
+            ``None`` for counting-process input unless subject identifiers are
+            supplied.
         n_iter: Newton iterations.
         converged: whether Newton's method reached ``tol`` with a finite, well-identified fit.
             ``False`` means either it hit ``max_iter`` without reaching ``tol``, a step produced a
@@ -128,9 +133,10 @@ class CoxResult:
     loglik: float
     baseline_time: np.ndarray
     baseline_cumhaz: np.ndarray
-    concordance: float
+    concordance: float | None
     n_iter: int
     converged: bool
+    baseline_by_stratum: dict[object, dict[str, np.ndarray]] = field(default_factory=dict)
 
     def hazard_ratios(self) -> np.ndarray:
         """Return exponentiated Cox coefficients."""
@@ -145,24 +151,100 @@ class CoxResult:
         return 2.0 * stats.norm.sf(np.abs(self.z_values()))
 
 
-def _concordance(risk: np.ndarray, time: np.ndarray, event: np.ndarray) -> float:
-    """Harrell's C-index: fraction of comparable pairs ordered correctly by risk score."""
-    n = time.shape[0]
+def _concordance(
+    risk: np.ndarray,
+    time: np.ndarray,
+    event: np.ndarray,
+    *,
+    start: np.ndarray,
+    strata: np.ndarray,
+    subject: np.ndarray,
+) -> float:
+    """Harrell's C-index across comparable subjects within the same stratum."""
     conc = disc = 0.0
-    for i in range(n):
+    unique_subjects = np.unique(subject)
+    terminal_time: dict[object, float] = {}
+    subject_stratum: dict[object, object] = {}
+    for identifier in unique_subjects:
+        rows = subject == identifier
+        stratum_values = np.unique(strata[rows])
+        if stratum_values.size != 1:
+            raise ValueError("every subject must remain in one stratum")
+        terminal_time[identifier] = float(np.max(time[rows]))
+        subject_stratum[identifier] = stratum_values[0]
+    for i in range(time.shape[0]):
         if event[i] != 1:
             continue
-        for j in range(n):
-            if time[j] > time[i]:  # j outlives i -> i should be the higher risk
-                if risk[i] > risk[j]:
+        event_subject = subject[i]
+        for competitor in unique_subjects:
+            if competitor == event_subject or subject_stratum[competitor] != strata[i]:
+                continue
+            if terminal_time[competitor] > time[i]:
+                active = (
+                    (subject == competitor)
+                    & (strata == strata[i])
+                    & (start < time[i])
+                    & (time >= time[i])
+                )
+                active_rows = np.flatnonzero(active)
+                if active_rows.size != 1:
+                    raise ValueError("counting-process rows must define exactly one active interval per subject")
+                competitor_risk = risk[active_rows[0]]
+                if risk[i] > competitor_risk:
                     conc += 1
-                elif risk[i] < risk[j]:
+                elif risk[i] < competitor_risk:
                     disc += 1
                 else:
                     conc += 0.5
                     disc += 0.5
     total = conc + disc
     return float(conc / total) if total > 0 else 0.5
+
+
+def _cox_inputs(
+    x: np.ndarray,
+    time: np.ndarray,
+    event: np.ndarray,
+    start: np.ndarray | None,
+    strata: np.ndarray | None,
+    subject: np.ndarray | None,
+    ties: str,
+    max_iter: int,
+    tol: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    X = np.asarray(x, dtype=float)
+    stop = np.asarray(time, dtype=float)
+    observed = np.asarray(event, dtype=float)
+    if X.ndim != 2 or X.shape[0] < 1 or X.shape[1] < 1:
+        raise ValueError("x must be a non-empty two-dimensional design matrix")
+    n = X.shape[0]
+    if stop.ndim != 1 or observed.ndim != 1 or stop.shape[0] != n or observed.shape[0] != n:
+        raise ValueError("time and event must be one-dimensional arrays aligned with x")
+    if not np.all(np.isfinite(X)) or not np.all(np.isfinite(stop)) or not np.all(np.isfinite(observed)):
+        raise ValueError("x, time, and event must contain only finite values")
+    if np.any((observed != 0) & (observed != 1)):
+        raise ValueError("event must contain only 0 and 1")
+    begin = np.full(n, -np.inf) if start is None else np.asarray(start, dtype=float)
+    if begin.ndim != 1 or begin.shape[0] != n or np.any(np.isnan(begin)) or np.any(begin >= stop):
+        raise ValueError("start must be aligned with x and strictly less than time")
+    strata_values = np.zeros(n, dtype=int) if strata is None else np.asarray(strata)
+    if strata_values.ndim != 1 or strata_values.shape[0] != n:
+        raise ValueError("strata must be a one-dimensional array aligned with x")
+    if any(value != value for value in strata_values.tolist()):
+        raise ValueError("strata must not contain missing labels")
+    identifiers = None if subject is None else np.asarray(subject)
+    if identifiers is not None:
+        if identifiers.ndim != 1 or identifiers.shape[0] != n:
+            raise ValueError("subject must be a one-dimensional array aligned with x")
+        if any(value != value for value in identifiers.tolist()):
+            raise ValueError("subject must not contain missing labels")
+    if ties not in {"breslow", "efron"}:
+        raise ValueError("ties must be 'breslow' or 'efron'")
+    if isinstance(max_iter, (bool, np.bool_)) or not isinstance(max_iter, (int, np.integer)) or max_iter < 1:
+        raise ValueError("max_iter must be a positive integer")
+    if not np.isfinite(tol) or tol <= 0:
+        raise ValueError("tol must be finite and > 0")
+    return X, stop, observed, begin, strata_values, identifiers
 
 
 def cox_ph(
@@ -172,6 +254,7 @@ def cox_ph(
     *,
     start: np.ndarray | None = None,
     strata: np.ndarray | None = None,
+    subject: np.ndarray | None = None,
     ties: str = "efron",
     max_iter: int = 50,
     tol: float = 1e-9,
@@ -189,18 +272,19 @@ def cox_ph(
         event: ``(n,)`` 1 = event, 0 = censored.
         start: optional ``(n,)`` interval start times for time-varying covariates / left truncation.
         strata: optional ``(n,)`` labels; each stratum gets its own baseline hazard (coefficients shared).
+        subject: optional ``(n,)`` subject identifiers. Required to compute
+            concordance for counting-process input with multiple rows per subject.
         ties: ``"efron"`` (default, more accurate) or ``"breslow"`` tie handling.
         max_iter, tol: Newton controls.
 
     Returns:
         A :class:`CoxResult`.
     """
-    X = np.atleast_2d(np.asarray(x, dtype=float))
-    time = np.asarray(time, dtype=float)
-    event = np.asarray(event, dtype=float)
+    counting_process = start is not None
+    X, time, event, start, strata, subject = _cox_inputs(
+        x, time, event, start, strata, subject, ties, max_iter, tol
+    )
     n, p = X.shape
-    start = np.full(n, -np.inf) if start is None else np.asarray(start, dtype=float)
-    strata = np.zeros(n, dtype=int) if strata is None else np.asarray(strata)
 
     beta = np.zeros(p)
     n_iter = 0
@@ -276,11 +360,13 @@ def cox_ph(
 
     # partial log-likelihood (under the requested ties handling) and Breslow baseline cumulative hazard
     loglik = 0.0
-    base_t, base_h = [], []
+    baseline_by_stratum: dict[object, dict[str, np.ndarray]] = {}
     for s in np.unique(strata):
         sm = strata == s
         Xs, ts, es, sts = X[sm], time[sm], event[sm], start[sm]
         cum = 0.0
+        stratum_time: list[float] = []
+        stratum_hazard: list[float] = []
         for et in np.unique(ts[es == 1]):
             risk = (sts < et) & (ts >= et)
             tied = (ts == et) & (es == 1)
@@ -294,13 +380,33 @@ def cox_ph(
                 sd0 = np.exp(Xs[tied] @ beta).sum()
                 loglik -= float(np.sum(np.log(s0 - np.arange(d) / d * sd0)))
             cum += d / s0
-            base_t.append(et)
-            base_h.append(cum)
-    order = np.argsort(base_t)
-    base_t = np.asarray(base_t)[order]
-    base_h = np.asarray(base_h)[order]
+            stratum_time.append(float(et))
+            stratum_hazard.append(float(cum))
+        key = s.item() if isinstance(s, np.generic) else s
+        baseline_by_stratum[key] = {
+            "time": np.asarray(stratum_time, dtype=float),
+            "cumhaz": np.asarray(stratum_hazard, dtype=float),
+        }
+    if len(baseline_by_stratum) == 1:
+        sole_baseline = next(iter(baseline_by_stratum.values()))
+        base_t = sole_baseline["time"].copy()
+        base_h = sole_baseline["cumhaz"].copy()
+    else:
+        base_t = np.array([], dtype=float)
+        base_h = np.array([], dtype=float)
     risk_score = X @ beta
-    conc = _concordance(risk_score, time, event)
+    if counting_process and subject is None:
+        conc = None
+    else:
+        identifiers = np.arange(n) if subject is None else subject
+        conc = _concordance(
+            risk_score,
+            time,
+            event,
+            start=start,
+            strata=strata,
+            subject=identifiers,
+        )
     return CoxResult(
         coef=beta,
         se=se,
@@ -311,6 +417,7 @@ def cox_ph(
         concordance=conc,
         n_iter=n_iter,
         converged=converged,
+        baseline_by_stratum=baseline_by_stratum,
     )
 
 
@@ -459,8 +566,11 @@ class FrailtyCoxResult:
         coef / se: fixed-effect log-hazard-ratios and standard errors.
         theta: estimated frailty variance (0 means no clustering signal).
         frailties: posterior mean random effect per group.
+        frailty_variance: posterior variance of each group random effect.
+        frailty_log_mean: posterior expectation of ``log(w_g)``.
         groups: group labels aligned to ``frailties``.
         n_iter: EM iterations.
+        converged: whether the EM convergence criterion was met.
     """
 
     coef: np.ndarray
@@ -468,7 +578,11 @@ class FrailtyCoxResult:
     theta: float
     frailties: np.ndarray
     groups: np.ndarray
+    frailty_variance: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
+    frailty_log_mean: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
     n_iter: int = field(default=0)
+    converged: bool = field(default=False)
+    ties: str = field(default="breslow")
 
 
 def frailty_cox(
@@ -484,53 +598,89 @@ def frailty_cox(
     """Shared gamma-frailty Cox model for clustered survival, by EM.
 
     Subjects in the same group share an unobserved frailty ``w_g ~ Gamma(1/theta, 1/theta)`` (mean 1,
-    variance ``theta``) that multiplies the hazard, capturing within-group correlation. The E-step takes
-    the posterior-mean frailties; the M-step refits Cox with ``log w_g`` as an offset and updates
-    ``theta``. ``theta -> 0`` indicates no detectable clustering.
+    variance ``theta``) that multiplies the hazard, capturing within-group correlation. The E-step
+    retains ``E[w_g]``, ``Var(w_g)``, and ``E[log(w_g)]`` under the conjugate gamma posterior. The
+    coefficient/baseline M-step uses ``E[w_g]`` in the integrated-hazard term, while the dispersion
+    M-step maximises the expected gamma-prior log likelihood using both ``E[w_g]`` and
+    ``E[log(w_g)]``. ``theta -> 0`` indicates no detectable clustering.
 
     Returns:
         A :class:`FrailtyCoxResult`.
     """
-    X = np.atleast_2d(np.asarray(x, dtype=float))
-    time = np.asarray(time, dtype=float)
-    event = np.asarray(event, dtype=float)
+    X, time, event, _, _, _ = _cox_inputs(
+        x,
+        time,
+        event,
+        None,
+        None,
+        None,
+        ties,
+        max_iter,
+        tol,
+    )
     groups = np.asarray(groups)
-    uniq = np.unique(groups)
+    if groups.ndim != 1 or groups.shape[0] != X.shape[0]:
+        raise ValueError("groups must be a one-dimensional array aligned with x")
+    if any(value != value for value in groups.tolist()):
+        raise ValueError("groups must not contain missing labels")
+    uniq, group_index = np.unique(groups, return_inverse=True)
     theta = 0.5
-    log_w = np.zeros(X.shape[0])
-    res = None
+    w_post = np.ones(uniq.size)
+    var_post = np.full(uniq.size, theta)
+    elog_post = np.full(uniq.size, special.digamma(1.0 / theta) - np.log(1.0 / theta))
+    beta = np.zeros(X.shape[1])
     n_iter = 0
+    converged = False
     for n_iter in range(1, max_iter + 1):
-        res = _cox_offset(X, time, event, log_w, ties=ties)
-        risk_score = np.exp(X @ res)
-        base = _breslow_cumhaz(X, time, event, res, log_w)
-        H = _cumhaz_at(np.unique(time[event == 1]), base, time)
-        w_post = np.empty(len(uniq))
-        theta_terms = []
-        for gi, g in enumerate(uniq):
-            gm = groups == g
-            d_g = float(np.sum(event[gm]))
-            expected = float(np.sum(H[gm] * risk_score[gm]))
-            shape = 1.0 / theta + d_g
-            rate = 1.0 / theta + expected
-            w_post[gi] = shape / rate
-            theta_terms.append((d_g, expected))
-        log_w = np.array([np.log(w_post[np.where(uniq == g)[0][0]]) for g in groups])
-        # method-of-moments update for theta from posterior frailty variance
-        new_theta = max(float(np.var(w_post)), 1e-4)
-        if abs(new_theta - theta) < tol:
-            theta = new_theta
+        previous_beta = beta.copy()
+        previous_theta = theta
+        previous_w = w_post.copy()
+        log_mean_w = np.log(w_post[group_index])
+        beta = _cox_offset(X, time, event, log_mean_w, ties=ties)
+        baseline = _breslow_cumhaz(X, time, event, beta, log_mean_w, ties=ties)
+        w_post, var_post, elog_post = _frailty_posterior(
+            X,
+            time,
+            event,
+            group_index,
+            uniq.size,
+            beta,
+            baseline,
+            theta,
+        )
+        theta = _gamma_frailty_variance_mstep(w_post, elog_post)
+        change = max(
+            float(np.max(np.abs(beta - previous_beta))),
+            abs(theta - previous_theta) / max(1.0, previous_theta),
+            float(np.max(np.abs(w_post - previous_w))),
+        )
+        if change < tol:
+            converged = True
             break
-        theta = new_theta
-    cov = _cox_cov(X, time, event, log_w, res, ties=ties)
+    log_mean_w = np.log(w_post[group_index])
+    cov = _cox_cov(X, time, event, log_mean_w, beta, ties=ties)
     se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
-    return FrailtyCoxResult(res, se, float(theta), w_post, uniq, n_iter)
+    if not np.all(np.isfinite(se)):
+        raise RuntimeError("frailty Cox fit produced non-finite standard errors")
+    return FrailtyCoxResult(
+        coef=beta,
+        se=se,
+        theta=float(theta),
+        frailties=w_post,
+        groups=uniq,
+        frailty_variance=var_post,
+        frailty_log_mean=elog_post,
+        n_iter=n_iter,
+        converged=converged,
+        ties=ties,
+    )
 
 
 def _cox_offset(X, time, event, offset, *, ties="breslow", max_iter=50, tol=1e-9):
     """Cox coefficient estimate with a fixed per-observation offset (for the frailty M-step)."""
-    n, p = X.shape
+    _, p = X.shape
     beta = np.zeros(p)
+    converged = False
     for _ in range(max_iter):
         grad = np.zeros(p)
         hess = np.zeros((p, p))
@@ -542,13 +692,38 @@ def _cox_offset(X, time, event, offset, *, ties="breslow", max_iter=50, tol=1e-9
             s0 = theta_r.sum()
             s1 = theta_r @ Xr
             s2 = (Xr * theta_r[:, None]).T @ Xr
-            d = tied.sum()
-            grad += X[tied].sum(axis=0) - d * s1 / s0
-            hess -= d * (s2 / s0 - np.outer(s1, s1) / s0**2)
-        step = np.linalg.solve(hess, grad)
+            d = int(tied.sum())
+            Xd = X[tied]
+            grad += Xd.sum(axis=0)
+            if ties == "breslow" or d == 1:
+                grad -= d * s1 / s0
+                hess -= d * (s2 / s0 - np.outer(s1, s1) / s0**2)
+            else:
+                theta_d = np.exp(Xd @ beta + offset[tied])
+                sd0 = theta_d.sum()
+                sd1 = theta_d @ Xd
+                sd2 = (Xd * theta_d[:, None]).T @ Xd
+                for ell in range(d):
+                    fraction = ell / d
+                    a0 = s0 - fraction * sd0
+                    a1 = s1 - fraction * sd1
+                    a2 = s2 - fraction * sd2
+                    grad -= a1 / a0
+                    hess -= a2 / a0 - np.outer(a1, a1) / a0**2
+        if not np.all(np.isfinite(grad)) or not np.all(np.isfinite(hess)):
+            raise RuntimeError("frailty Cox coefficient M-step produced non-finite derivatives")
+        try:
+            step = np.linalg.solve(hess, grad)
+        except np.linalg.LinAlgError as exc:
+            raise RuntimeError("frailty Cox coefficient M-step has singular information") from exc
         beta = beta - step
+        if not np.all(np.isfinite(beta)):
+            raise RuntimeError("frailty Cox coefficient M-step diverged")
         if np.max(np.abs(step)) < tol:
+            converged = True
             break
+    if not converged:
+        raise RuntimeError(f"frailty Cox coefficient M-step failed to converge in {max_iter} iterations")
     return beta
 
 
@@ -562,11 +737,28 @@ def _cox_cov(X, time, event, offset, beta, *, ties="breslow"):
         s0 = theta_r.sum()
         s1 = theta_r @ Xr
         s2 = (Xr * theta_r[:, None]).T @ Xr
-        hess -= tied.sum() * (s2 / s0 - np.outer(s1, s1) / s0**2)
-    return np.linalg.inv(-hess)
+        d = int(tied.sum())
+        if ties == "breslow" or d == 1:
+            hess -= d * (s2 / s0 - np.outer(s1, s1) / s0**2)
+        else:
+            Xd = X[tied]
+            theta_d = np.exp(Xd @ beta + offset[tied])
+            sd0 = theta_d.sum()
+            sd1 = theta_d @ Xd
+            sd2 = (Xd * theta_d[:, None]).T @ Xd
+            for ell in range(d):
+                fraction = ell / d
+                a0 = s0 - fraction * sd0
+                a1 = s1 - fraction * sd1
+                a2 = s2 - fraction * sd2
+                hess -= a2 / a0 - np.outer(a1, a1) / a0**2
+    information = -hess
+    if not np.all(np.isfinite(information)) or np.linalg.matrix_rank(information) < information.shape[0]:
+        raise RuntimeError("frailty Cox covariance is not identified")
+    return np.linalg.inv(information)
 
 
-def _breslow_cumhaz(X, time, event, beta, offset):
+def _breslow_cumhaz(X, time, event, beta, offset, *, ties="breslow"):
     """Breslow baseline cumulative hazard under a fixed per-observation ``offset`` (frailty log w_g).
 
     ``_cox_offset``/``_cox_cov`` both include ``offset`` in the risk-set sum ``s0`` -- this must
@@ -579,9 +771,69 @@ def _breslow_cumhaz(X, time, event, beta, offset):
         risk = time >= et
         tied = (time == et) & (event == 1)
         s0 = np.exp(X[risk] @ beta + offset[risk]).sum()
-        cum += tied.sum() / s0
+        d = int(tied.sum())
+        if ties == "breslow" or d == 1:
+            increment = d / s0
+        else:
+            tied_weight = np.exp(X[tied] @ beta + offset[tied]).sum()
+            increment = float(np.sum(1.0 / (s0 - np.arange(d) / d * tied_weight)))
+        cum += increment
         out.append(cum)
     return np.asarray(out)
+
+
+def _frailty_posterior(
+    X: np.ndarray,
+    time: np.ndarray,
+    event: np.ndarray,
+    group_index: np.ndarray,
+    n_groups: int,
+    beta: np.ndarray,
+    baseline: np.ndarray,
+    theta: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    event_times = np.unique(time[event == 1])
+    cumulative_baseline = _cumhaz_at(event_times, baseline, time)
+    linear_risk = np.exp(X @ beta)
+    exposure = np.bincount(group_index, weights=cumulative_baseline * linear_risk, minlength=n_groups)
+    event_count = np.bincount(group_index, weights=event, minlength=n_groups)
+    working_theta = max(float(theta), 1.0e-10)
+    prior_shape = 1.0 / working_theta
+    shape = prior_shape + event_count
+    rate = prior_shape + exposure
+    mean = shape / rate
+    variance = shape / rate**2
+    expected_log = special.digamma(shape) - np.log(rate)
+    if (
+        not np.all(np.isfinite(mean))
+        or not np.all(np.isfinite(variance))
+        or not np.all(np.isfinite(expected_log))
+        or np.any(mean <= 0)
+        or np.any(variance < 0)
+    ):
+        raise RuntimeError("frailty E-step produced invalid posterior moments")
+    return mean, variance, expected_log
+
+
+def _gamma_frailty_variance_mstep(mean: np.ndarray, expected_log: np.ndarray) -> float:
+    """Maximise the expected Gamma(a, a) prior log likelihood, returning theta=1/a."""
+    group_count = mean.size
+    sufficient_term = float(np.sum(expected_log - mean))
+
+    def score(shape: float) -> float:
+        return group_count * (np.log(shape) + 1.0 - special.digamma(shape)) + sufficient_term
+
+    lower, upper = 1.0e-8, 1.0e8
+    lower_score = score(lower)
+    upper_score = score(upper)
+    if not np.isfinite(lower_score) or not np.isfinite(upper_score):
+        raise RuntimeError("frailty dispersion M-step produced non-finite derivatives")
+    if upper_score >= 0:
+        return 0.0
+    if lower_score <= 0:
+        return 1.0 / lower
+    shape = optimize.brentq(score, lower, upper, xtol=1.0e-10, rtol=1.0e-12)
+    return float(1.0 / shape)
 
 
 def _cumhaz_at(event_times, base, t):
