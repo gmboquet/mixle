@@ -26,6 +26,35 @@ try:
 except ImportError:  # pragma: no cover - torch is optional
     _HAS_TORCH = False
 
+
+def _positive_int(value: Any, name: str) -> int:
+    import numbers
+
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise ValueError(f"{name} must be a positive integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
+
+
+def _validate_architecture(vocab: Any, d_model: Any, n_layer: Any, n_head: Any, block: Any) -> tuple[int, ...]:
+    values = tuple(
+        _positive_int(value, name)
+        for value, name in (
+            (vocab, "vocab"),
+            (d_model, "d_model"),
+            (n_layer, "n_layer"),
+            (n_head, "n_head"),
+            (block, "block"),
+        )
+    )
+    _, model_width, _, heads, _ = values
+    if model_width % heads != 0:
+        raise ValueError(f"d_model ({model_width}) must be divisible by n_head ({heads})")
+    return values
+
+
 if _HAS_TORCH:
 
     class CausalAttention(nn.Module):
@@ -76,12 +105,23 @@ if _HAS_TORCH:
             self, vocab: int, d_model: int, n_layer: int, n_head: int, block: int, embedding: Any = None
         ) -> None:
             super().__init__()
+            vocab, d_model, n_layer, n_head, block = _validate_architecture(
+                vocab, d_model, n_layer, n_head, block
+            )
+            if embedding is not None:
+                if not isinstance(embedding, nn.Embedding):
+                    raise TypeError("embedding must be a torch.nn.Embedding")
+                if embedding.num_embeddings != vocab or embedding.embedding_dim != d_model:
+                    raise ValueError(
+                        f"embedding must have shape ({vocab}, {d_model}), got "
+                        f"({embedding.num_embeddings}, {embedding.embedding_dim})"
+                    )
             # record the shape so a trained module can be rebuilt from hyperparameters on load
-            self.vocab = int(vocab)
-            self.d_model = int(d_model)
-            self.n_layer = int(n_layer)
-            self.n_head = int(n_head)
-            self.block = int(block)
+            self.vocab = vocab
+            self.d_model = d_model
+            self.n_layer = n_layer
+            self.n_head = n_head
+            self.block = block
             self.tok = embedding if embedding is not None else nn.Embedding(vocab, d_model)
             self.pos = nn.Embedding(block, d_model)
             self.blocks = nn.ModuleList([Block(d_model, n_head) for _ in range(n_layer)])
@@ -101,7 +141,49 @@ if _HAS_TORCH:
             gc = getattr(self, "gradient_checkpointing", False)
             if isinstance(gc, bool):
                 return gc
-            return bool(gc[i])  # per-block list/tuple, one entry per self.blocks
+            return gc[i]
+
+        def _validate_checkpoint_policy(self) -> None:
+            policy = getattr(self, "gradient_checkpointing", False)
+            if isinstance(policy, bool):
+                return
+            if not isinstance(policy, (list, tuple)):
+                raise ValueError("gradient_checkpointing must be a bool or a per-block list/tuple of bools")
+            if len(policy) != len(self.blocks):
+                raise ValueError(
+                    f"gradient_checkpointing has {len(policy)} entries; expected {len(self.blocks)}"
+                )
+            if any(not isinstance(value, bool) for value in policy):
+                raise ValueError("every per-block gradient_checkpointing entry must be a bool")
+
+        def _validated_ids(
+            self,
+            value: Any,
+            *,
+            name: str,
+            expected_shapes: tuple[tuple[int, ...], ...],
+            upper_bound: int,
+        ) -> Any:
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"{name} must be a torch tensor")
+            if tuple(value.shape) not in expected_shapes:
+                expected = " or ".join(str(shape) for shape in expected_shapes)
+                raise ValueError(f"{name} must have shape {expected}, got {tuple(value.shape)}")
+            if value.device != self.tok.weight.device:
+                raise ValueError(
+                    f"{name} is on {value.device}; model token embeddings are on {self.tok.weight.device}"
+                )
+            if value.dtype == torch.bool or (not value.is_floating_point() and not value.dtype.is_signed):
+                raise ValueError(f"{name} must use a signed integer or floating-point dtype")
+            if value.is_floating_point():
+                if not bool(torch.isfinite(value).all()):
+                    raise ValueError(f"{name} must contain only finite values")
+                if not bool((value == torch.round(value)).all()):
+                    raise ValueError(f"{name} must contain integer-valued entries")
+            ids = value.long()
+            if not bool(((ids >= 0) & (ids < upper_bound)).all()):
+                raise ValueError(f"{name} entries must lie in [0, {upper_bound})")
+            return ids
 
         def forward(
             self,
@@ -117,17 +199,34 @@ if _HAS_TORCH:
             the global sequence.  The default return remains last-token logits
             for compatibility; training asks for all positions explicitly.
             """
-            x = x.long()
-            t = x.shape[1]
+            if not isinstance(x, torch.Tensor):
+                raise TypeError("x must be a torch tensor")
+            if x.ndim != 2 or x.shape[0] == 0 or x.shape[1] == 0:
+                raise ValueError("x must have non-empty shape (batch, sequence)")
+            batch, t = x.shape
+            if t > self.block:
+                raise ValueError(f"x sequence length {t} exceeds configured block size {self.block}")
+            if not isinstance(return_all_logits, bool):
+                raise ValueError("return_all_logits must be a boolean")
+            self._validate_checkpoint_policy()
+            x = self._validated_ids(
+                x,
+                name="x",
+                expected_shapes=((batch, t),),
+                upper_bound=self.vocab,
+            )
             if position_ids is None:
                 position_ids = torch.arange(t, device=x.device)
-            position_ids = position_ids.long()
+            position_ids = self._validated_ids(
+                position_ids,
+                name="position_ids",
+                expected_shapes=((t,), (batch, t)),
+                upper_bound=self.block,
+            )
             if position_ids.ndim == 1:
                 position_embeddings = self.pos(position_ids)[None, :, :]
-            elif position_ids.ndim == 2:
-                position_embeddings = self.pos(position_ids)
             else:
-                raise ValueError("position_ids must have shape (sequence,) or (batch, sequence).")
+                position_embeddings = self.pos(position_ids)
             h = self.tok(x) + position_embeddings
             for i, blk in enumerate(self.blocks):
                 if self._checkpoint_block(i) and self.training and torch.is_grad_enabled():
@@ -161,10 +260,13 @@ def build_causal_lm(
     """
     if not _HAS_TORCH:
         raise ImportError("build_causal_lm requires torch.")
+    vocab, d_model, n_layer, n_head, block = _validate_architecture(vocab, d_model, n_layer, n_head, block)
+    if not isinstance(gradient_checkpointing, bool):
+        raise ValueError("gradient_checkpointing must be a boolean")
 
     from mixle.models.embedding import resolve_embedding
 
     embedding = resolve_embedding(embedding, vocab, d_model)  # CategoricalEmbedding | nn.Embedding | None -> module
     lm = CausalLM(vocab, d_model, n_layer, n_head, block, embedding=embedding)
-    lm.gradient_checkpointing = bool(gradient_checkpointing)
+    lm.gradient_checkpointing = gradient_checkpointing
     return lm
