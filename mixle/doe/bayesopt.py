@@ -215,15 +215,26 @@ def thompson_sampling(
     negation when minimizing, so the selected point is the optimum of the *sampled* objective. A
     randomized, exploration-aware acquisition -- repeated proposals explore competing optima in
     proportion to posterior probability, with no exploration knob to tune. This is the low-cost *marginal*
-    variant (independent per-candidate draws, ignoring the GP's cross-candidate correlation); pass an
-    ``rng`` (via ``acq_kwargs``) for reproducible proposals. ``best`` is ignored.
+    variant (independent per-candidate draws, ignoring the GP's cross-candidate correlation). The proposal
+    loop (:func:`_propose_one`, and so :func:`propose_next` / :func:`propose_batch` /
+    :class:`~mixle.doe.optimizer.BayesianOptimizer`) automatically threads its own candidate-generation
+    ``rng`` through to this acquisition, so a seeded caller gets reproducible draws with no extra wiring;
+    pass ``rng`` explicitly via ``acq_kwargs`` only to override that with a different generator. Called
+    directly with no ``rng`` at all, this draws from a fresh, unseeded generator (matching ``_as_rng``'s
+    own ``None`` convention) -- reproducible only through the proposal loop's threading above. ``best``
+    is ignored.
 
     Raises ``ValueError`` if ``std`` is negative/non-finite, ``mean``/``std`` shapes disagree,
     ``mean``/``best`` are non-finite, or ``rng`` is neither ``None`` nor a ``numpy.random``
     ``RandomState``/``Generator``.
     """
     mean, std = _validate_acquisition_inputs(mean, std, best, rng=rng)
-    rng = rng if rng is not None else np.random.RandomState()
+    # Match designs._as_rng's None convention (a fresh, OS-entropy-seeded RandomState) without routing
+    # a non-None rng through _as_rng itself: _as_rng only special-cases RandomState, and constructing
+    # RandomState(a_generator) raises -- np.random.Generator is a first-class rng type here too (see
+    # _validate_acquisition_inputs above), so an already-given rng (RandomState or Generator) must pass
+    # through untouched.
+    rng = rng if rng is not None else _as_rng(None)
     draw = mean + std * rng.standard_normal(mean.shape)
     return draw if maximize else -draw
 
@@ -383,6 +394,13 @@ def _propose_one(
 ) -> tuple[np.ndarray, float, Surrogate]:
     """Fit the surrogate, score Latin-hypercube candidates, return (best point, its merit, fitted gp).
 
+    ``rng`` is used both to draw the Latin-hypercube candidate set AND -- unless ``acq_kwargs`` already
+    supplies its own ``"rng"`` -- is forwarded to ``acq_fn`` itself, so a randomized acquisition (e.g.
+    ``thompson_sampling``) draws from the SAME caller-seeded stream as everything else in the proposal
+    loop, instead of silently falling back to its own fresh, unseeded generator. Every built-in
+    acquisition accepts and ignores an ``rng`` it does not use (the shared ``**params`` contract
+    documented at this module's acquisition registry), so this is safe to pass unconditionally.
+
     Raises ``ValueError`` if the surrogate's predicted mean/covariance don't match the candidate
     contract (wrong shape, non-finite, asymmetric covariance) or if every candidate's acquisition
     merit is non-finite (see :func:`_validate_prediction` / :func:`_select_index`).
@@ -402,7 +420,11 @@ def _propose_one(
     mean, cov = _validate_prediction(mean, cov, n_cand, context="_propose_one")
     std = np.sqrt(np.clip(np.diag(cov), 0.0, None))
     best = float(np.max(y)) if maximize else float(np.min(y))
-    merit = np.asarray(acq_fn(mean, std, best, maximize=maximize, **acq_kwargs), dtype=np.float64)
+    # {"rng": rng, **acq_kwargs}: an explicit rng in acq_kwargs (a caller-supplied override) wins over
+    # this ambient one -- dict-literal duplicate keys resolve to the later value, so an acq_kwargs
+    # entry always overrides the "rng": rng default that comes before it.
+    call_kwargs = {"rng": rng, **acq_kwargs}
+    merit = np.asarray(acq_fn(mean, std, best, maximize=maximize, **call_kwargs), dtype=np.float64)
     idx = _select_index(merit, n_cand, largest=True, context="_propose_one acquisition merit")
     return candidates[idx], float(merit[idx]), gp
 
