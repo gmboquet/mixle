@@ -6,6 +6,19 @@ into a fitted or posterior-bearing model. The core entry points share one
 encoder/estimator loop and differ mainly in how much control you want over
 initialization, objectives, streaming, restarts, and diagnostics.
 
+Public API Manifest
+-------------------
+
+``mixle.inference.public_api_manifest()`` returns the complete, ordered package
+surface. Each entry records its source module, whether it is lazy, and whether
+the API is ``stable`` or ``experimental``. The manifest and ``__all__`` contain
+the same unique names and are checked in tests.
+
+The conditional-inference function is exported as ``condition_model`` because
+``condition`` is reserved for the ``mixle.inference.condition`` submodule.
+Objective optimization and general MCMC entry points are available directly
+from ``mixle.inference``; their implementation modules remain public as well.
+
 Entry Points
 ------------
 

@@ -23,6 +23,8 @@ exactly this reason.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from mixle.capability import ConjugateUpdatable
 from mixle.inference import production
 from mixle.inference.bayesian_network import (
@@ -73,30 +75,9 @@ from mixle.inference.causal import do as bn_do
 #      THIS module's own top level created a circular import through mixle.stats.bayes.dirichlet,
 #      which is sometimes still mid-init when mixle.inference is first reached from within
 #      mixle.stats' own chain.
-#   2. `condition` (the FUNCTION in mixle.inference.condition) is deliberately NOT re-exported at
-#      this package level at all, lazily or otherwise -- Python's import machinery always binds a
-#      submodule onto its parent package's namespace on first import, and `mixle.inference.condition`
-#      is ALSO this submodule's own dotted name; any attempt to shadow that with the function loses
-#      to the module every time a second name from the same submodule is imported in the same
-#      `from mixle.inference import ...` statement (confirmed: causes __getattr__ to be skipped for
-#      "condition" entirely once the submodule is bound). Every existing caller already reaches the
-#      function the unambiguous way -- `from mixle.inference.condition import condition` or
-#      `mixle.inference.condition.condition(...)` -- so nothing regresses by leaving it that way.
-_CONDITION_LAZY_NAMES = frozenset({"do", "Posterior", "ConditionReceipt", "ImpossibleEvidenceError", "FieldPath"})
-
-# M2's scenario simulators (mixle.inference.scenario) sit on top of condition.py and eagerly import
-# mixle.stats.latent.hidden_markov -- the same circular-import hazard condition.py's own lazy export
-# above exists to avoid. Lazily exported for the same reason, under aliases (this package's names
-# differ from scenario.py's own, to avoid colliding with mixle.task.solve's own "Scenario" name
-# elsewhere in the codebase) via the _SCENARIO_LAZY_NAMES map below (exported name -> attribute name
-# on the scenario submodule).
-_SCENARIO_LAZY_NAMES = {
-    "simulate_scenario": "simulate",
-    "ScenarioSpec": "Scenario",
-    "ScenarioSimulator": "Simulator",
-    "ScenarioSimulationReceipt": "SimulationReceipt",
-    "ScenarioFieldPosterior": "FieldPosterior",
-}
+#   2. `condition` is also the submodule name, so Python can replace a function bound under that
+#      name with the module object. The package exposes the function under the stable, unambiguous
+#      `condition_model` name; `mixle.inference.condition.condition` remains available.
 from mixle.inference.conformal import (
     conformal_label_sets,
     conformal_label_threshold,
@@ -204,6 +185,20 @@ from mixle.inference.nonparametric import (
     sign_test,
     wilcoxon_signed_rank,
 )
+from mixle.inference.objectives import (
+    CallableObjective,
+    ExpectedLogDensity,
+    ObjectiveFitResult,
+    ObjectiveParameter,
+    ObjectiveParameterSet,
+    ObjectiveSum,
+    UnnormalizedLogLikelihood,
+    fit_objective,
+    fit_parameter_objective,
+    optimize_torch_objective,
+    projection_samples,
+    variational_projection,
+)
 from mixle.inference.orchestration import (
     LearnedAcquisition,
     LearnedPolicy,
@@ -272,13 +267,6 @@ from mixle.inference.resampling import (
     wild_bootstrap,
 )
 
-# risk / tail metrics over a Monte-Carlo outcome distribution (VaR, CVaR, stress-scenario ranking).
-# Same circular-import hazard as the condition/scenario lazy exports above: mixle.inference.risk ->
-# mixle.analysis -> mixle.reason -> ... -> mixle.stats.latent.mixture -> mixle.stats.bayes.dirichlet,
-# which is exactly the module whose own top-level `from mixle.inference.fisher import FixedFisherView`
-# reaches this package mid-init. Exported lazily instead (see __getattr__ at the bottom of this module).
-_RISK_LAZY_NAMES = frozenset({"conditional_value_at_risk", "stress_rank", "value_at_risk"})
-
 # robust / sandwich covariance for M-estimators and regression (misspecification-robust SEs)
 from mixle.inference.robust import (
     cluster_robust_covariance,
@@ -287,20 +275,6 @@ from mixle.inference.robust import (
     robust_standard_errors,
     sandwich_covariance,
 )
-
-# M2's scenario simulators (mixle.inference.scenario) eagerly import
-# mixle.stats.latent.hidden_markov -- importing that at THIS module's own top level creates a real
-# circular import through mixle.stats.bayes.dirichlet (mixle.stats -> ... -> mixle.inference ->
-# scenario -> mixle.stats.latent.hidden_markov -> mixle.stats.latent.mixture ->
-# mixle.stats.bayes.dirichlet, still mid-init). Exported lazily instead (see __getattr__ at the
-# bottom of this module), under aliases since these names differ from scenario.py's own.
-_SCENARIO_LAZY_NAMES = {
-    "simulate_scenario": "simulate",
-    "ScenarioSpec": "Scenario",
-    "ScenarioSimulator": "Simulator",
-    "ScenarioSimulationReceipt": "SimulationReceipt",
-    "ScenarioFieldPosterior": "FieldPosterior",
-}
 
 # proper scoring rules — fair currency for comparing probabilistic forecasts / interval methods
 from mixle.inference.scoring import (
@@ -403,7 +377,49 @@ from mixle.stats.compute.pdist import ParameterEstimator
 # the functional estimation drivers (moved off the mixle.stats object namespace)
 from mixle.stats.compute.sequence import estimate, initialize, seq_estimate, seq_initialize
 
+
+@dataclass(frozen=True)
+class PublicAPIEntry:
+    """One name in the package export manifest."""
+
+    name: str
+    source: str
+    status: str
+    lazy: bool
+
+
+# The sole lazy-export policy. Values are (module, source attribute). A single table keeps
+# circular-import handling and public-name aliasing consistent.
+_LAZY_EXPORTS = {
+    "do": ("mixle.inference.condition", "do"),
+    "condition_model": ("mixle.inference.condition", "condition"),
+    "Posterior": ("mixle.inference.condition", "Posterior"),
+    "ConditionReceipt": ("mixle.inference.condition", "ConditionReceipt"),
+    "ImpossibleEvidenceError": ("mixle.inference.condition", "ImpossibleEvidenceError"),
+    "FieldPath": ("mixle.inference.condition", "FieldPath"),
+    "simulate_scenario": ("mixle.inference.scenario", "simulate"),
+    "ScenarioSpec": ("mixle.inference.scenario", "Scenario"),
+    "ScenarioSimulator": ("mixle.inference.scenario", "Simulator"),
+    "ScenarioSimulationReceipt": ("mixle.inference.scenario", "SimulationReceipt"),
+    "ScenarioFieldPosterior": ("mixle.inference.scenario", "FieldPosterior"),
+    "conditional_value_at_risk": ("mixle.inference.risk", "conditional_value_at_risk"),
+    "stress_rank": ("mixle.inference.risk", "stress_rank"),
+    "value_at_risk": ("mixle.inference.risk", "value_at_risk"),
+    "MCMCResult": ("mixle.inference.mcmc", "MCMCResult"),
+    "ParameterBridge": ("mixle.inference.mcmc", "ParameterBridge"),
+    "build_parameter_bridge": ("mixle.inference.mcmc", "build_parameter_bridge"),
+    "hamiltonian_monte_carlo": ("mixle.inference.mcmc", "hamiltonian_monte_carlo"),
+    "metropolis_hastings": ("mixle.inference.mcmc", "metropolis_hastings"),
+    "run_chains": ("mixle.inference.mcmc", "run_chains"),
+    "sample_conjugate_posterior": ("mixle.inference.mcmc", "sample_conjugate_posterior"),
+    "sample_distribution": ("mixle.inference.mcmc", "sample_distribution"),
+    "sample_parameter_posterior": ("mixle.inference.mcmc", "sample_parameter_posterior"),
+}
+
+
 __all__ = [
+    "PublicAPIEntry",
+    "public_api_manifest",
     "Explanation",
     "explain",
     "explain_margin",
@@ -415,9 +431,9 @@ __all__ = [
     "average_causal_effect",
     "counterfactual",
     "do",
+    "condition_model",
     "bn_do",
-    # NOT "condition" -- reach the M0 condition() function via mixle.inference.condition.condition
-    # or `from mixle.inference.condition import condition`; see the module-level comment above.
+    # `condition` is reserved for the submodule; use `condition_model` for the function.
     "Posterior",
     "ConditionReceipt",
     "ImpossibleEvidenceError",
@@ -448,6 +464,18 @@ __all__ = [
     "held_out_log_likelihood",
     "fisher_merge",
     "fit",
+    "ObjectiveFitResult",
+    "ObjectiveParameter",
+    "ObjectiveParameterSet",
+    "ExpectedLogDensity",
+    "ObjectiveSum",
+    "UnnormalizedLogLikelihood",
+    "CallableObjective",
+    "fit_objective",
+    "fit_parameter_objective",
+    "optimize_torch_objective",
+    "projection_samples",
+    "variational_projection",
     "EMStep",
     "best_of",
     "run_em",
@@ -536,12 +564,6 @@ __all__ = [
     "Receipt",
     "VerificationReport",
     "verify_receipt",
-    # diagnosis-directed correction vs blind structure search
-    "TrialsToTarget",
-    "apply_add_edge_fix",
-    "blind_search_trials_to_target",
-    "directed_correction",
-    "held_out_log_likelihood",
     # reproducibility receipts -- record a fit, replay it, check it comes out bit-for-bit
     "fit_and_record",
     "record_fit",
@@ -743,6 +765,16 @@ __all__ = [
     "available_backends",
     "InferenceBackend",
     "register_inference_backend",
+    # general-purpose MCMC and parameter-posterior bridges
+    "MCMCResult",
+    "ParameterBridge",
+    "build_parameter_bridge",
+    "hamiltonian_monte_carlo",
+    "metropolis_hastings",
+    "run_chains",
+    "sample_conjugate_posterior",
+    "sample_distribution",
+    "sample_parameter_posterior",
     # hierarchical within-subject event study / difference-in-differences
     "EventStudyResult",
     "EventStudyIdentification",
@@ -753,30 +785,78 @@ __all__ = [
 ]
 
 
+_EXPERIMENTAL_PUBLIC_NAMES = frozenset(
+    {
+        "CreatedModel",
+        "CyclicGroup",
+        "Dataset",
+        "EmbeddedStructureModel",
+        "JITExecutionResult",
+        "JittedScorer",
+        "LearnedAcquisition",
+        "LearnedPolicy",
+        "ScenarioFieldPosterior",
+        "ScenarioSimulationReceipt",
+        "ScenarioSimulator",
+        "ScenarioSpec",
+        "TwistedMixtureResult",
+        "create",
+        "default_registry",
+        "fit_independent_mixtures",
+        "fit_twisted_mixture",
+        "independent_log_density",
+        "jit_em_mixture",
+        "jit_seq_log_density",
+        "learn_action_policy",
+        "learn_placement_policy",
+        "learn_schedule_policy",
+        "learn_structure_embedded",
+        "meta_improve",
+        "simulate_scenario",
+        "skill",
+        "synthesize",
+    }
+)
+
+
+def _build_public_api_manifest() -> tuple[PublicAPIEntry, ...]:
+    duplicate_names = sorted(name for name in set(__all__) if __all__.count(name) > 1)
+    if duplicate_names:
+        raise RuntimeError(f"duplicate inference exports: {duplicate_names}")
+
+    entries = []
+    for name in __all__:
+        lazy = name in _LAZY_EXPORTS
+        if lazy:
+            source = _LAZY_EXPORTS[name][0]
+        else:
+            value = globals().get(name)
+            if value is None and name != "public_api_manifest":
+                raise RuntimeError(f"unresolved inference export: {name}")
+            source = (
+                getattr(value, "__module__", getattr(value, "__name__", __name__)) if value is not None else __name__
+            )
+        status = "experimental" if name in _EXPERIMENTAL_PUBLIC_NAMES else "stable"
+        entries.append(PublicAPIEntry(name=name, source=source, status=status, lazy=lazy))
+    return tuple(entries)
+
+
+_PUBLIC_API_MANIFEST = _build_public_api_manifest()
+
+
+def public_api_manifest() -> tuple[PublicAPIEntry, ...]:
+    """Return the immutable, ordered package export manifest."""
+    return _PUBLIC_API_MANIFEST
+
+
 def __getattr__(name: str):
-    if name in _CONDITION_LAZY_NAMES:
+    export = _LAZY_EXPORTS.get(name)
+    if export is not None:
         import importlib
 
-        # importlib.import_module (not `from mixle.inference import condition`) -- the latter
-        # resolves the submodule name via THIS package's own attribute lookup, which re-enters
-        # __getattr__("condition") (the lazy-exported FUNCTION shares its name with the submodule)
-        # and recurses forever.
-        _condition_module = importlib.import_module("mixle.inference.condition")
-        value = getattr(_condition_module, name)
-        globals()[name] = value  # subsequent accesses skip __getattr__ entirely
-        return value
-    if name in _SCENARIO_LAZY_NAMES:
-        import importlib
-
-        _scenario_module = importlib.import_module("mixle.inference.scenario")
-        value = getattr(_scenario_module, _SCENARIO_LAZY_NAMES[name])
-        globals()[name] = value
-        return value
-    if name in _RISK_LAZY_NAMES:
-        import importlib
-
-        _risk_module = importlib.import_module("mixle.inference.risk")
-        value = getattr(_risk_module, name)
+        module_name, attribute_name = export
+        module = importlib.import_module(module_name)
+        value = getattr(module, attribute_name)
         globals()[name] = value
         return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
