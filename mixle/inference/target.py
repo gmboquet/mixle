@@ -80,7 +80,7 @@ class NutsResult:
     chains: np.ndarray
     rhat: np.ndarray
     ess: np.ndarray
-    num_target_evals: int
+    num_target_evals: int | None
     step_size: float
     extra: dict = field(default_factory=dict)
 
@@ -151,8 +151,27 @@ def nuts(
         ``(chains, draws, d)``, per-dimension ``rhat`` and ``ess``, the total target-evaluation
         count, the adapted ``step_size``, and ``extra={"backend": name}``.
     """
+    num_samples = _integer_control("num_samples", num_samples, minimum=1)
+    warmup = _integer_control("warmup", warmup, minimum=0)
+    chains = _integer_control("chains", chains, minimum=1)
+    max_tree_depth = _integer_control("max_tree_depth", max_tree_depth, minimum=1)
+    thin = _integer_control("thin", thin, minimum=1)
+    if (
+        isinstance(target_accept, (bool, np.bool_))
+        or not isinstance(target_accept, (int, float, np.integer, np.floating))
+        or not np.isfinite(target_accept)
+        or not 0.0 < float(target_accept) < 1.0
+    ):
+        raise ValueError("target_accept must be a finite number strictly between 0 and 1")
+    target_accept = float(target_accept)
+    if parallel not in (None, False, True, "process", "thread"):
+        raise ValueError("parallel must be None/False, True, 'process', or 'thread'.")
+    if not callable(target):
+        raise TypeError("target must be callable")
     if dim is None and init is None:
         raise ValueError("pass dim= or init=.")
+    if dim is not None:
+        dim = _integer_control("dim", dim, minimum=1)
     from .backends import _dispatch_target_kind
 
     kind_hint = _dispatch_target_kind(target, backend_kwargs.pop("target_kind", None))
@@ -382,10 +401,10 @@ def _nuts_jax(
     num_samples: int = 1000,
     warmup: int = 1000,
     chains: int = 1,
-    mass: Any = 1.0,  # noqa: ARG001 — NumPyro adapts a (dense/diagonal) mass matrix in warmup itself
+    mass: Any = 1.0,
     target_accept: float = 0.8,
     max_tree_depth: int = 10,
-    thin: int = 1,  # noqa: ARG001 — thinning handled by num_samples; kept for signature parity
+    thin: int = 1,
     rng: np.random.RandomState | int | None = None,
     chain_method: str = "vectorized",
 ) -> NutsResult:
@@ -396,6 +415,16 @@ def _nuts_jax(
     hand-roll the tree). For ``chains > 1`` the chains are vectorized (init shape ``(chains, d)``).
     JAX picks the device automatically (GPU if a CUDA build is installed) — no device special-casing.
     """
+    mass_array = np.asarray(mass)
+    if mass_array.ndim != 0 or not np.isfinite(mass_array) or float(mass_array) != 1.0:
+        raise NotImplementedError(
+            "the JAX backend adapts its own mass matrix and does not support the public mass control"
+        )
+    if thin != 1:
+        raise NotImplementedError(
+            "the JAX backend does not support the public thin control; use thin=1 and thin draws explicitly"
+        )
+
     import jax
     import jax.numpy as jnp
     from numpyro.infer import MCMC, NUTS
@@ -430,7 +459,15 @@ def _nuts_jax(
     except Exception:  # noqa: BLE001
         pass
     chain_arrays = [samples[c] for c in range(chains)]
-    return _pool_chains(chain_arrays, d, chains, 0, step_size, backend="jax")
+    return _pool_chains(
+        chain_arrays,
+        d,
+        chains,
+        None,
+        step_size,
+        backend="jax",
+        target_evals_observed=False,
+    )
 
 
 def advi(
@@ -497,15 +534,33 @@ def _as_rng(rng: np.random.RandomState | int | None) -> np.random.RandomState:
     return rng
 
 
+def _integer_control(name: str, value: int, *, minimum: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    value = int(value)
+    if value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return value
+
+
 def _chain_inits(init: Any, dim: int | None, chains: int, rng: np.random.RandomState) -> np.ndarray:
     """Build a ``(chains, d)`` array of initial states from ``init`` / ``dim``."""
     if init is None:
         if dim is None:
             raise ValueError("pass dim= or init=.")
         return np.zeros((chains, int(dim)), dtype=float)
-    arr = np.asarray(init, dtype=float)
+    try:
+        arr = np.asarray(init, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("init must contain finite numeric values") from exc
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("init must contain only finite values")
     if arr.ndim == 1:
         d = arr.shape[0]
+        if d == 0:
+            raise ValueError("init must contain at least one parameter")
+        if dim is not None and d != dim:
+            raise ValueError(f"init has dimension {d}; dim={dim} was requested")
         out = np.tile(arr, (chains, 1))
         if chains > 1:  # over-disperse the extra chains so R-hat is meaningful
             out[1:] = out[1:] + rng.standard_normal((chains - 1, d))
@@ -513,6 +568,10 @@ def _chain_inits(init: Any, dim: int | None, chains: int, rng: np.random.RandomS
     if arr.ndim == 2:
         if arr.shape[0] != chains:
             raise ValueError("init with shape (n, d) must have n == chains.")
+        if arr.shape[1] == 0:
+            raise ValueError("init must contain at least one parameter")
+        if dim is not None and arr.shape[1] != dim:
+            raise ValueError(f"init has dimension {arr.shape[1]}; dim={dim} was requested")
         return arr
     raise ValueError("init must be 1-D (d,) or 2-D (chains, d).")
 
@@ -521,26 +580,48 @@ def _pool_chains(
     chain_arrays: list[np.ndarray],
     d: int,
     chains: int,
-    total_evals: int,
+    total_evals: int | None,
     last_step: float,
     *,
     backend: str,
     **extra: Any,
 ) -> NutsResult:
     """Stack per-chain draws into a :class:`NutsResult` with pooled draws + R-hat / ESS."""
-    n = min(a.shape[0] for a in chain_arrays)
-    stacked = np.stack([a[:n] for a in chain_arrays], axis=0)  # (chains, n, d)
+    if len(chain_arrays) != chains or not chain_arrays:
+        raise RuntimeError(f"backend returned {len(chain_arrays)} chains; expected {chains}")
+    normalized = [np.asarray(array, dtype=float) for array in chain_arrays]
+    expected_shape = normalized[0].shape
+    if len(expected_shape) != 2 or expected_shape[0] == 0 or expected_shape[1] != d:
+        raise RuntimeError(f"backend returned invalid chain shape {expected_shape}; expected (draws, {d})")
+    if any(array.shape != expected_shape for array in normalized):
+        raise RuntimeError("backend returned chains with unequal draw counts or parameter dimensions")
+    if any(not np.all(np.isfinite(array)) for array in normalized):
+        raise RuntimeError("backend returned non-finite posterior draws")
+    n = expected_shape[0]
+    stacked = np.stack(normalized, axis=0)
     pooled = stacked.reshape(-1, d)
-    rh = rhat(stacked) if chains >= 2 else np.full(d, np.nan)
-    es = ess(stacked)
+    diagnostic_ready = n >= 4
+    rh = rhat_max(stacked) if chains >= 2 and diagnostic_ready else np.full(d, np.nan)
+    es = ess_bulk(stacked) if diagnostic_ready else ess(stacked)
+    if total_evals is not None and (
+        isinstance(total_evals, (bool, np.bool_))
+        or not isinstance(total_evals, (int, np.integer))
+        or total_evals < 0
+    ):
+        raise RuntimeError("backend returned an invalid target-evaluation count")
     return NutsResult(
         samples=pooled,
         chains=stacked,
         rhat=rh,
         ess=es,
-        num_target_evals=total_evals,
+        num_target_evals=None if total_evals is None else int(total_evals),
         step_size=last_step,
-        extra={"backend": backend, **extra},
+        extra={
+            "backend": backend,
+            "diagnostics": "rank_normalized_split" if diagnostic_ready else "insufficient_draws",
+            "target_evals_observed": total_evals is not None,
+            **extra,
+        },
     )
 
 
