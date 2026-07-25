@@ -340,6 +340,8 @@ def birth_and_merge(
     :data:`E2_UNAVAILABLE_PIECES`).
     """
     _require_torch()
+    if isinstance(outlier_top_k, bool) or not isinstance(outlier_top_k, int) or outlier_top_k < 0:
+        raise ValueError("outlier_top_k must be a non-negative exact integer.")
     n_head, max_clusters, d_head = bank.mu_k.shape
     device = bank.mu_k.device
     dtype = bank.mu_k.dtype
@@ -479,7 +481,9 @@ def birth_and_merge(
     if n > 0:
         with torch.no_grad():
             r = cluster_responsibilities(k, bank)[..., :n]  # (b, t, h, n)
-            assigned = r >= (1.0 / max(n, 1))
+            # One hard token-level membership is required by the storage seam. Head-specific threshold
+            # masks overlap and therefore cannot conserve tokens across cluster tails.
+            token_membership = r.mean(dim=2).argmax(dim=-1).reshape(-1)  # (b*t,)
             mu_k = bank.mu_k[:, :n]
             mu_v = bank.mu_v[:, :n]
             sigma_kk = bank.sigma_kk[:, :n].clamp_min(1e-6)
@@ -492,18 +496,25 @@ def birth_and_merge(
 
             misfit_by_cluster: dict[int, float] = {}
             outliers: dict[int, dict[str, Any]] = {}
+            flat_k = k.reshape(b * t, n_head, d_head)
+            flat_v = v.reshape(b * t, n_head, d_head)
             for c in range(n):
-                mask = assigned[:, :, :, c]
-                if bool(mask.any()):
-                    misfit_by_cluster[c] = float(resid_norm[:, :, :, c][mask].mean())
+                member_indices = torch.nonzero(token_membership == c, as_tuple=False).flatten()
+                if member_indices.numel():
+                    flat_resid_bt = resid_norm[:, :, :, c].mean(dim=2).reshape(-1)
+                    misfit_by_cluster[c] = float(flat_resid_bt[member_indices].mean())
                     # per-token (head-averaged) residual so the top-k indices align 1:1 with flat_k/flat_v's
                     # (b*t) token axis -- an outlier is a TOKEN (its full multi-head k/v), not a (token, head)
                     # pair, matching what a real ProfileQuantized consumer (I2/G4) would want to store.
-                    flat_resid_bt = resid_norm[:, :, :, c].mean(dim=2).reshape(-1)  # (b*t,)
-                    flat_k = k.reshape(b * t, n_head, d_head)
-                    flat_v = v.reshape(b * t, n_head, d_head)
-                    top = torch.topk(flat_resid_bt, k=min(outlier_top_k, flat_resid_bt.shape[0])).indices
-                    outliers[c] = {"k": flat_k[top].detach(), "v": flat_v[top].detach(), "indices": top.detach()}
+                    n_outliers = min(outlier_top_k, int(member_indices.numel()))
+                    local_top = torch.topk(flat_resid_bt[member_indices], k=n_outliers).indices
+                    top = member_indices[local_top]
+                    outliers[c] = {
+                        "k": flat_k[top].detach(),
+                        "v": flat_v[top].detach(),
+                        "indices": top.detach(),
+                        "member_indices": member_indices.detach(),
+                    }
                 else:
                     misfit_by_cluster[c] = 0.0
             receipt["misfit"] = misfit_by_cluster
