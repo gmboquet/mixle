@@ -34,7 +34,17 @@ Triple = tuple  # (subject, relation, object) or any fixed-arity fact tuple
 
 def canonical_graph(triples: Iterable[Any]) -> frozenset:
     """Return an order-independent, deduplicated graph representation."""
-    return frozenset(tuple(t) for t in triples)
+    canonical = []
+    for triple in triples:
+        if not isinstance(triple, (tuple, list)) or not triple:
+            raise TypeError("every graph fact must be a non-empty tuple or list.")
+        fact = tuple(triple)
+        try:
+            hash(fact)
+        except TypeError as exc:
+            raise TypeError("every graph fact and field must be hashable.") from exc
+        canonical.append(fact)
+    return frozenset(canonical)
 
 
 @dataclass(frozen=True)
@@ -46,8 +56,36 @@ class GraphDistribution:
     answered by marginalizing this distribution over the graphs that produce the queried outcome.
     """
 
-    graphs: list[frozenset]
+    graphs: tuple[frozenset, ...]
     probs: np.ndarray
+
+    def __post_init__(self) -> None:
+        graphs = tuple(self.graphs)
+        if not graphs:
+            raise ValueError("GraphDistribution requires at least one graph.")
+        if any(not isinstance(graph, frozenset) for graph in graphs):
+            raise TypeError("graphs must contain canonical frozenset graph values.")
+        for graph in graphs:
+            for fact in graph:
+                if not isinstance(fact, tuple) or not fact:
+                    raise TypeError("canonical graph facts must be non-empty tuples.")
+                try:
+                    hash(fact)
+                except TypeError as exc:
+                    raise TypeError("canonical graph facts must be hashable.") from exc
+        if len(set(graphs)) != len(graphs):
+            raise ValueError("GraphDistribution graphs must be distinct.")
+        probabilities = np.asarray(self.probs, dtype=float)
+        if probabilities.shape != (len(graphs),):
+            raise ValueError("probs must contain exactly one probability per graph.")
+        if not np.isfinite(probabilities).all() or np.any(probabilities < 0.0):
+            raise ValueError("graph probabilities must be finite and non-negative.")
+        if not np.isclose(float(probabilities.sum()), 1.0, rtol=0.0, atol=1e-10):
+            raise ValueError("graph probabilities must sum to one.")
+        probabilities = probabilities.copy()
+        probabilities.setflags(write=False)
+        object.__setattr__(self, "graphs", graphs)
+        object.__setattr__(self, "probs", probabilities)
 
     def marginalize(self, outcome: Callable[[frozenset], Hashable]) -> list[tuple[Any, float]]:
         """Return ``P(outcome = c) = sum_{G : outcome(G) = c} P(G)``.
@@ -95,12 +133,16 @@ class GraphDistribution:
         return dict(zip(keys, (float(v) for v in vals)))
 
     def query(self, *prefix: Any) -> list[tuple[Any, float]]:
-        """Answer-completion posterior: ``P(object | prefix)`` over triples whose leading fields match.
+        """Return per-object fact marginals for triples matching ``prefix``.
 
-        ``query("eiffel", "city")`` marginalizes over graphs, collecting the objects of every triple
-        starting ``("eiffel", "city", ...)`` weighted by ``P(G)``, then renormalizes over the objects
-        actually asserted. Returns ``[(object, probability), ...]`` best-first.
+        A graph may assert several matching objects; each is then an event with
+        its own marginal and may have probability one. The result is therefore
+        not renormalized into a categorical outcome. Use :meth:`functional_query`
+        when the relation is declared single-valued and a categorical outcome,
+        including no assertion, is required.
         """
+        if not prefix:
+            raise ValueError("query requires a non-empty fact prefix.")
         k = len(prefix)
         mass: dict[Any, float] = {}
         for g, p in zip(self.graphs, self.probs):
@@ -108,10 +150,29 @@ class GraphDistribution:
             for o in objs:  # a graph asserting the fact contributes its full mass once
                 val = o[0] if len(o) == 1 else o
                 mass[val] = mass.get(val, 0.0) + float(p)
-        total = sum(mass.values())
-        if total <= 0.0:
-            return []
-        return sorted(((v, m / total) for v, m in mass.items()), key=lambda kv: -kv[1])
+        return sorted(mass.items(), key=lambda kv: -kv[1])
+
+    def functional_query(self, *prefix: Any, no_assertion: Hashable = None) -> list[tuple[Any, float]]:
+        """Return a categorical outcome for an explicitly functional relation.
+
+        Every graph must assert at most one matching suffix. Graphs with no
+        match contribute to ``no_assertion`` rather than disappearing.
+        """
+        if not prefix:
+            raise ValueError("functional_query requires a non-empty fact prefix.")
+        k = len(prefix)
+        mass: dict[Any, float] = {}
+        for graph, probability in zip(self.graphs, self.probs):
+            objects = {fact[k:] for fact in graph if len(fact) > k and tuple(fact[:k]) == tuple(prefix)}
+            if len(objects) > 1:
+                raise ValueError(f"relation prefix {prefix!r} is not functional in every graph.")
+            if objects:
+                suffix = next(iter(objects))
+                value = suffix[0] if len(suffix) == 1 else suffix
+            else:
+                value = no_assertion
+            mass[value] = mass.get(value, 0.0) + float(probability)
+        return sorted(mass.items(), key=lambda item: -item[1])
 
     def most_likely_graph(self) -> tuple[frozenset, float]:
         """The single most probable graph and its probability."""
@@ -137,13 +198,16 @@ class GraphLLM:
         *,
         n: int = 10,
     ) -> None:
+        if not callable(generate) or not callable(parse):
+            raise TypeError("generate and parse must be callable.")
         self.generate = generate
         self.parse = parse
-        self.n = int(n)
+        self.n = _positive_sample_count(n)
 
     def sample_graphs(self, prompt: str, n: int | None = None) -> list[frozenset]:
         """Sample ``n`` generations and parse each into a canonical graph."""
-        return [canonical_graph(self.parse(self.generate(prompt))) for _ in range(int(n or self.n))]
+        count = self.n if n is None else _positive_sample_count(n)
+        return [canonical_graph(self.parse(self.generate(prompt))) for _ in range(count)]
 
     def distribution(
         self,
@@ -152,6 +216,7 @@ class GraphLLM:
         *,
         log_probs: Sequence[float] | None = None,
         graphs: Sequence[frozenset] | None = None,
+        strings: Sequence[str] | None = None,
     ) -> GraphDistribution:
         """Sample, parse, and marginalize strings onto graphs.
 
@@ -160,9 +225,24 @@ class GraphLLM:
         sequence likelihoods within each graph. This lower-variance estimator
         does not assume every string realizing a graph is equiprobable.
         """
-        gs = list(graphs) if graphs is not None else self.sample_graphs(prompt, n)
+        if graphs is None:
+            if strings is not None:
+                raise ValueError("strings may only be supplied with explicit graphs.")
+            count = self.n if n is None else _positive_sample_count(n)
+            generated = [self.generate(prompt) for _ in range(count)]
+            if any(not isinstance(value, str) for value in generated):
+                raise TypeError("generate must return strings.")
+            gs = [canonical_graph(self.parse(value)) for value in generated]
+            generated_strings = generated
+        else:
+            gs = list(graphs)
+            generated_strings = list(strings) if strings is not None else None
+            if n is not None:
+                raise ValueError("n cannot be supplied together with explicit graphs.")
         if not gs:
             raise ValueError("no samples to form a graph distribution")
+        if any(not isinstance(graph, frozenset) for graph in gs):
+            raise TypeError("graphs must contain canonical frozenset values.")
         distinct: list[frozenset] = []
         index: dict[frozenset, int] = {}
         for g in gs:
@@ -173,17 +253,40 @@ class GraphLLM:
             lp = np.asarray(log_probs, dtype=float).reshape(-1)
             if lp.size != len(gs):
                 raise ValueError("log_probs must have one entry per sample")
+            if np.isnan(lp).any() or np.isposinf(lp).any() or not np.isfinite(lp).any():
+                raise ValueError("log_probs must contain valid log mass and cannot be all -inf.")
+            if generated_strings is None:
+                raise ValueError("strings are required with log_probs so duplicate sequences can be deduplicated.")
+            if len(generated_strings) != len(gs) or any(not isinstance(value, str) for value in generated_strings):
+                raise ValueError("strings must contain one generated string per graph and log probability.")
+            unique_strings: dict[str, tuple[frozenset, float]] = {}
+            for string, graph, log_probability in zip(generated_strings, gs, lp):
+                if string in unique_strings:
+                    previous_graph, previous_log_probability = unique_strings[string]
+                    if graph != previous_graph or not np.isclose(log_probability, previous_log_probability):
+                        raise ValueError("duplicate strings must map to the same graph and log probability.")
+                    continue
+                unique_strings[string] = (graph, float(log_probability))
             logmass = np.full(len(distinct), -np.inf)
-            for g, l in zip(gs, lp):
+            for g, l in unique_strings.values():
                 i = index[g]
                 logmass[i] = np.logaddexp(logmass[i], l)
-            probs = np.exp(logmass - logsumexp(logmass))
+            normalizer = float(logsumexp(logmass))
+            if not np.isfinite(normalizer):
+                raise ValueError("enumerated string log mass must contain at least one finite value.")
+            probs = np.exp(logmass - normalizer)
         else:
             counts = np.zeros(len(distinct))
             for g in gs:
                 counts[index[g]] += 1.0
             probs = counts / counts.sum()
         return GraphDistribution(distinct, probs)
+
+
+def _positive_sample_count(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or int(value) <= 0:
+        raise ValueError("sample count must be a positive integer.")
+    return int(value)
 
 
 def fit_fact_calibrator(
