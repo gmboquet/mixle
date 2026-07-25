@@ -336,7 +336,7 @@ def test_referee_suite_smoke():
     assert set(result["suites"].keys()) == {6, 10, 14}
     for distance, row in result["suites"].items():
         for suite_name in ("needle", "copy", "multi_hop"):
-            assert 0.0 <= row[suite_name]["accuracy"] <= 1.0
+            assert 0.0 <= row[suite_name]["loss_threshold_success_rate"] <= 1.0
         assert row["perplexity"]["perplexity"] > 0.0
     assert result["state_bytes_used"] >= 0
     assert math.isfinite(model.last_misfit)

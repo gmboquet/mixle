@@ -1,6 +1,7 @@
 """E7: the long-context referee -- one evaluation suite every Track-E mechanism (E1's baseline and every
-E2-E6 challenger) is measured against on the same terms (see ``mixle/experimental/README.md``'s graduation
-rule: "beats the E1 baseline on the E7 evaluation suite at matched FLOPs" + misfit receipts).
+E2-E6 challenger) is measured against on the same terms. The graduation rule requires matched compute;
+this module now rejects a comparison that has neither equal measured training FLOPs nor a shared enforced
+training-compute ceiling.
 
 ``evaluate(mechanism, ...)`` drives any :class:`~mixle.experimental.context_spine.ContextMechanism` through
 four kinds of controlled-dependency-distance probes at every requested range:
@@ -16,27 +17,21 @@ four kinds of controlled-dependency-distance probes at every requested range:
   trained and measured at each range, to see whether streaming quality degrades with total length,
   independent of any single controlled dependency.
 
-Every probe trains ``mechanism`` briefly (via :func:`~mixle.experimental.context_spine.train_tbptt`) on
-fresh random instances of its suite, then measures held-out accuracy: the protocol
-(:class:`~mixle.experimental.context_spine.ContextMechanism`) only returns a scalar mean loss per step, not
-logits, so exact argmax accuracy is unavailable by design -- "solved" is instead a chance-normalized loss
-threshold (probe loss below half the uniform-guess loss ``0.5 * ln(vocab)``), which is a real, documented
-proxy rather than a silently-approximate one.
+Every controlled-dependency probe trains a fresh clone of the same initial mechanism only on the final
+dependency position, then measures a paired held-out ``loss_threshold_success_rate``. The
+:class:`~mixle.experimental.context_spine.ContextMechanism` protocol returns scalar loss rather than
+logits, so this module does not call that threshold statistic classification accuracy.
 
 **Calibrated forgetting curves ("does it know what it forgot?").** The mechanism's OWN per-probe loss is
 its only self-reported signal (the protocol exposes nothing else). :func:`evaluate` overlays that signal
-against the needle accuracy curve and reports ``self_knowledge_correlation`` -- the correlation between
-"how much it forgot" (``1 - accuracy``) and "how surprised it says it was" (its own probe loss) across
-ranges. A mechanism that is well-calibrated about its own forgetting scores near +1; a mechanism that is
-confidently wrong scores near 0.
+against the needle threshold-success curve and reports ``self_knowledge_correlation`` -- the correlation
+between ``1 - loss_threshold_success_rate`` and probe loss across ranges.
 
-**Matched-FLOPs / matched-state-bytes protocols.** :func:`evaluate` reports, per range, the FLOPs spent
-(``6 * n_params * n_tokens``, the same Kaplan/Hoffmann approximation :mod:`mixle.ppl.scaling_laws` uses)
-and, once, the carried-state byte footprint at the largest tested range against the caller-supplied
-``state_budget_bytes``. Two mechanisms compared with :func:`comparison_table` on the SAME ``ranges`` and
-``state_budget_bytes`` are, by construction, being compared at matched FLOPs and matched state bytes --
-that comparison is the caller's job (pass a ``{name: evaluate(...)}`` mapping); this module only makes the
-numbers honest and side-by-side.
+**Compute/state protocols.** :func:`evaluate` accounts for training and evaluation tokens separately and
+can enforce a shared ``suite_training_budget_flops`` across the isolated cells. :func:`comparison_table`
+rejects multi-mechanism output unless seed, data protocol, ranges, vocabulary, compute contract, and state
+budget match; it also rejects any result that exceeded its state budget. Merely using the same token counts
+is not described as matched compute.
 
 **Length curriculum as a bandit.** :func:`length_curriculum` (also run internally by :func:`evaluate`) uses
 :class:`mixle.task.bandit.ThompsonBernoulli` (reused, not reimplemented) with one arm per length bucket in
@@ -58,8 +53,12 @@ same code path a caller would use at card scale.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
+import hashlib
+import json
 import math
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -104,6 +103,36 @@ def _to_tensors(x: np.ndarray, y: np.ndarray) -> tuple[Any, Any]:
 
 def _chunks(x: Any, y: Any, chunk_size: int) -> list[tuple[Any, Any]]:
     return [(x[:, i : i + chunk_size], y[:, i : i + chunk_size]) for i in range(0, x.shape[1], chunk_size)]
+
+
+def _exact_positive_int(value: Any, name: str, *, minimum: int = 1) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral) or int(value) < minimum:
+        raise ValueError(f"{name} must be an exact integer >= {minimum}.")
+    return int(value)
+
+
+def _finite_nonnegative(value: Any, name: str, *, positive: bool = False) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a real number.")
+    result = float(value)
+    if not math.isfinite(result) or result < 0 or (positive and result == 0):
+        qualifier = "positive" if positive else "non-negative"
+        raise ValueError(f"{name} must be finite and {qualifier}.")
+    return result
+
+
+def _cell_seed(seed: int, distance: int, suite_index: int) -> int:
+    return int(np.random.SeedSequence([seed, distance, suite_index]).generate_state(1, dtype=np.uint32)[0])
+
+
+def _fresh_mechanism(mechanism: ContextMechanism, *, seed: int) -> ContextMechanism:
+    """Return an independent copy at the caller-supplied initial weights."""
+    try:
+        cloned = copy.deepcopy(mechanism)
+    except Exception as exc:
+        raise TypeError("mechanism must support deepcopy so every evaluation cell starts identically.") from exc
+    torch.manual_seed(seed)
+    return cloned
 
 
 def _choose_chunk_size(distance: int) -> int:
@@ -195,17 +224,32 @@ def _train_and_probe(
     rng: np.random.RandomState,
     **suite_kwargs: Any,
 ) -> dict[str, Any]:
+    distance = _exact_positive_int(distance, "distance")
+    vocab = _exact_positive_int(vocab, "vocab", minimum=2)
+    chunk_size = _exact_positive_int(chunk_size, "chunk_size")
+    n_train_steps = _exact_positive_int(n_train_steps, "n_train_steps", minimum=0)
+    n_eval_trials = _exact_positive_int(n_eval_trials, "n_eval_trials")
     chance_loss = math.log(vocab)
     threshold = 0.5 * chance_loss
+    was_training = getattr(mechanism, "training", None)
 
+    if hasattr(mechanism, "train"):
+        mechanism.train()
     for _ in range(n_train_steps):
         x, y = suite_fn(rng, distance=distance, vocab=vocab, **suite_kwargs)
         state = mechanism.init_state(1)
-        chunks = _chunks(x, y, chunk_size)
-        train_tbptt(mechanism, state, chunks, opt, detach_horizon=len(chunks))
+        # Warm the prefix without an optimizer step, then train only on the controlled dependency target.
+        # Otherwise identity targets at every uninteresting prefix position dominate the scientific probe.
+        with torch.no_grad():
+            for chunk in _chunks(x[:, :-1], y[:, :-1], chunk_size):
+                state, _ = mechanism.step(state, chunk)
+        state = mechanism.detach(state)
+        train_tbptt(mechanism, state, [(x[:, -1:], y[:, -1:])], opt, detach_horizon=1)
 
     solved: list[bool] = []
     probe_losses: list[float] = []
+    if hasattr(mechanism, "eval"):
+        mechanism.eval()
     with torch.no_grad():
         for _ in range(n_eval_trials):
             x, y = suite_fn(rng, distance=distance, vocab=vocab, **suite_kwargs)
@@ -218,12 +262,21 @@ def _train_and_probe(
             probe_losses.append(loss_v)
             solved.append(loss_v < threshold)
 
-    return {
+    result = {
         "distance": distance,
-        "accuracy": float(np.mean(solved)),
+        "metric": "loss_threshold_success_rate",
+        "loss_threshold_success_rate": float(np.mean(solved)),
+        "loss_threshold": threshold,
         "mean_probe_loss": float(np.mean(probe_losses)),
         "chance_loss": chance_loss,
+        "training_steps": n_train_steps,
+        "training_tokens": n_train_steps * (distance + 1),
+        "evaluation_trials": n_eval_trials,
+        "evaluation_tokens": n_eval_trials * (distance + 1),
     }
+    if was_training is not None:
+        mechanism.train(was_training)
+    return result
 
 
 def multi_scale_perplexity(
@@ -234,33 +287,71 @@ def multi_scale_perplexity(
     vocab: int,
     chunk_size: int,
     n_steps: int,
+    n_eval_trials: int,
     rng: np.random.RandomState,
     perm: np.ndarray,
 ) -> dict[str, Any]:
-    """Train ``n_steps`` fresh order-1-Markov instances of ``length`` and report mean loss / perplexity."""
-    losses: list[float] = []
+    """Train on fresh Markov instances, then report loss/perplexity on separate held-out sequences."""
+    length = _exact_positive_int(length, "length", minimum=2)
+    vocab = _exact_positive_int(vocab, "vocab", minimum=2)
+    chunk_size = _exact_positive_int(chunk_size, "chunk_size")
+    n_steps = _exact_positive_int(n_steps, "n_steps", minimum=0)
+    n_eval_trials = _exact_positive_int(n_eval_trials, "n_eval_trials")
+    was_training = getattr(mechanism, "training", None)
+    if hasattr(mechanism, "train"):
+        mechanism.train()
     for _ in range(n_steps):
         x, y = _markov_sequence(rng, length=length, vocab=vocab, perm=perm)
         state = mechanism.init_state(1)
-        chunks = _chunks(x, y, chunk_size)
-        receipt = train_tbptt(mechanism, state, chunks, opt, detach_horizon=len(chunks))
-        losses.append(float(np.mean(receipt["losses"])))
+        with torch.no_grad():
+            state, _ = mechanism.step(state, (x[:, :1], y[:, :1]))
+        state = mechanism.detach(state)
+        chunks = _chunks(x[:, 1:], y[:, 1:], chunk_size)
+        train_tbptt(mechanism, state, chunks, opt, detach_horizon=len(chunks))
+
+    losses: list[float] = []
+    if hasattr(mechanism, "eval"):
+        mechanism.eval()
+    with torch.no_grad():
+        for _ in range(n_eval_trials):
+            x, y = _markov_sequence(rng, length=length, vocab=vocab, perm=perm)
+            state = mechanism.init_state(1)
+            state, _ = mechanism.step(state, (x[:, :1], y[:, :1]))
+            trial_losses: list[float] = []
+            for chunk in _chunks(x[:, 1:], y[:, 1:], chunk_size):
+                state, loss = mechanism.step(state, chunk)
+                trial_losses.append(float(loss))
+            losses.append(float(np.mean(trial_losses)))
     mean_loss = float(np.mean(losses))
-    return {"length": length, "mean_loss": mean_loss, "perplexity": float(math.exp(min(mean_loss, 50.0)))}
+    result = {
+        "length": length,
+        "mean_loss": mean_loss,
+        "perplexity": float(math.exp(min(mean_loss, 50.0))),
+        "training_steps": n_steps,
+        "training_tokens": n_steps * length,
+        "training_scored_tokens": n_steps * (length - 1),
+        "evaluation_trials": n_eval_trials,
+        "evaluation_tokens": n_eval_trials * length,
+        "evaluation_scored_tokens": n_eval_trials * (length - 1),
+    }
+    if was_training is not None:
+        mechanism.train(was_training)
+    return result
 
 
 def _forgetting_curve(needle_rows: list[dict[str, Any]]) -> dict[str, Any]:
     distances = [r["distance"] for r in needle_rows]
-    accuracy = np.array([r["accuracy"] for r in needle_rows])
+    success_rate = np.array([r["loss_threshold_success_rate"] for r in needle_rows])
     self_loss = np.array([r["mean_probe_loss"] for r in needle_rows])
-    forgetting = 1.0 - accuracy
+    forgetting = 1.0 - success_rate
     if len(distances) >= 2 and np.std(self_loss) > 0 and np.std(forgetting) > 0:
         corr = float(np.corrcoef(forgetting, self_loss)[0, 1])
     else:
         corr = float("nan")
     return {
         "distances": distances,
-        "accuracy": accuracy.tolist(),
+        "metric": "loss_threshold_success_rate",
+        "success_rate": success_rate.tolist(),
         "self_reported_loss": self_loss.tolist(),
         "self_knowledge_correlation": corr,
     }
@@ -343,7 +434,19 @@ def length_curriculum(
     buckets) additionally masks out any arm whose next pull would exceed its remaining share -- ultra-long
     buckets are rationed by construction, since each of their pulls costs proportionally more.
     """
-    bandit = ThompsonBernoulli(len(ranges), seed=seed)
+    if not ranges:
+        raise ValueError("ranges must be non-empty.")
+    ranges = tuple(_exact_positive_int(value, "range", minimum=2) for value in ranges)
+    vocab = _exact_positive_int(vocab, "vocab", minimum=2)
+    n_rounds = _exact_positive_int(n_rounds, "n_rounds", minimum=0)
+    compute_budget_flops = _finite_nonnegative(compute_budget_flops, "compute_budget_flops")
+    seed = _exact_positive_int(seed, "seed", minimum=0)
+    was_training = getattr(mechanism, "training", None)
+    bandit = ThompsonBernoulli(len(ranges), seed=seed) if len(ranges) >= 2 else None
+    single_rng = np.random.RandomState(seed)
+    single_alpha = 1.0
+    single_beta = 1.0
+    single_pulls = 0
     ledger = np.full(len(ranges), float(compute_budget_flops) / len(ranges))
     costs = np.array([_flops_for(mechanism, r) for r in ranges])
     cost_ratio = costs / max(float(np.min(costs)), 1.0)
@@ -354,16 +457,25 @@ def length_curriculum(
         affordable = ledger >= costs
         if not affordable.any():
             break  # the compute box is exhausted; stop rather than overspend any bucket.
-        draws = bandit.rng.beta(bandit.alpha, bandit.beta)
-        draws = np.where(affordable, draws, -np.inf)
-        arm = int(np.argmax(draws))
+        if bandit is None:
+            single_rng.beta(single_alpha, single_beta)  # advance deterministically like a Thompson draw
+            arm = 0
+        else:
+            draws = bandit.rng.beta(bandit.alpha, bandit.beta)
+            draws = np.where(affordable, draws, -np.inf)
+            arm = int(np.argmax(draws))
         length = int(ranges[arm])
         chunk_size = _choose_chunk_size(length)
 
+        if hasattr(mechanism, "eval"):
+            mechanism.eval()
         with torch.no_grad():
-            x0, y0 = _markov_sequence(rng, length=length, vocab=vocab, perm=perm)
+            # Hold the evaluation sample fixed across the update. Comparing two independent draws adds
+            # sampling noise to the reward and can credit a harmful update merely because x2 was easier.
+            x_eval, y_eval = _markov_sequence(rng, length=length, vocab=vocab, perm=perm)
             state0 = mechanism.init_state(1)
-            before_chunks = _chunks(x0, y0, chunk_size)
+            state0, _ = mechanism.step(state0, (x_eval[:, :1], y_eval[:, :1]))
+            before_chunks = _chunks(x_eval[:, 1:], y_eval[:, 1:], chunk_size)
             loss_before = 0.0
             for chunk in before_chunks:
                 state0, loss = mechanism.step(state0, chunk)
@@ -371,14 +483,21 @@ def length_curriculum(
             loss_before /= len(before_chunks)
 
         x1, y1 = _markov_sequence(rng, length=length, vocab=vocab, perm=perm)
+        if hasattr(mechanism, "train"):
+            mechanism.train()
         state1 = mechanism.init_state(1)
-        chunks1 = _chunks(x1, y1, chunk_size)
+        with torch.no_grad():
+            state1, _ = mechanism.step(state1, (x1[:, :1], y1[:, :1]))
+        state1 = mechanism.detach(state1)
+        chunks1 = _chunks(x1[:, 1:], y1[:, 1:], chunk_size)
         train_tbptt(mechanism, state1, chunks1, opt, detach_horizon=len(chunks1))
 
+        if hasattr(mechanism, "eval"):
+            mechanism.eval()
         with torch.no_grad():
-            x2, y2 = _markov_sequence(rng, length=length, vocab=vocab, perm=perm)
             state2 = mechanism.init_state(1)
-            after_chunks = _chunks(x2, y2, chunk_size)
+            state2, _ = mechanism.step(state2, (x_eval[:, :1], y_eval[:, :1]))
+            after_chunks = _chunks(x_eval[:, 1:], y_eval[:, 1:], chunk_size)
             loss_after = 0.0
             for chunk in after_chunks:
                 state2, loss = mechanism.step(state2, chunk)
@@ -389,17 +508,28 @@ def length_curriculum(
         improvement = max(loss_before - loss_after, 0.0)
         normalized_improvement = min(improvement / chance_loss, 1.0)
         reward = float(np.clip(normalized_improvement / cost_ratio[arm], 0.0, 1.0))
-        bandit.update(arm, reward)
+        if bandit is None:
+            single_alpha += reward
+            single_beta += 1.0 - reward
+            single_pulls += 1
+        else:
+            bandit.update(arm, reward)
         ledger[arm] -= costs[arm]
         pulled_lengths.append(length)
 
-    return {
+    result = {
         "bucket_ranges": [int(r) for r in ranges],
-        "pulls": bandit.pulls.tolist(),
-        "posterior_means": bandit.means.tolist(),
+        "pulls": [single_pulls] if bandit is None else bandit.pulls.tolist(),
+        "posterior_means": ([single_alpha / (single_alpha + single_beta)] if bandit is None else bandit.means.tolist()),
         "ledger_remaining": ledger.tolist(),
         "pulled_lengths": pulled_lengths,
+        "paired_before_after": True,
+        "compute_budget_flops": float(compute_budget_flops),
+        "compute_flops_used": float(np.sum(np.full(len(ranges), compute_budget_flops / len(ranges)) - ledger)),
     }
+    if was_training is not None:
+        mechanism.train(was_training)
+    return result
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -410,7 +540,7 @@ def length_curriculum(
 def evaluate(
     mechanism: ContextMechanism,
     *,
-    ranges: tuple[float, ...] = (1e3, 1e4, 1e5, 1e6),
+    ranges: tuple[int, ...] = (1_000, 10_000, 100_000, 1_000_000),
     state_budget_bytes: float,
     seed: int,
     hops: int = 3,
@@ -419,105 +549,146 @@ def evaluate(
     perplexity_steps: int = 6,
     curriculum_rounds: int = 12,
     compute_budget_flops: float | None = None,
+    suite_training_budget_flops: float | None = None,
 ) -> dict[str, Any]:
     """Run the full E7 referee suite against ``mechanism`` end-to-end. See the module docstring for what
     each piece measures and honestly claims. Requires a torch-trainable mechanism (``.parameters()``
-    exposed, as every Track-E mechanism in :mod:`mixle.experimental.context_spine` is) -- trains it IN
-    PLACE via TBPTT, so pass a freshly-initialized instance for a clean baseline measurement.
+    exposed, as every Track-E mechanism in :mod:`mixle.experimental.context_spine` is). The supplied
+    mechanism is not trained or mutated: every range/suite, state probe, and curriculum receives an
+    independent deep copy of its initial weights.
 
-    ``compute_budget_flops`` defaults to ``20x`` the FLOP cost of one full pass over the largest range,
-    generous enough that the length-curriculum bandit (:func:`length_curriculum`) gets a meaningful number
-    of rounds without the caller having to reason about FLOPs by hand.
+    ``suite_training_budget_flops`` is a total ceiling split evenly across every range/suite cell. When it
+    is supplied, each cell uses as many of the requested training steps as fit within its share. The
+    separate ``compute_budget_flops`` controls only the curriculum and defaults to ``20x`` one pass over
+    the largest range.
     """
     _require_torch()
     if not hasattr(mechanism, "parameters"):
         raise ValueError("evaluate() requires a torch-trainable mechanism exposing .parameters().")
 
-    ranges = tuple(int(r) for r in ranges)
     if not ranges:
         raise ValueError("ranges must be non-empty.")
-    if any(r < 2 for r in ranges):
-        raise ValueError(f"every range must be >= 2 (needle_suite's minimum controlled distance): {ranges}")
+    ranges = tuple(_exact_positive_int(r, "range", minimum=2) for r in ranges)
+    if len(set(ranges)) != len(ranges):
+        raise ValueError("ranges must not contain duplicate distances.")
+    state_budget_bytes = _finite_nonnegative(state_budget_bytes, "state_budget_bytes")
+    seed = _exact_positive_int(seed, "seed", minimum=0)
+    hops = _exact_positive_int(hops, "hops")
+    n_train_steps = _exact_positive_int(n_train_steps, "n_train_steps", minimum=0)
+    n_eval_trials = _exact_positive_int(n_eval_trials, "n_eval_trials")
+    perplexity_steps = _exact_positive_int(perplexity_steps, "perplexity_steps", minimum=0)
+    curriculum_rounds = _exact_positive_int(curriculum_rounds, "curriculum_rounds", minimum=0)
+    if suite_training_budget_flops is not None:
+        suite_training_budget_flops = _finite_nonnegative(
+            suite_training_budget_flops,
+            "suite_training_budget_flops",
+            positive=True,
+        )
 
-    torch.manual_seed(seed)
-    rng = np.random.RandomState(seed)
-    vocab = int(getattr(mechanism, "vocab", DEFAULT_VOCAB))
-    opt = torch.optim.Adam(mechanism.parameters(), lr=1e-2)
-    perm = rng.permutation(vocab)
+    n_params = _n_params(mechanism)
+    if n_params <= 0:
+        raise ValueError("evaluate() requires a mechanism with at least one trainable parameter.")
+    vocab = _exact_positive_int(getattr(mechanism, "vocab", DEFAULT_VOCAB), "mechanism.vocab", minimum=2)
+    perm = np.random.RandomState(_cell_seed(seed, max(ranges), 99)).permutation(vocab)
+
+    n_cells = 4 * len(ranges)
+    cell_budget = None if suite_training_budget_flops is None else suite_training_budget_flops / n_cells
+
+    def steps_within_budget(requested: int, model: ContextMechanism, tokens_per_step: int) -> int:
+        if cell_budget is None:
+            return requested
+        cost = _flops_for(model, tokens_per_step)
+        return min(requested, int(math.floor(cell_budget / cost))) if cost > 0 else 0
+
+    training_flops_used = 0.0
+    evaluation_flops_used = 0.0
 
     suites: dict[int, dict[str, Any]] = {}
     needle_rows: list[dict[str, Any]] = []
     for distance in ranges:
         chunk_size = _choose_chunk_size(distance)
-        needle = _train_and_probe(
-            mechanism,
-            opt,
-            needle_suite,
-            distance=distance,
-            vocab=vocab,
-            chunk_size=chunk_size,
-            n_train_steps=n_train_steps,
-            n_eval_trials=n_eval_trials,
-            rng=rng,
-        )
-        copy_ = _train_and_probe(
-            mechanism,
-            opt,
-            copy_suite,
-            distance=distance,
-            vocab=vocab,
-            chunk_size=chunk_size,
-            n_train_steps=n_train_steps,
-            n_eval_trials=n_eval_trials,
-            rng=rng,
-        )
-        multi_hop = _train_and_probe(
-            mechanism,
-            opt,
-            multi_hop_suite,
-            distance=distance,
-            vocab=vocab,
-            chunk_size=chunk_size,
-            n_train_steps=n_train_steps,
-            n_eval_trials=n_eval_trials,
-            rng=rng,
-            hops=hops,
-        )
+        dependency_rows: list[dict[str, Any]] = []
+        for suite_index, (suite_fn, suite_kwargs) in enumerate(
+            ((needle_suite, {}), (copy_suite, {}), (multi_hop_suite, {"hops": hops}))
+        ):
+            cell_seed = _cell_seed(seed, distance, suite_index)
+            cell_model = _fresh_mechanism(mechanism, seed=cell_seed)
+            effective_steps = steps_within_budget(n_train_steps, cell_model, distance + 1)
+            cell_opt = torch.optim.Adam(cell_model.parameters(), lr=1e-2)
+            row = _train_and_probe(
+                cell_model,
+                cell_opt,
+                suite_fn,
+                distance=distance,
+                vocab=vocab,
+                chunk_size=chunk_size,
+                n_train_steps=effective_steps,
+                n_eval_trials=n_eval_trials,
+                rng=np.random.RandomState(cell_seed),
+                **suite_kwargs,
+            )
+            row["data_seed"] = cell_seed
+            row["training_flops"] = _flops_for(cell_model, row["training_tokens"])
+            row["evaluation_flops"] = _flops_for(cell_model, row["evaluation_tokens"])
+            training_flops_used += row["training_flops"]
+            evaluation_flops_used += row["evaluation_flops"]
+            dependency_rows.append(row)
+        needle, copy_, multi_hop = dependency_rows
+
+        perplexity_seed = _cell_seed(seed, distance, 3)
+        perplexity_model = _fresh_mechanism(mechanism, seed=perplexity_seed)
+        effective_perplexity_steps = steps_within_budget(perplexity_steps, perplexity_model, distance)
+        perplexity_opt = torch.optim.Adam(perplexity_model.parameters(), lr=1e-2)
         perplexity = multi_scale_perplexity(
-            mechanism,
-            opt,
+            perplexity_model,
+            perplexity_opt,
             length=distance,
             vocab=vocab,
             chunk_size=chunk_size,
-            n_steps=perplexity_steps,
-            rng=rng,
+            n_steps=effective_perplexity_steps,
+            n_eval_trials=n_eval_trials,
+            rng=np.random.RandomState(perplexity_seed),
             perm=perm,
         )
+        perplexity["data_seed"] = perplexity_seed
+        perplexity["training_flops"] = _flops_for(perplexity_model, perplexity["training_tokens"])
+        perplexity["evaluation_flops"] = _flops_for(perplexity_model, perplexity["evaluation_tokens"])
+        training_flops_used += perplexity["training_flops"]
+        evaluation_flops_used += perplexity["evaluation_flops"]
         needle_rows.append(needle)
         suites[distance] = {
             "needle": needle,
             "copy": copy_,
             "multi_hop": multi_hop,
             "perplexity": perplexity,
-            "flops": _flops_for(mechanism, distance),
+            "training_flops": sum(row["training_flops"] for row in (needle, copy_, multi_hop, perplexity)),
+            "evaluation_flops": sum(row["evaluation_flops"] for row in (needle, copy_, multi_hop, perplexity)),
         }
 
     forgetting_curve = _forgetting_curve(needle_rows)
 
     largest = max(ranges)
     chunk_size = _choose_chunk_size(largest)
-    x, y = copy_suite(rng, distance=largest, vocab=vocab)
-    state = mechanism.init_state(1)
+    state_model = _fresh_mechanism(mechanism, seed=_cell_seed(seed, largest, 4))
+    state_rng = np.random.RandomState(_cell_seed(seed, largest, 4))
+    x, y = copy_suite(state_rng, distance=largest, vocab=vocab)
+    state = state_model.init_state(1)
+    if hasattr(state_model, "eval"):
+        state_model.eval()
     with torch.no_grad():
         for chunk in _chunks(x, y, chunk_size):
-            state, _ = mechanism.step(state, chunk)
+            state, _ = state_model.step(state, chunk)
     state_bytes_used = _state_bytes(state)
 
+    curriculum_model = _fresh_mechanism(mechanism, seed=_cell_seed(seed, largest, 5))
+    curriculum_opt = torch.optim.Adam(curriculum_model.parameters(), lr=1e-2)
     if compute_budget_flops is None:
-        compute_budget_flops = 20.0 * _flops_for(mechanism, largest)
+        compute_budget_flops = 20.0 * _flops_for(curriculum_model, largest)
+    else:
+        compute_budget_flops = _finite_nonnegative(compute_budget_flops, "compute_budget_flops")
     curriculum = length_curriculum(
-        mechanism,
-        opt,
+        curriculum_model,
+        curriculum_opt,
         ranges,
         vocab=vocab,
         n_rounds=curriculum_rounds,
@@ -526,12 +697,33 @@ def evaluate(
         perm=perm,
     )
 
+    protocol_config = {
+        "version": 2,
+        "seed": seed,
+        "ranges": ranges,
+        "vocab": vocab,
+        "hops": hops,
+        "n_train_steps": n_train_steps,
+        "n_eval_trials": n_eval_trials,
+        "perplexity_steps": perplexity_steps,
+        "curriculum_rounds": curriculum_rounds,
+    }
+    paired_dataset_id = hashlib.sha256(
+        json.dumps(protocol_config, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
     return {
         "ranges": ranges,
         "seed": seed,
         "vocab": vocab,
-        "n_params": _n_params(mechanism),
-        "state_budget_bytes": float(state_budget_bytes),
+        "n_params": n_params,
+        "evaluation_protocol": "paired-isolated-dependency-v2",
+        "paired_dataset_id": paired_dataset_id,
+        "suite_training_budget_flops": suite_training_budget_flops,
+        "training_flops_used": training_flops_used,
+        "evaluation_flops_used": evaluation_flops_used,
+        "curriculum_compute_budget_flops": float(compute_budget_flops),
+        "state_budget_bytes": state_budget_bytes,
         "state_bytes_used": int(state_bytes_used),
         "within_state_budget": bool(state_bytes_used <= state_budget_bytes),
         "suites": suites,
@@ -542,30 +734,86 @@ def evaluate(
 
 def comparison_table(results: dict[str, Any]) -> str:
     """Render :func:`evaluate` output as a plain-text table. Accepts either a single ``evaluate()``
-    return value, or a ``{name: evaluate(...)}`` mapping for a matched-FLOPs / matched-state-bytes
-    side-by-side comparison (e.g. an E2-E6 challenger against the E1 baseline, both evaluated with the
-    same ``ranges`` and ``state_budget_bytes``)."""
+    return value, or a ``{name: evaluate(...)}`` mapping. Multi-mechanism comparisons fail closed unless
+    their paired-data, compute, and state contracts match."""
     if "suites" in results:
         results = {"mechanism": results}
+    if not isinstance(results, dict) or not results:
+        raise ValueError("results must contain at least one evaluate() receipt.")
+
+    receipts = list(results.values())
+    required = {
+        "ranges",
+        "seed",
+        "vocab",
+        "evaluation_protocol",
+        "paired_dataset_id",
+        "suite_training_budget_flops",
+        "training_flops_used",
+        "curriculum_compute_budget_flops",
+        "state_budget_bytes",
+        "state_bytes_used",
+        "within_state_budget",
+        "suites",
+    }
+    for name, receipt in results.items():
+        if not isinstance(receipt, dict):
+            raise TypeError(f"{name!r} must be an evaluate() receipt dictionary.")
+        missing = required - set(receipt)
+        if missing:
+            raise ValueError(f"{name!r} is missing evaluate() receipt fields: {sorted(missing)}")
+        if not receipt["within_state_budget"]:
+            raise ValueError(f"{name!r} exceeded the declared state budget and cannot enter the comparison.")
+
+    if len(receipts) > 1:
+        reference = receipts[0]
+        paired_fields = (
+            "ranges",
+            "seed",
+            "vocab",
+            "evaluation_protocol",
+            "paired_dataset_id",
+            "curriculum_compute_budget_flops",
+            "state_budget_bytes",
+        )
+        for field in paired_fields:
+            if any(receipt[field] != reference[field] for receipt in receipts[1:]):
+                raise ValueError(f"comparison requires identical {field}.")
+
+        budgets = [receipt["suite_training_budget_flops"] for receipt in receipts]
+        if all(budget is None for budget in budgets):
+            used = [float(receipt["training_flops_used"]) for receipt in receipts]
+            tolerance = max(1.0, max(used)) * 1e-12
+            if max(used) - min(used) > tolerance:
+                raise ValueError("training FLOPs differ; rerun with one shared suite_training_budget_flops ceiling.")
+        elif any(budget is None for budget in budgets) or len(set(float(budget) for budget in budgets)) != 1:
+            raise ValueError("comparison requires the same suite_training_budget_flops contract.")
 
     lines: list[str] = []
     for name, r in results.items():
         budget_note = "OK" if r["within_state_budget"] else "OVER BUDGET"
+        compute_note = (
+            f"used_flops={r['training_flops_used']:.3e}"
+            if r["suite_training_budget_flops"] is None
+            else f"used_flops={r['training_flops_used']:.3e}/{r['suite_training_budget_flops']:.3e}"
+        )
         lines.append(
             f"== {name} (seed={r['seed']}, n_params={r['n_params']}, "
-            f"state_bytes={r['state_bytes_used']}/{int(r['state_budget_bytes'])} {budget_note}) =="
+            f"{compute_note}, state_bytes={r['state_bytes_used']}/{int(r['state_budget_bytes'])} "
+            f"{budget_note}) =="
         )
         w = max(len(str(d)) for d in r["ranges"])
         lines.append(
-            f"{'range'.rjust(w)}   {'needle_acc':>10}   {'copy_acc':>10}   {'multihop_acc':>12}   "
-            f"{'ppl':>10}   {'flops':>12}"
+            f"{'range'.rjust(w)}   {'needle_ok':>10}   {'copy_ok':>10}   {'multihop_ok':>12}   "
+            f"{'ppl':>10}   {'train_flops':>12}"
         )
         for d in r["ranges"]:
             s = r["suites"][d]
             lines.append(
-                f"{str(d).rjust(w)}   {s['needle']['accuracy']:>10.3f}   {s['copy']['accuracy']:>10.3f}   "
-                f"{s['multi_hop']['accuracy']:>12.3f}   {s['perplexity']['perplexity']:>10.3f}   "
-                f"{s['flops']:>12.3e}"
+                f"{str(d).rjust(w)}   {s['needle']['loss_threshold_success_rate']:>10.3f}   "
+                f"{s['copy']['loss_threshold_success_rate']:>10.3f}   "
+                f"{s['multi_hop']['loss_threshold_success_rate']:>12.3f}   "
+                f"{s['perplexity']['perplexity']:>10.3f}   {s['training_flops']:>12.3e}"
             )
         fc = r["forgetting_curve"]
         lines.append(

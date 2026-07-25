@@ -78,8 +78,8 @@ def _run_baseline(seed: int) -> dict:
 
 
 def test_needle_retrieval_beyond_window_beats_baseline():
-    tree_acc = [_run_tree(s, aux_weight=0.2)["accuracy"] for s in SEEDS]
-    base_acc = [_run_baseline(s)["accuracy"] for s in SEEDS]
+    tree_acc = [_run_tree(s, aux_weight=0.2)["loss_threshold_success_rate"] for s in SEEDS]
+    base_acc = [_run_baseline(s)["loss_threshold_success_rate"] for s in SEEDS]
     tree_mean, base_mean = float(np.mean(tree_acc)), float(np.mean(base_acc))
 
     print(
@@ -95,8 +95,8 @@ def test_needle_retrieval_beyond_window_beats_baseline():
 
 
 def test_ablation_auxiliary_loss_improves_summary_usefulness():
-    on = [_run_tree(s, aux_weight=0.2)["accuracy"] for s in SEEDS]
-    off = [_run_tree(s, aux_weight=0.0)["accuracy"] for s in SEEDS]
+    on = [_run_tree(s, aux_weight=0.2)["loss_threshold_success_rate"] for s in SEEDS]
+    off = [_run_tree(s, aux_weight=0.0)["loss_threshold_success_rate"] for s in SEEDS]
     on_mean, off_mean = float(np.mean(on)), float(np.mean(off))
 
     print(

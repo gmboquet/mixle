@@ -13,7 +13,7 @@ in a few seconds, while exercising the EXACT same ``evaluate()`` code path a cal
 Four receipts:
 1. one command (``evaluate``) runs the full E1-baseline suite end-to-end and returns every documented key.
 2. ``comparison_table`` renders a non-empty table containing every tested range and both mechanism names
-   when comparing two evaluate() results (the matched-FLOPs / matched-state-bytes comparison shape).
+   when their paired-data, compute, and state contracts match.
 3. suites are seed-reproducible: two ``evaluate()`` calls with identical seeds and a freshly re-seeded
    model produce bitwise-identical receipts.
 4. the train-then-probe machinery is really measuring something: given enough training steps on the
@@ -66,14 +66,14 @@ def test_evaluate_end_to_end_smoke():
     for distance in _STAND_IN_RANGES:
         row = result["suites"][distance]
         for suite_name in ("needle", "copy", "multi_hop"):
-            assert 0.0 <= row[suite_name]["accuracy"] <= 1.0
+            assert 0.0 <= row[suite_name]["loss_threshold_success_rate"] <= 1.0
             assert row[suite_name]["distance"] == distance
         assert row["perplexity"]["perplexity"] > 0.0
-        assert row["flops"] > 0.0
+        assert row["training_flops"] > 0.0
 
     fc = result["forgetting_curve"]
     assert fc["distances"] == list(_STAND_IN_RANGES)
-    assert len(fc["accuracy"]) == len(_STAND_IN_RANGES)
+    assert len(fc["success_rate"]) == len(_STAND_IN_RANGES)
 
     cur = result["curriculum"]
     assert sum(cur["pulls"]) <= 4  # curriculum_rounds
@@ -131,10 +131,11 @@ def test_evaluate_is_seed_reproducible():
         for suite_name in ("needle", "copy", "multi_hop"):
             assert row_1[suite_name] == row_2[suite_name]
         assert row_1["perplexity"] == row_2["perplexity"]
-        assert row_1["flops"] == row_2["flops"]
+        assert row_1["training_flops"] == row_2["training_flops"]
+        assert row_1["evaluation_flops"] == row_2["evaluation_flops"]
     fc_1, fc_2 = result_1["forgetting_curve"], result_2["forgetting_curve"]
     assert fc_1["distances"] == fc_2["distances"]
-    assert fc_1["accuracy"] == fc_2["accuracy"]
+    assert fc_1["success_rate"] == fc_2["success_rate"]
     assert fc_1["self_reported_loss"] == fc_2["self_reported_loss"]
     corr_1, corr_2 = fc_1["self_knowledge_correlation"], fc_2["self_knowledge_correlation"]
     assert (math.isnan(corr_1) and math.isnan(corr_2)) or corr_1 == corr_2

@@ -187,10 +187,14 @@ def test_hybrid_beats_ablations_at_matched_params_on_local_and_global_tasks():
             n_eval_trials=40,
             rng=rng,
         )
-        results[name] = {"local_acc": local_task["accuracy"], "global_acc": global_task["accuracy"]}
+        results[name] = {
+            "local_acc": local_task["loss_threshold_success_rate"],
+            "global_acc": global_task["loss_threshold_success_rate"],
+        }
         print(
-            f"[E5 part-2 receipt] {name}: local(copy@3) acc={local_task['accuracy']:.3f} "
-            f"loss={local_task['mean_probe_loss']:.3f} | global(needle@8) acc={global_task['accuracy']:.3f} "
+            f"[E5 part-2 receipt] {name}: local(copy@3) success={local_task['loss_threshold_success_rate']:.3f} "
+            f"loss={local_task['mean_probe_loss']:.3f} | "
+            f"global(needle@8) success={global_task['loss_threshold_success_rate']:.3f} "
             f"loss={global_task['mean_probe_loss']:.3f} (chance={global_task['chance_loss']:.3f})"
         )
 

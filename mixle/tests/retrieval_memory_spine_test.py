@@ -143,9 +143,10 @@ def test_retrieval_beats_window_only_baseline_beyond_the_window():
     print(
         f"[E6 receipt] needle recall at distance={distance}, window={window}: "
         f"retrieval mean_probe_loss={result_retrieval['mean_probe_loss']:.4f} "
-        f"(accuracy={result_retrieval['accuracy']:.3f})  "
+        f"(success={result_retrieval['loss_threshold_success_rate']:.3f})  "
         f"window-only baseline mean_probe_loss={result_baseline['mean_probe_loss']:.4f} "
-        f"(accuracy={result_baseline['accuracy']:.3f})  chance_loss={result_retrieval['chance_loss']:.4f}"
+        f"(success={result_baseline['loss_threshold_success_rate']:.3f})  "
+        f"chance_loss={result_retrieval['chance_loss']:.4f}"
     )
     assert result_retrieval["mean_probe_loss"] < result_baseline["mean_probe_loss"], (
         "retrieval memory should recall the beyond-window needle better than a window-only baseline that "
