@@ -64,6 +64,23 @@ class RetrievedHit:
         object.__setattr__(self, "score", fscore)
 
 
+_ELLIPSIS = "…"
+
+
+def _truncate_for_budget(text: str, max_chars: int) -> str:
+    """Cut ``text`` to at most ``max_chars`` (``max_chars >= 0``), preferring to mark the cut with an
+    ellipsis when there is room for one.
+
+    A small local twin of :mod:`mixle.substrate.context`'s own hard-truncation helper -- duplicated
+    rather than imported so :meth:`Retrieval.to_context`'s single-item budget fallback does not reach
+    into another module's private helper for one five-line primitive.
+    """
+    if len(text) <= max_chars:
+        return text
+    keep = max(max_chars - len(_ELLIPSIS), 0)
+    return text[:keep] + (_ELLIPSIS if keep < max_chars else "")
+
+
 @dataclass(init=False)
 class Retrieval:
     """A planned, cross-kind retrieval result: items in merged relevance order, grouped by kind.
@@ -136,13 +153,112 @@ class Retrieval:
         ]
 
     def to_context(self, task: str | None = None, **assemble_kw: Any) -> Any:
-        """Assemble a :class:`ContextPacket` from this retrieval (over an in-memory shard of its items)."""
-        from mixle.substrate.context import assemble_context
+        """Budget THIS retrieval's own ordered, weighted hits into a ``ContextPacket`` (MXR-080-0249).
 
-        shard = Substrate()
-        for it in self.items:
-            shard.put(it)
-        return assemble_context(shard, task or self.query, **assemble_kw)
+        Previously this copied ``self.items`` into a throwaway
+        :class:`~mixle.substrate.core.Substrate` and called
+        :func:`~mixle.substrate.context.assemble_context`, which ran ITS OWN fresh, unweighted search
+        over that tiny shard -- discarding this retrieval's cross-kind weights, diversification order,
+        and scores entirely, and substituting whatever a brand-new lexical/cosine fit over just these
+        few items happened to produce instead. A weighted retrieval that had ranked an artifact above
+        a text item (scores 50 and 1) came back from that fresh search reordered text-before-artifact,
+        rescored 1 and 0.5 -- the weighting had silently vanished.
+
+        This instead packs ``self.hits`` -- already in this retrieval's own decided order, at their
+        own decided scores -- directly against the budget, with the same greedy, fit-checked packing
+        :func:`~mixle.substrate.context.assemble_context` itself uses (built on the same public
+        ``ContextPacket``/``ContextBudget``/``compress_text`` surface, so the fit guarantee -- the
+        default rendering is always checked against its TRUE length, never an estimate -- holds here
+        too), but never re-scoring, re-ordering, or re-searching.
+
+        Accepts the same ``budget``/``compress``/``telemetry`` keywords ``assemble_context`` did.
+        ``kind``/``scope`` are no longer accepted: there is no fresh search left for them to filter --
+        restrict ``kinds=``/``scope=`` on the original :func:`retrieve` call instead.
+        """
+        from mixle.substrate.context import ContextBudget, ContextPacket, compress_text
+
+        budget = assemble_kw.pop("budget", None) or ContextBudget()
+        compress = bool(assemble_kw.pop("compress", False))
+        telemetry = assemble_kw.pop("telemetry", None)
+        if assemble_kw:
+            raise TypeError(
+                "Retrieval.to_context() got unexpected keyword argument(s): "
+                f"{sorted(assemble_kw)}; kind/scope no longer apply here (there is no fresh search to "
+                "filter) -- pass kinds=/scope= to retrieve() instead"
+            )
+        task_text = task or self.query
+
+        empty_len = ContextPacket(task=task_text, budget=budget).used_chars
+        if empty_len > budget.max_chars:
+            raise ValueError(
+                f"ContextBudget.max_chars={budget.max_chars} cannot fit even an empty context for "
+                f"this task (the header alone renders to {empty_len} characters); use a larger "
+                "max_chars or a shorter task string"
+            )
+
+        hits = self.hits
+        overhead = 0 if budget.shape == "brief" else 24
+        selected: list[SubstrateItem] = []
+        scores: list[float] = []
+        texts: list[str] = []
+
+        if compress and hits:
+            # give each of up to max_items sources a fair share of the budget and summarize each to
+            # fit, so several relevant sources are covered instead of one full document crowding out
+            # the rest -- mirrors assemble_context's own compress path exactly.
+            n_target = min(budget.max_items, len(hits))
+            per_item = budget.max_chars // n_target - overhead
+            for h in hits[:n_target]:
+                if per_item < 1:
+                    continue
+                summary = compress_text(h.item.text, task_text, per_item)
+                trial_items, trial_scores, trial_texts = [*selected, h.item], [*scores, h.score], [*texts, summary]
+                trial = ContextPacket(
+                    task=task_text, items=trial_items, scores=trial_scores, budget=budget, texts=trial_texts
+                )
+                if trial.used_chars > budget.max_chars:
+                    break
+                selected, scores, texts = trial_items, trial_scores, trial_texts
+        else:
+            for h in hits:
+                if len(selected) >= budget.max_items:
+                    break
+                trial_items, trial_scores, trial_texts = [*selected, h.item], [*scores, h.score], [*texts, h.item.text]
+                trial = ContextPacket(
+                    task=task_text, items=trial_items, scores=trial_scores, budget=budget, texts=trial_texts
+                )
+                if trial.used_chars > budget.max_chars:
+                    break
+                selected, scores, texts = trial_items, trial_scores, trial_texts
+
+        if not selected and hits:
+            # a small-but-feasible budget still yields the single most relevant hit, shrunk to
+            # genuinely fit -- never the full (possibly overflowing) text, never nothing when
+            # something can fit.
+            h = hits[0]
+            item_overhead = ContextPacket(
+                task=task_text, items=[h.item], scores=[h.score], budget=budget, texts=[""]
+            ).used_chars
+            available = budget.max_chars - item_overhead
+            if available > 0:
+                source = (
+                    compress_text(h.item.text, task_text, available)
+                    if compress and len(h.item.text) > available
+                    else h.item.text
+                )
+                selected, scores, texts = [h.item], [h.score], [_truncate_for_budget(source, available)]
+
+        packet = ContextPacket(
+            task=task_text,
+            items=selected,
+            scores=scores,
+            budget=budget,
+            n_candidates=len(hits),
+            texts=texts,
+            compressed=compress and any(len(t) < len(i.text) for i, t in zip(selected, texts, strict=True)),
+        )
+        _emit_context(telemetry, packet)
+        return packet
 
     def __len__(self) -> int:
         return len(self.hits)
@@ -221,4 +337,29 @@ def _emit(telemetry: Any, result: Retrieval, kinds: list[str], diversify: bool) 
             outcome={"n": len(result.items), "kinds_covered": len(result.by_kind())},
         )
     except Exception:  # noqa: BLE001 - telemetry must never break retrieval
+        pass
+
+
+def _emit_context(telemetry: Any, packet: Any) -> None:
+    try:
+        from mixle.telemetry import record
+
+        rec = telemetry.record if telemetry is not None else record
+        rec(
+            "context",
+            features={
+                "budget_chars": packet.budget.max_chars,
+                "max_items": packet.budget.max_items,
+                "shape": packet.budget.shape,
+                "n_candidates": packet.n_candidates,
+            },
+            choice=[i.id for i in packet.items],
+            outcome={
+                "n_selected": len(packet.items),
+                "used_chars": packet.used_chars,
+                "compressed": packet.compressed,
+                "compression_ratio": packet.compression_ratio,
+            },
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never break assembly
         pass
