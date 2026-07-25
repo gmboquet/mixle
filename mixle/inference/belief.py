@@ -8,9 +8,10 @@ not a concatenation. That makes multi-source reasoning an **assimilation loop**:
 prior, fold in evidence one piece at a time, and watch the posterior entropy shrink.
 
 This module provides the exact, canonical realization -- :class:`GaussianBelief`, a multivariate
-Gaussian over a continuous latent with a linear-Gaussian (Kalman) measurement update. Two beliefs
-about the same latent fuse as a **product of experts** (:meth:`GaussianBelief.fuse`), which is the
-cross-modal fusion the reasoning layer is built on. Sequential updates are exact and
+Gaussian over a continuous latent with a linear-Gaussian (Kalman) measurement update. Two posteriors
+about the same latent can be fused only when their shared prior is supplied; a Gaussian likelihood
+message can instead be applied explicitly. This prevents cross-modal fusion from counting a common
+prior once per modality. Sequential updates are exact and
 order-independent: folding in evidence one datum at a time equals conditioning on all of it at
 once -- the property the tests check.
 
@@ -34,6 +35,12 @@ from mixle.utils.callables import accepts_call
 
 def _as_rng(rng: Any) -> RandomState:
     return rng if isinstance(rng, RandomState) else RandomState(rng)
+
+
+def _positive_count(n: int) -> int:
+    if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 1:
+        raise ValueError("n must be a positive integer")
+    return int(n)
 
 
 class BeliefState(ABC):
@@ -124,16 +131,21 @@ class CategoricalBelief(BeliefState):
 
     def sample(self, n: int = 1, rng: Any = None) -> np.ndarray:
         """Draw hypothesis indices according to the belief probabilities."""
-        return _as_rng(rng).choice(len(self.probs), size=n, p=self.probs)
+        return _as_rng(rng).choice(len(self.probs), size=_positive_count(n), p=self.probs)
 
     def update(self, log_lik: Any) -> CategoricalBelief:
         """Exact Bayes: condition on a length-``K`` log-likelihood vector for one observation."""
         ll = np.asarray(log_lik, dtype=np.float64).reshape(-1)
         if ll.shape != self.probs.shape:
             raise ValueError("log_lik must have one entry per hypothesis (%d)" % self.probs.size)
+        if np.any(np.isnan(ll)) or np.any(np.isposinf(ll)):
+            raise ValueError("log_lik must contain finite values or -inf for impossible hypotheses")
         with np.errstate(divide="ignore"):
             log_post = np.log(self.probs) + ll
-        log_post -= log_post.max()
+        finite = np.isfinite(log_post)
+        if not np.any(finite):
+            raise ValueError("evidence is impossible under every hypothesis with positive prior mass")
+        log_post -= np.max(log_post[finite])
         post = np.exp(log_post)
         return CategoricalBelief(post, self.labels)
 
@@ -148,7 +160,8 @@ class GaussianBelief(BeliefState):
     Evidence is a linear-Gaussian observation ``y = H z + noise``, ``noise ~ N(0, R)``; :meth:`update`
     applies the exact Kalman measurement update (Joseph form, so the covariance stays symmetric
     positive-definite). :meth:`fuse` combines two beliefs about the same latent as a product of
-    Gaussian experts. :meth:`condition` does noiseless Gaussian conditioning on a coordinate subset.
+    Gaussian experts only with an explicit fusion contract. :meth:`condition`
+    does noiseless Gaussian conditioning on a coordinate subset.
     """
 
     def __init__(self, mean: Any, cov: Any) -> None:
@@ -214,7 +227,7 @@ class GaussianBelief(BeliefState):
 
     def sample(self, n: int = 1, rng: Any = None) -> np.ndarray:
         """Draw samples from the Gaussian belief."""
-        return _as_rng(rng).multivariate_normal(self._mean, self._cov, size=int(n))
+        return _as_rng(rng).multivariate_normal(self._mean, self._cov, size=_positive_count(n))
 
     def update(self, H: Any, y: Any, R: Any) -> GaussianBelief:
         """Kalman measurement update: condition on ``y = H z + noise``, ``noise ~ N(0, R)``.
@@ -254,6 +267,8 @@ class GaussianBelief(BeliefState):
         # eigenvalues both positive), so an invalid R is not reliably caught downstream.
         if not np.isfinite(Rm).all():
             raise ValueError("R must be finite (no NaN or inf)")
+        if Rm.shape != (k, k) or not np.allclose(Rm, Rm.T, rtol=1e-10, atol=1e-12):
+            raise ValueError(f"R must be a symmetric ({k}, {k}) covariance matrix")
         evals = np.linalg.eigvalsh(Rm)
         if evals.min() < -1e-9 * np.abs(evals).max():
             raise ValueError("R must be positive semi-definite")
@@ -267,15 +282,56 @@ class GaussianBelief(BeliefState):
         P_new = ImKH @ P @ ImKH.T + K @ Rm @ K.T  # Joseph form: symmetric, PSD
         return GaussianBelief(m_new, P_new)
 
-    def fuse(self, other: GaussianBelief) -> GaussianBelief:
-        """Product-of-experts fusion of two beliefs about the same latent (cross-modal fusion).
+    def fuse(
+        self,
+        other: GaussianBelief,
+        *,
+        shared_prior: GaussianBelief | None = None,
+        other_is_likelihood: bool = False,
+    ) -> GaussianBelief:
+        """Fuse a posterior or an explicitly identified Gaussian likelihood message.
 
-        Equivalent to conditioning ``self`` on ``other`` treated as a direct Gaussian observation
-        (``H = I``, ``R = other.cov``), so it reuses the exact Kalman update.
+        For two posteriors derived from the same prior, pass ``shared_prior``;
+        its information is subtracted once. If ``other`` is instead a
+        likelihood factor represented by a Gaussian kernel, set
+        ``other_is_likelihood=True``. Omitting both is ambiguous and rejected.
         """
         if other.dim != self._dim:
             raise ValueError(f"cannot fuse beliefs of dimension {self._dim} and {other.dim}")
-        return self.update(np.eye(self._dim), other._mean, other._cov)
+        if shared_prior is not None and other_is_likelihood:
+            raise ValueError("pass either shared_prior or other_is_likelihood, not both")
+        if shared_prior is None and not other_is_likelihood:
+            raise ValueError(
+                "ambiguous belief fusion: pass shared_prior for posterior fusion or "
+                "other_is_likelihood=True for a likelihood message"
+            )
+        if other_is_likelihood:
+            return self.update(np.eye(self._dim), other._mean, other._cov)
+        if shared_prior.dim != self._dim:
+            raise ValueError(f"shared prior dimension {shared_prior.dim} does not match {self._dim}")
+
+        def information(belief: GaussianBelief, name: str) -> tuple[np.ndarray, np.ndarray]:
+            try:
+                np.linalg.cholesky(belief._cov)
+                precision = np.linalg.inv(belief._cov)
+            except np.linalg.LinAlgError as exc:
+                raise ValueError(f"{name} covariance must be positive definite for density fusion") from exc
+            if not np.all(np.isfinite(precision)):
+                raise ValueError(f"{name} precision must be finite")
+            return precision, precision @ belief._mean
+
+        self_precision, self_information = information(self, "self")
+        other_precision, other_information = information(other, "other")
+        prior_precision, prior_information = information(shared_prior, "shared prior")
+        fused_precision = self_precision + other_precision - prior_precision
+        fused_precision = 0.5 * (fused_precision + fused_precision.T)
+        try:
+            fused_covariance = np.linalg.inv(fused_precision)
+            np.linalg.cholesky(fused_covariance)
+        except np.linalg.LinAlgError as exc:
+            raise ValueError("shared-prior fusion does not define a proper Gaussian posterior") from exc
+        fused_mean = fused_covariance @ (self_information + other_information - prior_information)
+        return GaussianBelief(fused_mean, fused_covariance)
 
     def condition(self, indices: Any, values: Any) -> GaussianBelief:
         """Noiseless Gaussian conditioning: fix latent coordinates ``indices`` to ``values``.
