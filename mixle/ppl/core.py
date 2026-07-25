@@ -12,6 +12,7 @@ combinations should fail explicitly rather than returning a partially lowered mo
 
 from __future__ import annotations
 
+import inspect
 import math
 from collections.abc import Callable, Sequence
 from numbers import Integral
@@ -1044,10 +1045,23 @@ class Family:
         if keys is not None:
             kwargs["keys"] = keys
         try:
-            return self.est_cls(**kwargs)
-        except TypeError:
-            # Estimator does not accept name/keys; fall back to the bare constructor.
-            return self.est_cls()
+            signature = inspect.signature(self.est_cls)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"cannot inspect estimator constructor {self.est_cls!r}; "
+                "register an estimator with an inspectable keyword signature."
+            ) from exc
+        parameters = signature.parameters.values()
+        accepts_extra = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters)
+        accepted_names = {
+            p.name
+            for p in parameters
+            if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        call_kwargs = kwargs if accepts_extra else {key: value for key, value in kwargs.items() if key in accepted_names}
+        # Do not catch TypeError here. A TypeError raised inside the constructor is a code/data defect,
+        # not evidence that a different calling convention should be retried.
+        return self.est_cls(**call_kwargs)
 
 
 class CompositeFamily:
@@ -1130,14 +1144,137 @@ def register_composite(
     return fam
 
 
-def _count_params(p) -> int:
-    """Heuristic free-parameter count: numeric leaves in a params structure."""
-    if isinstance(p, dict):
-        return sum(_count_params(v) for v in p.values())
-    if isinstance(p, (list, tuple)):
-        return sum(_count_params(v) for v in p)
-    arr = np.asarray(p)
-    return int(arr.size) if arr.dtype.kind in "fiu" else 0
+def _structural_parameter_dimension(spec) -> int:
+    """Return statistical degrees of freedom for one declared structural parameter."""
+    if isinstance(spec, _SimplexSpec):
+        return spec.rows * (len(spec.alpha) - 1)
+    if isinstance(spec, (_VectorSpec, _OrderedSpec)):
+        return spec.dim
+    if isinstance(spec, _CholeskySpec):
+        return spec.dim * (spec.dim + 1) // 2
+    raise TypeError(f"unknown structural parameter {type(spec).__name__}.")
+
+
+def _inferable_parameter_dimension(rv: RandomVariable) -> int | None:
+    """Count declared inferable degrees of freedom without inspecting fitted numeric summaries.
+
+    Fixed constructor values and derived result fields never contribute. Shared parameter/prior
+    handles contribute once by identity, while separate uses of the bare ``free`` token are
+    independent scalar declarations. ``None`` means the backend owns parameters that this structural
+    model cannot count before execution (currently arbitrary neural predictors).
+    """
+
+    seen_handles: set[int] = set()
+
+    def slot(value) -> int | None:
+        if value is free:
+            return 1
+        if isinstance(value, (_SimplexSpec, _VectorSpec, _OrderedSpec, _CholeskySpec)):
+            return _structural_parameter_dimension(value)
+        if isinstance(value, _LinearPredictor):
+            total = 0
+            for coefficient, _field in value.terms:
+                count = slot(coefficient)
+                if count is None:
+                    return None
+                total += count
+            if value.intercept is not None:
+                count = slot(value.intercept)
+                if count is None:
+                    return None
+                total += count
+            for _group_name, slopes in value.groups:
+                width = 1 + len(slopes)
+                total += width * (width + 1) // 2
+            return total
+        if isinstance(value, _NeuralPredictor):
+            return None
+        if not isinstance(value, RandomVariable):
+            return 0
+        key = id(value)
+        if key in seen_handles:
+            return 0
+        seen_handles.add(key)
+        if value._kind == "param":
+            return _structural_parameter_dimension(value._args[0])
+        if value._kind in {"apply", "pow", "select", "gather"}:
+            return slot(value._args[0])
+        if value._kind in {"sum", "prod"}:
+            left, right = slot(value._args[0]), slot(value._args[1])
+            return None if left is None or right is None else left + right
+        if value._kind == "sample":
+            # In a flat family slot this RV is one latent parameter. Random hyperparameters are
+            # additional latents and are counted recursively; fixed hyperparameters are not.
+            total = 1
+            for argument in value._args:
+                if isinstance(argument, RandomVariable):
+                    count = slot(argument)
+                    if count is None:
+                        return None
+                    total += count
+            return total
+        return 0
+
+    def model(node: RandomVariable) -> int | None:
+        if node._kind != "sample":
+            return slot(node)
+        family = node._family
+        if not isinstance(family, CompositeFamily):
+            total = 0
+            for argument in node._args:
+                count = slot(argument)
+                if count is None:
+                    return None
+                total += count
+            return total
+
+        name = family.name
+        if name in {"Mixture", "SemiMix"}:
+            components, weights = node._args
+            total = 0
+            for component in components:
+                count = model(component)
+                if count is None:
+                    return None
+                total += count
+            if weights is None or weights is free:
+                total += len(components) - 1
+            elif isinstance(weights, (_SimplexSpec, RandomVariable)):
+                count = slot(weights)
+                if count is None:
+                    return None
+                total += count
+            return total
+        if name == "Sequence":
+            return model(node._args[0])
+        if name == "Markov":
+            components = node._args[0]
+            total = 0
+            for component in components:
+                count = model(component)
+                if count is None:
+                    return None
+                total += count
+            k = len(components)
+            transitions = node._args[1] if len(node._args) > 1 else None
+            initial = node._args[2] if len(node._args) > 2 else None
+            if not isinstance(transitions, np.ndarray):
+                total += k * (k - 1)
+            if not isinstance(initial, np.ndarray):
+                total += k - 1
+            return total
+        # Generic composites recurse into declared child models and structural/free slots only.
+        total = 0
+        for argument in node._args:
+            values = argument if isinstance(argument, (list, tuple)) else (argument,)
+            for value in values:
+                count = model(value) if isinstance(value, RandomVariable) and value._kind == "sample" else slot(value)
+                if count is None:
+                    return None
+                total += count
+        return total
+
+    return model(rv)
 
 
 def compare(models, data, *, by: str = "aic"):
@@ -1148,6 +1285,30 @@ def compare(models, data, *, by: str = "aic"):
     uncertainty via the posterior draws of a Bayesian fit); ``'aic'``/``'bic'`` use the point estimate.
     Each row also reports ``elpd`` differences from the best model (``d_elpd``) for waic/loo.
     """
+    keys = {
+        "loglik": lambda r: -r["loglik"],
+        "aic": lambda r: r["aic"],
+        "bic": lambda r: r["bic"],
+        "waic": lambda r: r["waic"],
+        "loo": lambda r: r["loo"],
+    }
+    if by not in keys:
+        raise ValueError(f"by must be one of {sorted(keys)}, got {by!r}.")
+    try:
+        models = list(models)
+    except TypeError as exc:
+        raise TypeError("models must be an iterable of fitted RandomVariable objects.") from exc
+    if not models:
+        raise ValueError("compare() needs at least one fitted model.")
+    if any(not isinstance(model, RandomVariable) or not model.is_bound for model in models):
+        raise TypeError("compare() models must be fitted RandomVariable objects.")
+    try:
+        data = list(data)
+    except TypeError as exc:
+        raise TypeError("compare() data must be an iterable of observations.") from exc
+    if not data:
+        raise ValueError("compare() data must not be empty.")
+
     rows = []
     for m in models:
         ll = m.log_likelihood(data)
@@ -1160,13 +1321,6 @@ def compare(models, data, *, by: str = "aic"):
             if by == "loo":
                 row["khat_max"] = res["khat_max"]
         rows.append(row)
-    keys = {
-        "loglik": lambda r: -r["loglik"],
-        "aic": lambda r: r["aic"],
-        "bic": lambda r: r["bic"],
-        "waic": lambda r: r["waic"],
-        "loo": lambda r: r["loo"],
-    }
     rows = sorted(rows, key=keys[by])
     if by in ("waic", "loo"):
         best = rows[0]["elpd"]
@@ -1221,7 +1375,19 @@ class RandomVariable:
     state. Construct via the family functions in :mod:`mixle.ppl` or ``fit``.
     """
 
-    __slots__ = ("_kind", "_family", "_args", "_name", "_keys", "_dist", "_result", "_cache", "_scope", "_reparam")
+    __slots__ = (
+        "_kind",
+        "_family",
+        "_args",
+        "_name",
+        "_keys",
+        "_dist",
+        "_result",
+        "_cache",
+        "_scope",
+        "_reparam",
+        "_group_by",
+    )
 
     @property
     def certificate(self):
@@ -1244,6 +1410,7 @@ class RandomVariable:
         result: Any | None = None,
         scope="shared",
         reparam=None,
+        group_by=None,
     ):
         # Private; use the classmethods / family functions. Treated as immutable.
         object.__setattr__(self, "_kind", kind)
@@ -1256,18 +1423,37 @@ class RandomVariable:
         object.__setattr__(self, "_cache", {})
         object.__setattr__(self, "_scope", scope)  # 'shared' | 'grouped'
         object.__setattr__(self, "_reparam", reparam)  # None | 'loc_scale' (non-centered prior)
+        object.__setattr__(self, "_group_by", group_by)
 
     def __setattr__(self, *a):  # enforce immutability
         raise AttributeError("RandomVariable is immutable")
 
     def __reduce__(self):
-        # Picklable so models can cross a process boundary (parallel chains,
-        # distributed fits). Families live in the module-level registry and are
-        # restored by name; transient _result/_cache are dropped.
+        # Versioned artifact state lets fitted models and structural grouping cross process/storage
+        # boundaries without silently degrading into unfitted or ungrouped objects. Runtime-only caches
+        # (lowered encoders, KDEs, Monte Carlo estimates) remain deliberately excluded.
         fam_name = self._family.name if self._family is not None else None
+        durable_cache = {
+            key: self._cache[key]
+            for key in ("certificate", "_fit_explanation", "_free_parameter_count", "_group_labels")
+            if key in self._cache
+        }
         return (
-            _rv_reconstruct,
-            (self._kind, fam_name, self._args, self._name, self._keys, self._dist, self._scope, self._reparam),
+            _rv_reconstruct_v2,
+            (
+                1,
+                self._kind,
+                fam_name,
+                self._args,
+                self._name,
+                self._keys,
+                self._dist,
+                self._result,
+                self._scope,
+                self._reparam,
+                self._group_by,
+                durable_cache,
+            ),
         )
 
     # -- constructors -------------------------------------------------------
@@ -1292,12 +1478,17 @@ class RandomVariable:
         """
         if self._kind != "sample":
             raise TypeError("each() applies to a distribution used as a prior.")
-        rv = RandomVariable(
-            "sample", family=self._family, args=self._args, name=self._name, keys=self._keys, scope="grouped"
+        if by is not None and (not isinstance(by, str) or not by):
+            raise ValueError("each(by=...) requires a non-empty string field name.")
+        return RandomVariable(
+            "sample",
+            family=self._family,
+            args=self._args,
+            name=self._name,
+            keys=self._keys,
+            scope="grouped",
+            group_by=by,
         )
-        if by is not None:
-            rv._cache["group_by"] = str(by)  # read by fit() to reshape indexed-flat data into groups
-        return rv
 
     def noncentered(self) -> RandomVariable:
         """Sample this location-scale prior in non-centered form (offset/multiplier).
@@ -1319,6 +1510,7 @@ class RandomVariable:
             keys=self._keys,
             scope=self._scope,
             reparam="loc_scale",
+            group_by=self._group_by,
         )
 
     @property
@@ -1483,6 +1675,18 @@ class RandomVariable:
     def name(self) -> str | None:
         """Return the optional user-visible variable name."""
         return self._name
+
+    @property
+    def parameter_dimension(self) -> int | None:
+        """Declared inferable degrees of freedom, or ``None`` when a backend owns an unknown-size model.
+
+        A fitted artifact returns the count recorded before execution; an unfitted structural model is
+        counted directly. Fixed constructor values and derived posterior summaries are excluded.
+        """
+        if self._kind == "bound":
+            value = self._cache.get("_free_parameter_count")
+            return None if value is None else int(value)
+        return _inferable_parameter_dimension(self)
 
     @property
     def columns(self) -> list:
@@ -1660,15 +1864,33 @@ class RandomVariable:
         return float(np.sum(self.log_prob(list(data))))
 
     def aic(self, data, k: int | None = None) -> float:
-        """Akaike information criterion (lower is better). ``k`` defaults to a heuristic
-        parameter count from ``.params``."""
-        k = k if k is not None else _count_params(self.params)
+        """Akaike information criterion (lower is better).
+
+        ``k`` defaults to the declared inferable dimension recorded by :meth:`fit`; fixed constructor
+        values and derived summaries are never counted. Models without such a record must pass ``k``.
+        """
+        if k is None:
+            k = self._cache.get("_free_parameter_count")
+            if k is None:
+                raise ValueError("AIC needs k= because this artifact has no recorded inferable parameter dimension.")
+        if isinstance(k, (bool, np.bool_)) or not isinstance(k, Integral) or k < 0:
+            raise ValueError("AIC parameter count k must be an exact non-negative integer.")
+        k = int(k)
         return 2.0 * k - 2.0 * self.log_likelihood(data)
 
     def bic(self, data, k: int | None = None) -> float:
         """Bayesian information criterion (lower is better)."""
-        k = k if k is not None else _count_params(self.params)
-        n = len(list(data))
+        if k is None:
+            k = self._cache.get("_free_parameter_count")
+            if k is None:
+                raise ValueError("BIC needs k= because this artifact has no recorded inferable parameter dimension.")
+        if isinstance(k, (bool, np.bool_)) or not isinstance(k, Integral) or k < 0:
+            raise ValueError("BIC parameter count k must be an exact non-negative integer.")
+        k = int(k)
+        data = list(data)
+        n = len(data)
+        if n == 0:
+            raise ValueError("BIC requires at least one observation.")
         return k * math.log(n) - 2.0 * self.log_likelihood(data)
 
     def pointwise_log_likelihood(self, data) -> np.ndarray:
@@ -2026,8 +2248,11 @@ class RandomVariable:
         # .explain_fit() reports what actually happened, instead of re-deriving from a structure that no
         # longer carries it (see the "bound" branch in explain_fit()).
         _original_how = how
+        _parameter_dimension = _inferable_parameter_dimension(self)
 
         def _stash_explanation(rv):
+            if _parameter_dimension is not None:
+                rv._cache["_free_parameter_count"] = int(_parameter_dimension)
             try:
                 rv._cache["_fit_explanation"] = self.explain_fit(
                     how=_original_how, constraints=kw.get("constraints"), potentials=kw.get("potentials")
@@ -2081,7 +2306,7 @@ class RandomVariable:
         if self._kind == "sample":
             _gby = next(
                 (
-                    a._cache.get("group_by")
+                    a._group_by
                     for a in self._args
                     if isinstance(a, RandomVariable) and a._scope == "grouped"
                 ),
@@ -2309,13 +2534,54 @@ def _param_handle(dim: int, *, name=None, kind: str = "vector", support: str = "
 
 
 def _rv_reconstruct(kind, fam_name, args, name, keys, dist, scope, reparam=None):
-    """Rebuild a RandomVariable from its picklable structural fields."""
+    """Rebuild the legacy, structure-only RandomVariable pickle format."""
     if kind == "bound":
         return RandomVariable._bound(dist, name=name)
     family = _FAMILIES[fam_name] if fam_name is not None else None
     if kind == "sample" and isinstance(family, (Family, CompositeFamily)):
         family.validate_args(tuple(args))
     return RandomVariable(kind, family=family, args=args, name=name, keys=keys, scope=scope, reparam=reparam)
+
+
+def _rv_reconstruct_v2(
+    version,
+    kind,
+    fam_name,
+    args,
+    name,
+    keys,
+    dist,
+    result,
+    scope,
+    reparam,
+    group_by,
+    durable_cache,
+):
+    """Rebuild a versioned RandomVariable artifact with fitted and structural semantics intact."""
+    if version != 1:
+        raise ValueError(f"unsupported RandomVariable artifact version {version!r}.")
+    if not isinstance(durable_cache, dict):
+        raise TypeError("RandomVariable artifact cache must be a dictionary.")
+    if kind == "bound":
+        rv = RandomVariable._bound(dist, name=name, result=result)
+    else:
+        family = _FAMILIES[fam_name] if fam_name is not None else None
+        if kind == "sample" and isinstance(family, (Family, CompositeFamily)):
+            family.validate_args(tuple(args))
+        rv = RandomVariable(
+            kind,
+            family=family,
+            args=args,
+            name=name,
+            keys=keys,
+            dist=dist,
+            result=result,
+            scope=scope,
+            reparam=reparam,
+            group_by=group_by,
+        )
+    rv._cache.update(durable_cache)
+    return rv
 
 
 # -------------------------------------------------------------------- the lowering
