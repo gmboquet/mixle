@@ -196,17 +196,19 @@ class SqlCursorSource:
                 flush(buf)
             return results
 
-        # Grouped: requires rows contiguous by group key (query must ORDER BY the group column). A new
-        # group's partition is fixed the moment it starts (round-robin over distinct groups seen so
-        # far) and its rows are appended to that partition's own buffer -- which may already hold an
-        # earlier, different group's unflushed tail, exactly like partition_records's grouped branch
-        # lets several groups share a partition -- flushing whenever that partition's buffer reaches
-        # `bs`. Memory is bounded by `n_parts * bs`, never by the whole dataset or even one whole group.
-        buffers = [[] for _ in range(n_parts)]
-        current_part = 0
+        # A grouped encoder invocation is one complete group.  Splitting at ``batch_size`` changes
+        # sufficient statistics for encoders that interpret each call as one unit, so buffer through
+        # the group boundary.  Memory is consequently bounded by the largest group, not by the whole
+        # query; callers requiring a stricter ceiling need a group-aware incremental encoder.
+        group_buffer: list[Any] = []
         current_key: Any = _NO_GROUP
         closed_keys: set[Any] = set()
-        group_count = 0
+
+        def flush_group() -> None:
+            nonlocal group_buffer
+            flush(group_buffer)
+            group_buffer = []
+
         for rec in self._stream():
             key = self.structure.group_key(rec)
             if key != current_key:
@@ -218,15 +220,10 @@ class SqlCursorSource:
                     )
                 if current_key is not _NO_GROUP:
                     closed_keys.add(current_key)
+                    flush_group()
                 current_key = key
-                current_part = group_count % n_parts
-                group_count += 1
-            buffers[current_part].append(rec)
-            if len(buffers[current_part]) >= bs:
-                flush(buffers[current_part])
-                buffers[current_part] = []
-        for buf in buffers:
-            flush(buf)
+            group_buffer.append(rec)
+        flush_group()
         return results
 
 

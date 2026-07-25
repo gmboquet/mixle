@@ -24,6 +24,9 @@ class GraphEmbedding:
     """A message-passing embedding: ``(node_features, adjacency) -> (n_nodes, dim)`` with ``layers`` GCN rounds."""
 
     def __init__(self, in_features: int, dim: int, *, layers: int = 2, name: str | None = None) -> None:
+        for field, value in (("in_features", in_features), ("dim", dim), ("layers", layers)):
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value <= 0:
+                raise ValueError(f"{field} must be a positive integer, got {value!r}")
         self.in_features = int(in_features)
         self.dim = int(dim)
         self.layers = int(layers)
@@ -74,9 +77,24 @@ class GraphEncoder(ModalityEncoder):
         """Encode graph nodes and adjacency into Torch embeddings."""
         import torch
 
+        if not isinstance(raw, (tuple, list)) or len(raw) != 2:
+            raise ValueError("a graph record must be (node_features, adjacency)")
         nodes, adj = raw
-        x = torch.as_tensor(np.asarray(nodes), dtype=torch.float32)
-        a = torch.as_tensor(np.asarray(adj), dtype=torch.float32)
+        node_array = np.asarray(nodes, dtype=np.float64)
+        adjacency = np.asarray(adj, dtype=np.float64)
+        if node_array.ndim != 2 or node_array.shape[0] == 0 or node_array.shape[1] != self.embedding.in_features:
+            raise ValueError(
+                f"node_features must have shape (n>0, {self.embedding.in_features}), got {node_array.shape}"
+            )
+        n_nodes = node_array.shape[0]
+        if adjacency.shape != (n_nodes, n_nodes):
+            raise ValueError(f"adjacency must have shape ({n_nodes}, {n_nodes}), got {adjacency.shape}")
+        if not np.isfinite(node_array).all() or not np.isfinite(adjacency).all():
+            raise ValueError("graph features and adjacency must contain only finite values")
+        if np.any(adjacency < 0.0):
+            raise ValueError("adjacency weights must be non-negative")
+        x = torch.as_tensor(node_array, dtype=torch.float32)
+        a = torch.as_tensor(adjacency, dtype=torch.float32)
         return self.embedding.module()(x, a)  # (n_nodes, dim)
 
     def encode_numpy(self, raw: Any) -> np.ndarray:

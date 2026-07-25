@@ -36,7 +36,17 @@ class ByteSegmenter(Segmenter):
 
     def segment(self, raw: Any) -> np.ndarray:
         """Return UTF-8 byte ids for a string or bytes-like object."""
-        data = raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
+        if isinstance(raw, str):
+            data = raw.encode("utf-8")
+        else:
+            if isinstance(raw, (bool, int, np.bool_, np.integer)):
+                raise TypeError("ByteSegmenter accepts text or an explicit bytes-like buffer, not a numeric length")
+            try:
+                data = memoryview(raw).tobytes()
+            except TypeError:
+                raise TypeError(
+                    f"ByteSegmenter accepts str or a bytes-like buffer, got {type(raw).__name__}"
+                ) from None
         return np.frombuffer(data, dtype=np.uint8).astype(np.int64)
 
 
@@ -98,8 +108,19 @@ class WindowSegmenter(Segmenter):
     discrete = False
 
     def __init__(self, window: int = 64, hop: int | None = None) -> None:
+        if isinstance(window, (bool, np.bool_)) or not isinstance(window, (int, np.integer)) or window <= 0:
+            raise ValueError(f"window must be a positive integer, got {window!r}")
+        resolved_hop = window if hop is None else hop
+        if (
+            isinstance(resolved_hop, (bool, np.bool_))
+            or not isinstance(resolved_hop, (int, np.integer))
+            or resolved_hop <= 0
+        ):
+            raise ValueError(f"hop must be a positive integer, got {hop!r}")
+        if resolved_hop > window:
+            raise ValueError("hop cannot exceed window because that would leave samples uncovered")
         self.window = int(window)
-        self.hop = int(hop) if hop is not None else int(window)
+        self.hop = int(resolved_hop)
 
     def segment(self, raw: Any) -> np.ndarray:
         """Split a one-dimensional signal into fixed windows.
@@ -109,7 +130,11 @@ class WindowSegmenter(Segmenter):
         contract and rejects a too-small image outright): the real samples fill ``[:len(x)]`` and
         only the remaining slots are zero-padded, so the padding never overwrites real data.
         """
-        x = np.asarray(raw, dtype=np.float32).ravel()
+        x = np.asarray(raw, dtype=np.float32)
+        if x.ndim != 1:
+            raise ValueError(f"WindowSegmenter requires a one-dimensional signal, got shape {x.shape}")
+        if not np.isfinite(x).all():
+            raise ValueError("WindowSegmenter requires a finite signal")
         if len(x) < self.window:
             # (len(x) - window) // hop + 1 is <= 0 here, so this used to be treated as "zero
             # windows" and silently answered with one fabricated ALL-zero window instead --
@@ -120,8 +145,15 @@ class WindowSegmenter(Segmenter):
             padded = np.zeros(self.window, dtype=np.float32)
             padded[: len(x)] = x
             return padded[None, :]
-        n = (len(x) - self.window) // self.hop + 1
-        return np.stack([x[i * self.hop : i * self.hop + self.window] for i in range(n)]).astype(np.float32)
+        starts = list(range(0, len(x) - self.window + 1, self.hop))
+        frames = [x[start : start + self.window] for start in starts]
+        if starts[-1] + self.window < len(x):
+            start = starts[-1] + self.hop
+            tail = np.zeros(self.window, dtype=np.float32)
+            observed = x[start : start + self.window]
+            tail[: len(observed)] = observed
+            frames.append(tail)
+        return np.stack(frames).astype(np.float32)
 
 
 class WholeSegmenter(Segmenter):
@@ -131,7 +163,11 @@ class WholeSegmenter(Segmenter):
 
     def segment(self, raw: Any) -> np.ndarray:
         """Treat the whole input as one feature-vector segment."""
-        v = np.asarray(raw, dtype=np.float32).ravel()
+        v = np.asarray(raw, dtype=np.float32)
+        if v.ndim == 0:
+            v = v.reshape(1)
+        if v.ndim != 1 or v.size == 0 or not np.isfinite(v).all():
+            raise ValueError("WholeSegmenter requires one non-empty finite feature vector")
         return v[None, :]
 
 
@@ -146,5 +182,12 @@ class SetSegmenter(Segmenter):
 
     def segment(self, raw: Any) -> np.ndarray:
         """Return set elements as rows of a feature matrix."""
-        arr = np.asarray(raw, dtype=np.float32)
-        return arr if arr.ndim == 2 else arr[None, :]
+        try:
+            arr = np.asarray(raw, dtype=np.float32)
+        except (TypeError, ValueError):
+            raise ValueError("SetSegmenter requires a rectangular numeric feature collection") from None
+        if arr.ndim == 1:
+            arr = arr[None, :]
+        if arr.ndim != 2 or arr.shape[0] == 0 or arr.shape[1] == 0 or not np.isfinite(arr).all():
+            raise ValueError("SetSegmenter requires a non-empty finite matrix with fixed positive feature width")
+        return arr

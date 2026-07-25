@@ -28,6 +28,8 @@ import numpy as np
 from mixle.task.calibrate import CalibratedTaskModel
 from mixle.task.model import TaskModel
 
+__all__ = ["Registry", "RegistryEntry"]
+
 _INDEX_NAME = "index.json"
 _LOCK_NAME = ".registry.lock"
 

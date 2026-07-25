@@ -42,32 +42,25 @@ class MaterializedSource:
     def __init__(
         self, data: Sequence[Any], structure: SampleStructure = EXCHANGEABLE, schema: Schema | None = None
     ) -> None:
-        # materialize()/records() re-derive from self._data on every call (cheap and correct for a
-        # real Sequence, which supports repeated iteration by definition) rather than caching like
-        # LazySource does -- but that's only safe if data really IS re-iterable. A one-shot iterator
-        # or generator passed here despite the type hint would silently materialize empty/partial on
-        # the SECOND call, far from this constructor. Checking __len__ (not isinstance(..., Sequence))
-        # is deliberate: numpy.ndarray is a perfectly safe, re-iterable container here but does NOT
-        # register as collections.abc.Sequence, while every one-shot iterator/generator lacks __len__.
-        if not hasattr(data, "__len__"):
-            raise TypeError(
-                f"MaterializedSource requires a re-iterable container (with __len__), got "
-                f"{type(data).__name__}; wrap a one-shot iterable with list(...) first."
-            )
-        self._data = data
+        # This class owns one replayable snapshot.  ``__len__`` is not evidence that an object is
+        # replayable: custom iterators commonly expose a remaining-length hint while still returning
+        # themselves from ``iter()``.  Snapshotting once also prevents later caller mutation of a list
+        # from changing the source between validation, hashing and fitting.
+        raw = list(data)
+        self._data = tuple(schema.conform(raw) if schema is not None else raw)
         self.structure = structure
         self.schema = schema
 
     def records(self) -> Iterable[Any]:
-        """Return an iterator over the in-memory records without copying the underlying sequence."""
+        """Return conformed records from the owned replayable snapshot."""
         return iter(self._data)
 
     def __len__(self) -> int:
         return len(self._data)
 
     def materialize(self) -> list[Any]:
-        """Return the records as a list, coerced to the schema if one is set."""
-        return self.schema.conform(self._data) if self.schema is not None else list(self._data)
+        """Return a caller-owned list copy of the conformed snapshot."""
+        return list(self._data)
 
     def partition(self, n: int, *, by: Any = None) -> list[MaterializedSource]:
         """Split into ``n`` structure-safe sub-sources (group-aware for partially-exchangeable data)."""
@@ -98,22 +91,35 @@ class LazySource:
         self._factory = factory
         self.structure = structure
         self.schema = schema
+        if isinstance(length, bool) or (length is not None and (not isinstance(length, int) or length < 0)):
+            raise ValueError(f"length must be a non-negative integer or None, got {length!r}")
         self._length = length
-        self._cache: list[Any] | None = None
+        self._cache: tuple[Any, ...] | None = None
 
-    def materialize(self) -> list[Any]:
-        """Read records from the factory once, apply the schema if present, and cache the list."""
+    def _realize(self) -> tuple[Any, ...]:
+        """Build and validate the immutable cache exactly once."""
         if self._cache is None:
             records = list(self._factory())
-            self._cache = self.schema.conform(records) if self.schema is not None else records
+            conformed = self.schema.conform(records) if self.schema is not None else records
+            realized = tuple(conformed)
+            if self._length is not None and self._length != len(realized):
+                raise ValueError(
+                    f"declared length {self._length} does not match the realized record count {len(realized)}"
+                )
+            self._cache = realized
+            self._length = len(realized)
         return self._cache
+
+    def materialize(self) -> list[Any]:
+        """Return a caller-owned list copy of the immutable, conformed cache."""
+        return list(self._realize())
 
     def records(self) -> Iterable[Any]:
         """Return an iterator over the cached materialized records."""
-        return iter(self.materialize())
+        return iter(self._realize())
 
     def __len__(self) -> int:
-        return self._length if self._length is not None else len(self.materialize())
+        return self._length if self._length is not None and self._cache is None else len(self._realize())
 
     def partition(self, n: int, *, by: Any = None) -> list[MaterializedSource]:
         """Materialize and split into ``n`` structure-aware in-memory sources."""

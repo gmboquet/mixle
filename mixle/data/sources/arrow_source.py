@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from mixle.data.core import LazySource
-from mixle.data.schema import Boolean, Categorical, Count, Field, Optional, Real, Schema, Text
+from mixle.data.schema import Boolean, Categorical, Count, Field, Integer, Optional, Real, Schema, Text
 from mixle.data.structure import EXCHANGEABLE, SampleStructure
 
 try:  # optional dependency
@@ -75,7 +75,9 @@ def _arrow_field_type(arrow_type: Any) -> Any:
     """
     if _pat.is_boolean(arrow_type):
         return Boolean()
-    if _pat.is_integer(arrow_type):
+    if _pat.is_signed_integer(arrow_type):
+        return Integer()
+    if _pat.is_unsigned_integer(arrow_type):
         return Count()
     if _pat.is_floating(arrow_type):
         return Real()
@@ -122,7 +124,9 @@ def read_parquet(
     materialized). Pass an explicit ``schema`` to skip inference -- required for files whose columns
     fall outside the supported mapping (see :func:`_arrow_field_type`).
     """
-    resolved_columns = columns
+    from mixle.data.sources.text_source import _validate_columns
+
+    resolved_columns = _validate_columns(columns)
     if schema is None:
         _require_arrow()
         arrow_schema = _pa_dataset.dataset(path, format="parquet").schema
@@ -151,7 +155,9 @@ def read_feather(
     explicit ``schema`` to skip inference -- required for files whose columns fall outside the
     supported mapping (see :func:`_arrow_field_type`).
     """
-    resolved_columns = columns
+    from mixle.data.sources.text_source import _validate_columns
+
+    resolved_columns = _validate_columns(columns)
     if schema is None:
         _require_arrow()
         with _ipc.open_file(path) as reader:

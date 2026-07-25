@@ -15,7 +15,8 @@ accept the payload under the forged identity (MXR-080-0052). Header fields are f
 :func:`mixle.data.hashing._canonical`'s self-delimiting canonical encoding -- the same helper
 ``dataset_hash``/``model_hash`` use -- so on-disk JSON key order or whitespace can never produce a false
 "corrupt" mismatch, and the header/body split can never be ambiguous with a different split producing the
-same bytes. The on-disk magic changed (``PSPENC1`` -> ``PSPENC2``) alongside the digest scope, so a file
+same bytes. The current on-disk magic is ``PSPENC3``; it adds mandatory, versioned encoder binding and
+rejects older unbound artifacts rather than treating an opaque payload as checked reusable data. A file
 written by the older, narrower-digest code is rejected outright as an unrecognized format rather than
 failing the new digest check in a way that reads like corruption.
 
@@ -30,12 +31,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pickle
+import tempfile
 from typing import Any
 
 from mixle.data.hashing import _canonical
 
-_MAGIC = b"PSPENC2\n"
+_MAGIC = b"PSPENC3\n"
 
 
 def _envelope_digest(header_fields: dict[str, Any], body: bytes) -> str:
@@ -57,20 +60,51 @@ def _envelope_digest(header_fields: dict[str, Any], body: bytes) -> str:
 def save_encoded(encoded: Any, path: str, *, encoder: Any = None) -> str:
     """Write ``encoded`` (the output of ``encoder.seq_encode(...)``) to ``path``; return its hex digest.
 
-    ``encoder`` (optional) records the encoder's structural signature -- ``str(encoder)``, not just its
+    ``encoder`` is required and records the encoder's versioned structural signature -- not just its
     class name -- so a load against a structurally different encoder is flagged. Comparing class names
     alone would let e.g. a one-field ``CompositeDataEncoder`` be accepted for a two-field
     ``CompositeDataEncoder`` request, since both share the same class name. The returned digest (also
     stored in the header) covers this signature as well as the body -- see :func:`_envelope_digest`."""
+    if encoder is None:
+        raise ValueError("save_encoded requires encoder= so the opaque payload has a structural type binding")
     body = pickle.dumps(encoded, protocol=pickle.HIGHEST_PROTOCOL)
-    header_fields: dict[str, Any] = {"encoder": str(encoder) if encoder is not None else None}
+    header_fields: dict[str, Any] = {
+        "format_version": 3,
+        "encoder": {
+            "module": type(encoder).__module__,
+            "qualname": type(encoder).__qualname__,
+            "signature": str(encoder),
+        },
+    }
     digest = _envelope_digest(header_fields, body)
     meta = {"digest": digest, **header_fields}
-    with open(path, "wb") as f:
-        f.write(_MAGIC)
-        f.write(json.dumps(meta).encode("utf-8"))
-        f.write(b"\n")
-        f.write(body)
+    destination = os.path.abspath(os.fspath(path))
+    directory = os.path.dirname(destination)
+    fd, temporary = tempfile.mkstemp(prefix=f".{os.path.basename(destination)}.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(_MAGIC)
+            f.write(json.dumps(meta, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            f.write(b"\n")
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, destination)
+        try:
+            dir_fd = os.open(directory, os.O_RDONLY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
     return digest
 
 
@@ -79,14 +113,16 @@ def load_encoded(path: str, *, encoder: Any = None) -> Any:
 
     The header is parsed as JSON (never pickle) and the envelope digest -- header fields and body
     together, see :func:`_envelope_digest` -- is checked BEFORE the body is unpickled, so a
-    truncated, corrupted, or header-tampered file is rejected before any deserialization runs. If
-    ``encoder`` is given, its structural signature (``str(encoder)``) must match the one recorded at
+    truncated, corrupted, or header-tampered file is rejected before any deserialization runs. The
+    required ``encoder`` argument's structural signature must match the one recorded at
     save time (else ``ValueError``). This deliberately checks more than the encoder's class: a
     ``DataSequenceEncoder`` subclass is expected to make ``__str__`` structural (mirroring what its
     ``__eq__`` checks) -- e.g. ``CompositeDataEncoder.__str__`` recurses into its component encoders
     and so reflects field count, and ``DiagonalGaussianDataEncoder.__str__`` includes its ``dim`` --
     so a shape mismatch under the same class name (e.g. a one-field vs. two-field
     ``CompositeDataEncoder``) is caught, not just a mismatch in class."""
+    if encoder is None:
+        raise ValueError("load_encoded requires encoder= to verify the payload's structural type binding")
     with open(path, "rb") as f:
         if f.read(len(_MAGIC)) != _MAGIC:
             raise ValueError(f"{path!r} is not a mixle encoded-data file")
@@ -104,6 +140,11 @@ def load_encoded(path: str, *, encoder: Any = None) -> Any:
     header_fields = {k: v for k, v in meta.items() if k != "digest"}
     if _envelope_digest(header_fields, body) != meta.get("digest"):
         raise ValueError(f"{path!r} failed its integrity check (corrupt, truncated, or a tampered header)")
-    if encoder is not None and meta.get("encoder") is not None and str(encoder) != meta["encoder"]:
-        raise ValueError(f"encoder mismatch: file was encoded with {meta['encoder']}, got {encoder}")
+    expected_encoder = {
+        "module": type(encoder).__module__,
+        "qualname": type(encoder).__qualname__,
+        "signature": str(encoder),
+    }
+    if meta.get("format_version") != 3 or meta.get("encoder") != expected_encoder:
+        raise ValueError(f"encoder mismatch: file was encoded with {meta.get('encoder')!r}, got {expected_encoder!r}")
     return pickle.loads(body)  # noqa: S301 - digest-verified above; still a local-trust artifact, see module docstring

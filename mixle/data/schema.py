@@ -36,8 +36,34 @@ class Real(FieldType):
     numpy_dtype = np.float64
 
     def coerce(self, value: Any) -> float:
-        """Coerce ``value`` to a Python ``float``."""
-        return float(value)
+        """Coerce a finite, non-Boolean value to a Python ``float``."""
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError(f"cannot coerce Boolean value {value!r} to Real")
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"cannot coerce {value!r} to Real") from None
+        if not np.isfinite(result):
+            raise ValueError(f"cannot coerce non-finite value {value!r} to Real")
+        return result
+
+
+class Integer(FieldType):
+    """A signed integer logical type."""
+
+    numpy_dtype = np.int64
+
+    def coerce(self, value: Any) -> int:
+        """Coerce an exact, finite, non-Boolean integer."""
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError(f"cannot coerce Boolean value {value!r} to Integer")
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"cannot coerce {value!r} to Integer") from None
+        if not np.isfinite(number) or number != int(number):
+            raise ValueError(f"cannot coerce non-integral value {value!r} to Integer")
+        return int(number)
 
 
 class Count(FieldType):
@@ -93,7 +119,13 @@ class Boolean(FieldType):
             if s in _BOOLEAN_TRUE_STRINGS:
                 return True
             raise ValueError("cannot coerce string %r to Boolean" % value)
-        return bool(value)
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if isinstance(value, (int, np.integer, float, np.floating)) and not isinstance(value, (bool, np.bool_)):
+            number = float(value)
+            if np.isfinite(number) and number in (0.0, 1.0):
+                return bool(int(number))
+        raise ValueError(f"cannot coerce {value!r} to Boolean")
 
 
 class Text(FieldType):
@@ -127,11 +159,23 @@ class Vector(FieldType):
     dim: int | None = None
     numpy_dtype: Any = np.float64
 
+    def __post_init__(self) -> None:
+        if self.dim is not None and (
+            isinstance(self.dim, (bool, np.bool_)) or not isinstance(self.dim, (int, np.integer)) or self.dim <= 0
+        ):
+            raise ValueError(f"dim must be a positive integer or None, got {self.dim!r}")
+
     def coerce(self, value: Any) -> np.ndarray:
         """Coerce ``value`` to a one-dimensional ``float64`` array and validate ``dim`` when set."""
         arr = np.asarray(value, dtype=np.float64)
+        if arr.ndim != 1:
+            raise ValueError(f"expected a one-dimensional vector, got shape {arr.shape}")
+        if arr.size == 0:
+            raise ValueError("vector observations must contain at least one value")
         if self.dim is not None and arr.shape != (self.dim,):
             raise ValueError("expected a length-%d vector, got shape %s" % (self.dim, arr.shape))
+        if not np.isfinite(arr).all():
+            raise ValueError("vector observations must contain only finite values")
         return arr
 
 
@@ -142,7 +186,13 @@ class Timestamp(FieldType):
 
     def coerce(self, value: Any) -> Any:
         """Coerce ``value`` to ``numpy.datetime64`` unless it already has that representation."""
-        return np.datetime64(value) if not isinstance(value, np.datetime64) else value
+        try:
+            result = np.datetime64(value) if not isinstance(value, np.datetime64) else value
+        except (TypeError, ValueError):
+            raise ValueError(f"cannot coerce {value!r} to Timestamp") from None
+        if np.isnat(result):
+            raise ValueError("Timestamp does not accept NaT; wrap it in Optional and use None for missing values")
+        return result
 
 
 @dataclass(frozen=True)
@@ -193,6 +243,17 @@ class Schema:
     # False so a hand-built single-field Vector/Nested Schema keeps conform_record's stricter
     # raise-on-ambiguity behavior (see ConformRecordLengthTest in mixle/tests/data_schema_test.py).
     container_value: bool = False
+
+    def __post_init__(self) -> None:
+        fields = tuple(self.fields)
+        object.__setattr__(self, "fields", fields)
+        if not fields:
+            raise ValueError("a schema must contain at least one field")
+        names = [field.name for field in fields]
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("schema field names must be non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError(f"schema field names must be unique, got {names!r}")
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -282,15 +343,33 @@ def _type_for(dist: Any) -> FieldType:
 def _type_for_discrete_support(dist: Any, *, peek: int = 16) -> FieldType:
     """Classify a ``Discrete`` distribution's logical type from its own declared support values.
 
-    Draws up to ``peek`` values from ``dist.enumerator()`` (lazily -- ``itertools.islice`` never pulls
-    more than ``peek`` items, so this is safe even for the unbounded-support enumerators, e.g. Poisson
-    or negative-binomial, that stream in descending-probability order rather than materializing their
-    whole support). All-``bool`` support -> :class:`Boolean`; all non-boolean-integer support ->
-    :class:`Count`; anything else (strings, tuples, mixed types, ...) -> :class:`Categorical`. Falls
-    back to :class:`Count` -- the prior behaviour for every ``Discrete`` distribution -- only when the
-    support cannot be inspected at all (no working enumerator), so this never regresses a distribution
-    this module previously handled correctly.
+    Bounded enumeration is evidence of categorical support, but it cannot prove that a support remains
+    integer-valued after the inspected prefix. Therefore only an explicit finite-support certificate
+    may infer ``Boolean`` or ``Count``; otherwise the conservative type is ``Categorical``.
     """
+    declaration = getattr(type(dist), "compute_declaration", None)
+    if callable(declaration):
+        try:
+            support = declaration().support
+        except (AttributeError, TypeError, ValueError):
+            support = None
+        if support == "boolean":
+            return Boolean()
+        if support == "non_negative_integer":
+            return Count()
+    pmap = getattr(dist, "pmap", None)
+    if isinstance(pmap, dict):
+        return Categorical(categories=tuple(pmap))
+    values_attr = getattr(dist, "values", None)
+    if values_attr is not None and not callable(values_attr):
+        values = list(values_attr)
+        if values and all(isinstance(v, (bool, np.bool_)) for v in values):
+            return Boolean()
+        if values and all(
+            isinstance(v, (int, np.integer)) and not isinstance(v, (bool, np.bool_)) and int(v) >= 0 for v in values
+        ):
+            return Count()
+        return Categorical(categories=tuple(values)) if values else Categorical()
     enumerator = getattr(dist, "enumerator", None)
     values: list[Any] = []
     if callable(enumerator):
@@ -299,9 +378,7 @@ def _type_for_discrete_support(dist: Any, *, peek: int = 16) -> FieldType:
         except Exception:  # noqa: BLE001
             values = []
     if not values:
-        return Count()
+        return Categorical()
     if all(isinstance(v, (bool, np.bool_)) for v in values):
         return Boolean()
-    if all(isinstance(v, (int, np.integer)) and not isinstance(v, (bool, np.bool_)) for v in values):
-        return Count()
     return Categorical()

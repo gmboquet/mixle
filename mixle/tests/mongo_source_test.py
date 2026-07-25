@@ -60,7 +60,7 @@ from mixle.data.partition import partition_records
 from mixle.data.schema import Field, Real, Schema
 from mixle.data.sources import mongo_source
 from mixle.data.sources.mongo_source import MongoCursorSource, read_mongo
-from mixle.data.structure import EXCHANGEABLE, partially_exchangeable
+from mixle.data.structure import EXCHANGEABLE, grouping_policy, partially_exchangeable
 
 _HAS_PYMONGO = getattr(mongo_source, "_pymongo", None) is not None
 try:
@@ -538,7 +538,7 @@ class MongoCursorSourceGroupedStreamingTest(unittest.TestCase):
         patcher = _patch_mongo_client(store)
         patcher.start()
         self.addCleanup(patcher.stop)
-        structure = partially_exchangeable(lambda row: row[0])
+        structure = partially_exchangeable(grouping_policy("test.mongo.group", "1", lambda row: row[0]))
         src = read_mongo(
             _MOCK_URI, _DB, _COLL, columns=["grp", "x"], structure=structure, batch_size=2, sort=[("grp", 1)]
         )
@@ -558,7 +558,7 @@ class MongoCursorSourceGroupedStreamingTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         # No sort at all, natural insertion order: a, b, a -- "a" reappears after "b" has started.
-        structure = partially_exchangeable(lambda row: row[0])
+        structure = partially_exchangeable(grouping_policy("test.mongo.group", "1", lambda row: row[0]))
         src = read_mongo(_MOCK_URI, _DB, _COLL, columns=["grp", "x"], structure=structure)
         with self.assertRaises(ValueError):
             src.encode(_RecordingEncoder([]), num_chunks=2)

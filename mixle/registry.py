@@ -12,6 +12,7 @@ import warnings
 from typing import Any
 
 _MOVED = "mixle.system.registry"
+__all__ = ["Registry", "RegistryEntry"]  # noqa: F822
 
 
 def __getattr__(name: str) -> Any:
@@ -30,6 +31,4 @@ def __getattr__(name: str) -> Any:
 
 
 def __dir__() -> list[str]:
-    import importlib
-
-    return sorted(n for n in dir(importlib.import_module(_MOVED)) if not n.startswith("_"))
+    return sorted(set(globals()) | set(__all__))

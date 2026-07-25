@@ -36,7 +36,7 @@ from mixle.data.sources.array_source import (
     ZarrArraySource,
     _ArrayVolumeSource,
 )
-from mixle.data.structure import EXCHANGEABLE, partially_exchangeable
+from mixle.data.structure import EXCHANGEABLE, grouping_policy, partially_exchangeable
 from mixle.inference.estimation import optimize
 from mixle.stats import (
     GaussianDistribution,
@@ -480,7 +480,7 @@ class ArraySourceEncodeBoundedBatchingTest(unittest.TestCase):
         def group_key(row):
             return int(row[0] // 2) % 4  # 4 groups of 3 rows each, scattered by construction
 
-        structure = partially_exchangeable(group_key)
+        structure = partially_exchangeable(grouping_policy("test.array.group", "1", group_key))
         source = _CountingArraySource(arr, structure=structure)
         encoder = _RecordingEncoder(arr)
 

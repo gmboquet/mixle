@@ -84,7 +84,14 @@ def __getattr__(name: str):  # PEP 562 — resolve subsystem contracts lazily
     import importlib
 
     module, attr = target
-    return getattr(importlib.import_module(module), attr)
+    value = getattr(importlib.import_module(module), attr)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    """Expose lazy contracts to normal Python/IDE/documentation discovery."""
+    return sorted(set(globals()) | set(_LAZY) | set(__all__))
 
 
 __all__ = [

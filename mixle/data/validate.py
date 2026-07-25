@@ -56,6 +56,8 @@ def check_dataset(
     schema_desc = [(f.name, repr(f.type)) for f in schema.fields]
     recs = list(itertools.islice(_records(data), sample))
     issues: list[str] = []
+    if not recs:
+        issues.append("dataset is empty; no records were available to validate")
     conformed: list[Any] = []
     for i, r in enumerate(recs):
         try:

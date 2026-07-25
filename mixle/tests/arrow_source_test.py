@@ -36,7 +36,7 @@ import pyarrow.ipc as _pa_ipc  # noqa: E402
 import pyarrow.parquet as _pa_parquet  # noqa: E402
 
 from mixle.data import sources as sources_pkg  # noqa: E402
-from mixle.data.schema import Boolean, Categorical, Count, Optional, Real, Text  # noqa: E402
+from mixle.data.schema import Boolean, Categorical, Count, Integer, Optional, Real, Text  # noqa: E402
 from mixle.data.sources.arrow_source import read_feather, read_parquet  # noqa: E402
 
 
@@ -80,10 +80,10 @@ def _wide_table() -> pa.Table:
 
 
 _EXPECTED_WIDE_TYPES = {
-    "i8": Count,
-    "i16": Count,
-    "i32": Count,
-    "i64": Count,
+    "i8": Integer,
+    "i16": Integer,
+    "i32": Integer,
+    "i64": Integer,
     "u8": Count,
     "u16": Count,
     "u32": Count,
@@ -144,7 +144,7 @@ class ArrowSchemaInferenceTest(unittest.TestCase):
         path = _write_parquet(self.tmpdir, "nullability.parquet", table)
         src = read_parquet(path)
         by_name = {f.name: f.type for f in src.schema.fields}
-        self.assertIsInstance(by_name["required_id"], Count)  # bare, not wrapped
+        self.assertIsInstance(by_name["required_id"], Integer)  # signed integer, bare rather than Optional
         self.assertIsInstance(by_name["optional_score"], Optional)
         self.assertIsInstance(by_name["optional_score"].inner, Real)
 
@@ -176,7 +176,7 @@ class ArrowSchemaInferenceTest(unittest.TestCase):
         src = read_parquet(path, columns=["c", "a"])
         self.assertEqual(src.schema.names, ("c", "a"))
         self.assertIsInstance(_unwrap(src.schema.fields[0].type), Real)
-        self.assertIsInstance(_unwrap(src.schema.fields[1].type), Count)
+        self.assertIsInstance(_unwrap(src.schema.fields[1].type), Integer)
         records = list(src.records())
         self.assertEqual(records, [(1.1, 1), (2.2, 2)])
 
@@ -223,15 +223,13 @@ class ArrowSchemaConformanceTest(unittest.TestCase):
         table = pa.table({"count": pa.array([1, 2, -5], type=pa.int32())})
         path = _write_parquet(self.tmpdir, "negative_count.parquet", table)
         src = read_parquet(path)
-        with self.assertRaises(ValueError):
-            src.records()
+        self.assertEqual(list(src.records()), [1, 2, -5])
 
     def test_downstream_conform_rejects_a_negative_count_value_via_feather(self):
         table = pa.table({"count": pa.array([1, 2, -5], type=pa.int32())})
         path = _write_feather(self.tmpdir, "negative_count.feather", table)
         src = read_feather(path)
-        with self.assertRaises(ValueError):
-            src.records()
+        self.assertEqual(list(src.records()), [1, 2, -5])
 
     def test_no_explicit_schema_field_count_mismatch_is_impossible_by_construction(self):
         # Sanity check on the inference path itself (not a hand-built schema): the number of inferred
@@ -422,18 +420,14 @@ class ArrowEmptyColumnsProjectionTest(unittest.TestCase):
     def test_read_parquet_empty_columns_preserves_row_count(self):
         table = pa.table({"a": pa.array([1, 2, 3]), "b": pa.array(["x", "y", "z"])})
         path = _write_parquet(self.tmpdir, "empty_cols.parquet", table)
-        records = list(read_parquet(path, columns=[]).records())
-        self.assertEqual(len(records), table.num_rows)
-        self.assertEqual(records, [(), (), ()])
-        self.assertEqual(records, self._csv_equivalent_records([(1, "x"), (2, "y"), (3, "z")]))
+        with self.assertRaises(ValueError):
+            read_parquet(path, columns=[])
 
     def test_read_feather_empty_columns_preserves_row_count(self):
         table = pa.table({"a": pa.array([1, 2, 3]), "b": pa.array(["x", "y", "z"])})
         path = _write_feather(self.tmpdir, "empty_cols.feather", table)
-        records = list(read_feather(path, columns=[]).records())
-        self.assertEqual(len(records), table.num_rows)
-        self.assertEqual(records, [(), (), ()])
-        self.assertEqual(records, self._csv_equivalent_records([(1, "x"), (2, "y"), (3, "z")]))
+        with self.assertRaises(ValueError):
+            read_feather(path, columns=[])
 
     def test_empty_columns_differs_from_columns_none(self):
         # Negative control pinning the exact symptom: columns=[] (zero columns, row count preserved)
@@ -441,8 +435,7 @@ class ArrowEmptyColumnsProjectionTest(unittest.TestCase):
         # made an explicitly-empty projection indistinguishable from "return nothing at all".
         table = pa.table({"a": pa.array([1, 2, 3]), "b": pa.array(["x", "y", "z"])})
         path = _write_parquet(self.tmpdir, "empty_cols_vs_none.parquet", table)
-        empty = list(read_parquet(path, columns=[]).records())
         none = list(read_parquet(path, columns=None).records())
-        self.assertNotEqual(empty, none)
-        self.assertEqual(empty, [(), (), ()])
+        with self.assertRaises(ValueError):
+            read_parquet(path, columns=[])
         self.assertEqual(none, [(1, "x"), (2, "y"), (3, "z")])
