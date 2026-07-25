@@ -40,6 +40,7 @@ would otherwise be the best -- "matched size" is enforced on real measured bytes
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -61,6 +62,7 @@ __all__ = [
     "QuantizationReceipt",
     "MethodCandidate",
     "QuantizedTensor",
+    "QuantizationBudgetError",
     "SymmetricQuantPayload",
     "LNSTensorPayload",
     "quantize_tensor",
@@ -72,50 +74,98 @@ METHODS: tuple[str, ...] = ("int8", "int4", "lns", "sorted_profile")
 
 _LNS_EPS = 1e-12
 
-# Every method carries a small, fixed PER-TENSOR metadata overhead on top of its per-element rate
-# (int8/int4: one fp32 scale; LNS: step + center + a packed sign bit per element; sorted_profile: a
-# fitted-distribution parameter budget + the goodness-of-fit receipt itself, see
-# mixle.models.sorted_profile_quantizer._DISTRIBUTION_PARAM_BYTES). That overhead is independent of
-# tensor size, so it dominates the byte budget on SMALL tensors and is negligible on large ones. The
-# "matched size" budget therefore compares actual measured bytes against the bits-derived rate PLUS
-# this relative headroom, so a method is not disqualified purely for reporting its own honest
-# metadata cost -- the eligibility check still uses REAL measured nbytes, just with realistic slack.
-_BUDGET_SLACK = 1.5
+class QuantizationBudgetError(ValueError):
+    """No candidate satisfies the caller's literal serialized-byte budget."""
+
+    def __init__(self, target_bytes: int, candidates: dict[str, MethodCandidate]) -> None:
+        self.target_bytes = target_bytes
+        self.candidates = candidates
+        measured = ", ".join(f"{name}={candidate.nbytes}B" for name, candidate in candidates.items())
+        super().__init__(f"no quantization method fits the {target_bytes}-byte budget ({measured})")
 
 
-def _as_flat_numpy(tensor: Any) -> np.ndarray:
-    """Flatten ``tensor`` (numpy array or torch tensor) to a 1-D float64 numpy array."""
+def _as_source_array(tensor: Any) -> np.ndarray:
+    """Return a finite non-empty real array while preserving source dtype and shape."""
     if hasattr(tensor, "detach"):  # torch.Tensor
-        flat = tensor.detach().cpu().numpy()
+        array = tensor.detach().cpu().numpy()
     else:
-        flat = np.asarray(tensor)
-    return flat.reshape(-1).astype(np.float64)
+        array = np.asarray(tensor)
+    if array.dtype.kind not in {"i", "u", "f"} or array.dtype.kind == "b":
+        raise TypeError("quantize_tensor requires a real integer or floating tensor")
+    if array.size == 0:
+        raise ValueError("quantize_tensor requires a non-empty tensor")
+    if not np.all(np.isfinite(array)):
+        raise ValueError("quantize_tensor requires finite values")
+    return array
 
 
-def _shape_of(tensor: Any, n: int) -> tuple[int, ...]:
-    return tuple(tensor.shape) if hasattr(tensor, "shape") else (n,)
+def _exact_int(value: Any, name: str, *, minimum: int = 1) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return result
+
+
+def _finite_real(value: Any, name: str, *, minimum: float, maximum: float) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite real number")
+    result = float(value)
+    if not np.isfinite(result) or result < minimum or result > maximum:
+        raise ValueError(f"{name} must be finite and in [{minimum}, {maximum}]")
+    return result
 
 
 # --- payload wrappers for the two mixle.task.quantize primitives (int8/int4, LNS) -------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class SymmetricQuantPayload:
-    """The int8/int4 payload: exactly what :func:`mixle.task.quantize.quantize_dequantize_array` returns."""
+    """Validated serialized symmetric payload: int8 codes or true two-per-byte packed int4 codes."""
 
-    wq: np.ndarray
+    codes: np.ndarray
     scale: float
     bits: int
+    n: int
+
+    def __post_init__(self) -> None:
+        bits = _exact_int(self.bits, "bits")
+        if bits not in _QMAX:
+            raise ValueError(f"bits must be one of {sorted(_QMAX)}")
+        n = _exact_int(self.n, "n")
+        codes = np.asarray(self.codes)
+        expected = n if bits == 8 else (n + 1) // 2
+        expected_dtype = np.int8 if bits == 8 else np.uint8
+        if codes.shape != (expected,) or codes.dtype != expected_dtype:
+            raise ValueError(
+                f"int{bits} codes must have shape {(expected,)} and dtype {np.dtype(expected_dtype)}"
+            )
+        scale = np.float64(self.scale)
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise ValueError("quantization scale must be positive and finite")
+        codes = np.ascontiguousarray(codes).copy()
+        codes.setflags(write=False)
+        object.__setattr__(self, "codes", codes)
+        object.__setattr__(self, "scale", scale)
+        object.__setattr__(self, "bits", bits)
+        object.__setattr__(self, "n", n)
+
+    @property
+    def wq(self) -> np.ndarray:
+        """Return unpacked integer codes for compatibility with the symmetric primitive."""
+        if self.bits == 4:
+            return _unpack_nibbles(self.codes, (self.n,))
+        return self.codes.copy()
 
     def nbytes(self) -> int:
-        per_elem = 1.0 if self.bits == 8 else 0.5
-        return int(np.ceil(self.wq.size * per_elem)) + 4  # packed weights + one fp32 scale
+        return self.codes.nbytes + np.dtype(np.float64).itemsize
 
     def reconstruct(self) -> np.ndarray:
         return _dequantize_symmetric(self.wq, self.scale)
 
 
-@dataclass
+@dataclass(frozen=True)
 class LNSTensorPayload:
     """The LNS payload: log-magnitude quantized via :class:`mixle.engines.lns.LogNumberSystem`
     (the SAME class ``mixle.task.quantize.lns_classifier`` uses for its integer log-space
@@ -134,9 +184,38 @@ class LNSTensorPayload:
     bits: int
     n: int
 
+    def __post_init__(self) -> None:
+        bits = _exact_int(self.bits, "bits")
+        if bits not in _QMAX:
+            raise ValueError(f"bits must be one of {sorted(_QMAX)}")
+        n = _exact_int(self.n, "n")
+        codes = np.asarray(self.codes)
+        expected_codes = n if bits == 8 else (n + 1) // 2
+        expected_dtype = np.int8 if bits == 8 else np.uint8
+        if codes.shape != (expected_codes,) or codes.dtype != expected_dtype:
+            raise ValueError(
+                f"LNS int{bits} codes must have shape {(expected_codes,)} and dtype {np.dtype(expected_dtype)}"
+            )
+        sign_bits = np.asarray(self.sign_bits)
+        if sign_bits.shape != ((n + 7) // 8,) or sign_bits.dtype != np.uint8:
+            raise ValueError("LNS sign_bits must be a canonical packed uint8 vector")
+        step = float(self.step)
+        center = float(self.center)
+        if not np.isfinite(step) or step <= 0.0 or not np.isfinite(center):
+            raise ValueError("LNS step must be positive finite and center must be finite")
+        codes = np.ascontiguousarray(codes).copy()
+        sign_bits = np.ascontiguousarray(sign_bits).copy()
+        codes.setflags(write=False)
+        sign_bits.setflags(write=False)
+        object.__setattr__(self, "codes", codes)
+        object.__setattr__(self, "sign_bits", sign_bits)
+        object.__setattr__(self, "step", step)
+        object.__setattr__(self, "center", center)
+        object.__setattr__(self, "bits", bits)
+        object.__setattr__(self, "n", n)
+
     def nbytes(self) -> int:
-        per_elem = 1.0 if self.bits == 8 else 0.5
-        return int(np.ceil(self.n * per_elem)) + self.sign_bits.nbytes + 8  # codes + sign + (step, center)
+        return self.codes.nbytes + self.sign_bits.nbytes + 16  # codes + sign + float64 step/center
 
     def reconstruct(self) -> np.ndarray:
         return lns_dequantize_array(self)
@@ -155,9 +234,12 @@ def lns_quantize_array(flat: np.ndarray, bits: int = 8) -> LNSTensorPayload:
     already-near-zero-centered, additive-scale data -- exactly where int8's LINEAR quantization
     should (and, per the model-zoo test, does) win instead.
     """
+    bits = _exact_int(bits, "bits")
     if bits not in _QMAX:
         raise ValueError(f"bits must be one of {sorted(_QMAX)}, got {bits}")
     flat = np.asarray(flat, dtype=np.float64)
+    if flat.ndim != 1 or flat.size == 0 or not np.all(np.isfinite(flat)):
+        raise ValueError("lns_quantize_array requires a non-empty finite one-dimensional array")
     n = flat.size
     qmax = _QMAX[bits]
     sign = np.where(flat < 0, -1.0, 1.0)
@@ -211,6 +293,8 @@ class QuantizationReceipt:
     nbytes: int
     reconstruction_error: float
     compression_ratio: float
+    original_bytes: int
+    source_dtype: str
     target_bytes: int
     candidates: dict[str, MethodCandidate] = field(default_factory=dict)
     notes: str = ""
@@ -227,6 +311,7 @@ class QuantizedTensor:
 
     method: str
     shape: tuple[int, ...]
+    source_dtype: str
     payload: SymmetricQuantPayload | LNSTensorPayload | SortedProfileEncoding
     receipt: QuantizationReceipt
 
@@ -249,7 +334,8 @@ def _reconstruction_error(flat: np.ndarray, flat_hat: np.ndarray) -> float:
 
 def _run_int(flat: np.ndarray, bits: int, clip_percentile: float | None) -> tuple[SymmetricQuantPayload, np.ndarray]:
     wq, scale = _symmetric_quantize(flat, bits=bits, clip_percentile=clip_percentile)
-    payload = SymmetricQuantPayload(wq=wq, scale=scale, bits=bits)
+    codes = _pack_nibbles(wq) if bits == 4 else np.asarray(wq, dtype=np.int8)
+    payload = SymmetricQuantPayload(codes=codes, scale=np.float64(scale), bits=bits, n=wq.size)
     return payload, payload.reconstruct()
 
 
@@ -270,8 +356,10 @@ def _candidate(
 ) -> tuple[Any, MethodCandidate]:
     nbytes = payload.nbytes()
     err = _reconstruction_error(flat, flat_hat)
-    eligible = nbytes <= target_bytes * _BUDGET_SLACK
-    reward = -err if eligible else -(err + 1e6)  # ineligible methods never win the picker
+    if not np.isfinite(err) or err < 0.0:
+        raise ValueError(f"{method} produced an invalid reconstruction error")
+    eligible = nbytes <= target_bytes
+    reward = -err if eligible else float("-inf")
     ratio = original_bytes / nbytes if nbytes > 0 else float("inf")
     return payload, MethodCandidate(
         method=method,
@@ -329,10 +417,11 @@ def quantize_tensor(
         method: ``"auto"`` (default, runs the picker) or one of :data:`METHODS`
             (``"int8"``, ``"int4"``, ``"lns"``, ``"sorted_profile"``) to dispatch directly to the
             corresponding underlying primitive.
-        bits: target bits/element for the matched-size budget (``target_bytes = ceil(n*bits/8)``);
-            also the bit width int8/int4/LNS quantize AT when explicitly requested. ``target_compression``
-            (if given) overrides ``bits`` as ``bits = 32 // target_compression`` (e.g.
-            ``target_compression=4`` -> 8 bits, matching the fp32 -> int8 4x-compression convention).
+        bits: exact target bits/element for the hard matched-size budget
+            (``target_bytes = ceil(n*bits/8)``). Explicit int8/int4 methods retain their named code
+            widths; LNS uses int4 below 8 target bits and int8 at or above 8. ``target_compression``
+            (if given) derives an exact target rate from the actual source dtype width, and is rejected
+            when that division is not integral.
         top_k, tail_family, gof_threshold: forwarded to
             :func:`mixle.models.sorted_profile_quantizer.fit_sorted_profile`.
         clip_percentile: forwarded to :func:`mixle.task.quantize.quantize_dequantize_array` for the
@@ -343,17 +432,40 @@ def quantize_tensor(
     Returns:
         QuantizedTensor
     """
+    source = _as_source_array(tensor)
+    source_bits = source.dtype.itemsize * 8
+    bits = _exact_int(bits, "bits")
     if target_compression is not None:
-        bits = max(1, 32 // int(target_compression))
-    flat = _as_flat_numpy(tensor)
+        target_compression = _exact_int(target_compression, "target_compression")
+        if source_bits % target_compression:
+            raise ValueError(
+                f"target_compression={target_compression} does not produce an exact bit rate "
+                f"from {source_bits}-bit source values"
+            )
+        bits = source_bits // target_compression
+        if bits < 1:
+            raise ValueError("target_compression produces a sub-bit target rate")
+    if bits > source_bits:
+        raise ValueError(f"bits cannot exceed the source precision ({source_bits})")
+    if clip_percentile is not None:
+        clip_percentile = _finite_real(
+            clip_percentile,
+            "clip_percentile",
+            minimum=np.nextafter(0.0, 1.0),
+            maximum=100.0,
+        )
+    if seed is not None:
+        seed = _exact_int(seed, "seed", minimum=0)
+        if seed > np.iinfo(np.uint32).max:
+            raise ValueError("seed must fit in an unsigned 32-bit integer")
+    flat = source.reshape(-1).astype(np.float64)
     n = flat.size
-    if n == 0:
-        raise ValueError("quantize_tensor requires a non-empty tensor")
-    shape = _shape_of(tensor, n)
-    original_bytes = n * 4
-    target_bytes = max(1, int(np.ceil(n * bits / 8)))
+    shape = tuple(source.shape)
+    source_dtype = source.dtype.str
+    original_bytes = source.nbytes
+    target_bytes = int(np.ceil(n * bits / 8))
 
-    if method != "auto" and method not in METHODS:
+    if not isinstance(method, str) or (method != "auto" and method not in METHODS):
         raise ValueError(f"method must be 'auto' or one of {METHODS}, got {method!r}")
 
     if method == "int8" or method == "int4":
@@ -361,7 +473,7 @@ def quantize_tensor(
         payload, flat_hat = _run_int(flat, req_bits, clip_percentile)
         payload, cand = _candidate(method, payload, flat, flat_hat, target_bytes, original_bytes)
     elif method == "lns":
-        payload, flat_hat = _run_lns(flat, bits if bits in _QMAX else 8)
+        payload, flat_hat = _run_lns(flat, 8 if bits >= 8 else 4)
         payload, cand = _candidate(method, payload, flat, flat_hat, target_bytes, original_bytes)
     elif method == "sorted_profile":
         payload, flat_hat = _run_sorted_profile(tensor, top_k, tail_family, gof_threshold)
@@ -370,13 +482,15 @@ def quantize_tensor(
         results = _run_all_methods(
             tensor, flat, bits, target_bytes, original_bytes, top_k, tail_family, gof_threshold, clip_percentile
         )
-        picked_method, payload, candidates = _auto_pick(results, seed=seed)
+        picked_method, payload, candidates = _auto_pick(results, target_bytes=target_bytes, seed=seed)
         receipt = QuantizationReceipt(
             method=picked_method,
             auto=True,
             nbytes=candidates[picked_method].nbytes,
             reconstruction_error=candidates[picked_method].reconstruction_error,
             compression_ratio=candidates[picked_method].compression_ratio,
+            original_bytes=original_bytes,
+            source_dtype=source_dtype,
             target_bytes=target_bytes,
             candidates=candidates,
             notes=f"UCB1 evaluated all {len(candidates)} methods once (real measured reward); "
@@ -387,9 +501,18 @@ def quantize_tensor(
                 if m != picked_method
             ),
         )
-        return QuantizedTensor(method=picked_method, shape=shape, payload=payload, receipt=receipt)
+        return QuantizedTensor(
+            method=picked_method,
+            shape=shape,
+            source_dtype=source_dtype,
+            payload=payload,
+            receipt=receipt,
+        )
     else:  # pragma: no cover - guarded above
         raise ValueError(f"unknown method {method!r}")
+
+    if not cand.eligible:
+        raise QuantizationBudgetError(target_bytes, {method: cand})
 
     receipt = QuantizationReceipt(
         method=method,
@@ -397,15 +520,23 @@ def quantize_tensor(
         nbytes=cand.nbytes,
         reconstruction_error=cand.reconstruction_error,
         compression_ratio=cand.compression_ratio,
+        original_bytes=original_bytes,
+        source_dtype=source_dtype,
         target_bytes=target_bytes,
         candidates={method: cand},
         notes=f"explicit method={method!r}: no picker was run.",
     )
-    return QuantizedTensor(method=method, shape=shape, payload=payload, receipt=receipt)
+    return QuantizedTensor(
+        method=method,
+        shape=shape,
+        source_dtype=source_dtype,
+        payload=payload,
+        receipt=receipt,
+    )
 
 
 def _auto_pick(
-    results: dict[str, tuple[Any, MethodCandidate]], seed: int | None = None
+    results: dict[str, tuple[Any, MethodCandidate]], target_bytes: int, seed: int | None = None
 ) -> tuple[str, Any, dict[str, MethodCandidate]]:
     """The D5/ConditionalJIT pattern at micro scale: a small bandit controller picks an action
     (quantization method) per context (one tensor).
@@ -413,16 +544,21 @@ def _auto_pick(
     Reuses :class:`mixle.task.bandit.UCB1` -- the codebase's existing discrete-arm picker -- rather
     than a bespoke learned-picker framework. Because the "reward" for every arm (method) is fully,
     cheaply computable up front (real measured reconstruction error at the matched byte budget,
-    already computed by :func:`_run_all_methods`), this is UCB1's cold-start regime taken to
+    already computed by :func:`_run_all_methods`), over-budget arms are removed before selection
+    (and an empty eligible set raises :class:`QuantizationBudgetError`). This is UCB1's cold-start regime taken to
     completion: ``select()`` plays each never-pulled arm once IN ORDER (its documented behavior when
     ``pulls`` is all zero), so calling it once per method sweeps every arm exactly once; ``update``
     then records the real reward. After the sweep, ``ucb1.means`` holds each arm's single observed
-    (real) reward, and the arm with the highest mean -- ineligible (over-budget) methods carry a
-    large penalty baked into their reward so they cannot win -- is the pick. This is the same
+    (real) reward, and the eligible arm with the highest mean is the pick. This is the same
     select/update loop the rest of mixle's bandit call sites use; it is simply run to convergence in
     one sweep because, unlike a serving-time bandit, every arm's true reward is already known here.
     """
     order = list(results.keys())
+    candidates = {m: c for m, (_p, c) in results.items()}
+    eligible_order = [method for method in order if candidates[method].eligible]
+    if not eligible_order:
+        raise QuantizationBudgetError(target_bytes, candidates)
+    order = eligible_order
     n_arms = len(order)
     bandit = UCB1(n_arms=n_arms, seed=seed)
     for _ in range(n_arms):
@@ -433,5 +569,4 @@ def _auto_pick(
     best_arm = int(np.argmax(bandit.means))
     best_method = order[best_arm]
     payload = results[best_method][0]
-    candidates = {m: c for m, (_p, c) in results.items()}
     return best_method, payload, candidates

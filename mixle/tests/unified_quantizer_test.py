@@ -21,6 +21,7 @@ from mixle.engines.lns import LogNumberSystem
 from mixle.models.sorted_profile_quantizer import fit_sorted_profile
 from mixle.models.unified_quantizer import (
     METHODS,
+    QuantizationBudgetError,
     lns_quantize_array,
     quantize_tensor,
 )
@@ -96,7 +97,7 @@ class ExplicitDispatchTest(unittest.TestCase):
         self.tensor = self.rng.normal(0.0, 2.0, size=200)
 
     def test_int8_matches_symmetric_quantize_directly(self):
-        qt = quantize_tensor(self.tensor, method="int8")
+        qt = quantize_tensor(self.tensor, method="int8", bits=16)
         wq_direct, scale_direct = symmetric_quantize(self.tensor, bits=8)
         np.testing.assert_array_equal(qt.payload.wq, wq_direct)
         self.assertEqual(qt.payload.scale, scale_direct)
@@ -109,7 +110,7 @@ class ExplicitDispatchTest(unittest.TestCase):
         self.assertEqual(qt.payload.scale, scale_direct)
 
     def test_lns_matches_log_number_system_directly(self):
-        qt = quantize_tensor(self.tensor, method="lns", bits=8)
+        qt = quantize_tensor(self.tensor, method="lns", bits=16)
         payload_direct = lns_quantize_array(self.tensor, bits=8)
         np.testing.assert_array_equal(qt.payload.codes, payload_direct.codes)
         self.assertEqual(qt.payload.step, payload_direct.step)
@@ -121,7 +122,13 @@ class ExplicitDispatchTest(unittest.TestCase):
         np.testing.assert_array_equal(payload_direct.codes, k_direct)
 
     def test_sorted_profile_matches_fit_sorted_profile_directly(self):
-        qt = quantize_tensor(self.tensor, method="sorted_profile", top_k=5, tail_family=GaussianEstimator())
+        qt = quantize_tensor(
+            self.tensor,
+            method="sorted_profile",
+            bits=64,
+            top_k=5,
+            tail_family=GaussianEstimator(),
+        )
         direct = fit_sorted_profile(self.tensor, top_k=5, tail_family=GaussianEstimator())
         self.assertEqual(qt.payload.used_dense_fallback, direct.used_dense_fallback)
         self.assertEqual(qt.payload.goodness_of_fit, direct.goodness_of_fit)
@@ -140,7 +147,7 @@ class ModelZooAutoPickTest(unittest.TestCase):
 
     def test_auto_pick_beats_or_matches_best_single_method(self):
         zoo = _build_zoo(seed=42)
-        bits = 8
+        bits = 16
 
         auto_total_error = 0.0
         auto_choices = {}
@@ -152,8 +159,11 @@ class ModelZooAutoPickTest(unittest.TestCase):
             auto_choices[name] = auto_qt.receipt.method
 
             for m in METHODS:
-                fixed_qt = quantize_tensor(tensor, method=m, bits=bits, top_k=max(1, len(tensor) // 100))
-                fixed_totals[m] += fixed_qt.receipt.reconstruction_error
+                candidate = auto_qt.receipt.candidates[m]
+                if candidate.eligible and np.isfinite(fixed_totals[m]):
+                    fixed_totals[m] += candidate.reconstruction_error
+                else:
+                    fixed_totals[m] = float("inf")
 
         best_single_method = min(fixed_totals, key=fixed_totals.get)
         best_single_total = fixed_totals[best_single_method]
@@ -175,7 +185,7 @@ class ReceiptTest(unittest.TestCase):
     def test_auto_receipt_has_real_comparison_data_for_rejected_methods(self):
         rng = np.random.RandomState(7)
         tensor = _heavy_tailed_optimizer_state(rng, n=256)
-        qt = quantize_tensor(tensor, method="auto", bits=8, top_k=2)
+        qt = quantize_tensor(tensor, method="auto", bits=16, top_k=2)
         receipt = qt.receipt
 
         self.assertTrue(receipt.auto)
@@ -198,7 +208,7 @@ class ReceiptTest(unittest.TestCase):
     def test_explicit_receipt_is_not_auto_and_has_one_candidate(self):
         rng = np.random.RandomState(3)
         tensor = rng.normal(size=100)
-        qt = quantize_tensor(tensor, method="int8")
+        qt = quantize_tensor(tensor, method="int8", bits=16)
         self.assertFalse(qt.receipt.auto)
         self.assertEqual(list(qt.receipt.candidates.keys()), ["int8"])
         self.assertEqual(qt.receipt.rejected(), {})
@@ -211,10 +221,59 @@ class IneligibleMethodsAreNeverAutoPickedTest(unittest.TestCase):
     def test_oversized_sorted_profile_is_marked_ineligible_at_a_tiny_budget(self):
         rng = np.random.RandomState(9)
         tensor = rng.normal(size=5000)  # large n -> uint16/uint32 permutation indices
-        qt = quantize_tensor(tensor, method="auto", bits=1, top_k=0)  # an unrealistically tiny budget
-        sp_cand = qt.receipt.candidates["sorted_profile"]
-        self.assertFalse(sp_cand.eligible)
-        self.assertNotEqual(qt.receipt.method, "sorted_profile")
+        with self.assertRaises(QuantizationBudgetError) as caught:
+            quantize_tensor(tensor, method="auto", bits=1, top_k=0)  # an unrealistically tiny budget
+        self.assertEqual(caught.exception.target_bytes, 625)
+        self.assertFalse(caught.exception.candidates["sorted_profile"].eligible)
+        self.assertTrue(all(not candidate.eligible for candidate in caught.exception.candidates.values()))
+
+
+class PhysicalPayloadAndContractTest(unittest.TestCase):
+    def test_int4_codes_are_physically_nibble_packed(self):
+        tensor = np.arange(8, dtype=np.float32)
+        qt = quantize_tensor(tensor, method="int4", bits=16)
+        self.assertEqual(qt.payload.codes.dtype, np.uint8)
+        self.assertEqual(qt.payload.codes.shape, (4,))
+        self.assertEqual(qt.payload.nbytes(), qt.payload.codes.nbytes + 8)
+        self.assertEqual(qt.receipt.nbytes, qt.payload.nbytes())
+        self.assertEqual(qt.payload.wq.shape, (8,))
+
+    def test_literal_budget_never_selects_an_ineligible_candidate(self):
+        with self.assertRaises(QuantizationBudgetError) as caught:
+            quantize_tensor(np.array([1.0], dtype=np.float32), method="auto", bits=8)
+        self.assertEqual(caught.exception.target_bytes, 1)
+        self.assertTrue(all(not candidate.eligible for candidate in caught.exception.candidates.values()))
+
+    def test_source_dtype_and_actual_bytes_are_recorded(self):
+        for dtype in (np.float16, np.float32, np.float64, np.int64):
+            tensor = np.arange(32, dtype=dtype)
+            qt = quantize_tensor(tensor, method="int4", bits=8)
+            with self.subTest(dtype=dtype):
+                self.assertEqual(qt.source_dtype, tensor.dtype.str)
+                self.assertEqual(qt.receipt.source_dtype, tensor.dtype.str)
+                self.assertEqual(qt.receipt.original_bytes, tensor.nbytes)
+                self.assertAlmostEqual(qt.receipt.compression_ratio, tensor.nbytes / qt.payload.nbytes())
+
+    def test_invalid_values_and_rate_controls_fail_closed(self):
+        tensor = np.arange(32, dtype=np.float32)
+        for value in ([0.0, np.nan], [0.0, np.inf]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                quantize_tensor(value)
+        for controls in (
+            {"bits": 0},
+            {"bits": 1.5},
+            {"bits": True},
+            {"bits": 64},
+            {"target_compression": 0},
+            {"target_compression": 1.5},
+            {"target_compression": 3},
+            {"clip_percentile": np.nan},
+            {"clip_percentile": 0.0},
+            {"seed": True},
+            {"seed": -1},
+        ):
+            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError)):
+                quantize_tensor(tensor, **controls)
 
 
 if __name__ == "__main__":
