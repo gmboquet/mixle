@@ -35,11 +35,38 @@ def _law(mu, covar) -> GaussianLaw:
 
 class LinearExactTest(unittest.TestCase):
     def test_hand_computed_case_matches_to_float_precision(self):
+        """``w`` is SQUARE and invertible (det=1) on purpose, not merely for simplicity: for any invertible
+        ``w``, ``w @ covar @ w.T`` is a congruence transform of the PD ``covar`` and is therefore guaranteed
+        PD too, so `linear_law`'s output never leaves the fast (non-healing) path through
+        `MultivariateGaussianDistribution.__init__` (see ``_robust_cho_factor`` in
+        ``mixle.stats.multivariate.multivariate_gaussian``) -- confirmed bit-exact (0 ULP) on this
+        environment.
+
+        An earlier version of this test used a (3, 2) ``w`` (mapping the 2-D input law into 3-D). That is
+        mathematically GUARANTEED to make ``w @ covar @ w.T`` rank-deficient (rank <= 2 in a 3x3 matrix, for
+        ANY choice of entries, on any numpy/BLAS build -- not a numerical artifact of one environment).
+        `linear_law` routes its output through `MultivariateGaussianDistribution`, whose constructor
+        self-heals a covariance that fails strict Cholesky factorization by adding a small trace-scaled
+        diagonal jitter (so `log_det`/`inv_covar`/sampling stay well-defined) -- by design, and load-bearing
+        elsewhere for float32/GPU EM (see ``_robust_cho_factor``'s docstring). Whether that healing actually
+        fires for a given rank-deficient matrix is a knife-edge floating-point question (whether the
+        near-zero pivot LAPACK's ``potrf`` hits during elimination rounds positive or negative) that depends
+        on the specific numbers AND the BLAS/LAPACK build. Confirmed by direct investigation: on this
+        environment (numpy 2.4.6 / Apple Accelerate) the old (3, 2) case reproducibly triggered healing,
+        adding exactly ``1e-10 * trace(expected_covar)/3 ~= 4.53e-10`` to the diagonal only (matching
+        ``_robust_cho_factor``'s formula to 6 significant figures, and sparing every off-diagonal entry) --
+        a real, deterministic, structural effect, NOT generic accumulated matmul-rounding noise (which would
+        be ~1e-15 here, on the diagonal AND off-diagonal alike). Since no change to `linear_law`'s
+        (already-exact) formula can make an exactly-singular output matrix Cholesky-exact too, this test now
+        uses an invertible ``w`` so it tests what its name promises; the dimension-expanding/rank-deficient
+        regime is covered explicitly, with an honestly-derived tolerance, by
+        `test_dimension_expanding_output_is_psd_with_bounded_diagonal_jitter` below.
+        """
         mu = np.array([1.0, -2.0])
         covar = np.array([[2.0, 0.3], [0.3, 1.5]])
         law = _law(mu, covar)
-        w = np.array([[1.0, 2.0], [0.0, 1.0], [-1.0, 1.0]])
-        b = np.array([0.5, -0.5, 0.0])
+        w = np.array([[1.0, 2.0], [0.0, 1.0]])
+        b = np.array([0.5, -0.5])
 
         out, jac = linear_law(law, w, b)
 
@@ -52,7 +79,45 @@ class LinearExactTest(unittest.TestCase):
         # hand-computed by hand for a sanity cross-check independent of the formula above
         self.assertAlmostEqual(expected_mu[0], 1.0 * 1.0 + 2.0 * -2.0 + 0.5)
         self.assertAlmostEqual(expected_mu[1], 0.0 * 1.0 + 1.0 * -2.0 - 0.5)
-        self.assertAlmostEqual(expected_mu[2], -1.0 * 1.0 + 1.0 * -2.0 + 0.0)
+
+    def test_dimension_expanding_output_is_psd_with_bounded_diagonal_jitter(self):
+        """Companion to the test above: `linear_law` used the way `attention_law` actually uses it for its
+        ``qkv`` projection (mapping to MORE output dimensions than the input law's rank) -- ``w`` here is the
+        original (3, 2) case the test above used to (fragilely) assert bit-exactness against. ``w @ covar @
+        w.T`` is mathematically rank-deficient (confirmed: rank 2 in a 3x3 matrix, on any BLAS build), so
+        `linear_law`'s returned ``.covar`` may carry `MultivariateGaussianDistribution`'s documented,
+        trace-scaled, DIAGONAL-ONLY self-healing jitter (see ``_robust_cho_factor``). This asserts what IS
+        guaranteed instead: the mean and Jacobian are exact (never touched by covariance healing), the
+        off-diagonal covariance entries match to float precision (the jitter is diagonal-only by
+        construction), the diagonal matches within a generous, explicitly-derived multiple of the documented
+        jitter formula, and the result is a valid PSD covariance.
+        """
+        mu = np.array([1.0, -2.0])
+        covar = np.array([[2.0, 0.3], [0.3, 1.5]])
+        law = _law(mu, covar)
+        w = np.array([[1.0, 2.0], [0.0, 1.0], [-1.0, 1.0]])
+        b = np.array([0.5, -0.5, 0.0])
+
+        out, jac = linear_law(law, w, b)
+
+        expected_mu = w @ mu + b
+        expected_covar = w @ covar @ w.T
+        self.assertEqual(np.linalg.matrix_rank(expected_covar), 2)  # genuinely singular, not a close call
+
+        np.testing.assert_allclose(out.mu, expected_mu, atol=1e-12, rtol=0)
+        np.testing.assert_allclose(jac, w, atol=0, rtol=0)
+
+        off_diag = ~np.eye(expected_covar.shape[0], dtype=bool)
+        np.testing.assert_allclose(out.covar[off_diag], expected_covar[off_diag], atol=1e-12, rtol=0)
+
+        # _robust_cho_factor's healing jitter (when it fires at all) is `1e-10 * trace / n`; 1e-6 * trace/n
+        # leaves >1000x headroom above that first-attempt scale for a slower-converging healing search (the
+        # jitter escalates x10 per attempt) on a different BLAS/LAPACK build.
+        diag_atol = 1e-6 * (np.trace(expected_covar) / expected_covar.shape[0])
+        np.testing.assert_allclose(np.diag(out.covar), np.diag(expected_covar), atol=diag_atol, rtol=0)
+
+        eigvals = np.linalg.eigvalsh(out.covar)
+        self.assertTrue(np.all(eigvals >= -1e-8))
 
 
 class GeluMomentsTest(unittest.TestCase):

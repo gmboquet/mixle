@@ -123,6 +123,17 @@ def linear_law(law: GaussianLaw, weight: np.ndarray, bias: np.ndarray | None = N
 
     ``x ~ N(mu, Sigma) => y ~ N(W mu + b, W Sigma W^T)`` exactly -- no approximation. Returns the new law
     together with the Jacobian ``dy/dx = W`` (used to chain residual cross-covariances).
+
+    Note on ``out.covar`` when ``weight`` maps to MORE output dimensions than ``law.covar``'s rank (e.g. an
+    expanding projection like the ``qkv`` weight in :func:`attention_law`): ``W Sigma W^T`` is then
+    mathematically rank-deficient (PSD, not PD), and the returned law -- a
+    :class:`MultivariateGaussianDistribution`, which self-heals a non-PD covariance with a small trace-scaled
+    diagonal jitter so it stays Cholesky-factorizable for ``log_det``/``inv_covar``/sampling, see
+    ``_robust_cho_factor`` in :mod:`mixle.stats.multivariate.multivariate_gaussian` -- may therefore differ
+    from the exact ``W Sigma W^T`` by that jitter (diagonal-only, ``~1e-10 * trace/n``). This is NOT an error
+    in the formula above -- verified bit-exact whenever the output is genuinely PD (e.g. square invertible
+    ``weight``); see ``mixle/tests/moment_propagation_test.py::LinearExactTest`` for both regimes -- it is the
+    unavoidable cost of representing an exactly-singular covariance with a factorization that requires one.
     """
     w = np.asarray(weight, dtype=np.float64)
     b = np.zeros(w.shape[0]) if bias is None else np.asarray(bias, dtype=np.float64)
