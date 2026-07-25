@@ -42,6 +42,42 @@ def _seed(s=0):
 
 
 class FlowLeafTest(unittest.TestCase):
+    def test_sampling_and_scoring_restore_mode_and_leave_global_rng_unchanged(self):
+        _seed()
+        module = build_coupling_flow(4, hidden=8, layers=4)
+        module.train()
+        module.s[0].eval()
+        modes_before = [part.training for part in module.modules()]
+        leaf = NeuralDensity(module)
+        rng_before = torch.random.get_rng_state().clone()
+
+        leaf.seq_log_density(np.zeros((2, 4)))
+        first = leaf.sampler(11).sample(3)
+
+        self.assertEqual([part.training for part in module.modules()], modes_before)
+        torch.testing.assert_close(torch.random.get_rng_state(), rng_before)
+        np.testing.assert_array_equal(first, leaf.sampler(11).sample(3))
+
+    def test_coupling_masks_alternate_and_transform_round_trip(self):
+        _seed()
+        module = build_coupling_flow(4, hidden=8, layers=6)
+        expected = torch.tensor([[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0]] * 3)
+        torch.testing.assert_close(module.masks.cpu(), expected)
+
+        x = torch.randn(5, 4)
+        z, _ = module._normalize(x)
+        restored = z
+        for mask, scale, shift in zip(reversed(module.masks), reversed(list(module.s)), reversed(list(module.t))):
+            fixed = restored * mask
+            s = scale(fixed) * (1.0 - mask)
+            t = shift(fixed) * (1.0 - mask)
+            restored = fixed + (1.0 - mask) * (restored * torch.exp(s) + t)
+        torch.testing.assert_close(restored, x)
+
+    def test_coupling_flow_rejects_a_one_dimensional_identity(self):
+        with self.assertRaisesRegex(ValueError, "dim >= 2"):
+            build_coupling_flow(1)
+
     def test_flow_leaf_beats_gaussian_on_multimodal_density(self):
         _seed()
         train, test = _two_modes(0), _two_modes(1)

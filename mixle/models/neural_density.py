@@ -22,7 +22,15 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
-from mixle.models.grad_leaf import DataBufferAccumulatorFactory, GradEstimator, GradLeaf
+from mixle.models.grad_leaf import (
+    DataBufferAccumulatorFactory,
+    GradEstimator,
+    GradLeaf,
+    _call_sample_with_seed,
+    _module_mode,
+    _resolve_device,
+    _sample_count,
+)
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -64,9 +72,10 @@ class NeuralDensity(GradLeaf):
         """Return per-row log densities for encoded observations."""
         torch = _torch()
         xx = check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "NeuralDensity.seq_log_density")
-        self.module.to(self.device).eval()
-        xt = torch.as_tensor(xx, dtype=torch.float32, device=self.device)
-        with torch.no_grad():
+        dev = _resolve_device(self.device, torch)
+        self.module.to(dev)
+        xt = torch.as_tensor(xx, dtype=torch.float32, device=dev)
+        with _module_mode(self.module, train=False), torch.no_grad():
             return self.module.log_density(xt).cpu().numpy().reshape(-1)
 
     def sampler(self, seed: int | None = None) -> NeuralDensitySampler:
@@ -124,11 +133,14 @@ class NeuralDensitySampler(DistributionSampler):
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw observations from the wrapped module's sampler."""
         torch = _torch()
-        n = int(size or 1)
-        self.dist.module.to(self.dist.device).eval()
-        torch.manual_seed(int(self.rng.randint(0, 2**31 - 1)))
-        with torch.no_grad():
-            out = self.dist.module.sample(n).cpu().numpy()
+        n = _sample_count(size)
+        dev = _resolve_device(self.dist.device, torch)
+        self.dist.module.to(dev)
+        seed = int(self.rng.randint(0, 2**31 - 1))
+        with _module_mode(self.dist.module, train=False), torch.no_grad():
+            out = _call_sample_with_seed(
+                self.dist.module.sample, n, torch=torch, device=dev, seed=seed
+            ).cpu().numpy()
         return out if (size is not None) else out[0]
 
 
@@ -273,10 +285,12 @@ def _build_coupling_flow_class(torch: Any, nn: Any) -> Any:
             self.dim = int(dim)
             self.hidden = int(hidden)
             self.layers = int(layers)
+            if self.dim < 2:
+                raise ValueError("coupling flows require dim >= 2.")
             masks = []
             for k in range(self.layers):
                 m = torch.zeros(self.dim)
-                m[k % self.dim :: 2] = 1.0  # alternating coordinate masks
+                m[k % 2 :: 2] = 1.0  # alternate the two parity masks for every layer
                 masks.append(m)
             self.register_buffer("masks", torch.stack(masks))
             self.s = nn.ModuleList(
@@ -309,8 +323,8 @@ def _build_coupling_flow_class(torch: Any, nn: Any) -> Any:
             base = -0.5 * (z**2).sum(dim=1) - 0.5 * self.dim * float(np.log(2.0 * np.pi))
             return base + logdet
 
-        def sample(self, n: int) -> Any:
-            z = torch.randn(int(n), self.dim, device=self.masks.device)
+        def sample(self, n: int, *, generator: Any = None) -> Any:
+            z = torch.randn(int(n), self.dim, device=self.masks.device, generator=generator)
             x = z
             for m, s_net, t_net in zip(reversed(self.masks), reversed(list(self.s)), reversed(list(self.t))):
                 xm = x * m
@@ -391,9 +405,10 @@ def _build_vae_class(torch: Any, nn: Any) -> Any:
             kl = 0.5 * (torch.exp(log_var) + mu**2 - 1.0 - log_var).sum(1)
             return self._decode_logp(x, z) - kl  # ELBO: E_q[log p(x|z)] - KL(q(z|x) || p(z))
 
-        def sample(self, n: int) -> Any:
-            z = torch.randn(int(n), self.latent, device=self.log_obs_scale.device)
-            return self.dec(z) + torch.exp(self.log_obs_scale) * torch.randn(int(n), self.dim, device=z.device)
+        def sample(self, n: int, *, generator: Any = None) -> Any:
+            z = torch.randn(int(n), self.latent, device=self.log_obs_scale.device, generator=generator)
+            noise = torch.randn(int(n), self.dim, device=z.device, generator=generator)
+            return self.dec(z) + torch.exp(self.log_obs_scale) * noise
 
     return VAE
 
@@ -485,8 +500,8 @@ def _build_maf_class(torch: Any, nn: Any) -> Any:
             base = -0.5 * (z**2).sum(1) - 0.5 * self.D * float(np.log(2.0 * np.pi))
             return base + logdet
 
-        def sample(self, n: int) -> Any:
-            z = torch.randn(int(n), self.D, device=next(self.parameters()).device)
+        def sample(self, n: int, *, generator: Any = None) -> Any:
+            z = torch.randn(int(n), self.D, device=next(self.parameters()).device, generator=generator)
             for i in reversed(range(len(self.mades))):
                 if i < len(self.mades) - 1:
                     z = z.flip(1)  # undo the inter-block flip
@@ -549,11 +564,11 @@ def _build_autoregressive_categorical_class(torch: Any, nn: Any) -> Any:
             idx = x.long().clamp(0, self.C - 1).unsqueeze(-1)  # (n, D, 1)
             return log_p.gather(-1, idx).squeeze(-1).sum(1)  # sum_i log p(x_i | x_{<i})
 
-        def sample(self, n: int) -> Any:
+        def sample(self, n: int, *, generator: Any = None) -> Any:
             x = torch.zeros(int(n), self.D, device=next(self.parameters()).device)
             for d in range(self.D):  # coordinate d's conditional depends only on already-filled x_{<d}
                 probs = torch.softmax(self._logits(x)[:, d, :], dim=-1)
-                x[:, d] = torch.multinomial(probs, 1).squeeze(-1).float()
+                x[:, d] = torch.multinomial(probs, 1, generator=generator).squeeze(-1).float()
             return x
 
     return AutoregressiveCategorical

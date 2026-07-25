@@ -30,6 +30,8 @@ Serialization: the module round-trips as portable bytes (``mixle.models._neural_
 
 from __future__ import annotations
 
+import inspect
+import operator
 from contextlib import contextmanager
 from typing import Any
 
@@ -137,6 +139,64 @@ def _module_mode(module: Any, *, train: bool) -> Any:
             m.training = was_training
 
 
+def _sample_count(size: Any) -> int:
+    """Validate the distribution-sampler size contract without lossy integer coercion."""
+    if size is None:
+        return 1
+    if isinstance(size, (bool, np.bool_)):
+        raise TypeError("sample size must be an integer, not a boolean.")
+    try:
+        count = operator.index(size)
+    except TypeError as exc:
+        raise TypeError("sample size must be an integer.") from exc
+    if count <= 0:
+        raise ValueError("sample size must be positive.")
+    return count
+
+
+def _accepts_generator(method: Any) -> bool:
+    """Return whether a bound sampling method explicitly supports an isolated Torch generator."""
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "generator"
+        or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _call_sample_with_seed(method: Any, *args: Any, torch: Any, device: Any, seed: int) -> Any:
+    """Call a sampling method reproducibly without changing the caller's Torch RNG state.
+
+    New modules should accept ``generator=``. The state-preserving fallback keeps legacy ``sample(n)``
+    modules working without mistaking an internal ``TypeError`` for an unsupported keyword.
+    """
+    if _accepts_generator(method):
+        try:
+            generator = torch.Generator(device=device)
+        except RuntimeError:
+            generator = None
+        if generator is not None:
+            generator.manual_seed(seed)
+            return method(*args, generator=generator)
+
+    cuda_devices = []
+    if device.type == "cuda":
+        cuda_devices = [device.index if device.index is not None else torch.cuda.current_device()]
+    mps_state = None
+    if device.type == "mps" and hasattr(torch.mps, "get_rng_state"):
+        mps_state = torch.mps.get_rng_state()
+    try:
+        with torch.random.fork_rng(devices=cuda_devices):
+            torch.manual_seed(seed)
+            return method(*args)
+    finally:
+        if mps_state is not None:
+            torch.mps.set_rng_state(mps_state)
+
+
 def looks_like_torch_module(obj: Any) -> bool:
     """A bare torch density module: scores batches and carries parameters -- coercible to a leaf."""
     return (
@@ -212,7 +272,7 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         # ``*`` either way, same tuple-default pattern GradEstimator.estimate uses for the M-step.
         fields = x if isinstance(x, tuple) else (x,)
         dev = _resolve_device(self.device, torch)
-        self.module.to(dev).eval()
+        self.module.to(dev)
         xts = tuple(
             torch.as_tensor(
                 check_finite(np.atleast_2d(np.asarray(f, dtype=float)), f"{type(self).__name__}.seq_log_density"),
@@ -221,7 +281,7 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
             )
             for f in fields
         )
-        with torch.no_grad():
+        with _module_mode(self.module, train=False), torch.no_grad():
             return self.module.log_density(*xts).cpu().numpy().reshape(-1)
 
     def sampler(self, seed: int | None = None) -> GradLeafSampler:
@@ -267,12 +327,14 @@ class GradLeafSampler(DistributionSampler):
                 "log_density, but drawing samples needs the module to implement sample(n) -> (n, d)."
             )
         torch = _torch()
-        n = int(size or 1)
+        n = _sample_count(size)
         dev = _resolve_device(self.dist.device, torch)
-        self.dist.module.to(dev).eval()
-        torch.manual_seed(int(self.rng.randint(0, 2**31 - 1)))
-        with torch.no_grad():
-            out = self.dist.module.sample(n).cpu().numpy()
+        self.dist.module.to(dev)
+        seed = int(self.rng.randint(0, 2**31 - 1))
+        with _module_mode(self.dist.module, train=False), torch.no_grad():
+            out = _call_sample_with_seed(
+                self.dist.module.sample, n, torch=torch, device=dev, seed=seed
+            ).cpu().numpy()
         return out if (size is not None) else out[0]
 
 
