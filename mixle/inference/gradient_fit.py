@@ -5,6 +5,7 @@ backend (constraint reparameterization, optional declaration-backed priors), ret
 ``GradientFitResult``. This is the gradient counterpart of the EM drivers in ``estimation.py``.
 """
 
+import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import IO, Any, TypeVar
@@ -21,7 +22,12 @@ E0 = TypeVar("E0")
 
 @dataclass
 class GradientFitResult:
-    """Optimization result for generic autograd MLE/MAP fitting."""
+    """Optimization result for generic autograd MLE/MAP fitting.
+
+    ``model`` and ``value`` refer to the best finite iterate seen. ``history`` retains every
+    attempted iterate, and ``final_delta`` describes the last attempted step even when that step
+    was not returned.
+    """
 
     model: SequenceEncodableProbabilityDistribution
     value: float
@@ -206,6 +212,60 @@ def _ordered_bound_delta_name(name: str, anchor: str, constraint: str) -> str:
     return "%s_minus_%s" % (anchor, name)
 
 
+def _gradient_leaf_parameters(template, declaration, raw, fixed, torch) -> dict[str, Any]:
+    """Resolve constrained parameters by dependency, independent of declaration order."""
+    specs = {spec.name: spec for spec in declaration.parameters}
+    if len(specs) != len(declaration.parameters):
+        raise GradientFitError("Gradient declaration contains duplicate parameter names.")
+    resolved: dict[str, Any] = {}
+    resolving: set[str] = set()
+
+    def resolve(name: str) -> Any:
+        if name in resolved:
+            return resolved[name]
+        if name in resolving:
+            raise GradientFitError("Cyclic ordered-bound dependency involving %s." % name)
+        spec = specs.get(name)
+        if spec is None:
+            if not hasattr(template, name):
+                raise GradientFitError("Ordered-bound anchor %s is not declared or present on the model." % name)
+            return getattr(template, name)
+        resolving.add(name)
+        try:
+            if name in fixed:
+                value = fixed[name]
+            elif _is_ordered_bound_constraint(spec.constraint):
+                anchor = _ordered_bound_anchor(spec.constraint)
+                anchor_value = resolve(anchor)
+                delta = torch.exp(raw[_coupled_raw_name(name, anchor, spec.constraint)])
+                value = anchor_value + delta if _is_greater_than_constraint(spec.constraint) else anchor_value - delta
+            else:
+                raw_name, _ = _raw_name_and_transform(name, spec.constraint)
+                value = _canonical_value(raw_name, name, spec.constraint, raw, torch)
+            resolved[name] = value
+            return value
+        finally:
+            resolving.remove(name)
+
+    for spec in declaration.parameters:
+        resolve(spec.name)
+    return resolved
+
+
+def _constructor_accepts_keyword(cls: type[Any], keyword: str) -> bool:
+    """Inspect constructor compatibility without invoking user code speculatively."""
+    try:
+        signature = inspect.signature(cls)
+    except (TypeError, ValueError) as exc:
+        raise GradientFitError(
+            "Cannot inspect %s constructor; provide a gradient_fit_state build hook." % cls.__name__
+        ) from exc
+    parameter = signature.parameters.get(keyword)
+    if parameter is not None and parameter.kind != inspect.Parameter.POSITIONAL_ONLY:
+        return True
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+
+
 def _gradient_shadow_state(state, torch):
     shadow_fn = getattr(state, "shadow", None)
     if callable(shadow_fn):
@@ -215,21 +275,8 @@ def _gradient_shadow_state(state, torch):
         _, template, declaration, raw, fixed = state
         shadow = object.__new__(type(template))
         shadow.__dict__.update(getattr(template, "__dict__", {}))
-        params = {}
+        params = _gradient_leaf_parameters(template, declaration, raw, fixed, torch)
         for spec in declaration.parameters:
-            if spec.name in fixed:
-                params[spec.name] = fixed[spec.name]
-            elif _is_ordered_bound_constraint(spec.constraint):
-                anchor = _ordered_bound_anchor(spec.constraint)
-                anchor_value = params.get(anchor, getattr(template, anchor))
-                delta = torch.exp(raw[_coupled_raw_name(spec.name, anchor, spec.constraint)])
-                if _is_greater_than_constraint(spec.constraint):
-                    params[spec.name] = anchor_value + delta
-                else:
-                    params[spec.name] = anchor_value - delta
-            else:
-                raw_name, _ = _raw_name_and_transform(spec.name, spec.constraint)
-                params[spec.name] = _canonical_value(raw_name, spec.name, spec.constraint, raw, torch)
             setattr(shadow, spec.name, params[spec.name])
         if "p_vec" in params:
             shadow.log_p_vec = torch.log(params["p_vec"])
@@ -283,7 +330,11 @@ def _tensor_scalar(x) -> float:
 
 def _gradient_best_entry(history: Sequence[float]) -> tuple[float, int]:
     values = np.asarray(history, dtype=np.float64)
-    idx = int(np.nanargmax(values))
+    finite = np.isfinite(values)
+    if values.size == 0 or not np.any(finite):
+        idx = values.size - 1 if values.size else 0
+        return (float(values[idx]) if values.size else float("nan")), idx
+    idx = int(np.argmax(np.where(finite, values, -np.inf)))
     return float(values[idx]), idx
 
 
@@ -315,31 +366,14 @@ def _gradient_build_state(state, torch):
     kind = state[0]
     if kind == "leaf":
         _, template, declaration, raw, fixed = state
-        args = []
-        params = {}
-        for spec in declaration.parameters:
-            if spec.name in fixed:
-                value = fixed[spec.name]
-            elif _is_ordered_bound_constraint(spec.constraint):
-                anchor = _ordered_bound_anchor(spec.constraint)
-                anchor_value = params.get(anchor, getattr(template, anchor))
-                delta = torch.exp(raw[_coupled_raw_name(spec.name, anchor, spec.constraint)])
-                value = anchor_value + delta if _is_greater_than_constraint(spec.constraint) else anchor_value - delta
-            else:
-                raw_name, _ = _raw_name_and_transform(spec.name, spec.constraint)
-                value = _canonical_value(raw_name, spec.name, spec.constraint, raw, torch)
-            params[spec.name] = value
-            args.append(_detach_value(value))
+        params = _gradient_leaf_parameters(template, declaration, raw, fixed, torch)
+        args = [_detach_value(params[spec.name]) for spec in declaration.parameters]
         kwargs = {}
-        if hasattr(template, "name"):
+        if hasattr(template, "name") and _constructor_accepts_keyword(type(template), "name"):
             kwargs["name"] = template.name
-        if hasattr(template, "keys"):
+        if hasattr(template, "keys") and _constructor_accepts_keyword(type(template), "keys"):
             kwargs["keys"] = template.keys
-        try:
-            return type(template)(*args, **kwargs)
-        except TypeError:
-            kwargs.pop("keys", None)
-            return type(template)(*args, **kwargs)
+        return type(template)(*args, **kwargs)
     if kind == "fixed":
         return state[1]
     raise GradientFitError("Unknown gradient fit state %s." % kind)
@@ -473,9 +507,8 @@ def _fit_gradient(
     def objective():
         return log_likelihood() + log_prior()
 
-    # one gradient-descent loop, shared with objectives.optimize_torch_objective.
-    # restore_best=False keeps this fit's "return the final iterate" semantics
-    # (the leaves still hold the final values for the diagnostics below).
+    # One gradient-descent loop, shared with objectives.optimize_torch_objective. Restore the
+    # verified best state so the returned model and value cannot describe different iterates.
     from mixle.inference.objectives import optimize_torch_objective
 
     loop = optimize_torch_objective(
@@ -489,18 +522,21 @@ def _fit_gradient(
         maximize=True,
         out=out,
         print_iter=print_iter,
-        restore_best=False,
+        restore_best=True,
         return_result=True,
     )
     history = list(loop.history)
     iterations = loop.iterations
     converged = loop.converged
 
-    final_obj = history[-1]
+    if not history or not np.any(np.isfinite(np.asarray(history, dtype=np.float64))):
+        raise GradientFitError("Gradient objective was non-finite at every evaluated iterate.")
+    final_obj = float(loop.value)
     final_ll = _tensor_scalar(log_likelihood())
     final_lp = _tensor_scalar(log_prior())
     final_delta = history[-1] - history[-2] if len(history) > 1 else None
-    best_value, best_iteration = _gradient_best_entry(history)
+    best_value = float(loop.best_value)
+    best_iteration = int(loop.best_iteration)
     final_gradient_norm = _gradient_objective_norm(torch, leaves, objective)
     result = GradientFitResult(
         _gradient_build_state(state, torch),
