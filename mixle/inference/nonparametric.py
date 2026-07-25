@@ -25,6 +25,39 @@ import numpy as np
 from scipy import stats
 
 
+def _alternative(value: str, allowed: tuple[str, ...] = ("two-sided", "greater", "less")) -> str:
+    if value not in allowed:
+        raise ValueError(f"alternative must be one of {allowed}")
+    return value
+
+
+def _sample(name: str, values: Any, *, minimum: int = 1) -> np.ndarray:
+    try:
+        sample = np.asarray(values, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite one-dimensional sample") from exc
+    if sample.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    if len(sample) < minimum:
+        raise ValueError(f"{name} must contain at least {minimum} observations")
+    if not np.all(np.isfinite(sample)):
+        raise ValueError(f"{name} must contain only finite observations")
+    return sample
+
+
+def _groups(samples: tuple[Any, ...], *, minimum_groups: int = 2, minimum_size: int = 1) -> list[np.ndarray]:
+    if len(samples) < minimum_groups:
+        raise ValueError(f"test requires at least {minimum_groups} samples")
+    return [_sample(f"sample {index}", values, minimum=minimum_size) for index, values in enumerate(samples)]
+
+
+def _related(measurements: tuple[Any, ...], *, minimum_groups: int = 3) -> np.ndarray:
+    groups = _groups(measurements, minimum_groups=minimum_groups, minimum_size=2)
+    if any(len(group) != len(groups[0]) for group in groups[1:]):
+        raise ValueError("related samples must have matching lengths")
+    return np.column_stack(groups)
+
+
 def _ranks(a: np.ndarray) -> np.ndarray:
     return stats.rankdata(a)
 
@@ -56,11 +89,10 @@ def mann_whitney_u(x: Any, y: Any, *, alternative: str = "two-sided", use_contin
     ``'two-sided'``, ``'greater'`` (x > y), or ``'less'``. The rank-biserial correlation
     ``2*U1/(n1 n2) - 1`` is reported as the effect size.
     """
-    x = np.asarray(x, dtype=float).ravel()
-    y = np.asarray(y, dtype=float).ravel()
+    _alternative(alternative)
+    x = _sample("x", x)
+    y = _sample("y", y)
     n1, n2 = x.size, y.size
-    if n1 == 0 or n2 == 0:
-        raise ValueError("both samples must be non-empty.")
     pooled = np.concatenate([x, y])
     ranks = _ranks(pooled)
     r1 = float(ranks[:n1].sum())
@@ -70,7 +102,7 @@ def mann_whitney_u(x: Any, y: Any, *, alternative: str = "two-sided", use_contin
     mu = n1 * n2 / 2.0
     sigma = np.sqrt((n1 * n2 / 12.0) * ((n + 1) - _tie_term(pooled) / (n * (n - 1))))
     if sigma == 0:
-        z, p = 0.0, 1.0
+        raise ValueError("Mann-Whitney test is undefined when all pooled ranks are tied")
     else:
         d = u1 - mu
         if use_continuity:  # shrink the gap toward the mean by 1/2
@@ -94,8 +126,8 @@ def mann_whitney_u(x: Any, y: Any, *, alternative: str = "two-sided", use_contin
 
 def cliffs_delta(x: Any, y: Any) -> float:
     """Cliff's delta effect size in [-1, 1]: ``P(x > y) - P(x < y)`` (rank-based, ties count as 0)."""
-    x = np.asarray(x, dtype=float).ravel()
-    y = np.asarray(y, dtype=float).ravel()
+    x = _sample("x", x)
+    y = _sample("y", y)
     diff = np.sign(x[:, None] - y[None, :])
     return float(diff.mean())
 
@@ -118,8 +150,11 @@ def brunner_munzel(x: Any, y: Any, *, alternative: str = "two-sided", distributi
     (recommended for small samples); ``'normal'`` the normal approximation. Reports the estimated
     relative effect ``p_hat = P(x < y) + 0.5 P(x = y)`` in ``extra``.
     """
-    x = np.asarray(x, dtype=float).ravel()
-    y = np.asarray(y, dtype=float).ravel()
+    _alternative(alternative)
+    if distribution not in ("t", "normal"):
+        raise ValueError("distribution must be 't' or 'normal'")
+    x = _sample("x", x, minimum=2)
+    y = _sample("y", y, minimum=2)
     n1, n2 = x.size, y.size
     rank_all = _ranks(np.concatenate([x, y]))
     rx, ry = _ranks(x), _ranks(y)
@@ -128,7 +163,7 @@ def brunner_munzel(x: Any, y: Any, *, alternative: str = "two-sided", distributi
     s2 = np.sum((rank_all[n1:] - ry - r2m + (n2 + 1) / 2.0) ** 2) / (n2 - 1)
     denom = n1 * s1 + n2 * s2
     if denom <= 0:
-        return TestResult(0.0, 1.0, {"p_hat": 0.5})
+        raise ValueError("Brunner-Munzel test requires non-zero rank variation")
     w = n1 * n2 * (r2m - r1m) / ((n1 + n2) * np.sqrt(denom))
     p_hat = (r2m - (n2 + 1) / 2.0) / n1  # P(x < y) + 0.5 P(x = y)
     if distribution == "t":
@@ -153,8 +188,9 @@ def brunner_munzel(x: Any, y: Any, *, alternative: str = "two-sided", distributi
 
 def ks_2samp(x: Any, y: Any, *, alternative: str = "two-sided") -> TestResult:
     """Two-sample Kolmogorov-Smirnov test: max gap between the two empirical CDFs (asymptotic p)."""
-    x = np.sort(np.asarray(x, dtype=float).ravel())
-    y = np.sort(np.asarray(y, dtype=float).ravel())
+    _alternative(alternative)
+    x = np.sort(_sample("x", x))
+    y = np.sort(_sample("y", y))
     n1, n2 = x.size, y.size
     allv = np.concatenate([x, y])
     cdf1 = np.searchsorted(x, allv, side="right") / n1
@@ -178,9 +214,16 @@ def ks_2samp(x: Any, y: Any, *, alternative: str = "two-sided") -> TestResult:
 
 def ks_1samp(x: Any, cdf: Callable[[np.ndarray], np.ndarray], *, alternative: str = "two-sided") -> TestResult:
     """One-sample Kolmogorov-Smirnov goodness-of-fit test against a fully-specified ``cdf`` callable."""
-    x = np.sort(np.asarray(x, dtype=float).ravel())
+    _alternative(alternative)
+    if not callable(cdf):
+        raise TypeError("cdf must be callable")
+    x = np.sort(_sample("x", x))
     n = x.size
     cdfv = np.asarray(cdf(x), dtype=float)
+    if cdfv.shape != x.shape or not np.all(np.isfinite(cdfv)):
+        raise ValueError("cdf must return one finite value per observation")
+    if np.any((cdfv < 0.0) | (cdfv > 1.0)) or np.any(np.diff(cdfv) < 0.0):
+        raise ValueError("cdf values must lie in [0, 1] and be non-decreasing")
     d_plus = float(np.max(np.arange(1, n + 1) / n - cdfv))
     d_minus = float(np.max(cdfv - np.arange(0, n) / n))
     if alternative == "two-sided":
@@ -204,12 +247,12 @@ def kruskal_wallis(*samples: Any) -> TestResult:
     Tie-corrected H with a chi-square(k-1) reference. ``extra`` carries ``df`` and the ``epsilon_squared``
     effect size ``(H - k + 1)/(N - k)``.
     """
-    groups = [np.asarray(s, dtype=float).ravel() for s in samples]
-    if len(groups) < 2:
-        raise ValueError("kruskal_wallis needs at least two samples.")
+    groups = _groups(samples)
     sizes = [g.size for g in groups]
     pooled = np.concatenate(groups)
     n = pooled.size
+    if n <= len(groups) or np.unique(pooled).size < 2:
+        raise ValueError("Kruskal-Wallis requires residual degrees of freedom and non-tied ranks")
     ranks = _ranks(pooled)
     idx, h_sum = 0, 0.0
     for sz in sizes:
@@ -231,7 +274,9 @@ def mood_median_test(*samples: Any, ties: str = "below") -> TestResult:
     Cross-tabulates each observation as above / (at-or-below) the pooled grand median and runs a
     chi-square test of independence on the resulting 2xk table. ``extra`` carries the ``grand_median``.
     """
-    groups = [np.asarray(s, dtype=float).ravel() for s in samples]
+    if ties not in ("below", "above"):
+        raise ValueError("ties must be 'below' or 'above'")
+    groups = _groups(samples)
     pooled = np.concatenate(groups)
     gm = float(np.median(pooled))
     above = [int(np.sum(g > gm)) for g in groups]
@@ -241,6 +286,8 @@ def mood_median_test(*samples: Any, ties: str = "below") -> TestResult:
         above = [int(np.sum(g >= gm)) for g in groups]
         below = [g.size - a for g, a in zip(groups, above)]
     table = np.array([above, below], dtype=float)
+    if np.any(table.sum(axis=1) == 0) or np.any(table.sum(axis=0) == 0):
+        raise ValueError("Mood median test requires observations on both sides of the pooled median")
     chi2, p, dof, _ = stats.chi2_contingency(table, correction=False)
     return TestResult(float(chi2), float(p), {"df": int(dof), "grand_median": gm})
 
@@ -261,7 +308,9 @@ def dunn_test(*samples: Any, p_adjust: str = "holm") -> DunnResult:
     Uses the pooled-rank z statistic with the shared tie-corrected variance, and adjusts the pairwise
     p-values by ``'holm'``, ``'bonferroni'``, or ``'none'``.
     """
-    groups = [np.asarray(s, dtype=float).ravel() for s in samples]
+    if p_adjust not in ("holm", "bonferroni", "none"):
+        raise ValueError("p_adjust must be 'holm', 'bonferroni', or 'none'.")
+    groups = _groups(samples)
     sizes = [g.size for g in groups]
     pooled = np.concatenate(groups)
     n = pooled.size
@@ -272,6 +321,8 @@ def dunn_test(*samples: Any, p_adjust: str = "holm") -> DunnResult:
         idx += sz
     tie = _tie_term(pooled)
     sigma2_base = (n * (n + 1) - tie / (n - 1)) / 12.0
+    if sigma2_base <= 0:
+        raise ValueError("Dunn test requires non-zero pooled rank variation")
     comps, zs, raw = [], [], []
     k = len(groups)
     for i in range(k):
@@ -294,8 +345,6 @@ def dunn_test(*samples: Any, p_adjust: str = "holm") -> DunnResult:
             adj[k_] = min(running, 1.0)
     elif p_adjust == "none":
         adj = raw
-    else:
-        raise ValueError("p_adjust must be 'holm', 'bonferroni', or 'none'.")
     return DunnResult(comps, np.asarray(zs), adj, p_adjust)
 
 
@@ -322,19 +371,30 @@ def wilcoxon_signed_rank(
     Pratt/Cureton zero corrections applied to the null mean and variance (as scipy does). The
     matched-pairs rank-biserial correlation is reported as the effect size.
     """
-    x = np.asarray(x, dtype=float).ravel()
-    d = x if y is None else x - np.asarray(y, dtype=float).ravel()
+    _alternative(alternative)
+    if zero_method not in ("wilcox", "pratt"):
+        raise ValueError("zero_method must be 'wilcox' or 'pratt'")
+    x = _sample("x", x)
+    if y is None:
+        d = x
+    else:
+        y_array = _sample("y", y)
+        if y_array.shape != x.shape:
+            raise ValueError("paired samples must have matching shapes")
+        d = x - y_array
     if zero_method == "wilcox":
         d = d[d != 0]
     n = d.size
     if n == 0:
-        return WilcoxonResult(0.0, 0.0, 1.0, 0.0, alternative)
+        raise ValueError("Wilcoxon signed-rank test requires at least one non-zero difference")
     r = _ranks(np.abs(d))
     n_zero = 0
     if zero_method == "pratt":
         n_zero = int(np.sum(d == 0))
         keep = d != 0
         r, d = r[keep], d[keep]
+        if d.size == 0:
+            raise ValueError("Wilcoxon signed-rank test requires at least one non-zero difference")
     r_plus = float(r[d > 0].sum())
     r_minus = float(r[d < 0].sum())
     nn = d.size + n_zero  # the ranked count (zeros stay in the ranking under 'pratt')
@@ -347,7 +407,7 @@ def wilcoxon_signed_rank(
         (nn * (nn + 1) * (2 * nn + 1) - n_zero * (n_zero + 1) * (2 * n_zero + 1) - 0.5 * _tie_term(r)) / 24.0
     )
     if sigma == 0:
-        z, p = 0.0, 1.0
+        raise ValueError("Wilcoxon signed-rank reference variance is zero")
     else:
         if alternative == "two-sided":
             cc = 0.5 if correction else 0.0
@@ -374,13 +434,20 @@ def sign_test(x: Any, y: Any = None, *, alternative: str = "two-sided") -> TestR
     Only the directions of the differences are used (ties dropped), so it is maximally robust but less
     powerful than the signed-rank test. ``extra`` carries ``n_positive`` and ``n`` (non-zero pairs).
     """
-    x = np.asarray(x, dtype=float).ravel()
-    d = x if y is None else x - np.asarray(y, dtype=float).ravel()
+    _alternative(alternative)
+    x = _sample("x", x)
+    if y is None:
+        d = x
+    else:
+        y_array = _sample("y", y)
+        if y_array.shape != x.shape:
+            raise ValueError("paired samples must have matching shapes")
+        d = x - y_array
     d = d[d != 0]
     n = d.size
     n_pos = int(np.sum(d > 0))
     if n == 0:
-        return TestResult(0.0, 1.0, {"n_positive": 0, "n": 0})
+        raise ValueError("sign test requires at least one non-zero difference")
     res = stats.binomtest(n_pos, n, 0.5, alternative=alternative)
     return TestResult(float(n_pos), float(res.pvalue), {"n_positive": n_pos, "n": n})
 
@@ -393,14 +460,15 @@ def friedman_test(*measurements: Any) -> TestResult:
     tie-corrects, and uses a chi-square(k-1) reference. ``extra`` carries ``df`` and Kendall's ``W``
     concordance effect size.
     """
-    data = np.column_stack([np.asarray(m, dtype=float).ravel() for m in measurements])
+    data = _related(measurements)
     nblocks, k = data.shape
-    if k < 3:
-        raise ValueError("friedman_test needs at least three related samples.")
     ranks = np.apply_along_axis(stats.rankdata, 1, data)
     rsum = ranks.sum(axis=0)
     tie = sum(_tie_term(ranks[b]) for b in range(nblocks))
-    q = (12.0 * np.sum(rsum**2) - 3.0 * nblocks**2 * k * (k + 1) ** 2) / (nblocks * k * (k + 1) - tie / (k - 1))
+    denominator = nblocks * k * (k + 1) - tie / (k - 1)
+    if denominator <= 0:
+        raise ValueError("Friedman test requires within-block rank variation")
+    q = (12.0 * np.sum(rsum**2) - 3.0 * nblocks**2 * k * (k + 1) ** 2) / denominator
     df = k - 1
     p = float(stats.chi2.sf(q, df))
     w = q / (nblocks * (k - 1))
@@ -415,7 +483,8 @@ def jonckheere_terpstra(*samples: Any, alternative: str = "increasing") -> TestR
     order. ``alternative='increasing'`` / ``'decreasing'`` / ``'two-sided'``. Uses the tie-corrected
     normal approximation of the J statistic (sum of pairwise Mann-Whitney counts over ordered pairs).
     """
-    groups = [np.asarray(s, dtype=float).ravel() for s in samples]
+    _alternative(alternative, ("increasing", "decreasing", "two-sided"))
+    groups = _groups(samples)
     k = len(groups)
     j = 0.0
     for a in range(k):
@@ -425,6 +494,8 @@ def jonckheere_terpstra(*samples: Any, alternative: str = "increasing") -> TestR
             )
     sizes = [g.size for g in groups]
     n = sum(sizes)
+    if n < 3:
+        raise ValueError("Jonckheere-Terpstra requires at least three pooled observations")
     mu = (n**2 - sum(s**2 for s in sizes)) / 4.0
     pooled = np.concatenate(groups)
     tie = _tie_term(pooled)
@@ -444,8 +515,10 @@ def jonckheere_terpstra(*samples: Any, alternative: str = "increasing") -> TestR
             / (36.0 * n * (n - 1) * (n - 2))
             + (sum(s * (s - 1) for s in sizes) * sum(c * (c - 1) for c in tc)) / (8.0 * n * (n - 1))
         )
+    if not np.isfinite(var) or var <= 0:
+        raise ValueError("Jonckheere-Terpstra requires non-zero rank variation")
     sigma = np.sqrt(var)
-    z = (j - mu) / sigma if sigma > 0 else 0.0
+    z = (j - mu) / sigma
     if alternative == "increasing":
         p = stats.norm.sf(z)
     elif alternative == "decreasing":
@@ -464,9 +537,11 @@ def page_trend_test(*measurements: Any, decreasing: bool = False) -> TestResult:
     ``L = sum_j j * R_j`` against the normal approximation. Set ``decreasing=True`` to predict the
     reverse ordering. ``extra`` carries the z-score.
     """
-    data = np.column_stack([np.asarray(m, dtype=float).ravel() for m in measurements])
+    data = _related(measurements)
     nblocks, k = data.shape
     ranks = np.apply_along_axis(stats.rankdata, 1, data)
+    if np.all(np.ptp(ranks, axis=1) == 0.0):
+        raise ValueError("Page trend test requires within-block rank variation")
     rsum = ranks.sum(axis=0)
     weights = np.arange(k, 0, -1) if decreasing else np.arange(1, k + 1)
     L = float(np.sum(weights * rsum))
@@ -485,19 +560,28 @@ def runs_test(x: Any, *, cutoff: str | float = "median") -> TestResult:
     count departs from what independence predicts (too few runs => clustering/trend; too many =>
     over-alternation). Normal approximation, two-sided. ``extra`` carries the run count and z-score.
     """
-    a = np.asarray(x, dtype=float).ravel()
-    c = float(np.median(a)) if cutoff == "median" else float(cutoff)
+    a = _sample("x", x, minimum=2)
+    if isinstance(cutoff, str):
+        if cutoff != "median":
+            raise ValueError("cutoff must be 'median' or a finite number")
+        c = float(np.median(a))
+    else:
+        c = float(cutoff)
+        if not np.isfinite(c):
+            raise ValueError("cutoff must be 'median' or a finite number")
     s = a[a != c] > c if cutoff == "median" else a > c
     s = np.asarray(s, dtype=bool)
     n1 = int(np.sum(s))
     n2 = int(s.size - n1)
     if n1 == 0 or n2 == 0:
-        return TestResult(1.0, 1.0, {"runs": 1, "zscore": 0.0})
+        raise ValueError("runs test requires observations on both sides of the cutoff")
     runs = 1 + int(np.sum(s[1:] != s[:-1]))
     n = n1 + n2
     mu = 2.0 * n1 * n2 / n + 1.0
     var = 2.0 * n1 * n2 * (2.0 * n1 * n2 - n) / (n**2 * (n - 1))
-    z = (runs - mu) / np.sqrt(var) if var > 0 else 0.0
+    if var <= 0:
+        raise ValueError("runs test requires enough observations for a positive reference variance")
+    z = (runs - mu) / np.sqrt(var)
     p = 2.0 * stats.norm.sf(abs(z))
     return TestResult(float(runs), float(min(p, 1.0)), {"runs": runs, "zscore": float(z)})
 
