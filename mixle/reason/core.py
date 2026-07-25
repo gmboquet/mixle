@@ -17,6 +17,71 @@ import numpy as np
 from mixle.inference.belief import BeliefState, GaussianBelief
 from mixle.inference.uncertainty import UncertaintyDecomposition
 
+_PSD_EIGENVALUE_RATIO = 1e-9
+"""Relative-tolerance bound (matching ``mixle.inference.belief.GaussianBelief``'s own PSD gate and
+``mixle.doe.batch._safe_cholesky``'s) on how negative a covariance's worst eigenvalue may be, relative
+to its own eigenvalue scale, before it is refused outright as not a valid covariance at all."""
+
+
+def _validated_covariance(cov: Any, d: int, name: str) -> np.ndarray:
+    """Return ``cov`` as a validated ``(d, d)`` covariance: finite, symmetric, and PSD.
+
+    Symmetrized defensively before the finiteness/PSD checks run (matching
+    ``GaussianBelief.__init__`` and ``mixle.doe.batch._safe_cholesky``'s established convention) so
+    the matrix that gets validated is the SAME one that gets used -- an asymmetric-but-otherwise-valid
+    input is silently harmonized rather than having its off-diagonal disagreement silently ignored by
+    whichever triangle a downstream ``eigvalsh``/diagonal read happens to prefer.
+
+    Raises:
+        ValueError: if ``cov`` is not exactly ``(d, d)``, is non-finite, or (after symmetrizing) is
+            not positive semi-definite within :data:`_PSD_EIGENVALUE_RATIO` of its own eigenvalue scale.
+    """
+    P = np.atleast_2d(np.asarray(cov, dtype=float))
+    if P.shape != (d, d):
+        raise ValueError(f"{name} must have shape ({d}, {d}); got {P.shape}")
+    if not np.isfinite(P).all():
+        raise ValueError(f"{name} must be finite (no NaN or inf)")
+    P = 0.5 * (P + P.T)
+    evals = np.linalg.eigvalsh(P)
+    scale = float(np.abs(evals).max()) if evals.size else 0.0
+    if evals.min() < -_PSD_EIGENVALUE_RATIO * max(scale, 1e-300):
+        raise ValueError(
+            f"{name} must be positive semi-definite (worst eigenvalue {evals.min():.6g} vs "
+            f"eigenvalue scale {scale:.6g})"
+        )
+    return P
+
+
+def _aleatoric_from_noise(R: Any, k: int) -> np.ndarray:
+    """Validate a prediction's noise ``R`` and return its ``k`` per-coordinate variances.
+
+    Accepts a scalar (homoscedastic noise shared by all ``k`` outputs), a length-``k`` vector
+    (per-output variances), or a ``(k, k)`` covariance matrix (validated and symmetrized via
+    :func:`_validated_covariance`; only its diagonal is used, since :meth:`ReasonedAnswer.predict`'s
+    law-of-total-variance split is per-coordinate). Every form must be finite, and every variance
+    must be non-negative -- a negative entry cannot be a variance under any interpretation.
+
+    Raises:
+        ValueError: if ``R``'s shape doesn't match ``k``, it is non-finite, contains a negative
+            variance, or (matrix form) fails :func:`_validated_covariance`.
+    """
+    Rm = np.asarray(R, dtype=float)
+    if Rm.ndim == 0:
+        if not np.isfinite(Rm):
+            raise ValueError("R must be finite (no NaN or inf)")
+        if Rm < 0.0:
+            raise ValueError(f"R must be non-negative (a variance); got {float(Rm):.6g}")
+        return np.full(k, float(Rm))
+    if Rm.ndim == 1:
+        if Rm.shape != (k,):
+            raise ValueError(f"R must have length {k} (one variance per predicted output); got shape {Rm.shape}")
+        if not np.isfinite(Rm).all():
+            raise ValueError("R must be finite (no NaN or inf)")
+        if np.any(Rm < 0.0):
+            raise ValueError(f"R must be non-negative (a variance per output); got {Rm}")
+        return Rm.copy()
+    return np.diag(_validated_covariance(Rm, k, "R")).copy()
+
 
 class Latent:
     """Factories for the shared latent prior used at the start of assimilation."""
@@ -243,21 +308,33 @@ class ReasonedAnswer:
         ``epistemic = diag(H P Hᵀ)`` (from the latent's remaining uncertainty, reducible by more
         data) and ``aleatoric = diag(R)`` (irreducible observation noise). Exact for the Gaussian
         belief.
+
+        Args:
+            H: ``(k, d)`` observation operator, where ``d`` is this belief's own latent dimension.
+                Its shape must match exactly -- it is never reshaped from a looser guess, since a
+                wrong-width ``H`` can have a total element count that happens to divide evenly by
+                ``d`` and so silently describe a DIFFERENT (still valid-looking) operator instead.
+            R: the prediction's noise covariance: a scalar (shared by all ``k`` outputs), a
+                length-``k`` vector of per-output variances, or a ``(k, k)`` covariance matrix
+                (symmetrized, and required finite and positive semi-definite).
+
+        Raises:
+            ValueError: if ``H``'s width doesn't match this belief's latent dimension, or ``R`` is
+                the wrong shape, non-finite, or not a valid (non-negative / positive semi-definite)
+                noise covariance (MXR-080-0273).
         """
         P = np.atleast_2d(self.belief.cov())
         Hm = np.atleast_2d(np.asarray(H, dtype=float))
         if Hm.shape[1] != P.shape[0]:
-            Hm = Hm.reshape(-1, P.shape[0])
+            raise ValueError(
+                f"H must have {P.shape[0]} columns to match this belief's latent dimension; got shape "
+                f"{Hm.shape}. predict() no longer reshapes a wrong-width H from its element count alone, "
+                "since that can silently match a different, unintended operator by coincidence."
+            )
         epistemic = np.diag(Hm @ P @ Hm.T).copy()
-        Rm = np.asarray(R, dtype=float)
-        if Rm.ndim == 0:
-            aleatoric = np.full(epistemic.shape, float(Rm))
-        elif Rm.ndim == 1:
-            aleatoric = Rm.copy()
-        else:
-            aleatoric = np.diag(Rm).copy()
+        aleatoric = _aleatoric_from_noise(R, epistemic.shape[0])
         total = epistemic + aleatoric
-        return UncertaintyDecomposition(total, aleatoric, epistemic, "variance")
+        return UncertaintyDecomposition(total=total, aleatoric=aleatoric, epistemic=epistemic, kind="variance")
 
     def marginal(self, indices: Any) -> ReasonedAnswer:
         """Restrict the answer to a subset of latent coordinates (query a specific variable).
