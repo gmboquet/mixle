@@ -87,6 +87,25 @@ class _BatchOKModel:
         return -0.5
 
 
+class _InternalTypeErrorModel:
+    """A user/model implementation bug must propagate, not be retried as an outage."""
+
+    def __init__(self):
+        self.batch_calls = 0
+        self.scalar_calls = 0
+
+    def dist_to_encoder(self):
+        return _IdentityEncoder()
+
+    def seq_log_density(self, enc):
+        self.batch_calls += 1
+        raise TypeError("internal scoring bug")
+
+    def log_density(self, r):
+        self.scalar_calls += 1
+        return -0.5
+
+
 class ModelRegistryTest(unittest.TestCase):
     def _fit(self, mu, seed):
         data = np.random.RandomState(seed).normal(mu, 1.0, 300).tolist()
@@ -294,6 +313,30 @@ class ModelServiceBatchFallbackTest(unittest.TestCase):
         svc.score([0.0, 0.5, 1.0])
         self.assertEqual(svc.activity[-1]["n_batch_unavailable"], 0)
         self.assertEqual(svc.health()["batch_unavailable_rate"], 0.0)
+
+    def test_internal_type_error_is_not_masked_as_a_compatibility_retry(self):
+        model = _InternalTypeErrorModel()
+        svc = Service(model, name="buggy")
+
+        with self.assertRaisesRegex(TypeError, "internal scoring bug"):
+            svc.score([1.0, 2.0])
+
+        self.assertEqual(model.batch_calls, 1)
+        self.assertEqual(model.scalar_calls, 0)
+        self.assertEqual(svc.activity, [])
+
+    def test_custom_availability_error_is_explicitly_opted_in(self):
+        class CustomUnavailable(Exception):
+            pass
+
+        class CustomOutage(_BatchOKModel):
+            def seq_log_density(self, enc):
+                raise CustomUnavailable("custom transport is down")
+
+        svc = Service(CustomOutage(), availability_errors=(CustomUnavailable,))
+        values = svc.score([1.0, 2.0])
+        self.assertTrue(np.all(np.isfinite(values)))
+        self.assertEqual(svc.activity[-1]["n_batch_unavailable"], 2)
 
 
 if __name__ == "__main__":

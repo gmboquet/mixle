@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -58,7 +59,18 @@ class LineageTraceTest(unittest.TestCase):
     def test_lineage_false_skips_fingerprinting(self):
         _, header = fit_with_provenance(_data(), _est(), max_its=4, delta=None, seed=1, lineage=False)
         self.assertNotIn("model_hash", header.training["convergence"][0])
-        self.assertTrue(verify_lineage(header))  # vacuously intact -- nothing recorded
+        self.assertFalse(verify_lineage(header))  # missing evidence is unverified, never vacuously intact
+
+    def test_verify_rejects_missing_lineage_metadata(self):
+        _, header = fit_with_provenance(_data(), _est(), max_its=4, delta=None, seed=1)
+        del header.training["convergence"][1]["transition_digest"]
+        self.assertFalse(verify_lineage(header))
+
+    def test_verify_detects_a_recomputed_parent_claim_without_the_execution_transition(self):
+        _, header = fit_with_provenance(_data(), _est(), max_its=4, delta=None, seed=1)
+        trace = header.training["convergence"]
+        trace[1]["parent_hash"] = trace[1]["model_hash"]
+        self.assertFalse(verify_lineage(header))
 
 
 class CheckpointChainTest(unittest.TestCase):
@@ -78,7 +90,15 @@ class CheckpointChainTest(unittest.TestCase):
             self.assertIsNone(metas[0]["parent_hash"])
             for prev, cur in zip(metas, metas[1:]):
                 self.assertEqual(cur["parent_hash"], prev["model_hash"])
+                self.assertEqual(cur["parent_version"], reg.versions("run")[metas.index(prev)])
+                self.assertIsNotNone(cur["parent_record_digest"])
             self.assertTrue(reg.verify_chain("run"))
+
+    def test_verify_chain_rejects_versions_without_checkpoint_lineage(self):
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            reg.register(GaussianDistribution(0.0, 1.0), "plain")
+            self.assertFalse(reg.verify_chain("plain"))
 
     def test_verify_chain_detects_corruption(self):
         with tempfile.TemporaryDirectory() as d:
@@ -113,12 +133,10 @@ class CheckpointChainTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             reg = Registry(d)
             stat_model = GaussianDistribution(0.0, 1.0)
-            h1 = model_hash(stat_model)
-            reg.register(stat_model, "chain", metadata={"model_hash": h1, "parent_hash": None})
-
             neural_model = NeuralGaussian(make_mlp(input_dim=1, hidden_dims=[4], output_dim=1))
-            h2 = model_hash(neural_model)  # encoding only -- no trust gate needed to hash
-            reg.register(neural_model, "chain", metadata={"model_hash": h2, "parent_hash": h1})
+            save = reg.checkpointer("chain")
+            save(SimpleNamespace(iter=1, log_density=-2.0, model=stat_model))
+            save(SimpleNamespace(iter=2, log_density=-1.0, model=neural_model))
 
             self.assertTrue(reg.verify_chain("chain", trust_code=True))
 
@@ -134,12 +152,10 @@ class CheckpointChainTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             reg = Registry(d)
             stat_model = GaussianDistribution(0.0, 1.0)
-            h1 = model_hash(stat_model)
-            reg.register(stat_model, "chain", metadata={"model_hash": h1, "parent_hash": None})
-
             neural_model = NeuralGaussian(make_mlp(input_dim=1, hidden_dims=[4], output_dim=1))
-            h2 = model_hash(neural_model)
-            reg.register(neural_model, "chain", metadata={"model_hash": h2, "parent_hash": h1})
+            save = reg.checkpointer("chain")
+            save(SimpleNamespace(iter=1, log_density=-2.0, model=stat_model))
+            save(SimpleNamespace(iter=2, log_density=-1.0, model=neural_model))
 
             with self.assertRaises(SerializationError):
                 reg.verify_chain("chain")
