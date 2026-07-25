@@ -1,5 +1,5 @@
-"""Regression test: graph coercion used to truncate fractional edge endpoints and block
-assignments instead of rejecting them.
+"""Regression test: graph coercion used to truncate fractional edge endpoints, block assignments,
+and num_nodes instead of rejecting them.
 
 Edge endpoints (``_edge_list_to_adjacency``) and block assignments (``_as_assignments``, and
 ``GraphDataEncoder``'s own ``fallback_assignments`` constructor argument, which has the identical
@@ -10,9 +10,17 @@ any error. Casting an existing NumPy float array (as opposed to a fresh Python l
 ``int64`` is worse: a non-finite entry (``nan``/``inf``) does not raise at all, it silently becomes
 an unspecified, platform-dependent integer.
 
+``num_nodes`` (``_edge_list_to_adjacency``'s own parameter, and the ``_coerce_mapping``
+"edges"+"num_nodes" mapping path that feeds it, e.g. ``GraphDataEncoder().seq_encode([{"edges": [],
+"num_nodes": 5.5}])``) has the identical bare ``int(...)`` pattern but was out of scope for the fix
+described above, which named only "edge endpoints and block assignments." ``int(5.5)`` silently
+produced a wrong-sized graph instead of raising; ``int(float("nan"))``/``int(float("inf"))`` already
+raised (``ValueError``/``OverflowError`` respectively, straight out of the bare ``int()`` call) but
+with generic messages that neither name ``num_nodes`` nor share a common exception type.
+
 The fix validates finite, exact integrality on the ORIGINAL representation before any cast, via
-``_require_exact_int`` (scalar: edge endpoints) and ``_require_exact_int_array`` (array: block
-assignments, fallback_assignments).
+``_require_exact_int`` (scalar: edge endpoints, num_nodes) and ``_require_exact_int_array`` (array:
+block assignments, fallback_assignments).
 """
 
 import numpy as np
@@ -57,6 +65,47 @@ def test_edge_endpoint_negative_control_integers_still_work():
 
     adj_numpy_int = _edge_list_to_adjacency([(np.int64(0), np.int64(1))], 2, directed=True)
     assert adj_numpy_int[0, 1] == 1.0
+
+
+# --------------------------------------------------------------------------- num_nodes
+# (_edge_list_to_adjacency's num_nodes parameter, and the "edges"+"num_nodes" mapping path in
+# _coerce_mapping that feeds it -- same bare int(...) truncation hazard as edge endpoints above, but
+# out of scope for the original fix, which named only "edge endpoints and block assignments.")
+
+
+def test_fractional_num_nodes_raises():
+    with pytest.raises(ValueError, match="exact integer"):
+        _edge_list_to_adjacency([], 5.5, directed=True)
+
+
+def test_fractional_num_nodes_raises_via_public_seq_encode():
+    enc = GraphDataEncoder(directed=True)
+    with pytest.raises(ValueError, match="exact integer"):
+        enc.seq_encode([{"edges": [], "num_nodes": 5.5}])
+
+
+def test_num_nodes_nan_raises():
+    with pytest.raises(ValueError, match="finite"):
+        _edge_list_to_adjacency([], float("nan"), directed=True)
+
+
+def test_num_nodes_inf_raises():
+    with pytest.raises(ValueError, match="finite"):
+        _edge_list_to_adjacency([], float("inf"), directed=True)
+
+
+def test_num_nodes_negative_control_integers_still_work():
+    """Legitimate integer num_nodes, as a plain int, an exact-valued float, and a numpy integer,
+    must be unaffected by the stricter check."""
+    adj_ints = _edge_list_to_adjacency([(0, 1)], 2, directed=True)
+    assert adj_ints.shape == (2, 2)
+
+    # 2.0 is an exact integer even though its Python type is float -- must NOT be rejected.
+    adj_exact_float = _edge_list_to_adjacency([(0, 1)], 2.0, directed=True)
+    assert adj_exact_float.shape == (2, 2)
+
+    adj_numpy_int = _edge_list_to_adjacency([(0, 1)], np.int64(2), directed=True)
+    assert adj_numpy_int.shape == (2, 2)
 
 
 # --------------------------------------------------------------------------- block assignments
