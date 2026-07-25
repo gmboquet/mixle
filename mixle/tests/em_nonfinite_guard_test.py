@@ -10,12 +10,13 @@ mixture smoke test exercises the bundled ``robust=True`` path end-to-end (the re
 """
 
 import unittest
+import unittest.mock
 
 import numpy as np
 
 from mixle.inference.em import MonteCarloEM, OnlineEM
 from mixle.inference.estimation import _em_loop, _resolve_monotone, _resolve_track_best, optimize
-from mixle.stats import DiagonalGaussianEstimator, MixtureEstimator
+from mixle.stats import DiagonalGaussianEstimator, GaussianEstimator, MixtureEstimator
 
 
 class _Model:
@@ -142,6 +143,87 @@ class EmNonFiniteGuardTest(unittest.TestCase):
         )
         self.assertIs(chosen, good)
 
+    def test_finite_step_replaces_nan_initial_best_state(self):
+        """Best-state tracking must not restore a NaN-scoring initializer over a valid fit."""
+        init = _Model("init", float("nan"))
+        repaired = _Model("repaired", 2.0)
+        chosen, score = _em_loop(
+            None,
+            None,
+            init,
+            _steps([repaired]),
+            _ll_fn,
+            max_its=1,
+            delta=None,
+            out=None,
+            monotone=True,
+            track_best=True,
+        )
+        self.assertIs(chosen, repaired)
+        self.assertEqual(score, 2.0)
+
+    def test_nan_validation_baseline_is_replaced_by_first_finite_score(self):
+        init = _Model("init", 0.0)
+        init.vll = float("nan")
+        repaired = _Model("repaired", 1.0)
+        repaired.vll = 3.0
+
+        def scorer(enc, model):
+            return 1, model.vll if enc == "validation" else model.ll
+
+        chosen, score = _em_loop(
+            "train",
+            None,
+            init,
+            _steps([repaired]),
+            scorer,
+            max_its=1,
+            delta=None,
+            enc_vdata="validation",
+            out=None,
+            monotone=True,
+            track_best=True,
+        )
+        self.assertIs(chosen, repaired)
+        self.assertEqual(score, 3.0)
+
+    def test_no_finite_initial_or_candidate_state_fails_explicitly(self):
+        with self.assertRaisesRegex(ValueError, "did not produce a finite objective"):
+            _em_loop(
+                None,
+                None,
+                _Model("init", float("nan")),
+                _steps([_Model("bad", float("-inf"))]),
+                _ll_fn,
+                max_its=1,
+                delta=None,
+                out=None,
+                monotone=False,
+                track_best=False,
+            )
+
+    def test_fused_loop_replaces_nan_initial_best_state(self):
+        init = _Model("init", float("nan"))
+        repaired = _Model("repaired", 4.0)
+
+        def fused_step_fn(_enc, _est, model):
+            return repaired, model.ll
+
+        chosen, score = _em_loop(
+            None,
+            None,
+            init,
+            None,
+            _ll_fn,
+            max_its=1,
+            delta=None,
+            out=None,
+            track_best=True,
+            fused_step_fn=fused_step_fn,
+        )
+        self.assertIs(chosen, repaired)
+        self.assertEqual(score, 4.0)
+
     def test_fused_loop_survives_nonfinite_without_stalling(self):
         """The fused loop returns a finite-best model and terminates when a step goes non-finite."""
         init = _Model("init", 0.0)
@@ -159,6 +241,57 @@ class EmNonFiniteGuardTest(unittest.TestCase):
         )
         self.assertTrue(np.isfinite(score))
         self.assertIsInstance(chosen, _Model)
+
+    def test_public_optimizer_rejects_invalid_policies_and_initialization_controls(self):
+        data = [0.0, 1.0]
+        estimator = GaussianEstimator()
+        invalid = (
+            {"structure": "guess"},
+            {"schedule": "sometimes"},
+            {"objective": "likelihood"},
+            {"init_p": 0.0},
+            {"init_p": 1.1},
+            {"init_p": float("nan")},
+            {"max_its": 1.5},
+            {"delta": -1.0},
+            {"print_iter": 0.5},
+        )
+        for kwargs in invalid:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                optimize(data, estimator, **({"max_its": 1, "out": None} | kwargs))
+        for kwargs in ({"reuse_estep_ll": 1}, {"monotone": "yes"}, {"track_best": 0}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(TypeError):
+                optimize(data, estimator, max_its=1, out=None, **kwargs)
+
+    def test_internal_structure_fit_errors_are_not_masked_as_routing_fallbacks(self):
+        rows = [("a" if i % 2 else "b", float(i)) for i in range(60)]
+        with unittest.mock.patch(
+            "mixle.inference.bayesian_network.learn_bayesian_network",
+            side_effect=ValueError("internal structure fit failed"),
+        ):
+            with self.assertRaisesRegex(ValueError, "internal structure fit failed"):
+                optimize(rows, out=None)
+
+    def test_nonfinite_candidate_bic_fails_closed(self):
+        rows = [("a" if i % 2 else "b", float(i)) for i in range(60)]
+
+        class Network:
+            @staticmethod
+            def edges():
+                return [(0, 1)]
+
+        with (
+            unittest.mock.patch(
+                "mixle.inference.bayesian_network.learn_bayesian_network",
+                return_value=Network(),
+            ),
+            unittest.mock.patch(
+                "mixle.inference.bayesian_network.bayesian_network_bic",
+                return_value=float("nan"),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "non-finite candidate BIC"):
+                optimize(rows, out=None, max_its=1)
 
     def test_high_dim_diagonal_mixture_robust_fits_without_crash(self):
         """robust=True fits a high-dim, few-sample Gaussian mixture without singular-covariance crashes."""
