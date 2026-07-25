@@ -301,21 +301,37 @@ class ContextPacket:
     """
 
     task: str
-    items: list[SubstrateItem] = field(default_factory=list)  # selected, in descending relevance
-    scores: list[float] = field(default_factory=list)
+    items: Sequence[SubstrateItem] = field(default_factory=tuple)  # selected, in descending relevance
+    scores: Sequence[float] = field(default_factory=tuple)
     budget: ContextBudget = field(default_factory=ContextBudget)
-    used_chars: int = 0
     n_candidates: int = 0  # how many the retriever surfaced before budgeting
-    texts: list[str] = field(default_factory=list)  # the text actually used per item (full or compressed)
+    texts: Sequence[str] = field(default_factory=tuple)  # the text actually used per item (full or compressed)
     compressed: bool = False
 
     def __post_init__(self) -> None:
-        if not self.texts:  # default: use the items' full surfaces
-            self.texts = [i.text for i in self.items]
+        # items/scores/texts are one aligned record, not three independently-settable parallel lists
+        # (MXR-080-0240): frozen into tuples so nothing can append/mutate one array out of step with the
+        # others after construction, and length-validated together so a caller can never build a packet
+        # that cites a different set of evidence than the text it renders.
+        self.items = tuple(self.items)
+        self.scores = tuple(self.scores)
+        self.texts = tuple(self.texts) if self.texts else tuple(i.text for i in self.items)  # default: full surfaces
+        if not (len(self.items) == len(self.scores) == len(self.texts)):
+            raise ValueError(
+                "ContextPacket requires items, scores, and texts of equal length; got "
+                f"{len(self.items)} items, {len(self.scores)} scores, {len(self.texts)} texts"
+            )
 
     def render(self, *, header: bool = True) -> str:
         """The assembled context string the target consumes (respecting the budget shape)."""
         return _render_body(self.task, self.items, self.texts, self.budget.shape, header=header)
+
+    @property
+    def used_chars(self) -> int:
+        """The TRUE size of this packet's default (header-included) rendering -- always derived from
+        the actual :meth:`render` output, never an independently-settable estimate that can silently
+        drift from what a receiver actually gets (MXR-080-0239, MXR-080-0240)."""
+        return len(self.render())
 
     def preservation(self) -> list[float]:
         """Per item, the fraction of the task's query terms retained in the used text (1.0 = all kept).
@@ -323,7 +339,7 @@ class ContextPacket:
         The receipt for compression: a value near 1.0 means the summary kept what the query cares
         about; a low value flags an item whose relevant content was squeezed out.
         """
-        return [_query_coverage(used, self.task, full=i.text) for i, used in zip(self.items, self.texts)]
+        return [_query_coverage(used, self.task, full=i.text) for i, used in zip(self.items, self.texts, strict=True)]
 
     @property
     def compression_ratio(self) -> float:
@@ -341,7 +357,7 @@ class ContextPacket:
                 "source": i.provenance.get("source") or i.provenance.get("path"),
                 "score": round(float(s), 4),
             }
-            for i, s in zip(self.items, self.scores)
+            for i, s in zip(self.items, self.scores, strict=True)
         ]
 
     def as_dict(self) -> dict[str, Any]:
@@ -479,7 +495,7 @@ def _render_body(
     provenance tags included -- of a candidate selection before committing to it, rather than an
     estimate that can silently diverge from what :meth:`~ContextPacket.render` actually returns
     (MXR-080-0239). ``items`` and ``texts`` must already be equal length; use ``strict=True`` zipping
-    so a caller error here fails loudly rather than quietly dropping evidence.
+    so a caller error here fails loudly rather than quietly dropping evidence (MXR-080-0240).
     """
     head = f"# Context for: {task}\n" if header else ""
     if shape == "brief":
@@ -667,13 +683,11 @@ def assemble_context(
             source = _compress(item.text, task, available) if compress and len(item.text) > available else item.text
             selected, scores, texts = [item], [score], [_truncate_to_budget(source, available)]
 
-    final_render = _render_body(task, selected, texts, budget.shape)
     packet = ContextPacket(
         task=task,
         items=selected,
         scores=scores,
         budget=budget,
-        used_chars=len(final_render),
         n_candidates=len(hits),
         texts=texts,
         compressed=compress and any(len(t) < len(i.text) for i, t in zip(selected, texts, strict=True)),
@@ -704,6 +718,12 @@ class ReceiverProfile:
     shape: str = "passages"  # 'passages' (LLM) | 'brief' (human) | 'features' (student)
     compress: bool = False
 
+    def __post_init__(self) -> None:
+        # Fail at construction, not several calls later inside assemble_for_receivers, when this
+        # profile's identity is meaningless (MXR-080-0241).
+        if not self.name:
+            raise ValueError(f"ReceiverProfile.name must be non-empty, got {self.name!r}")
+
     def to_budget(self) -> ContextBudget:
         """Convert this receiver profile to a context budget."""
         return ContextBudget(max_chars=self.max_chars, max_items=self.max_items, shape=self.shape)
@@ -730,7 +750,19 @@ def assemble_for_receivers(
             ReceiverProfile("local_student", max_chars=200, shape="features", compress=True),
         ])
         packets["frontier_llm"].render(), packets["local_student"].render()
+
+    ``receivers`` must have unique, non-empty names -- the result is keyed by name, so a duplicate
+    would otherwise silently discard an earlier receiver's packet AFTER its retrieval, compression, and
+    telemetry work has already run (MXR-080-0241). Validated upfront, before any of that work starts.
     """
+    seen: set[str] = set()
+    for r in receivers:
+        if not r.name:
+            raise ValueError(f"ReceiverProfile.name must be non-empty, got {r.name!r}")
+        if r.name in seen:
+            raise ValueError(f"assemble_for_receivers requires unique receiver names; {r.name!r} is duplicated")
+        seen.add(r.name)
+
     return {
         r.name: assemble_context(
             substrate, task, budget=r.to_budget(), kind=kind, scope=scope, compress=r.compress, telemetry=telemetry

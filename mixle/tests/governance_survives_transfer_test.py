@@ -36,7 +36,7 @@ class GovernanceSurvivesTransferTest(unittest.TestCase):
 
         packet = assemble_context(s, "refunds", budget=ContextBudget(max_items=5), scope="org")
 
-        self.assertEqual(packet.items, [])  # still teamA-scoped -- proposing alone does not share it
+        self.assertFalse(packet.items)  # still teamA-scoped -- proposing alone does not share it
         origin_packet = assemble_context(s, "refunds", budget=ContextBudget(max_items=5), scope="teamA")
         self.assertEqual(len(origin_packet.items), 1)
         self.assertEqual(origin_packet.items[0].provenance["proposal"]["status"], PENDING)
@@ -49,7 +49,7 @@ class GovernanceSurvivesTransferTest(unittest.TestCase):
         self.assertTrue(reject(s, item_id, by="orgadmin", governance=gov, reason="unverified"))
 
         org_packet = assemble_context(s, "refund shortcut", budget=ContextBudget(max_items=5), scope="org")
-        self.assertEqual(org_packet.items, [])  # rejection never shares it into org
+        self.assertFalse(org_packet.items)  # rejection never shares it into org
 
         origin_packet = assemble_context(s, "refund shortcut", budget=ContextBudget(max_items=5), scope="teamA")
         self.assertEqual(origin_packet.items[0].scope, "teamA")
