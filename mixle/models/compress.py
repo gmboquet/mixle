@@ -49,12 +49,15 @@ from __future__ import annotations
 
 import copy
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
 
 from mixle.models.coarsening import CoarsenResult, ScaleReceipt, coarsen
+from mixle.models.grad_leaf import _module_mode
 from mixle.models.moment_propagation import GaussianLaw, _as_law, _to_numpy
 from mixle.task.acquire import acquire, register_strategy
 from mixle.task.bandit import UCB1
@@ -92,8 +95,9 @@ class MethodCandidate:
     :class:`mixle.models.unified_quantizer.MethodCandidate`."""
 
     method: str
-    quality: float  # teacher-agreement on eval_data, higher is better; nan if unmeasured
-    sample_count: int  # real calibration samples this method actually consumed
+    quality: float  # finite teacher-agreement on the independent selection set
+    sample_count: int  # real calibration samples this method actually consumed for training
+    evaluation_sample_count: int  # independent selection examples scored for this candidate
     reward: float  # what the auto-pick bandit compared
 
 
@@ -105,13 +109,21 @@ class CompressionReceipt:
 
     method: str
     auto: bool
-    quality: float
+    quality: float | None
     sample_count: int
+    selection_training_sample_count: int = 0
+    selection_evaluation_sample_count: int = 0
+    quality_basis: str = "unmeasured"
     candidates: dict[str, MethodCandidate] = field(default_factory=dict)
     notes: str = ""
 
     def rejected(self) -> dict[str, MethodCandidate]:
         return {m: c for m, c in self.candidates.items() if m != self.method}
+
+    @property
+    def total_selection_sample_count(self) -> int:
+        """All real training plus evaluation examples consumed to make an automatic choice."""
+        return self.selection_training_sample_count + self.selection_evaluation_sample_count
 
 
 @dataclass
@@ -125,6 +137,7 @@ class CompressedModel:
     receipt: CompressionReceipt
     non_sampling_receipts: dict[str, ScaleReceipt] = field(default_factory=dict)
     hybrid_selected_stages: list[str] = field(default_factory=list)
+    hybrid_sample_indices: list[int] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -143,25 +156,111 @@ def _default_input_law(model: Any) -> GaussianLaw:
     return _as_law(mu, covar)
 
 
-def _as_long_tensor(x: Any) -> Any:
+def _exact_int(value: Any, name: str, *, minimum: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    return result
+
+
+def _finite_fraction(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite real number in [0, 1]")
+    result = float(value)
+    if not np.isfinite(result) or not 0.0 <= result <= 1.0:
+        raise ValueError(f"{name} must be a finite real number in [0, 1]")
+    return result
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a positive finite real number")
+    result = float(value)
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a positive finite real number")
+    return result
+
+
+def _validated_token_batch(x: Any, name: str, *, vocab: int | None = None) -> Any:
     if torch.is_tensor(x):
-        return x.long()
-    return torch.as_tensor(x, dtype=torch.long)
+        if x.dtype not in (
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+            torch.uint8,
+        ):
+            raise TypeError(f"{name} must contain exact integer token IDs")
+        result = x.detach().to(device="cpu", dtype=torch.long).clone()
+    else:
+        array = np.asarray(x)
+        if array.dtype.kind not in {"i", "u"}:
+            raise TypeError(f"{name} must contain exact integer token IDs")
+        result = torch.as_tensor(np.array(array, dtype=np.int64, copy=True), dtype=torch.long)
+    if result.ndim != 2 or not all(result.shape):
+        raise ValueError(f"{name} must be a non-empty two-dimensional token batch")
+    if bool(torch.any(result < 0)):
+        raise ValueError(f"{name} token IDs must be non-negative")
+    if vocab is not None and bool(torch.any(result >= vocab)):
+        raise ValueError(f"{name} token IDs must be less than vocabulary size {vocab}")
+    return result
+
+
+def _model_device(model: Any) -> Any:
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
+def _shares_selection_data(calibration_data: Any, eval_data: Any) -> bool:
+    if calibration_data is eval_data:
+        return True
+    if torch.is_tensor(calibration_data) and torch.is_tensor(eval_data):
+        if calibration_data.device.type == "cpu" and eval_data.device.type == "cpu":
+            if calibration_data.untyped_storage().data_ptr() == eval_data.untyped_storage().data_ptr():
+                return True
+        return bool(
+            calibration_data.shape == eval_data.shape
+            and torch.equal(calibration_data.detach().cpu(), eval_data.detach().cpu())
+        )
+    calibration_array = np.asarray(calibration_data)
+    eval_array = np.asarray(eval_data)
+    return bool(
+        np.shares_memory(calibration_array, eval_array)
+        or (calibration_array.shape == eval_array.shape and np.array_equal(calibration_array, eval_array))
+    )
 
 
 def _quality(student: Any, teacher: Any, eval_data: Any) -> float:
     """Teacher-agreement (fraction of matching argmax next-token predictions) on ``eval_data`` --
     higher is better, ``1.0`` for a model identical to the teacher, the common scalar every method
     (and the no-compression baseline) is compared on."""
-    if eval_data is None:
-        return float("nan")
-    x = _as_long_tensor(eval_data)
-    student.eval()
-    teacher.eval()
-    with torch.no_grad():
-        s_logits = student(x)
-        t_logits = teacher(x)
-    return _agreement(s_logits, t_logits)
+    x = _validated_token_batch(eval_data, "eval_data", vocab=int(teacher.vocab))
+    student_x = x.to(_model_device(student))
+    teacher_x = x.to(_model_device(teacher))
+    with (
+        _module_mode(student, train=False),
+        _module_mode(teacher, train=False),
+        torch.no_grad(),
+    ):
+        s_logits = student(student_x)
+        t_logits = teacher(teacher_x)
+    if not isinstance(s_logits, torch.Tensor) or not isinstance(t_logits, torch.Tensor):
+        raise TypeError("compression quality models must return torch tensors")
+    if tuple(s_logits.shape) != tuple(t_logits.shape) or s_logits.numel() == 0:
+        raise ValueError(
+            f"compression quality logits must have identical non-empty shapes; "
+            f"got {tuple(s_logits.shape)} and {tuple(t_logits.shape)}"
+        )
+    if not bool(torch.isfinite(s_logits).all()) or not bool(torch.isfinite(t_logits).all()):
+        raise ValueError("compression quality logits must be finite")
+    quality = float(_agreement(s_logits.to("cpu"), t_logits.to("cpu")))
+    if not np.isfinite(quality):
+        raise ValueError("compression quality must be finite")
+    return quality
 
 
 # --------------------------------------------------------------------------------------------------
@@ -195,9 +294,10 @@ def _sampling_kd(
 
     student = build_causal_lm(
         vocab=model.vocab, d_model=model.d_model, n_layer=target_n_layer, n_head=model.n_head, block=model.block
-    )
-    x = _as_long_tensor(calibration_data)
-    return response_distill(student, model, x, epochs=epochs, lr=lr, seed=seed, baseline=False)
+    ).to(_model_device(model))
+    x = _validated_token_batch(calibration_data, "calibration_data", vocab=int(model.vocab)).to(_model_device(model))
+    with _module_mode(model, train=False):
+        return response_distill(student, model, x, epochs=epochs, lr=lr, seed=seed, baseline=False)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -231,20 +331,19 @@ def _stage_block_indices(stage_names: list[str]) -> list[int]:
     return indices
 
 
-def _set_trainable_blocks(model: Any, block_indices: list[int]) -> None:
-    """Freeze every parameter except the flagged blocks' -- the "receipt-directed" part of
-    receipt-directed micro-calibration: only the closure-error-flagged stages get real gradient
-    updates."""
-    for p in model.parameters():
-        p.requires_grad_(False)
-    for idx in block_indices:
-        for p in model.blocks[idx].parameters():
-            p.requires_grad_(True)
-
-
-def _unfreeze_all(model: Any) -> None:
-    for p in model.parameters():
-        p.requires_grad_(True)
+@contextmanager
+def _trainable_blocks(model: Any, block_indices: list[int]) -> Any:
+    """Temporarily expose originally-trainable parameters in selected blocks and restore every flag."""
+    parameters = list(model.parameters())
+    original = {id(parameter): parameter.requires_grad for parameter in parameters}
+    selected = {id(parameter) for index in block_indices for parameter in model.blocks[index].parameters()}
+    try:
+        for parameter in parameters:
+            parameter.requires_grad_(id(parameter) in selected and original[id(parameter)])
+        yield model
+    finally:
+        for parameter in parameters:
+            parameter.requires_grad_(original[id(parameter)])
 
 
 def _finetune_stages(student: Any, teacher: Any, x: Any, epochs: int, lr: float) -> None:
@@ -254,20 +353,22 @@ def _finetune_stages(student: Any, teacher: Any, x: Any, epochs: int, lr: float)
     parameters before training (correct for building a fresh ``sampling_kd`` student, wrong here:
     hybrid must FINE-TUNE the existing non_sampling weights, not discard them). Only parameters with
     ``requires_grad=True`` (set by :func:`_set_trainable_blocks`) receive gradient updates."""
-    teacher.eval()
-    with torch.no_grad():
-        teacher_logits = teacher(x)
+    teacher_x = x.to(_model_device(teacher))
+    student_x = x.to(_model_device(student))
+    with _module_mode(teacher, train=False), torch.no_grad():
+        teacher_logits = teacher(teacher_x).to(_model_device(student))
     trainable = [p for p in student.parameters() if p.requires_grad]
     if not trainable:
         return
     opt = torch.optim.Adam(trainable, lr=lr)
-    student.train()
-    for _ in range(int(epochs)):
-        opt.zero_grad()
-        loss = kd_loss(student(x), teacher_logits, None, temperature=4.0, alpha=1.0)
-        loss.backward()
-        opt.step()
-    student.eval()
+    with _module_mode(student, train=True):
+        for _ in range(epochs):
+            opt.zero_grad()
+            loss = kd_loss(student(student_x), teacher_logits, None, temperature=4.0, alpha=1.0)
+            if not bool(torch.isfinite(loss)):
+                raise ValueError("hybrid compression KD loss became non-finite")
+            loss.backward()
+            opt.step()
 
 
 def _hybrid(
@@ -290,26 +391,34 @@ def _hybrid(
     pool = [(name, r) for name, r in result.receipt_map.items() if np.isfinite(r.surrogate_closure_error)]
     n_calib = len(calibration_data)
     if sample_budget is not None:
-        budget_n = max(1, min(int(sample_budget), n_calib))
+        budget_n = min(sample_budget, n_calib)
     else:
-        budget_n = max(1, min(n_calib, int(np.ceil(sample_fraction * n_calib))))
+        budget_n = min(n_calib, int(np.ceil(sample_fraction * n_calib)))
 
     if not pool or budget_n <= 0:
-        return ns_model, result, {"selected_stages": [], "sample_count": 0}
+        return ns_model, result, {"selected_stages": [], "sample_indices": [], "sample_count": 0}
 
     k_stages = max(1, min(max_stages, len(pool)))
     selected = acquire(pool, model=None, k=k_stages, strategy="closure_error")
     selected_names = [name for name, _r in selected]
     block_indices = _stage_block_indices(selected_names)
     if not block_indices:
-        return ns_model, result, {"selected_stages": selected_names, "sample_count": 0}
+        return ns_model, result, {"selected_stages": selected_names, "sample_indices": [], "sample_count": 0}
 
-    x = _as_long_tensor(calibration_data)[:budget_n]
-    _set_trainable_blocks(ns_model, block_indices)
-    _finetune_stages(ns_model, model, x, epochs=epochs, lr=lr)
-    _unfreeze_all(ns_model)
+    sample_indices = np.random.default_rng(seed).choice(n_calib, size=budget_n, replace=False).tolist()
+    x = calibration_data[torch.as_tensor(sample_indices, dtype=torch.long)]
+    with _trainable_blocks(ns_model, block_indices):
+        _finetune_stages(ns_model, model, x, epochs=epochs, lr=lr)
 
-    return ns_model, result, {"selected_stages": selected_names, "sample_count": int(x.shape[0])}
+    return (
+        ns_model,
+        result,
+        {
+            "selected_stages": selected_names,
+            "sample_indices": sample_indices,
+            "sample_count": int(x.shape[0]),
+        },
+    )
 
 
 # --------------------------------------------------------------------------------------------------
@@ -342,21 +451,35 @@ def _auto_pick(
     from per-tensor reconstruction error to per-model teacher-agreement."""
     payloads: dict[str, Any] = {}
     candidates: dict[str, MethodCandidate] = {}
-    extra: dict[str, Any] = {}
+    extras: dict[str, dict[str, Any]] = {}
+    eval_count = int(len(eval_data))
 
     ns_result = _non_sampling(model, input_law, budget, trust_region, n_mc, seed)
     ns_model = ns_result.model
     q_ns = _quality(ns_model, model, eval_data)
     payloads["non_sampling"] = ns_model
-    candidates["non_sampling"] = MethodCandidate("non_sampling", quality=q_ns, sample_count=0, reward=q_ns)
-    extra["non_sampling_receipts"] = ns_result.receipt_map
+    candidates["non_sampling"] = MethodCandidate(
+        "non_sampling",
+        quality=q_ns,
+        sample_count=0,
+        evaluation_sample_count=eval_count,
+        reward=q_ns,
+    )
+    extras["non_sampling"] = {"non_sampling_receipts": ns_result.receipt_map}
 
     sk_result = _sampling_kd(model, calibration_data, target_n_layer, kd_epochs, kd_lr, seed)
     sk_model = sk_result.student
     q_sk = _quality(sk_model, model, eval_data)
     n_sk = int(len(calibration_data))
     payloads["sampling_kd"] = sk_model
-    candidates["sampling_kd"] = MethodCandidate("sampling_kd", quality=q_sk, sample_count=n_sk, reward=q_sk)
+    candidates["sampling_kd"] = MethodCandidate(
+        "sampling_kd",
+        quality=q_sk,
+        sample_count=n_sk,
+        evaluation_sample_count=eval_count,
+        reward=q_sk,
+    )
+    extras["sampling_kd"] = {}
 
     hy_model, hy_result, hy_info = _hybrid(
         model,
@@ -374,9 +497,18 @@ def _auto_pick(
     )
     q_hy = _quality(hy_model, model, eval_data)
     payloads["hybrid"] = hy_model
-    candidates["hybrid"] = MethodCandidate("hybrid", quality=q_hy, sample_count=hy_info["sample_count"], reward=q_hy)
-    extra["hybrid_receipts"] = hy_result.receipt_map
-    extra["hybrid_selected_stages"] = hy_info["selected_stages"]
+    candidates["hybrid"] = MethodCandidate(
+        "hybrid",
+        quality=q_hy,
+        sample_count=hy_info["sample_count"],
+        evaluation_sample_count=eval_count,
+        reward=q_hy,
+    )
+    extras["hybrid"] = {
+        "non_sampling_receipts": hy_result.receipt_map,
+        "hybrid_selected_stages": hy_info["selected_stages"],
+        "hybrid_sample_indices": hy_info["sample_indices"],
+    }
 
     order = list(candidates.keys())
     bandit = UCB1(n_arms=len(order), seed=seed)
@@ -386,7 +518,12 @@ def _auto_pick(
         bandit.update(arm, candidates[m].reward)
     best_arm = int(np.argmax(bandit.means))
     best_method = order[best_arm]
-    return best_method, payloads[best_method], candidates, extra
+    selected_extra = dict(extras[best_method])
+    selected_extra["selection_training_sample_count"] = sum(candidate.sample_count for candidate in candidates.values())
+    selected_extra["selection_evaluation_sample_count"] = sum(
+        candidate.evaluation_sample_count for candidate in candidates.values()
+    )
+    return best_method, payloads[best_method], candidates, selected_extra
 
 
 # --------------------------------------------------------------------------------------------------
@@ -424,7 +561,9 @@ def compress(
         calibration_data: integer token-context tensor/array ``(N, L)`` -- required for
             ``"sampling_kd"``, ``"hybrid"``, and ``"auto"`` (the two methods that touch real data).
         eval_data: held-out integer token-context tensor/array used to MEASURE quality
-            (teacher-agreement against ``model``); defaults to ``calibration_data`` if omitted.
+            (teacher-agreement against ``model``). Required and memory/value-independent from
+            ``calibration_data`` for ``method="auto"``. Explicit methods may omit it, in which case
+            quality is unmeasured rather than fabricated from training data.
         sample_budget: an explicit cap (absolute count) on how many REAL calibration samples
             ``"hybrid"``/``"auto"``'s hybrid arm may use; if ``None``, ``hybrid_sample_fraction`` of
             ``len(calibration_data)`` is used instead.
@@ -454,20 +593,55 @@ def compress(
     if method not in ("auto",) + METHODS:
         raise ValueError(f"method must be 'auto' or one of {METHODS}, got {method!r}")
 
+    seed = _exact_int(seed, "seed", minimum=0)
+    n_mc = _exact_int(n_mc, "n_mc", minimum=2)
+    kd_epochs = _exact_int(kd_epochs, "kd_epochs", minimum=1)
+    kd_lr = _positive_finite(kd_lr, "kd_lr")
+    hybrid_sample_fraction = _finite_fraction(hybrid_sample_fraction, "hybrid_sample_fraction")
+    hybrid_max_stages = _exact_int(hybrid_max_stages, "hybrid_max_stages", minimum=1)
+    hybrid_epochs = _exact_int(hybrid_epochs, "hybrid_epochs", minimum=1)
+    hybrid_lr = _positive_finite(hybrid_lr, "hybrid_lr")
+    if sample_budget is not None:
+        sample_budget = _exact_int(sample_budget, "sample_budget", minimum=0)
+
     input_law = input_law if input_law is not None else _default_input_law(model)
     if target_n_layer is None:
         target_n_layer = max(1, model.n_layer // 2)
-    if eval_data is None:
-        eval_data = calibration_data
+    else:
+        target_n_layer = _exact_int(target_n_layer, "target_n_layer", minimum=1)
+
+    raw_calibration_data = calibration_data
+    needs_calibration = method in {"sampling_kd", "hybrid", "auto"}
+    if needs_calibration:
+        if calibration_data is None:
+            raise ValueError(f"compress(method={method!r}) requires calibration_data")
+        calibration_data = _validated_token_batch(
+            calibration_data,
+            "calibration_data",
+            vocab=int(model.vocab),
+        )
+
+    quality_basis = "unmeasured"
+    if eval_data is not None:
+        if method == "auto" and _shares_selection_data(raw_calibration_data, eval_data):
+            raise ValueError("method='auto' requires eval_data independent from calibration_data")
+        if raw_calibration_data is not None and _shares_selection_data(raw_calibration_data, eval_data):
+            quality_basis = "training_data"
+        else:
+            quality_basis = "caller_declared_held_out"
+        eval_data = _validated_token_batch(eval_data, "eval_data", vocab=int(model.vocab))
+    elif method == "auto":
+        raise ValueError("compress(method='auto') requires independent eval_data for method selection")
 
     if method == "non_sampling":
         result = _non_sampling(model, input_law, budget, trust_region, n_mc, seed)
-        quality = _quality(result.model, model, eval_data)
+        quality = None if eval_data is None else _quality(result.model, model, eval_data)
         receipt = CompressionReceipt(
             method="non_sampling",
             auto=False,
             quality=quality,
             sample_count=0,
+            quality_basis=quality_basis,
             notes="data-free coarsen() depth-merge (G1 laws + G3 operator); no real forward pass over "
             "calibration data was used.",
         )
@@ -476,23 +650,20 @@ def compress(
         )
 
     if method == "sampling_kd":
-        if calibration_data is None:
-            raise ValueError("compress(method='sampling_kd') requires calibration_data")
         sk_result = _sampling_kd(model, calibration_data, target_n_layer, kd_epochs, kd_lr, seed)
         n_samples = int(len(calibration_data))
-        quality = _quality(sk_result.student, model, eval_data)
+        quality = None if eval_data is None else _quality(sk_result.student, model, eval_data)
         receipt = CompressionReceipt(
             method="sampling_kd",
             auto=False,
             quality=quality,
             sample_count=n_samples,
+            quality_basis=quality_basis,
             notes=f"full response_distill KD (mixle.task.distill_methods) using all {n_samples} calibration samples.",
         )
         return CompressedModel(model=sk_result.student, method="sampling_kd", receipt=receipt)
 
     if method == "hybrid":
-        if calibration_data is None:
-            raise ValueError("compress(method='hybrid') requires calibration_data")
         hy_model, hy_result, hy_info = _hybrid(
             model,
             input_law,
@@ -507,12 +678,13 @@ def compress(
             hybrid_epochs,
             hybrid_lr,
         )
-        quality = _quality(hy_model, model, eval_data)
+        quality = None if eval_data is None else _quality(hy_model, model, eval_data)
         receipt = CompressionReceipt(
             method="hybrid",
             auto=False,
             quality=quality,
             sample_count=hy_info["sample_count"],
+            quality_basis=quality_basis,
             notes=f"non_sampling base + acquire()-ranked (closure_error) micro-calibration on stages "
             f"{hy_info['selected_stages']} using {hy_info['sample_count']} real samples.",
         )
@@ -522,11 +694,10 @@ def compress(
             receipt=receipt,
             non_sampling_receipts=hy_result.receipt_map,
             hybrid_selected_stages=hy_info["selected_stages"],
+            hybrid_sample_indices=hy_info["sample_indices"],
         )
 
     # method == "auto"
-    if calibration_data is None:
-        raise ValueError("compress(method='auto') requires calibration_data (needed by the sampling_kd/hybrid arms)")
     best_method, best_model, candidates, extra = _auto_pick(
         model,
         calibration_data,
@@ -550,8 +721,14 @@ def compress(
         auto=True,
         quality=candidates[best_method].quality,
         sample_count=candidates[best_method].sample_count,
+        selection_training_sample_count=extra["selection_training_sample_count"],
+        selection_evaluation_sample_count=extra["selection_evaluation_sample_count"],
+        quality_basis="caller_declared_held_out",
         candidates=candidates,
-        notes=f"UCB1 evaluated all {len(candidates)} methods once (real measured reward=teacher-agreement); "
+        notes=f"UCB1 evaluated all {len(candidates)} methods once on an independent selection set "
+        f"(real measured reward=teacher-agreement; total selection cost="
+        f"{extra['selection_training_sample_count']} training + "
+        f"{extra['selection_evaluation_sample_count']} evaluation examples); "
         f"picked {best_method!r} over "
         + ", ".join(
             f"{m}(quality={c.quality:.4g}, samples={c.sample_count})" for m, c in candidates.items() if m != best_method
@@ -563,4 +740,5 @@ def compress(
         receipt=receipt,
         non_sampling_receipts=extra.get("non_sampling_receipts", {}),
         hybrid_selected_stages=extra.get("hybrid_selected_stages", []),
+        hybrid_sample_indices=extra.get("hybrid_sample_indices", []),
     )
