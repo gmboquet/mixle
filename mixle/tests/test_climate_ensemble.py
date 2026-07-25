@@ -111,3 +111,29 @@ def test_outlier_realization_of_the_same_model_is_rejected_not_silently_kept():
     assert by_version["r1i1p1f1"]["adjudication_status"] == "accepted"
     assert by_version["r2i1p1f1"]["adjudication_status"] == "rejected"  # the blown run, excluded
     assert fused.mean == pytest.approx(2.025, abs=1e-6)  # only the two agreeing members, not the 200.0 outlier
+
+
+def test_posterior_weight_is_precision_once_not_skill_times_precision():
+    """Regression/pinning test for MXR-080-0287: the docstring used to say the posterior weight is
+    `skill_i * prec_i` while `prec_i = skill_i / variance_i` was already defined, which literally implies
+    `skill_i^2 / variance_i` (squared skill). The implementation only ever used skill once (through
+    `prec_i`). Different variances per member make the two hypotheses numerically distinguishable --
+    equal variances alone cannot tell them apart, since a common factor cancels in the ratio either way.
+    """
+    fused = skill_weighted_fuse(
+        [
+            ClimateMember(value=0.0, variance=2.0, model_id="A", version="v1", content_hash="a" * 64, skill=2.0),
+            ClimateMember(value=1.0, variance=0.5, model_id="B", version="v1", content_hash="b" * 64, skill=4.0),
+        ]
+    )
+    prec_a, prec_b = 2.0 / 2.0, 4.0 / 0.5  # prec_i = skill_i / variance_i -> 1.0, 8.0
+    want_a, want_b = prec_a / (prec_a + prec_b), prec_b / (prec_a + prec_b)
+    assert fused.weights["A"] == pytest.approx(want_a, abs=1e-9)
+    assert fused.weights["B"] == pytest.approx(want_b, abs=1e-9)
+    assert fused.weights["A"] == pytest.approx(1.0 / 9.0, abs=1e-9)
+    assert fused.weights["B"] == pytest.approx(8.0 / 9.0, abs=1e-9)
+
+    # the docstring's old, literal (buggy) formula would instead give skill_i * prec_i = skill_i^2/variance_i
+    wrong_a, wrong_b = 2.0 * prec_a, 4.0 * prec_b  # = 2.0, 32.0
+    wrong_norm = wrong_a + wrong_b
+    assert fused.weights["A"] != pytest.approx(wrong_a / wrong_norm, abs=1e-9)
