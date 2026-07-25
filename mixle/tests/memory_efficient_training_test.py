@@ -314,6 +314,56 @@ class SelectiveRecomputePolicyTest(unittest.TestCase):
         out = model(torch.randint(0, 11, (3, 8)).float())
         self.assertEqual(tuple(out.shape), (3, 11))
 
+    def test_decisions_follow_actual_heterogeneous_block_manifest(self):
+        class SmallBlock(torch.nn.Module):
+            d_model = 4
+
+            def __init__(self):
+                super().__init__()
+                self.proj = torch.nn.Linear(4, 4)
+
+        class LargeBlock(torch.nn.Module):
+            d_model = 4
+
+            def __init__(self):
+                super().__init__()
+                self.proj = torch.nn.Sequential(torch.nn.Linear(4, 100), torch.nn.Linear(100, 4))
+
+        class EditedModel:
+            d_model = 4
+            n_layer = 99  # deliberately stale metadata
+            blocks = torch.nn.ModuleList([SmallBlock(), LargeBlock()])
+
+        decisions = SelectiveRecomputePolicy(memory_value_per_byte=1.0, flop_cost_per_unit=0.1).decide_model(
+            EditedModel(),
+            batch=1,
+            seq_len=1,
+        )
+        self.assertEqual(len(decisions), 2)
+        self.assertTrue(decisions[0].should_recompute)
+        self.assertFalse(decisions[1].should_recompute)
+        self.assertLess(decisions[0].recompute_flops, decisions[1].recompute_flops)
+
+    def test_recompute_policy_rejects_invalid_dimensions_and_costs(self):
+        for kwargs in (
+            {"memory_value_per_byte": -1.0},
+            {"flop_cost_per_unit": np.nan},
+        ):
+            with self.assertRaises(ValueError):
+                SelectiveRecomputePolicy(**kwargs)
+        policy = SelectiveRecomputePolicy()
+        for args in ((-1, 1.0, 1.0), (0, -1.0, 1.0), (0, 1.0, np.inf)):
+            with self.assertRaises((TypeError, ValueError)):
+                policy.decide_block(*args)
+        model = build_causal_lm(vocab=5, d_model=4, n_layer=1, n_head=1, block=4)
+        for kwargs in (
+            {"batch": 0, "seq_len": 4},
+            {"batch": 1, "seq_len": -1},
+            {"batch": 1, "seq_len": 4, "dtype_bytes": 0},
+        ):
+            with self.assertRaises(ValueError):
+                policy.decide_model(model, **kwargs)
+
 
 class Int8BlockwiseUnitTest(unittest.TestCase):
     """Direct unit coverage of the int8 quantize/dequantize round trip, independent of the

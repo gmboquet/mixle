@@ -1089,6 +1089,10 @@ def estimate_block_activation_bytes(batch: int, seq_len: int, d_model: int, dtyp
     """Estimate the memory footprint of ONE transformer block's stored output activation
     (``mixle.models.transformer.Block``'s output, shape ``(batch, seq_len, d_model)``) -- the
     memory that activation checkpointing (recomputing instead of storing) frees."""
+    batch = _positive_int(batch, "batch")
+    seq_len = _positive_int(seq_len, "seq_len")
+    d_model = _positive_int(d_model, "d_model")
+    dtype_bytes = _positive_int(dtype_bytes, "dtype_bytes")
     return float(batch) * float(seq_len) * float(d_model) * float(dtype_bytes)
 
 
@@ -1100,6 +1104,9 @@ def estimate_block_recompute_flops(batch: int, seq_len: int, d_model: int) -> fl
     token" forward-pass heuristic turns that into a FLOP estimate, plus the attention score/value
     matmuls (``QK^T`` and ``attn @ V``, each ``~2*batch*seq_len^2*d_model`` FLOPs) that scale with
     ``seq_len^2`` rather than with parameter count."""
+    batch = _positive_int(batch, "batch")
+    seq_len = _positive_int(seq_len, "seq_len")
+    d_model = _positive_int(d_model, "d_model")
     params_per_block = 12.0 * float(d_model) ** 2
     linear_flops = 2.0 * float(batch) * float(seq_len) * params_per_block
     attn_score_flops = 4.0 * float(batch) * float(seq_len) ** 2 * float(d_model)
@@ -1110,12 +1117,16 @@ def estimate_recompute_benefit(
     activation_bytes: float, memory_value_per_byte: float = _DEFAULT_MEMORY_VALUE_PER_BYTE
 ) -> float:
     """The value of the memory freed by recomputing (rather than storing) one block's activation."""
-    return float(activation_bytes) * float(memory_value_per_byte)
+    activation_bytes = _finite_float(activation_bytes, "activation_bytes", minimum=0.0)
+    memory_value_per_byte = _finite_float(memory_value_per_byte, "memory_value_per_byte", minimum=0.0)
+    return activation_bytes * memory_value_per_byte
 
 
 def estimate_recompute_cost(recompute_flops: float, flop_cost_per_unit: float = _DEFAULT_FLOP_COST_PER_UNIT) -> float:
     """The cost of the extra compute spent recomputing one block's activation during backward."""
-    return float(recompute_flops) * float(flop_cost_per_unit)
+    recompute_flops = _finite_float(recompute_flops, "recompute_flops", minimum=0.0)
+    flop_cost_per_unit = _finite_float(flop_cost_per_unit, "flop_cost_per_unit", minimum=0.0)
+    return recompute_flops * flop_cost_per_unit
 
 
 @dataclass(frozen=True)
@@ -1158,10 +1169,22 @@ class SelectiveRecomputePolicy:
         memory_value_per_byte: float = _DEFAULT_MEMORY_VALUE_PER_BYTE,
         flop_cost_per_unit: float = _DEFAULT_FLOP_COST_PER_UNIT,
     ) -> None:
-        self.memory_value_per_byte = float(memory_value_per_byte)
-        self.flop_cost_per_unit = float(flop_cost_per_unit)
+        self.memory_value_per_byte = _finite_float(
+            memory_value_per_byte, "memory_value_per_byte", minimum=0.0
+        )
+        self.flop_cost_per_unit = _finite_float(flop_cost_per_unit, "flop_cost_per_unit", minimum=0.0)
 
     def decide_block(self, block_index: int, activation_bytes: float, recompute_flops: float) -> RecomputeDecision:
+        if isinstance(block_index, (bool, np.bool_)):
+            raise TypeError("block_index must be a non-negative integer.")
+        try:
+            block_index = operator.index(block_index)
+        except TypeError as exc:
+            raise TypeError("block_index must be a non-negative integer.") from exc
+        if block_index < 0:
+            raise ValueError("block_index must be non-negative.")
+        activation_bytes = _finite_float(activation_bytes, "activation_bytes", minimum=0.0)
+        recompute_flops = _finite_float(recompute_flops, "recompute_flops", minimum=0.0)
         benefit = estimate_recompute_benefit(activation_bytes, self.memory_value_per_byte)
         cost = estimate_recompute_cost(recompute_flops, self.flop_cost_per_unit)
         should_recompute = benefit > cost
@@ -1182,13 +1205,35 @@ class SelectiveRecomputePolicy:
 
     def decide_model(self, lm: Any, batch: int, seq_len: int, dtype_bytes: int = 4) -> list[RecomputeDecision]:
         """Decide per-block recompute for every block of a ``CausalLM``
-        (``mixle.models.transformer.build_causal_lm``), using its own ``d_model``/``n_layer``."""
-        d_model = int(lm.d_model)
-        n_layer = int(lm.n_layer)
+        (``mixle.models.transformer.build_causal_lm``), bound to its actual block manifest.
+
+        Linear recompute cost is measured from every block's real parameter count, so edited,
+        widened, coarsened, or otherwise heterogeneous blocks can receive different decisions.
+        """
+        batch = _positive_int(batch, "batch")
+        seq_len = _positive_int(seq_len, "seq_len")
+        dtype_bytes = _positive_int(dtype_bytes, "dtype_bytes")
+        if not hasattr(lm, "blocks"):
+            raise TypeError("model must expose an ordered blocks manifest.")
+        blocks = list(lm.blocks)
+        if not blocks:
+            raise ValueError("model blocks manifest must not be empty.")
         decisions = []
-        for i in range(n_layer):
+        for i, block in enumerate(blocks):
+            normalized_shape = getattr(getattr(block, "ln1", None), "normalized_shape", None)
+            if normalized_shape:
+                d_model = _positive_int(normalized_shape[0], f"blocks[{i}].d_model")
+            else:
+                d_model = _positive_int(getattr(block, "d_model", lm.d_model), f"blocks[{i}].d_model")
             activation_bytes = estimate_block_activation_bytes(batch, seq_len, d_model, dtype_bytes)
-            recompute_flops = estimate_block_recompute_flops(batch, seq_len, d_model)
+            parameter_count = sum(parameter.numel() for parameter in block.parameters())
+            linear_flops = 2.0 * float(batch) * float(seq_len) * float(parameter_count)
+            attention_flops = (
+                4.0 * float(batch) * float(seq_len) ** 2 * float(d_model)
+                if hasattr(block, "attn")
+                else 0.0
+            )
+            recompute_flops = linear_flops + attention_flops
             decisions.append(self.decide_block(i, activation_bytes, recompute_flops))
         return decisions
 
