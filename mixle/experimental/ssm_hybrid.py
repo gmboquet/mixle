@@ -11,8 +11,7 @@ Reuses, without reimplementing:
 - ``mixle.experimental.context_spine``: ``_rope_angles``/``_apply_rope``/``SlidingWindowState`` (E1's near
   field, exactly the code path ``SlidingWindowSpine.step`` uses).
 - ``mixle.experimental.moment_closure_attention``: ``ClusterBank``/``_empty_cluster_bank``/
-  ``mgf_cluster_attention``/``cluster_responsibilities``/``update_cluster_bank``/``birth_and_merge`` (E2's
-  far field, verbatim).
+  ``mgf_cluster_attention``/``ingest_cluster_batch`` (E2's far field, verbatim).
 - ``mixle.experimental.selective_scan``: ``_scan_layer``/``_s4d_real_a_log_init``/``_dt_bias_init`` (E5 part
   1's S6 recurrence and its verified init, verbatim -- the ONE scan implementation, not a second one).
 """
@@ -27,10 +26,9 @@ from mixle.experimental.graduation import REGISTRY, ExperimentalMechanism
 from mixle.experimental.moment_closure_attention import (
     ClusterBank,
     _empty_cluster_bank,
-    birth_and_merge,
-    cluster_responsibilities,
+    _representation_receipt,
+    ingest_cluster_batch,
     mgf_cluster_attention,
-    update_cluster_bank,
 )
 
 try:
@@ -187,10 +185,24 @@ if _HAS_TORCH:
                 cache_k, cache_v = state.near.cache_k[layer], state.near.cache_v[layer]
                 if cache_k is not None:
                     cache_len = cache_k.shape[1]
+                    _representation_receipt(
+                        state.banks[layer],
+                        batch_size=b,
+                        positions_seen=state.near.pos,
+                        near_tokens_per_stream=cache_len,
+                        evicted_tokens_per_stream=0,
+                    )
                     key_positions = torch.arange(state.near.pos - cache_len, state.near.pos + t, device=device)
                     k_full = torch.cat([cache_k, k], dim=1)
                     v_full = torch.cat([cache_v, v], dim=1)
                 else:
+                    _representation_receipt(
+                        state.banks[layer],
+                        batch_size=b,
+                        positions_seen=state.near.pos,
+                        near_tokens_per_stream=0,
+                        evicted_tokens_per_stream=0,
+                    )
                     key_positions = query_positions
                     k_full, v_full = k, v
 
@@ -256,21 +268,36 @@ if _HAS_TORCH:
                 h = h + mix_out
                 h = h + self.mlp[layer](self.ln2[layer](h))
 
-                keep = self.window
+                keep = min(self.window, k_full.shape[1])
+                evicted = k_full.shape[1] - keep
                 new_cache_k.append(k_full[:, -keep:])
                 new_cache_v.append(v_full[:, -keep:])
                 new_ssm_h.append(h_ssm_last)
 
-                bank, receipt = birth_and_merge(
+                if evicted > 0:
+                    bank, receipt = ingest_cluster_batch(
+                        bank,
+                        k_full[:, :evicted],
+                        v_full[:, :evicted],
+                        birth_threshold=self.birth_threshold,
+                        merge_threshold=self.merge_threshold,
+                    )
+                else:
+                    receipt = {
+                        "birthed": False,
+                        "birth_incorporated_batch": False,
+                        "merged": [],
+                        "soft_update_applied": False,
+                        "expected_ingested_tokens_per_head": 0,
+                        "count_conserved": True,
+                    }
+                receipt["accounting"] = _representation_receipt(
                     bank,
-                    k.detach(),
-                    v.detach(),
-                    birth_threshold=self.birth_threshold,
-                    merge_threshold=self.merge_threshold,
+                    batch_size=b,
+                    positions_seen=state.near.pos + t,
+                    near_tokens_per_stream=keep,
+                    evicted_tokens_per_stream=evicted,
                 )
-                if bank.n_clusters > 0:
-                    resp = cluster_responsibilities(k, bank)
-                    bank = update_cluster_bank(bank, k, v, resp)
                 new_banks.append(bank)
                 receipts.append(receipt)
 

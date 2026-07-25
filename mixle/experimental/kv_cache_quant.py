@@ -14,10 +14,9 @@ mechanisms rather than inventing a new quantizer:
 2. :func:`quantize_cluster_outliers` -- G4's sorted-profile quantizer (``mixle.models.sorted_profile_quantizer``)
    applied to the E2 ``ClusterBank``'s own outlier/tail bookkeeping. E2 already separates, per cluster, per
    chunk (``birth_and_merge``'s ``receipt["per_cluster_outlier_tokens"]``): tokens whose residual against
-   the cluster's Gaussian-affine fit was largest (the ``outlier_top_k`` highest-residual tokens per cluster,
-   currently a plain dense fp32 tensor -- E2's own module docstring calls this out as the "I2/G4 storage
-   seam", see ``E2_UNAVAILABLE_PIECES["I2/G4"]`` in ``moment_closure_attention.py``). This module closes
-   that seam: those flagged outlier tokens are int8-quantized ("quantized exact outliers" -- exact in the
+   the cluster's Gaussian-affine fit was largest (the ``outlier_top_k`` highest-residual tokens per cluster).
+   This module closes that storage seam: those flagged outlier tokens are int8-quantized ("quantized exact
+   outliers" -- exact in the
    sense of being carved out and identified individually, not exact in the sense of full float32 precision),
    while the surrounding non-outlier K/V population of the same chunk goes through G4's
    ``fit_sorted_profile`` (head-exact top-k + parametric Gaussian tail fit, its own KS-receipt-gated dense
@@ -174,8 +173,7 @@ def dequantize_kv_cache(q: AffineQuantized) -> Any:
 
 @dataclass
 class QuantizedClusterOutliers:
-    """Storage format for one ``birth_and_merge`` chunk's per-cluster outlier tokens (E2's "I2/G4 storage
-    seam", see ``moment_closure_attention.E2_UNAVAILABLE_PIECES["I2/G4"]``): the flagged outlier tokens'
+    """Storage format for one ``birth_and_merge`` chunk's per-cluster outlier tokens: the flagged tokens'
     K/V get :func:`quantize_kv_cache`'d ("quantized exact outliers" -- exact positions, quantized values);
     the surrounding non-outlier chunk population gets G4's :func:`~mixle.models.sorted_profile_quantizer.fit_sorted_profile`
     ("G4 parametric tails").
@@ -212,10 +210,7 @@ class ClusterTokenConservation:
 
     @property
     def conserved(self) -> bool:
-        return (
-            self.input_count == self.member_count
-            and self.member_count == self.outlier_count + self.tail_count
-        )
+        return self.input_count == self.member_count and self.member_count == self.outlier_count + self.tail_count
 
 
 def _token_indices(value: Any, *, name: str, n_tokens: int, device: Any) -> Any:
