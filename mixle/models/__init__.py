@@ -45,7 +45,7 @@ from mixle.models.dirichlet_process_mixture import (
     stick_breaking_weights,
 )
 from mixle.models.dpo_leaf import DPOLeaf, DPOModel
-from mixle.models.embedding import CategoricalEmbedding
+from mixle.models.embedding import CategoricalEmbedding, EmbeddingSpec
 from mixle.models.energy import (
     EnergyModel,
     build_convex_energy_net,
@@ -145,6 +145,7 @@ from mixle.models.transformer import build_causal_lm
 __all__ = [
     "LM",
     "CategoricalEmbedding",
+    "EmbeddingSpec",
     "CausalSkeleton",
     "CategoricalClassificationNeuralNetwork",
     "ConditionalIndependenceResult",
