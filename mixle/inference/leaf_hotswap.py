@@ -21,17 +21,13 @@ M-step cost proxy) to ``O(param_count)`` (a closed-form MLE).
 Correctness backbone (unchanged from the rest of the D-track): this is a SCHEDULING/specialization
 optimization only. Swapping a node's *model object* for an approximation is more aggressive than
 D2/D3's "leave the object alone, just skip recomputing/re-fitting it" story, so D4 earns back the
-Neal-Hinton guarantee two ways instead of one: (1) the swap itself is gated on a genuine, locally
-computed misfit RECEIPT (:func:`misfit_receipt`) -- not merely assumed to be a good approximation
--- and (2) the ORIGINAL gradient leaf is never discarded (:class:`SwapRecord.original`), so if the
-receipt later shows the surrogate drifting away from the real held-out data (e.g. the underlying
-regime shifts after the swap), :func:`swap_back` restores the exact retained object and gradient
-fitting resumes exactly where it left off -- "never truly forget", the same policy D2's freeze/
-roll-up commits to for frozen mixture components. F itself (the real Neal-Hinton free energy) is
-still the audit receipt: :func:`run_em_with_hotswap` gates every round's proposal -- the swap-in
-itself AND the following M-step (gradient OR closed-form), as one atomic unit -- behind the same
-accept/reject monotone-F test D2/D3 already use, so a bad swap can cost speed (a rejected-and-
-reverted round, or a later swap-back once already committed) but never correctness. This is the
+Neal-Hinton guarantee two ways instead of one: (1) the surrogate is compared directly with the
+original on independent validation rows (:func:`fidelity_receipt`) and (2) the ORIGINAL gradient
+leaf is never discarded (:class:`SwapRecord.original`). If independent monitoring later shows
+that fidelity degrading, restoring the original is proposed. F itself (the real Neal-Hinton free
+energy) is still the audit receipt: :func:`run_em_with_hotswap` measures the immutable last-accepted
+model before any mutation, then gates the swap-in or swap-back and following M-step as one atomic
+proposal. A bad mutation can cost speed but cannot silently become the new baseline. This is the
 gate that actually makes the mechanism safe: :func:`moment_matched_surrogate` on its own is a
 plain Gaussian MLE fit with no guarantee of matching an arbitrary (e.g. multi-modal) gradient
 leaf's held-out density -- see that function's own docstring for a worked adversarial example and
@@ -100,6 +96,7 @@ __all__ = [
     "SwapRecord",
     "LeafHotswapStats",
     "moment_matched_surrogate",
+    "fidelity_receipt",
     "misfit_receipt",
     "swap_leaf",
     "swap_back",
@@ -109,7 +106,7 @@ __all__ = [
 _DEFAULT_PLATEAU_Q_GAIN_TOL = 0.02
 _DEFAULT_PLATEAU_PATIENCE = 3
 _DEFAULT_PLATEAU_N_MC = 2000
-_DEFAULT_MISFIT_TOL = 0.15  # relative NLL degradation tolerated before swapping back
+_DEFAULT_MISFIT_TOL = 0.15  # normalized held-out NLL degradation tolerated
 _DEFAULT_ACCEPT_TOLERANCE = 1.0e-9
 # The accept gate compares a float32 torch leaf's density sum against a float64 closed-form
 # surrogate's, so the two paths legitimately differ by ~1e-7 RELATIVE of the objective magnitude
@@ -263,8 +260,8 @@ def moment_matched_surrogate(
     docstring): a swap-plus-refit round that does not improve the real Neal-Hinton objective is
     rejected and reverted, INCLUDING the swap itself, not merely the following M-step. Do not call
     :func:`moment_matched_surrogate` outside that gated driver (or an equivalent one) and assume
-    the result is a safe stand-in for ``gradient_leaf`` -- verify with a real misfit receipt
-    (:func:`misfit_receipt`) against genuinely held-out data first.
+    the result is a safe stand-in for ``gradient_leaf`` -- compare it directly with the original
+    using :func:`fidelity_receipt` on genuinely held-out data first.
     """
     if not isinstance(gradient_leaf, GradLeaf):
         raise TypeError("moment_matched_surrogate expects a GradLeaf (the D4 hot-swap target).")
@@ -299,7 +296,11 @@ class SwapRecord:
     surrogate: MultivariateGaussianDistribution
     swap_round: int
     baseline_misfit: float | None
+    fidelity_degradation: float | None = None
+    fidelity_rows: int = 0
+    monitoring_rows: int = 0
     misfit_history: list[float] = field(default_factory=list)
+    fidelity_history: list[float] = field(default_factory=list)
     swapped_back: bool = False
     swap_back_round: int | None = None
 
@@ -319,7 +320,12 @@ def _replace_leaf(tree: Any, leaf_path: Any, new_leaf: Any) -> Any:
             raise IndexError(f"leaf_path {idx} out of range for a {tree.num_components}-component mixture.")
         new_components = list(tree.components)
         new_components[idx] = new_leaf
-        return MixtureDistribution(new_components, list(tree.w), name=tree.name)
+        return MixtureDistribution(
+            new_components,
+            list(tree.w),
+            name=tree.name,
+            prior=tree.get_prior(),
+        )
     return new_leaf
 
 
@@ -365,6 +371,27 @@ def swap_back(tree: Any, swap_record: SwapRecord, *, round_index: int = 0) -> An
 # --------------------------------------------------------------------------------------------------
 
 
+def fidelity_receipt(original: GradLeaf, surrogate: MultivariateGaussianDistribution, validation_data: Any) -> float:
+    """Normalized held-out NLL degradation of ``surrogate`` against the retained ``original``.
+
+    The validation rows must be independent of the responsibility-weighted training rows used to
+    construct the surrogate. Negative values mean the surrogate scores the validation rows better;
+    positive values quantify how much worse it is relative to the original.
+    """
+    x = _as_matrix(validation_data)
+    if x.shape[0] == 0:
+        raise ValueError("fidelity_receipt requires at least one validation observation")
+    original_scores = np.asarray(original.seq_log_density(x), dtype=np.float64)
+    surrogate_scores = np.asarray(surrogate.seq_log_density(x), dtype=np.float64)
+    if original_scores.shape != (x.shape[0],) or surrogate_scores.shape != (x.shape[0],):
+        raise ValueError("fidelity scorers must return one aligned score per validation observation")
+    if np.any(~np.isfinite(original_scores)) or np.any(~np.isfinite(surrogate_scores)):
+        return float("inf")
+    original_nll = float(-np.mean(original_scores))
+    surrogate_nll = float(-np.mean(surrogate_scores))
+    return (surrogate_nll - original_nll) / max(abs(original_nll), 1.0)
+
+
 def misfit_receipt(surrogate: MultivariateGaussianDistribution, holdout_data: Any) -> float:
     """A genuine, locally-computed misfit scalar for ``surrogate`` on REAL held-out data: its own
     negative log-likelihood, ``-mean(log_density(x))``. Not a placeholder -- recomputed from real
@@ -374,6 +401,8 @@ def misfit_receipt(surrogate: MultivariateGaussianDistribution, holdout_data: An
     data it was swapped in to approximate.
     """
     x = _as_matrix(holdout_data)
+    if x.shape[0] == 0:
+        raise ValueError("misfit_receipt requires at least one held-out observation")
     return float(-np.mean(surrogate.seq_log_density(x)))
 
 
@@ -387,6 +416,8 @@ def should_swap_back(
     non-finite current misfit conservatively triggers a swap-back rather than silently keeping a
     surrogate whose fit quality this module cannot actually vouch for.
     """
+    if not np.isfinite(misfit_tol) or misfit_tol < 0.0:
+        raise ValueError("misfit_tol must be finite and non-negative")
     if swap_record.baseline_misfit is None or not np.isfinite(swap_record.baseline_misfit):
         return True
     if not np.isfinite(current_misfit):
@@ -408,11 +439,9 @@ class LeafHotswapStats:
     that is literally what "faster to same F" is measured against: a swapped component's per-round
     M-step cost drops from D1's ``param_count * _GRADIENT_STEPS`` proxy to ``param_count``.
 
-    ``swapped_this_round`` is which components a plateau *proposed* a swap for this round -- it is
-    recorded even when ``accepted`` is False (a rejected round rolls the swap itself back out of
-    the returned model/``swap_records``, but the attempt still happened and is worth a receipt);
-    use ``n_swapped`` (or check ``idx in swap_records``) for which swaps are actually COMMITTED as
-    of this round.
+    ``swapped_this_round`` and ``swapped_back_this_round`` are proposals and remain recorded when
+    ``accepted`` is False. Use ``n_swapped`` plus :class:`SwapRecord` state for committed actions.
+    ``rejected_by_fidelity`` records candidates stopped by the independent validation gate.
     """
 
     round_index: int
@@ -426,6 +455,7 @@ class LeafHotswapStats:
     accepted: bool = True
     swapped_this_round: tuple[Any, ...] = ()
     swapped_back_this_round: tuple[Any, ...] = ()
+    rejected_by_fidelity: tuple[Any, ...] = ()
 
 
 def _m_step_hotswap(
@@ -490,28 +520,28 @@ def run_em_with_hotswap(
     as a plateaued gradient leaf (see :class:`PlateauMonitor`) is swapped for a moment-matched
     closed-form surrogate (:func:`moment_matched_surrogate`, fit against that round's
     responsibility-weighted data), which is then updated by a closed-form re-fit every round
-    instead of gradient descent -- and swapped back to the retained original the instant a real
-    misfit receipt (:func:`misfit_receipt` on ``holdout_data``, when supplied) shows it has drifted
-    (see :func:`should_swap_back`).
+    instead of gradient descent. A swap is enabled only when ``holdout_data`` supplies disjoint
+    admission and monitoring rows: admission compares the surrogate directly with the retained
+    original, while monitoring independently checks that fidelity on later rounds.
 
     Reuses D2's ``FreezeRollupCache``/``detect_frozen`` for ordinary converged-component freezing
     (composes with D4 exactly like D3 does: a frozen component is excluded from both the swap
-    check and the M-step) and the same per-round objective accept/reject gate D2/D3 use, so
-    ``history`` is a real monotone-F receipt: swapping in a surrogate, or swapping back out of one,
-    can only ever be accepted if the round's real Neal-Hinton objective does not decrease.
+    check and the M-step) and an immutable-baseline objective gate. Swapping in a surrogate, or
+    swapping back out of one, is accepted only when the complete round stays within the explicitly
+    configured numerical tolerance of the last accepted Neal-Hinton objective.
 
-    ``holdout_data``, if given, is treated as belonging to whichever component the CURRENT model
-    would assign it to most responsibly at swap time (a single fixed sample scored against every
-    swapped component's surrogate) -- a simplification documented here rather than a full
-    per-component responsibility-weighted holdout split, mirroring D2/D3's own explicit
-    single-combinator scope carve-outs (see this module's docstring).
+    ``holdout_data`` must be independent of ``enc_data``. Its alternating rows are split into
+    non-overlapping fidelity-admission and ongoing-monitoring sets. Without at least two holdout
+    observations the driver still performs ordinary gated EM, but does not hot-swap any leaf.
 
     Returns ``(final_model, history, swap_records)`` where ``swap_records`` maps component index to
     every :class:`SwapRecord` created during the run (including ones later swapped back), so a
-    caller/test can retrieve the retained original gradient leaf and inspect ``misfit_history``.
+    caller/test can retrieve the retained original gradient leaf and inspect ``fidelity_history``.
     """
     if not isinstance(initial_model, MixtureDistribution):
         raise TypeError("run_em_with_hotswap requires a MixtureDistribution model.")
+    if not np.isfinite(misfit_tol) or misfit_tol < 0.0:
+        raise ValueError("misfit_tol must be finite and non-negative")
     cache = FreezeRollupCache(q_gain_tol=freeze_q_gain_tol) if cache is None else cache
     monitor = (
         PlateauMonitor(q_gain_tol=plateau_q_gain_tol, patience=plateau_patience, n_mc=plateau_n_mc)
@@ -520,6 +550,12 @@ def run_em_with_hotswap(
     )
     enc_payload = _resolve_payload(enc_data)
     holdout_matrix = None if holdout_data is None else _as_matrix(holdout_data)
+    if holdout_matrix is None or holdout_matrix.shape[0] < 2:
+        fidelity_matrix = None
+        monitoring_matrix = None
+    else:
+        fidelity_matrix = holdout_matrix[::2]
+        monitoring_matrix = holdout_matrix[1::2]
     map_objective = estimator.get_prior() is not None
 
     def objective_value(log_density: np.ndarray, candidate_model: MixtureDistribution) -> float:
@@ -535,125 +571,165 @@ def run_em_with_hotswap(
     old_value: float | None = None
 
     for round_index in range(max(1, int(max_its))):
-        frozen_idx = detect_frozen(cache, model)
-
-        swapped_this_round: list[int] = []
-        swapped_back_this_round: list[int] = []
-
-        # -- misfit check first: a surrogate that has drifted swaps back BEFORE this round's
-        #    E-step, so the (re-activated) gradient leaf's fresh log-density is what this round
-        #    actually scores/updates against, not a stale cached surrogate value.
-        for idx in list(swapped_idx):
-            record = swap_records[idx]
-            if holdout_matrix is None:
-                continue
-            current = misfit_receipt(model.components[idx], holdout_matrix)
-            record.misfit_history.append(current)
-            if should_swap_back(record, current, misfit_tol=misfit_tol):
-                model = swap_back(model, record, round_index=round_index)
-                swapped_idx.discard(idx)
-                monitor.reset(idx)
-                swapped_back_this_round.append(idx)
-
-        # -- plateau check: any eligible (not frozen, not already swapped) gradient leaf that has
-        #    plateaued gets swapped in for a moment-matched surrogate fit on THIS round's E-step
-        #    responsibilities (computed just below) -- so the swap needs one E-step first.
-        ll_mat, evals_e = _component_log_density_matrix(model, enc_payload, cache, frozen_idx | swapped_idx)
-        log_density, gamma = _combine(ll_mat, model.log_w)
-        current_value = objective_value(log_density, model)
+        # The accepted model and objective are immutable for this entire round. Every swap-in,
+        # swap-back, and M-step below is a proposal compared with this baseline.
+        accepted_model = model
+        frozen_idx = detect_frozen(cache, accepted_model)
+        baseline_ll, evals_baseline = _component_log_density_matrix(
+            accepted_model,
+            enc_payload,
+            cache,
+            frozen_idx | swapped_idx,
+        )
+        baseline_log_density, baseline_gamma = _combine(baseline_ll, accepted_model.log_w)
+        baseline_value = objective_value(baseline_log_density, accepted_model)
         if old_value is None:
-            old_value = current_value
+            old_value = baseline_value
 
-        # ``pre_swap_model`` is the receipt of "the tree as it stood when ``current_value`` was
-        # measured" -- the ONLY state the round's accept/reject gate below is entitled to fall back
-        # to. A newly-triggered plateau swap is proposed into ``model`` below (so the very same
-        # round's closed-form M-step can immediately re-fit it against fresh responsibilities), but
-        # that proposal is provisional exactly like the M-step's own ``candidate``: if the round is
-        # rejected, EVERYTHING proposed this round -- the M-step AND the swap-in -- must roll back
-        # together, or a swap that measurably worsens the objective would silently survive into the
-        # returned model even though ``accepted`` reads False for that round (the bug this comment
-        # replaces: ``model`` used to be rebound in place by the swap loop below with no matching
-        # rollback path, so a rejected round still returned the swapped-in surrogate).
-        pre_swap_model = model
-        new_swap_ids: list[int] = []
+        working_model = accepted_model
+        working_swapped_idx = set(swapped_idx)
+        working_frozen_idx = set(frozen_idx)
+        proposed_swapbacks: list[int] = []
+        proposed_records: dict[int, SwapRecord] = {}
+        rejected_by_fidelity: list[int] = []
 
-        for idx in range(model.num_components):
-            if idx in frozen_idx or idx in swapped_idx or model.zw[idx]:
-                continue
-            component = model.components[idx]
-            if not isinstance(component, GradLeaf):
-                continue
-            if not monitor.is_plateaued(idx, component, scores=ll_mat[:, idx], nobs=1.0):
-                continue
-            enc_i = _component_enc(enc_payload, idx)
-            surrogate = moment_matched_surrogate(component, enc_i, weights=gamma[:, idx])
-            model, record = swap_leaf(model, idx, surrogate, round_index=round_index)
-            if holdout_matrix is not None:
-                record.baseline_misfit = misfit_receipt(surrogate, holdout_matrix)
-            swap_records[idx] = record
-            swapped_idx.add(idx)
-            swapped_this_round.append(idx)
-            new_swap_ids.append(idx)
+        # Ongoing monitoring compares the accepted surrogate directly with the retained original
+        # on rows disjoint from the admission rows. A triggered swap-back remains provisional.
+        if monitoring_matrix is not None:
+            for idx in sorted(swapped_idx):
+                record = swap_records[idx]
+                degradation = fidelity_receipt(record.original, accepted_model.components[idx], monitoring_matrix)
+                record.fidelity_history.append(degradation)
+                record.misfit_history.append(misfit_receipt(accepted_model.components[idx], monitoring_matrix))
+                if not np.isfinite(degradation) or degradation > misfit_tol:
+                    working_model = _replace_leaf(working_model, idx, record.original)
+                    working_swapped_idx.discard(idx)
+                    working_frozen_idx.discard(idx)
+                    proposed_swapbacks.append(idx)
 
-        # A GradLeaf's ordinary (non-swapped) M-step mutates its underlying nn.Module IN PLACE
-        # (opt.step()), and the pre- and post-step wrapper objects alias that same module -- unlike
-        # freeze_rollup.run_em_freeze_rollup (which snapshots exactly this way before its own
-        # _m_step call), this loop had no such snapshot, so a rejected round's gradient update
-        # silently survived: `model = pre_swap_model` below restores which WRAPPER objects are
-        # "current" (undoing the swap-in), but not the shared module's already-mutated parameter
-        # values for any component that went through an ordinary gradient M-step this round.
-        transaction = MutableStateSnapshot.capture(model, estimator)
-        candidate, n_grad, n_closed = _m_step_hotswap(enc_payload, estimator, model, gamma, frozen_idx, swapped_idx)
-        # Reuse `frozen_idx` (computed against `model` above), not a fresh `detect_frozen(cache,
-        # candidate)` call -- see freeze_rollup.run_em_freeze_rollup's matching comment: a second
-        # detect_frozen call here would update the cache's score/weight convergence
-        # bookkeeping from a candidate that may be REJECTED below, and that pollution is never
-        # rolled back by this round's `transaction.restore()` (which only undoes model/estimator's
-        # own mutable state), letting a discarded candidate's reading masquerade as convergence
-        # progress the real trajectory never earned.
-        ll_mat_c, evals_c = _component_log_density_matrix(candidate, enc_payload, cache, frozen_idx | swapped_idx)
+        if proposed_swapbacks:
+            working_ll, evals_working = _component_log_density_matrix(
+                working_model,
+                enc_payload,
+                cache,
+                working_frozen_idx | working_swapped_idx,
+            )
+            _, working_gamma = _combine(working_ll, working_model.log_w)
+        else:
+            working_ll = baseline_ll
+            working_gamma = baseline_gamma
+            evals_working = 0
+
+        # New hot-swaps require independent admission fidelity before they even enter the
+        # objective-gated proposal.
+        if fidelity_matrix is not None:
+            for idx in range(working_model.num_components):
+                if (
+                    idx in working_frozen_idx
+                    or idx in working_swapped_idx
+                    or idx in proposed_swapbacks
+                    or working_model.zw[idx]
+                ):
+                    continue
+                component = working_model.components[idx]
+                if not isinstance(component, GradLeaf):
+                    continue
+                if not monitor.is_plateaued(idx, component, scores=working_ll[:, idx], nobs=1.0):
+                    continue
+                enc_i = _component_enc(enc_payload, idx)
+                surrogate = moment_matched_surrogate(component, enc_i, weights=working_gamma[:, idx])
+                degradation = fidelity_receipt(component, surrogate, fidelity_matrix)
+                if not np.isfinite(degradation) or degradation > misfit_tol:
+                    rejected_by_fidelity.append(idx)
+                    monitor.reset(idx)
+                    continue
+                working_model, record = swap_leaf(working_model, idx, surrogate, round_index=round_index)
+                record.fidelity_degradation = degradation
+                record.fidelity_rows = len(fidelity_matrix)
+                record.monitoring_rows = len(monitoring_matrix)
+                record.baseline_misfit = misfit_receipt(surrogate, monitoring_matrix)
+                proposed_records[idx] = record
+                working_swapped_idx.add(idx)
+
+        # Gradient M-steps may mutate shared torch modules in place, so the proposal owns a
+        # transaction that restores every such mutation on rejection.
+        transaction = MutableStateSnapshot.capture(working_model, estimator)
+        candidate, n_grad, n_closed = _m_step_hotswap(
+            enc_payload,
+            estimator,
+            working_model,
+            working_gamma,
+            working_frozen_idx,
+            working_swapped_idx,
+        )
+        ll_mat_c, evals_c = _component_log_density_matrix(
+            candidate,
+            enc_payload,
+            cache,
+            working_frozen_idx | working_swapped_idx,
+        )
         candidate_log_density, _ = _combine(ll_mat_c, candidate.log_w)
         candidate_value = objective_value(candidate_log_density, candidate)
 
-        # the slack's relative term absorbs float32-leaf-vs-float64-surrogate path noise (see
-        # _DEFAULT_REL_ACCEPT_TOLERANCE); real degradations are orders of magnitude above it
-        accept_slack = max(accept_tolerance, rel_accept_tolerance * abs(current_value))
-        accepted = np.isfinite(candidate_value) and candidate_value + accept_slack >= current_value
+        # Validate the actual post-M-step surrogate, not merely the pre-M-step proposal.
+        candidate_fidelity_failed: list[int] = []
+        if fidelity_matrix is not None and monitoring_matrix is not None:
+            for idx in sorted(working_swapped_idx):
+                record = proposed_records.get(idx, swap_records.get(idx))
+                if record is None:
+                    candidate_fidelity_failed.append(idx)
+                    continue
+                validation = fidelity_matrix if idx in proposed_records else monitoring_matrix
+                degradation = fidelity_receipt(record.original, candidate.components[idx], validation)
+                if idx in proposed_records:
+                    record.fidelity_degradation = degradation
+                if not np.isfinite(degradation) or degradation > misfit_tol:
+                    candidate_fidelity_failed.append(idx)
+                    if idx not in rejected_by_fidelity:
+                        rejected_by_fidelity.append(idx)
+
+        accept_slack = max(accept_tolerance, rel_accept_tolerance * abs(baseline_value))
+        accepted = (
+            not candidate_fidelity_failed
+            and np.isfinite(candidate_value)
+            and candidate_value + accept_slack >= baseline_value
+        )
         if accepted:
             model = candidate
             round_value = candidate_value
+            swapped_idx = working_swapped_idx
+            for idx in proposed_swapbacks:
+                record = swap_records[idx]
+                record.swapped_back = True
+                record.swap_back_round = round_index
+                monitor.reset(idx)
+                cache.invalidate(idx)
+            swap_records.update(proposed_records)
         else:
-            # Roll back not just the M-step but this round's provisional swap-in(s) too: the gate
-            # rejected the round's objective, so the surrogate that produced it never earns a place
-            # in the returned model. The retained gradient leaf(s) go back into ``model`` exactly as
-            # :func:`swap_back` would restore them, the streak resets so the plateau monitor can
-            # retry cleanly next round, and any never-committed ``SwapRecord``/cache entry from this
-            # round's rejected proposal is discarded rather than left to look like a real swap.
-            transaction.restore()  # undo any in-place gradient-leaf mutation from this round's M-step
-            model = pre_swap_model
-            for idx in new_swap_ids:
-                swapped_idx.discard(idx)
-                swap_records.pop(idx, None)
+            transaction.restore()
+            model = accepted_model
+            round_value = baseline_value
+            for idx in proposed_records:
                 cache.invalidate(idx)
                 monitor.reset(idx)
-            round_value = current_value
 
         history.append(
             LeafHotswapStats(
                 round_index=round_index,
                 n_components=model.num_components,
-                n_frozen=len(frozen_idx),
+                n_frozen=len(working_frozen_idx),
                 n_swapped=len(swapped_idx),
-                n_log_density_evals=evals_e + evals_c,
+                n_log_density_evals=evals_baseline + evals_working + evals_c,
                 n_gradient_m_steps=n_grad,
                 n_closed_form_m_steps=n_closed,
                 objective=round_value,
                 accepted=accepted,
-                swapped_this_round=tuple(swapped_this_round),
-                swapped_back_this_round=tuple(swapped_back_this_round),
+                swapped_this_round=tuple(proposed_records),
+                swapped_back_this_round=tuple(proposed_swapbacks),
+                rejected_by_fidelity=tuple(rejected_by_fidelity),
             )
         )
-        cache.record_component_scores(ll_mat_c if accepted else ll_mat)
+        cache.record_component_scores(ll_mat_c if accepted else baseline_ll)
 
         if delta is not None and 0.0 <= round_value - old_value < delta:
             break
