@@ -67,6 +67,57 @@ _MIN_BLOCK = 8
 _PERPLEXITY_FAMILY_SEED = 20240101  # fixes *which* Markov chain is "the benchmark"; independent of the sample seed
 
 
+def _exact_int(value: Any, name: str, *, minimum: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return result
+
+
+def _seed(value: Any) -> int:
+    result = _exact_int(value, "seed", minimum=0)
+    if result > np.iinfo(np.uint64).max:
+        raise ValueError("seed is outside the supported unsigned 64-bit range")
+    return result
+
+
+def _finite_score(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a finite real scalar")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a finite real scalar") from exc
+    if not np.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+def _model_device(model: Any) -> Any:
+    import torch
+
+    tensors = list(model.parameters()) if callable(getattr(model, "parameters", None)) else []
+    tensors += list(model.buffers()) if callable(getattr(model, "buffers", None)) else []
+    devices = {tensor.device for tensor in tensors}
+    if len(devices) > 1:
+        raise ValueError(f"evaluation model spans multiple devices: {sorted(map(str, devices))}")
+    return next(iter(devices), torch.device("cpu"))
+
+
+def _validated_logits(value: Any, rows: int, vocab: int, task: str) -> Any:
+    import torch
+
+    if not isinstance(value, torch.Tensor):
+        raise TypeError(f"{task} model output must be a torch.Tensor")
+    if value.ndim != 2 or tuple(value.shape) != (rows, vocab):
+        raise ValueError(f"{task} logits must have shape {(rows, vocab)}; got {tuple(value.shape)}")
+    if not bool(torch.isfinite(value).all()):
+        raise ValueError(f"{task} logits contain non-finite values")
+    return value
+
+
 def markov_transition_matrix(vocab: int) -> np.ndarray:
     """The fixed order-1 Markov chain the perplexity task scores against.
 
@@ -89,10 +140,29 @@ class TaskResult:
     """One capability-axis score: a name, a scalar, and which direction is "better" for regression math."""
 
     name: str
-    score: float
+    score: float | None
     higher_is_better: bool
     n_examples: int
     details: dict[str, Any] = field(default_factory=dict)
+    succeeded: bool = True
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("task name must be a non-empty string")
+        if not isinstance(self.higher_is_better, (bool, np.bool_)):
+            raise TypeError("higher_is_better must be a boolean")
+        _exact_int(self.n_examples, "n_examples", minimum=0)
+        if not isinstance(self.details, dict):
+            raise TypeError("task details must be a dictionary")
+        if not isinstance(self.succeeded, (bool, np.bool_)):
+            raise TypeError("task succeeded flag must be a boolean")
+        if self.succeeded:
+            if self.error is not None:
+                raise ValueError("a successful task cannot carry an error")
+            _finite_score(self.score, f"task {self.name!r} score")
+        elif self.score is not None or not isinstance(self.error, str) or not self.error:
+            raise ValueError("a failed task must carry score=None and a non-empty error")
 
 
 @dataclass
@@ -104,7 +174,19 @@ class EvalReport:
     seed: int
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def scores(self) -> dict[str, float]:
+    def __post_init__(self) -> None:
+        if not isinstance(self.checkpoint_id, str) or not self.checkpoint_id:
+            raise ValueError("checkpoint_id must be a non-empty string")
+        _seed(self.seed)
+        if not isinstance(self.tasks, list) or not all(isinstance(task, TaskResult) for task in self.tasks):
+            raise TypeError("tasks must be a list of TaskResult values")
+        names = [task.name for task in self.tasks]
+        if len(names) != len(set(names)):
+            raise ValueError("task names must be unique within an evaluation report")
+        if not isinstance(self.metadata, dict):
+            raise TypeError("metadata must be a dictionary")
+
+    def scores(self) -> dict[str, float | None]:
         """``{task_name: score}`` -- the compact view :func:`track_regression` consumes."""
         return {t.name: t.score for t in self.tasks}
 
@@ -119,6 +201,8 @@ class EvalReport:
                     "higher_is_better": t.higher_is_better,
                     "n_examples": t.n_examples,
                     "details": t.details,
+                    "succeeded": t.succeeded,
+                    "error": t.error,
                 }
                 for t in self.tasks
             ],
@@ -131,7 +215,9 @@ class EvalReport:
 # ---------------------------------------------------------------------------
 
 
-def _held_out_perplexity_task(model: Any, vocab: int, block: int, rng: Any, n_examples: int) -> TaskResult:
+def _held_out_perplexity_task(
+    model: Any, vocab: int, block: int, rng: Any, n_examples: int, device: Any
+) -> TaskResult:
     """Cross-entropy / perplexity against a fixed order-1 Markov chain over the vocabulary.
 
     See :func:`markov_transition_matrix`: the chain itself is a fixed benchmark distribution; ``rng`` (seeded
@@ -151,12 +237,13 @@ def _held_out_perplexity_task(model: Any, vocab: int, block: int, rng: Any, n_ex
         seqs[:, t] = nxt
         cur = nxt
 
-    x = torch.as_tensor(seqs[:, :-1])
-    y = torch.as_tensor(seqs[:, -1])
+    x = torch.as_tensor(seqs[:, :-1], device=device)
+    y = torch.as_tensor(seqs[:, -1], device=device)
     with torch.no_grad():
-        logits = model(x)
+        logits = _validated_logits(model(x), n_examples, vocab, "held_out_perplexity")
         loss = torch.nn.functional.cross_entropy(logits, y)
     loss_v = float(loss.item())
+    _finite_score(loss_v, "held_out_perplexity cross_entropy")
     ppl = float(np.exp(min(loss_v, 50.0)))  # clip before exp so a garbage model can't overflow to inf
     return TaskResult(
         name="held_out_perplexity",
@@ -167,7 +254,7 @@ def _held_out_perplexity_task(model: Any, vocab: int, block: int, rng: Any, n_ex
     )
 
 
-def _arithmetic_task(model: Any, vocab: int, block: int, rng: Any, n_examples: int) -> TaskResult:
+def _arithmetic_task(model: Any, vocab: int, block: int, rng: Any, n_examples: int, device: Any) -> TaskResult:
     """Modular addition ``a + b = ?`` (mod ``m``) as a single next-token prediction; accuracy is the score."""
     import torch
 
@@ -179,10 +266,10 @@ def _arithmetic_task(model: Any, vocab: int, block: int, rng: Any, n_examples: i
     target = (a + b) % m
 
     seq = np.stack([a, np.full(n_examples, plus_id), b, np.full(n_examples, eq_id)], axis=1)
-    x = torch.as_tensor(seq.astype(np.int64))
-    y = torch.as_tensor(target.astype(np.int64))
+    x = torch.as_tensor(seq.astype(np.int64), device=device)
+    y = torch.as_tensor(target.astype(np.int64), device=device)
     with torch.no_grad():
-        logits = model(x)
+        logits = _validated_logits(model(x), n_examples, vocab, "modular_arithmetic")
         pred = logits.argmax(dim=-1)
     acc = float((pred == y).float().mean().item())
     return TaskResult(
@@ -194,7 +281,7 @@ def _arithmetic_task(model: Any, vocab: int, block: int, rng: Any, n_examples: i
     )
 
 
-def _parity_task(model: Any, vocab: int, block: int, rng: Any, n_examples: int) -> TaskResult:
+def _parity_task(model: Any, vocab: int, block: int, rng: Any, n_examples: int, device: Any) -> TaskResult:
     """XOR parity of a random bitstring as a next-token prediction; a counting axis orthogonal to arithmetic."""
     import torch
 
@@ -206,10 +293,10 @@ def _parity_task(model: Any, vocab: int, block: int, rng: Any, n_examples: int) 
     bits = rng.integers(0, 2, size=(n_examples, bit_len))
     target = bits.sum(axis=1) % 2
 
-    x = torch.as_tensor(bits.astype(np.int64))
-    y = torch.as_tensor(target.astype(np.int64))
+    x = torch.as_tensor(bits.astype(np.int64), device=device)
+    y = torch.as_tensor(target.astype(np.int64), device=device)
     with torch.no_grad():
-        logits = model(x)
+        logits = _validated_logits(model(x), n_examples, vocab, "parity_reasoning")
         pred = logits.argmax(dim=-1)
     acc = float((pred == y).float().mean().item())
     return TaskResult(
@@ -221,7 +308,7 @@ def _parity_task(model: Any, vocab: int, block: int, rng: Any, n_examples: int) 
     )
 
 
-def _induction_task(model: Any, vocab: int, block: int, rng: Any, n_examples: int) -> TaskResult:
+def _induction_task(model: Any, vocab: int, block: int, rng: Any, n_examples: int, device: Any) -> TaskResult:
     """Synthetic induction-head probe: ``... A B ... A -> ?``, correct completion ``B``.
 
     The standard synthetic proxy for in-context learning: a bigram ``(A, B)`` is planted once early in the
@@ -233,21 +320,23 @@ def _induction_task(model: Any, vocab: int, block: int, rng: Any, n_examples: in
     if ctx_len < 4:
         raise ValueError("induction task needs block >= 4")
 
-    seqs = rng.integers(0, vocab, size=(n_examples, ctx_len))
     a = rng.integers(0, vocab, size=n_examples)
     b = rng.integers(0, vocab, size=n_examples)
     b = np.where(b == a, (b + 1) % vocab, b)  # A != B
     plant_pos = rng.integers(0, ctx_len - 3, size=n_examples)  # leave room for [.., A, B, .., A]
+    seqs = np.empty((n_examples, ctx_len), dtype=np.int64)
     for i in range(n_examples):
+        allowed = np.delete(np.arange(vocab), a[i])
+        seqs[i] = rng.choice(allowed, size=ctx_len)
         p = int(plant_pos[i])
         seqs[i, p] = a[i]
         seqs[i, p + 1] = b[i]
         seqs[i, ctx_len - 1] = a[i]  # repeat A as the final context token
 
-    x = torch.as_tensor(seqs.astype(np.int64))
-    y = torch.as_tensor(b.astype(np.int64))
+    x = torch.as_tensor(seqs, device=device)
+    y = torch.as_tensor(b.astype(np.int64), device=device)
     with torch.no_grad():
-        logits = model(x)
+        logits = _validated_logits(model(x), n_examples, vocab, "in_context_induction")
         pred = logits.argmax(dim=-1)
     acc = float((pred == y).float().mean().item())
     return TaskResult(
@@ -255,11 +344,24 @@ def _induction_task(model: Any, vocab: int, block: int, rng: Any, n_examples: in
         score=acc,
         higher_is_better=True,
         n_examples=n_examples,
-        details={"context_len": ctx_len, "chance_accuracy": 1.0 / vocab},
+        details={
+            "context_len": ctx_len,
+            "chance_accuracy": 1.0 / vocab,
+            "instances": {
+                "contexts": seqs.tolist(),
+                "targets": b.tolist(),
+                "plant_positions": plant_pos.tolist(),
+            },
+        },
     )
 
 
-_TASKS = (_held_out_perplexity_task, _arithmetic_task, _parity_task, _induction_task)
+_TASKS = (
+    (_held_out_perplexity_task, "held_out_perplexity", False),
+    (_arithmetic_task, "modular_arithmetic", True),
+    (_parity_task, "parity_reasoning", True),
+    (_induction_task, "in_context_induction", True),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -283,18 +385,41 @@ def evaluate_checkpoint(
     """
     if not hasattr(model, "vocab") or not hasattr(model, "block"):
         raise TypeError("evaluate_checkpoint expects a CausalLM-like model with .vocab and .block attributes")
-    vocab, block = int(model.vocab), int(model.block)
+    vocab = _exact_int(model.vocab, "model.vocab", minimum=1)
+    block = _exact_int(model.block, "model.block", minimum=1)
+    seed = _seed(seed)
+    n_examples = _exact_int(n_examples, "n_examples", minimum=1)
+    if not isinstance(checkpoint_id, str) or not checkpoint_id:
+        raise ValueError("checkpoint_id must be a non-empty string")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise TypeError("metadata must be a dictionary or None")
     if vocab < _MIN_VOCAB:
         raise ValueError(f"eval suite needs vocab >= {_MIN_VOCAB} (got {vocab})")
     if block < _MIN_BLOCK:
         raise ValueError(f"eval suite needs block >= {_MIN_BLOCK} (got {block})")
 
     was_training = getattr(model, "training", False)
+    device = _model_device(model)
     if hasattr(model, "eval"):
         model.eval()
     try:
         rng = np.random.default_rng(seed)
-        results = [task(model, vocab, block, rng, n_examples) for task in _TASKS]
+        results = []
+        for task, task_name, higher_is_better in _TASKS:
+            try:
+                results.append(task(model, vocab, block, rng, n_examples, device))
+            except Exception as exc:  # noqa: BLE001 - task failures belong in the evaluation receipt
+                results.append(
+                    TaskResult(
+                        name=task_name,
+                        score=None,
+                        higher_is_better=higher_is_better,
+                        n_examples=n_examples,
+                        details={"device": str(device)},
+                        succeeded=False,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                )
     finally:
         if was_training and hasattr(model, "train"):
             model.train()
@@ -374,8 +499,29 @@ def track_regression(
     """
     if reference not in ("best", "prior"):
         raise ValueError("reference must be 'best' or 'prior'")
+    threshold = _finite_score(threshold, "threshold")
     if threshold < 0:
         raise ValueError("threshold must be non-negative")
+    if not isinstance(reports, Sequence) or any(not isinstance(report, EvalReport) for report in reports):
+        raise TypeError("reports must be a sequence of EvalReport values")
+    checkpoint_ids = [report.checkpoint_id for report in reports]
+    if len(checkpoint_ids) != len(set(checkpoint_ids)):
+        raise ValueError("checkpoint_id values must be unique within a regression sequence")
+    expected_schema: dict[str, bool] | None = None
+    for report in reports:
+        schema = {task.name: task.higher_is_better for task in report.tasks}
+        if len(schema) != len(report.tasks):
+            raise ValueError(f"checkpoint {report.checkpoint_id!r} contains duplicate task names")
+        if expected_schema is None:
+            expected_schema = schema
+        elif schema != expected_schema:
+            raise ValueError(
+                f"checkpoint {report.checkpoint_id!r} task schema/directions do not match the first report"
+            )
+        for task in report.tasks:
+            if not task.succeeded:
+                raise ValueError(f"checkpoint {report.checkpoint_id!r} task {task.name!r} failed: {task.error}")
+            _finite_score(task.score, f"checkpoint {report.checkpoint_id!r} task {task.name!r} score")
 
     flags: list[RegressionFlag] = []
     # best_so_far[task] = (score, checkpoint_id, index); direction resolved from the first report's TaskResult
@@ -386,13 +532,14 @@ def track_regression(
         for t in rep.tasks:
             directions.setdefault(t.name, t.higher_is_better)
             if t.name not in best_so_far:
-                best_so_far[t.name] = (t.score, rep.checkpoint_id, idx)
+                best_so_far[t.name] = (float(t.score), rep.checkpoint_id, idx)
                 continue
 
             ref_score, ref_id, ref_idx = best_so_far[t.name]
             higher_is_better = directions[t.name]
             denom = abs(ref_score) if abs(ref_score) > 1e-12 else 1e-12
-            raw_delta = (t.score - ref_score) / denom
+            current_score = float(t.score)
+            raw_delta = (current_score - ref_score) / denom
             # normalize so "negative" always means worse, regardless of metric direction
             signed = raw_delta if higher_is_better else -raw_delta
             if signed < -threshold:
@@ -401,7 +548,7 @@ def track_regression(
                         task=t.name,
                         checkpoint_id=rep.checkpoint_id,
                         checkpoint_index=idx,
-                        current_score=t.score,
+                        current_score=current_score,
                         reference_score=ref_score,
                         reference_checkpoint_id=ref_id,
                         reference_index=ref_idx,
@@ -411,10 +558,10 @@ def track_regression(
                 )
 
             if reference == "prior":
-                best_so_far[t.name] = (t.score, rep.checkpoint_id, idx)
+                best_so_far[t.name] = (current_score, rep.checkpoint_id, idx)
             else:  # "best": keep whichever of (current, reference) is better
-                is_better = t.score > ref_score if higher_is_better else t.score < ref_score
+                is_better = current_score > ref_score if higher_is_better else current_score < ref_score
                 if is_better:
-                    best_so_far[t.name] = (t.score, rep.checkpoint_id, idx)
+                    best_so_far[t.name] = (current_score, rep.checkpoint_id, idx)
 
     return RegressionReport(flags=flags, n_checkpoints=len(reports), threshold=threshold, reference=reference)
