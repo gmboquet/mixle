@@ -82,8 +82,17 @@ class SenseSimulateInvertReportTest(unittest.TestCase):
         # alpha, calibration-set size, and width_multiples spacing -- none broke the tie; only widening
         # tol did). tol=0.2 clears that edge with real margin: 125/125 across a (describer, calibrate,
         # describe) seed sweep resolve to a clean singleton, vs. 0/125 at tol=0.15.
+        #
+        # alpha=0.1 (this class's own default, not 0.2): MXR-080-0291 fixed PosteriorDescriber.calibrate
+        # to sum softmax probability over EVERY nested candidate that covers the calibration truth,
+        # not just an artificial single "exclusive band" -- the honest, sound event, but a stricter one
+        # to satisfy at a fixed alpha, since a candidate's own admission threshold now has to clear
+        # after genuinely sharing credit with the other candidates that also cover on each calibration
+        # row. alpha=0.2 no longer reliably reaches that bar here (0/125 across the same seed sweep,
+        # post-fix); alpha=0.1 does, with room to spare (256/256 across an 8x8x4 describer/calibrate/
+        # describe seed sweep, holding this test's own n=60 calibration set and tol=0.2 fixed).
         describer = PosteriorDescriber(
-            "depth_km", tol=0.2, k=3, alpha=0.2, width_multiples=(1.0, 3.0, 10.0), n_probe=300, seed=0
+            "depth_km", tol=0.2, k=3, alpha=0.1, width_multiples=(1.0, 3.0, 10.0), n_probe=300, seed=0
         )
         describer.calibrate(calibration_set, seed=0)
         claim = describer.describe(inv_model.posterior(y_obs), seed=0)

@@ -339,17 +339,34 @@ class PosteriorDescriber:
     def calibrate(self, calibration_set: Sequence[tuple[Any, float]], *, seed: int | None = None) -> PosteriorDescriber:
         """Fit the conformal threshold from ``(posterior, true_value)`` held-out pairs.
 
-        ``is_correct`` assigns EXCLUSIVE correctness across the ``k`` nested candidate widths --
-        the true value's distance from the shared center falls in exactly one of the ``k`` disjoint
-        precision BANDS ``(0, tol], (tol, 3*tol], ...`` (widths are nested/overlapping as claims, but
-        only the tightest band a true value actually falls in counts as "correct"). Without this, a
-        wide claim trivially contains the true value whenever a narrower nested claim does too, so
-        every calibration point would credit ALL of them at once and the conformal threshold would
-        never learn to prefer -- or reject -- any one candidate.
+        MXR-080-0291: ``is_correct`` is EXACTLY "does the emitted interval cover the truth" --
+        ``claim.contains(true_value)``, i.e. ``claim.lo <= true_value <= claim.hi`` -- checked
+        independently per candidate, non-strict on both ends. Nothing else. This module previously
+        assigned correctness to a single artificial distance BAND per candidate (the true value's
+        distance from the shared center had to land in an EXCLUSIVE, disjoint slice ``(prev_half,
+        this_half]``), which is a different and unsound event: a truth sitting exactly on the shared
+        center (distance 0) failed the narrowest band's strict ``0 < dist`` lower bound and therefore
+        failed EVERY band, so the objectively best-supported truth was scored as covered by nothing;
+        and a wider candidate that genuinely contains the truth (``dist <= its own half-width``) was
+        marked wrong whenever a narrower nested candidate ALSO contained it, purely because the
+        narrower band "claimed" that distance range first -- docking a candidate for a coverage fact
+        about a DIFFERENT candidate. Both are boundary/exclusivity artifacts of the banding scheme
+        itself, not properties of whether the claim actually covers the truth.
+
+        The direct coverage check has no such artifact: every nested candidate whose interval contains
+        ``true_value`` counts as correct, independently, exactly matching what :meth:`describe` /
+        :func:`claim_score` actually serve. This is the standard split-conformal LAC construction
+        :func:`mixle.inference.conformal.conformal_label_threshold` implements (mirrored by A1's
+        :class:`~mixle.task.calibrate.CalibratedTaskModel` and, for this codebase's other
+        conformal-calibrated surface, :meth:`mixle.reason.model.CrossModalModel.calibrate`,
+        MXR-080-0279): calibrate against the actual served event, not a proxy for it.
         """
+        calibration_set = list(calibration_set)
         posteriors = [p for p, _ in calibration_set]
         truths = [v for _, v in calibration_set]
-        half_widths = sorted(mult * self.tol for mult in self.width_multiples)
+        non_finite = [v for v in truths if not np.isfinite(v)]
+        if non_finite:
+            raise ValueError(f"calibration_set true_value(s) must be finite, got {non_finite!r}")
         k = len(self.width_multiples)  # exactly how many claims _generate() draws per posterior
 
         # `is_correct` is CalibratedGenerator.calibrate()'s correctness oracle: it is called with only
@@ -366,11 +383,7 @@ class PosteriorDescriber:
         def is_correct(posterior: Any, claim: Claim) -> bool:
             true_value = truths[calls["n"] // k]
             calls["n"] += 1
-            dist = abs(true_value - 0.5 * (claim.lo + claim.hi))
-            half = 0.5 * claim.width
-            idx = min(range(len(half_widths)), key=lambda j: abs(half_widths[j] - half))
-            band_lo = half_widths[idx - 1] if idx > 0 else 0.0
-            return band_lo < dist <= half_widths[idx]
+            return claim.contains(true_value)
 
         self._gen.calibrate(posteriors, is_correct, seed=seed)
         return self
