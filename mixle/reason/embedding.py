@@ -1,17 +1,28 @@
-"""A rate-adaptive common embedding whose active dimension scales with information content.
+"""A rate-adaptive embedding whose active dimension scales with information content.
 
 A fixed-width embedding wastes capacity on low-information inputs and truncates high-information
-ones. This encoder learns a *shared* latent code with a **variational** per-coordinate posterior
+ones. This encoder learns a latent code with a **variational** per-coordinate posterior
 ``q(z_k | x) = N(m_k(x), s_k(x)^2)`` and an ARD (automatic relevance determination) gate: a
 coordinate whose posterior stays at its prior (``KL(q || p) ~ 0``) carries no information and is
 *inactive*. The **active dimension of an input** is therefore ``#{k : KL(q(z_k|x) || p) > tau}`` --
-it grows, per input and per modality, with the mutual information between the input and the latent.
+it grows with the mutual information between the input and the latent.
 
 Training is a rate--distortion (beta-VAE) objective: reconstruct the input subject to a rate budget
 on the total KL. The ``beta`` knob sets bits-per-embedding; the data decides how those bits are
 spent across coordinates, so a dense high-entropy input lights up more coordinates than a sparse one.
-Because all inputs share one ordered coordinate system, the codes are comparable across modalities
-(a *common* embedding), and can index a :class:`mixle.reason.CrossModalStore`.
+
+CONTRACT (MXR-080-0282): one instance is a plain autoencoder over ONE fixed input feature space. All
+inputs it is fit and later queried on share that one instance's ordered coordinate system, so codes
+produced by THE SAME FITTED INSTANCE are comparable to each other and can index a
+:class:`mixle.reason.CrossModalStore` as one corpus's retrieval keys. This class has no modality
+identity, no paired views, no contrastive/alignment objective, and no modality-specific front ends --
+it does NOT align codes across *different* instances. Two independently-fit ``ScaledEmbedding``s
+(e.g. one per modality) converge to arbitrary, unrelated latent rotations, so comparing a code from
+one instance against a code from another (cosine similarity, nearest neighbor, shared coordinates,
+...) is meaningless, even when both share the same ``max_dim``. For genuine cross-modal comparison,
+use a mechanism built for it -- e.g. :class:`mixle.reason.CrossModalJoint` (a shared mixture-latent
+joint over named modalities) or Bayesian evidence fusion via :func:`mixle.reason.reason` -- not
+independently-fit embeddings.
 
 Torch is imported lazily; :mod:`mixle.reason` exposes this via a deferred attribute.
 """
@@ -87,7 +98,11 @@ def _require_2d_finite(X: Any, name: str, width: int) -> np.ndarray:
 
 
 class ScaledEmbedding:
-    """A beta-VAE-style common embedding with an ARD gate giving a data-dependent active dimension.
+    """A beta-VAE-style rate-adaptive embedding with an ARD gate giving a data-dependent active dim.
+
+    One instance covers a single fixed input feature space -- see the module docstring's CONTRACT
+    (MXR-080-0282): codes are comparable within one fitted instance, never across independently-fit
+    instances (e.g. one per modality has its own, unrelated latent rotation).
 
     Args:
         in_dim: input feature width.
@@ -189,7 +204,11 @@ class ScaledEmbedding:
             )
 
     def encode(self, X: Any) -> np.ndarray:
-        """The embedding means ``(n, max_dim)`` -- the common code (use with a store's keys)."""
+        """The embedding means ``(n, max_dim)`` -- this instance's code (use as a store's keys).
+
+        Only comparable to other codes from THIS fitted instance -- see the module docstring's
+        CONTRACT (MXR-080-0282).
+        """
         self._require_fitted()
         torch = _torch()
         Xs = (np.atleast_2d(np.asarray(X, dtype=float)) - self._x_mean) / self._x_scale
