@@ -1,14 +1,12 @@
-"""Experimental design for cross-modal reasoning -- which evidence to acquire, in what batch, under a budget.
+"""Budgeted selection over cross-modal evidence whose outcomes are already observed.
 
-:meth:`~mixle.reason.store.CrossModalStore.next_evidence` picks the single most informative item (expected
-information gain). But real evidence gathering is a *budgeted batch* over *fidelities*: acquire the set of
-``(item, fidelity)`` observations that most sharpens the answer per unit cost, without wasting budget on evidence
-that is redundant given what you have already chosen. This is cost-aware multi-fidelity experimental design --
-the discrete-corpus analogue of ``mixle.doe.multi_fidelity_minimize`` -- and it is *adaptive*: after each pick it
-re-scores every candidate against the *updated* belief, so overlapping evidence is naturally avoided (the
-near-optimal greedy for submodular information gain).
+:meth:`~mixle.reason.store.CrossModalStore.next_evidence` and this module score the realized evidence produced
+from stored payloads. That is useful for cost-aware selection from an existing evidence corpus, but it is not
+pre-acquisition expected information gain: hidden future outcomes require a declared predictive observation
+model. :func:`select_evidence_batch` therefore requires an explicit ``evidence_is_observed=True`` assertion and
+fails closed otherwise.
 
-:func:`select_evidence_batch` plans the acquisition; the returned :class:`AcquisitionPlan` carries the chosen
+:func:`select_evidence_batch` performs the selection; the returned :class:`AcquisitionPlan` carries the chosen
 ``(index, fidelity, gain, cost)`` trail, the total nats gained, and the assimilated belief.
 """
 
@@ -17,6 +15,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+
+import numpy as np
 
 from mixle.reason.store import CrossModalStore, _apply, _query_entropy
 
@@ -48,24 +48,66 @@ def select_evidence_batch(
     candidates: Sequence[int] | None = None,
     max_items: int | None = None,
     min_gain: float = 1e-9,
+    evidence_is_observed: bool = False,
 ) -> AcquisitionPlan:
-    """Greedily acquire the most-informative-per-cost ``(item, fidelity)`` evidence under a total ``budget``.
+    """Select already-observed evidence by realized gain under a total ``budget``.
 
-    At each step every remaining candidate is scored -- at each allowed fidelity -- by the entropy it would remove
-    from the query *given the belief so far*, divided by its cost; the best affordable one is folded in. Adaptive
-    re-scoring means a batch never double-counts overlapping evidence. Stops when nothing affordable helps.
+    This function evaluates the actual evidence built from each payload, so it is not a
+    pre-acquisition expected-information-gain planner. Callers must explicitly set
+    ``evidence_is_observed=True`` to confirm the candidate payloads are already observed and selection
+    does not leak hidden outcomes. A future acquisition requires a predictive observation model.
     """
+    if evidence_is_observed is not True:
+        raise ValueError(
+            "select_evidence_batch evaluates realized payload evidence and is only valid with "
+            "evidence_is_observed=True; hidden-outcome acquisition requires a predictive observation model."
+        )
+    budget = float(budget)
+    fine_cost = float(fine_cost)
+    coarse_cost = float(coarse_cost)
+    min_gain = float(min_gain)
+    if not np.isfinite(budget) or budget < 0.0:
+        raise ValueError("budget must be finite and non-negative.")
+    if not np.isfinite(fine_cost) or fine_cost <= 0.0 or not np.isfinite(coarse_cost) or coarse_cost <= 0.0:
+        raise ValueError("fine_cost and coarse_cost must be finite and positive.")
+    if not np.isfinite(min_gain) or min_gain < 0.0:
+        raise ValueError("min_gain must be finite and non-negative.")
+    if max_items is not None:
+        if (
+            isinstance(max_items, (bool, np.bool_))
+            or not isinstance(max_items, (int, np.integer))
+            or max_items < 0
+        ):
+            raise ValueError("max_items must be an exact non-negative integer or None.")
+        max_items = int(max_items)
     cost_of = {"coarse": float(coarse_cost), "fine": float(fine_cost)}
     build_of: dict[str, Callable[[Any], Any]] = {"coarse": store.coarse, "fine": store.fine}
-    fids = [f for f in fidelities if f in build_of]
+    fids = list(fidelities)
+    if not fids or len(set(fids)) != len(fids) or any(fidelity not in build_of for fidelity in fids):
+        raise ValueError("fidelities must be a non-empty unique sequence containing only 'coarse' and 'fine'.")
 
     pool = list(range(len(store.payloads))) if candidates is None else list(candidates)
+    if any(
+        isinstance(index, (bool, np.bool_))
+        or not isinstance(index, (int, np.integer))
+        or index < 0
+        or index >= len(store.payloads)
+        for index in pool
+    ):
+        raise ValueError("candidate indices must be exact integers within the store.")
+    pool = [int(index) for index in pool]
+    if len(set(pool)) != len(pool):
+        raise ValueError("candidate indices must be unique.")
     prior_entropy = _query_entropy(belief, query)
+    if not np.isfinite(prior_entropy):
+        raise ValueError("query entropy must be finite.")
     plan = AcquisitionPlan(belief=belief)
     remaining = set(pool)
 
     while remaining and (max_items is None or len(plan.items) < max_items):
         before = _query_entropy(plan.belief, query)
+        if not np.isfinite(before):
+            raise ValueError("query entropy must remain finite during selection.")
         best = None  # (gain_per_cost, idx, fidelity, evidence, gain, cost)
         for idx in remaining:
             payload = store.payloads[idx]
@@ -75,6 +117,8 @@ def select_evidence_batch(
                     continue
                 ev = build_of[fidelity](payload)
                 gain = before - _query_entropy(_apply(plan.belief, ev), query)
+                if not np.isfinite(gain):
+                    raise ValueError("candidate evidence produced a non-finite information gain.")
                 if gain <= min_gain:
                     continue
                 gpc = gain / max(cost, 1e-12)
@@ -89,4 +133,6 @@ def select_evidence_batch(
         remaining.discard(idx)
 
     plan.total_gain = float(prior_entropy - _query_entropy(plan.belief, query))
+    if not np.isfinite(plan.total_gain):
+        raise ValueError("selected evidence produced a non-finite total information gain.")
     return plan

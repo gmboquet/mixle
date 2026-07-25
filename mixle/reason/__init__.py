@@ -43,7 +43,7 @@ from mixle.reason.cycle_consistency import (
     selective_error,
 )
 from mixle.reason.design import AcquisitionPlan, select_evidence_batch
-from mixle.reason.discrete import DiscreteAnswer, model_evidence, reason_discrete
+from mixle.reason.discrete import DecisionAction, DiscreteAnswer, model_evidence, reason_discrete
 from mixle.reason.graph_llm import (
     GraphDistribution,
     GraphLLM,
@@ -89,6 +89,7 @@ __all__ = [
     "AXIOMS",
     "NonlinearEvidence",
     "DiscreteAnswer",
+    "DecisionAction",
     "model_evidence",
     "reason_discrete",
     "reason",

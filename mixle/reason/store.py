@@ -31,6 +31,12 @@ from mixle.inference.belief import GaussianBelief
 from mixle.reason.core import LinearGaussianEvidence
 
 
+def _exact_nonnegative_int(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 0:
+        raise ValueError(f"{name} must be an exact non-negative integer.")
+    return int(value)
+
+
 @dataclass(frozen=True)
 class RetrievalStep:
     """Provenance for one assimilated item: which corpus index, at what fidelity, and the nats it removed."""
@@ -68,12 +74,16 @@ class CrossModalStore:
         fine: Callable[[Any], LinearGaussianEvidence],
         metric: str = "euclidean",
     ) -> None:
-        self.keys = np.atleast_2d(np.asarray(keys, dtype=float))
+        self.keys = np.asarray(keys, dtype=float)
+        if self.keys.ndim != 2 or self.keys.shape[1] == 0 or not np.isfinite(self.keys).all():
+            raise ValueError("keys must be a finite two-dimensional (N, d) matrix with d > 0.")
         self.payloads = list(payloads)
         if self.keys.shape[0] != len(self.payloads):
             raise ValueError(f"{self.keys.shape[0]} keys but {len(self.payloads)} payloads")
         if metric not in ("euclidean", "cosine"):
             raise ValueError("metric must be 'euclidean' or 'cosine'")
+        if metric == "cosine" and np.any(np.linalg.norm(self.keys, axis=1) == 0.0):
+            raise ValueError("cosine keys must all have non-zero norm.")
         self.coarse = coarse
         self.fine = fine
         self.metric = metric
@@ -83,14 +93,19 @@ class CrossModalStore:
 
     def retrieve(self, query_key: Any, k: int = 8) -> list[int]:
         """Return indices of the nearest ``k`` embedding keys to ``query_key``."""
-        q = np.asarray(query_key, dtype=float).reshape(-1)
+        k = _exact_nonnegative_int(k, "k")
+        q = np.asarray(query_key, dtype=float)
+        if q.ndim != 1 or q.shape[0] != self.keys.shape[1] or not np.isfinite(q).all():
+            raise ValueError(f"query_key must be a finite vector of width {self.keys.shape[1]}.")
+        if self.metric == "cosine" and np.linalg.norm(q) == 0.0:
+            raise ValueError("cosine query_key must have non-zero norm.")
         if self.metric == "cosine":
             kn = self.keys / (np.linalg.norm(self.keys, axis=1, keepdims=True) + 1e-12)
             qn = q / (np.linalg.norm(q) + 1e-12)
             dist = 1.0 - kn @ qn
         else:
             dist = np.linalg.norm(self.keys - q, axis=1)
-        return list(np.argsort(dist)[: int(k)])
+        return list(np.argsort(dist)[:k])
 
     def assimilate(
         self,
@@ -109,6 +124,9 @@ class CrossModalStore:
         and a per-item provenance trail.
         """
         steps: list[RetrievalStep] = []
+        epsilon = float(epsilon)
+        if not np.isfinite(epsilon):
+            raise ValueError("epsilon must be finite.")
         for idx in self.retrieve(query_key, k):
             payload = self.payloads[idx]
             before = _query_entropy(belief, query)
@@ -139,12 +157,31 @@ class CrossModalStore:
         Returns ``(index, expected_gain_nats)``. ``fidelity`` selects the ``fine`` (raw) or
         ``coarse`` (embedding) evidence builder for the look-ahead.
         """
+        if fidelity not in {"fine", "coarse"}:
+            raise ValueError("fidelity must be exactly 'fine' or 'coarse'.")
         build = self.fine if fidelity == "fine" else self.coarse
         pool = list(range(len(self.payloads))) if candidates is None else list(candidates)
+        if not pool:
+            raise LookupError("no candidate evidence is available.")
+        if any(
+            isinstance(index, (bool, np.bool_))
+            or not isinstance(index, (int, np.integer))
+            or index < 0
+            or index >= len(self.payloads)
+            for index in pool
+        ):
+            raise ValueError("candidate indices must be exact integers within the store.")
+        pool = [int(index) for index in pool]
+        if len(set(pool)) != len(pool):
+            raise ValueError("candidate indices must be unique.")
         before = _query_entropy(belief, query)
+        if not np.isfinite(before):
+            raise ValueError("query entropy must be finite.")
         best_idx, best_gain = -1, -np.inf
         for idx in pool:
             gain = before - _query_entropy(_apply(belief, build(self.payloads[idx])), query)
+            if not np.isfinite(gain):
+                raise ValueError("candidate evidence produced a non-finite information gain.")
             if gain > best_gain:
                 best_idx, best_gain = idx, gain
         return best_idx, float(best_gain)

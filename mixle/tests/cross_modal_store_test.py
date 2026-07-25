@@ -32,6 +32,19 @@ class RetrieveTest(unittest.TestCase):
     def test_len_and_validation(self):
         with self.assertRaises(ValueError):
             CrossModalStore(np.zeros((3, 2)), [1, 2], coarse=lambda p: None, fine=lambda p: None)
+        with self.assertRaises(ValueError):
+            CrossModalStore(np.zeros(3), [1, 2, 3], coarse=lambda p: None, fine=lambda p: None)
+        with self.assertRaises(ValueError):
+            CrossModalStore([[0.0], [np.nan]], [1, 2], coarse=lambda p: None, fine=lambda p: None)
+
+    def test_retrieve_rejects_invalid_queries_and_limits(self):
+        store = CrossModalStore([[0.0], [1.0]], [1, 2], coarse=lambda p: None, fine=lambda p: None)
+        for query, k in (([0.0, 1.0], 1), ([np.nan], 1), ([0.0], -1), ([0.0], True), ([0.0], 1.5)):
+            with self.subTest(query=query, k=k), self.assertRaises(ValueError):
+                store.retrieve(query, k)
+        cosine = CrossModalStore([[1.0], [2.0]], [1, 2], coarse=lambda p: None, fine=lambda p: None, metric="cosine")
+        with self.assertRaisesRegex(ValueError, "non-zero"):
+            cosine.retrieve([0.0])
 
 
 class AssimilateTest(unittest.TestCase):
@@ -76,6 +89,16 @@ class AssimilateTest(unittest.TestCase):
 
 
 class ActiveRetrievalTest(unittest.TestCase):
+    def test_invalid_fidelity_candidates_and_empty_pool_fail_closed(self):
+        store = CrossModalStore([[0.0]], [1], coarse=lambda p: None, fine=lambda p: None)
+        belief = Latent.vector(1)
+        with self.assertRaises(ValueError):
+            store.next_evidence(belief, fidelity="typo")
+        with self.assertRaises(LookupError):
+            store.next_evidence(belief, candidates=[])
+        with self.assertRaises(ValueError):
+            store.next_evidence(belief, candidates=[-1])
+
     def test_greedy_active_beats_random_order(self):
         # Greedily fetching the highest-EIG item each step reduces entropy at least as fast as a
         # fixed arbitrary order.

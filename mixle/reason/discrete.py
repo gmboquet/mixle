@@ -11,11 +11,18 @@ elsewhere become reasoning evidence with no glue.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 import numpy as np
 
 from mixle.inference.belief import CategoricalBelief
+
+
+class DecisionAction(Enum):
+    """Typed out-of-band actions that cannot collide with user action labels."""
+
+    ABSTAIN = "abstain"
 
 
 def model_evidence(name: str, models: Any, x: Any) -> tuple[str, np.ndarray]:
@@ -43,8 +50,12 @@ class DiscreteAnswer:
 
     def top(self, k: int = 3) -> list[tuple[Any, float]]:
         """Return the top ``k`` hypotheses and probabilities."""
+        if isinstance(k, (bool, np.bool_)) or not isinstance(k, (int, np.integer)) or k < 0:
+            raise ValueError("k must be an exact non-negative integer.")
+        if k == 0:
+            return []
         p = self.belief.probs
-        order = np.argsort(-p)[: int(k)]
+        order = np.argsort(-p)[:k]
         return [(self.belief.labels[int(i)], float(p[i])) for i in order]
 
     def summary(self) -> str:
@@ -70,6 +81,13 @@ class DiscreteAnswer:
         """
         labels = self.belief.labels
         acts = list(actions) if actions is not None else list(labels)
+        if not acts:
+            raise ValueError("at least one decision action is required.")
+        try:
+            if len(set(acts)) != len(acts):
+                raise ValueError("decision action labels must be unique.")
+        except TypeError as exc:
+            raise TypeError("decision action labels must be hashable typed identities.") from exc
         p = self.belief.probs
         if callable(loss):
             mat = np.asarray([[float(loss(a, h)) for h in labels] for a in acts], dtype=np.float64)
@@ -77,10 +95,17 @@ class DiscreteAnswer:
             mat = np.asarray(loss, dtype=np.float64)
             if mat.shape != (len(acts), len(labels)):
                 raise ValueError("loss matrix must be (n_actions, n_hypotheses) = (%d, %d)" % (len(acts), len(labels)))
+        if not np.isfinite(mat).all():
+            raise ValueError("loss values must all be finite.")
         expected = mat @ p
         if abstain_cost is not None:
-            acts = [*acts, "abstain"]
-            expected = np.concatenate([expected, [float(abstain_cost)]])
+            abstain_cost = float(abstain_cost)
+            if not np.isfinite(abstain_cost):
+                raise ValueError("abstain_cost must be finite.")
+            acts = [*acts, DecisionAction.ABSTAIN]
+            expected = np.concatenate([expected, [abstain_cost]])
+        if not np.isfinite(expected).all():
+            raise ValueError("expected decision losses must all be finite.")
         i = int(np.argmin(expected))
         return {
             "action": acts[i],
