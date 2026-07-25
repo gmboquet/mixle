@@ -147,6 +147,14 @@ def _data_magnitude_safe(data: Any, max_magnitude: float, sample_size: int) -> t
     s = _numeric_data_sample(sample, sample_size)
     if s is None or s.size == 0:
         return False, "non-numeric / empty data -> float64", None
+    if not np.all(np.isfinite(s)):
+        # NaN/Inf anywhere in the sample must route to the safe fallback EXPLICITLY (MXR-080-0145,
+        # mirroring precision_plan.recommend_compute_precision's identical guard): IEEE-754 defines
+        # every comparison against NaN as False, so a NaN `amax` would make `amax > max_magnitude`
+        # below silently evaluate to False and fall through to the SAFE-looking `return True` instead
+        # of the correct float64 verdict -- the opposite of what "risk could not be computed" should
+        # mean.
+        return False, "non-finite data (NaN/Inf) -> float64", None
     amax = float(np.max(np.abs(s)))
     if amax > max_magnitude:
         return False, "data magnitude %.1e too large for float32 -> float64" % amax, amax
