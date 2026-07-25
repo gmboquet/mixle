@@ -148,14 +148,27 @@ def _fit_hierarchical(rv, data, **kw):
 
 @register_fitter("vmp")
 def _fit_vmp(rv, data, **kw):
-    # Entangled branch: a Mixture(...) RV reroutes to ``mixture_vmp`` using the RV's own family/args
-    # (only the component COUNT is threaded; component-level priors/fixed params/constraints are NOT
-    # applied -- use how='vi'/'mcmc' for those). Kept here as a closure over ``rv`` so the special
-    # case travels with the rest of the pure-``how`` table rather than living in the ladder.
+    # The specialized mixture route implements one model only: scalar Gaussian
+    # components with unknown mean/scale and inferred symmetric weights.  Reject
+    # every other declaration instead of silently replacing its likelihood or
+    # discarding fixed values and priors.
     from mixle.ppl import vmp as _vmp
 
     if isinstance(rv._family, CompositeFamily) and rv._family.name == "Mixture":
-        comps = rv._args[0]
+        comps, weights = rv._args
+        supported = all(
+            c._kind == "sample"
+            and not isinstance(c._family, CompositeFamily)
+            and c._family.name == "Normal"
+            and len(c._args) == 2
+            and all(a is free for a in c._args)
+            for c in comps
+        )
+        if not supported or (weights is not None and weights is not free):
+            raise NotImplementedError(
+                "mixture VMP supports only Mix([Normal(free, free), ...], weights=None|free); "
+                "use how='vi' or how='mcmc' for other families, fixed parameters, or declared priors."
+            )
         return _vmp.mixture_vmp(data, len(comps), **kw)
     return _vmp.vmp_fit(rv, data, **kw)
 
