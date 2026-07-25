@@ -8,9 +8,9 @@ Four receipts:
    auxiliary loss version scores materially higher.
 3. positions stable under re-chunking -- identical token stream through two different chunk-size
    schedules produces identical tree topology (paths, node ids, finalization order) for every node.
-4. stop-gradient horizon (receipted) -- exact ``detached_at_finalized_count - finalized_index_within_level
-   == H`` accounting, plus the "load-bearing, not just bookkept" consequence check: a loss built purely
-   from an archived (detached) node's summary must not touch ``compressor``'s gradient.
+4. stop-gradient horizon (receipted) -- detachment after ``H`` subsequent evictions, within the caller's
+   detach cadence, plus the "load-bearing, not just bookkept" consequence check: a loss built purely from
+   an archived (detached) node's summary must not touch ``compressor``'s gradient.
 """
 
 import numpy as np
@@ -140,6 +140,76 @@ def test_positions_stable_under_rechunking():
     assert topo_32 == topo_8 == topo_16, "tree topology (level, g, path) differs across chunk-size schedules"
 
 
+def test_frontier_is_bounded_non_overlapping_and_incomplete_leaves_are_visible():
+    torch.manual_seed(11)
+    model = SummaryTreeSpine(
+        VOCAB,
+        d_model=16,
+        n_layer=1,
+        n_head=2,
+        window=2,
+        fanout=2,
+        aux_weight=0.0,
+    )
+    state = model.init_state(1)
+    x = torch.randint(0, VOCAB, (1, 18))
+    y = torch.randint(0, VOCAB, (1, 18))
+
+    state, _ = model.step(state, (x[:, :3], y[:, :3]))
+    assert state.evicted_count == 1
+    assert state.receipt["pending_leaves"] == 1
+    assert len(model._far_field_nodes(state)) == 1
+
+    state, _ = model.step(state, (x[:, 3:], y[:, 3:]))
+    receipt = state.receipt
+    assert receipt["evicted_tokens_per_stream"] == 16
+    assert receipt["represented_leaf_mass"] == 16
+    assert receipt["non_overlapping"] is True
+    assert receipt["conserved"] is True
+    assert receipt["stored_frontier_nodes"] <= receipt["storage_bound"]
+    assert receipt["frontier_nodes"] < state.evicted_count
+
+
+def test_outputs_and_frontier_are_invariant_to_chunk_schedule():
+    torch.manual_seed(12)
+    model = SummaryTreeSpine(
+        VOCAB,
+        d_model=16,
+        n_layer=1,
+        n_head=2,
+        window=3,
+        fanout=2,
+        aux_weight=0.0,
+    )
+    x = torch.randint(0, VOCAB, (1, 12))
+    y = torch.randint(0, VOCAB, (1, 12))
+
+    with torch.no_grad():
+        full_state, full_loss = model.step(model.init_state(1), (x, y))
+        chunked_state = model.init_state(1)
+        chunked_losses = []
+        for start in range(0, x.shape[1], 3):
+            chunked_state, chunk_loss = model.step(
+                chunked_state,
+                (x[:, start : start + 3], y[:, start : start + 3]),
+            )
+            chunked_losses.append(chunk_loss)
+
+    torch.testing.assert_close(full_loss, torch.stack(chunked_losses).mean())
+    assert full_state.receipt == chunked_state.receipt
+    full_nodes = sorted(model._stored_frontier_nodes(full_state), key=lambda node: (node.level, node.g))
+    chunked_nodes = sorted(
+        model._stored_frontier_nodes(chunked_state),
+        key=lambda node: (node.level, node.g),
+    )
+    assert [(node.level, node.g, node.represented_leaves) for node in full_nodes] == [
+        (node.level, node.g, node.represented_leaves) for node in chunked_nodes
+    ]
+    for full_node, chunked_node in zip(full_nodes, chunked_nodes, strict=True):
+        torch.testing.assert_close(full_node.histogram, chunked_node.histogram)
+        torch.testing.assert_close(full_node.summary[0], chunked_node.summary[0])
+
+
 def test_digits_of_and_lca_depth_basic_properties():
     """Sanity-checks the integer building blocks the re-chunking receipt and the far-field bias
     depend on, independent of any trained model."""
@@ -161,10 +231,9 @@ def test_digits_of_and_lca_depth_basic_properties():
 
 
 def test_stop_gradient_horizon_exact_and_load_bearing():
-    """The horizon receipt: (a) every archived node's `detached_at_finalized_count -
-    finalized_index_within_level == H` exactly (not `>= H`), and (b) the horizon is load-bearing --
-    a loss built purely from an archived node's (detached) summary must not touch `compressor`'s
-    gradient, since that summary carries no autograd path back to it."""
+    """The horizon receipt: (a) every archived frontier node is detached after at least ``H`` later
+    evictions, with at most one caller chunk of cadence overshoot, and (b) the horizon is load-bearing:
+    a loss built purely from an archived summary cannot touch ``compressor`` gradients."""
     torch.manual_seed(0)
     H = 2
     m = SummaryTreeSpine(
@@ -186,14 +255,16 @@ def test_stop_gradient_horizon_exact_and_load_bearing():
     n_checked = 0
     for level_pending in state.archived:
         for node in level_pending:
-            diff = node.detached_at_finalized_count - node.finalized_index_within_level
-            assert diff == H, f"level {node.level} node g={node.g}: horizon accounting not exact (diff={diff}, H={H})"
+            diff = node.detached_at_evicted_count - node.finalized_step
+            assert H <= diff < H + 2, (
+                f"level {node.level} node g={node.g}: horizon accounting exceeds detach cadence (diff={diff}, H={H})"
+            )
             assert node.summary[0].requires_grad is False and node.summary[0].grad_fn is None
             n_checked += 1
-    print(f"[E4 receipt 4a] {n_checked} archived nodes, all with exact horizon accounting (H={H})")
+    print(f"[E4 receipt 4a] {n_checked} archived frontier nodes with receipted horizon accounting (H={H})")
     assert n_checked > 0, "test degenerate: no nodes were archived"
 
-    archived_node = state.archived[0][0]
+    archived_node = next(node for level_nodes in state.archived for node in level_nodes)
     m.zero_grad()
     probe_loss = m.predict_head(archived_node.summary[0]).sum()
     probe_loss.backward()

@@ -1,12 +1,12 @@
 """E4: hierarchical summary tree + multi-scale objective -- see ``notes/designs/E4.md`` for the full
-derivation (persistent append-only tree over evicted tokens, tree-path positional encoding, the
+derivation (persistent frontier tree over evicted tokens, tree-path positional encoding, the
 predict-the-summary auxiliary loss, the stop-gradient horizon receipt). This module implements that
 note section-by-section; see the note's "Implementation notes vs. this design" section for the small,
 honestly-documented places this module simplifies the note's scheme for tractability.
 
 **What this is.** E1's :class:`~mixle.experimental.context_spine.SlidingWindowSpine` keeps an exact
 but bounded KV window; anything evicted from that window is gone. E4 keeps it: every evicted token is
-folded, one at a time, into a persistent tree of learned summaries via mixed-radix carry propagation
+folded, one at a time, into a bounded frontier of learned summaries via mixed-radix carry propagation
 (the fast-multipole-method structure -- near field exact, far field via a bounded number of
 increasingly coarse representatives -- applied to token history). Tree depth grows only as
 ``log_fanout(evicted_count)``, so the far-field attention set stays bounded regardless of how much
@@ -27,9 +27,9 @@ exact additive token-id histogram of the leaves it covers via one shared linear 
 independent of whether any future query ever attends to that node -- for a node many levels up the
 tree that a training run may never query again, this is its compressor's only gradient.
 
-**Stop-gradient horizon (receipted).** A node moves from ``live`` to ``archived`` once ``H`` further
-nodes have finalized at its own level after it; ``.summary`` is ``.detach()``-ed at that moment and
-never un-detaches. Archived nodes stay forward-visible (attendable) but stop receiving gradient. See
+**Stop-gradient horizon (receipted).** A frontier node moves from ``live`` to ``archived`` once ``H``
+further evicted tokens have arrived after it finalized; ``.summary`` is ``.detach()``-ed at that moment
+and never un-detaches. Archived frontier nodes stay forward-visible but stop receiving gradient. See
 :meth:`SummaryTreeSpine.detach` and ``mixle/tests/summary_tree_test.py`` for the exact-accounting
 receipt.
 """
@@ -116,8 +116,10 @@ class TreeNode:
     g: int  # this node's own 0-based sequential index among nodes finalized at `level`
     finalized_step: int
     finalized_index_within_level: int  # value of level_finalized_count[level] at finalization time
+    represented_leaves: int = 0
     detached: bool = False
     detached_at_finalized_count: int | None = None
+    detached_at_evicted_count: int | None = None
 
 
 @dataclass
@@ -127,11 +129,13 @@ class SummaryTreeState:
     window: SlidingWindowState  # E1's near field, unmodified
     cached_ids: Any | None  # (batch, cache_len) token ids aligned with window's cache -- shared across layers
     pending_leaf: list  # buffered evicted (k_per_layer, v_per_layer, id) tuples not yet forming a level-1 node
-    pending: list[list[TreeNode]]  # index i = level (i + 2)'s buffered children (level-1's buffer is pending_leaf)
-    live: list[list[TreeNode]]  # index i = level (i + 1): finalized, not-yet-detached nodes
-    archived: list[list[TreeNode]]  # index i = level (i + 1): finalized, detached nodes
+    pending: list[list[TreeNode]]  # references to frontier children awaiting a same-level carry group
+    live: list[list[TreeNode]]  # index i = level (i + 1): live nodes on the non-overlapping frontier
+    archived: list[list[TreeNode]]  # index i = level (i + 1): detached nodes on that same frontier
     level_finalized_count: list[int]  # index i = level (i + 1): total nodes ever finalized at that level
     evicted_count: int = 0
+    batch_size: int = 1
+    receipt: dict[str, Any] | None = None
 
 
 def _ensure_level(lists: list[list], level: int) -> None:
@@ -246,8 +250,20 @@ if _HAS_TORCH:
         # -----------------------------------------------------------------------------------------------
 
         def init_state(self, batch_size: int, *, device: str = "cpu") -> SummaryTreeState:
-            del batch_size
-            window = SlidingWindowState(cache_k=[None] * self.n_layer, cache_v=[None] * self.n_layer, pos=0)
+            if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+                raise ValueError("batch_size must be a positive exact integer.")
+            dev = torch.device(device)
+            if dev != self.tok.weight.device:
+                raise ValueError("state device must match the model device.")
+            window = SlidingWindowState(
+                cache_k=[None] * self.n_layer,
+                cache_v=[None] * self.n_layer,
+                pos=0,
+                batch_size=batch_size,
+                n_head=self.n_head,
+                head_dim=self.head_dim,
+                device=dev,
+            )
             return SummaryTreeState(
                 window=window,
                 cached_ids=None,
@@ -257,6 +273,17 @@ if _HAS_TORCH:
                 archived=[],
                 level_finalized_count=[],
                 evicted_count=0,
+                batch_size=batch_size,
+                receipt={
+                    "evicted_tokens_per_stream": 0,
+                    "represented_leaf_mass": 0,
+                    "frontier_nodes": 0,
+                    "stored_frontier_nodes": 0,
+                    "pending_leaves": 0,
+                    "storage_bound": 0,
+                    "non_overlapping": True,
+                    "conserved": True,
+                },
             )
 
         def detach(self, state: SummaryTreeState) -> SummaryTreeState:
@@ -274,8 +301,6 @@ if _HAS_TORCH:
                 ([kk.detach() for kk in k_layers], [vv.detach() for vv in v_layers], ids)
                 for (k_layers, v_layers, ids) in state.pending_leaf
             ]
-            pending = [[self._detach_node(n, force=True) for n in level_pending] for level_pending in state.pending]
-
             live: list[list[TreeNode]] = []
             archived: list[list[TreeNode]] = [list(lvl) for lvl in state.archived]
             while len(archived) < len(state.live):
@@ -287,16 +312,29 @@ if _HAS_TORCH:
                 )
                 still_live: list[TreeNode] = []
                 for node in level_live:
-                    age = finalized_total - node.finalized_index_within_level
+                    age = state.evicted_count - node.finalized_step
                     if age >= self.detach_horizon_nodes:
                         detached_node = self._detach_node(node, force=True)
                         detached_node.detached_at_finalized_count = finalized_total
+                        detached_node.detached_at_evicted_count = state.evicted_count
                         archived[level_idx].append(detached_node)
                     else:
                         still_live.append(node)
                 live.append(still_live)
 
-            return SummaryTreeState(
+            # ``pending`` is an index into the same bounded frontier, not a second ownership store.
+            # Rebind it to the detached/live replacements so the two lists never carry divergent copies.
+            replacements = {
+                (node.level, node.g): node
+                for levels in (live, archived)
+                for level_nodes in levels
+                for node in level_nodes
+            }
+            pending = [
+                [replacements[(node.level, node.g)] for node in level_pending] for level_pending in state.pending
+            ]
+
+            detached_state = SummaryTreeState(
                 window=window,
                 cached_ids=cached_ids,
                 pending_leaf=pending_leaf,
@@ -305,7 +343,10 @@ if _HAS_TORCH:
                 archived=archived,
                 level_finalized_count=list(state.level_finalized_count),
                 evicted_count=state.evicted_count,
+                batch_size=state.batch_size,
             )
+            detached_state.receipt = self._frontier_receipt(detached_state)
+            return detached_state
 
         @staticmethod
         def _detach_node(node: TreeNode, *, force: bool) -> TreeNode:
@@ -319,7 +360,14 @@ if _HAS_TORCH:
         # -----------------------------------------------------------------------------------------------
 
         def _finalize_node(
-            self, state: SummaryTreeState, level: int, children_summaries: list[list[Any]], histogram: Any
+            self,
+            state: SummaryTreeState,
+            level: int,
+            children_summaries: list[list[Any]],
+            histogram: Any,
+            *,
+            represented_leaves: int,
+            finalized: list[TreeNode],
         ) -> TreeNode:
             """``children_summaries[layer]``: list of ``fanout`` ``(batch, d_model)`` tensors for that
             layer. Runs the shared ``compressor`` once per layer and stamps bookkeeping fields."""
@@ -339,13 +387,31 @@ if _HAS_TORCH:
                 g=g,
                 finalized_step=state.evicted_count,
                 finalized_index_within_level=g,
+                represented_leaves=represented_leaves,
             )
             state.level_finalized_count[level - 1] += 1
             _ensure_level(state.live, level)
             state.live[level - 1].append(node)
+            finalized.append(node)
             return node
 
-        def _carry_propagate(self, state: SummaryTreeState, node: TreeNode) -> None:
+        @staticmethod
+        def _remove_frontier_node(state: SummaryTreeState, node: TreeNode) -> None:
+            for levels in (state.live, state.archived):
+                if len(levels) < node.level:
+                    continue
+                levels[node.level - 1] = [
+                    candidate
+                    for candidate in levels[node.level - 1]
+                    if not (candidate.level == node.level and candidate.g == node.g)
+                ]
+
+        def _carry_propagate(
+            self,
+            state: SummaryTreeState,
+            node: TreeNode,
+            finalized: list[TreeNode],
+        ) -> None:
             """A freshly finalized node at ``node.level`` becomes a pending child at ``node.level + 1``;
             once ``fanout`` of those accumulate, finalize the parent and recurse (E4.md's carry step)."""
             parent_level_idx = node.level - 1  # pending[parent_level_idx] holds children for level (node.level + 1)
@@ -356,23 +422,32 @@ if _HAS_TORCH:
                 return
             children = state.pending[parent_level_idx][: self.fanout]
             state.pending[parent_level_idx] = state.pending[parent_level_idx][self.fanout :]
+            for child in children:
+                self._remove_frontier_node(state, child)
 
             children_summaries = [[c.summary[layer] for c in children] for layer in range(self.n_layer)]
             histogram = children[0].histogram
             for c in children[1:]:
                 histogram = histogram + c.histogram
-            parent = self._finalize_node(state, node.level + 1, children_summaries, histogram)
-            self._carry_propagate(state, parent)
+            parent = self._finalize_node(
+                state,
+                node.level + 1,
+                children_summaries,
+                histogram,
+                represented_leaves=sum(child.represented_leaves for child in children),
+                finalized=finalized,
+            )
+            self._carry_propagate(state, parent, finalized)
 
         def _absorb_evicted_token(
             self, state: SummaryTreeState, k_layers: list[Any], v_layers: list[Any], token_id: Any
-        ) -> None:
+        ) -> list[TreeNode]:
             """Feed ONE evicted token into the tree (E4.md construction step 1). ``k_layers``/``v_layers``:
             list of ``(batch, d_model)`` per layer (flattened across heads -- see module docstring).
             ``token_id``: ``(batch,)`` long tensor."""
             state.pending_leaf.append((k_layers, v_layers, token_id))
             if len(state.pending_leaf) < self.fanout:
-                return
+                return []
             group = state.pending_leaf[: self.fanout]
             state.pending_leaf = state.pending_leaf[self.fanout :]
 
@@ -383,27 +458,98 @@ if _HAS_TORCH:
             for _, _, tid in group:
                 onehot = F.one_hot(tid, num_classes=self.vocab).to(children_summaries[0][0].dtype)
                 histogram = onehot if histogram is None else histogram + onehot
-            node = self._finalize_node(state, 1, children_summaries, histogram)
-            self._carry_propagate(state, node)
+            finalized: list[TreeNode] = []
+            node = self._finalize_node(
+                state,
+                1,
+                children_summaries,
+                histogram,
+                represented_leaves=self.fanout,
+                finalized=finalized,
+            )
+            self._carry_propagate(state, node, finalized)
+            return finalized
 
         # -----------------------------------------------------------------------------------------------
         # Far-field attention set + predict-the-summary aux loss
         # -----------------------------------------------------------------------------------------------
 
-        def _far_field_nodes(self, state: SummaryTreeState) -> list[TreeNode]:
-            """``live ∪ archived`` across every level -- archived nodes stay forward-visible (E4.md:
-            "stop-gradient only cuts backward"), still O(log_fanout(evicted_count)) total."""
+        @staticmethod
+        def _stored_frontier_nodes(state: SummaryTreeState) -> list[TreeNode]:
             nodes: list[TreeNode] = []
-            for lvl in state.live:
-                nodes.extend(lvl)
-            for lvl in state.archived:
-                nodes.extend(lvl)
+            for levels in (state.live, state.archived):
+                for level_nodes in levels:
+                    nodes.extend(level_nodes)
             return nodes
+
+        def _pending_leaf_nodes(self, state: SummaryTreeState) -> list[TreeNode]:
+            nodes: list[TreeNode] = []
+            first_position = state.evicted_count - len(state.pending_leaf)
+            for offset, (k_layers, v_layers, token_id) in enumerate(state.pending_leaf):
+                absolute_position = first_position + offset
+                summaries = [
+                    self.compressor.leaf_adapter(torch.cat([k_layers[layer], v_layers[layer]], dim=-1))
+                    for layer in range(self.n_layer)
+                ]
+                histogram = F.one_hot(token_id, num_classes=self.vocab).to(summaries[0].dtype)
+                nodes.append(
+                    TreeNode(
+                        summary=summaries,
+                        histogram=histogram,
+                        path=digits_of(absolute_position, self.fanout),
+                        level=0,
+                        g=absolute_position,
+                        finalized_step=absolute_position + 1,
+                        finalized_index_within_level=absolute_position,
+                        represented_leaves=1,
+                    )
+                )
+            return nodes
+
+        def _frontier_receipt(self, state: SummaryTreeState) -> dict[str, Any]:
+            stored = self._stored_frontier_nodes(state)
+            keys = [(node.level, node.g) for node in stored]
+            represented = sum(node.represented_leaves for node in stored) + len(state.pending_leaf)
+            pending_keys = [(node.level, node.g) for level_pending in state.pending for node in level_pending]
+            storage_bound = len(state.pending_leaf) + (self.fanout - 1) * len(state.level_finalized_count)
+            non_overlapping = (
+                len(keys) == len(set(keys))
+                and len(pending_keys) == len(set(pending_keys))
+                and set(pending_keys) == set(keys)
+            )
+            conserved = non_overlapping and represented == state.evicted_count
+            receipt = {
+                "evicted_tokens_per_stream": state.evicted_count,
+                "represented_leaf_mass": represented,
+                "frontier_nodes": len(stored) + len(state.pending_leaf),
+                "stored_frontier_nodes": len(stored),
+                "pending_leaves": len(state.pending_leaf),
+                "storage_bound": storage_bound,
+                "non_overlapping": non_overlapping,
+                "conserved": conserved,
+            }
+            if not conserved or receipt["frontier_nodes"] > storage_bound:
+                raise RuntimeError(
+                    f"summary-tree frontier violates non-overlapping bounded-state accounting: {receipt}"
+                )
+            return receipt
+
+        def _far_field_nodes(self, state: SummaryTreeState) -> list[TreeNode]:
+            """Return the non-overlapping frontier plus incomplete leaves.
+
+            A parent replaces its children, so no leaf is represented at multiple levels. Incomplete
+            leaf groups remain visible through a single-token adapter until they form a level-1 node.
+            """
+            self._frontier_receipt(state)
+            return self._stored_frontier_nodes(state) + self._pending_leaf_nodes(state)
 
         def _content_bias(self, nodes: list[TreeNode], device: Any) -> Any:
             if not nodes:
                 return None
-            levels = torch.as_tensor([min(n.level - 1, self.max_level_cap - 1) for n in nodes], device=device)
+            levels = torch.as_tensor(
+                [min(max(n.level - 1, 0), self.max_level_cap - 1) for n in nodes],
+                device=device,
+            )
             slots = torch.as_tensor([n.path[0] % self.fanout for n in nodes], device=device)
             return self.level_embed(levels) + self.slot_embed(slots)  # (n_far, d_model)
 
@@ -443,32 +589,123 @@ if _HAS_TORCH:
         # -----------------------------------------------------------------------------------------------
 
         def step(self, state: SummaryTreeState, chunk: tuple[Any, Any]) -> tuple[SummaryTreeState, Any]:
+            if not isinstance(state, SummaryTreeState):
+                raise TypeError("state must be a SummaryTreeState.")
+            if not isinstance(chunk, tuple) or len(chunk) != 2:
+                raise TypeError("chunk must be an (input_tokens, target_tokens) tuple.")
             x, y = chunk
+            if not torch.is_tensor(x) or not torch.is_tensor(y) or x.dtype != torch.long or y.dtype != torch.long:
+                raise TypeError("input and target tokens must be torch.long tensors.")
+            if x.ndim != 2 or y.shape != x.shape or x.shape[0] == 0 or x.shape[1] == 0:
+                raise ValueError("input and target tokens must have equal non-empty (batch, time) shape.")
             b, t = x.shape
+            if b != state.batch_size:
+                raise ValueError(f"state batch_size={state.batch_size} does not match chunk batch_size={b}.")
+            if x.device != self.tok.weight.device or y.device != x.device:
+                raise ValueError("state, model, input, and target tensors must be on the same device.")
+            if bool(((x < 0) | (x >= self.vocab) | (y < 0) | (y >= self.vocab)).any().item()):
+                raise ValueError(f"input and target token IDs must lie in [0, {self.vocab}).")
+
+            # Single-token advancement makes the tree boundary part of the causal recurrence. This keeps
+            # outputs and state invariant to how a caller chunks the same stream.
+            if t > 1:
+                current_state = state
+                losses = []
+                auxiliary_losses = []
+                for query_index in range(t):
+                    current_state, token_loss = self.step(
+                        current_state,
+                        (
+                            x[:, query_index : query_index + 1],
+                            y[:, query_index : query_index + 1],
+                        ),
+                    )
+                    losses.append(token_loss)
+                    auxiliary_losses.append(self.last_aux_loss)
+                self.last_aux_loss = float(sum(auxiliary_losses) / len(auxiliary_losses))
+                return current_state, torch.stack(losses).mean()
+
             device = x.device
             query_positions = torch.arange(state.window.pos, state.window.pos + t, device=device)
+
+            working_state = SummaryTreeState(
+                window=state.window,
+                cached_ids=state.cached_ids,
+                pending_leaf=list(state.pending_leaf),
+                pending=[list(level_pending) for level_pending in state.pending],
+                live=[list(level_live) for level_live in state.live],
+                archived=[list(level_archived) for level_archived in state.archived],
+                level_finalized_count=list(state.level_finalized_count),
+                evicted_count=state.evicted_count,
+                batch_size=state.batch_size,
+                receipt=dict(state.receipt or {}),
+            )
+            finalized_this_step: list[TreeNode] = []
+
+            cached_ids = working_state.cached_ids
+            cache_lengths = {cache.shape[1] for cache in working_state.window.cache_k if cache is not None}
+            if len(cache_lengths) > 1:
+                raise ValueError("all summary-tree layer caches must have the same length.")
+            cache_len = next(iter(cache_lengths), 0)
+            if cached_ids is None:
+                if cache_len != 0 or any(cache is not None for cache in working_state.window.cache_v):
+                    raise ValueError("summary-tree token IDs and K/V caches are not aligned.")
+            elif cached_ids.shape != (b, cache_len):
+                raise ValueError("summary-tree cached token IDs do not align with the K/V caches.")
+            if cache_len > self.window:
+                raise ValueError("summary-tree near cache exceeds the configured window.")
+
+            # The token at distance ``window`` crosses into the far frontier before this query reads
+            # memory. Keeping it until after the query would make it invisible for one step.
+            if cache_len == self.window:
+                if any(cache is None for cache in working_state.window.cache_k + working_state.window.cache_v):
+                    raise ValueError("summary-tree has a partial per-layer K/V cache.")
+                working_state.evicted_count += 1
+                finalized_this_step.extend(
+                    self._absorb_evicted_token(
+                        working_state,
+                        [
+                            working_state.window.cache_k[layer][:, 0].reshape(b, self.d_model)
+                            for layer in range(self.n_layer)
+                        ],
+                        [
+                            working_state.window.cache_v[layer][:, 0].reshape(b, self.d_model)
+                            for layer in range(self.n_layer)
+                        ],
+                        cached_ids[:, 0],
+                    )
+                )
+                working_state.window = SlidingWindowState(
+                    cache_k=[cache[:, 1:] for cache in working_state.window.cache_k],
+                    cache_v=[cache[:, 1:] for cache in working_state.window.cache_v],
+                    pos=working_state.window.pos,
+                    batch_size=state.batch_size,
+                    n_head=self.n_head,
+                    head_dim=self.head_dim,
+                    device=device,
+                )
+                working_state.cached_ids = cached_ids[:, 1:]
 
             h = self.tok(x)
             new_cache_k: list[Any] = []
             new_cache_v: list[Any] = []
-            far_nodes = self._far_field_nodes(state)
+            far_nodes = self._far_field_nodes(working_state)
             content_bias = self._content_bias(far_nodes, device)  # (n_far, d_model) | None
             lca_bias_mat = self._lca_bias_matrix(query_positions, far_nodes) if far_nodes else None  # (t, n_far)
-
-            evicted_k_by_layer: list[Any] = []
-            evicted_v_by_layer: list[Any] = []
 
             for layer in range(self.n_layer):
                 hn = self.ln1[layer](h)
                 qkv = self.qkv[layer](hn).reshape(b, t, 3, self.n_head, self.head_dim)
                 q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]  # each (b, t, n_head, head_dim)
-                k_flat = k.reshape(b, t, self.d_model)  # pre-RoPE, flattened across heads -- tree leaf content
-                v_flat = v.reshape(b, t, self.d_model)
 
-                cache_k, cache_v = state.window.cache_k[layer], state.window.cache_v[layer]
+                cache_k, cache_v = working_state.window.cache_k[layer], working_state.window.cache_v[layer]
                 if cache_k is not None:
                     cache_len = cache_k.shape[1]
-                    key_positions = torch.arange(state.window.pos - cache_len, state.window.pos + t, device=device)
+                    key_positions = torch.arange(
+                        state.window.pos - cache_len,
+                        state.window.pos + t,
+                        device=device,
+                    )
                     k_full = torch.cat([cache_k, k], dim=1)
                     v_full = torch.cat([cache_v, v], dim=1)
                 else:
@@ -486,6 +723,7 @@ if _HAS_TORCH:
                 near_mask = near_mask.masked_fill(~allowed, float("-inf"))
 
                 qh = q_rope.transpose(1, 2)  # (b, n_head, t, head_dim)
+                qh_far = q.transpose(1, 2)
                 kh = k_full_rope.transpose(1, 2)
                 vh = v_full.transpose(1, 2)
                 near_logits = (qh @ kh.transpose(-2, -1)) / (self.head_dim**0.5)  # (b, n_head, t, len(keys))
@@ -498,7 +736,7 @@ if _HAS_TORCH:
                     k_far, v_far = far_qkv[:, :, 1], far_qkv[:, :, 2]  # no RoPE (E4.md: no single relative offset)
                     kfh = k_far.transpose(1, 2)  # (b, n_head, n_far, head_dim)
                     vfh = v_far.transpose(1, 2)
-                    far_logits = (qh @ kfh.transpose(-2, -1)) / (self.head_dim**0.5)  # (b, n_head, t, n_far)
+                    far_logits = (qh_far @ kfh.transpose(-2, -1)) / (self.head_dim**0.5)  # (b, n_head, t, n_far)
                     far_logits = far_logits + lca_bias_mat[None, None]
 
                     combined = torch.cat([near_logits, far_logits], dim=-1)
@@ -513,53 +751,36 @@ if _HAS_TORCH:
                 h = h + self.proj[layer](out)
                 h = h + self.mlp[layer](self.ln2[layer](h))
 
-                keep = self.window
+                keep = min(self.window, k_full.shape[1])
                 new_cache_k.append(k_full[:, -keep:])
                 new_cache_v.append(v_full[:, -keep:])
-                evict_amt = max(0, k_full.shape[1] - keep)
-                if evict_amt > 0:
-                    evicted_k_by_layer.append(k_full[:, :evict_amt].reshape(b, evict_amt, self.d_model))
-                    evicted_v_by_layer.append(v_full[:, :evict_amt].reshape(b, evict_amt, self.d_model))
-                else:
-                    evicted_k_by_layer.append(None)
-                    evicted_v_by_layer.append(None)
 
             logits = self.head(self.ln_f(h))
             lm_loss = F.cross_entropy(logits.reshape(b * t, self.vocab), y.reshape(b * t))
 
-            # ids for the evicted slice: the same absolute-position slice for every layer (window shared).
-            ids_full = x if state.cached_ids is None else torch.cat([state.cached_ids, x], dim=1)
-            evict_amt = max(0, ids_full.shape[1] - self.window)
-            evicted_ids = ids_full[:, :evict_amt] if evict_amt > 0 else None
+            ids_full = x if working_state.cached_ids is None else torch.cat([working_state.cached_ids, x], dim=1)
             new_cached_ids = ids_full[:, -self.window :]
 
             new_state = SummaryTreeState(
-                window=SlidingWindowState(cache_k=new_cache_k, cache_v=new_cache_v, pos=state.window.pos + t),
+                window=SlidingWindowState(
+                    cache_k=new_cache_k,
+                    cache_v=new_cache_v,
+                    pos=state.window.pos + t,
+                    batch_size=state.batch_size,
+                    n_head=self.n_head,
+                    head_dim=self.head_dim,
+                    device=device,
+                ),
                 cached_ids=new_cached_ids,
-                pending_leaf=list(state.pending_leaf),
-                pending=[list(lvl) for lvl in state.pending],
-                live=[list(lvl) for lvl in state.live],
-                archived=[list(lvl) for lvl in state.archived],
-                level_finalized_count=list(state.level_finalized_count),
-                evicted_count=state.evicted_count + evict_amt,
+                pending_leaf=working_state.pending_leaf,
+                pending=working_state.pending,
+                live=working_state.live,
+                archived=working_state.archived,
+                level_finalized_count=working_state.level_finalized_count,
+                evicted_count=working_state.evicted_count,
+                batch_size=state.batch_size,
             )
-
-            finalized_this_step: list[TreeNode] = []
-            if evicted_ids is not None and evict_amt > 0:
-                for pos in range(evict_amt):
-                    before_live_counts = [len(lvl) for lvl in new_state.live]
-                    self._absorb_evicted_token(
-                        new_state,
-                        [evicted_k_by_layer[layer][:, pos] for layer in range(self.n_layer)],
-                        [evicted_v_by_layer[layer][:, pos] for layer in range(self.n_layer)],
-                        evicted_ids[:, pos],
-                    )
-                    for level_idx, before in enumerate(before_live_counts):
-                        if len(new_state.live[level_idx]) > before:
-                            finalized_this_step.append(new_state.live[level_idx][-1])
-                    if len(new_state.live) > len(before_live_counts):
-                        for lvl in new_state.live[len(before_live_counts) :]:
-                            finalized_this_step.extend(lvl)
+            new_state.receipt = self._frontier_receipt(new_state)
 
             aux_loss = self._aux_loss_for_nodes(finalized_this_step)
             if aux_loss is not None and self.aux_weight > 0:
