@@ -5,6 +5,7 @@ from pathlib import Path
 
 from mixle.substrate import (
     ContextBudget,
+    ContextPacket,
     ReceiverProfile,
     Substrate,
     SubstrateItem,
@@ -96,7 +97,8 @@ class BudgetTest(unittest.TestCase):
 
     def test_assembled_rendering_always_fits_the_declared_budget(self):
         """The core MXR-080-0239 guarantee, swept from just-barely-feasible to generous: used_chars
-        never exceeds max_chars, and never disagrees with what render() actually returns."""
+        (now derived from the real rendering, MXR-080-0240) never exceeds max_chars, and never
+        disagrees with what render() actually returns."""
         s = Substrate()
         s.add("text", "a very long document that easily exceeds a tiny character budget on its own")
         s.add("text", "another document about something else entirely unrelated here as well")
@@ -415,6 +417,101 @@ class ReceiverConditionedCompressionTest(unittest.TestCase):
         self.assertEqual(budget.max_chars, 123)
         self.assertEqual(budget.max_items, 7)
         self.assertEqual(budget.shape, "brief")
+
+    def test_duplicate_receiver_names_are_rejected_before_any_work_starts(self):
+        """Regression (MXR-080-0241): assemble_for_receivers used to key its result dict by name, so a
+        duplicate silently discarded an earlier receiver's packet AFTER its retrieval, compression, and
+        telemetry work had already run. Confirmed against the pre-fix code: two profiles named "llm"
+        with different budgets ran retrieval/compression for BOTH (2 telemetry events recorded) but the
+        returned dict kept only the second. This must now be rejected upfront, before any of that work."""
+        s = self._shop_substrate()
+        tel = Telemetry()
+        with self.assertRaises(ValueError):
+            assemble_for_receivers(
+                s,
+                "refund policy",
+                [
+                    ReceiverProfile("llm", max_chars=500, shape="passages"),
+                    ReceiverProfile("llm", max_chars=40, shape="features", compress=True),
+                ],
+                telemetry=tel,
+            )
+        # validated BEFORE assembly -- no retrieval/compression/telemetry work happened for either
+        self.assertEqual(len(list(tel.events(kind="context"))), 0)
+
+    def test_empty_receiver_name_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ReceiverProfile("", max_chars=100)
+        with self.assertRaises(ValueError):
+            assemble_for_receivers(
+                self._shop_substrate(), "refund policy", [ReceiverProfile("ok"), ReceiverProfile("")]
+            )
+
+    def test_unique_receiver_names_all_survive(self):
+        s = self._shop_substrate()
+        packets = assemble_for_receivers(
+            s, "refund policy", [ReceiverProfile("a", max_chars=200), ReceiverProfile("b", max_chars=200)]
+        )
+        self.assertEqual(set(packets), {"a", "b"})
+
+
+class ContextPacketIntegrityTest(unittest.TestCase):
+    """MXR-080-0240: items/scores/texts are one aligned record, validated together at construction,
+    and used_chars is always derived from the actual rendering -- never an independent field that can
+    silently drift from what render()/provenance()/preservation() actually produce."""
+
+    def _items(self):
+        return [
+            SubstrateItem(id="i1", kind="text", text="full text of item one, quite long and detailed"),
+            SubstrateItem(id="i2", kind="text", text="full text of item two, this one talks about something else"),
+            SubstrateItem(id="i3", kind="text", text="full text of item three, a smoking gun that should be cited"),
+        ]
+
+    def test_mismatched_lengths_are_rejected_at_construction(self):
+        """Regression: a directly-constructed packet with 3 items but only 2 scores and 1 text used to
+        be accepted silently. render()/provenance()/preservation() then used zip() over the mismatched
+        arrays, which truncates to the shortest -- silently dropping the 2nd and 3rd items from the
+        actual rendering and provenance while still claiming len(items) == 3. Confirmed against the
+        pre-fix code: render() showed only item i1 (i2 and i3 -- one of them "a smoking gun that should
+        be cited" -- were invisible), and provenance() cited i1/i2 but silently omitted i3 entirely."""
+        items = self._items()
+        with self.assertRaises(ValueError):
+            ContextPacket(task="t", items=items, scores=[0.9, 0.5], texts=["only one text here"])
+        with self.assertRaises(ValueError):
+            ContextPacket(task="t", items=items, scores=[0.9, 0.5])  # texts omitted -> defaults to 3, scores is 2
+        with self.assertRaises(ValueError):
+            ContextPacket(task="t", items=items[:2], scores=[0.9, 0.5, 0.3], texts=["a", "b", "c"])
+
+    def test_used_chars_is_derived_not_independently_settable(self):
+        """Regression: used_chars used to be a plain field a caller (or a bug) could set to anything,
+        completely disconnected from the packet's actual rendered size."""
+        with self.assertRaises(TypeError):
+            ContextPacket(task="t", items=self._items(), scores=[0.9, 0.5, 0.3], used_chars=999)
+
+    def test_used_chars_always_matches_the_real_rendering(self):
+        pkt = ContextPacket(task="rank targets", items=self._items(), scores=[0.9, 0.5, 0.3])
+        self.assertEqual(pkt.used_chars, len(pkt.render()))
+
+    def test_a_validly_constructed_packet_cites_every_item_it_claims(self):
+        """Positive control: once construction validates alignment, render()/provenance()/preservation()
+        never silently drop an item -- every id shows up everywhere it should."""
+        items = self._items()
+        pkt = ContextPacket(task="rank targets", items=items, scores=[0.9, 0.5, 0.3])
+        rendered = pkt.render()
+        for item in items:
+            self.assertIn(f"[{item.kind}:{item.id}]", rendered)
+        self.assertEqual({p["id"] for p in pkt.provenance()}, {i.id for i in items})
+        self.assertEqual(len(pkt.preservation()), len(items))
+
+    def test_items_scores_texts_are_immutable_after_construction(self):
+        """Tuples, not lists: nothing can append/mutate one array out of step with the others after
+        construction -- the residual gap that per-construction length validation alone would not close."""
+        pkt = ContextPacket(task="t", items=self._items(), scores=[0.9, 0.5, 0.3])
+        self.assertIsInstance(pkt.items, tuple)
+        self.assertIsInstance(pkt.scores, tuple)
+        self.assertIsInstance(pkt.texts, tuple)
+        with self.assertRaises(AttributeError):
+            pkt.items.append(self._items()[0])
 
 
 class CanonicalHashTest(unittest.TestCase):
