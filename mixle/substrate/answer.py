@@ -64,7 +64,11 @@ def answer_from_substrate(
             is enough evidence above the confidence floor (so a weak retrieval never fabricates).
         budget: the context budget handed to the answerer (default 2000 chars).
         hops: 1 = single-shot :func:`retrieve`; >1 = :func:`multihop` chaining that many hops.
-        min_evidence: minimum retrieved items required to attempt an answer.
+        min_evidence: minimum evidence items the answerer must actually receive to attempt an answer --
+            checked against ``packet.items`` (what survives context budgeting), never the pre-budget
+            retrieved/hop-chain count. A small budget can drop most retrieved items before the answerer
+            ever sees them; gating on the pre-budget count would let a caller believe far more evidence
+            was used than the answerer actually got (MXR-080-0257).
         min_confidence: retrieval-strength floor below which it abstains rather than guess.
         compress: compress the context to fit more sources under budget.
         scope: restrict to a team/access scope.
@@ -75,20 +79,24 @@ def answer_from_substrate(
         from mixle.substrate.multihop import multihop
 
         chain = multihop(substrate, question, max_hops=hops, scope=scope, telemetry=telemetry)
-        evidence = chain.items
         packet = chain.to_context(question, budget=budget, compress=compress)
         top_score = max((s.score for s in chain.steps if s.depth == 0), default=0.0)
     else:
         from mixle.substrate.retrieve import retrieve
 
         r = retrieve(substrate, question, k=max(budget.max_items, 6), scope=scope, telemetry=telemetry)
-        evidence = r.items
         packet = r.to_context(question, budget=budget, compress=compress)
         top_score = r.scores[0] if r.scores else 0.0
 
     confidence = _confidence(top_score, packet)
+    # The gate and the abstention report below both read ONLY `packet.items` -- the final, aligned,
+    # actually-delivered evidence -- never the pre-budget retrieved/hop-chain set. `packet.n_candidates`
+    # (how many were retrieved before budgeting) is surfaced in the note as context, not as what was
+    # gated or what is reported as evidence (MXR-080-0257): a caller who sees "min_evidence satisfied"
+    # must be able to trust the answerer really received that many items.
+    n_delivered = len(packet)
 
-    if len(evidence) < min_evidence or confidence < min_confidence:
+    if n_delivered < min_evidence or confidence < min_confidence:
         ans = Answer(
             question=question,
             answer=None,
@@ -96,10 +104,11 @@ def answer_from_substrate(
             confidence=confidence,
             context=packet,
             note=(
-                f"abstained: {len(evidence)} item(s) at confidence {confidence:.2f} "
-                f"(needs >= {min_evidence} items above {min_confidence}) -- escalate rather than guess"
+                f"abstained: {n_delivered} item(s) delivered (of {packet.n_candidates} retrieved) at "
+                f"confidence {confidence:.2f} (needs >= {min_evidence} delivered items above "
+                f"{min_confidence}) -- escalate rather than guess"
             ),
-            evidence=list(evidence),
+            evidence=list(packet.items),
         )
         _emit(telemetry, ans)
         return ans

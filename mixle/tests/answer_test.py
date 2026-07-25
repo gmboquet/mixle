@@ -58,6 +58,87 @@ class AbstentionTest(unittest.TestCase):
         self.assertEqual(len(a.evidence), 0)
 
 
+def _five_item_shard():
+    s = Substrate()
+    for i in range(5):
+        s.add("text", f"widget policy alpha beta gamma document number {i} " + ("filler " * 40))
+    return s  # 5 items, well under the embedder's 8-item floor -> deterministic lexical retrieval
+
+
+class MinEvidenceGatingHonestyTest(unittest.TestCase):
+    """MXR-080-0257: min_evidence must gate -- and abstention must report -- the FINAL packet's
+    aligned, actually-delivered evidence (packet.items), never the pre-budget retrieved count."""
+
+    def test_audit_scenario_min_evidence_abstains_when_budget_drops_evidence(self):
+        # The audit's own scenario: 5 items are retrieved (>= min_evidence=3), but a budget this tight
+        # lets only 1 survive into the packet the answerer actually sees. Checking the gate against the
+        # pre-budget count of 5 would wrongly let this through; it must abstain instead.
+        s = _five_item_shard()
+
+        def _fabricator(_q, _c):
+            raise AssertionError("must not be called: min_evidence should abstain before answering")
+
+        a = answer_from_substrate(
+            s,
+            "widget policy alpha beta gamma document",
+            _fabricator,
+            budget=ContextBudget(max_chars=400, max_items=20),
+            min_evidence=3,
+            min_confidence=0.0,
+            compress=False,
+        )
+        self.assertEqual(a.context.n_candidates, 5)  # 5 were retrieved...
+        self.assertEqual(len(a.context.items), 1)  # ...but only 1 survived budgeting
+        self.assertTrue(a.abstained)  # the gate must fail on the delivered count, not pass on 5
+        self.assertIsNone(a.answer)
+
+    def test_min_evidence_passes_when_enough_evidence_survives_budgeting(self):
+        # Control: same shard and the same min_evidence=3, but a budget generous enough that 3 items
+        # genuinely survive into the packet -- this must answer, not abstain.
+        s = _five_item_shard()
+        a = answer_from_substrate(
+            s,
+            "widget policy alpha beta gamma document",
+            _first_line,
+            budget=ContextBudget(max_chars=1300, max_items=20),
+            min_evidence=3,
+            min_confidence=0.0,
+            compress=False,
+        )
+        self.assertEqual(a.context.n_candidates, 5)
+        self.assertEqual(len(a.context.items), 3)
+        self.assertFalse(a.abstained)
+        self.assertIsNotNone(a.answer)
+        self.assertGreaterEqual(len(a.evidence), 3)
+
+    def test_abstention_reports_only_delivered_evidence(self):
+        # Even when abstention is triggered by the confidence floor rather than min_evidence, the
+        # reported `evidence` must be exactly what the packet delivered -- never the broader
+        # pre-budget retrieved set (previously this reported all 5 retrieved items, 4 of which were
+        # never rendered into the context the answerer would have seen).
+        s = _five_item_shard()
+
+        def _fabricator(_q, _c):
+            raise AssertionError("must not be called on abstention")
+
+        a = answer_from_substrate(
+            s,
+            "widget policy alpha beta gamma document",
+            _fabricator,
+            budget=ContextBudget(max_chars=400, max_items=20),
+            min_evidence=1,
+            min_confidence=0.99,  # force abstention via the confidence floor, not min_evidence
+            compress=False,
+        )
+        self.assertTrue(a.abstained)
+        self.assertEqual(a.context.n_candidates, 5)
+        self.assertEqual(len(a.context.items), 1)
+        delivered_ids = {i.id for i in a.context.items}
+        reported_ids = {i.id for i in a.evidence}
+        self.assertEqual(reported_ids, delivered_ids)  # reported evidence == actually delivered
+        self.assertEqual(len(a.evidence), 1)  # not the 5 that were merely retrieved
+
+
 class MultiHopAnswerTest(unittest.TestCase):
     def test_answers_over_a_lineage_chain(self):
         s = Substrate()
