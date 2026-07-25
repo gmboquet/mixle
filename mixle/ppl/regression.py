@@ -20,6 +20,9 @@ unscaled -- the exact penalized-likelihood (MAP) mode.  Fit with
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
+
 import numpy as np
 
 from mixle.ppl.core import RandomVariable, _LinearPredictor
@@ -27,6 +30,107 @@ from mixle.ppl.core import free as FREE
 
 # family -> canonical link name
 _LINK = {"Normal": "identity", "Bernoulli": "logit", "Poisson": "log"}
+
+
+def _positive_int(value, label):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or int(value) <= 0:
+        raise ValueError(f"{label} must be a positive integer.")
+    return int(value)
+
+
+def _positive_float(value, label):
+    try:
+        out = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a finite positive scalar.") from exc
+    if not math.isfinite(out) or out <= 0.0:
+        raise ValueError(f"{label} must be a finite positive scalar.")
+    return out
+
+
+def _numeric_vector(value, label, *, length=None):
+    try:
+        out = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a finite numeric one-dimensional sequence.") from exc
+    if out.ndim != 1 or out.size == 0 or not np.isfinite(out).all():
+        raise ValueError(f"{label} must be a non-empty finite numeric one-dimensional sequence.")
+    if length is not None and out.size != length:
+        raise ValueError(f"{label} has {out.size} rows; expected exactly {length}.")
+    return out.copy()
+
+
+def _group_vector(value, label, *, length):
+    out = np.asarray(value)
+    if out.ndim != 1 or out.size != length:
+        raise ValueError(f"{label} must be one-dimensional with exactly {length} rows.")
+    for item in out:
+        if item is None or (isinstance(item, (float, np.floating)) and not math.isfinite(float(item))):
+            raise ValueError(f"{label} contains a missing or non-finite group label.")
+    return out.copy()
+
+
+def _validate_conditional_data(rv, data, given):
+    """Validate one aligned conditional dataset before any NumPy broadcasting."""
+    y = _numeric_vector(data, "response")
+    if given is None:
+        given = {}
+    if not isinstance(given, Mapping):
+        raise TypeError("given must be a mapping from field names to one-dimensional arrays.")
+    given = dict(given)
+    numeric_fields, group_fields = set(), set()
+    for arg in rv._args:
+        if not isinstance(arg, _LinearPredictor):
+            continue
+        numeric_fields.update(field.name for _, field in arg.terms)
+        for group, slopes in arg.groups:
+            group_fields.add(group)
+            numeric_fields.update(slopes)
+    required = numeric_fields | group_fields
+    missing = sorted(required - given.keys())
+    if missing:
+        raise ValueError(f"given is missing required field(s): {missing}.")
+    clean = {}
+    for name, values in given.items():
+        if name in group_fields and name not in numeric_fields:
+            clean[name] = _group_vector(values, f"given[{name!r}]", length=y.size)
+        else:
+            clean[name] = _numeric_vector(values, f"given[{name!r}]", length=y.size)
+    return y, clean
+
+
+def _parameter_layout(est):
+    """Return unambiguous display names and handle lookup for coefficient columns."""
+    names = [field.name if field is not None else "intercept" for _, field in est]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"regression coefficient aliases must be unique; duplicates: {duplicates}.")
+    idx_of, seen_handles = {}, set()
+    for i, (coef, _field) in enumerate(est):
+        if not isinstance(coef, RandomVariable):
+            continue  # the singleton `free` token is not an addressable parameter handle
+        key = id(coef)
+        if key in seen_handles:
+            raise ValueError("the same coefficient handle cannot occupy multiple regression columns.")
+        seen_handles.add(key)
+        idx_of[key] = i
+    return names, idx_of
+
+
+def _validate_response(family, y):
+    if family == "Bernoulli" and np.any((y != 0.0) & (y != 1.0)):
+        raise ValueError("Bernoulli regression responses must be exactly 0 or 1.")
+    if family == "Poisson" and (np.any(y < 0.0) or np.any(y != np.floor(y))):
+        raise ValueError("Poisson regression responses must be exact non-negative integers.")
+
+
+def _validate_supported_priors(est, *, allowed=("Normal", "Laplace")):
+    for coef, _field in est:
+        if isinstance(coef, RandomVariable) and coef._family.name not in allowed:
+            raise NotImplementedError(
+                f"regression coefficient prior {coef._family.name!r} is not implemented; "
+                f"supported prior families are {sorted(allowed)}."
+            )
 
 
 def _link_inv(link, eta):
@@ -52,29 +156,65 @@ def _irls_weight(link, mu):
 class RegressionResult:
     """Regression point estimate with coefficient curvature diagnostics."""
 
-    def __init__(self, names, idx_of, beta, cov, sigma, columns, link="identity"):
-        self.names = names  # column names (covariates + 'intercept')
-        self.beta = beta  # fitted coefficients
-        self.cov = cov  # route-specific covariance / inverse-curvature diagnostic
+    def __init__(
+        self,
+        names,
+        idx_of,
+        beta,
+        cov,
+        sigma,
+        columns,
+        link="identity",
+        *,
+        converged=True,
+        iterations=1,
+        termination_reason="closed_form",
+        objective_delta=0.0,
+    ):
+        self.names = list(names)  # unique display aliases
+        self.parameter_ids = [f"coef:{i}" for i in range(len(self.names))]
+        self.beta = np.asarray(beta, dtype=float).copy()
+        self.cov = None if cov is None else np.asarray(cov, dtype=float).copy()
         self.sigma = float(sigma)
         self.link = link
         self._idx_of = idx_of  # id(coef handle) -> column index
         self._columns = columns  # list of (kind, payload) for predict
+        self.converged = bool(converged)
+        self.iterations = int(iterations)
+        self.termination_reason = str(termination_reason)
+        self.objective_delta = float(objective_delta)
         self.coefficients = {
-            names[i]: {"mean": float(beta[i]), "sd": float(np.sqrt(cov[i, i]))} for i in range(len(names))
+            self.names[i]: {
+                "id": self.parameter_ids[i],
+                "mean": float(self.beta[i]),
+                "sd": None if self.cov is None else float(np.sqrt(max(self.cov[i, i], 0.0))),
+            }
+            for i in range(len(self.names))
         }
         self.acceptance_rate = None
         self.predictive = None
 
     def _resolve(self, param):
         if isinstance(param, str):
-            return self.names.index(param)
+            if param in self.parameter_ids:
+                return self.parameter_ids.index(param)
+            if param in self.names:
+                return self.names.index(param)
+            raise KeyError(f"unknown regression parameter {param!r}.")
         if isinstance(param, (int, np.integer)):
-            return int(param)
-        return self._idx_of[id(param)]
+            index = int(param)
+            if index < 0 or index >= len(self.names):
+                raise IndexError(f"regression parameter index {index} is out of range.")
+            return index
+        try:
+            return self._idx_of[id(param)]
+        except KeyError as exc:
+            raise KeyError("object is not an addressable coefficient handle in this regression.") from exc
 
     def samples(self, param=None, n: int = 4000, rng=None):
         """Draw from the Gaussian coefficient approximation represented by ``beta`` and ``cov``."""
+        if self.cov is None:
+            raise NotImplementedError("coefficient uncertainty was not estimated for this regression route.")
         rng = rng or np.random.RandomState()
         if param is None:
             return rng.multivariate_normal(self.beta, self.cov, n)
@@ -90,6 +230,8 @@ class RegressionResult:
         eta = offset + X @ self.beta
         if n is None:
             return _link_inv(self.link, eta)
+        if self.cov is None:
+            raise NotImplementedError("coefficient uncertainty was not estimated for this regression route.")
         rng = rng or np.random.RandomState()
         out = np.empty((n, eta.size))
         for k in range(n):
@@ -99,7 +241,14 @@ class RegressionResult:
 
     def summary(self):
         """Return coefficient summaries and residual scale metadata."""
-        return {"coefficients": self.coefficients, "sigma": self.sigma}
+        return {
+            "coefficients": self.coefficients,
+            "sigma": self.sigma,
+            "converged": self.converged,
+            "iterations": self.iterations,
+            "termination_reason": self.termination_reason,
+            "objective_delta": self.objective_delta,
+        }
 
     def to_exponential_family(self, engine=None):
         """Return the conditional exponential-family view ``p(y|x)`` for a canonical link.
@@ -201,32 +350,58 @@ def _columns_of(linpred: _LinearPredictor):
 def _design(columns, given):
     """Build the design matrix for the estimated columns and the fixed offset."""
     est, fixed = columns
+    if not isinstance(given, Mapping):
+        raise TypeError("given must be a mapping from field names to one-dimensional arrays.")
     n = None
     for _, field in est + fixed:
         if field is not None:
-            n = len(np.asarray(given[field.name]).reshape(-1))
+            if field.name not in given:
+                raise ValueError(f"given is missing required field {field.name!r}.")
+            n = _numeric_vector(given[field.name], f"given[{field.name!r}]").size
             break
     if n is None:  # intercept-only fixed part (e.g. a random-effects-only model): size from given
         for arr in (given or {}).values():
-            n = len(np.asarray(arr).reshape(-1))
+            raw = np.asarray(arr)
+            if raw.ndim != 1 or raw.size == 0:
+                raise ValueError("given arrays must be non-empty and one-dimensional.")
+            n = raw.size
             break
     if n is None:
         raise ValueError("need at least one covariate or a given= array to size the design matrix.")
     mat = []
     for _, field in est:
-        mat.append(np.ones(n) if field is None else np.asarray(given[field.name], float).reshape(-1))
+        mat.append(
+            np.ones(n) if field is None else _numeric_vector(given[field.name], f"given[{field.name!r}]", length=n)
+        )
     X = np.column_stack(mat) if mat else np.zeros((n, 0))
     offset = np.zeros(n)
     for c, field in fixed:
-        offset += c * (np.ones(n) if field is None else np.asarray(given[field.name], float).reshape(-1))
+        offset += c * (
+            np.ones(n) if field is None else _numeric_vector(given[field.name], f"given[{field.name!r}]", length=n)
+        )
     return X, offset
 
 
 class LMMResult:
     """Linear mixed model: fixed-effect coefficients + variance components + group effects."""
 
-    def __init__(self, names, beta, cov, Sigma, sigma, b, group_levels, re_names):
+    def __init__(
+        self,
+        names,
+        beta,
+        cov,
+        Sigma,
+        sigma,
+        b,
+        group_levels,
+        re_names,
+        *,
+        converged,
+        iterations,
+        objective_delta,
+    ):
         self.names = names
+        self.parameter_ids = [f"fixed:{i}" for i in range(len(names))]
         self.beta = beta
         self.cov = cov
         self.random_cov = np.asarray(Sigma)  # random-effects covariance (q x q)
@@ -237,10 +412,19 @@ class LMMResult:
         self.group_effects = {lv: float(b[i, 0]) for i, lv in enumerate(group_levels)}
         self.group_effects_full = {lv: b[i] for i, lv in enumerate(group_levels)}
         self.coefficients = {
-            names[i]: {"mean": float(beta[i]), "sd": float(np.sqrt(cov[i, i]))} for i in range(len(names))
+            names[i]: {
+                "id": self.parameter_ids[i],
+                "mean": float(beta[i]),
+                "sd": float(np.sqrt(cov[i, i])),
+            }
+            for i in range(len(names))
         }
         self.acceptance_rate = None
         self.predictive = None
+        self.converged = bool(converged)
+        self.iterations = int(iterations)
+        self.objective_delta = float(objective_delta)
+        self.termination_reason = "tolerance" if converged else "max_iterations"
 
     def summary(self):
         """Return fixed effects, random-effects covariance, scale, and group count."""
@@ -249,6 +433,10 @@ class LMMResult:
             "random_cov": self.random_cov,
             "sigma": self.sigma,
             "n_groups": len(self.group_effects),
+            "converged": self.converged,
+            "iterations": self.iterations,
+            "termination_reason": self.termination_reason,
+            "objective_delta": self.objective_delta,
         }
 
 
@@ -263,7 +451,7 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
     columns = _columns_of(linpred)
     est, _fixed = columns
     X, offset = _design(columns, given) if (est or _fixed) else (np.zeros((y.size, 0)), np.zeros(y.size))
-    names = [f.name if f is not None else "intercept" for _, f in est]
+    names, _ = _parameter_layout(est)
     if not names:
         X = np.ones((y.size, 1))
         names = ["intercept"]
@@ -271,7 +459,7 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
 
     # random-effects design Z: intercept + slope columns
     re_names = ["intercept"] + list(slopes)
-    zcols = [np.ones(N)] + [np.asarray(given[s], dtype=float).reshape(-1) for s in slopes]
+    zcols = [np.ones(N)] + [_numeric_vector(given[s], f"given[{s!r}]", length=N) for s in slopes]
     Z = np.column_stack(zcols)
     q = Z.shape[1]
     levels, g = np.unique(np.asarray(given[gname]), return_inverse=True)
@@ -285,7 +473,8 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
     b = np.zeros((G, q))
     # precompute per-group Z slices
     groups = [np.where(g == gi)[0] for gi in range(G)]
-    for _ in range(max_iter):
+    converged, delta = False, math.inf
+    for iteration in range(1, max_iter + 1):
         resid = yv - X @ beta
         Sinv = np.linalg.inv(Sigma)
         SS = np.zeros((q, q))
@@ -314,6 +503,7 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
         )
         beta, Sigma, sigma2 = beta_new, Sigma_new, sigma2_new
         if delta < tol:
+            converged = True
             break
 
     # GLS fixed-effect covariance (X' V^-1 X)^-1 with V = Z Sigma Z' + sigma^2 I (block-diagonal
@@ -331,7 +521,19 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
         cov = np.linalg.inv(xtvx)
     else:
         cov = np.zeros((0, 0))
-    result = LMMResult(names, beta, cov, Sigma, np.sqrt(sigma2), b, list(levels), re_names)
+    result = LMMResult(
+        names,
+        beta,
+        cov,
+        Sigma,
+        np.sqrt(sigma2),
+        b,
+        list(levels),
+        re_names,
+        converged=converged,
+        iterations=iteration,
+        objective_delta=delta,
+    )
     return RandomVariable._bound(None, name=rv._name, result=result)
 
 
@@ -339,10 +541,28 @@ class GLMMResult:
     """Generalized linear mixed model: fixed-effect coefficients (on the link scale) + the
     random-effects covariance + per-group effects. No residual scale (the family sets dispersion)."""
 
-    def __init__(self, family, link, names, beta, cov, Sigma, b, group_levels, re_names):
+    def __init__(
+        self,
+        family,
+        link,
+        names,
+        beta,
+        cov,
+        Sigma,
+        b,
+        group_levels,
+        re_names,
+        *,
+        converged,
+        outer_iterations,
+        inner_iterations,
+        inner_converged,
+        objective_delta,
+    ):
         self.family = family
         self.link = link
         self.names = names
+        self.parameter_ids = [f"fixed:{i}" for i in range(len(names))]
         self.beta = beta
         self.cov = cov
         self.random_cov = np.asarray(Sigma)
@@ -351,10 +571,21 @@ class GLMMResult:
         self.group_effects = {lv: float(b[i, 0]) for i, lv in enumerate(group_levels)}
         self.group_effects_full = {lv: b[i] for i, lv in enumerate(group_levels)}
         self.coefficients = {
-            names[i]: {"mean": float(beta[i]), "sd": float(np.sqrt(max(cov[i, i], 0.0)))} for i in range(len(names))
+            names[i]: {
+                "id": self.parameter_ids[i],
+                "mean": float(beta[i]),
+                "sd": float(np.sqrt(max(cov[i, i], 0.0))),
+            }
+            for i in range(len(names))
         }
         self.acceptance_rate = None
         self.predictive = None
+        self.converged = bool(converged)
+        self.outer_iterations = int(outer_iterations)
+        self.inner_iterations = tuple(int(v) for v in inner_iterations)
+        self.inner_converged = tuple(bool(v) for v in inner_converged)
+        self.objective_delta = float(objective_delta)
+        self.termination_reason = "tolerance" if converged else "max_iterations"
 
     def summary(self):
         """Return fixed effects, random-effects covariance, link, and group count."""
@@ -363,10 +594,16 @@ class GLMMResult:
             "random_cov": self.random_cov,
             "link": self.link,
             "n_groups": len(self.group_effects),
+            "converged": self.converged,
+            "outer_iterations": self.outer_iterations,
+            "inner_iterations": self.inner_iterations,
+            "inner_converged": self.inner_converged,
+            "termination_reason": self.termination_reason,
+            "objective_delta": self.objective_delta,
         }
 
 
-def _glmm_fit(rv, y, given, linpred, link, max_iter, tol):
+def _glmm_fit(rv, y, given, linpred, link, max_iter, inner_max_iter, tol):
     """Generalized linear mixed model with one grouping factor, by penalized quasi-likelihood (PQL).
 
     ``eta = X beta + Z b_g``, ``b_g ~ N(0, Sigma)``, ``y ~ Family(link^-1(eta))`` (Poisson log /
@@ -381,14 +618,14 @@ def _glmm_fit(rv, y, given, linpred, link, max_iter, tol):
     columns = _columns_of(linpred)
     est, _fixed = columns
     X, offset = _design(columns, given) if (est or _fixed) else (np.zeros((y.size, 0)), np.zeros(y.size))
-    names = [f.name if f is not None else "intercept" for _, f in est]
+    names, _ = _parameter_layout(est)
     if not names:
         X = np.ones((y.size, 1))
         names = ["intercept"]
     N, p = X.shape
 
     re_names = ["intercept"] + list(slopes)
-    zcols = [np.ones(N)] + [np.asarray(given[s], dtype=float).reshape(-1) for s in slopes]
+    zcols = [np.ones(N)] + [_numeric_vector(given[s], f"given[{s!r}]", length=N) for s in slopes]
     Z = np.column_stack(zcols)
     q = Z.shape[1]
     levels, g = np.unique(np.asarray(given[gname]), return_inverse=True)
@@ -415,11 +652,15 @@ def _glmm_fit(rv, y, given, linpred, link, max_iter, tol):
     b = np.zeros((G, q))
     Sigma = np.eye(q) * 0.5
     cov = np.eye(p)
-    for _ in range(max_iter):
+    inner_iterations, inner_converged = [], []
+    converged, delta = False, math.inf
+    for outer_iteration in range(1, max_iter + 1):
         Sinv = np.linalg.inv(Sigma)
         beta_prev = beta.copy()
         # inner PQL: alternate IRLS fixed-effect and penalized random-effect updates to the joint mode
-        for _inner in range(100):
+        this_inner_converged = False
+        for inner_iteration in range(1, inner_max_iter + 1):
+            b_prev = b.copy()
             eta = np.clip(offset + X @ beta + np.einsum("nq,nq->n", Z, b[g]), -30, 30)
             mu = _link_inv(link, eta)
             w = _irls_weight(link, mu)
@@ -436,19 +677,42 @@ def _glmm_fit(rv, y, given, linpred, link, max_iter, tol):
                 cov_g = np.linalg.inv(Zg.T @ (wg[:, None] * Zg) + Sinv)
                 b[gi] = cov_g @ (Zg.T @ (wg * zg))
                 cov_groups.append(cov_g)
-            if np.max(np.abs(beta_new - beta)) < tol:
+            inner_delta = max(
+                float(np.max(np.abs(beta_new - beta))),
+                float(np.max(np.abs(b - b_prev))),
+            )
+            if inner_delta < tol:
                 beta = beta_new
+                this_inner_converged = True
                 break
             beta = beta_new
+        inner_iterations.append(inner_iteration)
+        inner_converged.append(this_inner_converged)
         Sigma_new = (sum(np.outer(b[gi], b[gi]) + cov_groups[gi] for gi in range(G))) / G  # M-step
         # Converge on (beta, Sigma) JOINTLY -- a beta-only test can exit while the variance
         # components are still moving (the same failure as the LMM in balanced designs).
         delta = max(float(np.max(np.abs(beta - beta_prev))), float(np.max(np.abs(Sigma_new - Sigma))))
         Sigma = Sigma_new
-        if delta < tol:
+        if delta < tol and this_inner_converged:
+            converged = True
             break
 
-    result = GLMMResult(rv._family.name, link, names, beta, cov, Sigma, b, list(levels), re_names)
+    result = GLMMResult(
+        rv._family.name,
+        link,
+        names,
+        beta,
+        cov,
+        Sigma,
+        b,
+        list(levels),
+        re_names,
+        converged=converged,
+        outer_iterations=outer_iteration,
+        inner_iterations=inner_iterations,
+        inner_converged=inner_converged,
+        objective_delta=delta,
+    )
     return RandomVariable._bound(None, name=rv._name, result=result)
 
 
@@ -465,10 +729,11 @@ def _slot_design(slot, given, n):
             raise NotImplementedError("location-scale regression does not support group effects yet.")
         columns = _columns_of(slot)
         est, _ = columns
+        _validate_supported_priors(est, allowed=("Normal",))
         X, offset = _design(columns, given)
-        names, m0, p0 = [], [], []
+        names, _ = _parameter_layout(est)
+        m0, p0 = [], []
         for coef, field in est:
-            names.append(field.name if field is not None else "intercept")
             if isinstance(coef, RandomVariable) and coef._family.name == "Normal":
                 m0.append(float(coef._args[0]))
                 p0.append(1.0 / float(coef._args[1]) ** 2)
@@ -503,25 +768,52 @@ class LocationScaleResult:
     and ``scale``.
     """
 
-    def __init__(self, family, names_m, names_s, beta, cov, spec_m, spec_s):
+    def __init__(
+        self,
+        family,
+        names_m,
+        names_s,
+        beta,
+        cov,
+        spec_m,
+        spec_s,
+        *,
+        iterations,
+        objective_delta,
+        termination_reason,
+    ):
         self.family = family
         self.names = list(names_m) + list(names_s)
         self.names_mean = list(names_m)
         self.names_scale = list(names_s)
-        self.beta = beta
-        self.cov = cov
+        self.parameter_ids_mean = [f"mean:{i}" for i in range(len(names_m))]
+        self.parameter_ids_scale = [f"scale:{i}" for i in range(len(names_s))]
+        self.beta = np.asarray(beta, dtype=float).copy()
+        self.cov = np.asarray(cov, dtype=float).copy()
         self._pm = len(names_m)
         self._spec_m = spec_m
         self._spec_s = spec_s
         sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
-        self.coefficients = {names_m[i]: {"mean": float(beta[i]), "sd": float(sd[i])} for i in range(self._pm)}
+        self.coefficients = {
+            names_m[i]: {"id": self.parameter_ids_mean[i], "mean": float(beta[i]), "sd": float(sd[i])}
+            for i in range(self._pm)
+        }
         self.scale_coefficients = {
-            names_s[j]: {"mean": float(beta[self._pm + j]), "sd": float(sd[self._pm + j])} for j in range(len(names_s))
+            names_s[j]: {
+                "id": self.parameter_ids_scale[j],
+                "mean": float(beta[self._pm + j]),
+                "sd": float(sd[self._pm + j]),
+            }
+            for j in range(len(names_s))
         }
         self.link = "identity"
         self.scale_link = "log"
         self.acceptance_rate = None
         self.predictive = None
+        self.converged = True
+        self.iterations = int(iterations)
+        self.objective_delta = float(objective_delta)
+        self.termination_reason = str(termination_reason)
 
     def predict(self, given, **_):
         """Return ``{'loc': array, 'scale': array}`` at covariates ``given``."""
@@ -537,7 +829,14 @@ class LocationScaleResult:
 
     def summary(self):
         """Return separate coefficient summaries for location and scale predictors."""
-        return {"mean_coefficients": self.coefficients, "scale_coefficients": self.scale_coefficients}
+        return {
+            "mean_coefficients": self.coefficients,
+            "scale_coefficients": self.scale_coefficients,
+            "converged": self.converged,
+            "iterations": self.iterations,
+            "termination_reason": self.termination_reason,
+            "objective_delta": self.objective_delta,
+        }
 
 
 def _locscale_fit(rv, data, given, *, max_iter=200, tol=1e-8):
@@ -549,7 +848,7 @@ def _locscale_fit(rv, data, given, *, max_iter=200, tol=1e-8):
     from scipy.optimize import minimize
 
     fam = rv._family.name
-    y = np.asarray(data, dtype=float).reshape(-1)
+    y = np.asarray(data, dtype=float)
     if fam == "LogNormal":
         if np.any(y <= 0):
             raise ValueError("LogNormal regression requires positive observations.")
@@ -568,7 +867,7 @@ def _locscale_fit(rv, data, given, *, max_iter=200, tol=1e-8):
     def nll(theta):
         bm, bs = unpack(theta)
         mu = offm + (Xm @ bm if pm else 0.0)
-        eta = np.clip(offs + (Xs @ bs if ps else 0.0), -20, 20)
+        eta = np.clip(offs + (Xs @ bs if ps else 0.0), -20.0, 20.0)
         r = w - mu
         inv2 = np.exp(-2.0 * eta)
         val = np.sum(eta + 0.5 * r * r * inv2)
@@ -578,11 +877,13 @@ def _locscale_fit(rv, data, given, *, max_iter=200, tol=1e-8):
     def grad(theta):
         bm, bs = unpack(theta)
         mu = offm + (Xm @ bm if pm else 0.0)
-        eta = np.clip(offs + (Xs @ bs if ps else 0.0), -20, 20)
+        raw_eta = offs + (Xs @ bs if ps else 0.0)
+        eta = np.clip(raw_eta, -20.0, 20.0)
+        active = ((raw_eta > -20.0) & (raw_eta < 20.0)).astype(float)
         r = w - mu
         inv2 = np.exp(-2.0 * eta)
         gm = (-Xm.T @ (r * inv2) + p0m * (bm - m0m)) if pm else np.zeros(0)
-        gs = (Xs.T @ (1.0 - r * r * inv2) + p0s * (bs - m0s)) if ps else np.zeros(0)
+        gs = (Xs.T @ ((1.0 - r * r * inv2) * active) + p0s * (bs - m0s)) if ps else np.zeros(0)
         return np.concatenate([gm, gs])
 
     # warm start: OLS mean, unit scale
@@ -593,31 +894,47 @@ def _locscale_fit(rv, data, given, *, max_iter=200, tol=1e-8):
         except np.linalg.LinAlgError:
             pass
     res = minimize(nll, theta0, jac=grad, method="L-BFGS-B", options={"maxiter": max_iter, "ftol": tol})
+    if not res.success or not math.isfinite(float(res.fun)) or not np.isfinite(res.x).all():
+        raise RuntimeError(f"location-scale regression optimization failed: {res.message}")
     theta = res.x
     bm, bs = unpack(theta)
 
     # Laplace covariance from the analytic Hessian at the optimum
     mu = offm + (Xm @ bm if pm else 0.0)
-    eta = np.clip(offs + (Xs @ bs if ps else 0.0), -20, 20)
+    raw_eta = offs + (Xs @ bs if ps else 0.0)
+    eta = np.clip(raw_eta, -20.0, 20.0)
+    active = ((raw_eta > -20.0) & (raw_eta < 20.0)).astype(float)
     r = w - mu
     inv2 = np.exp(-2.0 * eta)
     Hmm = (Xm.T @ (Xm * inv2[:, None]) + np.diag(p0m)) if pm else np.zeros((0, 0))
-    Hss = (Xs.T @ (Xs * (2.0 * r * r * inv2)[:, None]) + np.diag(p0s)) if ps else np.zeros((0, 0))
-    Hms = (2.0 * Xm.T @ (Xs * (r * inv2)[:, None])) if (pm and ps) else np.zeros((pm, ps))
+    Hss = Xs.T @ (Xs * (2.0 * r * r * inv2 * active)[:, None]) + np.diag(p0s) if ps else np.zeros((0, 0))
+    Hms = (2.0 * Xm.T @ (Xs * (r * inv2 * active)[:, None])) if (pm and ps) else np.zeros((pm, ps))
     H = np.block([[Hmm, Hms], [Hms.T, Hss]])
     try:
         cov = np.linalg.inv(H + 1e-8 * np.eye(H.shape[0]))
     except np.linalg.LinAlgError:
         cov = np.linalg.pinv(H)
 
-    result = LocationScaleResult(fam, names_m, names_s, theta, cov, spec_m, spec_s)
+    result = LocationScaleResult(
+        fam,
+        names_m,
+        names_s,
+        theta,
+        cov,
+        spec_m,
+        spec_s,
+        iterations=int(res.nit),
+        objective_delta=float(np.linalg.norm(res.jac, ord=np.inf)),
+        termination_reason=str(res.message),
+    )
     return RandomVariable._bound(None, name=rv._name, result=result)
 
 
-def _coord_descent(X, target, p0, m0, l1, loc1, max_iter, tol: float = 1e-8):
+def _coord_descent(X, target, p0, m0, l1, loc1, max_iter, tol, *, fixed_sigma2=None):
     """Cyclic coordinate descent for penalized least squares with per-coefficient L1/L2.
 
-    Minimizes ``0.5||target - X beta||^2 + sum_i [0.5 p0_i (beta_i - m0_i)^2 + l1_i |beta_i - loc1_i|]``.
+    Minimizes the Normal negative log posterior, scaling coefficient-prior
+    penalties by the fixed or iteratively estimated residual variance.
     Each coordinate has a closed-form soft-threshold update, so a ``free`` coefficient reduces to
     the OLS update, a Normal prior to ridge, and a Laplace prior to lasso (the families mix freely).
     """
@@ -625,29 +942,46 @@ def _coord_descent(X, target, p0, m0, l1, loc1, max_iter, tol: float = 1e-8):
     beta = np.zeros(p)
     z = (X * X).sum(axis=0)  # squared column norms
     resid = target - X @ beta
-    for _ in range(max(int(max_iter), 200)):
+    sigma2 = (
+        _positive_float(fixed_sigma2, "fixed residual variance")
+        if fixed_sigma2 is not None
+        else max(float(resid @ resid) / n, 1.0e-8)
+    )
+    converged, delta = False, math.inf
+    for iteration in range(1, max_iter + 1):
         delta = 0.0
         for j in range(p):
             resid = resid + X[:, j] * beta[j]  # partial residual excluding coordinate j
-            a = z[j] + p0[j]
-            c = X[:, j] @ resid + p0[j] * m0[j]
+            # In RSS units, a coefficient prior's negative log density is
+            # multiplied by sigma^2.  This keeps Normal/Laplace prior strength
+            # invariant to the response's declared likelihood scale.
+            a = z[j] + sigma2 * p0[j]
+            c = X[:, j] @ resid + sigma2 * p0[j] * m0[j]
+            threshold = sigma2 * l1[j]
             if a <= 0.0:
                 bj = 0.0
             else:
-                d = a * loc1[j] - c  # objective in u = beta_j - loc1[j]: 0.5 a u^2 + d u + l1|u|
-                if d > l1[j]:
-                    u = -(d - l1[j]) / a
-                elif d < -l1[j]:
-                    u = -(d + l1[j]) / a
+                d = a * loc1[j] - c
+                if d > threshold:
+                    u = -(d - threshold) / a
+                elif d < -threshold:
+                    u = -(d + threshold) / a
                 else:
                     u = 0.0
                 bj = loc1[j] + u
             delta = max(delta, abs(bj - beta[j]))
             beta[j] = bj
             resid = resid - X[:, j] * beta[j]
+        sigma_delta = 0.0
+        if fixed_sigma2 is None:
+            new_sigma2 = max(float(resid @ resid) / n, 1.0e-8)
+            sigma_delta = abs(new_sigma2 - sigma2)
+            sigma2 = new_sigma2
+        delta = max(delta, sigma_delta)
         if delta < tol:
+            converged = True
             break
-    return beta
+    return beta, sigma2, converged, iteration, delta
 
 
 def _quantile_fit(rv: RandomVariable, data, given, tau: float) -> RandomVariable:
@@ -657,8 +991,8 @@ def _quantile_fit(rv: RandomVariable, data, given, tau: float) -> RandomVariable
     exact linear program ``min tau*sum(u) + (1-tau)*sum(v)`` subject to
     ``X beta + u - v = y - offset``, ``u, v >= 0``, solved with HiGHS. The returned
     :class:`RegressionResult` predicts the fitted quantile through the identity link;
-    coefficient standard errors for quantile regression need a bootstrap, so ``cov`` is
-    left at zero rather than reporting a misleading OLS curvature.
+    coefficient standard errors for quantile regression need a bootstrap, so
+    uncertainty is explicitly unavailable rather than represented by zero variance.
     """
     if not 0.0 < tau < 1.0:
         raise ValueError(f"quantile must be in (0, 1); got {tau}.")
@@ -668,10 +1002,18 @@ def _quantile_fit(rv: RandomVariable, data, given, tau: float) -> RandomVariable
     from scipy.optimize import linprog
 
     linpred = next(a for a in rv._args if isinstance(a, _LinearPredictor))
+    if linpred.groups:
+        raise NotImplementedError("quantile regression does not support grouped effects.")
+    if rv._args[1] is not FREE:
+        raise NotImplementedError(
+            "quantile regression requires a free scale slot; declared scale semantics are unused."
+        )
     columns = _columns_of(linpred)
     est, _fixed = columns
+    if any(isinstance(coef, RandomVariable) for coef, _field in est):
+        raise NotImplementedError("quantile regression does not implement coefficient-prior semantics.")
     X, offset = _design(columns, given)
-    y = np.asarray(data, dtype=float).reshape(-1)
+    y = np.asarray(data, dtype=float)
     n, p = X.shape
     c = np.concatenate([np.zeros(p), tau * np.ones(n), (1.0 - tau) * np.ones(n)])
     a_eq = sparse.hstack([sparse.csr_matrix(X), sparse.eye(n), -sparse.eye(n)], format="csr")
@@ -680,55 +1022,94 @@ def _quantile_fit(rv: RandomVariable, data, given, tau: float) -> RandomVariable
     if not res.success:
         raise RuntimeError(f"quantile regression LP did not converge: {res.message}")
     beta = np.asarray(res.x[:p], dtype=float)
-    names, idx_of = [], {}
-    for i, (coef, field) in enumerate(est):
-        names.append(field.name if field is not None else "intercept")
-        idx_of[id(coef)] = i
-    result = RegressionResult(names, idx_of, beta, np.zeros((p, p)), float("nan"), columns, link="identity")
+    names, idx_of = _parameter_layout(est)
+    result = RegressionResult(
+        names,
+        idx_of,
+        beta,
+        None,
+        float("nan"),
+        columns,
+        link="identity",
+        converged=True,
+        iterations=int(getattr(res, "nit", 0)),
+        termination_reason="optimal",
+    )
     result.quantile = float(tau)
     return RandomVariable._bound(None, name=rv._name, result=result)
 
 
 def regression_fit(
-    rv: RandomVariable, data, *, given=None, max_iter: int = 100, tol: float = 1e-9, quantile=None, l2=0.0, **_
+    rv: RandomVariable,
+    data,
+    *,
+    given=None,
+    how="auto",
+    max_iter: int = 100,
+    inner_max_iter: int = 100,
+    tol: float = 1e-9,
+    quantile=None,
+    l2=0.0,
+    **_,
 ) -> RandomVariable:
     """Fit a PPL regression expression using the appropriate linear-model route."""
+    if how not in {"auto", "map"}:
+        raise NotImplementedError(
+            f"regression's specialized backend implements point-estimate how='map' only, not how={how!r}."
+        )
+    max_iter = _positive_int(max_iter, "max_iter")
+    inner_max_iter = _positive_int(inner_max_iter, "inner_max_iter")
+    tol = _positive_float(tol, "tol")
+    try:
+        l2 = float(l2)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("l2 must be a finite non-negative scalar.") from exc
+    if not math.isfinite(l2) or l2 < 0.0:
+        raise ValueError("l2 must be a finite non-negative scalar.")
+    y, given = _validate_conditional_data(rv, data, given)
+    fam = rv._family.name
+    _validate_response(fam, y)
     linpred0 = next((a for a in rv._args if isinstance(a, _LinearPredictor)), None)
     if quantile is not None:  # pinball-loss quantile regression (same linear-predictor syntax)
-        return _quantile_fit(rv, data, given or {}, float(quantile))
+        if how != "auto":
+            raise NotImplementedError("quantile regression is a separate loss route and requires how='auto'.")
+        return _quantile_fit(rv, y, given, float(quantile))
     if linpred0 is not None and linpred0.groups:  # mixed-effects model
-        y = np.asarray(data, float).reshape(-1)
-        if rv._family.name == "Normal":
-            return _lmm_fit(rv, y, given or {}, linpred0, max_iter, tol)
-        glmm_link = _LINK.get(rv._family.name)
-        if glmm_link is None:
+        est, _fixed = _columns_of(linpred0)
+        if any(isinstance(coef, RandomVariable) for coef, _field in est):
             raise NotImplementedError(
-                f"mixed-effects models support {sorted(_LINK)} responses (got {rv._family.name!r})."
+                "mixed-model coefficient priors are not implemented by the current LMM/GLMM routes."
             )
-        return _glmm_fit(rv, y, given or {}, linpred0, glmm_link, max(max_iter, 100), tol)
-    fam = rv._family.name
+        _parameter_layout(est)
+        if fam == "Normal":
+            if rv._args[1] is not FREE:
+                raise NotImplementedError("the LMM route currently requires a free residual-scale slot.")
+            return _lmm_fit(rv, y, given, linpred0, max_iter, tol)
+        glmm_link = _LINK.get(fam)
+        if glmm_link is None:
+            raise NotImplementedError(f"mixed-effects models support {sorted(_LINK)} responses (got {fam!r}).")
+        return _glmm_fit(rv, y, given, linpred0, glmm_link, max_iter, inner_max_iter, tol)
     # heteroskedastic location-scale: a linear predictor in the *scale* slot (log link)
     if fam in ("Normal", "LogNormal") and isinstance(rv._args[1], _LinearPredictor):
-        return _locscale_fit(rv, data, given or {}, max_iter=max(max_iter, 200))
+        return _locscale_fit(rv, y, given, max_iter=max_iter, tol=tol)
     link = _LINK.get(fam)
     if link is None:
         raise NotImplementedError(f"regression for family {fam} is not supported (have {sorted(_LINK)}).")
     linpred = next(a for a in rv._args if isinstance(a, _LinearPredictor))
     scale = rv._args[1] if fam == "Normal" else None
-    given = given or {}
-    y = np.asarray(data, dtype=float).reshape(-1)
     columns = _columns_of(linpred)
     est, _fixed = columns
+    _validate_supported_priors(est)
+    names, idx_of = _parameter_layout(est)
     X, offset = _design(columns, given)
     N, p = X.shape
+    if p == 0:
+        raise ValueError("regression has no estimated coefficient columns.")
 
     # coefficient priors per slot: Normal -> L2 (ridge), Laplace -> L1 (lasso), free -> none
     m0, p0 = np.zeros(p), np.zeros(p)  # L2 mean / precision
     l1, loc1 = np.zeros(p), np.zeros(p)  # L1 strength / center
-    idx_of, names = {}, []
     for i, (coef, field) in enumerate(est):
-        names.append(field.name if field is not None else "intercept")
-        idx_of[id(coef)] = i
         if isinstance(coef, RandomVariable) and coef._family.name == "Normal":
             m0[i] = float(coef._args[0])
             p0[i] = 1.0 / float(coef._args[1]) ** 2
@@ -737,17 +1118,41 @@ def regression_fit(
             l1[i] = 1.0 / float(coef._args[1])  # Laplace scale b -> L1 penalty 1/b
     if l2 > 0.0:  # global ridge added to every non-intercept coefficient (elastic net with Laplace priors)
         not_intercept = np.array([field is not None for (_coef, field) in est], dtype=float)
-        p0 = p0 + float(l2) * not_intercept
+        p0 = p0 + l2 * not_intercept
     P0 = np.diag(p0)
 
     if np.any(l1 > 0.0) or l2 > 0.0:  # L1 and/or global L2 -> coordinate descent (lasso / ridge / elastic net)
         if fam != "Normal":
             raise NotImplementedError("penalized (L1 / elastic-net) regression is supported for Normal responses.")
-        beta = _coord_descent(X, y - offset, p0, m0, l1, loc1, max_iter)
-        resid = y - (offset + X @ beta)
-        sigma = float(np.sqrt(max(resid @ resid / N, 1e-8)))
-        # L1 coefficient standard errors need a bootstrap; leave cov at zero (no OLS curvature)
-        result = RegressionResult(names, idx_of, beta, np.zeros((p, p)), sigma, columns, link="identity")
+        if isinstance(scale, RandomVariable):
+            raise NotImplementedError("a prior-bearing Normal scale is not implemented by regression.")
+        fixed_sigma2 = None if scale is FREE else _positive_float(scale, "Normal scale") ** 2
+        beta, sigma2, converged, iterations, objective_delta = _coord_descent(
+            X,
+            y - offset,
+            p0,
+            m0,
+            l1,
+            loc1,
+            max_iter,
+            tol,
+            fixed_sigma2=fixed_sigma2,
+        )
+        sigma = math.sqrt(sigma2)
+        cov = None if np.any(l1 > 0.0) else np.linalg.inv(X.T @ X / sigma2 + P0)
+        result = RegressionResult(
+            names,
+            idx_of,
+            beta,
+            cov,
+            sigma,
+            columns,
+            link="identity",
+            converged=converged,
+            iterations=iterations,
+            termination_reason="tolerance" if converged else "max_iterations",
+            objective_delta=objective_delta,
+        )
         return RandomVariable._bound(None, name=rv._name, result=result)
 
     # IRLS / Fisher scoring (one step is OLS for the Gaussian identity link).
@@ -757,11 +1162,14 @@ def regression_fit(
     # the exact Gaussian posterior mode. Unscaled, the "Bayesian" fit is ridge-at-sigma=1.
     # Non-Gaussian GLM families (Bernoulli/Poisson) have unit dispersion, so X'WX is already the
     # likelihood precision and P0 enters unscaled (the exact penalized-likelihood / MAP mode).
-    sigma_fixed = fam != "Normal" or not (scale is FREE or isinstance(scale, RandomVariable))
-    sigma2_work = float(scale) ** 2 if (fam == "Normal" and sigma_fixed) else 1.0
+    if fam == "Normal" and isinstance(scale, RandomVariable):
+        raise NotImplementedError("a prior-bearing Normal scale is not implemented by regression.")
+    sigma_fixed = fam != "Normal" or scale is not FREE
+    sigma2_work = _positive_float(scale, "Normal scale") ** 2 if (fam == "Normal" and sigma_fixed) else 1.0
     beta = np.zeros(p)
     cov = np.eye(p)
-    for _ in range(max_iter):
+    converged, objective_delta = False, math.inf
+    for iteration in range(1, max_iter + 1):
         eta = offset + X @ beta
         mu = _link_inv(link, eta)
         W = _irls_weight(link, mu)
@@ -773,8 +1181,10 @@ def regression_fit(
         A = X.T @ WX + sigma2_work * P0
         cov = np.linalg.inv(A)
         new_beta = cov @ (X.T @ (W * z) + sigma2_work * (P0 @ m0))
-        if np.max(np.abs(new_beta - beta)) < tol:
+        objective_delta = float(np.max(np.abs(new_beta - beta)))
+        if objective_delta < tol:
             beta = new_beta
+            converged = True
             break
         beta = new_beta
 
@@ -790,5 +1200,17 @@ def regression_fit(
     else:
         sigma = float("nan")
 
-    result = RegressionResult(names, idx_of, beta, cov, sigma, columns, link=link)
+    result = RegressionResult(
+        names,
+        idx_of,
+        beta,
+        cov,
+        sigma,
+        columns,
+        link=link,
+        converged=converged,
+        iterations=iteration,
+        termination_reason="tolerance" if converged else "max_iterations",
+        objective_delta=objective_delta,
+    )
     return RandomVariable._bound(None, name=rv._name, result=result)
