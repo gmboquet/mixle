@@ -502,5 +502,92 @@ class ScoreNormalizationTest(unittest.TestCase):
         self.assertGreater(post["a"], post["c"])  # higher raw score keeps a higher share
 
 
+class ConfidencePolicyTest(unittest.TestCase):
+    """MXR-080-0301: constrained_decode must validate its confidence policy and receipt its identity."""
+
+    class _NaNCalibrator:
+        method = "broken-nan"
+
+        def predict(self, arr):
+            return np.array([float("nan")] * len(arr))
+
+    class _AboveOneCalibrator:
+        method = "broken-unbounded"
+
+        def predict(self, arr):
+            return np.array([1.7] * len(arr))
+
+    class _ScaledCalibrator:
+        method = "isotonic-ish"
+
+        def predict(self, arr):
+            return np.clip(np.asarray(arr, dtype=float) * 0.9, 0.0, 1.0)
+
+    def _ont_and_llm(self):
+        ont = Ontology().add_class("Person").add_class("City").add_relation("lives_in", "Person", "City")
+        types = {"ada": "Person", "paris": "City"}
+
+        class _LLM:
+            def sample_graphs(self, prompt, n):
+                return [frozenset({("ada", "lives_in", "paris")})]
+
+            def distribution(self, prompt, graphs):
+                from mixle.reason.graph_llm import GraphDistribution
+
+                distinct = list({g for g in graphs})
+                return GraphDistribution(distinct, np.array([1.0 / len(distinct)] * len(distinct)))
+
+        return ont, types, _LLM()
+
+    def test_nan_calibrated_confidence_is_rejected_not_silently_below_floor(self):
+        # The audit's own reproduction: a NaN confidence simply fell into `below_floor`.
+        ont, types, llm = self._ont_and_llm()
+        with self.assertRaises(ValueError):
+            constrained_decode(llm, "p", ont, types, n=1, floor=0.5, calibrator=self._NaNCalibrator())
+
+    def test_calibrator_output_above_one_is_rejected_not_published_unchanged(self):
+        ont, types, llm = self._ont_and_llm()
+        with self.assertRaises(ValueError):
+            constrained_decode(llm, "p", ont, types, n=1, floor=0.5, calibrator=self._AboveOneCalibrator())
+
+    def test_nan_floor_rejected(self):
+        ont, types, llm = self._ont_and_llm()
+        with self.assertRaises(ValueError):
+            constrained_decode(llm, "p", ont, types, n=1, floor=float("nan"))
+
+    def test_out_of_range_floor_rejected(self):
+        ont, types, llm = self._ont_and_llm()
+        with self.assertRaises(ValueError):
+            constrained_decode(llm, "p", ont, types, n=1, floor=1.5)
+
+    def test_receipt_binds_calibrator_population_and_ontology_version(self):
+        ont, types, llm = self._ont_and_llm()
+        ont.version = "kg-schema-v3"
+        dec = constrained_decode(
+            llm,
+            "p",
+            ont,
+            types,
+            n=1,
+            floor=0.1,
+            calibrator=self._ScaledCalibrator(),
+            calibration_population="2026-07 labeled facts, n=500",
+        )
+        # __qualname__ (not the bare __name__) so two same-named calibrators from different scopes
+        # are still distinguishable in an audit -- this test's calibrator is nested in this class.
+        self.assertEqual(dec.receipt["calibrator"]["class"], "ConfidencePolicyTest._ScaledCalibrator")
+        self.assertEqual(dec.receipt["calibrator"]["method"], "isotonic-ish")
+        self.assertEqual(dec.receipt["calibration_population"], "2026-07 labeled facts, n=500")
+        self.assertEqual(dec.receipt["ontology_version"], "kg-schema-v3")
+        self.assertEqual(dec.as_dict()["receipt"], dec.receipt)
+
+    def test_receipt_is_honest_about_absence_of_calibrator_and_version(self):
+        ont, types, llm = self._ont_and_llm()  # ont.version defaults to None; no calibrator passed
+        dec = constrained_decode(llm, "p", ont, types, n=1, floor=0.1)
+        self.assertIsNone(dec.receipt["calibrator"])
+        self.assertIsNone(dec.receipt["calibration_population"])
+        self.assertIsNone(dec.receipt["ontology_version"])
+
+
 if __name__ == "__main__":
     unittest.main()

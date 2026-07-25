@@ -16,6 +16,17 @@ mask before accepting generated triples.
 
 Everything is symbolic and dependency-free: entities/relations are strings, entity types are supplied
 as a ``{entity: class}`` map (the entity-linking output). Violations are named, never silent.
+
+Construction is collision- and cycle-safe (MXR-080-0297): :meth:`Ontology.add_class`/``add_relation``
+reject a name that is already registered instead of silently overwriting its definition, and
+:meth:`Ontology.replace_class`/``replace_relation`` are the explicit, differently named operations for
+deliberately redefining one -- this codebase's established reject-then-explicit-replace convention (see
+e.g. ``CrossModalModel.add_modality``/``replace_modality``, MXR-080-0276). Decode-time filtering and KG
+completion validate the FULL contract -- per-triple axioms plus cross-triple graph axioms plus the raw
+model output itself -- rather than the partial checks that let a schema-violating or numerically
+degenerate result through while still claiming to be "ontology-constrained" (MXR-080-0298/0299/0300),
+and constrained decoding validates its confidence policy and binds its identity to the result
+(MXR-080-0301).
 """
 
 from __future__ import annotations
@@ -36,6 +47,7 @@ class Ontology:
     relations: dict[str, tuple[str, str]] = field(default_factory=dict)  # relation -> (domain, range)
     axioms: dict[str, set[str]] = field(default_factory=dict)  # relation -> subset of AXIOMS
     disjoint: list[tuple[str, str]] = field(default_factory=list)  # mutually-exclusive class pairs
+    version: str | None = None  # opaque caller-assigned id, bound into decode receipts (MXR-080-0301)
 
     # -- construction (chainable) ------------------------------------------------------------------
     def add_class(self, name: str, parent: str | None = None) -> Ontology:
@@ -413,6 +425,25 @@ def _require_unique(names: list[str], *, what: str) -> None:
         raise ValueError(f"duplicate {what} name(s), index/name maps would be ambiguous: {sorted(dupes)}")
 
 
+def _require_unit_probability(value: float, *, what: str) -> float:
+    """Reject a non-finite or out-of-``[0, 1]`` value outright rather than clip or misclassify it
+    (MXR-080-0300/0301).
+
+    A NaN score previously passed every ``<= 0`` / ``>=`` comparison as False, so it slipped through
+    checks meant to catch exactly this and came out the other end labeled a valid probability (or,
+    in :func:`constrained_decode`, a valid-but-low ``below_floor`` confidence). An out-of-range
+    calibrator output was published unchanged. Both are rejected here, not clipped: silently
+    clipping would mask exactly the kind of broken/mismatched score this validates against, behind a
+    plausible-looking capped number.
+    """
+    v = float(value)
+    if not np.isfinite(v):
+        raise ValueError(f"{what} must be finite; got {value!r}")
+    if not (0.0 <= v <= 1.0):
+        raise ValueError(f"{what} must be within [0, 1]; got {v!r}")
+    return v
+
+
 def _masked_log_normalize(lp: np.ndarray, mask: np.ndarray, *, context: str) -> np.ndarray:
     """Numerically stable log-normalization restricted to ``mask`` (MXR-080-0300).
 
@@ -565,6 +596,7 @@ class ConstrainedDecode:
     rejected: list[dict[str, Any]]  # ontology-violating triples with named reasons
     below_floor: list[tuple[Any, float]]  # consistent but under-confident facts (withheld, not asserted)
     n_samples: int
+    receipt: dict[str, Any] = field(default_factory=dict)  # calibrator/population/ontology identity (MXR-080-0301)
 
     def asserted(self) -> list[Any]:
         """Return facts that passed constraints and confidence floor."""
@@ -577,6 +609,7 @@ class ConstrainedDecode:
             "rejected": self.rejected,
             "below_floor": [{"triple": list(t), "confidence": round(c, 4)} for t, c in self.below_floor],
             "n_samples": self.n_samples,
+            "receipt": self.receipt,
         }
 
 
@@ -589,6 +622,7 @@ def constrained_decode(
     n: int | None = None,
     floor: float = 0.5,
     calibrator: Any = None,
+    calibration_population: Any = None,
 ) -> ConstrainedDecode:
     """Decode only schema-consistent facts above a confidence floor.
 
@@ -609,8 +643,17 @@ def constrained_decode(
     "ontology-constrained". ``facts`` is re-validated as a graph after confidence-sorting, so
     :meth:`Ontology.filter_triples`'s "first in the list wins" conflict policy resolves to
     "highest-confidence wins" at this aggregate stage; every casualty is named in ``rejected``.
+
+    MXR-080-0301: ``floor`` and every calibrated confidence must be finite and within ``[0, 1]`` --
+    see :func:`_require_unit_probability` for why these raise rather than silently clip or
+    misclassify. The result's ``receipt`` binds the calibrator's identity (its class and, when
+    available, its ``method``), the ``calibration_population`` the caller asserts it was fit on
+    (this function cannot recover that from an arbitrary calibrator object, so it is taken on trust
+    from the caller -- pass whatever identifies the labeled set used with
+    :func:`~mixle.reason.graph_llm.fit_fact_calibrator`), and ``ontology.version``, so a result can
+    be independently audited instead of trusted blind.
     """
-    import numpy as np  # noqa: F811 - local so the module stays import-light
+    floor = _require_unit_probability(floor, what="floor")
 
     from mixle.reason.graph_llm import canonical_graph
 
@@ -629,9 +672,12 @@ def constrained_decode(
 
     def confidence(marg: float) -> float:
         if calibrator is None:
-            return float(marg)
+            return _require_unit_probability(marg, what="raw edge marginal (no calibrator)")
         out = calibrator.predict(np.asarray([marg]))
-        return float(np.asarray(out).reshape(-1)[0])
+        raw = np.asarray(out).reshape(-1)
+        if raw.size != 1:
+            raise ValueError(f"calibrator.predict(...) must return exactly one value per input; got {raw.size}")
+        return _require_unit_probability(float(raw[0]), what=f"calibrated confidence for marginal {marg!r}")
 
     facts: list[tuple[Any, float]] = []
     withheld: list[tuple[Any, float]] = []
@@ -649,6 +695,19 @@ def constrained_decode(
         for entry in aggregate_conflicts:
             rejected_all.setdefault(tuple(entry["triple"]), entry)
 
+    receipt = {
+        "calibrator": (
+            None
+            if calibrator is None
+            else {"class": type(calibrator).__qualname__, "method": getattr(calibrator, "method", None)}
+        ),
+        "calibration_population": calibration_population,
+        "ontology_version": ontology.version,
+    }
     return ConstrainedDecode(
-        facts=facts, rejected=list(rejected_all.values()), below_floor=withheld, n_samples=n_samples
+        facts=facts,
+        rejected=list(rejected_all.values()),
+        below_floor=withheld,
+        n_samples=n_samples,
+        receipt=receipt,
     )
