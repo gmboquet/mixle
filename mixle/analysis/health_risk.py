@@ -150,11 +150,23 @@ class _DeterministicRisk:
     point. `prior_dominated` is always False -- there is no prior/regulariser in play, only a direct
     threshold test on the supplied field. `grid_shape` is extra (not part of IC-1) so a caller that
     knows it received an ndarray can reshape `samples` back into the original spatial layout.
+
+    Construction validates `samples`: non-empty and finite (no NaN/Inf) -- the same defense-in-depth
+    guard `_SampleDerivedQuantity` above carries, so invalid state can never flow downstream even if
+    some upstream pushforward (here, `safety_risk_surface`'s ndarray path) fails to validate its own
+    inputs.
     """
 
     samples: np.ndarray  # (1, n_cells), 0.0/1.0 exceedance indicator
     grid_shape: tuple[int, ...]
     prior_dominated: bool = field(default=False)
+
+    def __post_init__(self) -> None:
+        arr = np.asarray(self.samples, dtype=float)
+        if arr.size == 0:
+            raise ValueError("_DeterministicRisk.samples must be non-empty.")
+        if not np.isfinite(arr).all():
+            raise ValueError("_DeterministicRisk.samples must be finite (no NaN/Inf).")
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         point = self.samples[0]
