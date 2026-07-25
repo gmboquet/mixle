@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from mixle.reason.ontology import Ontology, OntologyConstrainedKG
+from mixle.reason.ontology import Ontology, OntologyConstrainedKG, constrained_decode
 
 
 def _ont():
@@ -287,6 +287,84 @@ class ConstructionSafetyTest(unittest.TestCase):
         ont.classes["P"] = "Q"  # direct mutation: P -> Q -> P
         with self.assertRaises(RuntimeError):
             ont.is_a("P", "SomethingElse")
+
+
+class CrossTripleConflictResolutionTest(unittest.TestCase):
+    """MXR-080-0298: filter_triples/constrained_decode must validate the ACCEPTED SET as a graph."""
+
+    def test_functional_relation_two_tails_no_longer_both_kept(self):
+        # The audit's own reproduction: a functional relation asserted with two different tails for
+        # the same head was previously returned ENTIRELY in `kept`.
+        ont = Ontology().add_class("Person").add_class("City").add_relation("lives_in", "Person", "City", "functional")
+        types = {"ada": "Person", "paris": "City", "lyon": "City"}
+        triples = [("ada", "lives_in", "paris"), ("ada", "lives_in", "lyon")]
+        kept, rejected = ont.filter_triples(triples, types)
+        self.assertEqual(len(kept), 1, "a functional relation must never keep two tails for one head")
+        self.assertEqual(kept, [("ada", "lives_in", "paris")])  # first-declared wins, deterministically
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["triple"], ("ada", "lives_in", "lyon"))
+        self.assertIn("functional", rejected[0]["problems"][0])
+
+    def test_inverse_functional_two_heads_resolved(self):
+        ont = Ontology().add_class("Person").add_relation("has_bio_mother", "Person", "Person", "inverse_functional")
+        types = {"a": "Person", "b": "Person", "m": "Person"}
+        kept, rejected = ont.filter_triples([("a", "has_bio_mother", "m"), ("b", "has_bio_mother", "m")], types)
+        self.assertEqual(kept, [("a", "has_bio_mother", "m")])
+        self.assertEqual(rejected[0]["triple"], ("b", "has_bio_mother", "m"))
+        self.assertIn("inverse_functional", rejected[0]["problems"][0])
+
+    def test_asymmetric_both_directions_resolved_to_first_declared(self):
+        ont = Ontology().add_class("Person").add_relation("manages", "Person", "Person", "asymmetric")
+        types = {"ada": "Person", "bob": "Person"}
+        kept, rejected = ont.filter_triples([("ada", "manages", "bob"), ("bob", "manages", "ada")], types)
+        self.assertEqual(kept, [("ada", "manages", "bob")])
+        self.assertEqual(rejected[0]["triple"], ("bob", "manages", "ada"))
+
+    def test_symmetric_unpaired_edge_rejected_paired_edges_kept(self):
+        ont = Ontology().add_class("Person").add_relation("married_to", "Person", "Person", "symmetric")
+        types = {"ada": "Person", "bob": "Person", "carl": "Person"}
+        triples = [("ada", "married_to", "bob"), ("ada", "married_to", "carl"), ("carl", "married_to", "ada")]
+        kept, rejected = ont.filter_triples(triples, types)
+        self.assertNotIn(("ada", "married_to", "bob"), kept)  # unpaired -> cannot stand alone
+        self.assertIn(("ada", "married_to", "carl"), kept)
+        self.assertIn(("carl", "married_to", "ada"), kept)
+        self.assertEqual(rejected[0]["triple"], ("ada", "married_to", "bob"))
+
+    def test_transitive_premises_survive_missing_closure_reported_not_stripped(self):
+        ont = Ontology().add_class("Person").add_relation("ancestor_of", "Person", "Person", "transitive")
+        types = {"ada": "Person", "bob": "Person", "carl": "Person"}
+        triples = [("ada", "ancestor_of", "bob"), ("bob", "ancestor_of", "carl")]
+        kept, rejected = ont.filter_triples(triples, types)
+        # the two premises did nothing wrong individually and must NOT be discarded
+        self.assertEqual(set(kept), set(triples))
+        self.assertEqual(rejected[0]["triple"], ("ada", "ancestor_of", "carl"))
+        self.assertIn("transitive", rejected[0]["problems"][0])
+
+    def test_constrained_decode_resolves_functional_conflict_across_different_samples(self):
+        # Per-sample filtering alone cannot catch this: each individual sampled graph asserts only
+        # ONE tail (so each sample is, by itself, functional-clean), but DIFFERENT samples pick
+        # different tails. If both tails' marginals independently clear the floor, the aggregate
+        # `facts` set is globally inconsistent unless it is re-validated as a graph.
+        ont = Ontology().add_class("Person").add_class("City").add_relation("lives_in", "Person", "City", "functional")
+        types = {"ada": "Person", "paris": "City", "london": "City"}
+        calls = {"n": 0}
+
+        def generate(prompt):
+            calls["n"] += 1
+            # 3/5 samples say paris, 2/5 say london -- both would clear a floor of 0.3
+            return "ada|lives_in|paris" if calls["n"] % 5 in (1, 2, 3) else "ada|lives_in|london"
+
+        def parse(s):
+            return [tuple(t.split("|")) for t in s.split(";") if t]
+
+        from mixle.reason.graph_llm import GraphLLM
+
+        llm = GraphLLM(generate, parse, n=5)
+        dec = constrained_decode(llm, "facts about ada", ont, types, floor=0.3)
+        asserted = dec.asserted()
+        self.assertEqual(len(asserted), 1, f"functional relation must assert exactly one tail, got {asserted}")
+        self.assertEqual(asserted[0], ("ada", "lives_in", "paris"))  # higher marginal (0.6 > 0.4) wins
+        self.assertTrue(any(r["triple"] == ("ada", "lives_in", "london") for r in dec.rejected))
 
 
 if __name__ == "__main__":

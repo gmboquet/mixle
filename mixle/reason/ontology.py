@@ -211,7 +211,12 @@ class Ontology:
         """Audit a triple set: per-triple violations plus the cross-triple axioms (functional/symmetric/
         asymmetric/transitive).
 
-        Returns ``{consistent, n_triples, violations: [{triple, problems}]}`` -- every problem named."""
+        Returns ``{consistent, n_triples, violations: [{triple, problems}]}`` -- every problem named.
+        Every cross-triple (graph-level) violation also carries an ``"axiom"`` key naming which axiom
+        it is (the per-triple violations sourced from :meth:`check_triple` do not, since one of those
+        can bundle several different kinds of problem for a single triple) -- :meth:`filter_triples`
+        relies on this to apply a deterministic policy per axiom kind (MXR-080-0298).
+        """
         triple_list = [tuple(t) for t in triples]
         violations: list[dict[str, Any]] = []
         for tr in triple_list:
@@ -232,6 +237,7 @@ class Ontology:
                         violations.append(
                             {
                                 "triple": (h, r, "*"),
+                                "axiom": "functional",
                                 "problems": [f"functional: {r!r} has {sorted(tails)} tails for {h!r}"],
                             }
                         )
@@ -241,19 +247,27 @@ class Ontology:
                         violations.append(
                             {
                                 "triple": ("*", r, t),
+                                "axiom": "inverse_functional",
                                 "problems": [f"inverse_functional: {sorted(heads)} heads for {t!r}"],
                             }
                         )
             if "asymmetric" in ax:
                 for h, rr, t in triple_list:
                     if rr == r and (t, r, h) in present and h != t:
-                        violations.append({"triple": (h, r, t), "problems": ["asymmetric: both directions asserted"]})
+                        violations.append(
+                            {
+                                "triple": (h, r, t),
+                                "axiom": "asymmetric",
+                                "problems": ["asymmetric: both directions asserted"],
+                            }
+                        )
             if "symmetric" in ax:
                 for h, rr, t in triple_list:
                     if rr == r and h != t and (t, r, h) not in present:
                         violations.append(
                             {
                                 "triple": (h, r, t),
+                                "axiom": "symmetric",
                                 "problems": [f"symmetric: {r!r} has {h!r}->{t!r} without the reverse {t!r}->{h!r}"],
                             }
                         )
@@ -266,6 +280,7 @@ class Ontology:
                             violations.append(
                                 {
                                     "triple": (h, r, t),
+                                    "axiom": "transitive",
                                     "problems": [
                                         f"transitive: {r!r} has {h!r}->{m!r}->{t!r} without the closure edge "
                                         f"{h!r}->{t!r}"
@@ -274,8 +289,89 @@ class Ontology:
                             )
         return {"consistent": not violations, "n_triples": len(triple_list), "violations": violations}
 
+    def _resolve_graph_conflicts(
+        self, kept: list[tuple], types: dict[str, str]
+    ) -> tuple[list[tuple], list[dict[str, Any]]]:
+        """Deterministically resolve SET-level (cross-triple) axiom violations among per-triple-valid
+        ``kept`` triples (MXR-080-0298).
+
+        :meth:`check_triple` only ever sees one triple at a time, so it cannot catch a functional
+        relation asserted with two different tails, two different heads asserted for one inverse-
+        functional tail, both directions of an asymmetric relation, or an incomplete symmetric/
+        transitive closure -- those are properties of the whole candidate SET. This re-audits
+        ``kept`` with :meth:`check_graph` and, for every cross-triple violation, applies one fixed
+        policy per axiom kind:
+
+        * functional / inverse_functional / asymmetric (genuine VALUE conflicts: more than one
+          admissible filler for one slot, or both directions of an asymmetric relation asserted at
+          once): keep the FIRST triple by position in ``kept`` among the conflicting ones, reject
+          the rest. (A caller that wants "highest-scored wins" gets it for free by passing ``kept``
+          in descending-confidence order; :func:`constrained_decode` does exactly this for its
+          aggregate, confidence-sorted fact set.)
+        * symmetric (a triple's required reverse edge was never asserted): the ontology promises
+          symmetric relations only ever appear in pairs, so a solitary direction cannot stand alone
+          as validated -- it is rejected too.
+        * transitive (the required closure edge was never asserted): the two premise triples are
+          each individually valid and are NOT removed from ``kept`` -- only the missing closure fact
+          itself is reported, since it names something that was never in the candidate set at all.
+
+        Returns ``(new_kept, extra_rejected)``. Every triple removed from ``kept``, and every
+        unconfirmed transitive closure, is named in ``extra_rejected`` with its reason.
+        """
+        if len(kept) < 2:
+            return kept, []  # no cross-triple axiom can be violated by 0 or 1 triples
+        report = self.check_graph(kept, types)
+        if report["consistent"]:
+            return kept, []
+
+        order = {tr: i for i, tr in enumerate(kept)}
+        kept_set = set(kept)
+        losers: dict[tuple, set[str]] = {}
+        missing: dict[tuple, set[str]] = {}
+
+        for v in report["violations"]:
+            axiom = v.get("axiom")
+            if axiom is None:
+                continue  # per-triple violation; filter_triples already excluded it from `kept`
+            reason = v["problems"][0]
+            h, r, t = v["triple"]
+            if axiom == "functional":  # (h, r, "*"): every tail asserted for this (h, r)
+                group = sorted((tr for tr in kept if tr[0] == h and tr[1] == r), key=order.get)
+                for loser in group[1:]:
+                    losers.setdefault(loser, set()).add(reason)
+            elif axiom == "inverse_functional":  # ("*", r, t): every head asserted for this (r, t)
+                group = sorted((tr for tr in kept if tr[1] == r and tr[2] == t), key=order.get)
+                for loser in group[1:]:
+                    losers.setdefault(loser, set()).add(reason)
+            elif axiom == "asymmetric":  # (h, r, t) with (t, r, h) also present
+                pair = [p for p in ((h, r, t), (t, r, h)) if p in kept_set]
+                pair.sort(key=order.get)
+                for loser in pair[1:]:
+                    losers.setdefault(loser, set()).add(reason)
+            elif axiom == "symmetric":  # (h, r, t) itself, missing its reverse
+                if (h, r, t) in kept_set:
+                    losers.setdefault((h, r, t), set()).add(reason)
+            elif axiom == "transitive":  # (h, r, t) is the MISSING closure edge, not in kept
+                missing.setdefault((h, r, t), set()).add(reason)
+
+        if not losers and not missing:
+            return kept, []
+        new_kept = [tr for tr in kept if tr not in losers]
+        extra_rejected = [{"triple": tr, "problems": sorted(reasons)} for tr, reasons in losers.items()]
+        extra_rejected += [{"triple": tr, "problems": sorted(reasons)} for tr, reasons in missing.items()]
+        return new_kept, extra_rejected
+
     def filter_triples(self, triples: Any, types: dict[str, str]) -> tuple[list[tuple], list[dict[str, Any]]]:
-        """Split triples into (kept, rejected-with-reasons) by per-triple consistency -- the decode mask."""
+        """Split triples into (kept, rejected-with-reasons) -- the decode mask.
+
+        MXR-080-0298: per-triple consistency (:meth:`check_triple`) alone is not enough -- it
+        cannot see that a functional relation was asserted with two different tails, or any other
+        cross-triple axiom violation, so ``kept`` could previously contain a set that is globally
+        inconsistent even though every individual triple in it looks fine alone. After the
+        per-triple pass, the accepted set is re-validated AS A GRAPH and any set-level conflict is
+        resolved by :meth:`_resolve_graph_conflicts`'s deterministic policy; every triple that
+        policy withholds is added to ``rejected`` with its reason, same as a per-triple violation.
+        """
         kept: list[tuple] = []
         rejected: list[dict[str, Any]] = []
         for tr in (tuple(t) for t in triples):
@@ -284,6 +380,8 @@ class Ontology:
                 rejected.append({"triple": tr, "problems": probs})
             else:
                 kept.append(tr)
+        kept, extra_rejected = self._resolve_graph_conflicts(kept, types)
+        rejected.extend(extra_rejected)
         return kept, rejected
 
 
@@ -390,6 +488,15 @@ def constrained_decode(
     :func:`~mixle.reason.graph_llm.fit_fact_calibrator` to apply the floor on calibrated truth
     probability rather than the raw marginal). Consistent-but-underconfident facts are reported as
     withheld, never silently dropped: the decode says what it refused to assert and why.
+
+    MXR-080-0298: per-sample filtering only guarantees each INDIVIDUAL sampled graph is internally
+    consistent; the published ``facts`` set is built by thresholding each triple's marginal
+    independently, so two triples that never co-occurred in any single sample (e.g. two different
+    tails of a functional relation, each confident in a disjoint subset of samples) could previously
+    both clear the floor and be asserted together -- globally inconsistent while still labeled
+    "ontology-constrained". ``facts`` is re-validated as a graph after confidence-sorting, so
+    :meth:`Ontology.filter_triples`'s "first in the list wins" conflict policy resolves to
+    "highest-confidence wins" at this aggregate stage; every casualty is named in ``rejected``.
     """
     import numpy as np  # noqa: F811 - local so the module stays import-light
 
@@ -421,6 +528,15 @@ def constrained_decode(
         (facts if conf >= floor else withheld).append((triple, conf))
     facts.sort(key=lambda tc: -tc[1])
     withheld.sort(key=lambda tc: -tc[1])
+
+    # MXR-080-0298: catch conflicts across the AGGREGATE fact set that no single sample exhibited.
+    surviving, aggregate_conflicts = ontology._resolve_graph_conflicts([t for t, _ in facts], types)
+    if aggregate_conflicts:
+        surviving_set = set(surviving)
+        facts = [(t, c) for t, c in facts if t in surviving_set]
+        for entry in aggregate_conflicts:
+            rejected_all.setdefault(tuple(entry["triple"]), entry)
+
     return ConstrainedDecode(
         facts=facts, rejected=list(rejected_all.values()), below_floor=withheld, n_samples=n_samples
     )
