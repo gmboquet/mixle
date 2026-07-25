@@ -7,6 +7,7 @@ distribution-specific likelihood math.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -14,6 +15,7 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 
 from mixle.inference.estimation import _engine_seq_estimate, _engine_seq_log_density_sum, _local_encoded_chunks
+from mixle.inference.transaction import AlgorithmStateSnapshot, MutableStateSnapshot
 from mixle.stats.compute.pdist import (
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -31,6 +33,23 @@ class EMStepResult:
     objective: float | None = None
     accepted: bool = True
     metadata: dict | None = None
+
+
+@dataclass(frozen=True)
+class SampledSufficientStatistics:
+    """Unambiguous Monte-Carlo EM payload for an optional observation count."""
+
+    suff_stat: Any
+    nobs: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.nobs is not None and (
+            isinstance(self.nobs, (bool, np.bool_))
+            or not isinstance(self.nobs, (int, float, np.integer, np.floating))
+            or not np.isfinite(self.nobs)
+            or self.nobs < 0.0
+        ):
+            raise ValueError("sampled sufficient-statistic nobs must be a finite non-negative number.")
 
 
 @runtime_checkable
@@ -296,17 +315,35 @@ class MonotonicEM:
         """Run the base step, then reject it if the objective is non-finite or decreases."""
         objective = observed_log_likelihood(enc_data, engine=engine) if objective is None else objective
         old_value = objective(model)
+        mutable_state = MutableStateSnapshot.capture(model, estimator, self.base_strategy)
+        strategy_state = AlgorithmStateSnapshot.capture(
+            self.base_strategy, enc_data, estimator, model, engine, objective
+        )
         try:
             base_result = self.base_strategy.step(enc_data, estimator, model, engine=engine, objective=objective)
             candidate = base_result.model
             new_value = objective(candidate) if base_result.objective is None else base_result.objective
         except (np.linalg.LinAlgError, FloatingPointError, ValueError, RuntimeError):
             # M-step blew up (e.g. a singular covariance slipped through): keep the last good model.
+            mutable_state.restore()
+            strategy_state.restore()
             return EMStepResult(model, old_value, False, metadata={"rejected": "exception"})
+        except Exception:
+            mutable_state.restore()
+            strategy_state.restore()
+            raise
 
+        if not base_result.accepted:
+            mutable_state.restore()
+            strategy_state.restore()
+            return EMStepResult(model, old_value, False, metadata={"rejected": "base_strategy"})
         if not np.isfinite(new_value):
+            mutable_state.restore()
+            strategy_state.restore()
             return EMStepResult(model, old_value, False, metadata={"rejected": "nonfinite"})
         if self.require_improvement and new_value + self.tolerance < old_value:
+            mutable_state.restore()
+            strategy_state.restore()
             return EMStepResult(model, old_value, False, metadata={"rejected": "decrease"})
         return EMStepResult(candidate, new_value, True)
 
@@ -352,8 +389,10 @@ class MonteCarloEM:
     """Monte-Carlo EM over sampled sufficient statistics.
 
     ``sample_suff_stat_fn`` is called as
-    ``fn(enc_data, estimator, model, rng, num_samples, engine)``.  It may return
-    either ``suff_stat`` or ``(nobs, suff_stat)`` for ``estimator.estimate``.
+    ``fn(enc_data, estimator, model, rng, num_samples, engine)``. Return a bare
+    sufficient statistic, or :class:`SampledSufficientStatistics` when the
+    estimator also needs an explicit observation count. A two-tuple is always
+    treated as a statistic because tuple-valued statistics are common.
     """
 
     def __init__(
@@ -812,21 +851,37 @@ class RestartEM:
         objective = observed_log_likelihood(enc_data, engine=engine) if objective is None else objective
         best_model = None
         best_value = -np.inf
-        for initial in self.initial_models:
-            candidate = run_em(
-                enc_data,
-                estimator,
-                initial,
-                strategy=self.strategy,
-                max_its=self.max_its,
-                delta=self.delta,
-                engine=engine,
-                objective=objective,
-            )
-            value = objective(candidate)
-            if best_model is None or value > best_value:
-                best_model = candidate
-                best_value = value
+        roots = (estimator, *self.initial_models)
+        mutable_baseline = MutableStateSnapshot.capture(*roots)
+        algorithm_baseline = AlgorithmStateSnapshot.capture(roots, enc_data, engine, objective)
+        try:
+            for initial in self.initial_models:
+                mutable_baseline.restore()
+                algorithm_baseline.restore()
+                try:
+                    strategy = copy.deepcopy(self.strategy)
+                except (TypeError, ValueError, RuntimeError) as exc:
+                    raise TypeError(
+                        "RestartEM requires a strategy whose initial state can be copied independently "
+                        "for each restart."
+                    ) from exc
+                candidate = run_em(
+                    enc_data,
+                    estimator,
+                    initial,
+                    strategy=strategy,
+                    max_its=self.max_its,
+                    delta=self.delta,
+                    engine=engine,
+                    objective=objective,
+                )
+                value = objective(candidate)
+                if best_model is None or value > best_value:
+                    best_model = copy.deepcopy(candidate)
+                    best_value = value
+        finally:
+            mutable_baseline.restore()
+            algorithm_baseline.restore()
         return best_model
 
 
@@ -888,17 +943,22 @@ def run_em(
     model = initial_model
     last_good = model
     old_value = objective(model)
-    from mixle.inference.transaction import MutableStateSnapshot
-
     for _ in range(max(1, int(max_its))):
-        transaction = MutableStateSnapshot.capture(model, estimator)
-        result = strategy.step(enc_data, estimator, model, engine=engine, objective=objective)
-        candidate = result.model
-        value = objective(candidate) if result.objective is None else result.objective
-        gain = value - old_value
-        accepted = bool(result.accepted) and np.isfinite(value) and ((not monotone) or gain >= -float(tolerance))
+        transaction = MutableStateSnapshot.capture(model, estimator, strategy)
+        strategy_transaction = AlgorithmStateSnapshot.capture(strategy, enc_data, estimator, model, engine, objective)
+        try:
+            result = strategy.step(enc_data, estimator, model, engine=engine, objective=objective)
+            candidate = result.model
+            value = objective(candidate) if result.objective is None else result.objective
+            gain = value - old_value
+            accepted = bool(result.accepted) and np.isfinite(value) and ((not monotone) or gain >= -float(tolerance))
+        except Exception:
+            transaction.restore()
+            strategy_transaction.restore()
+            raise
         if not accepted:
             transaction.restore()
+            strategy_transaction.restore()
             return last_good
         model = candidate
         last_good = model
@@ -943,6 +1003,6 @@ def _mixture_stats_from_gamma(model: Any, estimator: ParameterEstimator, enc: An
 
 
 def _split_suff_stat(sampled: Any) -> Any:
-    if isinstance(sampled, tuple) and len(sampled) == 2:
-        return sampled
+    if isinstance(sampled, SampledSufficientStatistics):
+        return sampled.nobs, sampled.suff_stat
     return None, sampled
