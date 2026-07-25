@@ -24,8 +24,14 @@ def _label_y(mean: np.ndarray) -> str:
     return "pos" if mean[1] >= 0 else "neg"
 
 
-TASK_A = TaskReadout("A", _label_x)
-TASK_B = TaskReadout("B", _label_y)
+def _fixture_projection_error(components, weights, merged):
+    # This fixture's labels depend only on the sign of one coordinate; all group
+    # components and the moment-matched result stay on the same side of zero.
+    return 0.0
+
+
+TASK_A = TaskReadout("A", _label_x, projection_error=_fixture_projection_error)
+TASK_B = TaskReadout("B", _label_y, projection_error=_fixture_projection_error)
 
 
 def _belief():
@@ -47,6 +53,39 @@ def _samples(belief, n, seed):
 
 
 class TaskProjectionTest(unittest.TestCase):
+    def test_invalid_mixture_weights_are_rejected(self):
+        belief = _belief()
+        belief.w[0] = np.nan
+        with self.assertRaisesRegex(ValueError, "weights"):
+            task_sufficient_projection(belief, TASK_A)
+
+    def test_impossible_observation_has_no_task_readout(self):
+        class ImpossibleComponent:
+            mu = 0.0
+            sigma2 = 1.0
+
+            def log_density(self, _x):
+                return -np.inf
+
+        class ImpossibleMixture:
+            components = (ImpossibleComponent(),)
+            w = np.array([1.0])
+
+        with self.assertRaisesRegex(ValueError, "impossible"):
+            read_out(ImpossibleMixture(), TaskReadout("impossible", _label_x), 0.0)
+
+    def test_equal_mean_labels_are_not_sufficient_without_an_error_verifier(self):
+        belief = _belief()
+        unverified = TaskReadout("unverified", _label_x)
+        with self.assertRaisesRegex(ValueError, "projection_error"):
+            task_sufficient_projection(belief, unverified)
+
+    def test_projection_error_bound_is_enforced(self):
+        belief = _belief()
+        unsafe = TaskReadout("unsafe", _label_x, projection_error=lambda *_: 0.2, max_projection_error=0.1)
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            task_sufficient_projection(belief, unsafe)
+
     def test_projection_shrinks_and_groups_by_task_label(self):
         belief = _belief()
         pi_a = task_sufficient_projection(belief, TASK_A)
