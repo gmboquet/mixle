@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from mixle.inference import average_causal_effect, do
+from mixle.inference import CausalIdentification, average_causal_effect, do
 from mixle.inference.bayesian_network import (
     HeterogeneousBayesianNetwork,
     _LinearGaussianFactor,
@@ -16,6 +16,13 @@ def _chain():
     fx = _MarginalFactor(0, GaussianDistribution(0.0, 1.0))
     fy = _LinearGaussianFactor(1, [0], {}, np.array([2.0, 0.0]), 0.5)
     return HeterogeneousBayesianNetwork([fx, fy])
+
+
+def _identification(*, counterfactuals=False):
+    return CausalIdentification.domain_asserted(
+        "test fixture DAG was specified independently of the observations",
+        structural_counterfactuals=counterfactuals,
+    )
 
 
 def test_do_on_the_cause_moves_the_effect_exactly():
@@ -51,7 +58,16 @@ def test_do_on_the_effect_leaves_the_cause_at_its_marginal():
 
 def test_average_causal_effect_matches_the_structural_slope():
     net = _chain()
-    ace = average_causal_effect(net, treatment=0, a=1.0, b=0.0, outcome=1, n=6000, seed=3)
+    ace = average_causal_effect(
+        net,
+        treatment=0,
+        a=1.0,
+        b=0.0,
+        outcome=1,
+        identification=_identification(),
+        n=6000,
+        seed=3,
+    )
     assert abs(ace - 2.0) < 0.06  # the structural coefficient
 
 
@@ -142,7 +158,7 @@ def test_counterfactual_replays_the_abducted_residual_exactly():
     f = {g.child: g for g in net.factors}[2]
 
     obs = rows[10]
-    cf = counterfactual(net, obs, {1: obs[1] + 1.0})
+    cf = counterfactual(net, obs, {1: obs[1] + 1.0}, identification=_identification(counterfactuals=True))
     mu_obs = float(f._row([obs[p] for p in f.parents]) @ f.coef)
     want = list(obs)
     want[1] = obs[1] + 1.0
@@ -157,7 +173,7 @@ def test_counterfactual_downstream_intervention_leaves_ancestors_alone():
 
     net, rows = _cf_network()
     obs = rows[3]
-    cf = counterfactual(net, obs, {2: 99.0})
+    cf = counterfactual(net, obs, {2: 99.0}, identification=_identification(counterfactuals=True))
     assert cf[2] == 99.0
     assert cf[1] == obs[1]  # in THIS dag x1 is upstream: intervening on the effect leaves the cause
     assert cf[0] == obs[0]
@@ -189,4 +205,9 @@ def test_counterfactual_discrete_with_changed_parents_raises_honestly():
     f1 = _DiscreteConditionalFactor.fit(1, [0], cols, template=CategoricalEstimator(), max_its=5)
     net = HeterogeneousBayesianNetwork([_MarginalFactor(0, x0_dist), f1])
     with pytest.raises(ValueError):
-        counterfactual(net, rows[0], {0: rows[0][0] + 3.0})
+        counterfactual(
+            net,
+            rows[0],
+            {0: rows[0][0] + 3.0},
+            identification=_identification(counterfactuals=True),
+        )

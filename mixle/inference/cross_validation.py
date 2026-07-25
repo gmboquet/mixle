@@ -32,6 +32,49 @@ from numpy.random import RandomState
 Fold = tuple[np.ndarray, np.ndarray]
 
 
+def _positive_int(name: str, value: int, *, minimum: int = 1) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    value = int(value)
+    if value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return value
+
+
+def _validate_folds(folds: list[Fold], n: int, *, expected: int) -> list[Fold]:
+    """Enforce the no-leakage/non-empty contract shared by every fold builder."""
+    if len(folds) != expected:
+        raise ValueError(f"requested {expected} folds but the split geometry produced {len(folds)}")
+    for number, (train, test) in enumerate(folds):
+        train = np.asarray(train)
+        test = np.asarray(test)
+        if train.ndim != 1 or test.ndim != 1:
+            raise ValueError(f"fold {number} indices must be one-dimensional")
+        if len(train) == 0 or len(test) == 0:
+            raise ValueError(f"fold {number} has an empty train or test partition")
+        if np.any(train < 0) or np.any(train >= n) or np.any(test < 0) or np.any(test >= n):
+            raise ValueError(f"fold {number} contains an out-of-range index")
+        if len(np.unique(train)) != len(train) or len(np.unique(test)) != len(test):
+            raise ValueError(f"fold {number} contains duplicate indices")
+        if np.intersect1d(train, test).size:
+            raise ValueError(f"fold {number} leaks test observations into training")
+    return folds
+
+
+def _labels(name: str, values: np.ndarray) -> np.ndarray:
+    labels = np.asarray(values)
+    if labels.ndim != 1 or labels.size == 0:
+        raise ValueError(f"{name} must be a non-empty one-dimensional array")
+    for value in labels.tolist():
+        if value is None or (isinstance(value, (float, np.floating)) and np.isnan(value)):
+            raise ValueError(f"{name} cannot contain missing labels")
+        try:
+            hash(value)
+        except TypeError as exc:
+            raise ValueError(f"{name} labels must be hashable scalars") from exc
+    return labels
+
+
 def _as_rng(seed: int | RandomState | None) -> RandomState:
     if isinstance(seed, RandomState):
         return seed
@@ -58,7 +101,9 @@ def kfold(n: int, n_splits: int = 5, *, shuffle: bool = False, seed: int | Rando
     Returns:
         ``k`` ``(train_index, test_index)`` pairs.
     """
-    if not 2 <= n_splits <= n:
+    n = _positive_int("n", n, minimum=2)
+    n_splits = _positive_int("n_splits", n_splits, minimum=2)
+    if n_splits > n:
         raise ValueError("n_splits must be in [2, n].")
     idx = np.arange(n)
     if shuffle:
@@ -70,7 +115,7 @@ def kfold(n: int, n_splits: int = 5, *, shuffle: bool = False, seed: int | Rando
         train = np.concatenate([idx[:start], idx[start + size :]])
         folds.append((train, test))
         start += size
-    return folds
+    return _validate_folds(folds, n, expected=n_splits)
 
 
 def blocked_kfold(n: int, n_splits: int = 5) -> list[Fold]:
@@ -104,10 +149,14 @@ def stratified_kfold(
     Returns:
         ``n_splits`` ``(train_index, test_index)`` pairs.
     """
-    y = np.asarray(y)
+    y = _labels("y", y)
     n = y.shape[0]
-    if not 2 <= n_splits <= n:
+    n_splits = _positive_int("n_splits", n_splits, minimum=2)
+    if n_splits > n:
         raise ValueError("n_splits must be in [2, n].")
+    _, class_counts = np.unique(y, return_counts=True)
+    if np.any(class_counts < n_splits):
+        raise ValueError("every class must have at least n_splits observations for stratified folds")
     rng = _as_rng(seed)
     test_assign = np.empty(n, dtype=int)
     for c in np.unique(y):
@@ -121,7 +170,7 @@ def stratified_kfold(
         test = all_idx[test_assign == f]
         train = all_idx[test_assign != f]
         folds.append((train, test))
-    return folds
+    return _validate_folds(folds, n, expected=n_splits)
 
 
 def leave_one_group_out(groups: np.ndarray) -> list[Fold]:
@@ -133,14 +182,16 @@ def leave_one_group_out(groups: np.ndarray) -> list[Fold]:
     Returns:
         One ``(train_index, test_index)`` pair per unique group.
     """
-    groups = np.asarray(groups)
+    groups = _labels("groups", groups)
+    if len(np.unique(groups)) < 2:
+        raise ValueError("leave-one-group-out requires at least two distinct groups")
     all_idx = np.arange(groups.shape[0])
     folds = []
     for g in np.unique(groups):
         test = all_idx[groups == g]
         train = all_idx[groups != g]
         folds.append((train, test))
-    return folds
+    return _validate_folds(folds, len(groups), expected=len(folds))
 
 
 def group_kfold(groups: np.ndarray, n_splits: int = 5) -> list[Fold]:
@@ -150,8 +201,9 @@ def group_kfold(groups: np.ndarray, n_splits: int = 5) -> list[Fold]:
     while keeping each group intact -- the right scheme for repeated measures when there are more
     groups than folds.
     """
-    groups = np.asarray(groups)
+    groups = _labels("groups", groups)
     uniq, counts = np.unique(groups, return_counts=True)
+    n_splits = _positive_int("n_splits", n_splits, minimum=2)
     if n_splits > len(uniq):
         raise ValueError("n_splits cannot exceed the number of groups.")
     order = np.argsort(-counts)
@@ -163,7 +215,8 @@ def group_kfold(groups: np.ndarray, n_splits: int = 5) -> list[Fold]:
         fold_load[f] += counts[gi]
     assign = np.array([fold_of_group[g] for g in groups])
     all_idx = np.arange(groups.shape[0])
-    return [(all_idx[assign != f], all_idx[assign == f]) for f in range(n_splits)]
+    folds = [(all_idx[assign != f], all_idx[assign == f]) for f in range(n_splits)]
+    return _validate_folds(folds, len(groups), expected=n_splits)
 
 
 def time_series_split(n: int, n_splits: int = 5, *, gap: int = 0, max_train_size: int | None = None) -> list[Fold]:
@@ -182,8 +235,11 @@ def time_series_split(n: int, n_splits: int = 5, *, gap: int = 0, max_train_size
     Returns:
         ``n_splits`` ``(train_index, test_index)`` pairs.
     """
-    if n_splits < 1:
-        raise ValueError("n_splits must be >= 1.")
+    n = _positive_int("n", n, minimum=2)
+    n_splits = _positive_int("n_splits", n_splits)
+    gap = _positive_int("gap", gap, minimum=0)
+    if max_train_size is not None:
+        max_train_size = _positive_int("max_train_size", max_train_size)
     test_size = n // (n_splits + 1)
     if test_size < 1:
         raise ValueError("n is too small for the requested n_splits.")
@@ -193,15 +249,12 @@ def time_series_split(n: int, n_splits: int = 5, *, gap: int = 0, max_train_size
         test_end = n if i == n_splits - 1 else test_start + test_size
         train_end = test_start - gap
         if train_end <= 0:
-            continue
+            raise ValueError(
+                f"gap={gap} leaves fold {i} without a training window; reduce gap or n_splits"
+            )
         train_start = 0 if max_train_size is None else max(0, train_end - max_train_size)
         folds.append((np.arange(train_start, train_end), np.arange(test_start, test_end)))
-    if not folds:
-        raise ValueError(
-            f"gap={gap} leaves no valid training window for any of the {n_splits} requested splits "
-            f"(n={n}); reduce gap or n_splits."
-        )
-    return folds
+    return _validate_folds(folds, n, expected=n_splits)
 
 
 def purged_kfold(n: int, n_splits: int = 5, *, embargo: int = 0) -> list[Fold]:
@@ -220,7 +273,10 @@ def purged_kfold(n: int, n_splits: int = 5, *, embargo: int = 0) -> list[Fold]:
     Returns:
         ``n_splits`` ``(train_index, test_index)`` pairs.
     """
-    if not 2 <= n_splits <= n:
+    n = _positive_int("n", n, minimum=2)
+    n_splits = _positive_int("n_splits", n_splits, minimum=2)
+    embargo = _positive_int("embargo", embargo, minimum=0)
+    if n_splits > n:
         raise ValueError("n_splits must be in [2, n].")
     folds = []
     start = 0
@@ -231,7 +287,7 @@ def purged_kfold(n: int, n_splits: int = 5, *, embargo: int = 0) -> list[Fold]:
         train = np.concatenate([np.arange(0, lo), np.arange(hi, n)])
         folds.append((train, test))
         start += size
-    return folds
+    return _validate_folds(folds, n, expected=n_splits)
 
 
 def spatial_block_kfold(
@@ -259,18 +315,35 @@ def spatial_block_kfold(
     Returns:
         ``n_splits`` ``(train_index, test_index)`` pairs.
     """
-    coords = np.atleast_2d(np.asarray(coords, dtype=float))
+    coords = np.asarray(coords, dtype=float)
+    if coords.ndim != 2 or coords.shape[0] < 2 or coords.shape[1] < 1:
+        raise ValueError("coords must have shape (n, d) with n >= 2 and d >= 1")
+    if not np.all(np.isfinite(coords)):
+        raise ValueError("coords must contain only finite values")
     n, d = coords.shape
+    n_splits = _positive_int("n_splits", n_splits, minimum=2)
+    if n_splits > n:
+        raise ValueError("n_splits cannot exceed the number of observations")
+    if block_size is not None and n_side is not None:
+        raise ValueError("specify block_size or n_side, not both")
     lo = coords.min(axis=0)
     hi = coords.max(axis=0)
     span = np.where(hi > lo, hi - lo, 1.0)
     if block_size is not None:
+        if (
+            isinstance(block_size, (bool, np.bool_))
+            or not isinstance(block_size, (int, float, np.integer, np.floating))
+            or not np.isfinite(block_size)
+            or block_size <= 0
+        ):
+            raise ValueError("block_size must be a finite positive number")
         cell = np.full(d, float(block_size))
         # cells covering [lo, hi] per axis; the epsilon absorbs float noise when span/cell is integral
         n_cells = np.maximum(np.ceil(span / cell - 1e-12).astype(int), 1)
     else:
         if n_side is None:
             n_side = max(2, int(np.ceil((4 * n_splits) ** (1.0 / d))))
+        n_side = _positive_int("n_side", n_side)
         cell = span / n_side
         n_cells = np.full(d, int(n_side))
     block_idx = np.floor((coords - lo) / cell).astype(int)
@@ -279,11 +352,16 @@ def spatial_block_kfold(
     block_idx = np.minimum(block_idx, n_cells - 1)
     _, block_id = np.unique(block_idx, axis=0, return_inverse=True)
     n_blocks = block_id.max() + 1
+    if n_blocks < n_splits:
+        raise ValueError(
+            f"spatial geometry has only {n_blocks} occupied blocks for {n_splits} requested folds"
+        )
     rng = _as_rng(seed)
     block_fold = rng.permutation(n_blocks) % n_splits
     assign = block_fold[block_id]
     all_idx = np.arange(n)
-    return [(all_idx[assign != f], all_idx[assign == f]) for f in range(n_splits)]
+    folds = [(all_idx[assign != f], all_idx[assign == f]) for f in range(n_splits)]
+    return _validate_folds(folds, n, expected=n_splits)
 
 
 @dataclass

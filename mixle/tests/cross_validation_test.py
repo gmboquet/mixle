@@ -141,7 +141,9 @@ class SpatialTest(unittest.TestCase):
         c1 = rng.normal([0.5, 0.5], 0.01, (50, 2))
         c2 = rng.normal([7.3, 7.3], 0.01, (50, 2))
         coords = np.vstack([c1, c2])
-        folds = spatial_block_kfold(coords, 5, block_size=1.0, seed=0)
+        # These coordinates occupy exactly two grid cells, so request two non-empty folds. Asking
+        # for five used to return three empty test folds, which is no longer a valid CV geometry.
+        folds = spatial_block_kfold(coords, 2, block_size=1.0, seed=0)
         test_fold = {}
         for f, (_, te) in enumerate(folds):
             for i in te:

@@ -26,6 +26,59 @@ from collections.abc import Callable
 import numpy as np
 
 
+def _alpha(alpha: float) -> float:
+    if (
+        isinstance(alpha, (bool, np.bool_))
+        or not isinstance(alpha, (int, float, np.integer, np.floating))
+        or not np.isfinite(alpha)
+        or not 0.0 <= float(alpha) <= 1.0
+    ):
+        raise ValueError(f"alpha must be a finite number in [0.0, 1.0], got {alpha!r}.")
+    return float(alpha)
+
+
+def _finite_vector(name: str, values: np.ndarray, *, allow_empty: bool = False) -> np.ndarray:
+    try:
+        array = np.asarray(values, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a one-dimensional finite numeric array") from exc
+    if array.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    if not allow_empty and array.size == 0:
+        raise ValueError(f"{name} must contain at least one value")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values")
+    return array
+
+
+def _feature_matrix(name: str, values: np.ndarray, *, n_features: int | None = None) -> np.ndarray:
+    try:
+        array = np.asarray(values, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite two-dimensional feature matrix") from exc
+    if array.ndim != 2 or array.shape[0] == 0 or array.shape[1] == 0:
+        raise ValueError(f"{name} must have non-empty shape (n_samples, n_features)")
+    if n_features is not None and array.shape[1] != n_features:
+        raise ValueError(f"{name} has {array.shape[1]} features; expected {n_features}")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values")
+    return array
+
+
+def _predictions(values: np.ndarray, expected: int, *, source: str) -> np.ndarray:
+    predictions = _finite_vector(f"{source} predictions", values)
+    if len(predictions) != expected:
+        raise ValueError(f"{source} returned {len(predictions)} predictions; expected exactly {expected}")
+    return predictions
+
+
+def _probability_vector(name: str, values: np.ndarray, *, allow_empty: bool = False) -> np.ndarray:
+    probabilities = _finite_vector(name, values, allow_empty=allow_empty)
+    if np.any((probabilities < 0.0) | (probabilities > 1.0)):
+        raise ValueError(f"{name} must contain probabilities in [0, 1]")
+    return probabilities
+
+
 def _conformal_quantile(scores: np.ndarray, alpha: float) -> float:
     """The ``ceil((n+1)(1-alpha))``-th smallest score (finite-sample conformal quantile).
 
@@ -37,14 +90,9 @@ def _conformal_quantile(scores: np.ndarray, alpha: float) -> float:
     an uncaught ``IndexError``. Mirrors :func:`weighted_conformal`'s already-correct ``min(k, n-1)``
     convention, which returns the minimum score at this same boundary.
     """
-    if not 0.0 <= alpha <= 1.0:
-        raise ValueError(f"alpha must be in [0.0, 1.0], got {alpha!r}.")
-    s = np.sort(np.asarray(scores, dtype=float))
+    alpha = _alpha(alpha)
+    s = np.sort(_finite_vector("conformal calibration scores", scores))
     n = s.shape[0]
-    if n == 0:
-        raise ValueError("conformal calibration requires at least one score, got 0.")
-    if not np.isfinite(s).all():
-        raise ValueError("conformal calibration scores must be finite (no NaN/Inf).")
     k = int(np.ceil((n + 1) * (1.0 - alpha)))
     if k > n:
         return float("inf")
@@ -63,8 +111,13 @@ def _jackknife_plus_bounds(lo_vals: np.ndarray, hi_vals: np.ndarray, alpha: floa
     virtual indices do not). An out-of-range index (small ``n`` for the requested ``alpha``)
     yields the honest unbounded endpoint ``-inf`` / ``+inf``.
     """
-    if not 0.0 <= alpha <= 1.0:
-        raise ValueError(f"alpha must be in [0.0, 1.0], got {alpha!r}.")
+    alpha = _alpha(alpha)
+    lo_vals = np.asarray(lo_vals, dtype=float)
+    hi_vals = np.asarray(hi_vals, dtype=float)
+    if lo_vals.ndim != 2 or hi_vals.shape != lo_vals.shape or 0 in lo_vals.shape:
+        raise ValueError("jackknife/CV+ bound matrices must have the same non-empty two-dimensional shape")
+    if not np.all(np.isfinite(lo_vals)) or not np.all(np.isfinite(hi_vals)):
+        raise ValueError("jackknife/CV+ bound matrices must be finite")
     n, m = lo_vals.shape
     k_lo = int(np.floor(alpha * (n + 1)))
     k_hi = int(np.ceil((1.0 - alpha) * (n + 1)))
@@ -94,9 +147,11 @@ def split_conformal(
     Returns:
         ``(lower, upper)`` arrays of length ``m`` (an unbounded side is ``-inf`` / ``+inf``).
     """
-    cal_pred = np.asarray(cal_pred, dtype=float)
-    cal_y = np.asarray(cal_y, dtype=float)
-    test_pred = np.asarray(test_pred, dtype=float)
+    cal_pred = _finite_vector("cal_pred", cal_pred)
+    cal_y = _finite_vector("cal_y", cal_y)
+    test_pred = _finite_vector("test_pred", test_pred)
+    if cal_pred.shape != cal_y.shape:
+        raise ValueError("cal_pred and cal_y must have matching one-dimensional shapes")
     if side == "two-sided":
         q = _conformal_quantile(np.abs(cal_y - cal_pred), alpha)
         return test_pred - q, test_pred + q
@@ -127,17 +182,24 @@ def jackknife_plus(
     Returns:
         ``(lower, upper)`` arrays of length ``len(x_test)``.
     """
-    x = np.atleast_2d(np.asarray(x, dtype=float))
-    y = np.asarray(y, dtype=float).ravel()
-    x_test = np.atleast_2d(np.asarray(x_test, dtype=float))
+    _alpha(alpha)
+    x = _feature_matrix("x", x)
+    y = _finite_vector("y", y)
+    x_test = _feature_matrix("x_test", x_test, n_features=x.shape[1])
     n, m = x.shape[0], x_test.shape[0]
+    if n < 2:
+        raise ValueError("jackknife_plus requires at least two training observations")
+    if len(y) != n:
+        raise ValueError("x and y must contain the same number of observations")
+    if not callable(fit_predict):
+        raise TypeError("fit_predict must be callable")
     loo_test = np.empty((n, m))
     resid = np.empty(n)
     idx = np.arange(n)
     for i in range(n):
         mask = idx != i
         eval_pts = np.vstack([x[i : i + 1], x_test])
-        preds = np.asarray(fit_predict(x[mask], y[mask], eval_pts), dtype=float).ravel()
+        preds = _predictions(fit_predict(x[mask], y[mask], eval_pts), 1 + m, source="fit_predict")
         resid[i] = abs(y[i] - preds[0])
         loo_test[i] = preds[1:]
     return _jackknife_plus_bounds(loo_test - resid[:, None], loo_test + resid[:, None], alpha)
@@ -161,10 +223,20 @@ def cv_plus(
     Returns:
         ``(lower, upper)`` arrays of length ``len(x_test)``.
     """
-    x = np.atleast_2d(np.asarray(x, dtype=float))
-    y = np.asarray(y, dtype=float).ravel()
-    x_test = np.atleast_2d(np.asarray(x_test, dtype=float))
+    _alpha(alpha)
+    x = _feature_matrix("x", x)
+    y = _finite_vector("y", y)
+    x_test = _feature_matrix("x_test", x_test, n_features=x.shape[1])
     n, m = x.shape[0], x_test.shape[0]
+    if len(y) != n:
+        raise ValueError("x and y must contain the same number of observations")
+    if isinstance(n_folds, (bool, np.bool_)) or not isinstance(n_folds, (int, np.integer)):
+        raise ValueError("n_folds must be an integer in [2, n]")
+    n_folds = int(n_folds)
+    if not 2 <= n_folds <= n:
+        raise ValueError("n_folds must be in [2, n]")
+    if not callable(fit_predict):
+        raise TypeError("fit_predict must be callable")
     rng = np.random.RandomState(seed)
     folds = np.array_split(rng.permutation(n), n_folds)
     loo_test = np.empty((n, m))
@@ -173,7 +245,7 @@ def cv_plus(
         mask = np.ones(n, dtype=bool)
         mask[fold] = False
         eval_pts = np.vstack([x[fold], x_test])
-        preds = np.asarray(fit_predict(x[mask], y[mask], eval_pts), dtype=float).ravel()
+        preds = _predictions(fit_predict(x[mask], y[mask], eval_pts), len(fold) + m, source="fit_predict")
         k = fold.shape[0]
         resid[fold] = np.abs(y[fold] - preds[:k])
         loo_test[fold] = np.tile(preds[k:], (k, 1))
@@ -202,11 +274,25 @@ def mondrian_conformal(
     Returns:
         ``(lower, upper)`` arrays of length ``len(test_pred)``.
     """
-    cal_pred = np.asarray(cal_pred, dtype=float)
-    cal_y = np.asarray(cal_y, dtype=float)
+    cal_pred = _finite_vector("cal_pred", cal_pred)
+    cal_y = _finite_vector("cal_y", cal_y)
     cal_groups = np.asarray(cal_groups)
-    test_pred = np.asarray(test_pred, dtype=float)
+    test_pred = _finite_vector("test_pred", test_pred)
     test_groups = np.asarray(test_groups)
+    if cal_pred.shape != cal_y.shape:
+        raise ValueError("cal_pred and cal_y must have matching one-dimensional shapes")
+    if cal_groups.ndim != 1 or cal_groups.shape != cal_pred.shape:
+        raise ValueError("cal_groups must be one-dimensional and match the calibration arrays")
+    if test_groups.ndim != 1 or test_groups.shape != test_pred.shape:
+        raise ValueError("test_groups must be one-dimensional and match test_pred")
+    for name, labels in (("cal_groups", cal_groups), ("test_groups", test_groups)):
+        for label in labels.tolist():
+            if label is None or (isinstance(label, (float, np.floating)) and np.isnan(label)):
+                raise ValueError(f"{name} cannot contain missing labels")
+            try:
+                hash(label)
+            except TypeError as exc:
+                raise ValueError(f"{name} must contain hashable scalar labels") from exc
     scores = np.abs(cal_y - cal_pred)
     qhat: dict = {}
     for g in np.unique(cal_groups):
@@ -243,22 +329,23 @@ def weighted_conformal(
     Returns:
         ``(lower, upper)`` arrays of length ``m`` (a symmetric interval per test point).
     """
-    if not 0.0 <= alpha <= 1.0:
-        raise ValueError(f"alpha must be in [0.0, 1.0], got {alpha!r}.")
-    cal_pred = np.asarray(cal_pred, dtype=float)
-    cal_y = np.asarray(cal_y, dtype=float)
-    test_pred = np.asarray(test_pred, dtype=float)
-    w = np.asarray(weights, dtype=float)
+    alpha = _alpha(alpha)
+    cal_pred = _finite_vector("cal_pred", cal_pred)
+    cal_y = _finite_vector("cal_y", cal_y)
+    test_pred = _finite_vector("test_pred", test_pred)
+    w = _finite_vector("weights", weights)
     # This function computes its own weighted quantile rather than routing through
     # _conformal_quantile (the weighting has no unweighted equivalent there), so it needs its own
     # complete set of guards rather than inheriting _conformal_quantile's.
-    if w.shape[0] == 0:
-        raise ValueError("weighted_conformal requires at least one calibration point, got 0.")
     if w.shape != cal_pred.shape or w.shape != cal_y.shape:
         raise ValueError(
             f"weights, cal_pred, and cal_y must have matching shape, got {w.shape}, {cal_pred.shape}, {cal_y.shape}."
         )
-    if not np.isfinite(w).all() or not np.isfinite(test_weight):
+    if (
+        isinstance(test_weight, (bool, np.bool_))
+        or not isinstance(test_weight, (int, float, np.integer, np.floating))
+        or not np.isfinite(test_weight)
+    ):
         # checked before the sign check below: a NaN comparison is always False, so `NaN < 0.0` would
         # otherwise silently pass as "non-negative" and corrupt every downstream sum/cdf entry.
         raise ValueError("weights and test_weight must be finite.")
@@ -271,8 +358,6 @@ def weighted_conformal(
         # divides the CDF by zero below (0/0 = NaN) and, since a NaN comparison is always False, was
         # silently falling through to the "insufficient mass" branch (q = inf) instead of raising.
         raise ValueError(f"weighted_conformal requires a positive, finite total weight, got {total_weight!r}.")
-    if not np.isfinite(cal_pred).all() or not np.isfinite(cal_y).all():
-        raise ValueError("cal_pred and cal_y must be finite.")
     scores = np.abs(cal_y - cal_pred)
     order = np.argsort(scores)
     s_sorted = scores[order]
@@ -299,7 +384,7 @@ def conformal_label_threshold(cal_prob_true: np.ndarray, *, alpha: float = 0.1) 
     Returns:
         ``qhat`` -- the score threshold (``+inf`` when ``n`` is too small for the requested ``alpha``).
     """
-    scores = 1.0 - np.asarray(cal_prob_true, dtype=float)
+    scores = 1.0 - _probability_vector("cal_prob_true", cal_prob_true)
     return _conformal_quantile(scores, alpha)
 
 
@@ -326,9 +411,27 @@ def conformal_label_sets(
     Returns:
         ``(sets, qhat)`` -- ``sets`` is an ``(m, K)`` boolean mask, ``qhat`` the threshold used.
     """
+    alpha = _alpha(alpha)
+    cal_prob_true = _probability_vector("cal_prob_true", cal_prob_true, allow_empty=qhat is not None)
     if qhat is None:
         qhat = conformal_label_threshold(cal_prob_true, alpha=alpha)
+    elif (
+        isinstance(qhat, (bool, np.bool_))
+        or not isinstance(qhat, (int, float, np.integer, np.floating))
+        or np.isnan(qhat)
+        or qhat < 0.0
+        or (not np.isposinf(qhat) and qhat > 1.0)
+    ):
+        raise ValueError("qhat must be a finite value in [0, 1] or positive infinity")
     test_prob = np.asarray(test_prob, dtype=float)
+    if test_prob.ndim != 2 or test_prob.shape[0] == 0 or test_prob.shape[1] == 0:
+        raise ValueError("test_prob must have non-empty shape (n_samples, n_classes)")
+    if not np.all(np.isfinite(test_prob)):
+        raise ValueError("test_prob must contain only finite probabilities")
+    if np.any((test_prob < 0.0) | (test_prob > 1.0)):
+        raise ValueError("test_prob must contain probabilities in [0, 1]")
+    if not np.allclose(test_prob.sum(axis=1), 1.0, rtol=1e-7, atol=1e-9):
+        raise ValueError("each test_prob row must sum to 1")
     sets = (1.0 - test_prob) <= qhat
     return sets, float(qhat)
 

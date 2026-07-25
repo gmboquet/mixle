@@ -1,36 +1,117 @@
-"""``do`` -- interventions on a learned heterogeneous Bayesian network (graph-surgery semantics).
+"""Structural interventions on a heterogeneous Bayesian network.
 
-The causality front door over :func:`mixle.inference.bayesian_network.learn_bayesian_network`. An
-intervention ``do(net, {field: value})`` clamps the intervened fields during ancestral sampling —
-their own factors (and hence their parents) are cut out of the generation, which is exactly Pearl's
-graph surgery — and everything downstream flows through the fitted conditional factors::
+``do(net, ...)`` performs graph surgery on the supplied directed factorization. That operation is
+useful for simulation, but observational structure learning does not establish that an arrow is a
+causal direction. Consequently an unaccompanied ``do`` result is explicitly an *unidentified
+structural scenario*, not an estimate of an intervention in the data-generating world.
 
-    net = learn_bayesian_network(records)
-    world = do(net, {0: 2.0})                    # the world where field 0 is set to 2.0
-    world.sample(1000)                            # interventional draws
-    world.expectation(2)                          # E[field 2 | do(field 0 = 2.0)]
-    average_causal_effect(net, 0, 2.0, 0.0, outcome=2)   # E[Y|do(a)] - E[Y|do(b)]
-
-The signature difference from conditioning: intervening on a DOWNSTREAM field leaves its ancestors
-at their marginal law (observing it would have shifted them). ``do`` gives interventional
-distributions; counterfactuals (abduction over exogenous noise) are a separate, harder rung and are
-deliberately not claimed here.
+Callers that have a domain-asserted causal graph or an identified design can attach a
+:class:`CausalIdentification` receipt. APIs whose names make a causal claim, such as
+:func:`average_causal_effect` and :func:`counterfactual`, require that receipt.
 """
 
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
 
 
-class InterventionalNetwork:
-    """A Bayesian network under ``do(...)``: sample and summarize the post-intervention world."""
+@dataclass(frozen=True)
+class CausalIdentification:
+    """Auditable assumptions under which a structural contrast is interpreted causally.
 
-    def __init__(self, net: Any, interventions: dict[int, Any]) -> None:
+    This record does not prove its assertions. It makes the assertions reviewable and prevents a
+    learned observational arrow from silently becoming a causal result. ``graph_source`` must say
+    how the direction was established, and ``evidence`` should identify the design, protocol, or
+    domain artifact supporting the claim.
+    """
+
+    graph_source: str
+    estimand: str
+    evidence: tuple[str, ...]
+    assumptions: tuple[str, ...]
+    exchangeability: bool
+    positivity: bool
+    consistency: bool
+    no_interference: bool
+    structural_counterfactuals: bool = False
+
+    def __post_init__(self) -> None:
+        allowed_sources = {"domain_asserted", "randomized_design", "identified_natural_experiment"}
+        if self.graph_source not in allowed_sources:
+            raise ValueError(
+                "graph_source must be domain_asserted, randomized_design, or "
+                "identified_natural_experiment; a learned observational graph is not causal evidence"
+            )
+        if not isinstance(self.estimand, str) or not self.estimand.strip():
+            raise ValueError("estimand must be a non-empty description")
+        if not self.evidence or any(not isinstance(item, str) or not item.strip() for item in self.evidence):
+            raise ValueError("evidence must contain at least one non-empty design or domain reference")
+        if not self.assumptions or any(
+            not isinstance(item, str) or not item.strip() for item in self.assumptions
+        ):
+            raise ValueError("assumptions must contain at least one non-empty identification assumption")
+
+    @property
+    def identified(self) -> bool:
+        """Whether all common treatment-effect identification assumptions were declared."""
+        return bool(
+            self.exchangeability and self.positivity and self.consistency and self.no_interference
+        )
+
+    @classmethod
+    def domain_asserted(
+        cls,
+        evidence: str,
+        *,
+        estimand: str = "average treatment effect",
+        assumptions: tuple[str, ...] = ("causal DAG supplied independently of fitted associations",),
+        structural_counterfactuals: bool = False,
+    ) -> CausalIdentification:
+        """Construct a receipt for a domain-asserted causal DAG.
+
+        This convenience constructor records that the caller accepts the standard identification
+        assumptions. Applications needing qualified assumptions should instantiate the dataclass
+        directly rather than use this shorthand.
+        """
+        return cls(
+            graph_source="domain_asserted",
+            estimand=estimand,
+            evidence=(evidence,),
+            assumptions=assumptions,
+            exchangeability=True,
+            positivity=True,
+            consistency=True,
+            no_interference=True,
+            structural_counterfactuals=structural_counterfactuals,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a serializable copy of the receipt."""
+        return asdict(self)
+
+
+class InterventionalNetwork:
+    """A graph-surgery scenario with an explicit causal-identification status."""
+
+    def __init__(
+        self,
+        net: Any,
+        interventions: dict[int, Any],
+        identification: CausalIdentification | None = None,
+    ) -> None:
         self.net = net
         self.interventions = dict(interventions)
+        self.identification = identification
+        self.identified = identification is not None and identification.identified
+        self.interpretation = (
+            "identified intervention under the attached assumptions"
+            if self.identified
+            else "unidentified structural scenario; not a causal estimate"
+        )
         # Validate by *membership* against the network's actual (int) node ids -- NOT by coercing
         # each key through int(k), which would silently accept e.g. "0" (a str) as if it were the
         # node id 0. dict/`in` lookups elsewhere in this class (e.g. `sample`'s `i in
@@ -58,34 +139,56 @@ class InterventionalNetwork:
         return rows
 
     def expectation(self, field: int, *, n: int = 4000, seed: int = 0) -> float:
-        """Monte-Carlo ``E[field | do(...)]`` for a numeric field."""
+        """Monte-Carlo expectation in this structural scenario."""
         draws = [row[field] for row in self.sample(n, seed=seed)]
         return float(np.mean(np.asarray(draws, dtype=np.float64)))
 
     def distribution(self, field: int, *, n: int = 4000, seed: int = 0) -> dict[Any, float]:
-        """Interventional marginal of a discrete field as ``{value: probability}``."""
+        """Structural-scenario marginal of a discrete field as ``{value: probability}``."""
         draws = [row[field] for row in self.sample(n, seed=seed)]
         counts = Counter(draws)
         return {k: v / len(draws) for k, v in sorted(counts.items(), key=lambda kv: str(kv[0]))}
 
 
-def do(net: Any, interventions: dict[int, Any]) -> InterventionalNetwork:
-    """Return the network under Pearl's ``do`` operator (see module docstring)."""
+def do(
+    net: Any,
+    interventions: dict[int, Any],
+    *,
+    identification: CausalIdentification | None = None,
+) -> InterventionalNetwork:
+    """Apply graph surgery, labeling the result unidentified unless a valid receipt is supplied."""
     if not hasattr(net, "factors") or not hasattr(net, "order"):
         raise TypeError("do() expects a learned HeterogeneousBayesianNetwork")
-    return InterventionalNetwork(net, interventions)
+    if identification is not None:
+        _require_identification(identification)
+    return InterventionalNetwork(net, interventions, identification)
 
 
 def average_causal_effect(
-    net: Any, treatment: int, a: Any, b: Any, outcome: int, *, n: int = 4000, seed: int = 0
+    net: Any,
+    treatment: int,
+    a: Any,
+    b: Any,
+    outcome: int,
+    *,
+    identification: CausalIdentification | None = None,
+    n: int = 4000,
+    seed: int = 0,
 ) -> float:
-    """``E[outcome | do(treatment=a)] - E[outcome | do(treatment=b)]`` (numeric outcome)."""
-    ea = do(net, {treatment: a}).expectation(outcome, n=n, seed=seed)
-    eb = do(net, {treatment: b}).expectation(outcome, n=n, seed=seed)
+    """Return an identified average causal contrast under an explicit assumption receipt."""
+    receipt = _require_identification(identification)
+    ea = do(net, {treatment: a}, identification=receipt).expectation(outcome, n=n, seed=seed)
+    eb = do(net, {treatment: b}, identification=receipt).expectation(outcome, n=n, seed=seed)
     return float(ea - eb)
 
 
-def counterfactual(net: Any, observed: tuple, interventions: dict[int, Any]) -> tuple:
+def counterfactual(
+    net: Any,
+    observed: tuple,
+    interventions: dict[int, Any],
+    *,
+    identification: CausalIdentification | None = None,
+) -> tuple:
     """What this observed record would have been under the intervention (abduction-action-prediction).
 
     Per Pearl's three steps, walked in topological order:
@@ -96,7 +199,8 @@ def counterfactual(net: Any, observed: tuple, interventions: dict[int, Any]) -> 
       * **prediction** -- the same residual replays through the counterfactual parents:
         ``cf = coef @ parents_cf + eps``.
 
-    Boundaries: (1) a field that is not linear-Gaussian keeps its observed value only while its
+    An identification receipt with ``structural_counterfactuals=True`` is required. Boundaries:
+    (1) a field that is not linear-Gaussian keeps its observed value only while its
     parents are unchanged under the intervention (that much IS identified); if its parents change, its
     exogenous noise cannot be recovered from one observation and this raises — use
     :func:`average_causal_effect` for the population answer instead of a guessed individual one.
@@ -106,6 +210,12 @@ def counterfactual(net: Any, observed: tuple, interventions: dict[int, Any]) -> 
     """
     from mixle.inference.bayesian_network import _LinearGaussianFactor
 
+    receipt = _require_identification(identification)
+    if not receipt.structural_counterfactuals:
+        raise ValueError(
+            "counterfactual() requires identification.structural_counterfactuals=True to declare "
+            "that the structural noise model supports individual counterfactuals"
+        )
     if not hasattr(net, "factors") or not hasattr(net, "order"):
         raise TypeError("counterfactual() expects a learned HeterogeneousBayesianNetwork")
     observed = tuple(observed)
@@ -132,6 +242,22 @@ def counterfactual(net: Any, observed: tuple, interventions: dict[int, Any]) -> 
             )
         cf[i] = observed[i]
     return tuple(cf)
+
+
+def _require_identification(
+    identification: CausalIdentification | None,
+) -> CausalIdentification:
+    if not isinstance(identification, CausalIdentification):
+        raise ValueError(
+            "a CausalIdentification receipt is required for a causal claim; use do() without a "
+            "receipt only as an unidentified structural scenario"
+        )
+    if not identification.identified:
+        raise ValueError(
+            "the causal identification receipt must affirm exchangeability, positivity, "
+            "consistency, and no interference"
+        )
+    return identification
 
 
 def _same_value(a: Any, b: Any) -> bool:

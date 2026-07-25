@@ -54,7 +54,12 @@ from mixle.inference.calibration import (
     reliability_curve,
     top_label_confidence,
 )
-from mixle.inference.causal import InterventionalNetwork, average_causal_effect, counterfactual
+from mixle.inference.causal import (
+    CausalIdentification,
+    InterventionalNetwork,
+    average_causal_effect,
+    counterfactual,
+)
 from mixle.inference.causal import do as bn_do
 
 # M0's generic do() -- works over any fitted composed model (composite / mixture / HMM /
@@ -124,6 +129,7 @@ from mixle.inference.estimation import BayesianStreamingEstimator, EMStep, best_
 
 # hierarchical within-subject event study / difference-in-differences (confirmed-exposure influence)
 from mixle.inference.event_study import (
+    EventStudyIdentification,
     EventStudyResult,
     gaussian_effect,
     hierarchical_event_study,
@@ -394,6 +400,7 @@ __all__ = [
     "FaultReport",
     "diagnose",
     "InterventionalNetwork",
+    "CausalIdentification",
     "average_causal_effect",
     "counterfactual",
     "do",
@@ -721,6 +728,7 @@ __all__ = [
     "register_inference_backend",
     # hierarchical within-subject event study / difference-in-differences
     "EventStudyResult",
+    "EventStudyIdentification",
     "gaussian_effect",
     "poisson_lograte_effect",
     "hierarchical_event_study",
