@@ -17,6 +17,21 @@ from mixle.inference.mcmc.parameter_bridge import _finite_difference_gradient
 HAS_TORCH = torch_available()
 
 
+class FiniteDifferenceBoundaryTestCase(unittest.TestCase):
+    def test_uses_one_sided_difference_at_a_support_boundary(self):
+        def target(x):
+            value = float(x)
+            return value if value >= 0.0 else -np.inf
+
+        gradient = _finite_difference_gradient(target)
+        self.assertAlmostEqual(gradient(0.0), 1.0, places=6)
+
+    def test_rejects_an_isolated_point_instead_of_inventing_zero_gradient(self):
+        gradient = _finite_difference_gradient(lambda x: 0.0 if float(x) == 0.0 else -np.inf)
+        with self.assertRaisesRegex(ValueError, "no in-support neighbor"):
+            gradient(0.0)
+
+
 @unittest.skipUnless(HAS_TORCH, "torch not installed")
 class TorchGradientTestCase(unittest.TestCase):
     def test_matches_finite_difference_scalar(self):

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 import numpy as np
@@ -121,15 +121,29 @@ def _stick_breaking_inverse(p: np.ndarray) -> np.ndarray:
     ``p`` must be a length-``k`` probability vector (strictly positive,
     summing to one); the returned vector has length ``k - 1``.
     """
+    p = _validate_simplex(p, name="simplex")
     k = p.shape[0]
     phi = np.empty(k - 1, dtype=float)
     remaining = 1.0
     for i in range(k - 1):
         z = p[i] / remaining
-        z = min(max(z, 1.0e-12), 1.0 - 1.0e-12)
         phi[i] = np.log(z) - np.log1p(-z) + np.log(float(k - 1 - i))
         remaining = remaining - p[i]
     return phi
+
+
+def _validate_simplex(value: Any, *, length: int | None = None, name: str) -> np.ndarray:
+    """Validate a strictly interior simplex without repairing the caller's state."""
+    p = np.asarray(value, dtype=float)
+    if p.ndim != 1 or (length is not None and p.shape != (length,)):
+        expected = f" length {length}" if length is not None else " one-dimensional"
+        raise ValueError(f"{name} must be a{expected} probability simplex.")
+    if p.size < 2 or not np.all(np.isfinite(p)) or np.any(p <= 0.0):
+        raise ValueError(f"{name} must contain at least two finite, strictly positive probabilities.")
+    total = float(np.sum(p))
+    if not np.isclose(total, 1.0, rtol=1.0e-12, atol=1.0e-12):
+        raise ValueError(f"{name} probabilities must sum to one; got {total!r}.")
+    return p
 
 
 def _seq_log_density_sum(dist: Any, encoded: Any) -> float:
@@ -311,9 +325,13 @@ def build_parameter_bridge(prototype: Any) -> ParameterBridge:
         build = _make_builder(prototype, cat_kw)
 
         def to_u(theta):
-            p = np.asarray([float(theta[label]) for label in labels], dtype=float)
-            p = np.clip(p, 1.0e-12, None)
-            p = p / p.sum()
+            if not isinstance(theta, Mapping) or set(theta) != set(labels):
+                raise ValueError("categorical initial state must contain exactly the prototype labels.")
+            p = _validate_simplex(
+                [float(theta[label]) for label in labels],
+                length=k,
+                name="categorical initial state",
+            )
             return _stick_breaking_inverse(p)
 
         def from_u(phi):
@@ -436,8 +454,7 @@ def _simplex_vector_block(name: str, length: int) -> _ParamBlock | None:
         return None
 
     def to_u(v: Any) -> np.ndarray:
-        p = np.clip(np.asarray(v, dtype=float), 1.0e-12, None)
-        p = p / p.sum()
+        p = _validate_simplex(v, length=length, name=f"{name} initial state")
         return _stick_breaking_inverse(p)
 
     return _ParamBlock(
@@ -454,9 +471,13 @@ def _simplex_map_block(name: str, labels: tuple[Any, ...]) -> _ParamBlock | None
         return None
 
     def to_u(prob_map: Any) -> np.ndarray:
-        p = np.asarray([float(prob_map[label]) for label in labels], dtype=float)
-        p = np.clip(p, 1.0e-12, None)
-        p = p / p.sum()
+        if not isinstance(prob_map, Mapping) or set(prob_map) != set(labels):
+            raise ValueError(f"{name} initial state must contain exactly the declared labels.")
+        p = _validate_simplex(
+            [float(prob_map[label]) for label in labels],
+            length=len(labels),
+            name=f"{name} initial state",
+        )
         return _stick_breaking_inverse(p)
 
     def from_u(phi: np.ndarray) -> dict[Any, float]:
@@ -727,16 +748,27 @@ def sample_parameter_posterior(
         theta = bridge.from_unconstrained(phi_arr)
         mapped.append(bridge.build(theta) if return_distributions else theta)
 
-    return MCMCResult(
-        samples=mapped, log_probs=raw.log_probs, accepted=raw.accepted, transition_labels=raw.transition_labels
-    )
+    mapped_result = replace(raw, samples=mapped)
+    declared_fields = {field.name for field in fields(raw)}
+    for diagnostic, value in vars(raw).items():
+        if diagnostic not in declared_fields:
+            object.__setattr__(mapped_result, diagnostic, value)
+    return mapped_result
 
 
 def _finite_difference_gradient(log_target: LogTarget, eps: float = 1.0e-5) -> Callable[[Any], Any]:
-    """Return a central finite-difference gradient of ``log_target``."""
+    """Return a central or support-aware one-sided finite-difference gradient."""
+    if isinstance(eps, bool) or not np.isfinite(eps) or eps <= 0.0:
+        raise ValueError("eps must be finite and positive.")
 
     def grad(x: Any) -> Any:
         arr = np.atleast_1d(np.asarray(x, dtype=float))
+        if not np.all(np.isfinite(arr)):
+            raise ValueError("finite-difference state must be finite.")
+        current_arg = arr if arr.size > 1 else float(arr[0])
+        f_current = float(log_target(current_arg))
+        if not np.isfinite(f_current):
+            raise ValueError("finite-difference state must have a finite log target.")
         g = np.zeros_like(arr)
         for i in range(arr.size):
             step = eps * (1.0 + abs(arr[i]))
@@ -744,12 +776,16 @@ def _finite_difference_gradient(log_target: LogTarget, eps: float = 1.0e-5) -> C
             down = arr.copy()
             up[i] += step
             down[i] -= step
-            f_up = log_target(up if arr.size > 1 else float(up[0]))
-            f_down = log_target(down if arr.size > 1 else float(down[0]))
-            if not (np.isfinite(f_up) and np.isfinite(f_down)):
-                g[i] = 0.0
-            else:
+            f_up = float(log_target(up if arr.size > 1 else float(up[0])))
+            f_down = float(log_target(down if arr.size > 1 else float(down[0])))
+            if np.isfinite(f_up) and np.isfinite(f_down):
                 g[i] = (f_up - f_down) / (2.0 * step)
+            elif np.isfinite(f_up):
+                g[i] = (f_up - f_current) / step
+            elif np.isfinite(f_down):
+                g[i] = (f_current - f_down) / step
+            else:
+                raise ValueError(f"finite-difference gradient has no in-support neighbor for coordinate {i}.")
         return float(g[0]) if np.isscalar(x) or np.ndim(x) == 0 else g
 
     return grad
