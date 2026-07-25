@@ -30,6 +30,7 @@ from mixle.models.grad_leaf import (
     GradLeaf,
     _call_sample_with_seed,
     _module_mode,
+    _precision_policy,
     _resolve_device,
     _sample_count,
 )
@@ -59,9 +60,16 @@ class NeuralDensity(GradLeaf):
     __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
 
     def __init__(
-        self, module: Any, *, m_steps: int = 60, lr: float = 5e-3, device: str = "cpu", name: str | None = None
+        self,
+        module: Any,
+        *,
+        m_steps: int = 60,
+        lr: float = 5e-3,
+        device: str = "cpu",
+        precision: str = "auto",
+        name: str | None = None,
     ) -> None:
-        super().__init__(module, m_steps=m_steps, lr=lr, device=device, name=name)
+        super().__init__(module, m_steps=m_steps, lr=lr, device=device, precision=precision, name=name)
 
     def __str__(self) -> str:
         return f"NeuralDensity({type(self.module).__name__})"
@@ -75,10 +83,19 @@ class NeuralDensity(GradLeaf):
         torch = _torch()
         xx = check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "NeuralDensity.seq_log_density")
         dev = _resolve_device(self.device, torch)
-        self.module.to(dev)
-        xt = torch.as_tensor(xx, dtype=torch.float32, device=dev)
-        with _module_mode(self.module, train=False), torch.no_grad():
-            return self.module.log_density(xt).cpu().numpy().reshape(-1)
+        dtype, use_bf16 = _precision_policy(torch, self.precision, dev, self.module)
+        self.module.to(device=dev, dtype=dtype)
+        xt = torch.as_tensor(xx, dtype=dtype, device=dev)
+        with (
+            _module_mode(self.module, train=False),
+            torch.no_grad(),
+            torch.autocast(device_type=dev.type, dtype=torch.bfloat16, enabled=use_bf16),
+        ):
+            scores = self.module.log_density(xt)
+            if tuple(scores.shape) != (xt.shape[0],) or not bool(torch.isfinite(scores).all()):
+                raise ValueError("NeuralDensity.log_density must return one finite score per row.")
+            scores = scores.float() if scores.dtype == torch.bfloat16 else scores
+            return scores.cpu().numpy()
 
     def sampler(self, seed: int | None = None) -> NeuralDensitySampler:
         """Return a sampler delegating to the wrapped module's ``sample`` method."""
@@ -86,7 +103,14 @@ class NeuralDensity(GradLeaf):
 
     def estimator(self, pseudo_count: float | None = None) -> NeuralDensityEstimator:
         """Return the generalized-EM estimator for weighted neural-density training."""
-        return NeuralDensityEstimator(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
+        return NeuralDensityEstimator(
+            self.module,
+            m_steps=self.m_steps,
+            lr=self.lr,
+            device=self.device,
+            precision=self.precision,
+            name=self.name,
+        )
 
     def dist_to_encoder(self) -> NeuralDensityEncoder:
         """Return the encoder for vectorized neural-density scoring and fitting."""
@@ -109,6 +133,7 @@ class NeuralDensity(GradLeaf):
             "m_steps": self.m_steps,
             "lr": self.lr,
             "device": self.device,
+            "precision": self.precision,
             "name": self.name,
             "module": encode_module(self.module),
         }
@@ -121,6 +146,7 @@ class NeuralDensity(GradLeaf):
             m_steps=payload["m_steps"],
             lr=payload["lr"],
             device=payload["device"],
+            precision=payload.get("precision", "auto"),
             name=payload["name"],
         )
 
@@ -225,16 +251,30 @@ class NeuralDensityEstimator(GradEstimator):
     """M-step: responsibility-weighted MLE -- ``max sum_i w_i log p(x_i)`` by gradient ascent on the module (warm)."""
 
     def __init__(
-        self, module: Any, *, m_steps: int = 60, lr: float = 5e-3, device: str = "cpu", name: str | None = None
+        self,
+        module: Any,
+        *,
+        m_steps: int = 60,
+        lr: float = 5e-3,
+        device: str = "cpu",
+        precision: str = "auto",
+        name: str | None = None,
     ) -> None:
-        super().__init__(module, m_steps=m_steps, lr=lr, device=device, name=name)
+        super().__init__(module, m_steps=m_steps, lr=lr, device=device, precision=precision, name=name)
 
     def accumulator_factory(self) -> DataBufferAccumulatorFactory:
         """Return an accumulator factory for weighted neural-density batches."""
         return DataBufferAccumulatorFactory(NeuralDensityEncoder())
 
     def _leaf(self) -> NeuralDensity:
-        return NeuralDensity(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
+        return NeuralDensity(
+            self.module,
+            m_steps=self.m_steps,
+            lr=self.lr,
+            device=self.device,
+            precision=self.precision,
+            name=self.name,
+        )
 
 
 # --- ready density modules to wrap ---------------------------------------------------------------------------

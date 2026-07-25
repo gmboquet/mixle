@@ -16,6 +16,7 @@ torch = pytest.importorskip("torch")
 
 from mixle.inference.estimation import optimize  # noqa: E402
 from mixle.models import GradLeaf, NeuralDensity  # noqa: E402
+from mixle.models.grad_leaf import GradEstimator  # noqa: E402
 from mixle.stats import GaussianDistribution, MixtureDistribution  # noqa: E402
 
 
@@ -369,6 +370,113 @@ class DivergenceRecoveryTest(unittest.TestCase):
         receipt = fitted.components[0].fit_receipt
         self.assertFalse(receipt["nonfinite_recovery"])
         self.assertEqual(receipt["nonfinite_recoveries_total"], 0)
+
+
+class GradientAuditContractTest(unittest.TestCase):
+    def test_active_engine_float64_controls_scoring_and_fitting_dtype(self):
+        from mixle.engines import TorchEngine
+        from mixle.engines.base import using_active_engine
+
+        class DtypeDensity(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.mean = torch.nn.Parameter(torch.zeros(1))
+                self.seen = []
+
+            def log_density(self, x):
+                self.seen.append(x.dtype)
+                return -0.5 * ((x - self.mean) ** 2).sum(1)
+
+        module = DtypeDensity()
+        leaf = GradLeaf(module, m_steps=1)
+        x = np.zeros((3, 1))
+        with using_active_engine(TorchEngine(dtype=torch.float64)):
+            leaf.seq_log_density(x)
+            fitted = leaf.estimator().estimate(None, (x, np.ones(3)))
+        fitted.seq_log_density(x)
+        self.assertEqual(module.seen, [torch.float64, torch.float64, torch.float64])
+        self.assertEqual(fitted.module.mean.dtype, torch.float64)
+
+    def test_controls_reject_lossy_nonpositive_and_nonfinite_values(self):
+        module = DiagGauss(1)
+        for constructor in (GradLeaf, GradEstimator):
+            for value in (0, -1):
+                with self.assertRaises(ValueError):
+                    constructor(module, m_steps=value)
+            for value in (True, 1.5):
+                with self.assertRaises(TypeError):
+                    constructor(module, m_steps=value)
+            for value in (0.0, -1.0, np.nan, np.inf):
+                with self.assertRaises(ValueError):
+                    constructor(module, lr=value)
+            with self.assertRaises(ValueError):
+                constructor(module, precision="floatish")
+
+    def test_estimator_rejects_invalid_field_weight_and_score_contracts(self):
+        x = np.zeros((2, 1))
+        estimator = GradEstimator(DiagGauss(1), m_steps=1)
+        for fields_and_weights in (
+            (x, np.array([1.0])),
+            (x, np.array([1.0, -1.0])),
+            (x, np.array([0.0, 0.0])),
+            (x, np.array([1.0, np.nan])),
+            (x, np.ones((2, 1))),
+        ):
+            with self.assertRaises(ValueError):
+                estimator.estimate(None, fields_and_weights)
+
+        class WrongShape(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.value = torch.nn.Parameter(torch.zeros(1))
+
+            def log_density(self, rows):
+                return self.value + torch.zeros((len(rows), 1), device=rows.device)
+
+        with self.assertRaisesRegex(RuntimeError, "one score per row"):
+            GradEstimator(WrongShape(), m_steps=1).estimate(None, (x, np.ones(2)))
+
+        def vector_loss(module, rows, weights):
+            return module.log_density(rows)
+
+        with self.assertRaisesRegex(RuntimeError, "scalar tensor"):
+            GradEstimator(DiagGauss(1), m_steps=1, loss=vector_loss).estimate(None, (x, np.ones(2)))
+
+    def test_program_error_restores_state_and_mode_then_propagates_with_context(self):
+        module = DiagGauss(1)
+        module.eval()
+        before = module.mu.detach().clone()
+
+        def broken_loss(model, x, weights):
+            with torch.no_grad():
+                model.mu.add_(10.0)
+            raise RuntimeError("user sentinel")
+
+        with self.assertRaisesRegex(RuntimeError, "user sentinel"):
+            GradEstimator(module, m_steps=1, loss=broken_loss).estimate(
+                None, (np.zeros((2, 1)), np.ones(2))
+            )
+        torch.testing.assert_close(module.mu, before)
+        self.assertFalse(module.training)
+
+    def test_partial_numerical_epoch_is_not_reported_complete(self):
+        class FailsSecondBatch(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.mean = torch.nn.Parameter(torch.zeros(1))
+                self.calls = 0
+
+            def log_density(self, x):
+                self.calls += 1
+                if self.calls == 2:
+                    return torch.full((len(x),), torch.nan, device=x.device)
+                return -0.5 * ((x - self.mean) ** 2).sum(1)
+
+        fitted = GradEstimator(FailsSecondBatch(), m_steps=2, batch_size=1).estimate(
+            None, (np.zeros((2, 1)), np.ones(2))
+        )
+        self.assertTrue(fitted.fit_receipt["nonfinite_recovery"])
+        self.assertEqual(fitted.fit_receipt["epochs_completed"], 0)
 
 
 if __name__ == "__main__":

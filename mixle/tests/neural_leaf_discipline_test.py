@@ -392,6 +392,25 @@ class DataBufferFanInTest(unittest.TestCase):
         torch.testing.assert_close(fanned.module.lin.weight, direct.module.lin.weight, rtol=0.0, atol=0.0)
         torch.testing.assert_close(fanned.module.lin.bias, direct.module.lin.bias, rtol=0.0, atol=0.0)
 
+    def test_schema_is_pinned_and_row_weight_mismatches_are_rejected(self):
+        acc = DataBufferAccumulatorFactory(GradLeafEncoder(), n_fields=1).make()
+        x = np.zeros((3, 1))
+        y = np.ones((3, 1))
+        acc.seq_update((x, y), np.ones(3), None)
+
+        with self.assertRaisesRegex(ValueError, "expected 2 fields"):
+            acc.seq_update(x, np.ones(3), None)
+        with self.assertRaisesRegex(ValueError, "same row count"):
+            DataBufferAccumulatorFactory(GradLeafEncoder()).make().seq_update(
+                (x, y[:2]), np.ones(3), None
+            )
+        with self.assertRaisesRegex(ValueError, "weights for 3 rows"):
+            DataBufferAccumulatorFactory(GradLeafEncoder()).make().seq_update(
+                x, np.ones(2), None
+            )
+        with self.assertRaisesRegex(ValueError, "expected 2 fields"):
+            acc.combine((x, y, np.zeros((3, 1)), np.ones(3)))
+
 
 class _DtypeProbe(torch.nn.Module):
     """A linear regressor that records the dtype of every forward input."""
