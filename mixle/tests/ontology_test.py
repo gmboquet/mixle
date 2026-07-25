@@ -430,5 +430,77 @@ class CompletionMaskTest(unittest.TestCase):
         self.assertNotIn("acme", post)  # Organization is disjoint-excluded despite range-conforming
 
 
+class ScoreNormalizationTest(unittest.TestCase):
+    """MXR-080-0300: invalid KG scores must never normalize into NaN "probabilities"."""
+
+    class _RawKG:
+        def __init__(self, lp):
+            self._lp = np.asarray(lp)
+
+        def tail_log_posterior(self, h, r):
+            return self._lp
+
+    def _ckg(self, kg, entities=("a", "b", "c")):
+        ont = Ontology().add_class("Person").add_relation("knows", "Person", "Person")
+        types = {e: "Person" for e in set(entities)}
+        return OntologyConstrainedKG(kg, ont, entities=list(entities), relations=["knows"], types=types)
+
+    def test_all_neg_inf_log_posterior_fails_closed_instead_of_nan(self):
+        # The audit's own reproduction: subtracting an all(-inf) maximum produces NaN, and
+        # `total <= 0` is False for NaN, so a dictionary of NaN "probabilities" was returned.
+        ckg = self._ckg(self._RawKG([-np.inf, -np.inf, -np.inf]))
+        with self.assertRaises(ValueError):
+            ckg.tail_posterior("a", "knows")
+
+    def test_nan_log_posterior_rejected(self):
+        ckg = self._ckg(self._RawKG([0.1, np.nan, 0.2]))
+        with self.assertRaises(ValueError):
+            ckg.tail_posterior("a", "knows")
+
+    def test_positive_inf_log_posterior_rejected(self):
+        ckg = self._ckg(self._RawKG([0.1, np.inf, 0.2]))
+        with self.assertRaises(ValueError):
+            ckg.tail_posterior("a", "knows")
+
+    def test_wrong_length_log_posterior_rejected(self):
+        ckg = self._ckg(self._RawKG([0.1, 0.2]))  # 2 entries for 3 entities
+        with self.assertRaises(ValueError):
+            ckg.tail_posterior("a", "knows")
+
+    def test_non_vector_log_posterior_rejected(self):
+        ckg = self._ckg(self._RawKG([[0.1, 0.2, 0.3]]))  # 2-D, not a vector
+        with self.assertRaises(ValueError):
+            ckg.tail_posterior("a", "knows")
+
+    def test_duplicate_entity_name_rejected_at_construction(self):
+        ont = Ontology().add_class("Person").add_relation("knows", "Person", "Person")
+        types = {"a": "Person", "b": "Person"}
+        with self.assertRaises(ValueError):
+            OntologyConstrainedKG(
+                self._RawKG([0.1, 0.2, 0.3]), ont, entities=["a", "a", "b"], relations=["knows"], types=types
+            )
+
+    def test_duplicate_relation_name_rejected_at_construction(self):
+        ont = Ontology().add_class("Person").add_relation("knows", "Person", "Person")
+        types = {"a": "Person", "b": "Person"}
+        with self.assertRaises(ValueError):
+            OntologyConstrainedKG(
+                self._RawKG([0.1, 0.2]),
+                ont,
+                entities=["a", "b"],
+                relations=["knows", "knows"],
+                types=types,
+            )
+
+    def test_ordinary_case_still_normalizes_to_a_valid_distribution(self):
+        # a mix of finite and -inf entries (the latter admissible-but-zero-mass) must still
+        # normalize cleanly over the admissible subset -- this fix must not break the happy path.
+        ckg = self._ckg(self._RawKG([1.0, -np.inf, 0.5]))
+        post = ckg.tail_posterior("a", "knows")
+        self.assertAlmostEqual(sum(post.values()), 1.0, places=9)
+        self.assertAlmostEqual(post["b"], 0.0, places=9)  # -inf candidate: admissible, zero mass
+        self.assertGreater(post["a"], post["c"])  # higher raw score keeps a higher share
+
+
 if __name__ == "__main__":
     unittest.main()
