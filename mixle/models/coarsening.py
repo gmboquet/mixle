@@ -334,6 +334,16 @@ if _HAS_TORCH:
                 out = out + self.bias
             return out
 
+        @property
+        def weight(self) -> Any:
+            """Materialized weight view for linear-module protocol consumers.
+
+            The factors remain the only registered parameters. Moment
+            propagation and subsequent structure edits can nevertheless treat
+            this module as a linear map without assuming dense storage.
+            """
+            return self.u @ self.v
+
 
 # --------------------------------------------------------------------------------------------------------
 # closed-form Gaussian KL -- the per-scale receipt's core arithmetic
@@ -822,6 +832,23 @@ def _narrow_coarsened_entry(entry: Any, law: GaussianLaw) -> tuple[Any, list[Pro
     return entry, []
 
 
+def _flatten_blocks(entries: list[Any]) -> list[Any]:
+    """Return the ordered executable leaf blocks from a transformed manifest.
+
+    A second coarsening pass must operate on the model it was given rather than
+    assuming every manifest entry has the concrete ``Block`` layout. Flattening
+    a prior ``MergedBlock`` preserves its execution order and exposes ordinary
+    block-protocol leaves, including leaves whose linears have low-rank storage.
+    """
+    flattened: list[Any] = []
+    for entry in entries:
+        if isinstance(entry, MergedBlock):
+            flattened.extend(_flatten_blocks([entry.block_a, entry.block_b]))
+        else:
+            flattened.append(entry)
+    return flattened
+
+
 # --------------------------------------------------------------------------------------------------------
 # 4. coarsen -- the iterated top-level operator R
 # --------------------------------------------------------------------------------------------------------
@@ -855,7 +882,7 @@ def coarsen(
     if not _HAS_TORCH:
         raise RuntimeError("coarsen requires torch (mixle.models.transformer is torch-only).")
 
-    blocks = list(model.blocks)
+    blocks = _flatten_blocks(list(model.blocks))
     new_blocks: list[Any] = []
     block_input_laws: list[GaussianLaw] = []  # law entering each new_blocks[i] entry, same order/length
     receipt_map: dict[str, ScaleReceipt] = {}
