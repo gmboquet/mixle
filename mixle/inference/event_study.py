@@ -1,14 +1,14 @@
-"""Confirmed-exposure influence measurement: a hierarchical within-subject event study.
+"""Hierarchical within-subject event-study associations and identified DiD estimates.
 
 Many SUBJECTS are each observed BEFORE and AFTER a known event time -- an exposure with a *confirmed*
 timestamp (on social data, a retweet: the act proves the content was seen, and dates it). We estimate
 whether, and how much, the event shifts each subject's generative activity, then pool those shifts into a
 population effect with calibrated uncertainty.
 
-A treated / control split turns the pooled shift into a **difference-in-differences**: the effect is
-``(treated shift) - (control shift)``, so anything that moves everyone at the event time (a concurrent
-external shock) cancels, and only the differential -- the influence attributable to the treatment --
-survives. The natural control is *exposed non-actors*: subjects the same content reached who did not act.
+A treated/control split computes the usual difference in changes. It becomes an identified causal
+difference-in-differences estimate only when the caller supplies an
+:class:`EventStudyIdentification` receipt. Without that receipt the calculation is explicitly labeled
+as a before/after or treated/control *association*.
 
 Two stages, exact/closed-form where the family permits:
 
@@ -20,26 +20,64 @@ Two stages, exact/closed-form where the family permits:
      per group, with the DiD contrast and its propagated variance and an empirical-Bayes shrinkage of each
      subject's effect toward its group.
 
-**Identification, stated rather than assumed away.** Within-subject differencing removes every
-TIME-INVARIANT subject trait -- the homophily / selection-into-ties confound (Shalizi & Thomas 2011) is
-exactly such a trait, so unit differencing annihilates it. The treated-vs-control contrast removes shocks
-common to both groups. The residual threat is time-VARYING selection into the event (whatever made the
-subject act *then*); it is mitigated -- not eliminated -- by a matched exposed-non-actor control, and
-:func:`tipping_drift` reports how large an unmeasured differential drift would have to be to explain the
-effect away (a transparent sensitivity bound, not a guarantee).
+Within-subject differencing removes additive time-invariant subject effects and a treated/control
+contrast removes additive shocks common to both groups. Neither fact alone establishes parallel trends,
+exchangeability, consistency, positivity, or absence of interference. :func:`tipping_drift` provides a
+simple sensitivity calculation; it is not a substitute for an identification argument.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from typing import Any
 
 import numpy as np
 
 
+@dataclass(frozen=True)
+class EventStudyIdentification:
+    """Auditable assumptions for interpreting a treated/control contrast as causal DiD."""
+
+    design_evidence: tuple[str, ...]
+    parallel_trends_evidence: tuple[str, ...]
+    exchangeability: bool
+    positivity: bool
+    consistency: bool
+    no_interference: bool
+    no_anticipation: bool
+    sensitivity_analysis: str | None = None
+
+    def __post_init__(self) -> None:
+        for name, values in (
+            ("design_evidence", self.design_evidence),
+            ("parallel_trends_evidence", self.parallel_trends_evidence),
+        ):
+            if not values or any(not isinstance(item, str) or not item.strip() for item in values):
+                raise ValueError(f"{name} must contain at least one non-empty evidence reference")
+        if self.sensitivity_analysis is not None and (
+            not isinstance(self.sensitivity_analysis, str) or not self.sensitivity_analysis.strip()
+        ):
+            raise ValueError("sensitivity_analysis must be None or a non-empty reference")
+
+    @property
+    def identified(self) -> bool:
+        return bool(
+            self.exchangeability
+            and self.positivity
+            and self.consistency
+            and self.no_interference
+            and self.no_anticipation
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a serializable copy of the receipt."""
+        return asdict(self)
+
+
 def gaussian_effect(pre: np.ndarray, post: np.ndarray) -> tuple[float, float]:
     """Per-subject mean shift and its (Welch) sampling variance from pre/post activity samples."""
-    pre = np.asarray(pre, dtype=float)
-    post = np.asarray(post, dtype=float)
+    pre = _finite_1d("pre", pre)
+    post = _finite_1d("post", post)
     if len(pre) < 2 or len(post) < 2:
         raise ValueError("need >=2 observations in each window for a variance")
     effect = float(post.mean() - pre.mean())
@@ -53,7 +91,15 @@ def poisson_lograte_effect(k_pre: float, t_pre: float, k_post: float, t_post: fl
     ``k_*`` are event counts, ``t_*`` the window durations (or exposures). Uses a Haldane 0.5 correction so
     zero-count windows are finite; variance is the delta-method log-rate variance ``1/k_post + 1/k_pre``.
     """
-    kp, kq = float(k_pre) + 0.5, float(k_post) + 0.5
+    raw_counts = (float(k_pre), float(k_post))
+    durations = (float(t_pre), float(t_post))
+    if not all(np.isfinite(value) for value in (*raw_counts, *durations)):
+        raise ValueError("counts and exposures must be finite")
+    if any(value < 0 or not value.is_integer() for value in raw_counts):
+        raise ValueError("event counts must be non-negative integers")
+    if any(value <= 0 for value in durations):
+        raise ValueError("exposures must be strictly positive")
+    kp, kq = raw_counts[0] + 0.5, raw_counts[1] + 0.5
     effect = float(np.log(kq / t_post) - np.log(kp / t_pre))
     var = float(1.0 / kq + 1.0 / kp)
     return effect, var
@@ -61,6 +107,8 @@ def poisson_lograte_effect(k_pre: float, t_pre: float, k_post: float, t_post: fl
 
 def _random_effects(y: np.ndarray, v: np.ndarray) -> tuple[float, float, float, np.ndarray]:
     """DerSimonian-Laird random-effects pool. Returns (mean, var_of_mean, tau2, EB-shrunk effects)."""
+    y = _finite_1d("effects", y)
+    v = _finite_1d("variances", v)
     if len(y) == 0:
         raise ValueError("need at least 1 subject to pool a random-effects estimate")
     if len(v) != len(y):
@@ -86,7 +134,7 @@ def _random_effects(y: np.ndarray, v: np.ndarray) -> tuple[float, float, float, 
 
 @dataclass
 class EventStudyResult:
-    """Pooled influence estimate. ``effect`` is the DiD ATT (treated minus control) when a control exists."""
+    """Pooled change contrast with explicit causal-identification metadata."""
 
     effect: float
     se: float
@@ -101,11 +149,16 @@ class EventStudyResult:
     n_treated: int
     n_control: int
     shrunk_treated: np.ndarray
+    estimand: str
+    identified: bool
+    interpretation: str
+    identification: dict[str, Any] | None
 
     def __str__(self) -> str:
         c = "" if self.control_mean is None else f", control {self.control_mean:+.4f}"
         return (
-            f"EventStudyResult(effect={self.effect:+.4f} ± {self.se:.4f}, "
+            f"EventStudyResult(estimand={self.estimand!r}, identified={self.identified}, "
+            f"effect={self.effect:+.4f} ± {self.se:.4f}, "
             f"95% CI [{self.ci[0]:+.4f}, {self.ci[1]:+.4f}], z={self.z:.2f}, p={self.p_value:.2e}, "
             f"treated {self.treated_mean:+.4f}{c}, tau^2={self.tau2_treated:.4f}, "
             f"n={self.n_treated}+{self.n_control})"
@@ -125,23 +178,58 @@ def hierarchical_event_study(
     control_vars: np.ndarray | None = None,
     *,
     alpha: float = 0.05,
+    identification: EventStudyIdentification | None = None,
 ) -> EventStudyResult:
-    """Pool per-subject effects into a population influence estimate (DiD if a control group is given).
+    """Pool per-subject changes into an association or explicitly identified DiD estimate.
 
-    ``*_effects`` / ``*_vars`` are the per-subject shifts and their variances from stage 1. With a control
-    group the reported ``effect`` is ``treated_mean - control_mean`` -- the difference-in-differences ATT.
+    ``*_effects`` / ``*_vars`` are per-subject changes and sampling variances. A control group makes the
+    numeric contrast ``treated_mean - control_mean``. It is labeled an ATT only when a complete
+    ``identification`` receipt is attached; otherwise it remains a treated/control change association.
     """
-    y_t, v_t = np.asarray(treated_effects, float), np.asarray(treated_vars, float)
+    if not isinstance(alpha, (int, float, np.integer, np.floating)) or not np.isfinite(alpha):
+        raise ValueError("alpha must be a finite number strictly between 0 and 1")
+    alpha = float(alpha)
+    if not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be strictly between 0 and 1")
+    if (control_effects is None) != (control_vars is None):
+        raise ValueError("control_effects and control_vars must be provided together")
+
+    y_t = _finite_1d("treated_effects", treated_effects)
+    v_t = _finite_1d("treated_vars", treated_vars)
     t_mean, t_var, tau2, shrunk = _random_effects(y_t, v_t)
 
-    if control_effects is not None and len(control_effects) > 0:
-        y_c, v_c = np.asarray(control_effects, float), np.asarray(control_vars, float)
+    has_control = control_effects is not None
+    if has_control:
+        y_c = _finite_1d("control_effects", control_effects)
+        v_c = _finite_1d("control_vars", control_vars)
+        if len(y_c) == 0:
+            raise ValueError("control group must contain at least one subject when supplied")
         c_mean, c_var, _, _ = _random_effects(y_c, v_c)
         effect, var = t_mean - c_mean, t_var + c_var
         n_c = len(y_c)
     else:
         c_mean = c_var = None
         effect, var, n_c = t_mean, t_var, 0
+
+    if identification is not None and not isinstance(identification, EventStudyIdentification):
+        raise TypeError("identification must be an EventStudyIdentification receipt")
+    if identification is not None and not has_control:
+        raise ValueError("causal difference-in-differences identification requires a control group")
+    identified = bool(identification is not None and identification.identified)
+    if identification is not None and not identified:
+        raise ValueError(
+            "identification must affirm exchangeability, positivity, consistency, no interference, "
+            "and no anticipation"
+        )
+    if identified:
+        estimand = "difference-in-differences average treatment effect on the treated"
+        interpretation = "causal contrast under the attached identification assumptions"
+    elif has_control:
+        estimand = "treated-minus-control change association"
+        interpretation = "association only; parallel trends and causal assumptions were not established"
+    else:
+        estimand = "before-after association"
+        interpretation = "association only; no control group or causal identification was supplied"
 
     se = float(np.sqrt(var))
     z = effect / se if se > 0 else 0.0
@@ -164,7 +252,23 @@ def hierarchical_event_study(
         n_treated=len(y_t),
         n_control=n_c,
         shrunk_treated=shrunk,
+        estimand=estimand,
+        identified=identified,
+        interpretation=interpretation,
+        identification=None if identification is None else identification.to_dict(),
     )
+
+
+def _finite_1d(name: str, values: Any) -> np.ndarray:
+    try:
+        array = np.asarray(values, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a one-dimensional finite numeric array") from exc
+    if array.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values")
+    return array
 
 
 def _inv_norm_sf(p: float) -> float:
