@@ -25,6 +25,7 @@
 import json
 import multiprocessing as mp
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -32,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+import mixle.inference.production.registry as registry_module
 import mixle.stats as st
 from mixle.inference.production.registry import Registry
 
@@ -92,12 +94,55 @@ def test_promote_writes_the_alias_atomically():
 
         alias_path = os.path.join(reg._dir("m"), "production.alias")
         assert os.path.exists(alias_path)
-        assert open(alias_path).read() == "v2"
+        with open(alias_path) as alias_file:
+            assert alias_file.read() == "v2"
         # no leftover temp file from the atomic-write dance
         assert [f for f in os.listdir(reg._dir("m")) if f.endswith(".tmp")] == []
 
         model, _ = reg.current("m")
         assert model.mu == 1.0
+
+
+def test_promote_fsyncs_both_the_alias_file_and_registry_directory(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        reg = Registry(os.path.join(tmp, "root"))
+        reg.register(st.GaussianDistribution(0.0, 1.0), "m")
+        calls: list[str] = []
+        real_fsync = os.fsync
+
+        def recording_fsync(fd):
+            calls.append("directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+            return real_fsync(fd)
+
+        monkeypatch.setattr(registry_module.os, "fsync", recording_fsync)
+        reg.promote("m", "v1")
+
+        assert "file" in calls
+        assert "directory" in calls
+
+
+def test_concurrent_promotions_use_private_temp_files_and_never_collide(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        reg = Registry(os.path.join(tmp, "root"))
+        reg.register(st.GaussianDistribution(0.0, 1.0), "m")
+        reg.register(st.GaussianDistribution(1.0, 1.0), "m")
+        barrier = threading.Barrier(2)
+        real_replace = os.replace
+
+        def synchronized_replace(source, target):
+            barrier.wait(timeout=5)
+            return real_replace(source, target)
+
+        monkeypatch.setattr(registry_module.os, "replace", synchronized_replace)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(reg.promote, "m", version) for version in ("v1", "v2")]
+            for future in futures:
+                future.result(timeout=5)
+
+        alias_path = os.path.join(reg._dir("m"), "production.alias")
+        with open(alias_path) as f:
+            assert f.read() in {"v1", "v2"}
+        assert [name for name in os.listdir(reg._dir("m")) if name.endswith(".tmp")] == []
 
 
 def test_promote_rejects_an_unknown_version_without_touching_the_alias():
@@ -109,7 +154,8 @@ def test_promote_rejects_an_unknown_version_without_touching_the_alias():
             reg.promote("m", "v99")
         # the failed promote must not have clobbered the existing alias
         alias_path = os.path.join(reg._dir("m"), "production.alias")
-        assert open(alias_path).read() == "v1"
+        with open(alias_path) as alias_file:
+            assert alias_file.read() == "v1"
 
 
 def test_concurrent_register_with_threads_does_not_silently_clobber_a_version():
@@ -257,3 +303,44 @@ def test_register_write_failure_leaves_no_corrupt_version_file_and_stays_retriab
         assert ver == "v1", "a failed write must not permanently consume its version number"
         model, _ = reg.get("m", "v1")
         assert model.mu == 5.0
+
+
+def test_register_never_temporarily_removes_the_live_models_header(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        reg = Registry(os.path.join(tmp, "root"))
+        model = st.GaussianDistribution(0.0, 1.0)
+        header = {"run": "immutable-snapshot"}
+        model.header = header
+        observed_live_headers = []
+        real_serialize = registry_module.to_serializable
+
+        def observing_serialize(subject):
+            observed_live_headers.append(getattr(model, "header", None))
+            assert not hasattr(subject, "header")
+            return real_serialize(subject)
+
+        monkeypatch.setattr(registry_module, "to_serializable", observing_serialize)
+        reg.register(model, "m")
+
+        assert observed_live_headers == [header]
+        assert model.header is header
+
+
+def test_version_envelope_digest_detects_header_or_metadata_tampering():
+    with tempfile.TemporaryDirectory() as tmp:
+        reg = Registry(os.path.join(tmp, "root"))
+        reg.register(
+            st.GaussianDistribution(0.0, 1.0),
+            "m",
+            header={"run": "original"},
+            metadata={"stage": "fit"},
+        )
+        path = os.path.join(reg._dir("m"), "v1.json")
+        with open(path) as f:
+            payload = json.load(f)
+        payload["metadata"]["stage"] = "tampered"
+        with open(path, "w") as f:
+            json.dump(payload, f)
+
+        with pytest.raises(ValueError, match="integrity failure"):
+            reg.metadata("m", "v1")

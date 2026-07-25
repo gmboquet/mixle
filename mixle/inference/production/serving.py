@@ -9,33 +9,49 @@ falling log-likelihood, slow batches) are visible; with a reference sample set i
 
 Unscorable and unavailable are deliberately kept distinct. A record legitimately outside the model's
 support scores as a non-finite log-density that the model itself computes and returns, no exception
-involved. An exception raised while *asking* the model -- a network call failing, a backend timing out,
-the model erroring outright -- means the model was never actually reached: an outage, not a scored
-observation. :meth:`Service.score` isolates that failure mode with
-:func:`mixle.system.fault.with_fallback` (mode ``"model_unavailable"``) so an outage is never silently
-folded into an ordinary ``-inf`` indistinguishable from a genuine one -- see :mod:`mixle.system.fault`.
+involved. A configured availability exception raised while *asking* the model -- by default a failed
+network call or backend timeout -- means the model was unavailable: an outage, not a scored observation.
+:meth:`Service.score` isolates only that explicit failure mode as ``"model_unavailable"`` so an outage
+is never silently folded into an ordinary ``-inf`` indistinguishable from a genuine one. Other
+exceptions propagate as implementation or request errors instead of being masked by compatibility
+retries.
 
 The batch call failing is itself a distinct, separately-tracked degradation (mode
-``"batch_unavailable"``). When ``seq_log_density`` raises, every record in that call is retried
-individually -- and a record can recover (score normally through the per-record path) even though the
-batch path failed for it. Left untracked, that retry would be invisible on precisely the calls where it
-matters most: a batch endpoint that fails on every call but whose per-record fallback always succeeds
-would leave no trace in the activity log or :meth:`health` at all, since every record still ends up
-scored and finite -- nothing looks unscorable or unavailable, even though every call is silently paying
-for a full per-record retry. ``n_batch_unavailable`` / ``batch_unavailable_rate`` count records exposed
-to that fallback regardless of whether the retry itself succeeded, so a degrading batch endpoint is
-visible before it starts actually losing data -- which is what ``unavailable_rate`` covers.
+``"batch_unavailable"``). When ``seq_log_density`` raises a configured availability exception, every
+record in that call is retried individually -- and a record can recover (score normally through the
+per-record path) even though the batch path failed for it. Left untracked, that retry would be invisible
+on precisely the calls where it matters most: a batch endpoint that fails on every call but whose
+per-record fallback always succeeds would leave no trace in the activity log or :meth:`health` at all,
+since every record still ends up scored and finite -- nothing looks unscorable or unavailable, even
+though every call is silently paying for a full per-record retry. ``n_batch_unavailable`` /
+``batch_unavailable_rate`` count records exposed to that fallback regardless of whether the retry
+itself succeeded, so a degrading batch endpoint is visible before it starts actually losing data --
+which is what ``unavailable_rate`` covers.
 """
 
 from __future__ import annotations
 
 import json
+import numbers
 import time
 from typing import Any
 
 import numpy as np
 
-from mixle.system.fault import DegradedResult, with_fallback
+from mixle.system.fault import DegradedResult
+
+
+def _contains_nonfinite_number(value: Any) -> bool:
+    """Return whether a structured record contains an explicitly non-finite numeric value."""
+    if isinstance(value, numbers.Number):
+        return not bool(np.isfinite(value))
+    if isinstance(value, np.ndarray) and np.issubdtype(value.dtype, np.number):
+        return not bool(np.isfinite(value).all())
+    if isinstance(value, dict):
+        return any(_contains_nonfinite_number(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_nonfinite_number(item) for item in value)
+    return False
 
 
 class Service:
@@ -49,12 +65,18 @@ class Service:
         reference: Any = None,
         log_path: str | None = None,
         keep: int = 1000,
+        availability_errors: tuple[type[Exception], ...] = (ConnectionError, TimeoutError),
     ) -> None:
         self.model = model
         self.name = name
         self.reference = list(reference) if reference is not None else None
         self.log_path = log_path
         self.keep = keep
+        if not availability_errors or not all(
+            isinstance(error, type) and issubclass(error, Exception) for error in availability_errors
+        ):
+            raise ValueError("availability_errors must be a non-empty tuple of Exception classes")
+        self.availability_errors = tuple(availability_errors)
         self.activity: list[dict] = []
         self.header = getattr(model, "header", None)
 
@@ -120,7 +142,21 @@ class Service:
                     n_unavailable += 1
             return lp
 
-        outcome = with_fallback(_batch_call, _batch_fallback, mode="batch_unavailable")
+        if any(_contains_nonfinite_number(record) for record in recs):
+            # Encoders commonly reject NaN/Inf before a distribution can return its ordinary
+            # non-finite support score. Use the scalar scoring contract for such explicit data;
+            # this is neither an availability outage nor permission to mask an arbitrary batch error.
+            outcome = DegradedResult(value=_batch_fallback(ValueError("non-finite record")), degraded=False)
+        else:
+            try:
+                outcome = DegradedResult(value=_batch_call(), degraded=False)
+            except self.availability_errors as exc:
+                outcome = DegradedResult(
+                    value=_batch_fallback(exc),
+                    degraded=True,
+                    mode="batch_unavailable",
+                    reason=str(exc),
+                )
         lp = outcome.value
         if not outcome.degraded and lp.shape != (n_expected,):
             raise ValueError(
@@ -147,12 +183,17 @@ class Service:
         return lp
 
     def _safe_logd(self, r: Any) -> DegradedResult:
-        """Score one record, isolating any exception -- the model being unreachable or erroring, not the
-        model judging the record impossible -- as an explicit ``model_unavailable`` degradation instead
-        of an indistinguishable ``-inf``."""
-        return with_fallback(
-            lambda: float(self.model.log_density(r)), lambda exc: float("-inf"), mode="model_unavailable"
-        )
+        """Score one record, isolating configured availability exceptions as an explicit
+        ``model_unavailable`` degradation instead of an indistinguishable ``-inf``."""
+        try:
+            return DegradedResult(value=float(self.model.log_density(r)), degraded=False)
+        except self.availability_errors as exc:
+            return DegradedResult(
+                value=float("-inf"),
+                degraded=True,
+                mode="model_unavailable",
+                reason=str(exc),
+            )
 
     def check_drift(self, records: Any) -> Any:
         """Drift of ``records`` versus the service's reference sample (requires a ``reference``)."""

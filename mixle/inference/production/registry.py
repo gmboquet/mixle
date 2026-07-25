@@ -9,18 +9,61 @@ to an alias (e.g. ``"production"``) -- the swap point a serving layer reads from
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
+import secrets
 import tempfile
 from collections.abc import Callable
+from copy import copy, deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
-from mixle.utils.serialization import ensure_pysp_serialization_registry, from_serializable, to_serializable
+from mixle.utils.serialization import (
+    SerializationError,
+    ensure_pysp_serialization_registry,
+    from_serializable,
+    to_serializable,
+)
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _fsync_directory(path: str) -> None:
+    """Durably commit a link/rename/unlink performed inside ``path``."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _record_digest(payload: dict[str, Any]) -> str:
+    """Content digest for a version envelope, excluding its own digest field."""
+    from mixle.data.hashing import _canonical
+
+    subject = dict(payload)
+    subject.pop("record_digest", None)
+    return hashlib.sha256(_canonical(subject)).hexdigest()
+
+
+def _transition_digest(metadata: dict[str, Any]) -> str:
+    """Bind one checkpoint transition to its exact persisted predecessor."""
+    from mixle.data.hashing import _canonical
+
+    fields = {
+        "lineage_schema": metadata.get("lineage_schema"),
+        "run_id": metadata.get("run_id"),
+        "checkpoint_iter": metadata.get("checkpoint_iter"),
+        "model_hash": metadata.get("model_hash"),
+        "parent_hash": metadata.get("parent_hash"),
+        "parent_version": metadata.get("parent_version"),
+        "parent_record_digest": metadata.get("parent_record_digest"),
+        "parent_transition_digest": metadata.get("parent_transition_digest"),
+    }
+    return hashlib.sha256(_canonical(fields)).hexdigest()
 
 
 def _safe_segment(seg: str, kind: str = "name") -> str:
@@ -119,17 +162,17 @@ class Registry:
         attached = getattr(model, "header", None)
         if header is None:
             header = attached
-        hdr = header.to_dict() if hasattr(header, "to_dict") else header
-        # the header is stored separately; detach it so it is not serialized as part of the model state
-        # (a Header is not a registered serializable class).
+        hdr_source = header.to_dict() if hasattr(header, "to_dict") else header
+        hdr = deepcopy(hdr_source)
+        metadata_snapshot = deepcopy(metadata or {})
+        # The header is stored separately. Serialize a shallow snapshot without it rather than
+        # deleting and restoring ``model.header`` on the caller's live object: the latter lets a
+        # concurrent scorer or second registration observe a transiently headerless model.
         had_attr = hasattr(model, "__dict__") and "header" in vars(model)
+        subject = copy(model) if had_attr else model
         if had_attr:
-            del model.header
-        try:
-            model_ser = to_serializable(model)
-        finally:
-            if had_attr:
-                model.header = attached
+            vars(subject).pop("header", None)
+        model_ser = to_serializable(subject)
 
         lock_path = os.path.join(d, ".register.lock")
         with open(lock_path, "w") as lock_f:
@@ -146,8 +189,9 @@ class Registry:
                     "registered_at": _now(),
                     "model": model_ser,
                     "header": hdr,
-                    "metadata": metadata or {},
+                    "metadata": metadata_snapshot,
                 }
+                payload["record_digest"] = _record_digest(payload)
                 path = os.path.join(d, ver + ".json")
                 # Write fully to a private temp file (fsynced) before it ever touches `path`, so a
                 # failure mid-write -- serialization raising partway through json.dump, disk full, a
@@ -174,6 +218,7 @@ class Registry:
                         os.unlink(tmp)
                     except OSError:
                         pass
+                    _fsync_directory(d)
             finally:
                 fcntl.flock(lock_f, fcntl.LOCK_UN)
         return ver
@@ -194,22 +239,36 @@ class Registry:
         from mixle.data.hashing import model_hash
 
         parent: str | None = None
+        parent_version: str | None = None
+        parent_record_digest: str | None = None
+        parent_transition_digest: str | None = None
+        run_id = secrets.token_hex(16)
 
         def _save(step: Any) -> None:
-            nonlocal parent
+            nonlocal parent, parent_record_digest, parent_transition_digest, parent_version
             if every <= 1 or step.iter % every == 0:
                 h = model_hash(step.model)
-                self.register(
+                metadata = {
+                    "lineage_schema": "mixle-checkpoint-lineage-v1",
+                    "run_id": run_id,
+                    "checkpoint_iter": step.iter,
+                    "log_density": step.log_density,
+                    "model_hash": h,
+                    "parent_hash": parent,
+                    "parent_version": parent_version,
+                    "parent_record_digest": parent_record_digest,
+                    "parent_transition_digest": parent_transition_digest,
+                }
+                metadata["transition_digest"] = _transition_digest(metadata)
+                version = self.register(
                     step.model,
                     name,
-                    metadata={
-                        "checkpoint_iter": step.iter,
-                        "log_density": step.log_density,
-                        "model_hash": h,
-                        "parent_hash": parent,
-                    },
+                    metadata=metadata,
                 )
                 parent = h
+                parent_version = version
+                parent_record_digest = self.record_digest(name, version)
+                parent_transition_digest = metadata["transition_digest"]
 
         return _save
 
@@ -236,8 +295,7 @@ class Registry:
         extension. A pure-statistical entry loads either way.
         """
         version = self._resolve_version(name, version)
-        with open(os.path.join(self._model_dir(name, create=False), version + ".json")) as f:
-            payload = json.load(f)
+        payload = self._load_payload(name, version)
         if trust_code:
             from mixle.utils.serialization import trusted_deserialization
 
@@ -248,14 +306,30 @@ class Registry:
     def header(self, name: str, version: str = "latest") -> dict | None:
         """Just the provenance header of a version (no model deserialization)."""
         version = self._resolve_version(name, version)
-        with open(os.path.join(self._model_dir(name, create=False), version + ".json")) as f:
-            return json.load(f).get("header")
+        return self._load_payload(name, version).get("header")
 
     def metadata(self, name: str, version: str = "latest") -> dict:
         """Just the ``metadata`` of a version (no model deserialization) -- e.g. a checkpoint's iteration."""
         version = self._resolve_version(name, version)
+        return self._load_payload(name, version).get("metadata") or {}
+
+    def _load_payload(self, name: str, version: str) -> dict[str, Any]:
+        """Read one immutable envelope and verify its content digest when present."""
         with open(os.path.join(self._model_dir(name, create=False), version + ".json")) as f:
-            return json.load(f).get("metadata") or {}
+            payload = json.load(f)
+        stored = payload.get("record_digest")
+        if stored is not None and stored != _record_digest(payload):
+            raise ValueError(f"registry integrity failure for {name!r} version {version!r}")
+        return payload
+
+    def record_digest(self, name: str, version: str = "latest") -> str:
+        """Verified digest of the exact persisted version envelope."""
+        version = self._resolve_version(name, version)
+        payload = self._load_payload(name, version)
+        stored = payload.get("record_digest")
+        if not isinstance(stored, str):
+            raise ValueError(f"{name!r} version {version!r} has no authenticated record digest")
+        return stored
 
     def promote(self, name: str, version: str, alias: str = "production") -> None:
         """Point ``alias`` (e.g. ``"production"``) at ``version`` -- the atomic model swap.
@@ -269,10 +343,19 @@ class Registry:
             raise KeyError(f"{name!r} has no version {version!r}")
         d = self._dir(name)
         target = os.path.join(d, _safe_segment(alias, "alias") + ".alias")
-        tmp = os.path.join(d, f".{_safe_segment(alias, 'alias')}.{os.getpid()}.tmp")
-        with open(tmp, "w") as f:
-            f.write(version)
-        os.replace(tmp, target)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{_safe_segment(alias, 'alias')}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(version)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+            _fsync_directory(d)
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
 
     def current(self, name: str, alias: str = "production", *, trust_code: bool = False) -> tuple[Any, dict | None]:
         """Load the model an ``alias`` points at (falls back to ``latest`` if the alias is unset).
@@ -292,10 +375,9 @@ class Registry:
     def verify_chain(self, name: str, *, trust_code: bool = False) -> bool:
         """Verify the persisted checkpoint lineage for ``name`` (see :meth:`checkpointer`).
 
-        For each version carrying a ``model_hash``, checks that its ``parent_hash`` matches the previous
-        such version's hash *and* that re-hashing the loaded model reproduces the stored hash (catching
-        corruption or tampering). Returns True when every link holds, or vacuously when no version carries
-        lineage metadata.
+        Requires every version to carry a complete authenticated lineage record. Checks exact parent
+        versions, record digests, model hashes, transition digests, run identity, and iteration order,
+        and re-hashes each loaded model. Missing or partial lineage is unverified and returns False.
 
         See :meth:`get` -- ``trust_code`` is required in the same way and for the same reason: a chain
         that contains a NeuralLeaf-family checkpoint must be loaded to be re-hashed, so verifying it is
@@ -303,15 +385,67 @@ class Registry:
         """
         from mixle.data.hashing import model_hash
 
-        prev: str | None = None
-        for ver in self.versions(name):
-            stored = self.metadata(name, ver).get("model_hash")
-            if stored is None:
-                continue
-            if self.metadata(name, ver).get("parent_hash") != prev:
-                return False
-            model, _ = self.get(name, ver, trust_code=trust_code)
-            if model_hash(model) != stored:
-                return False
-            prev = stored
+        versions = self.versions(name)
+        if not versions:
+            return False
+        required = {
+            "lineage_schema",
+            "run_id",
+            "checkpoint_iter",
+            "model_hash",
+            "parent_hash",
+            "parent_version",
+            "parent_record_digest",
+            "parent_transition_digest",
+            "transition_digest",
+        }
+        previous_hash: str | None = None
+        previous_version: str | None = None
+        previous_record_digest: str | None = None
+        previous_transition_digest: str | None = None
+        previous_iter: int | None = None
+        run_id: str | None = None
+        try:
+            for ver in versions:
+                metadata = self.metadata(name, ver)
+                if not required.issubset(metadata):
+                    return False
+                if metadata["lineage_schema"] != "mixle-checkpoint-lineage-v1":
+                    return False
+                if run_id is None:
+                    run_id = metadata["run_id"]
+                if not isinstance(run_id, str) or metadata["run_id"] != run_id:
+                    return False
+                checkpoint_iter = metadata["checkpoint_iter"]
+                if (
+                    isinstance(checkpoint_iter, bool)
+                    or not isinstance(checkpoint_iter, int)
+                    or (previous_iter is not None and checkpoint_iter <= previous_iter)
+                ):
+                    return False
+                if metadata["parent_hash"] != previous_hash:
+                    return False
+                if metadata["parent_version"] != previous_version:
+                    return False
+                if metadata["parent_record_digest"] != previous_record_digest:
+                    return False
+                if metadata["parent_transition_digest"] != previous_transition_digest:
+                    return False
+                if metadata["transition_digest"] != _transition_digest(metadata):
+                    return False
+                stored = metadata["model_hash"]
+                if not isinstance(stored, str):
+                    return False
+                model, _ = self.get(name, ver, trust_code=trust_code)
+                if model_hash(model) != stored:
+                    return False
+                previous_hash = stored
+                previous_version = ver
+                previous_record_digest = self.record_digest(name, ver)
+                previous_transition_digest = metadata["transition_digest"]
+                previous_iter = checkpoint_iter
+        except SerializationError:
+            raise
+        except (KeyError, TypeError, ValueError):
+            return False
         return True

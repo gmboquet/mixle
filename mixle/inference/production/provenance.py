@@ -10,8 +10,12 @@ JSON alongside the model.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import platform
+import secrets
+import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -29,32 +33,70 @@ def _version(mod: str) -> str | None:
         return None
 
 
-def _git_commit() -> str | None:
+def _git_state() -> dict[str, Any]:
+    """Identify both the commit and any uncommitted source state used by the fit."""
     try:
-        import subprocess
-
         import mixle
 
         root = os.path.dirname(os.path.dirname(os.path.abspath(mixle.__file__)))
-        r = subprocess.run(
+        commit_result = subprocess.run(
             ["git", "-C", root, "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=2
         )
-        return r.stdout.strip() or None
+        commit = commit_result.stdout.strip() or None
+        status_result = subprocess.run(
+            ["git", "-C", root, "status", "--porcelain=v1", "--untracked-files=all"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        status = status_result.stdout
+        dirty = bool(status)
+        state_digest = None
+        if dirty:
+            diff_result = subprocess.run(
+                ["git", "-C", root, "diff", "--binary", "HEAD"],
+                capture_output=True,
+                timeout=2,
+            )
+            untracked_result = subprocess.run(
+                ["git", "-C", root, "ls-files", "--others", "--exclude-standard", "-z"],
+                capture_output=True,
+                timeout=2,
+            )
+            h = hashlib.sha256()
+            h.update(status.encode("utf-8", errors="surrogateescape"))
+            h.update(diff_result.stdout)
+            for raw_path in sorted(p for p in untracked_result.stdout.split(b"\0") if p):
+                h.update(len(raw_path).to_bytes(8, "big"))
+                h.update(raw_path)
+                try:
+                    with open(os.path.join(root, os.fsdecode(raw_path)), "rb") as f:
+                        h.update(f.read())
+                except OSError:
+                    h.update(b"<unreadable>")
+            state_digest = h.hexdigest()
+        return {"git_commit": commit, "git_dirty": dirty, "git_worktree_digest": state_digest}
     except Exception:  # noqa: BLE001
-        return None
+        return {"git_commit": None, "git_dirty": None, "git_worktree_digest": None}
+
+
+def _git_commit() -> str | None:
+    """Backward-compatible commit accessor."""
+    return _git_state()["git_commit"]
 
 
 def environment_info() -> dict:
     """Snapshot of the software/hardware environment for reproducibility."""
-    return {
+    info = {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "numpy": _version("numpy"),
         "scipy": _version("scipy"),
         "mixle_version": _version("mixle"),
-        "git_commit": _git_commit(),
         "cpu_count": os.cpu_count(),
     }
+    info.update(_git_state())
+    return info
 
 
 def _schema_of(model: Any) -> list[tuple[str, str]]:
@@ -100,6 +142,22 @@ def _safe_model_hash(model: Any) -> str | None:
         return _model_hash(model)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _request_value(value: Any) -> Any:
+    """Canonical JSON-safe description of a fit-request value."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _request_value(v) for k, v in sorted(value.items(), key=lambda item: repr(item[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_request_value(v) for v in value]
+    return {"type": f"{type(value).__module__}.{type(value).__qualname__}", "repr": repr(value)}
+
+
+def _fit_request_digest(request: dict[str, Any]) -> str:
+    encoded = json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass
@@ -188,18 +246,34 @@ def build_header(
     )
 
 
+def _lineage_transition_digest(record: dict[str, Any]) -> str:
+    """Digest the executed transition fields recorded by the optimizer callback."""
+    fields = {
+        "lineage_schema": record.get("lineage_schema"),
+        "run_id": record.get("run_id"),
+        "iter": record.get("iter"),
+        "model_hash": record.get("model_hash"),
+        "parent_hash": record.get("parent_hash"),
+        "parent_transition_digest": record.get("parent_transition_digest"),
+    }
+    encoded = json.dumps(fields, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class _EMHistory:
     """A silent ``out`` + ``on_step`` sink that captures the per-iteration convergence trace.
 
     ``em_record`` (the ``_write_em_iter`` hook) records the scalar trace -- loglik / delta / valid_loglik /
     objective. ``__call__`` (the ``optimize(on_step=...)`` hook) fingerprints the accepted model each
-    iteration and chains it (``model_hash`` + the previous iteration's ``parent_hash``), so when both are
-    wired the trace is a verifiable hash chain: iteration i+1 records i's hash as its parent. Records are
+    iteration and chains it to the previous model and transition digests, so when both are wired the
+    trace is an authenticated execution chain rather than a set of asserted parent hashes. Records are
     merged by iteration, so either hook may be absent or fire in either order."""
 
     def __init__(self) -> None:
         self._by_iter: dict[int, dict] = {}
         self._prev_hash: str | None = None
+        self._prev_transition_digest: str | None = None
+        self._run_id = secrets.token_hex(16)
 
     def write(self, _s: str) -> None:  # discard the text lines; we keep the structured records
         pass
@@ -223,13 +297,31 @@ class _EMHistory:
     def __call__(self, step: Any) -> None:
         rec = self._rec(step.iter)
         h = _safe_model_hash(step.model)
+        rec["lineage_schema"] = "mixle-em-lineage-v1"
+        rec["run_id"] = self._run_id
         rec["model_hash"] = h
         rec["parent_hash"] = self._prev_hash
+        rec["parent_transition_digest"] = self._prev_transition_digest
+        rec["transition_digest"] = _lineage_transition_digest(rec)
         self._prev_hash = h
+        self._prev_transition_digest = rec["transition_digest"]
 
     @property
     def records(self) -> list[dict]:
         return [self._by_iter[k] for k in sorted(self._by_iter)]
+
+    def terminal(self, model: Any) -> dict[str, Any]:
+        """Bind the optimizer's returned (possibly restored-best) model to the executed step chain."""
+        record = {
+            "iter": "returned",
+            "lineage_schema": "mixle-em-lineage-v1",
+            "run_id": self._run_id,
+            "model_hash": _safe_model_hash(model),
+            "parent_hash": self._prev_hash,
+            "parent_transition_digest": self._prev_transition_digest,
+        }
+        record["transition_digest"] = _lineage_transition_digest(record)
+        return record
 
 
 def fit_with_provenance(
@@ -241,13 +333,17 @@ def fit_with_provenance(
     log-likelihood, and environment. Pass your own ``out=`` to print iterations (then the trace is not
     captured).
 
-    With ``lineage=True`` (default) each iteration in the convergence trace also records the accepted
-    model's ``model_hash`` and the previous iteration's ``parent_hash``, forming a verifiable hash chain
-    (check it with :func:`verify_lineage`). This fingerprints the model every iteration; pass
-    ``lineage=False`` to skip it for very large models. Any user ``on_step=`` is still called."""
+    With ``lineage=True`` (default) each iteration in the convergence trace records an authenticated
+    transition from the previous accepted model, and a terminal record binds the model actually returned
+    by the optimizer (check it with :func:`verify_lineage`). This fingerprints the model every iteration;
+    pass ``lineage=False`` to skip it for very large models. Any user ``on_step=`` is still called."""
     import inspect
 
     from mixle.inference.estimation import optimize
+
+    # Consume any sequence, DataSource, or one-shot iterator exactly once. This immutable request
+    # snapshot is then shared by fitting, final scoring, record counting, and hashing.
+    materialized_data = list(_records(data))
 
     # optimize()'s OWN defaults, not a hardcoded guess: a caller who relies on optimize()'s
     # defaults (doesn't pass max_its=/delta= explicitly) used to have those recorded as bare
@@ -255,6 +351,13 @@ def fit_with_provenance(
     # trail this function exists to build. `.get(key, default)` still returns an explicit
     # delta=None (disable early stopping) correctly, since that key IS present in optimize_kw.
     _optimize_defaults = inspect.signature(optimize).parameters
+    if "rng" in optimize_kw:
+        raise ValueError("fit_with_provenance requires seed= rather than a mutable rng= object")
+    effective_seed = 0 if seed is None else seed
+    if isinstance(effective_seed, bool) or not isinstance(effective_seed, int) or effective_seed < 0:
+        raise ValueError("seed must be a nonnegative integer or None")
+    optimize_kw["seed"] = effective_seed
+    request_optimize_kw = dict(optimize_kw)
     capture = "out" not in optimize_kw
     collector = _EMHistory() if capture else None
     if collector is not None:
@@ -275,11 +378,23 @@ def fit_with_provenance(
         "max_its": optimize_kw.get("max_its", _optimize_defaults["max_its"].default),
         "delta": optimize_kw.get("delta", _optimize_defaults["delta"].default),
         "backend": optimize_kw.get("backend", "local"),
-        "seed": seed,
+        "seed": effective_seed,
+        "data_materialized": True,
+        "lineage_status": "recorded" if collector is not None and lineage else "not_recorded",
     }
+    request = {
+        "estimator_type": f"{type(estimator).__module__}.{type(estimator).__qualname__}",
+        "estimator_repr": repr(estimator),
+        "data_hash": dataset_hash(materialized_data),
+        "n_records": len(materialized_data),
+        "optimize": {k: _request_value(v) for k, v in sorted(request_optimize_kw.items())},
+        "lineage": bool(lineage),
+    }
+    training["fit_request"] = request
+    training["fit_request_digest"] = _fit_request_digest(request)
     cpu0 = _resource_usage().get("cpu_time_s")
     t0 = time.time()
-    model = optimize(data, estimator, **optimize_kw)
+    model = optimize(materialized_data, estimator, **optimize_kw)
     t1 = time.time()
     usage = _resource_usage()
     if cpu0 is not None and usage.get("cpu_time_s") is not None:
@@ -287,12 +402,14 @@ def fit_with_provenance(
     if collector is not None:
         recs = collector.records
         training["convergence"] = recs
+        if lineage:
+            training["lineage_terminal"] = collector.terminal(model)
         training["iterations"] = recs[-1]["iter"] if recs else 0
         delta = training["delta"]  # the resolved value (falls back to optimize()'s own default)
         if delta is not None and recs:
             last = recs[-1]["delta"]
             training["converged"] = last is not None and last < delta
-    header = build_header(model, data, training=training, started=t0, finished=t1, resources=usage)
+    header = build_header(model, materialized_data, training=training, started=t0, finished=t1, resources=usage)
     try:
         model.header = header
     except Exception:  # noqa: BLE001
@@ -301,18 +418,68 @@ def fit_with_provenance(
 
 
 def verify_lineage(header: Any) -> bool:
-    """Check that a header's per-iteration convergence trace is an intact model-hash chain.
+    """Verify a complete execution-recorded EM transition chain.
 
-    Returns True when every iteration that recorded a ``model_hash`` names the previous such iteration's
-    hash as its ``parent_hash`` (so iteration i+1 provably descends from i), and True vacuously when the
-    trace carries no lineage (``fit_with_provenance(lineage=False)`` or a custom ``out``). Returns False
-    on the first invalid link. Accepts a :class:`Header` or its ``to_dict``."""
-    training = header.training if isinstance(header, Header) else dict(header or {}).get("training", {})
-    prev: str | None = None
-    for rec in training.get("convergence", []):
-        if "model_hash" not in rec:
-            continue
-        if rec.get("parent_hash") != prev:
+    Missing lineage is an unverified result, never a vacuous success. Each iteration must bind its
+    actual model hash to the previous model and transition digests, all records must share one run id,
+    and the final executed model hash must equal the header's fitted-model hash.
+    """
+    raw = header.to_dict() if isinstance(header, Header) else dict(header or {})
+    training = raw.get("training") or {}
+    records = training.get("convergence") or []
+    if training.get("lineage_status") != "recorded" or not records:
+        return False
+    required = {
+        "iter",
+        "lineage_schema",
+        "run_id",
+        "model_hash",
+        "parent_hash",
+        "parent_transition_digest",
+        "transition_digest",
+    }
+    previous_hash: str | None = None
+    previous_transition_digest: str | None = None
+    previous_iter: int | None = None
+    run_id: str | None = None
+    for record in records:
+        if not isinstance(record, dict) or not required.issubset(record):
             return False
-        prev = rec["model_hash"]
-    return True
+        if record["lineage_schema"] != "mixle-em-lineage-v1":
+            return False
+        if run_id is None:
+            run_id = record["run_id"]
+        if not isinstance(run_id, str) or record["run_id"] != run_id:
+            return False
+        iteration = record["iter"]
+        if (
+            isinstance(iteration, bool)
+            or not isinstance(iteration, int)
+            or (previous_iter is not None and iteration <= previous_iter)
+        ):
+            return False
+        if record["parent_hash"] != previous_hash:
+            return False
+        if record["parent_transition_digest"] != previous_transition_digest:
+            return False
+        if not isinstance(record["model_hash"], str):
+            return False
+        if record["transition_digest"] != _lineage_transition_digest(record):
+            return False
+        previous_hash = record["model_hash"]
+        previous_transition_digest = record["transition_digest"]
+        previous_iter = iteration
+    terminal = training.get("lineage_terminal")
+    if not isinstance(terminal, dict) or not required.issubset(terminal):
+        return False
+    if terminal["iter"] != "returned":
+        return False
+    if terminal["lineage_schema"] != "mixle-em-lineage-v1" or terminal["run_id"] != run_id:
+        return False
+    if terminal["parent_hash"] != previous_hash:
+        return False
+    if terminal["parent_transition_digest"] != previous_transition_digest:
+        return False
+    if terminal["transition_digest"] != _lineage_transition_digest(terminal):
+        return False
+    return isinstance(raw.get("model_hash"), str) and raw["model_hash"] == terminal["model_hash"]

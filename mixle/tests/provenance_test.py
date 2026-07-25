@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -267,6 +268,51 @@ class ProvenanceHeaderTest(unittest.TestCase):
         model = CompositeDistribution((GaussianDistribution(0, 1), CategoricalDistribution({"x": 0.5, "y": 0.5})))
         _, header = fit_with_provenance(data, model.estimator(), max_its=5, out=None)
         self.assertEqual(len(header.schema), 2)
+
+    def test_one_shot_data_is_materialized_once_for_fit_score_and_hash(self):
+        records = [1.0, 2.0, 3.0, 4.0]
+        consumed = []
+
+        def one_shot():
+            for value in records:
+                consumed.append(value)
+                yield value
+
+        _, header = fit_with_provenance(one_shot(), GaussianDistribution(0.0, 1.0).estimator(), max_its=3)
+
+        self.assertEqual(consumed, records)
+        self.assertEqual(header.n_records, len(records))
+        self.assertEqual(header.dataset_hash, dataset_hash(records))
+        self.assertIsNotNone(header.final_loglik)
+        self.assertTrue(header.training["data_materialized"])
+        self.assertEqual(header.training["fit_request"]["data_hash"], dataset_hash(records))
+
+    def test_recorded_seed_is_the_seed_passed_to_optimization(self):
+        captured = {}
+
+        def fake_optimize(data, estimator, max_its=10, delta=1.0e-9, **kwargs):
+            captured["data"] = list(data)
+            captured["seed"] = kwargs.get("seed")
+            return GaussianDistribution(0.0, 1.0)
+
+        with patch("mixle.inference.estimation.optimize", fake_optimize):
+            _, header = fit_with_provenance(
+                (value for value in [1.0, 2.0, 3.0]),
+                GaussianDistribution(0.0, 1.0).estimator(),
+                seed=17,
+            )
+
+        self.assertEqual(captured["data"], [1.0, 2.0, 3.0])
+        self.assertEqual(captured["seed"], 17)
+        self.assertEqual(header.training["seed"], 17)
+
+    def test_environment_records_dirty_worktree_state(self):
+        _, header = fit_with_provenance([1.0, 2.0, 3.0], GaussianDistribution(0.0, 1.0).estimator(), max_its=2)
+        self.assertIn("git_dirty", header.environment)
+        self.assertIn("git_worktree_digest", header.environment)
+        if header.environment["git_dirty"]:
+            self.assertIsInstance(header.environment["git_worktree_digest"], str)
+            self.assertEqual(len(header.environment["git_worktree_digest"]), 64)
 
 
 class CheckDatasetTest(unittest.TestCase):
