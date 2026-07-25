@@ -362,14 +362,62 @@ class CrossModalModel:
         **simultaneous**: :meth:`predict_interval` returns a box whose *joint* coverage over the whole
         target vector is ``>= 1 - alpha`` -- distribution-free, regardless of model specification
         (unlike the Gaussian posterior interval).
+
+        MXR-080-0279: every split-conformal precondition is validated and the method fails closed
+        -- raises without storing anything -- before a single score is computed. Previously,
+        ``alpha`` outside ``(0, 1)`` could select a negative-indexed or otherwise unrelated order
+        statistic instead of raising; an empty or wrong-width holdout produced an opaque
+        broadcasting ``ValueError`` (or worse, silently proceeded on a mismatched pairing); and
+        non-finite holdout values propagated into a NaN radius stored exactly like a valid one. A
+        stored radius is later presented, via :meth:`predict_interval`, as carrying a genuine
+        finite-sample coverage guarantee, so it must never come from anything but a valid
+        computation on a valid holdout.
+
+        Raises:
+            KeyError: ``target`` is not registered, or ``cal_data`` is missing a modality needed to
+                predict it.
+            ValueError: ``alpha`` is not strictly between 0 and 1; the holdout is empty; a
+                modality's holdout width doesn't match its registered ``in_dim``; a modality's
+                holdout row count disagrees with the others; or any holdout value is non-finite.
         """
         if target not in self._mods:
             raise KeyError(f"unknown modality {target!r}")
         others = [m for m in self._mods if m != target]
         if not others:
             raise ValueError("need at least one other modality to predict the target from")
+        if not (0.0 < alpha < 1.0):
+            raise ValueError(f"alpha must be strictly between 0 and 1, got {alpha!r}")
+        missing = [m for m in (*others, target) if m not in cal_data]
+        if missing:
+            raise KeyError(f"cal_data is missing modalities {missing} needed to calibrate target {target!r}")
+
+        target_mod = self._mods[target]
         y = np.atleast_2d(np.asarray(cal_data[target], dtype=float))
-        n = len(y)
+        if y.shape[0] == 0:
+            raise ValueError(f"calibration holdout for target {target!r} is empty")
+        if y.shape[1] != target_mod.in_dim:
+            raise ValueError(
+                f"target {target!r} declared in_dim={target_mod.in_dim} but holdout data has width {y.shape[1]}"
+            )
+        if not np.all(np.isfinite(y)):
+            raise ValueError(f"calibration holdout for target {target!r} contains non-finite values (NaN/Inf)")
+        n = y.shape[0]
+
+        for name in others:
+            mod = self._mods[name]
+            X = np.atleast_2d(np.asarray(cal_data[name], dtype=float))
+            if X.shape[0] != n:
+                raise ValueError(
+                    f"modality {name!r} holdout has {X.shape[0]} rows but target {target!r} holdout "
+                    f"has {n} rows; all modalities must share the same row count"
+                )
+            if X.shape[1] != mod.in_dim:
+                raise ValueError(
+                    f"modality {name!r} declared in_dim={mod.in_dim} but holdout data has width {X.shape[1]}"
+                )
+            if not np.all(np.isfinite(X)):
+                raise ValueError(f"modality {name!r} holdout data contains non-finite values (NaN/Inf)")
+
         preds = np.array([self.predict({o: cal_data[o][i] for o in others}, target) for i in range(n)])
         resid = np.abs(y - preds)  # (n, dim)
         scale = resid.std(axis=0) + 1e-8  # per-dim normalization so no dimension dominates the box
@@ -378,6 +426,7 @@ class CrossModalModel:
         # finite-sample split conformal: when ceil((n+1)(1-alpha)) exceeds n, no calibration score
         # certifies the level -- the radius is +inf (the box is unbounded), not the max score. Mirrors
         # mixle.scientist.study()'s identical k > n handling for the same split-conformal edge case.
+        # (alpha is now guaranteed in (0, 1) and n >= 1 above, so k >= 1 always -- never <= 0.)
         q = float(np.sort(scores)[k - 1]) if k <= n else float("inf")
         self._conformal[target] = (float(alpha), scale, q)
         return self

@@ -333,6 +333,43 @@ class CrossModalModelTest(unittest.TestCase):
         b1 = m.belief({"A": xA[1]})
         self.assertFalse(np.allclose(b0.mean(), b1.mean()))
 
+    # -- MXR-080-0279: calibrate() must validate alpha/holdout preconditions, fail closed ----------
+    def test_calibrate_rejects_invalid_alpha_and_malformed_holdouts(self):
+        from mixle.reason import CrossModalModel
+
+        rng = np.random.RandomState(25)
+        _, xA, xB = _two_view_data(rng, 200, k=2, dA=4, dB=3)
+        m = CrossModalModel(latent_dim=3, seed=0)
+        m.add_modality("A", 4).add_modality("B", 3)
+        m.fit({"A": xA, "B": xB}, epochs=40, beta=0.3)
+
+        for bad_alpha in (-0.5, 0.0, 1.0, 1.5):  # must be strictly between 0 and 1
+            with self.assertRaises(ValueError):
+                m.calibrate({"A": xA[:50], "B": xB[:50]}, target="B", alpha=bad_alpha)
+        with self.assertRaises(ValueError):  # empty holdout
+            m.calibrate({"A": xA[:0], "B": xB[:0]}, target="B", alpha=0.1)
+        with self.assertRaises(ValueError):  # wrong-width target holdout (declared 3, got 5)
+            m.calibrate({"A": xA[:50], "B": rng.normal(size=(50, 5))}, target="B", alpha=0.1)
+        with self.assertRaises(ValueError):  # wrong-width other-modality holdout (declared 4, got 9)
+            m.calibrate({"A": rng.normal(size=(50, 9)), "B": xB[:50]}, target="B", alpha=0.1)
+        with self.assertRaises(ValueError):  # mismatched row counts between modalities
+            m.calibrate({"A": xA[:30], "B": xB[:50]}, target="B", alpha=0.1)
+        with self.assertRaises(ValueError):  # non-finite holdout values
+            bad_B = xB[:50].copy()
+            bad_B[0, 0] = np.nan
+            m.calibrate({"A": xA[:50], "B": bad_B}, target="B", alpha=0.1)
+        with self.assertRaises(KeyError):  # cal_data missing a modality needed to predict target
+            m.calibrate({"B": xB[:50]}, target="B", alpha=0.1)
+
+        # none of the above invalid attempts may have stored a calibration record (fail closed)
+        self.assertEqual(m._conformal, {})
+
+        # a genuinely valid call still succeeds and stores a finite radius
+        m.calibrate({"A": xA[:50], "B": xB[:50]}, target="B", alpha=0.1)
+        self.assertIn("B", m._conformal)
+        _, _, q = m._conformal["B"]
+        self.assertTrue(np.isfinite(q))
+
 
 if __name__ == "__main__":
     unittest.main()
