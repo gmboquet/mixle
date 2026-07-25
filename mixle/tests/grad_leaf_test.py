@@ -91,6 +91,24 @@ class BareModuleTest(unittest.TestCase):
         with self.assertRaises(TypeError):  # scoring-only modules refuse to sample, with a real message
             GradLeaf(NoSample()).sampler(seed=0).sample(size=3)
 
+    def test_legacy_sampler_preserves_rng_mode_and_validates_size(self):
+        module = DiagGauss(1)
+        module.train()
+        sampler = GradLeaf(module).sampler(seed=7)
+        rng_before = torch.random.get_rng_state().clone()
+
+        first = sampler.sample(size=3)
+
+        torch.testing.assert_close(torch.random.get_rng_state(), rng_before)
+        self.assertTrue(module.training)
+        np.testing.assert_array_equal(first, GradLeaf(DiagGauss(1)).sampler(seed=7).sample(size=3))
+        for invalid in (0, -1):
+            with self.assertRaises(ValueError):
+                sampler.sample(size=invalid)
+        for invalid in (True, 1.5):
+            with self.assertRaises(TypeError):
+                sampler.sample(size=invalid)
+
 
 class CompositionTest(unittest.TestCase):
     def test_gradient_leaves_mix_with_classical_families(self):

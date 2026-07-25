@@ -28,6 +28,7 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
+from mixle.models.grad_leaf import _call_sample_with_seed, _module_mode, _resolve_device
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -108,10 +109,11 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
         xs, ys = enc
         xx = check_finite(np.atleast_2d(np.asarray(xs, dtype=float)), "NeuralConditionalDensity.seq_log_density (x)")
         yy = check_finite(np.atleast_2d(np.asarray(ys, dtype=float)), "NeuralConditionalDensity.seq_log_density (y)")
-        self.module.to(self.device).eval()
-        xt = torch.as_tensor(xx, dtype=torch.float32, device=self.device)
-        yt = torch.as_tensor(yy, dtype=torch.float32, device=self.device)
-        with torch.no_grad():
+        dev = _resolve_device(self.device, torch)
+        self.module.to(dev)
+        xt = torch.as_tensor(xx, dtype=torch.float32, device=dev)
+        yt = torch.as_tensor(yy, dtype=torch.float32, device=dev)
+        with _module_mode(self.module, train=False), torch.no_grad():
             return self.module.log_density(xt, yt).cpu().numpy().reshape(-1)
 
     def sampler(self, seed: int | None = None) -> NeuralConditionalDensitySampler:
@@ -175,11 +177,14 @@ class NeuralConditionalDensitySampler(DistributionSampler):
     def sample_given(self, x: Any) -> np.ndarray:
         """Draw one response from ``p(y | x)`` using the wrapped module."""
         torch = _torch()
-        self.dist.module.to(self.dist.device).eval()
-        torch.manual_seed(int(self.rng.randint(0, 2**31 - 1)))
-        xt = torch.as_tensor(np.atleast_2d(np.asarray(x, dtype=float)), dtype=torch.float32, device=self.dist.device)
-        with torch.no_grad():
-            return self.dist.module.sample_given(xt).cpu().numpy()[0]
+        dev = _resolve_device(self.dist.device, torch)
+        self.dist.module.to(dev)
+        seed = int(self.rng.randint(0, 2**31 - 1))
+        xt = torch.as_tensor(np.atleast_2d(np.asarray(x, dtype=float)), dtype=torch.float32, device=dev)
+        with _module_mode(self.dist.module, train=False), torch.no_grad():
+            return _call_sample_with_seed(
+                self.dist.module.sample_given, xt, torch=torch, device=dev, seed=seed
+            ).cpu().numpy()[0]
 
     def sample_given_batch(self, x_batch: Any) -> np.ndarray:
         """One draw of ``y ~ p(y | x)`` for every row of ``x_batch`` (shape ``(n, x_dim)``), in one
@@ -191,13 +196,14 @@ class NeuralConditionalDensitySampler(DistributionSampler):
         both call sites use this to speed up the same check/walk rather than shrink it. Repeat a row
         of ``x_batch`` to draw more than once from the same ``x``."""
         torch = _torch()
-        self.dist.module.to(self.dist.device).eval()
-        torch.manual_seed(int(self.rng.randint(0, 2**31 - 1)))
-        xt = torch.as_tensor(
-            np.atleast_2d(np.asarray(x_batch, dtype=float)), dtype=torch.float32, device=self.dist.device
-        )
-        with torch.no_grad():
-            return self.dist.module.sample_given(xt).cpu().numpy()  # (n, y_dim)
+        dev = _resolve_device(self.dist.device, torch)
+        self.dist.module.to(dev)
+        seed = int(self.rng.randint(0, 2**31 - 1))
+        xt = torch.as_tensor(np.atleast_2d(np.asarray(x_batch, dtype=float)), dtype=torch.float32, device=dev)
+        with _module_mode(self.dist.module, train=False), torch.no_grad():
+            return _call_sample_with_seed(
+                self.dist.module.sample_given, xt, torch=torch, device=dev, seed=seed
+            ).cpu().numpy()  # (n, y_dim)
 
 
 class NeuralConditionalDensityEncoder(DataSequenceEncoder):
@@ -374,13 +380,14 @@ def _build_mdn_class(torch: Any, nn: Any) -> Any:
             log_n = -0.5 * (z**2).sum(-1) - log_sigma.sum(-1) - 0.5 * self.y_dim * float(np.log(2.0 * np.pi))
             return torch.logsumexp(log_pi + log_n, dim=1)  # (n,)
 
-        def sample_given(self, x: Any) -> Any:
+        def sample_given(self, x: Any, *, generator: Any = None) -> Any:
             log_pi, mu, log_sigma = self._params(x)
-            comp = torch.multinomial(torch.exp(log_pi), 1).squeeze(-1)  # (n,)
+            comp = torch.multinomial(torch.exp(log_pi), 1, generator=generator).squeeze(-1)  # (n,)
             idx = comp.view(-1, 1, 1).expand(-1, 1, self.y_dim)
             mu_c = mu.gather(1, idx).squeeze(1)  # (n, d)
             sig_c = torch.exp(log_sigma.gather(1, idx).squeeze(1))
-            return mu_c + sig_c * torch.randn_like(mu_c)
+            noise = torch.randn(mu_c.shape, dtype=mu_c.dtype, device=mu_c.device, generator=generator)
+            return mu_c + sig_c * noise
 
     return MixtureDensityNetwork
 
@@ -412,10 +419,12 @@ def _build_conditional_flow_class(torch: Any, nn: Any) -> Any:
             self.y_dim = int(y_dim)
             self.hidden = int(hidden)
             self.layers = int(layers)
+            if self.y_dim < 2:
+                raise ValueError("conditional coupling flows require y_dim >= 2.")
             masks = []
             for k in range(self.layers):
                 m = torch.zeros(self.y_dim)
-                m[k % self.y_dim :: 2] = 1.0  # alternating coordinate masks
+                m[k % 2 :: 2] = 1.0  # alternate the two parity masks for every layer
                 masks.append(m)
             self.register_buffer("masks", torch.stack(masks))
 
@@ -444,8 +453,8 @@ def _build_conditional_flow_class(torch: Any, nn: Any) -> Any:
             base = -0.5 * (z**2).sum(1) - 0.5 * self.y_dim * float(np.log(2.0 * np.pi))
             return base + logdet
 
-        def sample_given(self, x: Any) -> Any:
-            y = torch.randn(x.shape[0], self.y_dim, device=x.device)
+        def sample_given(self, x: Any, *, generator: Any = None) -> Any:
+            y = torch.randn(x.shape[0], self.y_dim, device=x.device, generator=generator)
             for m, s_net, t_net in zip(reversed(self.masks), reversed(list(self.s)), reversed(list(self.t))):
                 ym = y * m
                 inp = torch.cat([ym, x], dim=1)
@@ -648,11 +657,11 @@ def _build_conditional_autoregressive_categorical_class(torch: Any, nn: Any) -> 
             idx = y.long().clamp(0, self.C - 1).unsqueeze(-1)
             return log_p.gather(-1, idx).squeeze(-1).sum(1)  # sum_i log p(y_i | y_{<i}, x)
 
-        def sample_given(self, x: Any) -> Any:
+        def sample_given(self, x: Any, *, generator: Any = None) -> Any:
             y = torch.zeros(x.shape[0], self.D, device=x.device)
             for d in range(self.D):  # coordinate d depends on x (always) and already-filled y_{<d}
                 probs = torch.softmax(self._logits(x, y)[:, d, :], dim=-1)
-                y[:, d] = torch.multinomial(probs, 1).squeeze(-1).float()
+                y[:, d] = torch.multinomial(probs, 1, generator=generator).squeeze(-1).float()
             return y
 
     return ConditionalAutoregressiveCategorical

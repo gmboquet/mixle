@@ -77,6 +77,32 @@ def _within_y_curve(seed, n=800):
 
 
 class ConditionalFlowTest(unittest.TestCase):
+    def test_conditional_sampling_and_scoring_restore_mode_and_rng(self):
+        _seed()
+        module = build_conditional_flow(1, 4, hidden=8, layers=4)
+        module.train()
+        module.s[0].eval()
+        modes_before = [part.training for part in module.modules()]
+        leaf = NeuralConditionalDensity(module)
+        rng_before = torch.random.get_rng_state().clone()
+
+        leaf.seq_log_density((np.zeros((2, 1)), np.zeros((2, 4))))
+        first = leaf.sampler(13).sample_given_batch(np.zeros((3, 1)))
+
+        self.assertEqual([part.training for part in module.modules()], modes_before)
+        torch.testing.assert_close(torch.random.get_rng_state(), rng_before)
+        np.testing.assert_array_equal(first, leaf.sampler(13).sample_given_batch(np.zeros((3, 1))))
+
+    def test_conditional_coupling_masks_alternate_and_cover_every_coordinate(self):
+        module = build_conditional_flow(1, 4, hidden=8, layers=6)
+        expected = torch.tensor([[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0]] * 3)
+        torch.testing.assert_close(module.masks.cpu(), expected)
+        torch.testing.assert_close(module.masks.sum(0), torch.full((4,), 3.0))
+
+    def test_conditional_flow_rejects_one_dimensional_identity(self):
+        with self.assertRaisesRegex(ValueError, "y_dim >= 2"):
+            build_conditional_flow(1, 1)
+
     def test_conditional_flow_beats_single_gaussian_on_within_y_structure(self):
         _seed()
         train, test = _within_y_curve(0), _within_y_curve(1)
