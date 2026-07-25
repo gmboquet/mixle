@@ -13,6 +13,7 @@ Acceptance criteria under test (see the ConditionalJIT track's D4 item):
 
 import time
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ from mixle.inference.estimation import optimize  # noqa: E402
 from mixle.inference.freeze_rollup import FreezeRollupCache, _resolve_payload  # noqa: E402
 from mixle.inference.leaf_hotswap import (  # noqa: E402
     PlateauMonitor,
+    fidelity_receipt,
     misfit_receipt,
     moment_matched_surrogate,
     run_em_with_hotswap,
@@ -208,9 +210,16 @@ class FasterToSameFTestCase(unittest.TestCase):
         start = MixtureDistribution([comp0, comp1], [0.5, 0.5])
         estimator = MixtureEstimator([GradEstimator(pretrained.module, m_steps=30, lr=5e-3), GaussianEstimator()])
         enc = seq_encode(data, model=start)
+        independent_holdout = _data(-4.0, 1.0, 200, seed=7)
 
         model, history, swap_records = run_em_with_hotswap(
-            enc, estimator, start, max_its=10, delta=1.0e-9, plateau_patience=1
+            enc,
+            estimator,
+            start,
+            max_its=10,
+            delta=1.0e-9,
+            plateau_patience=1,
+            holdout_data=independent_holdout,
         )
 
         self.assertIn(0, swap_records, "the plateaued gradient leaf (component 0) should have been swapped")
@@ -353,15 +362,13 @@ class MonotoneObjectiveGateCatchesBadSwapTestCase(unittest.TestCase):
         # this is the module's documented, honest limitation: moment_matched_surrogate ALONE is a
         # coarse, Gaussian-only fit whose quality is not guaranteed on a non-Gaussian leaf.
         self.assertGreater(rel_degradation, 0.5, "a Gaussian surrogate should badly misfit a bimodal leaf")
+        self.assertGreater(fidelity_receipt(fitted, surrogate, holdout), 0.5)
 
     def test_run_em_with_hotswap_rejects_and_reverts_a_bad_bimodal_swap(self):
         """End to end: a mixture with a pre-plateaued, genuinely bimodal gradient leaf component
-        proposes a moment-matched swap exactly like the well-behaved (Gaussian-shaped) fixture
-        does, but here the surrogate is a bad approximation. The per-round monotone-F gate must (1)
-        reject that round (``accepted`` reads False), (2) leave NO record of a committed swap
-        (``swap_records`` empty -- the swap never survives to be returned), and (3) return a final
-        model whose component 0 is still the retained ``GradLeaf``, with held-out fit quality
-        essentially unaffected by the rejected swap attempt.
+        considers a moment-matched swap exactly like the well-behaved (Gaussian-shaped) fixture
+        does, but here the surrogate is a bad approximation. Independent held-out fidelity must
+        reject it before it can become an objective-gated model proposal.
         """
         rng = np.random.RandomState(21)
         comp0_data = _bimodal_data(1200, seed=22, mu=(-3.0, 3.0), sigma=0.5)
@@ -390,10 +397,9 @@ class MonotoneObjectiveGateCatchesBadSwapTestCase(unittest.TestCase):
             misfit_tol=0.15,
         )
 
-        swap_attempted = any(h.swapped_this_round for h in history)
-        self.assertTrue(swap_attempted, "the plateaued bimodal leaf should still trigger a swap attempt")
-        rejected_rounds = [h for h in history if h.swapped_this_round and not h.accepted]
-        self.assertTrue(rejected_rounds, "the round proposing the bad swap should be rejected by the gate")
+        fidelity_rejections = [h for h in history if 0 in h.rejected_by_fidelity]
+        self.assertTrue(fidelity_rejections, "independent fidelity should reject the bad surrogate")
+        self.assertFalse(any(h.swapped_this_round for h in history))
 
         self.assertNotIn(0, swap_records, "a rejected swap must leave no committed SwapRecord for component 0")
         self.assertIsInstance(
@@ -410,6 +416,51 @@ class MonotoneObjectiveGateCatchesBadSwapTestCase(unittest.TestCase):
             0.2,
             "a rejected bad swap must not measurably degrade the returned model's fit quality",
         )
+
+    def test_damaging_swapback_is_rejected_against_the_last_accepted_model(self):
+        """A swap-back is a proposal, not a new objective baseline."""
+        rng = np.random.RandomState(61)
+        data = [float(v) for v in np.concatenate([rng.normal(-5.0, 0.5, 300), rng.normal(5.0, 0.5, 300)])]
+        torch.manual_seed(61)
+        module = DiagGauss(1, mu0=0.0)
+        comp0 = GradLeaf(module, m_steps=1, lr=1.0e-6)
+        comp1 = GaussianDistribution(5.0, 0.25)
+        start = MixtureDistribution([comp0, comp1], [0.5, 0.5])
+        estimator = MixtureEstimator([GradEstimator(module, m_steps=1, lr=1.0e-6), GaussianEstimator()])
+        enc = seq_encode(data, model=start)
+        holdout = _data(-5.0, 0.5, 100, seed=62)
+        fidelity_calls = 0
+
+        def controlled_fidelity(*_args, **_kwargs):
+            nonlocal fidelity_calls
+            fidelity_calls += 1
+            return 0.0 if fidelity_calls <= 2 else 1.0
+
+        def no_op_m_step(_enc, _estimator, working_model, _gamma, _frozen, _swapped):
+            return working_model, 0, 0
+
+        with (
+            patch("mixle.inference.leaf_hotswap.fidelity_receipt", side_effect=controlled_fidelity),
+            patch("mixle.inference.leaf_hotswap._m_step_hotswap", side_effect=no_op_m_step),
+        ):
+            model, history, records = run_em_with_hotswap(
+                enc,
+                estimator,
+                start,
+                max_its=4,
+                delta=None,
+                plateau_patience=1,
+                holdout_data=holdout,
+                misfit_tol=0.15,
+            )
+
+        self.assertIn(0, records)
+        self.assertFalse(records[0].swapped_back)
+        rejected_swapbacks = [item for item in history if item.swapped_back_this_round and not item.accepted]
+        self.assertTrue(rejected_swapbacks)
+        self.assertNotIsInstance(model.components[0], GradLeaf)
+        objectives = np.asarray([item.objective for item in history])
+        self.assertTrue(np.all(np.diff(objectives) >= -1.0e-9), objectives)
 
 
 class TransactionalRollbackTestCase(unittest.TestCase):
