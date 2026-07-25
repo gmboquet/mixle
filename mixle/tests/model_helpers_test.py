@@ -235,6 +235,94 @@ class PartiallyObservableMarkovDecisionProcessModelHelpersTestCase(unittest.Test
         self.assertGreater(final_ll, initial_ll)
         self.assertGreaterEqual(result.history[-1], result.history[0] - 1.0e-8)
 
+    def test_impossible_observations_do_not_invent_posteriors(self):
+        model = PartiallyObservableMarkovDecisionProcessModel(
+            transition=[[[1.0, 0.0], [0.0, 1.0]]],
+            observation=[[[1.0, 0.0], [1.0, 0.0]]],
+            initial_belief=[0.5, 0.5],
+        )
+
+        result = model.filter([0], [1])
+
+        self.assertFalse(result.possible)
+        self.assertEqual(result.impossible_at, 0)
+        self.assertEqual(result.log_likelihood, float("-inf"))
+        self.assertEqual(result.predictive_observation_probs[0], 0.0)
+        self.assertTrue(np.all(np.isnan(result.beliefs[0])))
+        with self.assertRaisesRegex(ValueError, "zero"):
+            model.forward_backward([0], [1])
+
+    def test_pomdp_shapes_rewards_and_indices_are_validated(self):
+        for transition, observation in (
+            (np.empty((0, 2, 2)), np.empty((0, 2, 1))),
+            (np.empty((1, 0, 0)), np.empty((1, 0, 1))),
+            (np.ones((1, 2, 2)) / 2.0, np.empty((1, 2, 0))),
+        ):
+            with self.subTest(transition=transition.shape, observation=observation.shape):
+                with self.assertRaises(ValueError):
+                    PartiallyObservableMarkovDecisionProcessModel(transition, observation)
+
+        with self.assertRaisesRegex(ValueError, "finite"):
+            PartiallyObservableMarkovDecisionProcessModel(
+                transition=[[[1.0]]],
+                observation=[[[1.0]]],
+                rewards=[[np.nan]],
+            )
+
+        model = PartiallyObservableMarkovDecisionProcessModel(
+            transition=[[[1.0]]],
+            observation=[[[1.0]]],
+        )
+        for actions, observations in (
+            ([[0]], [[0]]),
+            ([0], [0, 0]),
+            ([0.5], [0]),
+            (["0"], [0]),
+        ):
+            with self.subTest(actions=actions, observations=observations):
+                with self.assertRaises((TypeError, ValueError)):
+                    model.filter(actions, observations)
+        for action in (True, "0", 0.5):
+            with self.subTest(action=action), self.assertRaises((TypeError, ValueError)):
+                model.predict_observation([1.0], action)
+
+    def test_baum_welch_controls_and_schema_are_not_coerced(self):
+        sequence = [([0], [0])]
+        for controls in (
+            {"num_states": 0},
+            {"num_states": True},
+            {"num_actions": 1.5},
+            {"num_observations": "1"},
+            {"max_its": 0},
+            {"max_its": 1.5},
+            {"pseudo_count": -1.0},
+            {"pseudo_count": np.nan},
+            {"tol": -1.0},
+            {"tol": np.nan},
+            {"seed": True},
+        ):
+            kwargs = {
+                "sequences": sequence,
+                "num_states": 1,
+                "num_actions": 1,
+                "num_observations": 1,
+                **controls,
+            }
+            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError)):
+                baum_welch_pomdp(**kwargs)
+
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            baum_welch_pomdp([([], [])], 1, 1, 1)
+        with self.assertRaisesRegex(ValueError, "outside"):
+            baum_welch_pomdp([([1], [0])], 1, 1, 1)
+
+        wrong_schema = PartiallyObservableMarkovDecisionProcessModel(
+            transition=[[[1.0]]],
+            observation=[[[1.0]]],
+        )
+        with self.assertRaisesRegex(ValueError, "schema"):
+            baum_welch_pomdp(sequence, 2, 1, 1, initial_model=wrong_schema)
+
 
 class KnowledgeGraphHelpersTestCase(unittest.TestCase):
     def test_transe_margin_training_reduces_fixed_negative_loss(self):
