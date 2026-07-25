@@ -29,12 +29,40 @@ from mixle.ppl.core import RandomVariable, free
 _LOG2PI = math.log(2.0 * math.pi)
 
 
+def _positive_scalar(value, label: str) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a finite positive scalar.") from exc
+    if not math.isfinite(out) or out <= 0.0:
+        raise ValueError(f"{label} must be a finite positive scalar.")
+    return out
+
+
+def _positive_int(value, label: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or int(value) <= 0:
+        raise ValueError(f"{label} must be a positive integer.")
+    return int(value)
+
+
+def _scalar_observations(data, label: str = "observations") -> np.ndarray:
+    try:
+        out = np.asarray(data, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a numeric one-dimensional sequence.") from exc
+    if out.ndim != 1 or out.size == 0 or not np.isfinite(out).all():
+        raise ValueError(f"{label} must be a non-empty finite one-dimensional sequence.")
+    return out.copy()
+
+
 # ----------------------------------------------------------------- nodes & constants
 class MeanConst:
     """Constant mean term used where the graph expects a Gaussian mean node."""
 
     def __init__(self, v):
         self.v = float(v)
+        if not math.isfinite(self.v):
+            raise ValueError("a fixed Gaussian mean must be finite.")
 
     def ex(self):
         """Return ``E[x]`` for the constant mean."""
@@ -49,7 +77,7 @@ class PrecConst:
     """Constant precision term used where the graph expects a precision node."""
 
     def __init__(self, v):
-        self.v = float(v)
+        self.v = _positive_scalar(v, "fixed precision")
 
     def et(self):
         """Return ``E[tau]`` for the constant precision."""
@@ -90,8 +118,12 @@ class GaussianVNode:
             a, b = msg()
             e1 += a
             e2 += b
+        if not math.isfinite(e1) or not math.isfinite(e2) or e2 >= 0.0:
+            raise FloatingPointError("Gaussian VMP update produced invalid natural parameters.")
         self.s2 = -0.5 / e2
         self.m = e1 * self.s2
+        if not math.isfinite(self.m) or not math.isfinite(self.s2) or self.s2 <= 0.0:
+            raise FloatingPointError("Gaussian VMP update produced an invalid variational factor.")
 
     def entropy(self):
         """Return the entropy of the Gaussian variational factor."""
@@ -110,8 +142,9 @@ class GammaVNode:
     is_gaussian = False
 
     def __init__(self, a0, b0):
-        self.a0, self.b0 = float(a0), float(b0)
-        self.a, self.b = float(a0), float(b0)
+        self.a0 = _positive_scalar(a0, "Gamma prior shape")
+        self.b0 = _positive_scalar(b0, "Gamma prior rate")
+        self.a, self.b = self.a0, self.b0
         self.inbox = []
 
     def et(self):
@@ -126,6 +159,8 @@ class GammaVNode:
         """Apply one coordinate-ascent update from accumulated messages."""
         self.a = self.a0 + sum(msg()[0] for msg in self.inbox)
         self.b = self.b0 + sum(msg()[1] for msg in self.inbox)
+        if not math.isfinite(self.a) or not math.isfinite(self.b) or self.a <= 0.0 or self.b <= 0.0:
+            raise FloatingPointError("Gamma VMP update produced an invalid variational factor.")
 
     def entropy(self):
         """Return the entropy of the Gamma variational factor."""
@@ -143,6 +178,13 @@ class DirichletVNode:
 
     def __init__(self, alpha0):
         self.alpha0 = np.asarray(alpha0, dtype=float)
+        if (
+            self.alpha0.ndim != 1
+            or self.alpha0.size == 0
+            or not np.isfinite(self.alpha0).all()
+            or np.any(self.alpha0 <= 0.0)
+        ):
+            raise ValueError("Dirichlet concentration must be a non-empty finite positive vector.")
         self.alpha = self.alpha0.copy()
         self.inbox = []
 
@@ -159,6 +201,8 @@ class DirichletVNode:
         total = self.alpha0.copy()
         for msg in self.inbox:
             total = total + msg()  # accumulate expected counts (sharing!)
+        if not np.isfinite(total).all() or np.any(total <= 0.0):
+            raise FloatingPointError("Dirichlet VMP update produced an invalid variational factor.")
         self.alpha = total
 
     def _log_beta(self, a):
@@ -195,7 +239,7 @@ class _GraphFactor:
     """Gaussian likelihood y ~ Normal(mean, 1/prec) over a data plate."""
 
     def __init__(self, mean, prec, data):
-        a = np.asarray(data, dtype=float).reshape(-1)
+        a = _scalar_observations(data)
         self.mean, self.prec = mean, prec
         self.N, self.sum, self.sumsq = float(a.size), float(a.sum()), float((a * a).sum())
 
@@ -216,36 +260,53 @@ class _GraphFactor:
 class GraphResult:
     """Fitted VMP graph with posterior accessors for graph node handles."""
 
-    def __init__(self, node_of, elbo_trace):
-        self._node_of = node_of  # id(rv) -> node
-        self.elbo = elbo_trace[-1]
-        self.elbo_trace = np.asarray(elbo_trace)
+    def __init__(self, node_of, elbo_trace, *, converged: bool, termination_reason: str):
+        # Snapshot every factor.  A Graph can be refit, but a previously returned
+        # scientific result must remain an immutable record of that run.
+        self._posterior_of = {}
+        for key, node in node_of.items():
+            if isinstance(node, GaussianVNode):
+                self._posterior_of[key] = ("gaussian", float(node.m), float(node.s2))
+            elif isinstance(node, DirichletVNode):
+                self._posterior_of[key] = ("dirichlet", node.alpha.copy())
+            else:
+                self._posterior_of[key] = ("gamma", float(node.a), float(node.b))
+        self.elbo_trace = np.asarray(elbo_trace, dtype=float).copy()
+        self.elbo_trace.setflags(write=False)
+        self.elbo = float(self.elbo_trace[-1])
+        self.converged = bool(converged)
+        self.iterations = int(self.elbo_trace.size)
+        self.termination_reason = str(termination_reason)
+        self.objective_delta = (
+            abs(float(self.elbo_trace[-1] - self.elbo_trace[-2])) if self.elbo_trace.size > 1 else math.inf
+        )
         self.acceptance_rate = None
 
     def _node(self, rv):
-        n = self._node_of.get(id(rv))
-        if n is None:
+        posterior = self._posterior_of.get(id(rv))
+        if posterior is None:
             raise KeyError("variable is not a node in this graph.")
-        return n
+        return posterior
 
     def posterior(self, rv):
         """Return posterior parameters for a latent handle in the fitted graph."""
-        n = self._node(rv)
-        if isinstance(n, GaussianVNode):
-            return {"mean": n.m, "sd": math.sqrt(n.s2)}
-        if isinstance(n, DirichletVNode):
-            return {"alpha": n.alpha, "mean": n.expected()}
-        return {"shape": n.a, "rate": n.b, "mean": n.et()}
+        node = self._node(rv)
+        if node[0] == "gaussian":
+            return {"mean": node[1], "sd": math.sqrt(node[2])}
+        if node[0] == "dirichlet":
+            alpha = node[1].copy()
+            return {"alpha": alpha, "mean": alpha / alpha.sum()}
+        return {"shape": node[1], "rate": node[2], "mean": node[1] / node[2]}
 
     def samples(self, rv, n: int = 4000, rng=None):
         """Draw samples from the variational factor attached to ``rv``."""
         rng = rng or np.random.RandomState()
         node = self._node(rv)
-        if isinstance(node, GaussianVNode):
-            return rng.normal(node.m, math.sqrt(node.s2), n)
-        if isinstance(node, DirichletVNode):
-            return rng.dirichlet(node.alpha, n)
-        return rng.gamma(node.a, 1.0 / node.b, n)
+        if node[0] == "gaussian":
+            return rng.normal(node[1], math.sqrt(node[2]), n)
+        if node[0] == "dirichlet":
+            return rng.dirichlet(node[1], n)
+        return rng.gamma(node[1], 1.0 / node[2], n)
 
 
 # --------------------------------------------------------------------------- the graph
@@ -269,7 +330,11 @@ class Graph:
 
     def observe(self, model, data) -> Graph:
         """Add an observed likelihood factor and return ``self`` for chaining."""
-        self._obs.append((model, data))
+        try:
+            frozen_data = tuple(data)
+        except TypeError as exc:
+            raise ValueError("graph observations must be an iterable of scalar values.") from exc
+        self._obs.append((model, frozen_data))
         return self
 
     def _mean_of(self, spec):
@@ -281,7 +346,8 @@ class Graph:
             return self._nodes[id(spec)]  # SHARED instance -> one node
         mean_arg, scale_arg = spec._args
         prior_mean = self._mean_of(mean_arg) if isinstance(mean_arg, RandomVariable) else MeanConst(mean_arg)
-        prior_prec = PrecConst(1.0 / float(scale_arg) ** 2)
+        prior_sd = _positive_scalar(scale_arg, "Gaussian prior standard deviation")
+        prior_prec = PrecConst(1.0 / prior_sd**2)
         node = GaussianVNode(prior_mean, prior_prec)
         self._nodes[id(spec)] = node
         if isinstance(prior_mean, GaussianVNode):  # child -> parent message (hierarchy)
@@ -290,7 +356,8 @@ class Graph:
 
     def _prec_of(self, spec):
         if not isinstance(spec, RandomVariable):
-            return PrecConst(1.0 / float(spec) ** 2)  # constant sd -> precision
+            sd = _positive_scalar(spec, "Gaussian observation standard deviation")
+            return PrecConst(1.0 / sd**2)  # constant sd -> precision
         if spec._family.name != "Gamma":
             raise NotImplementedError("graph precision priors must be Gamma.")
         if id(spec) in self._nodes:
@@ -311,18 +378,30 @@ class Graph:
         return node
 
     def _make_factor(self, model, data):
+        if not isinstance(model, RandomVariable) or model._kind != "sample":
+            raise TypeError("graph observations require a sampled RandomVariable model.")
         fam = model._family.name
         if fam == "Normal":
             return _GraphFactor(self._mean_of(model._args[0]), self._prec_of(model._args[1]), data)
         if fam == "Categorical":
             pi = self._pi_of(model._args[0])
             K = pi.alpha0.size if isinstance(pi, DirichletVNode) else len(pi)
-            counts = np.bincount(np.asarray(data, dtype=int), minlength=K).astype(float)
+            raw = _scalar_observations(data, "categorical observations")
+            if np.any(raw != np.floor(raw)) or np.any(raw < 0.0) or np.any(raw >= K):
+                raise ValueError(f"categorical observations must be exact integer labels in [0, {K}).")
+            counts = np.bincount(raw.astype(int), minlength=K).astype(float)
             return _CategoricalFactor(pi, counts)
         raise NotImplementedError(f"graph observations of family {fam} are not supported.")
 
     def fit(self, *, max_its: int = 300, tol: float = 1e-8) -> GraphResult:
         """Run coordinate-ascent VMP and return the fitted graph result."""
+        max_its = _positive_int(max_its, "max_its")
+        tol = _positive_scalar(tol, "tol")
+        if not self._obs:
+            raise ValueError("a VMP graph must contain at least one observation factor.")
+        # Nodes and message inboxes are run-local.  Reusing a Graph starts from
+        # the declared priors and cannot retain evidence from an earlier fit.
+        self._nodes = {}
         factors = [self._make_factor(model, data) for model, data in self._obs]
         for f in factors:
             f.wire()
@@ -330,6 +409,7 @@ class Graph:
         gaussian, gamma, dirichlet = by_type(GaussianVNode), by_type(GammaVNode), by_type(DirichletVNode)
 
         trace = []
+        converged = False
         for _ in range(max_its):
             for n in gaussian:
                 n.update()
@@ -343,10 +423,14 @@ class Graph:
                 + sum(n.cross_prior() + n.entropy() for n in gamma)
                 + sum(n.cross_prior() + n.entropy() for n in dirichlet)
             )
+            if not math.isfinite(elbo):
+                raise FloatingPointError("VMP produced a non-finite ELBO.")
             trace.append(elbo)
             if len(trace) > 1 and abs(trace[-1] - trace[-2]) < tol:
+                converged = True
                 break
-        return GraphResult(dict(self._nodes), trace)
+        reason = "tolerance" if converged else "max_iterations"
+        return GraphResult(dict(self._nodes), trace, converged=converged, termination_reason=reason)
 
 
 # ----------------------------------------------------- ppl entry point: fit(how="vmp")
@@ -354,16 +438,18 @@ class _VMPFit:
     """Result for ``fit(how="vmp")``: wraps a GraphResult, plus convenience views of the
     top observation's mean / precision nodes (q_mu, q_tau) and posterior-predictive."""
 
-    def __init__(self, gres: GraphResult, mean_node, prec_node):
+    def __init__(self, gres: GraphResult, mean_handle, prec_handle):
         self._g = gres
-        self._mean, self._prec = mean_node, prec_node
+        self._mean_handle, self._prec_handle = mean_handle, prec_handle
         self.elbo_trace = gres.elbo_trace
         self.elbo = gres.elbo
+        self.converged = gres.converged
+        self.iterations = gres.iterations
+        self.termination_reason = gres.termination_reason
+        self.objective_delta = gres.objective_delta
         self.acceptance_rate = None
-        self.q_mu = {"mean": mean_node.m, "sd": math.sqrt(mean_node.s2)} if mean_node is not None else None
-        self.q_tau = (
-            {"shape": prec_node.a, "rate": prec_node.b, "mean": prec_node.et()} if prec_node is not None else None
-        )
+        self.q_mu = gres.posterior(mean_handle) if mean_handle is not None else None
+        self.q_tau = gres.posterior(prec_handle) if prec_handle is not None else None
         self.predictive = None
 
     def posterior(self, handle):
@@ -373,17 +459,25 @@ class _VMPFit:
     def samples(self, param=None, n: int = 4000, rng=None):
         """Draw samples for the named mean, precision, standard deviation, or raw handle."""
         rng = rng or np.random.RandomState()
-        if param in ("mu", "mean", 0) and self._mean is not None:
-            return rng.normal(self._mean.m, math.sqrt(self._mean.s2), n)
-        if param in ("tau", "precision") and self._prec is not None:
-            return rng.gamma(self._prec.a, 1.0 / self._prec.b, n)
-        if param == "sd" and self._prec is not None:
-            return 1.0 / np.sqrt(rng.gamma(self._prec.a, 1.0 / self._prec.b, n))
+        if param in ("mu", "mean", 0) and self.q_mu is not None:
+            return rng.normal(self.q_mu["mean"], self.q_mu["sd"], n)
+        if param in ("tau", "precision") and self.q_tau is not None:
+            return rng.gamma(self.q_tau["shape"], 1.0 / self.q_tau["rate"], n)
+        if param == "sd" and self.q_tau is not None:
+            return 1.0 / np.sqrt(rng.gamma(self.q_tau["shape"], 1.0 / self.q_tau["rate"], n))
         return self._g.samples(param, n=n, rng=rng)  # any node handle
 
     def summary(self) -> dict:
         """Return mean, precision, ELBO, and iteration metadata for the fit."""
-        return {"q_mu": self.q_mu, "q_tau": self.q_tau, "elbo": self.elbo, "iterations": int(self.elbo_trace.size)}
+        return {
+            "q_mu": self.q_mu,
+            "q_tau": self.q_tau,
+            "elbo": self.elbo,
+            "iterations": self.iterations,
+            "converged": self.converged,
+            "termination_reason": self.termination_reason,
+            "objective_delta": self.objective_delta,
+        }
 
 
 def vmp_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float = 1e-8, rng=None) -> RandomVariable:
@@ -413,18 +507,20 @@ def vmp_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float = 1e-8, 
     g = Graph().observe(rv, data)
     res = g.fit(max_its=max_its, tol=tol)
 
-    mean_node = g._nodes.get(id(mean_spec)) if isinstance(mean_spec, RandomVariable) else None
-    mean_val = mean_node.m if mean_node is not None else float(mean_spec)
-    prec_node = g._nodes.get(id(scale_spec)) if isinstance(scale_spec, RandomVariable) else None
-    sd = (1.0 / math.sqrt(prec_node.et())) if prec_node is not None else float(scale_spec)
+    mean_handle = mean_spec if isinstance(mean_spec, RandomVariable) else None
+    mean_q = res.posterior(mean_handle) if mean_handle is not None else None
+    mean_val = mean_q["mean"] if mean_q is not None else float(mean_spec)
+    prec_handle = scale_spec if isinstance(scale_spec, RandomVariable) else None
+    prec_q = res.posterior(prec_handle) if prec_handle is not None else None
+    sd = (1.0 / math.sqrt(prec_q["mean"])) if prec_q is not None else float(scale_spec)
 
     fitted = GaussianDistribution(mu=mean_val, sigma2=sd * sd, name=rv._name)
-    result = _VMPFit(res, mean_node, prec_node)
+    result = _VMPFit(res, mean_handle, prec_handle)
 
     def predictive(n, r):
-        mu = r.normal(mean_node.m, math.sqrt(mean_node.s2), n) if mean_node is not None else np.full(n, mean_val)
-        if prec_node is not None:
-            tau = r.gamma(prec_node.a, 1.0 / prec_node.b, n)
+        mu = r.normal(mean_q["mean"], mean_q["sd"], n) if mean_q is not None else np.full(n, mean_val)
+        if prec_q is not None:
+            tau = r.gamma(prec_q["shape"], 1.0 / prec_q["rate"], n)
             return mu + r.normal(0.0, 1.0, n) / np.sqrt(tau)
         return mu + r.normal(0.0, sd, n)
 
@@ -444,7 +540,8 @@ from scipy.special import logsumexp as _logsumexp
 
 
 def _kmeanspp(x, k, rng):
-    chosen = [int(rng.randint(x.size))]
+    first = rng.integers(x.size) if callable(getattr(rng, "integers", None)) else rng.randint(x.size)
+    chosen = [int(first)]
     d2 = (x - x[chosen[0]]) ** 2
     for _ in range(1, k):
         tot = d2.sum()
@@ -458,16 +555,33 @@ def _kmeanspp(x, k, rng):
 class MixtureVMPResult:
     """Variational result for a scalar Gaussian mixture with discrete responsibilities."""
 
-    def __init__(self, weights, comps, responsibilities, elbo_trace, normalizer_trace):
-        self.weights = np.asarray(weights)  # E[pi]
-        self.components = comps  # [{'mean','sd'}, ...]
-        self.responsibilities = np.asarray(responsibilities)  # (N, K)
+    def __init__(
+        self,
+        weights,
+        comps,
+        responsibilities,
+        elbo_trace,
+        normalizer_trace,
+        *,
+        converged: bool,
+        termination_reason: str,
+    ):
+        self.weights = np.asarray(weights, dtype=float).copy()  # E[pi]
+        self.components = [dict(c) for c in comps]
+        self.responsibilities = np.asarray(responsibilities, dtype=float).copy()  # (N, K)
         self.objective_kind = "finite_mixture_elbo"
         self.elbo = float(elbo_trace[-1])
-        self.elbo_trace = np.asarray(elbo_trace)
-        self.responsibility_normalizer_trace = np.asarray(normalizer_trace)
+        self.elbo_trace = np.asarray(elbo_trace, dtype=float).copy()
+        self.responsibility_normalizer_trace = np.asarray(normalizer_trace, dtype=float).copy()
+        self.converged = bool(converged)
+        self.iterations = int(self.elbo_trace.size)
+        self.termination_reason = str(termination_reason)
+        self.objective_delta = (
+            abs(float(self.elbo_trace[-1] - self.elbo_trace[-2])) if self.elbo_trace.size > 1 else math.inf
+        )
         self.acceptance_rate = None
         self.predictive = None
+        self.plugin_distribution = None
 
     def summary(self):
         """Return mixture weights, component summaries, and objective metadata."""
@@ -476,6 +590,10 @@ class MixtureVMPResult:
             "components": self.components,
             "elbo": self.elbo,
             "objective_kind": self.objective_kind,
+            "iterations": self.iterations,
+            "converged": self.converged,
+            "termination_reason": self.termination_reason,
+            "objective_delta": self.objective_delta,
         }
 
 
@@ -508,18 +626,40 @@ def _mixture_vmp_elbo(x, r, m, s2, a, b, alpha, *, m0, s0, a0, b0, alpha0):
 
 
 def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None, m0=None, s0=None, a0=1.0, b0=1.0, alpha0=1.0):
-    """Bayesian Gaussian mixture by variational message passing (VBEM)."""
+    """Bayesian scalar Gaussian mixture by variational message passing (VBEM)."""
     from mixle.stats.latent.mixture import MixtureDistribution
     from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 
-    x = np.asarray(data, dtype=float).reshape(-1)
+    x = _scalar_observations(data)
     N = x.size
-    rng = rng or np.random.RandomState(0)
+    K = _positive_int(K, "K")
+    if K > N:
+        raise ValueError("K cannot exceed the number of observations.")
+    max_its = _positive_int(max_its, "max_its")
+    tol = _positive_scalar(tol, "tol")
+    a0 = _positive_scalar(a0, "a0")
+    b0 = _positive_scalar(b0, "b0")
+    alpha0 = _positive_scalar(alpha0, "alpha0")
+    if rng is None:
+        rng = np.random.RandomState(0)
+    if not callable(getattr(rng, "choice", None)) or not (
+        callable(getattr(rng, "randint", None)) or callable(getattr(rng, "integers", None))
+    ):
+        raise TypeError("rng must provide choice() and randint() or integers().")
     var = float(x.var()) or 1.0
     if m0 is None:
         m0 = float(x.mean())
+    else:
+        try:
+            m0 = float(m0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("m0 must be a finite scalar.") from exc
+        if not math.isfinite(m0):
+            raise ValueError("m0 must be a finite scalar.")
     if s0 is None:
         s0 = 10.0 * math.sqrt(var)
+    else:
+        s0 = _positive_scalar(s0, "s0")
 
     m = x[_kmeanspp(x, K, rng)].astype(float)  # component means (q means)
     s2 = np.full(K, var)
@@ -529,6 +669,7 @@ def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None, m0=None, s0=None, a
 
     trace = []
     normalizer_trace = []
+    converged = False
     for _ in range(max_its):
         Elogpi = digamma(alpha) - digamma(alpha.sum())
         Etau, Elogtau = a / b, digamma(a) - np.log(b)
@@ -547,16 +688,59 @@ def mixture_vmp(data, K, *, max_its=300, tol=1e-7, rng=None, m0=None, s0=None, a
         b = b0 + 0.5 * (r * diff2).sum(0)
         alpha = alpha0 + Nk  # q(pi)
 
+        # Complete the responsibility coordinate update after the parameter
+        # update so every stored diagnostic describes this same iterate.
+        Elogpi = digamma(alpha) - digamma(alpha.sum())
+        Etau, Elogtau = a / b, digamma(a) - np.log(b)
+        diff2 = (x[:, None] - m[None, :]) ** 2 + s2[None, :]
+        log_rho = Elogpi[None, :] + 0.5 * Elogtau[None, :] - 0.5 * _LOG2PI - 0.5 * Etau[None, :] * diff2
+        log_norm = _logsumexp(log_rho, axis=1, keepdims=True)
+        r = np.exp(log_rho - log_norm)
         normalizer_trace.append(float(np.sum(log_norm)))
         elbo = _mixture_vmp_elbo(x, r, m, s2, a, b, alpha, m0=m0, s0=s0, a0=a0, b0=b0, alpha0=alpha0)
+        if not math.isfinite(elbo) or not np.isfinite(r).all():
+            raise FloatingPointError("mixture VMP produced non-finite variational state.")
         trace.append(elbo)
         if len(trace) > 1 and abs(trace[-1] - trace[-2]) < tol:
+            converged = True
             break
 
     Etau = a / b
     weights = alpha / alpha.sum()
     sds = 1.0 / np.sqrt(Etau)
-    comps = [{"mean": float(m[k]), "sd": float(sds[k])} for k in range(K)]
+    comps = [
+        {
+            "mean": float(m[k]),
+            "sd": float(sds[k]),
+            "mean_sd": float(math.sqrt(s2[k])),
+            "precision_shape": float(a[k]),
+            "precision_rate": float(b[k]),
+            "plugin_variance": float(b[k] / a[k]),
+            "predictive_variance": float(s2[k] + b[k] / (a[k] - 1.0)) if a[k] > 1.0 else math.inf,
+        }
+        for k in range(K)
+    ]
     fitted = MixtureDistribution([GaussianDistribution(float(m[k]), float(sds[k] ** 2)) for k in range(K)], w=weights)
-    result = MixtureVMPResult(weights, comps, r, trace, normalizer_trace)
+    result = MixtureVMPResult(
+        weights,
+        comps,
+        r,
+        trace,
+        normalizer_trace,
+        converged=converged,
+        termination_reason="tolerance" if converged else "max_iterations",
+    )
+    result.plugin_distribution = fitted
+
+    # Posterior predictive: sample q(mu_k) and q(tau_k), then an observation.
+    # The bound distribution above is deliberately the separately labelled
+    # plug-in view needed by the existing distribution protocol.
+    def predictive(n, rgen):
+        n = _positive_int(n, "n")
+        z = rgen.choice(K, size=n, p=weights)
+        mu = rgen.normal(m[z], np.sqrt(s2[z]))
+        tau = rgen.gamma(a[z], 1.0 / b[z])
+        return mu + rgen.normal(0.0, 1.0, n) / np.sqrt(tau)
+
+    result.predictive = predictive
     return RandomVariable._bound(fitted, result=result)
