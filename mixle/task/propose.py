@@ -12,6 +12,14 @@ only ``keep_frac`` of each round feeds the refit.
 
 Same "no verifiable objective, no optimization" precondition as ``optimize_under_oracle``:
 ``oracle=None`` refuses immediately rather than fabricating a candidate.
+
+An abstained oracle call (``OracleResult.abstained`` -- e.g. a timeout; see
+:class:`~mixle.doe.oracle.VerifiableOracle`) is never selected as a "winner" to refit on, and never
+becomes ``best_result``: its placeholder ``-inf`` score is not a real observation of the oracle's
+objective, only a record that the oracle did not answer. Every attempted candidate is still logged in
+its round's :class:`RoundLog`, abstained or not, for the full receipted record -- only the *selection*
+and *best-result* bookkeeping exclude abstentions, mirroring
+:func:`mixle.doe.oracle.optimize_under_oracle`'s own "always record, selectively use" pattern.
 """
 
 from __future__ import annotations
@@ -83,7 +91,14 @@ class SequenceProposal:
 
 @dataclass
 class RoundLog:
-    """One round's full record: every candidate tried and its oracle result, plus which were kept."""
+    """One round's full record: every candidate tried and its oracle result, plus which were kept.
+
+    ``candidates``/``results`` include every attempted candidate, abstained or not -- dead ends and
+    abstentions alike are never dropped from the receipted record. ``kept_indices`` never includes an
+    abstained candidate's index (see ``propose_verify_retrain``): an abstention is not a real observation
+    of the oracle's objective, so it is excluded from the ranking that produces ``kept_indices`` even
+    when there are too few genuine candidates in the round to fill the usual quota.
+    """
 
     round_index: int
     candidates: list[tuple]
@@ -128,6 +143,12 @@ def propose_verify_retrain(
     keeps the top ``keep_frac`` by oracle score, and refits ``proposal`` on the kept winners weighted
     by score. The exact oracle-call budget is ``k_per_round * rounds``. ``oracle=None`` raises
     immediately because this routine requires a verifiable objective rather than fabricating one.
+
+    An abstained oracle result (``OracleResult.abstained``) never wins a "kept" slot and never becomes
+    ``best_result``: both are ranked/compared only among that round's GENUINE candidates. A round in
+    which every candidate abstains leaves ``proposal`` unchanged for that round rather than refitting on
+    a fabricated all-abstained weight vector; every attempted candidate, abstained or not, still appears
+    in that round's ``RoundLog``.
     """
     if oracle is None:
         raise ValueError(
@@ -147,17 +168,35 @@ def propose_verify_retrain(
         results = [oracle(c) for c in candidates]
         scores = np.asarray([r.score for r in results], dtype=float)
 
+        # Rank only GENUINE (non-abstained) candidates for the top-n_keep selection: an abstained result
+        # (OracleResult.abstained -- e.g. a timeout) is a placeholder -inf, not a real observation of the
+        # oracle's objective, so it must never be picked as a "winner" to refit on, nor treated as
+        # "verifiably terrible but real." Restricting the ranking pool to genuine indices up front (rather
+        # than ranking every index and relying on -inf sorting last) means an abstained candidate is
+        # excluded even when there are too few genuine candidates to fill n_keep, instead of being pulled
+        # in just to pad out the count.
         n_keep = max(1, int(np.ceil(keep_frac * len(candidates))))
-        kept_indices = [int(i) for i in np.argsort(-scores)[:n_keep]]
+        genuine_indices = np.asarray([i for i, r in enumerate(results) if not r.abstained], dtype=int)
+        if genuine_indices.size:
+            order = np.argsort(-scores[genuine_indices])[:n_keep]
+            kept_indices = [int(genuine_indices[i]) for i in order]
+        else:
+            kept_indices = []
         result.rounds.append(RoundLog(round_index, candidates, results, kept_indices))
 
         for candidate, oracle_result in zip(candidates, results):
+            if oracle_result.abstained:
+                continue  # a timeout's -inf placeholder must never win "best", genuine or not yet seen
             if result.best_result is None or oracle_result.score > result.best_result.score:
                 result.best_candidate, result.best_result = candidate, oracle_result
 
-        winners = [candidates[i] for i in kept_indices]
-        winner_scores = scores[kept_indices]
-        current = current.refit(winners, winner_scores)
+        if kept_indices:
+            winners = [candidates[i] for i in kept_indices]
+            winner_scores = scores[kept_indices]
+            current = current.refit(winners, winner_scores)
+        # else: every candidate this round abstained -- nothing genuine to refit on, so the proposal is
+        # left unchanged for this round rather than fed a fabricated all-abstained weight vector (mirrors
+        # optimize_under_oracle skipping opt.tell() for an abstention rather than corrupting the fit).
 
     result.proposal = current
     return result
