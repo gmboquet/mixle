@@ -2,13 +2,12 @@
 
 Acceptance criteria under test (see the ConditionalJIT track's D2 item):
 
-1. wall-clock-to-F speedup by the active-fraction ratio -- measured as a per-datum
+1. Explicit approximate freezing can provide a wall-clock-to-F speedup -- measured as a per-datum
    log-density-EVALUATION count (a deliberately more robust-for-CI proxy than raw wall-clock; see
    ``test_evaluation_count_speedup_matches_active_fraction`` for the honesty note on why).
-2. F (the real Neal-Hinton free energy / observed-data log-likelihood) is non-decreasing
-   round-to-round under freeze/roll-up, the same coordinate-ascent guarantee vanilla EM has.
-3. Cache invalidation correctness -- a frozen subtree whose parameters move again is never served
-   a stale cached log-density.
+2. F (the observed-data log-likelihood) is non-decreasing under the objective gate.
+3. Exact mode is the default; approximation has a bounded escape policy.
+4. Cache invalidation binds data, model state, component index, and scoring mode.
 """
 
 import unittest
@@ -68,13 +67,13 @@ def _make_problem(seed=42, nobs=400):
 
 class FreezeRollupSpeedupTestCase(unittest.TestCase):
     def test_evaluation_count_speedup_matches_active_fraction(self):
-        """Freeze/roll-up reaches the SAME target F using far fewer log-density evaluations.
+        """The bounded approximate mode reaches the reference F with fewer density evaluations.
 
         Honesty note on the metric: wall-clock is what the roadmap item names, but on a shared/CI
         machine a handful of milliseconds of Gaussian ``seq_log_density`` calls is dominated by
         scheduling noise, not the effect under test. The thing freeze/roll-up actually removes is
         calls into a component's ``seq_log_density`` (each ``O(nobs)``); a cache hit is an
-        ``O(1)`` dict lookup. Counting those calls is a direct, deterministic, CI-safe proxy for
+        signature check and dict lookup. Counting those calls is a deterministic CI-safe proxy for
         the wall-clock claim -- it IS the operation whose count wall-clock would otherwise be
         approximating, without the noise floor.
         """
@@ -90,6 +89,8 @@ class FreezeRollupSpeedupTestCase(unittest.TestCase):
             q_gain_tol=1.0e-5,
             weight_delta_tol=1.0e-11,
             freeze_patience=10,
+            approximate_freezing=True,
+            max_frozen_rounds=50,
         )
         vanilla = run_em(enc, estimator, start, strategy=PosteriorTransformEM(), max_its=400, delta=1.0e-9)
 
@@ -97,7 +98,7 @@ class FreezeRollupSpeedupTestCase(unittest.TestCase):
         fr_value = objective(model)
         vanilla_value = objective(vanilla)
 
-        # Same target F reached (freeze/roll-up must not change WHAT is computed, only how often).
+        # This fixture stays within the declared approximation budget and reaches the reference F.
         self.assertAlmostEqual(fr_value, vanilla_value, places=6)
         np.testing.assert_allclose(model.w, vanilla.w, atol=1.0e-8)
 
@@ -138,7 +139,9 @@ class FreezeRollupMonotonicityTestCase(unittest.TestCase):
         that the gate is wired correctly end to end, not re-deriving the EM theorem.
         """
         start, estimator, enc = _make_problem(seed=7, nobs=300)
-        _, history = run_em_freeze_rollup(enc, estimator, start, max_its=150, delta=1.0e-10)
+        _, history = run_em_freeze_rollup(
+            enc, estimator, start, max_its=150, delta=1.0e-10, approximate_freezing=True
+        )
 
         self.assertGreater(len(history), 1)
         objectives = [h.objective for h in history]
@@ -200,6 +203,73 @@ class FreezeStreakBookkeepingTestCase(unittest.TestCase):
 
 
 class FreezeRollupCacheInvalidationTestCase(unittest.TestCase):
+    def test_cache_never_reuses_a_column_across_datasets(self):
+        component = GaussianDistribution(0.0, 1.0)
+        cache = FreezeRollupCache()
+        first_enc = component.dist_to_encoder().seq_encode([-2.0, -1.0])
+        second_enc = component.dist_to_encoder().seq_encode([3.0, 4.0])
+
+        first, first_hit = cache.component_log_density(0, component, first_enc, frozen=True)
+        second, second_hit = cache.component_log_density(0, component, second_enc, frozen=True)
+
+        self.assertFalse(first_hit)
+        self.assertFalse(second_hit)
+        np.testing.assert_allclose(second, component.seq_log_density(second_enc))
+        self.assertFalse(np.allclose(first, second))
+
+    def test_cache_signature_includes_private_slotted_state(self):
+        class PrivateSlottedDistribution:
+            __slots__ = ("_location",)
+
+            def __init__(self, location):
+                self._location = location
+
+            def seq_log_density(self, enc):
+                values = np.asarray(enc)
+                return -((values - self._location) ** 2)
+
+        component = PrivateSlottedDistribution(0.0)
+        data = np.asarray([0.0, 1.0])
+        cache = FreezeRollupCache()
+
+        before, _ = cache.component_log_density(0, component, data, frozen=True)
+        _, hit = cache.component_log_density(0, component, data, frozen=True)
+        component._location = 10.0
+        after, mutation_hit = cache.component_log_density(0, component, data, frozen=True)
+
+        self.assertTrue(hit)
+        self.assertFalse(mutation_hit)
+        self.assertFalse(np.allclose(before, after))
+
+    def test_heuristic_freezing_is_explicit_and_forces_reactivation(self):
+        component = GaussianDistribution(0.0, 1.0)
+        scores = np.asarray([[0.0], [1.0]])
+
+        exact_cache = FreezeRollupCache(
+            weight_tol=1.0, q_gain_tol=1.0, weight_delta_tol=1.0, freeze_patience=1
+        )
+        exact_cache.record_component_scores(scores)
+        self.assertFalse(exact_cache.is_frozen(0, component, 0.01))
+        exact_cache.record_component_scores(scores)
+        self.assertFalse(exact_cache.is_frozen(0, component, 0.01))
+
+        approximate_cache = FreezeRollupCache(
+            weight_tol=1.0,
+            q_gain_tol=1.0,
+            weight_delta_tol=1.0,
+            freeze_patience=1,
+            approximate_freezing=True,
+            max_frozen_rounds=1,
+        )
+        approximate_cache.record_component_scores(scores)
+        self.assertFalse(approximate_cache.is_frozen(0, component, 0.01))
+        approximate_cache.record_component_scores(scores)
+        self.assertTrue(approximate_cache.is_frozen(0, component, 0.01))
+        self.assertTrue(approximate_cache.is_approximately_frozen(0))
+        approximate_cache.record_component_scores(scores)
+        self.assertFalse(approximate_cache.is_frozen(0, component, 0.01))
+        self.assertFalse(approximate_cache.is_approximately_frozen(0))
+
     def test_cache_signature_includes_nested_component_parameters(self):
         component = CompositeDistribution((GaussianDistribution(0.0, 1.0), GaussianDistribution(2.0, 1.0)))
         enc = component.dist_to_encoder().seq_encode([(0.0, 2.0), (1.0, 3.0)])
@@ -271,6 +341,7 @@ class FreezeRollupCacheInvalidationTestCase(unittest.TestCase):
             q_gain_tol=1.0e-5,
             weight_delta_tol=1.0e-11,
             freeze_patience=10,
+            approximate_freezing=True,
         )
         reference = run_em(enc, estimator, start, strategy=PosteriorTransformEM(), max_its=max_its, delta=None)
 

@@ -7,12 +7,12 @@ structurally frozen, or its real-data scores and collapsed weight have converged
 recomputing its per-datum log-density on every subsequent E-step round and instead reuses a cached
 array -- turning E-step cost from ``O(full tree)`` into ``O(active fraction)``.
 
-Correctness backbone (unchanged from the rest of the D-track): freeze/roll-up is a SCHEDULING
-optimization only. It never changes what is computed, only how often -- a cached per-datum
-log-density is byte-identical to a freshly recomputed one for the SAME parameters, and the cache
-is invalidated (recomputed) the instant a subtree's parameters move again. This module tracks the
-observed-data MLE or MAP objective; that directly computed objective is the audit receipt that the
-cache never silently drifted from a real EM trajectory.
+Correctness backbone: exact freeze/roll-up is a scheduling optimization only. It caches only
+structurally frozen components and never changes the EM target. Near-zero-weight heuristic freezing
+is a separate, explicit approximation: callers must opt in, its eligibility threshold is the
+declared approximation budget, and every heuristically frozen component is forcibly reactivated
+after a bounded number of rounds. Cache entries bind the complete encoded-data digest, component
+state digest, component index, and compute dtype, so reuse cannot cross datasets or scoring modes.
 
 Scope: this module targets :class:`mixle.stats.latent.mixture.MixtureDistribution`, the
 combinator with the clearest "some subtrees stop mattering" story (a component whose mixture
@@ -45,22 +45,24 @@ _DEFAULT_ACCEPT_TOLERANCE = 1.0e-9
 
 
 def _param_signature(dist: Any) -> bytes:
-    """Recursive structural fingerprint of a distribution subtree's parameters.
+    """Return a recursive content fingerprint for model or encoded-data state.
 
-    Used to decide whether a cached per-datum log-density array is still valid: if a frozen
-    node's owning subtree parameters have moved since the array was cached, the signature no
-    longer matches and the cache is invalidated. Unlike the former shallow attribute walk, this
-    includes nested combinators and torch-like modules. Module tensors use their identity and
-    in-place version counter, so the check is O(number of parameter tensors), not O(parameter
-    bytes); optimizer and ``load_state_dict`` updates advance those counters.
+    Public, private, and slotted state is included. Arrays and tensor-like values are keyed by
+    contents rather than object identity, so in-place mutation and equivalent objects cannot
+    produce stale cache hits.
     """
 
     digest = hashlib.blake2b(digest_size=20)
     seen: set[int] = set()
 
     def add(value: Any) -> None:
+        digest.update(f"<{type(value).__module__}.{type(value).__qualname__}>".encode())
         if value is None or isinstance(value, (str, bytes, bytearray, int, float, complex, bool)):
             digest.update(repr(value).encode("utf-8"))
+            return
+        if isinstance(value, np.generic):
+            digest.update(value.dtype.str.encode("ascii"))
+            digest.update(value.tobytes())
             return
         ident = id(value)
         if ident in seen:
@@ -69,42 +71,67 @@ def _param_signature(dist: Any) -> bytes:
         seen.add(ident)
 
         if isinstance(value, np.ndarray):
-            digest.update(str(value.dtype).encode("ascii"))
+            digest.update(value.dtype.str.encode("ascii"))
             digest.update(repr(value.shape).encode("ascii"))
-            digest.update(value.tobytes())
+            digest.update(np.ascontiguousarray(value).tobytes())
             return
 
         named_parameters = getattr(value, "named_parameters", None)
         named_buffers = getattr(value, "named_buffers", None)
         if callable(named_parameters) and callable(named_buffers):
-            digest.update(type(value).__qualname__.encode("utf-8"))
             for name, tensor in list(named_parameters()) + list(named_buffers()):
                 digest.update(name.encode("utf-8"))
-                digest.update(repr(tuple(tensor.shape)).encode("ascii"))
-                digest.update(str(tensor.dtype).encode("ascii"))
-                digest.update(str(tensor.device).encode("ascii"))
-                digest.update(str(getattr(tensor, "_version", 0)).encode("ascii"))
-                try:
-                    digest.update(str(tensor.data_ptr()).encode("ascii"))
-                except RuntimeError:
-                    digest.update(str(id(tensor)).encode("ascii"))
+                add(tensor.detach().cpu().contiguous().numpy())
+            digest.update(repr(bool(getattr(value, "training", False))).encode("ascii"))
+            return
+
+        detach = getattr(value, "detach", None)
+        if callable(detach) and hasattr(value, "shape") and hasattr(value, "dtype"):
+            try:
+                add(detach().cpu().contiguous().numpy())
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                digest.update(repr(value).encode("utf-8"))
             return
 
         if isinstance(value, dict):
+            digest.update(repr(len(value)).encode("ascii"))
             for key in sorted(value, key=repr):
                 add(key)
                 add(value[key])
             return
         if isinstance(value, (list, tuple)):
+            digest.update(repr(len(value)).encode("ascii"))
             for child in value:
                 add(child)
             return
+        if isinstance(value, (set, frozenset)):
+            digest.update(repr(len(value)).encode("ascii"))
+            for child in sorted(value, key=lambda item: (type(item).__qualname__, repr(item))):
+                add(child)
+            return
+
+        fields: dict[str, Any] = {}
         if hasattr(value, "__dict__"):
-            digest.update(type(value).__qualname__.encode("utf-8"))
             for name, child in sorted(vars(value).items()):
-                if not name.startswith("_"):
-                    digest.update(name.encode("utf-8"))
-                    add(child)
+                fields[name] = child
+        for cls in type(value).__mro__:
+            slots = cls.__dict__.get("__slots__", ())
+            if isinstance(slots, str):
+                slots = (slots,)
+            for name in slots:
+                if name in {"__dict__", "__weakref__"}:
+                    continue
+                attr_name = name
+                if name.startswith("__") and not name.endswith("__"):
+                    attr_name = f"_{cls.__name__.lstrip('_')}{name}"
+                if hasattr(value, attr_name):
+                    fields[f"{cls.__module__}.{cls.__qualname__}.{name}"] = getattr(value, attr_name)
+        if fields:
+            for name, child in sorted(fields.items()):
+                digest.update(name.encode("utf-8"))
+                add(child)
+            return
+        digest.update(repr(value).encode("utf-8"))
 
     add(dist)
     return digest.digest()
@@ -112,7 +139,9 @@ def _param_signature(dist: Any) -> bytes:
 
 @dataclass
 class _CacheEntry:
-    signature: bytes
+    model_signature: bytes
+    data_signature: bytes
+    compute_signature: str
     log_density: np.ndarray
 
 
@@ -152,6 +181,7 @@ class FreezeRollupStats:
     n_log_density_evals: int
     objective: float
     accepted: bool = True
+    n_approximate_frozen: int = 0
 
     @property
     def active_fraction(self) -> float:
@@ -160,19 +190,12 @@ class FreezeRollupStats:
 
 
 class FreezeRollupCache:
-    """Per-mixture-component cache of per-datum log-density, keyed by component index.
+    """Per-mixture-component cache keyed by data, model state, index, and compute dtype.
 
-    A component is eligible for caching once :func:`mixle.inference.node_report.node_report`
-    reports it as D1-``"frozen"`` (the ``Neutral`` capability) or the directly evaluated global
-    accepted real-data component scores have stabilized for ``freeze_patience`` consecutive rounds
-    while its mixture weight has collapsed below ``weight_tol`` (the natural mixture-specific
-    trigger: a near-zero-weight component's data-weighted M-step contribution is ~0, so its
-    params -- and hence its real-data scores -- stop moving). Once frozen, the caller (see
-    :func:`run_em_freeze_rollup`) also skips that component's M-step entirely and carries its
-    model object forward unchanged, so the cached signature can never go stale on its own; the
-    cache only invalidates if a caller explicitly mutates/re-estimates a "frozen" component
-    (:meth:`invalidate`) or the component's own parameter signature is found to have moved (a
-    belt-and-suspenders check on every lookup, not just a documented invariant).
+    Structurally frozen components are exact cache candidates. Heuristic freezing is disabled by
+    default because skipping a non-neutral component's M-step changes the optimization target.
+    ``approximate_freezing=True`` opts into that behavior with ``weight_tol`` as the eligibility
+    budget and ``max_frozen_rounds`` as a mandatory escape/recheck interval.
     """
 
     def __init__(
@@ -182,14 +205,29 @@ class FreezeRollupCache:
         weight_tol: float = _DEFAULT_WEIGHT_TOL,
         weight_delta_tol: float = _DEFAULT_WEIGHT_DELTA_TOL,
         freeze_patience: int = _DEFAULT_FREEZE_PATIENCE,
+        approximate_freezing: bool = False,
+        max_frozen_rounds: int = 10,
     ) -> None:
+        if not isinstance(approximate_freezing, (bool, np.bool_)):
+            raise ValueError("approximate_freezing must be boolean.")
+        if (
+            isinstance(max_frozen_rounds, (bool, np.bool_))
+            or not isinstance(max_frozen_rounds, (int, np.integer))
+            or int(max_frozen_rounds) <= 0
+        ):
+            raise ValueError("max_frozen_rounds must be a positive integer.")
         self.q_gain_tol = float(q_gain_tol)
         self.weight_tol = float(weight_tol)
         self.weight_delta_tol = float(weight_delta_tol)
         self.freeze_patience = max(1, int(freeze_patience))
+        self.approximate_freezing = bool(approximate_freezing)
+        self.max_frozen_rounds = int(max_frozen_rounds)
         self._entries: dict[int, _CacheEntry] = {}
+        self._data_signature: bytes | None = None
         self._prev_weight: dict[int, float] = {}
         self._frozen_streak: dict[int, int] = {}
+        self._approximate_freeze_age: dict[int, int] = {}
+        self._approximately_frozen: set[int] = set()
         self._last_component_scores: np.ndarray | None = None
         self._component_score_change: dict[int, float] = {}
 
@@ -202,15 +240,28 @@ class FreezeRollupCache:
         """
         if idx is None:
             self._entries.clear()
+            self._data_signature = None
             self._frozen_streak.clear()
+            self._approximate_freeze_age.clear()
+            self._approximately_frozen.clear()
             self._prev_weight.clear()
             self._last_component_scores = None
             self._component_score_change.clear()
         else:
             self._entries.pop(idx, None)
             self._frozen_streak.pop(idx, None)
+            self._approximate_freeze_age.pop(idx, None)
+            self._approximately_frozen.discard(idx)
             self._prev_weight.pop(idx, None)
             self._component_score_change.pop(idx, None)
+
+    def bind_data(self, enc_data: Any) -> bytes:
+        """Bind the cache and convergence bookkeeping to one encoded dataset digest."""
+        signature = _param_signature(enc_data)
+        if self._data_signature is not None and self._data_signature != signature:
+            self.invalidate()
+        self._data_signature = signature
+        return signature
 
     def record_component_scores(self, matrix: np.ndarray) -> None:
         """Record accepted real-data component scores and their maximum rowwise movement."""
@@ -232,24 +283,27 @@ class FreezeRollupCache:
         self._last_component_scores = current
 
     def is_frozen(self, idx: int, component: Any, weight: float) -> bool:
-        """Return the evidence-driven freeze verdict for component ``idx`` this round.
+        """Return the exact or explicitly approximate freeze verdict for ``idx``.
 
-        Reads the node's structural update kind and accepted real-data component-score movement.
-        The streak resets when those scores stop looking converged, the weight climbs back out of
-        ``weight_tol``, or the weight itself is still moving.
-
-        Both converged component scores AND a converged *weight* are required: a mixture
-        component's parameters can stabilize well before the joint E-step's responsibility
-        reallocation finishes settling its weight. Freezing on either signal alone would risk locking
-        in a component's weight (and hence the M-step never revisiting it) before it has actually
-        reached its coordinate-ascent fixed point -- silently changing what the fit converges to,
-        which the ConditionalJIT track's own correctness backbone forbids (a scheduler may change
-        speed, never the answer). Requiring the weight to also have stopped moving
-        (``abs(weight - prev_weight) < weight_delta_tol``) for ``freeze_patience`` consecutive
-        rounds is the guard against that false-freeze failure mode.
+        A structurally ``"frozen"`` node is exact. Otherwise, only an opted-in approximate cache
+        can freeze it, after both scores and a below-budget weight stabilize for
+        ``freeze_patience`` rounds. Score/weight movement escapes immediately, and
+        ``max_frozen_rounds`` forces periodic reactivation because plateau evidence is not proof
+        that skipping the component's M-step preserves the exact fixed point.
         """
         report = node_report(component, field_path=str(idx))
-        score_converged = report.update_kind == "frozen" or (
+        if report.update_kind == "frozen":
+            self._approximately_frozen.discard(idx)
+            self._approximate_freeze_age.pop(idx, None)
+            return True
+        if not self.approximate_freezing:
+            self._frozen_streak[idx] = 0
+            self._approximately_frozen.discard(idx)
+            self._approximate_freeze_age.pop(idx, None)
+            self._prev_weight[idx] = weight
+            return False
+
+        score_converged = (
             idx in self._component_score_change and self._component_score_change[idx] < self.q_gain_tol
         )
         weight_collapsed = weight < self.weight_tol
@@ -260,25 +314,60 @@ class FreezeRollupCache:
         converged = score_converged and weight_collapsed and weight_converged
         streak = self._frozen_streak.get(idx, 0) + 1 if converged else 0
         self._frozen_streak[idx] = streak
-        return streak >= self.freeze_patience
+        if streak < self.freeze_patience:
+            self._approximately_frozen.discard(idx)
+            self._approximate_freeze_age.pop(idx, None)
+            return False
+        age = self._approximate_freeze_age.get(idx, 0) + 1
+        if age > self.max_frozen_rounds:
+            self._frozen_streak[idx] = 0
+            self._approximate_freeze_age.pop(idx, None)
+            self._approximately_frozen.discard(idx)
+            self._entries.pop(idx, None)
+            return False
+        self._approximate_freeze_age[idx] = age
+        self._approximately_frozen.add(idx)
+        return True
+
+    def is_approximately_frozen(self, idx: int) -> bool:
+        """Whether the current freeze verdict for ``idx`` used the opt-in heuristic."""
+        return idx in self._approximately_frozen
 
     def component_log_density(
-        self, idx: int, component: Any, enc: Any, *, frozen: bool, compute_dtype: Any = None
+        self,
+        idx: int,
+        component: Any,
+        enc: Any,
+        *,
+        frozen: bool,
+        compute_dtype: Any = None,
+        data_signature: bytes | None = None,
     ) -> tuple[np.ndarray, bool]:
         """Return ``(log_density, was_cache_hit)`` for one component on this round.
 
-        A cache hit costs a dict lookup + an ``O(param_count)`` signature compare -- never a call
-        into ``component.seq_log_density`` (``O(nobs)``), which is the entire point of D2. Any
-        mismatch between the cached signature and the component's current parameters -- frozen or
-        not -- forces a recompute, so a stale cache can never silently persist past the point
-        where it is wrong (acceptance criterion 3).
+        A hit still verifies the component content signature, but avoids
+        ``component.seq_log_density``. Any model, data, index, or compute-dtype mismatch forces a
+        recompute.
         """
-        signature = _param_signature(component)
+        model_signature = _param_signature(component)
+        data_signature = _param_signature(enc) if data_signature is None else data_signature
+        compute_signature = repr(None if compute_dtype is None else np.dtype(compute_dtype).str)
         entry = self._entries.get(idx)
-        if frozen and entry is not None and entry.signature == signature:
+        if (
+            frozen
+            and entry is not None
+            and entry.model_signature == model_signature
+            and entry.data_signature == data_signature
+            and entry.compute_signature == compute_signature
+        ):
             return entry.log_density, True
         log_density = _component_score(component, enc, compute_dtype)
-        self._entries[idx] = _CacheEntry(signature=signature, log_density=log_density)
+        self._entries[idx] = _CacheEntry(
+            model_signature=model_signature,
+            data_signature=data_signature,
+            compute_signature=compute_signature,
+            log_density=log_density,
+        )
         return log_density, False
 
 
@@ -474,6 +563,7 @@ def _component_log_density_matrix_profiled(
 ) -> tuple[np.ndarray, int, DensityMatrixProfile]:
     """Build a component score matrix and expose the assumptions behind saved work."""
 
+    data_signature = cache.bind_data(enc_data)
     n = None
     cols: list[np.ndarray | None] = [None] * model.num_components
     evals = 0
@@ -490,7 +580,12 @@ def _component_log_density_matrix_profiled(
         started = time.perf_counter()
         if idx in frozen_idx:
             log_density, hit = cache.component_log_density(
-                idx, model.components[idx], enc_i, frozen=True, compute_dtype=compute_dtype
+                idx,
+                model.components[idx],
+                enc_i,
+                frozen=True,
+                compute_dtype=compute_dtype,
+                data_signature=data_signature,
             )
         else:
             log_density = _component_score(model.components[idx], enc_i, compute_dtype)
@@ -616,7 +711,12 @@ def _updated_component_log_density_columns_profiled(
 
 
 def _component_log_density_matrix(
-    model: MixtureDistribution, enc_data: Any, cache: FreezeRollupCache, frozen_idx: set[int]
+    model: MixtureDistribution,
+    enc_data: Any,
+    cache: FreezeRollupCache,
+    frozen_idx: set[int],
+    *,
+    data_signature: bytes | None = None,
 ) -> tuple[np.ndarray, int]:
     """Return ``(ll_mat, n_log_density_evals)`` for one E-step over ``model``, cache-aware.
 
@@ -624,6 +724,7 @@ def _component_log_density_matrix(
     cache-hit component or an exact-zero-weight component (already skipped by
     ``MixtureDistribution`` itself) costs 0.
     """
+    data_signature = cache.bind_data(enc_data) if data_signature is None else data_signature
     n = None
     cols: list[np.ndarray | None] = [None] * model.num_components
     evals = 0
@@ -631,7 +732,13 @@ def _component_log_density_matrix(
         if model.zw[idx]:
             continue
         enc_i = _component_enc(enc_data, idx)
-        log_density, hit = cache.component_log_density(idx, model.components[idx], enc_i, frozen=idx in frozen_idx)
+        log_density, hit = cache.component_log_density(
+            idx,
+            model.components[idx],
+            enc_i,
+            frozen=idx in frozen_idx,
+            data_signature=data_signature,
+        )
         if not hit:
             evals += 1
         cols[idx] = log_density
@@ -797,23 +904,24 @@ def run_em_freeze_rollup(
     weight_tol: float = _DEFAULT_WEIGHT_TOL,
     weight_delta_tol: float = _DEFAULT_WEIGHT_DELTA_TOL,
     freeze_patience: int = _DEFAULT_FREEZE_PATIENCE,
+    approximate_freezing: bool = False,
+    max_frozen_rounds: int = 10,
     accept_tolerance: float = _DEFAULT_ACCEPT_TOLERANCE,
 ) -> tuple[MixtureDistribution, list[FreezeRollupStats]]:
     """Run EM over a :class:`MixtureDistribution` with D1-driven freeze/roll-up E-step caching.
 
-    Mirrors :func:`mixle.inference.em.run_em` + ``PosteriorTransformEM``'s soft-EM update (same
-    GEM/ECM coordinate-ascent structure: an E-step producing responsibilities, then a per-block
-    conditional M-step), with two differences that only affect SPEED, never correctness:
+    Mirrors :func:`mixle.inference.em.run_em` + ``PosteriorTransformEM``'s soft-EM update. By
+    default, only structurally neutral components are frozen, so caching affects speed but not the
+    EM target.
 
-    1. A component D1 reports as frozen (see :meth:`FreezeRollupCache.is_frozen`) reuses last
-       round's cached per-datum log-density instead of recomputing it, and is excluded from the
-       M-step (its model object carries forward unchanged) -- so a round with only ``k`` of ``K``
-       components active costs ``O(k/K)`` of a full round's ``seq_log_density`` work.
-    2. Every round is objective-gated exactly like ``MonotonicEM``: the candidate model's
-       objective is checked (again cache-aware, so this costs the same ``O(active fraction)``) and
-       the step is rejected -- keeping the previous model -- if the objective would decrease
-       beyond ``accept_tolerance``. This is what makes the returned ``history`` a real monotone-objective
-       receipt, not just an assumption.
+    ``approximate_freezing=True`` additionally permits converged, near-zero-weight components to
+    skip M-steps. That changes the reachable target and is therefore explicitly approximate.
+    ``weight_tol`` is its eligibility budget; weight/score drift immediately escapes, and
+    ``max_frozen_rounds`` forces a full component recheck even without detected drift. History
+    reports how many components used this approximation each round.
+
+    Every round is objective-gated: a candidate that decreases the observed-data MLE/MAP objective
+    beyond ``accept_tolerance`` is rejected.
 
     Returns ``(final_model, history)`` where ``history[i]`` is round ``i``'s
     :class:`FreezeRollupStats` (including ``objective``, the observed-data MLE/MAP objective for that round,
@@ -827,6 +935,8 @@ def run_em_freeze_rollup(
             weight_tol=weight_tol,
             weight_delta_tol=weight_delta_tol,
             freeze_patience=freeze_patience,
+            approximate_freezing=approximate_freezing,
+            max_frozen_rounds=max_frozen_rounds,
         )
         if cache is None
         else cache
@@ -845,8 +955,11 @@ def run_em_freeze_rollup(
         return value
 
     for round_index in range(max(1, int(max_its))):
+        data_signature = cache.bind_data(enc_payload)
         frozen_idx = detect_frozen(cache, model)
-        ll_mat, evals_e = _component_log_density_matrix(model, enc_payload, cache, frozen_idx)
+        ll_mat, evals_e = _component_log_density_matrix(
+            model, enc_payload, cache, frozen_idx, data_signature=data_signature
+        )
         log_density, gamma = _combine(ll_mat, model.log_w)
         current_value = objective_value(log_density, model)
         if old_value is None:
@@ -866,7 +979,9 @@ def run_em_freeze_rollup(
         # (a spuriously "converged" streak reading that the real, accepted trajectory never earned,
         # eventually freezing a component that never actually converged and permanently skipping
         # its real M-step).
-        ll_mat_c, evals_c = _component_log_density_matrix(candidate, enc_payload, cache, frozen_idx)
+        ll_mat_c, evals_c = _component_log_density_matrix(
+            candidate, enc_payload, cache, frozen_idx, data_signature=data_signature
+        )
         candidate_log_density = _log_density_from_matrix(ll_mat_c, candidate.log_w)
         candidate_value = objective_value(candidate_log_density, candidate)
 
@@ -890,6 +1005,7 @@ def run_em_freeze_rollup(
                 n_log_density_evals=evals_e + evals_c,
                 objective=round_value,
                 accepted=accepted,
+                n_approximate_frozen=sum(cache.is_approximately_frozen(idx) for idx in frozen_idx),
             )
         )
         cache.record_component_scores(ll_mat_c if accepted else ll_mat)
