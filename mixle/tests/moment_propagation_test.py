@@ -22,6 +22,7 @@ from mixle.models.moment_propagation import (
     GaussianLaw,
     attention_law,
     gelu_law,
+    iter_moments,
     layernorm_law,
     linear_law,
     propagate_moments,
@@ -295,9 +296,11 @@ class ErrorMapReceiptTest(unittest.TestCase):
         self.assertGreater(bad, 2.0 * max(good_candidates))
 
 
-class ConstantMemoryReceiptTest(unittest.TestCase):
-    """Peak memory during propagate_moments should not scale meaningfully with model depth -- the streaming,
-    layer-local execution contract only ever holds one block's weights + the current (mu, Sigma) at a time.
+class StreamingMemoryReceiptTest(unittest.TestCase):
+    """Peak retained memory while consuming iter_moments should not scale meaningfully with model depth.
+
+    ``propagate_moments`` deliberately materializes every full-covariance receipt and therefore has a
+    documented ``O(depth*d_model^2)`` returned-memory cost; this test targets the streaming API.
     """
 
     def test_peak_memory_does_not_scale_with_depth(self):
@@ -312,7 +315,8 @@ class ConstantMemoryReceiptTest(unittest.TestCase):
         for n_layer in (2, 8):
             model = _build_small_model(seed=9, n_layer=n_layer, d_model=d_model, n_head=2)
             tracemalloc.start()
-            propagate_moments(model, input_law, n_mc=32, seq_len=8, seed=10)
+            for _ in iter_moments(model, input_law, n_mc=32, seq_len=8, seed=10):
+                pass
             _, peak = tracemalloc.get_traced_memory()
             tracemalloc.stop()
             peaks[n_layer] = peak
