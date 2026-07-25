@@ -11,6 +11,7 @@ recorded a negative result, so no equivariant refinement is attempted even where
 """
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -24,6 +25,7 @@ except ImportError:
 from mixle.reason.transport_edge import (
     COVERAGE_P_FLOOR,
     EdgeTransportVerdict,
+    PremiseStatus,
     coverage_consistent_with_nominal,
     fit_conditional_transport,
     verify_edge_transport,
@@ -93,6 +95,85 @@ class KillCriterionUnusableEdgeTest(unittest.TestCase):
         verdict = verify_edge_transport("broken_edge", _ConstantSampler(), x_test, y_test, n_draws=50)
         self.assertFalse(verdict.usable)
         self.assertIn("dim(s)", verdict.reason)
+
+
+class _CenteredSampler:
+    def sample_given_batch(self, x_batch):
+        x = np.asarray(x_batch, dtype=float)
+        offsets = np.linspace(-0.2, 0.2, len(x)).reshape(-1, 1)
+        return x[:, :1] + offsets
+
+
+class _WideSampler:
+    def sample_given_batch(self, x_batch):
+        return np.linspace(-100.0, 100.0, len(x_batch)).reshape(-1, 1)
+
+
+class _WrongShapeSampler:
+    def sample_given_batch(self, x_batch):
+        return np.zeros((len(x_batch) - 1, 1))
+
+
+class TransportVerdictContractTest(unittest.TestCase):
+    def setUp(self):
+        self.x = np.linspace(-1.0, 1.0, 40).reshape(-1, 1)
+        self.y = self.x.copy()
+
+    def test_passing_verdict_has_a_dataset_bound_receipt(self):
+        verdict = verify_edge_transport("centered", _CenteredSampler(), self.x, self.y, n_draws=100)
+        self.assertEqual(verdict.status, PremiseStatus.PASS)
+        self.assertTrue(verdict.receipt.passed)
+        self.assertRegex(verdict.receipt.dataset_digest, r"^sha256:[0-9a-f]{64}$")
+        self.assertTrue(verdict.coverage_lower_bounds)
+        self.assertTrue(verdict.subgroup_coverage_rates)
+
+    def test_wide_but_covering_sampler_fails_sharpness(self):
+        verdict = verify_edge_transport("wide", _WideSampler(), self.x, self.y, n_draws=100)
+        self.assertEqual(verdict.status, PremiseStatus.FAIL)
+        self.assertIn("uninformative", verdict.reason)
+
+    def test_bad_sampler_contract_is_an_invalid_verdict(self):
+        verdict = verify_edge_transport("broken", _WrongShapeSampler(), self.x, self.y, n_draws=100)
+        self.assertEqual(verdict.status, PremiseStatus.INVALID)
+        self.assertFalse(verdict.usable)
+
+    def test_small_holdout_is_inconclusive_not_approved(self):
+        verdict = verify_edge_transport("small", _CenteredSampler(), self.x[:10], self.y[:10], n_draws=100)
+        self.assertEqual(verdict.status, PremiseStatus.INCONCLUSIVE)
+        self.assertFalse(verdict.usable)
+
+    @unittest.skipUnless(_HAS_TORCH, "seed test needs torch")
+    def test_fit_seed_is_applied_before_module_construction(self):
+        import torch
+
+        class FakeLeaf:
+            def __init__(self, module, **_kwargs):
+                self.module = module
+
+            def estimator(self):
+                return self.module
+
+        class FakeFit:
+            def __init__(self, module):
+                self.module = module
+
+            def sampler(self, seed):
+                return self.module, seed
+
+        def build(**_kwargs):
+            return float(torch.rand(()))
+
+        def optimize(_data, estimator, **_kwargs):
+            return FakeFit(estimator)
+
+        with (
+            mock.patch("mixle.reason.transport_edge.build_mdn", side_effect=build),
+            mock.patch("mixle.reason.transport_edge.NeuralConditionalDensity", FakeLeaf),
+            mock.patch("mixle.reason.transport_edge.optimize", side_effect=optimize),
+        ):
+            first = fit_conditional_transport([], x_dim=1, y_dim=1, seed=17)
+            second = fit_conditional_transport([], x_dim=1, y_dim=1, seed=17)
+        self.assertEqual(first, second)
 
 
 if __name__ == "__main__":
