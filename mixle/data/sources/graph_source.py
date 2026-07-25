@@ -143,7 +143,7 @@ def _require_exact_int_array(values: Any, label: str) -> np.ndarray:
 
 
 def _edge_list_to_adjacency(edges: Sequence[Any], num_nodes: int, directed: bool) -> np.ndarray:
-    n = int(num_nodes)
+    n = _require_exact_int(num_nodes, "num_nodes")
     if n < 0:
         raise ValueError("num_nodes must be non-negative.")
     adj = np.zeros((n, n), dtype=np.float64)
@@ -205,7 +205,7 @@ def _coerce_mapping(x: Any, directed: bool, fallback_assignments: Any | None) ->
             assignments = graph_assignments
         adj = _as_adjacency(adj)
     elif "edges" in x and "num_nodes" in x:
-        adj = _edge_list_to_adjacency(x["edges"], int(x["num_nodes"]), directed=directed)
+        adj = _edge_list_to_adjacency(x["edges"], _require_exact_int(x["num_nodes"], "num_nodes"), directed=directed)
     else:
         raise ValueError("graph mapping must contain adjacency, adj, graph, or edges+num_nodes.")
     return GraphObservation(adj, _as_assignments(assignments, adj.shape[0]))
