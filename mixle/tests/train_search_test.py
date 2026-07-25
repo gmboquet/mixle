@@ -34,6 +34,24 @@ class MultiFidelitySearchTest(unittest.TestCase):
         self.assertIn(0.25, fids)  # it actually spent cheap low-budget evaluations
         self.assertIn(1.0, fids)
 
+    def test_raises_clear_error_when_budget_never_reaches_target_fidelity(self):
+        # max_cost=0.3 clears multi_fidelity_minimize's upfront "cheapest fidelity affordable" check
+        # (the cheapest fidelity, 0.25, is <= 0.3) but can never afford a single evaluation at the
+        # target fidelity (cost 1.0, the max of `fidelities`), so target_evaluated stays False and
+        # `result["x"]`/`result["y"]` are None (MXR-080-0181). Before the tune_training fix, that None
+        # reached `np.asarray(None, dtype=np.float64)` -- which silently becomes `array(nan)` rather
+        # than raising -- and only failed later, inside TrainingSpace.decode, with an unrelated-looking
+        # IndexError instead of a message naming the actual problem (the budget was too tight).
+        def train(recipe, budget):
+            return 1.0  # value is irrelevant; the target fidelity is never reached regardless
+
+        with self.assertRaises(ValueError) as cm:
+            tune_training(train, TrainingSpace(), fidelities=(0.25, 1.0), max_cost=0.3, n_init=4, seed=0)
+        message = str(cm.exception)
+        self.assertIn("tune_training", message)  # names the failing function
+        self.assertIn("target fidelity", message)  # explains why
+        self.assertIn("0.3", message)  # the actual max_cost, for actionability
+
 
 class LearningCurveTest(unittest.TestCase):
     def test_power_law_extrapolation(self):
