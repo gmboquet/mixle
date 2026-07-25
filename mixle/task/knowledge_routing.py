@@ -179,12 +179,10 @@ def _verdict_low_power(verdict: Any) -> bool:
     """Whether the verdict itself flags that it had no statistical power to distinguish a real pass
     from a real failure (e.g. :attr:`~mixle.inference.calibration_gate.CalibrationVerdict.low_power`,
     surfaced on the ``"low_power"`` key of :meth:`~mixle.inference.calibration_gate.CalibrationVerifier
-    .verify`'s dict). A ``passed=True, low_power=True`` verdict means "undetectable with this little
-    data," not "calibrated" -- see ``CalibrationVerdict``'s docstring -- so it must not read as
-    resolving evidence for a knowledge gap here, even though ``.passed`` alone reads True for the
-    routing-layer promotion predicate. Verifiers that never report this concept (the common case --
-    most IC-6 verifiers here are structural, not statistical) read as False, so this only changes
-    behaviour for verifiers that explicitly opt into it."""
+    .verify`'s dict). A low-power calibration verdict is explicitly indeterminate and ``passed=False``;
+    retaining this diagnostic lets routing record why the evidence was inconclusive. Verifiers that
+    never report this concept (the common case -- most IC-6 verifiers here are structural, not
+    statistical) read as False."""
     if verdict is None:
         return False
     if isinstance(verdict, dict):
@@ -194,10 +192,9 @@ def _verdict_low_power(verdict: Any) -> bool:
 
 def _verdict_resolves_gap(verdict: Any) -> bool:
     """Whether this verdict is real resolving evidence for a knowledge gap: a pass that also had the
-    statistical power to have failed. A check with no power to fail (``low_power=True``) must not
-    close out an epistemic gap on the strength of its ``passed=True`` alone -- the gap stays open,
-    exactly as if the check had not run, so a later attempt with more evidence still gets a chance to
-    genuinely confirm or refute it."""
+    statistical power to have failed. The explicit ``passed=False`` on an indeterminate verdict is
+    sufficient for current calibration verifiers; the low-power check also protects older or external
+    verifier implementations that still expose an ambiguous boolean."""
     return _verdict_passed(verdict) and not _verdict_low_power(verdict)
 
 
