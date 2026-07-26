@@ -366,6 +366,7 @@ __all__ = [
     "IndianBuffetProcessEstimator",
     "IndianBuffetProcessDataEncoder",
     "IntegerChowLiuTreeDistribution",
+    "IntegerChowLiuStatistics",
     "IntegerChowLiuTreeEstimator",
     "IntegerChowLiuTreeSampler",
     "IntegerChowLiuTreeDataEncoder",
@@ -1711,6 +1712,7 @@ from mixle.stats.trees.chow_liu_tree import (
     ChowLiuTreeSampler,
 )
 from mixle.stats.trees.integer_chow_liu_tree import (
+    IntegerChowLiuStatistics,
     IntegerChowLiuTreeDataEncoder,
     IntegerChowLiuTreeDistribution,
     IntegerChowLiuTreeEnumerator,
