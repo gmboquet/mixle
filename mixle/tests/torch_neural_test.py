@@ -23,6 +23,25 @@ except ImportError:
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+class DistributedTokenScheduleTest(unittest.TestCase):
+    def test_unequal_shards_have_equal_steps_without_dropping_local_targets(self):
+        from mixle.utils.parallel.torch_neural import _global_targets_for_step, _rank_window_schedule
+
+        counts, steps = _rank_window_schedule(
+            23,
+            2,
+            block=3,
+            batch_size=4,
+            shard_by_rank=True,
+        )
+        self.assertEqual(counts, (8, 9))
+        self.assertEqual(steps, 3)
+        self.assertEqual([_global_targets_for_step(counts, step, 4) for step in range(steps)], [8, 8, 1])
+        self.assertEqual(sum(counts), 17)
+        self.assertEqual(steps * 4 - counts[0], 4)
+        self.assertEqual(steps * 4 - counts[1], 3)
+
+
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class TorchNeuralHandleTest(unittest.TestCase):
     def _corpus(self):
@@ -49,6 +68,29 @@ class TorchNeuralHandleTest(unittest.TestCase):
         ctx = np.stack([ids[i : i + block] for i in range(48)]).astype("float32")
         nll = -np.mean(leaf.seq_log_density((ctx, ids[block : block + 48])))
         self.assertLess(nll, 0.5)  # the streamed model learned next-token prediction
+
+    def test_partial_batch_is_masked_and_receipted(self):
+        from mixle.models.streaming_transformer_leaf import StreamingTransformerLeafEstimator
+        from mixle.models.transformer import build_causal_lm
+        from mixle.utils.parallel.torch_neural import StreamingTokenEncodedData
+
+        ids = np.arange(12, dtype=np.int64) % 5
+        estimator = StreamingTransformerLeafEstimator(
+            build_causal_lm(5, d_model=8, n_layer=1, n_head=1, block=3),
+            lr=1e-3,
+        )
+        handle = StreamingTokenEncodedData(
+            ids,
+            block=3,
+            batch_size=4,
+            epochs=1,
+            shuffle=False,
+        )
+        handle.pysp_seq_estimate(estimator, None)
+        self.assertEqual(handle.steps_per_epoch, 3)
+        self.assertEqual(handle.local_target_tokens, 9)
+        self.assertEqual(handle.masked_target_tokens, 3)
+        self.assertEqual(handle.excluded_target_tokens, 0)
 
     @unittest.skipUnless(os.environ.get("MIXLE_RUN_TORCHRUN_SMOKE"), "gated: set MIXLE_RUN_TORCHRUN_SMOKE=1")
     def test_two_rank_distributed_streaming_is_consistent(self):
