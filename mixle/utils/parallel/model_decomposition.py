@@ -146,18 +146,29 @@ class NodeSize:
 
 
 def size_model_tree(model: Any, _path: str = "", _seen: set[int] | None = None) -> NodeSize:
-    """Recursively size the model tree via the decomposition contract (shared subtrees counted once)."""
+    """Recursively size the full ownership tree (shared subtrees counted once)."""
     seen = _seen if _seen is not None else set()
+    if id(model) in seen:
+        raise ValueError("size_model_tree received a root already present in its ownership traversal.")
+    seen.add(id(model))
     dc = decomposition_for(model)
-    children = shard_children(model, dc)
+    shardable_children = shard_children(model, dc)
+    children = cost_children(model)
     child_sizes: list[NodeSize] = []
     subtree = _own_param_bytes(model)
     work = _own_work(model)
     for i, child in enumerate(children):
         if child is None or id(child) in seen:
             continue
-        seen.add(id(child))
-        role = dc.child_roles[i] if i < len(dc.child_roles) else f"{dc.axis.value}_{i}"
+        shard_position = next(
+            (position for position, shard_child in enumerate(shardable_children) if shard_child is child),
+            None,
+        )
+        role = (
+            dc.child_roles[shard_position]
+            if shard_position is not None and shard_position < len(dc.child_roles)
+            else f"owned_{i}"
+        )
         cs = size_model_tree(child, f"{_path}/{role}".lstrip("/"), seen)
         child_sizes.append(cs)
         subtree += cs.subtree_param_bytes
@@ -214,9 +225,18 @@ def tree_axes(model: Any) -> list[AxisCandidate]:
                     tuple(cost[1] for cost in unit_costs),
                 )
             )
-        for i, child in enumerate(kids):
+        ownership = cost_children(node)
+        for i, child in enumerate(ownership):
             if child is not None:
-                role = dc.child_roles[i] if i < len(dc.child_roles) else f"{dc.axis.value}_{i}"
+                shard_position = next(
+                    (position for position, shard_child in enumerate(kids) if shard_child is child),
+                    None,
+                )
+                role = (
+                    dc.child_roles[shard_position]
+                    if shard_position is not None and shard_position < len(dc.child_roles)
+                    else f"owned_{i}"
+                )
                 walk(child, f"{path}/{role}".lstrip("/"))
 
     walk(model, "")

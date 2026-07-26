@@ -70,7 +70,7 @@ def _parallel_ids(model: Any, num_workers: int | None) -> frozenset[int]:
     ancestor/descendant and at most one pool is ever live (no nested pools, no oversubscription). Because
     the choice only reorders disjoint writes, the fold stays bit-identical regardless of what is selected.
     """
-    from mixle.utils.parallel.model_decomposition import shard_children, subtree_work
+    from mixle.utils.parallel.model_decomposition import cost_children, shard_children, subtree_work
 
     benefits: dict[int, float] = {}
     seen: set[int] = set()
@@ -88,10 +88,12 @@ def _parallel_ids(model: Any, num_workers: int | None) -> frozenset[int]:
                 total = float(sum(works))
                 p = dc.num_units if not num_workers else min(num_workers, dc.num_units)
                 benefits[id(node)] = total - max(max(works), total / max(1, p))
-        if threadable:  # don't descend a STATE/SEQUENCE node's children (e.g. an HMM's 1000s of emission
-            for child in kids:  # states): the executor can't thread inside them, and walking them is pure cost
-                if child is not None:
-                    walk(child)
+        # Axis discovery follows ownership, not shardability. An atomic wrapper
+        # can own a separable mixture/composite whose axis is still executable
+        # through the wrapper adapters in _fold_into.
+        for child in cost_children(node):
+            if child is not None:
+                walk(child)
 
     walk(model)
     if not benefits:
@@ -124,6 +126,29 @@ def _component_ok(acc: Any, model: Any, dc: Any) -> bool:
         and len(getattr(acc, "accumulators", ())) == dc.num_units
         and hasattr(model, "log_w")
         and hasattr(model, "zw")
+    )
+
+
+def _optional_ok(acc: Any, model: Any, enc: Any, dc: Any) -> bool:
+    return (
+        dc.axis is DecompAxis.NONE
+        and hasattr(acc, "accumulator")
+        and hasattr(acc, "weights")
+        and hasattr(model, "dist")
+        and isinstance(enc, (tuple, list))
+        and len(enc) == 4
+    )
+
+
+def _sequence_ok(acc: Any, model: Any, enc: Any, dc: Any) -> bool:
+    return (
+        dc.axis is DecompAxis.SEQUENCE
+        and hasattr(acc, "accumulator")
+        and hasattr(acc, "len_accumulator")
+        and hasattr(model, "dist")
+        and hasattr(model, "len_dist")
+        and isinstance(enc, (tuple, list))
+        and len(enc) == 5
     )
 
 
@@ -203,6 +228,22 @@ def _fold_into(
         )
     elif _component_ok(acc, model, dc):
         _fold_component_into(acc, model, enc, weights, parallel, sub, num_workers)
+    elif _optional_ok(acc, model, enc, dc):
+        _size, zero_indices, nonzero_indices, child_encoding = enc
+        nonzero_weights = weights[nonzero_indices]
+        acc.weights[0] += float(np.sum(weights[zero_indices]))
+        acc.weights[1] += float(np.sum(nonzero_weights))
+        _fold_into(acc.accumulator, model.dist, child_encoding, nonzero_weights, pset, num_workers)
+    elif _sequence_ok(acc, model, enc, dc):
+        indices, inverse_counts, _nonzero, element_encoding, length_encoding = enc
+        element_weights = (
+            weights[indices] * inverse_counts[indices]
+            if getattr(acc, "len_normalized", False)
+            else weights[indices]
+        )
+        _fold_into(acc.accumulator, model.dist, element_encoding, element_weights, pset, num_workers)
+        if not getattr(acc, "null_len_accumulator", False):
+            _fold_into(acc.len_accumulator, model.len_dist, length_encoding, weights, pset, num_workers)
     else:
         # base case: an accumulator that is not suff-stat-separable (a leaf, or an HMM whose forward-backward
         # couples all states). If it opts into internal state-parallelism (``_state_workers``, e.g. an HMM's
