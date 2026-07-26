@@ -16,8 +16,10 @@ torch = pytest.importorskip("torch")
 
 from mixle.task.data_mixture import (  # noqa: E402
     SyntheticDomain,
+    _minhash_signatures,
     _normalize_weights,
     _sample_interleaved_stream,
+    _shingles,
     estimate_near_duplicate_rate,
     optimize_mixture,
     proxy_run_score,
@@ -215,6 +217,25 @@ class LearnedMixtureBeatsUniformTest(unittest.TestCase):
 
 
 class NearDuplicateReceiptTest(unittest.TestCase):
+    def test_short_and_empty_document_semantics_are_explicit(self):
+        self.assertEqual(_shingles("", 3), frozenset())
+        self.assertEqual(len(_shingles("alpha beta", 3)), 2)
+        self.assertEqual(
+            estimate_near_duplicate_rate(["", ""], shingle_size=3, threshold=1.0),
+            1.0,
+        )
+        self.assertEqual(
+            estimate_near_duplicate_rate(["", "alpha"], shingle_size=3, threshold=0.1),
+            0.0,
+        )
+
+    def test_exact_permutation_signatures_estimate_jaccard_without_overflow(self):
+        left = frozenset({1, 2, 3, 2**64 - 1})
+        right = frozenset({2, 3, 4, 2**64 - 1})
+        signatures = _minhash_signatures([left, right], 4096, seed=7)
+        estimate = float(np.mean(signatures[0] == signatures[1]))
+        self.assertAlmostEqual(estimate, 3.0 / 5.0, delta=0.03)
+
     def test_planted_duplicates_are_detected(self):
         base = "the quick brown fox jumps over the lazy dog near the river bank at dawn"
         corpus = [

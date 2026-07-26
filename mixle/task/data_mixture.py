@@ -414,17 +414,46 @@ def _stable_token_hash(tokens: Sequence[str]) -> int:
 
 def _shingles(text: str, k: int) -> frozenset[int]:
     toks = text.lower().split()
+    if not toks:
+        return frozenset()
     if len(toks) < k:
-        return frozenset({_stable_token_hash(toks)})
+        # A short document has one shingle per token rather than one synthetic
+        # whole-document shingle. An empty document has the empty shingle set.
+        return frozenset(_stable_token_hash((token,)) for token in toks)
     return frozenset(_stable_token_hash(toks[i : i + k]) for i in range(len(toks) - k + 1))
 
 
-def _minhash_signature(shingle_set: frozenset[int], a: np.ndarray, b: np.ndarray, prime: int) -> np.ndarray:
-    if not shingle_set:
-        return np.zeros(len(a), dtype=np.int64)
-    hashes = np.array([s % prime for s in shingle_set], dtype=np.int64)
-    sig = (np.outer(a, hashes) + b[:, None]) % prime  # (num_hashes, n_shingles)
-    return sig.min(axis=1)
+def _minhash_signatures(
+    shingle_sets: Sequence[frozenset[int]],
+    num_hashes: int,
+    *,
+    seed: int,
+) -> np.ndarray:
+    """Return exact random-permutation MinHash signatures over this corpus.
+
+    Drawing a uniform permutation of the observed shingle universe avoids the
+    signed-integer overflow and limited affine-hash family of the former
+    implementation. For every non-empty pair, each equality indicator is an
+    unbiased Jaccard-similarity estimate over the random permutation.
+    Empty sets retain the ``-1`` sentinel and are handled explicitly by the
+    caller, never compared to non-empty signatures.
+    """
+    universe = sorted(set().union(*shingle_sets))
+    signatures = np.full((len(shingle_sets), num_hashes), -1, dtype=np.int64)
+    if not universe:
+        return signatures
+
+    locations = {shingle: index for index, shingle in enumerate(universe)}
+    members = [np.fromiter((locations[shingle] for shingle in shingles), dtype=np.int64) for shingles in shingle_sets]
+    rng = np.random.RandomState(_random_state_seed(seed))
+    ranks = np.empty(len(universe), dtype=np.int64)
+    for column in range(num_hashes):
+        permutation = rng.permutation(len(universe))
+        ranks[permutation] = np.arange(len(universe), dtype=np.int64)
+        for row, indices in enumerate(members):
+            if indices.size:
+                signatures[row, column] = int(ranks[indices].min())
+    return signatures
 
 
 def estimate_near_duplicate_rate(
@@ -438,13 +467,17 @@ def estimate_near_duplicate_rate(
     """Estimate the fraction of documents in ``corpus`` that have a near-duplicate elsewhere in it.
 
     A minimal, honest MinHash quality/dedup receipt: each document is reduced to its set of
-    word-``shingle_size`` shingles, each shingle set to a ``num_hashes``-entry MinHash signature (an
-    unbiased estimator of Jaccard similarity), and two documents are called near-duplicates when their
-    signatures agree on at least ``threshold`` of their entries. Returns
+    word-``shingle_size`` shingles, each non-empty shingle set to a ``num_hashes``-entry exact
+    random-permutation MinHash signature (an unbiased estimator of Jaccard similarity over the observed
+    shingle universe), and two documents are called near-duplicates when their signatures agree on at
+    least ``threshold`` of their entries. Two empty documents have similarity 1; an empty and non-empty
+    document have similarity 0. Returns
     ``|{documents with >= 1 near-duplicate partner}| / |corpus|``. ``O(n^2)`` in the corpus size --
     fine for the receipt-sized corpora this is meant for, not a production LSH dedup pipeline.
     """
     docs = list(corpus)
+    if any(not isinstance(doc, str) for doc in docs):
+        raise TypeError("corpus must contain only strings")
     if isinstance(shingle_size, bool) or not isinstance(shingle_size, int) or shingle_size <= 0:
         raise ValueError("shingle_size must be a positive integer")
     if isinstance(num_hashes, bool) or not isinstance(num_hashes, int) or num_hashes <= 0:
@@ -456,15 +489,18 @@ def estimate_near_duplicate_rate(
         return 0.0
     if n == 1:
         return 0.0
-    prime = (1 << 61) - 1
-    rng = np.random.RandomState(seed)
-    a = rng.randint(1, prime - 1, size=int(num_hashes))
-    b = rng.randint(0, prime - 1, size=int(num_hashes))
-    sigs = [_minhash_signature(_shingles(doc, shingle_size), a, b, prime) for doc in docs]
+    seed = _random_state_seed(seed)
+    shingle_sets = [_shingles(doc, shingle_size) for doc in docs]
+    sigs = _minhash_signatures(shingle_sets, num_hashes, seed=seed)
     has_dup = np.zeros(n, dtype=bool)
     for i in range(n):
         for j in range(i + 1, n):
-            sim = float(np.mean(sigs[i] == sigs[j]))
+            if not shingle_sets[i] and not shingle_sets[j]:
+                sim = 1.0
+            elif not shingle_sets[i] or not shingle_sets[j]:
+                sim = 0.0
+            else:
+                sim = float(np.mean(sigs[i] == sigs[j]))
             if sim >= threshold:
                 has_dup[i] = True
                 has_dup[j] = True
