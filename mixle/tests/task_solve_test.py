@@ -142,6 +142,19 @@ class SolveTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             served.improve()  # loaded artifacts serve + harvest; improving needs the original data
 
+    def test_save_load_preserves_rejected_promotion(self):
+        import tempfile
+
+        from mixle.task import Solution, solve
+
+        sol = solve(_route, _tickets(80), target_agreement=1.01, ood=None, seed=0, epochs=30)
+        self.assertFalse(sol.promoted)
+        with tempfile.TemporaryDirectory() as d:
+            served = Solution.load(sol.save(d), _route)
+        self.assertFalse(served.promoted)
+        ticket = {"kind": "refund", "amount": 900.0, "region": "us"}
+        self.assertEqual(served(ticket), _route(ticket))
+
     def test_text_path_and_input_sniffing(self):
         from mixle.task import solve
 
