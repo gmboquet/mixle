@@ -103,26 +103,31 @@ class WishartEstimatedDFTest(unittest.TestCase):
 
 
 class WishartAccumulatorLogdetTest(unittest.TestCase):
-    """The sum_logdet sufficient statistic (used for df MLE) must reject a positive-determinant,
-    negative-definite matrix the same way log_density does, not silently include a wrong value."""
+    """Invalid matrices must be rejected before they can poison fit state."""
 
-    def test_negative_definite_with_positive_determinant_contributes_minus_inf(self):
+    def test_negative_definite_with_positive_determinant_is_rejected_atomically(self):
         from mixle.stats.matrix.wishart import WishartAccumulator
 
         acc = WishartAccumulator(dim=2)
-        acc.update(-np.eye(2), 1.0, None)  # det = +1, but negative definite
+        with self.assertRaises(ValueError):
+            acc.update(-np.eye(2), 1.0, None)
         _, count, sum_logdet = acc.value()
-        self.assertEqual(count, 1.0)
-        self.assertEqual(sum_logdet, -np.inf)
+        self.assertEqual(count, 0.0)
+        self.assertEqual(sum_logdet, 0.0)
 
-    def test_seq_update_matches_update_for_negative_definite(self):
+    def test_seq_update_rejects_an_invalid_row_atomically(self):
         from mixle.stats.matrix.wishart import WishartAccumulator
 
         acc = WishartAccumulator(dim=2)
-        acc.seq_update(np.array([-np.eye(2), np.eye(2)]), np.array([1.0, 1.0]), None)
+        with self.assertRaises(ValueError):
+            acc.seq_update(
+                np.array([-np.eye(2), np.eye(2)]),
+                np.array([1.0, 1.0]),
+                None,
+            )
         _, count, sum_logdet = acc.value()
-        self.assertEqual(count, 2.0)
-        self.assertEqual(sum_logdet, -np.inf)  # one -inf term poisons the weighted sum, as intended
+        self.assertEqual(count, 0.0)
+        self.assertEqual(sum_logdet, 0.0)
 
 
 class WishartValidationTest(unittest.TestCase):

@@ -755,6 +755,7 @@ __all__ = [
     "MatrixNormalSampler",
     "MatrixNormalEstimator",
     "MatrixNormalDataEncoder",
+    "MatrixNormalFitError",
     "WatsonDistribution",
     "WatsonSampler",
     "WatsonEstimator",
@@ -763,6 +764,7 @@ __all__ = [
     "WishartSampler",
     "WishartEstimator",
     "WishartDataEncoder",
+    "WishartFitError",
     "LKJDistribution",
     "LKJSampler",
     "LKJEstimator",
@@ -778,7 +780,9 @@ __all__ = [
     "InverseWishartDistribution",
     "InverseWishartSampler",
     "InverseWishartEstimator",
+    "InverseWishartMeanMomentEstimator",
     "InverseWishartDataEncoder",
+    "InverseWishartMomentFitError",
     "VonMisesFisherSampler",
     "VonMisesFisherEstimator",
     "VonMisesFisherDataEncoder",
@@ -1380,6 +1384,8 @@ from mixle.stats.matrix.inverse_wishart import (
     InverseWishartDataEncoder,
     InverseWishartDistribution,
     InverseWishartEstimator,
+    InverseWishartMeanMomentEstimator,
+    InverseWishartMomentFitError,
     InverseWishartSampler,
 )
 from mixle.stats.matrix.lkj import (
@@ -1392,12 +1398,14 @@ from mixle.stats.matrix.matrix_normal import (
     MatrixNormalDataEncoder,
     MatrixNormalDistribution,
     MatrixNormalEstimator,
+    MatrixNormalFitError,
     MatrixNormalSampler,
 )
 from mixle.stats.matrix.wishart import (
     WishartDataEncoder,
     WishartDistribution,
     WishartEstimator,
+    WishartFitError,
     WishartSampler,
 )
 from mixle.stats.missing import MISSING, composite_with_missing, marginalized
