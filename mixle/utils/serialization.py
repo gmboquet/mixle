@@ -35,6 +35,7 @@ _CLASS_IDS: dict[type[Any], str] = {}
 _CALLABLE_REGISTRY: dict[str, Callable[..., Any]] = {}
 _CALLABLE_IDS: dict[Callable[..., Any], str] = {}
 _REGISTRY_READY = False
+_REGISTRY_LOCK = threading.RLock()
 _OPTIONAL_IMPORT_NAMES = {"torch", "umap", "pyspark"}
 
 # Trust gate for code-executing deserialization (currently: an embedded torch module, persisted as a
@@ -114,6 +115,23 @@ def _type_id(cls: type[Any]) -> str:
     return "%s.%s" % (cls.__module__, cls.__name__)
 
 
+def _register_class(
+    registry: dict[str, type[Any]],
+    class_ids: dict[type[Any], str],
+    cls: type[Any],
+    type_id: str | None = None,
+) -> None:
+    tid = type_id or _type_id(cls)
+    previous = registry.get(tid)
+    if previous is not None and previous is not cls:
+        raise SerializationError("type id %r is already registered for %r" % (tid, previous))
+    previous_id = class_ids.get(cls)
+    if previous_id is not None and previous_id != tid:
+        raise SerializationError("class %r is already registered under type id %r" % (cls, previous_id))
+    registry[tid] = cls
+    class_ids[cls] = tid
+
+
 def register_serializable_class(cls: type[Any], type_id: str | None = None) -> type[Any]:
     """Register a class that may be reconstructed from serialized state.
 
@@ -121,15 +139,8 @@ def register_serializable_class(cls: type[Any], type_id: str | None = None) -> t
     already be present in this registry, which is populated from mixle package
     modules by ``ensure_pysp_serialization_registry``.
     """
-    tid = type_id or _type_id(cls)
-    previous = _CLASS_REGISTRY.get(tid)
-    if previous is not None and previous is not cls:
-        raise SerializationError("type id %r is already registered for %r" % (tid, previous))
-    previous_id = _CLASS_IDS.get(cls)
-    if previous_id is not None and previous_id != tid:
-        raise SerializationError("class %r is already registered under type id %r" % (cls, previous_id))
-    _CLASS_REGISTRY[tid] = cls
-    _CLASS_IDS[cls] = tid
+    with _REGISTRY_LOCK:
+        _register_class(_CLASS_REGISTRY, _CLASS_IDS, cls, type_id)
     return cls
 
 
@@ -181,61 +192,59 @@ def _iter_distribution_modules(package_name: str) -> Iterable[Any]:
 
 def ensure_pysp_serialization_registry() -> None:
     """Populate the closed registry of mixle classes that can be decoded."""
-    global _REGISTRY_READY
+    global _CLASS_IDS, _CLASS_REGISTRY, _REGISTRY_READY
     if _REGISTRY_READY:
         return
 
-    from mixle.stats.compute.pdist import ParameterEstimator as StatsEstimator
-    from mixle.stats.compute.pdist import ProbabilityDistribution as StatsDistribution
+    with _REGISTRY_LOCK:
+        if _REGISTRY_READY:
+            return
 
-    for package_name in ("mixle.stats", "mixle.analysis"):
-        for module in _iter_distribution_modules(package_name):
-            for _, cls in inspect.getmembers(module, inspect.isclass):
-                if cls.__module__ != module.__name__:
-                    continue
-                if issubclass(cls, (StatsDistribution, StatsEstimator)):
-                    register_serializable_class(cls)
-                elif cls.__module__ == "mixle.stats.combinator.transform" and cls.__name__.endswith("Transform"):
-                    register_serializable_class(cls)
-                elif getattr(cls, "__pysp_serializable__", False):
-                    register_serializable_class(cls)
+        registry = dict(_CLASS_REGISTRY)
+        class_ids = dict(_CLASS_IDS)
 
-    try:
+        from mixle.stats.compute.pdist import ParameterEstimator as StatsEstimator
+        from mixle.stats.compute.pdist import ProbabilityDistribution as StatsDistribution
+
+        for package_name in ("mixle.stats", "mixle.analysis"):
+            for module in _iter_distribution_modules(package_name):
+                for _, cls in inspect.getmembers(module, inspect.isclass):
+                    if cls.__module__ != module.__name__:
+                        continue
+                    if issubclass(cls, (StatsDistribution, StatsEstimator)):
+                        _register_class(registry, class_ids, cls)
+                    elif cls.__module__ == "mixle.stats.combinator.transform" and cls.__name__.endswith("Transform"):
+                        _register_class(registry, class_ids, cls)
+                    elif getattr(cls, "__pysp_serializable__", False):
+                        _register_class(registry, class_ids, cls)
+
         automatic = importlib.import_module("mixle.utils.automatic")
         for _, cls in inspect.getmembers(automatic, inspect.isclass):
             if cls.__module__ == automatic.__name__ and issubclass(cls, (StatsDistribution, StatsEstimator)):
-                register_serializable_class(cls)
-    except Exception:  # noqa: BLE001
-        # Automatic estimator support is optional for the serializer.  The core
-        # stats/bstats registries above should still be available.
-        pass
+                _register_class(registry, class_ids, cls)
 
-    # Structure-learning distributions (DependencyTreeDistribution and its regression/GLM edges) live in
-    # mixle.inference, outside the stats walk above, but opt in explicitly via __pysp_serializable__ so a
-    # learned structured model -- e.g. a distilled structured classifier -- persists through the json artifact path.
-    try:
+        # Structure-learning distributions (DependencyTreeDistribution and its regression/GLM edges) live in
+        # mixle.inference, outside the stats walk above, but opt in explicitly via __pysp_serializable__ so a
+        # learned structured model -- e.g. a distilled structured classifier -- persists through the json artifact path.
         structure = importlib.import_module("mixle.inference.structure")
         for _, cls in inspect.getmembers(structure, inspect.isclass):
             if cls.__module__ == structure.__name__ and getattr(cls, "__pysp_serializable__", False):
-                register_serializable_class(cls)
-    except Exception:  # noqa: BLE001
-        # Optional: the core stats registry above is enough for pure-stats models.
-        pass
+                _register_class(registry, class_ids, cls)
 
-    # Heterogeneous Bayesian networks (HeterogeneousBayesianNetwork + its per-child factor classes) live
-    # in mixle.inference.bayesian_network -- same opt-in mechanism, same reason: optimize(data)'s automatic
-    # structure-discovery path (F10.1) returns one of these, and it must survive a save/reload round trip
-    # through the same safe json artifact path as everything else, not fall back to raw pickle.
-    try:
+        # Heterogeneous Bayesian networks (HeterogeneousBayesianNetwork + its per-child factor classes) live
+        # in mixle.inference.bayesian_network -- same opt-in mechanism, same reason: optimize(data)'s automatic
+        # structure-discovery path (F10.1) returns one of these, and it must survive a save/reload round trip
+        # through the same safe json artifact path as everything else, not fall back to raw pickle.
         bn = importlib.import_module("mixle.inference.bayesian_network")
         for _, cls in inspect.getmembers(bn, inspect.isclass):
             if cls.__module__ == bn.__name__ and getattr(cls, "__pysp_serializable__", False):
-                register_serializable_class(cls)
-    except Exception:  # noqa: BLE001
-        # Optional: the core stats registry above is enough for pure-stats models.
-        pass
+                _register_class(registry, class_ids, cls)
 
-    _REGISTRY_READY = True
+        # Publish one complete snapshot. A failed discovery leaves the previous
+        # registry intact and _REGISTRY_READY false, so a later call can retry.
+        _CLASS_REGISTRY = registry
+        _CLASS_IDS = class_ids
+        _REGISTRY_READY = True
 
 
 def _cycle_enter(value: Any, active: set[int]) -> int:

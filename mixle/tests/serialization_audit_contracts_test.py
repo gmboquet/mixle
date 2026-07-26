@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from unittest import mock
 
 import numpy as np
 
+import mixle.utils.serialization as serialization
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 from mixle.utils.serialization import (
     SerializationError,
@@ -85,6 +87,40 @@ class ObjectGraphTest(unittest.TestCase):
         first = to_json({StableKey(2): "b", StableKey(1): "a"})
         second = to_json({StableKey(1): "a", StableKey(2): "b"})
         self.assertEqual(json.loads(first), json.loads(second))
+
+
+class RegistryInitializationTest(unittest.TestCase):
+    def test_failed_initialization_is_atomic_and_retried(self):
+        original_registry = serialization._CLASS_REGISTRY
+        original_ids = serialization._CLASS_IDS
+        original_ready = serialization._REGISTRY_READY
+        calls = 0
+
+        def fail_once(_package_name):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("transient registry failure")
+            return ()
+
+        serialization._CLASS_REGISTRY = {}
+        serialization._CLASS_IDS = {}
+        serialization._REGISTRY_READY = False
+        try:
+            with mock.patch.object(serialization, "_iter_distribution_modules", side_effect=fail_once):
+                with self.assertRaisesRegex(RuntimeError, "transient registry failure"):
+                    serialization.ensure_pysp_serialization_registry()
+                self.assertFalse(serialization._REGISTRY_READY)
+                self.assertEqual(serialization._CLASS_REGISTRY, {})
+                self.assertEqual(serialization._CLASS_IDS, {})
+
+                serialization.ensure_pysp_serialization_registry()
+                self.assertTrue(serialization._REGISTRY_READY)
+                self.assertGreaterEqual(calls, 3)
+        finally:
+            serialization._CLASS_REGISTRY = original_registry
+            serialization._CLASS_IDS = original_ids
+            serialization._REGISTRY_READY = original_ready
 
 
 class TrustScopeTest(unittest.TestCase):
