@@ -28,6 +28,23 @@ from mixle.task.toolcall import ToolSpec
 _DEFAULT_DIR = Path.home() / ".mixle-agent" / "conversations"
 
 
+class TraceFormatError(ValueError):
+    """Raised when a stored trace row violates the conversation schema."""
+
+
+class AmbiguousTraceError(LookupError):
+    """Raised when one request text has multiple conflicting harvested executions."""
+
+
+@dataclass(frozen=True)
+class TraceRejection:
+    """A file or row rejected during harvesting, with enough location to repair it."""
+
+    source: str
+    location: str
+    reason: str
+
+
 @dataclass
 class AgentTrace:
     """One request, ordered tool calls, and final text reply."""
@@ -36,6 +53,7 @@ class AgentTrace:
     plan: list[dict]  # [{"tool": name, "args": {...}}, ...] in execution order
     reply: str = ""
     conversation_id: str = ""
+    trace_id: str = ""
 
 
 @dataclass
@@ -43,6 +61,7 @@ class AgentTraces:
     """The harvested corpus plus the teacher views the distillers consume."""
 
     traces: list[AgentTrace] = field(default_factory=list)
+    rejections: list[TraceRejection] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.traces)
@@ -50,6 +69,15 @@ class AgentTraces:
     def requests(self, *, min_steps: int = 0) -> list[str]:
         """The request texts (optionally only those whose plan has at least ``min_steps`` calls)."""
         return [t.request for t in self.traces if len(t.plan) >= min_steps]
+
+    def by_id(self, trace_id: str) -> AgentTrace:
+        """Return one execution by its stable harvested ID."""
+        matches = [trace for trace in self.traces if trace.trace_id == trace_id]
+        if not matches:
+            raise KeyError(trace_id)
+        if len(matches) > 1:
+            raise AmbiguousTraceError(f"duplicate trace ID {trace_id!r}")
+        return matches[0]
 
     def tool_specs(self) -> list[ToolSpec]:
         """Infer tool specs from observed argument usage."""
@@ -65,8 +93,24 @@ class AgentTraces:
             specs.append(ToolSpec(name, union, required))
         return specs
 
-    def _by_request(self) -> dict[str, AgentTrace]:
-        return {t.request: t for t in self.traces}
+    def _by_request(self) -> dict[str, list[AgentTrace]]:
+        table: dict[str, list[AgentTrace]] = {}
+        for trace in self.traces:
+            table.setdefault(trace.request, []).append(trace)
+        return table
+
+    @staticmethod
+    def _unique_execution(candidates: list[AgentTrace], request: str) -> AgentTrace | None:
+        if not candidates:
+            return None
+        signatures = {
+            json.dumps({"plan": trace.plan, "reply": trace.reply}, sort_keys=True, default=repr)
+            for trace in candidates
+        }
+        if len(signatures) != 1:
+            ids = [trace.trace_id for trace in candidates]
+            raise AmbiguousTraceError(f"request {request!r} has conflicting executions {ids!r}; select by trace ID")
+        return candidates[0]
 
     def call_teacher(self) -> Any:
         """Return a ``distill_tool_caller`` teacher over the first tool call."""
@@ -75,7 +119,8 @@ class AgentTraces:
         def teacher(r: Any) -> Any:
             if isinstance(r, list):
                 return [teacher(x) for x in r]
-            t = table.get(str(r))
+            request = str(r)
+            t = self._unique_execution(table.get(request, []), request)
             if t is None or not t.plan:
                 return {"tool": None, "args": {}}
             first = t.plan[0]
@@ -90,59 +135,181 @@ class AgentTraces:
         def teacher(r: Any) -> Any:
             if isinstance(r, list):
                 return [teacher(x) for x in r]
-            t = table.get(str(r))
+            request = str(r)
+            t = self._unique_execution(table.get(request, []), request)
             return [dict(s) for s in t.plan] if t is not None else []
 
         return teacher
 
 
-def _text_of(message: dict) -> str:
-    return " ".join(b.get("text", "") for b in message.get("content", []) if b.get("type") == "text").strip()
+def _reject(
+    rejections: list[TraceRejection] | None,
+    *,
+    source: str,
+    location: str,
+    reason: str,
+) -> None:
+    rejection = TraceRejection(source=source, location=location, reason=reason)
+    if rejections is None:
+        raise TraceFormatError(f"{source}:{location}: {reason}")
+    rejections.append(rejection)
 
 
-def _tool_uses(message: dict) -> list[dict]:
-    return [
-        {"tool": str(b.get("name")), "args": {k: v for k, v in (b.get("input") or {}).items()}}
-        for b in message.get("content", [])
-        if b.get("type") == "tool_use" and b.get("name")
-    ]
+def _content_blocks(
+    message: Any,
+    *,
+    source: str,
+    message_index: int,
+    rejections: list[TraceRejection] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(message, dict):
+        _reject(rejections, source=source, location=f"messages[{message_index}]", reason="message must be an object")
+        return []
+    content = message.get("content", [])
+    if not isinstance(content, list):
+        _reject(
+            rejections,
+            source=source,
+            location=f"messages[{message_index}].content",
+            reason="content must be an array",
+        )
+        return []
+    valid: list[dict[str, Any]] = []
+    for block_index, block in enumerate(content):
+        if not isinstance(block, dict):
+            _reject(
+                rejections,
+                source=source,
+                location=f"messages[{message_index}].content[{block_index}]",
+                reason="content block must be an object",
+            )
+            continue
+        valid.append(block)
+    return valid
 
 
-def parse_conversation(doc: dict) -> list[AgentTrace]:
+def _text_of(
+    message: Any,
+    *,
+    source: str = "conversation",
+    message_index: int = 0,
+    rejections: list[TraceRejection] | None = None,
+) -> str:
+    parts: list[str] = []
+    for block_index, block in enumerate(
+        _content_blocks(message, source=source, message_index=message_index, rejections=rejections)
+    ):
+        if block.get("type") != "text":
+            continue
+        text = block.get("text")
+        if not isinstance(text, str):
+            _reject(
+                rejections,
+                source=source,
+                location=f"messages[{message_index}].content[{block_index}].text",
+                reason="text block value must be a string",
+            )
+            continue
+        parts.append(text)
+    return " ".join(parts).strip()
+
+
+def _tool_uses(
+    message: Any,
+    *,
+    source: str = "conversation",
+    message_index: int = 0,
+    rejections: list[TraceRejection] | None = None,
+) -> list[dict]:
+    uses: list[dict] = []
+    for block_index, block in enumerate(
+        _content_blocks(message, source=source, message_index=message_index, rejections=rejections)
+    ):
+        if block.get("type") != "tool_use":
+            continue
+        name = block.get("name")
+        raw_input = block.get("input", {})
+        location = f"messages[{message_index}].content[{block_index}]"
+        if not isinstance(name, str) or not name.isidentifier():
+            _reject(rejections, source=source, location=location, reason="tool_use name must be an identifier")
+            continue
+        if not isinstance(raw_input, dict):
+            _reject(rejections, source=source, location=location, reason="tool_use input must be an object")
+            continue
+        if any(not isinstance(key, str) or not key.isidentifier() for key in raw_input):
+            _reject(rejections, source=source, location=location, reason="tool_use argument keys must be identifiers")
+            continue
+        uses.append({"tool": name, "args": dict(raw_input)})
+    return uses
+
+
+def parse_conversation(
+    doc: dict,
+    *,
+    source_id: str = "",
+    rejections: list[TraceRejection] | None = None,
+) -> list[AgentTrace]:
     """Split one stored conversation into request-to-tool-plan traces."""
+    source = source_id or "conversation"
+    if not isinstance(doc, dict):
+        raise TraceFormatError(f"{source}: document must be an object")
     out: list[AgentTrace] = []
     convo_id = str(doc.get("id", ""))
-    messages = list(doc.get("messages", []))
+    raw_messages = doc.get("messages", [])
+    if not isinstance(raw_messages, list):
+        raise TraceFormatError(f"{source}: messages must be an array")
+    messages = list(raw_messages)
     i = 0
     while i < len(messages):
         m = messages[i]
-        if m.get("role") != "user" or not _text_of(m):
+        if not isinstance(m, dict):
+            _reject(rejections, source=source, location=f"messages[{i}]", reason="message must be an object")
             i += 1
             continue
-        request = _text_of(m)
+        request = _text_of(m, source=source, message_index=i, rejections=rejections)
+        if m.get("role") != "user" or not request:
+            i += 1
+            continue
         plan: list[dict] = []
         reply = ""
         j = i + 1
-        while j < len(messages) and messages[j].get("role") != "user":
-            if messages[j].get("role") == "assistant":
-                plan.extend(_tool_uses(messages[j]))
-                text = _text_of(messages[j])
+        while j < len(messages) and (
+            not isinstance(messages[j], dict) or messages[j].get("role") != "user"
+        ):
+            if isinstance(messages[j], dict) and messages[j].get("role") == "assistant":
+                plan.extend(
+                    _tool_uses(messages[j], source=source, message_index=j, rejections=rejections)
+                )
+                text = _text_of(messages[j], source=source, message_index=j, rejections=rejections)
                 if text:
                     reply = text
+            elif not isinstance(messages[j], dict):
+                _reject(rejections, source=source, location=f"messages[{j}]", reason="message must be an object")
             j += 1
-        out.append(AgentTrace(request=request, plan=plan, reply=reply, conversation_id=convo_id))
+        stable_source = source_id or convo_id or "conversation"
+        out.append(
+            AgentTrace(
+                request=request,
+                plan=plan,
+                reply=reply,
+                conversation_id=convo_id,
+                trace_id=f"{stable_source}:{i}",
+            )
+        )
         i = j
     return out
 
 
 def harvest_agent_traces(directory: str | Path | None = None) -> AgentTraces:
-    """Read every stored mixle-agent conversation and return the trace corpus (skips unreadable files)."""
+    """Read stored conversations, preserving traces and a ledger of rejected files/rows."""
     root = Path(directory) if directory is not None else _DEFAULT_DIR
     traces: list[AgentTrace] = []
+    rejections: list[TraceRejection] = []
     if root.is_dir():
         for p in sorted(root.glob("*.json")):
             try:
-                traces.extend(parse_conversation(json.loads(p.read_text())))
-            except (OSError, ValueError):
-                continue  # a corrupt file is skipped, never fatal
-    return AgentTraces(traces=traces)
+                document = json.loads(p.read_text())
+                traces.extend(parse_conversation(document, source_id=p.name, rejections=rejections))
+            except (OSError, ValueError) as exc:
+                rejections.append(TraceRejection(source=str(p), location="document", reason=str(exc)))
+    return AgentTraces(traces=traces, rejections=rejections)

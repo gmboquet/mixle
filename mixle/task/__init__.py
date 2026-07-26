@@ -137,7 +137,10 @@ from mixle.task.inverse import InverseModel, InverseReceipts, learn_inverse
 from mixle.task.irl import MaxEntIRLResult, max_ent_irl, rollout_states, state_features
 from mixle.task.llm import (
     CallableLLM,
+    LLMParseError,
+    LLMResponseError,
     OpenAICompatLLM,
+    extract_json_object,
     llm_extractor,
     llm_labeler,
     pick_label,
@@ -219,7 +222,16 @@ from mixle.task.task_decomposition import (
     record_decomposition_outcome,
 )
 from mixle.task.toolcall import ToolCaller, ToolSpec, distill_tool_caller
-from mixle.task.traces import AgentTrace, AgentTraces, harvest_agent_traces, parse_conversation
+from mixle.task.trace_record import TraceRecord, TraceStepRecord, from_execution_trace, validate_trace_record
+from mixle.task.traces import (
+    AgentTrace,
+    AgentTraces,
+    AmbiguousTraceError,
+    TraceFormatError,
+    TraceRejection,
+    harvest_agent_traces,
+    parse_conversation,
+)
 from mixle.task.tune import CalibratedTuneResult, RecipeSpace, TuneResult, tune_recipe, tune_recipe_for_routing
 from mixle.task.vlm import (
     CallableVLM,
@@ -234,6 +246,7 @@ __all__ = [
     "ActiveResult",
     "AgentTrace",
     "AgentTraces",
+    "AmbiguousTraceError",
     "CalibratedTaskModel",
     "CallableLLM",
     "CapabilitySuite",
@@ -306,6 +319,8 @@ __all__ = [
     "KNOWN_RUNGS",
     "LNSStructuredClassifierIO",
     "LadderResult",
+    "LLMParseError",
+    "LLMResponseError",
     "ModelRecommendation",
     "OpenAICompatLLM",
     "OpenAICompatVLM",
@@ -367,7 +382,11 @@ __all__ = [
     "StructuredClassifierIO",
     "TaskManifest",
     "TaskModel",
+    "TraceFormatError",
+    "TraceRecord",
+    "TraceRejection",
     "TraceStep",
+    "TraceStepRecord",
     "ToolCaller",
     "ToolSpec",
     "TextClassifierIO",
@@ -410,6 +429,8 @@ __all__ = [
     "distill_soft",
     "soft_agreement",
     "extraction_f1",
+    "extract_json_object",
+    "from_execution_trace",
     "harvest_agent_traces",
     "keyboard_typo_corruption",
     "parse_conversation",
@@ -444,6 +465,7 @@ __all__ = [
     "QLearningResult",
     "tabular_q_learning",
     "rollout",
+    "validate_trace_record",
     "MaxEntIRLResult",
     "max_ent_irl",
     "rollout_states",

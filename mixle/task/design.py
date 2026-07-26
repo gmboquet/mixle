@@ -19,6 +19,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from mixle.task.llm import extract_json_object
+
 # Allowlisted scalar families -> mixle estimator class name. No eval, no arbitrary import: a fixed map.
 _FAMILY = {
     "gaussian": "GaussianEstimator",
@@ -149,17 +151,7 @@ def design_model(
 
 def _extract_json(text: str) -> dict[str, Any]:
     """Pull the first JSON object out of an LLM reply (tolerates code fences / surrounding prose)."""
-    start, depth = None, 0
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if start is None:
-                start = i
-            depth += 1
-        elif ch == "}" and start is not None:
-            depth -= 1
-            if depth == 0:
-                return json.loads(text[start : i + 1])
-    raise ValueError("no JSON object found in LLM reply")
+    return extract_json_object(text)
 
 
 def _fit_validate(estimator: Any, data: Sequence[Any], rows: int) -> None:

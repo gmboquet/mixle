@@ -29,7 +29,7 @@ from typing import Any
 
 from mixle.task.extract import distill_extractor
 from mixle.task.solve import solve
-from mixle.task.toolcall import ToolSpec
+from mixle.task.toolcall import ToolSpec, _tool_spec_map, _validated_args, _validated_call
 
 _STOP = "__stop__"
 
@@ -67,13 +67,19 @@ class Planner:
             tool = self.selector.cascade.model.decide(ctx)
             if tool == _STOP:
                 return {"plan": steps, "results": results}
-            if tool is None or tool not in self.extractors:
+            if tool is None or tool not in self.tools:
                 return None  # unsure which step comes next
-            args = self.extractors[tool](ctx)
             spec = self.tools[tool]
-            if not all(args.get(a) for a in spec.required_args):
-                return None  # cannot fill the step's required arguments
-            step = {"tool": tool, "args": {k: v for k, v in args.items() if k in spec.args}}
+            if spec.args:
+                if tool not in self.extractors:
+                    return None
+                try:
+                    args = _validated_args(spec, self.extractors[tool](ctx))
+                except ValueError:
+                    return None
+            else:
+                args = {}
+            step = {"tool": tool, "args": args}
             if execute is not None:
                 try:
                     results.append(execute[tool](**step["args"]))
@@ -89,7 +95,7 @@ class Planner:
         if local is not None:
             return {**local, "escalate": False}
         self.n_escalated += 1
-        plan = self.teacher(request)
+        plan = [_validated_call(step, self.tools) for step in self.teacher(request)]
         self.harvested.append((request, plan))
         out: dict[str, Any] = {"plan": [dict(p) for p in plan], "escalate": True}
         if execute is not None:
@@ -141,7 +147,10 @@ class Planner:
         extractors = {
             name: TaskModel.load(str(p / "extractors" / name), device=device) for name in manifest["extractors"]
         }
-        tools = {n: ToolSpec(n, list(t["args"]), t.get("required")) for n, t in manifest["tools"].items()}
+        tools = _tool_spec_map(
+            [ToolSpec(n, list(t["args"]), t.get("required")) for n, t in manifest["tools"].items()],
+            reserved=(_STOP,),
+        )
         return cls(
             selector=selector,
             extractors=extractors,
@@ -171,7 +180,7 @@ def distill_planner(
     reqs = [str(r) for r in requests]
     if len(reqs) < 8:
         raise ValueError("distill_planner needs at least 8 example requests")
-    specs = {t.name: t for t in tools}
+    specs = _tool_spec_map(tools, reserved=(_STOP,))
 
     import numpy as np
 
@@ -181,11 +190,7 @@ def distill_planner(
     hold = [reqs[i] for i in order[:n_hold]]
     train = [reqs[i] for i in order[n_hold:]]
 
-    traces = {r: list(teacher(r)) for r in train}
-    for plan in traces.values():
-        for step in plan:
-            if step.get("tool") not in specs:
-                raise ValueError(f"teacher plan uses tool {step.get('tool')!r} not in the provided specs")
+    traces = {r: [_validated_call(step, specs) for step in teacher(r)] for r in train}
 
     # flatten traces into (context -> next tool) and (context -> args) supervision
     contexts: list[str] = []
