@@ -14,9 +14,12 @@ episode against the same ``world.step`` for a bit-identical-replay check.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
+
+import numpy as np
 
 from mixle.task.replay import ExecutionTrace, TraceStep
 
@@ -48,7 +51,7 @@ class OrchestrationResult:
 
     answer: Any
     trace: ExecutionTrace
-    stopped_reason: str  # "plan_stop" | "budget_exhausted" | "world_done" | "low_confidence" | "replan_failed"
+    stopped_reason: str
 
 
 def _is_stop(step: dict[str, Any] | None) -> bool:
@@ -72,6 +75,59 @@ def _tool_name(step: dict[str, Any]) -> str:
     )
 
 
+def _snapshot(world: World) -> Any:
+    snapshot = getattr(world, "snapshot", None)
+    if callable(snapshot):
+        return copy.deepcopy(snapshot())
+    return None
+
+
+def _validated_step(step: Any) -> dict[str, Any] | None:
+    if step is None:
+        return None
+    if not isinstance(step, dict):
+        raise ValueError("plan_model must return a step dictionary or None")
+    if _is_stop(step):
+        return None
+    _tool_name(step)
+    confidence = step.get("confidence", 1.0)
+    if not isinstance(confidence, (int, float)) or not np.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        raise ValueError("step confidence must be finite and in [0, 1]")
+    return copy.deepcopy(step)
+
+
+def _attempt(world: World, step: dict[str, Any]) -> tuple[TraceStep, bool, Any]:
+    before = _snapshot(world)
+    try:
+        observation = world.step(copy.deepcopy(step))
+    except Exception as exc:  # noqa: BLE001 - external world failures are returned as evidence
+        result = {"error": {"type": type(exc).__name__, "message": str(exc)}}
+        return (
+            TraceStep(
+                tool=_tool_name(step),
+                args=copy.deepcopy(step.get("args") or {}),
+                result=result,
+                action=copy.deepcopy(step),
+                state_before=before,
+                state_after=_snapshot(world),
+            ),
+            False,
+            exc,
+        )
+    return (
+        TraceStep(
+            tool=_tool_name(step),
+            args=copy.deepcopy(step.get("args") or {}),
+            result=observation,
+            action=copy.deepcopy(step),
+            state_before=before,
+            state_after=_snapshot(world),
+        ),
+        True,
+        observation,
+    )
+
+
 def orchestrate(
     question: str,
     plan_model: Callable[[str, list[dict[str, Any]]], dict[str, Any] | None],
@@ -82,50 +138,65 @@ def orchestrate(
 ) -> OrchestrationResult:
     """Plan one step at a time against ``plan_model``, execute it on ``world``, re-plan once on a
     failed step, and stop on an explicit STOP, low confidence, world completion, or budget exhaustion."""
-    trace = ExecutionTrace(request=question)
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget < 0:
+        raise ValueError("budget must be a nonnegative integer")
+    if confidence_threshold is not None and (
+        not np.isfinite(confidence_threshold) or not 0.0 <= confidence_threshold <= 1.0
+    ):
+        raise ValueError("confidence_threshold must be finite and in [0, 1]")
+    if not callable(plan_model):
+        raise TypeError("plan_model must be callable")
+
+    trace = ExecutionTrace(request=str(question))
     history: list[dict[str, Any]] = []
     stopped_reason = "budget_exhausted"
+    attempts = 0
 
-    for _ in range(int(budget)):
+    while attempts < budget:
         if world.done:
             stopped_reason = "world_done"
             break
 
-        step = plan_model(question, history)
-        if _is_stop(step):
+        raw_step = plan_model(question, history)
+        step = _validated_step(raw_step)
+        if step is None:
             stopped_reason = "plan_stop"
             break
         if confidence_threshold is not None and float(step.get("confidence", 1.0)) < confidence_threshold:
             stopped_reason = "low_confidence"
             break
 
-        try:
-            observation = world.step(step)
-        except Exception as exc:  # noqa: BLE001
-            # atypical/failed step: record the failure, then give the plan model one chance to re-plan
-            # around it before giving up -- the trace shows what actually happened, not just the outcome
-            trace.steps.append(TraceStep(tool=_tool_name(step), args=step.get("args", {}), result={"error": str(exc)}))
-            retry_history = [*history, {**step, "error": str(exc)}]
-            retry_step = plan_model(question, retry_history)
-            if _is_stop(retry_step):
+        attempts += 1  # reserve the action budget before entering user-controlled code
+        trace_step, succeeded, outcome = _attempt(world, step)
+        trace.steps.append(trace_step)
+        if not succeeded:
+            if not bool(getattr(world, "failure_atomic", False)):
+                stopped_reason = "partial_failure"
+                break
+            if attempts >= budget:
+                stopped_reason = "budget_exhausted"
+                break
+            retry_history = [
+                *history,
+                {**step, "error": trace_step.result["error"], "attempt": attempts},
+            ]
+            retry_step = _validated_step(plan_model(question, retry_history))
+            if retry_step is None:
                 stopped_reason = "replan_failed"
                 break
-            try:
-                observation = world.step(retry_step)
-            except Exception as retry_exc:  # noqa: BLE001
-                trace.steps.append(
-                    TraceStep(
-                        tool=_tool_name(retry_step), args=retry_step.get("args", {}), result={"error": str(retry_exc)}
-                    )
-                )
+            if confidence_threshold is not None and float(retry_step.get("confidence", 1.0)) < confidence_threshold:
+                stopped_reason = "low_confidence"
+                break
+            attempts += 1
+            retry_trace, retry_succeeded, retry_outcome = _attempt(world, retry_step)
+            trace.steps.append(retry_trace)
+            if not retry_succeeded:
                 stopped_reason = "replan_failed"
                 break
             step = retry_step
+            outcome = retry_outcome
 
-        trace.steps.append(TraceStep(tool=_tool_name(step), args=step.get("args", {}), result=observation))
-        history.append({**step, "result": observation})
-    else:
-        stopped_reason = "budget_exhausted"
+        history.append({**step, "result": outcome, "attempt": attempts})
 
     answer = world.score()
     return OrchestrationResult(answer=answer, trace=trace, stopped_reason=stopped_reason)
