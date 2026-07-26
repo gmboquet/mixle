@@ -10,7 +10,7 @@ multi-task coverage, cross-modal coverage, and cost.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -66,7 +66,7 @@ def distillation_design(
     or ``(N, T)``; the latter is averaged across the task tags present on each candidate. Higher
     uncertainty/preference and better coverage increase merit; higher ``cost`` lowers it.
     """
-    if int(n) <= 0:
+    if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n <= 0:
         raise ValueError("n must be positive.")
     x = _as_2d_features(features, "features")
     n_pool = x.shape[0]
@@ -135,6 +135,8 @@ def distillation_design(
             "task_targets": _count_map(task_names, task_target),
             "modality_targets": _count_map(mod_names, mod_target),
             "eligible": int(eligible_mask.sum()),
+            "feature_missing_policy": "reject_nonfinite",
+            "incidence_policy": "finite_binary",
             "weights": {
                 "uncertainty": float(uncertainty_weight),
                 "diversity": float(diversity_weight),
@@ -177,7 +179,14 @@ def cross_modal_distillation_design(
     if not modality_features:
         raise ValueError("modality_features must contain at least one modality.")
     names = list(modality_features)
-    arrays = [_as_2d_features(modality_features[name], f"modality_features[{name!r}]") for name in names]
+    arrays = [
+        _as_2d_features(
+            modality_features[name],
+            f"modality_features[{name!r}]",
+            allow_nonfinite=True,
+        )
+        for name in names
+    ]
     n_pool = arrays[0].shape[0]
     if any(arr.shape[0] != n_pool for arr in arrays):
         raise ValueError("all modality feature matrices must have the same number of rows.")
@@ -210,7 +219,7 @@ def cross_modal_distillation_design(
     combined_unc = _unit_scale(base_unc) + float(alignment_weight) * _unit_scale(alignment)
     combined_pref = _unit_scale(_as_score(preference, n_pool, default=0.0, name="preference"))
 
-    return distillation_design(
+    design = distillation_design(
         fused,
         n,
         task_labels=task_labels,
@@ -222,14 +231,23 @@ def cross_modal_distillation_design(
         seed=seed,
         **kwargs,
     )
+    return replace(
+        design,
+        metadata={
+            **design.metadata,
+            "source_feature_missing_policy": "row_missing_if_any_coordinate_nonfinite",
+        },
+    )
 
 
-def _as_2d_features(value: Any, name: str) -> np.ndarray:
+def _as_2d_features(value: Any, name: str, *, allow_nonfinite: bool = False) -> np.ndarray:
     arr = np.asarray(value, dtype=np.float64)
     if arr.ndim == 1:
         arr = arr.reshape(-1, 1)
     if arr.ndim != 2:
         raise ValueError(f"{name} must be a 1-D or 2-D numeric array.")
+    if not allow_nonfinite and np.any(~np.isfinite(arr)):
+        raise ValueError(f"{name} entries must be finite.")
     return arr
 
 
@@ -241,10 +259,14 @@ def _eligible_mask(eligible: Any | None, n: int) -> np.ndarray:
         if arr.shape != (n,):
             raise ValueError("eligible mask length must match features.")
         return arr.astype(bool, copy=True)
-    mask = np.zeros(n, dtype=bool)
-    idx = np.asarray(arr, dtype=int).ravel()
+    if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer) or np.issubdtype(arr.dtype, np.bool_):
+        raise ValueError("eligible must be a Boolean mask or a one-dimensional array of exact integer indices.")
+    idx = np.asarray(arr, dtype=np.int64)
     if np.any((idx < 0) | (idx >= n)):
         raise ValueError("eligible indices are out of range.")
+    if len(np.unique(idx)) != len(idx):
+        raise ValueError("eligible indices must be unique.")
+    mask = np.zeros(n, dtype=bool)
     mask[idx] = True
     return mask
 
@@ -257,9 +279,12 @@ def _incidence(labels: Any | None, n: int, name: str) -> tuple[np.ndarray, list[
     except ValueError:
         numeric = np.asarray([], dtype=object)
     if numeric.ndim == 2 and (np.issubdtype(numeric.dtype, np.number) or np.issubdtype(numeric.dtype, np.bool_)):
-        inc = np.asarray(numeric, dtype=np.float64) > 0.0
-        if inc.shape[0] != n:
+        values = np.asarray(numeric, dtype=np.float64)
+        if values.shape[0] != n:
             raise ValueError(f"{name} row count must match features.")
+        if np.any(~np.isfinite(values)) or np.any((values != 0.0) & (values != 1.0)):
+            raise ValueError(f"{name} numeric incidence entries must be finite and exactly zero or one.")
+        inc = values > 0.0
         return inc.astype(np.float64), list(range(inc.shape[1]))
     arr = np.asarray(labels, dtype=object)
     if len(labels) != n:  # type: ignore[arg-type]
@@ -357,26 +382,11 @@ def _standardized_feature_space(x: np.ndarray, reference_features: Any | None) -
         if ref.shape[1] != x.shape[1]:
             raise ValueError("reference_features must have the same number of columns as features.")
     both = np.vstack([x, ref])
-    both = _fill_nonfinite_with_column_mean(both)
     mean = both.mean(axis=0, keepdims=True)
     scale = both.std(axis=0, keepdims=True)
     scale[scale <= 1e-12] = 1.0
     z = (both - mean) / scale
     return z[: x.shape[0]], z[x.shape[0] :]
-
-
-def _fill_nonfinite_with_column_mean(x: np.ndarray) -> np.ndarray:
-    arr = np.asarray(x, dtype=np.float64).copy()
-    finite = np.isfinite(arr)
-    counts = finite.sum(axis=0)
-    sums = np.where(finite, arr, 0.0).sum(axis=0)
-    means = np.divide(sums, np.maximum(counts, 1), out=np.zeros(arr.shape[1], dtype=np.float64), where=counts > 0)
-    bad = ~finite
-    if np.any(bad):
-        arr[bad] = means[np.nonzero(bad)[1]]
-    return arr
-
-
 def _standardize_with_missing(x: np.ndarray, present: np.ndarray) -> np.ndarray:
     arr = np.asarray(x, dtype=np.float64).copy()
     if np.any(present):
