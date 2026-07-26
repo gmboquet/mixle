@@ -18,6 +18,7 @@ event catalogues -- earthquakes, blooms, drilling -- have strong calendar/season
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Sequence
 from typing import Any
 
@@ -59,7 +60,10 @@ def to_unix_seconds(x: Any) -> np.ndarray:
     arr = np.asarray(x)
     if arr.dtype == object or np.issubdtype(arr.dtype, np.str_) or np.issubdtype(arr.dtype, np.datetime64):
         sec = np.asarray(x, dtype="datetime64[ns]").astype("datetime64[ns]")
-        return np.atleast_1d(sec.astype("int64").astype(float) / 1e9)
+        missing = np.isnat(sec)
+        result = np.atleast_1d(sec.astype("int64").astype(float) / 1e9)
+        result[missing.reshape(result.shape)] = np.nan
+        return result
     if np.issubdtype(arr.dtype, np.number):
         return np.atleast_1d(arr.astype(float))
     sec = np.asarray(x, dtype="datetime64[ns]")
@@ -70,8 +74,35 @@ def _period_seconds(period: float | str) -> float:
     if isinstance(period, str):
         if period not in PERIODS:
             raise ValueError(f"unknown period {period!r}; use one of {list(PERIODS)} or seconds.")
-        return PERIODS[period]
-    return float(period)
+        result = PERIODS[period]
+    else:
+        if isinstance(period, (bool, np.bool_)):
+            raise TypeError("period must be a named cycle or real seconds")
+        try:
+            result = float(period)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                "period must be a named cycle or real seconds"
+            ) from exc
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError("period must be finite and strictly positive")
+    return result
+
+
+def _exact_integer(value: Any, *, label: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{label} must be an exact integer")
+    try:
+        return operator.index(value)
+    except TypeError as exc:
+        raise TypeError(f"{label} must be an exact integer") from exc
+
+
+def _finite_times(value: Any, *, label: str) -> np.ndarray:
+    times = to_unix_seconds(value)
+    if times.ndim != 1 or np.any(~np.isfinite(times)):
+        raise ValueError(f"{label} must be a finite one-dimensional sequence")
+    return times
 
 
 def cyclic_phase(times: Any, period: float | str) -> np.ndarray:
@@ -81,10 +112,15 @@ def cyclic_phase(times: Any, period: float | str) -> np.ndarray:
 
 
 class PeriodicTimeDistribution(SequenceEncodableProbabilityDistribution):
-    """A distribution over raw timestamps whose recurring-cycle *phase* is von Mises.
+    """A distribution over timestamp equivalence classes modulo one cycle.
 
-    The cycle phase ``phi = 2*pi*(t mod P)/P`` is distributed von Mises around a peak; this is a proper
-    density over *time* within one period (a constant Jacobian ``log(2*pi/P)`` makes it integrate to 1).
+    The random variable is the quotient ``R / P Z``: timestamps separated by
+    whole cycles are the same outcome. The canonical representative sampled by
+    this class lies in ``[0, P)``. The cycle phase
+    ``phi = 2*pi*(t mod P)/P`` is distributed von Mises around a peak; this is
+    a proper density over the quotient/canonical period (a constant Jacobian
+    ``log(2*pi/P)`` makes it integrate to 1). It is deliberately not a joint
+    probability law over an unbounded absolute timestamp.
     It follows the mixle Distribution / Sampler / Estimator / Accumulator / DataEncoder contract by
     delegating the circular density to :class:`~mixle.stats.directional.von_mises.VonMisesDistribution`, so
     recurring time-of-day / day-of-week / seasonal patterns compose with the rest of the library.
@@ -120,7 +156,15 @@ class PeriodicTimeDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, t: Any) -> float:
         """Log-density at one timestamp (the von Mises phase density plus the time Jacobian)."""
-        return float(self.von_mises.log_density(float(cyclic_phase(t, self.period)[0])) + self._jac)
+        seconds = to_unix_seconds(t)
+        if seconds.size != 1 or np.any(~np.isfinite(seconds)):
+            return -np.inf
+        return float(
+            self.von_mises.log_density(
+                float(cyclic_phase(seconds, self.period)[0])
+            )
+            + self._jac
+        )
 
     def seq_log_density(self, x) -> np.ndarray:
         """Return vectorized log-densities for phase-encoded timestamps."""
@@ -136,6 +180,21 @@ class PeriodicTimeDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> PeriodicTimeEstimator:
         """Return an estimator for the recurring timestamp phase."""
+        if pseudo_count is not None:
+            if (
+                isinstance(pseudo_count, (bool, np.bool_))
+                or np.ndim(pseudo_count) != 0
+                or not np.isfinite(pseudo_count)
+                or float(pseudo_count) < 0.0
+            ):
+                raise ValueError(
+                    "PeriodicTime pseudo-count must be finite and non-negative"
+                )
+            if float(pseudo_count) != 0.0:
+                raise NotImplementedError(
+                    "PeriodicTime does not define an implicit pseudo-count "
+                    "prior; use an explicit directional prior instead"
+                )
         return PeriodicTimeEstimator(self.period, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> PeriodicTimeDataEncoder:
@@ -162,6 +221,7 @@ class PeriodicTimeDataEncoder(DataSequenceEncoder):
 
     def __init__(self, period, von_mises_encoder):
         self.period = period
+        self.period_s = _period_seconds(period)
         self.von_mises_encoder = von_mises_encoder
 
     def __str__(self) -> str:
@@ -176,7 +236,14 @@ class PeriodicTimeDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x):
         """Encode raw timestamps as von Mises phase observations."""
-        return self.von_mises_encoder.seq_encode(cyclic_phase(x, self.period))
+        times = _finite_times(x, label="PeriodicTime observations")
+        return self.von_mises_encoder.seq_encode(
+            cyclic_phase(times, self.period)
+        )
+
+    def row_count(self, x: Any) -> int:
+        """Return the delegated encoded observation count."""
+        return int(self.von_mises_encoder.row_count(x))
 
 
 class PeriodicTimeEstimator(ParameterEstimator):
@@ -184,6 +251,7 @@ class PeriodicTimeEstimator(ParameterEstimator):
 
     def __init__(self, period: float | str = "day", name=None, keys=None):
         self.period = period
+        self.period_s = _period_seconds(period)
         self.von_mises_estimator = VonMisesEstimator()
         self.name = name
         self.keys = keys
@@ -212,18 +280,35 @@ class PeriodicTimeAccumulator(SequenceEncodableStatisticAccumulator):
 
     def __init__(self, period, von_mises_acc, keys=None):
         self.period = period
+        self.period_s = _period_seconds(period)
         self.von_mises_acc = von_mises_acc
         self.keys = keys
 
     def update(self, t, weight, estimate):
         """Update delegated von Mises statistics from one raw timestamp."""
+        seconds = _finite_times(t, label="PeriodicTime observation")
+        if seconds.size != 1:
+            raise ValueError(
+                "PeriodicTime update requires exactly one timestamp"
+            )
         self.von_mises_acc.update(
-            float(cyclic_phase(t, self.period)[0]), weight, None if estimate is None else estimate.von_mises
+            float(cyclic_phase(seconds, self.period)[0]),
+            weight,
+            None if estimate is None else estimate.von_mises,
         )
 
     def initialize(self, t, weight, rng):
         """Initialize delegated von Mises statistics from one raw timestamp."""
-        self.von_mises_acc.initialize(float(cyclic_phase(t, self.period)[0]), weight, rng)
+        seconds = _finite_times(t, label="PeriodicTime observation")
+        if seconds.size != 1:
+            raise ValueError(
+                "PeriodicTime initialize requires exactly one timestamp"
+            )
+        self.von_mises_acc.initialize(
+            float(cyclic_phase(seconds, self.period)[0]),
+            weight,
+            rng,
+        )
 
     def seq_update(self, x, weights, estimate):
         """Update delegated von Mises statistics from phase-encoded timestamps."""
@@ -285,9 +370,32 @@ class SeasonalTimeSeries:
     """
 
     def __init__(self, periods: Sequence[float | str] = ("year",), harmonics: int = 3, trend: bool = True):
-        self.periods = [_period_seconds(p) for p in periods]
+        if isinstance(periods, (str, bytes)) or not isinstance(
+            periods,
+            Sequence,
+        ):
+            raise TypeError("SeasonalTimeSeries periods must be a sequence")
         self.period_names = list(periods)
-        self.harmonics = int(harmonics)
+        self.periods = [_period_seconds(p) for p in self.period_names]
+        display_names = [str(period) for period in self.period_names]
+        if len(set(display_names)) != len(display_names):
+            raise ValueError(
+                "SeasonalTimeSeries period identifiers must be unique"
+            )
+        if len(set(self.periods)) != len(self.periods):
+            raise ValueError(
+                "SeasonalTimeSeries cycle lengths must be unique"
+            )
+        self.harmonics = _exact_integer(
+            harmonics,
+            label="SeasonalTimeSeries harmonics",
+        )
+        if self.harmonics <= 0:
+            raise ValueError(
+                "SeasonalTimeSeries harmonics must be strictly positive"
+            )
+        if not isinstance(trend, (bool, np.bool_)):
+            raise TypeError("SeasonalTimeSeries trend must be Boolean")
         self.trend = bool(trend)
 
     def _design(self, secs: np.ndarray) -> np.ndarray:
@@ -304,27 +412,72 @@ class SeasonalTimeSeries:
 
     def fit(self, times: Any, values: Any) -> SeasonalTimeSeries:
         """Fit trend, seasonal coefficients, noise variance, and predictive covariance terms."""
-        secs = to_unix_seconds(times)
-        y = np.asarray(values, dtype=float).ravel()
+        secs = _finite_times(times, label="SeasonalTimeSeries times")
+        try:
+            y = np.asarray(values, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "SeasonalTimeSeries values must be numeric"
+            ) from exc
+        if y.ndim != 1:
+            raise ValueError(
+                "SeasonalTimeSeries values must be one-dimensional"
+            )
+        if secs.size == 0:
+            raise ValueError("SeasonalTimeSeries fitting data cannot be empty")
+        if y.shape != secs.shape:
+            raise ValueError(
+                "SeasonalTimeSeries times and values must align exactly"
+            )
+        if np.any(~np.isfinite(y)):
+            raise ValueError(
+                "SeasonalTimeSeries values must be finite"
+            )
         order = np.argsort(secs)
         secs, y = secs[order], y[order]
         self._t0 = secs[0]
         x = self._design(secs)
+        if len(y) <= x.shape[1]:
+            raise ValueError(
+                "SeasonalTimeSeries needs more observations than design "
+                "coefficients to identify residual variance"
+            )
+        rank = int(np.linalg.matrix_rank(x))
+        if rank != x.shape[1]:
+            raise ValueError(
+                "SeasonalTimeSeries design is rank-deficient; add distinct "
+                "times or reduce periods/harmonics/trend"
+            )
         beta, *_ = np.linalg.lstsq(x, y, rcond=None)
         resid = y - x @ beta
-        dof = max(len(y) - x.shape[1], 1)
+        dof = len(y) - x.shape[1]
+        rss = float(np.sum(resid**2))
+        scale = max(1.0, float(y @ y))
+        if not np.isfinite(rss) or rss <= np.finfo(np.float64).eps * scale:
+            raise ValueError(
+                "SeasonalTimeSeries residual variance is zero or "
+                "numerically unidentified"
+            )
         self.beta = beta
-        self.sigma = float(np.sqrt(np.sum(resid**2) / dof))
-        self._xtx_inv = np.linalg.pinv(x.T @ x)
+        self.sigma = float(np.sqrt(rss / dof))
+        self._xtx_inv = np.linalg.inv(x.T @ x)
         return self
 
     def mean(self, times: Any) -> np.ndarray:
         """The conditional expectation ``E[value | time]`` -- the fitted trend + seasonality."""
-        return self._design(to_unix_seconds(times)) @ self.beta
+        if not hasattr(self, "beta"):
+            raise RuntimeError("SeasonalTimeSeries must be fitted before use")
+        return self._design(
+            _finite_times(times, label="SeasonalTimeSeries query times")
+        ) @ self.beta
 
     def _predictive_var(self, times: Any) -> np.ndarray:
         """Posterior-predictive variance at ``times`` (observation noise + parameter uncertainty)."""
-        x = self._design(to_unix_seconds(times))
+        if not hasattr(self, "beta"):
+            raise RuntimeError("SeasonalTimeSeries must be fitted before use")
+        x = self._design(
+            _finite_times(times, label="SeasonalTimeSeries query times")
+        )
         return self.sigma**2 * (1.0 + np.einsum("ij,jk,ik->i", x, self._xtx_inv, x))
 
     def conditional(self, time: Any):
@@ -341,7 +494,18 @@ class SeasonalTimeSeries:
     def log_density(self, times: Any, values: Any) -> np.ndarray | float:
         """Conditional log-density of ``(time, value)`` observations under the model."""
         m, v = self.mean(times), self._predictive_var(times)
-        y = np.asarray(values, dtype=float).ravel()
+        try:
+            y = np.asarray(values, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "SeasonalTimeSeries values must be numeric"
+            ) from exc
+        if y.ndim == 0:
+            y = y.reshape(1)
+        if y.ndim != 1 or y.shape != m.shape or np.any(~np.isfinite(y)):
+            raise ValueError(
+                "SeasonalTimeSeries values must be finite and align with times"
+            )
         ld = -0.5 * ((y - m) ** 2 / v + np.log(2.0 * np.pi * v))
         return float(ld[0]) if np.ndim(values) == 0 else ld
 
@@ -351,9 +515,17 @@ class SeasonalTimeSeries:
 
     def decompose(self, times: Any) -> dict[str, np.ndarray]:
         """Split the prediction into ``trend`` and one component per period (the seasonal contributions)."""
-        secs = to_unix_seconds(times)
+        if not hasattr(self, "beta"):
+            raise RuntimeError("SeasonalTimeSeries must be fitted before use")
+        secs = _finite_times(times, label="SeasonalTimeSeries query times")
         t_days = (secs - self._t0) / 86400.0
-        out = {"trend": self.beta[0] + (self.beta[1] * t_days if self.trend else 0.0)}
+        out = {
+            "trend": (
+                self.beta[0] + self.beta[1] * t_days
+                if self.trend
+                else np.full_like(t_days, self.beta[0], dtype=float)
+            )
+        }
         j = 2 if self.trend else 1
         for name, p in zip(self.period_names, self.periods):
             part = np.zeros_like(secs, dtype=float)
@@ -362,6 +534,16 @@ class SeasonalTimeSeries:
                 part = part + self.beta[j] * np.sin(w) + self.beta[j + 1] * np.cos(w)
                 j += 2
             out[str(name)] = part
+        reconstructed = np.sum(np.stack(list(out.values())), axis=0)
+        if not np.allclose(
+            reconstructed,
+            self._design(secs) @ self.beta,
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        ):
+            raise RuntimeError(
+                "SeasonalTimeSeries decomposition failed to reconstruct mean"
+            )
         return out
 
 
