@@ -14,10 +14,14 @@ import unittest
 
 import numpy as np
 
+from mixle.inference import estimate
 from mixle.stats import (
+    CompositeDistribution,
+    CompositeEstimator,
     ExponentialDistribution,
     GammaDistribution,
     GaussianDistribution,
+    GaussianEstimator,
     GeometricDistribution,
     MixtureDistribution,
     SkellamDistribution,
@@ -125,6 +129,25 @@ class KeyedPoolingProtocolTest(unittest.TestCase):
         # tuple keys stay legal exactly where they are declared: combinator estimators
         good = MixtureEstimator([GaussianEstimator(keys="s"), GaussianEstimator(keys="s")], keys=("w", "c"))
         validate_estimator_keys(good)
+
+    def test_scalar_estimate_applies_key_pooling_once(self):
+        previous = CompositeDistribution(
+            (
+                GaussianDistribution(0.0, 1.0),
+                GaussianDistribution(0.0, 1.0),
+            )
+        )
+        estimator = CompositeEstimator(
+            (
+                GaussianEstimator(keys="shared"),
+                GaussianEstimator(keys="shared"),
+            )
+        )
+        fitted = estimate([(0.0, 10.0), (2.0, 12.0)], estimator, previous)
+
+        for child in fitted.dists:
+            self.assertAlmostEqual(child.mu, 6.0)
+            self.assertAlmostEqual(child.sigma2, 26.0)
 
     def test_tied_gaussian_mixture_reaches_the_analytic_pooled_fixed_point(self):
         from mixle.stats.compute.sequence import seq_estimate
