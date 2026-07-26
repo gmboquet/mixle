@@ -140,6 +140,67 @@ class BitwiseLoaderStateTest(unittest.TestCase):
             self.assertEqual(loader_state, expected)
 
 
+class ElasticInputAndDeadlineTest(unittest.TestCase):
+    def test_loader_and_world_coordinates_are_validated_eagerly(self):
+        invalid_states = (
+            {"seed": -1, "epoch": 0, "rank": 0, "world_size": 1},
+            {"seed": 0, "epoch": -1, "rank": 0, "world_size": 1},
+            {"seed": 0, "epoch": 0, "rank": 1, "world_size": 1},
+            {"seed": 0, "epoch": 0, "rank": 0, "world_size": 0},
+            {"seed": 0, "epoch": 0, "rank": 0, "world_size": 1, "batch_idx": -1},
+        )
+        for coordinates in invalid_states:
+            with self.subTest(coordinates=coordinates), self.assertRaises(ValueError):
+                LoaderState(**coordinates)
+        with self.assertRaises(TypeError):
+            LoaderState(seed=0, epoch=0, rank=0.5, world_size=1)
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ValueError):
+                ElasticTrainingJob(_tiny_model, world_size=0, batch_fn_for_rank=_batch_fn, checkpoint_dir=d)
+            with self.assertRaises(TypeError):
+                ElasticTrainingJob(_tiny_model, world_size=1.5, batch_fn_for_rank=_batch_fn, checkpoint_dir=d)
+            with self.assertRaises(ValueError):
+                ElasticTrainingJob(
+                    _tiny_model,
+                    world_size=1,
+                    batch_fn_for_rank=_batch_fn,
+                    checkpoint_dir=d,
+                    step_timeout_s=float("nan"),
+                )
+
+    def test_one_deadline_cancels_a_slow_rank_without_losing_ready_ranks(self):
+        def _slow_first_rank(rank: int, state: LoaderState):
+            if rank == 0:
+                time.sleep(0.4)
+            return _batch_fn(rank, state)
+
+        with tempfile.TemporaryDirectory() as d:
+            job = ElasticTrainingJob(
+                _tiny_model,
+                world_size=2,
+                batch_fn_for_rank=_slow_first_rank,
+                checkpoint_dir=d,
+                step_timeout_s=0.2,
+            )
+            started = time.monotonic()
+            record = job.run_step(0)
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 0.35)
+            self.assertEqual(record["survivors"], [1])
+            self.assertEqual(record["newly_dead"], [0])
+            self.assertIn(0, job.dead_ranks)
+            time.sleep(0.25)
+            self.assertIsNone(job.ranks[0]._result)
+
+    def test_invalid_kill_rank_is_rejected_without_mutating_dead_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = ElasticTrainingJob(_tiny_model, world_size=2, batch_fn_for_rank=_batch_fn, checkpoint_dir=d)
+            with self.assertRaisesRegex(ValueError, "out-of-world"):
+                job.run_step(0, kill_ranks=frozenset({2}))
+            self.assertEqual(job.dead_ranks, set())
+
+
 class ResumeContinuityBothDirectionsTest(unittest.TestCase):
     """F4's continuity check, wired into the real resume path: PASSES for a correctly-implemented resume
     (model + optimizer state genuinely restored) and FAILS for a deliberately broken one (state silently
@@ -396,7 +457,7 @@ class ElasticTrainingJobSingleDriverTest(unittest.TestCase):
             job.run_step(0)
             handle = job.checkpoint()
             handle.wait(timeout=10)
-            job.run_step(1)
+            job.run_step(1, kill_ranks=frozenset({0}))
             restored = job.respawn_rank(0)
             self.assertIsInstance(restored, LoaderState)
 
@@ -423,6 +484,7 @@ class ElasticTrainingJobSingleDriverTest(unittest.TestCase):
 
             handle = job.checkpoint()
             self.assertFalse(handle.done)  # the write is still in flight when respawn_rank() is called
+            job.run_step(1, kill_ranks=frozenset({0}))
             restored = job.respawn_rank(0)  # no manual .wait() here -- this call must do it internally
 
             self.assertTrue(handle.done)

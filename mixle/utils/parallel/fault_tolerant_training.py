@@ -48,6 +48,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -81,6 +82,15 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+def _require_int(value: Any, name: str, *, minimum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer, got {value!r}")
+    result = int(value)
+    if minimum is not None and result < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {result}")
+    return result
+
+
 @dataclass(frozen=True)
 class LoaderState:
     """Resumability state of one rank's data loader: enough to reproduce its exact next batch after a
@@ -100,21 +110,36 @@ class LoaderState:
     world_size: int
     batch_idx: int = 0
 
+    def __post_init__(self) -> None:
+        seed = _require_int(self.seed, "seed", minimum=0)
+        epoch = _require_int(self.epoch, "epoch", minimum=0)
+        world_size = _require_int(self.world_size, "world_size", minimum=1)
+        rank = _require_int(self.rank, "rank", minimum=0)
+        batch_idx = _require_int(self.batch_idx, "batch_idx", minimum=0)
+        if rank >= world_size:
+            raise ValueError(f"rank must satisfy 0 <= rank < world_size, got rank={rank} world_size={world_size}")
+        object.__setattr__(self, "seed", seed)
+        object.__setattr__(self, "epoch", epoch)
+        object.__setattr__(self, "rank", rank)
+        object.__setattr__(self, "world_size", world_size)
+        object.__setattr__(self, "batch_idx", batch_idx)
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> LoaderState:
         return cls(
-            seed=int(d["seed"]),
-            epoch=int(d["epoch"]),
-            rank=int(d["rank"]),
-            world_size=int(d["world_size"]),
-            batch_idx=int(d["batch_idx"]),
+            seed=d["seed"],
+            epoch=d["epoch"],
+            rank=d["rank"],
+            world_size=d["world_size"],
+            batch_idx=d["batch_idx"],
         )
 
     def advanced(self, n: int = 1) -> LoaderState:
         """The state after ``n`` more batches have been consumed this epoch."""
+        n = _require_int(n, "n", minimum=0)
         return LoaderState(self.seed, self.epoch, self.rank, self.world_size, self.batch_idx + n)
 
 
@@ -147,6 +172,9 @@ def synthetic_batch_for_state(
     different ``batch_idx`` never collide. This is what makes "does the resumed loader produce the same
     next batch as the uninterrupted run would have" a directly testable, bitwise claim.
     """
+    vocab = _require_int(vocab, "vocab", minimum=1)
+    block = _require_int(block, "block", minimum=1)
+    batch_size = _require_int(batch_size, "batch_size", minimum=1)
     seed = int(
         np.random.SeedSequence([state.seed, state.epoch, state.rank, state.world_size, state.batch_idx]).generate_state(
             1
@@ -292,7 +320,7 @@ class SimulatedRank:
     """
 
     def __init__(self, rank_id: int, model_factory: Callable[[], Any], batch_fn: Callable[[], tuple[Any, Any]]):
-        self.rank_id = rank_id
+        self.rank_id = _require_int(rank_id, "rank_id", minimum=0)
         self.model_factory = model_factory
         self.batch_fn = batch_fn
         self._started = threading.Event()
@@ -301,11 +329,20 @@ class SimulatedRank:
         self._result: StepResult | None = None
         self._error: BaseException | None = None
         self._thread: threading.Thread | None = None
+        self._cancel = threading.Event()
 
     def start_step(self, step: int, canonical_state_dict: dict[str, Any]) -> None:
-        self._started.clear()
-        self._go.clear()
-        self._done.clear()
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError(f"rank {self.rank_id} still has a step in flight")
+        step = _require_int(step, "step", minimum=0)
+        started = threading.Event()
+        go = threading.Event()
+        done = threading.Event()
+        cancel = threading.Event()
+        self._started = started
+        self._go = go
+        self._done = done
+        self._cancel = cancel
         self._result = None
         self._error = None
 
@@ -314,6 +351,12 @@ class SimulatedRank:
                 local_model = self.model_factory()
                 local_model.load_state_dict(canonical_state_dict)
                 x, y = self.batch_fn()
+                if not torch.is_tensor(x) or not torch.is_tensor(y):
+                    raise TypeError("batch_fn must return two tensors")
+                if x.ndim < 1 or y.ndim < 1 or x.shape[0] <= 0 or x.shape[0] != y.shape[0]:
+                    raise ValueError(
+                        f"batch_fn returned incompatible batch dimensions x={tuple(x.shape)} y={tuple(y.shape)}"
+                    )
                 local_model.zero_grad(set_to_none=True)
                 logits = local_model(x)
                 loss = torch.nn.functional.cross_entropy(logits, y)
@@ -323,15 +366,18 @@ class SimulatedRank:
                     (p.grad.detach().clone() if p.grad is not None else torch.zeros_like(p))
                     for p in local_model.parameters()
                 ]
-                self._started.set()
-                if not self._go.wait(timeout=5.0):
-                    return  # never released -> simulated crash: exit with no result
+                if cancel.is_set():
+                    return
+                started.set()
+                go.wait()
+                if cancel.is_set():
+                    return
                 self._result = StepResult(self.rank_id, step, float(loss.item()), float(grad_norm.item()), grads)
             except BaseException as e:  # noqa: BLE001 - surface on the driver, mirroring resilient_em's worker path
                 self._error = e
-                self._started.set()
+                started.set()
             finally:
-                self._done.set()
+                done.set()
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
@@ -343,8 +389,14 @@ class SimulatedRank:
         """Wave this rank through the rendezvous -- it survives this step."""
         self._go.set()
 
+    def cancel(self) -> None:
+        """Cancel this step and wake a worker already waiting at the rendezvous."""
+        self._cancel.set()
+        self._go.set()
+
     def join(self, timeout: float = 5.0) -> StepResult | None:
-        self._done.wait(timeout=timeout)
+        if not self._done.wait(timeout=max(0.0, timeout)):
+            raise TimeoutError(f"rank {self.rank_id} did not finish before the step deadline")
         if self._error is not None:
             raise RuntimeError(f"rank {self.rank_id} step {self._error!r} failed") from self._error
         return self._result
@@ -392,12 +444,23 @@ class ElasticTrainingJob:
         *,
         seed: int = 0,
         lr: float = 1e-2,
+        step_timeout_s: float = 5.0,
         health_monitor: TrainingHealthMonitor | None = None,
     ) -> None:
+        world_size = _require_int(world_size, "world_size", minimum=1)
+        seed = _require_int(seed, "seed", minimum=0)
+        if (
+            isinstance(step_timeout_s, bool)
+            or not isinstance(step_timeout_s, Real)
+            or not np.isfinite(step_timeout_s)
+            or step_timeout_s <= 0
+        ):
+            raise ValueError(f"step_timeout_s must be finite and positive, got {step_timeout_s!r}")
         self.model_factory = model_factory
-        self.world_size = int(world_size)
+        self.world_size = world_size
         self.batch_fn_for_rank = batch_fn_for_rank
         self.checkpoint_dir = str(checkpoint_dir)
+        self.step_timeout_s = float(step_timeout_s)
 
         self.canonical_model = model_factory()
         self.canonical_optimizer = torch.optim.SGD(self.canonical_model.parameters(), lr=lr)
@@ -437,27 +500,65 @@ class ElasticTrainingJob:
         so their gradient is excluded from this step's average -- the job continues with fewer ranks
         rather than raising."""
         self._check_single_driver("run_step")
+        step = _require_int(step, "step", minimum=0)
+        kill_set = set(kill_ranks)
+        if any(isinstance(rank, bool) or not isinstance(rank, Integral) for rank in kill_set):
+            raise TypeError("kill_ranks must contain integer rank identifiers")
+        kill_set = {int(rank) for rank in kill_set}
+        invalid = sorted(rank for rank in kill_set if rank < 0 or rank >= self.world_size)
+        if invalid:
+            raise ValueError(f"kill_ranks contains out-of-world rank identifiers: {invalid}")
         canonical_sd = {k: v.detach().clone() for k, v in self.canonical_model.state_dict().items()}
         live = [r for r in self.ranks if r not in self.dead_ranks]
         if not live:
             raise RuntimeError("ElasticTrainingJob has no live ranks left.")
+        already_dead = sorted(kill_set.intersection(self.dead_ranks))
+        if already_dead:
+            raise ValueError(f"kill_ranks contains ranks that are already dead: {already_dead}")
 
+        deadline = time.monotonic() + self.step_timeout_s
         for r in live:
             self.ranks[r].start_step(step, canonical_sd)
-        for r in live:
-            self.ranks[r].wait_started()
+        pending = set(live)
+        ready: set[int] = set()
+        while pending:
+            for r in tuple(pending):
+                if not self.ranks[r].wait_started(0.0):
+                    continue
+                pending.remove(r)
+                ready.add(r)
+                if r in kill_set:
+                    self.ranks[r].cancel()
+                else:
+                    self.ranks[r].release()
+            remaining = max(0.0, deadline - time.monotonic())
+            if not pending or remaining == 0.0:
+                break
+            time.sleep(min(0.001, remaining))
 
-        survivors = [r for r in live if r not in kill_ranks]
-        for r in survivors:
-            self.ranks[r].release()
+        newly_dead = pending | kill_set
+        for r in newly_dead:
+            self.ranks[r].cancel()
+        survivors = [r for r in live if r in ready and r not in kill_set]
 
         results: dict[int, StepResult] = {}
+        rank_failures: dict[int, str] = {}
         for r in survivors:
-            res = self.ranks[r].join()
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                res = self.ranks[r].join(remaining)
+            except (RuntimeError, TimeoutError) as error:
+                self.ranks[r].cancel()
+                newly_dead.add(r)
+                rank_failures[r] = str(error)
+                continue
             if res is not None:
                 results[r] = res
+            else:
+                newly_dead.add(r)
 
-        newly_dead = sorted(set(kill_ranks) | (set(survivors) - set(results)))
+        for r in newly_dead:
+            self.dead_ranks.add(r)
         if not results:
             raise RuntimeError(f"all live ranks died at step {step} -- nothing to average")
 
@@ -477,15 +578,13 @@ class ElasticTrainingJob:
         anomalies = self.health.observe_step(step, mean_loss, grad_norm=mean_grad_norm, restart=restarted_this_step)
         self.pending_restart = False
 
-        for r in newly_dead:
-            self.dead_ranks.add(r)
-
         record = {
             "step": step,
             "loss": mean_loss,
             "grad_norm": mean_grad_norm,
             "survivors": sorted(results),
-            "newly_dead": newly_dead,
+            "newly_dead": sorted(newly_dead),
+            "rank_failures": rank_failures,
             "restart": restarted_this_step,
             "anomalies": [a.kind for a in anomalies],
         }
@@ -511,6 +610,11 @@ class ElasticTrainingJob:
         so F4's continuity check evaluates it.
         """
         self._check_single_driver("respawn_rank")
+        rank_id = _require_int(rank_id, "rank_id", minimum=0)
+        if rank_id >= self.world_size:
+            raise ValueError(f"rank_id must be less than world_size={self.world_size}, got {rank_id}")
+        if rank_id not in self.dead_ranks:
+            raise ValueError(f"rank {rank_id} is already live and cannot be respawned")
         path = checkpoint_path or self.checkpoint_dir
         # A checkpoint write in flight to this same path must finish before it's read back, or this can
         # load a partially-written / stale directory -- wait rather than trust the caller to have done so.
@@ -525,7 +629,14 @@ class ElasticTrainingJob:
         saved_state = loader_states.get(rank_id, loader_states.get(str(rank_id)))
         if saved_state is None:
             raise RuntimeError(f"checkpoint does not contain loader state for rank {rank_id}")
-        self.loader_states[rank_id] = LoaderState.from_dict(saved_state)
+        restored_state = LoaderState.from_dict(saved_state)
+        if restored_state.rank != rank_id or restored_state.world_size != self.world_size:
+            raise RuntimeError(
+                "checkpoint loader coordinates do not match this job: "
+                f"saved rank={restored_state.rank} world_size={restored_state.world_size}, "
+                f"expected rank={rank_id} world_size={self.world_size}"
+            )
+        self.loader_states[rank_id] = restored_state
         self.dead_ranks.discard(rank_id)
         self._spawn_rank(rank_id)
         self.pending_restart = True
