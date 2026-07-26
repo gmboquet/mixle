@@ -72,6 +72,19 @@ from mixle.epistemic.portfolio import HypothesisPortfolio
 # --- scoring: get a row-stochastic (n, k) prediction matrix out of any scoreable model -----------
 
 
+def _validated_probability_matrix(values: Any, n_rows: int, *, name: str = "predictions") -> np.ndarray:
+    matrix = np.asarray(values, dtype=np.float64)
+    if matrix.ndim != 2 or matrix.shape[0] != n_rows or matrix.shape[1] == 0:
+        raise ValueError(f"{name} must have shape ({n_rows}, n_classes) with n_classes > 0")
+    if (
+        np.any(~np.isfinite(matrix))
+        or np.any((matrix < 0.0) | (matrix > 1.0))
+        or not np.allclose(matrix.sum(axis=1), 1.0, rtol=1e-7, atol=1e-9)
+    ):
+        raise ValueError(f"{name} must contain finite row-stochastic probabilities in [0, 1]")
+    return matrix
+
+
 def _proba_batch(model: Any, items: Sequence[Any]) -> np.ndarray:
     """Row-stochastic ``(len(items), k)`` predictions for ``items`` under ``model``.
 
@@ -83,17 +96,21 @@ def _proba_batch(model: Any, items: Sequence[Any]) -> np.ndarray:
     items = list(items)
     predict_proba = getattr(model, "predict_proba", None)
     if callable(predict_proba):
-        return np.asarray(predict_proba(items), dtype=np.float64)
+        return _validated_probability_matrix(predict_proba(items), len(items))
 
     adapter = getattr(model, "adapter", None)
     inner = getattr(model, "model", None)
     if adapter is not None and inner is not None and callable(getattr(adapter, "proba_batch", None)):
-        return np.asarray(adapter.proba_batch(inner, items), dtype=np.float64)
+        return _validated_probability_matrix(adapter.proba_batch(inner, items), len(items))
 
     members, weights = _ensemble_members(model)
     if members is not None and len(members):
-        stacked = np.stack([_proba_batch(m, items) for m in members])  # (M, n, k)
-        return np.asarray(np.tensordot(weights, stacked, axes=1))
+        member_probabilities = [_proba_batch(member, items) for member in members]
+        widths = {matrix.shape[1] for matrix in member_probabilities}
+        if len(widths) != 1:
+            raise ValueError("ensemble members must expose the same class width and ordering")
+        stacked = np.stack(member_probabilities)  # (M, n, k)
+        return _validated_probability_matrix(np.tensordot(weights, stacked, axes=1), len(items), name="mixture")
 
     raise CapabilityError(
         f"{type(model).__name__} is not scoreable: expected predict_proba(items), a "
@@ -114,6 +131,8 @@ def _ensemble_members(model: Any) -> tuple[list[Any] | None, np.ndarray | None]:
         if not active:
             return [], np.array([])
         weights = np.array([w for w, _ in active], dtype=np.float64)
+        if np.any(~np.isfinite(weights)) or np.any(weights <= 0.0) or not np.isfinite(weights.sum()):
+            raise ValueError("active portfolio weights must be finite and strictly positive")
         weights = weights / weights.sum()
         return [p for _, p in active], weights
 
@@ -126,6 +145,10 @@ def _ensemble_members(model: Any) -> tuple[list[Any] | None, np.ndarray | None]:
             if raw_weights is None
             else np.asarray(raw_weights, dtype=np.float64)
         )
+        if weights.shape != (len(members),):
+            raise ValueError(f"ensemble weights must have shape ({len(members)},)")
+        if len(members) and (np.any(~np.isfinite(weights)) or np.any(weights <= 0.0)):
+            raise ValueError("ensemble weights must be finite and strictly positive")
         weights = weights / weights.sum()
         return members, weights
 
@@ -202,8 +225,8 @@ def _disagreement_strategy(pool: Sequence[Any], model: Any, **_: Any) -> np.ndar
     scores = np.empty(n, dtype=np.float64)
     for i in range(n):
         votes = preds[:, i]
-        _, counts = np.unique(votes, return_counts=True)
-        scores[i] = 1.0 - float(counts.max()) / float(votes.shape[0])
+        vote_weight = np.bincount(votes, weights=weights, minlength=stacked.shape[-1])
+        scores[i] = 1.0 - float(vote_weight.max())
     return scores
 
 
@@ -222,7 +245,13 @@ def register_strategy(name: str, fn: Callable[..., np.ndarray]) -> None:
     """
     if not callable(fn):
         raise TypeError("strategy must be callable.")
-    _STRATEGIES[name.lower()] = fn
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("strategy name must be a non-empty string")
+    key = name.lower()
+    existing = _STRATEGIES.get(key)
+    if existing is not None and existing is not fn:
+        raise ValueError(f"strategy {name!r} is already registered")
+    _STRATEGIES[key] = fn
 
 
 def available_strategies() -> list[str]:
@@ -266,12 +295,16 @@ def acquire(
     worth-labeling first; an empty ``pool`` or non-positive ``k`` returns ``[]``.
     """
     pool = list(pool)
-    if k <= 0 or not pool:
+    if isinstance(k, (bool, np.bool_)) or not isinstance(k, (int, np.integer)) or k < 0:
+        raise ValueError("k must be an exact non-negative integer")
+    if k == 0 or not pool:
         return []
     fn = _get_strategy(strategy)
     scores = np.asarray(fn(pool, model, **strategy_kwargs), dtype=np.float64)
     if scores.shape != (len(pool),):
         raise ValueError(f"strategy {strategy!r} returned scores of shape {scores.shape}, expected ({len(pool)},)")
+    if np.any(~np.isfinite(scores)):
+        raise ValueError(f"strategy {strategy!r} returned non-finite acquisition scores")
     order = np.argsort(scores, kind="stable")[::-1][: min(int(k), len(pool))]
     return [pool[i] for i in order]
 
