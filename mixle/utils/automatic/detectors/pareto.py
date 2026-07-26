@@ -2,8 +2,8 @@
 
 The Pareto candidate targets strictly positive samples with an empirical lower bound near the observed
 bulk and a power-law right tail. The support and lower-bound gates keep it focused on type-I Pareto data
-instead of broad positive families whose density rises away from zero, while the score charges only the
-free tail-index parameter because the lower bound is fixed by the sample minimum.
+instead of broad positive families whose density rises away from zero. The score charges both the
+tail index and the lower bound selected from the sample.
 """
 
 import math
@@ -56,12 +56,9 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
     nll_nats_per_obs = -(math.log(alpha) + alpha * math.log(xm) - (alpha + 1.0) * float(log_x.mean()))
     if not math.isfinite(nll_nats_per_obs):
         return None
-    # The scale xm is pinned to the data minimum (a support bound, not a likelihood-estimated
-    # parameter -- cf. StatisticSpec("min_val", kind="support_bound")), so only alpha is free: the
-    # BIC charges one parameter. This is also what correctly distinguishes a true Pareto from the
-    # unconstrained generalized-Pareto superset, which fits two free parameters above the same
-    # threshold and so must out-fit Pareto by more than a one-parameter penalty to win.
-    return nll_nats_per_obs / math.log(2.0) + _bic_penalty_bits(1, nobs)
+    # xm is selected from these observations (its boundary MLE is their minimum),
+    # so it is a fitted support parameter and must be charged alongside alpha.
+    return nll_nats_per_obs / math.log(2.0) + _bic_penalty_bits(2, nobs)
 
 
 def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
@@ -84,5 +81,5 @@ def _cdf(arr: np.ndarray):
 
 
 register(
-    Detector(name="pareto", kind="continuous", applies=_applies, score=_score, factory=_factory, cdf=_cdf, n_params=1)
+    Detector(name="pareto", kind="continuous", applies=_applies, score=_score, factory=_factory, cdf=_cdf, n_params=2)
 )

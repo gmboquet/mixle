@@ -21,8 +21,8 @@ from mixle.utils.automatic.detectors import Detector, register
 _MIN_XI = 0.12
 
 
-def _fit(arr: np.ndarray):
-    """Return ``(loc, scale, shape)`` from a fixed-threshold method-of-moments GPD fit, or None.
+def _moment_fit(arr: np.ndarray):
+    """Return ``(loc, scale, shape)`` from a fixed-threshold method-of-moments GPD gate, or None.
 
     The threshold ``loc`` is the data minimum (the peaks-over-threshold setup); ``scale`` and
     ``shape`` follow from the exceedance mean ``m`` and variance ``v`` in closed form
@@ -41,11 +41,32 @@ def _fit(arr: np.ndarray):
     return loc, scale, xi
 
 
+def _fit(arr: np.ndarray):
+    """Return the exact MLE used by scoring, deployment, and diagnostics."""
+    from scipy import stats
+
+    if arr.size == 0 or not np.all(np.isfinite(arr)):
+        return None
+    try:
+        loc = float(np.min(arr))
+        shape, fitted_loc, scale = stats.genpareto.fit(arr, floc=loc)
+    except Exception:  # noqa: BLE001
+        return None
+    if (
+        not math.isfinite(shape)
+        or not math.isfinite(fitted_loc)
+        or not math.isfinite(scale)
+        or not scale > 0.0
+    ):
+        return None
+    return float(fitted_loc), float(scale), float(shape)
+
+
 def _applies(arr: np.ndarray) -> bool:
     # Positive support (threshold exceedances / tails); exclude non-positive data outright.
     if arr.size < 16 or not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
         return False
-    fit = _fit(arr)
+    fit = _moment_fit(arr)
     if fit is None:
         return False
     _, _, xi = fit
@@ -59,19 +80,36 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
 
     from mixle.utils.automatic.profiling import _bic_penalty_bits
 
-    try:
-        # Fit the GPD by MLE with the threshold pinned to the data minimum (floc), matching the
-        # peaks-over-threshold convention; this fits shape + scale (2 free parameters).
-        floc = float(np.min(arr))
-        shape, loc, scale = stats.genpareto.fit(arr, floc=floc)
-        if not (scale > 0.0) or not math.isfinite(scale) or not math.isfinite(shape):
-            return None
-        nll_nats = -float(np.mean(stats.genpareto.logpdf(arr, shape, loc=loc, scale=scale)))
-    except Exception:  # noqa: BLE001
+    fit = _fit(arr)
+    if fit is None:
         return None
+    loc, scale, shape = fit
+    nll_nats = -float(np.mean(stats.genpareto.logpdf(arr, shape, loc=loc, scale=scale)))
     if not math.isfinite(nll_nats):
         return None
-    return nll_nats / math.log(2.0) + _bic_penalty_bits(2, nobs)
+    # loc is pinned to a statistic selected from this same sample, so it is
+    # charged alongside scale and shape rather than treated as external.
+    return nll_nats / math.log(2.0) + _bic_penalty_bits(3, nobs)
+
+
+class _FittedEstimator:
+    """Estimator protocol that preserves the exact candidate selected by MLE."""
+
+    def __init__(self, distribution):
+        self.distribution = distribution
+        self._delegate = distribution.estimator()
+
+    def accumulator_factory(self):
+        return self._delegate.accumulator_factory()
+
+    def estimate(self, nobs, suff_stat):
+        return self.distribution
+
+    def get_prior(self):
+        return None
+
+    def model_log_density(self, model):
+        return 0.0
 
 
 def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
@@ -84,20 +122,18 @@ def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
     else:
         keys = [float(k) for k in vdict.keys() if isinstance(k, (int, float, np.integer, np.floating))]
         loc, scale, xi = (min(keys) if keys else 0.0), 1.0, 0.1
-    return GeneralizedParetoDistribution(scale=scale, shape=xi, loc=loc).estimator(pseudo_count=pseudo_count)
+    distribution = GeneralizedParetoDistribution(scale=scale, shape=xi, loc=loc)
+    return _FittedEstimator(distribution)
 
 
 def _cdf(arr: np.ndarray):
     from scipy import stats
 
-    try:
-        floc = float(np.min(arr))
-        shape, loc, scale = stats.genpareto.fit(arr, floc=floc)
-        if not (scale > 0.0) or not math.isfinite(scale) or not math.isfinite(shape):
-            return None
-        return stats.genpareto.cdf(arr, shape, loc=loc, scale=scale)
-    except Exception:  # noqa: BLE001
+    fit = _fit(arr)
+    if fit is None:
         return None
+    loc, scale, shape = fit
+    return stats.genpareto.cdf(arr, shape, loc=loc, scale=scale)
 
 
 register(
@@ -108,6 +144,6 @@ register(
         score=_score,
         factory=_factory,
         cdf=_cdf,
-        n_params=2,
+        n_params=3,
     )
 )

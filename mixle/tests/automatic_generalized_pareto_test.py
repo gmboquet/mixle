@@ -41,6 +41,15 @@ class AutomaticGeneralizedParetoTest(unittest.TestCase):
         model = fit(data, get_estimator(data), max_its=25, out=None)
         self.assertNotIsInstance(model, GeneralizedParetoDistribution)
 
+    def test_factory_preserves_the_mle_used_for_selection(self):
+        from mixle.utils.automatic.detectors.generalized_pareto import _factory, _fit
+
+        data = stats.genpareto.rvs(0.35, loc=1.0, scale=2.0, size=1000, random_state=np.random.RandomState(7))
+        loc, scale, shape = _fit(data)
+        estimator = _factory({float(value): 1.0 for value in data}, None, True, False)
+        deployed = estimator.estimate(None, (0.0, 0.0, 0.0))
+        self.assertEqual((deployed.loc, deployed.scale, deployed.shape), (loc, scale, shape))
+
 
 if __name__ == "__main__":
     unittest.main()
