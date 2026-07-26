@@ -13,6 +13,12 @@ from mixle.utils.parallel.training_contracts import (
     StateLayout,
     StepReceipt,
 )
+from mixle.utils.parallel.training_launchers import (
+    LightningFabricLauncher,
+    RayTrainLauncher,
+    _TopologyBoundFabric,
+    attest_worker_coordinate,
+)
 
 pytestmark = pytest.mark.fast
 
@@ -77,6 +83,65 @@ class TrainingReceiptContractTest(unittest.TestCase):
         ):
             with self.subTest(updates=updates), self.assertRaises((TypeError, ValueError)):
                 StepReceipt(**(base | updates))
+
+
+class LauncherTopologyContractTest(unittest.TestCase):
+    def test_every_rank_maps_to_one_unique_planned_coordinate(self):
+        plan = ParallelPlan(dp_replicate=2, tp=2)
+        attestations = [
+            attest_worker_coordinate(plan, actual_world_size=4, rank=rank)
+            for rank in range(4)
+        ]
+        self.assertEqual(len({attestation.coordinate for attestation in attestations}), 4)
+        with self.assertRaises(ValueError):
+            attest_worker_coordinate(plan, actual_world_size=2, rank=0)
+        with self.assertRaises(ValueError):
+            attest_worker_coordinate(plan, actual_world_size=4, rank=4)
+
+    def test_lightning_rejects_topology_mismatch_before_optional_import(self):
+        with self.assertRaises(ValueError):
+            LightningFabricLauncher().create(
+                plan=ParallelPlan(dp_replicate=4),
+                devices=1,
+                num_nodes=1,
+            )
+        with self.assertRaises(ValueError):
+            LightningFabricLauncher().create(
+                plan=ParallelPlan(dp_replicate=4),
+                devices="auto",
+                num_nodes=2,
+            )
+
+    def test_ray_rejects_resource_conflicts_before_optional_import(self):
+        launcher = RayTrainLauncher()
+        with self.assertRaises(ValueError):
+            launcher.launch(
+                lambda config: config,
+                plan=ParallelPlan(),
+                use_gpu=False,
+                resources_per_worker={"GPU": 1.0},
+            )
+        with self.assertRaises(ValueError):
+            launcher.launch(
+                lambda config: config,
+                plan=ParallelPlan(),
+                use_gpu=True,
+                resources_per_worker={"GPU": 0.0},
+            )
+
+    def test_fabric_binding_produces_runtime_attestation(self):
+        class FakeFabric:
+            world_size = 2
+            global_rank = 1
+
+            def launch(self):
+                return "launched"
+
+        binding = _TopologyBoundFabric(FakeFabric(), ParallelPlan(dp_replicate=2))
+        with self.assertRaises(RuntimeError):
+            binding.attest_topology()
+        self.assertEqual(binding.launch(), "launched")
+        self.assertEqual(binding.attest_topology().rank, 1)
 
 
 if __name__ == "__main__":
