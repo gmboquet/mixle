@@ -11,6 +11,7 @@ This is the conjugate prior for the univariate :class:`~mixle.stats.univariate.c
 It is a parameter prior: it is scored on ``(mu, tau)`` parameter pairs, not fit from data by EM.
 """
 
+import operator
 from typing import Any, Optional
 
 import numpy as np
@@ -53,7 +54,14 @@ class NormalGammaDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def _validated_parameters(params: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
-        mu, lam, a, b = (float(value) for value in params)
+        if not isinstance(params, (tuple, list)) or len(params) != 4:
+            raise ValueError("NormalGammaDistribution parameters must be a four-item tuple.")
+        if any(np.ndim(value) != 0 for value in params):
+            raise ValueError("NormalGammaDistribution parameters must be scalars.")
+        try:
+            mu, lam, a, b = (float(value) for value in params)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("NormalGammaDistribution parameters must be numeric scalars.") from exc
         if not np.isfinite(mu):
             raise ValueError("NormalGammaDistribution requires a finite prior mean.")
         if not np.isfinite(lam) or lam <= 0.0:
@@ -63,6 +71,23 @@ class NormalGammaDistribution(SequenceEncodableProbabilityDistribution):
         if not np.isfinite(b) or b <= 0.0:
             raise ValueError("NormalGammaDistribution requires finite b > 0.")
         return mu, lam, a, b
+
+    @staticmethod
+    def _validated_observation(x: Any) -> tuple[float, float]:
+        if not isinstance(x, (tuple, list, np.ndarray)):
+            raise ValueError("NormalGammaDistribution observations must be (mu, tau) pairs.")
+        try:
+            values = np.asarray(x, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("NormalGammaDistribution observations must be numeric.") from exc
+        if values.shape != (2,) or np.any(~np.isfinite(values)):
+            raise ValueError("NormalGammaDistribution observations must be finite vectors of length 2.")
+        if values[1] <= 0.0:
+            raise ValueError("NormalGammaDistribution observation precision tau must be positive.")
+        return float(values[0]), float(values[1])
+
+    def _validated_state(self) -> tuple[float, float, float, float]:
+        return self._validated_parameters(self.get_parameters())
 
     def __str__(self) -> str:
         return "NormalGammaDistribution(%s, %s, %s, %s, name=%s, prior=%s)" % (
@@ -88,15 +113,8 @@ class NormalGammaDistribution(SequenceEncodableProbabilityDistribution):
         Closed form for a NormalGamma argument; numerical double integration otherwise.
         """
         if isinstance(dist, NormalGammaDistribution):
-            a = self.a
-            b = self.b
-            m = self.mu
-            lam = self.lam
-
-            aa = dist.a
-            bb = dist.b
-            mm = dist.mu
-            ll = dist.lam
+            m, lam, a, b = self._validated_state()
+            mm, ll, aa, bb = dist._validated_state()
 
             c1 = np.log(bb) * aa + 0.5 * np.log(ll) - gammaln(aa) - 0.5 * np.log(2 * np.pi)
             c2 = (aa - 0.5) * (digamma(a) - np.log(b)) - bb * (a / b)
@@ -113,9 +131,7 @@ class NormalGammaDistribution(SequenceEncodableProbabilityDistribution):
 
     def entropy(self) -> float:
         """Returns the entropy of the Normal-Gamma distribution (in nats)."""
-        a = self.a
-        b = self.b
-        lam = self.lam
+        _, lam, a, b = self._validated_state()
 
         return -(
             (a - 0.5) * (digamma(a) - np.log(b))
@@ -133,24 +149,29 @@ class NormalGammaDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: tuple[float, float]) -> float:
         """Log-density at x = (mu, tau) with tau > 0."""
-        a = self.a
-        b = self.b
-        mu = self.mu
-        lam = self.lam
+        mu, lam, a, b = self._validated_state()
+        observed_mu, tau = self._validated_observation(x)
 
         c0 = np.log(b) * a + 0.5 * np.log(lam / (2 * np.pi)) - gammaln(a)
-        c1 = np.log(x[1]) * (a - 0.5) - b * x[1]
-        c2 = -lam * x[1] * (x[0] - mu) * (x[0] - mu) / 2
+        c1 = np.log(tau) * (a - 0.5) - b * tau
+        c2 = -lam * tau * (observed_mu - mu) * (observed_mu - mu) / 2
         return float(c0 + c1 + c2)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized log-density at sequence-encoded (n, 2) array of (mu, tau) rows."""
-        mu0 = self.mu
-        b = self.b
-        a = self.a
-        lam = self.lam
-        m = x[:, 0]
-        tau = x[:, 1]
+        mu0, lam, a, b = self._validated_state()
+        try:
+            values = np.asarray(x, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("NormalGammaDistribution encoded observations must be numeric.") from exc
+        if values.ndim != 2 or values.shape[1] != 2:
+            raise ValueError("NormalGammaDistribution encoded observations must have exact shape (n, 2).")
+        if np.any(~np.isfinite(values)):
+            raise ValueError("NormalGammaDistribution encoded observations must be finite.")
+        m = values[:, 0]
+        tau = values[:, 1]
+        if np.any(tau <= 0.0):
+            raise ValueError("NormalGammaDistribution encoded precisions must be positive.")
         c0 = np.log(b) * a + 0.5 * np.log(lam / (2 * np.pi)) - gammaln(a)
         c1 = np.log(tau) * (a - 0.5) - b * tau
         c2 = -lam * tau * (m - mu0) * (m - mu0) / 2
@@ -181,12 +202,20 @@ class NormalGammaSampler(DistributionSampler):
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw size samples (a single (mu, tau) pair when size is None)."""
+        mu, lam, a, b = self.dist._validated_state()
         if size is None:
-            t = self.grng.gamma(self.dist.a, 1 / self.dist.b)
-            x = self.nrng.normal(self.dist.mu, np.sqrt(1 / (self.dist.lam * t)))
+            t = self.grng.gamma(a, 1 / b)
+            x = self.nrng.normal(mu, np.sqrt(1 / (lam * t)))
             return x, t
-        else:
-            return [self.sample() for _ in range(size)]
+        if isinstance(size, (bool, np.bool_)):
+            raise TypeError("NormalGammaSampler size must be a non-negative integer.")
+        try:
+            count = operator.index(size)
+        except TypeError as exc:
+            raise TypeError("NormalGammaSampler size must be a non-negative integer.") from exc
+        if count < 0:
+            raise ValueError("NormalGammaSampler size must be non-negative.")
+        return [self.sample() for _ in range(count)]
 
 
 class NormalGammaDataEncoder(DataSequenceEncoder):
@@ -200,4 +229,12 @@ class NormalGammaDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Any) -> np.ndarray:
         """Encode Normal-Gamma observations as a floating array."""
-        return np.asarray(x, dtype=float)
+        try:
+            values = np.asarray(x, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("NormalGammaDataEncoder observations must be numeric.") from exc
+        if values.ndim != 2 or values.shape[1] != 2:
+            raise ValueError("NormalGammaDataEncoder observations must have exact shape (n, 2).")
+        if np.any(~np.isfinite(values)) or np.any(values[:, 1] <= 0.0):
+            raise ValueError("NormalGammaDataEncoder requires finite means and positive precisions.")
+        return values
