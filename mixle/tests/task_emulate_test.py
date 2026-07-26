@@ -245,6 +245,71 @@ class MultiFidelityBudgetEnforcementTest(unittest.TestCase):
                 seed=5,
             )
 
+    @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")
+    def test_every_call_is_reserved_under_the_reported_hard_budget(self):
+        from mixle.task.emulate import emulate
+
+        budget = 35.0
+        spent = {"value": 0.0}
+
+        def simulator(x, fidelity):
+            spent["value"] += fidelity  # costs=(1, 10), matching these fidelity values
+            self.assertLessEqual(spent["value"], budget)
+            return float(np.sin(x[0]) + 0.01 * fidelity)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            emulator = emulate(
+                simulator,
+                BOUNDS_1D,
+                budget=budget,
+                fidelities=(1.0, 10.0),
+                costs=(1.0, 10.0),
+                n_init=2,
+                n_candidates=8,
+                n_reference=8,
+                holdout_frac=0.01,
+                seed=0,
+            )
+        self.assertLessEqual(emulator.receipt.cost_spent, budget)
+        self.assertEqual(emulator.receipt.cost_spent, spent["value"])
+
+    def test_rejects_malformed_fidelity_and_cost_schedules_before_simulation(self):
+        from mixle.task.emulate import emulate
+
+        calls = {"count": 0}
+
+        def simulator(_x, _fidelity):
+            calls["count"] += 1
+            return 0.0
+
+        invalid = (
+            {"fidelities": (0.5, 1.0), "costs": (1.0,)},
+            {"fidelities": (0.5, 0.5), "costs": (1.0, 2.0)},
+            {"fidelities": (0.5, np.nan), "costs": (1.0, 2.0)},
+            {"fidelities": (0.5, 1.0), "costs": (1.0, np.inf)},
+            {"fidelities": (0.5, 1.0), "costs": (1.0, 0.0)},
+        )
+        for kwargs in invalid:
+            with self.assertRaises((TypeError, ValueError)):
+                emulate(simulator, BOUNDS_1D, budget=35.0, n_init=2, **kwargs)
+        self.assertEqual(calls["count"], 0)
+
+    def test_public_budget_and_acquisition_controls_are_exact(self):
+        from mixle.task.emulate import emulate
+
+        with self.assertRaises(TypeError):
+            emulate(_true_f, BOUNDS_2D, budget=3.5)
+        for kwargs in (
+            {"n_init": 0},
+            {"n_candidates": 0},
+            {"n_reference": 0},
+            {"holdout_frac": np.nan},
+            {"holdout_frac": 1.0},
+        ):
+            with self.assertRaises((TypeError, ValueError)):
+                emulate(_true_f, BOUNDS_2D, budget=10, **kwargs)
+
 
 # --------------------------------------------------------------------------- MXR-080-0183
 # _fit_multi_fidelity's sequential loop caught every exception from surrogate fitting with a bare
