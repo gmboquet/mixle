@@ -12,7 +12,15 @@ from mixle.stats.processes.power_law_hawkes import PowerLawHawkesDistribution as
 class PowerLawHawkesTest(unittest.TestCase):
     def setUp(self):
         self.d = PLH(
-            mu=0.2, A=4.0, c=0.02, p=1.3, window=2000.0, alpha=1.2, mark_dist=ExponentialDistribution(1.0 / np.log(10))
+            mu=0.2,
+            A=4.0,
+            c=0.02,
+            p=1.3,
+            window=2000.0,
+            alpha=1.2,
+            mark_dist=ExponentialDistribution(1.0 / np.log(10)),
+            name="truth",
+            keys="shared",
         )
 
     def test_intensity_spikes_then_power_law_decays(self):
@@ -23,7 +31,14 @@ class PowerLawHawkesTest(unittest.TestCase):
         self.assertGreater(later, self.d.mu - 1e-9)
 
     def test_branching_ratio_subcritical(self):
-        self.assertTrue(0 < self.d.branching_ratio(0.5) < 1)
+        self.assertTrue(0 < self.d.branching_ratio() < 1)
+        expected = (
+            self.d.A
+            * self.d.c
+            / (self.d.p - 1.0)
+            / (1.0 - self.d.mark_dist.beta * self.d.alpha)
+        )
+        self.assertAlmostEqual(self.d.branching_ratio(), expected)
 
     def test_sampler_is_clustered(self):
         ts, _ = self.d.sampler(seed=1).sample()
@@ -40,7 +55,14 @@ class PowerLawHawkesTest(unittest.TestCase):
             fit = est.estimate(None, acc.value())
         self.assertAlmostEqual(fit.mu, 0.2, delta=0.1)
         self.assertAlmostEqual(fit.alpha, 1.2, delta=0.3)
-        self.assertAlmostEqual(fit.branching_ratio(ms.mean()), self.d.branching_ratio(ms.mean()), delta=0.15)
+        self.assertAlmostEqual(
+            fit.branching_ratio(),
+            self.d.branching_ratio(),
+            delta=0.15,
+        )
+        self.assertIs(fit.mark_dist, self.d.mark_dist)
+        self.assertEqual(fit.name, self.d.name)
+        self.assertEqual(fit.keys, self.d.keys)
 
     def test_forecast_elevated_after_a_large_mark(self):
         busy = self.d.expected_count(10, 11, [10.0], [5.0])
@@ -72,14 +94,13 @@ class PowerLawHawkesTest(unittest.TestCase):
         lls = d.seq_log_density([(times, [0.0, 0.0, 0.0]), (times, [0.0, 0.0, 100.0])])
         self.assertAlmostEqual(lls[0] - lls[1], 5000.0, delta=1.0)
 
-    def test_unmarked_process_scores_ignore_mark_values(self):
-        # Negative control for the mark-log-density fix: with no mark_dist and alpha=0.0 there is no
-        # mark law and no excitation sensitivity, so log_density must stay independent of the marks.
+    def test_unmarked_process_requires_zero_marks(self):
         du = PLH(mu=0.5, A=2.0, c=0.05, p=1.4, window=1500.0)  # no mark_dist -> marks are 0
         times = [10.0, 20.0, 30.0]
         ll_a = du.log_density((times, [0.0, 0.0, 0.0]))
         ll_b = du.log_density((times, [3.0, -7.0, 42.0]))
-        self.assertAlmostEqual(ll_a, ll_b, places=9)
+        self.assertTrue(np.isfinite(ll_a))
+        self.assertEqual(ll_b, -np.inf)
 
     def test_mismatched_mark_length_raises(self):
         # A mark array shorter than the times array previously either raised an opaque numpy
@@ -95,6 +116,94 @@ class PowerLawHawkesTest(unittest.TestCase):
     def test_invalid_parameters_raise(self):
         with self.assertRaises(ValueError):
             PLH(mu=0.2, A=1.0, c=0.1, p=0.5, window=100.0)  # p must exceed 1
+        for field in ("mu", "A", "alpha", "c", "p", "window"):
+            values = dict(
+                mu=0.2,
+                A=1.0,
+                alpha=0.2,
+                c=0.1,
+                p=1.5,
+                window=100.0,
+                mark_dist=GaussianDistribution(0.0, 1.0),
+            )
+            values[field] = np.inf
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                PLH(**values)
+        with self.assertRaises(ValueError):
+            PLH(
+                mu=0.2,
+                A=1.0,
+                alpha=3.0,
+                c=0.1,
+                p=1.5,
+                window=100.0,
+                mark_dist=ExponentialDistribution(1.0),
+            )
+
+    def test_strict_marked_history_and_query_contracts(self):
+        self.assertEqual(
+            self.d.log_density(([1.0, 1.0], [0.1, 0.2])),
+            -np.inf,
+        )
+        self.assertEqual(
+            self.d.log_density(([1.0], [np.nan])),
+            -np.inf,
+        )
+        with self.assertRaises(ValueError):
+            self.d.intensity(2.0, [1.0, 1.5], [0.1])
+        with self.assertRaises(ValueError):
+            self.d.expected_count(3.0, 2.0, [], [])
+
+    def test_event_budget_fails_with_receipt(self):
+        sampler = PLH(
+            mu=100.0,
+            A=0.0,
+            c=0.1,
+            p=1.5,
+            window=1.0,
+            max_events=0,
+        ).sampler(seed=0)
+        with self.assertRaises(RuntimeError):
+            sampler.sample()
+        self.assertFalse(sampler.last_receipt["complete"])
+        self.assertEqual(
+            sampler.last_receipt["termination_reason"],
+            "background_event_budget_exhausted",
+        )
+
+    def test_statistics_are_owned_versioned_and_validated(self):
+        est = self.d.estimator()
+        acc = est.accumulator_factory().make()
+        times = np.array([1.0, 2.0])
+        marks = np.array([0.1, 0.2])
+        acc.update((times, marks), 1.0, None)
+        times[0] = 9.0
+        marks[0] = 9.0
+        value = acc.value()
+        self.assertEqual(value.schema_version, 1)
+        np.testing.assert_array_equal(value.realizations[0][0], [1.0, 2.0])
+        np.testing.assert_array_equal(value.realizations[0][1], [0.1, 0.2])
+        self.assertFalse(value.realizations[0][0].flags.writeable)
+        self.assertFalse(value.weights.flags.writeable)
+        with self.assertRaises(ValueError):
+            acc.update(([1.0], [0.1]), -1.0, None)
+        with self.assertRaises(ValueError):
+            acc.seq_update(
+                [([1.0], [0.1]), ([2.0], [0.2])],
+                [1.0],
+                None,
+            )
+        with self.assertRaises(ValueError):
+            est.estimate(
+                None,
+                (
+                    (),
+                    np.zeros(0),
+                    2000.0,
+                    None,
+                    str(self.d.mark_dist),
+                ),
+            )
 
     def test_estimator_preserves_name_and_keys(self):
         d = PLH(mu=0.2, A=1.0, c=0.1, p=1.5, window=100.0, name="my-hawkes", keys="shared-key")
@@ -127,16 +236,15 @@ class PowerLawHawkesTest(unittest.TestCase):
         acc_low.update((ts, ms), 0.1, None)
         acc_high = est.accumulator_factory().make()
         acc_high.update((ts, ms), 100.0, None)
-        self.assertEqual(acc_low.value()[0][0][1], 0.1)
-        self.assertEqual(acc_high.value()[0][0][1], 100.0)
+        self.assertEqual(acc_low.value().weights[0], 0.1)
+        self.assertEqual(acc_high.value().weights[0], 100.0)
 
     def test_accumulator_seq_update_uses_weights(self):
         est = self.d.estimator()
         ts, ms = self.d.sampler(seed=3).sample()
         acc = est.accumulator_factory().make()
         acc.seq_update([(ts, ms), (ts, ms)], [0.25, 4.0], None)
-        weights = [w for _, w in acc.value()[0]]
-        self.assertEqual(weights, [0.25, 4.0])
+        np.testing.assert_array_equal(acc.value().weights, [0.25, 4.0])
 
     def test_accumulator_seq_update_weights_default_to_one_when_none(self):
         # test_mle_recovers_parameters calls seq_update(..., None, ...); confirm that path treats a
@@ -145,8 +253,7 @@ class PowerLawHawkesTest(unittest.TestCase):
         ts, ms = self.d.sampler(seed=3).sample()
         acc = est.accumulator_factory().make()
         acc.seq_update([(ts, ms), (ts, ms)], None, None)
-        weights = [w for _, w in acc.value()[0]]
-        self.assertEqual(weights, [1.0, 1.0])
+        np.testing.assert_array_equal(acc.value().weights, [1.0, 1.0])
 
     def test_scale_multiplies_stored_weights(self):
         # scale() previously was a documented no-op; it must now multiply every stored weight by c,
@@ -157,8 +264,7 @@ class PowerLawHawkesTest(unittest.TestCase):
         acc.update((ts, ms), 1.0, None)
         acc.update((ts, ms), 3.0, None)
         acc.scale(2.0)
-        weights = [w for _, w in acc.value()[0]]
-        self.assertEqual(weights, [2.0, 6.0])
+        np.testing.assert_array_equal(acc.value().weights, [2.0, 6.0])
 
     def test_scale_does_not_alter_realization_data(self):
         # scale() must only touch the linear weight, never the raw event catalogue, window, or the
@@ -168,14 +274,14 @@ class PowerLawHawkesTest(unittest.TestCase):
         acc = est.accumulator_factory().make()
         acc.update((ts, ms), 1.0, None)
         before = acc.value()
-        before_times, before_marks = before[0][0][0]
+        before_times, before_marks = before.realizations[0]
         acc.scale(5.0)
         after = acc.value()
-        after_times, after_marks = after[0][0][0]
+        after_times, after_marks = after.realizations[0]
         np.testing.assert_array_equal(before_times, after_times)
         np.testing.assert_array_equal(before_marks, after_marks)
-        self.assertEqual(before[1], after[1])  # window
-        self.assertEqual(before[2], after[2])  # alpha_fixed
+        self.assertEqual(before.window, after.window)
+        self.assertEqual(before.alpha_fixed, after.alpha_fixed)
 
     def test_scale_by_one_is_identity(self):
         # Negative control for the scale fix: scaling by 1.0 must leave the weight unchanged.
@@ -183,9 +289,9 @@ class PowerLawHawkesTest(unittest.TestCase):
         ts, ms = self.d.sampler(seed=7).sample()
         acc = est.accumulator_factory().make()
         acc.update((ts, ms), 2.5, None)
-        before = acc.value()[0][0][1]
+        before = acc.value().weights[0]
         acc.scale(1.0)
-        after = acc.value()[0][0][1]
+        after = acc.value().weights[0]
         self.assertEqual(before, after)
 
     def test_zero_weight_realization_does_not_affect_estimate(self):
