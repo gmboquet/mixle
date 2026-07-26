@@ -14,6 +14,7 @@ from mixle.experimental.typed_runtime.proposal import (
     payload_fingerprint,
 )
 from mixle.experimental.typed_runtime.staleness import (
+    CorrectionResult,
     StalenessAction,
     StalenessPolicy,
     StalenessReceipt,
@@ -22,7 +23,7 @@ from mixle.experimental.typed_runtime.staleness import (
 )
 from mixle.experimental.typed_runtime.transaction import CommitReceipt, TransactionalCoordinator
 
-CorrectionProvider = Callable[[ProposalPacket, StalenessReceipt], Any]
+CorrectionProvider = Callable[[ProposalPacket, StalenessReceipt], CorrectionResult]
 
 
 @dataclass(frozen=True)
@@ -74,8 +75,6 @@ class HierarchicalProposalCoordinator:
         self,
         round_id: str,
         proposals: Sequence[ProposalPacket],
-        *,
-        correction_fingerprints: Mapping[str, str] | None = None,
     ) -> HierarchicalRoundReceipt:
         """Admit, transform, merge, and commit one set of island proposals."""
 
@@ -84,7 +83,6 @@ class HierarchicalProposalCoordinator:
         rows = tuple(proposals)
         if len({proposal.proposal_id for proposal in rows}) != len(rows):
             raise ValueError("hierarchical input proposal ids must be unique.")
-        correction_fingerprints = dict(correction_fingerprints or {})
         staleness_receipts: list[StalenessReceipt] = []
         rejected: dict[str, str] = {}
         admitted: list[ProposalPacket] = []
@@ -95,30 +93,47 @@ class HierarchicalProposalCoordinator:
                 rejected[proposal.proposal_id] = "unknown-node"
                 continue
             policy = self.node_staleness_policies.get(proposal.node_id, self.default_staleness_policy)
-            receipt = assess_staleness(
-                proposal,
-                contract,
-                self.coordinator.versions,
-                policy,
-                correction_fingerprint=correction_fingerprints.get(proposal.proposal_id),
-            )
+            correction = None
+            receipt = assess_staleness(proposal, contract, self.coordinator.versions, policy)
+            if receipt.reason == "missing-drift-correction":
+                if self.correction_provider is None:
+                    staleness_receipts.append(receipt)
+                    rejected[proposal.proposal_id] = "missing-correction-provider"
+                    continue
+                try:
+                    correction = self.correction_provider(proposal, receipt)
+                    if not isinstance(correction, CorrectionResult):
+                        raise TypeError("correction provider must return CorrectionResult.")
+                    receipt = assess_staleness(
+                        proposal,
+                        contract,
+                        self.coordinator.versions,
+                        policy,
+                        correction=correction,
+                    )
+                except Exception as error:  # noqa: BLE001 - isolate one untrusted provider
+                    staleness_receipts.append(receipt)
+                    rejected[proposal.proposal_id] = "correction-failed:%s:%s" % (
+                        type(error).__name__,
+                        error,
+                    )
+                    continue
             staleness_receipts.append(receipt)
             if not receipt.accepted:
                 rejected[proposal.proposal_id] = receipt.reason
                 continue
             if receipt.action in (StalenessAction.SHRINK, StalenessAction.CORRECT):
-                corrected_payload = None
-                if receipt.action is StalenessAction.CORRECT:
-                    if self.correction_provider is None:
-                        rejected[proposal.proposal_id] = "missing-correction-provider"
-                        continue
-                    corrected_payload = self.correction_provider(proposal, receipt)
-                proposal = shrink_proposal(
-                    proposal,
-                    receipt,
-                    proposal_id="rebased:%s:v%d" % (proposal.proposal_id, self.coordinator.versions.model_version),
-                    corrected_payload=corrected_payload,
-                )
+                try:
+                    proposal = shrink_proposal(
+                        proposal,
+                        receipt,
+                        proposal_id="rebased:%s:v%d"
+                        % (proposal.proposal_id, self.coordinator.versions.model_version),
+                        correction=correction,
+                    )
+                except (TypeError, ValueError) as error:
+                    rejected[proposal.proposal_id] = "stale-transform-failed:%s" % error
+                    continue
             admitted.append(proposal)
 
         grouped: dict[str, list[ProposalPacket]] = {}
