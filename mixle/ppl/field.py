@@ -1187,7 +1187,7 @@ class FieldPosterior:
 def _register_field_posterior_sampling() -> None:
     from mixle.stats.compute.sampling_api import SAMPLE_UNHANDLED, _resolve_rng, register_sample_dispatch
 
-    @register_sample_dispatch
+    @register_sample_dispatch("mixle.ppl.field-posterior")
     def _sample_field_posterior(model, size, *, seed, rng, **kwargs):
         if isinstance(model, FieldPosterior):
             return model.sample(1 if size is None else size, rng=_resolve_rng(seed, rng), **kwargs)

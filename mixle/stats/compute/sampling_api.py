@@ -17,14 +17,23 @@ per-call stream is seeded from it, so one ``rng`` drives independent reproducibl
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from operator import index
+from threading import RLock
 from typing import Any
 
 import numpy as np
 
 from mixle.engines.arithmetic import maxrandint
 
-__all__ = ["sample", "register_sample_dispatch"]
+__all__ = [
+    "SampleDispatchRegistration",
+    "register_sample_dispatch",
+    "replace_sample_dispatch",
+    "sample",
+    "unregister_sample_dispatch",
+]
 
 
 def _resolve_rng(seed: int | None, rng: np.random.RandomState | None) -> np.random.RandomState:
@@ -53,13 +62,71 @@ def _validate_size(size: Any) -> int | None:
 # dependency graph strictly ppl -> core. Each handler is ``fn(model, size, *, seed, rng, **kwargs)`` and
 # returns a draw, or the ``SAMPLE_UNHANDLED`` sentinel if ``model`` is not its type.
 SAMPLE_UNHANDLED: Any = object()
-_SAMPLE_DISPATCHERS: list[Any] = []
+SampleDispatch = Callable[..., Any]
 
 
-def register_sample_dispatch(fn):
-    """Register a :func:`sample` handler for a type the core layer must not import. Returns ``fn``."""
-    _SAMPLE_DISPATCHERS.append(fn)
+@dataclass(frozen=True, slots=True)
+class SampleDispatchRegistration:
+    """One named extension in the deterministic :func:`sample` dispatch order."""
+
+    dispatch_id: str
+    handler: SampleDispatch
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.dispatch_id, str) or not self.dispatch_id.strip():
+            raise ValueError("sample dispatch_id must be a non-empty string.")
+        if not callable(self.handler):
+            raise TypeError("sample dispatch handler must be callable.")
+
+
+_SAMPLE_DISPATCHERS: dict[str, SampleDispatchRegistration] = {}
+_SAMPLE_DISPATCH_LOCK = RLock()
+
+
+def _install_sample_dispatch(
+    dispatch_id: str,
+    fn: SampleDispatch,
+    *,
+    replace: bool,
+) -> SampleDispatch:
+    registration = SampleDispatchRegistration(dispatch_id, fn)
+    with _SAMPLE_DISPATCH_LOCK:
+        exists = dispatch_id in _SAMPLE_DISPATCHERS
+        if exists != replace:
+            action = "replace" if exists else "register"
+            raise KeyError(f"cannot {action} sample dispatch {dispatch_id!r}: registration {'exists' if exists else 'missing'}.")
+        # A dict assignment preserves the existing precedence slot during an explicit replacement.
+        _SAMPLE_DISPATCHERS[dispatch_id] = registration
     return fn
+
+
+def register_sample_dispatch(dispatch_id: str, fn: SampleDispatch | None = None):
+    """Register a named out-of-core sampler, rejecting duplicate IDs.
+
+    Registration order defines dispatch precedence. A handler that does not own ``model`` MUST return
+    :data:`SAMPLE_UNHANDLED` before mutating the model, RNG, or any other observable state.
+    """
+
+    def decorate(handler: SampleDispatch) -> SampleDispatch:
+        return _install_sample_dispatch(dispatch_id, handler, replace=False)
+
+    return decorate if fn is None else decorate(fn)
+
+
+def replace_sample_dispatch(dispatch_id: str, fn: SampleDispatch) -> SampleDispatch:
+    """Explicitly replace an existing named handler without changing its precedence slot."""
+    return _install_sample_dispatch(dispatch_id, fn, replace=True)
+
+
+def unregister_sample_dispatch(dispatch_id: str) -> SampleDispatchRegistration:
+    """Remove and return an existing named handler."""
+    if not isinstance(dispatch_id, str) or not dispatch_id.strip():
+        raise ValueError("sample dispatch_id must be a non-empty string.")
+    with _SAMPLE_DISPATCH_LOCK:
+        try:
+            return _SAMPLE_DISPATCHERS.pop(dispatch_id)
+        except KeyError:
+            raise KeyError(f"sample dispatch {dispatch_id!r} is not registered.") from None
 
 
 def sample(
@@ -104,8 +171,10 @@ def sample(
 
     # Out-of-core samplables registered by higher layers (e.g. mixle.ppl FieldPosterior -- joint
     # field/parameter draws). Iterated before LatentPosterior to preserve the original dispatch order.
-    for _dispatch in _SAMPLE_DISPATCHERS:
-        out = _dispatch(model, size, seed=seed, rng=rng, **kwargs)
+    with _SAMPLE_DISPATCH_LOCK:
+        dispatchers = tuple(_SAMPLE_DISPATCHERS.values())
+    for registration in dispatchers:
+        out = registration.handler(model, size, seed=seed, rng=rng, **kwargs)
         if out is not SAMPLE_UNHANDLED:
             return out
 
