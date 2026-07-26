@@ -165,15 +165,18 @@ class NestedImpossibleRowTest(unittest.TestCase):
         enc = model.dist_to_encoder().seq_encode(data)
         w = np.ones(len(data))
         with np.errstate(over="ignore"):
-            est, legacy = _legacy_suff_stats(model, enc, w)
             suff, ll = fn.fused_nested_accumulate(model, enc, w, return_ll=True)
+            valid_enc = model.dist_to_encoder().seq_encode([data[0], data[2]])
+            _, expected = _legacy_suff_stats(model, valid_enc, np.ones(2))
         # Root and inner mixture counts match the host policy: the impossible row contributes
-        # no latent assignment at any level.
-        np.testing.assert_allclose(np.asarray(suff[0]), np.asarray(legacy[0]), rtol=1e-12)
+        # no latent assignment or leaf arithmetic at any level. Compare against
+        # physically removing that row; multiplying its overflowing values by
+        # zero would otherwise manufacture NaN sufficient statistics.
+        np.testing.assert_allclose(np.asarray(suff[0]), np.asarray(expected[0]), rtol=1e-12)
         for j in range(2):
-            np.testing.assert_allclose(np.asarray(suff[1][j][0]), np.asarray(legacy[1][j][0]), rtol=1e-12)
-            for leaf_fused, leaf_legacy in zip(suff[1][j][1], legacy[1][j][1]):
-                np.testing.assert_allclose(np.asarray(leaf_fused), np.asarray(leaf_legacy), rtol=1e-12)
+            np.testing.assert_allclose(np.asarray(suff[1][j][0]), np.asarray(expected[1][j][0]), rtol=1e-12)
+            for leaf_fused, leaf_expected in zip(suff[1][j][1], expected[1][j][1]):
+                np.testing.assert_allclose(np.asarray(leaf_fused), np.asarray(leaf_expected), rtol=1e-12)
         self.assertTrue(np.isneginf(ll))
 
     def test_zero_weighted_impossible_row_contributes_exactly_zero_not_nan(self):

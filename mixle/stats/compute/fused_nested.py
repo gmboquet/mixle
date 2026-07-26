@@ -227,8 +227,9 @@ def _emit_backward(node: Any, rho: str, lines: list[str]) -> None:
     """Append E-step lines: accumulate leaf stats / mixture counts under responsibility ``rho``."""
     if isinstance(node, _Leaf):
         accmap = {an: f"a{node.node_id}_{an}" for an in node.template.acc_names}
-        lines.append(f"    ct{node.node_id}[0] += {rho}")
-        lines.append("    " + node.template.acc_stmt(_vals(node), accmap, rho))  # type: ignore[misc]
+        lines.append(f"    if {rho} != 0.0:")
+        lines.append(f"        ct{node.node_id}[0] += {rho}")
+        lines.append("        " + node.template.acc_stmt(_vals(node), accmap, rho))  # type: ignore[misc]
         return
     if isinstance(node, _Composite):
         for c in node.children:
