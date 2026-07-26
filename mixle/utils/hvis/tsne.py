@@ -10,6 +10,7 @@ guarded by HAS_NUMBA exactly as before.
 import sys
 
 import numpy as np
+import scipy.optimize
 import scipy.sparse
 
 from mixle.utils.hvis.affinity import _calibrate_row
@@ -86,6 +87,48 @@ def _convergence_update(
     return False, current, worsening_checks
 
 
+def _positive_integer(value, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return int(value)
+
+
+def _nonnegative_integer(value, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer.")
+    return int(value)
+
+
+def _validate_tsne_controls(
+    *,
+    emb_dim,
+    max_its,
+    eta,
+    momentum,
+    early_exaggeration,
+    early_its,
+    min_gain,
+    tol,
+    check_every,
+    print_iter,
+) -> None:
+    _positive_integer(emb_dim, "emb_dim")
+    _positive_integer(max_its, "max_its")
+    _nonnegative_integer(early_its, "early_its")
+    _positive_integer(check_every, "check_every")
+    _positive_integer(print_iter, "print_iter")
+    if eta is not None and (not np.isfinite(eta) or eta <= 0.0):
+        raise ValueError("eta must be finite and positive or None.")
+    if not np.isfinite(momentum) or not 0.0 <= momentum < 1.0:
+        raise ValueError("momentum must be finite and in [0, 1).")
+    if not np.isfinite(early_exaggeration) or early_exaggeration <= 0.0:
+        raise ValueError("early_exaggeration must be finite and positive.")
+    if not np.isfinite(min_gain) or min_gain <= 0.0:
+        raise ValueError("min_gain must be finite and positive.")
+    if not np.isfinite(tol) or tol < 0.0:
+        raise ValueError("tol must be finite and non-negative.")
+
+
 def t_kernel(tx: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Heavy-tailed student-t kernel on embedding tx.
 
@@ -93,6 +136,13 @@ def t_kernel(tx: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray, np.n
     num_ij = 1 / (1 + d_ij^2 / alpha), and squared distances d2. At alpha = 1
     this is the standard t-SNE kernel.
     """
+    tx = np.asarray(tx, dtype=np.float64)
+    if tx.ndim != 2 or tx.shape[0] < 2 or tx.shape[1] == 0:
+        raise ValueError("tx must be a two-dimensional embedding with at least two rows.")
+    if not np.all(np.isfinite(tx)):
+        raise ValueError("tx must contain only finite coordinates.")
+    if not np.isfinite(alpha) or alpha <= 0.0:
+        raise ValueError("alpha must be finite and positive.")
     n = tx.shape[0]
     rsum = np.sum(np.square(tx), axis=1, keepdims=True)
     d2 = np.dot(-2.0 * tx, tx.T)
@@ -170,41 +220,50 @@ def update_alpha(
     eps: float = 1.0e-6,
     max_alpha: float = 1.0e6,
 ) -> float:
-    """Optimize the kernel tail parameter alpha by guarded Newton steps.
+    """Minimize ``KL(P || Q_alpha(Y))`` by bounded scalar line search.
 
-    d(-log q~_ij)/d(alpha) = 0.5 log(1 + d2/alpha) - (alpha+1) d2 / (2 alpha^2 (1 + d2/alpha)),
-    and dKL/d(alpha) = sum_ij (p_ij - q_ij) d(-log q~_ij)/d(alpha) (the partition
-    function term cancels because sum P = sum Q = 1). Steps are clipped to a
-    +-step trust region; alpha is kept in [min_alpha, max_alpha].
+    The search is performed in log-alpha within a relative ``step`` trust
+    region and the explicit ``[min_alpha, max_alpha]`` domain. A candidate is
+    accepted only when its evaluated objective improves by more than ``eps``.
     """
-    Q, num, d2 = t_kernel(Y, alpha)
-    np.maximum(Q, min_value, out=Q)
-    kl = _kl(P, Q)
+    p = _validate_dense_joint_probability(P)
+    _positive_integer(max_its, "max_its")
+    if not np.isfinite(alpha) or alpha <= 0.0:
+        raise ValueError("alpha must be finite and positive.")
+    if not np.isfinite(min_alpha) or min_alpha <= 0.0:
+        raise ValueError("min_alpha must be finite and positive.")
+    if not np.isfinite(max_alpha) or max_alpha <= min_alpha:
+        raise ValueError("max_alpha must be finite and greater than min_alpha.")
+    if not min_alpha <= alpha <= max_alpha:
+        raise ValueError("alpha must lie within [min_alpha, max_alpha].")
+    if not np.isfinite(step) or not 0.0 < step <= 1.0:
+        raise ValueError("step must be finite and in (0, 1].")
+    if not np.isfinite(eps) or eps < 0.0:
+        raise ValueError("eps must be finite and non-negative.")
+    if not np.isfinite(min_value) or not 0.0 < min_value < 1.0:
+        raise ValueError("min_value must be finite and in (0, 1).")
 
-    for _ in range(max_its):
-        e_a = 1.0 + d2 / alpha
-        dlq = 0.5 * np.log(e_a) - ((alpha + 1.0) / (2.0 * alpha * alpha)) * (d2 / e_a)
-        g = float(np.sum((P - Q) * dlq))
+    def objective(log_alpha: float) -> float:
+        q, _, _ = t_kernel(Y, float(np.exp(log_alpha)))
+        np.maximum(q, min_value, out=q)
+        return _kl(p, q)
 
-        if not np.isfinite(g) or g == 0.0:
-            break
-
-        prop = alpha - kl / g if g != 0 else alpha
-        prop = min(max(prop, alpha * (1.0 - step)), alpha * (1.0 + step))
-        new_alpha = min(max(prop, min_alpha), max_alpha)
-
-        if new_alpha == alpha:
-            break
-
-        Q, num, d2 = t_kernel(Y, new_alpha)
-        np.maximum(Q, min_value, out=Q)
-        new_kl = _kl(P, Q)
-
-        if new_kl > kl - eps:
-            break
-        alpha, kl = new_alpha, new_kl
-
-    return alpha
+    current_kl = objective(float(np.log(alpha)))
+    lower = max(min_alpha, alpha * (1.0 - step))
+    upper = min(max_alpha, alpha * (1.0 + step))
+    if lower >= upper:
+        return float(alpha)
+    result = scipy.optimize.minimize_scalar(
+        objective,
+        bounds=(float(np.log(lower)), float(np.log(upper))),
+        method="bounded",
+        options={"maxiter": int(max_its), "xatol": 1.0e-10},
+    )
+    candidate = float(np.exp(result.x))
+    candidate_kl = objective(float(result.x))
+    if np.isfinite(candidate_kl) and candidate_kl < current_kl - eps:
+        return candidate
+    return float(alpha)
 
 
 def tsne_exact(
@@ -237,6 +296,26 @@ def tsne_exact(
     """
     from mixle.utils.hvis.goals import apply_projections, goals_fix_gauge, total_goal_gradient
 
+    _validate_tsne_controls(
+        emb_dim=emb_dim,
+        max_its=max_its,
+        eta=eta,
+        momentum=momentum,
+        early_exaggeration=early_exaggeration,
+        early_its=early_its,
+        min_gain=min_gain,
+        tol=tol,
+        check_every=check_every,
+        print_iter=print_iter,
+    )
+    if not np.isfinite(alpha) or alpha <= 0.0:
+        raise ValueError("alpha must be finite and positive.")
+    if not np.isfinite(min_alpha) or min_alpha <= 0.0 or min_alpha > alpha:
+        raise ValueError("min_alpha must be finite, positive, and no greater than alpha.")
+    _positive_integer(max_alpha_its, "max_alpha_its")
+    if not np.isfinite(min_value) or not 0.0 < min_value < 1.0:
+        raise ValueError("min_value must be finite and in (0, 1).")
+
     center = not goals_fix_gauge(goals)
     if out is None:
         out = sys.stdout
@@ -252,6 +331,10 @@ def tsne_exact(
         Y = rng.randn(n, emb_dim) * 1.0e-4
     else:
         Y = np.array(Y, dtype=np.float64)
+        if Y.ndim != 2 or Y.shape[0] != n or Y.shape[1] == 0:
+            raise ValueError(f"initial Y must have shape ({n}, emb_dim).")
+        if not np.all(np.isfinite(Y)):
+            raise ValueError("initial Y must contain only finite coordinates.")
         emb_dim = Y.shape[1]
 
     iY = np.zeros((n, emb_dim))
@@ -276,7 +359,8 @@ def tsne_exact(
             alpha = update_alpha(P, Y, alpha, min_alpha, min_value, max_alpha_its)
 
         if (i % print_iter) == 0:
-            out.write("Iteration %d: alpha = %f, KL(P||Q)=%f\n" % (i, alpha, _kl(P, Q)))
+            source = "bounded line search" if optimize_alpha and i > early_its else "fixed"
+            out.write("Iteration %d: alpha = %f (%s), KL(P||Q)=%f\n" % (i, alpha, source, _kl(P, Q)))
 
         if i > early_its and (i % check_every) == 0:
             kl = _kl(P, Q)
@@ -724,6 +808,19 @@ def _tsne_barnes_hut_from_p(
     re-projected each step, and mean-centering is skipped when a goal fixes the gauge."""
     from mixle.utils.hvis.goals import apply_projections, goals_fix_gauge, total_goal_gradient
 
+    _validate_tsne_controls(
+        emb_dim=emb_dim,
+        max_its=max_its,
+        eta=eta,
+        momentum=momentum,
+        early_exaggeration=early_exaggeration,
+        early_its=early_its,
+        min_gain=min_gain,
+        tol=tol,
+        check_every=check_every,
+        print_iter=print_iter,
+    )
+
     center = not goals_fix_gauge(goals)
     if out is None:
         out = sys.stdout
@@ -739,15 +836,16 @@ def _tsne_barnes_hut_from_p(
         Y = rng.randn(n, emb_dim) * 1.0e-4
     else:
         Y = np.asarray(Y, dtype=np.float64).copy()
-        if Y.shape[0] != n:
-            raise ValueError("initial embedding Y has the wrong number of rows.")
+        if Y.ndim != 2 or Y.shape[0] != n or Y.shape[1] == 0:
+            raise ValueError(f"initial Y must have shape ({n}, emb_dim).")
+        if not np.all(np.isfinite(Y)):
+            raise ValueError("initial Y must contain only finite coordinates.")
         emb_dim = Y.shape[1]
     if center:
         Y -= np.mean(Y, axis=0, keepdims=True)
 
     iY = np.zeros_like(Y)
     gains = np.ones_like(Y)
-    n_iter = max(int(max_its), 0)
     last_kl = None
     worsening_checks = 0
     p_edges = P.tocoo()
@@ -755,7 +853,7 @@ def _tsne_barnes_hut_from_p(
     p_upper = scipy.sparse.triu(P, k=1).tocoo()
     pos_rows, pos_cols, pos_data = p_upper.row, p_upper.col, p_upper.data
 
-    for it in range(1, n_iter + 1):
+    for it in range(1, max_its + 1):
         exaggeration = early_exaggeration if it <= early_its else 1.0
 
         pos = _sparse_positive_forces_symmetric_from_edges(pos_rows, pos_cols, pos_data, Y, exaggeration)
