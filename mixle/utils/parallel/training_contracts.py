@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import StrEnum
+from numbers import Integral, Real
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -82,24 +83,35 @@ class ParallelPlan:
     gradient_accumulation_steps: int = 1
 
     def __post_init__(self) -> None:
-        dimensions = self.axis_sizes
-        if any(size < 1 for size in dimensions.values()):
-            raise ValueError("parallel dimensions must all be positive.")
-        if self.microbatches < 1 or self.gradient_accumulation_steps < 1:
-            raise ValueError("microbatches and gradient accumulation must be positive.")
+        names = (
+            "dp_replicate",
+            "dp_shard",
+            "tp",
+            "pp",
+            "cp",
+            "ep",
+            "etp",
+            "microbatches",
+            "gradient_accumulation_steps",
+        )
+        for name in names:
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
+                raise ValueError(f"{name} must be an exact positive integer.")
+            object.__setattr__(self, name, int(value))
         if self.data_parallel_size % self.ep:
             raise ValueError("expert parallelism must divide the data-parallel domain.")
 
     @property
     def axis_sizes(self) -> dict[ParallelAxis, int]:
         return {
-            ParallelAxis.DP_REPLICATE: int(self.dp_replicate),
-            ParallelAxis.DP_SHARD: int(self.dp_shard),
-            ParallelAxis.TP: int(self.tp),
-            ParallelAxis.PP: int(self.pp),
-            ParallelAxis.CP: int(self.cp),
-            ParallelAxis.EP: int(self.ep),
-            ParallelAxis.ETP: int(self.etp),
+            ParallelAxis.DP_REPLICATE: self.dp_replicate,
+            ParallelAxis.DP_SHARD: self.dp_shard,
+            ParallelAxis.TP: self.tp,
+            ParallelAxis.PP: self.pp,
+            ParallelAxis.CP: self.cp,
+            ParallelAxis.EP: self.ep,
+            ParallelAxis.ETP: self.etp,
         }
 
     @property
@@ -148,10 +160,13 @@ class ParallelPlan:
         return self.axis_sizes[key]
 
     def validate_world_size(self, actual: int) -> None:
-        if int(actual) != self.world_size:
+        if isinstance(actual, bool) or not isinstance(actual, Integral) or actual < 1:
+            raise ValueError("actual world size must be an exact positive integer.")
+        actual = int(actual)
+        if actual != self.world_size:
             raise ValueError(
                 "parallel plan requires world_size=%d, but the process group has world_size=%d."
-                % (self.world_size, int(actual))
+                % (self.world_size, actual)
             )
 
     def as_dict(self) -> dict[str, int]:
@@ -221,6 +236,39 @@ class ParameterLayout:
     shared_group: str | None = None
     optimizer_state: StateLayout = StateLayout.REPLICATED
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.logical_id, str) or not self.logical_id.strip():
+            raise ValueError("logical_id must be a non-empty string.")
+        if not isinstance(self.global_shape, tuple):
+            raise TypeError("global_shape must be a tuple of exact non-negative integers.")
+        canonical_shape = []
+        for size in self.global_shape:
+            if isinstance(size, bool) or not isinstance(size, Integral) or size < 0:
+                raise ValueError("global_shape must contain exact non-negative integers.")
+            canonical_shape.append(int(size))
+        object.__setattr__(self, "global_shape", tuple(canonical_shape))
+        if not isinstance(self.placements, tuple):
+            raise TypeError("placements must be a tuple of (axis, placement) pairs.")
+        canonical_placements = []
+        seen_axes = set()
+        for placement in self.placements:
+            if not isinstance(placement, tuple) or len(placement) != 2:
+                raise ValueError("each placement must be an (axis, placement) pair.")
+            axis, value = placement
+            if not isinstance(axis, str) or not axis.strip() or not isinstance(value, str) or not value.strip():
+                raise ValueError("placement axes and values must be non-empty strings.")
+            if axis in seen_axes:
+                raise ValueError(f"parameter placement axis {axis!r} is duplicated.")
+            seen_axes.add(axis)
+            canonical_placements.append((axis, value))
+        object.__setattr__(self, "placements", tuple(canonical_placements))
+        if self.shared_group is not None and (
+            not isinstance(self.shared_group, str) or not self.shared_group.strip()
+        ):
+            raise ValueError("shared_group must be a non-empty string or None.")
+        if not isinstance(self.optimizer_state, StateLayout):
+            raise TypeError("optimizer_state must be a StateLayout.")
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "logical_id": self.logical_id,
@@ -250,15 +298,40 @@ class DistributedUpdate:
     numerics_sample_count: int = 0
 
     def __post_init__(self) -> None:
-        if not self.node_id:
+        if not isinstance(self.node_id, str) or not self.node_id.strip():
             raise ValueError("distributed update node_id must be non-empty.")
+        if not isinstance(self.payload, PayloadKind):
+            raise TypeError("payload must be a PayloadKind.")
+        if not isinstance(self.collective, CollectiveKind):
+            raise TypeError("collective must be a CollectiveKind.")
+        if not isinstance(self.state_layout, StateLayout):
+            raise TypeError("state_layout must be a StateLayout.")
+        if not isinstance(self.mesh_axes, tuple) or any(not isinstance(axis, ParallelAxis) for axis in self.mesh_axes):
+            raise TypeError("mesh_axes must be a tuple of ParallelAxis values.")
+        if len(set(self.mesh_axes)) != len(self.mesh_axes):
+            raise ValueError("mesh_axes must not contain duplicates.")
+        if not isinstance(self.exact, bool) or not isinstance(self.contract_exact, bool):
+            raise TypeError("exact and contract_exact must be booleans.")
+        if self.determinism_observed is not None and not isinstance(self.determinism_observed, bool):
+            raise TypeError("determinism_observed must be boolean or None.")
+        if not isinstance(self.notes, tuple) or any(not isinstance(note, str) for note in self.notes):
+            raise TypeError("notes must be a tuple of strings.")
         if self.exact and self.collective is not CollectiveKind.NONE:
             raise ValueError("a distributed collective cannot claim guaranteed numerical exactness.")
         errors = (self.maximum_absolute_error, self.maximum_relative_error)
         if any(value is not None and (not math.isfinite(value) or value < 0.0) for value in errors):
             raise ValueError("observed collective errors must be finite and non-negative.")
-        if self.numerics_sample_count < 0:
-            raise ValueError("numerics_sample_count must be non-negative.")
+        if (
+            isinstance(self.numerics_sample_count, bool)
+            or not isinstance(self.numerics_sample_count, Integral)
+            or self.numerics_sample_count < 0
+        ):
+            raise ValueError("numerics_sample_count must be an exact non-negative integer.")
+        object.__setattr__(self, "numerics_sample_count", int(self.numerics_sample_count))
+        if self.numerics_evidence_id is not None and (
+            not isinstance(self.numerics_evidence_id, str) or not self.numerics_evidence_id.strip()
+        ):
+            raise ValueError("numerics_evidence_id must be a non-empty string or None.")
         has_evidence = self.numerics_evidence_id is not None
         if has_evidence != (self.numerics_sample_count > 0):
             raise ValueError("collective numerical evidence requires both an id and positive sample count.")
@@ -303,6 +376,37 @@ class StepReceipt:
     collective_bytes: int = 0
     skipped: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        integer_domains = {
+            "step": 0,
+            "local_examples": 0,
+            "local_tokens": 0,
+            "microbatches": 1,
+            "accumulation_steps": 1,
+            "data_parallel_size": 1,
+            "collective_bytes": 0,
+        }
+        for name, minimum in integer_domains.items():
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Integral) or value < minimum:
+                qualifier = "positive" if minimum == 1 else "non-negative"
+                raise ValueError(f"{name} must be an exact {qualifier} integer.")
+            object.__setattr__(self, name, int(value))
+        if not isinstance(self.loss, Real) or isinstance(self.loss, bool):
+            raise TypeError("loss must be a finite non-negative real number.")
+        loss = float(self.loss)
+        if not math.isfinite(loss) or loss < 0.0:
+            raise ValueError("loss must be a finite non-negative real number.")
+        object.__setattr__(self, "loss", loss)
+        if not isinstance(self.optimizer, str) or not self.optimizer.strip():
+            raise ValueError("optimizer must be a non-empty string.")
+        if not isinstance(self.precision, str) or not self.precision.strip():
+            raise ValueError("precision must be a non-empty string.")
+        if not isinstance(self.skipped, bool):
+            raise TypeError("skipped must be boolean.")
+        if not isinstance(self.extra, dict):
+            raise TypeError("extra must be a dictionary.")
 
     @property
     def global_examples(self) -> int:
