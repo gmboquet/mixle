@@ -20,7 +20,7 @@ import numpy as np
 
 from mixle.engines import NUMPY_ENGINE, NumpyEngine, auto_precision, engine_with_precision, precision_name
 from mixle.stats import ResidentEncodedPayload, move_encoded_payload
-from mixle.stats.compute.pdist import DataSequenceEncoder, encoded_nbytes
+from mixle.stats.compute.pdist import DataSequenceEncoder
 
 __all__ = [
     "CalibrationCatalog",
@@ -30,7 +30,9 @@ __all__ = [
     "EncodedDataHandle",
     "EncodedFold",
     "LocalEncodedData",
+    "MemorySized",
     "ModelShard",
+    "UnknownMemoryFootprintError",
     "Placement",
     "PlacementShard",
     "Resources",
@@ -45,6 +47,19 @@ __all__ = [
     "plan",
     "register_encoded_data_backend",
 ]
+
+
+class UnknownMemoryFootprintError(ValueError):
+    """Raised when a hard placement decision lacks complete size evidence."""
+
+
+@runtime_checkable
+class MemorySized(Protocol):
+    """Explicit total-resident-memory contract for opaque backend/model objects."""
+
+    def mixle_memory_nbytes(self) -> int:
+        """Return the object's complete resident byte footprint."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -1866,21 +1881,24 @@ def _record_calibration(
 
 
 def estimate_model_nbytes(model: Any) -> int:
-    """Approximate bytes held by a model's public parameter payload."""
+    """Return complete recursively owned model bytes or fail when unknown."""
     if model is None:
         return 0
-    return _object_nbytes(model, set(), depth=0, max_depth=8)
+    return _object_nbytes(model, set(), path=type(model).__name__)
 
 
 def estimate_estimator_stat_nbytes(estimator: Any) -> int:
-    """Approximate bytes in a zero accumulator value for an estimator."""
+    """Return complete bytes in a zero accumulator value or fail when unknown."""
     if estimator is None:
         return 0
     try:
         acc = estimator.accumulator_factory().make()
-        return _object_nbytes(acc.value(), set(), depth=0, max_depth=8)
-    except Exception:  # noqa: BLE001
-        return 0
+        value = acc.value()
+    except Exception as exc:  # noqa: BLE001
+        raise UnknownMemoryFootprintError(
+            "could not construct a zero accumulator for %s" % type(estimator).__name__
+        ) from exc
+    return _object_nbytes(value, set(), path="%s.accumulator" % type(estimator).__name__)
 
 
 def _estimate_encoded_row_bytes(data: Sequence[Any], encoder: DataSequenceEncoder, sample_size: int) -> float:
@@ -2007,44 +2025,74 @@ def _dtype_bytes(dtype: Any, precision: Any | None) -> int:
         return 8
 
 
-def _object_nbytes(x: Any, seen: set, depth: int, max_depth: int) -> int:
-    if x is None or depth > max_depth:
-        return 0
+def _object_nbytes(x: Any, seen: set[int], path: str) -> int:
+    if x is None:
+        return sys.getsizeof(None)
     oid = id(x)
     if oid in seen:
         return 0
     seen.add(oid)
+    explicit = getattr(x, "mixle_memory_nbytes", None)
+    if callable(explicit):
+        try:
+            result = explicit()
+        except Exception as exc:  # noqa: BLE001
+            raise UnknownMemoryFootprintError("%s size protocol failed" % path) from exc
+        if isinstance(result, (bool, np.bool_)) or not isinstance(result, (int, np.integer)) or result < 0:
+            raise UnknownMemoryFootprintError("%s size protocol returned an invalid byte count" % path)
+        return int(result)
     if isinstance(x, np.ndarray):
-        return int(x.nbytes)
+        return max(sys.getsizeof(x), int(x.nbytes))
+    if hasattr(x, "numel") and callable(x.numel) and hasattr(x, "element_size"):
+        try:
+            return sys.getsizeof(x) + int(x.numel() * x.element_size())
+        except Exception as exc:  # noqa: BLE001
+            raise UnknownMemoryFootprintError("%s tensor size protocol failed" % path) from exc
     if isinstance(x, (bytes, bytearray)):
-        return len(x)
+        return sys.getsizeof(x)
     if isinstance(x, str):
-        return len(x.encode("utf-8"))
+        return sys.getsizeof(x)
     if isinstance(x, (bool, np.bool_)):
-        return 1
+        return sys.getsizeof(x)
     if isinstance(x, (int, float, complex, np.number)):
         return sys.getsizeof(x)
     nbytes = getattr(x, "nbytes", None)
     if isinstance(nbytes, (int, np.integer)):
-        return int(nbytes)
+        if nbytes < 0:
+            raise UnknownMemoryFootprintError("%s exposes a negative nbytes value" % path)
+        return max(sys.getsizeof(x), int(nbytes))
     if isinstance(x, dict):
-        return sum(
-            _object_nbytes(k, seen, depth + 1, max_depth) + _object_nbytes(v, seen, depth + 1, max_depth)
+        return sys.getsizeof(x) + sum(
+            _object_nbytes(k, seen, "%s.key" % path) + _object_nbytes(v, seen, "%s[%r]" % (path, k))
             for k, v in x.items()
         )
-    if isinstance(x, (list, tuple)):
-        return sum(_object_nbytes(v, seen, depth + 1, max_depth) for v in x)
+    if isinstance(x, (list, tuple, set, frozenset)):
+        return sys.getsizeof(x) + sum(
+            _object_nbytes(value, seen, "%s[%d]" % (path, index)) for index, value in enumerate(x)
+        )
+    if callable(x):
+        raise UnknownMemoryFootprintError("%s contains callable state without an explicit size protocol" % path)
     if hasattr(x, "__dict__"):
-        total = 0
+        total = sys.getsizeof(x) + sys.getsizeof(vars(x))
         for key, value in vars(x).items():
-            if key.startswith("_") or callable(value):
-                continue
-            total += _object_nbytes(value, seen, depth + 1, max_depth)
+            total += _object_nbytes(key, seen, "%s.__dict__.key" % path)
+            total += _object_nbytes(value, seen, "%s.%s" % (path, key))
         return total
-    try:
-        return encoded_nbytes(x)
-    except Exception:  # noqa: BLE001
-        return 0
+    slots: list[str] = []
+    for cls in type(x).__mro__:
+        declared = getattr(cls, "__slots__", ())
+        slots.extend((declared,) if isinstance(declared, str) else declared)
+    slots = [slot for slot in slots if slot not in ("__dict__", "__weakref__") and hasattr(x, slot)]
+    if slots:
+        return sys.getsizeof(x) + sum(
+            _object_nbytes(getattr(x, slot), seen, "%s.%s" % (path, slot)) for slot in slots
+        )
+    if type(x).__module__ == "builtins":
+        return sys.getsizeof(x)
+    raise UnknownMemoryFootprintError(
+        "%s (%s.%s) has opaque state; implement mixle_memory_nbytes()"
+        % (path, type(x).__module__, type(x).__qualname__)
+    )
 
 
 def _kernel_or_none(model: Any, engine: Any, estimator: Any | None = None) -> Any:

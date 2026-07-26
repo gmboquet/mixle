@@ -24,6 +24,7 @@ from mixle.utils.parallel.planner import (
     Placement,
     PlacementShard,
     Resources,
+    UnknownMemoryFootprintError,
     calibrate_resources,
     encoded_data,
     estimate_model_nbytes,
@@ -214,7 +215,7 @@ class PlacementPlanningTestCase(unittest.TestCase):
             ],
             [0.5, 0.5],
         )
-        resources = Resources.single_cpu(memory_bytes=1_000)
+        resources = Resources.single_cpu(memory_bytes=4_000)
 
         placement = plan(data=data, model=model, estimator=model.estimator(), resources=resources, safety_factor=1.0)
 
@@ -245,6 +246,33 @@ class PlacementPlanningTestCase(unittest.TestCase):
         )
 
         self.assertGreater(estimate_model_nbytes(model), 0)
+
+    def test_memory_estimate_includes_private_and_deep_state_and_rejects_opaque_state(self):
+        class OwnedState:
+            def __init__(self):
+                self._private = np.zeros(17, dtype=np.float64)
+                value = np.ones(5, dtype=np.float64)
+                for _ in range(12):
+                    value = [value]
+                self.deep = value
+
+        owned = OwnedState()
+        estimate = estimate_model_nbytes(owned)
+        self.assertGreaterEqual(estimate, owned._private.nbytes + owned.deep[0][0][0][0][0][0][0][0][0][0][0][0].nbytes)
+
+        class Opaque:
+            __slots__ = ()
+
+        with self.assertRaisesRegex(UnknownMemoryFootprintError, "mixle_memory_nbytes"):
+            estimate_model_nbytes(Opaque())
+
+        class Declared:
+            __slots__ = ()
+
+            def mixle_memory_nbytes(self):
+                return 1234
+
+        self.assertEqual(estimate_model_nbytes(Declared()), 1234)
 
     def test_calibrate_resources_updates_throughput_from_kernel_scoring(self):
         model = GaussianDistribution(0.0, 1.0)
