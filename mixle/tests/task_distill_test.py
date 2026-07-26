@@ -7,6 +7,7 @@ should reproduce the teacher with high agreement on held-out text and survive a 
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -14,7 +15,7 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("safetensors")
 
-from mixle.task.distill import agreement, distill  # noqa: E402
+from mixle.task.distill import _fit_mlp, agreement, distill, distill_from_labels  # noqa: E402
 from mixle.task.model import TaskModel  # noqa: E402
 
 
@@ -69,6 +70,43 @@ class EarlyStoppingTest(unittest.TestCase):
         student = distill(_teacher, train, n=3, dim=64, epochs=15, seed=0)
         self.assertLessEqual(student.meta["recipe"]["epochs_run"], 15)
 
+    def test_restores_the_best_loss_checkpoint_after_stalled_worse_steps(self):
+        losses = iter([1.0, 0.5, 0.6, 0.7, 0.8])
+        calls = {"count": 0}
+
+        class Fit:
+            def __init__(self, module, loss):
+                self.module = module
+                self.loss = loss
+                self.fit_receipt = {"optimizer_plan": {"checkpoint": calls["count"]}}
+
+            def seq_log_density(self, encoded):
+                return np.full(len(encoded[1]), -self.loss)
+
+        def fake_optimize(data, estimator, *, prev_estimate, **kwargs):
+            calls["count"] += 1
+            with __import__("torch").no_grad():
+                for parameter in prev_estimate.module.parameters():
+                    parameter.fill_(float(calls["count"]))
+            return Fit(prev_estimate.module, next(losses))
+
+        with patch("mixle.inference.optimize", side_effect=fake_optimize):
+            module, _, steps_run, receipt = _fit_mlp(
+                np.ones((4, 2)),
+                np.asarray([0, 1, 0, 1]),
+                2,
+                [2],
+                50,
+                0.01,
+                0,
+                "cpu",
+            )
+        self.assertEqual(steps_run, 50)
+        self.assertEqual(receipt["best_step"], 20)
+        self.assertEqual(receipt["best_loss"], 0.5)
+        for parameter in module.parameters():
+            np.testing.assert_array_equal(parameter.detach().numpy(), np.full_like(parameter.detach().numpy(), 2.0))
+
     def test_does_not_regress_accuracy_vs_the_full_fixed_run(self):
         # early stopping should only skip steps that weren't improving the loss -- held-out accuracy should
         # match (not merely "be acceptable in isolation", but be comparable to) an unrelated full run
@@ -84,6 +122,17 @@ class EarlyStoppingTest(unittest.TestCase):
         self.assertEqual(sorted(student.adapter.labels), ["ham", "spam"])
         self.assertTrue(student.meta["distilled"])
         self.assertEqual(student.meta["n_examples"], len(train))
+
+    def test_label_and_agreement_cardinality_is_exact(self):
+        with self.assertRaisesRegex(ValueError, "same length"):
+            distill_from_labels(["a", "b"], ["x"], epochs=1)
+
+        class BadStudent:
+            def batch(self, texts):
+                return ["x"]
+
+        with self.assertRaisesRegex(ValueError, "same length"):
+            agreement(BadStudent(), ["x", "y"], ["a", "b"])
 
     def test_distilled_model_saves_and_calls_locally(self):
         train = _make_corpus(seed=3)

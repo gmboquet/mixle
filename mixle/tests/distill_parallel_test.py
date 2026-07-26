@@ -20,12 +20,12 @@ class TeacherLabelsTest(unittest.TestCase):
     TEXTS = [f"item-{i}" * (1 + i % 3) for i in range(23)]
 
     def test_sequential_path_is_exactly_as_batched(self):
-        want = _as_batched(_label)(list(self.TEXTS))
-        self.assertEqual(_teacher_labels(_label, list(self.TEXTS), n_jobs=1), want)
+        want = _as_batched(_label, teacher_mode="item")(list(self.TEXTS))
+        self.assertEqual(_teacher_labels(_label, list(self.TEXTS), n_jobs=1, teacher_mode="item"), want)
 
     def test_per_item_teacher_keeps_order_across_threads(self):
         want = [_label(t) for t in self.TEXTS]
-        self.assertEqual(_teacher_labels(_label, list(self.TEXTS), n_jobs=4), want)
+        self.assertEqual(_teacher_labels(_label, list(self.TEXTS), n_jobs=4, teacher_mode="item"), want)
 
     def test_batched_teacher_keeps_order_across_threads(self):
         def batched_teacher(texts):
@@ -48,11 +48,29 @@ class TeacherLabelsTest(unittest.TestCase):
             return _label(text)
 
         want = [_label(t) for t in self.TEXTS]
-        self.assertEqual(_teacher_labels(slow_teacher, list(self.TEXTS), n_jobs=4), want)
+        self.assertEqual(
+            _teacher_labels(slow_teacher, list(self.TEXTS), n_jobs=4, teacher_mode="item"),
+            want,
+        )
         self.assertGreaterEqual(state["max_in_flight"], 2)  # concurrency observed, not assumed
 
     def test_single_item_short_circuits(self):
-        self.assertEqual(_teacher_labels(_label, ["ab"], n_jobs=8), ["short"])
+        self.assertEqual(_teacher_labels(_label, ["ab"], n_jobs=8, teacher_mode="item"), ["short"])
+
+    def test_batch_teacher_is_called_once_and_bad_cardinality_is_not_retried(self):
+        calls = []
+
+        def bad_teacher(items):
+            calls.append(tuple(items))
+            return ["only-one"]
+
+        with self.assertRaisesRegex(ValueError, "returned 1 labels for 3 inputs"):
+            _teacher_labels(bad_teacher, ["a", "b", "c"], teacher_mode="batch")
+        self.assertEqual(calls, [("a", "b", "c")])
+
+    def test_teacher_mode_must_be_explicitly_valid(self):
+        with self.assertRaisesRegex(ValueError, "teacher_mode"):
+            _teacher_labels(_label, ["a"], teacher_mode="auto")
 
 
 class EndToEndTest(unittest.TestCase):
