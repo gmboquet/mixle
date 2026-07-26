@@ -54,7 +54,7 @@ from mixle.task.collapse import (
     distinct_count_diversity,
     entropy_diversity,
 )
-from mixle.task.compose import ComposedAnswer, ComposedModel, compose
+from mixle.task.compose import ComposedAnswer, ComposedModel, EvidenceValue, StageReceipt, compose
 from mixle.task.data_mixture import SyntheticDomain, estimate_near_duplicate_rate, optimize_mixture, proxy_run_score
 from mixle.task.density import DensityGate
 from mixle.task.design import DesignedModel, design_model, spec_to_estimator
@@ -254,6 +254,7 @@ __all__ = [
     "CascadeStats",
     "ComposedAnswer",
     "ComposedModel",
+    "EvidenceValue",
     "SyntheticDomain",
     "estimate_near_duplicate_rate",
     "optimize_mixture",
@@ -379,6 +380,7 @@ __all__ = [
     "PlanModel",
     "fit_plan_model",
     "Solution",
+    "StageReceipt",
     "StructuredClassifierIO",
     "TaskManifest",
     "TaskModel",
