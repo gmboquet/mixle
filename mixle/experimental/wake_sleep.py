@@ -19,8 +19,9 @@ Exploratory ``mixle.experimental`` code (P12 card).
 
 from __future__ import annotations
 
-from collections import Counter
+import math
 from dataclasses import dataclass, field
+from itertools import combinations
 
 import numpy as np
 
@@ -31,6 +32,18 @@ class Atom:
 
     name: str
     cols: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("atom name must be a non-empty string")
+        if not isinstance(self.cols, tuple) or not self.cols:
+            raise ValueError("atom cols must be a non-empty tuple")
+        if any(isinstance(col, bool) or not isinstance(col, (int, np.integer)) or col < 0 for col in self.cols):
+            raise ValueError("atom cols must contain non-negative integer column indices")
+        normalized = tuple(sorted(int(col) for col in self.cols))
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("atom cols must not contain duplicates")
+        object.__setattr__(self, "cols", normalized)
 
 
 def _mdl(y: np.ndarray, features: np.ndarray, cols: tuple[int, ...], penalty: float) -> float:
@@ -54,6 +67,23 @@ class SearchResult:
 
 def greedy_search(y: np.ndarray, features: np.ndarray, library: list[Atom], *, penalty: float = 2.0) -> SearchResult:
     """Forward-selection structure search; returns the chosen atoms and the number of fit evaluations."""
+    y = np.asarray(y, dtype=float)
+    features = np.asarray(features, dtype=float)
+    if y.ndim != 1 or y.size == 0 or not np.all(np.isfinite(y)):
+        raise ValueError("y must be a non-empty finite one-dimensional array")
+    if features.ndim != 2 or features.shape[0] != y.size or features.shape[1] == 0:
+        raise ValueError("features must be a non-empty matrix with one row per target")
+    if not np.all(np.isfinite(features)):
+        raise ValueError("features must contain only finite values")
+    if not isinstance(library, list) or any(not isinstance(atom, Atom) for atom in library):
+        raise TypeError("library must be a list of Atom objects")
+    if len({atom.name for atom in library}) != len(library):
+        raise ValueError("library atom names must be unique")
+    if any(col >= features.shape[1] for atom in library for col in atom.cols):
+        raise ValueError("library atom column is outside the feature matrix")
+    if isinstance(penalty, bool) or not isinstance(penalty, (int, float)) or not math.isfinite(penalty) or penalty < 0:
+        raise ValueError("penalty must be finite and non-negative")
+
     chosen: list[Atom] = []
     used: tuple[int, ...] = ()
     current = _mdl(y, features, used, penalty)
@@ -78,7 +108,34 @@ def greedy_search(y: np.ndarray, features: np.ndarray, library: list[Atom], *, p
 
 def primitive_library(n_primitives: int) -> list[Atom]:
     """One atom per basis component."""
+    if isinstance(n_primitives, bool) or not isinstance(n_primitives, int) or n_primitives <= 0:
+        raise ValueError("n_primitives must be a positive integer")
     return [Atom(f"p{i}", (i,)) for i in range(n_primitives)]
+
+
+def _validate_task_spec(
+    features: np.ndarray,
+    motif: tuple[int, ...],
+    n_specific: int,
+) -> tuple[np.ndarray, tuple[int, ...]]:
+    features = np.asarray(features, dtype=float)
+    if features.ndim != 2 or min(features.shape) == 0 or not np.all(np.isfinite(features)):
+        raise ValueError("features must be a non-empty finite matrix")
+    if not isinstance(motif, tuple) or not motif:
+        raise ValueError("motif must be a non-empty tuple of column indices")
+    if any(isinstance(col, bool) or not isinstance(col, (int, np.integer)) for col in motif):
+        raise ValueError("motif must contain integer column indices")
+    motif = tuple(int(col) for col in motif)
+    if len(set(motif)) != len(motif):
+        raise ValueError("motif columns must be unique")
+    n_primitives = features.shape[1]
+    if any(col < 0 or col >= n_primitives for col in motif):
+        raise ValueError("motif column is outside the feature matrix")
+    if isinstance(n_specific, bool) or not isinstance(n_specific, int) or n_specific < 0:
+        raise ValueError("n_specific must be a non-negative integer")
+    if n_specific > n_primitives - len(motif):
+        raise ValueError("n_specific exceeds the number of columns outside the motif")
+    return features, motif
 
 
 def make_task(rng: np.random.Generator, features: np.ndarray, motif: tuple[int, ...], n_specific: int) -> np.ndarray:
@@ -87,6 +144,9 @@ def make_task(rng: np.random.Generator, features: np.ndarray, motif: tuple[int, 
     The motif components carry a strong coefficient (so greedy reliably recovers all of them),
     the task-specific ones a weaker coefficient.
     """
+    if not isinstance(rng, np.random.Generator):
+        raise TypeError("rng must be a numpy Generator")
+    features, motif = _validate_task_spec(features, motif, n_specific)
     n_primitives = features.shape[1]
     specific = rng.choice([i for i in range(n_primitives) if i not in motif], size=n_specific, replace=False)
     motif_coef = rng.uniform(2.0, 3.0, size=len(motif)) * rng.choice([-1.0, 1.0], size=len(motif))
@@ -96,26 +156,63 @@ def make_task(rng: np.random.Generator, features: np.ndarray, motif: tuple[int, 
 
 
 def abstract_fragment(solutions: list[tuple[int, ...]], *, min_support: float = 0.6, min_size: int = 2) -> Atom | None:
-    """Anti-unify solutions into one fragment: the largest column set present in >= min_support of them."""
+    """Return the largest exact itemset jointly present in at least ``min_support`` of solutions.
+
+    Ties are resolved by larger exact support and then lexicographically. Every returned fragment is therefore
+    a subset of at least the required number of observed solutions; individually frequent columns are never
+    unioned into a fragment unless that exact union is also jointly frequent.
+    """
+    if not isinstance(solutions, list):
+        raise TypeError("solutions must be a list of column tuples")
+    if (
+        isinstance(min_support, bool)
+        or not isinstance(min_support, (int, float))
+        or not math.isfinite(min_support)
+        or not 0.0 < min_support <= 1.0
+    ):
+        raise ValueError("min_support must be finite and in (0, 1]")
+    if isinstance(min_size, bool) or not isinstance(min_size, int) or min_size < 1:
+        raise ValueError("min_size must be a positive integer")
     if not solutions:
         return None
-    n = len(solutions)
-    # Count support of each individual column, then grow the frequent set greedily by support.
-    col_support = Counter()
-    for sol in solutions:
-        for c in set(sol):
-            col_support[c] += 1
-    frequent = sorted([c for c, k in col_support.items() if k / n >= min_support])
-    if len(frequent) < min_size:
+    normalized: list[frozenset[int]] = []
+    for solution in solutions:
+        if not isinstance(solution, tuple):
+            raise TypeError("each solution must be a tuple of column indices")
+        if any(isinstance(col, bool) or not isinstance(col, (int, np.integer)) or col < 0 for col in solution):
+            raise ValueError("solution columns must be non-negative integers")
+        if len(set(solution)) != len(solution):
+            raise ValueError("solution columns must not contain duplicates")
+        normalized.append(frozenset(int(col) for col in solution))
+
+    required = int(math.ceil(float(min_support) * len(normalized)))
+
+    def support(itemset: frozenset[int]) -> int:
+        return sum(itemset.issubset(solution) for solution in normalized)
+
+    universe = sorted(set().union(*normalized))
+    current = {frozenset((col,)) for col in universe if support(frozenset((col,))) >= required}
+    frequent: dict[frozenset[int], int] = {itemset: support(itemset) for itemset in current}
+    size = 2
+    while current:
+        candidates: set[frozenset[int]] = set()
+        ordered = sorted(current, key=lambda itemset: tuple(sorted(itemset)))
+        for left_index, left in enumerate(ordered):
+            for right in ordered[left_index + 1 :]:
+                candidate = left | right
+                if len(candidate) != size:
+                    continue
+                if all(frozenset(subset) in current for subset in combinations(candidate, size - 1)):
+                    candidates.add(candidate)
+        current = {candidate for candidate in candidates if support(candidate) >= required}
+        frequent.update({itemset: support(itemset) for itemset in current})
+        size += 1
+
+    eligible = [(itemset, count) for itemset, count in frequent.items() if len(itemset) >= min_size]
+    if not eligible:
         return None
-    # Keep only the columns that co-occur together in >= min_support of solutions.
-    kept = [c for c in frequent if sum(1 for s in solutions if set(frequent) <= set(s)) / n >= min_support]
-    if len(kept) < min_size:
-        # fall back to the maximal subset that actually co-occurs
-        kept = frequent
-    cols = tuple(sorted(kept))
-    if len(cols) < min_size:
-        return None
+    eligible.sort(key=lambda item: (-len(item[0]), -item[1], tuple(sorted(item[0]))))
+    cols = tuple(sorted(eligible[0][0]))
     return Atom("frag(" + ",".join(map(str, cols)) + ")", cols)
 
 
@@ -140,11 +237,24 @@ def wake_sleep(
     seed: int = 0,
 ) -> WakeSleepReport:
     """Run one wake-sleep round and measure held-out search cost with vs without the learned fragment."""
+    for value, name in (
+        (n_train, "n_train"),
+        (n_heldout, "n_heldout"),
+        (n_primitives, "n_primitives"),
+        (n_t, "n_t"),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if n_t < n_primitives:
+        raise ValueError("n_t must be at least n_primitives for the orthonormal feature design")
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise ValueError("seed must be a non-negative integer")
     rng = np.random.default_rng(seed)
     # Orthonormal component basis: with genuinely orthogonal columns, greedy recovers the exact
     # support (no column is redundant), so the abstraction sees the true motif in every solution.
     q, _ = np.linalg.qr(rng.standard_normal((n_t, n_primitives)))
     features = q[:, :n_primitives]
+    features, motif = _validate_task_spec(features, motif, n_specific)
 
     prims = primitive_library(n_primitives)
 
