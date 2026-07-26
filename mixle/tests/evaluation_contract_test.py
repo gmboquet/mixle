@@ -93,3 +93,60 @@ class _InconsistentDistribution:
 def test_chi_square_rejects_probabilities_inconsistent_with_the_cdf():
     with pytest.raises(ValueError, match="sum to one"):
         evaluation.chi_square_test([0], _InconsistentDistribution(), lo=0, hi=0)
+
+
+def test_k_fold_split_conserves_every_row_and_balances_folds():
+    assignments = evaluation.k_fold_split_index(11, 3, np.random.RandomState(4))
+    assert assignments.shape == (11,)
+    counts = np.bincount(assignments, minlength=3)
+    assert counts.sum() == 11
+    assert counts.min() > 0
+    assert counts.max() - counts.min() <= 1
+
+
+@pytest.mark.parametrize(
+    ("size", "folds"),
+    [
+        (0, 2),
+        (4, 1),
+        (4, 5),
+        (4.5, 2),
+        (4, True),
+    ],
+)
+def test_k_fold_rejects_infeasible_or_inexact_sizes(size, folds):
+    with pytest.raises(ValueError):
+        evaluation.k_fold_split_index(size, folds, np.random.RandomState(0))
+
+
+def test_proportional_split_uses_every_index_exactly_once():
+    partitions = evaluation.partition_data_index(
+        11,
+        [0.0, 0.33, 0.67],
+        np.random.RandomState(8),
+    )
+    assert [len(partition) for partition in partitions] == [0, 4, 7]
+    flattened = np.concatenate(partitions)
+    np.testing.assert_array_equal(np.sort(flattened), np.arange(11))
+
+    data_parts = evaluation.partition_data(
+        list("abcdefghijk"),
+        [0.5, 0.5],
+        np.random.RandomState(2),
+    )
+    assert sorted(item for part in data_parts for item in part) == list("abcdefghijk")
+
+
+@pytest.mark.parametrize(
+    "proportions",
+    [
+        [],
+        [0.4, 0.4],
+        [0.5, -0.5, 1.0],
+        [0.5, np.nan, 0.5],
+        [[0.5, 0.5]],
+    ],
+)
+def test_proportional_split_rejects_invalid_or_nonexhaustive_proportions(proportions):
+    with pytest.raises(ValueError):
+        evaluation.partition_data_index(10, proportions, np.random.RandomState(0))
