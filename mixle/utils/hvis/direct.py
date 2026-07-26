@@ -56,13 +56,25 @@ _MAX_QUAD_BASE = 8  # quadratic lift caps its base at this many pre-PCA directio
 
 
 def _sqrt_psd(mat: np.ndarray) -> np.ndarray:
-    vals, vecs = np.linalg.eigh(np.asarray(mat, dtype=np.float64))
+    mat = np.asarray(mat, dtype=np.float64)
+    if mat.ndim != 2 or mat.shape[0] == 0 or mat.shape[0] != mat.shape[1]:
+        raise ValueError("PSD matrix must be non-empty and square.")
+    if not np.all(np.isfinite(mat)) or not np.allclose(mat, mat.T, rtol=1.0e-8, atol=1.0e-10):
+        raise ValueError("PSD matrix must be finite and symmetric.")
+    vals, vecs = np.linalg.eigh(mat)
+    if float(vals.min()) < -1.0e-8:
+        raise ValueError("matrix must be positive semidefinite.")
     return vecs @ np.diag(np.sqrt(np.maximum(vals, 0.0))) @ vecs.T
 
 
 def _canonical_signs(components: np.ndarray) -> np.ndarray:
     """Fix each principal direction's sign so its largest-magnitude loading is positive --
     determinism must not depend on LAPACK's arbitrary eigenvector signs."""
+    components = np.asarray(components, dtype=np.float64)
+    if components.ndim != 2 or components.shape[0] == 0 or components.shape[1] == 0:
+        raise ValueError("components must be a non-empty two-dimensional matrix.")
+    if not np.all(np.isfinite(components)):
+        raise ValueError("components must contain only finite values.")
     flips = np.sign(components[np.abs(components).argmax(axis=0), np.arange(components.shape[1])])
     flips[flips == 0] = 1.0
     return components * flips
@@ -71,6 +83,9 @@ def _canonical_signs(components: np.ndarray) -> np.ndarray:
 def _lift_quadratic(v: np.ndarray) -> np.ndarray:
     """Explicit degree-2 polynomial features: ``[v, v_i v_j for i <= j]`` -- a closed-form,
     deterministic, placement-compatible nonlinear chart."""
+    v = np.asarray(v, dtype=np.float64)
+    if v.ndim != 2 or v.shape[0] == 0 or v.shape[1] == 0 or not np.all(np.isfinite(v)):
+        raise ValueError("quadratic chart input must be a finite non-empty matrix.")
     n, m = v.shape
     prods = [v[:, i] * v[:, j] for i in range(m) for j in range(i, m)]
     return np.column_stack([v] + prods)
@@ -91,16 +106,24 @@ def component_fiber_coords(mix_model, data, field_weights=None) -> tuple[np.ndar
     :func:`mixle.utils.hvis.topology.model_fit_health`).
     """
     data = list(data)
+    if len(data) < 2:
+        raise ValueError("direct model maps require at least two observations.")
+    if mix_model is None or not getattr(mix_model, "components", None):
+        raise ValueError("mix_model must expose at least one component.")
     z, _ = _posteriors_and_loglikes(mix_model, data=data)
     k_count = z.shape[1]
     factors = local_factors(mix_model, data, field_weights=field_weights)
     terms = list(_field_log_density_features(list(mix_model.components), data))
+    if len(factors) != len(terms):
+        raise ValueError("local affinity factors and field-coordinate terms must have identical schemas.")
 
     field_specs, xs, labels, keep = [], [], [], []
     for f_pos, (factor, (_l, x_f, native_f)) in enumerate(zip(factors, terms)):
         if x_f is None:
             continue
         x_f = np.asarray(x_f, dtype=np.float64)
+        if x_f.ndim != 2 or x_f.shape[0] != len(data) or x_f.shape[1] == 0 or not np.all(np.isfinite(x_f)):
+            raise ValueError("field coordinates must be a finite matrix aligned with the observations.")
         if not _is_local_factor(factor):  # coordinate-bearing fields are always local factors
             raise ValueError("internal: coordinate-bearing fields must be local factors.")
         weight = float(factor["weight"])
@@ -110,6 +133,8 @@ def component_fiber_coords(mix_model, data, field_weights=None) -> tuple[np.ndar
         keep.append(f_pos)
         kind = "native" if native_f else "typicality"
         labels.extend([f"field{f_pos}[{kind}]:{c}" for c in range(x_f.shape[1])])
+    if not xs:
+        raise ValueError("direct model maps require at least one coordinate-bearing field.")
 
     inv_covs = [np.asarray(factors[i]["inv_cov"], dtype=np.float64) for i in keep]
     whiteners = [[_sqrt_psd(inv_covs[f_pos][k]) for f_pos in range(len(keep))] for k in range(k_count)]
@@ -133,9 +158,29 @@ def _resolve_overlap(
     on screen. Pairs in ``allowed`` (model overlap present) may overlap visually -- screen overlap
     then MEANS model overlap. Pushes only ever grow separations, so adjacency orderings among the
     allowed pairs are preserved."""
+    vertices = np.asarray(vertices, dtype=np.float64)
+    radii = np.asarray(radii, dtype=np.float64)
+    if vertices.ndim != 2 or vertices.shape[0] == 0 or vertices.shape[1] == 0:
+        raise ValueError("vertices must be a non-empty two-dimensional matrix.")
+    if not np.all(np.isfinite(vertices)):
+        raise ValueError("vertices must contain only finite coordinates.")
+    if radii.shape != (vertices.shape[0],) or not np.all(np.isfinite(radii)) or np.any(radii < 0.0):
+        raise ValueError("radii must be a finite non-negative vector aligned with vertices.")
+    if not np.isfinite(margin) or margin <= 0.0:
+        raise ValueError("margin must be finite and positive.")
+    if isinstance(max_sweeps, bool) or not isinstance(max_sweeps, (int, np.integer)) or max_sweeps <= 0:
+        raise ValueError("max_sweeps must be a positive integer.")
+    k = vertices.shape[0]
+    for pair in allowed:
+        if (
+            not isinstance(pair, tuple)
+            or len(pair) != 2
+            or any(isinstance(i, bool) or not isinstance(i, (int, np.integer)) for i in pair)
+            or not 0 <= pair[0] < pair[1] < k
+        ):
+            raise ValueError("allowed must contain ordered in-range vertex-index pairs.")
     v = vertices.copy()
-    k = v.shape[0]
-    for _ in range(int(max_sweeps)):
+    for _ in range(max_sweeps):
         moved = False
         for a in range(k):
             for b in range(a + 1, k):
@@ -189,6 +234,61 @@ class ModelMap:
     _fiber_scale: float = field(repr=False, default=1.0)
     _emb_dim: int = field(repr=False, default=2)
 
+    def __post_init__(self) -> None:
+        self.coords = np.asarray(self.coords, dtype=np.float64)
+        self.vertices = np.asarray(self.vertices, dtype=np.float64)
+        self.responsibilities = np.asarray(self.responsibilities, dtype=np.float64)
+        if self.coords.ndim != 2 or self.coords.shape[1] == 0:
+            raise ValueError("coords must be a two-dimensional matrix with a non-zero embedding width.")
+        n, emb_dim = self.coords.shape
+        if not np.all(np.isfinite(self.coords)):
+            raise ValueError("coords must contain only finite values.")
+        if self.vertices.ndim != 2 or self.vertices.shape[1] != emb_dim or self.vertices.shape[0] == 0:
+            raise ValueError("vertices must be a non-empty matrix with the embedding width.")
+        if not np.all(np.isfinite(self.vertices)):
+            raise ValueError("vertices must contain only finite values.")
+        k_count = self.vertices.shape[0]
+        if self.responsibilities.shape != (n, k_count):
+            raise ValueError("responsibilities must align with coordinate rows and vertices.")
+        if not np.all(np.isfinite(self.responsibilities)) or np.any(self.responsibilities < 0.0):
+            raise ValueError("responsibilities must contain finite non-negative probabilities.")
+        if not np.allclose(self.responsibilities.sum(axis=1), 1.0, rtol=1.0e-6, atol=1.0e-10):
+            raise ValueError("responsibility rows must sum to one.")
+        if len(self.loadings) != k_count:
+            raise ValueError("loadings must contain one matrix per component.")
+        self.loadings = [np.asarray(loading, dtype=np.float64) for loading in self.loadings]
+        if any(
+            loading.ndim != 2
+            or loading.shape[0] == 0
+            or loading.shape[1] != emb_dim
+            or not np.all(np.isfinite(loading))
+            for loading in self.loadings
+        ):
+            raise ValueError("each loading must be a finite feature-by-embedding matrix.")
+        if not self.coord_labels or any(len(self.coord_labels) != loading.shape[0] for loading in self.loadings):
+            raise ValueError("coord_labels must name every loading row.")
+        if len(self.frames) != k_count:
+            raise ValueError("frames must contain one matrix per component.")
+        self.frames = [np.asarray(frame, dtype=np.float64) for frame in self.frames]
+        if any(frame.shape != (emb_dim, emb_dim) or not np.all(np.isfinite(frame)) for frame in self.frames):
+            raise ValueError("each frame must be a finite square embedding-space matrix.")
+        if self.chart not in ("linear", "quadratic"):
+            raise ValueError("chart must be 'linear' or 'quadratic'.")
+        self.chart_residuals = np.asarray(self.chart_residuals, dtype=np.float64)
+        if (
+            self.chart_residuals.shape != (k_count,)
+            or not np.all(np.isfinite(self.chart_residuals))
+            or np.any(self.chart_residuals < 0.0)
+            or np.any(self.chart_residuals > 1.0 + 1.0e-10)
+        ):
+            raise ValueError("chart_residuals must be finite fractions aligned with components.")
+        if not np.isfinite(self._fiber_scale) or self._fiber_scale <= 0.0:
+            raise ValueError("fiber scale must be finite and positive.")
+        if self._emb_dim != emb_dim:
+            raise ValueError("_emb_dim must match the coordinate width.")
+        if self._model is None:
+            raise ValueError("a fitted model is required for out-of-sample placement.")
+
     def _chart_features(self, u: np.ndarray, k: int) -> np.ndarray:
         if self.chart == "linear":
             return u
@@ -200,7 +300,11 @@ class ModelMap:
         """Closed-form out-of-sample placement with the FIT-TIME transforms (means, whiteners,
         chart directions, frames, scale). Placing the training data reproduces ``coords`` exactly."""
         data = list(data)
+        if not data:
+            raise ValueError("placement data must contain at least one observation.")
         z, _ = _posteriors_and_loglikes(self._model, data=data)
+        if z.shape[1] != self.vertices.shape[0]:
+            raise ValueError("placement responsibilities do not match the fitted component map.")
         terms = list(_field_log_density_features(list(self._model.components), data))
         keep = self._transforms["keep"]
         if max(keep, default=-1) >= len(terms):
@@ -210,7 +314,10 @@ class ModelMap:
             x_f = terms[f_pos][1]
             if x_f is None or np.asarray(x_f).shape[1] != spec["dim"]:
                 raise ValueError("data decomposes into a different field set than the fitted map.")
-            xs.append(np.asarray(x_f, dtype=np.float64))
+            x_f = np.asarray(x_f, dtype=np.float64)
+            if x_f.ndim != 2 or x_f.shape[0] != len(data) or not np.all(np.isfinite(x_f)):
+                raise ValueError("placement field coordinates must be finite and row-aligned.")
+            xs.append(x_f)
         k_count = self.vertices.shape[0]
         y = np.zeros((len(data), self._emb_dim))
         for k in range(k_count):
@@ -223,6 +330,8 @@ class ModelMap:
             feats = self._chart_features(u, k)
             scores = (feats - self._fiber_means[k]) @ self.loadings[k] * self._fiber_scale
             y += z[:, k : k + 1] * (self.vertices[k][None, :] + scores @ self.frames[k])
+        if not np.all(np.isfinite(y)):
+            raise FloatingPointError("direct placement produced non-finite coordinates.")
         return y
 
 
@@ -255,9 +364,29 @@ def model_map(
     itself uses no randomness. ``refine=True`` polishes local neighborhoods with t-SNE initialized
     FROM this layout (exaggeration off), leaving the global arrangement model-decided.
     """
+    data = list(data)
+    if len(data) < 2:
+        raise ValueError("model_map requires at least two observations.")
+    if isinstance(emb_dim, bool) or not isinstance(emb_dim, (int, np.integer)) or emb_dim <= 0:
+        raise ValueError("emb_dim must be a positive integer.")
+    if not np.isfinite(spread) or spread <= 0.0:
+        raise ValueError("spread must be finite and positive.")
     if chart not in ("linear", "quadratic"):
         raise ValueError("chart must be 'linear' or 'quadratic'.")
-    data = list(data)
+    if not isinstance(occlusion, (bool, np.bool_)):
+        raise TypeError("occlusion must be boolean.")
+    if not np.isfinite(occlusion_margin) or occlusion_margin <= 0.0:
+        raise ValueError("occlusion_margin must be finite and positive.")
+    if not np.isfinite(edge_threshold) or not 0.0 <= edge_threshold <= 1.0:
+        raise ValueError("edge_threshold must be finite and in [0, 1].")
+    if isinstance(max_components, bool) or not isinstance(max_components, (int, np.integer)) or max_components <= 0:
+        raise ValueError("max_components must be a positive integer.")
+    if isinstance(dpm_max_its, bool) or not isinstance(dpm_max_its, (int, np.integer)) or dpm_max_its <= 0:
+        raise ValueError("dpm_max_its must be a positive integer.")
+    if not isinstance(refine, (bool, np.bool_)):
+        raise TypeError("refine must be boolean.")
+    if refine_kwargs is not None and not isinstance(refine_kwargs, dict):
+        raise TypeError("refine_kwargs must be a mapping or None.")
     if mix_model is None:
         from mixle.utils.automatic import get_dpm_mixture
 
@@ -267,6 +396,10 @@ def model_map(
 
     z, us, base_labels, transforms = component_fiber_coords(mix_model, data, field_weights=field_weights)
     n, k_count = z.shape
+    if z.shape[0] != len(data) or not np.all(np.isfinite(z)) or np.any(z < 0.0):
+        raise ValueError("responsibilities must be finite, non-negative, and aligned with data.")
+    if not np.allclose(z.sum(axis=1), 1.0, rtol=1.0e-6, atol=1.0e-10):
+        raise ValueError("responsibility rows must sum to one.")
     vertices = component_map(z, emb_dim=emb_dim, edge_threshold=edge_threshold)
 
     fiber_means, loadings, raw_scores, pre_list, residuals = [], [], [], [], []

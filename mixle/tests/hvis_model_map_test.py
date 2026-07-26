@@ -19,7 +19,7 @@ from mixle.stats import (
     IntegerCategoricalDistribution,
     MixtureDistribution,
 )
-from mixle.utils.hvis import model_map
+from mixle.utils.hvis import ModelMap, model_map
 
 _MODEL3 = MixtureDistribution(
     [GaussianDistribution(0.0, 1.0), GaussianDistribution(4.0, 1.0), GaussianDistribution(20.0, 1.0)],
@@ -71,6 +71,38 @@ class DeterminismAndPlacementTest(unittest.TestCase):
         fitted._model = comp_model  # simulate a model/data mismatch at placement time
         with self.assertRaises(ValueError):
             fitted.place([(0.0, "a"), (1.0, "a")])
+
+    def test_model_map_rejects_invalid_geometry_controls(self):
+        data, _ = _data3(n_per=2)
+        for kwargs in (
+            {"emb_dim": 0},
+            {"spread": 0.0},
+            {"spread": np.nan},
+            {"occlusion_margin": -1.0},
+            {"edge_threshold": 2.0},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                model_map(data, mix_model=_MODEL3, **kwargs)
+
+    def test_model_map_constructor_rejects_invalid_responsibilities(self):
+        with self.assertRaises(ValueError):
+            ModelMap(
+                coords=np.zeros((3, 2)),
+                vertices=np.zeros((2, 2)),
+                responsibilities=np.array([[1.0, 0.0], [0.5, 0.6], [0.0, 1.0]]),
+                loadings=[np.ones((1, 2)), np.ones((1, 2))],
+                coord_labels=["x"],
+                frames=[np.eye(2), np.eye(2)],
+                chart_residuals=np.zeros(2),
+                _model=_MODEL3,
+                _emb_dim=2,
+            )
+
+    def test_place_rejects_empty_data(self):
+        data, _ = _data3(n_per=2)
+        fitted = model_map(data, mix_model=_MODEL3)
+        with self.assertRaises(ValueError):
+            fitted.place([])
 
 
 class GeometryAndInterpretabilityTest(unittest.TestCase):

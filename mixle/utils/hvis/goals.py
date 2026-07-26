@@ -38,6 +38,17 @@ import numpy as np
 __all__ = ["Anchor", "AxisAlign", "LabelCohesion", "apply_projections", "goals_fix_gauge", "total_goal_gradient"]
 
 
+def _validate_embedding(y: np.ndarray) -> np.ndarray:
+    y = np.asarray(y)
+    if y.ndim != 2 or y.shape[0] == 0 or y.shape[1] == 0:
+        raise ValueError("embedding coordinates must be a non-empty two-dimensional array.")
+    if not np.issubdtype(y.dtype, np.floating):
+        raise TypeError("embedding coordinates must use a floating-point dtype.")
+    if not np.all(np.isfinite(y)):
+        raise ValueError("embedding coordinates must contain only finite values.")
+    return y
+
+
 class Anchor:
     """Pin ``indices`` to ``coordinates``: hard when ``weight`` is None (exact projection each
     step), soft for ``weight`` in ``(0, 1]`` (close that fraction of the remaining gap per step)."""
@@ -45,11 +56,24 @@ class Anchor:
     fixes_gauge = True
 
     def __init__(self, indices: Sequence[int], coordinates: Any, weight: float | None = None) -> None:
-        self.indices = np.asarray(indices, dtype=np.int64)
+        raw_indices = np.asarray(indices)
+        if raw_indices.ndim != 1 or raw_indices.size == 0:
+            raise ValueError("indices must be a non-empty one-dimensional integer sequence.")
+        if raw_indices.dtype.kind not in "iu":
+            raise TypeError("indices must contain integers.")
+        self.indices = raw_indices.astype(np.int64, copy=True)
+        if np.any(self.indices < 0):
+            raise ValueError("indices must be non-negative.")
+        if np.unique(self.indices).size != self.indices.size:
+            raise ValueError("indices must not contain duplicates.")
         self.coordinates = np.atleast_2d(np.asarray(coordinates, dtype=np.float64))
+        if self.coordinates.ndim != 2 or self.coordinates.shape[1] == 0:
+            raise ValueError("coordinates must be a non-empty two-dimensional array.")
         if self.coordinates.shape[0] != len(self.indices):
             raise ValueError(f"coordinates must have one row per index ({len(self.indices)}).")
-        if weight is not None and not 0.0 < weight <= 1.0:
+        if not np.all(np.isfinite(self.coordinates)):
+            raise ValueError("coordinates must contain only finite values.")
+        if weight is not None and (not np.isfinite(weight) or not 0.0 < weight <= 1.0):
             raise ValueError("soft anchor weight is a per-step fraction in (0, 1] (None = hard pin).")
         self.weight = None if weight is None else float(weight)
 
@@ -58,9 +82,19 @@ class Anchor:
         return self.weight is None
 
     def gradient(self, y: np.ndarray) -> np.ndarray:
+        self._validate_for(y)
         return np.zeros_like(y)  # both anchor kinds act in project(): relaxation is already a step
 
+    def _validate_for(self, y: np.ndarray) -> np.ndarray:
+        y = _validate_embedding(y)
+        if int(self.indices.max()) >= y.shape[0]:
+            raise ValueError("anchor index is outside the embedding row range.")
+        if self.coordinates.shape[1] != y.shape[1]:
+            raise ValueError("anchor coordinate width must equal the embedding dimension.")
+        return y
+
     def project(self, y: np.ndarray) -> np.ndarray:
+        y = self._validate_for(y)
         if self.hard:
             y[self.indices] = self.coordinates
         else:
@@ -77,18 +111,29 @@ class LabelCohesion:
     fixes_gauge = False
 
     def __init__(self, labels: Sequence[Any], weight: float = 0.1, margin: float | None = None) -> None:
-        if not 0.0 < weight <= 1.0:
+        if not np.isfinite(weight) or not 0.0 < weight <= 1.0:
             raise ValueError("weight is a per-step fraction in (0, 1].")
         self.labels = list(labels)
+        if not self.labels:
+            raise ValueError("labels must contain at least one entry.")
         self.weight = float(weight)
+        if margin is not None and (not np.isfinite(margin) or margin <= 0.0):
+            raise ValueError("margin must be finite and positive or None.")
         self.margin = None if margin is None else float(margin)
         self._groups: dict[Any, np.ndarray] = {}
-        for label in sorted({lab for lab in self.labels if lab is not None}, key=str):
+        try:
+            unique_labels = {lab for lab in self.labels if lab is not None}
+        except TypeError as exc:
+            raise TypeError("non-None labels must be hashable.") from exc
+        for label in sorted(unique_labels, key=str):
             self._groups[label] = np.asarray([i for i, lab in enumerate(self.labels) if lab == label], dtype=np.int64)
         if not self._groups:
             raise ValueError("LabelCohesion needs at least one labeled point.")
+        if self.margin is not None and len(self._groups) < 2:
+            raise ValueError("margin requires at least two distinct labels.")
 
     def gradient(self, y: np.ndarray) -> np.ndarray:
+        y = _validate_embedding(y)
         if len(self.labels) != y.shape[0]:
             raise ValueError(f"labels cover {len(self.labels)} points but the embedding has {y.shape[0]}.")
         grad = np.zeros_like(y)
@@ -98,16 +143,24 @@ class LabelCohesion:
         if self.margin is not None and len(self._groups) > 1:
             labels = list(self._groups)
             n_pairs = len(labels) * (len(labels) - 1) // 2
+            pair_position = 0
             for a_pos, a in enumerate(labels):
                 for b in labels[a_pos + 1 :]:
                     diff = centroids[a] - centroids[b]
                     dist = float(np.linalg.norm(diff))
                     gap = self.margin - dist
                     if gap <= 0:
+                        pair_position += 1
                         continue
-                    push = (self.weight * gap / n_pairs) * (diff / max(dist, 1.0e-12))
+                    if dist <= 1.0e-12:
+                        direction = np.zeros(y.shape[1], dtype=np.float64)
+                        direction[pair_position % y.shape[1]] = 1.0
+                    else:
+                        direction = diff / dist
+                    push = (self.weight * gap / n_pairs) * direction
                     grad[self._groups[a]] -= push  # Y -= grad: a-members move +push (apart), b-members -push
                     grad[self._groups[b]] += push
+                    pair_position += 1
         return grad
 
 
@@ -120,9 +173,15 @@ class AxisAlign:
     fixes_gauge = False
 
     def __init__(self, values: Sequence[float], axis: int = 0, weight: float = 0.5) -> None:
-        if weight <= 0.0:
-            raise ValueError("weight must be positive.")
+        if not np.isfinite(weight) or not 0.0 < weight <= 1.0:
+            raise ValueError("weight must be a per-step fraction in (0, 1].")
         self.values = np.asarray(values, dtype=np.float64)
+        if self.values.ndim != 1 or self.values.size < 2:
+            raise ValueError("values must be a one-dimensional sequence with at least two entries.")
+        if not np.all(np.isfinite(self.values)):
+            raise ValueError("values must contain only finite numbers.")
+        if isinstance(axis, bool) or not isinstance(axis, (int, np.integer)) or axis < 0:
+            raise ValueError("axis must be a non-negative integer.")
         self.axis = int(axis)
         self.weight = float(weight)
         centered = self.values - self.values.mean()
@@ -132,8 +191,11 @@ class AxisAlign:
         self._v_unit = centered / norm
 
     def gradient(self, y: np.ndarray) -> np.ndarray:
+        y = _validate_embedding(y)
         if len(self.values) != y.shape[0]:
             raise ValueError(f"values cover {len(self.values)} points but the embedding has {y.shape[0]}.")
+        if self.axis >= y.shape[1]:
+            raise ValueError("axis is outside the embedding dimension.")
         grad = np.zeros_like(y)
         u = y[:, self.axis]
         u_centered = u - u.mean()
@@ -152,9 +214,13 @@ def total_goal_gradient(goals: Sequence[Any] | None, y: np.ndarray) -> np.ndarra
     are no goals so the optimizers skip the add entirely."""
     if not goals:
         return None
+    y = _validate_embedding(y)
     total = np.zeros_like(y)
     for goal in goals:
-        total += goal.gradient(y)
+        gradient = np.asarray(goal.gradient(y), dtype=y.dtype)
+        if gradient.shape != y.shape or not np.all(np.isfinite(gradient)):
+            raise ValueError("each goal gradient must be finite and match the embedding shape.")
+        total += gradient
     return total
 
 
@@ -163,11 +229,16 @@ def apply_projections(goals: Sequence[Any] | None, y: np.ndarray, velocity: np.n
     momentum cannot accumulate against the pin."""
     if not goals:
         return y
+    y = _validate_embedding(y)
+    if velocity is not None:
+        velocity = np.asarray(velocity)
+        if velocity.shape != y.shape or not np.all(np.isfinite(velocity)):
+            raise ValueError("velocity must be finite and match the embedding shape.")
     for goal in goals:
         project = getattr(goal, "project", None)
         if project is None:
             continue
-        y = project(y)
+        y = _validate_embedding(project(y))
         if velocity is not None and getattr(goal, "hard", False):
             velocity[goal.indices] = 0.0
     return y
