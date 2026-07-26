@@ -43,6 +43,11 @@ class FeaturizerTest(unittest.TestCase):
         g = HashedNGram.from_spec(f.to_spec())
         self.assertTrue(np.array_equal(f.transform(["abc"]), g.transform(["abc"])))
 
+    def test_invalid_geometry_is_rejected_at_construction(self):
+        for kwargs in ({"n": 0}, {"n": 1.5}, {"dim": 0}, {"dim": True}, {"seed": 1.5}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                HashedNGram(**kwargs)
+
 
 class TaskModelCallTest(unittest.TestCase):
     def test_call_returns_a_label(self):
@@ -56,6 +61,22 @@ class TaskModelCallTest(unittest.TestCase):
         batch = task.batch(xs)
         singles = [task(x) for x in xs]
         self.assertEqual(batch, singles)
+
+    def test_inference_restores_module_mode_and_checks_output_width(self):
+        task, _ = _toy_classifier()
+        task.model.train()
+        task.adapter.logits_batch(task.model, ["x"])
+        self.assertTrue(task.model.training)
+
+        bad = torch.nn.Linear(task.adapter.featurizer.dim, 3)
+        with self.assertRaisesRegex(ValueError, "shape"):
+            task.adapter.logits_batch(bad, ["x"])
+
+    def test_labels_must_be_nonempty_and_unique(self):
+        feature = HashedNGram()
+        for labels in ([], ["x", "x"], [""]):
+            with self.subTest(labels=labels), self.assertRaises(ValueError):
+                TextClassifierIO(feature, labels)
 
 
 class TaskModelPersistenceTest(unittest.TestCase):

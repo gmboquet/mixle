@@ -40,9 +40,18 @@ class WordEmbeddingFeaturizer:
     """
 
     def __init__(self, vectors: dict[str, Sequence[float]] | None, dim: int, seed: int = 0) -> None:
-        self.vectors = {str(k): np.asarray(v, dtype=np.float32) for k, v in (vectors or {}).items()}
+        if isinstance(dim, (bool, np.bool_)) or not isinstance(dim, (int, np.integer)) or dim <= 0:
+            raise ValueError("dim must be an exact positive integer.")
+        if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer)):
+            raise ValueError("seed must be an exact integer.")
         self.dim = int(dim)
         self.seed = int(seed)
+        self.vectors = {}
+        for key, value in (vectors or {}).items():
+            vector = np.asarray(value, dtype=np.float32)
+            if vector.shape != (self.dim,) or np.any(~np.isfinite(vector)):
+                raise ValueError(f"embedding vector {key!r} must be finite with shape ({self.dim},).")
+            self.vectors[str(key)] = vector
         self._fallback = HashedNGram(n=3, dim=self.dim, seed=self.seed)
 
     def transform(self, texts: list[str]) -> np.ndarray:

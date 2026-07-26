@@ -317,7 +317,7 @@ def distill_records_from_labels(
     """Teacher-free record-classifier training core (mirrors :func:`distill_from_labels` for structured records)."""
     records = list(records)
     label_list, y = _encode_labels(teacher_labels, labels)
-    feat = HashedRecord(dim=dim, seed=seed)
+    feat = HashedRecord.for_records(records, dim=dim, seed=seed)
     module, cfg, steps_run, optimizer_receipt = _fit_mlp(
         feat.transform(records), y, len(label_list), hidden, epochs, lr, seed, device
     )
@@ -498,7 +498,7 @@ def distill_structured_from_labels(
         )
         edges = model.edges()
 
-    adapter = StructuredClassifierIO(field_keys, label_index, label_list)
+    adapter = StructuredClassifierIO(field_keys, label_index, label_list, field_count=len(values[0]))
     student = TaskModel(
         model,
         adapter,
