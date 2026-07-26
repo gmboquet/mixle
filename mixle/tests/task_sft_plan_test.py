@@ -2,6 +2,7 @@
 
 import re
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -53,9 +54,107 @@ class PlanGrammarTest(unittest.TestCase):
         self.assertEqual(_parse_plan(_serialize_plan(plan)), plan)
         self.assertEqual(_parse_plan(_serialize_plan([])), [])
 
+    def test_serialize_parse_escapes_structural_and_typed_values(self):
+        plan = [
+            {
+                "tool": "notify",
+                "args": {
+                    "message": "a; b | c=(d)\nnext",
+                    "count": 2,
+                    "enabled": False,
+                    "empty": "",
+                },
+            }
+        ]
+        self.assertEqual(_parse_plan(_serialize_plan(plan)), plan)
+
     def test_malformed_text_is_rejected_not_guessed(self):
         for bad in ("lookup_order(order_id=", "notify user=kim)", "do(x=1) & do(y=2)", "notify(=kim)"):
             self.assertIsNone(_parse_plan(bad + "\n"))
+
+    def test_plan_agreement_compares_optional_arguments_too(self):
+        from mixle.task import ToolSpec
+
+        specs = {
+            "notify": ToolSpec(
+                "notify",
+                ["user", "channel"],
+                required=["user"],
+            )
+        }
+        want = [{"tool": "notify", "args": {"user": "kim", "channel": "email"}}]
+        wrong = [{"tool": "notify", "args": {"user": "kim", "channel": "sms"}}]
+        missing = [{"tool": "notify", "args": {"user": "kim"}}]
+        self.assertFalse(_plans_match(wrong, want, specs))
+        self.assertFalse(_plans_match(missing, want, specs))
+
+    def test_fixed_values_require_declared_vocabulary_not_tool_name_substrings(self):
+        from mixle.task import ToolSpec
+        from mixle.task.sft_plan import GenerativePlanner, _CharCodec
+
+        request = "please process this transaction"
+        plan = [{"tool": "refund_order", "args": {"kind": "refund"}}]
+        undeclared = GenerativePlanner(
+            lm=None,
+            codec=_CharCodec(["x"]),
+            tools={"refund_order": ToolSpec("refund_order", ["kind"])},
+            teacher=_teacher,
+            plan_agreement=0.0,
+        )
+        declared = GenerativePlanner(
+            lm=None,
+            codec=_CharCodec(["x"]),
+            tools={
+                "refund_order": ToolSpec(
+                    "refund_order",
+                    ["kind"],
+                    vocabulary={"kind": ["refund"]},
+                )
+            },
+            teacher=_teacher,
+            plan_agreement=0.0,
+        )
+        self.assertFalse(undeclared._validate(plan, request))
+        self.assertTrue(declared._validate(plan, request))
+
+    def test_teacher_traces_are_validated_once_and_eval_is_split(self):
+        from mixle.task import ToolSpec, sft_planner
+
+        calls = 0
+
+        def teacher(_request):
+            nonlocal calls
+            calls += 1
+            return []
+
+        class FakeLM:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def fit_pairs(self, pairs, **kwargs):
+                self.pairs = list(pairs)
+
+        requests = ["duplicate request"] * 16
+        with (
+            patch("mixle.models.LM", FakeLM),
+            patch(
+                "mixle.task.constrained.constrained_plan_decode",
+                return_value=("done\n", 0.0),
+            ),
+        ):
+            planner = sft_planner(
+                teacher,
+                requests,
+                [ToolSpec("ping", [])],
+                epochs=1,
+            )
+
+        self.assertEqual(calls, len(requests))
+        self.assertEqual(len(planner.lm.pairs), 12)
+        self.assertEqual(planner.calibration_size, 2)
+        self.assertEqual(planner.test_size, 2)
+        self.assertEqual(planner.calibration_agreement, 1.0)
+        self.assertEqual(planner.plan_agreement, 1.0)
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")

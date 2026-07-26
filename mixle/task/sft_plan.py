@@ -18,6 +18,9 @@ collection.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,12 +34,46 @@ _PROMPT_SEP = "\n=> "
 _EMPTY = "done"
 
 
+def _encode_value(value: Any) -> str:
+    """Encode one argument without colliding with the plan separators."""
+    if isinstance(value, str) and value and not value.startswith("~") and not any(char in value for char in "();|=\n"):
+        return value
+    try:
+        payload = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    except (TypeError, ValueError) as exc:
+        raise ValueError("plan argument values must be finite JSON values") from exc
+    encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return f"~{encoded}"
+
+
+def _decode_value(token: str) -> Any:
+    if not token.startswith("~"):
+        return token
+    encoded = token[1:]
+    if not encoded:
+        raise ValueError("empty escaped plan value")
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        value = json.loads(base64.b64decode(padded, altchars=b"-_", validate=True).decode())
+    except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
+        raise ValueError("invalid escaped plan value") from exc
+    if _encode_value(value) != token:
+        raise ValueError("non-canonical escaped plan value")
+    return value
+
+
 def _serialize_plan(plan: Sequence[dict]) -> str:
     if not plan:
         return _EMPTY + _EOS
     parts = []
     for step in plan:
-        args = "; ".join(f"{k}={v}" for k, v in (step.get("args") or {}).items())
+        args = "; ".join(f"{k}={_encode_value(v)}" for k, v in (step.get("args") or {}).items())
         parts.append(f"{step['tool']}({args})")
     return " | ".join(parts) + _EOS
 
@@ -60,18 +97,27 @@ def _parse_plan(text: str) -> list[dict] | None:
                 if "=" not in kv:
                     return None
                 k, v = kv.split("=", 1)
-                v = v.strip()
-                # structural characters inside a VALUE mean the text was not a well-formed step list
-                if (
-                    not k.strip().isidentifier()
-                    or not v
-                    or any(c in v for c in "()|=")
-                    or k.strip() in args
-                ):
+                token = v.strip()
+                if not k.strip().isidentifier() or not token or any(c in token for c in "()|=;") or k.strip() in args:
                     return None
-                args[k.strip()] = v
+                try:
+                    args[k.strip()] = _decode_value(token)
+                except ValueError:
+                    return None
         steps.append({"tool": name, "args": args})
     return steps
+
+
+def _validated_teacher_plan(plan: Any, specs: dict[str, ToolSpec]) -> list[dict[str, Any]]:
+    if isinstance(plan, (str, bytes)) or not isinstance(plan, Sequence):
+        raise ValueError("teacher plan must be a sequence of tool-call dictionaries")
+    validated: list[dict[str, Any]] = []
+    for step in plan:
+        call = _validated_call(step, specs)
+        if call["tool"] is None:
+            raise ValueError("teacher plans must represent no action as an empty plan")
+        validated.append(call)
+    return validated
 
 
 class _CharCodec:
@@ -111,6 +157,9 @@ class GenerativePlanner:
     tools: dict[str, ToolSpec]
     teacher: Callable[[str], list[dict]]
     plan_agreement: float
+    calibration_agreement: float | None = None
+    calibration_size: int = 0
+    test_size: int = 0
     max_new: int = 160
     constrained: bool = True  # decode inside the plan grammar (invalid output unrepresentable)
     conf_floor: float | None = None  # calibrated mean-logprob floor: low-confidence decodes escalate
@@ -133,8 +182,12 @@ class GenerativePlanner:
             # copy-fidelity: plan arguments are EXTRACTIVE — a generated value that does not literally
             # occur in the request (or the tool's own fixed vocabulary, e.g. kind=refund) is a silent
             # copy error (order 4242 -> order_id=4202) that spec validity cannot catch. Reject it.
-            for v in args.values():
-                if str(v) not in request and str(v) not in step["tool"]:
+            for argument, value in args.items():
+                copied = bool(str(value)) and str(value) in request
+                declared = any(
+                    _encode_value(value) == _encode_value(candidate) for candidate in spec.fixed_values(argument)
+                )
+                if not copied and not declared:
                     return False
         return True
 
@@ -169,7 +222,7 @@ class GenerativePlanner:
         if plan is not None:
             return {"plan": plan, "escalate": False}
         self.n_escalated += 1
-        want = list(self.teacher(request))
+        want = _validated_teacher_plan(self.teacher(request), self.tools)
         self.harvested.append((request, want))
         return {"plan": [dict(p) for p in want], "escalate": True}
 
@@ -177,6 +230,11 @@ class GenerativePlanner:
         """Return plan agreement, escalation, and harvested-trace metrics."""
         return {
             "plan_agreement": round(self.plan_agreement, 4),
+            "calibration_agreement": (
+                round(self.calibration_agreement, 4) if self.calibration_agreement is not None else None
+            ),
+            "calibration_size": self.calibration_size,
+            "test_size": self.test_size,
             "requests": self.n_requests,
             "escalated": self.n_escalated,
             "escalation_rate": (self.n_escalated / self.n_requests) if self.n_requests else 0.0,
@@ -196,8 +254,18 @@ class GenerativePlanner:
         manifest = {
             "kind": "genplanner/v1",
             "itos": self.codec.itos,
-            "tools": {n: {"args": t.args, "required": t.required} for n, t in self.tools.items()},
+            "tools": {
+                n: {
+                    "args": t.args,
+                    "required": t.required,
+                    "vocabulary": t.vocabulary,
+                }
+                for n, t in self.tools.items()
+            },
             "plan_agreement": self.plan_agreement,
+            "calibration_agreement": self.calibration_agreement,
+            "calibration_size": self.calibration_size,
+            "test_size": self.test_size,
             "max_new": self.max_new,
             "constrained": self.constrained,
             "conf_floor": self.conf_floor,
@@ -222,7 +290,15 @@ class GenerativePlanner:
         module, _ = load_module(str(p / "lm"), device=device)
         lm.module = module
         tools = _tool_spec_map(
-            [ToolSpec(n, list(t["args"]), t.get("required")) for n, t in manifest["tools"].items()],
+            [
+                ToolSpec(
+                    n,
+                    list(t["args"]),
+                    t.get("required"),
+                    t.get("vocabulary"),
+                )
+                for n, t in manifest["tools"].items()
+            ],
             reserved=(_EMPTY,),
         )
         return cls(
@@ -231,6 +307,9 @@ class GenerativePlanner:
             tools=tools,
             teacher=teacher,
             plan_agreement=float(manifest.get("plan_agreement", float("nan"))),
+            calibration_agreement=manifest.get("calibration_agreement"),
+            calibration_size=int(manifest.get("calibration_size", 0)),
+            test_size=int(manifest.get("test_size", 0)),
             max_new=int(manifest.get("max_new", 160)),
             constrained=bool(manifest.get("constrained", True)),
             conf_floor=manifest.get("conf_floor"),
@@ -239,14 +318,19 @@ class GenerativePlanner:
 
 
 def _plans_match(got: list[dict], want: list[dict], specs: dict[str, ToolSpec]) -> bool:
-    if len(got) != len(want):
+    try:
+        got_validated = _validated_teacher_plan(got, specs)
+        want_validated = _validated_teacher_plan(want, specs)
+    except (TypeError, ValueError):
         return False
-    for g, w in zip(got, want):
+    if len(got_validated) != len(want_validated):
+        return False
+    for g, w in zip(got_validated, want_validated):
         if g["tool"] != w["tool"]:
             return False
-        spec = specs.get(w["tool"])
-        req = spec.required_args if spec else list((w.get("args") or {}).keys())
-        if any(str(g["args"].get(a)) != str((w.get("args") or {}).get(a)) for a in req):
+        if set(g["args"]) != set(w["args"]):
+            return False
+        if any(_encode_value(g["args"][argument]) != _encode_value(w["args"][argument]) for argument in g["args"]):
             return False
     return True
 
@@ -277,24 +361,43 @@ def sft_planner(
 
     from mixle.models import LM
 
-    torch.manual_seed(seed)  # LM weight init draws from torch's global RNG; pin it so seed= means seed
-    reqs = [str(r) for r in requests]
+    if not callable(teacher):
+        raise TypeError("teacher must be callable")
+    if isinstance(requests, (str, bytes)):
+        raise TypeError("requests must be a sequence of request strings")
+    reqs = list(requests)
+    if any(not isinstance(request, str) or not request for request in reqs):
+        raise ValueError("requests must contain non-empty strings")
     if len(reqs) < 16:
         raise ValueError("sft_planner needs at least 16 example requests")
+    if (
+        isinstance(holdout, (bool, np.bool_))
+        or not isinstance(holdout, (int, float, np.integer, np.floating))
+        or not np.isfinite(holdout)
+        or not 0.0 < float(holdout) < 1.0
+    ):
+        raise ValueError("holdout must be a finite fraction strictly between 0 and 1")
     specs = _tool_spec_map(tools, reserved=(_EMPTY,))
+    # Validate and bind every teacher trace exactly once. Duplicate requests
+    # remain distinct rows and cannot collapse through a request-keyed dict.
+    teacher_plans = [_validated_teacher_plan(teacher(request), specs) for request in reqs]
 
+    torch.manual_seed(seed)  # LM weight init draws from torch's global RNG; pin it so seed= means seed
     rng = np.random.RandomState(seed)
     order = rng.permutation(len(reqs))
-    n_hold = max(2, int(round(len(reqs) * holdout)))
-    hold = [reqs[i] for i in order[:n_hold]]
-    train = [reqs[i] for i in order[n_hold:]]
+    n_evaluation = min(
+        len(reqs) - 4,
+        max(4, int(round(len(reqs) * float(holdout)))),
+    )
+    n_calibration = n_evaluation // 2
+    calibration_indices = [int(index) for index in order[:n_calibration]]
+    test_indices = [int(index) for index in order[n_calibration:n_evaluation]]
+    train_indices = [int(index) for index in order[n_evaluation:]]
 
-    traces = {r: [_validated_call(step, specs) for step in teacher(r)] for r in train}
-
-    prompts = {r: r + _PROMPT_SEP for r in train}
-    completions = {r: _serialize_plan(traces[r]) for r in train}
-    codec = _CharCodec([*prompts.values(), *completions.values()])
-    pairs = [(codec.encode(prompts[r]), codec.encode(completions[r])) for r in train]
+    prompts = [reqs[index] + _PROMPT_SEP for index in train_indices]
+    completions = [_serialize_plan(teacher_plans[index]) for index in train_indices]
+    codec = _CharCodec([*prompts, *completions])
+    pairs = [(codec.encode(prompt), codec.encode(completion)) for prompt, completion in zip(prompts, completions)]
 
     lm = LM(vocab=codec.vocab, d_model=d_model, n_layer=n_layer, n_head=n_head, block=block, device=device)
     lm.fit_pairs(pairs, epochs=epochs, lr=lr, seed=seed)
@@ -305,6 +408,8 @@ def sft_planner(
         tools=specs,
         teacher=teacher,
         plan_agreement=float("nan"),
+        calibration_size=len(calibration_indices),
+        test_size=len(test_indices),
         max_new=block,
         constrained=constrained,
         lm_config={"vocab": codec.vocab, "d_model": d_model, "n_layer": n_layer, "n_head": n_head, "block": block},
@@ -317,23 +422,30 @@ def sft_planner(
 
         correct_scores: list[float] = []
         wrong_scores: list[float] = []
-        for r in hold:
-            decoded = constrained_plan_decode(lm, codec, r, specs, max_new=block)
+        for index in calibration_indices:
+            request = reqs[index]
+            decoded = constrained_plan_decode(lm, codec, request, specs, max_new=block)
             if decoded is None:
                 continue
             plan = _parse_plan(decoded[0] if decoded[0].endswith(_EOS) else decoded[0] + _EOS)
-            ok = plan is not None and _plans_match(plan, list(teacher(r)), specs)
+            ok = plan is not None and _plans_match(plan, teacher_plans[index], specs)
             (correct_scores if ok else wrong_scores).append(decoded[1])
         if correct_scores:
             floor = float(np.quantile(correct_scores, 0.05))
             if wrong_scores:
                 floor = max(floor, min(float(max(wrong_scores)) + 1e-9, float(np.quantile(correct_scores, 0.5))))
             planner.conf_floor = floor
-    agree = 0
-    for r in hold:
-        got = planner.try_plan(r)
-        agree += int(got is not None and _plans_match(got, list(teacher(r)), specs))
-    planner.plan_agreement = agree / len(hold)
+    calibration_agree = 0
+    for index in calibration_indices:
+        got = planner.try_plan(reqs[index])
+        calibration_agree += int(got is not None and _plans_match(got, teacher_plans[index], specs))
+    planner.calibration_agreement = calibration_agree / len(calibration_indices)
+
+    test_agree = 0
+    for index in test_indices:
+        got = planner.try_plan(reqs[index])
+        test_agree += int(got is not None and _plans_match(got, teacher_plans[index], specs))
+    planner.plan_agreement = test_agree / len(test_indices)
     return planner
 
 

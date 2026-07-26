@@ -36,6 +36,7 @@ class ToolSpec:
     name: str
     args: list[str]
     required: list[str] | None = None  # defaults to all args
+    vocabulary: dict[str, list[Any]] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.isidentifier():
@@ -56,11 +57,22 @@ class ToolSpec:
             ):
                 raise ValueError(f"tool {self.name!r} required arguments must be a unique subset of args")
             self.required = list(self.required)
+        if self.vocabulary is not None:
+            if not isinstance(self.vocabulary, dict) or any(
+                key not in self.args or not isinstance(values, list) or not values
+                for key, values in self.vocabulary.items()
+            ):
+                raise ValueError(f"tool {self.name!r} vocabulary must map declared arguments to non-empty value lists")
+            self.vocabulary = {key: list(values) for key, values in self.vocabulary.items()}
 
     @property
     def required_args(self) -> list[str]:
         """Return required argument names, defaulting to all declared arguments."""
         return list(self.required) if self.required is not None else list(self.args)
+
+    def fixed_values(self, argument: str) -> list[Any]:
+        """Return declared non-extractive values for one argument."""
+        return list((self.vocabulary or {}).get(argument, ()))
 
 
 def _tool_spec_map(tools: Sequence[ToolSpec], *, reserved: Sequence[str] = ()) -> dict[str, ToolSpec]:
@@ -171,7 +183,14 @@ class ToolCaller:
             ex.save(str(out / "extractors" / name))
         manifest = {
             "kind": "toolcaller/v1",
-            "tools": {n: {"args": t.args, "required": t.required} for n, t in self.tools.items()},
+            "tools": {
+                n: {
+                    "args": t.args,
+                    "required": t.required,
+                    "vocabulary": t.vocabulary,
+                }
+                for n, t in self.tools.items()
+            },
             "extractors": sorted(self.extractors),
             "selection_agreement": self.selection_agreement,
         }
@@ -196,7 +215,15 @@ class ToolCaller:
             name: TaskModel.load(str(p / "extractors" / name), device=device) for name in manifest["extractors"]
         }
         tools = _tool_spec_map(
-            [ToolSpec(n, list(t["args"]), t.get("required")) for n, t in manifest["tools"].items()],
+            [
+                ToolSpec(
+                    n,
+                    list(t["args"]),
+                    t.get("required"),
+                    t.get("vocabulary"),
+                )
+                for n, t in manifest["tools"].items()
+            ],
             reserved=(_NO_TOOL,),
         )
         return cls(
