@@ -132,6 +132,19 @@ class DisagreementGateTest(unittest.TestCase):
         union_none = UnionGate(_NeverFlag(), _NeverFlag())
         self.assertFalse(np.any(union_none.ood_mask(["a", "b"])))
 
+    def test_gate_records_disjoint_calibration_and_rejects_misaligned_evidence(self):
+        student, gate = self._fit_student_and_gate(seed=3)
+        receipt = gate.calibration_receipt
+        self.assertEqual(receipt["kind"], "seeded_internal")
+        self.assertTrue(set(receipt["fit_indices"]).isdisjoint(receipt["calibration_indices"]))
+        self.assertLessEqual(receipt["realized_agree_flag_rate"], receipt["alpha"])
+        with self.assertRaisesRegex(ValueError, "same length"):
+            fit_disagreement_gate(student, ["one", "two"], ["positive"])
+        with self.assertRaisesRegex(ValueError, "same length"):
+            measure_disagreement_mass(student, ["one", "two"], ["positive"])
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            measure_disagreement_mass(student, [], [])
+
 
 class ActiveLabelingShrinksTheRegionTest(unittest.TestCase):
     def test_labeling_the_flagged_region_and_redistilling_shrinks_its_disagreement_mass(self):

@@ -53,6 +53,29 @@ class DensityGateTest(unittest.TestCase):
         after = clone.log_density(texts)
         self.assertAlmostEqual(clone.log_threshold, gate.log_threshold, places=9)
         self.assertTrue(np.allclose(before, after, atol=1e-6))
+        self.assertEqual(clone.calibration_receipt, gate.calibration_receipt)
+        self.assertEqual(gate.calibration_receipt["kind"], "seeded_internal")
+        self.assertTrue(
+            set(gate.calibration_receipt["fit_indices"]).isdisjoint(
+                gate.calibration_receipt["calibration_indices"]
+            )
+        )
+
+    def test_fit_contracts_and_explicit_held_out_calibration(self):
+        from mixle.task.density import DensityGate
+        from mixle.task.model import HashedNGram
+
+        train, calibration = _id_corpus(20, seed=1), _id_corpus(10, seed=2)
+        gate = DensityGate(HashedNGram(n=3, dim=16, seed=1)).fit(
+            train, calibration_texts=calibration, n_components=2, max_its=3
+        )
+        self.assertEqual(gate.calibration_receipt["kind"], "explicit")
+        self.assertEqual(gate.calibration_receipt["fit_count"], 20)
+        self.assertEqual(gate.calibration_receipt["calibration_count"], 10)
+        with self.assertRaisesRegex(ValueError, "at least two"):
+            DensityGate(gate.featurizer).fit(["one"])
+        with self.assertRaisesRegex(ValueError, "alpha"):
+            DensityGate(gate.featurizer).fit(train, alpha=float("nan"))
 
 
 class CalibratedWithDensityTest(unittest.TestCase):

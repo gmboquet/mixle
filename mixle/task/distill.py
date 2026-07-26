@@ -582,10 +582,12 @@ def _fit_density_gate(
     held-out threshold, consistent with how :meth:`~mixle.task.calibrate.CalibratedTaskModel.calibrate` treats
     the same split.
     """
-    gate = DensityGate(student.adapter.featurizer)
-    gate.fit(train_items, seed=seed)
-    gate.log_threshold = float(np.quantile(gate.log_density(cal_items), alpha))
-    return gate
+    return DensityGate(student.adapter.featurizer).fit(
+        train_items,
+        calibration_texts=cal_items,
+        alpha=alpha,
+        seed=seed,
+    )
 
 
 # Early-stopping schedule for _fit_mlp: check the training loss every _ES_CHECK_EVERY gradient steps, stop once

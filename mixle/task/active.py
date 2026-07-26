@@ -31,6 +31,19 @@ from mixle.task.distill import agreement, distill_from_labels
 from mixle.task.model import TaskModel
 
 
+def _validated_probability_matrix(values: Any, n_rows: int) -> np.ndarray:
+    matrix = np.asarray(values, dtype=np.float64)
+    if matrix.ndim != 2 or matrix.shape[0] != n_rows or matrix.shape[1] == 0:
+        raise ValueError(f"predictions must have shape ({n_rows}, n_classes) with n_classes > 0")
+    if (
+        np.any(~np.isfinite(matrix))
+        or np.any((matrix < 0.0) | (matrix > 1.0))
+        or not np.allclose(matrix.sum(axis=1), 1.0, rtol=1e-7, atol=1e-9)
+    ):
+        raise ValueError("predictions must contain finite row-stochastic probabilities in [0, 1]")
+    return matrix
+
+
 def _entropy(p: np.ndarray) -> np.ndarray:
     return -np.sum(np.where(p > 0, p * np.log(p), 0.0), axis=1)
 
@@ -54,7 +67,7 @@ def acquisition_scores(student: TaskModel, texts: Sequence[str], method: str = "
     if method not in _ACQ:
         raise ValueError(f"unknown acquisition {method!r}; expected one of {sorted(_ACQ) + ['random']}")
     prob = student.adapter.proba_batch(student.model, list(texts))
-    return _ACQ[method](prob)
+    return _ACQ[method](_validated_probability_matrix(prob, len(texts)))
 
 
 @dataclass
@@ -62,7 +75,10 @@ class ActiveResult:
     """The actively-distilled student plus an audit trail of labels spent vs. quality reached each round."""
 
     model: TaskModel
-    labels_used: int
+    labels_used: int  # every teacher label purchased, including validation
+    training_labels_used: int = 0
+    validation_labels_used: int = 0
+    teacher_queries: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
     labeled_texts: list[str] = field(default_factory=list)
     labeled_labels: list[Any] = field(default_factory=list)
@@ -87,32 +103,61 @@ def active_distill(
     ``acquisition``) until ``budget`` labels are spent, refitting the student each round. If ``val_texts`` is
     given, the teacher labels it once and each round's agreement on it is logged.
     """
-    rng = np.random.RandomState(seed)
+    if isinstance(budget, (bool, np.bool_)) or not isinstance(budget, (int, np.integer)) or budget <= 0:
+        raise ValueError("budget must be an exact positive integer")
+    if isinstance(seed_size, (bool, np.bool_)) or not isinstance(seed_size, (int, np.integer)) or seed_size <= 0:
+        raise ValueError("seed_size must be an exact positive integer")
+    if isinstance(rounds, (bool, np.bool_)) or not isinstance(rounds, (int, np.integer)) or rounds <= 0:
+        raise ValueError("rounds must be an exact positive integer")
+    if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer)):
+        raise ValueError("seed must be an exact integer")
+    rng = np.random.RandomState(int(seed))
     pool = [str(t) for t in pool]
+    if not pool:
+        raise ValueError("pool must be non-empty")
     recipe = dict(recipe or {})
-    label_space = list(labels) if labels is not None else None
+    label_space = [str(label) for label in labels] if labels is not None else None
+    if label_space is not None and (not label_space or len(set(label_space)) != len(label_space)):
+        raise ValueError("labels must be a non-empty sequence of unique values")
 
     teach = _batched_teacher(teacher)
-    val_truth = teach(list(val_texts)) if val_texts is not None else None
+    validation_texts = [str(text) for text in val_texts] if val_texts is not None else []
+    if len(validation_texts) >= budget:
+        raise ValueError("budget must exceed the number of validation labels so at least one training label remains")
+    val_truth = teach(validation_texts) if validation_texts else None
+    validation_labels_used = len(validation_texts)
+    training_budget = int(budget) - validation_labels_used
 
     remaining = list(range(len(pool)))
     rng.shuffle(remaining)
-    take = min(seed_size, budget, len(remaining))
+    take = min(int(seed_size), training_budget, len(remaining))
     chosen = remaining[:take]
     remaining = remaining[take:]
 
     labeled_texts = [pool[i] for i in chosen]
     labeled_labels = list(teach(labeled_texts))
-    if label_space is None:  # lock the label set from the seed so refits keep a stable head
+    if label_space is None:
         label_space = sorted({str(y) for y in labeled_labels})
+    else:
+        unknown = sorted({str(value) for value in labeled_labels} - set(label_space))
+        if unknown:
+            raise ValueError(f"teacher returned labels outside the declared label space: {unknown!r}")
 
     history: list[dict[str, Any]] = []
     student = _fit(labeled_texts, labeled_labels, label_space, recipe, seed)
-    _log_round(history, student, labeled_texts, val_texts, val_truth, acquisition)
+    _log_round(
+        history,
+        student,
+        labeled_texts,
+        validation_texts,
+        val_truth,
+        acquisition,
+        validation_labels_used,
+    )
 
-    per_round = max(1, (budget - take) // max(1, rounds))
-    while len(labeled_labels) < budget and remaining:
-        k = min(per_round, budget - len(labeled_labels), len(remaining))
+    per_round = max(1, (training_budget - take) // int(rounds))
+    while len(labeled_labels) < training_budget and remaining:
+        k = min(per_round, training_budget - len(labeled_labels), len(remaining))
         cand_texts = [pool[i] for i in remaining]
         if acquisition == "random":
             pick_local = list(range(k))
@@ -124,13 +169,33 @@ def active_distill(
 
         new_texts = [pool[i] for i in picked]
         labeled_texts += new_texts
-        labeled_labels += list(teach(new_texts))
+        new_labels = list(teach(new_texts))
+        labeled_labels += new_labels
+        observed_space = sorted({str(value) for value in labeled_labels})
+        if labels is None:
+            label_space = observed_space
+        else:
+            unknown = sorted(set(observed_space) - set(label_space))
+            if unknown:
+                raise ValueError(f"teacher returned labels outside the declared label space: {unknown!r}")
         student = _fit(labeled_texts, labeled_labels, label_space, recipe, seed)
-        _log_round(history, student, labeled_texts, val_texts, val_truth, acquisition)
+        _log_round(
+            history,
+            student,
+            labeled_texts,
+            validation_texts,
+            val_truth,
+            acquisition,
+            validation_labels_used,
+        )
 
+    teacher_queries = validation_labels_used + len(labeled_labels)
     return ActiveResult(
         model=student,
-        labels_used=len(labeled_labels),
+        labels_used=teacher_queries,
+        training_labels_used=len(labeled_labels),
+        validation_labels_used=validation_labels_used,
+        teacher_queries=teacher_queries,
         history=history,
         labeled_texts=labeled_texts,
         labeled_labels=labeled_labels,
@@ -141,9 +206,14 @@ def _fit(texts, labels_list, label_space, recipe, seed):
     return distill_from_labels(texts, labels_list, labels=label_space, seed=seed, **recipe)
 
 
-def _log_round(history, student, labeled_texts, val_texts, val_truth, acquisition):
-    row = {"labels_used": len(labeled_texts), "acquisition": acquisition}
-    if val_texts is not None:
+def _log_round(history, student, labeled_texts, val_texts, val_truth, acquisition, validation_labels_used):
+    row = {
+        "labels_used": validation_labels_used + len(labeled_texts),
+        "training_labels_used": len(labeled_texts),
+        "validation_labels_used": validation_labels_used,
+        "acquisition": acquisition,
+    }
+    if val_texts:
         row["val_agreement"] = agreement(student, val_truth, list(val_texts))
     history.append(row)
 
@@ -153,8 +223,8 @@ def _batched_teacher(teacher: Callable[..., Any]) -> Callable[[list[str]], list[
         if not texts:
             return []
         out = teacher(texts)
-        if isinstance(out, (list, tuple)) and len(out) == len(texts):
-            return list(out)
-        return [teacher(t) for t in texts]
+        if not isinstance(out, (list, tuple)) or len(out) != len(texts):
+            raise ValueError("teacher must return exactly one label per batched input")
+        return list(out)
 
     return batched

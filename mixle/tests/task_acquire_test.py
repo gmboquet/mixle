@@ -264,9 +264,53 @@ class DisagreementAndEntropySanityTest(unittest.TestCase):
         with self.assertRaises(CapabilityError):
             acquire(self.pool, member, k=1, strategy="disagreement")
 
+    def test_weighted_disagreement_uses_declared_member_weights(self) -> None:
+        from mixle.task.acquire import _disagreement_strategy
+
+        class Fixed:
+            def __init__(self, probability):
+                self.probability = probability
+
+            def predict_proba(self, items):
+                return np.repeat([self.probability], len(items), axis=0)
+
+        ensemble = Ensemble([Fixed([1.0, 0.0]), Fixed([0.0, 1.0])])
+        ensemble.weights = np.asarray([0.9, 0.1])
+        score = _disagreement_strategy(["x"], ensemble)
+        self.assertAlmostEqual(score[0], 0.1)
+
+    def test_probability_weight_and_score_contracts_fail_closed(self) -> None:
+        class Invalid:
+            def __init__(self, matrix):
+                self.matrix = matrix
+
+            def predict_proba(self, items):
+                return np.asarray(self.matrix)
+
+        for matrix in (
+            [[0.8, 0.8]],
+            [[np.nan, 0.0]],
+            [[-0.1, 1.1]],
+            [[1.0], [1.0]],
+        ):
+            with self.subTest(matrix=matrix), self.assertRaises(ValueError):
+                acquire(["x"], Invalid(matrix), k=1, strategy="entropy")
+
+        invalid_ensemble = Ensemble([StumpModel(), StumpModel()])
+        for weights in ([1.0], [1.0, 0.0], [1.0, np.nan]):
+            invalid_ensemble.weights = np.asarray(weights)
+            with self.subTest(weights=weights), self.assertRaises(ValueError):
+                acquire(["x"], invalid_ensemble, k=1, strategy="eig")
+
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            acquire(["x"], None, k=1, strategy=lambda *_args, **_kwargs: [np.nan])
+
     def test_empty_pool_and_nonpositive_k(self) -> None:
         self.assertEqual(acquire([], self.ensemble, k=3, strategy="entropy"), [])
         self.assertEqual(acquire(self.pool, self.ensemble, k=0, strategy="entropy"), [])
+        for invalid in (-1, 1.5, True):
+            with self.subTest(k=invalid), self.assertRaises(ValueError):
+                acquire(self.pool, self.ensemble, k=invalid, strategy="entropy")
 
 
 class HypothesisPortfolioIntegrationTest(unittest.TestCase):
