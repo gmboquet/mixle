@@ -1038,29 +1038,9 @@ class MixtureSampler(DistributionSampler):
             return self.comp_samplers[comp_state].sample()
         if not batched:
             return [self.comp_samplers[i].sample() for i in comp_state]
+        from mixle.stats.compute._sampling import scatter_component_draws
 
-        comp_state = np.asarray(comp_state)
-        draws_by_comp = {}
-        all_array = True
-        for c in range(self.dist.num_components):
-            count = int(np.count_nonzero(comp_state == c))
-            if count:
-                drawn = self.comp_samplers[c].sample(size=count)
-                draws_by_comp[c] = drawn
-                all_array = all_array and isinstance(drawn, np.ndarray)
-        if all_array and draws_by_comp:
-            sample = next(iter(draws_by_comp.values()))
-            # carry any trailing sample shape (e.g. D-vectors from multivariate
-            # leaves) so the scatter is not restricted to scalar draws
-            out_arr = np.empty((size,) + sample.shape[1:], dtype=sample.dtype)
-            for c, drawn in draws_by_comp.items():
-                out_arr[comp_state == c] = drawn
-            return list(out_arr)
-        out: list[Any] = [None] * size
-        for c, drawn in draws_by_comp.items():
-            for m, pos in enumerate(np.nonzero(comp_state == c)[0]):
-                out[pos] = drawn[m]
-        return out
+        return scatter_component_draws(comp_state, self.comp_samplers, int(size))
 
 
 class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
