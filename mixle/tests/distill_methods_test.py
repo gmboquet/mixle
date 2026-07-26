@@ -9,6 +9,7 @@ torch = pytest.importorskip("torch")
 
 from mixle.task.distill_methods import (
     DistillResult,
+    _greedy_generate,
     analytic_response_distill,
     attention_transfer,
     hint_distill,
@@ -68,6 +69,31 @@ def test_kd_loss_is_scalar_and_pure_soft():
     assert loss.dim() == 0 and float(loss) >= 0.0
     mixed = kd_loss(sl, tl, torch.zeros(8, dtype=torch.long), temperature=3.0, alpha=0.5)
     assert mixed.dim() == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"temperature": 0.0},
+        {"temperature": float("nan")},
+        {"temperature": float("inf")},
+        {"alpha": -0.1},
+        {"alpha": 1.1},
+        {"alpha": float("nan")},
+    ],
+)
+def test_kd_loss_rejects_invalid_mathematical_parameters(kwargs):
+    with pytest.raises(ValueError):
+        kd_loss(torch.randn(2, 3), torch.randn(2, 3), **kwargs)
+
+
+def test_kd_loss_requires_exact_finite_shapes_and_labels():
+    with pytest.raises(ValueError):
+        kd_loss(torch.randn(2, 3), torch.randn(1, 3))
+    with pytest.raises(ValueError):
+        kd_loss(torch.full((2, 3), float("nan")), torch.randn(2, 3))
+    with pytest.raises(ValueError):
+        kd_loss(torch.randn(2, 3), torch.randn(2, 3), torch.zeros(1, dtype=torch.long), alpha=0.5)
 
 
 def test_response_distill_closes_teacher_gap():
@@ -151,6 +177,36 @@ def test_multi_teacher_beats_average_single_teacher():
     assert res.improved
     # the ensemble student matches the ensemble consensus better than the mean single-teacher student does.
     assert res.after > res.extra["mean_single_teacher_agreement"]
+
+
+def test_multi_teacher_rejects_empty_or_non_probability_weights_before_queries():
+    student = _mlp(2, (2,), 2)
+    x = torch.randn(3, 2)
+    with pytest.raises(ValueError, match="at least one"):
+        multi_teacher_distill(student, [], x, epochs=1)
+
+    calls = {"count": 0}
+
+    class Teacher(torch.nn.Module):
+        def forward(self, values):
+            calls["count"] += 1
+            return torch.zeros(values.shape[0], 2)
+
+    teachers = [Teacher(), Teacher()]
+    for weights in ([-1.0, 2.0], [float("nan"), 1.0], [float("inf"), 1.0], [0.0, 0.0]):
+        with pytest.raises(ValueError):
+            multi_teacher_distill(student, teachers, x, weights=weights, epochs=1)
+    assert calls["count"] == 0
+
+
+def test_teacher_mode_is_restored_after_response_distillation():
+    teacher = torch.nn.Linear(2, 2)
+    teacher.train()
+    response_distill(_mlp(2, (2,), 2), teacher, torch.randn(4, 2), epochs=1, baseline=False)
+    assert teacher.training
+    teacher.eval()
+    response_distill(_mlp(2, (2,), 2), teacher, torch.randn(4, 2), epochs=1, baseline=False)
+    assert not teacher.training
 
 
 def test_hint_distill_reduces_feature_gap_and_helps_accuracy():
@@ -257,6 +313,70 @@ def test_sequence_level_distill_lifts_match_to_teacher():
     assert res.after > res.before + 0.3
     assert res.improved
     assert res.after > res.extra["baseline_match"]
+
+
+def test_sequence_training_masks_prompt_reconstruction_tokens(monkeypatch):
+    vocab, dim = 7, 5
+    prompts = torch.randint(0, vocab, (3, 4))
+    teacher_lm = _TinyLM(vocab, dim, seed=1)
+    student_lm = _TinyLM(vocab, dim, seed=2)
+
+    def teacher_step(context):
+        return teacher_lm(context)[:, -1, :]
+
+    real_cross_entropy = torch.nn.functional.cross_entropy
+    observed_rows = []
+
+    def recording_cross_entropy(logits, targets, *args, **kwargs):
+        observed_rows.append((logits.shape[0], targets.shape[0]))
+        return real_cross_entropy(logits, targets, *args, **kwargs)
+
+    monkeypatch.setattr(torch.nn.functional, "cross_entropy", recording_cross_entropy)
+    result = sequence_level_distill(
+        student_lm,
+        teacher_step,
+        prompts,
+        gen_length=2,
+        vocab_size=vocab,
+        epochs=1,
+        baseline=False,
+    )
+    assert observed_rows == [(prompts.shape[0] * 2, prompts.shape[0] * 2)]
+    assert result.extra["prompt_tokens_masked"] == prompts.shape[0] * (prompts.shape[1] - 1)
+    assert not result.student.training
+
+
+def test_zero_length_generation_is_well_defined_but_not_a_trainable_objective():
+    prompts = torch.ones((2, 3), dtype=torch.long)
+    empty = _greedy_generate(lambda context: torch.zeros(context.shape[0], 4), prompts, 0, vocab_size=4)
+    assert empty.shape == (2, 0)
+    with pytest.raises(ValueError, match="gen_length"):
+        sequence_level_distill(
+            _TinyLM(4, 3),
+            lambda context: torch.zeros(context.shape[0], 4),
+            prompts,
+            gen_length=0,
+            vocab_size=4,
+            epochs=1,
+        )
+
+
+def test_feature_teacher_mode_and_hooks_are_restored():
+    teacher = _mlp(2, (3,), 2)
+    student = _mlp(2, (3,), 2)
+    teacher.train()
+    result = hint_distill(
+        student,
+        teacher,
+        torch.randn(4, 2),
+        student_layer="0",
+        teacher_layer="0",
+        epochs=1,
+    )
+    assert teacher.training
+    assert not result.student.training
+    assert not teacher[0]._forward_hooks
+    assert not student[0]._forward_hooks
 
 
 def test_result_gain_sign():
