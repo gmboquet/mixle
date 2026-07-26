@@ -6,6 +6,8 @@ verified score non-decreasing AND proposal diversity not shrinking, across every
 
 import unittest
 
+import numpy as np
+
 from mixle.task.collapse import (
     CollapseVerdict,
     collapse_monitor,
@@ -31,6 +33,7 @@ class ImprovingTrajectoryTest(unittest.TestCase):
         verdict = collapse_monitor(history)
         self.assertIsInstance(verdict, CollapseVerdict)
         self.assertTrue(verdict.ok)
+        self.assertEqual(verdict.status, "ok")
         self.assertIsNone(verdict.reason)
         self.assertIsNone(verdict.failed_round)
         self.assertEqual(verdict.scores, [0.50, 0.62, 0.71, 0.80])
@@ -53,6 +56,7 @@ class ModeCollapseTest(unittest.TestCase):
         ]
         verdict = collapse_monitor(history)
         self.assertFalse(verdict.ok)
+        self.assertEqual(verdict.status, "collapse_detected")
         self.assertEqual(verdict.reason, "diversity_shrunk")
         self.assertEqual(verdict.failed_round, 1)  # the FIRST round the shrink is visible
 
@@ -112,14 +116,51 @@ class DiversityFunctionsTest(unittest.TestCase):
 
 
 class EdgeCasesTest(unittest.TestCase):
-    def test_single_round_history_is_trivially_ok(self):
+    def test_single_round_history_is_insufficient_evidence(self):
         verdict = collapse_monitor([_round(0.5, ["a"])])
-        self.assertTrue(verdict.ok)
+        self.assertFalse(verdict.ok)
+        self.assertEqual(verdict.status, "insufficient_evidence")
+        self.assertEqual(verdict.reason, "insufficient_evidence")
 
-    def test_empty_history_is_trivially_ok(self):
+    def test_empty_history_is_insufficient_evidence(self):
         verdict = collapse_monitor([])
-        self.assertTrue(verdict.ok)
+        self.assertFalse(verdict.ok)
+        self.assertEqual(verdict.status, "insufficient_evidence")
+        self.assertEqual(verdict.reason, "insufficient_evidence")
         self.assertEqual(verdict.scores, [])
+
+    def test_nonfinite_series_are_rejected(self):
+        for history in (
+            [_round(0.5, ["a"]), _round(np.nan, ["b"])],
+            [_round(0.5, ["a"]), {"score": 0.6, "diversity": np.inf}],
+            [_round(0.5, ["a"]), {"score": 0.6, "diversity": -1.0}],
+        ):
+            with self.assertRaises(ValueError):
+                collapse_monitor(history)
+
+    def test_negative_or_nonfinite_tolerances_are_rejected(self):
+        history = [_round(0.5, ["a"]), _round(0.6, ["b"])]
+        for kwargs in (
+            {"score_tol": -0.1},
+            {"diversity_tol": -0.1},
+            {"score_tol": np.nan},
+            {"diversity_tol": np.inf},
+        ):
+            with self.assertRaises(ValueError):
+                collapse_monitor(history, **kwargs)
+
+    def test_round_shape_and_diversity_function_are_validated(self):
+        with self.assertRaises(TypeError):
+            collapse_monitor([_round(0.5, ["a"]), None])
+        with self.assertRaises(ValueError):
+            collapse_monitor([_round(0.5, ["a"]), {"score": 0.6}])
+        with self.assertRaises(TypeError):
+            collapse_monitor([_round(0.5, ["a"]), _round(0.6, ["b"])], diversity_fn=1)
+        with self.assertRaises(ValueError):
+            collapse_monitor(
+                [_round(0.5, ["a"]), _round(0.6, ["b"])],
+                diversity_fn=lambda _candidates: np.nan,
+            )
 
 
 if __name__ == "__main__":
