@@ -7,6 +7,7 @@ that work over plain Python sequences.
 
 from collections import defaultdict
 from collections.abc import Callable, Sequence
+from os import PathLike
 from typing import TypeVar
 
 import numpy as np
@@ -34,20 +35,37 @@ def map_to_integers(x: Sequence[T], val_map: dict[T, int]) -> list[int]:
     return rv
 
 
-def get_inv_map(val_map: dict[T, T1]) -> dict[T1, T]:
-    """Obtain the inverse dictionary mapping of key/value pairs.
+def get_inv_map(val_map: dict[T, T1], *, multi: bool = False) -> dict[T1, T] | dict[T1, list[T]]:
+    """Obtain an inverse dictionary mapping without silently losing collisions.
 
     Args:
         val_map (Dict[T1, T]): Dictionary mapping keys to values.
+        multi: Return every source key in an insertion-ordered list for each
+            value. When false, repeated values make the mapping non-invertible
+            and raise ``ValueError``.
 
     Returns:
-        Inverse mapping of val_map (value -> key).
+        Inverse mapping of val_map (value -> key), or a value -> keys
+        multi-map when ``multi=True``.
 
     """
-    return {v: k for k, v in val_map.items()}
+    if not isinstance(multi, bool):
+        raise TypeError("multi must be a bool")
+    grouped: dict[T1, list[T]] = defaultdict(list)
+    for key, value in val_map.items():
+        grouped[value].append(key)
+    if multi:
+        return dict(grouped)
+    collisions = [value for value, keys in grouped.items() if len(keys) > 1]
+    if collisions:
+        raise ValueError(
+            "mapping is not invertible because multiple keys map to "
+            f"{collisions[0]!r}; pass multi=True to retain every key"
+        )
+    return {value: keys[0] for value, keys in grouped.items()}
 
 
-def text_file(f) -> list[str]:
+def text_file(f: str | PathLike[str], *, encoding: str = "utf-8") -> list[str]:
     """Open a file and split by newline.
 
     Args
@@ -57,8 +75,8 @@ def text_file(f) -> list[str]:
         List of strings split on newline character.
 
     """
-    fin = open(f)
-    rv = fin.read()
+    with open(f, encoding=encoding) as fin:
+        rv = fin.read()
 
     if rv is not None and len(rv) > 0 and rv[-1] == "\n":
         return rv[:-1].split("\n")
@@ -181,17 +199,30 @@ def flat_map(f: Callable[[T], Sequence[T1]], x: Sequence[T]) -> list[T1]:
 
 def least_occurring(x: Sequence[T], count: int | None = None, percent: float | None = None, keep_freq: bool = True):
     """Return the least frequent values by count or percentile cutoff."""
+    if count is not None and percent is not None:
+        raise ValueError("specify only one of count or percent")
+    if count is not None:
+        if isinstance(count, (bool, np.bool_)) or not isinstance(count, (int, np.integer)) or int(count) < 0:
+            raise ValueError("count must be a nonnegative integer")
+        count = int(count)
+    if percent is not None:
+        if isinstance(percent, (bool, np.bool_)) or not isinstance(percent, (int, float, np.integer, np.floating)):
+            raise ValueError("percent must be a finite number between 0 and 1")
+        percent = float(percent)
+        if not np.isfinite(percent) or not 0.0 <= percent <= 1.0:
+            raise ValueError("percent must be a finite number between 0 and 1")
+
     cnt_map = list(count_by_value(x).items())
-    s_idx = np.argsort([u[1] for u in cnt_map])
+    cnt_map.sort(key=lambda item: item[1])
 
     if count is not None:
-        n = min(len(s_idx), count)
+        n = min(len(cnt_map), count)
     elif percent is not None:
-        n = max(int(len(s_idx) * percent), 1)
+        n = 0 if percent == 0.0 else max(int(len(cnt_map) * percent), 1)
     else:
         return list(x)
 
-    vals = [cnt_map[i][0] for i in s_idx[:n]]
+    vals = [item[0] for item in cnt_map[:n]]
 
     if keep_freq:
         vset = set(vals)

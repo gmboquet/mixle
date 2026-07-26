@@ -2,23 +2,50 @@
 
 import io
 import unittest
+from unittest import mock
 
 import numpy as np
 
 from mixle.inference.estimation import best_of
 from mixle.stats import GaussianEstimator
 from mixle.utils.metrics import roc_auc, roc_curve
-from mixle.utils.optsutil import least_occurring
+from mixle.utils.optsutil import get_inv_map, least_occurring, text_file
 from mixle.utils.vector import sorted_dict_merge_add
 
 
 class UtilsTestCase(unittest.TestCase):
+    def test_text_file_closes_the_descriptor_it_opens(self):
+        opened = mock.mock_open(read_data="a\nb\n")
+        with mock.patch("builtins.open", opened):
+            self.assertEqual(text_file("observations.txt"), ["a", "b"])
+        opened.assert_called_once_with("observations.txt", encoding="utf-8")
+        opened.return_value.__enter__.assert_called_once_with()
+        opened.return_value.__exit__.assert_called_once()
+
+    def test_inverse_map_rejects_or_preserves_collisions_explicitly(self):
+        with self.assertRaisesRegex(ValueError, "not invertible"):
+            get_inv_map({"first": 1, "second": 1})
+        self.assertEqual(get_inv_map({"first": 1, "second": 1}, multi=True), {1: ["first", "second"]})
+        self.assertEqual(get_inv_map({"first": 1, "second": 2}), {1: "first", 2: "second"})
+
     def test_least_occurring_modern_dict_items(self):
         rare = list(least_occurring(["a", "a", "b", "c", "c", "d"], count=2, keep_freq=True))
         self.assertEqual(set(rare), {"b", "d"})
 
         rare_values = least_occurring(["a", "a", "b", "c", "c", "d"], count=2, keep_freq=False)
         self.assertEqual(set(rare_values), {"b", "d"})
+
+    def test_least_occurring_validates_selection_controls(self):
+        values = ["a", "b"]
+        for count in (-1, 1.5, True):
+            with self.subTest(count=count), self.assertRaisesRegex(ValueError, "nonnegative integer"):
+                least_occurring(values, count=count)
+        for percent in (-0.1, 1.1, float("nan"), float("inf"), True):
+            with self.subTest(percent=percent), self.assertRaisesRegex(ValueError, "between 0 and 1"):
+                least_occurring(values, percent=percent)
+        with self.assertRaisesRegex(ValueError, "only one"):
+            least_occurring(values, count=1, percent=0.5)
+        self.assertEqual(least_occurring(values, percent=0.0), [])
 
     def test_sorted_dict_merge_add_keeps_counts_aligned(self):
         keys, counts = sorted_dict_merge_add(
