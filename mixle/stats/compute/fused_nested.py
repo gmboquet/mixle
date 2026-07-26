@@ -77,7 +77,7 @@ def _shape(node: Any) -> Any:
     """Structural signature of a BUILT tree -- the kernel cache key. Captures ALL children so distinct
     heterogeneous mixtures never share a compiled kernel."""
     if isinstance(node, _Leaf):
-        return ("leaf", node.template.name, node.slot)
+        return ("leaf", node.template.fingerprint, node.slot)
     if isinstance(node, _Composite):
         return ("comp", tuple(_shape(c) for c in node.children))
     return ("mix", node.shared_encoding, tuple(_shape(c) for c in node.children))
@@ -93,7 +93,7 @@ def _model_shape(dist: Any) -> Any:
     if tname == "MixtureDistribution":
         return ("mix", tuple(_model_shape(c) for c in dist.components))
     t = _template_for(dist)
-    return ("leaf", t.name if t is not None else tname)
+    return ("leaf", t.fingerprint if t is not None else tname)
 
 
 def _shared_component_encoding(model: Any) -> bool:
@@ -291,7 +291,11 @@ def _cast_reduced(arrays: list, compute_dtype: Any) -> list:
 
 
 def _sig(root: Any, ctx: _Ctx) -> tuple:
-    return ("nested", _shape(root), tuple(ctx.slot_template[s].name for s in range(len(ctx.slots))))
+    return (
+        "nested",
+        _shape(root),
+        tuple(ctx.slot_template[s].fingerprint for s in range(len(ctx.slots))),
+    )
 
 
 def _compile_score(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False, quantized_lse: bool = False) -> Any:

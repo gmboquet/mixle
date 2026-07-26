@@ -62,8 +62,10 @@ structure changes or digest-salt bumps.
 
 from __future__ import annotations
 
+import hashlib
+import marshal
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -137,14 +139,121 @@ class LeafTemplate:
         None  # (init_hist_k (S,), trans_hist_k (S,S), enc, count) -> leaf value
     )
     dtype: str = "float64"
+    cache_version: str = "1"
+    fingerprint: str = field(init=False, repr=False, compare=True)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("leaf template name must be a non-empty string.")
+        if not isinstance(self.cache_version, str) or not self.cache_version:
+            raise ValueError("leaf template cache_version must be a non-empty string.")
+        if isinstance(self.arity, bool) or not isinstance(self.arity, int) or self.arity < 0:
+            raise ValueError("leaf template arity must be a non-negative integer.")
+        if not callable(self.matches) or not callable(self.data) or not callable(self.params):
+            raise TypeError("leaf template matches, data, and params hooks must be callable.")
+        object.__setattr__(self, "fingerprint", _leaf_template_fingerprint(self))
 
 
 _TEMPLATES: list[LeafTemplate] = []
 
 
+def _stable_semantic_token(value: Any) -> Any:
+    """Return a deterministic token for Python hook code and captured state."""
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return (type(value).__name__, value)
+    if isinstance(value, (tuple, list)):
+        return (type(value).__name__, tuple(_stable_semantic_token(item) for item in value))
+    if isinstance(value, dict):
+        items = sorted(
+            ((_stable_semantic_token(key), _stable_semantic_token(item)) for key, item in value.items()),
+            key=repr,
+        )
+        return ("dict", tuple(items))
+    if isinstance(value, np.ndarray):
+        return (
+            "ndarray",
+            value.dtype.str,
+            tuple(value.shape),
+            hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest(),
+        )
+    code = getattr(value, "__code__", None)
+    if code is not None:
+        closure = getattr(value, "__closure__", None) or ()
+        return (
+            "python-callable",
+            getattr(value, "__module__", None),
+            getattr(value, "__qualname__", None),
+            hashlib.sha256(marshal.dumps(code)).hexdigest(),
+            _stable_semantic_token(getattr(value, "__defaults__", None)),
+            _stable_semantic_token(getattr(value, "__kwdefaults__", None)),
+            tuple(_stable_semantic_token(cell.cell_contents) for cell in closure),
+        )
+    explicit = getattr(value, "__mixle_cache_key__", None)
+    if explicit is not None:
+        return ("explicit", _stable_semantic_token(explicit))
+    state = getattr(value, "__dict__", None)
+    return (
+        "opaque",
+        type(value).__module__,
+        type(value).__qualname__,
+        _stable_semantic_token(state) if state else None,
+    )
+
+
+def _leaf_template_fingerprint(template: LeafTemplate) -> str:
+    """Fingerprint every field that can change generated or marshalled semantics."""
+    hooks = (
+        template.matches,
+        template.data,
+        template.params,
+        template.to_value,
+        template.expr,
+        template.acc_stmt,
+        template.mat_precompute,
+        template.mat_row,
+        template.mat_accumulate,
+        template.vec_row,
+        template.vec_accumulate,
+        template.tab_table,
+        template.tab_to_value,
+        template.to_value_g,
+        template.cat_table,
+        template.cat_to_value,
+        template.chain_tables,
+        template.chain_to_value,
+    )
+    semantics = (
+        template.name,
+        template.cache_version,
+        template.arity,
+        template.kind,
+        template.acc_names,
+        template.tab_hist,
+        template.wants_minmax,
+        template.min_acc_names,
+        template.dtype,
+        tuple(_stable_semantic_token(hook) for hook in hooks),
+    )
+    return hashlib.sha256(repr(semantics).encode("utf-8")).hexdigest()
+
+
 def register_leaf_template(t: LeafTemplate) -> None:
-    """Register a leaf template for fused scoring and E-step generation."""
-    _TEMPLATES.append(t)
+    """Register a uniquely named, fingerprinted leaf template.
+
+    Extensions registered after the built-in bridge are inserted before it so
+    the catch-all bridge cannot shadow them. Replacing a registered name is
+    forbidden: create a new process with the changed template (and bump
+    ``cache_version`` when semantics live outside inspectable Python hook code).
+    """
+    if not isinstance(t, LeafTemplate):
+        raise TypeError("register_leaf_template requires a LeafTemplate.")
+    if any(existing.name == t.name for existing in _TEMPLATES):
+        raise ValueError("leaf template name %r is already registered." % t.name)
+    bridge_index = next((index for index, existing in enumerate(_TEMPLATES) if existing.kind == "bridge"), None)
+    if bridge_index is None or t.kind == "bridge":
+        _TEMPLATES.append(t)
+    else:
+        _TEMPLATES.insert(bridge_index, t)
 
 
 def _template_for(dist: Any, allow_bridge: bool = True) -> LeafTemplate | None:
@@ -979,7 +1088,12 @@ def analyze(model: Any, bare_bridge: bool = False) -> FusedPlan | None:
         if any([_template_for(f) for f in p] != templates for p in per):  # type: ignore[union-attr]
             return None
         comp_is_composite = type(comps[0]).__name__ == "CompositeDistribution"
-        sig = ("mix", tuple(t.name for t in templates), comp_is_composite, bare_bridge)  # type: ignore[union-attr]
+        sig = (
+            "mix",
+            tuple(t.fingerprint for t in templates),
+            comp_is_composite,
+            bare_bridge,
+        )  # type: ignore[union-attr]
         return FusedPlan(len(comps), True, tuple(templates), sig, comp_is_composite, bare_bridge)  # type: ignore[arg-type]
     # The bare-bridge allowance never applies to the ROOT itself: bridging a bare leaf/combinator
     # root is one native scoring pass wrapped in a kernel -- no softmax, no templated siblings,
@@ -991,7 +1105,12 @@ def analyze(model: Any, bare_bridge: bool = False) -> FusedPlan | None:
     if any(t is None for t in templates):  # a composite factor has no leaf template
         return None
     is_composite = tname == "CompositeDistribution"
-    sig = ("comp", tuple(t.name for t in templates), is_composite, bare_bridge)  # type: ignore[union-attr]
+    sig = (
+        "comp",
+        tuple(t.fingerprint for t in templates),
+        is_composite,
+        bare_bridge,
+    )  # type: ignore[union-attr]
     return FusedPlan(1, False, tuple(templates), sig, is_composite, bare_bridge)  # type: ignore[arg-type]
 
 
@@ -1186,7 +1305,6 @@ def _emit(plan: FusedPlan, acc_suffix: str = "") -> dict[str, list[str]]:
     return frag
 
 
-import hashlib  # noqa: E402
 import importlib.util  # noqa: E402
 import os  # noqa: E402
 import stat  # noqa: E402
@@ -1262,8 +1380,13 @@ def _njit(src: str, fname: str, parallel: bool = False) -> Callable:
     digest = hashlib.sha1(f"v2|parallel={parallel}|{src}".encode()).hexdigest()[:16]  # noqa: S324 -- cache key
     modname = f"_pysp_fused_{digest}"
     with _NJIT_LOCK:
-        if modname in sys.modules:
-            return getattr(sys.modules[modname], fname)
+        cached_module = sys.modules.get(modname)
+        if cached_module is not None:
+            cached_function = getattr(cached_module, fname, None)
+            if callable(cached_function):
+                return cached_function
+            sys.modules.pop(modname, None)
+        path = None
         try:
             cache_dir = _private_cache_dir()
             if cache_dir is None:
@@ -1292,8 +1415,17 @@ def _njit(src: str, fname: str, parallel: bool = False) -> Callable:
             mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
             sys.modules[modname] = mod
             spec.loader.exec_module(mod)  # type: ignore[union-attr]
-            return getattr(mod, fname)
+            loaded = getattr(mod, fname)
+            if not callable(loaded):
+                raise TypeError("generated fused module did not define callable %s." % fname)
+            return loaded
         except Exception:  # noqa: BLE001
+            sys.modules.pop(modname, None)
+            if path is not None and _owned_privately(path, require_dir=False):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
             ns: dict[str, Any] = {"np": np, "numba": numba}
             exec(src, ns)  # noqa: S102 -- generated from fixed templates, no user input
             # same fastmath subset as the disk template (ninf/nnan off: the -inf guard must hold)
