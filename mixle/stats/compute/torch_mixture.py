@@ -16,6 +16,7 @@ is a small adapter over the modular compute-engine stack:
 
 from __future__ import annotations
 
+from operator import index
 from typing import Any
 
 import numpy as np
@@ -139,6 +140,7 @@ class TorchMixture:
         """Initialize through the standard sequence-initialization protocol."""
         from mixle.inference import seq_initialize
 
+        p = _unit_interval(p, "p")
         return seq_initialize([enc], estimator, rng, p)
 
     def fit(
@@ -153,9 +155,19 @@ class TorchMixture:
         out: Any | None = None,
     ) -> tuple[Any, float]:
         """Run local EM to convergence and return ``(model, log_likelihood)``."""
-        model = self.initialize(enc, estimator, rng or np.random.RandomState(0), p=init_p) if model is None else model
+        max_its = _nonnegative_integer(max_its, "max_its")
+        delta = _finite_nonnegative(delta, "delta")
+        init_p = _unit_interval(init_p, "init_p")
+        if max_its == 0:
+            model = self.model if model is None else model
+            return model, float(self.seq_log_density(enc, model=model).sum())
+        model = (
+            self.initialize(enc, estimator, np.random.RandomState(0) if rng is None else rng, p=init_p)
+            if model is None
+            else model
+        )
         old_ll = float(self.seq_log_density(enc, model=model).sum())
-        for i in range(max(1, int(max_its))):
+        for i in range(max_its):
             model = self.em_step(enc, estimator, model=model)
             ll = float(self.seq_log_density(enc, model=model).sum())
             if out is not None:
@@ -209,10 +221,15 @@ class TorchMixture:
     ) -> Any:
         """Delegate MAP fitting to the generic objective/declaration path.
 
-        ``priors`` and ``w_alpha`` are accepted for source compatibility; rich
-        conjugate priors now belong in distribution/objective declarations
-        rather than this compatibility shim.
+        ``w_alpha`` cannot be represented unambiguously by the current structured-prior contract and
+        therefore raises instead of being silently ignored. Use
+        ``priors={"family": "mixture", "weights": {"family": "dirichlet", "alpha": ...}}``.
         """
+        if w_alpha is not None:
+            raise TypeError(
+                "w_alpha is no longer accepted because it was previously ignored; pass a structured "
+                "mixture Dirichlet weight prior through priors= instead."
+            )
         return _fit_map(
             enc[1],
             self.model if model is None else model,
@@ -273,3 +290,34 @@ def _is_mixture_model(model: Any) -> bool:
 
 def _has_type_name(model: Any, name: str) -> bool:
     return any(cls.__name__ == name for cls in type(model).mro())
+
+
+def _nonnegative_integer(value: Any, label: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{label} must be an integer, not a boolean.")
+    try:
+        result = index(value)
+    except TypeError as exc:
+        raise TypeError(f"{label} must be an integer.") from exc
+    if result < 0:
+        raise ValueError(f"{label} must be non-negative.")
+    return result
+
+
+def _finite_nonnegative(value: Any, label: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{label} must be a scalar, not a boolean.")
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{label} must be a finite non-negative scalar.") from exc
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{label} must be a finite non-negative scalar.")
+    return result
+
+
+def _unit_interval(value: Any, label: str) -> float:
+    result = _finite_nonnegative(value, label)
+    if result > 1.0:
+        raise ValueError(f"{label} must lie in [0, 1].")
+    return result
