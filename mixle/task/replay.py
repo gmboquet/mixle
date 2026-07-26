@@ -10,11 +10,55 @@ silent pass.
 
 from __future__ import annotations
 
+import inspect
 import json
+import random
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
+
+def _rng_state() -> dict[str, Any]:
+    np_state = np.random.get_state()
+    return {
+        "python": list(random.getstate()),
+        "numpy": {
+            "kind": np_state[0],
+            "keys": np_state[1].tolist(),
+            "position": int(np_state[2]),
+            "has_gauss": int(np_state[3]),
+            "cached_gaussian": float(np_state[4]),
+        },
+    }
+
+
+def _nested_tuple(value: Any) -> Any:
+    return tuple(_nested_tuple(item) for item in value) if isinstance(value, list) else value
+
+
+def _restore_rng_state(state: dict[str, Any]) -> None:
+    if not isinstance(state, dict) or not isinstance(state.get("numpy"), dict):
+        raise ValueError("trace RNG state is malformed")
+    random.setstate(_nested_tuple(state["python"]))
+    np_state = state["numpy"]
+    np.random.set_state(
+        (
+            str(np_state["kind"]),
+            np.asarray(np_state["keys"], dtype=np.uint32),
+            int(np_state["position"]),
+            int(np_state["has_gauss"]),
+            float(np_state["cached_gaussian"]),
+        )
+    )
+
+
+def _canonical(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("replay identity must be canonical JSON data") from exc
 
 @dataclass
 class TraceStep:
@@ -27,6 +71,8 @@ class TraceStep:
     action: dict[str, Any] | None = None
     state_before: Any = None
     state_after: Any = None
+    rng_state_before: dict[str, Any] | None = None
+    rng_state_after: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         """Serialize this trace step to JSON-compatible data."""
@@ -38,6 +84,8 @@ class TraceStep:
             "action": self.action,
             "state_before": self.state_before,
             "state_after": self.state_after,
+            "rng_state_before": self.rng_state_before,
+            "rng_state_after": self.rng_state_after,
         }
 
     @classmethod
@@ -51,6 +99,8 @@ class TraceStep:
             action=d.get("action"),
             state_before=d.get("state_before"),
             state_after=d.get("state_after"),
+            rng_state_before=d.get("rng_state_before"),
+            rng_state_after=d.get("rng_state_after"),
         )
 
 
@@ -83,22 +133,54 @@ def record_step(
     fn = tools[tool]
     call_args = dict(args)
     if seed is not None:
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"cannot verify whether tool {tool!r} accepts seed") from exc
+        accepts_seed = "seed" in signature.parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+        )
+        if not accepts_seed:
+            raise ValueError(f"tool {tool!r} does not accept a seed argument")
         call_args["seed"] = seed
+    before = _rng_state()
     result = fn(**call_args)
-    return TraceStep(tool=tool, args=dict(args), seed=seed, result=result)
+    return TraceStep(
+        tool=tool,
+        args=dict(args),
+        seed=seed,
+        result=result,
+        rng_state_before=before,
+        rng_state_after=_rng_state(),
+    )
 
 
 def replay(trace: ExecutionTrace, tools: dict[str, Callable[..., Any]]) -> ExecutionTrace:
     """Re-execute every step of ``trace`` against ``tools`` with the exact same args and seed."""
-    replayed = [record_step(tools, step.tool, step.args, seed=step.seed) for step in trace.steps]
+    caller_state = _rng_state()
+    replayed: list[TraceStep] = []
+    try:
+        for step in trace.steps:
+            if step.rng_state_before is None:
+                raise ValueError("trace step has no captured RNG state")
+            _restore_rng_state(step.rng_state_before)
+            replayed_step = record_step(tools, step.tool, step.args, seed=step.seed)
+            replayed_step.action = step.action
+            replayed.append(replayed_step)
+    finally:
+        _restore_rng_state(caller_state)
     return ExecutionTrace(request=trace.request, steps=replayed)
 
 
 def diff(a: ExecutionTrace, b: ExecutionTrace) -> list[tuple[int, str]]:
     """Indices + tool names where ``a`` and ``b`` disagree (JSON-serialized result comparison)."""
     mismatches = []
+    if a.request != b.request:
+        mismatches.append((-1, "request_mismatch"))
+    if not a.steps and not b.steps:
+        mismatches.append((0, "empty_trace"))
     for i, (sa, sb) in enumerate(zip(a.steps, b.steps)):
-        if sa.tool != sb.tool or json.dumps(sa.result, sort_keys=True) != json.dumps(sb.result, sort_keys=True):
+        if _canonical(sa.to_json()) != _canonical(sb.to_json()):
             mismatches.append((i, sa.tool))
     if len(a.steps) != len(b.steps):
         mismatches.append((min(len(a.steps), len(b.steps)), "length_mismatch"))
