@@ -1,6 +1,7 @@
 """Parameter routing, measured fallback, curvature, and batch-semantics tests."""
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -61,6 +62,18 @@ class _Module:
         return iter(self.rows)
 
 
+class _SharedModule:
+    def __init__(self):
+        self.parameter = _Parameter((128, 128))
+
+    def named_parameters(self, *, remove_duplicate=True):
+        rows = (
+            ("token_embedding.weight", self.parameter),
+            ("lm_head.weight", self.parameter),
+        )
+        return iter(rows[:1] if remove_duplicate else rows)
+
+
 def _contract(*, curvature=CurvatureKind.UNAVAILABLE, update=UpdateKind.FIRST_ORDER):
     return UpdateContract(
         objective_kind=ObjectiveKind.MLE,
@@ -92,6 +105,19 @@ def test_parameter_roles_and_conservative_neural_routes():
     json.dumps(plan.as_dict(), allow_nan=False)
 
 
+def test_shared_parameter_aliases_are_enumerated_and_routed_once_conservatively():
+    descriptors = describe_parameters(_SharedModule())
+    assert len(descriptors) == 1
+    descriptor = descriptors[0]
+    assert descriptor.aliases == ("token_embedding.weight", "lm_head.weight")
+    assert descriptor.shared_group == "shared:token_embedding.weight"
+    assert descriptor.role is ParameterRole.OTHER
+    plan = route_optimizer_geometry(descriptors, _contract())
+    route = plan.routes[0]
+    assert route.family is OptimizerFamily.ADAMW
+    assert "shared aliases" in route.reason
+
+
 def test_exact_statistical_parameters_never_enter_neural_optimizer():
     exact = compile_update_graph(GaussianDistribution(0.0, 1.0), GaussianEstimator()).node("n0000").contract
     plan = route_optimizer_geometry(describe_parameters(_Module()), exact)
@@ -114,37 +140,87 @@ def test_measured_time_to_target_forces_and_avoids_fallback():
     descriptor = describe_parameters(_Module())[0]
     plan = route_optimizer_geometry((descriptor,), _contract())
     baseline = OptimizerEvidence(
-        descriptor.name,
-        OptimizerFamily.ADAMW,
-        "loss<=1",
-        True,
-        9.0,
-        10_000,
-        100,
-        1_000,
+        parameter_name=descriptor.name,
+        family=OptimizerFamily.ADAMW,
+        target_name="loss<=1",
+        parameter_fingerprint=descriptor.identity_fingerprint,
+        model_version=4,
+        target_achieved=True,
+        time_to_target_seconds=9.0,
+        consumed_tokens=10_000,
+        optimizer_updates=100,
+        state_bytes=1_000,
     )
     slow = OptimizerEvidence(
-        descriptor.name,
-        OptimizerFamily.MUON,
-        "loss<=1",
-        True,
-        10.0,
-        10_000,
-        100,
-        500,
+        parameter_name=descriptor.name,
+        family=OptimizerFamily.MUON,
+        target_name="loss<=1",
+        parameter_fingerprint=descriptor.identity_fingerprint,
+        model_version=4,
+        target_achieved=True,
+        time_to_target_seconds=10.0,
+        consumed_tokens=10_000,
+        optimizer_updates=100,
+        state_bytes=500,
     )
     fast = OptimizerEvidence(
-        descriptor.name,
-        OptimizerFamily.MUON,
-        "loss<=1",
-        True,
-        7.0,
-        10_000,
-        100,
-        500,
+        parameter_name=descriptor.name,
+        family=OptimizerFamily.MUON,
+        target_name="loss<=1",
+        parameter_fingerprint=descriptor.identity_fingerprint,
+        model_version=4,
+        target_achieved=True,
+        time_to_target_seconds=7.0,
+        consumed_tokens=10_000,
+        optimizer_updates=100,
+        state_bytes=500,
     )
-    assert apply_optimizer_evidence(plan, (baseline, slow)).routes[0].family is OptimizerFamily.ADAMW
-    assert apply_optimizer_evidence(plan, (baseline, fast)).routes[0].family is OptimizerFamily.MUON
+    assert (
+        apply_optimizer_evidence(
+            plan,
+            (baseline, slow),
+            target_name="loss<=1",
+            model_version=4,
+        ).routes[0].family
+        is OptimizerFamily.ADAMW
+    )
+    assert (
+        apply_optimizer_evidence(
+            plan,
+            (baseline, fast),
+            target_name="loss<=1",
+            model_version=4,
+        ).routes[0].family
+        is OptimizerFamily.MUON
+    )
+    missing = apply_optimizer_evidence(
+        plan,
+        (),
+        target_name="loss<=1",
+        model_version=4,
+    )
+    assert missing.routes[0].family is OptimizerFamily.ADAMW
+    with pytest.raises(ValueError, match="target"):
+        apply_optimizer_evidence(
+            plan,
+            (baseline, fast),
+            target_name="accuracy>=0.9",
+            model_version=4,
+        )
+    with pytest.raises(ValueError, match="model version"):
+        apply_optimizer_evidence(
+            plan,
+            (baseline, replace(fast, model_version=3)),
+            target_name="loss<=1",
+            model_version=4,
+        )
+    with pytest.raises(ValueError, match="fingerprint"):
+        apply_optimizer_evidence(
+            plan,
+            (baseline, replace(fast, parameter_fingerprint="wrong")),
+            target_name="loss<=1",
+            model_version=4,
+        )
 
 
 def test_batch_receipt_makes_effective_batch_and_update_clock_explicit():
@@ -168,12 +244,69 @@ def test_reference_geometry_transforms_are_finite_and_shape_checked():
     natural = natural_gradient_direction(np.array([2.0, 6.0]), np.diag([2.0, 3.0]), damping=1.0e-12)
     np.testing.assert_allclose(natural, [1.0, 2.0], rtol=1.0e-10)
 
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        kronecker_precondition(gradient, np.diag([1.0] * 7 + [-1.0]), np.eye(4))
+    with pytest.raises(ValueError, match="finite"):
+        kronecker_precondition(gradient, np.eye(8), np.full((4, 4), np.nan))
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        natural_gradient_direction(np.ones(2), np.diag([1.0, -1.0]))
+    with pytest.raises(ValueError, match="finite"):
+        natural_gradient_direction(np.array([1.0, np.nan]), np.eye(2))
+
 
 def test_curvature_cache_enforces_version_lag():
     cache = CurvatureCache(max_version_lag=1)
-    sketch = CurvatureSketch("experts:shared", CurvatureKind.KRONECKER, (np.eye(2),), 3, 100.0)
+    sketch = CurvatureSketch(
+        "experts:shared",
+        CurvatureKind.KRONECKER,
+        (np.eye(2), np.eye(2)),
+        "model",
+        "parameter-fingerprint",
+        3,
+        100.0,
+    )
     cache.put(sketch)
-    assert cache.get("experts:shared", model_version=4) is sketch
-    assert cache.get("experts:shared", model_version=5) is None
+    with pytest.raises(ValueError):
+        sketch.factors[0].setflags(write=True)
+    assert (
+        cache.get(
+            "experts:shared",
+            model_id="model",
+            parameter_fingerprint="parameter-fingerprint",
+            model_version=4,
+        )
+        is sketch
+    )
+    assert (
+        cache.get(
+            "experts:shared",
+            model_id="model",
+            parameter_fingerprint="parameter-fingerprint",
+            model_version=5,
+        )
+        is None
+    )
     with pytest.raises(ValueError, match="future"):
-        cache.get("experts:shared", model_version=2)
+        cache.get(
+            "experts:shared",
+            model_id="model",
+            parameter_fingerprint="parameter-fingerprint",
+            model_version=2,
+        )
+    with pytest.raises(ValueError, match="identity"):
+        cache.get(
+            "experts:shared",
+            model_id="other",
+            parameter_fingerprint="parameter-fingerprint",
+            model_version=4,
+        )
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        CurvatureSketch(
+            "bad",
+            CurvatureKind.FISHER,
+            (np.diag([1.0, -1.0]),),
+            "model",
+            "parameter",
+            0,
+            1.0,
+        )

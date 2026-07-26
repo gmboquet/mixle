@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -10,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from mixle.experimental.typed_runtime.contracts import CurvatureKind, UpdateContract, UpdateKind
+from mixle.experimental.typed_runtime.proposal import payload_fingerprint
 
 
 class ParameterRole(StrEnum):
@@ -55,6 +57,36 @@ class ParameterDescriptor:
     role: ParameterRole
     requires_grad: bool = True
     shared_group: str | None = None
+    aliases: tuple[str, ...] = ()
+    alias_roles: tuple[ParameterRole, ...] = ()
+
+    def __post_init__(self) -> None:
+        aliases = self.aliases or (self.name,)
+        roles = self.alias_roles or (self.role,)
+        if not self.name or len(set(aliases)) != len(aliases) or self.name not in aliases:
+            raise ValueError("parameter descriptor requires unique aliases including its primary name.")
+        if len(roles) != len(aliases):
+            raise ValueError("parameter alias roles must align with aliases.")
+        if self.numel < 0 or self.itemsize < 1 or any(dimension < 0 for dimension in self.shape):
+            raise ValueError("parameter shape, size, and itemsize must be non-negative/positive.")
+        object.__setattr__(self, "aliases", aliases)
+        object.__setattr__(self, "alias_roles", roles)
+
+    @property
+    def identity_fingerprint(self) -> str:
+        """Stable logical identity used to bind measurements and curvature."""
+
+        return payload_fingerprint(
+            (
+                self.name,
+                self.aliases,
+                tuple(role.value for role in self.alias_roles),
+                self.shape,
+                self.numel,
+                self.itemsize,
+                self.shared_group,
+            )
+        )
 
     @property
     def parameter_bytes(self) -> int:
@@ -74,6 +106,9 @@ class ParameterDescriptor:
             "role": self.role.value,
             "requires_grad": self.requires_grad,
             "shared_group": self.shared_group,
+            "aliases": list(self.aliases),
+            "alias_roles": [role.value for role in self.alias_roles],
+            "identity_fingerprint": self.identity_fingerprint,
         }
 
 
@@ -105,33 +140,57 @@ def describe_parameters(module: Any) -> tuple[ParameterDescriptor, ...]:
 
     named = getattr(module, "named_parameters", None)
     if callable(named):
-        rows = tuple(named())
+        try:
+            signature = inspect.signature(named)
+        except (TypeError, ValueError):
+            signature = None
+        supports_duplicates = signature is not None and (
+            "remove_duplicate" in signature.parameters
+            or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+        )
+        rows = tuple(named(remove_duplicate=False)) if supports_duplicates else tuple(named())
     else:
         parameters = getattr(module, "parameters", None)
         if not callable(parameters):
             raise TypeError("module must expose named_parameters() or parameters().")
         rows = tuple(("parameter_%d" % index, parameter) for index, parameter in enumerate(parameters()))
+    by_name: dict[str, int] = {}
+    groups: dict[int, tuple[Any, list[str]]] = {}
+    for raw_name, parameter in rows:
+        name = str(raw_name)
+        previous = by_name.get(name)
+        if previous is not None and previous != id(parameter):
+            raise ValueError("module parameter name resolves to multiple parameter objects: %s" % name)
+        by_name[name] = id(parameter)
+        if id(parameter) not in groups:
+            groups[id(parameter)] = (parameter, [])
+        groups[id(parameter)][1].append(name)
+
     descriptors = []
-    seen: dict[int, str] = {}
-    for name, parameter in rows:
+    for parameter, names in groups.values():
+        name = names[0]
         shape = tuple(int(value) for value in getattr(parameter, "shape", ()))
         numel_fn = getattr(parameter, "numel", None)
         numel = int(numel_fn()) if callable(numel_fn) else int(np.prod(shape) if shape else 1)
         element_size = getattr(parameter, "element_size", None)
         itemsize = int(element_size()) if callable(element_size) else int(getattr(parameter, "itemsize", 4))
-        identity = id(parameter)
-        shared_group = seen.get(identity)
-        if shared_group is None:
-            seen[identity] = str(name)
+        alias_roles = tuple(_parameter_role(alias, shape) for alias in names)
+        role = alias_roles[0] if len(set(alias_roles)) == 1 else ParameterRole.OTHER
+        shared_group = "shared:%s" % name if len(names) > 1 else None
         descriptors.append(
             ParameterDescriptor(
-                str(name),
+                name,
                 shape,
                 numel,
                 itemsize,
-                _parameter_role(str(name), shape),
+                role,
                 bool(getattr(parameter, "requires_grad", True)),
                 shared_group,
+                tuple(names),
+                alias_roles,
             )
         )
     return tuple(descriptors)
@@ -240,6 +299,11 @@ def _route_one(
     elif contract.update_kind in (UpdateKind.DISCRETE_SEARCH,):
         family, reason = OptimizerFamily.DISCRETE_SEARCH, "non-differentiable typed search block"
         fallback = OptimizerFamily.DISCRETE_SEARCH
+    elif parameter.shared_group is not None and parameter.role is ParameterRole.OTHER:
+        family, reason = (
+            OptimizerFamily.ADAMW,
+            "shared aliases span optimization roles; conservative shared-group route",
+        )
     elif parameter.role is ParameterRole.ROUTER and contract.curvature_kind is CurvatureKind.FISHER:
         family, reason = OptimizerFamily.NATURAL_GRADIENT, "probabilistic router has Fisher geometry"
     elif parameter.role is ParameterRole.LOW_RANK_ADAPTER:
@@ -296,6 +360,8 @@ class OptimizerEvidence:
     parameter_name: str
     family: OptimizerFamily
     target_name: str
+    parameter_fingerprint: str
+    model_version: int
     target_achieved: bool
     time_to_target_seconds: float | None
     consumed_tokens: int
@@ -304,26 +370,51 @@ class OptimizerEvidence:
     collective_bytes: int = 0
 
     def __post_init__(self) -> None:
-        if not self.parameter_name or not self.target_name:
-            raise ValueError("optimizer evidence parameter and target names must be non-empty.")
-        if self.time_to_target_seconds is not None and self.time_to_target_seconds < 0.0:
-            raise ValueError("time_to_target_seconds must be non-negative.")
+        if not self.parameter_name or not self.target_name or not self.parameter_fingerprint:
+            raise ValueError("optimizer evidence parameter, fingerprint, and target names must be non-empty.")
+        if self.model_version < 0:
+            raise ValueError("optimizer evidence model_version must be non-negative.")
+        if self.time_to_target_seconds is not None and (
+            not math.isfinite(self.time_to_target_seconds) or self.time_to_target_seconds < 0.0
+        ):
+            raise ValueError("time_to_target_seconds must be finite and non-negative.")
+        if self.target_achieved and self.time_to_target_seconds is None:
+            raise ValueError("achieved optimizer targets require a measured time_to_target_seconds.")
         counts = (self.consumed_tokens, self.optimizer_updates, self.state_bytes, self.collective_bytes)
-        if any(value < 0 for value in counts):
-            raise ValueError("optimizer evidence work counters must be non-negative.")
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
+            raise ValueError("optimizer evidence work counters must be non-negative integers.")
 
 
 def apply_optimizer_evidence(
     plan: OptimizerPlan,
     evidence: tuple[OptimizerEvidence, ...],
     *,
+    target_name: str,
+    model_version: int,
     minimum_time_improvement: float = 0.02,
 ) -> OptimizerPlan:
     """Fall back when a routed family does not beat measured AdamW time-to-target."""
 
-    if not 0.0 <= minimum_time_improvement < 1.0:
+    if not target_name or model_version < 0:
+        raise ValueError("optimizer evidence target_name and model_version must be valid.")
+    if not math.isfinite(minimum_time_improvement) or not 0.0 <= minimum_time_improvement < 1.0:
         raise ValueError("minimum_time_improvement must be in [0, 1).")
-    lookup = {(row.parameter_name, row.family): row for row in evidence}
+    parameters = {route.parameter.name: route.parameter for route in plan.routes}
+    lookup = {}
+    for row in evidence:
+        parameter = parameters.get(row.parameter_name)
+        if parameter is None:
+            raise ValueError("optimizer evidence refers to an unknown parameter: %s" % row.parameter_name)
+        if row.target_name != target_name:
+            raise ValueError("optimizer evidence target does not match the requested target.")
+        if row.model_version != model_version:
+            raise ValueError("optimizer evidence model version does not match the routed model.")
+        if row.parameter_fingerprint != parameter.identity_fingerprint:
+            raise ValueError("optimizer evidence parameter fingerprint does not match the route.")
+        key = (row.parameter_name, row.family)
+        if key in lookup:
+            raise ValueError("duplicate optimizer evidence for one parameter/family/target.")
+        lookup[key] = row
     routes = []
     for route in plan.routes:
         if route.family in (OptimizerFamily.EXACT, OptimizerFamily.FROZEN, OptimizerFamily.ADAMW):
@@ -332,16 +423,15 @@ def apply_optimizer_evidence(
         candidate = lookup.get((route.parameter.name, route.family))
         baseline = lookup.get((route.parameter.name, OptimizerFamily.ADAMW))
         fallback_reason = None
-        if candidate is not None and baseline is not None:
-            if not candidate.target_achieved:
-                fallback_reason = "%s failed target; measured fallback to AdamW" % route.family.value
-            elif baseline.target_achieved and baseline.time_to_target_seconds is not None:
-                if (
-                    candidate.time_to_target_seconds is None
-                    or candidate.time_to_target_seconds
-                    >= (1.0 - minimum_time_improvement) * baseline.time_to_target_seconds
-                ):
-                    fallback_reason = "%s did not beat AdamW time-to-target after overhead" % route.family.value
+        if candidate is None or baseline is None:
+            fallback_reason = "%s lacks complete target-bound evidence; fell back to AdamW" % route.family.value
+        elif not candidate.target_achieved:
+            fallback_reason = "%s failed target; measured fallback to AdamW" % route.family.value
+        elif baseline.target_achieved and (
+            candidate.time_to_target_seconds
+            >= (1.0 - minimum_time_improvement) * baseline.time_to_target_seconds
+        ):
+            fallback_reason = "%s did not beat AdamW time-to-target after overhead" % route.family.value
         if fallback_reason is None:
             routes.append(route)
         else:
@@ -438,20 +528,34 @@ def kronecker_precondition(
     column_factor = np.asarray(column_factor, dtype=np.float64)
     if gradient.ndim != 2:
         raise ValueError("Kronecker preconditioning requires a matrix gradient.")
+    if not np.all(np.isfinite(gradient)):
+        raise ValueError("Kronecker gradient must be finite.")
     if row_factor.shape != (gradient.shape[0], gradient.shape[0]) or column_factor.shape != (
         gradient.shape[1],
         gradient.shape[1],
     ):
         raise ValueError("Kronecker factor shapes do not match gradient axes.")
-    if damping <= 0.0:
-        raise ValueError("Kronecker damping must be positive.")
+    if not math.isfinite(damping) or damping <= 0.0:
+        raise ValueError("Kronecker damping must be finite and positive.")
 
     def inverse_quarter(matrix: np.ndarray) -> np.ndarray:
-        values, vectors = np.linalg.eigh(0.5 * (matrix + matrix.T))
-        powers = np.maximum(values, 0.0) + damping
+        if not np.all(np.isfinite(matrix)) or not np.allclose(
+            matrix,
+            matrix.T,
+            rtol=1.0e-10,
+            atol=1.0e-12,
+        ):
+            raise ValueError("Kronecker factors must be finite and symmetric.")
+        values, vectors = np.linalg.eigh(matrix)
+        if float(np.min(values)) < 0.0:
+            raise ValueError("Kronecker factors must be positive semidefinite.")
+        powers = values + damping
         return (vectors * powers[None, :] ** -0.25) @ vectors.T
 
-    return inverse_quarter(row_factor) @ gradient @ inverse_quarter(column_factor)
+    result = inverse_quarter(row_factor) @ gradient @ inverse_quarter(column_factor)
+    if not np.all(np.isfinite(result)):
+        raise ValueError("Kronecker preconditioning produced a non-finite direction.")
+    return result
 
 
 def natural_gradient_direction(gradient: Any, fisher: Any, *, damping: float = 1.0e-6) -> np.ndarray:
@@ -459,12 +563,24 @@ def natural_gradient_direction(gradient: Any, fisher: Any, *, damping: float = 1
 
     gradient = np.asarray(gradient, dtype=np.float64).reshape(-1)
     fisher = np.asarray(fisher, dtype=np.float64)
+    if not np.all(np.isfinite(gradient)):
+        raise ValueError("natural-gradient input gradient must be finite.")
     if fisher.shape != (gradient.size, gradient.size):
         raise ValueError("Fisher shape must match flattened gradient size.")
-    if damping <= 0.0 or not np.all(np.isfinite(fisher)):
+    if (
+        not math.isfinite(damping)
+        or damping <= 0.0
+        or not np.all(np.isfinite(fisher))
+        or not np.allclose(fisher, fisher.T, rtol=1.0e-10, atol=1.0e-12)
+    ):
         raise ValueError("natural-gradient Fisher and damping must be finite/positive.")
-    symmetric = 0.5 * (fisher + fisher.T)
-    return np.linalg.solve(symmetric + damping * np.eye(gradient.size), gradient)
+    eigenvalues = np.linalg.eigvalsh(fisher)
+    if float(np.min(eigenvalues)) < 0.0:
+        raise ValueError("natural-gradient Fisher must be positive semidefinite.")
+    result = np.linalg.solve(fisher + damping * np.eye(gradient.size), gradient)
+    if not np.all(np.isfinite(result)):
+        raise ValueError("natural-gradient solve produced a non-finite direction.")
+    return result
 
 
 @dataclass(frozen=True)
@@ -474,15 +590,57 @@ class CurvatureSketch:
     key: str
     kind: CurvatureKind
     factors: tuple[np.ndarray, ...]
+    model_id: str
+    parameter_fingerprint: str
     model_version: int
     observations: float
+
+    def __post_init__(self) -> None:
+        if not self.key or not self.model_id or not self.parameter_fingerprint:
+            raise ValueError("curvature sketch key, model, and parameter identity must be non-empty.")
+        if self.model_version < 0 or not math.isfinite(self.observations) or self.observations <= 0.0:
+            raise ValueError("curvature sketch version and observations must be valid.")
+        if not self.factors:
+            raise ValueError("curvature sketch requires at least one factor.")
+        if self.kind is CurvatureKind.UNAVAILABLE:
+            raise ValueError("unavailable curvature cannot be cached as a factor sketch.")
+        if self.kind is CurvatureKind.KRONECKER and len(self.factors) != 2:
+            raise ValueError("Kronecker curvature sketches require row and column factors.")
+        if self.kind in (CurvatureKind.FISHER, CurvatureKind.DIAGONAL) and len(self.factors) != 1:
+            raise ValueError("Fisher/diagonal curvature sketches require exactly one factor.")
+        frozen = []
+        for factor in self.factors:
+            value = np.array(factor, dtype=np.float64, copy=True)
+            if not np.all(np.isfinite(value)):
+                raise ValueError("curvature sketch factors must be finite.")
+            if self.kind in (CurvatureKind.KRONECKER, CurvatureKind.FISHER):
+                if value.ndim != 2 or value.shape[0] != value.shape[1]:
+                    raise ValueError("Kronecker/Fisher curvature factors must be square matrices.")
+                if not np.allclose(value, value.T, rtol=1.0e-10, atol=1.0e-12):
+                    raise ValueError("Kronecker/Fisher curvature factors must be symmetric.")
+                eigenvalues = np.linalg.eigvalsh(value)
+                if float(np.min(eigenvalues)) < 0.0:
+                    raise ValueError("Kronecker/Fisher curvature factors must be positive semidefinite.")
+            elif self.kind is CurvatureKind.DIAGONAL and (
+                value.ndim != 1 or np.any(value < 0.0)
+            ):
+                raise ValueError("diagonal curvature factors must be non-negative vectors.")
+            immutable = np.frombuffer(value.tobytes(order="C"), dtype=value.dtype).reshape(value.shape)
+            frozen.append(immutable)
+        object.__setattr__(self, "factors", tuple(frozen))
+
+    @property
+    def factor_fingerprint(self) -> str:
+        """Content identity for immutable cached factors."""
+
+        return payload_fingerprint(self.factors)
 
 
 @dataclass
 class CurvatureCache:
     """Share versioned curvature sketches across related parameters/experts."""
 
-    max_version_lag: int = 1
+    max_version_lag: int = 0
     _sketches: dict[str, CurvatureSketch] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -490,16 +648,34 @@ class CurvatureCache:
             raise ValueError("max_version_lag must be non-negative.")
 
     def put(self, sketch: CurvatureSketch) -> None:
-        if sketch.model_version < 0 or sketch.observations < 0.0 or not sketch.key:
-            raise ValueError("curvature sketch metadata must be non-negative and named.")
+        existing = self._sketches.get(sketch.key)
+        if existing is not None:
+            if (
+                existing.model_id != sketch.model_id
+                or existing.parameter_fingerprint != sketch.parameter_fingerprint
+            ):
+                raise ValueError("curvature cache key cannot be reused across model/parameter identities.")
+            if sketch.model_version < existing.model_version:
+                raise ValueError("curvature cache cannot replace a newer sketch with a stale one.")
         self._sketches[sketch.key] = sketch
 
-    def get(self, key: str, *, model_version: int) -> CurvatureSketch | None:
+    def get(
+        self,
+        key: str,
+        *,
+        model_id: str,
+        parameter_fingerprint: str,
+        model_version: int,
+    ) -> CurvatureSketch | None:
         sketch = self._sketches.get(key)
-        if sketch is None or model_version - sketch.model_version > self.max_version_lag:
+        if sketch is None:
             return None
+        if sketch.model_id != model_id or sketch.parameter_fingerprint != parameter_fingerprint:
+            raise ValueError("curvature cache identity does not match the requested model/parameter.")
         if model_version < sketch.model_version:
             raise ValueError("cannot read curvature from a future model version.")
+        if model_version - sketch.model_version > self.max_version_lag:
+            return None
         return sketch
 
 
