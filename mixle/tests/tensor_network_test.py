@@ -12,6 +12,7 @@ from __future__ import annotations
 import itertools
 
 import numpy as np
+import pytest
 
 from mixle.experimental.tensor_network import (
     MPS,
@@ -54,6 +55,57 @@ def test_exact_marginal_matches_brute_force() -> None:
         exact = mps.marginal(evidence)
         brute = sum(p[i] for i, s in enumerate(seqs) if all(s[k] == v for k, v in evidence.items()))
         assert np.isclose(exact, brute), f"ev={evidence}: {exact} vs {brute}"
+
+
+def test_probability_requires_a_complete_event_and_marginal_is_explicit() -> None:
+    mps = product_mps([[1.0, 1.0], [1.0, 1.0]])
+    with pytest.raises(ValueError, match="exactly 2"):
+        mps.probability([0])
+    with pytest.raises(ValueError, match="exactly 2"):
+        mps.probability([0, 1, 0])
+    assert np.isclose(mps.marginal({0: 0}), 0.5)
+
+
+def test_event_indices_symbols_and_zero_probability_evidence_fail_closed() -> None:
+    mps = product_mps([[1, 0], [1, 1]])
+    with pytest.raises(ValueError, match="evidence site"):
+        mps.marginal({2: 0})
+    with pytest.raises(ValueError, match=r"evidence\[0\]"):
+        mps.marginal({0: 2})
+    with pytest.raises(ValueError, match="query"):
+        mps.conditional(2, {})
+    with pytest.raises(ValueError, match="zero-probability"):
+        mps.conditional(1, {0: 1})
+
+
+def test_query_already_in_evidence_is_a_normalized_point_mass() -> None:
+    mps = random_mps(3, bond=2, d=3, seed=5)
+    conditional = mps.conditional(1, {1: 2})
+    assert np.array_equal(conditional, np.array([0.0, 0.0, 1.0]))
+    assert conditional.sum() == 1.0
+
+
+def test_complex_born_state_uses_conjugate_products_and_absolute_squares() -> None:
+    amplitudes = np.array([1.0, 1.0j]) / np.sqrt(2.0)
+    mps = product_mps([amplitudes])
+    assert np.isclose(mps.normalization(), 1.0)
+    assert np.allclose(mps.all_probabilities(), [0.5, 0.5])
+    assert np.isclose(mps.probability([0]), 0.5)
+    assert np.isclose(mps.probability([1]), 0.5)
+    assert np.isclose(mps.amplitude([1]), 1.0j / np.sqrt(2.0))
+
+
+def test_malformed_or_zero_norm_mps_is_rejected() -> None:
+    with pytest.raises(ValueError, match="left bond"):
+        MPS([np.ones((1, 2, 2)), np.ones((3, 2, 1))])
+    with pytest.raises(ValueError, match="boundary"):
+        MPS([np.ones((2, 2, 1))])
+
+    zero = product_mps([[0, 0]])
+    with pytest.raises(ValueError, match="zero Born normalization"):
+        zero.normalization()
+    with pytest.raises(ValueError, match="zero or non-finite"):
+        zero.all_probabilities()
 
 
 def test_entanglement_bounded_by_log_bond() -> None:
