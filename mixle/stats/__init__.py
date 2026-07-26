@@ -610,6 +610,7 @@ __all__ = [
     "EwensAccumulatorFactory",
     "EwensDataEncoder",
     "SpanningTreeDistribution",
+    "SpanningTreeFitError",
     "SpanningTreeSampler",
     "SpanningTreeEstimator",
     "SpanningTreeDataEncoder",
@@ -1719,6 +1720,7 @@ from mixle.stats.trees.spanning_tree import (
     SpanningTreeDistribution,
     SpanningTreeEnumerator,
     SpanningTreeEstimator,
+    SpanningTreeFitError,
     SpanningTreeSampler,
 )
 
