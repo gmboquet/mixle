@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
+from numbers import Integral, Real
 from typing import Any
+
+from mixle.experimental.typed_runtime.contracts import CounterSemantics
 
 
 @dataclass(frozen=True)
@@ -14,15 +18,31 @@ class ClockProgress:
     step: int = 0
     tokens: int = 0
     observations: float = 0.0
+    counter_semantics: CounterSemantics = CounterSemantics.CUMULATIVE
 
     def __post_init__(self) -> None:
-        if self.step < 0 or self.tokens < 0 or self.observations < 0.0:
+        integers = (self.step, self.tokens)
+        if any(isinstance(value, bool) or not isinstance(value, Integral) or value < 0 for value in integers):
             raise ValueError("clock progress must be non-negative.")
+        if (
+            isinstance(self.observations, bool)
+            or not isinstance(self.observations, Real)
+            or not math.isfinite(float(self.observations))
+            or self.observations < 0.0
+        ):
+            raise ValueError("clock progress observations must be finite and non-negative.")
+        if self.counter_semantics is not CounterSemantics.CUMULATIVE:
+            raise ValueError("clock progress counters must use cumulative semantics.")
 
     def as_dict(self) -> dict[str, int | float]:
         """Return a JSON-compatible progress vector."""
 
-        return {"step": self.step, "tokens": self.tokens, "observations": self.observations}
+        return {
+            "step": self.step,
+            "tokens": self.tokens,
+            "observations": self.observations,
+            "counter_semantics": self.counter_semantics.value,
+        }
 
 
 @dataclass(frozen=True)
@@ -38,8 +58,19 @@ class UpdateCadence:
         values = (self.every_steps, self.every_tokens, self.every_observations, self.max_staleness_steps)
         if all(value is None for value in values):
             raise ValueError("an update cadence requires at least one trigger.")
-        if any(value is not None and value <= 0 for value in values):
-            raise ValueError("cadence intervals must be positive when supplied.")
+        for name in ("every_steps", "every_tokens", "max_staleness_steps"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, Integral) or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive integer when supplied.")
+        if self.every_observations is not None and (
+            isinstance(self.every_observations, bool)
+            or not isinstance(self.every_observations, Real)
+            or not math.isfinite(float(self.every_observations))
+            or self.every_observations <= 0.0
+        ):
+            raise ValueError("every_observations must be finite and positive when supplied.")
 
 
 class ClockTrigger(StrEnum):
@@ -62,6 +93,26 @@ class ClockDecision:
     progress: ClockProgress
     last_commit: ClockProgress | None
     commit_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.node_id, str) or not self.node_id:
+            raise ValueError("clock decisions require a non-empty node_id.")
+        if not isinstance(self.due, bool):
+            raise TypeError("clock decision due must be boolean.")
+        if (
+            not isinstance(self.triggers, tuple)
+            or any(not isinstance(trigger, ClockTrigger) for trigger in self.triggers)
+            or len(set(self.triggers)) != len(self.triggers)
+        ):
+            raise ValueError("clock decision triggers must be unique ClockTrigger values.")
+        if self.due != bool(self.triggers):
+            raise ValueError("clock decision due flag must agree with its triggers.")
+        if not isinstance(self.progress, ClockProgress):
+            raise TypeError("clock decision progress must be ClockProgress.")
+        if self.last_commit is not None and not isinstance(self.last_commit, ClockProgress):
+            raise TypeError("clock decision last_commit must be ClockProgress or None.")
+        if isinstance(self.commit_count, bool) or not isinstance(self.commit_count, Integral) or self.commit_count < 0:
+            raise ValueError("clock decision commit_count must be a non-negative integer.")
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible clock decision."""
@@ -86,11 +137,17 @@ class MultiRateUpdateClocks:
     _last_progress: ClockProgress = field(default_factory=ClockProgress, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if not self.cadences or any(not node_id for node_id in self.cadences):
+        if not isinstance(self.cadences, dict) or not self.cadences:
             raise ValueError("multi-rate clocks require non-empty node ids and cadences.")
+        if any(not isinstance(node_id, str) or not node_id for node_id in self.cadences):
+            raise ValueError("multi-rate clocks require non-empty node ids and cadences.")
+        if any(not isinstance(cadence, UpdateCadence) for cadence in self.cadences.values()):
+            raise TypeError("multi-rate clock values must be UpdateCadence instances.")
         self.cadences = dict(self.cadences)
 
     def _validate_progress(self, progress: ClockProgress) -> None:
+        if not isinstance(progress, ClockProgress):
+            raise TypeError("clock progress must be ClockProgress.")
         previous = self._last_progress
         if (
             progress.step < previous.step
