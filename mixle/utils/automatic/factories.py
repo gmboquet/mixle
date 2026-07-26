@@ -8,6 +8,7 @@ closed-form conjugate / MAP update.
 
 import math
 from collections.abc import Sequence
+from numbers import Integral, Real
 from typing import Any, TypeVar
 
 import numpy as np
@@ -58,6 +59,47 @@ def _estimator_provider(use_bstats: bool = False):
 #   setdist:      BetaDistribution(1, 1)
 #   mvn:          NormalWishart(zeros(d), 1e-8, eye(d)*0.5, d + 2e-6)
 _BAYES_DIRICHLET_ALPHA = 1.0 + 1.0e-12
+
+
+def _validate_pseudo_count(pseudo_count: float | None) -> None:
+    if pseudo_count is None:
+        return
+    if isinstance(pseudo_count, bool) or not isinstance(pseudo_count, Real):
+        raise TypeError("pseudo_count must be a finite non-negative real number or None")
+    if not math.isfinite(float(pseudo_count)) or float(pseudo_count) < 0.0:
+        raise ValueError("pseudo_count must be a finite non-negative real number or None")
+
+
+def _validate_mass_map(
+    values: dict[Any, float],
+    *,
+    name: str,
+    require_positive_total: bool = False,
+) -> float:
+    if not isinstance(values, dict):
+        raise TypeError(f"{name} must be a dictionary of observations to masses")
+    total = 0.0
+    for mass in values.values():
+        if isinstance(mass, bool) or not isinstance(mass, Real):
+            raise TypeError(f"{name} masses must be finite non-negative real numbers")
+        mass = float(mass)
+        if not math.isfinite(mass) or mass < 0.0:
+            raise ValueError(f"{name} masses must be finite non-negative real numbers")
+        total += mass
+    if not math.isfinite(total):
+        raise ValueError(f"{name} total mass must be finite")
+    if require_positive_total and total <= 0.0:
+        raise ValueError(f"{name} must contain positive total mass")
+    return total
+
+
+def _validate_positive_int(value: int, *, name: str, minimum: int = 1) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
+    value = int(value)
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return value
 
 
 # The conjugate prior families are reached through the ``mixle.stats`` package
@@ -130,7 +172,10 @@ def get_length_estimator(
     so use an integer categorical model while the support is small. Fall back to a
     Poisson only when length support is broad enough to look count-like.
     """
-    n = sum(len_dict.values())
+    _validate_pseudo_count(pseudo_count)
+    n = _validate_mass_map(len_dict, name="len_dict")
+    if any(isinstance(k, bool) or not isinstance(k, Integral) or int(k) < 0 for k in len_dict):
+        raise ValueError("sequence lengths must be non-negative integers")
     cutoff = max(MAX_LENGTH_CATEGORICAL_DISTINCT, MAX_LENGTH_CATEGORICAL_FRACTION * n)
     if len(len_dict) <= cutoff and _dense_integer_support(len_dict):
         return get_integer_categorical_estimator(dict(len_dict), pseudo_count, emp_suff_stat, use_bstats=use_bstats)
@@ -145,6 +190,7 @@ def get_sequence_estimator(
     use_bstats: bool = False,
 ) -> "ParameterEstimator":
     """Return a sequence estimator with an optional empirical length model."""
+    _validate_pseudo_count(pseudo_count)
     len_est = None
     if len_dict:
         len_est = get_length_estimator(len_dict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
@@ -160,6 +206,17 @@ def get_set_estimator(
     use_bstats: bool = False,
 ) -> "ParameterEstimator":
     """Bernoulli set model with membership probabilities from observed sets."""
+    _validate_pseudo_count(pseudo_count)
+    _validate_mass_map(member_dict, name="member_dict")
+    if isinstance(num_sets, bool) or not isinstance(num_sets, Integral):
+        raise TypeError("num_sets must be a non-negative integer")
+    num_sets = int(num_sets)
+    if num_sets < 0:
+        raise ValueError("num_sets must be a non-negative integer")
+    if any(float(count) > num_sets for count in member_dict.values()):
+        raise ValueError("set-member counts cannot exceed num_sets")
+    if member_dict and num_sets == 0:
+        raise ValueError("non-empty member_dict requires num_sets > 0")
     BernoulliSetEstimator = _estimator_provider(use_bstats).BernoulliSetEstimator
     if use_bstats:
         return BernoulliSetEstimator(prior=_set_default_prior())
@@ -188,6 +245,8 @@ def get_categorical_estimator(
     vdict: dict[T, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
 ) -> "ParameterEstimator":
     """Return a categorical estimator from observed value counts."""
+    _validate_pseudo_count(pseudo_count)
+    _validate_mass_map(vdict, name="vdict", require_positive_total=True)
     provider = _estimator_provider(use_bstats)
     if use_bstats:
         return provider.CategoricalEstimator(prior=_categorical_default_prior(vdict))
@@ -219,6 +278,10 @@ def get_integer_categorical_estimator(
     vdict: dict[int, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
 ) -> "ParameterEstimator":
     """Return an integer-categorical estimator over the observed dense support."""
+    _validate_pseudo_count(pseudo_count)
+    _validate_mass_map(vdict, name="vdict", require_positive_total=True)
+    if any(isinstance(k, bool) or not isinstance(k, Integral) for k in vdict):
+        raise ValueError("integer-categorical observations must be integers")
     min_val, max_val, width = _integer_range(vdict)
 
     if use_bstats:
@@ -244,6 +307,10 @@ def get_poisson_estimator(
     vdict: dict[int, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
 ) -> "ParameterEstimator":
     """Return a Poisson count estimator from empirical integer counts."""
+    _validate_pseudo_count(pseudo_count)
+    _validate_mass_map(vdict, name="vdict")
+    if any(isinstance(k, bool) or not isinstance(k, Integral) or int(k) < 0 for k in vdict):
+        raise ValueError("Poisson observations must be non-negative integers")
 
     if use_bstats:
         return _estimator_provider(True).PoissonEstimator(prior=_poisson_default_prior())
@@ -278,6 +345,8 @@ def get_gaussian_estimator(
     use_bstats: bool = False,
 ) -> "ParameterEstimator":
     """Return a univariate Gaussian estimator from weighted numeric values."""
+    _validate_pseudo_count(pseudo_count)
+    _validate_mass_map(vdict, name="vdict")
 
     if emp_suff_stat:
         ss_0 = 0.0
@@ -320,6 +389,8 @@ def get_lognormal_estimator(
     use_bstats: bool = False,
 ) -> "ParameterEstimator":
     """Return a LogGaussian (log-normal) estimator fit to the log of strictly-positive values."""
+    _validate_pseudo_count(pseudo_count)
+    _validate_mass_map(vdict, name="vdict")
     if emp_suff_stat:
         ss_0 = 0.0
         ss_1 = 0.0
@@ -347,6 +418,9 @@ def get_lognormal_estimator(
         ss_1 = None
         ss_2 = None
 
+    if use_bstats:
+        return _estimator_provider(True).LogGaussianEstimator(prior=_gaussian_default_prior())
+
     return _estimator_provider(False).LogGaussianEstimator(
         pseudo_count=(pseudo_count, pseudo_count), suff_stat=(ss_1, ss_2)
     )
@@ -359,6 +433,10 @@ def get_gamma_estimator(
     use_bstats: bool = False,
 ) -> "ParameterEstimator":
     """Return a Gamma estimator initialized from the method-of-moments fit of positive values."""
+    _validate_pseudo_count(pseudo_count)
+    _validate_mass_map(vdict, name="vdict")
+    if use_bstats:
+        raise NotImplementedError("the Gamma factory has no conjugate prior for jointly unknown shape and scale")
     k = 1.0
     theta = 1.0
     if emp_suff_stat:
@@ -386,6 +464,10 @@ def get_student_t_estimator(
     use_bstats: bool = False,
 ) -> "ParameterEstimator":
     """Return a fixed-df Student-t estimator; df is set from the excess kurtosis of the data."""
+    _validate_pseudo_count(pseudo_count)
+    _validate_mass_map(vdict, name="vdict")
+    if use_bstats:
+        raise NotImplementedError("the Student-t factory has no conjugate prior for its fitted parameters")
     df = 5.0
     ss_0 = 0.0
     ss_1 = 0.0
@@ -417,29 +499,35 @@ def get_gaussian_mixture_estimator(
     n_components: int = 2,
 ) -> "ParameterEstimator":
     """Return a K-component Gaussian mixture estimator (robust init) for multimodal numeric data."""
-    provider = _estimator_provider(False)
-    components = [provider.GaussianEstimator() for _ in range(max(2, int(n_components)))]
+    _validate_pseudo_count(pseudo_count)
+    _validate_mass_map(vdict, name="vdict")
+    n_components = _validate_positive_int(n_components, name="n_components", minimum=2)
+    provider = _estimator_provider(use_bstats)
+    if use_bstats:
+        components = [provider.GaussianEstimator(prior=_gaussian_default_prior()) for _ in range(n_components)]
+        return provider.MixtureEstimator(
+            components,
+            robust=True,
+            prior=provider.SymmetricDirichletDistribution(_BAYES_DIRICHLET_ALPHA),
+        )
+    components = [provider.GaussianEstimator() for _ in range(n_components)]
     return provider.MixtureEstimator(components, robust=True)
 
 
 def get_multivariate_gaussian_estimator(dim: int, use_bstats: bool = False) -> "ParameterEstimator":
     """Return a multivariate Gaussian estimator for vectors of dimension ``dim``."""
+    dim = _validate_positive_int(dim, name="dim")
     if use_bstats:
         return _estimator_provider(True).MultivariateGaussianEstimator(dim=dim, prior=_mvn_default_prior(dim))
     return _estimator_provider(False).MultivariateGaussianEstimator(dim=dim)
 
 
-# --- modality-fingerprint routing ---------------------------------------------------------
+# --- explicit modality routing ------------------------------------------------------------
 #
-# A fixed-length numeric vector is not always "low-dimensional tabular numeric": at moderate-to-high
-# dimension it is much more often an embedding (a frozen encoder's output, a pooled feature vector) than
-# a handful of jointly-Gaussian measurements, and a bare multivariate Gaussian is the wrong default there
-# -- it can only capture a unimodal ellipsoid, not the manifold structure embeddings actually have. Above
-# EMBEDDING_MIN_DIM, route to a hybrid neural density (an exact normalizing flow) instead. A 2-D/3-D
-# numeric array (an image-shaped field) is routed through a frozen, deterministic feature extractor
-# (mixle.represent.modality.image_features) into the same hybrid density -- the "frozen encoder +
-# structured head" pattern. Below the threshold (plain low-dim tabular numeric) nothing changes: this is
-# additive, not a replacement of the existing per-coordinate/MVN path.
+# Shape is not provenance: ordinary wide vectors and matrices retain mathematical-array semantics.
+# When a caller explicitly identifies embedding or image data, these builders provide the corresponding
+# neural density. EMBEDDING_MIN_DIM is retained as the threshold for a diagnostic that suggests the
+# explicit embedding option without selecting it automatically.
 EMBEDDING_MIN_DIM = 16
 IMAGE_FEATURE_DIM = 16
 
@@ -454,6 +542,7 @@ def _has_torch() -> bool:
 
 def get_hybrid_embedding_estimator(dim: int) -> "ParameterEstimator":
     """An exact neural density (a coupling flow) over an embedding-shaped ``dim``-vector field."""
+    dim = _validate_positive_int(dim, name="dim")
     from mixle.models.neural_families import Flow
 
     return Flow(dim=dim).estimator()
@@ -461,6 +550,7 @@ def get_hybrid_embedding_estimator(dim: int) -> "ParameterEstimator":
 
 def get_hybrid_image_estimator(dim: int = IMAGE_FEATURE_DIM) -> "ParameterEstimator":
     """A frozen ``image_features`` extractor composed with an exact neural density over the induced features."""
+    dim = _validate_positive_int(dim, name="dim")
     from mixle.models.feature_map import FeatureMapEstimator, register_feature_fn
     from mixle.models.neural_families import Flow
     from mixle.represent.modality import image_features
@@ -510,14 +600,32 @@ def get_dpm_mixture(
     import mixle.stats as provider
     from mixle.inference.estimation import fit
 
-    from .profiling import get_estimator
+    from .profiling import get_estimator, normalize_input
+
+    max_components = _validate_positive_int(max_components, name="max_components")
+    max_its = _validate_positive_int(max_its, name="max_its")
+    print_iter = _validate_positive_int(print_iter, name="print_iter")
+    _validate_pseudo_count(pseudo_count)
+    if isinstance(delta, bool) or not isinstance(delta, Real):
+        raise TypeError("delta must be a finite non-negative real number")
+    delta = float(delta)
+    if not math.isfinite(delta) or delta < 0.0:
+        raise ValueError("delta must be a finite non-negative real number")
+
+    rows = list(normalize_input(data))
+    if not rows:
+        raise ValueError("data must contain at least one observation")
 
     if rng is None:
         rng = np.random.RandomState(0)  # fixed default: an un-seeded fit is deterministic
+    if not callable(getattr(rng, "choice", None)):
+        raise TypeError("rng must provide the NumPy random-state interface")
     if out is None:
         out = sys.stdout
+    if not callable(getattr(out, "write", None)):
+        raise TypeError("out must be a writable stream or None")
 
-    comp_ests = [get_estimator(data, pseudo_count=pseudo_count, use_bstats=True) for _ in range(max_components)]
+    comp_ests = [get_estimator(rows, pseudo_count=pseudo_count, use_bstats=True) for _ in range(max_components)]
     est = provider.DirichletProcessMixtureEstimator(comp_ests)
 
-    return fit(data, est, max_its=max_its, delta=delta, rng=rng, print_iter=print_iter, out=out)
+    return fit(rows, est, max_its=max_its, delta=delta, rng=rng, print_iter=print_iter, out=out)

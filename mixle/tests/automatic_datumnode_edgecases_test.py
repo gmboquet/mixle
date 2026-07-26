@@ -59,12 +59,12 @@ class ModalityFingerprintDictGuardTest(unittest.TestCase):
         profile = analyze_structure(data, pairwise=False)
         self.assertFalse(any("modality fingerprint" in w for w in profile.warnings))
 
-    def test_pure_embedding_field_without_dict_rows_is_unaffected(self):
-        # sanity: the dict_count guard must not suppress the warning when there are genuinely no
-        # dict rows -- only the mixed case should change.
+    def test_pure_wide_vector_requires_explicit_embedding_provenance(self):
         data = [[float(i)] * 16 for i in range(20)]
         profile = analyze_structure(data, pairwise=False)
-        self.assertTrue(any("modality fingerprint" in w for w in profile.warnings))
+        self.assertTrue(any("retained mathematical-vector semantics" in w for w in profile.warnings))
+        explicit = analyze_structure(data, pairwise=False, modality="embedding")
+        self.assertTrue(any("explicit modality: embedding" in w for w in explicit.warnings))
 
 
 class InfiniteFloatValueTest(unittest.TestCase):
