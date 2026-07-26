@@ -2131,6 +2131,7 @@
         "HashedNGram",
         "HashedRecord",
         "ImagineResult",
+        "ImpossibleEvidenceError",
         "InteractionLog",
         "InverseModel",
         "InverseReceipts",

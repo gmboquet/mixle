@@ -19,7 +19,7 @@ from mixle.task.calibrate import CalibratedTaskModel  # noqa: E402
 from mixle.task.cascade import Cascade  # noqa: E402
 from mixle.task.distill import agreement, distill_records  # noqa: E402
 from mixle.task.economics import CostModel  # noqa: E402
-from mixle.task.model import HashedRecord, TaskModel  # noqa: E402
+from mixle.task.model import HashedRecord, RecordClassifierIO, TaskModel  # noqa: E402
 
 
 def records(seed, n=400):
@@ -47,9 +47,19 @@ class HashedRecordTest(unittest.TestCase):
         self.assertEqual(f.transform([(1.0, "US", True)]).shape, (1, 64))
 
     def test_spec_round_trip(self):
-        f = HashedRecord(dim=128, seed=5)
+        f = HashedRecord.for_records([{"a": 2.0}], dim=128, seed=5)
         g = HashedRecord.from_spec(f.to_spec())
         self.assertTrue(np.array_equal(f.transform([{"a": 2.0}]), g.transform([{"a": 2.0}])))
+
+    def test_classifier_schema_is_fixed_and_numeric_fields_are_finite(self):
+        f = HashedRecord.for_records([{"a": 2.0, "b": "x"}], dim=32)
+        RecordClassifierIO(f, ["no", "yes"])
+        with self.assertRaisesRegex(ValueError, "schema"):
+            f.transform([{"a": 2.0}])
+        with self.assertRaisesRegex(ValueError, "finite"):
+            f.transform([{"a": np.nan, "b": "x"}])
+        with self.assertRaisesRegex(ValueError, "fixed record schema"):
+            RecordClassifierIO(HashedRecord(dim=32), ["no", "yes"])
 
 
 class DistillRecordsTest(unittest.TestCase):

@@ -28,6 +28,7 @@ import numpy as np
 from mixle.task.model import (
     HashedNGram,
     HashedRecord,
+    ImpossibleEvidenceError,
     StructuredClassifierIO,
     TaskModel,
     _ClassifierIO,
@@ -292,8 +293,16 @@ class LNSStructuredClassifierIO(StructuredClassifierIO):
 
     kind = "lns_structured_classifier"
 
-    def __init__(self, field_keys: list[str] | None, label_index: int, labels: list[str], step: float = 1e-2) -> None:
-        super().__init__(field_keys, label_index, labels)
+    def __init__(
+        self,
+        field_keys: list[str] | None,
+        label_index: int,
+        labels: list[str],
+        step: float = 1e-2,
+        *,
+        field_count: int | None = None,
+    ) -> None:
+        super().__init__(field_keys, label_index, labels, field_count=field_count)
         self.step = float(step)
         from mixle.engines.lns import LogNumberSystem
 
@@ -409,13 +418,19 @@ class LNSStructuredClassifierIO(StructuredClassifierIO):
 
         ints = self.int_logits_batch(model, raw_inputs)
         dead = ints <= _LOG_ZERO_INT // 2
-        ints = np.where(dead.all(axis=1, keepdims=True), 0, ints)  # all-impossible row -> uniform
+        impossible = np.flatnonzero(dead.all(axis=1))
+        if impossible.size:
+            raise ImpossibleEvidenceError(impossible.tolist())
         p = np.exp(log_softmax(ints * self.step, self._lns, axis=-1))
         return p / p.sum(axis=1, keepdims=True)
 
     def predict_batch(self, model: Any, raw_inputs: list[Any]) -> list[str]:
         """Return integer-logit argmax labels for a batch of raw inputs."""
-        idx = self.int_logits_batch(model, raw_inputs).argmax(axis=1)  # pure integer decision
+        logits = self.int_logits_batch(model, raw_inputs)
+        impossible = np.flatnonzero((logits <= _LOG_ZERO_INT // 2).all(axis=1))
+        if impossible.size:
+            raise ImpossibleEvidenceError(impossible.tolist())
+        idx = logits.argmax(axis=1)  # pure integer decision
         return [self.labels[i] for i in idx]
 
     def to_spec(self) -> dict[str, Any]:
@@ -428,7 +443,13 @@ class LNSStructuredClassifierIO(StructuredClassifierIO):
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> LNSStructuredClassifierIO:
         """Reconstruct the LNS structured-classifier adapter from a spec."""
-        return cls(spec.get("field_keys"), spec["label_index"], spec["labels"], step=spec.get("step", 1e-2))
+        return cls(
+            spec.get("field_keys"),
+            spec["label_index"],
+            spec["labels"],
+            step=spec.get("step", 1e-2),
+            field_count=spec.get("field_count"),
+        )
 
 
 register_adapter(LNSStructuredClassifierIO.kind, LNSStructuredClassifierIO.from_spec)
@@ -448,7 +469,11 @@ def lns_classifier(student: TaskModel, *, step: float = 1e-2) -> TaskModel:
     if not isinstance(student.adapter, StructuredClassifierIO) or student.payload != "json":
         raise ValueError("lns_classifier expects a structured student (from distill_structured)")
     adapter = LNSStructuredClassifierIO(
-        student.adapter.field_keys, student.adapter.label_index, student.adapter.labels, step=step
+        student.adapter.field_keys,
+        student.adapter.label_index,
+        student.adapter.labels,
+        step=step,
+        field_count=student.adapter.field_count,
     )
     meta = dict(student.meta)
     meta["lns"] = {"step": float(step), "max_fold_error": 1.5 * float(step)}

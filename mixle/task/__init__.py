@@ -145,6 +145,7 @@ from mixle.task.llm import (
 from mixle.task.model import (
     HashedNGram,
     HashedRecord,
+    ImpossibleEvidenceError,
     RecordClassifierIO,
     StructuredClassifierIO,
     TaskModel,
@@ -301,6 +302,7 @@ __all__ = [
     "validate_extraction_schema",
     "HashedNGram",
     "HashedRecord",
+    "ImpossibleEvidenceError",
     "KNOWN_RUNGS",
     "LNSStructuredClassifierIO",
     "LadderResult",

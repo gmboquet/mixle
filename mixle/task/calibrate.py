@@ -26,7 +26,7 @@ from typing import Any
 import numpy as np
 
 from mixle.inference.conformal import conformal_label_sets, conformal_label_threshold
-from mixle.task.model import TaskModel
+from mixle.task.model import ImpossibleEvidenceError, TaskModel
 
 ESCALATE = None  # the sentinel a decision returns when the conformal set is not a confident singleton
 
@@ -90,8 +90,32 @@ class CalibratedTaskModel:
         """Conformal label set per input (the classes whose score clears the calibrated threshold)."""
         if self.qhat is None:
             raise RuntimeError("call calibrate(...) (or load a calibrated artifact) before predicting sets")
-        sets, _ = conformal_label_sets(np.empty(0), self._proba(list(texts)), alpha=self.alpha, qhat=self.qhat)
-        return [[self.labels[i] for i in np.flatnonzero(row)] for row in sets]
+        rows = list(texts)
+        if not rows:
+            return []
+        try:
+            probabilities = self._proba(rows)
+            sets, _ = conformal_label_sets(np.empty(0), probabilities, alpha=self.alpha, qhat=self.qhat)
+            return [[self.labels[i] for i in np.flatnonzero(row)] for row in sets]
+        except ImpossibleEvidenceError:
+            # Preserve impossible structured evidence as an empty prediction set so the calibrated
+            # serving contract escalates it. Re-evaluate individually to keep valid rows in a mixed batch;
+            # implementation failures other than the explicit impossible-evidence signal still propagate.
+            result: list[list[str]] = []
+            for row in rows:
+                try:
+                    probabilities = self._proba([row])
+                except ImpossibleEvidenceError:
+                    result.append([])
+                    continue
+                sets, _ = conformal_label_sets(
+                    np.empty(0),
+                    probabilities,
+                    alpha=self.alpha,
+                    qhat=self.qhat,
+                )
+                result.append([self.labels[i] for i in np.flatnonzero(sets[0])])
+            return result
 
     def predict_set(self, text: Any) -> list[str]:
         """Return the conformal label set for one input."""
