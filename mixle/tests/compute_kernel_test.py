@@ -762,6 +762,45 @@ class ComputeKernelTestCase(unittest.TestCase):
         self.assertAlmostEqual(wrapped_model.mu, chunked_model.mu)
         self.assertAlmostEqual(wrapped_model.sigma2, chunked_model.sigma2)
 
+    def test_encoded_data_rejects_unverified_or_stale_metadata(self):
+        encoder = GaussianDistribution(0.0, 1.0).dist_to_encoder()
+        payload = np.asarray([1.0, 2.0], dtype=np.float64)
+        with self.assertRaisesRegex(ValueError, "count=.*encoder-measured"):
+            EncodedData.from_payload(payload, count=1, encoder=encoder)
+        with self.assertRaisesRegex(ValueError, "nonnegative integer"):
+            EncodedData.from_payload(payload, count=-1, encoder=encoder)
+        with self.assertRaisesRegex(ValueError, "does not match final encoded payload size"):
+            EncodedData(
+                count=2,
+                payload=payload,
+                engine=NUMPY_ENGINE,
+                nbytes=payload.nbytes + 1,
+                encoder=encoder,
+            )
+
+    def test_encoded_data_measures_final_transferred_payload(self):
+        data = np.asarray([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+        encoder = GaussianDistribution(0.0, 1.0).dist_to_encoder()
+        engine = NumpyEngine(dtype="float32")
+        wrapped = EncodedData.from_data(data, encoder, engine=engine)
+        self.assertEqual(wrapped.payload.dtype, np.dtype("float32"))
+        self.assertEqual(wrapped.nbytes, wrapped.payload.nbytes)
+        self.assertEqual(wrapped.nbytes, data.size * np.dtype("float32").itemsize)
+
+    def test_encoded_data_rejects_an_engine_that_does_not_own_payload(self):
+        from mixle.engines import TorchEngine
+
+        payload = np.asarray([1.0, 2.0], dtype=np.float64)
+        encoder = GaussianDistribution(0.0, 1.0).dist_to_encoder()
+        with self.assertRaisesRegex(ValueError, "does not own"):
+            EncodedData(
+                count=2,
+                payload=payload,
+                engine=TorchEngine(),
+                nbytes=payload.nbytes,
+                encoder=encoder,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
