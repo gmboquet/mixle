@@ -92,45 +92,78 @@ class LKJTest(unittest.TestCase):
         good = d.sampler(seed=3).sample(2)
         bad = np.array([[1.0, -1.5, -1.5], [-1.5, 1.0, 1.2], [-1.5, 1.2, 1.0]])
         batch = np.array([good[0], bad, good[1]])
-        encoded = LKJDataEncoder().seq_encode(batch)
-        self.assertEqual(encoded[1], -np.inf)
-        np.testing.assert_allclose(encoded[[0, 2]], [np.linalg.slogdet(good[0])[1], np.linalg.slogdet(good[1])[1]])
+        encoded = LKJDataEncoder(3).seq_encode(batch)
+        self.assertEqual(encoded[1][1], -np.inf)
+        self.assertFalse(encoded[2][1])
+        np.testing.assert_allclose(
+            encoded[1][[0, 2]],
+            [np.linalg.slogdet(good[0])[1], np.linalg.slogdet(good[1])[1]],
+        )
         seq_ll = d.seq_log_density(encoded)
         self.assertEqual(seq_ll[1], -np.inf)
         np.testing.assert_allclose(seq_ll[[0, 2]], [d.log_density(good[0]), d.log_density(good[1])])
 
-    def test_accumulator_poisons_sum_log_det_for_invalid_matrix(self):
+    def test_accumulator_rejects_invalid_matrix_atomically(self):
         from mixle.stats.matrix.lkj import LKJAccumulator
 
         bad = np.array([[1.0, -1.5, -1.5], [-1.5, 1.0, 1.2], [-1.5, 1.2, 1.0]])
-        acc = LKJAccumulator()
+        acc = LKJAccumulator(3)
         acc.update(np.eye(3), 1.0, None)
-        acc.update(bad, 1.0, None)
-        count, sum_log_det = acc.value()
-        self.assertEqual(count, 2.0)
-        self.assertEqual(sum_log_det, -np.inf)
-
-    def test_accumulator_zero_weight_on_invalid_matrix_does_not_poison(self):
-        from mixle.stats.matrix.lkj import LKJAccumulator
-
-        bad = np.array([[1.0, -1.5, -1.5], [-1.5, 1.0, 1.2], [-1.5, 1.2, 1.0]])
-        acc = LKJAccumulator()
-        acc.update(np.eye(3), 1.0, None)  # log det = 0
-        acc.update(bad, 0.0, None)  # zero weight: must contribute exactly 0, not nan (0 * -inf)
+        with self.assertRaises(ValueError):
+            acc.update(bad, 1.0, None)
         count, sum_log_det = acc.value()
         self.assertEqual(count, 1.0)
         self.assertEqual(sum_log_det, 0.0)
 
-    def test_seq_update_zero_weight_on_invalid_row_does_not_poison(self):
+    def test_accumulator_rejects_invalid_matrix_even_at_zero_weight(self):
+        from mixle.stats.matrix.lkj import LKJAccumulator
+
+        bad = np.array([[1.0, -1.5, -1.5], [-1.5, 1.0, 1.2], [-1.5, 1.2, 1.0]])
+        acc = LKJAccumulator(3)
+        acc.update(np.eye(3), 1.0, None)  # log det = 0
+        with self.assertRaises(ValueError):
+            acc.update(bad, 0.0, None)
+        count, sum_log_det = acc.value()
+        self.assertEqual(count, 1.0)
+        self.assertEqual(sum_log_det, 0.0)
+
+    def test_seq_update_rejects_invalid_row_even_at_zero_weight(self):
         from mixle.stats.matrix.lkj import LKJAccumulator, LKJDataEncoder
 
         bad = np.array([[1.0, -1.5, -1.5], [-1.5, 1.0, 1.2], [-1.5, 1.2, 1.0]])
-        encoded = LKJDataEncoder().seq_encode(np.array([np.eye(3), bad]))
-        acc = LKJAccumulator()
-        acc.seq_update(encoded, np.array([1.0, 0.0]), None)
+        encoded = LKJDataEncoder(3).seq_encode(np.array([np.eye(3), bad]))
+        acc = LKJAccumulator(3)
+        with self.assertRaises(ValueError):
+            acc.seq_update(encoded, np.array([1.0, 0.0]), None)
         count, sum_log_det = acc.value()
-        self.assertEqual(count, 1.0)
+        self.assertEqual(count, 0.0)
         self.assertEqual(sum_log_det, 0.0)
+
+    def test_encoded_dimension_is_bound_to_model(self):
+        encoded = LKJ(3, 1.0).dist_to_encoder().seq_encode([np.eye(3)])
+        with self.assertRaises(ValueError):
+            LKJ(2, 1.0).seq_log_density(encoded)
+        with self.assertRaises(ValueError):
+            LKJ(2, 1.0).dist_to_encoder().seq_encode([np.eye(3)])
+
+    def test_estimator_rejects_nonfinite_and_empty_statistics(self):
+        from mixle.stats.matrix.lkj import LKJEstimator, LKJFitError
+
+        estimator = LKJEstimator(3)
+        for statistics in (
+            (1.0, -np.inf),
+            (1.0, np.nan),
+            (-1.0, 0.0),
+        ):
+            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+                estimator.estimate(None, statistics)
+        with self.assertRaises(LKJFitError):
+            estimator.estimate(None, (0.0, 0.0))
+
+    def test_constructor_rejects_nonfinite_normalizer(self):
+        with np.errstate(invalid="ignore"):
+            with self.assertRaises(ValueError):
+                LKJ(3, 1.0e308)
 
     def test_mle_recovers_eta(self):
         for d, eta in [(3, 2.0), (4, 4.0)]:
