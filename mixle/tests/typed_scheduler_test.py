@@ -10,6 +10,8 @@ from mixle.experimental.typed_runtime import (
     GainEvidence,
     GainPerCostScheduler,
     MergeLaw,
+    NodeExecutionStatus,
+    NodeTerminalReceipt,
     ObjectiveKind,
     SchedulerConfig,
     UpdateContract,
@@ -70,8 +72,33 @@ def _two_leaf_graph(*, root_cost: float = 1.0, edge_from_a: bool = False) -> Upd
     return UpdateGraph(nodes, edges, "root")
 
 
-def _evidence(node_id: str, gain: float, *, error: float = 0.0, samples: int = 4) -> GainEvidence:
-    return GainEvidence(node_id, ObjectiveKind.MLE, gain, standard_error=error, sample_count=samples)
+def _evidence(
+    node_id: str,
+    gain: float,
+    *,
+    error: float = 0.0,
+    samples: int = 4,
+    model_version: int = 0,
+) -> GainEvidence:
+    return GainEvidence(
+        node_id,
+        ObjectiveKind.MLE,
+        gain,
+        standard_error=error,
+        sample_count=samples,
+        model_version=model_version,
+    )
+
+
+def _complete(scheduler, receipt, status=NodeExecutionStatus.COMMITTED):
+    return scheduler.record_terminal(
+        receipt,
+        tuple(
+            NodeTerminalReceipt(receipt.round_index, node_id, status, "terminal:%s" % node_id)
+            for node_id in receipt.selected_nodes
+        ),
+        terminal_id="terminal-round:%d" % receipt.round_index,
+    )
 
 
 class GainPerCostTest:
@@ -86,6 +113,7 @@ class GainPerCostTest:
                 "a": _evidence("a", 10.0, error=6.0),
                 "b": _evidence("b", 2.0, error=0.1),
             },
+            model_version=0,
         )
 
         assert receipt.selected_nodes == ("b",)
@@ -96,30 +124,38 @@ class GainPerCostTest:
         scheduler = GainPerCostScheduler(
             SchedulerConfig(budget_fraction=0.5, confidence_z=0.0, lambda_invalidation=1.0)
         )
-        receipt = scheduler.schedule(graph, {"a": _evidence("a", 10.0), "b": _evidence("b", 2.0)})
+        receipt = scheduler.schedule(
+            graph,
+            {"a": _evidence("a", 10.0), "b": _evidence("b", 2.0)},
+            model_version=0,
+        )
 
         assert receipt.effective_costs == {"a": pytest.approx(101.0), "b": pytest.approx(1.0)}
         assert receipt.selected_nodes == ("b",)
 
-    def test_soft_budget_selects_at_least_one_node(self):
+    def test_zero_budget_selects_no_node(self):
         graph = _two_leaf_graph()
         scheduler = GainPerCostScheduler(
             SchedulerConfig(budget_fraction=0.0, confidence_z=0.0, lambda_invalidation=0.0)
         )
-        receipt = scheduler.schedule(graph, {"a": _evidence("a", 2.0), "b": _evidence("b", 1.0)})
-        assert receipt.selected_nodes == ("a",)
+        receipt = scheduler.schedule(
+            graph,
+            {"a": _evidence("a", 2.0), "b": _evidence("b", 1.0)},
+            model_version=0,
+        )
+        assert receipt.selected_nodes == ()
         assert receipt.budget == 0.0
-        assert receipt.budget_overrun == pytest.approx(1.0)
+        assert receipt.spent == 0.0
 
 
 class ObjectiveCompatibilityTest:
     def test_surrogate_gain_is_skipped_until_explicitly_normalized(self):
         graph = _two_leaf_graph()
-        config = SchedulerConfig(budget_fraction=0.5, confidence_z=0.0, lambda_invalidation=0.0)
-        unnormalized = GainEvidence("a", ObjectiveKind.USER_SURROGATE, 100.0, sample_count=5)
+        config = SchedulerConfig(budget_fraction=1.0, confidence_z=0.0, lambda_invalidation=0.0)
+        unnormalized = GainEvidence("a", ObjectiveKind.USER_SURROGATE, 100.0, model_version=0, sample_count=5)
         baseline = _evidence("b", 1.0)
 
-        first = GainPerCostScheduler(config).schedule(graph, {"a": unnormalized, "b": baseline})
+        first = GainPerCostScheduler(config).schedule(graph, {"a": unnormalized, "b": baseline}, model_version=0)
         assert first.selected_nodes == ("b",)
         assert first.skipped["a"] == "incompatible-objective:user_surrogate"
 
@@ -127,11 +163,12 @@ class ObjectiveCompatibilityTest:
             "a",
             ObjectiveKind.USER_SURROGATE,
             100.0,
+            model_version=0,
             sample_count=5,
             normalized_to=ObjectiveKind.MLE,
         )
-        second = GainPerCostScheduler(config).schedule(graph, {"a": normalized, "b": baseline})
-        assert second.selected_nodes == ("a",)
+        second = GainPerCostScheduler(config).schedule(graph, {"a": normalized, "b": baseline}, model_version=0)
+        assert second.selected_nodes == ("a", "b")
 
 
 class FairnessAndReplayTest:
@@ -147,19 +184,22 @@ class FairnessAndReplayTest:
         )
         evidence = {"a": _evidence("a", 10.0), "b": _evidence("b", 1.0)}
 
-        first = scheduler.schedule(graph, evidence)
-        second = scheduler.schedule(graph, evidence)
+        first = scheduler.schedule(graph, evidence, model_version=0)
+        assert scheduler.states == {}
+        _complete(scheduler, first)
+        second = scheduler.schedule(graph, evidence, model_version=0)
+        _complete(scheduler, second)
 
         assert first.selected_nodes == ("a",)
         assert second.selected_nodes == ("b",)
         assert second.forced_starvation == ("b",)
-        assert scheduler.states["b"].last_selected_round == 1
+        assert scheduler.states["b"].last_committed_round == 1
 
     def test_bootstrap_and_receipt_are_json_safe_and_deterministic(self):
         graph = _two_leaf_graph()
         config = SchedulerConfig(budget_fraction=0.5, lambda_invalidation=0.0)
-        left = GainPerCostScheduler(config).schedule(graph)
-        right = GainPerCostScheduler(config).schedule(graph)
+        left = GainPerCostScheduler(config).schedule(graph, model_version=0)
+        right = GainPerCostScheduler(config).schedule(graph, model_version=0)
 
         assert left == right
         assert left.bootstrap_nodes == ("a", "b")
@@ -170,9 +210,64 @@ class FairnessAndReplayTest:
         graph = _two_leaf_graph()
         scheduler = GainPerCostScheduler()
         with pytest.raises(KeyError, match="unknown nodes"):
-            scheduler.schedule(graph, {"missing": _evidence("missing", 1.0)})
+            scheduler.schedule(graph, {"missing": _evidence("missing", 1.0)}, model_version=0)
         assert scheduler.states == {}
 
-        scheduler.schedule(graph)
+        pending = scheduler.schedule(graph, model_version=0)
+        _complete(scheduler, pending)
         with pytest.raises(ValueError, match="backwards"):
-            scheduler.schedule(graph, round_index=0)
+            scheduler.schedule(graph, model_version=0, round_index=0)
+
+    def test_failed_scheduled_work_does_not_count_as_fairness_service(self):
+        graph = _two_leaf_graph()
+        scheduler = GainPerCostScheduler(
+            SchedulerConfig(
+                budget_fraction=0.5,
+                confidence_z=0.0,
+                lambda_invalidation=0.0,
+                max_skip_rounds=1,
+            )
+        )
+        first = scheduler.schedule(
+            graph,
+            {"a": _evidence("a", 10.0), "b": _evidence("b", 1.0)},
+            model_version=0,
+        )
+        _complete(scheduler, first, NodeExecutionStatus.FAILED)
+        assert scheduler.states["a"].committed_count == 0
+        assert scheduler.states["a"].skip_rounds == 1
+        assert scheduler.states["a"].last_committed_round is None
+
+        second = scheduler.schedule(
+            graph,
+            {"a": _evidence("a", 10.0), "b": _evidence("b", 1.0)},
+            model_version=0,
+        )
+        assert len(second.forced_starvation) == 1
+        assert second.forced_starvation[0] in {"a", "b"}
+
+    def test_schedule_requires_terminal_receipts_before_next_decision(self):
+        graph = _two_leaf_graph()
+        scheduler = GainPerCostScheduler()
+        receipt = scheduler.schedule(graph, model_version=0)
+        with pytest.raises(RuntimeError, match="terminal execution"):
+            scheduler.schedule(graph, model_version=0)
+        with pytest.raises(ValueError, match="cover exactly"):
+            scheduler.record_terminal(receipt, (), terminal_id="incomplete")
+
+    def test_stale_gain_evidence_is_rejected_and_cannot_control_ranking(self):
+        graph = _two_leaf_graph()
+        scheduler = GainPerCostScheduler(
+            SchedulerConfig(budget_fraction=0.5, confidence_z=0.0, lambda_invalidation=0.0)
+        )
+        receipt = scheduler.schedule(
+            graph,
+            {
+                "a": _evidence("a", 1000.0, model_version=1),
+                "b": _evidence("b", 1.0, model_version=2),
+            },
+            model_version=2,
+        )
+        assert receipt.rejected_evidence == {"a": "model-version:1!=2"}
+        assert receipt.bootstrap_nodes == ("a",)
+        assert receipt.priorities["a"] is None

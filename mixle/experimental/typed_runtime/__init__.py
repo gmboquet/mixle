@@ -193,7 +193,10 @@ from mixle.experimental.typed_runtime.replay import (
 from mixle.experimental.typed_runtime.scheduler import (
     GainEvidence,
     GainPerCostScheduler,
+    NodeExecutionStatus,
     NodeScheduleState,
+    NodeTerminalReceipt,
+    ScheduleCompletionReceipt,
     SchedulerConfig,
     ScheduleReceipt,
 )
@@ -348,6 +351,7 @@ __all__ = [
     "MergeLaw",
     "MultiRateUpdateClocks",
     "NodePlacement",
+    "NodeExecutionStatus",
     "ObjectiveKind",
     "ObjectiveTarget",
     "OptimizerEvidence",
@@ -375,7 +379,9 @@ __all__ = [
     "RuntimeVersions",
     "ScaleRunReceipt",
     "NodeScheduleState",
+    "NodeTerminalReceipt",
     "ScheduleReceipt",
+    "ScheduleCompletionReceipt",
     "SchedulerConfig",
     "SnapshotFn",
     "StateSemantics",

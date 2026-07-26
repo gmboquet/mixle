@@ -18,6 +18,9 @@ from mixle.experimental.typed_runtime.measurement import WorkMeasurement
 from mixle.experimental.typed_runtime.scheduler import (
     GainEvidence,
     GainPerCostScheduler,
+    NodeExecutionStatus,
+    NodeTerminalReceipt,
+    ScheduleCompletionReceipt,
     SchedulerConfig,
     ScheduleReceipt,
 )
@@ -37,8 +40,14 @@ class _RunningGain:
     count: int = 0
     mean: float = 0.0
     m2: float = 0.0
+    model_version: int = 0
 
-    def update(self, value: float) -> None:
+    def update(self, value: float, *, model_version: int) -> None:
+        if model_version != self.model_version:
+            self.count = 0
+            self.mean = 0.0
+            self.m2 = 0.0
+            self.model_version = model_version
         self.count += 1
         delta = value - self.mean
         self.mean += delta / self.count
@@ -58,6 +67,7 @@ class TypedMixtureRoundReceipt:
 
     round_index: int
     schedule: ScheduleReceipt
+    schedule_completion: ScheduleCompletionReceipt
     coordinator_nodes: tuple[str, ...]
     objective_before: float
     candidate_objective: float
@@ -75,6 +85,7 @@ class TypedMixtureRoundReceipt:
         return {
             "round_index": self.round_index,
             "schedule": self.schedule.as_dict(),
+            "schedule_completion": self.schedule_completion.as_dict(),
             "coordinator_nodes": list(self.coordinator_nodes),
             "objective_before": self.objective_before,
             "candidate_objective": self.candidate_objective,
@@ -200,9 +211,18 @@ def run_typed_mixture_em(
     component_to_node = {index: node_id for node_id, index in node_to_component.items()}
     candidate_nodes = tuple(node_to_component)
     if scheduler is None:
+        candidate_costs = [
+            (
+                graph.node(node_id).cost.wall_time_seconds
+                if graph.node(node_id).cost.wall_time_seconds is not None
+                else max(graph.node(node_id).cost.compute_units, 1.0e-12)
+            )
+            for node_id in candidate_nodes
+        ]
+        one_node_budget = max(candidate_costs) / sum(candidate_costs)
         scheduler = GainPerCostScheduler(
             SchedulerConfig(
-                budget_fraction=min(0.5, 1.0 / max(1, len(candidate_nodes))),
+                budget_fraction=one_node_budget,
                 confidence_z=0.5,
                 lambda_invalidation=0.0,
                 max_skip_rounds=max(1, len(candidate_nodes) - 1),
@@ -216,6 +236,7 @@ def run_typed_mixture_em(
     model = initial_model
     history: list[TypedMixtureRoundReceipt] = []
     stall_streak = 0
+    model_version = 0
 
     for round_index in range(max_its):
         internal_evidence = {
@@ -225,7 +246,7 @@ def run_typed_mixture_em(
                 stats.mean,
                 standard_error=stats.standard_error,
                 sample_count=stats.count,
-                model_version=artifact_cache.generation(node_id),
+                model_version=stats.model_version,
             )
             for node_id, stats in gain_stats.items()
             if stats.count > 0
@@ -236,6 +257,7 @@ def run_typed_mixture_em(
             graph,
             internal_evidence,
             target_objective=ObjectiveKind.MLE,
+            model_version=model_version,
             round_index=round_index,
             candidate_nodes=candidate_nodes,
         )
@@ -259,6 +281,7 @@ def run_typed_mixture_em(
             committed_objective = candidate_objective
             written_nodes = tuple(schedule.selected_nodes) + (graph.root_node,)
             invalidation = artifact_cache.invalidate_many(written_nodes)
+            model_version += 1
         else:
             committed_objective = objective_before
             invalidation = None
@@ -268,13 +291,27 @@ def run_typed_mixture_em(
         if schedule.selected_nodes:
             attributed_gain = realized_gain / len(schedule.selected_nodes)
             for node_id in schedule.selected_nodes:
-                gain_stats[node_id].update(attributed_gain)
+                gain_stats[node_id].update(attributed_gain, model_version=model_version)
+        schedule_completion = scheduler.record_terminal(
+            schedule,
+            tuple(
+                NodeTerminalReceipt(
+                    round_index,
+                    node_id,
+                    (NodeExecutionStatus.COMMITTED if accepted else NodeExecutionStatus.REJECTED),
+                    "typed-mixture-round:%d" % round_index,
+                )
+                for node_id in schedule.selected_nodes
+            ),
+            terminal_id="typed-mixture-round:%d" % round_index,
+        )
 
         nobs = float(len(log_density))
         model_evaluations = evals_before + evals_after
         receipt = TypedMixtureRoundReceipt(
             round_index=round_index,
             schedule=schedule,
+            schedule_completion=schedule_completion,
             coordinator_nodes=(graph.root_node,),
             objective_before=objective_before,
             candidate_objective=candidate_objective,
