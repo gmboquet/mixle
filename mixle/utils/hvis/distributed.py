@@ -69,6 +69,33 @@ __all__ = [
 ]
 
 
+def _apply_tagged(fn, tagged_chunk):
+    shard_id, chunk = tagged_chunk
+    return shard_id, fn(chunk)
+
+
+def _ordered_map(mapper, fn, chunks: list) -> list:
+    """Map shards with stable IDs and reject missing, duplicate, or foreign results."""
+    tagged = list(enumerate(chunks))
+    results = list(mapper(partial(_apply_tagged, fn), tagged))
+    if len(results) != len(tagged):
+        raise ValueError("mapper must return exactly one result for each input shard.")
+    by_id = {}
+    for result in results:
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise TypeError("mapper results must preserve the tagged (shard_id, value) contract.")
+        shard_id, value = result
+        if isinstance(shard_id, bool) or not isinstance(shard_id, (int, np.integer)):
+            raise TypeError("mapper shard IDs must be integers.")
+        shard_id = int(shard_id)
+        if not 0 <= shard_id < len(tagged) or shard_id in by_id:
+            raise ValueError("mapper returned a duplicate or unknown shard ID.")
+        by_id[shard_id] = value
+    if len(by_id) != len(tagged):
+        raise ValueError("mapper omitted at least one shard ID.")
+    return [by_id[shard_id] for shard_id in range(len(tagged))]
+
+
 # ---------------------------------------------------------------------------------------------
 # pass 1: posterior overlaps + raw per-field moments
 # ---------------------------------------------------------------------------------------------
@@ -98,8 +125,21 @@ class _FieldMoments:
     deferred_zf: list = field(default_factory=list)
 
     def __add__(self, other: _FieldMoments) -> _FieldMoments:
+        if not isinstance(other, _FieldMoments):
+            return NotImplemented
         if self.dim != other.dim or self.native != other.native:
             raise ValueError("cannot combine moments from different field layouts.")
+        array_fields = (
+            "finite_col_sum",
+            "finite_col_cnt",
+            "g_sum",
+            "g_sum2",
+            "zf_sw",
+            "zf_sx",
+            "zf_sxx",
+        )
+        if any(np.shape(getattr(self, name)) != np.shape(getattr(other, name)) for name in array_fields):
+            raise ValueError("cannot combine moments with different typed array schemas.")
         return _FieldMoments(
             dim=self.dim,
             native=self.native,
@@ -128,15 +168,29 @@ class FiberStats:
     triple: np.ndarray | None = None  # sum_i z_ia z_ib z_ic (K, K, K), for the distributed nerve
 
     def __add__(self, other: FiberStats) -> FiberStats:
+        if not isinstance(other, FiberStats):
+            return NotImplemented
+        if (
+            self.mass.shape != other.mass.shape
+            or self.sqrt_overlap.shape != other.sqrt_overlap.shape
+            or self.co.shape != other.co.shape
+        ):
+            raise ValueError("cannot combine stats with different component schemas.")
         if len(self.fields) != len(other.fields):
             raise ValueError("cannot combine stats from different field layouts.")
         fields = []
         for a, b in zip(self.fields, other.fields):
             if (a is None) != (b is None):
                 raise ValueError("cannot combine stats from different field layouts.")
+            if a is not None and (not isinstance(a, _FieldMoments) or not isinstance(b, _FieldMoments)):
+                raise TypeError("field statistics must be _FieldMoments values or None.")
             fields.append(None if a is None else a + b)
+        if (self.triple is None) != (other.triple is None):
+            raise ValueError("cannot combine stats when only one shard carries triple-overlap statistics.")
         triple = None
-        if self.triple is not None and other.triple is not None:
+        if self.triple is not None:
+            if self.triple.shape != other.triple.shape:
+                raise ValueError("cannot combine triple-overlap statistics with different component schemas.")
             triple = self.triple + other.triple
         return FiberStats(
             n=self.n + other.n,
@@ -371,7 +425,32 @@ class ScoreStats:
     sffc: list | None
 
     def __add__(self, other: ScoreStats) -> ScoreStats:
-        both = self.sf is not None and other.sf is not None
+        if not isinstance(other, ScoreStats):
+            return NotImplemented
+        if self.sw.shape != other.sw.shape or len(self.su) != len(other.su) or len(self.suu) != len(other.suu):
+            raise ValueError("cannot combine score statistics with different component schemas.")
+        if any(a.shape != b.shape for a, b in zip(self.su, other.su)) or any(
+            a.shape != b.shape for a, b in zip(self.suu, other.suu)
+        ):
+            raise ValueError("cannot combine score statistics with different moment shapes.")
+        optional_names = ("sf", "sff", "swc", "sfc", "sffc")
+        self_present = [getattr(self, name) is not None for name in optional_names]
+        other_present = [getattr(other, name) is not None for name in optional_names]
+        if len(set(self_present)) != 1 or len(set(other_present)) != 1:
+            raise ValueError("each ScoreStats value must carry either all feature moments or none.")
+        if self_present != other_present:
+            raise ValueError("cannot combine score statistics when only one shard carries feature moments.")
+        both = self_present[0]
+        if both:
+            list_names = ("sf", "sff", "sfc", "sffc")
+            for name in list_names:
+                left, right = getattr(self, name), getattr(other, name)
+                if len(left) != len(right) or len(left) != len(self.su):
+                    raise ValueError("cannot combine score statistics with different feature schemas.")
+                if any(a.shape != b.shape for a, b in zip(left, right)):
+                    raise ValueError("cannot combine score statistics with different feature-moment shapes.")
+            if self.swc.shape != other.swc.shape or self.swc.shape != self.sw.shape:
+                raise ValueError("clamped score weights must align with component weights.")
         return ScoreStats(
             sw=self.sw + other.sw,
             su=[a + b for a, b in zip(self.su, other.su)],
@@ -388,7 +467,14 @@ def _chunk_u(plan: _ScorePlan, chunk: list) -> tuple[np.ndarray, list]:
     """Recompute (z, [u_k]) for a shard from the broadcast plan -- the map side of passes 2-3."""
     z, _ = _posteriors_and_loglikes(plan.mix_model, data=chunk)
     terms = list(_field_log_density_features(list(plan.mix_model.components), chunk))
-    xs = [np.asarray(terms[f_pos][1], dtype=np.float64) for f_pos in plan.keep]
+    if max(plan.keep, default=-1) >= len(terms):
+        raise ValueError("shard field schema does not match the distributed score plan.")
+    xs = []
+    for f_pos, spec in zip(plan.keep, plan.field_specs):
+        x = np.asarray(terms[f_pos][1], dtype=np.float64)
+        if x.ndim != 2 or x.shape != (len(chunk), spec["dim"]) or not np.all(np.isfinite(x)):
+            raise ValueError("shard field coordinates do not match the distributed score plan.")
+        xs.append(x)
     us = [
         np.column_stack([(x @ w) * spec["weight_sqrt"] for x, w, spec in zip(xs, plan.whiteners[k], plan.field_specs)])
         for k in range(z.shape[1])
@@ -411,6 +497,8 @@ def _plan_feats(plan: _ScorePlan, u: np.ndarray, k: int) -> np.ndarray | None:
 def score_stats(plan: _ScorePlan, chunk) -> ScoreStats:
     """Pass 2 over one shard (pure; combine with ``+``)."""
     chunk = list(chunk)
+    if not chunk:
+        raise ValueError("score_stats needs a non-empty shard.")
     z, us = _chunk_u(plan, chunk)
     k_count = z.shape[1]
     sw = np.array([float(z[:, k].sum()) for k in range(k_count)])
@@ -447,6 +535,8 @@ def score_stats(plan: _ScorePlan, chunk) -> ScoreStats:
 def radius_stats(plan: _ScorePlan, chunk) -> list:
     """Pass 3 over one shard: per component, the scaled score norms of the points it dominates."""
     chunk = list(chunk)
+    if not chunk:
+        raise ValueError("radius_stats needs a non-empty shard.")
     z, us = _chunk_u(plan, chunk)
     dominant = z.argmax(axis=1)
     out = []
@@ -507,8 +597,10 @@ def distributed_model_map(
     if not chunks:
         raise ValueError("no non-empty shards.")
     run = map if mapper is None else mapper
+    if not callable(run):
+        raise TypeError("mapper must be callable.")
 
-    stats = reduce(lambda a, b: a + b, run(partial(fiber_stats, mix_model), chunks))
+    stats = reduce(lambda a, b: a + b, _ordered_map(run, partial(fiber_stats, mix_model), chunks))
     n, k_count = stats.n, stats.mass.shape[0]
     plan, labels = _plan_from_stats(mix_model, stats, field_weights, chart)
     base_labels = list(labels)
@@ -519,7 +611,7 @@ def distributed_model_map(
         strong = _strong_edges(stats.co, stats.mass, edge_threshold)
         vertices = _component_map_core(stats.sqrt_overlap, stats.mass, strong, emb_dim, "nerve")
 
-    score = reduce(lambda a, b: a + b, run(partial(score_stats, plan), chunks))
+    score = reduce(lambda a, b: a + b, _ordered_map(run, partial(score_stats, plan), chunks))
     if score.sf is None:  # wide quadratic lift: fit the per-component pre-PCA, then one more pass
         pre = []
         for k in range(k_count):
@@ -530,7 +622,7 @@ def distributed_model_map(
             order = np.argsort(vals)[::-1][:_MAX_QUAD_BASE]
             pre.append((mu_u, _canonical_signs(vecs[:, order])))
         plan.pre = pre
-        score = reduce(lambda a, b: a + b, run(partial(score_stats, plan), chunks))
+        score = reduce(lambda a, b: a + b, _ordered_map(run, partial(score_stats, plan), chunks))
     pre_list = plan.pre if plan.pre is not None else [None] * k_count
 
     fiber_means, loadings, residuals, stds = [], [], [], []
@@ -572,7 +664,7 @@ def distributed_model_map(
 
     if occlusion and k_count > 1:
         plan.fiber_means, plan.loadings, plan.fiber_scale = fiber_means, loadings, scale
-        per_chunk = list(run(partial(radius_stats, plan), chunks))
+        per_chunk = _ordered_map(run, partial(radius_stats, plan), chunks)
         radii = np.zeros(k_count)
         for k in range(k_count):
             mine = np.concatenate([arrs[k] for arrs in per_chunk])
@@ -613,7 +705,16 @@ def distributed_model_map(
         _emb_dim=emb_dim,
     )
     if with_points:
-        parts = list(run(partial(_compose_chunk, result), chunks))
+        parts = _ordered_map(run, partial(_compose_chunk, result), chunks)
         result.coords = np.vstack([c for c, _z in parts]) if parts else np.zeros((n, emb_dim))
         result.responsibilities = np.vstack([zc for _c, zc in parts])
+        if (
+            result.coords.shape != (n, emb_dim)
+            or result.responsibilities.shape != (n, k_count)
+            or not np.all(np.isfinite(result.coords))
+            or not np.all(np.isfinite(result.responsibilities))
+            or np.any(result.responsibilities < 0.0)
+            or not np.allclose(result.responsibilities.sum(axis=1), 1.0, rtol=1.0e-6, atol=1.0e-10)
+        ):
+            raise ValueError("distributed point composition produced invalid coordinates or responsibilities.")
     return result

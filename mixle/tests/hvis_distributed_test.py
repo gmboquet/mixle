@@ -19,6 +19,7 @@ from mixle.stats import (
     MixtureDistribution,
 )
 from mixle.utils.hvis import distributed_model_map, fiber_stats, fuzzy_nerve_from_stats, model_map
+from mixle.utils.hvis.distributed import ScoreStats
 from mixle.utils.hvis.topology import fuzzy_nerve
 
 _MODEL3 = MixtureDistribution(
@@ -36,6 +37,10 @@ def _data3(n_per=30, seed=0):
 def _chunks(data, m):
     edges = np.linspace(0, len(data), m + 1).astype(int)
     return [data[a:b] for a, b in zip(edges[:-1], edges[1:])]
+
+
+def _reverse_mapper(fn, values):
+    return list(reversed([fn(value) for value in values]))
 
 
 def _assert_maps_equal(test, a, b, atol=1.0e-8):
@@ -130,6 +135,13 @@ class MapperAndGeometryOnlyTest(unittest.TestCase):
         placed = np.vstack([geo.place(c) for c in _chunks(data, 3)])
         np.testing.assert_allclose(placed, full.coords, atol=1.0e-10)
 
+    def test_unordered_mapper_results_preserve_original_row_order(self):
+        data = _data3(seed=9)
+        chunks = _chunks(data, 4)
+        serial = distributed_model_map(chunks, _MODEL3)
+        reordered = distributed_model_map(chunks, _MODEL3, mapper=_reverse_mapper)
+        _assert_maps_equal(self, reordered, serial)
+
     def test_requires_a_fitted_model(self):
         with self.assertRaises(ValueError):
             distributed_model_map(_chunks(_data3(), 2), None)
@@ -164,6 +176,50 @@ class DistributedNerveTest(unittest.TestCase):
         stats = fiber_stats(_MODEL3, _data3(seed=8))  # no nerve_triple
         with self.assertRaises(ValueError):
             fuzzy_nerve_from_stats(stats)
+
+    def test_fiber_fold_rejects_one_sided_triple_schema(self):
+        data = _data3(seed=10)
+        left = fiber_stats(_MODEL3, data[:20], nerve_triple=True)
+        right = fiber_stats(_MODEL3, data[20:40], nerve_triple=False)
+        with self.assertRaises(ValueError):
+            _ = left + right
+
+    def test_score_fold_rejects_truncating_or_one_sided_feature_schemas(self):
+        left = ScoreStats(
+            sw=np.ones(2),
+            su=[np.zeros(1), np.zeros(1)],
+            suu=[np.zeros((1, 1)), np.zeros((1, 1))],
+            sf=None,
+            sff=None,
+            swc=None,
+            sfc=None,
+            sffc=None,
+        )
+        truncated = ScoreStats(
+            sw=np.ones(2),
+            su=[np.zeros(1)],
+            suu=[np.zeros((1, 1))],
+            sf=None,
+            sff=None,
+            swc=None,
+            sfc=None,
+            sffc=None,
+        )
+        with self.assertRaises(ValueError):
+            _ = left + truncated
+
+        feature = ScoreStats(
+            sw=np.ones(2),
+            su=[np.zeros(1), np.zeros(1)],
+            suu=[np.zeros((1, 1)), np.zeros((1, 1))],
+            sf=[np.zeros(1), np.zeros(1)],
+            sff=[np.zeros((1, 1)), np.zeros((1, 1))],
+            swc=np.ones(2),
+            sfc=[np.zeros(1), np.zeros(1)],
+            sffc=[np.zeros((1, 1)), np.zeros((1, 1))],
+        )
+        with self.assertRaises(ValueError):
+            _ = left + feature
 
 
 if __name__ == "__main__":
