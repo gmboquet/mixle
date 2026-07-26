@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import numpy as np
@@ -161,6 +162,50 @@ class MultiprocessingBackendTestCase(unittest.TestCase):
         self.assertEqual(len(enc), len(self.data))
         enc.close()
         enc.close()
+
+    def test_stalled_worker_response_times_out_and_terminates_pool(self):
+        class StalledConnection:
+            def __init__(self):
+                self.closed = False
+
+            def poll(self, timeout):
+                return False
+
+            def close(self):
+                self.closed = True
+
+        class LiveProcess:
+            exitcode = None
+
+            def __init__(self):
+                self.alive = True
+                self.terminated = False
+
+            def is_alive(self):
+                return self.alive
+
+            def terminate(self):
+                self.terminated = True
+                self.alive = False
+
+            def join(self, timeout=None):
+                return None
+
+        handle = object.__new__(MPEncodedData)
+        connection = StalledConnection()
+        process = LiveProcess()
+        handle.response_timeout = 0.01
+        handle.shutdown_timeout = 0.01
+        handle._conns = [connection]
+        handle._procs = [process]
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, "timed out"):
+            handle._recv_at(0, started + 0.01, "test")
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertTrue(connection.closed)
+        self.assertTrue(process.terminated)
+        self.assertEqual(handle._conns, [])
+        self.assertEqual(handle._procs, [])
 
 
 MPI_SCRIPT = r"""

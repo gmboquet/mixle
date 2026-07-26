@@ -35,6 +35,7 @@ Notes:
 
 import multiprocessing as mp
 import pickle
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -139,7 +140,14 @@ class MPEncodedData(EncodedDataHandle):
     """
 
     def __init__(
-        self, data: Sequence[Any], estimator=None, encoder=None, num_workers: int | None = None, sub_chunks: int = 1
+        self,
+        data: Sequence[Any],
+        estimator=None,
+        encoder=None,
+        num_workers: int | None = None,
+        sub_chunks: int = 1,
+        response_timeout: float = 30.0,
+        shutdown_timeout: float = 2.0,
     ):
         if encoder is None:
             if estimator is None:
@@ -152,8 +160,14 @@ class MPEncodedData(EncodedDataHandle):
         if num_workers is None:
             num_workers = mp.cpu_count()
         num_workers = max(1, min(int(num_workers), n))
+        if not np.isfinite(response_timeout) or response_timeout <= 0.0:
+            raise ValueError("response_timeout must be finite and positive")
+        if not np.isfinite(shutdown_timeout) or shutdown_timeout <= 0.0:
+            raise ValueError("shutdown_timeout must be finite and positive")
 
         self.num_workers = num_workers
+        self.response_timeout = float(response_timeout)
+        self.shutdown_timeout = float(shutdown_timeout)
         self._ctx = mp.get_context("spawn")
         self._conns = []
         self._procs = []
@@ -172,25 +186,81 @@ class MPEncodedData(EncodedDataHandle):
             for i, conn in enumerate(self._conns):
                 shard = [data[j] for j in range(i, n, num_workers)]
                 conn.send(("setup", encoder_b, pickle.dumps(shard, protocol=_PROTO), sub_chunks))
-            for conn in self._conns:
-                self.size += self._recv(conn)
+            deadline = time.monotonic() + self.response_timeout
+            for index in range(len(self._conns)):
+                self.size += self._recv_at(index, deadline, "setup")
         except BaseException:
             self.close()
             raise
 
     # -- driver-side helpers ------------------------------------------------
 
-    @staticmethod
-    def _recv(conn):
-        status, payload = conn.recv()
+    def _recv_at(self, index: int, deadline: float, operation: str) -> Any:
+        conn = self._conns[index]
+        proc = self._procs[index]
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                self._terminate_workers()
+                raise TimeoutError(
+                    "parallel worker %d timed out after %.3fs during %s"
+                    % (index, self.response_timeout, operation)
+                )
+            try:
+                if conn.poll(min(0.05, remaining)):
+                    status, payload = conn.recv()
+                    break
+            except (EOFError, OSError) as exc:
+                exitcode = getattr(proc, "exitcode", None)
+                self._terminate_workers()
+                raise RuntimeError(
+                    "parallel worker %d disconnected during %s (exitcode=%r)" % (index, operation, exitcode)
+                ) from exc
+            if not proc.is_alive():
+                exitcode = proc.exitcode
+                self._terminate_workers()
+                raise RuntimeError(
+                    "parallel worker %d exited during %s (exitcode=%r)" % (index, operation, exitcode)
+                )
         if status != "ok":
             raise RuntimeError("parallel worker failed:\n%s" % payload)
         return payload
 
     def _broadcast_collect(self, msg) -> list[Any]:
-        for conn in self._conns:
-            conn.send(msg)
-        return [self._recv(conn) for conn in self._conns]
+        operation = str(msg[0]) if msg else "request"
+        try:
+            for conn in self._conns:
+                conn.send(msg)
+        except (BrokenPipeError, EOFError, OSError) as exc:
+            self._terminate_workers()
+            raise RuntimeError("parallel worker disconnected while sending %s" % operation) from exc
+        deadline = time.monotonic() + self.response_timeout
+        return [self._recv_at(index, deadline, operation) for index in range(len(self._conns))]
+
+    def _terminate_workers(self) -> None:
+        """Close pipes and terminate all workers within a shared deadline."""
+        conns = list(getattr(self, "_conns", ()))
+        procs = list(getattr(self, "_procs", ()))
+        self._conns, self._procs = [], []
+        for conn in conns:
+            try:
+                conn.close()
+            except OSError:
+                pass
+        for proc in procs:
+            if proc.is_alive():
+                proc.terminate()
+        deadline = time.monotonic() + float(getattr(self, "shutdown_timeout", 2.0))
+        for proc in procs:
+            proc.join(timeout=max(0.0, deadline - time.monotonic()))
+        for proc in procs:
+            if proc.is_alive():
+                kill = getattr(proc, "kill", None)
+                if callable(kill):
+                    kill()
+        for proc in procs:
+            if proc.is_alive():
+                proc.join(timeout=max(0.0, deadline - time.monotonic()))
 
     def _fold_stats(self, estimator, payloads) -> tuple[float, Any]:
         accumulator = estimator.accumulator_factory().make()
@@ -222,9 +292,14 @@ class MPEncodedData(EncodedDataHandle):
         """Distributed randomized initialization (mirrors seq_initialize)."""
         seeds = rng.randint(2**31, size=self.num_workers)
         estimator_b = pickle.dumps(estimator, protocol=_PROTO)
-        for conn, seed in zip(self._conns, seeds):
-            conn.send(("init", estimator_b, int(seed), float(p)))
-        payloads = [self._recv(conn) for conn in self._conns]
+        try:
+            for conn, seed in zip(self._conns, seeds):
+                conn.send(("init", estimator_b, int(seed), float(p)))
+        except (BrokenPipeError, EOFError, OSError) as exc:
+            self._terminate_workers()
+            raise RuntimeError("parallel worker disconnected while sending init") from exc
+        deadline = time.monotonic() + self.response_timeout
+        payloads = [self._recv_at(index, deadline, "init") for index in range(len(self._conns))]
         nobs, value = self._fold_stats(estimator, payloads)
         return estimator.estimate(nobs, value)
 
@@ -250,22 +325,24 @@ class MPEncodedData(EncodedDataHandle):
 
     def close(self) -> None:
         """Shut the worker pool down. Idempotent."""
-        for conn in self._conns:
+        conns = list(getattr(self, "_conns", ()))
+        procs = list(getattr(self, "_procs", ()))
+        if not conns and not procs:
+            return
+        for conn in conns:
             try:
                 conn.send(("stop",))
             except (BrokenPipeError, OSError):
                 pass
-        for conn in self._conns:
+        deadline = time.monotonic() + float(getattr(self, "shutdown_timeout", 2.0))
+        for conn, proc in zip(conns, procs):
             try:
-                conn.recv()
+                remaining = deadline - time.monotonic()
+                if remaining > 0.0 and proc.is_alive() and conn.poll(remaining):
+                    conn.recv()
             except (EOFError, OSError):
                 pass
-            conn.close()
-        for proc in self._procs:
-            proc.join(timeout=5)
-            if proc.is_alive():
-                proc.terminate()
-        self._conns, self._procs = [], []
+        self._terminate_workers()
 
     def __len__(self) -> int:
         return int(self.size)
@@ -278,7 +355,7 @@ class MPEncodedData(EncodedDataHandle):
 
     def __del__(self):
         try:
-            if self._conns:
+            if getattr(self, "_conns", None):
                 self.close()
         except Exception:  # noqa: BLE001
             pass
