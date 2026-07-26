@@ -63,6 +63,30 @@ def _validate_encoded_chunks(chunks: Any, encoder: DataSequenceEncoder, path: st
     return checked
 
 
+def _validated_update_chunk(
+    accumulator: Any,
+    declared: Any,
+    payload: Any,
+    path: str,
+) -> tuple[int, np.ndarray]:
+    if isinstance(declared, (bool, np.bool_)) or not isinstance(declared, (int, np.integer)):
+        raise TypeError("%s chunk count must be a non-negative integer." % path)
+    count = int(declared)
+    if count < 0:
+        raise ValueError("%s chunk count must be a non-negative integer." % path)
+    observed = accumulator.acc_to_encoder().row_count(payload)
+    if isinstance(observed, (bool, np.bool_)) or not isinstance(observed, (int, np.integer)):
+        raise TypeError("%s encoder row_count() must return an integer." % path)
+    if int(observed) != count:
+        raise ValueError(
+            "%s chunk metadata reports %d rows but its encoded payload contains %d." % (path, count, observed)
+        )
+    weights = np.ones(count, dtype=np.float64)
+    if len(weights) != count:
+        raise AssertionError("%s internal weight construction did not conserve row count." % path)
+    return count, weights
+
+
 def seq_encode(
     data: Sequence[T] | pyspark.rdd.RDD,
     encoder: DataSequenceEncoder | None = None,
@@ -326,12 +350,18 @@ def seq_estimate(
 
         def acc(split_index, itr):
             accumulator_for_split = estimator_broadcast.value.accumulator_factory().make()
-            counts_for_split = 0.0
+            counts_for_split = 0
             local_estimate = pickle.loads(estimate_broadcast.value)
 
-            for sz, x in itr:
-                counts_for_split = counts_for_split + sz
-                accumulator_for_split.seq_update(x, np.ones(sz), local_estimate)
+            for chunk_index, (sz, x) in enumerate(itr):
+                count, weights = _validated_update_chunk(
+                    accumulator_for_split,
+                    sz,
+                    x,
+                    "RDD partition %d chunk %d" % (split_index, chunk_index),
+                )
+                counts_for_split += count
+                accumulator_for_split.seq_update(x, weights, local_estimate)
 
             rv = pickle.dumps((counts_for_split, accumulator_for_split.value()), protocol=0)
 
@@ -367,17 +397,18 @@ def seq_estimate(
 
     else:
         accumulator = estimator.accumulator_factory().make()
-        nobs = 0.0
+        nobs = 0
 
-        for sz, x in enc_data:
-            nobs += sz
-            accumulator.seq_update(x, np.ones(sz), prev_estimate)
+        for chunk_index, (sz, x) in enumerate(enc_data):
+            count, weights = _validated_update_chunk(accumulator, sz, x, "local chunk %d" % chunk_index)
+            nobs += count
+            accumulator.seq_update(x, weights, prev_estimate)
 
         stats_dict = dict()
         accumulator.key_merge(stats_dict)
         accumulator.key_replace(stats_dict)
 
-        return estimator.estimate(None, accumulator.value())
+        return estimator.estimate(nobs, accumulator.value())
 
 
 def seq_initialize(

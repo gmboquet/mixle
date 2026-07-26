@@ -4,7 +4,8 @@ import unittest
 
 import numpy as np
 
-from mixle.stats import GaussianDistribution, log_density, seq_encode
+from mixle.inference import seq_estimate
+from mixle.stats import GaussianDistribution, GaussianEstimator, log_density, seq_encode
 from mixle.stats.compute.pdist import DataSequenceEncoder
 
 
@@ -51,6 +52,30 @@ class SequenceContractTest(unittest.TestCase):
         chunks = seq_encode(np.arange(7.0), model=self.model, num_chunks=3)
         self.assertEqual([count for count, _ in chunks], [3, 2, 2])
         self.assertEqual(sum(count for count, _ in chunks), 7)
+
+    def test_local_estimation_passes_the_validated_observation_count(self):
+        class RecordingEstimator(GaussianEstimator):
+            seen_nobs = None
+
+            def estimate(self, nobs, suff_stat):
+                self.seen_nobs = nobs
+                return super().estimate(nobs, suff_stat)
+
+        estimator = RecordingEstimator()
+        encoded = seq_encode([1.0, 2.0, 3.0], model=self.model, num_chunks=2)
+        seq_estimate(encoded, estimator, self.model)
+        self.assertEqual(estimator.seen_nobs, 3)
+
+    def test_estimation_rejects_false_chunk_metadata(self):
+        encoded = self.model.dist_to_encoder().seq_encode([1.0, 2.0])
+        for declared in (3, -1):
+            with self.subTest(declared=declared):
+                with self.assertRaises(ValueError):
+                    seq_estimate([(declared, encoded)], GaussianEstimator(), self.model)
+        for declared in (True, 2.0):
+            with self.subTest(declared=declared):
+                with self.assertRaises(TypeError):
+                    seq_estimate([(declared, encoded)], GaussianEstimator(), self.model)
 
 
 if __name__ == "__main__":
