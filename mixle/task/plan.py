@@ -42,6 +42,44 @@ def _render(request: str, steps: Sequence[dict]) -> str:
     return f"{request} [plan so far: {done}]"
 
 
+def _validated_plan(raw_plan: Any, tools: dict[str, ToolSpec], max_steps: int) -> list[dict[str, Any]]:
+    if isinstance(raw_plan, (str, bytes)) or not isinstance(raw_plan, Sequence):
+        raise ValueError("plan must be a sequence of tool-call dictionaries")
+    if len(raw_plan) > max_steps:
+        raise ValueError(f"plan contains {len(raw_plan)} steps, exceeding max_steps={max_steps}")
+    plan = [_validated_call(step, tools) for step in raw_plan]
+    if any(step["tool"] is None for step in plan):
+        raise ValueError("planner plans cannot contain a no-tool step; use an empty plan to stop")
+    return plan
+
+
+def _validate_execution_policy(plan: Sequence[dict[str, Any]], execute: dict[str, Callable[..., Any]]) -> None:
+    if not isinstance(execute, dict):
+        raise TypeError("execute must be a dictionary of tool names to callables")
+    missing = sorted({step["tool"] for step in plan if not callable(execute.get(step["tool"]))})
+    if missing:
+        raise ValueError(f"execute has no callable implementation for tools {missing}")
+
+
+def _execute_plan(plan: list[dict[str, Any]], execute: dict[str, Callable[..., Any]]) -> dict[str, Any]:
+    """Execute an already-validated plan once, returning an explicit partial-state receipt on failure."""
+    _validate_execution_policy(plan, execute)
+    results: list[Any] = []
+    for index, step in enumerate(plan):
+        try:
+            results.append(execute[step["tool"]](**step["args"]))
+        except Exception as exc:  # noqa: BLE001 - external tool failures become auditable state
+            return {
+                "plan": plan,
+                "results": results,
+                "partial": True,
+                "committed_steps": index,
+                "failed_step": index,
+                "error": {"type": type(exc).__name__, "message": str(exc)},
+            }
+    return {"plan": plan, "results": results}
+
+
 @dataclass
 class Planner:
     """A distilled decomposer: emit verified steps until ``STOP``, or escalate the whole problem."""
@@ -55,18 +93,18 @@ class Planner:
     n_requests: int = 0
     n_escalated: int = 0
     harvested: list[tuple[str, list[dict]]] = field(default_factory=list)
+    n_partial: int = 0
 
     def try_plan(self, request: str, *, execute: dict[str, Callable[..., Any]] | None = None) -> dict[str, Any] | None:
         """The local decomposition alone: a complete verified plan, or ``None`` (= must escalate).
 
         This method does not call the teacher."""
         steps: list[dict] = []
-        results: list[Any] = []
         for _ in range(self.max_steps):
             ctx = _render(request, steps)
             tool = self.selector.cascade.model.decide(ctx)
             if tool == _STOP:
-                return {"plan": steps, "results": results}
+                return _execute_plan(steps, execute) if execute is not None else {"plan": steps, "results": []}
             if tool is None or tool not in self.tools:
                 return None  # unsure which step comes next
             spec = self.tools[tool]
@@ -80,11 +118,6 @@ class Planner:
             else:
                 args = {}
             step = {"tool": tool, "args": args}
-            if execute is not None:
-                try:
-                    results.append(execute[tool](**step["args"]))
-                except Exception:  # noqa: BLE001 - a failing step is exactly what must escalate
-                    return None
             steps.append(step)
         return None  # max_steps without STOP
 
@@ -93,14 +126,20 @@ class Planner:
         self.n_requests += 1
         local = self.try_plan(request, execute=execute)
         if local is not None:
+            if local.get("partial"):
+                self.n_escalated += 1
+                self.n_partial += 1
+                return {**local, "escalate": True}
             return {**local, "escalate": False}
         self.n_escalated += 1
-        plan = [_validated_call(step, self.tools) for step in self.teacher(request)]
+        plan = _validated_plan(self.teacher(request), self.tools, self.max_steps)
         self.harvested.append((request, plan))
-        out: dict[str, Any] = {"plan": [dict(p) for p in plan], "escalate": True}
-        if execute is not None:
-            out["results"] = [execute[p["tool"]](**(p.get("args") or {})) for p in plan]
-        return out
+        if execute is None:
+            return {"plan": [dict(p) for p in plan], "escalate": True}
+        executed = _execute_plan(plan, execute)
+        if executed.get("partial"):
+            self.n_partial += 1
+        return {**executed, "escalate": True}
 
     def report(self) -> dict[str, Any]:
         """Return plan agreement, escalation, and harvested-trace metrics."""
@@ -110,6 +149,7 @@ class Planner:
             "escalated": self.n_escalated,
             "escalation_rate": (self.n_escalated / self.n_requests) if self.n_requests else 0.0,
             "harvested_traces": len(self.harvested),
+            "partial_executions": self.n_partial,
         }
 
     def save(self, path: str) -> str:
@@ -171,12 +211,21 @@ def distill_planner(
     max_steps: int = 8,
     selector_kw: dict | None = None,
     extractor_kw: dict | None = None,
+    behavior_verifier: Callable[[str, list[dict], list[dict]], bool] | None = None,
 ) -> Planner:
     """Distill the teacher's multi-step plans into next-step students (see module docstring).
 
     Plan-level verification is measured on held-out requests the students never trained on: a plan
     agrees when every step's tool and required arguments match the teacher's plan exactly, in order.
     """
+    if not callable(teacher):
+        raise TypeError("teacher must be callable")
+    if not 0.0 < holdout < 1.0:
+        raise ValueError("holdout must be in (0, 1)")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed must be an integer")
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps <= 0:
+        raise ValueError("max_steps must be a positive integer")
     reqs = [str(r) for r in requests]
     if len(reqs) < 8:
         raise ValueError("distill_planner needs at least 8 example requests")
@@ -187,24 +236,29 @@ def distill_planner(
     rng = np.random.RandomState(seed)
     order = rng.permutation(len(reqs))
     n_hold = max(2, int(round(len(reqs) * holdout)))
+    if n_hold >= len(reqs):
+        raise ValueError("holdout leaves no planner training requests")
     hold = [reqs[i] for i in order[:n_hold]]
     train = [reqs[i] for i in order[n_hold:]]
 
-    traces = {r: [_validated_call(step, specs) for step in teacher(r)] for r in train}
+    traces = [(request, _validated_plan(teacher(request), specs, max_steps)) for request in train]
 
     # flatten traces into (context -> next tool) and (context -> args) supervision
     contexts: list[str] = []
     next_tool: dict[str, str] = {}
     per_tool_rows: dict[str, list[tuple[str, dict]]] = {name: [] for name in specs}
-    for r, plan in traces.items():
+    for r, plan in traces:
         for i in range(len(plan) + 1):
             ctx = _render(r, plan[:i])
             contexts.append(ctx)
+            target = plan[i]["tool"] if i < len(plan) else _STOP
+            if ctx in next_tool and next_tool[ctx] != target:
+                raise ValueError("duplicate planner context has conflicting next-tool supervision")
             if i < len(plan):
-                next_tool[ctx] = plan[i]["tool"]
+                next_tool[ctx] = target
                 per_tool_rows[plan[i]["tool"]].append((ctx, dict(plan[i].get("args") or {})))
             else:
-                next_tool[ctx] = _STOP
+                next_tool[ctx] = target
 
     def select_teacher(c: Any) -> Any:
         if isinstance(c, list):
@@ -226,8 +280,13 @@ def distill_planner(
 
             return arg_teacher
 
+        table: dict[str, dict[str, Any]] = {}
+        for context, arguments in rows:
+            if context in table and table[context] != arguments:
+                raise ValueError(f"duplicate planner context has conflicting arguments for tool {name!r}")
+            table[context] = arguments
         extractors[name] = distill_extractor(
-            make_arg_teacher(dict(rows)), [c for c, _ in rows], specs[name].args, seed=seed, **(extractor_kw or {})
+            make_arg_teacher(table), list(table), specs[name].args, seed=seed, **(extractor_kw or {})
         )
 
     planner = Planner(
@@ -242,17 +301,11 @@ def distill_planner(
     # plan-level holdout verification (students never saw these requests)
     agree = 0
     for r in hold:
-        want = list(teacher(r))
-        got = planner(r)
-        ok = (not got["escalate"]) and len(got["plan"]) == len(want)
-        if ok:
-            for g, w in zip(got["plan"], want):
-                spec = specs[w["tool"]]
-                if g["tool"] != w["tool"] or any(
-                    str(g["args"].get(a)) != str((w.get("args") or {}).get(a)) for a in spec.required_args
-                ):
-                    ok = False
-                    break
+        want = _validated_plan(teacher(r), specs, max_steps)
+        got = planner.try_plan(r)
+        ok = got is not None and got["plan"] == want
+        if ok and behavior_verifier is not None:
+            ok = bool(behavior_verifier(r, got["plan"], want))
         agree += int(ok)
     planner.plan_agreement = agree / len(hold)
     planner.n_requests = 0  # verification calls don't count as live traffic
