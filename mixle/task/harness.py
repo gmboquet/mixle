@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task.extract import distill_extractor, extraction_f1
+from mixle.task.extract import distill_extractor, extraction_f1, tokenize
 from mixle.task.solve import Solution, solve
 
 
@@ -43,8 +43,11 @@ class ExtractorHarness:
 
     def __call__(self, text: str) -> dict:
         self.n_requests += 1
+        if len(tokenize(text)) > self.model.adapter.max_len:
+            self.n_fallback += 1
+            return self.teacher(text)
         out = self.model(text)
-        if all(out.get(f) for f in self.required):
+        if all(field in out for field in self.required):
             return out
         self.n_fallback += 1
         return self.teacher(text)

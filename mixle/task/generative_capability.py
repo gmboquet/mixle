@@ -49,24 +49,36 @@ def _field_f1(pred: Sequence[dict[str, Any]], gold: Sequence[dict[str, Any]]) ->
     """Micro-averaged field-level F1 (same formula as :func:`mixle.task.extract.extraction_f1`, generalized
     to operate on already-computed prediction dicts instead of requiring a ``TaskModel.batch`` call, so it
     scores a bare-callable teacher the same way it scores a ``TaskModel`` student)."""
+    pred = list(pred)
+    gold = list(gold)
+    if len(pred) != len(gold):
+        raise ValueError("prediction and gold record counts must match")
     tp = fp = fn = 0
-    for p, g in zip(pred, gold):
-        for field, value in g.items():
-            if p.get(field) == value:
+    for p, g in zip(pred, gold, strict=True):
+        if not isinstance(p, dict) or not isinstance(g, dict):
+            raise ValueError("predictions and gold records must be dictionaries")
+        for field in set(p) | set(g):
+            predicted = field in p
+            expected = field in g
+            if predicted and expected and p[field] == g[field]:
                 tp += 1
             else:
-                fn += 1
-        for field in p:
-            if field not in g:
-                fp += 1
+                if predicted:
+                    fp += 1
+                if expected:
+                    fn += 1
     denom = 2 * tp + fp + fn
-    return (2 * tp / denom) if denom else 1.0
+    return (2 * tp / denom) if denom else 0.0
 
 
 def _schema_validity_rate(records: Sequence[dict[str, Any]], texts: Sequence[str], fields: Sequence[str]) -> float:
+    records = list(records)
+    texts = list(texts)
+    if len(records) != len(texts):
+        raise ValueError("record and source-text counts must match")
     if not records:
-        return 1.0
-    checks = [validate_extraction_schema(r, t, fields) for r, t in zip(records, texts)]
+        return 0.0
+    checks = [validate_extraction_schema(record, text, fields) for record, text in zip(records, texts, strict=True)]
     return float(np.mean([c["complete"] and c["grounded"] for c in checks]))
 
 

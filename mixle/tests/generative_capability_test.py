@@ -22,6 +22,8 @@ from mixle.task.capability import (  # noqa: E402
 )
 from mixle.task.extract import distill_extractor  # noqa: E402
 from mixle.task.generative_capability import (  # noqa: E402
+    _field_f1,
+    _schema_validity_rate,
     extractive_capture_profile,
     validate_extraction_schema,
 )
@@ -72,6 +74,17 @@ class ValidateExtractionSchemaTest(unittest.TestCase):
         check = validate_extraction_schema({"name": "zach"}, "hi my name is alice", ["name"])
         self.assertFalse(check["grounded"])
         self.assertIn("name", check["ungrounded"])
+
+    def test_wrong_field_value_has_both_error_sides_in_micro_f1(self):
+        self.assertEqual(_field_f1([{"id": "wrong", "amount": "10"}], [{"id": "right", "amount": "10"}]), 0.5)
+
+    def test_empty_and_misaligned_metric_inputs_fail_closed(self):
+        self.assertEqual(_field_f1([{}], [{}]), 0.0)
+        with self.assertRaisesRegex(ValueError, "counts must match"):
+            _field_f1([{}], [])
+        self.assertEqual(_schema_validity_rate([], [], ["id"]), 0.0)
+        with self.assertRaisesRegex(ValueError, "counts must match"):
+            _schema_validity_rate([{}], [], ["id"])
 
 
 class ExtractiveCaptureProfileTest(unittest.TestCase):
