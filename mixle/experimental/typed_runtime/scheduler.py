@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from mixle.experimental.typed_runtime.contracts import ObjectiveKind, UpdateKind
@@ -25,11 +26,11 @@ class GainEvidence:
     node_id: str
     objective_kind: ObjectiveKind
     expected_gain: float
+    model_version: int
     standard_error: float = 0.0
     sample_count: int = 0
     normalized_to: ObjectiveKind | None = None
     staleness_risk: float = 0.0
-    model_version: int | None = None
 
     def __post_init__(self) -> None:
         numeric = (self.expected_gain, self.standard_error, self.staleness_risk)
@@ -39,8 +40,8 @@ class GainEvidence:
             raise ValueError("gain uncertainty and staleness risk must be non-negative.")
         if self.sample_count < 0:
             raise ValueError("sample_count must be non-negative.")
-        if self.model_version is not None and self.model_version < 0:
-            raise ValueError("model_version must be non-negative when supplied.")
+        if self.model_version < 0:
+            raise ValueError("model_version must be non-negative.")
 
     @property
     def effective_objective(self) -> ObjectiveKind:
@@ -102,11 +103,89 @@ class SchedulerConfig:
 
 @dataclass(frozen=True)
 class NodeScheduleState:
-    """Persistent fairness clock for one eligible node."""
+    """Persistent fairness clock advanced only by terminal execution evidence."""
 
-    selected_count: int = 0
+    committed_count: int = 0
     skip_rounds: int = 0
-    last_selected_round: int | None = None
+    last_committed_round: int | None = None
+
+    @property
+    def selected_count(self) -> int:
+        """Compatibility alias whose value now counts committed selections only."""
+
+        return self.committed_count
+
+    @property
+    def last_selected_round(self) -> int | None:
+        """Compatibility alias whose value now records the last committed round."""
+
+        return self.last_committed_round
+
+
+class NodeExecutionStatus(StrEnum):
+    """Terminal execution status for one scheduled node."""
+
+    COMMITTED = "committed"
+    REJECTED = "rejected"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True)
+class NodeTerminalReceipt:
+    """Execution evidence binding a scheduled node to one terminal outcome."""
+
+    round_index: int
+    node_id: str
+    status: NodeExecutionStatus
+    evidence_id: str
+
+    def __post_init__(self) -> None:
+        if self.round_index < 0 or not self.node_id or not self.evidence_id:
+            raise ValueError("terminal node receipt identity must be complete.")
+        if not isinstance(self.status, NodeExecutionStatus):
+            raise TypeError("terminal node status must be a NodeExecutionStatus value.")
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible terminal receipt."""
+
+        return {
+            "round_index": self.round_index,
+            "node_id": self.node_id,
+            "status": self.status.value,
+            "evidence_id": self.evidence_id,
+        }
+
+
+@dataclass(frozen=True)
+class ScheduleCompletionReceipt:
+    """Fairness-state transition justified by complete terminal node evidence."""
+
+    terminal_id: str
+    round_index: int
+    outcomes: tuple[NodeTerminalReceipt, ...]
+    committed_nodes: tuple[str, ...]
+    unsuccessful_nodes: tuple[str, ...]
+    states_after: dict[str, NodeScheduleState]
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible completion receipt."""
+
+        return {
+            "terminal_id": self.terminal_id,
+            "round_index": self.round_index,
+            "outcomes": [row.as_dict() for row in self.outcomes],
+            "committed_nodes": list(self.committed_nodes),
+            "unsuccessful_nodes": list(self.unsuccessful_nodes),
+            "states_after": {
+                node_id: {
+                    "committed_count": state.committed_count,
+                    "skip_rounds": state.skip_rounds,
+                    "last_committed_round": state.last_committed_round,
+                }
+                for node_id, state in sorted(self.states_after.items())
+            },
+        }
 
 
 @dataclass(frozen=True)
@@ -114,6 +193,7 @@ class ScheduleReceipt:
     """Complete, replayable record of one deterministic scheduling decision."""
 
     round_index: int
+    model_version: int
     target_objective: ObjectiveKind
     selected_nodes: tuple[str, ...]
     ranked_nodes: tuple[str, ...]
@@ -125,6 +205,7 @@ class ScheduleReceipt:
     priorities: dict[str, float | None]
     invalidation_costs: dict[str, float]
     skipped: dict[str, str]
+    rejected_evidence: dict[str, str]
     budget: float
     spent: float
 
@@ -139,6 +220,7 @@ class ScheduleReceipt:
 
         return {
             "round_index": self.round_index,
+            "model_version": self.model_version,
             "target_objective": self.target_objective.value,
             "selected_nodes": list(self.selected_nodes),
             "ranked_nodes": list(self.ranked_nodes),
@@ -150,6 +232,7 @@ class ScheduleReceipt:
             "priorities": dict(self.priorities),
             "invalidation_costs": dict(self.invalidation_costs),
             "skipped": dict(self.skipped),
+            "rejected_evidence": dict(self.rejected_evidence),
             "budget": self.budget,
             "spent": self.spent,
             "budget_overrun": self.budget_overrun,
@@ -164,17 +247,17 @@ def _base_cost(node: UpdateNode) -> float:
 
 
 class GainPerCostScheduler:
-    """Stateful deterministic scheduler with bounded starvation.
+    """Stateful deterministic scheduler with terminal-evidence fairness.
 
-    The resource budget is soft because fairness-forced nodes are always run.
-    This is deliberate: a budget may delay a reachable coordinate, but cannot
-    remove it from the optimization unless the caller freezes that node.
+    Starved nodes move to the front of the ranking, but no scheduling decision
+    may claim resources outside the declared budget.
     """
 
     def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
         self._states: dict[str, NodeScheduleState] = {}
         self._next_round = 0
+        self._pending: ScheduleReceipt | None = None
 
     @property
     def states(self) -> dict[str, NodeScheduleState]:
@@ -187,6 +270,7 @@ class GainPerCostScheduler:
 
         self._states.clear()
         self._next_round = 0
+        self._pending = None
 
     def schedule(
         self,
@@ -194,11 +278,16 @@ class GainPerCostScheduler:
         evidence: dict[str, GainEvidence] | None = None,
         *,
         target_objective: ObjectiveKind | None = None,
+        model_version: int,
         round_index: int | None = None,
         candidate_nodes: Collection[str] | None = None,
     ) -> ScheduleReceipt:
-        """Select a budgeted set of nodes and advance their fairness clocks."""
+        """Select a budgeted set without claiming that scheduled work succeeded."""
 
+        if self._pending is not None:
+            raise RuntimeError("the previous schedule requires terminal execution receipts.")
+        if model_version < 0:
+            raise ValueError("model_version must be non-negative.")
         validate_update_graph(graph, strict=True)
         evidence = dict(evidence or {})
         graph_nodes = {node.node_id for node in graph.nodes}
@@ -217,10 +306,10 @@ class GainPerCostScheduler:
             round_index = self._next_round
         if round_index < self._next_round:
             raise ValueError("round_index cannot move backwards.")
-        self._next_round = round_index + 1
         target = target_objective or graph.node(graph.root_node).contract.objective_kind
 
         skipped: dict[str, str] = {}
+        rejected_evidence: dict[str, str] = {}
         eligible: list[str] = []
         bootstrap: set[str] = set()
         lower_bounds: dict[str, float | None] = {}
@@ -237,6 +326,12 @@ class GainPerCostScheduler:
                 skipped[node_id] = "frozen"
                 continue
             row = evidence.get(node_id)
+            if row is not None and row.model_version != model_version:
+                rejected_evidence[node_id] = "model-version:%d!=%d" % (
+                    row.model_version,
+                    model_version,
+                )
+                row = None
             if row is not None and row.effective_objective is not target:
                 skipped[node_id] = "incompatible-objective:%s" % row.effective_objective.value
                 continue
@@ -269,7 +364,7 @@ class GainPerCostScheduler:
                     lower_bounds[node_id] = None
                     priorities[node_id] = None
                     continue
-                row = row or GainEvidence(node_id, target, 0.0)
+                row = row or GainEvidence(node_id, target, 0.0, model_version)
             lower_bound = row.lower_confidence_bound(self.config.confidence_z)
             lower_bounds[node_id] = lower_bound
             priorities[node_id] = lower_bound / effective_costs[node_id]
@@ -277,7 +372,13 @@ class GainPerCostScheduler:
         total_cost = sum(effective_costs.values())
         budget = self.config.budget_fraction * total_cost
         old_states = {node_id: self._states.get(node_id, NodeScheduleState()) for node_id in eligible}
-        forced = {node_id for node_id, state in old_states.items() if state.skip_rounds >= self.config.max_skip_rounds}
+        forced = {
+            node_id
+            for node_id, state in old_states.items()
+            if self.config.budget_fraction > 0.0
+            and state.skip_rounds > 0
+            and state.skip_rounds >= self.config.max_skip_rounds
+        }
 
         ranked = sorted(
             eligible,
@@ -289,17 +390,15 @@ class GainPerCostScheduler:
                 node_id,
             ),
         )
-        selected: set[str] = set(forced)
-        spent = sum(effective_costs[node_id] for node_id in selected)
+        selected: set[str] = set()
+        spent = 0.0
         for node_id in ranked:
-            if node_id in selected:
-                continue
             lower_bound = lower_bounds[node_id]
             if node_id not in bootstrap and lower_bound is not None and lower_bound < self.config.minimum_gain_lcb:
                 skipped[node_id] = "lower-confidence-bound-below-threshold"
                 continue
             node_cost = effective_costs[node_id]
-            if selected and spent + node_cost > budget:
+            if spent + node_cost > budget:
                 skipped[node_id] = "budget"
                 continue
             selected.add(node_id)
@@ -307,43 +406,86 @@ class GainPerCostScheduler:
 
         topo = graph.topological_order()
         selected_order = tuple(node_id for node_id in topo if node_id in selected)
-        for node_id in eligible:
-            state = old_states[node_id]
-            if node_id in selected:
-                self._states[node_id] = NodeScheduleState(
-                    selected_count=state.selected_count + 1,
-                    skip_rounds=0,
-                    last_selected_round=round_index,
-                )
-            else:
-                self._states[node_id] = NodeScheduleState(
-                    selected_count=state.selected_count,
-                    skip_rounds=state.skip_rounds + 1,
-                    last_selected_round=state.last_selected_round,
-                )
-
-        return ScheduleReceipt(
+        receipt = ScheduleReceipt(
             round_index=round_index,
+            model_version=model_version,
             target_objective=target,
             selected_nodes=selected_order,
             ranked_nodes=tuple(ranked),
             eligible_nodes=tuple(node_id for node_id in topo if node_id in eligible),
-            forced_starvation=tuple(node_id for node_id in topo if node_id in forced),
+            forced_starvation=tuple(node_id for node_id in topo if node_id in forced and node_id in selected),
             bootstrap_nodes=tuple(node_id for node_id in topo if node_id in bootstrap),
             lower_confidence_bounds=lower_bounds,
             effective_costs=effective_costs,
             priorities=priorities,
             invalidation_costs=invalidation_costs,
             skipped=skipped,
+            rejected_evidence=rejected_evidence,
             budget=budget,
             spent=spent,
+        )
+        self._pending = receipt
+        self._next_round = round_index + 1
+        return receipt
+
+    def record_terminal(
+        self,
+        receipt: ScheduleReceipt,
+        outcomes: Sequence[NodeTerminalReceipt],
+        *,
+        terminal_id: str,
+    ) -> ScheduleCompletionReceipt:
+        """Advance fairness clocks only after every selected node is terminal."""
+
+        if not terminal_id:
+            raise ValueError("terminal_id must be non-empty.")
+        if self._pending is None or receipt != self._pending:
+            raise ValueError("terminal outcomes do not match the pending schedule.")
+        rows = tuple(outcomes)
+        if len({row.node_id for row in rows}) != len(rows):
+            raise ValueError("terminal outcomes must contain each selected node exactly once.")
+        if any(row.round_index != receipt.round_index for row in rows):
+            raise ValueError("terminal outcome round does not match the pending schedule.")
+        expected = set(receipt.selected_nodes)
+        actual = {row.node_id for row in rows}
+        if actual != expected:
+            raise ValueError("terminal outcomes must cover exactly the selected nodes.")
+        committed = {row.node_id for row in rows if row.status is NodeExecutionStatus.COMMITTED}
+        for node_id in receipt.eligible_nodes:
+            state = self._states.get(node_id, NodeScheduleState())
+            if node_id in committed:
+                self._states[node_id] = NodeScheduleState(
+                    committed_count=state.committed_count + 1,
+                    skip_rounds=0,
+                    last_committed_round=receipt.round_index,
+                )
+            else:
+                self._states[node_id] = NodeScheduleState(
+                    committed_count=state.committed_count,
+                    skip_rounds=state.skip_rounds + 1,
+                    last_committed_round=state.last_committed_round,
+                )
+        self._pending = None
+        topo_order = tuple(receipt.eligible_nodes)
+        committed_nodes = tuple(node_id for node_id in topo_order if node_id in committed)
+        unsuccessful = tuple(node_id for node_id in topo_order if node_id not in committed)
+        return ScheduleCompletionReceipt(
+            terminal_id,
+            receipt.round_index,
+            tuple(sorted(rows, key=lambda row: row.node_id)),
+            committed_nodes,
+            unsuccessful,
+            self.states,
         )
 
 
 __all__ = [
     "GainEvidence",
     "GainPerCostScheduler",
+    "NodeExecutionStatus",
     "NodeScheduleState",
+    "NodeTerminalReceipt",
+    "ScheduleCompletionReceipt",
     "ScheduleReceipt",
     "SchedulerConfig",
 ]
