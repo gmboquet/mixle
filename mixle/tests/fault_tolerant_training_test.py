@@ -77,10 +77,17 @@ class ChaosTestKillRankMidStep(unittest.TestCase):
                 rec = job.run_step(step)
                 self.assertEqual(sorted(rec["survivors"]), [0, 2])
 
+            current_parameters = [parameter.detach().clone() for parameter in job.canonical_model.parameters()]
+            current_survivor_states = {rank: job.loader_states[rank] for rank in (0, 2)}
+
             # Elastic restart: bring rank 1 back from the checkpoint saved before it died, not from
-            # scratch -- its loader state resumes exactly where the checkpoint left it.
+            # scratch -- its loader state resumes exactly where the checkpoint left it, while the
+            # canonical model and surviving ranks stay at their current generation.
             restored_state = job.respawn_rank(1)
             self.assertEqual(restored_state, pre_kill_loader_states[1])
+            self.assertEqual({rank: job.loader_states[rank] for rank in (0, 2)}, current_survivor_states)
+            for expected, actual in zip(current_parameters, job.canonical_model.parameters()):
+                torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
             self.assertNotIn(1, job.dead_ranks)
             self.assertTrue(job.pending_restart)
 
