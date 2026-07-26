@@ -1,3 +1,4 @@
+import copy
 import unittest
 
 import numpy as np
@@ -123,6 +124,74 @@ class ChowLiuTreeTestCase(unittest.TestCase):
         for value, lp in items:
             self.assertAlmostEqual(lp, dist.log_density(value), places=12)
 
+    def test_constructor_requires_reachable_conditional_coverage(self):
+        marginals = [
+            CategoricalDistribution({"left": 0.5, "right": 0.5}),
+            CategoricalDistribution({0: 0.5, 1: 0.5}),
+        ]
+        with self.assertRaisesRegex(ValueError, "reachable parent value"):
+            ChowLiuTreeDistribution(
+                parents=[None, 0],
+                marginal_dists=marginals,
+                conditional_dists=[
+                    {},
+                    {
+                        freeze("left"): CategoricalDistribution({0: 1.0}),
+                    },
+                ],
+            )
+
+        covered = ChowLiuTreeDistribution(
+            parents=[None, 0],
+            marginal_dists=marginals,
+            conditional_dists=[
+                {},
+                {
+                    freeze("left"): CategoricalDistribution({0: 1.0}),
+                },
+            ],
+            default_dists=[None, marginals[1]],
+        )
+        self.assertAlmostEqual(
+            sum(np.exp(log_probability) for _, log_probability in covered.enumerator()),
+            1.0,
+            places=12,
+        )
+        ChowLiuTreeDistribution(
+            parents=[None, 0],
+            marginal_dists=[
+                CategoricalDistribution({"left": 1.0, "right": 0.0}),
+                marginals[1],
+            ],
+            conditional_dists=[
+                {},
+                {
+                    freeze("left"): CategoricalDistribution({0: 1.0}),
+                },
+            ],
+        )
+
+    def test_enumerator_follows_actual_conditionals_not_child_marginals(self):
+        dist = ChowLiuTreeDistribution(
+            parents=[None, 0],
+            marginal_dists=[
+                CategoricalDistribution({"root": 1.0}),
+                CategoricalDistribution({"marginal-only": 1.0}),
+            ],
+            conditional_dists=[
+                {},
+                {
+                    freeze("root"): CategoricalDistribution(
+                        {"conditional-only": 1.0}
+                    ),
+                },
+            ],
+        )
+        self.assertEqual(
+            list(dist.enumerator()),
+            [(("root", "conditional-only"), 0.0)],
+        )
+
     def test_backend_scoring_and_metadata_delegate_to_children(self):
         dist = ChowLiuTreeDistribution(
             parents=[None, 0],
@@ -205,6 +274,73 @@ class ChowLiuTreeTestCase(unittest.TestCase):
             rtol=1.0e-10,
             atol=1.0e-10,
         )
+
+    def test_batch_accumulation_validates_rows_and_weights_before_mutation(self):
+        estimator = ChowLiuTreeEstimator([BernoulliEstimator()] * 2)
+        for rows, weights, message in (
+            ([(False, False), (True, True)], [1.0], "exact shape"),
+            ([(False, False)], [-1.0], "non-negative"),
+            ([(False, False)], [np.nan], "finite"),
+            ([(False,)], [1.0], "feature count"),
+        ):
+            with self.subTest(message=message):
+                accumulator = estimator.accumulator_factory().make()
+                with self.assertRaisesRegex(ValueError, message):
+                    accumulator.seq_update(rows, weights, None)
+                self.assertEqual(accumulator.total_weight, 0.0)
+                self.assertEqual(accumulator.marginal_counts, [{}, {}])
+
+    def test_statistics_are_versioned_validated_and_defensively_restored(self):
+        estimator = ChowLiuTreeEstimator([BernoulliEstimator()] * 2)
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.seq_update(
+            [(False, False), (True, True)],
+            np.ones(2),
+            None,
+        )
+        value = accumulator.value()
+        self.assertEqual(value.schema_version, 1)
+
+        restored = estimator.accumulator_factory().make().from_value(value)
+        false_key = freeze(False)
+        value.marginal_values[0][false_key] = "mutated"
+        self.assertIs(restored.marginal_values[0][false_key], False)
+
+        bad_marginals = copy.deepcopy(accumulator.value())
+        bad_marginals.marginal_counts[0][false_key] += 1.0
+        with self.assertRaisesRegex(ValueError, "sum to total weight"):
+            estimator.estimate(None, bad_marginals)
+
+        bad_joint = copy.deepcopy(accumulator.value())
+        bad_joint.joint_counts[(0, 1)][(false_key, false_key)] += 1.0
+        with self.assertRaisesRegex(ValueError, "joint row sums"):
+            estimator.accumulator_factory().make().from_value(bad_joint)
+
+    def test_fit_round_trip_preserves_estimation_policy(self):
+        estimator = ChowLiuTreeEstimator(
+            [BernoulliEstimator()] * 2,
+            pseudo_count=0.5,
+            mi_pseudo_count=0.25,
+            default_policy="marginal",
+            keys="shared-tree",
+            name="tree",
+        )
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.seq_update(
+            [(False, False), (True, True)],
+            np.ones(2),
+            None,
+        )
+        model = estimator.estimate(None, accumulator.value())
+        self.assertEqual(model.keys, "shared-tree")
+        self.assertEqual(model.pseudo_count, 0.5)
+        self.assertEqual(model.mi_pseudo_count, 0.25)
+        self.assertEqual(model.default_policy, "marginal")
+        round_trip = model.estimator()
+        self.assertEqual(round_trip.keys, "shared-tree")
+        self.assertEqual(round_trip.pseudo_count, 0.5)
+        self.assertEqual(round_trip.mi_pseudo_count, 0.25)
+        self.assertEqual(round_trip.default_policy, "marginal")
 
 
 if __name__ == "__main__":

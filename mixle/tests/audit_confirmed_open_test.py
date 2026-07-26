@@ -19,7 +19,13 @@ class ChowLiuStructureTest(unittest.TestCase):
     def _make(self, parents, order):
         n = len(parents)
         marginals = [GaussianDistribution(0.0, 1.0) for _ in range(n)]
-        return ChowLiuTreeDistribution(parents, marginals, [{} for _ in range(n)], feature_order=order)
+        return ChowLiuTreeDistribution(
+            parents,
+            marginals,
+            [{} for _ in range(n)],
+            default_dists=marginals,
+            feature_order=order,
+        )
 
     def test_root_and_every_parent_must_precede_child(self):
         invalid = [
