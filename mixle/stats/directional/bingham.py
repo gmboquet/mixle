@@ -34,7 +34,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 from scipy.integrate import quad
-from scipy.special import iv
+from scipy.special import i0e
 
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -44,38 +44,120 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.directional.von_mises_fisher import (
+    _unit_batch,
+    _unit_vector,
+)
+from mixle.stats.matrix.wishart import (
+    _validated_sample_size,
+    _validated_weight,
+    _validated_weights,
+)
+
+_MOMENT_ATOL = 1.0e-8
+
+
+class BinghamFitError(RuntimeError):
+    """Raised when Bingham moments have no certified finite fit."""
+
+
+class BinghamSamplingError(RuntimeError):
+    """Raised when Bingham rejection sampling exhausts its proposal budget."""
+
+    def __init__(self, accepted: int, proposed: int, concentrations: np.ndarray):
+        self.accepted = accepted
+        self.proposed = proposed
+        self.concentrations = concentrations.copy()
+        super().__init__(
+            "Bingham rejection sampler accepted %d of %d proposals for z=%r"
+            % (accepted, proposed, concentrations.tolist())
+        )
 
 
 def _bingham_norm(z: np.ndarray) -> float:
-    """Return ``c(Z)`` via the stable 1-D reduction of the sphere integral (third axis = ``z[2]``)."""
+    """Return ``c(Z)`` through a scaled-Bessel one-dimensional integral."""
     z1, z2, z3 = float(z[0]), float(z[1]), float(z[2])
-    val, _ = quad(
-        lambda t: (
-            math.exp(z3 * math.cos(t) ** 2 + 0.5 * (z1 + z2) * math.sin(t) ** 2)
-            * iv(0, 0.5 * (z1 - z2) * math.sin(t) ** 2)
-            * math.sin(t)
-        ),
-        0.0,
-        math.pi,
+    def integrand(u: float) -> float:
+        sin2 = max(0.0, 1.0 - u * u)
+        argument = 0.5 * (z1 - z2) * sin2
+        exponent = z3 * u * u + 0.5 * (z1 + z2) * sin2 + abs(argument)
+        return math.exp(exponent) * float(i0e(argument))
+
+    val, error = quad(
+        integrand,
+        -1.0,
+        1.0,
+        epsabs=1.0e-11,
+        epsrel=1.0e-10,
+        limit=400,
     )
-    return 2.0 * math.pi * val
+    result = 2.0 * math.pi * val
+    if (
+        not np.isfinite(result)
+        or result <= 0.0
+        or not np.isfinite(error)
+        or error > max(1.0e-9, 1.0e-7 * abs(val))
+    ):
+        raise ValueError(
+            "Bingham normalizer integration failed its finite error contract"
+        )
+    return result
+
+
+def _validated_bingham_statistics(value: Any) -> tuple[float, np.ndarray]:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise ValueError("Bingham sufficient statistics must be a two-item tuple")
+    if isinstance(value[0], (bool, np.bool_)) or np.ndim(value[0]) != 0:
+        raise TypeError("Bingham count must be a real scalar")
+    try:
+        count = float(value[0])
+        scatter = np.asarray(value[1], dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Bingham sufficient statistics must be numeric") from exc
+    if not np.isfinite(count) or count < 0.0:
+        raise ValueError("Bingham count must be finite and non-negative")
+    if scatter.shape != (3, 3) or np.any(~np.isfinite(scatter)):
+        raise ValueError("Bingham scatter must be a finite 3x3 matrix")
+    if not np.array_equal(scatter, scatter.T):
+        raise ValueError("Bingham scatter must be exactly symmetric")
+    if count == 0.0:
+        if np.any(scatter != 0.0):
+            raise ValueError("empty Bingham statistics must have zero scatter")
+    else:
+        tolerance = _MOMENT_ATOL * max(1.0, count)
+        if abs(float(np.trace(scatter)) - count) > tolerance:
+            raise ValueError("Bingham scatter trace must equal its observation weight")
+        if float(np.linalg.eigvalsh(scatter).min()) < -tolerance:
+            raise ValueError("Bingham scatter must be positive semidefinite")
+    return count, scatter.copy()
 
 
 class BinghamDistribution(SequenceEncodableProbabilityDistribution):
     """Bingham distribution on ``S^2`` with orientation ``m`` (3x3) and concentrations ``z`` (length 3)."""
 
     def __init__(self, m: np.ndarray, z: Sequence[float], name: str | None = None, keys: str | None = None) -> None:
-        mm = np.asarray(m, dtype=np.float64)
-        zz = np.asarray(z, dtype=np.float64).reshape(3)
+        try:
+            mm = np.asarray(m, dtype=np.float64)
+            zz = np.asarray(z, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Bingham parameters must be numeric") from exc
         if mm.shape != (3, 3):
             raise ValueError("BinghamDistribution m must be a 3x3 orthonormal matrix (columns m1, m2, m3).")
+        if zz.shape != (3,):
+            raise ValueError("BinghamDistribution z must have exact shape (3,).")
+        if np.any(~np.isfinite(mm)) or np.any(~np.isfinite(zz)):
+            raise ValueError("BinghamDistribution parameters must be finite.")
         if not np.allclose(mm.T @ mm, np.eye(3), atol=1e-6):
             raise ValueError("BinghamDistribution m must be orthonormal.")
-        self.m = mm
-        self.z = zz - zz.max()  # canonical shift: largest concentration is 0 (does not change the law)
+        self.m = mm.copy()
+        self.z = (zz - zz.max()).copy()
+        self.m.setflags(write=False)
+        self.z.setflags(write=False)
         self.name = name
         self.keys = keys
         self._log_c = math.log(_bingham_norm(self.z))
+        if not np.isfinite(self._log_c):
+            raise ValueError("Bingham normalizer must be finite.")
 
     def __str__(self) -> str:
         return "BinghamDistribution(%s, %s, name=%s, keys=%s)" % (
@@ -91,12 +173,12 @@ class BinghamDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: Any) -> float:
         """Return the log-density at a unit 3-vector ``x`` (the same value at ``x`` and ``-x``)."""
-        p = np.asarray(x, dtype=np.float64) @ self.m
+        p = _unit_vector(x, 3, "Bingham observation") @ self.m
         return -self._log_c + float(np.dot(self.z, p * p))
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density for a sequence-encoded ``(n, 3)`` array of unit vectors."""
-        p = np.asarray(x, dtype=np.float64) @ self.m  # (n, 3) projections onto the axes
+        p = _unit_batch(x, 3, "Bingham observations") @ self.m
         return -self._log_c + (p * p) @ self.z
 
     # --- compute-engine backend (numpy + torch/GPU), SCORING only: the normalizer is a host scalar
@@ -111,7 +193,8 @@ class BinghamDistribution(SequenceEncodableProbabilityDistribution):
 
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for ``(N, 3)`` unit vectors."""
-        p = engine.matmul(engine.asarray(x), engine.asarray(self.m))
+        checked = _unit_batch(x, 3, "Bingham backend observations")
+        p = engine.matmul(engine.asarray(checked), engine.asarray(self.m.copy()))
         return -self._log_c + engine.matmul(p * p, engine.asarray(self.z))
 
     def sampler(self, seed: int | None = None) -> "BinghamSampler":
@@ -120,6 +203,8 @@ class BinghamDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "BinghamEstimator":
         """Return a maximum-likelihood estimator for Bingham orientation and concentration."""
+        if pseudo_count is not None:
+            raise ValueError("Bingham pseudo-count regularization is not implemented")
         return BinghamEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "BinghamDataEncoder":
@@ -148,8 +233,12 @@ class BinghamSampler(DistributionSampler):
         log_bound = -(3.0 - b) / 2.0 + 1.5 * math.log(3.0 / b)
         out = np.empty((n, 3))
         filled = 0
-        while filled < n:
+        proposed = 0
+        for _ in range(10_000):
+            if filled >= n:
+                break
             k = (n - filled) * 2 + 8
+            proposed += k
             z = self.rng.standard_normal((k, 3))
             y = z @ omega_inv_sqrt.T
             y /= np.linalg.norm(y, axis=1, keepdims=True)  # ACG(Omega^{-1}) draw
@@ -160,13 +249,15 @@ class BinghamSampler(DistributionSampler):
             take = min(len(ya), n - filled)
             out[filled : filled + take] = ya[:take]
             filled += take
+        if filled < n:
+            raise BinghamSamplingError(filled, proposed, self.dist.z)
         return out
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one axial unit vector or ``size`` iid vectors."""
         if size is None:
             return self._batch(1)[0]
-        return list(self._batch(int(size)))
+        return list(self._batch(_validated_sample_size(size)))
 
 
 class BinghamAccumulator(SequenceEncodableStatisticAccumulator):
@@ -180,9 +271,10 @@ class BinghamAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Any, weight: float, estimate: BinghamDistribution | None) -> None:
         """Update scatter statistics from one weighted unit vector."""
-        v = np.asarray(x, dtype=np.float64)
-        self.count += weight
-        self.sum_xx += weight * np.outer(v, v)
+        v = _unit_vector(x, 3, "Bingham observation")
+        checked_weight = _validated_weight(weight)
+        self.count += checked_weight
+        self.sum_xx += checked_weight * np.outer(v, v)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
         """Initialize scatter statistics from one weighted unit vector."""
@@ -190,8 +282,8 @@ class BinghamAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
         """Update scatter statistics from encoded unit vectors."""
-        v = np.asarray(x, dtype=np.float64)
-        w = np.asarray(weights, dtype=np.float64)
+        v = _unit_batch(x, 3, "Bingham observations")
+        w = _validated_weights(weights, len(v))
         self.count += float(w.sum())
         self.sum_xx += (v * w[:, None]).T @ v
 
@@ -201,18 +293,25 @@ class BinghamAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, np.ndarray]) -> "BinghamAccumulator":
         """Merge weighted count and scatter statistics."""
-        self.count += suff_stat[0]
-        self.sum_xx += suff_stat[1]
+        count, scatter = _validated_bingham_statistics(suff_stat)
+        combined = (self.count + count, self.sum_xx + scatter)
+        self.count, self.sum_xx = _validated_bingham_statistics(combined)
         return self
 
     def value(self) -> tuple[float, np.ndarray]:
         """Return weighted count and scatter matrix."""
-        return self.count, self.sum_xx
+        return self.count, self.sum_xx.copy()
 
     def from_value(self, x: tuple[float, np.ndarray]) -> "BinghamAccumulator":
         """Restore weighted count and scatter matrix."""
-        self.count = float(x[0])
-        self.sum_xx = np.asarray(x[1], dtype=np.float64).copy()
+        self.count, self.sum_xx = _validated_bingham_statistics(x)
+        return self
+
+    def scale(self, c: float) -> "BinghamAccumulator":
+        """Scale linear Bingham sufficient statistics."""
+        checked_scale = _validated_weight(c)
+        self.count *= checked_scale
+        self.sum_xx *= checked_scale
         return self
 
     def acc_to_encoder(self) -> "BinghamDataEncoder":
@@ -243,9 +342,9 @@ class BinghamEstimator(ParameterEstimator):
         """Estimate orientation and concentrations from scatter statistics."""
         from scipy.optimize import minimize
 
-        count, sum_xx = suff_stat
-        if count <= 0.0:
-            return BinghamDistribution(np.eye(3), np.zeros(3), name=self.name, keys=self.keys)
+        count, sum_xx = _validated_bingham_statistics(suff_stat)
+        if count == 0.0:
+            raise BinghamFitError("Bingham fitting requires positive observation weight")
         scatter = sum_xx / count
         omega, vecs = np.linalg.eigh(scatter)  # ascending eigenvalues; columns are the axes
         m = vecs  # orientation: column i is the axis with mean square projection omega[i]
@@ -256,10 +355,34 @@ class BinghamEstimator(ParameterEstimator):
             return math.log(_bingham_norm(z)) - float(np.dot(z, omega))
 
         res = minimize(
-            neg_g, np.array([-1.0, -0.5]), method="Nelder-Mead", options={"xatol": 1e-6, "fatol": 1e-8, "maxiter": 2000}
+            neg_g,
+            np.array([-1.0, -0.5]),
+            method="Nelder-Mead",
+            bounds=((-1.0e5, 0.0), (-1.0e5, 0.0)),
+            options={"xatol": 1e-6, "fatol": 1e-8, "maxiter": 2000},
         )
+        if (
+            not res.success
+            or np.asarray(res.x).shape != (2,)
+            or np.any(~np.isfinite(res.x))
+            or not np.isfinite(res.fun)
+        ):
+            raise BinghamFitError(
+                "Bingham concentration optimizer failed: %s" % res.message
+            )
         z = np.array([res.x[0], res.x[1], 0.0])
-        return BinghamDistribution(m, z, name=self.name, keys=self.keys)
+        result = BinghamDistribution(m, z, name=self.name, keys=self.keys)
+        result.fit_metadata = {
+            "converged": True,
+            "solver": "Nelder-Mead",
+            "iterations": int(res.nit),
+            "objective": float(res.fun),
+            "identifiable_orientation": bool(
+                np.min(np.diff(np.sort(omega))) > _MOMENT_ATOL
+            ),
+            "repairs": (),
+        }
+        return result
 
     def accumulator_factory(self) -> BinghamAccumulatorFactory:
         """Return a factory for Bingham sufficient-statistic accumulators."""
@@ -267,7 +390,7 @@ class BinghamEstimator(ParameterEstimator):
 
 
 class BinghamDataEncoder(DataSequenceEncoder):
-    """Encode axial data as a normalized ``(n, 3)`` float array (sign is irrelevant: ``x ~ -x``)."""
+    """Validate and encode axial data as an ``(n, 3)`` unit-vector array."""
 
     def __str__(self) -> str:
         return "BinghamDataEncoder"
@@ -276,6 +399,9 @@ class BinghamDataEncoder(DataSequenceEncoder):
         return isinstance(other, BinghamDataEncoder)
 
     def seq_encode(self, x: Sequence[Any]) -> np.ndarray:
-        """Normalize and encode axial observations as an ``(n, 3)`` array."""
-        v = np.asarray(x, dtype=np.float64).reshape(-1, 3)
-        return v / np.linalg.norm(v, axis=1, keepdims=True)
+        """Validate and encode axial observations as an ``(n, 3)`` array."""
+        return _unit_batch(x, 3, "Bingham observations")
+
+    def row_count(self, x: np.ndarray) -> int:
+        """Return the encoded row count after sphere validation."""
+        return len(_unit_batch(x, 3, "Bingham observations"))

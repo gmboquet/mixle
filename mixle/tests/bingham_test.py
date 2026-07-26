@@ -7,6 +7,7 @@ import numpy as np
 import mixle
 from mixle.capability import Fittable
 from mixle.stats import BinghamDistribution as B
+from mixle.stats.directional.bingham import BinghamFitError
 
 
 class BinghamTest(unittest.TestCase):
@@ -83,6 +84,59 @@ class BinghamTest(unittest.TestCase):
         # equal concentrations -> uniform on the sphere (constant density 1/(4 pi))
         d = B(np.eye(3), [0.0, 0.0, 0.0])
         self.assertAlmostEqual(d.density(np.array([0.3, 0.4, np.sqrt(1 - 0.25)])), 1.0 / (4 * np.pi), places=6)
+
+    def test_extreme_concentration_has_finite_normalizer_and_scores(self):
+        d = B(np.eye(3), [-10000.0, 0.0, 0.0])
+        self.assertTrue(np.isfinite(d._log_c))
+        self.assertTrue(np.isfinite(d.log_density([0.0, 1.0, 0.0])))
+
+    def test_parameters_are_copied_and_read_only(self):
+        orientation = np.eye(3)
+        concentration = np.asarray([-5.0, -2.0, 0.0])
+        d = B(orientation, concentration)
+        orientation[0, 0] = 0.0
+        concentration[0] = 0.0
+        np.testing.assert_array_equal(d.m, np.eye(3))
+        np.testing.assert_array_equal(d.z, [-5.0, -2.0, 0.0])
+        with self.assertRaises(ValueError):
+            d.m[0, 0] = 0.0
+        with self.assertRaises(ValueError):
+            d.z[0] = 0.0
+
+    def test_scoring_paths_reject_off_sphere_observations(self):
+        from mixle.engines import NUMPY_ENGINE
+
+        d = B(np.eye(3), [-5.0, -2.0, 0.0])
+        observations = np.asarray([[2.0, 0.0, 0.0]])
+        with self.assertRaises(ValueError):
+            d.log_density(observations[0])
+        with self.assertRaises(ValueError):
+            d.seq_log_density(observations)
+        with self.assertRaises(ValueError):
+            d.dist_to_encoder().seq_encode(observations)
+        with self.assertRaises(ValueError):
+            d.backend_seq_log_density(observations, NUMPY_ENGINE)
+
+    def test_accumulator_and_estimator_reject_invalid_statistics(self):
+        d = B(np.eye(3), [-5.0, -2.0, 0.0])
+        estimator = d.estimator()
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.update([1.0, 0.0, 0.0], 1.0, None)
+        before = accumulator.value()
+        for weight in (-1.0, np.nan, np.inf):
+            with self.subTest(weight=weight), self.assertRaises(ValueError):
+                accumulator.update([0.0, 1.0, 0.0], weight, None)
+            self.assertEqual(accumulator.value()[0], before[0])
+            np.testing.assert_array_equal(accumulator.value()[1], before[1])
+        with self.assertRaises(BinghamFitError):
+            estimator.estimate(None, (0.0, np.zeros((3, 3))))
+        for statistics in (
+            (1.0, np.eye(3)),
+            (1.0, np.diag([2.0, -1.0, 0.0])),
+            (1.0, np.full((3, 3), np.nan)),
+        ):
+            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+                estimator.estimate(None, statistics)
 
     def test_capabilities(self):
         self.assertTrue(mixle.supports(B(np.eye(3), [-3.0, -1.0, 0.0]), Fittable))

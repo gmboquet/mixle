@@ -7,7 +7,7 @@ import numpy as np
 import mixle
 from mixle.capability import Fittable
 from mixle.stats import KentDistribution as Kent
-from mixle.stats.directional.kent import _log_kent_norm
+from mixle.stats.directional.kent import KentFitError, _log_kent_norm
 
 
 class KentTest(unittest.TestCase):
@@ -87,6 +87,56 @@ class KentTest(unittest.TestCase):
             with self.subTest(beta=bad_beta):
                 with self.assertRaises(ValueError):
                     Kent(np.eye(3), 5.0, bad_beta)
+
+    def test_orientation_is_right_handed_copied_and_read_only(self):
+        orientation = np.eye(3)
+        d = Kent(orientation, 5.0, 1.0)
+        orientation[0, 0] = 0.0
+        np.testing.assert_array_equal(d.gamma, np.eye(3))
+        with self.assertRaises(ValueError):
+            d.gamma[0, 0] = 0.0
+        reflection = np.eye(3)
+        reflection[:, 2] *= -1.0
+        with self.assertRaises(ValueError):
+            Kent(reflection, 5.0, 1.0)
+        with self.assertRaises(ValueError):
+            Kent(np.ones((3, 3)), 5.0, 1.0)
+
+    def test_scoring_paths_reject_off_sphere_observations(self):
+        from mixle.engines import NUMPY_ENGINE
+
+        d = Kent(np.eye(3), 5.0, 1.0)
+        observations = np.asarray([[2.0, 0.0, 0.0]])
+        with self.assertRaises(ValueError):
+            d.log_density(observations[0])
+        with self.assertRaises(ValueError):
+            d.seq_log_density(observations)
+        with self.assertRaises(ValueError):
+            d.dist_to_encoder().seq_encode(observations)
+        with self.assertRaises(ValueError):
+            d.backend_seq_log_density(observations, NUMPY_ENGINE)
+
+    def test_accumulator_and_estimator_reject_invalid_statistics(self):
+        estimator = Kent(np.eye(3), 5.0, 1.0).estimator()
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.update([1.0, 0.0, 0.0], 1.0, None)
+        before = accumulator.value()
+        for weight in (-1.0, np.nan, np.inf):
+            with self.subTest(weight=weight), self.assertRaises(ValueError):
+                accumulator.update([0.0, 1.0, 0.0], weight, None)
+            actual = accumulator.value()
+            self.assertEqual(actual[0], before[0])
+            np.testing.assert_array_equal(actual[1], before[1])
+            np.testing.assert_array_equal(actual[2], before[2])
+        with self.assertRaises(KentFitError):
+            estimator.estimate(None, (0.0, np.zeros(3), np.zeros((3, 3))))
+        for statistics in (
+            (1.0, np.asarray([2.0, 0.0, 0.0]), np.eye(3) / 3.0),
+            (1.0, np.zeros(3), np.eye(3)),
+            (1.0, np.zeros(3), np.diag([2.0, -1.0, 0.0])),
+        ):
+            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+                estimator.estimate(None, statistics)
 
     def test_capabilities(self):
         self.assertTrue(mixle.supports(Kent(np.eye(3), 5.0, 1.0), Fittable))
