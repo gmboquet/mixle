@@ -371,8 +371,64 @@ def markov_chain_priors(priors, row_keys):
     raise ValueError("Markov-chain prior requires exact structure or an explicit alignment receipt.")
 
 
-def dirichlet_alpha_tensor(alpha, labels, logits, engine, torch):
-    """Broadcast Dirichlet concentration values to a logits tensor."""
+def _improper_acknowledged(prior: Any) -> bool:
+    if not isinstance(prior, Mapping):
+        return False
+    receipt = prior.get("improper_receipt")
+    if receipt is None:
+        if prior.get("proper") is False:
+            raise ValueError("an improper prior requires an improper_receipt.")
+        return False
+    if not isinstance(receipt, Mapping):
+        raise TypeError("improper_receipt must be a mapping.")
+    _unexpected_keys(receipt, {"status", "rationale"}, "improper_receipt")
+    if receipt.get("status") != "improper_limit_acknowledged":
+        raise ValueError("improper_receipt has an invalid status.")
+    rationale = receipt.get("rationale")
+    if not isinstance(rationale, str) or not rationale.strip():
+        raise ValueError("improper_receipt requires a non-empty rationale.")
+    return True
+
+
+def validated_prior_scalar(
+    prior: Mapping[Any, Any],
+    name: str,
+    *,
+    aliases: Sequence[str] = (),
+    positive: bool = True,
+) -> float:
+    """Return one finite scalar hyperparameter, honoring an explicit improper-limit receipt."""
+    keys = (name, *aliases)
+    present = [key for key in keys if key in prior]
+    if not present:
+        raise ValueError("%s prior requires hyperparameter %r." % (prior_family(prior), name))
+    values = [prior[key] for key in present]
+    if any(isinstance(value, (bool, np.bool_)) for value in values):
+        raise TypeError("prior hyperparameter %s must be a real scalar, not a boolean." % name)
+    if any(
+        isinstance(value, Mapping)
+        or (isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)))
+        or tuple(getattr(value, "shape", ())) != ()
+        for value in values
+    ):
+        raise ValueError("prior hyperparameter %s must be scalar." % name)
+    try:
+        converted = [float(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise TypeError("prior hyperparameter %s must be a real scalar." % name) from exc
+    if any(not np.isfinite(value) for value in converted):
+        raise ValueError("prior hyperparameter %s must be finite." % name)
+    if len(converted) > 1 and any(value != converted[0] for value in converted[1:]):
+        raise ValueError("prior hyperparameter aliases for %s disagree." % name)
+    value = converted[0]
+    if positive and value <= 0.0:
+        if value < 0.0 or not _improper_acknowledged(prior):
+            raise ValueError("prior hyperparameter %s must be positive." % name)
+    return value
+
+
+def dirichlet_alpha_tensor(alpha, labels, logits, engine, torch, *, prior=None):
+    """Return positive finite concentrations with scalar or exact-logit shape."""
     if alpha is None:
         alpha = 1.0
     if isinstance(alpha, Mapping):
@@ -387,6 +443,23 @@ def dirichlet_alpha_tensor(alpha, labels, logits, engine, torch):
             )
         alpha = [alpha[label] for label in labels]
     alpha_t = engine.asarray(alpha)
+    shape = tuple(getattr(alpha_t, "shape", ()))
+    logits_shape = tuple(getattr(logits, "shape", ()))
+    if shape not in ((), logits_shape):
+        raise ValueError("Dirichlet alpha has shape %s; expected scalar or exact logits shape %s." % (shape, logits_shape))
+    to_numpy = getattr(engine, "to_numpy", np.asarray)
+    host = np.asarray(to_numpy(alpha_t))
+    if host.dtype.kind == "b":
+        raise TypeError("Dirichlet concentrations must be real numbers, not booleans.")
+    try:
+        numeric = np.asarray(host, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("Dirichlet concentrations must be real numbers.") from exc
+    if not np.all(np.isfinite(numeric)):
+        raise ValueError("Dirichlet concentrations must be finite.")
+    if np.any(numeric <= 0.0):
+        if np.any(numeric < 0.0) or not _improper_acknowledged(prior):
+            raise ValueError("Dirichlet concentrations must be positive.")
     if alpha_t.ndim == 0:
         return alpha_t + torch.zeros_like(logits)
     return alpha_t
@@ -397,12 +470,13 @@ def normal_gamma_log_prior(mu, sigma2, priors, torch):
     if prior_family(priors) != "normalgamma":
         return None
     tau = 1.0 / sigma2
-    alpha = float(priors.get("alpha", priors.get("a", 1.0)))
-    beta = float(priors.get("beta", priors.get("b", 0.0)))
+    alpha = validated_prior_scalar(priors, "alpha", aliases=("a",))
+    beta = validated_prior_scalar(priors, "beta", aliases=("b",))
+    kappa = validated_prior_scalar(priors, "kappa")
+    mu0 = validated_prior_scalar(priors, "mu0", positive=False)
     lp = (alpha - 1.0) * torch.log(tau) - beta * tau
-    kappa = float(priors.get("kappa", 0.0))
     if kappa > 0.0:
-        lp = lp + 0.5 * torch.log(tau) - 0.5 * kappa * tau * (mu - float(priors.get("mu0", 0.0))) ** 2
+        lp = lp + 0.5 * torch.log(tau) - 0.5 * kappa * tau * (mu - mu0) ** 2
     return lp
 
 
@@ -447,7 +521,7 @@ class CategoricalGradientFitState:
             alpha = priors.get("alpha")
         if alpha is None:
             alpha = 1.0 + float(prior_strength) / max(1, self.logits.numel())
-        alpha_t = dirichlet_alpha_tensor(alpha, self.labels, self.logits, engine, torch)
+        alpha_t = dirichlet_alpha_tensor(alpha, self.labels, self.logits, engine, torch, prior=priors)
         return torch.sum((alpha_t - 1.0) * torch.log_softmax(self.logits, dim=0))
 
 
@@ -512,8 +586,8 @@ class OptionalGradientFitState:
         if self.logit_p is not None:
             p = torch.sigmoid(self.logit_p)
             if prior_family(missing_prior) == "beta":
-                alpha = float(missing_prior.get("alpha", 1.0))
-                beta = float(missing_prior.get("beta", 1.0))
+                alpha = validated_prior_scalar(missing_prior, "alpha")
+                beta = validated_prior_scalar(missing_prior, "beta")
                 rv = rv + (alpha - 1.0) * torch.log(p) + (beta - 1.0) * torch.log1p(-p)
             elif prior_strength != 0.0:
                 alpha = 1.0 + float(prior_strength) / 2.0
@@ -812,7 +886,14 @@ class MixtureGradientFitState:
         for child, child_prior in zip(self.components, component_priors):
             rv = rv + prior_child(child, child_prior, prior_strength, torch, engine, initial_leaves_by_id)
         if prior_family(weight_prior) == "dirichlet":
-            alpha = dirichlet_alpha_tensor(weight_prior.get("alpha"), None, self.w_logits, engine, torch)
+            alpha = dirichlet_alpha_tensor(
+                weight_prior.get("alpha"),
+                None,
+                self.w_logits,
+                engine,
+                torch,
+                prior=weight_prior,
+            )
             rv = rv + torch.sum((alpha - 1.0) * torch.log_softmax(self.w_logits, dim=0))
         elif prior_strength != 0.0:
             alpha = 1.0 + float(prior_strength) / max(1, len(self.components))
