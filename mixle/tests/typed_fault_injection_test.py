@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.experimental, pytest.mark.fast]
 
 def _runtime():
     graph = compile_update_graph(GaussianDistribution(0.0, 1.0), GaussianEstimator())
-    return BoundaryInbox(graph), RuntimeVersions(2, {"n0000": 0})
+    return BoundaryInbox(graph, run_id="run", model_id="model"), RuntimeVersions(2, {"n0000": 0})
 
 
 def _message(message_id="message", sequence=0):
@@ -35,7 +35,7 @@ def _message(message_id="message", sequence=0):
         "coordinator",
         2,
         0,
-        0,
+        (("n0000", 0),),
         sequence,
         BoundaryMessageKind.SUFFICIENT_STATISTICS,
         {"sum": np.array([1.0, 2.0])},
@@ -88,5 +88,5 @@ def test_worker_loss_blocks_other_messages_until_recovery_without_double_countin
     injector.recover("worker-a")
     retry = injector.intercept(_message(), step=2)[0]
     assert inbox.receive(retry, versions).accepted
-    assert len(inbox.as_dict()["seen_message_ids"]) == 1
+    assert len(inbox.as_dict()["seen_messages"]) == 1
     json.dumps(injector.as_dict(), allow_nan=False)
