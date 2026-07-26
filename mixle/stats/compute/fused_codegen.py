@@ -897,8 +897,26 @@ register_leaf_template(
 def _markov_chain_data(enc: Any) -> tuple[np.ndarray, ...]:
     """The chain encoding's scatter arrays: (init row idx, init state, trans row idx, from, to)."""
     _, idx0, idx1, init_x, prev_x, next_x, _, _ = enc
-    as_i8 = lambda a: np.ascontiguousarray(np.asarray(a, dtype=np.int64).reshape(-1))  # noqa: E731
-    return (as_i8(idx0), as_i8(init_x), as_i8(idx1), as_i8(prev_x), as_i8(next_x))
+
+    def as_i8(value: Any, path: str) -> np.ndarray:
+        raw = np.asarray(value)
+        if raw.ndim != 1:
+            raise ValueError("%s must be one-dimensional." % path)
+        try:
+            numeric = np.asarray(raw, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("%s must contain integer indices." % path) from exc
+        if np.any(~np.isfinite(numeric)) or np.any(np.floor(numeric) != numeric):
+            raise ValueError("%s must contain finite integer indices." % path)
+        return np.ascontiguousarray(numeric, dtype=np.int64)
+
+    return (
+        as_i8(idx0, "chain initial row indices"),
+        as_i8(init_x, "chain initial state indices"),
+        as_i8(idx1, "chain transition row indices"),
+        as_i8(prev_x, "chain previous-state indices"),
+        as_i8(next_x, "chain next-state indices"),
+    )
 
 
 def _markov_chain_tables(comps: list[Any], enc: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -1761,9 +1779,51 @@ def _component_factor_lists(model: Any, plan: FusedPlan) -> list[list[Any]]:
     return [_node_factors(model, bare_bridge=plan.bare_bridge)]  # type: ignore[list-item]
 
 
+def _fused_array(value: Any, path: str) -> np.ndarray:
+    """Return a contiguous numeric array safe to pass into generated code."""
+    try:
+        result = np.asarray(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("%s must be a numeric array." % path) from exc
+    if result.ndim == 0:
+        raise ValueError("%s must have at least one dimension." % path)
+    if result.dtype.kind not in "biuf":
+        raise TypeError("%s must have a real numeric dtype." % path)
+    return np.ascontiguousarray(result)
+
+
+def _aligned_fused_rows(current: int | None, candidate: int, path: str) -> int:
+    if candidate < 0:
+        raise ValueError("%s reports a negative row count." % path)
+    if current is not None and candidate != current:
+        raise ValueError("%s has %d rows but the fused encoding has %d." % (path, candidate, current))
+    return candidate if current is None else current
+
+
+def _validate_fused_indices(values: np.ndarray, upper: int, path: str) -> None:
+    numeric = np.asarray(values)
+    if np.any(~np.isfinite(numeric)) or np.any(np.floor(numeric) != numeric):
+        raise ValueError("%s must contain finite integer indices." % path)
+    if numeric.size and (np.any(numeric < 0) or np.any(numeric >= upper)):
+        raise ValueError("%s must lie in [0, %d)." % (path, upper))
+
+
+def _validated_fused_log_weights(model: Any, num_components: int) -> np.ndarray:
+    """Return a one-dimensional component log-weight vector with safe values."""
+    result = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
+    if result.shape != (int(num_components),):
+        raise ValueError(
+            "fused model has %d components but log_w has shape %s."
+            % (num_components, result.shape)
+        )
+    if np.any(np.isnan(result)) or np.any(np.isposinf(result)):
+        raise ValueError("fused model log weights may contain only finite values or -inf.")
+    return np.ascontiguousarray(result)
+
+
 def _data_and_params(
     model: Any, plan: FusedPlan, enc: Any, compute_dtype: Any = None
-) -> tuple[list[np.ndarray], list[np.ndarray], dict[int, tuple[int, int]]]:
+) -> tuple[list[np.ndarray], list[np.ndarray], dict[int, Any], int]:
     """Return (flattened data arrays, param arrays, tabulated-leaf context {i: (min_x, max_x)}).
 
     Tabulated leaves additionally get a data-dependent ``(K, max_x+1)`` log-pmf table appended to the param
@@ -1778,48 +1838,197 @@ def _data_and_params(
     left untouched. ``None`` keeps everything float64 (byte-identical to the legacy path).
     """
     factor_lists = _component_factor_lists(model, plan)
+    if len(factor_lists) != plan.num_components:
+        raise ValueError(
+            "fused plan expects %d components but the model exposes %d."
+            % (plan.num_components, len(factor_lists))
+        )
+    for component, factors in enumerate(factor_lists):
+        if factors is None or len(factors) != len(plan.leaf_templates):
+            count = 0 if factors is None else len(factors)
+            raise ValueError(
+                "fused component %d exposes %d factors but the plan expects %d."
+                % (component, count, len(plan.leaf_templates))
+            )
     # A Composite encodes as a per-factor tuple; a bare leaf encodes as its own payload (which may itself
     # be a tuple, e.g. Poisson's (x, lgamma(x+1))) -- so key on the structure, not isinstance(enc, tuple).
-    factor_encs = enc if plan.component_is_composite else (enc,)
+    if plan.component_is_composite:
+        if not isinstance(enc, (tuple, list)):
+            raise TypeError("fused composite encoding must be a sequence with one payload per factor.")
+        factor_encs = tuple(enc)
+    else:
+        factor_encs = (enc,)
+    if len(factor_encs) != len(plan.leaf_templates):
+        raise ValueError(
+            "fused encoding has %d factor payloads but the plan expects %d."
+            % (len(factor_encs), len(plan.leaf_templates))
+        )
     data_arrays: list[np.ndarray] = []
     param_arrays: list[np.ndarray] = []
-    tab_ctx: dict[int, tuple[int, int]] = {}
+    tab_ctx: dict[int, Any] = {}
     n_rows: int | None = None  # chain data arrays are transition-length, so rows come from another source
     for i, t in enumerate(plan.leaf_templates):
-        arrs = t.data(factor_encs[i])
+        try:
+            raw_arrays = t.data(factor_encs[i])
+        except (IndexError, TypeError, ValueError) as exc:
+            raise ValueError("fused factor %d (%s) has an invalid encoded payload: %s" % (i, t.name, exc)) from exc
+        if not isinstance(raw_arrays, (tuple, list)) or len(raw_arrays) != t.arity:
+            count = len(raw_arrays) if isinstance(raw_arrays, (tuple, list)) else -1
+            raise ValueError(
+                "fused factor %d (%s) produced %d data arrays but its arity is %d."
+                % (i, t.name, count, t.arity)
+            )
+        arrs = tuple(_fused_array(value, "fused factor %d (%s) data[%d]" % (i, t.name, j)) for j, value in enumerate(raw_arrays))
+        if t.kind in ("scalar", "tabulated", "categorical") and any(array.ndim != 1 for array in arrs):
+            raise ValueError("fused factor %d (%s) requires one-dimensional data arrays." % (i, t.name))
+        if t.kind in ("vector", "matrix") and (
+            len(arrs) != 1 or arrs[0].ndim != 2
+        ):
+            raise ValueError("fused factor %d (%s) requires one two-dimensional data array." % (i, t.name))
+        if t.kind == "chain" and any(array.ndim != 1 for array in arrs):
+            raise ValueError("fused factor %d (%s) requires one-dimensional scatter arrays." % (i, t.name))
         data_arrays.extend(arrs)  # arity arrays, flattened in leaf order
-        comps_i = [factor_lists[k][i] for k in range(plan.num_components)]
-        pdict = t.params(comps_i)
-        param_arrays.extend(np.ascontiguousarray(pdict[pn]) for pn in sorted(pdict.keys()))
+        if t.kind == "chain":
+            chain_enc = factor_encs[i]
+            if not isinstance(chain_enc, (tuple, list)) or len(chain_enc) != 8:
+                raise ValueError("fused chain encoding must contain exactly eight fields.")
+            chain_count = chain_enc[0]
+            if (
+                isinstance(chain_count, (bool, np.bool_))
+                or not np.isscalar(chain_count)
+                or not np.isfinite(chain_count)
+                or int(chain_count) != chain_count
+                or int(chain_count) < 0
+            ):
+                raise ValueError("fused chain row count must be a non-negative integer.")
+            n_rows = _aligned_fused_rows(n_rows, int(chain_count), "fused factor %d (%s)" % (i, t.name))
+            if len(arrs[0]) != len(arrs[1]):
+                raise ValueError("fused chain initial row and state arrays must have equal lengths.")
+            if not (len(arrs[2]) == len(arrs[3]) == len(arrs[4])):
+                raise ValueError("fused chain transition row/from/to arrays must have equal lengths.")
+            _validate_fused_indices(arrs[0], int(chain_count), "fused chain initial row indices")
+            _validate_fused_indices(arrs[2], int(chain_count), "fused chain transition row indices")
+            state_count = len(chain_enc[6])
+            _validate_fused_indices(arrs[1], state_count, "fused chain initial state indices")
+            _validate_fused_indices(arrs[3], state_count, "fused chain previous-state indices")
+            _validate_fused_indices(arrs[4], state_count, "fused chain next-state indices")
+        else:
+            for j, array in enumerate(arrs):
+                n_rows = _aligned_fused_rows(
+                    n_rows,
+                    int(array.shape[0]),
+                    "fused factor %d (%s) data[%d]" % (i, t.name, j),
+                )
+
+        comps_i = [factor_lists[k][i] for k in range(plan.num_components)]  # type: ignore[index]
+        try:
+            pdict = t.params(comps_i)
+        except (IndexError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "fused factor %d (%s) has incompatible component parameter geometry: %s"
+                % (i, t.name, exc)
+            ) from exc
+        if not isinstance(pdict, dict) or any(not isinstance(name, str) or not name.isidentifier() for name in pdict):
+            raise TypeError("fused factor %d (%s) params must be a mapping with identifier keys." % (i, t.name))
+        factor_params = []
+        for name in sorted(pdict):
+            parameter = _fused_array(pdict[name], "fused factor %d (%s) parameter %s" % (i, t.name, name))
+            if parameter.shape[0] != plan.num_components:
+                raise ValueError(
+                    "fused factor %d (%s) parameter %s has component width %d; expected %d."
+                    % (i, t.name, name, parameter.shape[0], plan.num_components)
+                )
+            factor_params.append(parameter)
+        if t.kind in ("vector", "matrix"):
+            dimension = int(arrs[0].shape[1])
+            for parameter in factor_params:
+                if parameter.ndim >= 2 and parameter.shape[1] != dimension:
+                    raise ValueError(
+                        "fused factor %d (%s) parameter shape %s is incompatible with data dimension %d."
+                        % (i, t.name, parameter.shape, dimension)
+                    )
+                if t.kind == "matrix" and parameter.ndim == 3 and parameter.shape[2] != dimension:
+                    raise ValueError(
+                        "fused factor %d (%s) matrix parameter shape %s is incompatible with data dimension %d."
+                        % (i, t.name, parameter.shape, dimension)
+                    )
+        param_arrays.extend(factor_params)
         if t.kind == "bridge":
-            cols = [np.asarray(c.seq_log_density(factor_encs[i]), dtype=np.float64) for c in comps_i]
+            cols = []
+            for component, distribution in enumerate(comps_i):
+                column = _fused_array(
+                    distribution.seq_log_density(factor_encs[i]),
+                    "fused bridge factor %d component %d scores" % (i, component),
+                )
+                if column.ndim != 1:
+                    raise ValueError("fused bridge score columns must be one-dimensional.")
+                n_rows = _aligned_fused_rows(
+                    n_rows,
+                    int(column.shape[0]),
+                    "fused bridge factor %d component %d" % (i, component),
+                )
+                cols.append(np.asarray(column, dtype=np.float64))
             table = np.ascontiguousarray(np.stack(cols, axis=1))  # (n, K)
-            if n_rows is None:
-                n_rows = int(table.shape[0])
+            if table.shape != (int(n_rows), plan.num_components):
+                raise ValueError(
+                    "fused bridge table has shape %s; expected (%d, %d)."
+                    % (table.shape, n_rows, plan.num_components)
+                )
             param_arrays.append(table)
             tab_ctx[i] = (factor_encs[i], 0)  # the factor's own encoding, for the wrapper's native updates
         if t.kind == "chain":
-            if n_rows is None:
-                n_rows = int(factor_encs[i][0])  # the chain encoding carries the row count directly
             init_table, trans_table = t.chain_tables(comps_i, factor_encs[i])  # type: ignore[misc]
-            param_arrays.append(np.ascontiguousarray(init_table))
-            param_arrays.append(np.ascontiguousarray(trans_table))
-            tab_ctx[i] = (factor_encs[i], init_table.shape[1])  # (encoding for to_value, S states)
-        elif n_rows is None:
-            n_rows = int(arrs[0].shape[0])
+            init_table = _fused_array(init_table, "fused chain initial table")
+            trans_table = _fused_array(trans_table, "fused chain transition table")
+            state_width = max(len(factor_encs[i][6]), 1)
+            if init_table.shape != (plan.num_components, state_width):
+                raise ValueError(
+                    "fused chain initial table has shape %s; expected (%d, %d)."
+                    % (init_table.shape, plan.num_components, state_width)
+                )
+            if trans_table.shape != (plan.num_components, state_width, state_width):
+                raise ValueError(
+                    "fused chain transition table has shape %s; expected (%d, %d, %d)."
+                    % (trans_table.shape, plan.num_components, state_width, state_width)
+                )
+            param_arrays.extend((init_table, trans_table))
+            tab_ctx[i] = (factor_encs[i], state_width)  # (encoding for to_value, S states)
         if t.kind == "tabulated":
             x = arrs[0]
+            if np.any(~np.isfinite(x)) or np.any(np.floor(x) != x) or np.any(x < 0):
+                raise ValueError("fused tabulated factor %d (%s) requires finite non-negative integer data." % (i, t.name))
             mx = int(np.rint(x.max())) if x.size else 0
             mn = int(np.rint(x.min())) if x.size else 0
-            param_arrays.append(np.ascontiguousarray(t.tab_table(comps_i, mx)))  # type: ignore[misc]
+            table = _fused_array(t.tab_table(comps_i, mx), "fused factor %d (%s) table" % (i, t.name))  # type: ignore[misc]
+            if table.shape != (plan.num_components, mx + 1):
+                raise ValueError(
+                    "fused factor %d (%s) table has shape %s; expected (%d, %d)."
+                    % (i, t.name, table.shape, plan.num_components, mx + 1)
+                )
+            param_arrays.append(table)
             tab_ctx[i] = (mn, mx)
         elif t.wants_minmax:
             x = arrs[0]
             tab_ctx[i] = (float(x.min()) if x.size else 0.0, float(x.max()) if x.size else 0.0)
         elif t.kind == "categorical":
-            table = np.ascontiguousarray(t.cat_table(comps_i, factor_encs[i]))  # type: ignore[misc]
+            table = _fused_array(
+                t.cat_table(comps_i, factor_encs[i]),  # type: ignore[misc]
+                "fused factor %d (%s) category table" % (i, t.name),
+            )
+            if table.ndim != 2 or table.shape[0] != plan.num_components:
+                raise ValueError(
+                    "fused factor %d (%s) category table must have shape (%d, C), got %s."
+                    % (i, t.name, plan.num_components, table.shape)
+                )
+            _validate_fused_indices(
+                arrs[0],
+                table.shape[1],
+                "fused factor %d (%s) category indices" % (i, t.name),
+            )
             param_arrays.append(table)
             tab_ctx[i] = (factor_encs[i], table.shape[1])  # (encoding for to_value, C for histogram width)
+    if n_rows is None:
+        raise ValueError("fused encoding does not expose an observation row count.")
     if compute_dtype is not None and np.dtype(compute_dtype) != np.float64:
         if np.dtype(compute_dtype) != np.float32:
             raise ValueError(
@@ -1876,7 +2085,7 @@ def fused_seq_log_density(
         if plan is None:
             raise ValueError("%s is not fusible on any path (template, nested, bridge)." % type(model).__name__)
     data_arrays, param_arrays, _, n = _data_and_params(model, plan, enc, compute_dtype)
-    logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
+    logw = _validated_fused_log_weights(model, plan.num_components)
     out = np.empty(n, dtype=np.float64)
     if parallel is None:
         parallel = _auto_parallel(n)
@@ -2039,7 +2248,7 @@ def fused_accumulate(
             acc_arrays.extend(ad.values())
         offset += t.arity
 
-    logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
+    logw = _validated_fused_log_weights(model, K)
     bridge_R = [np.empty((n, K), dtype=np.float64)] if plan.has_bridge else []
     if parallel:
         comp_counts = np.zeros((nc, K), dtype=np.float64)
