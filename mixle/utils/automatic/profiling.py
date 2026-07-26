@@ -355,7 +355,10 @@ def _entropy_from_counts(counts: Sequence[float]) -> float:
 def _gaussian_bits(var: float) -> float | None:
     if var <= 0.0 or not math.isfinite(var):
         return None
-    return max(0.0, 0.5 * math.log(2.0 * math.pi * math.e * var, 2.0))
+    # Differential code lengths may legitimately be negative when a density is
+    # concentrated enough to exceed one. Preserve that scale just as every
+    # competing continuous family does.
+    return 0.5 * math.log(2.0 * math.pi * math.e * var, 2.0)
 
 
 def _bic_penalty_bits(num_params: int, nobs: int) -> float:

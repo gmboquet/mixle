@@ -10,7 +10,7 @@ import unittest
 import numpy as np
 
 from mixle.utils.automatic import analyze_structure
-from mixle.utils.automatic.profiling import AMBIGUOUS_SCORE_GAP_BITS, MarginalFieldProfile
+from mixle.utils.automatic.profiling import AMBIGUOUS_SCORE_GAP_BITS, MarginalFieldProfile, _gaussian_bits
 
 
 def _profile(recommendation, validation_recommendation=None, validation_score_gap_bits=None):
@@ -29,6 +29,12 @@ def _profile(recommendation, validation_recommendation=None, validation_score_ga
 
 
 class RobustRecommendationUnitTest(unittest.TestCase):
+    def test_gaussian_differential_code_length_is_not_clipped(self):
+        variance = 1.0e-6
+        expected = 0.5 * np.log2(2.0 * np.pi * np.e * variance)
+        self.assertAlmostEqual(_gaussian_bits(variance), expected)
+        self.assertLess(_gaussian_bits(variance), 0.0)
+
     def test_no_validation_evidence_keeps_the_marginal_recommendation(self):
         p = _profile("gaussian")
         self.assertEqual(p.robust_recommendation(), "gaussian")
