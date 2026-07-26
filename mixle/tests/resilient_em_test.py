@@ -60,6 +60,28 @@ class ChaosDeterminismTestCase(unittest.TestCase):
         # the determinism receipt: exact equality, not just close
         self.assertEqual(_model_signature(model_chaos), _model_signature(model_ref))
 
+    def test_simultaneous_failures_are_recovered_only_on_known_survivors(self):
+        with ResilientMPEncodedData(self.data, estimator=self.est, num_workers=4) as ref_enc:
+            model_ref = ref_enc.pysp_seq_estimate(self.est, self.m_start)
+
+        killed: set[int] = set()
+
+        def hook(worker_id, proc):
+            if worker_id in {1, 2}:
+                killed.add(worker_id)
+                proc.kill()
+                proc.join(timeout=5)
+
+        with ResilientMPEncodedData(self.data, estimator=self.est, num_workers=4) as chaos_enc:
+            chaos_enc.arm_kill(hook)
+            model_chaos = chaos_enc.pysp_seq_estimate(self.est, self.m_start)
+            self.assertEqual(killed, {1, 2})
+            self.assertEqual(chaos_enc.last_round_failed_workers, {1, 2})
+            self.assertEqual(chaos_enc.last_round_recomputed_shards, {1, 2})
+            self.assertEqual(chaos_enc.last_round_reused_shards, {0, 3})
+
+        self.assertEqual(_model_signature(model_chaos), _model_signature(model_ref))
+
     def test_full_fit_resumes_and_reaches_bit_identical_result(self):
         """Run a REAL multi-iteration fit via optimize(); kill one worker on the very first
         E-step. The fit must complete and land on the exact same model as a failure-free

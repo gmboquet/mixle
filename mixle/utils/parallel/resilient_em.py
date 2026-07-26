@@ -444,16 +444,25 @@ class ResilientMPEncodedData(EncodedDataHandle):
 
         recomputed_shards: set[int] = set()
         blacklisted_now: set[int] = set()
+        failed_assignments: dict[int, set[int]] = {}
+
+        # Retire the complete failed set before choosing any recovery target. Otherwise a
+        # worker already known to have failed later in this same round remains in _conns and
+        # can be selected to recover an earlier worker's shard.
         for w in sorted(failed):
             self._failures[w] = self._failures.get(w, 0) + 1
-            shard_ids = self._worker_shards.pop(w, set())
+            failed_assignments[w] = self._worker_shards.pop(w, set())
             self._retire_worker(w)
 
+        for w in sorted(failed):
+            shard_ids = failed_assignments[w]
             for sid in shard_ids:
                 payload = self._recover_shard(estimator_b, model_b, sid)
                 groups.append((sid, payload))
                 recomputed_shards.add(sid)
 
+        for w in sorted(failed):
+            shard_ids = failed_assignments[w]
             if self._failures[w] >= self.max_retries:
                 self._blacklist.add(w)
                 blacklisted_now.add(w)
