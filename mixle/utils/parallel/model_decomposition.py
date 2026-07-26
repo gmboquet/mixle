@@ -214,7 +214,12 @@ def tree_axes(model: Any) -> list[AxisCandidate]:
     return out
 
 
-def best_parallel_axis(model: Any, max_workers: int | None = None) -> AxisCandidate | None:
+def best_parallel_axis(
+    model: Any,
+    max_workers: int | None = None,
+    *,
+    allowed_axes: frozenset[DecompAxis] | None = None,
+) -> AxisCandidate | None:
     """Pick the axis whose parallelization removes the most serial wall-time (heaviest, parallelizable).
 
     Benefit of cutting an axis with P available workers is ``total_work * (1 - 1/min(P, num_units))`` --
@@ -222,7 +227,7 @@ def best_parallel_axis(model: Any, max_workers: int | None = None) -> AxisCandid
     looks at the WHOLE tree, so a heavy mixture nested inside a thin composite is found (the root-only
     planner missed it). Returns ``None`` when nothing in the tree is worth splitting.
     """
-    candidates = tree_axes(model)
+    candidates = [candidate for candidate in tree_axes(model) if allowed_axes is None or candidate.axis in allowed_axes]
     if not candidates:
         return None
 
@@ -297,6 +302,7 @@ def decompose_model(
     n_data: int | None = None,
     min_components_per_shard: int = 1,
     prefer_data_parallel: bool = True,
+    allowed_axes: frozenset[DecompAxis] | None = None,
 ) -> ModelDecomposition:
     """Decide how to place ``model`` across ``resources`` for model parallelism.
 
@@ -308,7 +314,7 @@ def decompose_model(
     reduction.
     """
     devices = tuple(resources.devices)
-    best = best_parallel_axis(model, max_workers=len(devices))
+    best = best_parallel_axis(model, max_workers=len(devices), allowed_axes=allowed_axes)
     if best is None or len(devices) < 2:
         return ModelDecomposition(
             DecompAxis.NONE,

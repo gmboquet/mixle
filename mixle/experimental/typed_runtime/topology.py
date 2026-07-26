@@ -12,8 +12,9 @@ import numpy as np
 
 from mixle.experimental.typed_runtime.contracts import ConsistencyRequirement, MergeLaw, UpdateKind
 from mixle.experimental.typed_runtime.graph import UpdateGraph
+from mixle.experimental.typed_runtime.proposal import payload_fingerprint
 from mixle.stats.compute.decomposition import DecompAxis, ReductionOp
-from mixle.utils.parallel.model_decomposition import decompose_model
+from mixle.utils.parallel.model_decomposition import decompose_model, size_model_tree
 from mixle.utils.parallel.planner import DeviceSpec, Resources
 
 
@@ -258,6 +259,7 @@ class StructuredShard:
     stop: int
     reduction: str
     exact: bool
+    required_memory_bytes: int
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible shard placement."""
@@ -272,6 +274,7 @@ class StructuredShard:
             "stop": self.stop,
             "reduction": self.reduction,
             "exact": self.exact,
+            "required_memory_bytes": self.required_memory_bytes,
         }
 
 
@@ -305,6 +308,14 @@ class StructuredPlacementPlan:
 
     primary_island: str
     placements: tuple[NodePlacement, ...]
+    graph_fingerprint: str
+    topology_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not self.primary_island or not self.graph_fingerprint or not self.topology_fingerprint:
+            raise ValueError("structured placement identity must be complete.")
+        if len({row.node_id for row in self.placements}) != len(self.placements):
+            raise ValueError("structured placement may contain each node exactly once.")
 
     def placement(self, node_id: str) -> NodePlacement:
         """Return placement metadata for one node."""
@@ -316,6 +327,8 @@ class StructuredPlacementPlan:
 
         return {
             "primary_island": self.primary_island,
+            "graph_fingerprint": self.graph_fingerprint,
+            "topology_fingerprint": self.topology_fingerprint,
             "placements": [placement.as_dict() for placement in self.placements],
         }
 
@@ -339,6 +352,11 @@ def plan_structured_placement(
             scope = PlacementScope.LOCAL
         elif contract.consistency is ConsistencyRequirement.LOCAL_ONLY:
             scope = PlacementScope.LOCAL
+        elif replicas and contract.consistency in (
+            ConsistencyRequirement.BOUNDED_STALE,
+            ConsistencyRequirement.CORRECTED_EVENTUAL,
+        ):
+            scope = PlacementScope.CROSS_ISLAND_PROPOSAL
         elif len(resources.devices) > 1:
             scope = PlacementScope.INTRA_ISLAND_SYNCHRONOUS
         else:
@@ -346,16 +364,47 @@ def plan_structured_placement(
 
         shards: tuple[StructuredShard, ...] = ()
         rationale = "atomic typed node on primary island"
+        required_memory = size_model_tree(node.model).subtree_param_bytes
         if contract.decomposition_axes:
             if contract.merge_law in (MergeLaw.NON_MERGEABLE, MergeLaw.REPLICATED):
                 raise ValueError("node %s declares sharding without a merge law." % node_id)
+            try:
+                allowed_axes = frozenset(DecompAxis(axis) for axis in contract.decomposition_axes)
+            except ValueError as error:
+                raise ValueError("node %s declares an unsupported decomposition axis." % node_id) from error
             decomposition = decompose_model(
                 node.model,
                 resources,
                 n_data=n_data,
                 prefer_data_parallel=False,
+                allowed_axes=allowed_axes,
             )
             if decomposition.axis is not DecompAxis.NONE:
+                compatible_reductions = {
+                    MergeLaw.ADDITIVE: {ReductionOp.SUM},
+                    MergeLaw.ASSOCIATIVE_MONOID: {
+                        ReductionOp.SUM,
+                        ReductionOp.LOGSUMEXP_RESPONSIBILITY,
+                    },
+                    MergeLaw.INVERTIBLE_GROUP: {ReductionOp.SUM},
+                    MergeLaw.WEIGHTED_SKETCH: {ReductionOp.SUM},
+                    MergeLaw.LOW_RANK: {ReductionOp.SUM},
+                }
+                if decomposition.reduction not in compatible_reductions.get(contract.merge_law, set()):
+                    raise ValueError("node %s decomposition reduction is not admitted by its merge law." % node_id)
+                for cut in decomposition.cuts:
+                    if cut.device.memory_bytes is None:
+                        raise ValueError("node %s cannot verify capacity for device %s." % (node_id, cut.device.name))
+                    if required_memory > cut.device.memory_bytes:
+                        raise MemoryError(
+                            "node %s requires %d bytes but device %s declares %d."
+                            % (
+                                node_id,
+                                required_memory,
+                                cut.device.name,
+                                cut.device.memory_bytes,
+                            )
+                        )
                 shards = tuple(
                     StructuredShard(
                         shard_id="%s:%d" % (node_id, index),
@@ -367,12 +416,23 @@ def plan_structured_placement(
                         stop=cut.stop,
                         reduction=cut.reduction.value,
                         exact=contract.exact,
+                        required_memory_bytes=required_memory,
                     )
                     for index, cut in enumerate(decomposition.cuts)
                 )
                 rationale = decomposition.rationale
         if not shards:
-            device = topology.devices_in(primary)[0]
+            eligible_devices = tuple(
+                device
+                for device in topology.devices_in(primary)
+                if device.spec.memory_bytes is not None and required_memory <= device.spec.memory_bytes
+            )
+            if not eligible_devices:
+                raise MemoryError("node %s has no primary-island device with verified memory capacity." % node_id)
+            device = max(
+                eligible_devices,
+                key=lambda row: (row.spec.throughput, row.spec.memory_bytes or 0, row.device_id),
+            )
             shards = (
                 StructuredShard(
                     "%s:0" % node_id,
@@ -384,6 +444,7 @@ def plan_structured_placement(
                     1,
                     ReductionOp.REPLICATE.value,
                     contract.exact,
+                    required_memory,
                 ),
             )
         placements.append(
@@ -391,12 +452,17 @@ def plan_structured_placement(
                 node_id,
                 scope,
                 primary,
-                replicas if contract.consistency is not ConsistencyRequirement.LOCAL_ONLY else (),
+                replicas if scope is PlacementScope.CROSS_ISLAND_PROPOSAL else (),
                 shards,
                 rationale,
             )
         )
-    return StructuredPlacementPlan(primary, tuple(placements))
+    return StructuredPlacementPlan(
+        primary,
+        tuple(placements),
+        payload_fingerprint(graph.as_dict()),
+        payload_fingerprint(topology.as_dict()),
+    )
 
 
 __all__ = [

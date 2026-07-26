@@ -13,11 +13,12 @@ from mixle.experimental.typed_runtime.measurement import WorkMeasurement
 from mixle.experimental.typed_runtime.proposal import payload_fingerprint
 from mixle.experimental.typed_runtime.topology import (
     ClusterTopology,
+    PlacementScope,
     StructuredPlacementPlan,
     plan_structured_placement,
 )
 from mixle.stats.compute.pdist import ParameterEstimator, ProbabilityDistribution
-from mixle.utils.parallel.model_parallel import _parallel_ids, model_parallel_fold
+from mixle.utils.parallel.model_parallel import model_parallel_fold
 from mixle.utils.parallel.planner import _global_key_merge
 
 
@@ -28,6 +29,8 @@ class StructuredEstimationReceipt:
     placement: StructuredPlacementPlan
     observations: float
     num_workers: int
+    worker_device_ids: tuple[str, ...]
+    execution_backend: str
     parallel_node_ids: tuple[str, ...]
     parallel_statistics_hash: str
     reference_statistics_hash: str | None
@@ -44,6 +47,8 @@ class StructuredEstimationReceipt:
             "placement": self.placement.as_dict(),
             "observations": self.observations,
             "num_workers": self.num_workers,
+            "worker_device_ids": list(self.worker_device_ids),
+            "execution_backend": self.execution_backend,
             "parallel_node_ids": list(self.parallel_node_ids),
             "parallel_statistics_hash": self.parallel_statistics_hash,
             "reference_statistics_hash": self.reference_statistics_hash,
@@ -86,7 +91,9 @@ def _encoded_payload_and_size(encoded_data: Any, weights: np.ndarray | None) -> 
 
 def _model_hash(model: ProbabilityDistribution) -> str:
     to_json = getattr(model, "to_json", None)
-    return payload_fingerprint(to_json() if callable(to_json) else str(model))
+    if not callable(to_json):
+        raise TypeError("structured model hashing requires deterministic to_json().")
+    return payload_fingerprint(to_json())
 
 
 def run_structured_estimation_step(
@@ -104,13 +111,56 @@ def run_structured_estimation_step(
     payload, weights, nobs = _encoded_payload_and_size(encoded_data, weights)
     graph = compile_update_graph(model, estimator, nobs=nobs)
     placement = plan_structured_placement(graph, topology, n_data=int(len(weights)))
-    worker_count = num_workers or len(topology.devices_in(placement.primary_island))
-    if worker_count < 1:
+    if num_workers is not None and num_workers < 1:
         raise ValueError("num_workers must be positive.")
+    if any(row.scope is PlacementScope.CROSS_ISLAND_PROPOSAL for row in placement.placements):
+        raise NotImplementedError("the local structured executor cannot execute cross-island proposal placement.")
+    planned_parallel = tuple(row for row in placement.placements if any(shard.axis != "none" for shard in row.shards))
+    unsupported_axes = sorted(
+        {shard.axis for row in planned_parallel for shard in row.shards if shard.axis not in {"component", "factor"}}
+    )
+    if unsupported_axes:
+        raise NotImplementedError(
+            "the local structured executor does not implement planned axes: %s." % ", ".join(unsupported_axes)
+        )
+    worker_capacity = (
+        min(len({shard.device_id for shard in row.shards}) for row in planned_parallel) if planned_parallel else 1
+    )
+    worker_count = worker_capacity if num_workers is None else num_workers
+    if worker_count > worker_capacity:
+        raise ValueError("num_workers=%d exceeds the enforced placement capacity %d." % (worker_count, worker_capacity))
+    parallel_node_ids = tuple(row.node_id for row in planned_parallel)
+    parallel_model_ids = frozenset(id(graph.node(node_id).model) for node_id in parallel_node_ids)
+    worker_devices = tuple(
+        sorted(
+            {
+                shard.device_id
+                for row in (planned_parallel if planned_parallel else (placement.placement(graph.root_node),))
+                for shard in row.shards
+            }
+        )
+    )[:worker_count]
+    topology_devices = {device.device_id: device for device in topology.devices}
+    if any(
+        topology_devices[device_id].spec.kind != "cpu"
+        or topology_devices[device_id].spec.engine != "numpy"
+        or topology_devices[device_id].provider != "local"
+        for device_id in worker_devices
+    ):
+        raise NotImplementedError("the local structured executor supports only declared local numpy CPU worker slots.")
+    if len({topology_devices[device_id].host for device_id in worker_devices}) != 1:
+        raise ValueError("local structured worker slots must belong to one declared host.")
 
     parallel_accumulator = estimator.accumulator_factory().make()
     started = time.perf_counter()
-    model_parallel_fold(parallel_accumulator, model, payload, weights, worker_count)
+    model_parallel_fold(
+        parallel_accumulator,
+        model,
+        payload,
+        weights,
+        worker_count,
+        parallel_ids=parallel_model_ids,
+    )
     _global_key_merge(parallel_accumulator)
     parallel_statistics = parallel_accumulator.value()
     parallel_model = estimator.estimate(nobs, parallel_statistics)
@@ -136,13 +186,13 @@ def run_structured_estimation_step(
         if graph.node(graph.root_node).contract.exact and not parity:
             raise RuntimeError("exact structured estimation did not match the serial reference.")
 
-    selected_ids = _parallel_ids(model, worker_count)
-    parallel_nodes = tuple(node.node_id for node in graph.nodes if id(node.model) in selected_ids)
     receipt = StructuredEstimationReceipt(
         placement=placement,
         observations=nobs,
         num_workers=worker_count,
-        parallel_node_ids=parallel_nodes,
+        worker_device_ids=worker_devices,
+        execution_backend="local_numpy_thread_pool",
+        parallel_node_ids=parallel_node_ids,
         parallel_statistics_hash=parallel_statistics_hash,
         reference_statistics_hash=reference_statistics_hash,
         parallel_model_hash=parallel_model_hash,
@@ -156,7 +206,12 @@ def run_structured_estimation_step(
             compute_units=graph.node(graph.root_node).cost.compute_units,
             observations=nobs,
             operation_count=1,
-            extra={"num_workers": worker_count, "parallel_node_ids": list(parallel_nodes)},
+            extra={
+                "num_workers": worker_count,
+                "worker_device_ids": list(worker_devices),
+                "parallel_node_ids": list(parallel_node_ids),
+                "placement_enforced": True,
+            },
         ),
         reference_seconds=reference_seconds,
     )

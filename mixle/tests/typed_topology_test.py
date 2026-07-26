@@ -1,15 +1,19 @@
 """Measured topology and structured placement tests."""
 
 import json
+from dataclasses import replace
 
 import pytest
 
 from mixle.experimental.typed_runtime import (
     ClusterTopology,
+    ConsistencyRequirement,
     LinkProfile,
+    MergeLaw,
     PlacementScope,
     TopologyDevice,
     TransferSample,
+    UpdateGraph,
     calibrate_links,
     compile_update_graph,
     plan_structured_placement,
@@ -20,14 +24,14 @@ from mixle.utils.parallel.planner import DeviceSpec
 pytestmark = [pytest.mark.experimental, pytest.mark.fast]
 
 
-def _device(device_id, island, throughput):
+def _device(device_id, island, throughput, *, memory_bytes=8_000_000_000):
     return TopologyDevice(
         device_id,
         host="host-%s" % device_id,
         island=island,
         provider="provider",
         region="region",
-        spec=DeviceSpec(device_id, kind="gpu", memory_bytes=8_000_000_000, throughput=throughput),
+        spec=DeviceSpec(device_id, kind="gpu", memory_bytes=memory_bytes, throughput=throughput),
     )
 
 
@@ -80,7 +84,7 @@ def test_shortest_transfer_route_can_use_an_intermediate_device():
     assert unreachable.seconds == float("inf")
 
 
-def test_component_shards_stay_in_fast_island_and_cross_islands_are_replicas():
+def test_strict_component_shards_stay_in_fast_island_without_cross_island_claims():
     model = MixtureDistribution(
         [GaussianDistribution(float(index), 1.0) for index in range(4)],
         [0.25] * 4,
@@ -92,7 +96,7 @@ def test_component_shards_stay_in_fast_island_and_cross_islands_are_replicas():
 
     assert plan.primary_island == "island-a"
     assert root.scope is PlacementScope.INTRA_ISLAND_SYNCHRONOUS
-    assert root.replica_islands == ("island-b",)
+    assert root.replica_islands == ()
     assert len(root.shards) == 2
     assert {shard.device_id for shard in root.shards} == {"a0", "a1"}
     assert {shard.axis for shard in root.shards} == {"component"}
@@ -101,3 +105,53 @@ def test_component_shards_stay_in_fast_island_and_cross_islands_are_replicas():
     assert all(shard.island == "island-a" for placement in plan.placements for shard in placement.shards)
     json.dumps(plan.as_dict(), allow_nan=False)
     json.dumps(_topology().as_dict(), allow_nan=False)
+
+
+def _replace_root_contract(graph, **changes):
+    nodes = tuple(
+        replace(node, contract=replace(node.contract, **changes)) if node.node_id == graph.root_node else node
+        for node in graph.nodes
+    )
+    return UpdateGraph(nodes, graph.edges, graph.root_node, graph.compiler_version)
+
+
+def test_only_declared_axes_and_merge_reductions_can_be_planned():
+    model = MixtureDistribution(
+        [GaussianDistribution(float(index), 1.0) for index in range(4)],
+        [0.25] * 4,
+    )
+    graph = compile_update_graph(model, MixtureEstimator([GaussianEstimator() for _ in range(4)]))
+    undeclared = _replace_root_contract(graph, decomposition_axes=("factor",))
+    assert {
+        shard.axis
+        for shard in plan_structured_placement(undeclared, _topology(), n_data=10).placement(graph.root_node).shards
+    } == {"none"}
+
+    incompatible = _replace_root_contract(graph, merge_law=MergeLaw.ADDITIVE)
+    with pytest.raises(ValueError, match="not admitted"):
+        plan_structured_placement(incompatible, _topology(), n_data=10)
+
+
+def test_cross_island_scope_is_used_only_for_proposal_consistency():
+    model = MixtureDistribution(
+        [GaussianDistribution(float(index), 1.0) for index in range(4)],
+        [0.25] * 4,
+    )
+    graph = compile_update_graph(model, MixtureEstimator([GaussianEstimator() for _ in range(4)]))
+    eventual = _replace_root_contract(
+        graph,
+        consistency=ConsistencyRequirement.BOUNDED_STALE,
+    )
+    placement = plan_structured_placement(eventual, _topology(), n_data=10).placement(graph.root_node)
+    assert placement.scope is PlacementScope.CROSS_ISLAND_PROPOSAL
+    assert placement.replica_islands == ("island-b",)
+
+
+def test_atomic_placement_rejects_unverified_or_insufficient_memory():
+    graph = compile_update_graph(GaussianDistribution(0.0, 1.0), GaussianEstimator())
+    unknown = ClusterTopology(
+        (_device("x", "i", 1.0, memory_bytes=None),),
+        (),
+    )
+    with pytest.raises(MemoryError, match="verified memory"):
+        plan_structured_placement(graph, unknown)
