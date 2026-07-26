@@ -36,10 +36,23 @@ class GenerativeTextIO:
     kind = "generative_text"
 
     def __init__(self, labels: list[str], vocab: list[str], log_prior: list[float]) -> None:
-        self.labels = list(labels)
-        self.vocab = set(vocab)
-        self._vocab_list = list(vocab)
+        self.labels = [str(label) for label in labels]
+        self._vocab_list = [str(token) for token in vocab]
         self.log_prior = [float(v) for v in log_prior]
+        if not self.labels or any(not label for label in self.labels) or len(set(self.labels)) != len(self.labels):
+            raise ValueError("generative text labels must be nonempty and unique")
+        if (
+            not self._vocab_list
+            or _UNK not in self._vocab_list
+            or len(set(self._vocab_list)) != len(self._vocab_list)
+        ):
+            raise ValueError("generative text vocabulary must be unique and include '<unk>'")
+        if len(self.log_prior) != len(self.labels) or not np.all(np.isfinite(self.log_prior)):
+            raise ValueError("generative text log priors must be finite and aligned with labels")
+        prior_mass = float(np.exp(self.log_prior).sum())
+        if not np.isfinite(prior_mass) or not np.isclose(prior_mass, 1.0, atol=1e-10):
+            raise ValueError("generative text class priors must sum to one")
+        self.vocab = set(self._vocab_list)
 
     def _tokens(self, text: str) -> list[str]:
         toks = [w.lower() for w, _s, _e in tokenize(str(text))]
@@ -54,18 +67,27 @@ class GenerativeTextIO:
         doc = np.repeat(np.arange(len(rows)), [len(r) for r in rows])
         out = np.empty((len(rows), len(self.labels)), dtype=np.float64)
         for k, label in enumerate(self.labels):
+            if label not in model:
+                raise ValueError(f"generative text model is missing class {label!r}")
             dist = model[label]
             tok_logs = np.asarray(dist.seq_log_density(dist.dist_to_encoder().seq_encode(flat)), dtype=np.float64)
+            if tok_logs.shape != (len(flat),) or not np.all(np.isfinite(tok_logs)):
+                raise ValueError(f"generative text class {label!r} returned invalid token scores")
             out[:, k] = np.bincount(doc, weights=tok_logs, minlength=len(rows)) + self.log_prior[k]
         return out
 
     def proba_batch(self, model: Any, raw_inputs: list[Any]) -> np.ndarray:
         """The exact class posterior (softmax of log-joints; the shared evidence cancels)."""
         z = self.logits_batch(model, raw_inputs)
+        if not len(z):
+            return np.empty_like(z)
         z = np.where(np.isneginf(z).all(axis=1, keepdims=True), 0.0, z)
         z = z - z.max(axis=1, keepdims=True)
         e = np.exp(z)
-        return e / e.sum(axis=1, keepdims=True)
+        probabilities = e / e.sum(axis=1, keepdims=True)
+        if not np.all(np.isfinite(probabilities)):
+            raise ValueError("generative text posterior normalization failed")
+        return probabilities
 
     def log_evidence(self, model: Any, raw_inputs: list[Any]) -> np.ndarray:
         """Per-token ``log p(x)`` (length-normalized) -- the built-in typicality/OOD score.
@@ -74,6 +96,8 @@ class GenerativeTextIO:
         in-domain one), so typicality is reported per token: mean log-probability under the full
         generative model."""
         z = self.logits_batch(model, raw_inputs)
+        if not len(z):
+            return np.empty(0, dtype=np.float64)
         mx = z.max(axis=1, keepdims=True)
         doc = (mx + np.log(np.exp(z - mx).sum(axis=1, keepdims=True)))[:, 0]
         lens = np.asarray([len(self._tokens(t)) for t in raw_inputs], dtype=np.float64)
@@ -116,10 +140,21 @@ def distill_text_generative_from_labels(
 
     texts = [str(t) for t in texts]
     ys = [str(y) for y in teacher_labels]
-    label_list = list(labels) if labels is not None else sorted(set(ys))
+    if not texts or len(texts) != len(ys):
+        raise ValueError("texts and teacher_labels must be nonempty and have the same length")
+    if not np.isfinite(pseudo_count) or pseudo_count <= 0.0:
+        raise ValueError("pseudo_count must be finite and positive")
+    if isinstance(min_count, bool) or not isinstance(min_count, int) or min_count <= 0:
+        raise ValueError("min_count must be a positive integer")
+    label_list = [str(label) for label in labels] if labels is not None else sorted(set(ys))
+    if not label_list or any(not label for label in label_list) or len(set(label_list)) != len(label_list):
+        raise ValueError("labels must be nonempty and unique")
+    unknown = sorted(set(ys) - set(label_list))
+    if unknown:
+        raise ValueError(f"teacher labels are outside the declared support: {unknown}")
 
     counts = Counter(w.lower() for t in texts for w, _s, _e in tokenize(t))
-    vocab = sorted([w for w, c in counts.items() if c >= int(min_count)]) + [_UNK]
+    vocab = sorted([w for w, c in counts.items() if c >= min_count and w != _UNK]) + [_UNK]
     vset = set(vocab)
 
     def toks(t: str) -> list[str]:
@@ -133,6 +168,7 @@ def distill_text_generative_from_labels(
         n_docs[y] += 1
 
     n = len(texts)
+    n_labels = len(label_list)
     models: dict[str, Any] = {}
     log_prior: list[float] = []
     smooth = {w: 1.0 / len(vocab) for w in vocab}
@@ -142,7 +178,8 @@ def distill_text_generative_from_labels(
         # vetoing to -inf — and the smoothing mass stays small relative to the class's real counts
         est = CategoricalEstimator(pseudo_count=float(pseudo_count), suff_stat=smooth)
         models[lab] = optimize(by_class[lab] or [_UNK], est, max_its=2, out=None)
-        log_prior.append(float(np.log(max(n_docs[lab], 1) / max(n, 1))))
+        prior = (n_docs[lab] + float(pseudo_count)) / (n + float(pseudo_count) * n_labels)
+        log_prior.append(float(np.log(prior)))
 
     adapter = GenerativeTextIO(label_list, vocab, log_prior)
     return TaskModel(
@@ -165,11 +202,19 @@ def distill_text_generative(
 ) -> TaskModel:
     """Distill a teacher into the generative text student (the teacher labels; see module docstring)."""
     items = [str(t) for t in texts]
+    if not items:
+        raise ValueError("texts must contain at least one example")
     try:
         got = teacher(items)
-        ys = list(got) if isinstance(got, (list, tuple)) and len(got) == len(items) else [teacher(t) for t in items]
-    except Exception:  # noqa: BLE001 - a per-item teacher raises on the list probe
+    except TypeError:  # a per-item-only callable can reject the batch shape
         ys = [teacher(t) for t in items]
+    else:
+        if isinstance(got, (list, tuple)):
+            if len(got) != len(items):
+                raise ValueError("batched teacher must return exactly one label per text")
+            ys = list(got)
+        else:
+            ys = [teacher(t) for t in items]
     return distill_text_generative_from_labels(
         items, ys, labels=labels, pseudo_count=pseudo_count, min_count=min_count, task=task
     )

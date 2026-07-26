@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from mixle.task import TaskModel, distill_text_generative, solve
+from mixle.task import TaskModel, distill_text_generative, distill_text_generative_from_labels, solve
 
 
 def _intent(t):
@@ -60,6 +60,24 @@ class GenerativeTextStudentTest(unittest.TestCase):
         ev_a = m.adapter.log_evidence(m.model, ["refund my order 3"])
         ev_b = back.adapter.log_evidence(back.model, ["refund my order 3"])
         self.assertAlmostEqual(float(ev_a[0]), float(ev_b[0]), places=10)
+
+    def test_explicit_unobserved_labels_have_normalized_priors_and_strict_alignment(self):
+        model = distill_text_generative_from_labels(
+            ["alpha one", "alpha two"],
+            ["seen", "seen"],
+            labels=["seen", "unseen"],
+            min_count=1,
+        )
+        self.assertAlmostEqual(float(np.exp(model.adapter.log_prior).sum()), 1.0, places=12)
+        self.assertGreater(float(np.exp(model.adapter.log_prior[1])), 0.0)
+        with self.assertRaisesRegex(ValueError, "same length"):
+            distill_text_generative_from_labels(["one", "two"], ["seen"])
+        with self.assertRaisesRegex(ValueError, "outside"):
+            distill_text_generative_from_labels(["one"], ["other"], labels=["seen"])
+        with self.assertRaisesRegex(ValueError, "unique"):
+            distill_text_generative_from_labels(["one"], ["seen"], labels=["seen", "seen"])
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            distill_text_generative(lambda batch: ["seen"], ["one", "two"])
 
 
 if __name__ == "__main__":
