@@ -4,6 +4,8 @@ import numpy as np
 import pytest
 import scipy.sparse
 
+from mixle.utils.hvis.embed import htsne, humap
+from mixle.utils.hvis.goals import Anchor
 from mixle.utils.hvis.tsne import (
     _convergence_update,
     _validate_dense_joint_probability,
@@ -96,6 +98,58 @@ class OptimizerControlContractTest(unittest.TestCase):
             update_alpha(self.p, self.y, 0.0, 0.1, 1.0e-128)
         with self.assertRaises(ValueError):
             update_alpha(self.p, np.array([[np.nan], [0.0]]), 1.0, 0.1, 1.0e-128)
+
+
+class EntryPointContractTest(unittest.TestCase):
+    def setUp(self):
+        features = np.eye(4, dtype=np.float64) + 0.1
+        self.affinity = [(features, features)]
+
+    def test_exact_entry_point_materializes_generator_once(self):
+        data = (float(i) for i in range(4))
+        y = htsne(
+            data,
+            affinity=self.affinity,
+            method="exact",
+            perplexity=2.0,
+            max_its=1,
+            print_iter=10,
+            seed=2,
+        )
+        self.assertEqual(y.shape, (4, 2))
+
+    def test_internal_umap_entry_point_materializes_generator_once(self):
+        data = (float(i) for i in range(4))
+        y = humap(
+            data,
+            affinity=self.affinity,
+            engine="internal",
+            n_neighbors=2,
+            n_epochs=1,
+            seed=2,
+        )
+        self.assertEqual(y.shape, (4, 2))
+
+    def test_unknown_or_unsupported_tsne_algorithm_is_rejected(self):
+        with self.assertRaises(ValueError):
+            htsne(range(4), affinity=self.affinity, method="typo")
+        with self.assertRaises(ValueError):
+            htsne(range(4), affinity=self.affinity, method="barnes_hut", optimize_alpha=True)
+        with self.assertRaises(ValueError):
+            htsne(range(4), affinity=self.affinity, method="barnes_hut", alpha=2.0)
+
+    def test_umap_rejects_unsupported_goals_before_optional_import(self):
+        with self.assertRaises(ValueError):
+            humap(
+                range(4),
+                affinity=self.affinity,
+                engine="umap-learn",
+                goals=[Anchor([0], [[0.0, 0.0]])],
+            )
+
+    def test_umap_does_not_silently_reduce_neighborhood_size(self):
+        with self.assertRaises(ValueError):
+            humap(range(4), affinity=self.affinity, engine="internal", n_neighbors=4)
 
 
 if __name__ == "__main__":
