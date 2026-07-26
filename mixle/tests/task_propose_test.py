@@ -133,6 +133,11 @@ class SequenceProposalTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             proposal.refit([("A", "A", "A")], np.array([0.0]))
 
+    def test_refit_honors_zero_weight_without_replication(self):
+        proposal = SequenceProposal(alphabet=("A", "B"), length=1, pseudo_count=0.1)
+        refit = proposal.refit([("A",), ("B",)], np.array([1.0, 0.0]))
+        self.assertGreater(refit.position_models[0].pmap["A"], refit.position_models[0].pmap["B"])
+
 
 class ProposeVerifyRetrainTestCase(unittest.TestCase):
     def test_no_oracle_refuses(self):
@@ -170,6 +175,27 @@ class ProposeVerifyRetrainTestCase(unittest.TestCase):
         result_b = propose_verify_retrain(proposal, oracle_b, k_per_round=8, rounds=2, seed=42)
         for round_a, round_b in zip(result_a.rounds, result_b.rounds):
             self.assertEqual(round_a.candidates, round_b.candidates)
+
+    def test_failed_or_invalid_high_score_cannot_win(self):
+        calls = {"n": 0}
+
+        def score(candidate):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return OracleResult(score=1e9, passed=False, receipt={"reason": "failed verification"})
+            return OracleResult(score=float(_matches(candidate)), passed=True, valid=True)
+
+        oracle = VerifiableOracle(name="verdicts", tier="simulation", score_fn=score)
+        result = propose_verify_retrain(
+            SequenceProposal(alphabet=ALPHABET, length=LENGTH),
+            oracle,
+            k_per_round=4,
+            rounds=1,
+            keep_frac=1.0,
+            seed=0,
+        )
+        self.assertNotIn(0, result.rounds[0].kept_indices)
+        self.assertNotEqual(result.best_result.score, 1e9)
 
     def test_beats_random_search_and_fixed_heuristic_at_matched_budget(self):
         # A noisy oracle score makes any single observed candidate's score unreliable -- exactly the
