@@ -6,6 +6,8 @@ import pytest
 
 from mixle.experimental.typed_runtime import (
     BenchmarkPoint,
+    CounterSemantics,
+    EffectiveContextMeasurement,
     FailureKind,
     FailureLedger,
     FailureReceipt,
@@ -69,11 +71,44 @@ class TimeToTargetTest:
             "candidate",
             ObjectiveTarget("objective", TargetDirection.MAXIMIZE, 1.0),
         )
-        trace.record(BenchmarkPoint(1, 0.0, 1.0, operation_count=10))
+        trace.record(
+            BenchmarkPoint(
+                1,
+                0.0,
+                1.0,
+                operation_count=10,
+                peak_memory_bytes=10,
+                maximum_staleness_steps=3,
+            )
+        )
         with pytest.raises(ValueError, match="counters cannot decrease"):
             trace.record(BenchmarkPoint(2, 0.5, 2.0, operation_count=9))
         with pytest.raises(ValueError, match="advance"):
             trace.record(BenchmarkPoint(1, 0.5, 2.0, operation_count=11))
+        with pytest.raises(ValueError, match="counters cannot decrease"):
+            trace.record(
+                BenchmarkPoint(
+                    2,
+                    0.5,
+                    2.0,
+                    operation_count=11,
+                    peak_memory_bytes=9,
+                    maximum_staleness_steps=3,
+                )
+            )
+
+    def test_non_finite_or_ambiguous_benchmark_measurements_are_rejected(self):
+        with pytest.raises(ValueError, match="elapsed_seconds"):
+            BenchmarkPoint(0, 0.0, float("nan"))
+        with pytest.raises(ValueError, match="objective"):
+            BenchmarkPoint(0, float("inf"), 0.0)
+        with pytest.raises(ValueError, match="work counters semantics"):
+            BenchmarkPoint(
+                0,
+                0.0,
+                0.0,
+                work_counter_semantics=CounterSemantics.INCREMENTAL,
+            )
 
 
 class FailureOracleTest:
@@ -131,6 +166,35 @@ def test_work_measurement_has_explicit_io_operation_and_staleness_counters():
     assert measurement.as_dict()["operation_count"] == 5
     assert measurement.as_dict()["collective_bytes"] == 8
     assert measurement.as_dict()["staleness_steps"] == 2
+    assert measurement.as_dict()["counter_semantics"]["operation_count"] == "incremental"
+    assert measurement.as_dict()["counter_semantics"]["peak_memory_bytes"] == "high_water_mark"
 
     with pytest.raises(ValueError, match="non-negative"):
         WorkMeasurement("GaussianDistribution", UpdateKind.EXACT_CLOSED_FORM, "cpu", 0.01, bytes_read=-1)
+    with pytest.raises(ValueError, match="finite"):
+        WorkMeasurement("GaussianDistribution", UpdateKind.EXACT_CLOSED_FORM, "cpu", float("nan"))
+    with pytest.raises(ValueError, match="finite"):
+        WorkMeasurement(
+            "GaussianDistribution",
+            UpdateKind.EXACT_CLOSED_FORM,
+            "cpu",
+            0.01,
+            observations=float("inf"),
+        )
+    with pytest.raises(ValueError, match="work counters semantics"):
+        WorkMeasurement(
+            "GaussianDistribution",
+            UpdateKind.EXACT_CLOSED_FORM,
+            "cpu",
+            0.01,
+            work_counter_semantics=CounterSemantics.CUMULATIVE,
+        )
+
+
+def test_effective_context_rejects_non_finite_gate_measurements():
+    with pytest.raises(ValueError, match="latency_seconds"):
+        EffectiveContextMeasurement(latency_seconds=float("nan"))
+    with pytest.raises(ValueError, match="monetary_cost"):
+        EffectiveContextMeasurement(monetary_cost=float("inf"))
+    with pytest.raises(ValueError, match="verified_claim_fraction"):
+        EffectiveContextMeasurement(verified_claim_fraction=float("nan"))

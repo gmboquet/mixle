@@ -95,6 +95,14 @@ class ComputeBand(StrEnum):
     FLOAT64 = "float64"
 
 
+class CounterSemantics(StrEnum):
+    """How a numeric work field relates to earlier observations in the same run."""
+
+    INCREMENTAL = "incremental"
+    CUMULATIVE = "cumulative"
+    HIGH_WATER_MARK = "high_water_mark"
+
+
 def weakest_band(bands: Any) -> ComputeBand:
     """FLOAT32_ELIGIBLE only when every node is eligible; FLOAT64 otherwise (or when empty)."""
     result: ComputeBand | None = None
@@ -286,6 +294,7 @@ __all__ = [
     "ArtifactKind",
     "ConsistencyRequirement",
     "CostEstimate",
+    "CounterSemantics",
     "CurvatureKind",
     "MergeLaw",
     "ObjectiveKind",

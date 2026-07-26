@@ -5,7 +5,22 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import StrEnum
+from numbers import Integral, Real
 from typing import Any
+
+from mixle.experimental.typed_runtime.contracts import CounterSemantics
+
+
+def _nonnegative_integer(value: Any, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer.")
+
+
+def _finite_real(value: Any, name: str, *, nonnegative: bool = False) -> None:
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value)):
+        raise ValueError(f"{name} must be a finite number.")
+    if nonnegative and value < 0:
+        raise ValueError(f"{name} must be non-negative.")
 
 
 class TargetDirection(StrEnum):
@@ -25,17 +40,17 @@ class ObjectiveTarget:
     tolerance: float = 0.0
 
     def __post_init__(self) -> None:
-        if not self.name:
+        if not isinstance(self.name, str) or not self.name:
             raise ValueError("target name must be non-empty.")
-        if not math.isfinite(self.threshold) or not math.isfinite(self.tolerance):
-            raise ValueError("target threshold and tolerance must be finite.")
-        if self.tolerance < 0.0:
-            raise ValueError("target tolerance must be non-negative.")
+        if not isinstance(self.direction, TargetDirection):
+            raise TypeError("target direction must be TargetDirection.")
+        _finite_real(self.threshold, "target threshold")
+        _finite_real(self.tolerance, "target tolerance", nonnegative=True)
 
     def reached(self, value: float) -> bool:
         """Whether ``value`` reaches this target within tolerance."""
 
-        if not math.isfinite(value):
+        if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value)):
             return False
         if self.direction is TargetDirection.MAXIMIZE:
             return value + self.tolerance >= self.threshold
@@ -68,24 +83,34 @@ class BenchmarkPoint:
     maximum_staleness_steps: int = 0
     accepted_updates: int = 0
     rejected_updates: int = 0
+    work_counter_semantics: CounterSemantics = CounterSemantics.CUMULATIVE
+    peak_memory_semantics: CounterSemantics = CounterSemantics.HIGH_WATER_MARK
+    staleness_semantics: CounterSemantics = CounterSemantics.HIGH_WATER_MARK
 
     def __post_init__(self) -> None:
-        if self.step < 0 or not math.isfinite(self.objective):
-            raise ValueError("benchmark step must be non-negative and objective finite.")
-        counts = (
-            self.elapsed_seconds,
-            self.operation_count,
-            self.model_evaluations,
-            self.bytes_read,
-            self.bytes_written,
-            self.collective_bytes,
-            self.peak_memory_bytes,
-            self.maximum_staleness_steps,
-            self.accepted_updates,
-            self.rejected_updates,
+        _nonnegative_integer(self.step, "benchmark step")
+        _finite_real(self.objective, "benchmark objective")
+        _finite_real(self.elapsed_seconds, "benchmark elapsed_seconds", nonnegative=True)
+        for name in (
+            "operation_count",
+            "model_evaluations",
+            "bytes_read",
+            "bytes_written",
+            "collective_bytes",
+            "peak_memory_bytes",
+            "maximum_staleness_steps",
+            "accepted_updates",
+            "rejected_updates",
+        ):
+            _nonnegative_integer(getattr(self, name), f"benchmark {name}")
+        expected = (
+            (self.work_counter_semantics, CounterSemantics.CUMULATIVE, "work counters"),
+            (self.peak_memory_semantics, CounterSemantics.HIGH_WATER_MARK, "peak memory"),
+            (self.staleness_semantics, CounterSemantics.HIGH_WATER_MARK, "maximum staleness"),
         )
-        if any(value < 0 for value in counts):
-            raise ValueError("benchmark work counters must be non-negative.")
+        for actual, required, label in expected:
+            if actual is not required:
+                raise ValueError(f"benchmark {label} semantics must be {required.value}.")
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible benchmark observation."""
@@ -103,6 +128,18 @@ class BenchmarkPoint:
             "maximum_staleness_steps": self.maximum_staleness_steps,
             "accepted_updates": self.accepted_updates,
             "rejected_updates": self.rejected_updates,
+            "counter_semantics": {
+                "elapsed_seconds": CounterSemantics.CUMULATIVE.value,
+                "operation_count": self.work_counter_semantics.value,
+                "model_evaluations": self.work_counter_semantics.value,
+                "bytes_read": self.work_counter_semantics.value,
+                "bytes_written": self.work_counter_semantics.value,
+                "collective_bytes": self.work_counter_semantics.value,
+                "accepted_updates": self.work_counter_semantics.value,
+                "rejected_updates": self.work_counter_semantics.value,
+                "peak_memory_bytes": self.peak_memory_semantics.value,
+                "maximum_staleness_steps": self.staleness_semantics.value,
+            },
         }
 
 
@@ -116,12 +153,24 @@ class TimeToTargetTrace:
     points: list[BenchmarkPoint] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if not self.benchmark_id or not self.strategy:
+        if not isinstance(self.benchmark_id, str) or not self.benchmark_id:
             raise ValueError("benchmark_id and strategy must be non-empty.")
+        if not isinstance(self.strategy, str) or not self.strategy:
+            raise ValueError("benchmark_id and strategy must be non-empty.")
+        if not isinstance(self.target, ObjectiveTarget):
+            raise TypeError("time-to-target trace requires an ObjectiveTarget.")
+        if not isinstance(self.points, list) or any(not isinstance(point, BenchmarkPoint) for point in self.points):
+            raise TypeError("time-to-target points must be a list of BenchmarkPoint values.")
+        initial_points = list(self.points)
+        self.points = []
+        for point in initial_points:
+            self.record(point)
 
     def record(self, point: BenchmarkPoint) -> None:
         """Append a cumulative point after checking chronology and counters."""
 
+        if not isinstance(point, BenchmarkPoint):
+            raise TypeError("time-to-target traces accept BenchmarkPoint values.")
         if self.points:
             previous = self.points[-1]
             if point.step <= previous.step or point.elapsed_seconds < previous.elapsed_seconds:
@@ -132,6 +181,8 @@ class TimeToTargetTrace:
                 "bytes_read",
                 "bytes_written",
                 "collective_bytes",
+                "peak_memory_bytes",
+                "maximum_staleness_steps",
                 "accepted_updates",
                 "rejected_updates",
             )

@@ -7,6 +7,7 @@ import pytest
 from mixle.experimental.typed_runtime import (
     ClockProgress,
     ClockTrigger,
+    CounterSemantics,
     MultiRateUpdateClocks,
     UpdateCadence,
 )
@@ -58,3 +59,16 @@ def test_progress_rewind_and_unknown_clock_fail():
         clocks.evaluate(ClockProgress(1, 10, 5.0))
     with pytest.raises(KeyError, match="unknown update clocks"):
         clocks.evaluate(ClockProgress(3, 10, 5.0), ("missing",))
+
+
+def test_clock_measurements_are_finite_cumulative_and_cadences_are_typed():
+    progress = ClockProgress(2, 10, 5.0)
+    assert progress.as_dict()["counter_semantics"] == "cumulative"
+    with pytest.raises(ValueError, match="finite"):
+        ClockProgress(observations=float("nan"))
+    with pytest.raises(ValueError, match="cumulative"):
+        ClockProgress(counter_semantics=CounterSemantics.INCREMENTAL)
+    with pytest.raises(ValueError, match="finite"):
+        UpdateCadence(every_observations=float("nan"))
+    with pytest.raises(ValueError, match="positive integer"):
+        UpdateCadence(every_steps=1.5)

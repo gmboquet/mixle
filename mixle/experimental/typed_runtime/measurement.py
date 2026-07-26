@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from numbers import Integral, Real
 from typing import Any
 
-from mixle.experimental.typed_runtime.contracts import CostEstimate, UpdateKind
+from mixle.experimental.typed_runtime.contracts import CostEstimate, CounterSemantics, UpdateKind
+
+
+def _nonnegative_integer(value: Any, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer.")
+
+
+def _finite_real(value: Any, name: str, *, nonnegative: bool = False) -> None:
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value)):
+        raise ValueError(f"{name} must be a finite number.")
+    if nonnegative and value < 0:
+        raise ValueError(f"{name} must be non-negative.")
 
 
 @dataclass(frozen=True)
@@ -31,26 +45,44 @@ class WorkMeasurement:
     staleness_steps: int = 0
     run_id: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    work_counter_semantics: CounterSemantics = CounterSemantics.INCREMENTAL
+    peak_memory_semantics: CounterSemantics = CounterSemantics.HIGH_WATER_MARK
+    staleness_semantics: CounterSemantics = CounterSemantics.HIGH_WATER_MARK
 
     def __post_init__(self) -> None:
-        values = (
-            self.wall_time_seconds,
-            self.compute_units,
-            self.communication_bytes,
-            self.peak_memory_bytes,
-            self.observations,
-            self.tokens,
-            self.model_evaluations,
-            self.operation_count,
-            self.bytes_read,
-            self.bytes_written,
-            self.collective_bytes,
-            self.staleness_steps,
-        )
-        if any(value < 0 for value in values):
-            raise ValueError("work measurements must be non-negative.")
-        if not self.node_type or not self.backend:
+        if not isinstance(self.node_type, str) or not self.node_type:
             raise ValueError("node_type and backend must be non-empty.")
+        if not isinstance(self.backend, str) or not self.backend:
+            raise ValueError("node_type and backend must be non-empty.")
+        if not isinstance(self.update_kind, UpdateKind):
+            raise TypeError("work-measurement update_kind must be UpdateKind.")
+        _finite_real(self.wall_time_seconds, "wall_time_seconds", nonnegative=True)
+        _finite_real(self.compute_units, "compute_units", nonnegative=True)
+        _finite_real(self.observations, "observations", nonnegative=True)
+        for name in (
+            "communication_bytes",
+            "peak_memory_bytes",
+            "tokens",
+            "model_evaluations",
+            "operation_count",
+            "bytes_read",
+            "bytes_written",
+            "collective_bytes",
+            "staleness_steps",
+        ):
+            _nonnegative_integer(getattr(self, name), name)
+        if self.run_id is not None and (not isinstance(self.run_id, str) or not self.run_id):
+            raise ValueError("run_id must be a non-empty string when supplied.")
+        if not isinstance(self.extra, dict):
+            raise TypeError("work-measurement extra metadata must be a dictionary.")
+        expected = (
+            (self.work_counter_semantics, CounterSemantics.INCREMENTAL, "work counters"),
+            (self.peak_memory_semantics, CounterSemantics.HIGH_WATER_MARK, "peak memory"),
+            (self.staleness_semantics, CounterSemantics.HIGH_WATER_MARK, "staleness"),
+        )
+        for actual, required, label in expected:
+            if actual is not required:
+                raise ValueError(f"work-measurement {label} semantics must be {required.value}.")
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible receipt."""
@@ -73,6 +105,20 @@ class WorkMeasurement:
             "staleness_steps": self.staleness_steps,
             "run_id": self.run_id,
             "extra": dict(self.extra),
+            "counter_semantics": {
+                "wall_time_seconds": self.work_counter_semantics.value,
+                "compute_units": self.work_counter_semantics.value,
+                "communication_bytes": self.work_counter_semantics.value,
+                "observations": self.work_counter_semantics.value,
+                "tokens": self.work_counter_semantics.value,
+                "model_evaluations": self.work_counter_semantics.value,
+                "operation_count": self.work_counter_semantics.value,
+                "bytes_read": self.work_counter_semantics.value,
+                "bytes_written": self.work_counter_semantics.value,
+                "collective_bytes": self.work_counter_semantics.value,
+                "peak_memory_bytes": self.peak_memory_semantics.value,
+                "staleness_steps": self.staleness_semantics.value,
+            },
         }
 
 
@@ -87,9 +133,16 @@ class MeasurementCatalog:
 
     records: list[WorkMeasurement] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.records, list) or any(not isinstance(row, WorkMeasurement) for row in self.records):
+            raise TypeError("measurement catalog records must be a list of WorkMeasurement values.")
+        self.records = list(self.records)
+
     def record(self, measurement: WorkMeasurement) -> None:
         """Append one immutable measurement."""
 
+        if not isinstance(measurement, WorkMeasurement):
+            raise TypeError("measurement catalogs accept WorkMeasurement values.")
         self.records.append(measurement)
 
     def extend(self, measurements: Iterable[WorkMeasurement]) -> None:
@@ -153,28 +206,32 @@ class EffectiveContextMeasurement:
     stopped_reason: str | None = None
 
     def __post_init__(self) -> None:
-        counts = (
-            self.materialized_tokens,
-            self.attended_tokens,
-            self.evidence_nodes,
-            self.evidence_edges,
-            self.context_actions,
-            self.retrieval_actions,
-            self.generation_actions,
-            self.verification_actions,
-            self.tool_calls,
-        )
-        if any(value < 0 for value in counts):
-            raise ValueError("effective-context counts must be non-negative.")
+        for name in (
+            "materialized_tokens",
+            "attended_tokens",
+            "evidence_nodes",
+            "evidence_edges",
+            "context_actions",
+            "retrieval_actions",
+            "generation_actions",
+            "verification_actions",
+            "tool_calls",
+        ):
+            _nonnegative_integer(getattr(self, name), f"effective-context {name}")
         if self.source_horizon_tokens is not None:
-            if self.source_horizon_tokens < 0:
-                raise ValueError("source_horizon_tokens must be non-negative when supplied.")
+            _nonnegative_integer(self.source_horizon_tokens, "source_horizon_tokens")
             if self.source_horizon_tokens < self.materialized_tokens:
                 raise ValueError("source horizon cannot be smaller than materialized context.")
-        if self.latency_seconds < 0.0 or self.monetary_cost < 0.0:
-            raise ValueError("effective-context costs must be non-negative.")
-        if self.verified_claim_fraction is not None and not 0.0 <= self.verified_claim_fraction <= 1.0:
-            raise ValueError("verified_claim_fraction must be in [0, 1].")
+        _finite_real(self.latency_seconds, "effective-context latency_seconds", nonnegative=True)
+        _finite_real(self.monetary_cost, "effective-context monetary_cost", nonnegative=True)
+        if self.verified_claim_fraction is not None:
+            _finite_real(self.verified_claim_fraction, "verified_claim_fraction")
+            if not 0.0 <= self.verified_claim_fraction <= 1.0:
+                raise ValueError("verified_claim_fraction must be in [0, 1].")
+        if self.stopped_reason is not None and (
+            not isinstance(self.stopped_reason, str) or not self.stopped_reason
+        ):
+            raise ValueError("stopped_reason must be a non-empty string when supplied.")
         classified_actions = self.retrieval_actions + self.generation_actions + self.verification_actions
         if classified_actions > self.context_actions:
             raise ValueError("classified context actions cannot exceed total context_actions.")
@@ -206,6 +263,11 @@ class EffectiveContextMeasurement:
             "verified_claim_fraction": self.verified_claim_fraction,
             "stopped_reason": self.stopped_reason,
             "active_to_source_ratio": self.active_to_source_ratio,
+            "counter_semantics": {
+                "all_counts": CounterSemantics.INCREMENTAL.value,
+                "latency_seconds": CounterSemantics.INCREMENTAL.value,
+                "monetary_cost": CounterSemantics.INCREMENTAL.value,
+            },
         }
 
 
