@@ -21,6 +21,20 @@ class CascadeCostTest(unittest.TestCase):
         self.assertAlmostEqual(cascade_cost_per_request(c, 1.0), 1.01)
         self.assertLess(cascade_cost_per_request(c, 0.2), cascade_cost_per_request(c, 0.5))
 
+    def test_costs_and_probabilities_are_finite_nonnegative_and_bounded(self):
+        for kwargs in (
+            {"c_frontier": -1.0},
+            {"c_frontier": float("nan")},
+            {"c_frontier": 1.0, "c_local": float("inf")},
+            {"c_frontier": True},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                CostModel(**kwargs)
+        c = CostModel(c_frontier=1.0)
+        for probability in (-0.1, 1.1, float("nan"), True):
+            with self.subTest(probability=probability), self.assertRaises(ValueError):
+                cascade_cost_per_request(c, probability)
+
 
 class BreakEvenTest(unittest.TestCase):
     def test_local_only_break_even(self):
@@ -60,6 +74,38 @@ class RecommendTest(unittest.TestCase):
         plan = recommend_route(c, volume=10_000, n_label=100, p_escalate=0.4, max_escalation=0.2)
         self.assertEqual(plan.route, "frontier_only")
         self.assertNotIn("cascade", plan.options)
+        self.assertNotIn("local_only", plan.options)
+
+    def test_local_only_requires_an_explicit_zero_escalation_certificate(self):
+        c = CostModel(c_frontier=1.0, c_local=0.01)
+        ordinary = recommend_route(c, volume=10_000, n_label=0, p_escalate=0.0)
+        self.assertNotIn("local_only", ordinary.options)
+        certified = recommend_route(
+            c,
+            volume=10_000,
+            n_label=0,
+            p_escalate=0.0,
+            local_only_certified=True,
+        )
+        self.assertEqual(certified.route, "local_only")
+        with self.assertRaises(ValueError):
+            recommend_route(
+                c,
+                volume=10_000,
+                n_label=0,
+                p_escalate=0.1,
+                local_only_certified=True,
+            )
+
+    def test_volume_and_label_count_must_be_exact_nonnegative_integers(self):
+        c = CostModel(c_frontier=1.0)
+        for kwargs in (
+            {"volume": -1, "n_label": 0},
+            {"volume": 1.5, "n_label": 0},
+            {"volume": 1, "n_label": True},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                recommend_route(c, p_escalate=0.1, **kwargs)
 
 
 if __name__ == "__main__":

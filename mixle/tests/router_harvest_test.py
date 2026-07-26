@@ -55,6 +55,13 @@ class HarvestResolveTest(unittest.TestCase):
         self.assertEqual(result.escalation_before, 1.0)
         self.assertLess(result.escalation_after, 1.0)
         self.assertGreater(result.escalation_drop, 0.0)
+        self.assertGreaterEqual(result.escalation_drop_lower, 0.05)
+        self.assertGreaterEqual(result.local_accuracy_lower, 0.9)
+        self.assertGreaterEqual(result.n_evaluation, 20)
+        self.assertEqual(
+            result.n_train + result.n_calibration + result.n_evaluation,
+            result.n_harvested,
+        )
         self.assertIsNotNone(result.router)
 
         # the measured drop, on FRESH held-out traffic never seen during resolve_from_harvest, against
@@ -114,11 +121,8 @@ class HarvestResolveTest(unittest.TestCase):
         self.assertEqual(names[-2], "resolved")
         self.assertEqual(len(names), len(router.tiers) + 1)
 
-    def test_a_small_calibration_split_cannot_be_accepted_regardless_of_seed(self):
-        """At n_harvested=8 (the old accepted minimum), a 25% holdout gives only 2 calibration
-        points -- escalation_rate can only land on 0.0/0.5/1.0, so whether a run happened to be
-        "accepted" used to depend entirely on which 2 of 8 points landed in calibration, not on
-        anything real. Below the real minimum calibration size, every seed must reject."""
+    def test_insufficient_three_way_split_cannot_be_accepted_regardless_of_seed(self):
+        """Below the train+calibration+evaluation minimum, every seed rejects."""
         router, _tier0 = _build_router(seed=0)
         for n_target in (8, 10, 13):
             for seed in range(5):

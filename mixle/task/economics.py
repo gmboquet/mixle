@@ -17,8 +17,11 @@ escalation rate, and reports the savings.
 
 from __future__ import annotations
 
+import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from numbers import Integral, Real
 from typing import Any
 
 
@@ -31,14 +34,46 @@ class CostModel:
     c_label: float = 0.0  # cost of one teacher label during distillation
     train_cost: float = 0.0  # one-time cost to train/tune the student (compute)
 
+    def __post_init__(self) -> None:
+        for name in ("c_frontier", "c_local", "c_label", "train_cost"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, Real)
+                or not math.isfinite(value)
+                or value < 0.0
+            ):
+                raise ValueError(f"{name} must be a finite non-negative number")
+            object.__setattr__(self, name, float(value))
+
     def setup_cost(self, n_label: int) -> float:
         """Return the one-time label and training cost for a local model."""
+        _nonnegative_int(n_label, "n_label")
         return n_label * self.c_label + self.train_cost
+
+
+def _nonnegative_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+        raise ValueError(f"{name} must be an exact non-negative integer")
+    return int(value)
+
+
+def _probability(value: Any, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not math.isfinite(value)
+        or not 0.0 <= float(value) <= 1.0
+    ):
+        raise ValueError(f"{name} must be a finite probability in [0, 1]")
+    return float(value)
 
 
 def cascade_cost_per_request(cost: CostModel, p_escalate: float) -> float:
     """Expected per-request cost of the cascade: always run local, escalate the ``p_escalate`` fraction."""
-    return cost.c_local + float(p_escalate) * cost.c_frontier
+    if not isinstance(cost, CostModel):
+        raise TypeError("cost must be a CostModel")
+    return cost.c_local + _probability(p_escalate, "p_escalate") * cost.c_frontier
 
 
 def break_even_volume(cost: CostModel, n_label: int, *, p_escalate: float = 0.0) -> float:
@@ -75,21 +110,34 @@ def recommend_route(
     n_label: int,
     p_escalate: float,
     max_escalation: float | None = None,
+    local_only_certified: bool = False,
 ) -> RoutePlan:
     """Pick the lowest-cost route over ``volume`` requests.
 
-    ``local_only`` is offered only when the caller explicitly disallows
-    escalation by setting ``max_escalation == 0``. Otherwise the cascade route
-    keeps local answers for calibrated inputs and escalates the remaining
-    traffic to the teacher.
+    ``local_only`` is never inferred from an escalation preference: forcing
+    ambiguous requests through a local model changes serving semantics. It is
+    offered only when ``local_only_certified=True`` and the measured
+    escalation probability is exactly zero.
     """
+    if not isinstance(cost, CostModel):
+        raise TypeError("cost must be a CostModel")
+    volume = _nonnegative_int(volume, "volume")
+    n_label = _nonnegative_int(n_label, "n_label")
+    p_escalate = _probability(p_escalate, "p_escalate")
+    if max_escalation is not None:
+        max_escalation = _probability(max_escalation, "max_escalation")
+    if not isinstance(local_only_certified, bool):
+        raise ValueError("local_only_certified must be boolean")
+    if local_only_certified and p_escalate != 0.0:
+        raise ValueError("local_only_certified requires p_escalate == 0")
     frontier_total = volume * cost.c_frontier
     cascade_total = cost.setup_cost(n_label) + volume * cascade_cost_per_request(cost, p_escalate)
     local_total = cost.setup_cost(n_label) + volume * cost.c_local
 
     options: dict[str, float] = {"frontier_only": frontier_total, "cascade": cascade_total}
-    if max_escalation == 0:
+    if local_only_certified:
         options["local_only"] = local_total
+        options.pop("cascade")
     if max_escalation is not None and p_escalate > max_escalation:
         options.pop("cascade", None)  # cascade escalates too rarely-or-often for the caller's bar
 
@@ -115,6 +163,8 @@ def select_alpha_for_cost(
     probe_texts: Sequence[Any],
     cost: CostModel,
     *,
+    certification_texts: Sequence[Any],
+    certification_labels: Sequence[Any],
     volume: int,
     n_label: int,
     alphas: Sequence[float] = (0.01, 0.05, 0.1, 0.15, 0.2, 0.3),
@@ -128,22 +178,57 @@ def select_alpha_for_cost(
     :class:`~mixle.task.calibrate.CalibratedTaskModel` shape: a mutable
     ``alpha`` attribute, ``calibrate(texts, labels)``, and
     ``escalation_rate(texts)``. For each candidate in ``alphas``, this
-    recalibrates ``model`` and measures its realized escalation rate on
-    ``probe_texts`` (a held-out slice disjoint from ``cal_texts``), then scores
+    recalibrates ``model`` on policy-selection calibration data and measures
+    its realized escalation rate on ``probe_texts``, then scores
     that escalation rate with :func:`recommend_route` over ``volume`` requests.
     The winner is the alpha whose recommended route is lowest-cost overall;
-    ``model`` is left calibrated at that winning alpha. Returns
+    only after selection is complete is ``model`` calibrated at that alpha on
+    the independent ``certification_texts``/``certification_labels``. Thus the
+    coverage-bearing threshold never participates in policy selection. Returns
     ``(best_alpha, best_plan, plan_by_alpha)`` so the full sweep remains
-    auditable.
+    auditable; the plans are policy-selection cost estimates, while the model's
+    final threshold is the independent certification result.
     """
+    if not isinstance(cost, CostModel):
+        raise TypeError("cost must be a CostModel")
+    for attribute in ("calibrate", "escalation_rate"):
+        if not callable(getattr(model, attribute, None)):
+            raise TypeError(f"model must expose callable {attribute}()")
+    cal_texts = list(cal_texts)
+    cal_labels = list(cal_labels)
+    probe_texts = list(probe_texts)
+    certification_texts = list(certification_texts)
+    certification_labels = list(certification_labels)
+    if not cal_texts or len(cal_texts) != len(cal_labels):
+        raise ValueError("policy calibration texts and labels must be non-empty and aligned")
+    if not probe_texts:
+        raise ValueError("probe_texts must be non-empty")
+    if not certification_texts or len(certification_texts) != len(certification_labels):
+        raise ValueError("certification texts and labels must be non-empty and aligned")
+
+    def row_keys(rows: Sequence[Any]) -> set[str]:
+        return {json.dumps(row, sort_keys=True, default=repr) for row in rows}
+
+    selection_keys = row_keys(cal_texts)
+    probe_keys = row_keys(probe_texts)
+    certification_keys = row_keys(certification_texts)
+    if selection_keys & probe_keys or selection_keys & certification_keys or probe_keys & certification_keys:
+        raise ValueError("policy calibration, probe, and certification rows must be disjoint")
+
+    alpha_values = list(alphas)
+    if not alpha_values or len(set(alpha_values)) != len(alpha_values):
+        raise ValueError("alphas must be a non-empty sequence of unique values")
+    alpha_values = [_probability(alpha, "alpha") for alpha in alpha_values]
+    if any(alpha in (0.0, 1.0) for alpha in alpha_values):
+        raise ValueError("alpha candidates must be strictly between 0 and 1")
     plans: dict[float, RoutePlan] = {}
-    for a in alphas:
-        model.alpha = float(a)
+    for a in alpha_values:
+        model.alpha = a
         model.calibrate(cal_texts, cal_labels)
         p_escalate = model.escalation_rate(probe_texts)
         plans[a] = recommend_route(cost, volume=volume, n_label=n_label, p_escalate=p_escalate)
 
     best_alpha = min(plans, key=lambda a: plans[a].total)
-    model.alpha = float(best_alpha)
-    model.calibrate(cal_texts, cal_labels)
+    model.alpha = best_alpha
+    model.calibrate(certification_texts, certification_labels)
     return best_alpha, plans[best_alpha], plans

@@ -8,9 +8,9 @@
      a categorical claim (``shape``: which planted pattern the volume shows) and a numeric claim
      (``brightness``: its overall intensity), each distilled into its own calibrated local student.
   3. each claim is gated per-claim, not as one top-level generation:
-       * ``shape`` (a small finite candidate set) rides :class:`~mixle.task.calibrated_generator.CalibratedGenerator`
-         (workstream A1) directly -- draw the 3 candidate labels, score them from the patches, and calibrate
-         a conformal accept-singleton-or-abstain rule, so an ambiguous volume abstains instead of guessing.
+       * ``shape`` rides :class:`~mixle.task.calibrated_generator.CalibratedGenerator` (workstream A1)
+         directly -- draw the 3 candidate labels, score them from the patches, and certify a held-out
+         selective-risk gate, so an uncertified volume abstains instead of guessing.
        * ``brightness`` (continuous) rides its own split-conformal regression machinery directly
          (``RegressionSolution.answers_locally`` / ``.qhat``) -- CalibratedGenerator's finite-candidate-set
          model is the right fit for ``shape``'s 3 discrete labels, not for a continuous estimate; the spec
@@ -112,7 +112,7 @@ def claim_teacher(record: tuple[float, ...]) -> dict[str, Any]:
     return {"shape": shape, "brightness": brightness}
 
 
-# --- per-claim conformal gates --------------------------------------------------------------------
+# --- per-claim calibrated gates -------------------------------------------------------------------
 
 
 def _stable_unit(obj: Any) -> float:
@@ -151,9 +151,12 @@ def _score_shape_candidate(candidate: tuple[tuple[float, ...], str]) -> float:
 
 
 def build_shape_gate(cal_records: list[tuple[float, ...]], *, alpha: float = 0.1, seed: int = 0) -> CalibratedGenerator:
-    """Calibrate the per-claim conformal gate (workstream A1) for the ``shape`` claim: a singleton
-    conformal set -> serve that label; empty/multi -> :data:`ABSTAIN`, exactly as ``CalibratedGenerator``
-    already does for open-ended generation, here applied to a 3-way structured claim instead."""
+    """Certify a selective-risk gate for the ``shape`` claim.
+
+    The top-scored candidate is served only when its calibrated score margin
+    clears the independently certified accepted-error threshold; otherwise the
+    report records :data:`ABSTAIN`.
+    """
 
     def is_correct(record: tuple[float, ...], candidate: tuple[tuple[float, ...], str]) -> bool:
         _, label = candidate
@@ -213,11 +216,11 @@ def build_claim_report(
     served = shape_gate.serve(record, seed=seed)
     if served is ABSTAIN:
         verdicts["shape"] = ClaimVerdict(
-            "shape", None, "abstained", detail="no shape candidate cleared the conformal threshold"
+            "shape", None, "abstained", detail="no shape candidate cleared the selective-risk threshold"
         )
     else:
         _, label = served
-        verdicts["shape"] = ClaimVerdict("shape", label, "accepted", detail="conformal singleton")
+        verdicts["shape"] = ClaimVerdict("shape", label, "accepted", detail="certified selective-risk gate")
 
     brightness = structured.fields_num["brightness"]
     if brightness.answers_locally:

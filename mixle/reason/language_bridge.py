@@ -25,7 +25,7 @@ or generation model is built here (see ``notes/designs/M5.md`` part (c) for the 
   precision that counts" contract :func:`mixle.task.regress.solve_regression` already uses for numeric
   fields -- NOT widths relative to the posterior's own spread, which would be scale-invariant and could
   never detect "too diffuse to answer"), score each against the posterior it describes, and serve the
-  best one under A1's conformal accept-or-abstain guarantee. :func:`claim_score` is exported standalone
+  best one under A1's held-out selective-risk gate. :func:`claim_score` is exported standalone
   (not only reachable through :class:`PosteriorDescriber`) so B2 (claim-checking, built elsewhere) can
   score an ALREADY-EMITTED claim against any posterior directly, with no dependency on candidate
   generation/calibration at all.
@@ -311,7 +311,7 @@ class PosteriorDescriber:
         n_probe: int = 300,
         seed: int = 0,
     ) -> None:
-        # MXR-080-0292: every candidate-geometry / conformal-prerequisite parameter is validated here,
+        # MXR-080-0292: every candidate-geometry / calibration-prerequisite parameter is validated here,
         # before any candidate is ever generated. Previously k<=0 or an empty width_multiples let an
         # empty candidate set reach the generator; a zero or negative multiple produced a point or
         # reversed interval; a non-finite tol/multiple slipped past a bare `<= 0` check (a NaN
@@ -360,7 +360,7 @@ class PosteriorDescriber:
         return claim_score(claim)
 
     def calibrate(self, calibration_set: Sequence[tuple[Any, float]], *, seed: int | None = None) -> PosteriorDescriber:
-        """Fit the conformal threshold from ``(posterior, true_value)`` held-out pairs.
+        """Fit the selective-risk threshold from ``(posterior, true_value)`` held-out pairs.
 
         MXR-080-0291: ``is_correct`` is EXACTLY "does the emitted interval cover the truth" --
         ``claim.contains(true_value)``, i.e. ``claim.lo <= true_value <= claim.hi`` -- checked
@@ -376,13 +376,11 @@ class PosteriorDescriber:
         about a DIFFERENT candidate. Both are boundary/exclusivity artifacts of the banding scheme
         itself, not properties of whether the claim actually covers the truth.
 
-        The direct coverage check has no such artifact: every nested candidate whose interval contains
-        ``true_value`` counts as correct, independently, exactly matching what :meth:`describe` /
-        :func:`claim_score` actually serve. This is the standard split-conformal LAC construction
-        :func:`mixle.inference.conformal.conformal_label_threshold` implements (mirrored by A1's
-        :class:`~mixle.task.calibrate.CalibratedTaskModel` and, for this codebase's other
-        conformal-calibrated surface, :meth:`mixle.reason.model.CrossModalModel.calibrate`,
-        MXR-080-0279): calibrate against the actual served event, not a proxy for it.
+        The direct correctness check has no such artifact: it evaluates exactly
+        the top candidate the selective generator would serve. Calibration
+        proposes a top-score threshold on one split and certifies the accepted
+        interval-error rate on an independent split; it does not treat the
+        prompt-specific interval candidates as a fixed conformal label space.
         """
         calibration_set = list(calibration_set)
         posteriors = [p for p, _ in calibration_set]
@@ -390,21 +388,16 @@ class PosteriorDescriber:
         non_finite = [v for v in truths if not np.isfinite(v)]
         if non_finite:
             raise ValueError(f"calibration_set true_value(s) must be finite, got {non_finite!r}")
-        k = len(self.width_multiples)  # exactly how many claims _generate() draws per posterior
-
         # `is_correct` is CalibratedGenerator.calibrate()'s correctness oracle: it is called with only
-        # (posterior, claim) -- no row index -- so the matching true_value cannot be recovered by
-        # looking the posterior back up (an id()-keyed dict silently collapses when the SAME posterior
-        # object is reused across several calibration_set rows with different true values, e.g. one
-        # fitted/mock posterior paired with several synthetic points -- a realistic setup, not just a
-        # theoretical one). Instead this counts calls: CalibratedGenerator.calibrate() processes rows
-        # strictly in order, generating exactly `k` candidates and calling `is_correct` exactly `k`
-        # times for row i before ever moving to row i+1, so `calls // k` is that row's index --
-        # correct however many times a posterior object repeats, adjacently or not.
+        # (posterior, selected claim) -- no row index -- so the matching true_value
+        # cannot be recovered by looking the posterior back up (an id()-keyed dict
+        # collapses repeated posterior objects). CalibratedGenerator processes rows
+        # in order and calls the oracle once for the selected candidate in each row,
+        # so a monotone counter preserves row identity even for repeated objects.
         calls = {"n": 0}
 
         def is_correct(posterior: Any, claim: Claim) -> bool:
-            true_value = truths[calls["n"] // k]
+            true_value = truths[calls["n"]]
             calls["n"] += 1
             return claim.contains(true_value)
 
@@ -413,6 +406,6 @@ class PosteriorDescriber:
 
     def describe(self, posterior: Any, *, seed: int | None = None) -> Claim | None:
         """The best calibrated claim about ``posterior``, or :data:`ABSTAIN` (``None``) when no
-        candidate width conformally clears the threshold -- i.e. the posterior is too diffuse relative
+        candidate width clears the selective-risk threshold -- i.e. the posterior is too diffuse relative
         to ``tol`` for any of this describer's claims to be trustworthy."""
         return self._gen.serve(posterior, seed=seed)

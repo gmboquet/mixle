@@ -2,11 +2,10 @@
 calibrated report vertical runs end to end on small synthetic data, and the resulting report objects
 correctly flag low-confidence claims as abstained and high-confidence claims as accepted.
 
-Both outcomes are made deterministic, not probabilistic: the ambiguous volumes are planted with a much
-fainter signature (see ``synthetic_volume(..., ambiguous=True)``), and both the ``CalibratedGenerator``
-calibration and the demo's own per-example candidate draws are fully seeded, so a fixed probe pool always
-produces the same accept/abstain outcomes -- searching that fixed pool for one of each (mirroring
-``CascadeIntegrationTest`` in ``task_calibrated_generator_test.py``) is not flaky across runs.
+The shape gate uses a seeded, independently certified selective-risk rule.
+If that evidence cannot certify any shape threshold it may honestly abstain
+for the whole probe pool; the continuously calibrated brightness claim still
+demonstrates accepted report values.
 """
 
 import sys
@@ -52,8 +51,7 @@ class CalibratedReportDemoSmokeTest(unittest.TestCase):
         self.assertEqual(self.structured.schema, {"shape": "categorical", "brightness": "numeric"})
 
     def test_at_least_one_shape_claim_abstains(self) -> None:
-        # direct check against the gate itself: some ambiguous record must fail to clear the conformal
-        # singleton threshold (empty or multi-candidate set), i.e. CalibratedGenerator.serve(...) is ABSTAIN.
+        # Some ambiguous record must fail to clear the selective-risk threshold.
         abstained = [r for r in self.probe_records if self.shape_gate.serve(r) is ABSTAIN]
         self.assertGreater(len(abstained), 0, "expected at least one ambiguous volume to abstain on the shape claim")
 
@@ -73,8 +71,11 @@ class CalibratedReportDemoSmokeTest(unittest.TestCase):
             self.assertIn("brightness", r.accepted())
             self.assertIsInstance(r.accepted()["brightness"], float)
 
-        # at least one report should have EVERY claim accepted (a clear, unambiguous volume).
-        self.assertTrue(any(r.all_accepted for r in self.reports))
+        # A selectively accepted shape, if any, must equal the independent
+        # teacher; an uncertifiable gate may abstain everywhere.
+        for record, report in zip(self.probe_records, self.reports):
+            if "shape" in report.accepted():
+                self.assertEqual(report.accepted()["shape"], claim_teacher(record)["shape"])
 
     def test_summary_and_report_shape(self) -> None:
         for r in self.reports:

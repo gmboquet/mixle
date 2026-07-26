@@ -128,12 +128,15 @@ fits the student, and returns an already-``decide()``-able
 
    calibrated = distill_for_routing(teacher, unlabeled_emails, labels=["spam", "ham"])
 
-For *generation* rather than classification -- e.g. serving the external
-checkpoint's own free-text output under a coverage guarantee, or picking
-among several candidate continuations -- ``CalibratedGenerator`` is the
-generation-side sibling: draw ``k`` candidates from any generator (a
-``CallableLLM`` sampled ``k`` times, a beam, the teacher itself) and
-calibrate a conformal accept-or-abstain threshold over them.
+For *generation* rather than classification -- e.g. choosing whether to serve
+the external checkpoint's best candidate or escalate --
+``CalibratedGenerator`` provides a selective-risk gate. It draws ``k``
+candidates, proposes top-score thresholds on one calibration split, and
+certifies the accepted-error upper bound on an independent split. Candidate
+strings and their count are not a fixed label space, so this surface does not
+claim conformal label coverage. Its receipt names the target error,
+confidence, accepted certification cases, observed errors, and exact
+Bonferroni-corrected binomial upper bound.
 
 .. note::
 
@@ -261,8 +264,8 @@ reader should run these directly rather than trust the prose above:
        honest ``ESCALATE`` on ambiguous/OOD input
      - ``mixle/tests/task_calibrate_test.py``
    * - 3. Calibrated generation
-     - ``CalibratedGenerator`` gives conformal accept-or-abstain coverage
-       over sampled candidates
+     - ``CalibratedGenerator`` gives a held-out selective-risk certificate
+       for serving the top sampled candidate or abstaining
      - ``mixle/tests/task_calibrated_generator_test.py``
    * - 4. Cascade
      - one calibrated tier plus teacher fallback; realized cost and harvest
