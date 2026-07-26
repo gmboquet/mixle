@@ -30,7 +30,6 @@ from typing import Any
 import numpy as np
 
 from mixle.doe.oracle import OracleResult, VerifiableOracle
-from mixle.inference import optimize
 from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
 
 
@@ -44,8 +43,13 @@ class SequenceProposal:
     position_models: list[CategoricalDistribution] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if self.length <= 0:
+        self.alphabet = tuple(self.alphabet)
+        if not self.alphabet or len(set(self.alphabet)) != len(self.alphabet):
+            raise ValueError("alphabet must be nonempty and unique.")
+        if isinstance(self.length, bool) or not isinstance(self.length, int) or self.length <= 0:
             raise ValueError("length must be positive.")
+        if not np.isfinite(self.pseudo_count) or self.pseudo_count < 0.0:
+            raise ValueError("pseudo_count must be finite and nonnegative.")
         if not self.position_models:
             uniform = {sym: 1.0 / len(self.alphabet) for sym in self.alphabet}
             self.position_models = [CategoricalDistribution(pmap=dict(uniform)) for _ in range(self.length)]
@@ -54,6 +58,10 @@ class SequenceProposal:
 
     def sample(self, k: int, rng: np.random.Generator) -> list[tuple]:
         """Draw ``k`` i.i.d. sequences (each ``length`` symbols) from the current proposal."""
+        if isinstance(k, bool) or not isinstance(k, int) or k < 0:
+            raise ValueError("k must be a nonnegative integer")
+        if not isinstance(rng, np.random.Generator):
+            raise TypeError("rng must be a numpy.random.Generator")
         sequences = []
         for _ in range(k):
             symbols = [model.sampler(seed=int(rng.integers(0, 2**31 - 1))).sample() for model in self.position_models]
@@ -67,19 +75,22 @@ class SequenceProposal:
         w = np.asarray(weights, dtype=float)
         if w.shape != (len(sequences),):
             raise ValueError("weights must have one entry per sequence.")
-        w = np.clip(w, 0.0, None)
+        if not np.all(np.isfinite(w)) or np.any(w < 0.0):
+            raise ValueError("weights must be finite and nonnegative.")
         if not np.any(w > 0.0):
             raise ValueError("refit requires at least one strictly positive weight.")
-        counts = np.maximum(np.round(w / w.max() * 100.0), 1).astype(int)
+        for sequence in sequences:
+            if len(sequence) != self.length or any(symbol not in self.alphabet for symbol in sequence):
+                raise ValueError("every sequence must match the proposal length and alphabet")
 
         new_models = []
         for i in range(self.length):
-            data: list[Any] = []
-            for seq, count in zip(sequences, counts):
-                data.extend([seq[i]] * int(count))
             uniform = {sym: 1.0 / len(self.alphabet) for sym in self.alphabet}
             estimator = CategoricalDistribution(pmap=dict(uniform)).estimator(pseudo_count=self.pseudo_count)
-            fitted = optimize(data, estimator, max_its=1, out=None)
+            accumulator = estimator.accumulator_factory().make()
+            for sequence, weight in zip(sequences, w):
+                accumulator.update(sequence[i], float(weight), None)
+            fitted = estimator.estimate(float(w.sum()), accumulator.value())
             # Canonicalize pmap key order to `self.alphabet`: the accumulator's internal dict order
             # is not guaranteed stable across interpreter processes (Python's per-process string hash
             # randomization), which would otherwise change which sampled index maps to which symbol.
@@ -155,9 +166,16 @@ def propose_verify_retrain(
             "no verifiable objective; cannot optimize. propose_verify_retrain requires a "
             "VerifiableOracle -- this is a hard precondition, not a missing default."
         )
-    if not 0.0 < keep_frac <= 1.0:
+    if not np.isfinite(keep_frac) or not 0.0 < keep_frac <= 1.0:
         raise ValueError("keep_frac must be in (0, 1].")
-    if k_per_round <= 0 or rounds <= 0:
+    if (
+        isinstance(k_per_round, bool)
+        or not isinstance(k_per_round, int)
+        or isinstance(rounds, bool)
+        or not isinstance(rounds, int)
+        or k_per_round <= 0
+        or rounds <= 0
+    ):
         raise ValueError("k_per_round and rounds must be positive.")
 
     rng = np.random.default_rng(seed)
@@ -176,7 +194,9 @@ def propose_verify_retrain(
         # excluded even when there are too few genuine candidates to fill n_keep, instead of being pulled
         # in just to pad out the count.
         n_keep = max(1, int(np.ceil(keep_frac * len(candidates))))
-        genuine_indices = np.asarray([i for i, r in enumerate(results) if not r.abstained], dtype=int)
+        genuine_indices = np.asarray(
+            [i for i, r in enumerate(results) if not r.abstained and r.valid and r.passed], dtype=int
+        )
         if genuine_indices.size:
             order = np.argsort(-scores[genuine_indices])[:n_keep]
             kept_indices = [int(genuine_indices[i]) for i in order]
@@ -185,15 +205,17 @@ def propose_verify_retrain(
         result.rounds.append(RoundLog(round_index, candidates, results, kept_indices))
 
         for candidate, oracle_result in zip(candidates, results):
-            if oracle_result.abstained:
-                continue  # a timeout's -inf placeholder must never win "best", genuine or not yet seen
+            if oracle_result.abstained or not oracle_result.valid or not oracle_result.passed:
+                continue
             if result.best_result is None or oracle_result.score > result.best_result.score:
                 result.best_candidate, result.best_result = candidate, oracle_result
 
         if kept_indices:
             winners = [candidates[i] for i in kept_indices]
-            winner_scores = scores[kept_indices]
-            current = current.refit(winners, winner_scores)
+            baseline = float(np.min(scores[genuine_indices]))
+            winner_weights = scores[kept_indices] - baseline
+            if np.any(winner_weights > 0.0):
+                current = current.refit(winners, winner_weights)
         # else: every candidate this round abstained -- nothing genuine to refit on, so the proposal is
         # left unchanged for this round rather than fed a fabricated all-abstained weight vector (mirrors
         # optimize_under_oracle skipping opt.tell() for an abstention rather than corrupting the fit).

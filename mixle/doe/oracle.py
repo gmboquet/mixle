@@ -102,6 +102,8 @@ class OracleResult:
     receipt: dict[str, Any] = field(default_factory=dict)
     cost: float = 1.0
     abstained: bool = False
+    passed: bool = True
+    valid: bool = True
 
     def __post_init__(self) -> None:
         self.score = _validated_real(self.score, "OracleResult.score")
@@ -119,6 +121,11 @@ class OracleResult:
             raise TypeError(
                 f"OracleResult.receipt must be a dict, got {type(self.receipt).__name__}: {self.receipt!r}."
             )
+        if not isinstance(self.passed, bool) or not isinstance(self.valid, bool):
+            raise TypeError("OracleResult passed and valid verdicts must be boolean")
+        if self.abstained:
+            self.passed = False
+            self.valid = False
 
 
 @dataclass
