@@ -88,6 +88,141 @@ class BirthDeathSamplingValidationTestCase(unittest.TestCase):
         d = BirthDeathSamplingDistribution(0.5, 0.3, 0.2, horizon=4.0)
         self.assertEqual(d.horizon, 4.0)
 
+    def test_initial_population_must_be_an_exact_nonnegative_integer(self):
+        for value in (True, -1, 0.5):
+            with self.subTest(value=value), self.assertRaises(
+                (TypeError, ValueError)
+            ):
+                BirthDeathSamplingDistribution(
+                    0.5,
+                    0.3,
+                    0.2,
+                    initial_population=value,
+                )
+        dist = BirthDeathSamplingDistribution(
+            0.5,
+            0.3,
+            0.2,
+            initial_population=0,
+            horizon=4.0,
+        )
+        self.assertEqual(dist.sampler(seed=1).sample(), (0, 4.0, []))
+        self.assertEqual(dist.log_density((0, 4.0, [])), 0.0)
+
+    def test_trajectory_is_validated_transactionally(self):
+        dist = BirthDeathSamplingDistribution(0.5, 0.3, 0.2)
+        malformed = (
+            (0.5, 4.0, []),
+            (1, np.nan, []),
+            (1, 4.0, [(np.nan, 0)]),
+            (1, 4.0, [(-1.0, 0)]),
+            (1, 4.0, [(1.0, 0), (1.0, 1)]),
+            (1, 4.0, [(5.0, 0)]),
+            (1, 4.0, [(1.0, 0.5)]),
+            (1, 4.0, [(1.0, 3)]),
+            (1, 4.0, [(1.0,)]),
+            (1, 4.0),
+        )
+        for trajectory in malformed:
+            with self.subTest(trajectory=trajectory), self.assertRaises(
+                (TypeError, ValueError)
+            ):
+                dist.log_density(trajectory)
+
+    def test_encoded_schema_and_weights_fail_closed(self):
+        from mixle.stats.processes.birth_death import BirthDeathSamplingAccumulator
+
+        dist = BirthDeathSamplingDistribution(0.5, 0.3, 0.2)
+        valid = np.array([[1.0, 0.0, 0.0, 2.0, 0.0, 4.0]])
+        malformed = (
+            np.zeros((1, 5)),
+            np.zeros((1, 7)),
+            np.array([[0.5, 0.0, 0.0, 2.0, 0.0, 4.0]]),
+            np.array([[-1.0, 0.0, 0.0, 2.0, 0.0, 4.0]]),
+            np.array([[1.0, 0.0, 0.0, 0.0, 0.0, 4.0]]),
+            np.array([[0.0, 0.0, 0.0, 2.0, np.nan, 4.0]]),
+        )
+        for rows in malformed:
+            with self.subTest(rows=rows), self.assertRaises(ValueError):
+                dist.seq_log_density(rows)
+
+        for weights in ([], [-1.0], [np.nan]):
+            accumulator = BirthDeathSamplingAccumulator()
+            before = accumulator.value()
+            with self.subTest(weights=weights), self.assertRaises(ValueError):
+                accumulator.seq_update(valid, weights, None)
+            self.assertEqual(accumulator.value(), before)
+
+    def test_serialized_statistics_are_versioned_and_validated(self):
+        from mixle.stats.processes.birth_death import BirthDeathSamplingAccumulator
+
+        accumulator = BirthDeathSamplingAccumulator()
+        accumulator.update((2, 4.0, [(1.0, 0)]), 1.0, None)
+        value = accumulator.value()
+        self.assertEqual(value.schema_version, 1)
+        malformed = (
+            (1.0, 0.0, 0.0, 0.0, 1.0, 4.0),
+            (0.0, 0.0, 0.0, 0.0, 0.0, 4.0),
+            (0.0, 0.0, 0.0, -1.0, 1.0, 4.0),
+            (0.0, 0.0, 0.0, np.nan, 1.0, 4.0),
+        )
+        for statistic in malformed:
+            with self.subTest(statistic=statistic):
+                with self.assertRaises(ValueError):
+                    BirthDeathSamplingAccumulator().combine(statistic)
+                with self.assertRaises(ValueError):
+                    BirthDeathSamplingEstimator().estimate(None, statistic)
+
+    def test_fit_preserves_sampling_configuration_and_regularization(self):
+        from mixle.utils.serialization import from_json, to_json
+
+        dist = BirthDeathSamplingDistribution(
+            0.5,
+            0.3,
+            0.2,
+            initial_population=7,
+            horizon=9.0,
+            name="process",
+            keys="shared",
+        )
+        estimator = dist.estimator(pseudo_count=2.0)
+        statistic = (2.0, 1.0, 0.0, 4.0, 1.0, 4.0)
+        fit = estimator.estimate(None, statistic)
+        self.assertAlmostEqual(fit.birth_rate, 4.0 / 6.0)
+        self.assertAlmostEqual(fit.death_rate, 3.0 / 6.0)
+        self.assertAlmostEqual(fit.sampling_rate, 2.0 / 6.0)
+        self.assertEqual(fit.initial_population, 7)
+        self.assertEqual(fit.horizon, 9.0)
+        self.assertEqual(fit.name, "process")
+        self.assertEqual(fit.keys, "shared")
+
+        loaded = from_json(to_json(estimator))
+        np.testing.assert_array_equal(loaded.prior_shape, estimator.prior_shape)
+        np.testing.assert_array_equal(loaded.prior_rate, estimator.prior_rate)
+        self.assertEqual(loaded.initial_population, 7)
+        self.assertEqual(loaded.horizon, 9.0)
+
+    def test_explicit_gamma_prior_is_applied_per_rate(self):
+        estimator = BirthDeathSamplingEstimator(
+            initial_population=3,
+            horizon=8.0,
+            prior_shape=[2.0, 3.0, 4.0],
+            prior_rate=[5.0, 6.0, 7.0],
+        )
+        fit = estimator.estimate(
+            None,
+            (1.0, 2.0, 3.0, 4.0, 1.0, 4.0),
+        )
+        np.testing.assert_allclose(
+            [fit.birth_rate, fit.death_rate, fit.sampling_rate],
+            [2.0 / 9.0, 4.0 / 10.0, 6.0 / 11.0],
+        )
+        with self.assertRaises(ValueError):
+            BirthDeathSamplingEstimator(
+                pseudo_count=1.0,
+                prior_shape=2.0,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
