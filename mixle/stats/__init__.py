@@ -774,10 +774,14 @@ __all__ = [
     "KentSampler",
     "KentEstimator",
     "KentDataEncoder",
+    "KentFitError",
+    "KentSamplingError",
     "BinghamDistribution",
     "BinghamSampler",
     "BinghamEstimator",
     "BinghamDataEncoder",
+    "BinghamFitError",
+    "BinghamSamplingError",
     "InverseWishartDistribution",
     "InverseWishartSampler",
     "InverseWishartEstimator",
@@ -1124,13 +1128,17 @@ from mixle.stats.directional.bingham import (
     BinghamDataEncoder,
     BinghamDistribution,
     BinghamEstimator,
+    BinghamFitError,
     BinghamSampler,
+    BinghamSamplingError,
 )
 from mixle.stats.directional.kent import (
     KentDataEncoder,
     KentDistribution,
     KentEstimator,
+    KentFitError,
     KentSampler,
+    KentSamplingError,
 )
 from mixle.stats.directional.projected_normal import (
     ProjectedNormalDataEncoder,
