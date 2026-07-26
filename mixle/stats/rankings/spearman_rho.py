@@ -12,6 +12,7 @@ dimension equal to K representing the mean of the rank variables, and rho is a c
 """
 
 import itertools
+import math
 from collections.abc import Sequence
 from functools import cache
 from typing import Any
@@ -315,6 +316,10 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
     def enumerator(self) -> "SpearmanRankingEnumerator":
         """Returns SpearmanRankingEnumerator iterating permutations in descending probability order."""
         return SpearmanRankingEnumerator(self)
+
+    def support_size(self) -> int:
+        """Return the number of full rankings."""
+        return math.factorial(self.dim)
 
 
 class SpearmanRankingEnumerator(DistributionEnumerator):

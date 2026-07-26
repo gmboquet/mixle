@@ -196,6 +196,10 @@ class MallowsDistribution(SequenceEncodableProbabilityDistribution):
         """Return an exact finite enumerator over all orderings in decreasing probability order."""
         return MallowsEnumerator(self)
 
+    def support_size(self) -> int:
+        """Return the number of full rankings."""
+        return math.factorial(self.dim)
+
     def estimator(self, pseudo_count: float | None = None) -> "MallowsEstimator":
         """Return an estimator that keeps the item count fixed at this distribution's n."""
         return MallowsEstimator(dim=self.dim, name=self.name, keys=self.keys)
