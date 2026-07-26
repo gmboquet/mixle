@@ -55,10 +55,16 @@ class ThompsonBernoulliTest(unittest.TestCase):
 
     def test_rejects_rewards_outside_the_unit_interval(self):
         policy = ThompsonBernoulli(2, seed=0)
-        with self.assertRaises(ValueError):
-            policy.update(0, 1.5)
+        for reward in (1.5, np.nan, np.inf, -np.inf):
+            with self.assertRaises(ValueError):
+                policy.update(0, reward)
         with self.assertRaises(ValueError):
             policy.update(3, 1.0)
+
+    def test_rejects_nonfinite_priors(self):
+        for kwargs in ({"alpha": np.nan}, {"beta": np.inf}, {"alpha": 0.0}):
+            with self.assertRaises(ValueError):
+                ThompsonBernoulli(2, **kwargs)
 
 
 class ThompsonGaussianTest(unittest.TestCase):
@@ -82,6 +88,24 @@ class ThompsonGaussianTest(unittest.TestCase):
         np.testing.assert_allclose(seq.m, bat.m)
         np.testing.assert_allclose(seq.b, bat.b)
 
+    def test_rejects_nonfinite_rewards_and_priors_without_mutation(self):
+        policy = ThompsonGaussian(2)
+        before = (policy.m.copy(), policy.b.copy(), policy.pulls.copy())
+        for reward in (np.nan, np.inf, -np.inf):
+            with self.assertRaises(ValueError):
+                policy.update(0, reward)
+        np.testing.assert_array_equal(policy.m, before[0])
+        np.testing.assert_array_equal(policy.b, before[1])
+        np.testing.assert_array_equal(policy.pulls, before[2])
+        for kwargs in (
+            {"mu0": np.nan},
+            {"kappa0": np.inf},
+            {"alpha0": np.nan},
+            {"beta0": 0.0},
+        ):
+            with self.assertRaises(ValueError):
+                ThompsonGaussian(2, **kwargs)
+
 
 class UCB1Test(unittest.TestCase):
     def test_plays_every_arm_once_then_concentrates(self):
@@ -96,6 +120,17 @@ class UCB1Test(unittest.TestCase):
         b = _run_bernoulli(UCB1(3), ps=(0.9, 0.5, 0.1), steps=500, env_seed=3)
         np.testing.assert_array_equal(a.pulls, b.pulls)
         np.testing.assert_array_equal(a.sums, b.sums)
+
+    def test_rejects_nonfinite_rewards_and_exploration(self):
+        policy = UCB1(2)
+        for reward in (np.nan, np.inf, -np.inf):
+            with self.assertRaises(ValueError):
+                policy.update(0, reward)
+        np.testing.assert_array_equal(policy.pulls, [0, 0])
+        np.testing.assert_array_equal(policy.sums, [0.0, 0.0])
+        for c in (np.nan, np.inf, 0.0):
+            with self.assertRaises(ValueError):
+                UCB1(2, c=c)
 
 
 class EstimatorBanditTest(unittest.TestCase):
@@ -136,6 +171,52 @@ class EstimatorBanditTest(unittest.TestCase):
             EstimatorBandit([GaussianEstimator()])
         with self.assertRaises(ValueError):
             EstimatorBandit([GaussianEstimator(), GaussianEstimator()], n_boot=1)
+
+    def test_validates_draw_count_rewards_and_scores(self):
+        estimators = [GaussianEstimator(), GaussianEstimator()]
+        for mc_draws in (0, -1):
+            with self.assertRaises(ValueError):
+                EstimatorBandit(estimators, mc_draws=mc_draws)
+        with self.assertRaises(TypeError):
+            EstimatorBandit(estimators, mc_draws=1.5)
+        with self.assertRaises(TypeError):
+            EstimatorBandit(estimators, mean_fn=1.0)
+
+        policy = EstimatorBandit(estimators, seed=0)
+        for reward in (np.nan, np.inf, -np.inf):
+            with self.assertRaises(ValueError):
+                policy.update(0, reward)
+        np.testing.assert_array_equal(policy.pulls, [0, 0])
+
+        bad_score = EstimatorBandit(estimators, mean_fn=lambda _fitted: np.nan, seed=0)
+        bad_score.update(0, 1.0)
+        bad_score.update(1, 1.0)
+        with self.assertRaises(ValueError):
+            bad_score.select()
+
+    def test_batch_replay_preserves_order_but_bootstrap_updates_do_not_commute(self):
+        arms = [0, 1, 0, 1, 0]
+        rewards = [1.0, -0.5, 0.25, 2.0, 1.5]
+        sequential = EstimatorBandit([GaussianEstimator(), GaussianEstimator()], n_boot=8, seed=9)
+        batched = EstimatorBandit([GaussianEstimator(), GaussianEstimator()], n_boot=8, seed=9)
+        for arm, reward in zip(arms, rewards):
+            sequential.update(arm, reward)
+        batched.batch_update(arms, rewards)
+        np.testing.assert_array_equal(sequential.pulls, batched.pulls)
+        np.testing.assert_array_equal(sequential._replicate_weight, batched._replicate_weight)
+        self.assertEqual(
+            [[replicate.value() for replicate in arm] for arm in sequential._replicates],
+            [[replicate.value() for replicate in arm] for arm in batched._replicates],
+        )
+
+        forward = EstimatorBandit([GaussianEstimator(), GaussianEstimator()], n_boot=8, seed=9)
+        reverse = EstimatorBandit([GaussianEstimator(), GaussianEstimator()], n_boot=8, seed=9)
+        forward.batch_update([0, 0], [1.0, 2.0])
+        reverse.batch_update([0, 0], [2.0, 1.0])
+        self.assertNotEqual(
+            [replicate.value() for replicate in forward._replicates[0]],
+            [replicate.value() for replicate in reverse._replicates[0]],
+        )
 
 
 if __name__ == "__main__":
