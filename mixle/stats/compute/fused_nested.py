@@ -50,6 +50,7 @@ class _Mixture:
     node_id: int
     children: list[Any]
     log_w: np.ndarray
+    shared_encoding: bool
 
 
 @dataclass
@@ -69,10 +70,10 @@ def _shape(node: Any) -> Any:
     """Structural signature of a BUILT tree -- the kernel cache key. Captures ALL children so distinct
     heterogeneous mixtures never share a compiled kernel."""
     if isinstance(node, _Leaf):
-        return ("leaf", node.template.name)
+        return ("leaf", node.template.name, node.slot)
     if isinstance(node, _Composite):
         return ("comp", tuple(_shape(c) for c in node.children))
-    return ("mix", tuple(_shape(c) for c in node.children))
+    return ("mix", node.shared_encoding, tuple(_shape(c) for c in node.children))
 
 
 def _model_shape(dist: Any) -> Any:
@@ -88,9 +89,20 @@ def _model_shape(dist: Any) -> Any:
     return ("leaf", t.name if t is not None else tname)
 
 
-def _homogeneous(model: Any) -> bool:
+def _shared_component_encoding(model: Any) -> bool:
+    """Whether a mixture's components have one structurally valid shared encoding.
+
+    Recursive fusion needs both the same leaf structure and the same encoding
+    protocol. The mixture's own encoder is the authority on whether it emits
+    one shared payload or a per-component ``_HeteroMixtureEncoded`` payload.
+    Conservatively retain separate slots when an unfamiliar encoder does not
+    expose that decision.
+    """
     shapes = [_model_shape(c) for c in model.components]
-    return all(s == shapes[0] for s in shapes)
+    if not shapes or not all(shape == shapes[0] for shape in shapes[1:]):
+        return False
+    shared = getattr(model.dist_to_encoder(), "homogeneous", False)
+    return isinstance(shared, (bool, np.bool_)) and bool(shared)
 
 
 def _build(model: Any, path: tuple, ctx: _Ctx) -> Any | None:
@@ -104,14 +116,19 @@ def _build(model: Any, path: tuple, ctx: _Ctx) -> Any | None:
             return None
         return _Composite(ctx.fresh(), children)
     if tname == "MixtureDistribution":
-        homo = _homogeneous(model)  # homogeneous components share the encoding (same slot/path); else split
+        shared_encoding = _shared_component_encoding(model)
         children = []
         for j, c in enumerate(model.components):
-            child = _build(c, path if homo else path + (("h", j),), ctx)
+            child = _build(c, path if shared_encoding else path + (("h", j),), ctx)
             if child is None:
                 return None
             children.append(child)
-        return _Mixture(ctx.fresh(), children, np.asarray(model.log_w, dtype=np.float64))
+        return _Mixture(
+            ctx.fresh(),
+            children,
+            np.asarray(model.log_w, dtype=np.float64),
+            shared_encoding,
+        )
     t = _template_for(model)
     if t is None or t.kind != "scalar":  # only scalar leaves nest cleanly (no precompute / BLAS / tables)
         return None
@@ -381,7 +398,7 @@ def _compile_estep(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> 
 # --- marshalling ----------------------------------------------------------------------------------
 def _marshal(model: Any, root: Any, ctx: _Ctx, enc: Any) -> tuple[list, list]:
     """Fill the per-slot data arrays (from the real encoding) and the per-leaf / per-mixture params."""
-    _fill_slots(model, (), enc, ctx)
+    _fill_slots(model, root, enc, ctx)
     data = [ctx.slot_data[s][j] for s in range(len(ctx.slots)) for j in range(ctx.slot_template[s].arity)]
     params: list = []
     for lf in _leaves(root):
@@ -392,23 +409,33 @@ def _marshal(model: Any, root: Any, ctx: _Ctx, enc: Any) -> tuple[list, list]:
     return data, params
 
 
-def _fill_slots(model: Any, path: tuple, enc: Any, ctx: _Ctx) -> None:
-    tname = type(model).__name__
-    if tname == "CompositeDistribution":
+def _fill_slots(model: Any, node: Any, enc: Any, ctx: _Ctx) -> None:
+    """Fill each analyzed data slot from its matching encoded component view."""
+    if isinstance(node, _Composite):
         encs = enc if isinstance(enc, tuple) else (enc,)
-        for i, c in enumerate(model.dists):
-            _fill_slots(c, path + (("c", i),), encs[i], ctx)
-    elif tname == "MixtureDistribution":
-        if _homogeneous(model):
-            for c in model.components:  # components share the encoding
-                _fill_slots(c, path, enc, ctx)
+        if len(encs) != len(node.children):
+            raise ValueError(
+                "nested fused composite encoding has %d fields but the model has %d."
+                % (len(encs), len(node.children))
+            )
+        for child_model, child_node, child_enc in zip(model.dists, node.children, encs):
+            _fill_slots(child_model, child_node, child_enc, ctx)
+    elif isinstance(node, _Mixture):
+        if node.shared_encoding:
+            # Equal component encoders and equal model structure mean the first
+            # subtree fills every slot shared by the remaining components.
+            _fill_slots(model.components[0], node.children[0], enc, ctx)
         else:
-            sub = enc.encodings  # _HeteroMixtureEncoded: one encoding per component
-            for j, c in enumerate(model.components):
-                _fill_slots(c, path + (("h", j),), sub[j], ctx)
-    elif path in ctx.slots:
-        slot = ctx.slots[path][1]
-        ctx.slot_data[slot] = ctx.slots[path][0].data(enc)
+            sub = getattr(enc, "encodings", None)
+            if sub is None or len(sub) != len(node.children):
+                raise ValueError(
+                    "nested fused mixture requires %d per-component encodings."
+                    % len(node.children)
+                )
+            for child_model, child_node, child_enc in zip(model.components, node.children, sub):
+                _fill_slots(child_model, child_node, child_enc, ctx)
+    else:
+        ctx.slot_data[node.slot] = node.template.data(enc)
 
 
 def _mixture_depth(node: Any) -> int:
