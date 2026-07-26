@@ -228,7 +228,11 @@ class TorchDistributedSession:
         position_ids = torch.arange(inputs.shape[1], device=inputs.device).expand(inputs.shape[0], -1).clone()
         with self._context_parallel(inputs, targets, position_ids), self._autocast():
             logits = self.module(inputs, position_ids=position_ids, return_all_logits=True)
-            return torch.nn.functional.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1))
+            return torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.shape[-1]),
+                targets.reshape(-1),
+                reduction="sum",
+            )
 
     def _skipped_receipt(self, loss: float, examples: int, tokens: int) -> StepReceipt:
         return StepReceipt(
@@ -258,17 +262,17 @@ class TorchDistributedSession:
             raise ValueError("native language-model training expects equal (batch, sequence) inputs and targets.")
         input_chunks = torch.chunk(inputs, min(self.plan.microbatches, inputs.shape[0]), dim=0)
         target_chunks = torch.chunk(targets, len(input_chunks), dim=0)
-        total_targets = max(int(targets.numel()), 1)
-        detached_loss = 0.0
+        batch_loss_sum = 0.0
         for input_chunk, target_chunk in zip(input_chunks, target_chunks):
-            loss = self._loss(input_chunk, target_chunk)
-            weight = target_chunk.numel() / total_targets
-            (loss * weight / self.plan.gradient_accumulation_steps).backward()
-            detached_loss += float(loss.detach()) * weight
+            loss_sum = self._loss(input_chunk, target_chunk)
+            loss_sum.backward()
+            batch_loss_sum += float(loss_sum.detach())
+        batch_tokens = int(targets.numel())
+        detached_loss = batch_loss_sum / max(batch_tokens, 1)
         self._pending += 1
         self._pending_examples += int(inputs.shape[0])
-        self._pending_tokens += int(targets.numel())
-        self._pending_loss_sum += detached_loss * int(targets.numel())
+        self._pending_tokens += batch_tokens
+        self._pending_loss_sum += batch_loss_sum
         if self._pending < self.plan.gradient_accumulation_steps:
             return self._skipped_receipt(detached_loss, int(inputs.shape[0]), int(targets.numel()))
         return self._commit()
@@ -276,11 +280,22 @@ class TorchDistributedSession:
     def _commit(self, *, partial: bool = False) -> StepReceipt:
         import torch
 
-        if partial and self._pending:
-            correction = self.plan.gradient_accumulation_steps / self._pending
-            for parameter in self.module.parameters():
-                if parameter.grad is not None:
-                    parameter.grad.mul_(correction)
+        global_examples_f, global_tokens_f, global_loss_sum = self.reduce_sums(
+            float(self._pending_examples),
+            float(self._pending_tokens),
+            self._pending_loss_sum,
+        )
+        global_examples = int(global_examples_f)
+        global_tokens = int(global_tokens_f)
+        if global_tokens <= 0:
+            raise RuntimeError("cannot commit a training step with no target tokens")
+        # DDP/FSDP and the manual data-parallel path average rank gradients.
+        # Accumulated gradients are local token sums, so this converts that
+        # rank average into the exact global token mean.
+        gradient_scale = self.data_parallel_size / global_tokens
+        for parameter in self.module.parameters():
+            if parameter.grad is not None:
+                parameter.grad.mul_(gradient_scale)
         collective_bytes = self._sync_model_axis_gradients()
         collective_bytes += self._sync_manual_data_parallel_gradients()
         if self.max_grad_norm is not None:
@@ -292,7 +307,7 @@ class TorchDistributedSession:
         self.step += 1
         receipt = StepReceipt(
             step=self.step,
-            loss=self._pending_loss_sum / max(self._pending_tokens, 1),
+            loss=global_loss_sum / global_tokens,
             local_examples=self._pending_examples,
             local_tokens=self._pending_tokens,
             microbatches=self.plan.microbatches,
@@ -302,6 +317,8 @@ class TorchDistributedSession:
             precision=self.precision,
             collective_bytes=collective_bytes,
             extra={"partial_accumulation": partial, "parameter_layouts": len(self.parameter_layouts)},
+            global_examples_observed=global_examples,
+            global_tokens_observed=global_tokens,
         )
         self._pending = 0
         self._pending_examples = 0
@@ -311,6 +328,30 @@ class TorchDistributedSession:
 
     def finish_accumulation(self) -> StepReceipt | None:
         return self._commit(partial=True) if self._pending else None
+
+    def discard_accumulation(self) -> StepReceipt | None:
+        """Explicitly discard pending gradients without changing parameters or optimizer state."""
+        if not self._pending:
+            return None
+        receipt = StepReceipt(
+            step=self.step,
+            loss=self._pending_loss_sum / max(self._pending_tokens, 1),
+            local_examples=self._pending_examples,
+            local_tokens=self._pending_tokens,
+            microbatches=self.plan.microbatches,
+            accumulation_steps=self._pending,
+            data_parallel_size=self.plan.data_parallel_size,
+            optimizer=str(self.optimizer_receipt["name"]),
+            precision=self.precision,
+            skipped=True,
+            extra={"reason": "explicit_accumulation_discard"},
+        )
+        self.optimizer.zero_grad(set_to_none=True)
+        self._pending = 0
+        self._pending_examples = 0
+        self._pending_tokens = 0
+        self._pending_loss_sum = 0.0
+        return receipt
 
     def state(self) -> TorchSessionState:
         return TorchSessionState(self.step, self._pending, dict(self.optimizer_receipt))
@@ -371,7 +412,11 @@ class TorchDistributedSession:
         return tuple(float(value) for value in result.cpu())
 
     def close(self) -> None:
-        self.finish_accumulation()
+        if self._pending:
+            raise RuntimeError(
+                "training session has pending gradients; call finish_accumulation() to commit "
+                "or discard_accumulation() to discard them before close()."
+            )
         self._closed = True
 
 
