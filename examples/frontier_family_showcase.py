@@ -14,12 +14,12 @@ composed exactly the way F11 (:mod:`mixle.task.deploy_family`) composes it:
   2. J2 (:mod:`mixle.task.checkpoint_family_ladder`) walks that headline down a two-rung size ladder,
      collecting J1/G3's own compression receipts and a fresh F10 eval report per rung, gated by
      ``track_regression`` against the previous rung.
-  3. I1 (:mod:`mixle.models.unified_quantizer`) quantizes the headline and every rung's REAL parameter
-     tensors into measured deployment artifacts (bytes, reconstruction error, chosen method per tensor).
+  3. I1 (:mod:`mixle.models.unified_quantizer`) quantizes the headline and every accepted rung's REAL
+     parameter tensors into content-addressed deployment artifacts.
   4. J4 (:mod:`mixle.task.frontier_to_native`) distills a *separate* frontier/teacher model into a
      small LNS-compressed, calibrated edge student and serves it behind a two-tier ``Cascade``.
-  5. F11 (:mod:`mixle.task.deploy_family`) prices every J2/I1 artifact off ONE ``CostModel`` scaled by
-     real measured bytes, reports the family's cost/quality frontier, and carries J4's own served-cascade
+  5. F11 (:mod:`mixle.task.deploy_family`) prices every accepted J2/I1 artifact off ONE ``CostModel``
+     scaled by measured inference work, reports the family's cost/quality frontier, and carries J4's own served-cascade
      receipt alongside it (unmerged -- the two quality axes measure different tasks; see
      ``deploy_family``'s module docstring for why).
 
@@ -210,11 +210,16 @@ def main() -> None:
 
     line("STAGE 3 + 5: I1 quantized artifacts + F11's end-to-end serve receipt")
     serve_receipt = deploy_family(
-        family, headline, edge_cascade_receipt=edge_receipt, cost=CostModel(c_frontier=1.0), seed=0
+        family,
+        headline,
+        probe_inputs=calibration_data[:1],
+        edge_cascade_receipt=edge_receipt,
+        cost=CostModel(c_frontier=1.0),
+        seed=0,
     )
     print(serve_receipt.summary())
 
-    assert len(serve_receipt.points) == 1 + len(family.rungs)
+    assert len(serve_receipt.points) == 1 + len(family.passed_rungs())
     for p in serve_receipt.points:
         assert p.artifact.quantized_bytes < p.artifact.dense_bytes, f"{p.name}: I1 artifact did not shrink"
         assert p.cost_per_request > 0.0

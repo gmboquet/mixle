@@ -110,8 +110,10 @@ def _pack_nibbles(w: np.ndarray) -> np.ndarray:
 
 def _unpack_nibbles(packed: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
     """Inverse of :func:`_pack_nibbles`: uint8 pairs -> int8 values in [-7, 7] with ``shape``."""
-    if len(shape) != 2 or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in shape):
-        raise ValueError("packed int4 weight shape must contain two positive integers")
+    if not shape or any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in shape
+    ):
+        raise ValueError("packed int4 shape must contain positive integers")
     raw = np.asarray(packed)
     if raw.ndim != 1 or not np.issubdtype(raw.dtype, np.integer) or np.any(raw < 0) or np.any(raw > 255):
         raise ValueError("packed int4 weights must be a one-dimensional byte array")

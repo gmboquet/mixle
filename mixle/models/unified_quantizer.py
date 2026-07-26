@@ -560,6 +560,9 @@ def _auto_pick(
         raise QuantizationBudgetError(target_bytes, candidates)
     order = eligible_order
     n_arms = len(order)
+    if n_arms == 1:
+        best_method = order[0]
+        return best_method, results[best_method][0], candidates
     bandit = UCB1(n_arms=n_arms, seed=seed)
     for _ in range(n_arms):
         arm = bandit.select()

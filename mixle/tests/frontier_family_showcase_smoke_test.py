@@ -44,11 +44,16 @@ class FrontierFamilyShowcaseSmokeTest(unittest.TestCase):
         self.assertTrue(edge_receipt.earns_its_complexity())
 
         serve_receipt = deploy_family(
-            family, headline, edge_cascade_receipt=edge_receipt, cost=CostModel(c_frontier=1.0), seed=0
+            family,
+            headline,
+            probe_inputs=calibration_data[:1],
+            edge_cascade_receipt=edge_receipt,
+            cost=CostModel(c_frontier=1.0),
+            seed=0,
         )
         print("\n" + serve_receipt.summary())
 
-        self.assertEqual(len(serve_receipt.points), 1 + len(family.rungs))
+        self.assertEqual(len(serve_receipt.points), 1 + len(family.passed_rungs()))
         for p in serve_receipt.points:
             self.assertGreater(p.cost_per_request, 0.0)
             self.assertLess(p.artifact.quantized_bytes, p.artifact.dense_bytes)

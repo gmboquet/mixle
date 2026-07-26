@@ -10,6 +10,7 @@ the family, plus the edge tier's own real cost/quality receipt reported alongsid
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -20,7 +21,7 @@ from mixle.models.eval_harness import markov_transition_matrix  # noqa: E402
 from mixle.models.transformer import build_causal_lm  # noqa: E402
 from mixle.task.checkpoint_family_ladder import RungSpec, build_checkpoint_family  # noqa: E402
 from mixle.task.deploy_family import (  # noqa: E402
-    ArtifactReceipt,
+    DeployableArtifact,
     deploy_family,
     quantize_family_artifacts,
 )
@@ -156,7 +157,7 @@ class QuantizeFamilyArtifactsTest(unittest.TestCase):
         model = build_causal_lm(vocab=23, d_model=16, n_layer=3, n_head=2, block=12)
         artifact = quantize_family_artifacts(model, name="probe", seed=0)
 
-        self.assertIsInstance(artifact, ArtifactReceipt)
+        self.assertIsInstance(artifact, DeployableArtifact)
         self.assertGreater(artifact.n_tensors, 0)
         self.assertGreater(artifact.dense_bytes, 0)
         self.assertGreater(artifact.quantized_bytes, 0)
@@ -165,6 +166,23 @@ class QuantizeFamilyArtifactsTest(unittest.TestCase):
         self.assertGreater(artifact.compression_ratio, 1.0)
         self.assertGreaterEqual(artifact.mean_reconstruction_error, 0.0)
         self.assertEqual(sum(artifact.method_counts.values()), artifact.n_tensors)
+        self.assertTrue(artifact.verify())
+        self.assertEqual(len(artifact.content_digest), 64)
+        self.assertEqual(len(artifact.parameters), artifact.n_tensors)
+
+    def test_dense_bytes_use_the_source_dtype(self):
+        model = torch.nn.Linear(3, 2, bias=False, dtype=torch.float64)
+        artifact = quantize_family_artifacts(model, name="float64")
+        self.assertEqual(artifact.dense_bytes, model.weight.numel() * model.weight.element_size())
+
+    def test_mutated_artifact_fails_closed(self):
+        model = torch.nn.Linear(3, 2)
+        artifact = quantize_family_artifacts(model, name="mutated")
+        with torch.no_grad():
+            next(artifact.model.parameters()).add_(1.0)
+        self.assertFalse(artifact.verify())
+        with self.assertRaises(RuntimeError):
+            artifact.serve(torch.ones(1, 3))
 
     def test_empty_model_raises(self):
         class _Empty(torch.nn.Module):
@@ -172,6 +190,48 @@ class QuantizeFamilyArtifactsTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             quantize_family_artifacts(_Empty(), name="empty")
+
+
+class DeploymentContractTest(unittest.TestCase):
+    @staticmethod
+    def _eval(name):
+        return SimpleNamespace(
+            checkpoint_id=name,
+            scores=lambda: {
+                "modular_arithmetic": 0.8,
+                "parity_reasoning": 0.7,
+                "in_context_induction": 0.6,
+            },
+        )
+
+    def test_rejected_rungs_are_not_published(self):
+        headline = torch.nn.Linear(3, 2)
+        accepted = torch.nn.Linear(3, 2, bias=False)
+        rejected = torch.nn.Linear(3, 2, bias=False)
+        family = SimpleNamespace(
+            headline_eval=self._eval("headline"),
+            rungs=[
+                SimpleNamespace(
+                    name="accepted",
+                    real_target="small",
+                    model=accepted,
+                    eval_report=self._eval("accepted"),
+                    within_eval_budget=True,
+                ),
+                SimpleNamespace(
+                    name="rejected",
+                    real_target="bad",
+                    model=rejected,
+                    eval_report=self._eval("rejected"),
+                    within_eval_budget=False,
+                ),
+            ],
+        )
+        receipt = deploy_family(family, headline, probe_inputs=torch.ones(1, 3), seed=0)
+        self.assertEqual([point.name for point in receipt.points], ["headline", "accepted"])
+        self.assertEqual(len(receipt.probe_digest), 64)
+        self.assertTrue(all(point.artifact.verify() for point in receipt.points))
+        self.assertTrue(all(point.inference_flops > 0 for point in receipt.points))
 
 
 class DeployFamilyEndToEndTest(unittest.TestCase):
@@ -202,6 +262,7 @@ class DeployFamilyEndToEndTest(unittest.TestCase):
         cls.serve_receipt = deploy_family(
             cls.family,
             cls.headline,
+            probe_inputs=calibration_data[:1],
             edge_cascade_receipt=cls.edge_receipt,
             cost=CostModel(c_frontier=1.0),
             seed=0,
@@ -216,25 +277,26 @@ class DeployFamilyEndToEndTest(unittest.TestCase):
 
     def test_serve_receipt_has_one_point_per_family_member(self):
         print("\n" + self.serve_receipt.summary())
-        # headline + every attempted rung, each with a real quantized artifact.
-        self.assertEqual(len(self.serve_receipt.points), 1 + len(self.family.rungs))
+        # headline + every accepted rung; a rejected terminal attempt is not deployable.
+        accepted = [rung for rung in self.family.rungs if rung.within_eval_budget]
+        self.assertEqual(len(self.serve_receipt.points), 1 + len(accepted))
         names = {p.name for p in self.serve_receipt.points}
         self.assertIn("headline", names)
         for rung in self.family.rungs:
-            self.assertIn(rung.name, names)
+            self.assertEqual(rung.name in names, rung.within_eval_budget)
 
-    def test_cost_tracks_real_measured_artifact_bytes(self):
+    def test_cost_tracks_measured_inference_work_not_storage(self):
         headline_point = next(p for p in self.serve_receipt.points if p.name == "headline")
         # headline is priced at exactly CostModel.c_frontier (the pricing anchor).
         self.assertAlmostEqual(headline_point.cost_per_request, 1.0, places=9)
         for p in self.serve_receipt.points:
             self.assertGreater(p.cost_per_request, 0.0)
+            self.assertGreater(p.inference_flops, 0)
             self.assertGreater(p.artifact.quantized_bytes, 0)
-            # the cost/bytes ratio is identical across every point (same linear scaling by construction) --
-            # a real, checkable relationship between the priced number and the measured one.
-            ratio = p.cost_per_request / p.artifact.quantized_bytes
-            headline_ratio = headline_point.cost_per_request / headline_point.artifact.quantized_bytes
+            ratio = p.cost_per_request / p.inference_flops
+            headline_ratio = headline_point.cost_per_request / headline_point.inference_flops
             self.assertAlmostEqual(ratio, headline_ratio, places=9)
+            self.assertTrue(p.artifact.verify())
 
     def test_quality_scores_are_real_and_bounded(self):
         for p in self.serve_receipt.points:
