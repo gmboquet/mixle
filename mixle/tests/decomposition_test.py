@@ -12,6 +12,8 @@ from mixle.stats.compute.decomposition import (
     ReductionOp,
     decomposition_for,
     register_decomposition,
+    replace_decomposition,
+    unregister_decomposition,
 )
 
 
@@ -70,10 +72,50 @@ class ContractTest(unittest.TestCase):
         register_decomposition(_Marker, Decomposition(axis=DecompAxis.FACTOR, num_units=3, reduction=ReductionOp.SUM))
         try:
             self.assertEqual(decomposition_for(_Sub()).num_units, 3)
+            with self.assertRaisesRegex(KeyError, "already registered"):
+                register_decomposition(_Marker, Decomposition.atomic())
+            replacement = Decomposition(axis=DecompAxis.FACTOR, num_units=2, reduction=ReductionOp.SUM)
+            replace_decomposition(_Marker, replacement)
+            self.assertIs(decomposition_for(_Sub()), replacement)
         finally:
-            from mixle.stats.compute.decomposition import _DECOMPOSITIONS
+            unregister_decomposition(_Marker)
 
-            _DECOMPOSITIONS.pop(_Marker, None)
+    def test_descriptor_rejects_incoherent_planning_metadata(self):
+        invalid = (
+            {"num_units": 0},
+            {"axis": DecompAxis.FACTOR, "num_units": 2, "reduction": ReductionOp.REPLICATE},
+            {"axis": DecompAxis.NONE, "reduction": ReductionOp.SUM},
+            {"axis": DecompAxis.FACTOR, "num_units": 2, "reduction": ReductionOp.SUM, "engine_axis": 0},
+            {
+                "axis": DecompAxis.FACTOR,
+                "num_units": 2,
+                "reduction": ReductionOp.SUM,
+                "child_roles": ("same", "same"),
+            },
+        )
+        for kwargs in invalid:
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                Decomposition(**kwargs)
+
+    def test_hook_signature_and_body_failures_are_not_atomic_fallbacks(self):
+        class BadSignature:
+            def decomposition(self, required):
+                return Decomposition.atomic()
+
+        class BrokenBody:
+            def decomposition(self):
+                raise TypeError("defect inside hook")
+
+        class WrongResult:
+            def decomposition(self):
+                return None
+
+        with self.assertRaisesRegex(TypeError, "without arguments"):
+            decomposition_for(BadSignature())
+        with self.assertRaisesRegex(TypeError, "defect inside hook"):
+            decomposition_for(BrokenBody())
+        with self.assertRaisesRegex(TypeError, "must return"):
+            decomposition_for(WrongResult())
 
 
 class DescriptorTest(unittest.TestCase):

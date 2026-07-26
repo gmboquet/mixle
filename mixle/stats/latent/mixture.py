@@ -764,7 +764,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             num_units=self.num_components,
             reduction=ReductionOp.LOGSUMEXP_RESPONSIBILITY,
             exact=True,
-            child_roles=("component",) * self.num_components,
+            child_roles=tuple(f"component_{i}" for i in range(self.num_components)),
             engine_axis=0,
             key_pooling=getattr(self, "keys", None) is not None,
         )
