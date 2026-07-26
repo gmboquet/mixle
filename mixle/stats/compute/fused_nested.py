@@ -24,7 +24,14 @@ from typing import Any
 
 import numpy as np
 
-from mixle.stats.compute.fused_codegen import LeafTemplate, _auto_parallel, _n_chunks, _njit, _template_for
+from mixle.stats.compute.fused_codegen import (
+    LeafTemplate,
+    _auto_parallel,
+    _n_chunks,
+    _njit,
+    _template_for,
+    _validated_fused_weights,
+)
 from mixle.stats.compute.mixture_evidence import (
     InvalidMixtureEvidenceError,
     raise_for_invalid_log_evidence,
@@ -345,7 +352,7 @@ def _compile_estep(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> 
         )
         lines = [
             f"def _es({args}):",
-            "    n = weights.shape[0]",
+            "    n = invalid_rows.shape[0]",
             "    k = 0",
             "    for i in range(n):",
             "        wi = weights[i]",
@@ -372,7 +379,7 @@ def _compile_estep(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> 
         )
         lines = [
             f"def _es_par({args}):",
-            "    n = weights.shape[0]",
+            "    n = invalid_rows.shape[0]",
             "    step = (n + n_chunks - 1) // n_chunks",
             "    for c in numba.prange(n_chunks):",
         ]
@@ -526,6 +533,7 @@ def fused_nested_accumulate(
     data = _cast_reduced(data, compute_dtype)
     params = _cast_reduced(params, compute_dtype)
     n = data[0].shape[0] if data else int(np.asarray(weights).shape[0])
+    weights = _validated_fused_weights(weights, n)
     if parallel is None:
         parallel = _auto_parallel(n)
     nc = _n_chunks(n) if parallel else 0
@@ -547,7 +555,7 @@ def fused_nested_accumulate(
         _compile_estep(root, ctx, _sig(root, ctx), parallel=True)(
             *data,
             *params,
-            np.asarray(weights, dtype=np.float64),
+            weights,
             *cc_arrays,
             *leaf_acc,
             out_ll,
@@ -561,7 +569,7 @@ def fused_nested_accumulate(
         _compile_estep(root, ctx, _sig(root, ctx))(
             *data,
             *params,
-            np.asarray(weights, dtype=np.float64),
+            weights,
             *cc_arrays,
             *leaf_acc,
             out_ll,
