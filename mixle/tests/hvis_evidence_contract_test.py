@@ -13,8 +13,11 @@ from mixle.utils.hvis import (
     conditional_pmat,
     fisher_factors,
     local_factors,
+    model_knn,
     model_log_affinity,
+    sparse_model_distances,
 )
+from mixle.utils.hvis.neighbors import approx_sparse_model_distances
 from mixle.utils.vector import ImpossibleEvidenceError
 
 
@@ -186,6 +189,42 @@ class ConditionalAffinityContractTest(unittest.TestCase):
         probability = conditional_pmat(matrix, perplexity=3.0)
         np.testing.assert_array_equal(np.diag(probability), 0.0)
         np.testing.assert_allclose(probability.sum(axis=1), 1.0)
+
+
+class SparseNeighborEvidenceContractTest(unittest.TestCase):
+    def setUp(self):
+        self.features = np.asarray([[1.0, 0.1], [0.8, 0.2], [0.1, 1.0]], dtype=np.float64)
+
+    def test_zero_total_factor_weight_is_explicitly_no_evidence(self):
+        factors = [(self.features, self.features, 0.0)]
+        for fn in (sparse_model_distances, model_knn, approx_sparse_model_distances):
+            with self.subTest(fn=fn.__name__), self.assertRaises(ImpossibleEvidenceError):
+                fn(None, None, k=1, affinity=factors)
+
+    def test_impossible_similarity_rows_do_not_become_epsilon_neighbors(self):
+        factors = [(np.eye(3), np.eye(3))]
+        for fn in (sparse_model_distances, model_knn, approx_sparse_model_distances):
+            with self.subTest(fn=fn.__name__), self.assertRaises(ImpossibleEvidenceError):
+                fn(None, None, k=1, affinity=factors)
+
+    def test_neighbor_controls_are_not_silently_clamped_or_truncated(self):
+        factors = [(self.features, self.features)]
+        for kwargs in ({"k": 3}, {"k": 1.5}, {"block_size": 0}, {"evidence_cap": 0.0}):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                sparse_model_distances(None, None, affinity=factors, **kwargs)
+        for kwargs in (
+            {"n_trees": 0},
+            {"n_trees": 1.5},
+            {"leaf_size": 4},
+            {"candidate_multiplier": 0},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                approx_sparse_model_distances(None, None, k=1, affinity=factors, **kwargs)
+
+    def test_factor_row_counts_must_match(self):
+        factors = [(self.features, self.features), (np.ones((2, 1)), np.ones((2, 1)))]
+        with self.assertRaises(ValueError):
+            model_knn(None, None, k=1, affinity=factors)
 
 
 if __name__ == "__main__":
