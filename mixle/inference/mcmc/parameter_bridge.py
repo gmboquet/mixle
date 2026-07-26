@@ -191,7 +191,8 @@ def build_parameter_bridge(prototype: Any) -> ParameterBridge:
     parameter is sampled -- included in ``theta`` (a ``{name: value}`` dict here, unlike the
     tuple/scalar shapes above) -- when it is ``differentiable`` and its ``constraint`` is one
     of ``real`` (identity), ``positive``/``positive_vector`` (log), ``unit_interval`` (logit),
-    ``real_vector`` (identity), or ``simplex_vector``/``simplex_map`` (stick-breaking);
+    ``real_vector`` (identity), ``simplex_vector``/``simplex_map`` (stick-breaking), or
+    ``unit_interval_map`` (independent logits);
     non-differentiable declared parameters (e.g. a Binomial's ``n``) are carried as fixed
     constructor keywords taken from ``prototype``, the same nuisance-parameter treatment
     :mod:`mixle.stats.bayes.conjugate` uses. This covers 33 families as of this writing
@@ -358,7 +359,8 @@ def build_parameter_bridge(prototype: Any) -> ParameterBridge:
         "mixle.stats.compute.declarations.DistributionDeclaration is bridged automatically as long as "
         "every declared parameter name is also a constructor keyword and every differentiable "
         "parameter's constraint is one of real/positive/unit_interval/real_vector/positive_vector/"
-        "simplex_vector/simplex_map (see build_parameter_bridge's docstring). %s has none of a "
+        "simplex_vector/simplex_map/unit_interval_map (see build_parameter_bridge's docstring). "
+        "%s has none of a "
         "declaration, or fails one of those two conditions -- most likely because it has no "
         "declaration at all, its declaration describes a natural/scoring parameterization rather than "
         "its constructor's, or a differentiable parameter's constraint (e.g. a covariance matrix or a "
@@ -493,6 +495,53 @@ def _simplex_map_block(name: str, labels: tuple[Any, ...]) -> _ParamBlock | None
     )
 
 
+def _unit_interval_map_block(
+    name: str,
+    labels: tuple[Any, ...],
+) -> _ParamBlock | None:
+    if not labels:
+        return None
+
+    def to_u(prob_map: Any) -> np.ndarray:
+        if not isinstance(prob_map, Mapping) or set(prob_map) != set(labels):
+            raise ValueError(
+                f"{name} initial state must contain exactly the declared labels."
+            )
+        probabilities = np.asarray(
+            [float(prob_map[label]) for label in labels],
+            dtype=float,
+        )
+        if (
+            np.any(~np.isfinite(probabilities))
+            or np.any(probabilities <= 0.0)
+            or np.any(probabilities >= 1.0)
+        ):
+            raise ValueError(
+                f"{name} initial probabilities must lie strictly inside (0, 1)."
+            )
+        return np.log(probabilities) - np.log1p(-probabilities)
+
+    def from_u(phi: np.ndarray) -> dict[Any, float]:
+        values = np.asarray(phi, dtype=float)
+        probabilities = 1.0 / (1.0 + np.exp(-values))
+        return {
+            label: float(probabilities[index])
+            for index, label in enumerate(labels)
+        }
+
+    def log_det(phi: np.ndarray) -> float:
+        values = np.asarray(phi, dtype=float)
+        return float(np.sum(-_softplus(-values) - _softplus(values)))
+
+    return _ParamBlock(
+        name=name,
+        dim=len(labels),
+        to_unconstrained=to_u,
+        from_unconstrained=from_u,
+        log_abs_det_jacobian=log_det,
+    )
+
+
 def _declared_parameter_block(name: str, constraint: str, value: Any) -> _ParamBlock | None:
     """Return the unconstrained-space block for one declared, differentiable parameter.
 
@@ -515,6 +564,10 @@ def _declared_parameter_block(name: str, constraint: str, value: Any) -> _ParamB
         if not isinstance(value, Mapping):
             return None
         return _simplex_map_block(name, tuple(value.keys()))
+    if constraint == "unit_interval_map":
+        if not isinstance(value, Mapping):
+            return None
+        return _unit_interval_map_block(name, tuple(value.keys()))
     return None
 
 

@@ -2,7 +2,7 @@
 
 Covers BernoulliSetEnumerator (mixle/stats/setdist.py) against brute force on a 4-element
 universe: non-increasing order, exact de-duplication, log_prob == log_density, top-k
-agreement with the brute-force top-k, and fail-fast EnumerationError when a membership
+agreement with the brute-force top-k, and fail-fast validation when a membership
 probability lies outside [0, 1]. Also smoke-tests imports of the five set/association
 modules: setdist, int_edit_setdist, int_edit_stepsetdist, hidden_association, and
 int_hidden_association.
@@ -14,9 +14,18 @@ import unittest
 
 import numpy as np
 
-from mixle.stats.compute.pdist import EnumerationError
-from mixle.stats.sets.bernoulli_set import BernoulliSetDistribution, BernoulliSetEnumerator
+from mixle.engines import NumpyEngine
+from mixle.inference.mcmc.parameter_bridge import build_parameter_bridge
+from mixle.stats.sets.bernoulli_set import (
+    BernoulliSetAccumulator,
+    BernoulliSetDataEncoder,
+    BernoulliSetDistribution,
+    BernoulliSetEnumerator,
+    BernoulliSetEstimator,
+    BernoulliSetFitError,
+)
 from mixle.stats.sets.integer_step_bernoulli_edit import IntegerStepBernoulliEditEstimator
+from mixle.stats.univariate.continuous.beta import BetaDistribution
 
 TOL = 1e-9
 
@@ -160,15 +169,135 @@ class BernoulliSetEnumeratorTestCase(unittest.TestCase):
         self.assertAlmostEqual(items[0][1], 0.0, delta=TOL)
 
     def test_invalid_probability_fails_fast(self):
-        with np.errstate(invalid="ignore"):
-            dist = BernoulliSetDistribution({"a": 1.5, "b": 0.2}, min_prob=0)
-        with self.assertRaises(EnumerationError) as cm:
-            dist.enumerator()
-        self.assertIn("does not support enumeration", str(cm.exception))
-        self.assertTrue(cm.exception.reason)
+        with self.assertRaises(ValueError):
+            BernoulliSetDistribution({"a": 1.5, "b": 0.2}, min_prob=0)
 
     def test_enumerator_type(self):
         self.assertIsInstance(self.dist.enumerator(), BernoulliSetEnumerator)
+
+
+class BernoulliSetContractTestCase(unittest.TestCase):
+    def test_probability_configuration_is_validated_copied_and_immutable(self):
+        source = {"a": 0.2}
+        dist = BernoulliSetDistribution(source, min_prob=0.1)
+        source["a"] = 0.9
+        self.assertEqual(dist.pmap["a"], 0.2)
+        with self.assertRaises(TypeError):
+            dist.pmap["a"] = 0.4
+        for pmap in ({"a": np.nan}, {"a": -0.1}, {"a": 1.1}):
+            with self.subTest(pmap=pmap), self.assertRaises(ValueError):
+                BernoulliSetDistribution(pmap)
+        for min_prob in (-0.1, 0.51, np.inf):
+            with self.subTest(min_prob=min_prob), self.assertRaises(ValueError):
+                BernoulliSetDistribution({"a": 0.2}, min_prob=min_prob)
+
+    def test_duplicate_and_unknown_labels_are_rejected_consistently(self):
+        dist = BernoulliSetDistribution({"a": 0.4}, prior=BetaDistribution(2.0, 3.0))
+        encoder = BernoulliSetDataEncoder()
+        for observation in (["a", "a"], ["unknown"]):
+            with self.subTest(observation=observation):
+                with self.assertRaises(ValueError):
+                    dist.log_density(observation)
+                with self.assertRaises(ValueError):
+                    dist.expected_log_density(observation)
+        with self.assertRaises(ValueError):
+            encoder.seq_encode([["a", "a"]])
+        encoded = encoder.seq_encode([["unknown"]])
+        with self.assertRaises(ValueError):
+            dist.seq_log_density(encoded)
+        with self.assertRaises(ValueError):
+            dist.seq_expected_log_density(encoded)
+        with self.assertRaises(ValueError):
+            dist.backend_seq_log_density(encoded, NumpyEngine())
+
+    def test_encoder_preserves_heterogeneous_label_identity(self):
+        dist = BernoulliSetDistribution({1: 0.2, "1": 0.7, ("a", 2): 0.8})
+        observations = [[1, ("a", 2)], ["1"], []]
+        encoded = dist.dist_to_encoder().seq_encode(observations)
+        self.assertEqual(encoded[2].dtype, object)
+        self.assertEqual(encoded[2].tolist(), [1, ("a", 2), "1"])
+        np.testing.assert_allclose(
+            dist.seq_log_density(encoded),
+            [dist.log_density(row) for row in observations],
+        )
+        self.assertIn("('a', 2)", str(dist))
+
+    def test_accumulator_rejects_bad_events_weights_and_statistics_atomically(self):
+        acc = BernoulliSetAccumulator(support=("a", "b"))
+        acc.update(["a"], 2.0, None)
+        before = acc.value()
+        for observation, weight in ((["a", "a"], 1.0), (["c"], 1.0), (["b"], -1.0), (["b"], np.nan)):
+            with self.subTest(observation=observation, weight=weight), self.assertRaises(ValueError):
+                acc.update(observation, weight, None)
+            self.assertEqual(acc.value(), before)
+        with self.assertRaises(ValueError):
+            acc.combine(({"a": 3.0}, 2.0))
+        self.assertEqual(acc.value(), before)
+        source_counts = {"a": 1.0}
+        acc.from_value((source_counts, 2.0))
+        source_counts["a"] = 2.0
+        self.assertEqual(acc.value(), ({"a": 1.0}, 2.0))
+
+    def test_stacked_statistics_validate_weight_geometry_and_values(self):
+        engine = NumpyEngine()
+        dists = (
+            BernoulliSetDistribution({"a": 0.2}),
+            BernoulliSetDistribution({"a": 0.8}),
+        )
+        params = BernoulliSetDistribution.backend_stacked_params(dists, engine)
+        encoded = BernoulliSetDataEncoder().seq_encode([["a"], []])
+        for weights in (
+            np.ones((2, 1)),
+            np.asarray([[1.0, -1.0], [1.0, 1.0]]),
+            np.asarray([[1.0, np.nan], [1.0, 1.0]]),
+        ):
+            with self.subTest(weights=weights), self.assertRaises(ValueError):
+                BernoulliSetDistribution.backend_stacked_sufficient_statistics(
+                    encoded,
+                    weights,
+                    params,
+                    engine,
+                )
+
+    def test_estimator_rejects_unidentified_and_impossible_statistics(self):
+        estimator = BernoulliSetEstimator()
+        with self.assertRaises(BernoulliSetFitError):
+            estimator.estimate(None, ({}, 0.0))
+        with self.assertRaises(ValueError):
+            estimator.estimate(None, ({"a": 2.0}, 1.0))
+
+    def test_conjugate_fit_preserves_unobserved_support_and_metadata(self):
+        prior = BetaDistribution(2.0, 3.0)
+        estimator = BernoulliSetEstimator(
+            support=("a", "b"),
+            prior=prior,
+            keys="shared",
+            name="sets",
+        )
+        fitted = estimator.estimate(None, ({"a": 2.0}, 4.0))
+        self.assertEqual(tuple(fitted.pmap), ("a", "b"))
+        self.assertEqual(fitted.get_posteriors()["a"], (4.0, 5.0))
+        self.assertEqual(fitted.get_posteriors()["b"], (2.0, 7.0))
+        self.assertEqual(fitted.keys, "shared")
+        self.assertEqual(fitted.name, "sets")
+
+    def test_estimator_and_parameter_declaration_preserve_independent_map_semantics(self):
+        dist = BernoulliSetDistribution(
+            {"a": 0.2, "b": 0.7},
+            keys="shared",
+            name="sets",
+        )
+        estimator = dist.estimator()
+        self.assertEqual(estimator.support, ("a", "b"))
+        self.assertEqual(estimator.keys, "shared")
+        declaration = dist.compute_declaration()
+        self.assertEqual(declaration.parameters[0].constraint, "unit_interval_map")
+        bridge = build_parameter_bridge(dist)
+        self.assertEqual(bridge.dim, 2)
+        phi = bridge.to_unconstrained(bridge.initial_theta)
+        theta = bridge.from_unconstrained(phi)
+        self.assertEqual(theta["pmap"], dict(dist.pmap))
+        self.assertEqual(dict(bridge.build(theta).pmap), dict(dist.pmap))
 
 
 class StepBernoulliEditEstimatorTestCase(unittest.TestCase):

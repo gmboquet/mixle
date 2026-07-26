@@ -372,6 +372,7 @@ def _ensure_diagnostic_backend_trace_supported(declaration: DistributionDeclarat
         )
     non_symbolic = {
         "simplex_map",
+        "unit_interval_map",
         "row_simplex_map",
         "log_probability_tables",
     }
@@ -398,7 +399,7 @@ def _parameter_value_issues(spec: ParameterSpec, value: Any) -> tuple[str, ...]:
         return ()
     if constraint in ("optional_integer", "optional_log_unit_interval_vector") and value is None:
         return ()
-    if constraint == "simplex_map":
+    if constraint in ("simplex_map", "unit_interval_map"):
         if not isinstance(value, Mapping):
             return ("%s must be a mapping." % name,)
         try:
@@ -1447,6 +1448,7 @@ _KNOWN_PARAMETER_CONSTRAINTS = {
     "simplex",
     "simplex_vector",
     "simplex_map",
+    "unit_interval_map",
     "row_simplex_matrix",
     "row_simplex_map",
     "column_simplex_matrix",

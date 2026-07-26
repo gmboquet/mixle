@@ -15,8 +15,10 @@ elements an observation sequence. For this reason, we need not state the support
 
 """
 
+import operator
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -36,6 +38,189 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.univariate.continuous.beta import BetaDistribution
 from mixle.utils.aliasing import MISSING, coalesce_alias
 from mixle.utils.special import digamma
+
+_COUNT_ATOL = 1.0e-8
+
+
+class BernoulliSetFitError(RuntimeError):
+    """Raised when Bernoulli-set statistics do not define a fitted law."""
+
+
+def _validated_min_prob(value: Any) -> float:
+    if isinstance(value, (bool, np.bool_)) or np.ndim(value) != 0:
+        raise TypeError("Bernoulli-set min_prob must be a real scalar")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("Bernoulli-set min_prob must be a real scalar") from exc
+    if not np.isfinite(result) or result < 0.0 or result > 0.5:
+        raise ValueError("Bernoulli-set min_prob must lie in [0, 0.5]")
+    return result
+
+
+def _validated_probability_map(
+    value: Any,
+    *,
+    min_prob: float = 0.0,
+) -> dict[Any, float]:
+    if not isinstance(value, Mapping):
+        raise TypeError("Bernoulli-set pmap must be a mapping")
+    result = {}
+    for label, probability in value.items():
+        try:
+            hash(label)
+        except TypeError as exc:
+            raise TypeError("Bernoulli-set support labels must be hashable") from exc
+        if isinstance(probability, (bool, np.bool_)) or np.ndim(probability) != 0:
+            raise TypeError("Bernoulli-set probabilities must be real scalars")
+        try:
+            checked = float(probability)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("Bernoulli-set probabilities must be real scalars") from exc
+        if not np.isfinite(checked) or checked < 0.0 or checked > 1.0:
+            raise ValueError(
+                "Bernoulli-set probabilities must be finite values in [0, 1]"
+            )
+        if min_prob > 0.0:
+            upper = 1.0 - min_prob
+            if upper == 1.0:
+                upper = float(np.nextafter(1.0, 0.0))
+            checked = min(max(checked, min_prob), upper)
+        result[label] = checked
+    return result
+
+
+def _canonical_set(
+    value: Any,
+    *,
+    support: frozenset[Any] | None = None,
+) -> tuple[Any, ...]:
+    try:
+        labels = tuple(value)
+    except TypeError as exc:
+        raise TypeError("Bernoulli-set observations must be iterable") from exc
+    seen = set()
+    for label in labels:
+        try:
+            hash(label)
+        except TypeError as exc:
+            raise TypeError("Bernoulli-set observations must contain hashable labels") from exc
+        if label in seen:
+            raise ValueError("Bernoulli-set observations cannot contain duplicates")
+        if support is not None and label not in support:
+            raise ValueError("Bernoulli-set observation contains an unknown support label")
+        seen.add(label)
+    return labels
+
+
+def _object_array(values: Sequence[Any]) -> np.ndarray:
+    result = np.empty(len(values), dtype=object)
+    result[:] = values
+    return result
+
+
+def _validated_encoded_sets(
+    value: Any,
+    *,
+    support: frozenset[Any] | None = None,
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+    if not isinstance(value, (tuple, list)) or len(value) != 4:
+        raise ValueError("encoded Bernoulli sets must contain four items")
+    size = value[0]
+    if isinstance(size, (bool, np.bool_)) or not isinstance(
+        size,
+        (int, np.integer),
+    ):
+        raise TypeError("encoded Bernoulli-set row count must be an integer")
+    size = int(size)
+    if size < 0:
+        raise ValueError("encoded Bernoulli-set row count must be non-negative")
+    row_index = np.asarray(value[1])
+    labels = np.asarray(value[2], dtype=object)
+    label_index = np.asarray(value[3])
+    if (
+        row_index.ndim != 1
+        or labels.ndim != 1
+        or label_index.ndim != 1
+        or row_index.shape != label_index.shape
+    ):
+        raise ValueError("encoded Bernoulli-set arrays have invalid geometry")
+    if row_index.dtype.kind not in "iu" or label_index.dtype.kind not in "iu":
+        raise TypeError("encoded Bernoulli-set indices must be integer arrays")
+    row_index = row_index.astype(np.int64, copy=False)
+    label_index = label_index.astype(np.int64, copy=False)
+    if (
+        np.any(row_index < 0)
+        or np.any(row_index >= size)
+        or np.any(label_index < 0)
+        or np.any(label_index >= len(labels))
+    ):
+        raise ValueError("encoded Bernoulli-set indices are outside their declared ranges")
+    checked_labels = _canonical_set(labels, support=support)
+    labels = _object_array(checked_labels)
+    pairs = tuple(zip(row_index.tolist(), label_index.tolist()))
+    if len(set(pairs)) != len(pairs):
+        raise ValueError("encoded Bernoulli-set rows cannot contain duplicate labels")
+    return size, row_index, labels, label_index
+
+
+def _validated_weight(value: Any) -> float:
+    if isinstance(value, (bool, np.bool_)) or np.ndim(value) != 0:
+        raise TypeError("Bernoulli-set weight must be a real scalar")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("Bernoulli-set weight must be a real scalar") from exc
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError("Bernoulli-set weight must be finite and non-negative")
+    return result
+
+
+def _validated_weights(value: Any, rows: int) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Bernoulli-set weights must be numeric") from exc
+    if result.shape != (rows,):
+        raise ValueError("Bernoulli-set weights must have exact shape (%d,)" % rows)
+    if np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError("Bernoulli-set weights must be finite and non-negative")
+    return result
+
+
+def _validated_sample_size(value: Any) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("sample size must be a non-negative integer")
+    try:
+        result = operator.index(value)
+    except TypeError as exc:
+        raise TypeError("sample size must be a non-negative integer") from exc
+    if result < 0:
+        raise ValueError("sample size must be non-negative")
+    return result
+
+
+def _validated_statistics(
+    value: Any,
+    *,
+    support: frozenset[Any] | None = None,
+) -> tuple[dict[Any, float], float]:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise ValueError("Bernoulli-set sufficient statistics must contain two items")
+    if not isinstance(value[0], Mapping):
+        raise TypeError("Bernoulli-set inclusion counts must be a mapping")
+    total = _validated_weight(value[1])
+    counts = {}
+    tolerance = _COUNT_ATOL * max(1.0, total)
+    for label, raw_count in value[0].items():
+        _canonical_set((label,), support=support)
+        count = _validated_weight(raw_count)
+        if count > total + tolerance:
+            raise ValueError(
+                "Bernoulli-set inclusion count cannot exceed total weight"
+            )
+        counts[label] = count
+    return counts, total
 
 
 class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
@@ -57,7 +242,7 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
             name="bernoulli_set",
             distribution_type=cls,
             parameters=(
-                ParameterSpec("pmap", constraint="simplex_map"),
+                ParameterSpec("pmap", constraint="unit_interval_map"),
                 ParameterSpec("min_prob", constraint="unit_interval", differentiable=False),
             ),
             statistics=(
@@ -98,45 +283,32 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         pmap = coalesce_alias("pmap", pmap, "prob_map", prob_map, default=MISSING)
+        checked_min_prob = _validated_min_prob(min_prob)
+        checked_pmap = _validated_probability_map(
+            pmap,
+            min_prob=checked_min_prob,
+        )
         self.keys = keys
         self.name = name
-        self.pmap = pmap
+        self.pmap = MappingProxyType(checked_pmap)
+        self.support = frozenset(checked_pmap)
         self.required = set()
         self.nlog_sum = 0.0
         self.log_dmap = dict()
 
-        if min_prob == 0:
-            for k, v in pmap.items():
-                if v == 1.0:
-                    self.log_dmap[k] = 0.0
-                    self.required.add(k)
-                elif v == 0.0:
-                    self.log_dmap[k] = -np.inf
-                else:
-                    vv = np.log1p(-v)
-                    self.log_dmap[k] = np.log(v) - vv
-                    self.nlog_sum += vv
-            self.min_prob = 0.0
-            self.num_required = len(self.required)
-
-        else:
-            min_pv = np.log(min_prob)
-            min_nv = np.log1p(-min_prob)
-
-            for k, v in pmap.items():
-                if v == 1.0:
-                    self.log_dmap[k] = min_nv - min_pv
-                    self.nlog_sum += min_pv
-                elif v == 0.0:
-                    self.log_dmap[k] = min_pv - min_nv
-                    self.nlog_sum += min_nv
-                else:
-                    vv = np.log1p(-v)
-                    self.log_dmap[k] = np.log(v) - vv
-                    self.nlog_sum += vv
-
-            self.min_prob = min_prob
-            self.num_required = 0
+        for label, probability in checked_pmap.items():
+            if probability == 1.0:
+                self.log_dmap[label] = 0.0
+                self.required.add(label)
+            elif probability == 0.0:
+                self.log_dmap[label] = -np.inf
+            else:
+                log_exclusion = float(np.log1p(-probability))
+                self.log_dmap[label] = float(np.log(probability)) - log_exclusion
+                self.nlog_sum += log_exclusion
+        self.min_prob = checked_min_prob
+        self.required = frozenset(self.required)
+        self.num_required = len(self.required)
 
         self.set_prior(prior, posteriors)
 
@@ -161,16 +333,48 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
             posteriors: Optional per-element posterior Beta parameters carried forward from a
                 conjugate update.
         """
+        if prior is not None and not isinstance(prior, BetaDistribution):
+            raise TypeError("Bernoulli-set conjugate prior must be a BetaDistribution")
+        checked_posteriors = None
+        if posteriors is not None:
+            if prior is None:
+                raise ValueError("Bernoulli-set posteriors require a Beta prior")
+            if not isinstance(posteriors, Mapping):
+                raise TypeError("Bernoulli-set posteriors must be a mapping")
+            checked_posteriors = {}
+            for label, parameters in posteriors.items():
+                if label not in self.support:
+                    raise ValueError(
+                        "Bernoulli-set posterior label is outside configured support"
+                    )
+                if (
+                    not isinstance(parameters, (tuple, list))
+                    or len(parameters) != 2
+                ):
+                    raise ValueError(
+                        "Bernoulli-set posterior parameters must be (a, b) pairs"
+                    )
+                a = _validated_weight(parameters[0])
+                b = _validated_weight(parameters[1])
+                if a == 0.0 or b == 0.0:
+                    raise ValueError(
+                        "Bernoulli-set posterior Beta parameters must be positive"
+                    )
+                checked_posteriors[label] = (a, b)
         self.prior = prior
-        self.posteriors = posteriors
-        if isinstance(prior, BetaDistribution):
+        self.posteriors = (
+            None
+            if checked_posteriors is None
+            else MappingProxyType(checked_posteriors)
+        )
+        if prior is not None:
             self.has_conj_prior = True
             a0, b0 = prior.get_parameters()
             self._elp = dict()
             self._elnp = dict()
             for k in self.pmap.keys():
-                if posteriors is not None and k in posteriors:
-                    a, b = posteriors[k]
+                if self.posteriors is not None and k in self.posteriors:
+                    a, b = self.posteriors[k]
                 else:
                     a, b = a0, b0
                 dab = digamma(a + b)
@@ -193,7 +397,7 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
     def get_posteriors(self) -> dict[Any, tuple[float, float]] | None:
         """Return the per-element posterior Beta parameters (or ``None``)."""
-        return self.posteriors
+        return None if self.posteriors is None else dict(self.posteriors)
 
     def expected_log_density(self, x: Sequence[Any]) -> float:
         """Variational expectation ``E_q[log p(x | p)]`` under the per-element Beta prior.
@@ -205,19 +409,20 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         if not self.has_conj_prior:
             return self.log_density(x)
         rv = self._nelnp_sum
-        for u in x:
-            elp = self._elp.get(u, self._default_elp)
-            elnp = self._elnp.get(u, self._default_elnp)
-            rv += elp - elnp
+        for label in _canonical_set(x, support=self.support):
+            rv += self._elp[label] - self._elnp[label]
         return rv
 
     def seq_expected_log_density(self, x: tuple[int, np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
         """Vectorized ``expected_log_density`` over sequence-encoded observations."""
         if not self.has_conj_prior:
             return self.seq_log_density(x)
-        sz, idx, val_map_inv, xs = x
+        sz, idx, val_map_inv, xs = _validated_encoded_sets(
+            x,
+            support=self.support,
+        )
         diff_loc = np.asarray(
-            [self._elp.get(u, self._default_elp) - self._elnp.get(u, self._default_elnp) for u in val_map_inv],
+            [self._elp[u] - self._elnp[u] for u in val_map_inv],
             dtype=np.float64,
         )
         rv = np.bincount(idx, weights=diff_loc[xs], minlength=sz)
@@ -226,7 +431,7 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the distribution."""
-        s1 = repr(sorted(self.pmap.items(), key=lambda t: t[0]))
+        s1 = repr(list(self.pmap.items()))
         s2 = repr(self.min_prob)
         s3 = repr(self.name)
         s4 = repr(self.keys)
@@ -260,10 +465,11 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
             Log-density at observation x.
 
         """
-        if not self.required.issubset(x):
+        labels = _canonical_set(x, support=self.support)
+        if not self.required.issubset(labels):
             return -np.inf
         rv = 0.0
-        for v in x:
+        for v in labels:
             rv += self.log_dmap[v]
         return self.nlog_sum + rv
 
@@ -278,7 +484,10 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of log-density values, one per encoded observation.
 
         """
-        sz, idx, val_map_inv, xs = x
+        sz, idx, val_map_inv, xs = _validated_encoded_sets(
+            x,
+            support=self.support,
+        )
 
         dlog_loc = np.asarray([self.log_dmap[u] for u in val_map_inv], dtype=np.float64)
 
@@ -294,7 +503,10 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
     def backend_seq_log_density(self, x: tuple[int, np.ndarray, np.ndarray, np.ndarray], engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded object-valued sets."""
-        sz, idx, val_map_inv, xs = x
+        sz, idx, val_map_inv, xs = _validated_encoded_sets(
+            x,
+            support=self.support,
+        )
         rv = engine.zeros(sz) + float(self.nlog_sum)
 
         if len(xs) > 0:
@@ -315,6 +527,10 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def backend_stacked_params(cls, dists: Sequence["BernoulliSetDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked Bernoulli-set parameters for shared label support."""
+        if not dists:
+            raise ValueError(
+                "Stacked BernoulliSetDistribution parameters require at least one component."
+            )
         labels = tuple(dists[0].pmap.keys())
         min_prob = float(dists[0].min_prob)
         if any(tuple(dist.pmap.keys()) != labels or float(dist.min_prob) != min_prob for dist in dists):
@@ -337,23 +553,25 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         cls, x: tuple[int, np.ndarray, np.ndarray, np.ndarray], params: dict[str, Any], engine: Any
     ) -> Any:
         """Return an ``(n, k)`` matrix of Bernoulli-set log densities."""
-        sz, idx, val_map_inv, xs = x
+        sz, idx, val_map_inv, xs = _validated_encoded_sets(
+            x,
+            support=frozenset(params["labels"]),
+        )
         label_to_idx = {label: i for i, label in enumerate(params["labels"])}
-        mapped = np.asarray([label_to_idx.get(label, -1) for label in val_map_inv], dtype=np.int64)
-        good = mapped >= 0
-        safe = np.clip(mapped, 0, max(0, len(params["labels"]) - 1))
+        mapped = np.asarray(
+            [label_to_idx[label] for label in val_map_inv],
+            dtype=np.int64,
+        )
         rv = engine.zeros((sz, int(params["num_components"]))) + params["nlog_sum"][None, :]
 
         if len(xs) > 0:
-            log_dloc = params["log_d"][engine.asarray(safe), :]
-            log_dloc = engine.where(engine.asarray(good)[:, None], log_dloc, engine.asarray(-np.inf))
+            log_dloc = params["log_d"][engine.asarray(mapped), :]
             rv = engine.index_add(rv, engine.asarray(idx), log_dloc[engine.asarray(xs), :])
 
         if np.any(np.asarray(engine.to_numpy(params["num_required"])) != 0):
             req_cnt = engine.zeros((sz, int(params["num_components"])))
             if len(xs) > 0:
-                required_loc = params["required"][engine.asarray(safe), :]
-                required_loc = engine.where(engine.asarray(good)[:, None], required_loc, engine.asarray(0.0))
+                required_loc = params["required"][engine.asarray(mapped), :]
                 req_cnt = engine.index_add(req_cnt, engine.asarray(idx), required_loc[engine.asarray(xs), :])
             rv = engine.where(req_cnt != params["num_required"][None, :], engine.asarray(-np.inf), rv)
 
@@ -364,9 +582,26 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         cls, x: tuple[int, np.ndarray, np.ndarray, np.ndarray], weights: Any, params: dict[str, Any], engine: Any
     ) -> tuple[tuple[dict[Any, float], float], ...]:
         """Return per-component legacy ``(count_map, total_weight)`` statistics."""
-        sz, idx, val_map_inv, xs = x
+        sz, idx, val_map_inv, xs = _validated_encoded_sets(
+            x,
+            support=frozenset(params["labels"]),
+        )
         xx = engine.asarray(xs)
-        ww = engine.asarray(weights)
+        weights_np = np.asarray(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            dtype=np.float64,
+        )
+        expected_shape = (sz, int(params["num_components"]))
+        if weights_np.shape != expected_shape:
+            raise ValueError(
+                "Stacked Bernoulli-set weights must have exact shape %r"
+                % (expected_shape,)
+            )
+        if np.any(~np.isfinite(weights_np)) or np.any(weights_np < 0.0):
+            raise ValueError(
+                "Stacked Bernoulli-set weights must be finite and non-negative"
+            )
+        ww = engine.asarray(weights_np)
         count_rows = []
         if len(xs) > 0:
             row_weights = ww[engine.asarray(idx)]
@@ -376,7 +611,10 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
                 count_rows.append(engine.sum(engine.where(mask[:, None], row_weights, zero_rows), axis=0))
             counts = np.asarray(engine.to_numpy(engine.stack(count_rows, axis=0)), dtype=np.float64)
         else:
-            counts = np.zeros((0, int(params["num_components"])), dtype=np.float64)
+            counts = np.zeros(
+                (len(val_map_inv), int(params["num_components"])),
+                dtype=np.float64,
+            )
         totals = np.asarray(engine.to_numpy(engine.sum(ww, axis=0)), dtype=np.float64)
         return tuple(
             ({val_map_inv[j]: float(counts[j, component]) for j in range(len(val_map_inv))}, float(totals[component]))
@@ -406,14 +644,22 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return BernoulliSetEstimator(min_prob=self.min_prob, name=self.name, prior=self.prior)
+            return BernoulliSetEstimator(
+                min_prob=self.min_prob,
+                name=self.name,
+                keys=self.keys,
+                prior=self.prior,
+                support=tuple(self.pmap),
+            )
         else:
             return BernoulliSetEstimator(
                 min_prob=self.min_prob,
                 pseudo_count=pseudo_count,
                 suff_stat=self.pmap,
                 name=self.name,
+                keys=self.keys,
                 prior=self.prior,
+                support=tuple(self.pmap),
             )
 
     def dist_to_encoder(self) -> "BernoulliSetDataEncoder":
@@ -503,9 +749,10 @@ class BernoulliSetSampler(DistributionSampler):
 
         """
         if size is not None:
-            retval = [[] for i in range(size)]
+            checked_size = _validated_sample_size(size)
+            retval = [[] for _ in range(checked_size)]
             for k, v in self.dist.pmap.items():
-                for i in np.flatnonzero(self.rng.rand(size) <= v):
+                for i in np.flatnonzero(self.rng.rand(checked_size) <= v):
                     retval[i].append(k)
             return retval
 
@@ -520,7 +767,13 @@ class BernoulliSetSampler(DistributionSampler):
 class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulator for per-element inclusion counts from observed sets."""
 
-    def __init__(self, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        keys: str | None = None,
+        *,
+        support: Sequence[Any] | None = None,
+        name: str | None = None,
+    ) -> None:
         """Create an accumulator for Bernoulli-set sufficient statistics.
 
         Args:
@@ -533,6 +786,12 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.pmap = defaultdict(float)
         self.tot_sum = 0.0
+        self.support = (
+            None
+            if support is None
+            else frozenset(_canonical_set(support))
+        )
+        self.name = name
         self.keys = keys
 
     def update(self, x: Sequence[Any], weight: float, estimate: BernoulliSetDistribution | None) -> None:
@@ -544,9 +803,11 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
             estimate (Optional[BernoulliSetDistribution]): Unused (kept for protocol consistency).
 
         """
-        for u in x:
-            self.pmap[u] += weight
-        self.tot_sum += weight
+        labels = _canonical_set(x, support=self.support)
+        checked_weight = _validated_weight(weight)
+        for label in labels:
+            self.pmap[label] += checked_weight
+        self.tot_sum += checked_weight
 
     def initialize(self, x: Sequence[Any], weight: float, rng: RandomState | None) -> None:
         """Initialize the accumulator with a weighted observation. Calls update().
@@ -574,13 +835,21 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
             estimate (Optional[BernoulliSetDistribution]): Unused (kept for protocol consistency).
 
         """
-        sz, idx, val_map_inv, xs = x
-        agg_cnt = np.bincount(xs, weights[idx])
+        sz, idx, val_map_inv, xs = _validated_encoded_sets(
+            x,
+            support=self.support,
+        )
+        checked_weights = _validated_weights(weights, sz)
+        agg_cnt = np.bincount(
+            xs,
+            checked_weights[idx],
+            minlength=len(val_map_inv),
+        )
 
         for i, v in enumerate(agg_cnt):
             self.pmap[val_map_inv[i]] += v
 
-        self.tot_sum += weights.sum()
+        self.tot_sum += float(checked_weights.sum())
 
     def seq_update_engine(
         self,
@@ -594,8 +863,12 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
         The weighted element histogram is reduced on the active engine; the object-keyed count
         dict is host bookkeeping. Matches seq_update.
         """
-        sz, idx, val_map_inv, xs = x
+        sz, idx, val_map_inv, xs = _validated_encoded_sets(
+            x,
+            support=self.support,
+        )
         weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        weights_np = _validated_weights(weights_np, sz)
         w_eng = engine.asarray(weights_np)
 
         if len(xs) > 0:
@@ -641,9 +914,20 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
             This BernoulliSetAccumulator.
 
         """
-        for k, v in suff_stat[0].items():
-            self.pmap[k] += v
-        self.tot_sum += suff_stat[1]
+        counts, total = _validated_statistics(
+            suff_stat,
+            support=self.support,
+        )
+        combined_counts = dict(self.pmap)
+        for label, count in counts.items():
+            combined_counts[label] = combined_counts.get(label, 0.0) + count
+        combined_total = self.tot_sum + total
+        combined_counts, combined_total = _validated_statistics(
+            (combined_counts, combined_total),
+            support=self.support,
+        )
+        self.pmap = defaultdict(float, combined_counts)
+        self.tot_sum = combined_total
         return self
 
     def value(self) -> tuple[dict[Any, float], float]:
@@ -660,8 +944,17 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
             This BernoulliSetAccumulator.
 
         """
-        self.pmap = x[0]
-        self.tot_sum = x[1]
+        counts, total = _validated_statistics(x, support=self.support)
+        self.pmap = defaultdict(float, counts)
+        self.tot_sum = total
+        return self
+
+    def scale(self, c: float) -> "BernoulliSetAccumulator":
+        """Scale linear Bernoulli-set sufficient statistics."""
+        checked_scale = _validated_weight(c)
+        for label in tuple(self.pmap):
+            self.pmap[label] *= checked_scale
+        self.tot_sum *= checked_scale
         return self
 
     def acc_to_encoder(self) -> "BernoulliSetDataEncoder":
@@ -672,7 +965,13 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
 class BernoulliSetAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for Bernoulli set accumulators."""
 
-    def __init__(self, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        keys: str | None = None,
+        *,
+        support: Sequence[Any] | None = None,
+        name: str | None = None,
+    ) -> None:
         """Create a factory for Bernoulli set accumulators.
 
         Args:
@@ -683,10 +982,16 @@ class BernoulliSetAccumulatorFactory(StatisticAccumulatorFactory):
 
         """
         self.keys = keys
+        self.support = None if support is None else tuple(_canonical_set(support))
+        self.name = name
 
     def make(self) -> "BernoulliSetAccumulator":
         """Return a new Bernoulli set accumulator."""
-        return BernoulliSetAccumulator(self.keys)
+        return BernoulliSetAccumulator(
+            self.keys,
+            support=self.support,
+            name=self.name,
+        )
 
 
 class BernoulliSetEstimator(ParameterEstimator):
@@ -700,6 +1005,7 @@ class BernoulliSetEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
+        support: Sequence[Any] | None = None,
     ) -> None:
         """Create an estimator for Bernoulli set distributions.
 
@@ -718,17 +1024,51 @@ class BernoulliSetEstimator(ParameterEstimator):
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
-        self.pseudo_count = pseudo_count
-        self.suff_stat = suff_stat
+        self.min_prob = _validated_min_prob(min_prob)
+        self.support = (
+            None
+            if support is None
+            else tuple(_canonical_set(support))
+        )
+        self.support_set = (
+            None if self.support is None else frozenset(self.support)
+        )
+        if pseudo_count is None:
+            if suff_stat is not None:
+                raise ValueError(
+                    "Bernoulli-set prior probabilities require a pseudo-count"
+                )
+            self.pseudo_count = None
+            self.suff_stat = None
+        else:
+            self.pseudo_count = _validated_weight(pseudo_count)
+            self.suff_stat = (
+                None
+                if suff_stat is None
+                else MappingProxyType(_validated_probability_map(suff_stat))
+            )
+            if (
+                self.support_set is not None
+                and self.suff_stat is not None
+                and not set(self.suff_stat).issubset(self.support_set)
+            ):
+                raise ValueError(
+                    "Bernoulli-set prior probabilities exceed configured support"
+                )
         self.keys = keys
         self.name = name
-        self.min_prob = min_prob
+        if prior is not None and not isinstance(prior, BetaDistribution):
+            raise TypeError("Bernoulli-set conjugate prior must be a BetaDistribution")
         self.prior = prior
         self.has_conj_prior = isinstance(prior, BetaDistribution)
 
     def accumulator_factory(self) -> "BernoulliSetAccumulatorFactory":
         """Return an accumulator factory configured from this estimator."""
-        return BernoulliSetAccumulatorFactory(self.keys)
+        return BernoulliSetAccumulatorFactory(
+            self.keys,
+            support=self.support,
+            name=self.name,
+        )
 
     def model_log_density(self, model: "BernoulliSetDistribution") -> float:
         """Log-density of the model's per-element probabilities under the shared Beta prior.
@@ -749,17 +1089,31 @@ class BernoulliSetEstimator(ParameterEstimator):
         the returned probability is the corresponding posterior mode. The per-element
         posteriors are carried forward as ``posteriors`` on the fitted model.
         """
-        obs_cnt, tot_cnt = suff_stat
+        obs_cnt, tot_cnt = _validated_statistics(
+            suff_stat,
+            support=self.support_set,
+        )
         a0, b0 = self.prior.get_parameters()
         pmap = dict()
         posteriors = dict()
-        for k, v in obs_cnt.items():
+        labels = self.support if self.support is not None else tuple(obs_cnt)
+        if tot_cnt == 0.0 and not labels:
+            raise BernoulliSetFitError(
+                "Bernoulli-set fitting requires evidence or configured support"
+            )
+        for k in labels:
+            v = obs_cnt.get(k, 0.0)
             post_a = a0 + v
             post_b = b0 + (tot_cnt - v)
             posteriors[k] = (post_a, post_b)
             pmap[k] = _beta_posterior_mode(a0, b0, v, tot_cnt)
         return BernoulliSetDistribution(
-            pmap, min_prob=self.min_prob, name=self.name, prior=self.prior, posteriors=posteriors
+            pmap,
+            min_prob=self.min_prob,
+            name=self.name,
+            keys=self.keys,
+            prior=self.prior,
+            posteriors=posteriors,
         )
 
     def estimate(self, nobs: float | None, suff_stat: tuple[dict[Any, float], float]) -> "BernoulliSetDistribution":
@@ -773,31 +1127,67 @@ class BernoulliSetEstimator(ParameterEstimator):
             BernoulliSetDistribution object.
 
         """
+        counts, total = _validated_statistics(
+            suff_stat,
+            support=self.support_set,
+        )
         if self.has_conj_prior:
-            return self._estimate_conjugate(suff_stat)
+            result = self._estimate_conjugate((counts, total))
+            result.fit_metadata = {
+                "converged": True,
+                "solver": "beta-conjugate",
+                "regularized": True,
+                "support": tuple(result.pmap),
+                "repairs": (),
+            }
+            return result
+
+        labels = dict.fromkeys(self.support or ())
+        labels.update(dict.fromkeys(counts))
+        if self.suff_stat is not None:
+            labels.update(dict.fromkeys(self.suff_stat))
+        if total == 0.0 and (
+            self.pseudo_count is None or self.pseudo_count == 0.0
+        ):
+            raise BernoulliSetFitError(
+                "Bernoulli-set fitting requires positive observation or prior weight"
+            )
 
         if self.pseudo_count is not None and self.suff_stat is not None:
-            keys = set(suff_stat[0].keys())
-            keys.update(self.suff_stat.keys())
-
             pmap = {
-                k: (self.suff_stat.get(k, 0.0) * self.pseudo_count + suff_stat[0].get(k, 0.0))
-                / (self.pseudo_count + suff_stat[1])
-                for k in keys
+                k: (
+                    self.suff_stat.get(k, 0.0) * self.pseudo_count
+                    + counts.get(k, 0.0)
+                )
+                / (self.pseudo_count + total)
+                for k in labels
             }
 
         elif self.pseudo_count is not None and self.suff_stat is None:
             p = self.pseudo_count
-            cnt = float(p + suff_stat[1])
-            pmap = {k: (v + (p / 2.0)) / cnt for k, v in suff_stat[0].items()}
+            cnt = float(p + total)
+            pmap = {
+                k: (counts.get(k, 0.0) + (p / 2.0)) / cnt
+                for k in labels
+            }
 
         else:
-            if suff_stat[1] != 0:
-                pmap = {k: v / suff_stat[1] for k, v in suff_stat[0].items()}
-            else:
-                pmap = {k: 0.5 for k in suff_stat[0].keys()}
+            pmap = {k: counts.get(k, 0.0) / total for k in labels}
 
-        return BernoulliSetDistribution(pmap, min_prob=self.min_prob, name=self.name, keys=self.keys)
+        result = BernoulliSetDistribution(
+            pmap,
+            min_prob=self.min_prob,
+            name=self.name,
+            keys=self.keys,
+        )
+        result.fit_metadata = {
+            "converged": True,
+            "solver": "weighted-inclusion-frequency",
+            "regularized": self.pseudo_count is not None,
+            "support": tuple(result.pmap),
+            "repairs": (),
+        }
+        return result
 
 
 class BernoulliSetDataEncoder(DataSequenceEncoder):
@@ -825,19 +1215,38 @@ class BernoulliSetDataEncoder(DataSequenceEncoder):
             See 'rv' above.
 
         """
-        idx = []
-        xs = []
+        try:
+            rows = tuple(x)
+        except TypeError as exc:
+            raise TypeError(
+                "Bernoulli-set batches must be iterable collections of sets"
+            ) from exc
+        row_index = []
+        label_index = []
+        labels = []
+        label_to_index = {}
+        for row, observation in enumerate(rows):
+            for label in _canonical_set(observation):
+                if label not in label_to_index:
+                    label_to_index[label] = len(labels)
+                    labels.append(label)
+                row_index.append(row)
+                label_index.append(label_to_index[label])
+        encoded = (
+            len(rows),
+            np.asarray(row_index, dtype=np.int64),
+            _object_array(labels),
+            np.asarray(label_index, dtype=np.int64),
+        )
+        return _validated_encoded_sets(encoded)
 
-        for i in range(len(x)):
-            idx.extend([i] * len(x[i]))
-            xs.extend(x[i])
-
-        val_map, xs = np.unique(xs, return_inverse=True)
-
-        idx = np.asarray(idx, dtype=np.int32)
-        xs = np.asarray(xs, dtype=np.int32)
-
-        return len(x), idx, val_map, xs
+    def row_count(
+        self,
+        x: tuple[int, np.ndarray, np.ndarray, np.ndarray],
+    ) -> int:
+        """Return the encoded row count after set-identity validation."""
+        size, _, _, _ = _validated_encoded_sets(x)
+        return size
 
 
 def _beta_posterior_mode(beta_a: float, beta_b: float, obs_cnt: float, tot_cnt: float) -> float:
