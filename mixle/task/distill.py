@@ -18,7 +18,9 @@ calibration slice, fit the student on the rest, and return a :class:`~mixle.task
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Sequence
+from numbers import Integral
 from typing import Any
 
 import numpy as np
@@ -35,20 +37,39 @@ from mixle.task.model import (
 )
 
 
-def _as_batched(teacher: Callable[..., Any]) -> Callable[[list[str]], list[Any]]:
-    """Accept either a per-item ``teacher(text)`` or a batched ``teacher(list)`` and present a batched view."""
+def _as_batched(teacher: Callable[..., Any], *, teacher_mode: str = "batch") -> Callable[[list[Any]], list[Any]]:
+    """Build one explicit teacher adapter without speculative calls.
 
-    def batched(texts: list[str]) -> list[Any]:
-        out = teacher(texts)
-        if isinstance(out, (list, tuple)) and len(out) == len(texts):
-            return list(out)
-        # teacher was per-item (returned one label for a list, or we guessed wrong): call element-wise
-        return [teacher(t) for t in texts]
+    ``teacher_mode="batch"`` calls ``teacher(items)`` exactly once and requires one result per
+    item. ``teacher_mode="item"`` calls ``teacher(item)`` exactly once per item. The mode is never
+    inferred by executing a potentially side-effecting teacher.
+    """
+    if teacher_mode not in {"batch", "item"}:
+        raise ValueError("teacher_mode must be 'batch' or 'item'")
 
-    return batched
+    def adapted(items: list[Any]) -> list[Any]:
+        if teacher_mode == "item":
+            return [teacher(item) for item in items]
+        result = teacher(items)
+        if isinstance(result, (str, bytes)) or not isinstance(result, Sequence):
+            raise ValueError("a batch teacher must return a sequence with one label per input")
+        labels = list(result)
+        if len(labels) != len(items):
+            raise ValueError(
+                f"batch teacher returned {len(labels)} labels for {len(items)} inputs"
+            )
+        return labels
+
+    return adapted
 
 
-def _teacher_labels(teacher: Callable[..., Any], items: list, n_jobs: int = 1) -> list[Any]:
+def _teacher_labels(
+    teacher: Callable[..., Any],
+    items: list,
+    n_jobs: int = 1,
+    *,
+    teacher_mode: str = "batch",
+) -> list[Any]:
     """Label ``items`` with ``teacher``, fanning contiguous blocks across ``n_jobs`` THREADS.
 
     Threads, not processes: teachers are typically network-bound LM calls (:mod:`mixle.task.llm`),
@@ -57,17 +78,28 @@ def _teacher_labels(teacher: Callable[..., Any], items: list, n_jobs: int = 1) -
     order, and ``n_jobs=1`` is byte-for-byte the sequential batched call. Blocks are ~4 per worker
     so one slow straggler cannot idle the pool.
     """
-    if n_jobs <= 1 or len(items) <= 1:
-        return _as_batched(teacher)(items)
+    if isinstance(n_jobs, bool) or not isinstance(n_jobs, Integral) or n_jobs <= 0:
+        raise ValueError("n_jobs must be a positive integer")
+    items = list(items)
+    batched = _as_batched(teacher, teacher_mode=teacher_mode)
+    if not items:
+        return []
+    if n_jobs == 1 or len(items) <= 1:
+        labels = batched(items)
+        if len(labels) != len(items):
+            raise ValueError("teacher label count must match input count")
+        return labels
     from concurrent.futures import ThreadPoolExecutor
 
     n_blocks = min(len(items), 4 * n_jobs)
     edges = [round(i * len(items) / n_blocks) for i in range(n_blocks + 1)]
     blocks = [items[a:b] for a, b in zip(edges[:-1], edges[1:]) if b > a]
-    batched = _as_batched(teacher)
     with ThreadPoolExecutor(max_workers=n_jobs) as pool:
         parts = list(pool.map(batched, blocks))
-    return [label for part in parts for label in part]
+    labels = [label for part in parts for label in part]
+    if len(labels) != len(items):
+        raise ValueError("teacher label count must match input count")
+    return labels
 
 
 def distill(
@@ -84,6 +116,7 @@ def distill(
     task: str = "",
     device: str = "cpu",
     n_jobs: int = 1,
+    teacher_mode: str = "batch",
 ) -> TaskModel:
     """Label ``texts`` with ``teacher``, fit a local student, and return a callable :class:`TaskModel`.
 
@@ -91,10 +124,12 @@ def distill(
     (else inferred from the teacher's outputs). The student's train-set agreement with the teacher is recorded
     in ``meta``. ``n_jobs > 1`` fans teacher labeling across that many threads (order-preserving; the win is
     parallel in-flight requests against a network-bound teacher) -- every ``distill_*`` teacher entry point
-    takes the same knob.
+    takes the same knob. Set ``teacher_mode="batch"`` for ``teacher(items) -> labels`` or
+    ``teacher_mode="item"`` for ``teacher(item) -> label``; Mixle never probes one mode and retries
+    the other.
     """
     texts = [str(t) for t in texts]
-    teacher_labels = _teacher_labels(teacher, texts, n_jobs=n_jobs)
+    teacher_labels = _teacher_labels(teacher, texts, n_jobs=n_jobs, teacher_mode=teacher_mode)
     return distill_from_labels(
         texts,
         teacher_labels,
@@ -131,6 +166,11 @@ def distill_from_labels(
     trained on a partial sample still spans every class.
     """
     texts = [str(t) for t in texts]
+    teacher_labels = list(teacher_labels)
+    if not texts:
+        raise ValueError("distillation requires at least one training example")
+    if len(texts) != len(teacher_labels):
+        raise ValueError("texts and teacher_labels must have the same length")
     label_list, y = _encode_labels(teacher_labels, labels)
     feat = HashedNGram(n=n, dim=dim, seed=seed)
     module, cfg, steps_run, optimizer_receipt = _fit_mlp(
@@ -175,6 +215,7 @@ def distill_for_routing(
     density_gate: bool = False,
     density_gate_alpha: float = 0.05,
     n_jobs: int = 1,
+    teacher_mode: str = "batch",
 ) -> CalibratedTaskModel:
     """Label ``texts`` with ``teacher``, fit a student, and calibrate it for routing -- all in one call.
 
@@ -189,7 +230,7 @@ def distill_for_routing(
     :func:`distill_from_labels_for_routing`.
     """
     texts = [str(t) for t in texts]
-    teacher_labels = _teacher_labels(teacher, texts, n_jobs=n_jobs)
+    teacher_labels = _teacher_labels(teacher, texts, n_jobs=n_jobs, teacher_mode=teacher_mode)
     return distill_from_labels_for_routing(
         texts,
         teacher_labels,
@@ -241,6 +282,10 @@ def distill_from_labels_for_routing(
     model -- an input whose ``log p(x)`` falls below that floor escalates even if the conformal set is a
     confident singleton.
     """
+    texts = list(texts)
+    teacher_labels = list(teacher_labels)
+    if len(texts) != len(teacher_labels):
+        raise ValueError("texts and teacher_labels must have the same length")
     label_list = list(labels) if labels is not None else sorted({str(y) for y in teacher_labels})
     train_texts, train_labels, cal_texts, cal_labels = _split_for_calibration(
         texts, teacher_labels, calibration_frac, seed
@@ -279,6 +324,7 @@ def distill_records(
     task: str = "",
     device: str = "cpu",
     n_jobs: int = 1,
+    teacher_mode: str = "batch",
 ) -> TaskModel:
     """Distill a teacher into a record classifier (``record -> label`` over tuples/dicts of mixed fields).
 
@@ -286,7 +332,7 @@ def distill_records(
     Uses the hashing-trick :class:`~mixle.task.model.HashedRecord` featurizer, so it needs no fitted encoder.
     """
     records = list(records)
-    teacher_labels = _teacher_labels(teacher, records, n_jobs=n_jobs)
+    teacher_labels = _teacher_labels(teacher, records, n_jobs=n_jobs, teacher_mode=teacher_mode)
     return distill_records_from_labels(
         records,
         teacher_labels,
@@ -316,6 +362,11 @@ def distill_records_from_labels(
 ) -> TaskModel:
     """Teacher-free record-classifier training core (mirrors :func:`distill_from_labels` for structured records)."""
     records = list(records)
+    teacher_labels = list(teacher_labels)
+    if not records:
+        raise ValueError("distillation requires at least one training example")
+    if len(records) != len(teacher_labels):
+        raise ValueError("records and teacher_labels must have the same length")
     label_list, y = _encode_labels(teacher_labels, labels)
     feat = HashedRecord.for_records(records, dim=dim, seed=seed)
     module, cfg, steps_run, optimizer_receipt = _fit_mlp(
@@ -358,11 +409,12 @@ def distill_records_for_routing(
     density_gate: bool = False,
     density_gate_alpha: float = 0.05,
     n_jobs: int = 1,
+    teacher_mode: str = "batch",
 ) -> CalibratedTaskModel:
     """The structured-record sibling of :func:`distill_for_routing`: fit + calibrate a record classifier
     in one call, returning a routing-ready :class:`~mixle.task.calibrate.CalibratedTaskModel`."""
     records = list(records)
-    teacher_labels = _teacher_labels(teacher, records, n_jobs=n_jobs)
+    teacher_labels = _teacher_labels(teacher, records, n_jobs=n_jobs, teacher_mode=teacher_mode)
     return distill_records_from_labels_for_routing(
         records,
         teacher_labels,
@@ -401,6 +453,10 @@ def distill_records_from_labels_for_routing(
     """Teacher-free training core of :func:`distill_records_for_routing` (mirrors
     :func:`distill_from_labels_for_routing` for structured records). ``density_gate=True`` fits the OOD gate
     on the training slice's record features and calibrates it on the calibration slice, same as the text path."""
+    records = list(records)
+    teacher_labels = list(teacher_labels)
+    if len(records) != len(teacher_labels):
+        raise ValueError("records and teacher_labels must have the same length")
     label_list = list(labels) if labels is not None else sorted({str(y) for y in teacher_labels})
     train_records, train_labels, cal_records, cal_labels = _split_for_calibration(
         records, teacher_labels, calibration_frac, seed
@@ -437,6 +493,7 @@ def distill_structured(
     seed: int = 0,
     task: str = "",
     n_jobs: int = 1,
+    teacher_mode: str = "batch",
 ) -> TaskModel:
     """Distill a teacher into a structured probabilistic classifier -- a learned Bayesian network, not an MLP.
 
@@ -451,7 +508,15 @@ def distill_structured(
     student whose sub-structures differ by regime. Assumes a fixed record schema (see :class:`StructuredClassifierIO`).
     """
     records = list(records)
-    teacher_labels = [str(t) for t in _teacher_labels(teacher, records, n_jobs=n_jobs)]
+    teacher_labels = [
+        str(label)
+        for label in _teacher_labels(
+            teacher,
+            records,
+            n_jobs=n_jobs,
+            teacher_mode=teacher_mode,
+        )
+    ]
     return distill_structured_from_labels(
         records,
         teacher_labels,
@@ -482,10 +547,16 @@ def distill_structured_from_labels(
 
     records = list(records)
     teacher_labels = [str(t) for t in teacher_labels]
+    if not records:
+        raise ValueError("distillation requires at least one training example")
+    if len(records) != len(teacher_labels):
+        raise ValueError("records and teacher_labels must have the same length")
     label_list = list(labels) if labels is not None else sorted(set(teacher_labels))
     field_keys, values = _record_schema(records)
     label_index = len(field_keys) if field_keys is not None else len(values[0])
-    augmented = [v + (lab,) for v, lab in zip(values, teacher_labels)]  # label as the last joint field
+    augmented = [
+        value + (label,) for value, label in zip(values, teacher_labels, strict=True)
+    ]  # label as the last joint field
 
     if n_components > 1:
         model = learn_mixture_structure(
@@ -537,9 +608,17 @@ def _record_schema(records: Sequence[Any]) -> tuple[list[str] | None, list[tuple
 
 
 def _encode_labels(teacher_labels: Sequence[Any], labels: Sequence[str] | None) -> tuple[list[str], np.ndarray]:
-    label_list = list(labels) if labels is not None else sorted({str(y) for y in teacher_labels})
+    teacher_labels = [str(label) for label in teacher_labels]
+    label_list = [str(label) for label in labels] if labels is not None else sorted(set(teacher_labels))
+    if not label_list:
+        raise ValueError("distillation requires at least one label")
+    if len(set(label_list)) != len(label_list):
+        raise ValueError("labels must be unique")
     index = {y: i for i, y in enumerate(label_list)}
-    return label_list, np.asarray([index[str(t)] for t in teacher_labels], dtype=np.int64)
+    unknown = sorted(set(teacher_labels) - set(index))
+    if unknown:
+        raise ValueError(f"teacher labels are outside the declared label support: {unknown!r}")
+    return label_list, np.asarray([index[label] for label in teacher_labels], dtype=np.int64)
 
 
 def _split_for_calibration(
@@ -554,6 +633,8 @@ def _split_for_calibration(
     if not 0.0 < calibration_frac < 1.0:
         raise ValueError(f"calibration_frac must be in (0, 1), got {calibration_frac}")
     items, teacher_labels = list(items), list(teacher_labels)
+    if len(items) != len(teacher_labels):
+        raise ValueError("items and teacher_labels must have the same length")
     n_total = len(items)
     n_cal = max(1, int(round(n_total * calibration_frac)))
     if n_cal >= n_total:
@@ -630,6 +711,9 @@ def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, se
 
     remaining, best_loss, stall, fit_module, steps_run = int(epochs), float("inf"), 0, module, 0
     optimizer_receipt = None
+    best_state = None
+    best_optimizer_receipt = None
+    best_step = 0
     while remaining > 0:
         chunk = min(_ES_CHECK_EVERY, remaining)
         leaf = NeuralCategorical(fit_module, m_steps=chunk, lr=float(lr), device=device)
@@ -650,13 +734,26 @@ def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, se
         remaining -= chunk
         steps_run += chunk
         loss = -float(np.mean(fit.seq_log_density(enc)))
+        if not np.isfinite(loss):
+            raise RuntimeError("distillation produced a non-finite validation loss")
         if best_loss - loss > _ES_MIN_DELTA:
             best_loss, stall = loss, 0
+            best_state = copy.deepcopy(fit_module.state_dict())
+            best_optimizer_receipt = copy.deepcopy(optimizer_receipt)
+            best_step = steps_run
         else:
             stall += 1
             if stall >= _ES_PATIENCE:
                 break
-    return fit_module, cfg, steps_run, {"name": "auto", "plan": optimizer_receipt}
+    if best_state is None:
+        raise RuntimeError("distillation did not produce a valid checkpoint")
+    fit_module.load_state_dict(best_state)
+    return fit_module, cfg, steps_run, {
+        "name": "auto",
+        "plan": best_optimizer_receipt,
+        "best_step": best_step,
+        "best_loss": best_loss,
+    }
 
 
 def _student(module, cfg, adapter, task, n_examples, label_list, recipe) -> TaskModel:
@@ -672,6 +769,9 @@ def _student(module, cfg, adapter, task, n_examples, label_list, recipe) -> Task
 
 def agreement(student: TaskModel, teacher_labels: Sequence[Any], texts: Sequence[str]) -> float:
     """Fraction of ``texts`` where the student's label matches the teacher's -- distillation fidelity."""
-    pred = student.batch(list(texts))
+    texts = list(texts)
+    pred = list(student.batch(texts))
     tl = [str(t) for t in teacher_labels]
-    return float(np.mean([p == t for p, t in zip(pred, tl)])) if texts else 0.0
+    if len(pred) != len(tl) or len(tl) != len(texts):
+        raise ValueError("student predictions, teacher labels, and texts must have the same length")
+    return float(np.mean([prediction == truth for prediction, truth in zip(pred, tl, strict=True)])) if texts else 0.0
