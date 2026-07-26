@@ -14,6 +14,7 @@ This is the conjugate prior used by :class:`~mixle.stats.univariate.discrete.cat
 EM. Ported from mixle.bstats.catdirichlet.
 """
 
+import operator
 from typing import Any
 
 import numpy as np
@@ -40,6 +41,10 @@ _SIMPLEX_SUM_RTOL = 1.0e-5
 _SIMPLEX_SUM_ATOL = 1.0e-8
 
 
+class UnspecifiedDirichletDimensionError(ValueError):
+    """Raised when an information operation needs the dimension of a scalar-alpha law."""
+
+
 class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
     """Dirichlet distribution over probability maps keyed by arbitrary values; a scalar alpha denotes
     a symmetric Dirichlet of unspecified dimension."""
@@ -61,7 +66,7 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
 
     def get_parameters(self) -> dict | float:
         """Returns the concentration parameters (dict, or scalar if unbounded)."""
-        return self.alpha
+        return self.alpha if self.is_unbounded else dict(self.alpha)
 
     def set_parameters(self, params: dict[Any, float] | float) -> None:
         """Set the concentration parameters.
@@ -71,20 +76,43 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
                 Dirichlet of unspecified dimension.
 
         """
-        if isinstance(params, (float, int)) and not isinstance(params, bool):
-            a = float(params)
+        is_scalar = np.isscalar(params) or (
+            isinstance(params, np.ndarray) and params.ndim == 0
+        )
+        if is_scalar and not isinstance(params, (bool, np.bool_)):
+            try:
+                a = float(params)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "DictDirichletDistribution requires a positive finite concentration alpha."
+                ) from exc
             if not np.isfinite(a) or a <= 0.0:
                 raise ValueError("DictDirichletDistribution requires a positive finite concentration alpha.")
             self.alpha = a
             self.is_unbounded = True
         else:
-            vals = np.asarray(list(params.values()), dtype=float)
+            if not isinstance(params, dict):
+                raise TypeError(
+                    "DictDirichletDistribution alpha must be a positive scalar or non-empty dictionary."
+                )
+            try:
+                vals = np.asarray(list(params.values()), dtype=np.float64)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "DictDirichletDistribution concentration values must be numeric."
+                ) from exc
             if vals.size == 0 or not np.all(np.isfinite(vals)) or not np.all(vals > 0.0):
                 raise ValueError(
                     "DictDirichletDistribution requires a non-empty dict of positive finite concentration values."
                 )
-            self.alpha = params
+            self.alpha = {key: float(value) for key, value in params.items()}
             self.is_unbounded = False
+
+    def _validated_state(self) -> tuple[dict[Any, float] | float, bool]:
+        alpha = self.get_parameters()
+        probe = object.__new__(DictDirichletDistribution)
+        probe.set_parameters(alpha)
+        return probe.alpha, probe.is_unbounded
 
     def density(self, x: dict[Any, float]) -> float:
         """Density at the probability map x (exp of log_density)."""
@@ -105,12 +133,18 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
         # that don't sum to one) is validated up front and rejected as -inf -- checked before the
         # alpha == 1 short-circuit below, since a uniform-over-the-simplex density is still only
         # defined ON the simplex, not for an arbitrary input map.
-        if self.is_unbounded:
-            a = self.alpha
+        alpha, is_unbounded = self._validated_state()
+        if not isinstance(x, dict):
+            return float(-np.inf)
+        if is_unbounded:
+            a = alpha
             n = len(x)
             if n == 0:
                 return float(-np.inf)
-            vals = np.asarray(list(x.values()), dtype=float)
+            try:
+                vals = np.asarray(list(x.values()), dtype=np.float64)
+            except (TypeError, ValueError):
+                return float(-np.inf)
             if not np.all(np.isfinite(vals)) or np.any(vals < 0.0):
                 return float(-np.inf)
             if not np.isclose(float(vals.sum()), 1.0, rtol=_SIMPLEX_SUM_RTOL, atol=_SIMPLEX_SUM_ATOL):
@@ -122,7 +156,12 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
                 return float(np.inf if a < 1.0 else -np.inf)
             return float(np.sum(np.log(vals)) * (a - 1) - c)
         else:
-            vals = np.asarray(list(x.values()), dtype=float)
+            if set(x) != set(alpha):
+                return float(-np.inf)
+            try:
+                vals = np.asarray([x[key] for key in alpha], dtype=np.float64)
+            except (TypeError, ValueError):
+                return float(-np.inf)
             if vals.size == 0 or not np.all(np.isfinite(vals)) or np.any(vals < 0.0):
                 return float(-np.inf)
             if not np.isclose(float(vals.sum()), 1.0, rtol=_SIMPLEX_SUM_RTOL, atol=_SIMPLEX_SUM_ATOL):
@@ -132,8 +171,8 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
             asum = 0.0
             saw_pos_inf = False
             saw_neg_inf = False
-            for k, v in x.items():
-                a = self.alpha[k]
+            for k, a in alpha.items():
+                v = float(x[k])
                 asum += a
                 if v == 0.0:
                     if a < 1.0:
@@ -156,16 +195,27 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
     def cross_entropy(self, dist: "DictDirichletDistribution") -> float:
         """Cross entropy -E_self[log dist(x)] for a DictDirichlet argument."""
         if isinstance(dist, DictDirichletDistribution):
-            if self.is_unbounded and not dist.is_unbounded:
-                aa = np.asarray(list(dist.alpha.values()))
-                a = self.alpha * np.ones(len(aa))
-            elif not self.is_unbounded and dist.is_unbounded:
-                a = np.asarray(list(self.alpha.values()))
-                aa = dist.alpha * np.ones(len(a))
+            self_alpha, self_unbounded = self._validated_state()
+            dist_alpha, dist_unbounded = dist._validated_state()
+            if self_unbounded and dist_unbounded:
+                raise UnspecifiedDirichletDimensionError(
+                    "cross_entropy between scalar-alpha dictionary Dirichlet laws requires "
+                    "an explicit support dimension."
+                )
+            if self_unbounded and not dist_unbounded:
+                aa = np.asarray(list(dist_alpha.values()), dtype=np.float64)
+                a = self_alpha * np.ones(len(aa))
+            elif not self_unbounded and dist_unbounded:
+                a = np.asarray(list(self_alpha.values()), dtype=np.float64)
+                aa = dist_alpha * np.ones(len(a))
             else:
-                keys = list(self.alpha.keys())
-                a = np.asarray([self.alpha.get(k) for k in keys])
-                aa = np.asarray([dist.alpha.get(k, 0.0) for k in keys])
+                if set(self_alpha) != set(dist_alpha):
+                    raise ValueError(
+                        "DictDirichletDistribution cross-entropy requires identical dictionary support."
+                    )
+                keys = list(self_alpha)
+                a = np.asarray([self_alpha[k] for k in keys], dtype=np.float64)
+                aa = np.asarray([dist_alpha[k] for k in keys], dtype=np.float64)
 
             return float(
                 -((gammaln(np.sum(aa)) - np.sum(gammaln(aa))) + np.dot(digamma(a) - digamma(np.sum(a)), aa - 1))
@@ -178,7 +228,12 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
 
     def entropy(self) -> float:
         """Returns the differential entropy in nats (dict alpha only)."""
-        a = np.asarray(list(self.alpha.values()))
+        alpha, is_unbounded = self._validated_state()
+        if is_unbounded:
+            raise UnspecifiedDirichletDimensionError(
+                "entropy for a scalar-alpha dictionary Dirichlet law requires an explicit support dimension."
+            )
+        a = np.asarray(list(alpha.values()), dtype=np.float64)
         a0 = np.sum(a)
         return float(-((gammaln(a0) - np.sum(gammaln(a))) + np.dot(digamma(a) - digamma(a0), a - 1)))
 
@@ -204,17 +259,25 @@ class DictDirichletSampler(DistributionSampler):
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> dict | list[dict]:
         """Draw Dirichlet-distributed probability maps over the alpha keys (dict alpha only)."""
-        if self.dist.is_unbounded:
+        alpha_state, is_unbounded = self.dist._validated_state()
+        if is_unbounded:
             raise ValueError(
                 "DictDirichletSampler cannot sample from a DictDirichletDistribution with scalar alpha "
                 "(unspecified dimension)."
             )
-        keys = list(self.dist.alpha.keys())
-        alpha = np.asarray([self.dist.alpha[k] for k in keys], dtype=float)
+        keys = list(alpha_state)
+        alpha = np.asarray([alpha_state[k] for k in keys], dtype=np.float64)
         if size is None:
             return dict(zip(keys, self.rng.dirichlet(alpha)))
-        else:
-            return [dict(zip(keys, p)) for p in self.rng.dirichlet(alpha, size=size)]
+        if isinstance(size, (bool, np.bool_)):
+            raise TypeError("DictDirichletSampler size must be a non-negative integer.")
+        try:
+            count = operator.index(size)
+        except TypeError as exc:
+            raise TypeError("DictDirichletSampler size must be a non-negative integer.") from exc
+        if count < 0:
+            raise ValueError("DictDirichletSampler size must be non-negative.")
+        return [dict(zip(keys, p)) for p in self.rng.dirichlet(alpha, size=count)]
 
 
 class DictDirichletDataEncoder(DataSequenceEncoder):
