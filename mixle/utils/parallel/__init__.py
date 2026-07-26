@@ -18,6 +18,7 @@ from mixle.utils.parallel.model_parallel import (  # noqa: E402
     model_parallel_fold,
 )
 from mixle.utils.parallel.planner import (  # noqa: E402
+    EncodedDataControlConflictError,
     Resources,
     encoded_data,
     is_encoded_data_handle,
@@ -71,6 +72,7 @@ __all__ = [
     "auto_parallel_estimator",
     "UnrealizedModelPlacementError",
     "Resources",
+    "EncodedDataControlConflictError",
     "encoded_data",
     "is_encoded_data_handle",
     "model_sharding_plan",
