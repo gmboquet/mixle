@@ -626,6 +626,11 @@ class Placement:
             for shard in self.shards:
                 if known.get(shard.device.name) != shard.device:
                     raise ValueError("placement shard device %r is not in declared resources" % shard.device.name)
+                if shard.device.memory_bytes is not None and shard.total_bytes > shard.device.memory_bytes:
+                    raise MemoryError(
+                        "placement shard %s requires %d bytes but device capacity is %d"
+                        % (shard.device.name, shard.total_bytes, shard.device.memory_bytes)
+                    )
 
         ordered = sorted(self.shards, key=lambda shard: (shard.start, shard.stop))
         if self.total_rows == 0:
@@ -707,10 +712,29 @@ class ModelShard:
     parameter_bytes: int = 0
     statistic_bytes: int = 0
 
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("component_start", self.component_start),
+            ("component_stop", self.component_stop),
+            ("parameter_bytes", self.parameter_bytes),
+            ("statistic_bytes", self.statistic_bytes),
+        ):
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+                raise TypeError("model shard %s must be an integer" % label)
+        if self.component_start < 0 or self.component_stop <= self.component_start:
+            raise ValueError("model shard component range must be non-empty and non-negative")
+        if self.parameter_bytes < 0 or self.statistic_bytes < 0:
+            raise ValueError("model shard byte estimates must be non-negative")
+        if self.device.memory_bytes is not None and self.total_bytes > self.device.memory_bytes:
+            raise MemoryError(
+                "model shard %s requires %d bytes but device capacity is %d"
+                % (self.device.name, self.total_bytes, self.device.memory_bytes)
+            )
+
     @property
     def num_components(self) -> int:
         """Return the number of mixture components in this model shard."""
-        return max(0, int(self.component_stop) - int(self.component_start))
+        return int(self.component_stop) - int(self.component_start)
 
     @property
     def total_bytes(self) -> int:
@@ -1610,7 +1634,6 @@ def plan(
     for device, start, stop in chunks:
         size = stop - start
         row_bytes = encoded_row_bytes + transient_row_bytes
-        estimated_payload = int(np.ceil(size * row_bytes * safety_factor))
         fixed = int(np.ceil((model_bytes + statistic_bytes) * safety_factor))
         max_rows = _max_rows_for_device(device, row_bytes, fixed, safety_factor)
         shard_count = max(1, int(np.ceil(size / max_rows))) if max_rows is not None and size > max_rows else 1
@@ -1658,8 +1681,10 @@ def model_sharding_plan(
     k = int(getattr(model, "num_components", 0) or 0)
     if k <= 0:
         raise ValueError("model does not expose a positive num_components attribute.")
+    if min_components_per_shard > k:
+        raise ValueError("min_components_per_shard cannot exceed the model component count")
     devices = tuple(resources.devices)
-    max_shards = max(1, min(len(devices), int(np.ceil(k / float(min_components_per_shard)))))
+    max_shards = max(1, min(len(devices), k // min_components_per_shard))
     weights = np.asarray([d.throughput for d in devices[:max_shards]], dtype=np.float64)
     weights /= weights.sum()
     counts = np.floor(weights * k).astype(int)
@@ -1703,6 +1728,13 @@ def model_sharding_plan(
             parameter_bytes=last.parameter_bytes + int(np.ceil(total_param_bytes * (k - start) / float(k))),
             statistic_bytes=last.statistic_bytes + int(np.ceil(total_stat_bytes * (k - start) / float(k))),
         )
+    if not shards or shards[0].component_start != 0 or shards[-1].component_stop != k:
+        raise RuntimeError("model sharding failed to cover the component axis")
+    for previous, current in zip(shards, shards[1:]):
+        if previous.component_stop != current.component_start:
+            raise RuntimeError("model sharding produced overlapping or incomplete component ranges")
+    if any(shard.num_components < min_components_per_shard for shard in shards):
+        raise RuntimeError("model sharding violated min_components_per_shard")
     return tuple(shards)
 
 
@@ -1940,7 +1972,10 @@ def _max_rows_for_device(device: DeviceSpec, row_bytes: float, fixed_bytes: int,
         return None
     available = int(device.memory_bytes) - int(fixed_bytes)
     if available <= 0:
-        return 1
+        raise MemoryError(
+            "fixed model/statistic state requires %d bytes but device %s capacity is %d"
+            % (fixed_bytes, device.name, device.memory_bytes)
+        )
     return max(1, int(available / max(1.0, row_bytes * safety_factor)))
 
 
