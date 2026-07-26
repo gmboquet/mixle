@@ -109,14 +109,35 @@ class EstimatorTestCase(unittest.TestCase):
             self.assertLess(np.linalg.norm(f.mu - mu), 0.05)
 
     def test_degenerate_resultant(self):
-        # all observations identical -> rhat == 1 must yield a finite large kappa
+        # all observations identical put the MLE at kappa=+inf, not at an
+        # arbitrary finite clamp.
+        from mixle.stats.directional.von_mises_fisher import (
+            VonMisesFisherFitError,
+        )
+
         x = np.tile([0.0, 1.0], (20, 1))
         est = VonMisesFisherEstimator()
         acc = est.accumulator_factory().make()
         acc.seq_update(x, np.ones(20), None)
-        f = est.estimate(None, acc.value())
-        self.assertTrue(np.isfinite(f.kappa))
-        self.assertGreater(f.kappa, 100.0)
+        with self.assertRaisesRegex(VonMisesFisherFitError, "no finite"):
+            est.estimate(None, acc.value())
+
+    def test_invalid_or_absent_statistics_are_rejected(self):
+        from mixle.stats.directional.von_mises_fisher import (
+            VonMisesFisherFitError,
+        )
+
+        estimator = VonMisesFisherEstimator(dim=3)
+        with self.assertRaises(VonMisesFisherFitError):
+            estimator.estimate(None, (0.0, np.zeros(3)))
+        for statistics in (
+            (1.0, np.asarray([2.0, 0.0, 0.0])),
+            (1.0, np.asarray([np.nan, 0.0, 0.0])),
+            (-1.0, np.zeros(3)),
+            (1.0, np.zeros(2)),
+        ):
+            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+                estimator.estimate(None, statistics)
 
 
 class InvalidParameterTestCase(unittest.TestCase):
@@ -146,6 +167,69 @@ class InvalidParameterTestCase(unittest.TestCase):
     def test_non_finite_mu_raises(self):
         with self.assertRaises(ValueError):
             VonMisesFisherDistribution([float("nan"), 0.0], 2.0)
+
+    def test_dimension_one_is_rejected(self):
+        with self.assertRaises(ValueError):
+            VonMisesFisherDistribution([1.0], 2.0)
+
+    def test_mean_direction_is_copied_and_read_only(self):
+        mu = np.asarray([1.0, 0.0])
+        distribution = VonMisesFisherDistribution(mu, 2.0)
+        mu[:] = [0.0, 1.0]
+        np.testing.assert_array_equal(distribution.mu, [1.0, 0.0])
+        with self.assertRaises(ValueError):
+            distribution.mu[0] = 0.0
+
+
+class EventAndAccumulatorContractTestCase(unittest.TestCase):
+    def setUp(self):
+        self.distribution = VonMisesFisherDistribution([1.0, 0.0, 0.0], 2.0)
+
+    def test_all_scoring_paths_reject_off_sphere_data(self):
+        from mixle.engines import NUMPY_ENGINE
+
+        off_sphere = np.asarray([[2.0, 0.0, 0.0]])
+        with self.assertRaises(ValueError):
+            self.distribution.log_density(off_sphere[0])
+        with self.assertRaises(ValueError):
+            self.distribution.seq_log_density(off_sphere)
+        with self.assertRaises(ValueError):
+            self.distribution.dist_to_encoder().seq_encode(off_sphere)
+        with self.assertRaises(ValueError):
+            self.distribution.backend_seq_log_density(
+                off_sphere,
+                NUMPY_ENGINE,
+            )
+
+    def test_unsupported_pseudo_count_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.distribution.estimator(pseudo_count=1.0)
+        with self.assertRaises(ValueError):
+            VonMisesFisherEstimator(dim=3, pseudo_count=1.0)
+
+    def test_accumulator_accepts_lists_and_rejects_bad_weights_atomically(self):
+        accumulator = VonMisesFisherEstimator(dim=3).accumulator_factory().make()
+        accumulator.update([1.0, 0.0, 0.0], 1.0, None)
+        before = accumulator.value()
+        for weight in (-1.0, np.nan, np.inf):
+            with self.subTest(weight=weight), self.assertRaises(ValueError):
+                accumulator.update([0.0, 1.0, 0.0], weight, None)
+            self.assertEqual(accumulator.value()[0], before[0])
+            np.testing.assert_array_equal(accumulator.value()[1], before[1])
+        with self.assertRaises(ValueError):
+            accumulator.seq_update(
+                np.asarray([[0.0, 1.0, 0.0]]),
+                np.asarray([np.nan]),
+                None,
+            )
+
+    def test_uniform_density_order_has_only_the_tied_mass(self):
+        uniform = VonMisesFisherDistribution([1.0, 0.0, 0.0], 0.0)
+        self.assertEqual(uniform.density_cumulative([1.0, 0.0, 0.0]), 1.0)
+        self.assertEqual(uniform.density_cumulative([-1.0, 0.0, 0.0]), 1.0)
+        with self.assertRaises(ValueError):
+            uniform.density_quantile(0.5)
+        np.testing.assert_array_equal(uniform.density_quantile(1.0), uniform.mu)
 
 
 if __name__ == "__main__":
