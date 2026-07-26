@@ -28,6 +28,7 @@ from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
+from scipy.optimize import brentq
 from scipy.special import i0e, ive
 
 from mixle.stats.compute.pdist import (
@@ -38,9 +39,21 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.directional._circular import (
+    validated_angle,
+    validated_angles,
+    validated_circular_statistics,
+    validated_sample_size,
+    validated_trig,
+    validated_weight,
+    validated_weights,
+)
 
 _LOG_2PI = math.log(2.0 * math.pi)
-_MAX_KAPPA = 1.0e8
+
+
+class VonMisesFitError(RuntimeError):
+    """Raised when circular moments have no finite von Mises fit."""
 
 
 def _log_i0(kappa: float) -> float:
@@ -59,27 +72,36 @@ def _bessel_ratio(kappa: float) -> float:
 
 
 def _solve_kappa(r: float) -> float:
-    """Invert A(kappa) = r for the concentration (Best & Fisher initializer + Newton refinement)."""
-    if r <= 0.0:
+    """Invert ``I1(kappa)/I0(kappa)`` with an adaptive certified bracket."""
+    if not np.isfinite(r) or r < 0.0 or r >= 1.0:
+        raise VonMisesFitError(
+            "von Mises resultant must lie in [0, 1) for a finite fit"
+        )
+    if r == 0.0:
         return 0.0
-    if r >= 1.0 - 1.0e-12:
-        return _MAX_KAPPA
-    if r < 0.53:
-        kappa = 2.0 * r + r**3 + 5.0 * r**5 / 6.0
-    elif r < 0.85:
-        kappa = -0.4 + 1.39 * r + 0.43 / (1.0 - r)
-    else:
-        kappa = 1.0 / (r**3 - 4.0 * r**2 + 3.0 * r)
-    # Newton on A(kappa) = r, with A'(kappa) = 1 - A/kappa - A^2.
-    for _ in range(5):
-        if kappa <= 0.0 or kappa >= _MAX_KAPPA:
-            break
-        a = _bessel_ratio(kappa)
-        deriv = 1.0 - a / kappa - a * a
-        if deriv <= 1.0e-12:
-            break
-        kappa = kappa - (a - r) / deriv
-    return float(min(max(kappa, 0.0), _MAX_KAPPA))
+    upper = max(1.0, 1.0 / max(2.0 * (1.0 - r), 1.0e-12))
+    while _bessel_ratio(upper) < r:
+        upper *= 2.0
+        if upper > 1.0e12:
+            raise VonMisesFitError(
+                "von Mises concentration could not be bracketed"
+            )
+    try:
+        result = brentq(
+            lambda value: _bessel_ratio(value) - r,
+            0.0,
+            upper,
+            xtol=1.0e-12,
+            rtol=1.0e-12,
+            maxiter=200,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise VonMisesFitError("von Mises concentration solve failed") from exc
+    if not np.isfinite(result):
+        raise VonMisesFitError(
+            "von Mises concentration solve returned a non-finite value"
+        )
+    return float(result)
 
 
 class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
@@ -125,14 +147,26 @@ class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
         x: tuple[Any, Any], params: dict[str, Any], engine: Any
     ) -> tuple[Any, ...]:
         """Return per-row (count, cos, sin) sufficient statistics in accumulator order."""
-        cos_t = engine.asarray(x[0])
-        sin_t = engine.asarray(x[1])
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x[0]) or is_symbolic_payload(x[1]):
+            cosine, sine = x
+        else:
+            cosine, sine = validated_trig(x)
+        cos_t = engine.asarray(cosine)
+        sin_t = engine.asarray(sine)
         return cos_t * 0.0 + engine.asarray(1.0), cos_t, sin_t
 
     @staticmethod
     def exp_family_sufficient_statistics(x: tuple[Any, Any], engine: Any) -> tuple[Any, ...]:
         """Return von Mises sufficient statistics ``T(x) = (cos x, sin x)``."""
-        return engine.asarray(x[0]), engine.asarray(x[1])
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x[0]) or is_symbolic_payload(x[1]):
+            cosine, sine = x
+        else:
+            cosine, sine = validated_trig(x)
+        return engine.asarray(cosine), engine.asarray(sine)
 
     @staticmethod
     def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
@@ -176,12 +210,14 @@ class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
             log_const (float): Cached -log(2*pi*I_0(kappa)).
 
         """
-        if kappa < 0.0 or not np.isfinite(kappa):
+        checked_kappa = validated_angle(kappa, "von Mises concentration")
+        checked_mu = validated_angle(mu, "von Mises mean direction")
+        if checked_kappa < 0.0:
             raise ValueError("VonMisesDistribution requires kappa >= 0.")
-        if not np.isfinite(mu):
-            raise ValueError("VonMisesDistribution requires a finite mu.")
-        self.mu = float(math.atan2(math.sin(mu), math.cos(mu)))  # wrap to (-pi, pi]
-        self.kappa = float(kappa)
+        self.mu = float(
+            math.atan2(math.sin(checked_mu), math.cos(checked_mu))
+        )
+        self.kappa = checked_kappa
         self.eta1 = self.kappa * math.cos(self.mu)
         self.eta2 = self.kappa * math.sin(self.mu)
         if self.kappa <= 0.0:
@@ -206,18 +242,25 @@ class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: float) -> float:
         """Return the log-density at a single angle (radians)."""
-        return self.kappa * math.cos(float(x) - self.mu) + self.log_const
+        theta = validated_angle(x)
+        return self.kappa * math.cos(theta - self.mu) + self.log_const
 
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded (cos, sin) observations."""
-        cos_t, sin_t = x
+        cos_t, sin_t = validated_trig(x)
         return self.eta1 * cos_t + self.eta2 * sin_t + self.log_const
 
     def backend_seq_log_density(self, x: tuple[Any, Any], engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x[0]) or is_symbolic_payload(x[1]):
+            cosine, sine = x
+        else:
+            cosine, sine = validated_trig(x)
         return self.backend_log_density_from_params(
-            engine.asarray(x[0]),
-            engine.asarray(x[1]),
+            engine.asarray(cosine),
+            engine.asarray(sine),
             engine.asarray(self.eta1),
             engine.asarray(self.eta2),
             engine.asarray(self.log_const),
@@ -236,8 +279,14 @@ class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def backend_stacked_log_density(cls, x: tuple[Any, Any], params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of von Mises log densities."""
-        cos_t = engine.asarray(x[0])[:, None]
-        sin_t = engine.asarray(x[1])[:, None]
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x[0]) or is_symbolic_payload(x[1]):
+            cosine, sine = x
+        else:
+            cosine, sine = validated_trig(x)
+        cos_t = engine.asarray(cosine)[:, None]
+        sin_t = engine.asarray(sine)[:, None]
         return cls.backend_log_density_from_params(
             cos_t, sin_t, params["eta1"][None, :], params["eta2"][None, :], params["log_const"][None, :], engine
         )
@@ -247,8 +296,14 @@ class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
         cls, x: tuple[Any, Any], weights: Any, params: dict[str, Any], engine: Any
     ) -> tuple[Any, Any, Any]:
         """Return stacked sufficient statistics using engine-resident arrays."""
-        cos_t = engine.asarray(x[0])
-        sin_t = engine.asarray(x[1])
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x[0]) or is_symbolic_payload(x[1]):
+            cosine, sine = x
+        else:
+            cosine, sine = validated_trig(x)
+        cos_t = engine.asarray(cosine)
+        sin_t = engine.asarray(sine)
         ww = engine.asarray(weights)
         return (
             engine.sum(ww, axis=0),
@@ -286,23 +341,35 @@ class VonMisesSampler(DistributionSampler):
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw ``size`` iid angles in (-pi, pi] (a float when ``size`` is None)."""
-        return self.rng.vonmises(self.dist.mu, self.dist.kappa, size=size)
+        checked_size = None if size is None else validated_sample_size(size)
+        return self.rng.vonmises(
+            self.dist.mu,
+            self.dist.kappa,
+            size=checked_size,
+        )
 
 
 class VonMisesAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted count and circular moments (sum of cos / sin) for von Mises estimation."""
 
-    def __init__(self, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         self.count = 0.0
         self.sum_cos = 0.0
         self.sum_sin = 0.0
+        self.name = name
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: VonMisesDistribution | None) -> None:
         """Accumulate one weighted circular moment contribution."""
-        self.count += weight
-        self.sum_cos += math.cos(float(x)) * weight
-        self.sum_sin += math.sin(float(x)) * weight
+        theta = validated_angle(x)
+        checked_weight = validated_weight(weight)
+        self.count += checked_weight
+        self.sum_cos += math.cos(theta) * checked_weight
+        self.sum_sin += math.sin(theta) * checked_weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         """Initialize statistics from one angle."""
@@ -312,10 +379,11 @@ class VonMisesAccumulator(SequenceEncodableStatisticAccumulator):
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: VonMisesDistribution | None
     ) -> None:
         """Accumulate circular moments from encoded cos/sin values."""
-        cos_t, sin_t = x
-        self.count += np.sum(weights, dtype=np.float64)
-        self.sum_cos += np.dot(cos_t, weights)
-        self.sum_sin += np.dot(sin_t, weights)
+        cos_t, sin_t = validated_trig(x)
+        checked_weights = validated_weights(weights, len(cos_t))
+        self.count += float(checked_weights.sum())
+        self.sum_cos += float(np.dot(cos_t, checked_weights))
+        self.sum_sin += float(np.dot(sin_t, checked_weights))
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize statistics from encoded angles."""
@@ -323,9 +391,18 @@ class VonMisesAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "VonMisesAccumulator":
         """Merge another von Mises sufficient-statistic tuple."""
-        self.count += suff_stat[0]
-        self.sum_cos += suff_stat[1]
-        self.sum_sin += suff_stat[2]
+        count, sum_cos, sum_sin = validated_circular_statistics(
+            suff_stat,
+            count_index=0,
+        )
+        combined = (
+            self.count + count,
+            self.sum_cos + sum_cos,
+            self.sum_sin + sum_sin,
+        )
+        self.count, self.sum_cos, self.sum_sin = (
+            validated_circular_statistics(combined, count_index=0)
+        )
         return self
 
     def value(self) -> tuple[float, float, float]:
@@ -334,7 +411,17 @@ class VonMisesAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: tuple[float, float, float]) -> "VonMisesAccumulator":
         """Replace accumulator contents from circular-moment statistics."""
-        self.count, self.sum_cos, self.sum_sin = x
+        self.count, self.sum_cos, self.sum_sin = (
+            validated_circular_statistics(x, count_index=0)
+        )
+        return self
+
+    def scale(self, c: float) -> "VonMisesAccumulator":
+        """Scale linear von Mises sufficient statistics."""
+        checked_scale = validated_weight(c)
+        self.count *= checked_scale
+        self.sum_cos *= checked_scale
+        self.sum_sin *= checked_scale
         return self
 
     def acc_to_encoder(self) -> "VonMisesDataEncoder":
@@ -345,12 +432,17 @@ class VonMisesAccumulator(SequenceEncodableStatisticAccumulator):
 class VonMisesAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for VonMisesAccumulator."""
 
-    def __init__(self, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        self.name = name
         self.keys = keys
 
     def make(self) -> VonMisesAccumulator:
         """Create a fresh von Mises accumulator."""
-        return VonMisesAccumulator(keys=self.keys)
+        return VonMisesAccumulator(name=self.name, keys=self.keys)
 
 
 class VonMisesEstimator(ParameterEstimator):
@@ -367,33 +459,83 @@ class VonMisesEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.pseudo_count = pseudo_count
-        self.suff_stat = suff_stat
+        if pseudo_count is None:
+            if suff_stat is not None:
+                raise ValueError(
+                    "von Mises prior moments require a pseudo-count"
+                )
+            self.pseudo_count = None
+            self.suff_stat = None
+        else:
+            self.pseudo_count = validated_weight(pseudo_count)
+            if (
+                not isinstance(suff_stat, (tuple, list))
+                or len(suff_stat) != 2
+            ):
+                raise ValueError(
+                    "von Mises pseudo-count requires two prior moments"
+                )
+            mean_cos = validated_angle(
+                suff_stat[0],
+                "von Mises prior cosine moment",
+            )
+            mean_sin = validated_angle(
+                suff_stat[1],
+                "von Mises prior sine moment",
+            )
+            if math.hypot(mean_cos, mean_sin) > 1.0 + 1.0e-8:
+                raise ValueError(
+                    "von Mises prior resultant cannot exceed one"
+                )
+            self.suff_stat = (mean_cos, mean_sin)
         self.name = name
         self.keys = keys
 
     def accumulator_factory(self) -> VonMisesAccumulatorFactory:
         """Return an accumulator factory for von Mises circular moments."""
-        return VonMisesAccumulatorFactory(keys=self.keys)
+        return VonMisesAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> VonMisesDistribution:
         """Estimate mean direction and concentration from weighted circular moments."""
-        count, sum_cos, sum_sin = suff_stat
+        count, sum_cos, sum_sin = validated_circular_statistics(
+            suff_stat,
+            count_index=0,
+        )
         if self.pseudo_count is not None and self.suff_stat is not None:
             mean_cos0, mean_sin0 = self.suff_stat
             sum_cos += self.pseudo_count * mean_cos0
             sum_sin += self.pseudo_count * mean_sin0
             count += self.pseudo_count
 
-        if count <= 0.0:
-            return VonMisesDistribution(0.0, 0.0, name=self.name, keys=self.keys)
+        count, sum_cos, sum_sin = validated_circular_statistics(
+            (count, sum_cos, sum_sin),
+            count_index=0,
+        )
+        if count == 0.0:
+            raise VonMisesFitError(
+                "von Mises fitting requires positive observation weight"
+            )
 
         mean_cos = sum_cos / count
         mean_sin = sum_sin / count
         r = math.sqrt(mean_cos * mean_cos + mean_sin * mean_sin)
         mu = math.atan2(mean_sin, mean_cos)
         kappa = _solve_kappa(r)
-        return VonMisesDistribution(mu, kappa, name=self.name, keys=self.keys)
+        result = VonMisesDistribution(
+            mu,
+            kappa,
+            name=self.name,
+            keys=self.keys,
+        )
+        result.fit_metadata = {
+            "converged": True,
+            "solver": "brentq-resultant",
+            "identifiable_direction": bool(r > 1.0e-12),
+            "resultant_length": r,
+            "regularized": self.pseudo_count is not None,
+            "repairs": (),
+        }
+        return result
 
 
 class VonMisesDataEncoder(DataSequenceEncoder):
@@ -407,7 +549,10 @@ class VonMisesDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
         """Encode angles as cosine and sine arrays."""
-        rv = np.asarray(x, dtype=np.float64)
-        if rv.size and np.any(~np.isfinite(rv)):
-            raise ValueError("VonMisesDistribution requires finite angle observations.")
+        rv = validated_angles(x)
         return np.cos(rv), np.sin(rv)
+
+    def row_count(self, x: tuple[np.ndarray, np.ndarray]) -> int:
+        """Return the encoded row count after unit-circle validation."""
+        cosine, _ = validated_trig(x)
+        return len(cosine)

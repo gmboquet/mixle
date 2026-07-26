@@ -262,6 +262,7 @@ __all__ = [
     "WrappedCauchySampler",
     "WrappedCauchyEstimator",
     "WrappedCauchyDataEncoder",
+    "WrappedCauchyFitError",
     "ProjectedNormalDistribution",
     "ProjectedNormalSampler",
     "ProjectedNormalEstimator",
@@ -271,6 +272,7 @@ __all__ = [
     "WrappedNormalSampler",
     "WrappedNormalEstimator",
     "WrappedNormalDataEncoder",
+    "WrappedNormalFitError",
     "GeneralizedGaussianDistribution",
     "GeneralizedGaussianSampler",
     "GeneralizedGaussianEstimator",
@@ -286,6 +288,7 @@ __all__ = [
     "VonMisesSampler",
     "VonMisesEstimator",
     "VonMisesDataEncoder",
+    "VonMisesFitError",
     "WeibullDistribution",
     "GeneralizedParetoDistribution",
     "GeneralizedParetoSampler",
@@ -1154,6 +1157,7 @@ from mixle.stats.directional.von_mises import (
     VonMisesDataEncoder,
     VonMisesDistribution,
     VonMisesEstimator,
+    VonMisesFitError,
     VonMisesSampler,
 )
 from mixle.stats.directional.von_mises_fisher import (
@@ -1175,12 +1179,14 @@ from mixle.stats.directional.wrapped_cauchy import (
     WrappedCauchyDataEncoder,
     WrappedCauchyDistribution,
     WrappedCauchyEstimator,
+    WrappedCauchyFitError,
     WrappedCauchySampler,
 )
 from mixle.stats.directional.wrapped_normal import (
     WrappedNormalDataEncoder,
     WrappedNormalDistribution,
     WrappedNormalEstimator,
+    WrappedNormalFitError,
     WrappedNormalSampler,
 )
 from mixle.stats.graphs.erdos_renyi_graph import (

@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 import scipy.stats
 
-from mixle.stats import VonMisesDistribution
+from mixle.stats import VonMisesDistribution, VonMisesEstimator, VonMisesFitError
 
 
 def _dist():
@@ -73,6 +73,58 @@ class VonMisesTestCase(unittest.TestCase):
     def test_invalid_parameters_raise(self):
         with self.assertRaises(ValueError):
             VonMisesDistribution(0.0, -1.0)
+        for parameters in ((np.nan, 1.0), (0.0, np.nan), (0.0, np.inf)):
+            with self.subTest(parameters=parameters), self.assertRaises(ValueError):
+                VonMisesDistribution(*parameters)
+
+    def test_forged_encoded_observations_are_rejected(self):
+        from mixle.engines import NUMPY_ENGINE
+
+        dist = _dist()
+        for encoded in (
+            (np.asarray([1.0]), np.asarray([1.0])),
+            (np.asarray([1.0, 0.0]), np.asarray([0.0])),
+            (np.asarray([np.nan]), np.asarray([0.0])),
+        ):
+            with self.subTest(encoded=encoded), self.assertRaises(ValueError):
+                dist.seq_log_density(encoded)
+            with self.assertRaises(ValueError):
+                dist.backend_seq_log_density(encoded, NUMPY_ENGINE)
+
+    def test_accumulator_and_estimator_reject_invalid_moments(self):
+        estimator = VonMisesEstimator(name="vm")
+        accumulator = estimator.accumulator_factory().make()
+        self.assertEqual(accumulator.name, "vm")
+        accumulator.update(0.0, 1.0, None)
+        before = accumulator.value()
+        for weight in (-1.0, np.nan, np.inf):
+            with self.subTest(weight=weight), self.assertRaises(ValueError):
+                accumulator.update(1.0, weight, None)
+            self.assertEqual(accumulator.value(), before)
+        with self.assertRaises(VonMisesFitError):
+            estimator.estimate(None, (0.0, 0.0, 0.0))
+        with self.assertRaises(VonMisesFitError):
+            estimator.estimate(None, (1.0, 1.0, 0.0))
+        for statistics in (
+            (1.0, 2.0, 0.0),
+            (1.0, np.nan, 0.0),
+            (-1.0, 0.0, 0.0),
+        ):
+            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+                estimator.estimate(None, statistics)
+
+    def test_uniform_fit_records_non_identifiable_direction(self):
+        fitted = VonMisesEstimator().estimate(None, (2.0, 0.0, 0.0))
+        self.assertEqual(fitted.kappa, 0.0)
+        self.assertFalse(fitted.fit_metadata["identifiable_direction"])
+
+    def test_invalid_prior_contract_is_rejected(self):
+        with self.assertRaises(ValueError):
+            VonMisesEstimator(pseudo_count=1.0)
+        with self.assertRaises(ValueError):
+            VonMisesEstimator(pseudo_count=-1.0, suff_stat=(0.0, 0.0))
+        with self.assertRaises(ValueError):
+            VonMisesEstimator(pseudo_count=1.0, suff_stat=(2.0, 0.0))
 
 
 if __name__ == "__main__":

@@ -30,8 +30,21 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.directional._circular import (
+    validated_angle,
+    validated_angles,
+    validated_circular_statistics,
+    validated_sample_size,
+    validated_trig,
+    validated_weight,
+    validated_weights,
+)
 
 _LOG_2PI = math.log(2.0 * math.pi)
+
+
+class WrappedCauchyFitError(RuntimeError):
+    """Raised when circular moments have no finite wrapped-Cauchy fit."""
 
 
 def _wrap(theta: Any) -> Any:
@@ -43,14 +56,19 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
     """Wrapped Cauchy distribution with mean direction ``mu`` and concentration ``rho`` in ``[0, 1)``."""
 
     def __init__(self, mu: float, rho: float, name: str | None = None, keys: str | None = None) -> None:
-        if not (0.0 <= rho < 1.0):
+        checked_mu = validated_angle(mu, "wrapped-Cauchy mean direction")
+        checked_rho = validated_angle(rho, "wrapped-Cauchy concentration")
+        if not (0.0 <= checked_rho < 1.0):
             raise ValueError("WrappedCauchyDistribution requires concentration rho in [0, 1).")
-        self.mu = float(math.atan2(math.sin(mu), math.cos(mu)))  # wrap to (-pi, pi]
-        self.rho = float(rho)
+        self.mu = float(
+            math.atan2(math.sin(checked_mu), math.cos(checked_mu))
+        )
+        self.rho = checked_rho
         self.name = name
         self.keys = keys
-        self._log_num = math.log1p(-self.rho * self.rho) - _LOG_2PI  # log[(1-rho^2)/(2 pi)]
-        self._one_plus = 1.0 + self.rho * self.rho
+        self._log_num = (
+            math.log1p(-self.rho) + math.log1p(self.rho) - _LOG_2PI
+        )
         # parameter-side trig, cached as attributes: the compute declaration exposes these (not mu) so the
         # generated scorer sees scalar parameters and the (cos, sin) encoding needs no engine trig
         self.cos_mu = math.cos(self.mu)
@@ -70,13 +88,26 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: float) -> float:
         """Return the log-density at a single angle (radians)."""
-        return self._log_num - math.log(self._one_plus - 2.0 * self.rho * math.cos(float(x) - self.mu))
+        theta = validated_angle(x)
+        deviation = theta - self.mu
+        denominator = (
+            (1.0 - self.rho) ** 2
+            + 4.0 * self.rho * math.sin(0.5 * deviation) ** 2
+        )
+        return self._log_num - math.log(denominator)
 
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded ``(cos, sin)`` observations."""
-        cos_t, sin_t = x
-        cos_dev = cos_t * math.cos(self.mu) + sin_t * math.sin(self.mu)  # cos(theta - mu)
-        return self._log_num - np.log(self._one_plus - 2.0 * self.rho * cos_dev)
+        cos_t, sin_t = validated_trig(x)
+        cos_dev = np.clip(
+            cos_t * self.cos_mu + sin_t * self.sin_mu,
+            -1.0,
+            1.0,
+        )
+        denominator = (
+            (1.0 - self.rho) ** 2 + 2.0 * self.rho * (1.0 - cos_dev)
+        )
+        return self._log_num - np.log(denominator)
 
     # --- compute-engine backend (numpy + torch/GPU). The encoder pre-computes (cos, sin) and the
     # parameter-side trig is host-scalar math, so scoring needs no engine trig at all. ---
@@ -104,24 +135,48 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
     @staticmethod
     def backend_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
         """Per-row circular moments in accumulator order ``(sum_cos, sum_sin, count)``."""
-        cos_t = engine.asarray(x[0])
-        sin_t = engine.asarray(x[1])
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x[0]) or is_symbolic_payload(x[1]):
+            cosine, sine = x
+        else:
+            cosine, sine = validated_trig(x)
+        cos_t = engine.asarray(cosine)
+        sin_t = engine.asarray(sine)
         return cos_t, sin_t, cos_t * 0.0 + engine.asarray(1.0)
 
     @staticmethod
     def backend_log_density_from_params(cos_t: Any, sin_t: Any, cos_mu: Any, sin_mu: Any, rho: Any, engine: Any) -> Any:
         """Engine-neutral wrapped-Cauchy log-density from pre-computed observation/parameter trig."""
         cos_dev = cos_t * cos_mu + sin_t * sin_mu
-        log_num = engine.log(1.0 - rho * rho) - engine.log(engine.asarray(2.0 * math.pi))
-        return log_num - engine.log(1.0 + rho * rho - 2.0 * rho * cos_dev)
+        one_minus_cosine = engine.maximum(
+            1.0 - cos_dev,
+            engine.asarray(0.0),
+        )
+        log_num = (
+            engine.log(1.0 - rho)
+            + engine.log(1.0 + rho)
+            - engine.log(engine.asarray(2.0 * math.pi))
+        )
+        denominator = (
+            (1.0 - rho) * (1.0 - rho)
+            + 2.0 * rho * one_minus_cosine
+        )
+        return log_num - engine.log(denominator)
 
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded ``(cos, sin)`` data."""
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x[0]) or is_symbolic_payload(x[1]):
+            cosine, sine = x
+        else:
+            cosine, sine = validated_trig(x)
         return self.backend_log_density_from_params(
-            engine.asarray(x[0]),
-            engine.asarray(x[1]),
-            engine.asarray(math.cos(self.mu)),
-            engine.asarray(math.sin(self.mu)),
+            engine.asarray(cosine),
+            engine.asarray(sine),
+            engine.asarray(self.cos_mu),
+            engine.asarray(self.sin_mu),
             engine.asarray(self.rho),
             engine,
         )
@@ -138,8 +193,14 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def backend_stacked_log_density(cls, x: Any, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of wrapped-Cauchy log densities."""
-        cos_t = engine.asarray(x[0])
-        sin_t = engine.asarray(x[1])
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x[0]) or is_symbolic_payload(x[1]):
+            cosine, sine = x
+        else:
+            cosine, sine = validated_trig(x)
+        cos_t = engine.asarray(cosine)
+        sin_t = engine.asarray(sine)
         return cls.backend_log_density_from_params(
             cos_t[:, None],
             sin_t[:, None],
@@ -154,8 +215,14 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
         cls, x: Any, weights: Any, params: dict[str, Any], engine: Any
     ) -> tuple[Any, Any, Any]:
         """Stacked circular moments ``(sum_cos, sum_sin, count)`` using engine-resident arrays."""
-        cos_t = engine.asarray(x[0])
-        sin_t = engine.asarray(x[1])
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x[0]) or is_symbolic_payload(x[1]):
+            cosine, sine = x
+        else:
+            cosine, sine = validated_trig(x)
+        cos_t = engine.asarray(cosine)
+        sin_t = engine.asarray(sine)
         ww = engine.asarray(weights)
         return (
             engine.sum(ww * cos_t[:, None], axis=0),
@@ -169,6 +236,8 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "WrappedCauchyEstimator":
         """Return a closed-form (mean-resultant) estimator for ``mu`` and ``rho``."""
+        if pseudo_count is not None:
+            raise ValueError("wrapped-Cauchy pseudo-count regularization is not implemented")
         return WrappedCauchyEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "WrappedCauchyDataEncoder":
@@ -186,7 +255,7 @@ class WrappedCauchySampler(DistributionSampler):
     def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw one angle or an array of iid angles."""
         d = self.dist
-        n = 1 if size is None else int(size)
+        n = 1 if size is None else validated_sample_size(size)
         if d.rho == 0.0:  # uniform on the circle
             theta = self.rng.uniform(-math.pi, math.pi, size=n)
         else:
@@ -208,9 +277,11 @@ class WrappedCauchyAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: float, weight: float, estimate: WrappedCauchyDistribution | None) -> None:
         """Accumulate one weighted circular resultant contribution."""
-        self.sum_cos += weight * math.cos(float(x))
-        self.sum_sin += weight * math.sin(float(x))
-        self.count += weight
+        theta = validated_angle(x)
+        checked_weight = validated_weight(weight)
+        self.sum_cos += checked_weight * math.cos(theta)
+        self.sum_sin += checked_weight * math.sin(theta)
+        self.count += checked_weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         """Initialize statistics from one angle."""
@@ -218,8 +289,8 @@ class WrappedCauchyAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: Any) -> None:
         """Accumulate circular-resultant statistics from encoded cos/sin values."""
-        cos_t, sin_t = x
-        w = np.asarray(weights, dtype=np.float64)
+        cos_t, sin_t = validated_trig(x)
+        w = validated_weights(weights, len(cos_t))
         self.sum_cos += float(np.dot(cos_t, w))
         self.sum_sin += float(np.dot(sin_t, w))
         self.count += float(w.sum())
@@ -230,9 +301,18 @@ class WrappedCauchyAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "WrappedCauchyAccumulator":
         """Merge another wrapped-Cauchy sufficient-statistic tuple."""
-        self.sum_cos += suff_stat[0]
-        self.sum_sin += suff_stat[1]
-        self.count += suff_stat[2]
+        count, sum_cos, sum_sin = validated_circular_statistics(
+            suff_stat,
+            count_index=2,
+        )
+        combined = (
+            self.sum_cos + sum_cos,
+            self.sum_sin + sum_sin,
+            self.count + count,
+        )
+        self.count, self.sum_cos, self.sum_sin = (
+            validated_circular_statistics(combined, count_index=2)
+        )
         return self
 
     def value(self) -> tuple[float, float, float]:
@@ -241,7 +321,17 @@ class WrappedCauchyAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: tuple[float, float, float]) -> "WrappedCauchyAccumulator":
         """Replace accumulator contents from circular-resultant statistics."""
-        self.sum_cos, self.sum_sin, self.count = float(x[0]), float(x[1]), float(x[2])
+        self.count, self.sum_cos, self.sum_sin = (
+            validated_circular_statistics(x, count_index=2)
+        )
+        return self
+
+    def scale(self, c: float) -> "WrappedCauchyAccumulator":
+        """Scale linear wrapped-Cauchy sufficient statistics."""
+        checked_scale = validated_weight(c)
+        self.sum_cos *= checked_scale
+        self.sum_sin *= checked_scale
+        self.count *= checked_scale
         return self
 
     def acc_to_encoder(self) -> "WrappedCauchyDataEncoder":
@@ -264,8 +354,16 @@ class WrappedCauchyAccumulatorFactory(StatisticAccumulatorFactory):
 class WrappedCauchyEstimator(ParameterEstimator):
     """Estimate ``mu`` and ``rho`` from the mean resultant (the first trigonometric moment)."""
 
-    def __init__(self, rho_max: float = 1.0 - 1.0e-8, name: str | None = None, keys: str | None = None) -> None:
-        self.rho_max = rho_max
+    def __init__(
+        self,
+        rho_max: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        if rho_max is not None:
+            raise ValueError(
+                "wrapped-Cauchy boundary clipping is not a valid fit contract"
+            )
         self.name = name
         self.keys = keys
 
@@ -275,13 +373,34 @@ class WrappedCauchyEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> WrappedCauchyDistribution:
         """Estimate mean direction and concentration from the mean resultant."""
-        sum_cos, sum_sin, count = suff_stat
-        if count <= 0.0:
-            return WrappedCauchyDistribution(0.0, 0.0, name=self.name, keys=self.keys)
+        count, sum_cos, sum_sin = validated_circular_statistics(
+            suff_stat,
+            count_index=2,
+        )
+        if count == 0.0:
+            raise WrappedCauchyFitError(
+                "wrapped-Cauchy fitting requires positive observation weight"
+            )
         mu = math.atan2(sum_sin, sum_cos)
-        rho = math.sqrt(sum_cos * sum_cos + sum_sin * sum_sin) / count  # mean-resultant length -> rho
-        rho = min(max(rho, 0.0), self.rho_max)
-        return WrappedCauchyDistribution(mu, rho, name=self.name, keys=self.keys)
+        rho = math.hypot(sum_cos, sum_sin) / count
+        if rho >= 1.0 - 1.0e-12:
+            raise WrappedCauchyFitError(
+                "wrapped-Cauchy resultant is on a boundary with no finite fit"
+            )
+        result = WrappedCauchyDistribution(
+            mu,
+            rho,
+            name=self.name,
+            keys=self.keys,
+        )
+        result.fit_metadata = {
+            "converged": True,
+            "solver": "circular-resultant",
+            "identifiable_direction": bool(rho > 1.0e-12),
+            "resultant_length": rho,
+            "repairs": (),
+        }
+        return result
 
 
 class WrappedCauchyDataEncoder(DataSequenceEncoder):
@@ -295,5 +414,10 @@ class WrappedCauchyDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
         """Encode angles as cosine and sine arrays."""
-        theta = np.asarray(x, dtype=np.float64)
+        theta = validated_angles(x)
         return np.cos(theta), np.sin(theta)
+
+    def row_count(self, x: tuple[np.ndarray, np.ndarray]) -> int:
+        """Return the encoded row count after unit-circle validation."""
+        cosine, _ = validated_trig(x)
+        return len(cosine)
