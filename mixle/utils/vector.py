@@ -18,6 +18,32 @@ class ImpossibleEvidenceError(ValueError):
     """Raised when log evidence has zero mass and no posterior exists."""
 
 
+def validate_initialization_probability(p: object) -> float:
+    """Return a finite Bernoulli initialization probability in ``[0, 1]``."""
+    if isinstance(p, (bool, np.bool_)):
+        raise TypeError("initialization probability must be a real scalar, not boolean")
+    try:
+        value = float(p)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("initialization probability must be a real scalar") from exc
+    if not np.isfinite(value) or value < 0.0 or value > 1.0:
+        raise ValueError("initialization probability must be finite and in [0, 1]")
+    return value
+
+
+def require_initialized_observations(nobs: object) -> float:
+    """Return a positive selected-observation count or raise typed impossible evidence."""
+    try:
+        value = float(nobs)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("initialized observation count must be a real scalar") from exc
+    if not np.isfinite(value) or value < 0.0:
+        raise ValueError("initialized observation count must be finite and non-negative")
+    if value == 0.0:
+        raise ImpossibleEvidenceError("initialization selected no observations")
+    return value
+
+
 def _validated_log_evidence(value: np.ndarray, *, name: str = "log evidence") -> np.ndarray:
     result = np.asarray(value, dtype=np.float64)
     if result.ndim != 1 or result.size == 0:

@@ -479,6 +479,20 @@ class PlacementPlanningTestCase(unittest.TestCase):
 
 
 class LocalEncodedDataTestCase(unittest.TestCase):
+    def test_initialization_probability_and_nonempty_selection_are_common_contracts(self):
+        from mixle.utils.vector import ImpossibleEvidenceError
+
+        estimator = GaussianEstimator()
+        encoded = seq_encode([0.0, 1.0], estimator=estimator)
+        for p in (float("nan"), -0.01, 1.01, True):
+            with self.subTest(p=p), self.assertRaises((TypeError, ValueError)):
+                seq_initialize(encoded, estimator, np.random.RandomState(0), p=p)
+        with self.assertRaises(ImpossibleEvidenceError):
+            seq_initialize(encoded, estimator, np.random.RandomState(0), p=0.0)
+        with LocalEncodedData([0.0, 1.0], estimator=estimator) as handle:
+            with self.assertRaises(ImpossibleEvidenceError):
+                handle.pysp_seq_initialize(estimator, np.random.RandomState(0), p=0.0)
+
     def test_execution_revalidates_external_placement_against_data_and_resources(self):
         resources = Resources.single_cpu()
         placement = Placement(

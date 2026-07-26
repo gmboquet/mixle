@@ -42,7 +42,11 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.utils.parallel.planner import EncodedDataHandle, _global_key_merge, register_encoded_data_backend
-from mixle.utils.vector import ImpossibleEvidenceError
+from mixle.utils.vector import (
+    ImpossibleEvidenceError,
+    require_initialized_observations,
+    validate_initialization_probability,
+)
 
 
 class UnrealizedModelPlacementError(RuntimeError):
@@ -401,22 +405,16 @@ class ModelParallelEncodedData(EncodedDataHandle):
         """Initialize a model by randomly selecting observations with probability ``p``."""
         from mixle.stats import validate_estimator_keys
 
-        try:
-            p = float(p)
-        except (TypeError, ValueError) as exc:
-            raise TypeError("initialization probability must be a real scalar") from exc
-        if not np.isfinite(p) or p < 0.0 or p > 1.0:
-            raise ValueError("initialization probability must be finite and in [0, 1]")
+        p = validate_initialization_probability(p)
         validate_estimator_keys(estimator)
         acc = estimator.accumulator_factory().make()
         rng_w = np.random.RandomState(seed=rng.randint(2**31))
         weights = np.zeros(self.size, dtype=np.float64)
         weights[rng_w.rand(self.size) <= p] = 1.0
-        if not np.any(weights):
-            raise ImpossibleEvidenceError("initialization selected no observations")
+        nobs = require_initialized_observations(weights.sum())
         acc.seq_initialize(self.enc, weights, rng)
         _global_key_merge(acc)
-        return estimator.estimate(float(weights.sum()), acc.value())
+        return estimator.estimate(nobs, acc.value())
 
     def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
         """Accumulate model-parallel sufficient statistics for streaming backends."""

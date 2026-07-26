@@ -42,6 +42,7 @@ from typing import Any
 import numpy as np
 
 from mixle.utils.parallel.planner import EncodedDataHandle
+from mixle.utils.vector import require_initialized_observations, validate_initialization_probability
 
 __all__ = ["ResilientMPEncodedData", "checkpointed_fold"]
 
@@ -482,6 +483,7 @@ class ResilientMPEncodedData(EncodedDataHandle):
     def pysp_seq_initialize(self, estimator: Any, rng: np.random.RandomState, p: float) -> Any:
         """Distributed randomized initialization; seeds are anchored to shard id, not worker
         identity, so a shard reassigned to a different worker still uses its own fixed seed."""
+        p = validate_initialization_probability(p)
         estimator_b = pickle.dumps(estimator, protocol=_PROTO)
         seeds = rng.randint(2**31, size=self.num_workers)
         seeds_by_shard = {sid: int(seeds[sid]) for sid in range(self.num_workers)}
@@ -491,7 +493,7 @@ class ResilientMPEncodedData(EncodedDataHandle):
             self._send_raw(w, ("init", estimator_b, float(p), my_seeds))
         payloads = [self._recv_raw(w)[1] for w in live_workers]
         nobs, value = checkpointed_fold(estimator, payloads)
-        return estimator.estimate(nobs, value)
+        return estimator.estimate(require_initialized_observations(nobs), value)
 
     def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
         """Total observation count and summed log density across all live workers."""

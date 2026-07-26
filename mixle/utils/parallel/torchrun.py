@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 
 from mixle.utils.parallel.planner import EncodedDataHandle
+from mixle.utils.vector import require_initialized_observations, validate_initialization_probability
 
 __all__ = ["TorchRunEncodedData", "torchrun_out"]
 
@@ -222,6 +223,7 @@ class TorchRunEncodedData(EncodedDataHandle):
 
     def pysp_seq_initialize(self, estimator, rng: np.random.RandomState, p: float):
         """Distributed randomized initialization; identical model on all ranks."""
+        p = validate_initialization_probability(p)
         if self.rank == self.root:
             seeds = [int(s) for s in rng.randint(2**31, size=self.world)]
         else:
@@ -236,6 +238,8 @@ class TorchRunEncodedData(EncodedDataHandle):
             weights[rng_w.rand(sz) <= p] = 1.0
             count += float(weights.sum())
             accumulator.seq_initialize(enc, weights, rng_loc)
+        total = self._all_reduce_pair(count, 0.0)[0]
+        require_initialized_observations(total)
         return self._fold_model_and_share(estimator, (count, accumulator.value()))
 
     def pysp_seq_log_density_sum(self, estimate) -> tuple[float, float]:
