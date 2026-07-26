@@ -1,6 +1,7 @@
 """Automatic compute/memory/load-balancing planner (balance.py): grid choice across the model spectrum."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -71,6 +72,8 @@ class SpectrumDecisionTest(unittest.TestCase):
         self.assertEqual(plan.data_parallel, 4)  # one replica per observation
         self.assertEqual(plan.model_parallel, 2)  # split the model to fill the rest
         self.assertEqual(plan.workers_used, 8)
+        self.assertEqual(plan.extra["rows_per_data_replica"], 1)
+        self.assertAlmostEqual(plan.per_worker_flops, max(plan.extra["per_cut_flops"]))
 
     def test_memory_forces_model_split(self):
         big = _mixture(16, d=100)  # ~2.5 MB of covariances
@@ -84,6 +87,26 @@ class SpectrumDecisionTest(unittest.TestCase):
         plan = balance_plan(big, _cluster(8, mem=40_000), n_data=500)
         self.assertFalse(plan.fits)
         self.assertIn("WARNING", plan.rationale)
+
+    def test_unknown_memory_stays_unknown(self):
+        plan = balance_plan(_mixture(4), _cluster(2, mem=None), n_data=10)
+        self.assertIsNone(plan.fits)
+        self.assertEqual(plan.extra["fit_status"], "unknown")
+        self.assertIn("MEMORY FIT UNKNOWN", plan.rationale)
+
+    def test_each_concrete_cut_is_checked_against_its_device(self):
+        big = _mixture(16, d=100)
+        plan = balance_plan(big, _cluster(8, mem=400_000), n_data=500)
+        self.assertEqual(len(plan.extra["per_cut_bytes"]), plan.model_parallel)
+        self.assertLessEqual(max(plan.extra["per_cut_bytes"]), 400_000)
+
+    def test_workload_and_costs_are_not_silently_rewritten(self):
+        for n_data in (0, -1, 1.5, True):
+            with self.subTest(n_data=n_data), self.assertRaises(ValueError):
+                balance_plan(_mixture(4), _cluster(2), n_data=n_data)
+        with mock.patch("mixle.utils.parallel.balance.compute_cost", return_value=(np.nan, 0)):
+            with self.assertRaises(ValueError):
+                balance_plan(_mixture(4), _cluster(2), n_data=1)
 
     def test_single_device_is_data_parallel_degenerate(self):
         plan = balance_plan(_mixture(8), _cluster(1), n_data=100)
