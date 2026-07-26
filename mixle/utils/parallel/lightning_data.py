@@ -14,6 +14,7 @@ requested, so the rest of mixle (and CI without Lightning installed) is unaffect
 from __future__ import annotations
 
 from collections.abc import Iterator
+from operator import index
 from typing import Any
 
 from numpy.random import RandomState
@@ -32,28 +33,54 @@ def _resolve_encoder(estimator: Any, model: Any, encoder: DataSequenceEncoder | 
     raise ValueError("LightningEncodedData requires an encoder, model, or estimator.")
 
 
-def _make_datamodule(num_rows: int, batch_size: int, shuffle: bool, seed: int):
+def _epoch_seed(seed: int, epoch: int) -> int:
+    """Derive a stable, distinct PyTorch seed for a data epoch."""
+    return (seed + epoch) % (2**63 - 1)
+
+
+class _IndexDataset:
+    """Pickle-safe row-index dataset for spawned DataLoader workers."""
+
+    def __init__(self, num_rows: int):
+        self.num_rows = num_rows
+
+    def __len__(self) -> int:
+        return self.num_rows
+
+    def __getitem__(self, i: int) -> int:
+        return int(i)
+
+
+def _collate_indices(batch) -> list[int]:
+    """Convert a DataLoader index batch into plain Python integers."""
+    return [int(i) for i in batch]
+
+
+def _make_datamodule(num_rows: int, batch_size: int, shuffle: bool, seed: int, num_workers: int):
     """Return a LightningDataModule whose train DataLoader yields shuffled row-index batches."""
     import lightning.pytorch as pl
     import torch
-    from torch.utils.data import DataLoader, Dataset
-
-    class _IndexDataset(Dataset):
-        def __len__(self) -> int:
-            return num_rows
-
-        def __getitem__(self, i: int) -> int:
-            return int(i)
+    from torch.utils.data import DataLoader
 
     class _EncodedDataModule(pl.LightningDataModule):
+        def __init__(self):
+            super().__init__()
+            self._epoch = 0
+
+        def set_epoch(self, epoch: int) -> None:
+            self._epoch = epoch
+
         def train_dataloader(self) -> DataLoader:
-            generator = torch.Generator().manual_seed(int(seed))
+            epoch = self._epoch
+            self._epoch += 1
+            generator = torch.Generator().manual_seed(_epoch_seed(seed, epoch))
             return DataLoader(
-                _IndexDataset(),
+                _IndexDataset(num_rows),
                 batch_size=int(batch_size),
                 shuffle=bool(shuffle),
                 generator=generator,
-                collate_fn=lambda batch: [int(i) for i in batch],
+                num_workers=num_workers,
+                collate_fn=_collate_indices,
             )
 
     return _EncodedDataModule()
@@ -71,6 +98,7 @@ class LightningEncodedData(EncodedDataHandle):
         batch_size: int | None = None,
         shuffle: bool = True,
         seed: int = 0,
+        num_workers: int = 0,
         sub_chunks: int = 1,
         **_: Any,
     ) -> None:
@@ -80,14 +108,37 @@ class LightningEncodedData(EncodedDataHandle):
         self.encoder = _resolve_encoder(estimator, model, encoder)
         self._rows = rows
         self.size = len(rows)
-        self.batch_size = int(batch_size) if batch_size else max(1, self.size // 10)
-        self.shuffle = bool(shuffle)
-        self.seed = int(seed)
+        if batch_size is None:
+            self.batch_size = max(1, self.size // 10)
+        else:
+            try:
+                self.batch_size = index(batch_size)
+            except TypeError as exc:
+                raise ValueError("batch_size must be a positive integer or None.") from exc
+            if isinstance(batch_size, bool) or self.batch_size <= 0:
+                raise ValueError("batch_size must be a positive integer or None.")
+        if not isinstance(shuffle, bool):
+            raise TypeError("shuffle must be a bool.")
+        try:
+            self.seed = index(seed)
+        except TypeError as exc:
+            raise ValueError("seed must be a nonnegative integer.") from exc
+        if isinstance(seed, bool) or self.seed < 0:
+            raise ValueError("seed must be a nonnegative integer.")
+        try:
+            self.num_workers = index(num_workers)
+        except TypeError as exc:
+            raise ValueError("num_workers must be a nonnegative integer.") from exc
+        if isinstance(num_workers, bool) or self.num_workers < 0:
+            raise ValueError("num_workers must be a nonnegative integer.")
+        self.shuffle = shuffle
         # Full-data EM operations reuse the local handle (so backend="lightning" matches "local").
         self._local = LocalEncodedData(
             rows, estimator=estimator, model=model, encoder=self.encoder, sub_chunks=sub_chunks
         )
-        self._datamodule = _make_datamodule(self.size, self.batch_size, self.shuffle, self.seed)
+        self._datamodule = _make_datamodule(
+            self.size, self.batch_size, self.shuffle, self.seed, self.num_workers
+        )
 
     # -- full-data orchestrator contract: delegate to the resident local handle ------------
     def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
@@ -112,8 +163,16 @@ class LightningEncodedData(EncodedDataHandle):
         """Return the underlying ``lightning.pytorch.LightningDataModule``."""
         return self._datamodule
 
-    def minibatches(self) -> Iterator[list[Any]]:
-        """Yield one epoch of raw-observation mini-batches via the Lightning DataLoader."""
+    def minibatches(self, *, epoch: int | None = None) -> Iterator[list[Any]]:
+        """Yield one reproducibly shuffled epoch of raw-observation mini-batches."""
+        if epoch is not None:
+            try:
+                epoch = index(epoch)
+            except TypeError as exc:
+                raise ValueError("epoch must be a nonnegative integer or None.") from exc
+            if isinstance(epoch, bool) or epoch < 0:
+                raise ValueError("epoch must be a nonnegative integer or None.")
+            self._datamodule.set_epoch(epoch)
         for index_batch in self._datamodule.train_dataloader():
             yield [self._rows[i] for i in index_batch]
 
@@ -130,8 +189,8 @@ class LightningEncodedData(EncodedDataHandle):
 
         stream = StreamingEstimator(estimator, schedule=schedule, init_p=init_p, rng=RandomState(seed))
         model = None
-        for _epoch in range(int(epochs)):
-            for batch in self.minibatches():
+        for epoch in range(int(epochs)):
+            for batch in self.minibatches(epoch=epoch):
                 model = stream.update(batch)
         return model
 
