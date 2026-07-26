@@ -8,7 +8,7 @@ estimator via DatumNode. Estimator builders are imported from .factories.
 import math
 import numbers
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -175,6 +175,38 @@ class AutomaticSelectionResult:
     decisions: tuple[MarginalSelectionDecision, ...]
 
 
+@dataclass(frozen=True)
+class _SequenceObservation(Sequence[Any]):
+    """Reusable immutable form of a list/array/generator-valued observation."""
+
+    values: tuple[Any, ...]
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    def __getitem__(self, index):
+        return self.values[index]
+
+
+@dataclass(frozen=True)
+class _MappingObservation(Mapping[Any, Any]):
+    """Reusable immutable form of a mapping-valued observation."""
+
+    entries: tuple[tuple[Any, Any], ...]
+
+    def __getitem__(self, key: Any) -> Any:
+        for candidate, value in self.entries:
+            if candidate == key and type(candidate) is type(key):
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[Any]:
+        return (key for key, _ in self.entries)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+
 @dataclass
 class PairwiseDependencyHint:
     """Unconditional pairwise dependency hint measured from encoded values."""
@@ -333,11 +365,11 @@ def _path_sort_key(path: tuple[Any, ...]) -> tuple[tuple[int, Any], ...]:
 
 
 def _is_missing_value(x: Any) -> bool:
-    return x is None or (isinstance(x, (float, np.floating)) and math.isnan(float(x)))
+    return x is None or (isinstance(x, (float, np.floating)) and not math.isfinite(float(x)))
 
 
 def _is_sequence_like(x: Any) -> bool:
-    return isinstance(x, Iterable) and not isinstance(x, (str, bytes, dict, set, frozenset))
+    return isinstance(x, Iterable) and not isinstance(x, (str, bytes, Mapping, set, frozenset))
 
 
 def _entropy_from_counts(counts: Sequence[float]) -> float:
@@ -1055,7 +1087,7 @@ def _validate_marginal_profile(
     train, validation = split
     scores: dict[str, float | None] = {}
 
-    if profile.kind in ("string", "boolean"):
+    if profile.kind in ("string", "boolean", "mixed_categorical"):
         scores["categorical"] = _validation_categorical_bits(train, validation)
 
     elif profile.kind == "integer":
@@ -1181,11 +1213,11 @@ def _extract_field_series(
             path + ("set_member",): ("set_member", members),
         }
 
-    if all(isinstance(u, dict) for u in observed):
+    if all(isinstance(u, Mapping) for u in observed):
         keys = sorted({k for u in observed for k in u.keys()}, key=repr)
         rv: dict[tuple[Any, ...], tuple[str, list[Any]]] = {}
         for k in keys:
-            child_values = [u.get(k, None) if isinstance(u, dict) else None for u in data]
+            child_values = [u.get(k, None) if isinstance(u, Mapping) else None for u in data]
             rv.update(_extract_field_series(child_values, path + ("key", k), role="field"))
         return rv
 
@@ -1199,10 +1231,35 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
     observed_count = len(observed)
     missing_fraction = 0.0 if count == 0 else missing / float(count)
     notes: list[str] = []
+    nonfinite_count = sum(
+        1 for value in values if isinstance(value, (float, np.floating)) and not math.isfinite(float(value))
+    )
+    if nonfinite_count:
+        notes.append(
+            "%d non-finite value(s) are represented as explicit optional outcomes, not fitted as numeric data"
+            % nonfinite_count
+        )
 
     if observed_count == 0:
         return MarginalFieldProfile(
             path, role, count, missing, missing_fraction, observed_count, "empty", "ignored", notes=notes
+        )
+
+    has_bool = any(isinstance(value, (bool, np.bool_)) for value in observed)
+    has_nonbool_number = any(
+        isinstance(value, numbers.Real) and not isinstance(value, (bool, np.bool_)) for value in observed
+    )
+    if has_bool and has_nonbool_number:
+        return MarginalFieldProfile(
+            path,
+            role,
+            count,
+            missing,
+            missing_fraction,
+            observed_count,
+            "ambiguous_numeric_categorical",
+            "ignored",
+            notes=notes + ["Boolean and numeric values cannot be distinct keys under Python equality (True == 1)"],
         )
 
     vdict = defaultdict(int)
@@ -1242,6 +1299,9 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
         for u in observed
     )
     all_str = all(isinstance(u, (str, bytes)) for u in observed)
+    mixed_categorical = all(
+        isinstance(u, (str, bytes, int, np.integer, bool, np.bool_)) for u in observed
+    ) and len({type(value) for value in observed}) > 1
 
     if all_str:
         recommendation = "categorical"
@@ -1281,6 +1341,28 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
             missing_fraction,
             observed_count,
             "boolean",
+            "categorical",
+            bits_per_obs=entropy,
+            entropy_bits=entropy,
+            cardinality=cardinality,
+            unique_fraction=unique_fraction,
+            effective_cardinality=effective_cardinality,
+            is_constant=is_constant,
+            top_mass=top_mass,
+            model_scores_bits=model_scores,
+            notes=notes,
+        )
+
+    if mixed_categorical:
+        model_scores = _clean_scores({"categorical": _categorical_bic_bits(vdict)})
+        return MarginalFieldProfile(
+            path,
+            role,
+            count,
+            missing,
+            missing_fraction,
+            observed_count,
+            "mixed_categorical",
             "categorical",
             bits_per_obs=entropy,
             entropy_bits=entropy,
@@ -1650,7 +1732,7 @@ def analyze_structure(
                 "modeling is not implemented yet)" % (affected, missing_vec_dim)
             )
     observed_rows = [u for u in rows if u is not None]
-    if use_bstats and observed_rows and all(isinstance(u, dict) for u in observed_rows):
+    if use_bstats and observed_rows and all(isinstance(u, Mapping) for u in observed_rows):
         warnings.append(
             "dict records are profiled by key, but the Bayesian (conjugate-prior) automatic "
             "estimator construction currently leaves dict-valued observations ignored"
@@ -1841,7 +1923,7 @@ class DatumNode:
             self.len_dict[len(x)] += 1
             for xx in x:
                 self.set_member[xx] += 1
-        elif isinstance(x, dict):
+        elif isinstance(x, Mapping):
             self.dict_count += 1
             present = set(x.keys())
             existing = set(self.dict_children.keys())
@@ -1953,6 +2035,8 @@ class DatumNode:
 
     def _leaf_estimator(self, pseudo_count, emp_suff_stat, use_bstats, recommendation: str | None = None):
         if self.obj_count > 0 or len(self.vdict) == 0:
+            return get_ignored_estimator(use_bstats=use_bstats)
+        if self.bool_count > 0 and (self.int_count > 0 or self.float_count > 0):
             return get_ignored_estimator(use_bstats=use_bstats)
 
         if self.str_count > 0:
@@ -2325,18 +2409,18 @@ def normalize_input(data, *, rdd_cap: int = 200000):
             from mixle.data.core import DataSource
 
             if isinstance(data, DataSource):
-                return list(data.records())
+                data = list(data.records())
         except Exception:  # noqa: BLE001
             pass
     if hasattr(data, "columns") and hasattr(data, "itertuples"):  # a pandas DataFrame (duck-typed)
         from mixle.data.sources.pandas_source import dataframe_records
 
-        return dataframe_records(data)
+        data = dataframe_records(data)
     try:
         from mixle.utils.optional_deps import RDD_TYPES
 
         if RDD_TYPES and isinstance(data, RDD_TYPES):  # a Spark RDD -> a bounded local sample
-            return data.take(int(rdd_cap))
+            data = data.take(int(rdd_cap))
     except Exception:  # noqa: BLE001
         pass
     # A one-shot iterator returns itself from __iter__ and is consumed on the first pass; the profiler
@@ -2345,10 +2429,29 @@ def normalize_input(data, *, rdd_cap: int = 200000):
     # reusable sequence (list/tuple/ndarray) yields a fresh iterator and is left unchanged.
     try:
         if iter(data) is data:
-            return list(data)
+            data = list(data)
     except TypeError:
         pass  # not iterable -- leave it to the caller's own validation
-    return data
+    return [_freeze_observation(value) for value in data]
+
+
+def _freeze_observation(value: Any) -> Any:
+    """Materialize a nested observation once into a typed immutable value graph."""
+    if isinstance(value, _SequenceObservation | _MappingObservation):
+        return value
+    if isinstance(value, tuple):
+        return tuple(_freeze_observation(item) for item in value)
+    if isinstance(value, Mapping):
+        return _MappingObservation(tuple((key, _freeze_observation(item)) for key, item in value.items()))
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_observation(item) for item in value)
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return value.item()
+        return _SequenceObservation(tuple(_freeze_observation(item) for item in value))
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+        return _SequenceObservation(tuple(_freeze_observation(item) for item in value))
+    return value
 
 
 def get_estimator(data, pseudo_count: float | None = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
