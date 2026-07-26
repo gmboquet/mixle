@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from mixle.experimental.typed_runtime import (
+    ArtifactKind,
     CanaryVerdict,
     CostEstimate,
     MergeLaw,
@@ -65,6 +66,7 @@ def _coordinator(*, noise=0.0):
         lambda: state["parameters"].copy(),
         lambda value: state.__setitem__("parameters", value.copy()),
         lambda: payload_fingerprint(state["parameters"]),
+        frozenset({ArtifactKind.PARAMETERS}),
     )
 
     def apply(proposal):
@@ -75,7 +77,14 @@ def _coordinator(*, noise=0.0):
         after = float(np.sum(state["parameters"]))
         return CanaryVerdict(True, "deterministic canary", after - proposed_gain, after, sample_count=8)
 
-    return state, TransactionalCoordinator(_graph(), apply, canary, participants=(participant,))
+    return state, TransactionalCoordinator(
+        _graph(),
+        apply,
+        canary,
+        run_id="run",
+        model_id="model",
+        participants=(participant,),
+    )
 
 
 def test_two_commit_log_replays_bitwise_with_identical_versions_and_state():

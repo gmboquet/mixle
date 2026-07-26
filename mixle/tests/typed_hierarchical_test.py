@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from mixle.experimental.typed_runtime import (
+    ArtifactKind,
     CanaryVerdict,
     ConsistencyRequirement,
     CorrectionResult,
@@ -53,10 +54,21 @@ def _exact_proposal(proposal_id, payload, *, base=0, dependency=0, observations=
 def test_exact_shard_statistics_merge_then_commit_once():
     graph = compile_update_graph(GaussianDistribution(0.0, 1.0), GaussianEstimator())
     state = {"statistics": None}
+    participant = TransactionParticipant(
+        "installed-statistics",
+        frozenset({StateSemantics.MUTABLE_PARAMETERS}),
+        lambda: copy.deepcopy(state["statistics"]),
+        lambda value: state.__setitem__("statistics", copy.deepcopy(value)),
+        lambda: payload_fingerprint(state["statistics"]),
+        frozenset({ArtifactKind.PARAMETERS, ArtifactKind.SUFFICIENT_STATISTICS}),
+    )
     coordinator = TransactionalCoordinator(
         graph,
         lambda proposal: state.__setitem__("statistics", proposal.payload),
         lambda batch: CanaryVerdict(True, "global probe improved", 0.0, 1.0),
+        run_id="run",
+        model_id="model",
+        participants=(participant,),
     )
     hierarchical = HierarchicalProposalCoordinator(coordinator)
     left = _exact_proposal("proposal-left", {"sum": np.array([1.0, 2.0]), "count": 2}, observations=2)
@@ -79,6 +91,8 @@ def test_stale_exact_statistics_are_rejected_before_merge():
         graph,
         lambda proposal: pytest.fail("stale exact proposal was applied"),
         lambda batch: CanaryVerdict(True, "unreachable", 0.0, 1.0),
+        run_id="run",
+        model_id="model",
         versions=RuntimeVersions(1, {"n0000": 1}),
     )
     receipt = HierarchicalProposalCoordinator(
@@ -114,11 +128,14 @@ def test_bounded_stale_neural_delta_is_shrunk_rebased_and_committed():
         lambda: state["parameters"].copy(),
         lambda value: state.__setitem__("parameters", value.copy()),
         lambda: payload_fingerprint(state["parameters"]),
+        frozenset({ArtifactKind.PARAMETERS}),
     )
     coordinator = TransactionalCoordinator(
         graph,
         lambda proposal: state.__setitem__("parameters", state["parameters"] + proposal.payload["delta"]),
         lambda batch: CanaryVerdict(True, "probe improved", 0.0, 0.1),
+        run_id="run",
+        model_id="model",
         participants=(participant,),
         versions=RuntimeVersions(2, {"node": 2}),
     )
@@ -154,11 +171,14 @@ def test_corrected_eventual_provider_returns_identity_bound_exact_rebase():
         lambda: state["parameters"].copy(),
         lambda value: state.__setitem__("parameters", value.copy()),
         lambda: payload_fingerprint(state["parameters"]),
+        frozenset({ArtifactKind.PARAMETERS}),
     )
     coordinator = TransactionalCoordinator(
         graph,
         lambda proposal: state.__setitem__("parameters", state["parameters"] + proposal.payload["delta"]),
         lambda batch: CanaryVerdict(True, "probe improved", 0.0, 0.1),
+        run_id="run",
+        model_id="model",
         participants=(participant,),
         versions=RuntimeVersions(2, {"node": 2}),
     )
@@ -207,6 +227,8 @@ def test_invalid_correction_provider_result_is_rejected_without_apply():
         graph,
         lambda proposal: pytest.fail("invalid correction was applied"),
         lambda batch: CanaryVerdict(True, "unreachable", 0.0, 1.0),
+        run_id="run",
+        model_id="model",
         versions=RuntimeVersions(1, {"node": 1}),
     )
     proposal = ProposalPacket(
@@ -239,11 +261,14 @@ def test_nonmergeable_same_node_proposals_are_rejected_without_apply():
         lambda: state["parameters"].copy(),
         lambda value: state.__setitem__("parameters", copy.deepcopy(value)),
         lambda: payload_fingerprint(state["parameters"]),
+        frozenset({ArtifactKind.PARAMETERS}),
     )
     coordinator = TransactionalCoordinator(
         graph,
         lambda proposal: pytest.fail("nonmergeable proposals were applied"),
         lambda batch: CanaryVerdict(True, "unreachable", 0.0, 1.0),
+        run_id="run",
+        model_id="model",
         participants=(participant,),
     )
 

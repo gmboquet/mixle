@@ -14,11 +14,11 @@ from mixle.experimental.typed_runtime import (
     CostEstimate,
     DependencyEdge,
     MergeLaw,
+    ObjectiveGateEvidence,
     ObjectiveKind,
     ProposalBatch,
     ProposalPacket,
     StateSemantics,
-    TransactionalCoordinator,
     TransactionParticipant,
     UpdateContract,
     UpdateGraph,
@@ -26,8 +26,22 @@ from mixle.experimental.typed_runtime import (
     UpdateNode,
     payload_fingerprint,
 )
+from mixle.experimental.typed_runtime import (
+    TransactionalCoordinator as RuntimeTransactionalCoordinator,
+)
 
 pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+
+
+def TransactionalCoordinator(*args, **kwargs):
+    """Test fixture coordinator bound to the fixture proposal identity."""
+
+    return RuntimeTransactionalCoordinator(
+        *args,
+        run_id="run",
+        model_id="model",
+        **kwargs,
+    )
 
 
 def _mutable_contract(update=UpdateKind.FIRST_ORDER):
@@ -86,6 +100,12 @@ def _state_and_participants(*, broken_restore=False):
     }
 
     def participant(name, semantics):
+        artifacts = {
+            StateSemantics.MUTABLE_PARAMETERS: ArtifactKind.PARAMETERS,
+            StateSemantics.MUTABLE_OPTIMIZER: ArtifactKind.OPTIMIZER_STATE,
+            StateSemantics.STOCHASTIC_RNG: ArtifactKind.RNG_STATE,
+        }
+
         def snapshot():
             return copy.deepcopy(state[name])
 
@@ -99,6 +119,7 @@ def _state_and_participants(*, broken_restore=False):
             snapshot,
             restore,
             lambda: payload_fingerprint(state[name]),
+            frozenset({artifacts[semantics]}),
         )
 
     participants = (
@@ -117,6 +138,32 @@ def _apply(state, proposal):
 
 
 class CommitPreflightTest:
+    def test_coordinator_rejects_nonfinite_tolerance_and_foreign_identity(self):
+        graph = _single_node_graph()
+        state, participants = _state_and_participants()
+        with pytest.raises(ValueError, match="finite"):
+            RuntimeTransactionalCoordinator(
+                graph,
+                lambda proposal: _apply(state, proposal),
+                lambda batch: CanaryVerdict(True, "ok", 0.0, 1.0),
+                run_id="run",
+                model_id="model",
+                participants=participants,
+                objective_tolerance=float("nan"),
+            )
+
+        coordinator = RuntimeTransactionalCoordinator(
+            graph,
+            lambda proposal: _apply(state, proposal),
+            lambda batch: CanaryVerdict(True, "ok", 0.0, 1.0),
+            run_id="other-run",
+            model_id="model",
+            participants=participants,
+        )
+        receipt = coordinator.commit(_packet())
+        assert receipt.status is CommitStatus.REJECTED
+        assert receipt.reason == "run-id-mismatch:p1"
+
     def test_stale_model_version_never_calls_apply_or_canary(self):
         graph = _single_node_graph()
         state, participants = _state_and_participants()
@@ -149,7 +196,24 @@ class CommitPreflightTest:
         assert receipt.reason == "missing-transaction-state:stochastic_rng"
         assert np.array_equal(state["parameters"], [0.0, 0.0])
 
-    def test_mutated_payload_and_duplicate_proposal_ids_are_rejected(self):
+    def test_every_mutated_artifact_requires_explicit_snapshot_coverage(self):
+        graph = _single_node_graph()
+        state, participants = _state_and_participants()
+        uncovered_rng = replace(
+            participants[-1],
+            artifacts=frozenset({ArtifactKind.PARAMETERS}),
+        )
+        coordinator = TransactionalCoordinator(
+            graph,
+            lambda proposal: _apply(state, proposal),
+            lambda batch: CanaryVerdict(True, "ok", 0.0, 1.0),
+            participants=participants[:-1] + (uncovered_rng,),
+        )
+        receipt = coordinator.commit(_packet())
+        assert receipt.status is CommitStatus.REJECTED
+        assert receipt.reason == "missing-transaction-artifact:rng_state"
+
+    def test_preflight_rejection_does_not_consume_safe_retry_identity(self):
         graph = _single_node_graph()
         state, participants = _state_and_participants()
         coordinator = TransactionalCoordinator(
@@ -165,9 +229,8 @@ class CommitPreflightTest:
 
         assert first.status is CommitStatus.REJECTED
         assert first.reason == "proposal-payload-mutated:p1"
-        assert second.status is CommitStatus.REJECTED
-        assert second.reason == "duplicate-proposal-id:p1"
-        np.testing.assert_array_equal(state["parameters"], [0.0, 0.0])
+        assert second.status is CommitStatus.ACCEPTED
+        np.testing.assert_array_equal(state["parameters"], [1.0, -1.0])
 
     def test_commit_ids_cannot_be_reused(self):
         graph = _single_node_graph()
@@ -184,6 +247,33 @@ class CommitPreflightTest:
 
 
 class RollbackTest:
+    def test_verified_canary_rejection_allows_safe_same_proposal_retry(self):
+        graph = _single_node_graph()
+        state, participants = _state_and_participants()
+        attempts = 0
+
+        def canary(batch):
+            nonlocal attempts
+            attempts += 1
+            return CanaryVerdict(
+                attempts > 1,
+                "transient probe",
+                0.0,
+                1.0 if attempts > 1 else -1.0,
+            )
+
+        coordinator = TransactionalCoordinator(
+            graph,
+            lambda proposal: _apply(state, proposal),
+            canary,
+            participants=participants,
+        )
+        first = coordinator.commit(_packet())
+        second = coordinator.commit(_packet())
+        assert first.status is CommitStatus.ROLLED_BACK
+        assert second.status is CommitStatus.ACCEPTED
+        np.testing.assert_array_equal(state["parameters"], [1.0, -1.0])
+
     def test_canary_rejection_restores_parameters_optimizer_and_rng(self):
         graph = _single_node_graph()
         state, participants = _state_and_participants()
@@ -301,6 +391,60 @@ class AcceptedCommitTest:
         assert receipt.status is CommitStatus.ROLLED_BACK
         assert receipt.reason == "negative-canary-lower-bound"
 
+    def test_surrogate_batch_member_cannot_disable_strict_proposal_gate(self):
+        strict = replace(_mutable_contract(UpdateKind.COORDINATE), objective_kind=ObjectiveKind.MLE)
+        surrogate = replace(
+            strict,
+            objective_kind=ObjectiveKind.USER_SURROGATE,
+            outer_objective_compatible=False,
+            exact=False,
+        )
+        graph = UpdateGraph(
+            (
+                UpdateNode("strict", "root", "Strict", "E", strict, CostEstimate(1.0), 1),
+                UpdateNode("surrogate", "surrogate", "Surrogate", "E", surrogate, CostEstimate(1.0), 1),
+            ),
+            (),
+            "strict",
+        )
+        state, participants = _state_and_participants()
+        coordinator = TransactionalCoordinator(
+            graph,
+            lambda proposal: _apply(state, proposal),
+            lambda batch: CanaryVerdict(
+                True,
+                "surrogate improved overall",
+                0.0,
+                10.0,
+                proposal_objectives={
+                    "strict": ObjectiveGateEvidence(3.0, 2.0),
+                },
+            ),
+            participants=participants,
+        )
+        strict_proposal = replace(
+            _packet(
+                node_id="strict",
+                proposal_id="strict",
+                update=UpdateKind.COORDINATE,
+            ),
+            dependency_versions={"strict": 0},
+        )
+        surrogate_proposal = replace(
+            _packet(
+                node_id="surrogate",
+                proposal_id="surrogate",
+                update=UpdateKind.COORDINATE,
+            ),
+            dependency_versions={"surrogate": 0},
+            objective_kind=ObjectiveKind.USER_SURROGATE,
+            surrogate_disclosed=True,
+        )
+        receipt = coordinator.commit(ProposalBatch("mixed", (strict_proposal, surrogate_proposal)))
+        assert receipt.status is CommitStatus.ROLLED_BACK
+        assert receipt.reason == "strict-objective-regression:strict"
+        np.testing.assert_array_equal(state["parameters"], [0.0, 0.0])
+
 
 def test_independent_siblings_commit_one_global_version_and_one_parent_invalidation():
     mutable = _mutable_contract(update=UpdateKind.COORDINATE)
@@ -326,7 +470,16 @@ def test_independent_siblings_commit_one_global_version_and_one_parent_invalidat
     coordinator = TransactionalCoordinator(
         graph,
         apply_sibling,
-        lambda batch: CanaryVerdict(True, "joint canary passed", 0.0, 1.0),
+        lambda batch: CanaryVerdict(
+            True,
+            "joint canary passed",
+            0.0,
+            1.0,
+            proposal_objectives={
+                "p1": ObjectiveGateEvidence(0.0, 0.5),
+                "p2": ObjectiveGateEvidence(0.0, 0.5),
+            },
+        ),
         participants=participants,
     )
     left = replace(_packet(node_id="a", update=UpdateKind.COORDINATE), dependency_versions={"a": 0})

@@ -10,7 +10,12 @@ from enum import StrEnum
 from threading import RLock
 from typing import Any
 
-from mixle.experimental.typed_runtime.contracts import ObjectiveKind, StateSemantics, UpdateKind
+from mixle.experimental.typed_runtime.contracts import (
+    ArtifactKind,
+    ObjectiveKind,
+    StateSemantics,
+    UpdateKind,
+)
 from mixle.experimental.typed_runtime.graph import UpdateGraph
 from mixle.experimental.typed_runtime.proposal import (
     ProposalBatch,
@@ -59,12 +64,17 @@ class TransactionParticipant:
     snapshot_fn: SnapshotFn = field(repr=False, compare=False)
     restore_fn: RestoreFn = field(repr=False, compare=False)
     fingerprint_fn: FingerprintFn = field(repr=False, compare=False)
+    artifacts: frozenset[ArtifactKind] = frozenset()
 
     def __post_init__(self) -> None:
         if not self.name or not self.semantics:
             raise ValueError("transaction participants need a name and mutable state semantics.")
         if StateSemantics.IMMUTABLE_RESULT in self.semantics:
             raise ValueError("immutable_result is not a transaction participant state domain.")
+        if not self.artifacts:
+            raise ValueError("transaction participants must declare snapshotted artifacts.")
+        if any(not isinstance(artifact, ArtifactKind) for artifact in self.artifacts):
+            raise TypeError("transaction participant artifacts must be ArtifactKind values.")
 
     def snapshot(self) -> Any:
         """Capture state before applying a proposal."""
@@ -86,6 +96,33 @@ class TransactionParticipant:
 
 
 @dataclass(frozen=True)
+class ObjectiveGateEvidence:
+    """Proposal-specific objective evidence used for mixed or multi-update gates."""
+
+    objective_before: float
+    objective_after: float
+    lower_confidence_gain: float | None = None
+
+    def __post_init__(self) -> None:
+        values = (
+            self.objective_before,
+            self.objective_after,
+            self.lower_confidence_gain,
+        )
+        if any(value is not None and not math.isfinite(value) for value in values):
+            raise ValueError("proposal objective evidence must be finite.")
+
+    def as_dict(self) -> dict[str, float | None]:
+        """Return a JSON-compatible objective gate."""
+
+        return {
+            "objective_before": self.objective_before,
+            "objective_after": self.objective_after,
+            "lower_confidence_gain": self.lower_confidence_gain,
+        }
+
+
+@dataclass(frozen=True)
 class CanaryVerdict:
     """Measured acceptance evidence after proposals have been tentatively applied."""
 
@@ -97,6 +134,7 @@ class CanaryVerdict:
     confidence_level: float | None = None
     sample_count: int = 0
     metrics: dict[str, float] = field(default_factory=dict)
+    proposal_objectives: dict[str, ObjectiveGateEvidence] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.reason:
@@ -110,6 +148,10 @@ class CanaryVerdict:
             raise ValueError("canary sample_count must be non-negative.")
         if any(not math.isfinite(value) for value in self.metrics.values()):
             raise ValueError("canary metrics must be finite.")
+        if any(not proposal_id for proposal_id in self.proposal_objectives):
+            raise ValueError("proposal objective evidence ids must be non-empty.")
+        if any(not isinstance(row, ObjectiveGateEvidence) for row in self.proposal_objectives.values()):
+            raise TypeError("proposal objective evidence must use ObjectiveGateEvidence.")
 
     @property
     def objective_gain(self) -> float | None:
@@ -132,6 +174,9 @@ class CanaryVerdict:
             "confidence_level": self.confidence_level,
             "sample_count": self.sample_count,
             "metrics": dict(self.metrics),
+            "proposal_objectives": {
+                proposal_id: row.as_dict() for proposal_id, row in sorted(self.proposal_objectives.items())
+            },
         }
 
 
@@ -162,7 +207,15 @@ class CommitReceipt:
     rollback_verified: bool | None = None
     error_type: str | None = None
     error_message: str | None = None
+    run_id: str = ""
+    model_id: str = ""
     elapsed_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.commit_id or not self.batch_id or not self.reason:
+            raise ValueError("commit receipt identity must be complete.")
+        if not self.run_id or not self.model_id:
+            raise ValueError("commit receipt must bind run and model identity.")
 
     @property
     def accepted(self) -> bool:
@@ -189,6 +242,8 @@ class CommitReceipt:
             "rollback_verified": self.rollback_verified,
             "error_type": self.error_type,
             "error_message": self.error_message,
+            "run_id": self.run_id,
+            "model_id": self.model_id,
             "elapsed_seconds": self.elapsed_seconds,
         }
 
@@ -206,14 +261,20 @@ class TransactionalCoordinator:
         apply_proposal: ApplyProposalFn,
         canary: CanaryFn,
         *,
+        run_id: str,
+        model_id: str,
         participants: Iterable[TransactionParticipant] = (),
         versions: RuntimeVersions | None = None,
         objective_tolerance: float = 1.0e-9,
         enforce_monotone_objective: bool = True,
     ) -> None:
-        if objective_tolerance < 0.0:
-            raise ValueError("objective_tolerance must be non-negative.")
+        if not run_id or not model_id:
+            raise ValueError("transaction coordinator run_id and model_id must be non-empty.")
+        if not math.isfinite(objective_tolerance) or objective_tolerance < 0.0:
+            raise ValueError("objective_tolerance must be finite and non-negative.")
         self.graph = graph
+        self.run_id = run_id
+        self.model_id = model_id
         self.apply_proposal = apply_proposal
         self.canary = canary
         rows = tuple(participants)
@@ -254,6 +315,10 @@ class TransactionalCoordinator:
         for proposal in batch.proposals:
             if proposal.proposal_id in self._seen_proposal_ids:
                 return "duplicate-proposal-id:%s" % proposal.proposal_id
+            if proposal.run_id != self.run_id:
+                return "run-id-mismatch:%s" % proposal.proposal_id
+            if proposal.model_id != self.model_id:
+                return "model-id-mismatch:%s" % proposal.proposal_id
             if proposal.node_id not in known_nodes:
                 return "unknown-proposal-node:%s" % proposal.node_id
             try:
@@ -293,6 +358,15 @@ class TransactionalCoordinator:
         missing = self._required_semantics(batch) - covered
         if missing:
             return "missing-transaction-state:%s" % ",".join(sorted(state.value for state in missing))
+        covered_artifacts = frozenset(
+            artifact for participant in self.participants for artifact in participant.artifacts
+        )
+        required_artifacts = frozenset(artifact for proposal in batch.proposals for artifact in proposal.writes)
+        missing_artifacts = required_artifacts - covered_artifacts
+        if missing_artifacts:
+            return "missing-transaction-artifact:%s" % ",".join(
+                sorted(artifact.value for artifact in missing_artifacts)
+            )
         return None
 
     def _ordered_proposals(self, batch: ProposalBatch) -> tuple[ProposalPacket, ...]:
@@ -305,17 +379,41 @@ class TransactionalCoordinator:
     def _objective_error(self, batch: ProposalBatch, verdict: CanaryVerdict) -> str | None:
         if not verdict.accepted:
             return "canary-rejected:%s" % verdict.reason
+        proposal_ids = {proposal.proposal_id for proposal in batch.proposals}
+        unknown_evidence = sorted(set(verdict.proposal_objectives) - proposal_ids)
+        if unknown_evidence:
+            return "unknown-proposal-objective-evidence:%s" % unknown_evidence[0]
         if verdict.lower_confidence_gain is not None and verdict.lower_confidence_gain < -self.objective_tolerance:
             return "negative-canary-lower-bound"
-        strict = all(
+        strict_proposals = tuple(
             proposal.objective_kind in (ObjectiveKind.MLE, ObjectiveKind.MAP, ObjectiveKind.ELBO)
             for proposal in batch.proposals
         )
-        if self.enforce_monotone_objective and strict:
-            if verdict.objective_before is None or verdict.objective_after is None:
-                return "strict-objective-canary-missing-values"
-            if verdict.objective_after + self.objective_tolerance < verdict.objective_before:
-                return "strict-objective-regression"
+        if self.enforce_monotone_objective and any(strict_proposals):
+            strict_rows = tuple(proposal for proposal, is_strict in zip(batch.proposals, strict_proposals) if is_strict)
+            require_per_proposal = len(batch.proposals) > 1
+            for proposal in strict_rows:
+                evidence = verdict.proposal_objectives.get(proposal.proposal_id)
+                if evidence is None and require_per_proposal:
+                    return "strict-objective-evidence-missing:%s" % proposal.proposal_id
+                if evidence is None:
+                    if verdict.objective_before is None or verdict.objective_after is None:
+                        return "strict-objective-canary-missing-values"
+                    before = verdict.objective_before
+                    after = verdict.objective_after
+                    lower_bound = verdict.lower_confidence_gain
+                else:
+                    before = evidence.objective_before
+                    after = evidence.objective_after
+                    lower_bound = evidence.lower_confidence_gain
+                if lower_bound is not None and lower_bound < -self.objective_tolerance:
+                    return "negative-proposal-lower-bound:%s" % proposal.proposal_id
+                if after + self.objective_tolerance < before:
+                    return (
+                        "strict-objective-regression"
+                        if len(batch.proposals) == 1
+                        else "strict-objective-regression:%s" % proposal.proposal_id
+                    )
         return None
 
     def _rollback(
@@ -351,7 +449,6 @@ class TransactionalCoordinator:
             proposal_ids = tuple(proposal.proposal_id for proposal in batch.proposals)
             self.proposal_receipts.extend(proposal.as_dict() for proposal in batch.proposals)
             error = self._preflight_error(batch)
-            self._seen_proposal_ids.update(proposal_ids)
             if error is not None:
                 receipt = CommitReceipt(
                     commit_id,
@@ -361,6 +458,8 @@ class TransactionalCoordinator:
                     error,
                     versions_before,
                     self.versions.as_dict(),
+                    run_id=self.run_id,
+                    model_id=self.model_id,
                     elapsed_seconds=time.perf_counter() - started,
                 )
                 self.receipts.append(receipt)
@@ -380,6 +479,8 @@ class TransactionalCoordinator:
                     self.versions.as_dict(),
                     error_type=type(apply_error).__name__,
                     error_message=str(apply_error),
+                    run_id=self.run_id,
+                    model_id=self.model_id,
                     elapsed_seconds=time.perf_counter() - started,
                 )
                 self.receipts.append(receipt)
@@ -421,6 +522,8 @@ class TransactionalCoordinator:
                     rollback_verified=verified,
                     error_type=type(error_value).__name__ if error_value is not None else None,
                     error_message=str(error_value) if error_value is not None else None,
+                    run_id=self.run_id,
+                    model_id=self.model_id,
                     elapsed_seconds=time.perf_counter() - started,
                 )
                 self.receipts.append(receipt)
@@ -434,6 +537,7 @@ class TransactionalCoordinator:
             self.versions.model_version += 1
             for node_id in invalidated:
                 self.versions.node_versions[node_id] += 1
+            self._seen_proposal_ids.update(proposal_ids)
             receipt = CommitReceipt(
                 commit_id,
                 batch.batch_id,
@@ -446,6 +550,8 @@ class TransactionalCoordinator:
                 canary=verdict,
                 participant_fingerprints_before=fingerprints_before,
                 participant_fingerprints_after=tentative_fingerprints,
+                run_id=self.run_id,
+                model_id=self.model_id,
                 elapsed_seconds=time.perf_counter() - started,
             )
             self.receipts.append(receipt)
@@ -469,6 +575,7 @@ __all__ = [
     "CommitReceipt",
     "CommitStatus",
     "FingerprintFn",
+    "ObjectiveGateEvidence",
     "RestoreFn",
     "RuntimeVersions",
     "SnapshotFn",
