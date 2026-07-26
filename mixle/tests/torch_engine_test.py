@@ -127,6 +127,29 @@ class TorchEngineTestCase(unittest.TestCase):
         self.assertTrue(np.isfinite(ll))
         self.assertGreater(ll, ll0 - 0.05 * abs(ll0))
 
+    def test_em_fit_controls_are_exact_and_zero_iterations_are_a_noop(self):
+        estimator = make_estimator()
+        with mock.patch.object(self.tm, "initialize") as initialize, mock.patch.object(self.tm, "em_step") as em_step:
+            model, ll = self.tm.fit(self.enc, estimator, max_its=0)
+        self.assertIs(model, self.model)
+        self.assertTrue(np.isfinite(ll))
+        initialize.assert_not_called()
+        em_step.assert_not_called()
+
+        for max_its in (-1, 1.5, True, "2"):
+            with self.subTest(max_its=max_its), self.assertRaises((TypeError, ValueError)):
+                self.tm.fit(self.enc, estimator, max_its=max_its, model=self.model)
+        for delta in (-1.0, np.nan, np.inf):
+            with self.subTest(delta=delta), self.assertRaises((TypeError, ValueError)):
+                self.tm.fit(self.enc, estimator, max_its=0, delta=delta, model=self.model)
+        for init_p in (-0.1, 1.1, np.nan):
+            with self.subTest(init_p=init_p), self.assertRaises((TypeError, ValueError)):
+                self.tm.fit(self.enc, estimator, max_its=0, init_p=init_p, model=self.model)
+
+    def test_fit_map_rejects_the_previously_ignored_weight_prior_alias(self):
+        with self.assertRaisesRegex(TypeError, "structured mixture Dirichlet weight prior"):
+            self.tm.fit_map(self.enc, w_alpha=2.0)
+
     # -- gradient MLE ------------------------------------------------------------
 
     def test_fit_mle_improves_likelihood(self):
