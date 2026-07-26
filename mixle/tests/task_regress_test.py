@@ -55,6 +55,19 @@ class SolveRegressionTest(unittest.TestCase):
         self.assertAlmostEqual(sol(it), _price(it), places=9)  # every request runs the real code
         self.assertEqual(sol.report()["escalated"], 1)
 
+    def test_invalid_data_and_calibration_parameters_fail_closed(self):
+        from mixle.task import solve_regression
+
+        data = _items(40)
+        with self.assertRaisesRegex(ValueError, "alpha"):
+            solve_regression(_price, data, tol=1.0, alpha=float("nan"))
+        with self.assertRaisesRegex(ValueError, "tol"):
+            solve_regression(_price, data, tol=-1.0)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            solve_regression(lambda xs: [float("nan")] * len(xs), data, tol=1.0)
+        with self.assertRaisesRegex(ValueError, "requires at least"):
+            solve_regression(_price, data, tol=1.0, alpha=0.01, holdout=0.25)
+
     def test_improve_promotes_only_tighter_calibration(self):
         from mixle.task import solve_regression
 
