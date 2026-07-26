@@ -97,7 +97,9 @@ from mixle.experimental.typed_runtime.context_scheduler import (
 )
 from mixle.experimental.typed_runtime.contracts import (
     ArtifactKind,
+    ComputeBand,
     ConsistencyRequirement,
+    ConvergenceCertificate,
     CostEstimate,
     CounterSemantics,
     CurvatureKind,
@@ -106,6 +108,8 @@ from mixle.experimental.typed_runtime.contracts import (
     StateSemantics,
     UpdateContract,
     UpdateKind,
+    weakest_band,
+    weakest_certificate,
 )
 from mixle.experimental.typed_runtime.distributed import plan_distributed_updates
 from mixle.experimental.typed_runtime.faults import (
@@ -269,6 +273,8 @@ __all__ = [
     "CompressionReceipt",
     "CorrectionProvider",
     "ConsistencyRequirement",
+    "ComputeBand",
+    "ConvergenceCertificate",
     "ContextAction",
     "ContextActionKind",
     "ContextActionLimits",
@@ -417,6 +423,8 @@ __all__ = [
     "plan_structured_placement",
     "replay_log",
     "validate_update_graph",
+    "weakest_band",
+    "weakest_certificate",
     "run_typed_mixture_em",
     "run_structured_estimation_step",
     "run_graph_memory_pilot",
