@@ -292,25 +292,21 @@ def model_knn(
 ) -> tuple[np.ndarray, np.ndarray]:
     """k-nearest-neighbor arrays under the model distance d_ij = -log s_ij.
 
-    Returns (indices, distances), each n x k, sorted ascending per row with
-    each point as its own first neighbor at distance 0 (the convention
-    expected by umap-learn, where self counts toward n_neighbors). Built
-    blockwise; the dense affinity matrix is never materialized.
+    Returns (indices, distances), each n x k, sorted ascending per row and
+    containing only non-self neighbors. Built blockwise; the dense affinity
+    matrix is never materialized.
     evidence_cap as in model_log_affinity.
     """
     factors = _affinity_factors(posterior_mat, ll_mat, affinity)
     n = _factor_n(factors[0])
-    k = min(k, n)
-    m = k - 1  # non-self neighbors
+    if isinstance(k, bool) or not isinstance(k, (int, np.integer)) or not 1 <= k < n:
+        raise ValueError(f"k must be an integer between 1 and {n - 1}.")
+    if isinstance(block_size, bool) or not isinstance(block_size, (int, np.integer)) or block_size <= 0:
+        raise ValueError("block_size must be a positive integer.")
     cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
 
     knn_idx = np.empty((n, k), dtype=np.int64)
     knn_dist = np.empty((n, k), dtype=np.float64)
-    knn_idx[:, 0] = np.arange(n)
-    knn_dist[:, 0] = 0.0
-
-    if m == 0:
-        return knn_idx, knn_dist
 
     for s0 in range(0, n, block_size):
         s1 = min(s0 + block_size, n)
@@ -328,14 +324,14 @@ def model_knn(
         log_s[np.arange(s1 - s0), np.arange(s0, s1)] = -np.inf
         s_blk = log_s
 
-        nbr = np.argpartition(-s_blk, m - 1, axis=1)[:, :m]
+        nbr = np.argpartition(-s_blk, k - 1, axis=1)[:, :k]
 
         for bi, i in enumerate(range(s0, s1)):
             c = nbr[bi]
             d = -log_s[bi, c]
             np.maximum(d, 0.0, out=d)
-            order = np.argsort(d)
-            knn_idx[i, 1:] = c[order]
-            knn_dist[i, 1:] = d[order]
+            order = np.argsort(d, kind="stable")
+            knn_idx[i] = c[order]
+            knn_dist[i] = d[order]
 
     return knn_idx, knn_dist

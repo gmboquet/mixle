@@ -539,9 +539,9 @@ class HTSNETestCase(unittest.TestCase):
 
         idx, dist = model_knn(None, None, k=7, affinity=factors, block_size=13)
         self.assertEqual(idx.shape, (len(data), 7))
-        self.assertTrue(np.all(idx[:, 0] == np.arange(len(data))))
+        self.assertTrue(np.all(idx != np.arange(len(data))[:, None]))
         for i in (0, 11, len(data) - 1):
-            np.testing.assert_allclose(dist[i, 1:], np.maximum(-log_s[i, idx[i, 1:]], 0.0), atol=1.0e-12)
+            np.testing.assert_allclose(dist[i], np.maximum(-log_s[i, idx[i]], 0.0), atol=1.0e-12)
 
     def test_fisher_approx_sparse_distances_can_reduce_to_exact(self):
         data = self.data[:45]
@@ -926,13 +926,20 @@ class HTSNETestCase(unittest.TestCase):
         k = 12
         idx, dist = model_knn(self.z, self.l, k=k, block_size=64)
         self.assertEqual(idx.shape, (self.n, k))
-        self.assertTrue(np.all(idx[:, 0] == np.arange(self.n)))
-        self.assertTrue(np.all(dist[:, 0] == 0.0))
-        self.assertTrue(np.all(np.diff(dist[:, 1:], axis=1) >= -1.0e-12))
+        self.assertTrue(np.all(idx != np.arange(self.n)[:, None]))
+        self.assertTrue(np.all(np.diff(dist, axis=1) >= -1.0e-12))
         self.assertTrue(np.all(dist >= 0.0))
         log_s = model_log_affinity(self.z, self.l)
         for i in (0, 17, self.n - 1):
-            self.assertTrue(np.allclose(dist[i, 1:], np.maximum(-log_s[i, idx[i, 1:]], 0.0), atol=1.0e-12))
+            self.assertTrue(np.allclose(dist[i], np.maximum(-log_s[i, idx[i]], 0.0), atol=1.0e-12))
+
+    def test_model_knn_rejects_self_only_or_invalid_controls(self):
+        with self.assertRaises(ValueError):
+            model_knn(self.z[:1], self.l[:1], k=1)
+        with self.assertRaises(ValueError):
+            model_knn(self.z, self.l, k=self.n)
+        with self.assertRaises(ValueError):
+            model_knn(self.z, self.l, block_size=0)
 
     @unittest.skipUnless(HAS_UMAP, "umap-learn is not installed")
     def test_humap_embedding(self):
