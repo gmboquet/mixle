@@ -16,6 +16,8 @@ torch = pytest.importorskip("torch")
 
 from mixle.models.transformer import build_causal_lm  # noqa: E402
 from mixle.utils.parallel.training_health import (  # noqa: E402
+    MFUSample,
+    ModelFlopConfig,
     RollingBaseline,
     TrainingHealthMonitor,
     flop_config_from_causal_lm,
@@ -95,8 +97,6 @@ class TheoreticalFlopsTest(unittest.TestCase):
 
 class MFURatioTest(unittest.TestCase):
     def test_mfu_ratio_is_achieved_over_peak(self):
-        from mixle.utils.parallel.training_health import MFUSample
-
         # Synthetic (achieved, theoretical/peak) pair: step_flops chosen so achieved = step_flops/step_time.
         step_flops = 1.0e9
         step_time_s = 0.5  # achieved = 2e9 FLOPs/sec
@@ -148,6 +148,47 @@ class RollingBaselineTest(unittest.TestCase):
             rb.update(v)
         restored = RollingBaseline.from_state(rb.state())
         self.assertEqual(rb.baseline(), restored.baseline())
+
+
+class HealthInputValidationTest(unittest.TestCase):
+    def test_invalid_flop_and_monitor_configurations_fail_eagerly(self):
+        for values in (
+            {"n_params": 0, "n_layer": 1, "n_head": 1, "d_model": 4, "seq_len": 8},
+            {"n_params": 10, "n_layer": 0, "n_head": 1, "d_model": 4, "seq_len": 8},
+            {"n_params": 10, "n_layer": 1, "n_head": 0, "d_model": 4, "seq_len": 8},
+            {"n_params": 10, "n_layer": 1, "n_head": 1, "d_model": 0, "seq_len": 8},
+            {"n_params": 10, "n_layer": 1, "n_head": 1, "d_model": 4, "seq_len": 0},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                ModelFlopConfig(**values)
+        with self.assertRaises(ValueError):
+            RollingBaseline(window=3, min_periods=4)
+        with self.assertRaises(ValueError):
+            TrainingHealthMonitor(loss_z_thresh=float("nan"))
+        with self.assertRaises(ValueError):
+            TrainingHealthMonitor(grad_z_thresh=-1.0)
+        with self.assertRaises(ValueError):
+            TrainingHealthMonitor(rank_heartbeat_threshold=-1)
+        with self.assertRaises(ValueError):
+            TrainingHealthMonitor(peak_flops_per_sec=0.0)
+        with self.assertRaises(ValueError):
+            MFUSample(step=0, step_flops=1.0, step_time_s=0.0, peak_flops_per_sec=1.0)
+
+    def test_step_samples_and_heartbeats_are_monotone_and_physical(self):
+        monitor = TrainingHealthMonitor(loss_min_periods=2, grad_min_periods=2)
+        monitor.observe_step(0, 1.0)
+        with self.assertRaisesRegex(ValueError, "increase strictly"):
+            monitor.observe_step(0, 1.0)
+        with self.assertRaises(ValueError):
+            monitor.observe_step(1, 1.0, step_time_s=0.0)
+        with self.assertRaises(ValueError):
+            monitor.observe_step(1, 1.0, grad_norm=-1.0)
+
+        monitor.observe_rank_step("rank-0", 2)
+        with self.assertRaisesRegex(ValueError, "increase strictly"):
+            monitor.observe_rank_step("rank-0", 2)
+        with self.assertRaises(ValueError):
+            monitor.check_rank_liveness(1)
 
 
 class InjectedAnomalyDetectionTest(unittest.TestCase):
@@ -346,9 +387,7 @@ class RestartContinuityTest(unittest.TestCase):
             monitor.observe_step(step, loss)
         # Checkpoint + resume: state is saved/reloaded correctly, so training continues the same trend.
         restart_step = len(losses)
-        monitor.observe_step(restart_step, 2.68, restart=True)
-        # Next step continues the coherent downward trend -- no discontinuity.
-        anomalies = monitor.observe_step(restart_step + 1, 2.65)
+        anomalies = monitor.observe_step(restart_step, 2.68, restart=True)
         self.assertTrue(monitor.continuity_ok())
         self.assertFalse(any(a.kind == "restart_discontinuity" for a in anomalies))
 
@@ -360,10 +399,11 @@ class RestartContinuityTest(unittest.TestCase):
         # Checkpoint + resume, but the reload silently drops optimizer/RNG state (e.g. a fresh optimizer
         # with no momentum, or a re-shuffled data cursor) -- the loss jumps back up on resume.
         restart_step = len(losses)
-        monitor.observe_step(restart_step, 2.68, restart=True)
-        anomalies = monitor.observe_step(restart_step + 1, 9.5)  # a real discontinuity, not explained by trend
+        anomalies = monitor.observe_step(restart_step, 9.5, restart=True)
         self.assertFalse(monitor.continuity_ok())
         self.assertTrue(any(a.kind == "restart_discontinuity" for a in anomalies))
+        discontinuity = next(a for a in anomalies if a.kind == "restart_discontinuity")
+        self.assertEqual(discontinuity.detected_at_step, restart_step)
 
 
 class DeadRankLivenessTest(unittest.TestCase):

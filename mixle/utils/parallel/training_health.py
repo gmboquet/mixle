@@ -18,10 +18,9 @@ Four things are tracked:
 * **Grad-norm / precision anomalies** -- the same rolling z-score on grad-norm, plus NaN/Inf checks on both
   streams (these always fire, independent of the rolling window's warmup).
 * **Per-restart continuity** -- ``restart=True`` on the first step after a checkpoint resume marks the
-  rolling baseline boundary; the next step's z-score is evaluated against the *pre-restart* baseline (it
-  has not been updated with any post-restart value yet), so a resume that silently drops optimizer/RNG
-  state and produces a real loss jump is caught as ``restart_discontinuity`` -- a well-behaved resume is
-  not.
+  observation that must be evaluated against the *pre-restart* rolling baseline. It is scored before that
+  observation updates the window, so a resume that silently drops optimizer/RNG state and produces a real
+  loss jump is caught immediately as ``restart_discontinuity`` -- a well-behaved resume is not.
 * **Dead-rank liveness** -- ``observe_rank_step(rank, step)`` is a per-rank heartbeat: a data-parallel loop
   calls it once per step per rank (mirroring how :class:`~mixle.utils.parallel.fault_tolerant_training.
   ElasticTrainingJob` already tracks ``dead_ranks`` for gradient-averaging purposes, but that bookkeeping
@@ -39,6 +38,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -53,6 +53,28 @@ __all__ = [
     "theoretical_flops_per_iter",
     "flop_config_from_causal_lm",
 ]
+
+
+def _exact_int(value: Any, name: str, *, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    return result
+
+
+def _finite_real(value: Any, name: str, *, positive: bool = False, nonnegative: bool = False) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a real number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    if positive and result <= 0.0:
+        raise ValueError(f"{name} must be positive")
+    if nonnegative and result < 0.0:
+        raise ValueError(f"{name} must be nonnegative")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +98,8 @@ class ModelFlopConfig:
     seq_len: int
 
     def __post_init__(self) -> None:
+        for name in ("n_params", "n_layer", "n_head", "d_model", "seq_len"):
+            object.__setattr__(self, name, _exact_int(getattr(self, name), name, minimum=1))
         if self.d_model % self.n_head != 0:
             raise ValueError(f"d_model={self.d_model} not divisible by n_head={self.n_head}")
 
@@ -102,8 +126,14 @@ def theoretical_flops_per_iter(
     the ``6N`` param-count term. Multiplying by ``T`` (all tokens in the sequence) and ``batch_size`` gives
     the FLOPs for one full iteration.
     """
-    if seq_len <= 0 or batch_size <= 0:
-        raise ValueError("seq_len and batch_size must be positive")
+    n_params = _exact_int(n_params, "n_params", minimum=1)
+    n_layer = _exact_int(n_layer, "n_layer", minimum=1)
+    n_head = _exact_int(n_head, "n_head", minimum=1)
+    d_model = _exact_int(d_model, "d_model", minimum=1)
+    seq_len = _exact_int(seq_len, "seq_len", minimum=1)
+    batch_size = _exact_int(batch_size, "batch_size", minimum=1)
+    if d_model % n_head:
+        raise ValueError("d_model must be divisible by n_head")
     head_dim = d_model / n_head
     flops_per_token = 6.0 * n_params + 12.0 * n_layer * n_head * head_dim * seq_len
     flops_per_fwdbwd = flops_per_token * seq_len
@@ -138,14 +168,22 @@ class MFUSample:
     step_time_s: float
     peak_flops_per_sec: float
 
+    def __post_init__(self) -> None:
+        self.step = _exact_int(self.step, "step", minimum=0)
+        self.step_flops = _finite_real(self.step_flops, "step_flops", positive=True)
+        self.step_time_s = _finite_real(self.step_time_s, "step_time_s", positive=True)
+        self.peak_flops_per_sec = _finite_real(
+            self.peak_flops_per_sec,
+            "peak_flops_per_sec",
+            positive=True,
+        )
+
     @property
     def achieved_flops_per_sec(self) -> float:
-        return self.step_flops / self.step_time_s if self.step_time_s > 0 else float("nan")
+        return self.step_flops / self.step_time_s
 
     @property
     def mfu(self) -> float:
-        if self.peak_flops_per_sec <= 0:
-            return float("nan")
         return self.achieved_flops_per_sec / self.peak_flops_per_sec
 
 
@@ -165,10 +203,12 @@ class RollingBaseline:
     """
 
     def __init__(self, window: int = 20, min_periods: int = 5):
-        if min_periods < 2:
-            raise ValueError("min_periods must be >= 2")
-        self.window = int(window)
-        self.min_periods = int(min_periods)
+        window = _exact_int(window, "window", minimum=2)
+        min_periods = _exact_int(min_periods, "min_periods", minimum=2)
+        if min_periods > window:
+            raise ValueError("min_periods must not exceed window")
+        self.window = window
+        self.min_periods = min_periods
         self._values: deque[float] = deque(maxlen=self.window)
 
     def baseline(self) -> tuple[float, float] | None:
@@ -190,7 +230,7 @@ class RollingBaseline:
         return (value - med) / spread
 
     def update(self, value: float) -> None:
-        self._values.append(float(value))
+        self._values.append(_finite_real(value, "baseline value"))
 
     def state(self) -> dict[str, Any]:
         """Serializable snapshot -- carry this across a checkpoint/restart to preserve continuity."""
@@ -199,7 +239,11 @@ class RollingBaseline:
     @classmethod
     def from_state(cls, state: dict[str, Any]) -> RollingBaseline:
         obj = cls(window=state["window"], min_periods=state["min_periods"])
-        obj._values.extend(state["values"])
+        values = state["values"]
+        if len(values) > obj.window:
+            raise ValueError("rolling baseline state exceeds its declared window")
+        for value in values:
+            obj.update(value)
         return obj
 
 
@@ -257,11 +301,21 @@ class TrainingHealthMonitor:
         grad_z_thresh: float = 6.0,
         rank_heartbeat_threshold: int = 50,
     ) -> None:
+        if flop_config is not None and not isinstance(flop_config, ModelFlopConfig):
+            raise TypeError("flop_config must be ModelFlopConfig or None")
         self.flop_config = flop_config
-        self.peak_flops_per_sec = peak_flops_per_sec
-        self.loss_z_thresh = float(loss_z_thresh)
-        self.grad_z_thresh = float(grad_z_thresh)
-        self.rank_heartbeat_threshold = int(rank_heartbeat_threshold)
+        self.peak_flops_per_sec = (
+            None
+            if peak_flops_per_sec is None
+            else _finite_real(peak_flops_per_sec, "peak_flops_per_sec", positive=True)
+        )
+        self.loss_z_thresh = _finite_real(loss_z_thresh, "loss_z_thresh", nonnegative=True)
+        self.grad_z_thresh = _finite_real(grad_z_thresh, "grad_z_thresh", nonnegative=True)
+        self.rank_heartbeat_threshold = _exact_int(
+            rank_heartbeat_threshold,
+            "rank_heartbeat_threshold",
+            minimum=0,
+        )
 
         self._loss_baseline = RollingBaseline(window=loss_window, min_periods=loss_min_periods)
         self._grad_baseline = RollingBaseline(window=grad_window, min_periods=grad_min_periods)
@@ -269,7 +323,6 @@ class TrainingHealthMonitor:
         self.records: list[StepRecord] = []
         self.anomalies: list[Anomaly] = []
         self.mfu_samples: list[MFUSample] = []
-        self._pending_restart_step: int | None = None  # step index whose *next* observation is post-restart
         self._rank_last_seen: dict[str, int] = {}  # rank name -> last step it reported a heartbeat
         self._dead_ranks_flagged: set[str] = set()  # ranks already flagged dead in the current outage
 
@@ -284,12 +337,31 @@ class TrainingHealthMonitor:
         restart: bool = False,
     ) -> list[Anomaly]:
         """Record one step; returns any anomalies raised at this step (also appended to ``self.anomalies``)."""
+        step = _exact_int(step, "step", minimum=0)
+        if self.records and step <= self.records[-1].step:
+            raise ValueError(
+                f"step must increase strictly; previous={self.records[-1].step} current={step}"
+            )
+        if isinstance(loss, bool) or not isinstance(loss, Real):
+            raise TypeError("loss must be a real number")
         loss = float(loss)
+        if grad_norm is not None:
+            if isinstance(grad_norm, bool) or not isinstance(grad_norm, Real):
+                raise TypeError("grad_norm must be a real number or None")
+            grad_norm = float(grad_norm)
+            if math.isfinite(grad_norm) and grad_norm < 0.0:
+                raise ValueError("grad_norm must be nonnegative")
+        if step_time_s is not None:
+            step_time_s = _finite_real(step_time_s, "step_time_s", positive=True)
+        if batch_size is not None:
+            batch_size = _exact_int(batch_size, "batch_size", minimum=1)
+        if not isinstance(restart, bool):
+            raise TypeError("restart must be boolean")
         rec = StepRecord(step=step, loss=loss, grad_norm=grad_norm, step_time_s=step_time_s, restart=restart)
         self.records.append(rec)
         found: list[Anomaly] = []
 
-        is_post_restart = self._pending_restart_step is not None and step == self._pending_restart_step + 1
+        is_post_restart = restart
 
         # --- precision: NaN/Inf, unconditional, no warmup needed ---------------------------------------
         if not math.isfinite(loss):
@@ -343,14 +415,9 @@ class TrainingHealthMonitor:
                 )
             self._grad_baseline.update(grad_norm)
 
-        if restart:
-            self._pending_restart_step = step
-        elif is_post_restart:
-            self._pending_restart_step = None  # consumed; only the immediate next step is checked
-
         # --- MFU -------------------------------------------------------------------------------------
-        if step_time_s is not None and self.flop_config is not None and self.peak_flops_per_sec:
-            bs = int(batch_size) if batch_size is not None else 1
+        if step_time_s is not None and self.flop_config is not None and self.peak_flops_per_sec is not None:
+            bs = batch_size if batch_size is not None else 1
             step_flops = self.flop_config.flops_per_iter(bs)
             self.mfu_samples.append(
                 MFUSample(
@@ -370,8 +437,16 @@ class TrainingHealthMonitor:
         that has stopped reporting. A rank reporting again after an outage clears its ``dead_rank`` flag so a
         later re-death can be flagged again.
         """
+        if isinstance(rank, bool) or not isinstance(rank, (str, Integral)):
+            raise TypeError("rank must be a string or integer identifier")
         name = str(rank)
-        self._rank_last_seen[name] = int(step)
+        if not name:
+            raise ValueError("rank identifier must not be empty")
+        step = _exact_int(step, "step", minimum=0)
+        previous = self._rank_last_seen.get(name)
+        if previous is not None and step <= previous:
+            raise ValueError(f"rank {name!r} heartbeat step must increase strictly")
+        self._rank_last_seen[name] = step
         self._dead_ranks_flagged.discard(name)
 
     def check_rank_liveness(self, current_step: int) -> list[Anomaly]:
@@ -380,6 +455,9 @@ class TrainingHealthMonitor:
         the flag is cleared the next time that rank reports in, so a respawned/recovered rank can be caught
         going dead again later.
         """
+        current_step = _exact_int(current_step, "current_step", minimum=0)
+        if self._rank_last_seen and current_step < max(self._rank_last_seen.values()):
+            raise ValueError("current_step cannot precede an observed rank heartbeat")
         found: list[Anomaly] = []
         for rank, last_seen in self._rank_last_seen.items():
             silence = current_step - last_seen
