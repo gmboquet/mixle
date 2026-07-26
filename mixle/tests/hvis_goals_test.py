@@ -86,6 +86,18 @@ class AnchorTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             Anchor([0], np.zeros((1, 2)), weight=2.0)  # rate semantics: weights live in (0, 1]
 
+    def test_anchor_rejects_unsafe_indices_and_nonfinite_coordinates(self):
+        with self.assertRaises(ValueError):
+            Anchor([-1], [[0.0, 0.0]])
+        with self.assertRaises(TypeError):
+            Anchor([0.5], [[0.0, 0.0]])
+        with self.assertRaises(ValueError):
+            Anchor([0, 0], [[0.0, 0.0], [1.0, 1.0]])
+        with self.assertRaises(ValueError):
+            Anchor([0], [[np.nan, 0.0]])
+        with self.assertRaises(ValueError):
+            Anchor([2], [[0.0, 0.0]]).project(np.zeros((2, 2), dtype=np.float64))
+
 
 class LabelCohesionTest(unittest.TestCase):
     def test_partial_labels_tighten_labeled_groups(self):
@@ -122,6 +134,14 @@ class LabelCohesionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             LabelCohesion([None, None, None])
 
+    def test_invalid_margin_and_nonfinite_weight_raise(self):
+        with self.assertRaises(ValueError):
+            LabelCohesion([0, 1], weight=np.nan)
+        with self.assertRaises(ValueError):
+            LabelCohesion([0, 1], margin=0.0)
+        with self.assertRaises(ValueError):
+            LabelCohesion([0, 0], margin=1.0)
+
 
 class AxisAlignTest(unittest.TestCase):
     def test_values_run_along_the_chosen_axis(self):
@@ -136,6 +156,16 @@ class AxisAlignTest(unittest.TestCase):
     def test_constant_values_raise(self):
         with self.assertRaises(ValueError):
             AxisAlign([1.0, 1.0, 1.0])
+
+    def test_invalid_axis_values_and_weight_raise(self):
+        with self.assertRaises(ValueError):
+            AxisAlign([0.0, np.nan])
+        with self.assertRaises(ValueError):
+            AxisAlign([0.0, 1.0], axis=-1)
+        with self.assertRaises(ValueError):
+            AxisAlign([0.0, 1.0], weight=2.0)
+        with self.assertRaises(ValueError):
+            AxisAlign([0.0, 1.0], axis=2).gradient(np.zeros((2, 2), dtype=np.float64))
 
 
 class InternalUmapTest(unittest.TestCase):
