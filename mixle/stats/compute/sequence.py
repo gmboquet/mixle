@@ -30,6 +30,39 @@ T = TypeVar("T")
 T_D = TypeVar("T_D", bound=SequenceEncodableProbabilityDistribution)
 
 
+def _checked_encode(encoder: DataSequenceEncoder, rows: Any, path: str) -> tuple[int, Any]:
+    declared = len(rows)
+    payload = encoder.seq_encode(rows)
+    observed = encoder.row_count(payload)
+    if isinstance(observed, (bool, np.bool_)) or not isinstance(observed, (int, np.integer)):
+        raise TypeError("%s encoder row_count() must return an integer." % path)
+    if int(observed) != declared:
+        raise ValueError(
+            "%s encoded-row conservation failed: input has %d rows but payload reports %d."
+            % (path, declared, observed)
+        )
+    return declared, payload
+
+
+def _validate_encoded_chunks(chunks: Any, encoder: DataSequenceEncoder, path: str) -> Any:
+    if isinstance(chunks, RDD_TYPES):
+        return chunks
+    checked = []
+    for index, (declared, payload) in enumerate(chunks):
+        observed = encoder.row_count(payload)
+        if isinstance(declared, (bool, np.bool_)) or not isinstance(declared, (int, np.integer)):
+            raise TypeError("%s chunk %d count must be an integer." % (path, index))
+        if isinstance(observed, (bool, np.bool_)) or not isinstance(observed, (int, np.integer)):
+            raise TypeError("%s chunk %d encoder row_count() must return an integer." % (path, index))
+        if declared < 0 or int(observed) != int(declared):
+            raise ValueError(
+                "%s chunk %d encoded-row conservation failed: declared %d rows but payload reports %d."
+                % (path, index, declared, observed)
+            )
+        checked.append((int(declared), payload))
+    return checked
+
+
 def seq_encode(
     data: Sequence[T] | pyspark.rdd.RDD,
     encoder: DataSequenceEncoder | None = None,
@@ -80,42 +113,44 @@ def seq_encode(
     # encoder and returns the same [(count, payload)] shape; the bare-list and RDD paths are untouched.
     # Imported lazily so stats does not depend on mixle.data at module load (data depends on stats).
     from mixle.data.core import DataSource
+    from mixle.data.partition import num_chunks_for
+
+    # Validate both controls before selecting a backend. For streams whose size is
+    # unknown here, zero is sufficient because only the control contract matters.
+    control_size = len(data) if not isinstance(data, (DataSource, RDD_TYPES)) else 0
+    validated_num_chunks = num_chunks_for(control_size, num_chunks=num_chunks, chunk_size=chunk_size)
 
     if isinstance(data, DataSource):
-        return data.encode(encoder, num_chunks=num_chunks, chunk_size=chunk_size)
+        chunks = data.encode(encoder, num_chunks=num_chunks, chunk_size=chunk_size)
+        return _validate_encoded_chunks(chunks, encoder, type(data).__name__)
 
     if isinstance(data, RDD_TYPES):
         sc = data.context
         temp_encoder = pickle.dumps(encoder, protocol=0)
         encoder_broadcast = sc.broadcast(temp_encoder)
 
-        enc_data = (
-            data.glom()
-            .map(lambda x: list(x))
-            .map(lambda x: (len(x), pickle.loads(encoder_broadcast.value).seq_encode(x)))
-        )
+        def encode_partition(rows):
+            return _checked_encode(pickle.loads(encoder_broadcast.value), rows, "RDD partition")
+
+        enc_data = data.glom().map(lambda x: list(x)).map(encode_partition)
 
         return enc_data
 
     else:
         sz = len(data)
-        if chunk_size is not None:
-            num_chunks_loc = int(np.ceil(float(sz) / float(chunk_size)))
-        else:
-            num_chunks_loc = num_chunks
+        num_chunks_loc = validated_num_chunks
 
         if num_chunks_loc <= 1:
             # single chunk: hand the data straight to the encoder -- the old element-by-element
             # rebuild copied (and, for arrays, boxed) the whole dataset for nothing (audit E-3)
-            return [(sz, encoder.seq_encode(data))]
+            return [_checked_encode(encoder, data, "local chunk 0")]
 
         rv = []
         for i in range(num_chunks_loc):
             # a stride slice is C-speed for lists and a zero-copy view for arrays; the previous
             # per-element comprehension boxed every ndarray row and dominated encode time
             data_loc = data[i::num_chunks_loc]
-            enc_data = encoder.seq_encode(data_loc)
-            rv.append((len(data_loc), enc_data))
+            rv.append(_checked_encode(encoder, data_loc, "local chunk %d" % i))
 
         return rv
 
@@ -230,6 +265,8 @@ def log_density(
     # num_chunks=1 keeps the result aligned to the input order (multi-chunk encoding interleaves observations)
     enc_data = seq_encode(data, model=model, num_chunks=1)
     parts = seq_log_density(enc_data, model)
+    if not parts:
+        return np.empty(0, dtype=float)
     return np.concatenate([np.atleast_1d(np.asarray(p, dtype=float)) for p in parts])
 
 
