@@ -111,6 +111,7 @@ __all__ = [
     "GeneratedNumbaKernel",
     "NumbaKernelFactory",
     "GeneratedNumbaKernelFactory",
+    "ComponentShardLayout",
     "StackedComponentParams",
     "StackedMixtureResidentStats",
     "StackedMixtureShardEstimate",
@@ -1097,6 +1098,7 @@ from mixle.stats.compute.posterior import (
 )
 from mixle.stats.compute.sampling_api import sample
 from mixle.stats.compute.stacked import (
+    ComponentShardLayout,
     StackedComponentParams,
     StackedMixtureKernel,
     StackedMixtureKernelFactory,
