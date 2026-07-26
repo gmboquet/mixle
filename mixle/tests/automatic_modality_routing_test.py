@@ -1,9 +1,7 @@
-"""Modality-fingerprint routing (workstream A1): a fixed-length numeric vector or 2-D numeric array is
-not always low-dimensional tabular numeric. Above EMBEDDING_MIN_DIM, or when the field is a homogeneous
-2-D numeric array, ``mixle.utils.automatic`` routes to a hybrid neural density instead of a bare
-multivariate Gaussian / per-row sequence model -- with the routing reasoning recorded in
-``StructureProfile.warnings``. Below the threshold, nothing changes (GMM/MVN stays the default for plain
-low-dim tabular numeric).
+"""Explicit modality routing: shape alone never asserts embedding/image semantics.
+
+Callers with provenance can request ``modality="embedding"`` or ``"image"``;
+ordinary vectors and matrices retain mathematical-array semantics.
 """
 
 import unittest
@@ -36,25 +34,33 @@ class LowDimUnchangedTest(unittest.TestCase):
         profile = analyze_structure(_vectors(3), pairwise=False, validate_marginals=False)
         self.assertFalse(any("modality fingerprint" in w for w in profile.warnings))
 
+    def test_wide_vector_is_not_assumed_to_be_an_embedding(self):
+        est = get_estimator(_vectors(20))
+        self.assertIsInstance(est, MultivariateGaussianEstimator)
+        profile = analyze_structure(_vectors(20), pairwise=False, validate_marginals=False)
+        self.assertTrue(any("retained mathematical-vector semantics" in warning for warning in profile.warnings))
+
 
 class TorchAbsentFallbackTest(unittest.TestCase):
     """Graceful degradation: if torch is unavailable, the existing family is kept and the gap is recorded."""
 
     def test_embedding_falls_back_to_mvn_without_torch(self):
         with patch("mixle.utils.automatic.profiling._has_torch", return_value=False):
-            est = get_estimator(_vectors(20))
+            est = get_estimator(_vectors(20), modality="embedding")
         self.assertIsInstance(est, MultivariateGaussianEstimator)
         self.assertEqual(est.dim, 20)
 
     def test_embedding_fallback_is_recorded(self):
         with patch("mixle.utils.automatic.profiling._has_torch", return_value=False):
-            profile = analyze_structure(_vectors(20), pairwise=False, validate_marginals=False)
-        self.assertTrue(any("modality fingerprint: embedding" in w and "fell back" in w for w in profile.warnings))
+            profile = analyze_structure(
+                _vectors(20), pairwise=False, validate_marginals=False, modality="embedding"
+            )
+        self.assertTrue(any("explicit modality: embedding" in w and "fell back" in w for w in profile.warnings))
 
     def test_image_fallback_is_recorded(self):
         with patch("mixle.utils.automatic.profiling._has_torch", return_value=False):
-            profile = analyze_structure(_images(), pairwise=False, validate_marginals=False)
-        self.assertTrue(any("modality fingerprint: image" in w and "fell back" in w for w in profile.warnings))
+            profile = analyze_structure(_images(), pairwise=False, validate_marginals=False, modality="image")
+        self.assertTrue(any("explicit modality: image" in w and "fell back" in w for w in profile.warnings))
 
 
 class HybridRoutingTest(unittest.TestCase):
@@ -68,30 +74,30 @@ class HybridRoutingTest(unittest.TestCase):
             raise unittest.SkipTest("hybrid routing needs torch")
 
     def test_embedding_dim_routes_to_neural_density(self):
-        est = get_estimator(_vectors(20))
+        est = get_estimator(_vectors(20), modality="embedding")
         self.assertEqual(type(est).__name__, "NeuralDensityEstimator")
 
     def test_embedding_routing_is_recorded(self):
-        profile = analyze_structure(_vectors(20), pairwise=False, validate_marginals=False)
+        profile = analyze_structure(_vectors(20), pairwise=False, validate_marginals=False, modality="embedding")
         self.assertTrue(
-            any("modality fingerprint: embedding" in w and "hybrid neural density" in w for w in profile.warnings)
+            any("explicit modality: embedding" in w and "hybrid neural density" in w for w in profile.warnings)
         )
 
     def test_image_shape_routes_to_feature_map(self):
-        est = get_estimator(_images())
+        est = get_estimator(_images(), modality="image")
         self.assertEqual(type(est).__name__, "FeatureMapEstimator")
 
     def test_image_routing_is_recorded(self):
-        profile = analyze_structure(_images(), pairwise=False, validate_marginals=False)
+        profile = analyze_structure(_images(), pairwise=False, validate_marginals=False, modality="image")
         self.assertTrue(
-            any("modality fingerprint: image" in w and "hybrid neural density" in w for w in profile.warnings)
+            any("explicit modality: image" in w and "hybrid neural density" in w for w in profile.warnings)
         )
 
     def test_embedding_field_fits_and_scores_finite(self):
         from mixle.inference import optimize
 
         data = _vectors(20, n=80)
-        est = get_estimator(data)
+        est = get_estimator(data, modality="embedding")
         fitted = optimize(data, est, max_its=2, out=None)
         enc = fitted.dist_to_encoder().seq_encode(data)
         ll = fitted.seq_log_density(enc)
@@ -101,7 +107,7 @@ class HybridRoutingTest(unittest.TestCase):
         from mixle.inference import optimize
 
         data = _images(n=50)
-        est = get_estimator(data)
+        est = get_estimator(data, modality="image")
         fitted = optimize(data, est, max_its=2, out=None)
         enc = fitted.dist_to_encoder().seq_encode(data)
         ll = fitted.seq_log_density(enc)
@@ -110,8 +116,14 @@ class HybridRoutingTest(unittest.TestCase):
     def test_recommend_model_reports_modality_reasoning(self):
         from mixle.task.recommend import recommend_model
 
-        rec = recommend_model(_vectors(20), pairwise=False, validate_marginals=False)
-        self.assertTrue(any("modality fingerprint" in line for line in rec.explain()))
+        rec = recommend_model(_vectors(20), pairwise=False, validate_marginals=False, modality="embedding")
+        self.assertTrue(any("explicit modality" in line for line in rec.explain()))
+
+    def test_invalid_explicit_modality_shape_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "requires"):
+            get_estimator([1.0, 2.0, 3.0], modality="embedding")
+        with self.assertRaisesRegex(ValueError, "requires"):
+            analyze_structure(_vectors(3), pairwise=False, modality="image")
 
 
 def _missing_value_note(warnings):

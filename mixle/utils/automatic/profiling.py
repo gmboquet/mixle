@@ -1639,6 +1639,7 @@ def analyze_structure(
     pseudo_count: float | None = 1.0,
     emp_suff_stat: bool = True,
     use_bstats: bool = False,
+    modality: str | None = None,
 ) -> StructureProfile:
     """Profile data and return marginal recommendations plus pairwise hints.
 
@@ -1650,6 +1651,8 @@ def analyze_structure(
     Marginal validation is a bounded deterministic train/validation split over
     scalar fields, meant as a low-overhead predictive sanity check on the BIC choice.
     """
+    if modality not in {None, "embedding", "image"}:
+        raise ValueError("modality must be None, 'embedding', or 'image'")
     rows = list(normalize_input(data))  # accept a DataFrame / RDD / DataSource, not only a bare list
     total_rows = len(rows)
     root = DatumNode(data=rows)  # built directly (not via get_estimator) so its modality checks are inspectable
@@ -1670,6 +1673,7 @@ def analyze_structure(
         emp_suff_stat,
         use_bstats=use_bstats,
         recommendations=deployed_recommendations,
+        modality=modality,
     )
     selection = AutomaticSelectionResult(
         estimator=estimator,
@@ -1689,28 +1693,42 @@ def analyze_structure(
     warnings = ["pairwise hints are unconditional; latent mixture/state/topic structure can explain or hide them"]
     vec_dim = root._fixed_numeric_vector_dim()
     mat_shape = root._fixed_numeric_matrix_shape()
-    if vec_dim is not None and vec_dim >= EMBEDDING_MIN_DIM:
+    if modality == "embedding":
+        if vec_dim is None:
+            raise ValueError("modality='embedding' requires fixed-length, finite numeric vectors")
         if _has_torch():
             warnings.append(
-                "modality fingerprint: embedding (dim=%d >= %d) -> routed to a hybrid neural density "
-                "(an exact coupling flow) instead of a bare multivariate Gaussian" % (vec_dim, EMBEDDING_MIN_DIM)
+                "explicit modality: embedding (dim=%d) -> routed to a hybrid neural density "
+                "(an exact coupling flow) instead of a bare multivariate Gaussian" % vec_dim
             )
         else:
             warnings.append(
-                "modality fingerprint: embedding (dim=%d >= %d) would route to a hybrid neural density, "
-                "but torch is not installed -- fell back to a multivariate Gaussian" % (vec_dim, EMBEDDING_MIN_DIM)
+                "explicit modality: embedding (dim=%d) would route to a hybrid neural density, "
+                "but torch is not installed -- fell back to a multivariate Gaussian" % vec_dim
             )
-    elif mat_shape is not None:
+    elif modality == "image":
+        if mat_shape is None:
+            raise ValueError("modality='image' requires homogeneous finite numeric matrices")
         if _has_torch():
             warnings.append(
-                "modality fingerprint: image (shape=%s) -> routed through a frozen image_features extractor "
+                "explicit modality: image (shape=%s) -> routed through a frozen image_features extractor "
                 "into a hybrid neural density instead of a per-row sequence model" % (mat_shape,)
             )
         else:
             warnings.append(
-                "modality fingerprint: image (shape=%s) would route to a hybrid neural density, but torch "
+                "explicit modality: image (shape=%s) would route to a hybrid neural density, but torch "
                 "is not installed -- fell back to the per-row sequence model" % (mat_shape,)
             )
+    elif vec_dim is not None and vec_dim >= EMBEDDING_MIN_DIM:
+        warnings.append(
+            "wide numeric vector (dim=%d) retained mathematical-vector semantics; pass modality='embedding' "
+            "only when provenance establishes embedding semantics" % vec_dim
+        )
+    elif mat_shape is not None:
+        warnings.append(
+            "numeric matrix (shape=%s) retained array semantics; pass modality='image' only when provenance "
+            "establishes image semantics" % (mat_shape,)
+        )
     elif vec_dim is None:
         # A fixed-length all-numeric vector is otherwise the one shape the automatic pipeline builds a
         # dependency-capturing joint estimator for (MultivariateGaussianEstimator); missing/non-finite
@@ -2154,8 +2172,15 @@ class DatumNode:
         *,
         recommendations: dict[tuple[Any, ...], str] | None = None,
         path: tuple[Any, ...] = (),
+        modality: str | None = None,
     ):
         """Infer and return an estimator for the profiled observations."""
+        if modality not in {None, "embedding", "image"}:
+            raise ValueError("modality must be None, 'embedding', or 'image'")
+        if modality == "embedding" and self._fixed_numeric_vector_dim() is None:
+            raise ValueError("modality='embedding' requires fixed-length, finite numeric vectors")
+        if modality == "image" and self._fixed_numeric_matrix_shape() is None:
+            raise ValueError("modality='image' requires homogeneous finite numeric matrices")
         recommendations = {} if recommendations is None else recommendations
         structured = self.tuple_count + self.seq_count + self.set_count + self.dict_count
         typed = self.count - self.none_count
@@ -2209,17 +2234,16 @@ class DatumNode:
                 )
             elif self._fixed_numeric_vector_dim() is not None:
                 vec_dim = self._fixed_numeric_vector_dim()
-                if vec_dim >= EMBEDDING_MIN_DIM and _has_torch():
-                    # modality fingerprint: "embedding" -- a high-dim numeric vector is far more often a
-                    # frozen encoder's output than a handful of jointly-Gaussian measurements, so a bare
-                    # multivariate Gaussian is the wrong default here (see EMBEDDING_MIN_DIM in factories.py).
+                if modality == "image":
+                    raise ValueError("modality='image' requires homogeneous finite numeric matrices")
+                if modality == "embedding" and _has_torch():
                     rv = get_hybrid_embedding_estimator(vec_dim)
                 else:
                     rv = get_multivariate_gaussian_estimator(vec_dim, use_bstats=use_bstats)
-            elif self._fixed_numeric_matrix_shape() is not None and _has_torch():
-                # modality fingerprint: "image" -- a homogeneous 2-D numeric array field, routed through a
-                # frozen deterministic feature extractor into the same hybrid neural density.
+            elif self._fixed_numeric_matrix_shape() is not None and modality == "image" and _has_torch():
                 rv = get_hybrid_image_estimator()
+            elif modality == "embedding":
+                raise ValueError("modality='embedding' requires fixed-length, finite numeric vectors")
             elif fixed_arity and self.tuple_count == 0 and not self._children_homogeneous():
                 # fixed-length lists/vectors with positionally distinct types
                 rv = get_composite_estimator(
@@ -2454,9 +2478,18 @@ def _freeze_observation(value: Any) -> Any:
     return value
 
 
-def get_estimator(data, pseudo_count: float | None = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
+def get_estimator(
+    data,
+    pseudo_count: float | None = 1.0,
+    emp_suff_stat: bool = True,
+    use_bstats: bool = False,
+    *,
+    modality: str | None = None,
+):
     """Profile ``data`` and return the automatically selected estimator."""
-    return DatumNode(data=normalize_input(data)).get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+    return DatumNode(data=normalize_input(data)).get_estimator(
+        pseudo_count, emp_suff_stat, use_bstats=use_bstats, modality=modality
+    )
 
 
 def get_prototype(
@@ -2467,6 +2500,7 @@ def get_prototype(
     pseudo_count: float | None = 1.0,
     emp_suff_stat: bool = True,
     use_bstats: bool = False,
+    modality: str | None = None,
 ):
     """Infer a model structure and return an initialized prototype distribution.
 
@@ -2487,6 +2521,6 @@ def get_prototype(
     from mixle.stats.compute.sequence import seq_encode, seq_initialize
 
     rows = normalize_input(data)
-    est = get_estimator(rows, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+    est = get_estimator(rows, pseudo_count, emp_suff_stat, use_bstats=use_bstats, modality=modality)
     enc = seq_encode(rows, estimator=est)
     return seq_initialize(enc_data=enc, estimator=est, rng=np.random.RandomState(seed), p=p)
