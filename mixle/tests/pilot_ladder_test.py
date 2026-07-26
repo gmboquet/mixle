@@ -17,6 +17,8 @@ pytest.importorskip("safetensors")
 from mixle.task.pilot_ladder import (  # noqa: E402
     PILOT_LADDER_UNAVAILABLE_PIECES,
     Rung,
+    RungArtifacts,
+    _gate,
     run_pilot_ladder,
 )
 
@@ -78,6 +80,7 @@ class PilotLadderOrchestrationTest(unittest.TestCase):
             # forgetting-curve artifact
             self.assertGreater(len(artifacts.forgetting_curve), 1)
             self.assertIsNotNone(artifacts.forgetting_gap)
+            self.assertEqual(len(artifacts.forgetting_panel_digest), 64)
             # decision-journal entry
             self.assertTrue(outcome.passed)
             self.assertEqual(outcome.decision_record.rationale, outcome.reason)
@@ -89,6 +92,11 @@ class PilotLadderOrchestrationTest(unittest.TestCase):
         self.assertIn("H2_moe_vs_dense", rung_ii.exercised_receipts)
         self.assertIn("relative_output_diff", rung_ii.exercised_receipts["H2_moe_vs_dense"])
         self.assertIn("decision", rung_ii.exercised_receipts["H2_moe_vs_dense"])
+        self.assertEqual(rung_ii.exercised_receipts["H2_moe_vs_dense"]["source_training_steps"], 30)
+        self.assertEqual(
+            rung_ii.exercised_receipts["H2_moe_vs_dense"]["source_final_loss"],
+            rung_ii.final_loss,
+        )
         # E7 (opted out) is honestly noted as skipped, with the real reason
         self.assertIn("E7", rung_ii.skipped_pieces)
         self.assertEqual(rung_ii.skipped_pieces["E7"], PILOT_LADDER_UNAVAILABLE_PIECES["E7"])
@@ -173,6 +181,26 @@ class PilotLadderJournalIntegrityTest(unittest.TestCase):
         # round-trips through JSON exactly, so the whole ladder run is a durable, replayable artifact
         restored = type(result.journal).from_json(type(result.journal)(result.journal.records[1:]).to_json())
         self.assertEqual(len(restored), 1)
+
+
+class PilotLadderGateTest(unittest.TestCase):
+    def test_nonfinite_health_metrics_fail_closed(self):
+        rung = _tiny_rung("nonfinite", "test", ())
+        artifacts = RungArtifacts(
+            rung="nonfinite",
+            health_report={"restarts": {"continuity_ok": True}},
+            loss_curve=[1.0, float("nan")],
+            forgetting_curve=[1.0, float("nan")],
+            forgetting_gap=float("nan"),
+            final_loss=float("nan"),
+            mfu_mean=0.5,
+            forgetting_panel_digest="0" * 64,
+        )
+
+        passed, reason = _gate(rung, artifacts)
+
+        self.assertFalse(passed)
+        self.assertIn("non-finite", reason)
 
 
 if __name__ == "__main__":

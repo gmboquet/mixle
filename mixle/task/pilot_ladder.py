@@ -47,6 +47,7 @@ Every "not reachable" piece above is a named, spelled-out reason attached to the
 
 from __future__ import annotations
 
+import hashlib
 import math
 import time
 from collections.abc import Sequence
@@ -187,6 +188,7 @@ class RungArtifacts:
     forgetting_gap: float | None
     final_loss: float
     mfu_mean: float | None
+    forgetting_panel_digest: str
     skipped_pieces: dict[str, str] = field(default_factory=dict)
     exercised_receipts: dict[str, Any] = field(default_factory=dict)
 
@@ -254,10 +256,10 @@ def _train_step(model: Any, opt: Any, x: Any, y: Any) -> tuple[float, float]:
     return float(loss.item()), float(grad_norm.item())
 
 
-def _eval_loss(model: Any, vocab: int, block: int, batch_size: int, task: str, gen: torch.Generator) -> float:
+def _eval_loss(model: Any, x: Any, y: Any) -> float:
+    """Evaluate one immutable panel without consuming any RNG state."""
     model.eval()
     with torch.no_grad():
-        x, y = _make_batch(vocab, block, batch_size, task, gen)
         loss = torch.nn.functional.cross_entropy(model(x), y)
     model.train()
     return float(loss.item())
@@ -295,18 +297,7 @@ def _run_rung(rung: Rung, *, peak_flops_per_sec: float) -> RungArtifacts:
     elif "F9" in rung.decision_pieces:
         skipped["F9"] = f"rung {rung.name!r} named F9 in decision_pieces but exercise_mup_transfer=False"
 
-    # H2: MoE-vs-dense upcycling receipt -- measured, not assumed. Recorded as a decision receipt; the
-    # trained model below stays dense (swapping architecture mid-optimizer-state is a separate integration
-    # step once a rung is actually promoted, out of scope for this pilot's gating logic).
-    if rung.exercise_moe_decision:
-        from mixle.models.moe import upcycle_dense_to_moe
-
-        _moe_block, moe_receipt = upcycle_dense_to_moe(model.blocks[0], rung.moe_experts, seed=rung.seed)
-        moe_receipt["decision"] = (
-            "moe" if moe_receipt["relative_output_diff"] <= rung.moe_max_relative_diff else "dense"
-        )
-        exercised["H2_moe_vs_dense"] = moe_receipt
-    elif "H2" in rung.decision_pieces:
+    if not rung.exercise_moe_decision and "H2" in rung.decision_pieces:
         skipped["H2"] = f"rung {rung.name!r} named H2 in decision_pieces but exercise_moe_decision=False"
 
     for piece in rung.decision_pieces:
@@ -323,6 +314,16 @@ def _run_rung(rung: Rung, *, peak_flops_per_sec: float) -> RungArtifacts:
     gen_a = torch.Generator().manual_seed(rung.seed * 1000 + 1)
     gen_b = torch.Generator().manual_seed(rung.seed * 1000 + 2)
     eval_gen_a = torch.Generator().manual_seed(rung.seed * 1000 + 3)
+    eval_x_a, eval_y_a = _make_batch(
+        rung.vocab,
+        rung.block,
+        rung.batch_size,
+        "A",
+        eval_gen_a,
+    )
+    forgetting_panel_digest = hashlib.sha256(
+        eval_x_a.detach().cpu().contiguous().numpy().tobytes() + eval_y_a.detach().cpu().contiguous().numpy().tobytes()
+    ).hexdigest()
 
     loss_curve: list[float] = []
     forgetting_curve: list[float] = []
@@ -338,12 +339,26 @@ def _run_rung(rung: Rung, *, peak_flops_per_sec: float) -> RungArtifacts:
         monitor.observe_step(step, loss, grad_norm=grad_norm, step_time_s=dt, batch_size=rung.batch_size)
         loss_curve.append(loss)
         if step % eval_every == 0 or step == rung.steps - 1:
-            forgetting_curve.append(_eval_loss(model, rung.vocab, rung.block, rung.batch_size, "A", eval_gen_a))
+            forgetting_curve.append(_eval_loss(model, eval_x_a, eval_y_a))
 
     final_loss = loss_curve[-1]
     forgetting_gap = (forgetting_curve[-1] - min(forgetting_curve)) if forgetting_curve else None
     health_report = monitor.report()
     mfu_mean = health_report["mfu"]["mean"]
+
+    # H2 is measured only now, against the exact block produced by this rung's
+    # completed training loop. The dense model remains the promoted artifact;
+    # architecture replacement is a separate downstream decision.
+    if rung.exercise_moe_decision:
+        from mixle.models.moe import upcycle_dense_to_moe
+
+        _moe_block, moe_receipt = upcycle_dense_to_moe(model.blocks[0], rung.moe_experts, seed=rung.seed)
+        moe_receipt["decision"] = (
+            "moe" if moe_receipt["relative_output_diff"] <= rung.moe_max_relative_diff else "dense"
+        )
+        moe_receipt["source_training_steps"] = rung.steps
+        moe_receipt["source_final_loss"] = final_loss
+        exercised["H2_moe_vs_dense"] = moe_receipt
 
     return RungArtifacts(
         rung=rung.name,
@@ -353,6 +368,7 @@ def _run_rung(rung: Rung, *, peak_flops_per_sec: float) -> RungArtifacts:
         forgetting_gap=forgetting_gap,
         final_loss=final_loss,
         mfu_mean=mfu_mean,
+        forgetting_panel_digest=forgetting_panel_digest,
         skipped_pieces=skipped,
         exercised_receipts=exercised,
     )
@@ -361,14 +377,35 @@ def _run_rung(rung: Rung, *, peak_flops_per_sec: float) -> RungArtifacts:
 def _gate(rung: Rung, artifacts: RungArtifacts) -> tuple[bool, str]:
     """The real GO/NO-GO check: measured training-health receipts against ``rung``'s stated criteria."""
     reasons: list[str] = []
-    if artifacts.final_loss > rung.max_final_loss:
+
+    def finite(value: Any) -> bool:
+        return (
+            isinstance(value, (int, float, np.integer, np.floating))
+            and not isinstance(value, (bool, np.bool_))
+            and bool(np.isfinite(value))
+        )
+
+    if not finite(artifacts.final_loss):
+        reasons.append("final loss is missing or non-finite")
+    if not finite(rung.max_final_loss):
+        reasons.append("configured final-loss target is non-finite")
+    elif finite(artifacts.final_loss) and artifacts.final_loss > rung.max_final_loss:
         reasons.append(f"final loss {artifacts.final_loss:.4f} > target {rung.max_final_loss}")
-    if (
-        rung.max_forgetting_gap is not None
-        and artifacts.forgetting_gap is not None
-        and artifacts.forgetting_gap > rung.max_forgetting_gap
-    ):
-        reasons.append(f"forgetting gap {artifacts.forgetting_gap:.4f} > allowed {rung.max_forgetting_gap}")
+    if any(not finite(value) for value in artifacts.loss_curve):
+        reasons.append("loss curve contains non-finite values")
+    if any(not finite(value) for value in artifacts.forgetting_curve):
+        reasons.append("forgetting curve contains non-finite values")
+    if artifacts.forgetting_gap is not None and not finite(artifacts.forgetting_gap):
+        reasons.append("forgetting gap is non-finite")
+    if rung.max_forgetting_gap is not None:
+        if not finite(rung.max_forgetting_gap):
+            reasons.append("configured forgetting-gap limit is non-finite")
+        elif artifacts.forgetting_gap is None:
+            reasons.append("forgetting gap is missing")
+        elif finite(artifacts.forgetting_gap) and artifacts.forgetting_gap > rung.max_forgetting_gap:
+            reasons.append(f"forgetting gap {artifacts.forgetting_gap:.4f} > allowed {rung.max_forgetting_gap}")
+    if artifacts.mfu_mean is None or not finite(artifacts.mfu_mean):
+        reasons.append("MFU mean is missing or non-finite")
     if rung.require_continuity and not artifacts.health_report["restarts"]["continuity_ok"]:
         reasons.append("training-health flagged a restart discontinuity")
     passed = not reasons
@@ -402,21 +439,37 @@ def _journal_rung(
     hyps = (Hypothesis(id="go", payload={"rung": rung.name}), Hypothesis(id="no_go", payload={"rung": rung.name}))
     prior = HypothesisPortfolio(hyps, np.array([0.5, 0.5]), w_open=0.0)
 
-    loss_margin = (rung.max_final_loss - artifacts.final_loss) / max(abs(rung.max_final_loss), 1e-6)
-    if rung.max_forgetting_gap is not None and artifacts.forgetting_gap is not None:
+    if np.isfinite(rung.max_final_loss) and np.isfinite(artifacts.final_loss):
+        loss_margin = (rung.max_final_loss - artifacts.final_loss) / max(abs(rung.max_final_loss), 1e-6)
+    else:
+        loss_margin = -1.0
+    if (
+        rung.max_forgetting_gap is not None
+        and artifacts.forgetting_gap is not None
+        and np.isfinite(rung.max_forgetting_gap)
+        and np.isfinite(artifacts.forgetting_gap)
+    ):
         forgetting_margin = (rung.max_forgetting_gap - artifacts.forgetting_gap) / max(
             abs(rung.max_forgetting_gap), 1e-6
         )
         margin = min(loss_margin, forgetting_margin)
     else:
         margin = loss_margin
+    if not np.isfinite(margin):
+        margin = -1.0
 
     likelihood = _go_likelihood_fn(margin)
     observation = {
         "rung": rung.name,
-        "final_loss": artifacts.final_loss,
-        "forgetting_gap": artifacts.forgetting_gap,
-        "mfu_mean": artifacts.mfu_mean,
+        "final_loss": artifacts.final_loss if np.isfinite(artifacts.final_loss) else None,
+        "forgetting_gap": (
+            artifacts.forgetting_gap
+            if artifacts.forgetting_gap is not None and np.isfinite(artifacts.forgetting_gap)
+            else None
+        ),
+        "mfu_mean": (
+            artifacts.mfu_mean if artifacts.mfu_mean is not None and np.isfinite(artifacts.mfu_mean) else None
+        ),
         "margin": margin,
     }
     surprise = prior.surprise_score(observation, likelihood)
