@@ -13,6 +13,7 @@ from mixle.stats import (
     CategoricalLatentPosterior,
     GaussianDistribution,
     HiddenMarkovModelDistribution,
+    ImpossiblePosteriorError,
     LatentPosterior,
     LDADistribution,
     MarkovChainLatentPosterior,
@@ -127,6 +128,47 @@ class HmmChainLatentPosteriorTest(unittest.TestCase):
         self.assertIsInstance(self.q, MarkovChainLatentPosterior)
         self.assertIsInstance(self.q, LatentPosterior)
 
+    def test_chain_constructor_validates_probability_laws_and_shapes(self):
+        valid_pi = np.log([0.5, 0.5])
+        valid_a = np.log([[0.7, 0.3], [0.2, 0.8]])
+        valid_b = np.zeros((2, 2))
+        invalid = (
+            (np.empty(0), np.empty((0, 0)), np.empty((1, 0))),
+            (valid_pi[None, :], valid_a, valid_b),
+            (valid_pi, np.zeros((2, 3)), valid_b),
+            (valid_pi, valid_a, np.zeros(2)),
+            (np.log([0.2, 0.2]), valid_a, valid_b),
+            (valid_pi, np.log([[0.2, 0.2], [0.2, 0.8]]), valid_b),
+            (np.array([np.nan, 0.0]), valid_a, valid_b),
+            (valid_pi, valid_a, np.array([[0.0, np.inf]])),
+        )
+        for args in invalid:
+            with self.subTest(shapes=tuple(np.shape(arg) for arg in args)), self.assertRaises((TypeError, ValueError)):
+                MarkovChainLatentPosterior(*args)
+
+    def test_empty_chain_is_the_valid_empty_posterior(self):
+        q = MarkovChainLatentPosterior(np.log([0.5, 0.5]), np.log([[0.8, 0.2], [0.3, 0.7]]), np.empty((0, 2)))
+        self.assertFalse(q.is_impossible)
+        self.assertEqual(q.log_likelihood(), 0.0)
+        self.assertEqual(q.marginals().shape, (0, 2))
+        self.assertEqual(q.sample(0).shape, (0,))
+        self.assertEqual(q.mode().shape, (0,))
+        self.assertEqual(q.entropy(), 0.0)
+
+    def test_zero_probability_evidence_has_an_explicit_impossibility_result(self):
+        q = MarkovChainLatentPosterior(
+            np.log([0.5, 0.5]),
+            np.log([[0.8, 0.2], [0.3, 0.7]]),
+            np.array([[0.0, 0.0], [-np.inf, -np.inf]]),
+        )
+        self.assertTrue(q.is_impossible)
+        self.assertIsNotNone(q.impossibility)
+        self.assertEqual(q.impossibility.log_evidence, -np.inf)
+        self.assertEqual(q.log_likelihood(), -np.inf)
+        for operation in (q.marginals, q.sample, q.mode, q.entropy):
+            with self.subTest(operation=operation.__name__), self.assertRaises(ImpossiblePosteriorError):
+                operation()
+
     def test_marginals_mode_entropy_match_brute_force(self):
         gamma, mode, entropy = self._brute_force()
         np.testing.assert_allclose(self.q.marginals(), gamma, atol=1e-9)
@@ -234,6 +276,38 @@ class LDAMeanFieldPosteriorTest(unittest.TestCase):
         phi = self.q.marginals()
         self.assertEqual(phi.shape, (3, 2))
         np.testing.assert_allclose(phi.sum(axis=1), 1.0)
+
+    def test_constructor_requires_valid_dirichlet_categorical_and_count_laws(self):
+        valid_gamma = np.array([1.0, 2.0])
+        valid_phi = np.array([[0.4, 0.6], [0.7, 0.3]])
+        valid_counts = np.array([2, 3])
+        invalid = (
+            (np.array([]), np.empty((0, 0)), np.empty(0)),
+            (np.array([[1.0, 2.0]]), valid_phi, valid_counts),
+            (np.array([0.0, 2.0]), valid_phi, valid_counts),
+            (np.array([np.inf, 2.0]), valid_phi, valid_counts),
+            (valid_gamma, np.array([[0.2, 0.2], [0.7, 0.3]]), valid_counts),
+            (valid_gamma, np.array([[0.4, -0.4], [0.7, 0.3]]), valid_counts),
+            (valid_gamma, valid_phi, np.array([2])),
+            (valid_gamma, valid_phi, np.array([2.5, 3.0])),
+            (valid_gamma, valid_phi, np.array([-1, 3])),
+            (valid_gamma, valid_phi, np.array([True, False])),
+        )
+        for args in invalid:
+            with self.subTest(shapes=tuple(np.shape(arg) for arg in args)), self.assertRaises((TypeError, ValueError)):
+                MeanFieldLDAPosterior(*args)
+
+    def test_constructor_owns_validated_lda_factors(self):
+        gamma = np.array([1.0, 2.0])
+        phi = np.array([[0.4, 0.6]])
+        counts = np.array([3])
+        posterior = MeanFieldLDAPosterior(gamma, phi, counts)
+        gamma[:] = 9.0
+        phi[:] = [1.0, 0.0]
+        counts[:] = 0
+        np.testing.assert_array_equal(posterior.gamma, [1.0, 2.0])
+        np.testing.assert_array_equal(posterior.phi, [[0.4, 0.6]])
+        np.testing.assert_array_equal(posterior.counts, [3])
 
     def test_entropy_decomposes_into_dirichlet_plus_categorical(self):
         phi = self.q.marginals()
