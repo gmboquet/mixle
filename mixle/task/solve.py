@@ -29,6 +29,7 @@ import json
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,11 @@ def _batch_view(teacher: Callable[..., Any]) -> Callable[[list], list]:
         return _label_with(teacher, list(batch))
 
     return batched
+
+
+def _evidence_digest(inputs: Sequence[Any], labels: Sequence[Any]) -> str:
+    """Bind a verification decision to the exact ordered evidence rows without persisting those rows."""
+    return sha256(repr(list(zip(inputs, labels))).encode("utf-8")).hexdigest()
 
 
 def load_harvested(path: str) -> tuple[list, list]:
@@ -242,6 +248,7 @@ class Solution:
     device: Any = None  # DeviceSpec solve() searched under (edge != None) -- improve() re-searches the SAME budget
     device_space: Any = None  # EdgeSpace the edge search used (None = default); reused to warm-start from edge.design
     propose_budget: int = 8  # edge-search effort improve() reuses when re-searching under device
+    verification_digest: str | None = None
 
     def __call__(self, x: Any) -> Any:
         if not self.promoted:
@@ -392,7 +399,14 @@ class Solution:
                     "n_calibration": len(self.cal_inputs),
                     "synthesized_inputs": self.synthesized,
                     "verified_at": time.time(),
+                    "evidence_sha256": self.verification_digest
+                    or _evidence_digest(self.cal_inputs, self.cal_labels),
+                    # Task artifacts bind the entire manifest (including this decision) and payload with
+                    # SHA-256. Loading may promote only when this marker and the strict evidence record
+                    # survive that integrity check.
+                    "artifact_binding": "manifest-integrity-v1",
                 },
+                "target_agreement": self.target_agreement,
             },
         }
         return self.cascade.model.save(path)
@@ -411,6 +425,32 @@ class Solution:
         harvested pairs and re-``solve`` (real + harvested inputs) to train the next round."""
         cal = CalibratedTaskModel.load(path, device=device)
         meta = (cal.task.meta or {}).get("solve", {})
+        if not isinstance(meta, dict):
+            raise ValueError("artifact solve metadata must be a dictionary")
+        verification = meta.get("verification")
+        promoted = False
+        holdout_agreement = float("nan")
+        escalation_rate = float("nan")
+        verification_digest = None
+        if verification is not None:
+            if not isinstance(verification, dict):
+                raise ValueError("artifact verification metadata must be a dictionary")
+            saved_promoted = verification.get("promoted")
+            if not isinstance(saved_promoted, bool):
+                raise ValueError("artifact verification promoted state must be boolean")
+            holdout_agreement = float(verification.get("holdout_agreement", float("nan")))
+            escalation_rate = float(verification.get("holdout_escalation_rate", float("nan")))
+            verification_digest = verification.get("evidence_sha256")
+            valid_evidence = (
+                isinstance(verification_digest, str)
+                and len(verification_digest) == 64
+                and verification.get("artifact_binding") == "manifest-integrity-v1"
+                and np.isfinite(holdout_agreement)
+                and 0.0 <= holdout_agreement <= 1.0
+                and np.isfinite(escalation_rate)
+                and 0.0 <= escalation_rate <= 1.0
+            )
+            promoted = bool(saved_promoted and valid_evidence)
         return cls(
             cascade=Cascade(cal, _batch_view(teacher), cost=cost),
             teacher=teacher,
@@ -419,11 +459,12 @@ class Solution:
             train_labels=[],
             cal_inputs=[],
             cal_labels=[],
-            holdout_agreement=float("nan"),
-            escalation_rate=float("nan"),
-            promoted=True,  # only verified solutions should be saved; loading one serves it
-            target_agreement=None,
+            holdout_agreement=holdout_agreement,
+            escalation_rate=escalation_rate,
+            promoted=promoted,
+            target_agreement=meta.get("target_agreement"),
             ood=meta.get("ood"),
+            verification_digest=verification_digest,
         )
 
 
@@ -577,4 +618,5 @@ def solve(
         device=device,
         device_space=device_space,
         propose_budget=propose_budget,
+        verification_digest=_evidence_digest(cal_inputs, cal_labels),
     )
