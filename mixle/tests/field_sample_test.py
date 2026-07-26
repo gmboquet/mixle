@@ -27,6 +27,11 @@ def _fit(how, intercept=0.5):
 
 @unittest.skipUnless(HAS_TORCH, "fit_field requires PyTorch")
 class FieldSampleTest(unittest.TestCase):
+    def test_zero_draws_preserve_structured_collection_shapes(self):
+        post = _fit("laplace")
+        draws = post.sample(0, rng=1)
+        self.assertEqual(draws["T"].shape, (0, 8))
+
     def test_laplace_draws_match_posterior_moments(self):
         """Empirical mean/covariance of the draws must recover the Laplace posterior mean/cov."""
         post = _fit("laplace")

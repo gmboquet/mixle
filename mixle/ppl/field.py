@@ -1067,8 +1067,8 @@ class FieldPosterior:
         Returns:
             ``{node: ndarray}`` with shape ``(size,)`` for scalar nodes and ``(size, dim)`` otherwise.
         """
-        if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)) or size <= 0:
-            raise ValueError("sample size must be a positive integer.")
+        if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)) or size < 0:
+            raise ValueError("sample size must be a non-negative integer.")
         size = int(size)
         if rng is None or isinstance(rng, (int, np.integer)):
             rng = np.random.RandomState(None if rng is None else int(rng))
