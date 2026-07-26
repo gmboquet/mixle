@@ -30,17 +30,25 @@ _EPS = 1e-12
 
 
 def _as_prob_matrix(rows: Sequence[Any], n_labels: int | None) -> np.ndarray:
-    """Coerce teacher output to an ``(N, C)`` row-stochastic matrix; renormalize and clip small negatives."""
-    p = np.atleast_2d(np.asarray(rows, dtype=np.float64))
+    """Validate teacher output as a finite, non-negative, row-stochastic ``(N, C)`` matrix."""
+    try:
+        p = np.atleast_2d(np.asarray(rows, dtype=np.float64))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("teacher_probs must be a numeric 2-D probability matrix") from exc
     if p.ndim != 2:
         raise ValueError("teacher_probs must be a 2-D (N, C) array of per-example class probabilities.")
+    if p.shape[0] == 0 or p.shape[1] == 0:
+        raise ValueError("teacher_probs must contain at least one row and one class")
     if n_labels is not None and p.shape[1] != n_labels:
         raise ValueError(f"teacher_probs has {p.shape[1]} columns but {n_labels} labels were given.")
-    p = np.clip(p, 0.0, None)
+    if not np.all(np.isfinite(p)):
+        raise ValueError("teacher_probs must contain only finite probabilities")
+    if np.any(p < 0.0):
+        raise ValueError("teacher_probs must contain only non-negative probabilities")
     sums = p.sum(axis=1, keepdims=True)
-    if np.any(sums <= 0.0):
-        raise ValueError("every teacher_probs row must have positive total mass.")
-    return p / sums
+    if not np.allclose(sums, 1.0, rtol=1e-7, atol=1e-8):
+        raise ValueError("every teacher_probs row must sum to one")
+    return p
 
 
 def distill_from_soft_labels(
@@ -78,12 +86,26 @@ def distill_from_soft_labels(
     from mixle.models.neural import make_mlp
     from mixle.task.distill_methods import planned_response_distill
 
-    if not 0.0 <= hard_weight <= 1.0:
+    try:
+        hard_weight = float(hard_weight)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("hard_weight must be finite and in [0, 1].") from exc
+    if not np.isfinite(hard_weight) or not 0.0 <= hard_weight <= 1.0:
         raise ValueError("hard_weight must be in [0, 1].")
-    if temperature <= 0.0:
+    try:
+        temperature = float(temperature)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("temperature must be finite and positive.") from exc
+    if not np.isfinite(temperature) or temperature <= 0.0:
         raise ValueError("temperature must be positive.")
+    if isinstance(labels, (str, bytes)):
+        raise ValueError("labels must be a sequence of unique class names")
     label_list = [str(v) for v in labels]
+    if not label_list or len(set(label_list)) != len(label_list):
+        raise ValueError("labels must be a nonempty sequence of unique class names")
     texts = [str(t) for t in texts]
+    if not texts:
+        raise ValueError("soft-label distillation requires at least one text")
     p_teacher = _as_prob_matrix(teacher_probs, len(label_list))
     if p_teacher.shape[0] != len(texts):
         raise ValueError("teacher_probs must have one row per text.")
@@ -156,7 +178,10 @@ def distill_soft(
     """Query a probability-returning teacher once over ``texts`` and soft-distill it (see
     :func:`distill_from_soft_labels`). ``teacher_proba(texts) -> (N, C)`` returns each example's class
     distribution over ``labels`` (e.g. an LLM's normalized top-k logprobs)."""
-    probs = teacher_proba(list(str(t) for t in texts))
+    texts = [str(text) for text in texts]
+    if not texts:
+        raise ValueError("soft-label distillation requires at least one text")
+    probs = teacher_proba(texts)
     return distill_from_soft_labels(texts, probs, labels=labels, **kwargs)
 
 
@@ -164,8 +189,22 @@ def soft_agreement(student: TaskModel, teacher_probs: Sequence[Any], texts: Sequ
     """Mean KL divergence ``KL(teacher || student)`` over ``texts`` -- how faithfully the student matches
     the teacher's full soft distribution (0 = identical), the soft-distillation analog of
     :func:`mixle.task.distill.agreement`. Lower is better; use it to compare soft vs hard students."""
+    texts = [str(text) for text in texts]
     p_teacher = _as_prob_matrix(teacher_probs, None)
-    p_student = np.asarray(student.adapter.proba_batch(student.model, [str(t) for t in texts]), dtype=np.float64)
-    p_student = np.clip(p_student, _EPS, None)
-    kl = np.sum(p_teacher * (np.log(np.clip(p_teacher, _EPS, None)) - np.log(p_student)), axis=1)
+    if p_teacher.shape[0] != len(texts):
+        raise ValueError("teacher_probs must have one row per text")
+    raw_student = student.adapter.proba_batch(student.model, texts)
+    p_student = _as_prob_matrix(raw_student, p_teacher.shape[1])
+    if p_student.shape != p_teacher.shape:
+        raise ValueError(
+            f"student probabilities have shape {p_student.shape}, expected {p_teacher.shape}"
+        )
+    kl = np.sum(
+        p_teacher
+        * (
+            np.log(np.clip(p_teacher, _EPS, None))
+            - np.log(np.clip(p_student, _EPS, None))
+        ),
+        axis=1,
+    )
     return float(np.mean(kl))
