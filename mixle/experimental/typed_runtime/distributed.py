@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
+from dataclasses import dataclass
+
 from mixle.experimental.typed_runtime.contracts import MergeLaw, UpdateKind
 from mixle.experimental.typed_runtime.graph import UpdateGraph
 from mixle.utils.parallel.training_contracts import (
@@ -26,6 +30,41 @@ _STATISTIC_UPDATES = {
 }
 
 
+@dataclass(frozen=True)
+class CollectiveNumericsEvidence:
+    """Observed backend determinism and error for one exact collective identity."""
+
+    evidence_id: str
+    update_id: str
+    collective: CollectiveKind
+    mesh_axes: tuple[ParallelAxis, ...]
+    backend: str
+    dtype: str
+    deterministic: bool
+    maximum_absolute_error: float
+    maximum_relative_error: float
+    sample_count: int
+    ordering_fingerprint: str
+
+    def __post_init__(self) -> None:
+        strings = (
+            self.evidence_id,
+            self.update_id,
+            self.backend,
+            self.dtype,
+            self.ordering_fingerprint,
+        )
+        if any(not isinstance(value, str) or not value for value in strings):
+            raise ValueError("collective numerical evidence identities must be non-empty.")
+        errors = (self.maximum_absolute_error, self.maximum_relative_error)
+        if any(not math.isfinite(value) or value < 0.0 for value in errors):
+            raise ValueError("collective numerical error bounds must be finite and non-negative.")
+        if isinstance(self.sample_count, bool) or not isinstance(self.sample_count, int) or self.sample_count < 1:
+            raise ValueError("collective numerical evidence requires a positive integer sample_count.")
+        if len(set(self.mesh_axes)) != len(self.mesh_axes):
+            raise ValueError("collective numerical evidence mesh axes must be unique.")
+
+
 def _data_collective(plan: ParallelPlan, *, statistics: bool) -> tuple[CollectiveKind, tuple[ParallelAxis, ...]]:
     axes = tuple(axis for axis in (ParallelAxis.DP_REPLICATE, ParallelAxis.DP_SHARD) if plan.size(axis) > 1)
     if not axes:
@@ -37,7 +76,52 @@ def _data_collective(plan: ParallelPlan, *, statistics: bool) -> tuple[Collectiv
     return CollectiveKind.ALL_REDUCE, axes
 
 
-def plan_distributed_updates(graph: UpdateGraph, plan: ParallelPlan) -> tuple[DistributedUpdate, ...]:
+def _lower_update(
+    *,
+    update_id: str,
+    payload: PayloadKind,
+    collective: CollectiveKind,
+    axes: tuple[ParallelAxis, ...],
+    state_layout: StateLayout,
+    contract_exact: bool,
+    note: str,
+    evidence: Mapping[str, CollectiveNumericsEvidence],
+    used_evidence: set[str],
+) -> DistributedUpdate:
+    observed = evidence.get(update_id)
+    if observed is not None:
+        if observed.update_id != update_id:
+            raise ValueError("collective evidence key does not match its update_id.")
+        if observed.collective is not collective or observed.mesh_axes != axes:
+            raise ValueError("collective evidence does not match the planned collective and mesh axes.")
+        used_evidence.add(update_id)
+    guaranteed_exact = contract_exact and collective is CollectiveKind.NONE
+    notes = [note]
+    if contract_exact and not guaranteed_exact:
+        notes.append("model contract is exact; distributed numerical exactness is not guaranteed")
+    return DistributedUpdate(
+        node_id=update_id,
+        payload=payload,
+        collective=collective,
+        mesh_axes=axes,
+        state_layout=state_layout,
+        exact=guaranteed_exact,
+        notes=tuple(notes),
+        contract_exact=contract_exact,
+        determinism_observed=observed.deterministic if observed is not None else None,
+        maximum_absolute_error=observed.maximum_absolute_error if observed is not None else None,
+        maximum_relative_error=observed.maximum_relative_error if observed is not None else None,
+        numerics_evidence_id=observed.evidence_id if observed is not None else None,
+        numerics_sample_count=observed.sample_count if observed is not None else 0,
+    )
+
+
+def plan_distributed_updates(
+    graph: UpdateGraph,
+    plan: ParallelPlan,
+    *,
+    numerics_evidence: Mapping[str, CollectiveNumericsEvidence] | None = None,
+) -> tuple[DistributedUpdate, ...]:
     """Produce an auditable collective plan for every compiled update node.
 
     The result deliberately distinguishes additive sufficient statistics from
@@ -46,20 +130,24 @@ def plan_distributed_updates(graph: UpdateGraph, plan: ParallelPlan) -> tuple[Di
     synchronization.
     """
 
+    evidence = dict(numerics_evidence or {})
+    used_evidence: set[str] = set()
     updates: list[DistributedUpdate] = []
     for node_id in graph.topological_order():
         contract = graph.node(node_id).contract
         kind = contract.update_kind
         if kind is UpdateKind.FROZEN:
             updates.append(
-                DistributedUpdate(
-                    node_id=node_id,
+                _lower_update(
+                    update_id=node_id,
                     payload=PayloadKind.PARAMETER,
                     collective=CollectiveKind.NONE,
-                    mesh_axes=(),
+                    axes=(),
                     state_layout=StateLayout.REPLICATED,
-                    exact=True,
-                    notes=("frozen state has no distributed update",),
+                    contract_exact=contract.exact,
+                    note="frozen state has no distributed update",
+                    evidence=evidence,
+                    used_evidence=used_evidence,
                 )
             )
             continue
@@ -86,14 +174,16 @@ def plan_distributed_updates(graph: UpdateGraph, plan: ParallelPlan) -> tuple[Di
 
         state_layout = StateLayout.SHARDED if plan.dp_shard > 1 else StateLayout.REPLICATED
         updates.append(
-            DistributedUpdate(
-                node_id=node_id,
+            _lower_update(
+                update_id=node_id,
                 payload=payload,
                 collective=collective,
-                mesh_axes=axes,
+                axes=axes,
                 state_layout=state_layout,
-                exact=contract.exact,
-                notes=("derived from %s/%s" % (kind.value, contract.merge_law.value),),
+                contract_exact=contract.exact,
+                note="derived from %s/%s" % (kind.value, contract.merge_law.value),
+                evidence=evidence,
+                used_evidence=used_evidence,
             )
         )
 
@@ -106,12 +196,13 @@ def plan_distributed_updates(graph: UpdateGraph, plan: ParallelPlan) -> tuple[Di
         )
         for axis, axis_payload, axis_collective, note in model_axis_updates:
             if plan.size(axis) > 1 and payload in {PayloadKind.GRADIENT, PayloadKind.PARAMETER}:
+                update_id = "%s:%s" % (node_id, axis.value)
                 updates.append(
-                    DistributedUpdate(
-                        node_id="%s:%s" % (node_id, axis.value),
+                    _lower_update(
+                        update_id=update_id,
                         payload=axis_payload,
                         collective=axis_collective,
-                        mesh_axes=(axis,),
+                        axes=(axis,),
                         state_layout=(
                             StateLayout.EXPERT_LOCAL
                             if axis in {ParallelAxis.EP, ParallelAxis.ETP}
@@ -119,11 +210,16 @@ def plan_distributed_updates(graph: UpdateGraph, plan: ParallelPlan) -> tuple[Di
                             if axis is ParallelAxis.PP
                             else StateLayout.SHARDED
                         ),
-                        exact=contract.exact,
-                        notes=(note,),
+                        contract_exact=contract.exact,
+                        note=note,
+                        evidence=evidence,
+                        used_evidence=used_evidence,
                     )
                 )
+    unused = sorted(set(evidence) - used_evidence)
+    if unused:
+        raise ValueError("collective numerical evidence did not match planned updates: %s" % ", ".join(unused))
     return tuple(updates)
 
 
-__all__ = ["plan_distributed_updates"]
+__all__ = ["CollectiveNumericsEvidence", "plan_distributed_updates"]

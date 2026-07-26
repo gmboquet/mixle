@@ -111,7 +111,10 @@ from mixle.experimental.typed_runtime.contracts import (
     weakest_band,
     weakest_certificate,
 )
-from mixle.experimental.typed_runtime.distributed import plan_distributed_updates
+from mixle.experimental.typed_runtime.distributed import (
+    CollectiveNumericsEvidence,
+    plan_distributed_updates,
+)
 from mixle.experimental.typed_runtime.faults import (
     BoundaryFaultInjector,
     FaultEvent,
@@ -265,6 +268,7 @@ __all__ = [
     "ClockProgress",
     "ClockTrigger",
     "ClusterTopology",
+    "CollectiveNumericsEvidence",
     "CommitReceipt",
     "CommitStatus",
     "CompressedDelta",
