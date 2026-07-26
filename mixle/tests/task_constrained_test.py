@@ -65,6 +65,51 @@ class PlanGrammarAutomatonTest(unittest.TestCase):
         self.assertNotIn("=", allowed)
         self.assertNotIn("|", allowed)
 
+    def test_step_cannot_close_until_every_required_argument_is_complete(self):
+        specs = {"send": ToolSpec("send", ["required", "optional"], required=["required"])}
+        grammar = PlanGrammar(specs, "x y")
+        _, rejected, allowed = _walk(grammar, "send(optional=x")
+        self.assertIsNone(rejected)
+        self.assertNotIn(")", allowed)
+        state, rejected, _ = _walk(grammar, "send(optional=x; required=y)\n")
+        self.assertIsNone(rejected)
+        self.assertEqual(state.mode, "terminal")
+
+    @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+    def test_decode_preserves_the_callers_model_mode(self):
+        from types import SimpleNamespace
+
+        import torch
+
+        from mixle.task.constrained import constrained_plan_decode
+
+        module = torch.nn.Linear(1, 1)
+        module.eval()
+        lm = SimpleNamespace(module=module, device="cpu", block=8)
+        codec = SimpleNamespace(encode=lambda _text: [0], stoi={}, itos={})
+        self.assertIsNone(constrained_plan_decode(lm, codec, "request", SPECS, max_new=0))
+        self.assertFalse(module.training)
+
+    @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+    def test_plan_scoring_preserves_the_callers_model_mode(self):
+        from types import SimpleNamespace
+
+        import torch
+
+        from mixle.task.sft_plan import score_plan
+
+        class UniformLM(torch.nn.Module):
+            def forward(self, _x):
+                return torch.zeros((1, 4), dtype=torch.float32)
+
+        module = UniformLM()
+        module.eval()
+        lm = SimpleNamespace(module=module, device="cpu", block=16)
+        codec = SimpleNamespace(encode=lambda text: [0] * max(1, len(text)))
+        planner = SimpleNamespace(lm=lm, codec=codec)
+        self.assertTrue(np.isfinite(score_plan(planner, "request", [])))
+        self.assertFalse(module.training)
+
 
 def _teacher(request):
     m = re.search(r"refund order (\d+) for (\w+)", request)

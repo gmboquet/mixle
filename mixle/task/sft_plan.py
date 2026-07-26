@@ -355,6 +355,7 @@ def score_plan(planner: GenerativePlanner, request: str, plan: Sequence[dict]) -
     w = planner.codec.encode(str(request) + _PROMPT_SEP)
     ids = planner.codec.encode(text)
     logps: list[float] = []
+    was_training = bool(lm.module.training)
     lm.module.to(lm.device).eval()
     try:
         with torch.no_grad():
@@ -365,7 +366,7 @@ def score_plan(planner: GenerativePlanner, request: str, plan: Sequence[dict]) -
                 logps.append(float(logits[ch_id]) - lse)
                 w.append(ch_id)
     finally:
-        lm.module.train()
+        lm.module.train(was_training)
     return float(np.mean(logps)) if logps else float("-inf")
 
 
