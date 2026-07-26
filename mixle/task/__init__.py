@@ -236,6 +236,8 @@ from mixle.task.tune import CalibratedTuneResult, RecipeSpace, TuneResult, tune_
 from mixle.task.vlm import (
     CallableVLM,
     OpenAICompatVLM,
+    TokenizerBoundVLM,
+    exact_token_scorer_for,
     score_candidate,
     score_fn_for,
 )
@@ -326,6 +328,8 @@ __all__ = [
     "OpenAICompatLLM",
     "OpenAICompatVLM",
     "CallableVLM",
+    "TokenizerBoundVLM",
+    "exact_token_scorer_for",
     "score_candidate",
     "score_fn_for",
     "QuantizedClassifierIO",

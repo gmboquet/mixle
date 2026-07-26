@@ -9,7 +9,13 @@ import unittest
 
 from mixle.enumeration import best_first_decode, top_k_scored
 from mixle.task import vlm as V
-from mixle.task.vlm import CallableVLM, OpenAICompatVLM, score_candidate, score_fn_for
+from mixle.task.vlm import (
+    CallableVLM,
+    OpenAICompatVLM,
+    exact_token_scorer_for,
+    score_candidate,
+    score_fn_for,
+)
 
 
 def _toy_next_logprobs(image, prefix):
@@ -47,7 +53,7 @@ class CallableVLMEnumerationTest(unittest.TestCase):
     def test_score_fn_for_ranks_a_fixed_candidate_set(self):
         vlm = CallableVLM(_toy_next_logprobs)
         decode = vlm.next_logprobs_for("https://example.com/cat.png")
-        score = score_fn_for(decode)
+        score = score_fn_for(decode, eos="<eos>")
         ranked = top_k_scored([("a", "cat"), ("a", "dog")], score)
         self.assertEqual(ranked[0][0], ("a", "cat"))
         self.assertGreater(ranked[0][1], ranked[1][1])
@@ -55,7 +61,33 @@ class CallableVLMEnumerationTest(unittest.TestCase):
     def test_score_candidate_returns_neg_inf_for_a_token_the_model_never_considered(self):
         vlm = CallableVLM(_toy_next_logprobs)
         decode = vlm.next_logprobs_for("https://example.com/cat.png")
-        self.assertEqual(score_candidate(decode, ("a", "bird")), float("-inf"))
+        self.assertEqual(score_candidate(decode, ("a", "bird"), eos="<eos>"), float("-inf"))
+
+    def test_empty_candidate_is_scored_by_eos_probability(self):
+        def root_with_eos(_image, prefix):
+            if not prefix:
+                return [("<eos>", -2.0), ("word", -0.2)]
+            return [("<eos>", 0.0)]
+
+        decode = CallableVLM(root_with_eos).next_logprobs_for("image")
+        self.assertEqual(score_candidate(decode, (), eos="<eos>"), -2.0)
+
+    def test_exact_interface_requires_token_ids_and_full_normalized_support(self):
+        import math
+
+        class ExactModel:
+            vocab_size = 3
+            eos_token_id = 2
+
+            def next_token_logprobs(self, image, prefix_token_ids):
+                if not prefix_token_ids:
+                    return [math.log(0.6), math.log(0.3), math.log(0.1)]
+                return [float("-inf"), float("-inf"), 0.0]
+
+        decode, eos = exact_token_scorer_for(ExactModel(), "image")
+        self.assertEqual(eos, 2)
+        results = list(best_first_decode(decode, eos=eos, max_len=3, max_results=2))
+        self.assertEqual(results[0][0], (0, 2))
 
 
 class OpenAICompatVLMTest(unittest.TestCase):
@@ -158,7 +190,13 @@ class OpenAICompatVLMTest(unittest.TestCase):
         V._http_post_json = fake_post
         try:
             client = OpenAICompatVLM("http://localhost:8000/v1", "m")
-            decode = client.next_logprobs_for("https://example.com/cat.png", "What is this?")
+            with self.assertRaisesRegex(ValueError, "truncated"):
+                client.next_logprobs_for("https://example.com/cat.png", "What is this?")
+            decode = client.next_logprobs_for(
+                "https://example.com/cat.png",
+                "What is this?",
+                allow_truncated=True,
+            )
             self.assertEqual(decode(()), [("a", -0.1)])
         finally:
             V._http_post_json = orig
