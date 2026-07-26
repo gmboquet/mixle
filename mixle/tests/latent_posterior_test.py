@@ -70,6 +70,28 @@ class MixtureLatentPosteriorTest(unittest.TestCase):
         draws = np.array([q.sample(rng=i)[0] for i in range(400)])
         self.assertAlmostEqual(np.mean(draws == "a"), 0.7, delta=0.06)  # row 0 ~ 70% 'a'
 
+    def test_categorical_posterior_requires_a_complete_probability_law(self):
+        invalid = (
+            np.empty((2, 0)),
+            np.array([[0.2, 0.2]]),
+            np.array([[0.8, -0.2]]),
+            np.array([[0.5, np.nan]]),
+            np.array([[0.5, np.inf]]),
+        )
+        for responsibilities in invalid:
+            with self.subTest(responsibilities=responsibilities), self.assertRaises((TypeError, ValueError)):
+                CategoricalLatentPosterior(responsibilities)
+        with self.assertRaisesRegex(ValueError, "exactly 2 labels"):
+            CategoricalLatentPosterior(np.array([[0.5, 0.5]]), support=["only-one"])
+
+    def test_categorical_posterior_owns_its_validated_probabilities(self):
+        responsibilities = np.array([[0.25, 0.75]])
+        posterior = CategoricalLatentPosterior(responsibilities)
+        responsibilities[:] = [1.0, 0.0]
+        np.testing.assert_array_equal(posterior.marginals(), [[0.25, 0.75]])
+        with self.assertRaises(ValueError):
+            posterior.marginals()[0, 0] = 1.0
+
 
 class HmmChainLatentPosteriorTest(unittest.TestCase):
     def setUp(self):

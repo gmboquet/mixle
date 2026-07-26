@@ -43,7 +43,8 @@ def _as_rng(rng: Any) -> RandomState:
 
 
 def _cat(rng: RandomState, p: np.ndarray) -> int:
-    return int(np.searchsorted(np.cumsum(p), rng.random_sample() * p.sum()))
+    cdf = np.cumsum(p)
+    return int(np.searchsorted(cdf, rng.random_sample() * cdf[-1], side="right"))
 
 
 def _entropy(p: np.ndarray) -> float:
@@ -119,11 +120,37 @@ class CategoricalLatentPosterior(LatentPosterior):
     """
 
     def __init__(self, responsibilities: np.ndarray, support: Any = None) -> None:
-        self.responsibilities = np.asarray(responsibilities, dtype=np.float64)
-        if self.responsibilities.ndim != 2:
+        try:
+            probabilities = np.asarray(responsibilities, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("responsibilities must be a finite row-stochastic (N, K) matrix.") from exc
+        if probabilities.ndim != 2:
             raise ValueError("responsibilities must be a 2-D (N, K) matrix")
-        self.n, self.k = self.responsibilities.shape
-        self.support = np.arange(self.k) if support is None else np.asarray(list(support))
+        self.n, self.k = probabilities.shape
+        if self.k == 0:
+            raise ValueError("responsibilities must contain at least one latent category.")
+        if not np.isfinite(probabilities).all() or np.any(probabilities < 0.0):
+            raise ValueError("responsibilities must contain finite non-negative probabilities.")
+        row_sums = probabilities.sum(axis=1)
+        if not np.allclose(row_sums, 1.0, rtol=1.0e-10, atol=1.0e-12):
+            raise ValueError("each responsibility row must sum to one.")
+        # Normalize only round-off-sized deviations already accepted above; never assign missing
+        # probability mass to a particular category.
+        self.responsibilities = np.array(probabilities / row_sums[:, None], copy=True)
+        self.responsibilities.setflags(write=False)
+        if support is None:
+            self.support = np.arange(self.k)
+        else:
+            try:
+                labels = list(support)
+            except TypeError as exc:
+                raise TypeError("support must be an iterable with one label per category.") from exc
+            if len(labels) != self.k:
+                raise ValueError(f"support must contain exactly {self.k} labels.")
+            self.support = np.empty(self.k, dtype=object)
+            for i, label in enumerate(labels):
+                self.support[i] = label
+        self.support.setflags(write=False)
 
     def marginals(self) -> np.ndarray:
         """The ``(N, K)`` responsibility matrix."""
@@ -132,10 +159,7 @@ class CategoricalLatentPosterior(LatentPosterior):
     def sample(self, rng: Any = None) -> np.ndarray:
         """Draw one latent label per observation; returns an ``(N,)`` array of support labels."""
         rng = _as_rng(rng)
-        cdf = np.cumsum(self.responsibilities, axis=1)
-        cdf[:, -1] = 1.0  # guard tiny round-off so every uniform draw lands in a bin
-        u = rng.random_sample(self.n)[:, None]
-        idx = (u < cdf).argmax(axis=1)
+        idx = np.fromiter((_cat(rng, row) for row in self.responsibilities), dtype=int, count=self.n)
         return self.support[idx]
 
     def mode(self) -> np.ndarray:
