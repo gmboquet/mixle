@@ -65,6 +65,11 @@ class FitPlanModelTest(unittest.TestCase):
         plan = ["search", "fetch", "summarize"]
         self.assertEqual(model_a.log_prob(plan), model_b.log_prob(plan))
         self.assertEqual(list(model_a.training_log_probs), list(model_b.training_log_probs))
+        self.assertTrue(
+            set(model_a.calibration_receipt["fit_indices"]).isdisjoint(
+                model_a.calibration_receipt["calibration_indices"]
+            )
+        )
 
     def test_accepts_either_plan_shape(self):
         dict_shaped = [{"tool": "search", "args": {}}, {"tool": "summarize", "args": {}}]
