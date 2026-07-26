@@ -44,13 +44,12 @@ Algorithm (``notes/designs/M3.md``):
    importance-resampled approximation, not an exact continuous density; ESS and a warning make that
    contract explicit.
 5. **Calibration receipts (always computed).**
-   - **SBC.** Resolved decision (was open): a chi-square uniformity test on binned ranks (Talts et
-     al.), ``bins = min(20, n_sbc_replications // 5)`` (clamped to >= 2), one chi-square statistic
-     per ``theta`` dimension SUMMED (valid under the standard independence-across-dimensions
-     simplification -- a sum of independent chi-square variables is chi-square with summed degrees
-     of freedom), against threshold ``p-value > 0.01`` (no rejection of uniformity).
-   - **Coverage.** Per-dimension, per-replication credible interval containment vs nominal level,
-     averaged; pass when within +/-5% of nominal.
+   - **SBC.** Ties are randomized and every discrete rank cell is jittered into a continuous
+     uniform variate. Each parameter dimension gets an equal-probability-bin chi-square test;
+     a Bonferroni-adjusted minimum p-value supplies a valid global test under arbitrary
+     cross-dimension dependence.
+   - **Coverage.** Per-dimension empirical coverage ships with simultaneous 99% Wilson intervals;
+     a level passes only when its nominal probability lies inside every dimension's interval.
    - **Prior-predictive.** Empirical mean/std of the round-1 simulated ``y_i``'s, plus (when
      ``y_obs`` is given) its per-dimension z-score against that empirical distribution -- a
      caller-facing warning, not a gate.
@@ -60,10 +59,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
-from scipy.stats import chi2
+from scipy.stats import chi2, norm
 
 from mixle.inference.condition import ConditionReceipt, Posterior
 from mixle.inference.estimation import optimize
@@ -82,15 +82,97 @@ def _next_seed(rng: np.random.RandomState) -> int:
     return int(rng.randint(0, 2**31 - 1))
 
 
-def _as_rows(arr: Any, n: int) -> np.ndarray:
+def _as_rows(
+    arr: Any,
+    n: int,
+    *,
+    context: str = "sampler",
+    expected_width: int | None = None,
+) -> np.ndarray:
     """Normalize a sampler's ``sample(n)`` output to shape ``(n, d)``. A univariate sampler
     (e.g. ``GaussianDistribution``) returns a flat ``(n,)`` array of scalar draws -- ``atleast_2d``
     on that would misread it as ONE row of ``n`` dimensions instead of ``n`` rows of one dimension,
     so a 1-D result of length ``n`` is reshaped to ``(n, 1)`` explicitly rather than via ``atleast_2d``."""
-    a = np.asarray(arr, dtype=float)
-    if a.ndim == 1:
-        return a.reshape(n, 1)
+    try:
+        a = np.asarray(arr, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{context} must return a rectangular numeric sample array") from exc
+    if a.ndim == 0:
+        if n != 1:
+            raise ValueError(f"{context} returned one scalar for {n} requested samples")
+        a = a.reshape(1, 1)
+    elif a.ndim == 1:
+        if n == 1:
+            a = a.reshape(1, -1)
+        elif a.size == n:
+            a = a.reshape(n, 1)
+        else:
+            raise ValueError(f"{context} returned {a.size} values for {n} requested samples")
+    elif a.ndim != 2:
+        raise ValueError(f"{context} samples must be scalar or vector rows")
+    if a.shape[0] != n or a.shape[1] == 0:
+        raise ValueError(f"{context} must return exactly {n} non-empty sample rows")
+    if expected_width is not None and a.shape[1] != expected_width:
+        raise ValueError(f"{context} must return vectors of width {expected_width}, got {a.shape[1]}")
+    if not np.all(np.isfinite(a)):
+        raise ValueError(f"{context} returned non-finite samples")
     return a
+
+
+def _simulate_rows(
+    simulator: Callable[[Any], Any],
+    thetas: np.ndarray,
+    *,
+    expected_width: int | None = None,
+) -> np.ndarray:
+    rows: list[np.ndarray] = []
+    for index, theta in enumerate(thetas):
+        try:
+            row = np.asarray(simulator(theta), dtype=float).reshape(-1)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"simulator output {index} must be numeric") from exc
+        if row.size == 0 or not np.all(np.isfinite(row)):
+            raise ValueError(f"simulator output {index} must be a non-empty finite vector")
+        if expected_width is not None and row.size != expected_width:
+            raise ValueError(f"simulator output {index} has width {row.size}; expected {expected_width}")
+        if rows and row.size != rows[0].size:
+            raise ValueError("simulator outputs must have one consistent vector width")
+        rows.append(row)
+    return np.asarray(rows, dtype=float)
+
+
+def _positive_integer(value: Any, name: str, *, minimum: int = 1) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return result
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    if (
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, Real)
+        or not np.isfinite(value)
+        or float(value) <= 0.0
+    ):
+        raise ValueError(f"{name} must be a positive finite number")
+    return float(value)
+
+
+def _module_placement(module: Any) -> tuple[Any, Any]:
+    torch = _torch()
+    tensor = next(iter((*module.parameters(), *module.buffers())), None)
+    if tensor is None:
+        return torch.device("cpu"), torch.float32
+    dtype = tensor.dtype if tensor.is_floating_point() else torch.float32
+    return tensor.device, dtype
+
+
+def _restore_training_modes(states: list[tuple[Any, bool]]) -> None:
+    for child, training in states:
+        child.training = training
 
 
 def _build_student(family: str, *, x_dim: int, y_dim: int, hidden: int, seed: int | None) -> Any:
@@ -101,11 +183,12 @@ def _build_student(family: str, *, x_dim: int, y_dim: int, hidden: int, seed: in
     # too (determinism is a contract, rule 0.2.4), independent of whatever global torch state a
     # caller/earlier test left behind.
     torch = _torch()
-    torch.manual_seed(int(seed) if seed is not None else 0)
-    if family == "flow":
-        return build_conditional_flow(x_dim, y_dim, hidden=hidden)
-    if family == "mdn":
-        return build_mdn(x_dim, y_dim, hidden=hidden)
+    with torch.random.fork_rng():
+        torch.manual_seed(int(seed) if seed is not None else 0)
+        if family == "flow":
+            return build_conditional_flow(x_dim, y_dim, hidden=hidden)
+        if family == "mdn":
+            return build_mdn(x_dim, y_dim, hidden=hidden)
     raise ValueError(f"family must be 'flow' or 'mdn', got {family!r}")
 
 
@@ -114,32 +197,80 @@ def _generate_pairs(
 ) -> tuple[np.ndarray, np.ndarray]:
     """``n`` fresh ``(theta_i, y_i)`` pairs: ``theta_i ~ prior``, ``y_i = simulator(theta_i)`` (a plain
     Python loop -- no batching assumption on ``simulator``)."""
-    thetas = _as_rows(prior.sampler(seed=seed).sample(int(n)), int(n))
-    ys = np.asarray([np.atleast_1d(np.asarray(simulator(theta), dtype=float)) for theta in thetas], dtype=float)
+    thetas = _as_rows(
+        prior.sampler(seed=seed).sample(int(n)),
+        int(n),
+        context="prior sampler",
+    )
+    ys = _simulate_rows(simulator, thetas)
     return thetas, ys
 
 
 def _sample_given(module: Any, x_row: np.ndarray, n: int, *, seed: int | None) -> np.ndarray:
     """``n`` draws of ``theta ~ q(theta | x_row)`` from a fitted student ``module``."""
     torch = _torch()
-    module.eval()
+    n = _positive_integer(n, "posterior sample count")
+    x_row = np.asarray(x_row, dtype=float).reshape(-1)
+    if x_row.size == 0 or not np.all(np.isfinite(x_row)):
+        raise ValueError("posterior conditioning input must be a non-empty finite vector")
     rng = np.random.RandomState(seed)
-    torch.manual_seed(_next_seed(rng))
-    xt = torch.as_tensor(np.tile(np.atleast_1d(np.asarray(x_row, dtype=float)), (int(n), 1)), dtype=torch.float32)
-    with torch.no_grad():
-        return module.sample_given(xt).cpu().numpy()
+    draw_seed = _next_seed(rng)
+    device, dtype = _module_placement(module)
+    xt = torch.as_tensor(np.tile(x_row, (n, 1)), dtype=dtype, device=device)
+    states = [(child, child.training) for child in module.modules()]
+    cuda_devices = []
+    if device.type == "cuda":
+        cuda_devices = [device.index if device.index is not None else torch.cuda.current_device()]
+    mps_state = None
+    if device.type == "mps" and hasattr(torch.mps, "get_rng_state"):
+        mps_state = torch.mps.get_rng_state()
+    try:
+        module.eval()
+        with torch.random.fork_rng(devices=cuda_devices), torch.no_grad():
+            torch.manual_seed(draw_seed)
+            output = module.sample_given(xt)
+    finally:
+        if mps_state is not None:
+            torch.mps.set_rng_state(mps_state)
+        _restore_training_modes(states)
+    if not torch.is_tensor(output):
+        raise ValueError("conditional student sample_given must return a tensor")
+    return _as_rows(
+        output.detach().cpu().numpy(),
+        n,
+        context="conditional student sample_given",
+    )
 
 
 def _log_density_given(module: Any, x_row: np.ndarray, theta_batch: np.ndarray) -> np.ndarray:
     """``log q(theta | x_row)`` for every row of ``theta_batch`` (shape ``(n, theta_dim)``)."""
     torch = _torch()
-    module.eval()
+    x_row = np.asarray(x_row, dtype=float).reshape(-1)
     theta_batch = np.atleast_2d(np.asarray(theta_batch, dtype=float))
+    if (
+        x_row.size == 0
+        or theta_batch.shape[1] == 0
+        or not np.all(np.isfinite(x_row))
+        or not np.all(np.isfinite(theta_batch))
+    ):
+        raise ValueError("density inputs must be non-empty finite vectors")
     n = theta_batch.shape[0]
-    xt = torch.as_tensor(np.tile(np.atleast_1d(np.asarray(x_row, dtype=float)), (n, 1)), dtype=torch.float32)
-    yt = torch.as_tensor(theta_batch, dtype=torch.float32)
-    with torch.no_grad():
-        return module.log_density(xt, yt).cpu().numpy().reshape(-1)
+    device, dtype = _module_placement(module)
+    xt = torch.as_tensor(np.tile(x_row, (n, 1)), dtype=dtype, device=device)
+    yt = torch.as_tensor(theta_batch, dtype=dtype, device=device)
+    states = [(child, child.training) for child in module.modules()]
+    try:
+        module.eval()
+        with torch.no_grad():
+            output = module.log_density(xt, yt)
+    finally:
+        _restore_training_modes(states)
+    if not torch.is_tensor(output) or output.numel() != n:
+        raise ValueError("conditional student log_density must return exactly one tensor score per row")
+    scores = output.detach().cpu().numpy().reshape(-1)
+    if np.any(np.isnan(scores)) or np.any(np.isposinf(scores)):
+        raise ValueError("conditional student log_density returned invalid scores")
+    return scores
 
 
 def _fit_round(
@@ -220,7 +351,12 @@ def _posterior_sharpness(module: Any, y_obs: np.ndarray, theta_dim: int, *, n: i
     mass having moved at all. Trimming keeps the receipt reporting the posterior's actual central
     spread instead of one unlucky sample.
     """
-    samples = _sample_given(module, y_obs, n, seed=seed)
+    samples = _as_rows(
+        _sample_given(module, y_obs, n, seed=seed),
+        n,
+        context="posterior sharpness sampler",
+        expected_width=theta_dim,
+    )
     trimmed = np.sort(samples, axis=0)
     cut = int(0.1 * len(trimmed))
     if cut > 0:
@@ -234,42 +370,107 @@ def _calibration_receipts(
     simulator: Callable[[Any], Any],
     *,
     theta_dim: int,
+    y_dim: int,
     n_replications: int,
     n_posterior_samples: int,
     coverage_levels: tuple[float, ...],
     seed: int | None,
-) -> tuple[float, float, int, dict[float, float]]:
-    """SBC (chi-square on binned ranks) + per-level coverage, sharing the same replications."""
+) -> tuple[
+    float,
+    float,
+    int,
+    list[float],
+    dict[float, float],
+    dict[float, list[float]],
+    dict[float, list[tuple[float, float]]],
+    dict[float, bool],
+]:
+    """Randomized-rank SBC and uncertainty-aware marginal coverage.
+
+    Each dimension gets its own chi-square test. Their p-values are combined
+    with a Bonferroni minimum, which remains valid when posterior dimensions
+    are correlated. Coverage uses simultaneous Wilson intervals across every
+    requested level and dimension.
+    """
     rng = np.random.RandomState(seed)
-    ranks = np.zeros((n_replications, theta_dim), dtype=int)
+    randomized_ranks = np.zeros((n_replications, theta_dim), dtype=float)
     covered = {c: np.zeros((n_replications, theta_dim), dtype=bool) for c in coverage_levels}
     for r in range(n_replications):
-        theta_star = np.atleast_1d(np.asarray(prior.sampler(seed=_next_seed(rng)).sample(1), dtype=float)).reshape(-1)[
-            :theta_dim
-        ]
-        y_star = np.atleast_1d(np.asarray(simulator(theta_star), dtype=float))
-        samples = _sample_given(module, y_star, n_posterior_samples, seed=_next_seed(rng))
+        theta_star = _as_rows(
+            prior.sampler(seed=_next_seed(rng)).sample(1),
+            1,
+            context="prior sampler during calibration",
+            expected_width=theta_dim,
+        )[0]
+        y_star = _simulate_rows(
+            simulator,
+            theta_star.reshape(1, -1),
+            expected_width=y_dim,
+        )[0]
+        samples = _as_rows(
+            _sample_given(module, y_star, n_posterior_samples, seed=_next_seed(rng)),
+            n_posterior_samples,
+            context="posterior sampler during calibration",
+            expected_width=theta_dim,
+        )
         for d in range(theta_dim):
-            ranks[r, d] = int(np.sum(samples[:, d] < theta_star[d]))
+            less = int(np.sum(samples[:, d] < theta_star[d]))
+            ties = int(np.sum(samples[:, d] == theta_star[d]))
+            # Exchangeability makes the rank position discrete-uniform on
+            # 0..S. Random tie placement plus within-cell jitter turns it into
+            # a continuous U(0,1) variate suitable for equal-probability bins.
+            position = less + int(rng.randint(0, ties + 1))
+            randomized_ranks[r, d] = (position + float(rng.uniform())) / (n_posterior_samples + 1)
             for c in coverage_levels:
                 lo_q, hi_q = (1.0 - c) / 2.0, (1.0 + c) / 2.0
                 lo, hi = np.quantile(samples[:, d], [lo_q, hi_q])
                 covered[c][r, d] = bool(lo <= theta_star[d] <= hi)
 
-    # SBC: bins = min(20, n_sbc_replications // 5), clamped to >= 2 -- the resolved binning choice
-    # (design note "Resolved" section / mixle.task.inverse docstring).
     bins = max(2, min(20, n_replications // 5))
-    edges = np.linspace(0.0, float(n_posterior_samples), bins + 1)
-    stat_total, df_total = 0.0, 0
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    statistics: list[float] = []
+    pvalues: list[float] = []
     for d in range(theta_dim):
-        hist, _ = np.histogram(ranks[:, d], bins=edges)
+        hist, _ = np.histogram(randomized_ranks[:, d], bins=edges)
         expected = n_replications / bins
-        stat_total += float(np.sum((hist - expected) ** 2 / expected))
-        df_total += bins - 1
-    pvalue = float(chi2.sf(stat_total, df_total)) if df_total > 0 else 1.0
+        statistic = float(np.sum((hist - expected) ** 2 / expected))
+        statistics.append(statistic)
+        pvalues.append(float(chi2.sf(statistic, bins - 1)))
+    # Valid under arbitrary cross-dimension dependence; unlike summing the
+    # statistics, this makes no independence claim.
+    global_pvalue = min(1.0, theta_dim * min(pvalues))
 
-    coverage_emp = {c: float(np.mean(covered[c])) for c in coverage_levels}
-    return stat_total, pvalue, bins, coverage_emp
+    coverage_emp: dict[float, float] = {}
+    coverage_by_dimension: dict[float, list[float]] = {}
+    coverage_intervals: dict[float, list[tuple[float, float]]] = {}
+    coverage_pass: dict[float, bool] = {}
+    n_tests = max(theta_dim * len(coverage_levels), 1)
+    z = float(norm.ppf(1.0 - (0.01 / n_tests) / 2.0))
+    for level in coverage_levels:
+        successes = covered[level].sum(axis=0)
+        proportions = successes / n_replications
+        intervals: list[tuple[float, float]] = []
+        for count in successes:
+            phat = float(count) / n_replications
+            denominator = 1.0 + z**2 / n_replications
+            center = (phat + z**2 / (2.0 * n_replications)) / denominator
+            radius = z * np.sqrt(phat * (1.0 - phat) / n_replications + z**2 / (4.0 * n_replications**2)) / denominator
+            intervals.append((max(0.0, center - radius), min(1.0, center + radius)))
+        coverage_emp[level] = float(np.mean(proportions))
+        coverage_by_dimension[level] = [float(value) for value in proportions]
+        coverage_intervals[level] = intervals
+        coverage_pass[level] = all(lo <= level <= hi for lo, hi in intervals)
+
+    return (
+        max(statistics),
+        global_pvalue,
+        bins,
+        pvalues,
+        coverage_emp,
+        coverage_by_dimension,
+        coverage_intervals,
+        coverage_pass,
+    )
 
 
 def _prior_predictive_receipt(ys: np.ndarray, y_obs: np.ndarray | None) -> dict[str, Any]:
@@ -333,11 +534,16 @@ class InverseReceipts:
     sbc_pvalue: float
     sbc_bins: int
     sbc_replications: int
-    sbc_pass: bool  # p-value > 0.01 (resolved acceptance threshold -- see module docstring)
+    sbc_pass: bool  # dependence-safe Bonferroni global p-value > 0.01
     coverage: dict[float, float]  # nominal level -> empirical coverage
-    coverage_pass: dict[float, bool]  # within +/-5% of nominal
+    coverage_pass: dict[float, bool]  # nominal lies in every simultaneous Wilson interval
     prior_predictive: dict[str, Any]
     rounds_trained: int
+    sbc_pvalues_by_dimension: list[float] = field(default_factory=list)
+    sbc_method: str = "randomized_rank_bonferroni"
+    coverage_by_dimension: dict[float, list[float]] = field(default_factory=dict)
+    coverage_intervals: dict[float, list[tuple[float, float]]] = field(default_factory=dict)
+    coverage_method: str = "simultaneous_99pct_wilson"
     sharpness_by_round: list[float] = field(default_factory=list)
     round_training: list[dict[str, Any]] = field(default_factory=list)
     ess: float | None = None
@@ -363,6 +569,35 @@ class InverseModel:
         reweighted_particles: np.ndarray | None = None,
         reweighted_weights: np.ndarray | None = None,
     ) -> None:
+        theta_dim = _positive_integer(theta_dim, "theta_dim")
+        y_dim = _positive_integer(y_dim, "y_dim")
+        if not isinstance(receipts, InverseReceipts):
+            raise TypeError("receipts must be an InverseReceipts instance")
+        correction_parts = (
+            reweighted_y is not None,
+            reweighted_particles is not None,
+            reweighted_weights is not None,
+        )
+        if any(correction_parts) and not all(correction_parts):
+            raise ValueError("target correction requires y, particles, and normalized weights together")
+        if all(correction_parts):
+            reweighted_y = np.asarray(reweighted_y, dtype=float).reshape(-1)
+            reweighted_particles = _as_rows(
+                reweighted_particles,
+                len(reweighted_weights),
+                context="reweighted particles",
+                expected_width=theta_dim,
+            )
+            reweighted_weights = np.asarray(reweighted_weights, dtype=float).reshape(-1)
+            if (
+                reweighted_y.shape != (y_dim,)
+                or not np.all(np.isfinite(reweighted_y))
+                or reweighted_weights.shape != (len(reweighted_particles),)
+                or not np.all(np.isfinite(reweighted_weights))
+                or np.any(reweighted_weights < 0.0)
+                or not np.isclose(float(reweighted_weights.sum()), 1.0, atol=1e-12)
+            ):
+                raise ValueError("target-correction arrays must be finite, aligned, and normalized")
         self.module = module
         self.prior = prior
         self.simulator = simulator
@@ -403,6 +638,8 @@ class InverseModel:
                 return np.asarray(particles[indices], dtype=float).copy()
 
             def weighted_mean_fn(path: tuple[int, ...]) -> float:
+                if len(path) > 1:
+                    raise ValueError("inverse posterior fields are one-dimensional parameter indices")
                 idx = int(path[0]) if len(path) else 0
                 if idx < 0 or idx >= self.theta_dim:
                     raise ValueError(f"posterior field must be in [0, {self.theta_dim})")
@@ -429,10 +666,19 @@ class InverseModel:
             return _sample_given(module, y_row, n, seed=s if s is not None else base_seed)
 
         def log_density_fn(theta: Any) -> float:
-            theta_row = np.atleast_2d(np.asarray(theta, dtype=float))
+            theta_array = np.asarray(theta, dtype=float)
+            if theta_array.ndim == 0:
+                theta_array = theta_array.reshape(1)
+            theta_row = np.atleast_2d(theta_array)
+            if theta_row.shape != (1, self.theta_dim) or not np.all(np.isfinite(theta_row)):
+                raise ValueError(
+                    f"posterior density query must be one finite parameter vector of width {self.theta_dim}"
+                )
             return float(_log_density_given(module, y_row, theta_row)[0])
 
         def mean_fn(path: tuple[int, ...]) -> float:
+            if len(path) > 1:
+                raise ValueError("inverse posterior fields are one-dimensional parameter indices")
             idx = int(path[0]) if len(path) else 0
             if idx < 0 or idx >= self.theta_dim:
                 raise ValueError(f"posterior field must be in [0, {self.theta_dim})")
@@ -493,11 +739,54 @@ def learn_inverse(
     importance-resampled posterior. It improves the target measure when its ESS is healthy but does
     not claim an exact continuous density.
     """
+    if not callable(simulator):
+        raise TypeError("simulator must be callable")
+    if not callable(getattr(prior, "sampler", None)):
+        raise TypeError("prior must expose sampler(seed=...).sample(n)")
     if family not in ("flow", "mdn"):
         raise ValueError(f"family must be 'flow' or 'mdn', got {family!r}")
-    if int(rounds) < 1:
-        raise ValueError("rounds must be >= 1")
-    if int(rounds) > 1 and y_obs is None:
+    n_sims = _positive_integer(n_sims, "n_sims")
+    rounds = _positive_integer(rounds, "rounds")
+    n_sbc_replications = _positive_integer(
+        n_sbc_replications,
+        "n_sbc_replications",
+        minimum=10,
+    )
+    n_posterior_samples = _positive_integer(
+        n_posterior_samples,
+        "n_posterior_samples",
+        minimum=2,
+    )
+    n_reweight_samples = _positive_integer(
+        n_reweight_samples,
+        "n_reweight_samples",
+        minimum=2,
+    )
+    m_steps = _positive_integer(m_steps, "m_steps")
+    max_its = _positive_integer(max_its, "max_its")
+    hidden = _positive_integer(hidden, "hidden")
+    lr = _positive_finite(lr, "lr")
+    if seed is not None and (
+        isinstance(seed, (bool, np.bool_)) or not isinstance(seed, Integral) or not 0 <= int(seed) < 2**32
+    ):
+        raise ValueError("seed must be None or an integer in [0, 2**32)")
+    seed = None if seed is None else int(seed)
+    if not isinstance(reweight, (bool, np.bool_)):
+        raise TypeError("reweight must be boolean")
+    reweight = bool(reweight)
+    if isinstance(coverage_levels, (str, bytes)):
+        raise TypeError("coverage_levels must be a sequence of probabilities")
+    try:
+        coverage_levels = tuple(float(level) for level in coverage_levels)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("coverage_levels must contain finite probabilities in (0, 1)") from exc
+    if (
+        not coverage_levels
+        or len(set(coverage_levels)) != len(coverage_levels)
+        or any(not np.isfinite(level) or not 0.0 < level < 1.0 for level in coverage_levels)
+    ):
+        raise ValueError("coverage_levels must contain unique finite probabilities in (0, 1)")
+    if rounds > 1 and y_obs is None:
         raise ValueError(
             "learn_inverse(rounds > 1) requires y_obs: rounds 2..R perform SNPE-style refinement "
             "toward a SPECIFIC observation (draw theta ~ q(theta | y_obs) from the current round's "
@@ -505,18 +794,30 @@ def learn_inverse(
             "to refine toward, so rounds > 1 is meaningless. Round 1 alone (unconditional pair "
             "generation) is valid without y_obs; pass y_obs=... for rounds > 1."
         )
-    if reweight and true_log_likelihood is None:
+    if reweight and not callable(true_log_likelihood):
         raise ValueError("reweight=True requires true_log_likelihood(theta, y_obs) -> float (a LOG likelihood).")
     if reweight and y_obs is None:
         raise ValueError("reweight=True requires y_obs because importance weights are observation-specific.")
+    if (rounds > 1 or reweight) and not callable(getattr(prior, "log_density", None)):
+        raise TypeError("sequential or target-corrected inverse fitting requires prior.log_density(theta)")
 
     rng = np.random.RandomState(seed)
-    y_obs_arr = None if y_obs is None else np.atleast_1d(np.asarray(y_obs, dtype=float))
+    if y_obs is None:
+        y_obs_arr = None
+    else:
+        try:
+            y_obs_arr = np.asarray(y_obs, dtype=float).reshape(-1)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("y_obs must be a finite observation vector") from exc
+        if y_obs_arr.size == 0 or not np.all(np.isfinite(y_obs_arr)):
+            raise ValueError("y_obs must be a finite observation vector")
 
     # round 1: unconditional pair generation
     thetas, ys = _generate_pairs(prior, simulator, n_sims, _next_seed(rng))
     theta_dim = thetas.shape[1]
     y_dim = ys.shape[1]
+    if y_obs_arr is not None and y_obs_arr.shape != (y_dim,):
+        raise ValueError(f"y_obs must have simulator output width {y_dim}, got {y_obs_arr.size}")
 
     if family == "flow" and theta_dim < 2:
         raise ValueError(
@@ -546,7 +847,12 @@ def learn_inverse(
         sharpness_by_round.append(_posterior_sharpness(module, y_obs_arr, theta_dim, n=500, seed=_next_seed(rng)))
 
     for _r in range(2, int(rounds) + 1):
-        theta_round = _sample_given(module, y_obs_arr, n_sims, seed=_next_seed(rng))
+        theta_round = _as_rows(
+            _sample_given(module, y_obs_arr, n_sims, seed=_next_seed(rng)),
+            n_sims,
+            context=f"sequential proposal round {_r}",
+            expected_width=theta_dim,
+        )
         log_proposal = _log_density_given(module, y_obs_arr, theta_round)
         log_prior = np.asarray(
             [_scalar_log_value(prior.log_density(theta), context="prior.log_density") for theta in theta_round],
@@ -561,7 +867,7 @@ def learn_inverse(
         # same total. This is a multiple-proposal importance objective for the
         # original prior joint, never an uncorrected proposal objective.
         block_weights *= len(theta_round)
-        y_round = np.asarray([np.atleast_1d(np.asarray(simulator(t), dtype=float)) for t in theta_round], dtype=float)
+        y_round = _simulate_rows(simulator, theta_round, expected_width=y_dim)
         retained_thetas.append(theta_round)
         retained_ys.append(y_round)
         retained_weights.append(block_weights)
@@ -591,17 +897,26 @@ def learn_inverse(
         )
         sharpness_by_round.append(_posterior_sharpness(module, y_obs_arr, theta_dim, n=500, seed=_next_seed(rng)))
 
-    sbc_stat, sbc_pvalue, sbc_bins, coverage_emp = _calibration_receipts(
+    (
+        sbc_stat,
+        sbc_pvalue,
+        sbc_bins,
+        sbc_pvalues_by_dimension,
+        coverage_emp,
+        coverage_by_dimension,
+        coverage_intervals,
+        coverage_pass,
+    ) = _calibration_receipts(
         module,
         prior,
         simulator,
         theta_dim=theta_dim,
+        y_dim=y_dim,
         n_replications=n_sbc_replications,
         n_posterior_samples=n_posterior_samples,
         coverage_levels=coverage_levels,
         seed=_next_seed(rng),
     )
-    coverage_pass = {c: bool(abs(coverage_emp[c] - c) <= 0.05) for c in coverage_levels}
     prior_pred = _prior_predictive_receipt(ys, y_obs_arr)
 
     ess = ess_ratio = None
@@ -623,6 +938,9 @@ def learn_inverse(
         coverage_pass=coverage_pass,
         prior_predictive=prior_pred,
         rounds_trained=int(rounds),
+        sbc_pvalues_by_dimension=sbc_pvalues_by_dimension,
+        coverage_by_dimension=coverage_by_dimension,
+        coverage_intervals=coverage_intervals,
         sharpness_by_round=sharpness_by_round,
         round_training=round_training,
         ess=ess,

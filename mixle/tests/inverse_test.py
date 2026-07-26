@@ -4,10 +4,9 @@ Acceptance receipts, one per test:
   (a) linear-Gaussian inverse matches the analytic (precision-weighted) posterior mean/cov.
   (b) bimodal toy (``y = theta^2 + noise``) -- the learned posterior captures BOTH modes, asserted
       via the repo's existing merged-regime detector (``mixle.inference.structure._split_separation``).
-  (c) SBC ranks uniform within finite-sample bounds (200 replications): chi-square p-value > 0.01.
-  (d) coverage within +/-5% of nominal at 50%/90%.
-  (e) sequential refinement rounds measurably sharpen the posterior at the observed y (round-1
-      deliberately under-trained so refinement has visible room to help).
+  (c) randomized SBC ranks are uniform with a dependence-safe global p-value.
+  (d) nominal coverage lies inside simultaneous finite-sample Wilson intervals.
+  (e) sequential refinement retains prior support and proposal-corrects every later round.
 
 Also covers the two API guards the design note's "resolved" section pins: rounds > 1 without
 ``y_obs`` raises ``ValueError``, and ``family="flow"`` with 1-D ``theta`` raises ``ValueError``
@@ -128,17 +127,153 @@ def test_sbc_uniform_and_coverage_within_tolerance():
     )
     r = model.receipts
 
-    # (c) SBC: chi-square uniformity test on binned ranks (Talts et al.), bins = min(20, n // 5),
-    # p-value > 0.01 -- the resolved acceptance threshold (design note "Resolved" / module docstring).
+    # Randomized-rank tests are performed per dimension and combined without
+    # assuming the dimensions are independent.
     assert r.sbc_bins == min(20, 200 // 5)
+    assert len(r.sbc_pvalues_by_dimension) == 2
+    assert r.sbc_method == "randomized_rank_bonferroni"
     assert r.sbc_pvalue > 0.01
     assert r.sbc_pass is True
 
-    # (d) coverage within +/-5% of nominal at both levels, independently.
-    assert abs(r.coverage[0.5] - 0.5) <= 0.05
-    assert abs(r.coverage[0.9] - 0.9) <= 0.05
+    # Coverage qualification uses simultaneous finite-sample intervals.
+    assert len(r.coverage_intervals[0.5]) == 2
+    assert len(r.coverage_intervals[0.9]) == 2
+    assert all(lo <= 0.5 <= hi for lo, hi in r.coverage_intervals[0.5])
+    assert all(lo <= 0.9 <= hi for lo, hi in r.coverage_intervals[0.9])
     assert r.coverage_pass[0.5] is True
     assert r.coverage_pass[0.9] is True
+
+
+def test_randomized_rank_sbc_and_wilson_coverage_are_valid_without_dimension_independence(
+    monkeypatch,
+):
+    class UniformSampler:
+        def __init__(self, seed):
+            self.rng = np.random.RandomState(seed)
+
+        def sample(self, n):
+            return self.rng.uniform(-1.0, 1.0, size=(n, 1))
+
+    class UniformPrior:
+        def sampler(self, seed=None):
+            return UniformSampler(seed)
+
+    def exact_uninformative_posterior(module, y, n, seed=None):
+        return np.random.RandomState(seed).uniform(-1.0, 1.0, size=(n, 1))
+
+    monkeypatch.setattr(inverse_module, "_sample_given", exact_uninformative_posterior)
+    (
+        _statistic,
+        global_pvalue,
+        bins,
+        dimensional_pvalues,
+        coverage,
+        coverage_by_dimension,
+        intervals,
+        coverage_pass,
+    ) = inverse_module._calibration_receipts(
+        object(),
+        UniformPrior(),
+        lambda theta: np.array([0.0]),
+        theta_dim=1,
+        y_dim=1,
+        n_replications=500,
+        n_posterior_samples=100,
+        coverage_levels=(0.5, 0.9),
+        seed=7,
+    )
+    assert bins == 20
+    assert len(dimensional_pvalues) == 1
+    assert global_pvalue == dimensional_pvalues[0]
+    assert global_pvalue > 0.01
+    assert abs(coverage[0.5] - 0.5) < 0.08
+    assert abs(coverage_by_dimension[0.9][0] - 0.9) < 0.08
+    assert all(intervals[level][0][0] <= level <= intervals[level][0][1] for level in (0.5, 0.9))
+    assert coverage_pass == {0.5: True, 0.9: True}
+
+
+def test_inverse_sampling_preserves_torch_mode_dtype_and_rng_state():
+    class Conditional(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.location = torch.nn.Parameter(torch.tensor([0.0], dtype=torch.float64))
+
+        def sample_given(self, x):
+            return self.location + torch.randn((len(x), 1), dtype=x.dtype, device=x.device)
+
+        def log_density(self, x, theta):
+            return -((theta - self.location) ** 2).sum(dim=1)
+
+    module = Conditional()
+    module.train()
+    rng_before = torch.random.get_rng_state().clone()
+    samples = inverse_module._sample_given(module, np.array([1.0]), 4, seed=9)
+    scores = inverse_module._log_density_given(module, np.array([1.0]), samples)
+    assert samples.shape == (4, 1)
+    assert scores.shape == (4,)
+    assert module.training is True
+    assert torch.equal(torch.random.get_rng_state(), rng_before)
+
+
+@pytest.mark.parametrize(
+    ("keyword", "value", "message"),
+    [
+        ("n_sims", 2.5, "n_sims"),
+        ("rounds", True, "rounds"),
+        ("n_sbc_replications", 9, "n_sbc_replications"),
+        ("n_posterior_samples", 1, "n_posterior_samples"),
+        ("coverage_levels", (0.0, 0.9), "coverage_levels"),
+        ("coverage_levels", (0.9, 0.9), "coverage_levels"),
+        ("lr", np.nan, "lr"),
+    ],
+)
+def test_inverse_controls_reject_invalid_counts_and_probabilities(keyword, value, message):
+    prior = GaussianDistribution(mu=0.0, sigma2=1.0)
+    with pytest.raises((TypeError, ValueError), match=message):
+        learn_inverse(
+            lambda theta: np.atleast_1d(theta),
+            prior,
+            family="mdn",
+            **{keyword: value},
+        )
+
+
+def test_inverse_rejects_nonfinite_simulation_and_wrong_posterior_widths():
+    prior = GaussianDistribution(mu=0.0, sigma2=1.0)
+    with pytest.raises(ValueError, match="simulator output"):
+        learn_inverse(
+            lambda theta: np.array([np.nan]),
+            prior,
+            family="mdn",
+            n_sims=10,
+            n_sbc_replications=10,
+        )
+
+    receipts = InverseReceipts(
+        sbc_statistic=0.0,
+        sbc_pvalue=1.0,
+        sbc_bins=2,
+        sbc_replications=10,
+        sbc_pass=True,
+        coverage={0.9: 0.9},
+        coverage_pass={0.9: True},
+        prior_predictive={},
+        rounds_trained=1,
+    )
+    model = InverseModel(
+        module=object(),
+        prior=prior,
+        simulator=lambda theta: theta,
+        family="mdn",
+        theta_dim=1,
+        y_dim=1,
+        receipts=receipts,
+    )
+    with pytest.raises(ValueError, match="width 1"):
+        model.posterior([1.0, 2.0])
+    posterior = model.posterior([1.0])
+    with pytest.raises(ValueError, match="width 1"):
+        posterior.log_density([1.0, 2.0])
 
 
 def test_rounds_greater_than_one_without_y_obs_raises():
@@ -166,6 +301,9 @@ def test_sequential_rounds_retain_prior_rows_and_apply_proposal_correction(monke
     """
 
     class Prior:
+        def sampler(self, seed=None):
+            return None
+
         def log_density(self, theta):
             return -float(np.asarray(theta).reshape(-1)[0])
 
@@ -195,7 +333,16 @@ def test_sequential_rounds_retain_prior_rows_and_apply_proposal_correction(monke
     monkeypatch.setattr(
         inverse_module,
         "_calibration_receipts",
-        lambda *args, **kwargs: (0.0, 1.0, 2, {0.5: 0.5, 0.9: 0.9}),
+        lambda *args, **kwargs: (
+            0.0,
+            1.0,
+            2,
+            [1.0],
+            {0.5: 0.5, 0.9: 0.9},
+            {0.5: [0.5], 0.9: [0.9]},
+            {0.5: [(0.2, 0.8)], 0.9: [(0.7, 1.0)]},
+            {0.5: True, 0.9: True},
+        ),
     )
 
     def capture_fit(current, ys, thetas, *, weights=None, **kwargs):
