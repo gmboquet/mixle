@@ -32,21 +32,17 @@ Algorithm (``notes/designs/M3.md``):
 2. **Student.** ``build_conditional_flow``/``build_mdn`` wrapped in :class:`GradLeaf`, fit via
    ``optimize(list(zip(y_pairs, theta_pairs)), leaf, ...)`` -- A4.4's tuple-default-loss fix is what
    lets the bare module's two-arg ``log_density(x, y)`` score straight off tuple observations.
-3. **Sequential refinement (rounds 2..R).** Resolved decision (was open in the design note): eager,
-   via an optional ``y_obs`` keyword to THIS function. When ``y_obs`` is given, each subsequent
-   round draws ``theta ~ q(theta | y_obs)`` from the CURRENT round's student, re-runs the simulator,
-   and retrains warm-started from the previous round's module weights (same object, so ``optimize``
-   continues training it in place -- the same warm-start pattern ``GradLeaf``'s own M-step uses
-   across EM iterations). ``rounds > 1`` without ``y_obs`` has no observation to sharpen toward, so
-   it raises ``ValueError`` rather than silently doing nothing -- round 1 alone (unconditional pair
-   generation) is valid without ``y_obs``.
-4. **Optional exactness stage.** ``reweight=True`` with ``true_log_likelihood(theta, y_obs) ->
-   float`` (a LOG likelihood) treats the final round's ``q(theta | y_obs)`` as a self-normalized-
-   importance-sampling proposal: ``log w_j = log p(theta_j) + true_log_likelihood(theta_j, y_obs) -
-   log q(theta_j | y_obs)``, normalized by log-sum-exp (the same construction
-   ``mixle.inference.condition``'s SIR fallback uses), with ``ESS = 1 / sum(w_norm^2)`` reported so a
-   low ESS visibly says "don't trust this reweighted posterior" instead of silently returning a
-   degenerate one.
+3. **Proposal-corrected sequential refinement (rounds 2..R).** Each round draws from the frozen
+   current proposal ``q_r(theta | y_obs)``, records ``p(theta) / q_r(theta | y_obs)`` importance
+   weights, and refits on ALL retained rounds. Round 1 prior draws keep global support; every later
+   block is self-normalized to equal round mass. Thus every round's weighted conditional-density
+   objective targets the original prior joint ``p(theta)p(y|theta)`` -- never the proposal joint.
+4. **Optional finite-particle target correction.** ``reweight=True`` with
+   ``true_log_likelihood(theta, y_obs)`` turns the final neural posterior into a self-normalized
+   importance proposal. The returned model stores those particles and normalized weights, and
+   ``posterior(y_obs)`` samples and computes means from that weighted empirical posterior. It is an
+   importance-resampled approximation, not an exact continuous density; ESS and a warning make that
+   contract explicit.
 5. **Calibration receipts (always computed).**
    - **SBC.** Resolved decision (was open): a chi-square uniformity test on binned ranks (Talts et
      al.), ``bins = min(20, n_sbc_replications // 5)`` (clamped to >= 2), one chi-square statistic
@@ -146,13 +142,70 @@ def _log_density_given(module: Any, x_row: np.ndarray, theta_batch: np.ndarray) 
         return module.log_density(xt, yt).cpu().numpy().reshape(-1)
 
 
-def _fit_round(module: Any, ys: np.ndarray, thetas: np.ndarray, *, m_steps: int, lr: float, max_its: int) -> Any:
+def _fit_round(
+    module: Any,
+    ys: np.ndarray,
+    thetas: np.ndarray,
+    *,
+    m_steps: int,
+    lr: float,
+    max_its: int,
+    weights: np.ndarray | None = None,
+) -> Any:
     """One ``optimize()`` call against ``(y, theta)`` pairs, warm-started from ``module``'s own weights
     (same underlying ``nn.Module`` object -- ``GradEstimator.estimate`` mutates it in place)."""
     data = list(zip(ys.tolist(), thetas.tolist()))
     leaf = GradLeaf(module, m_steps=m_steps, lr=lr)
+    if weights is not None:
+        row_weights = np.asarray(weights, dtype=float)
+        if (
+            row_weights.shape != (len(data),)
+            or not np.all(np.isfinite(row_weights))
+            or np.any(row_weights < 0.0)
+            or float(row_weights.sum()) <= 0.0
+        ):
+            raise ValueError("inverse training weights must be finite, non-negative, and match all rows")
+        estimator = leaf.estimator()
+        encoded = leaf.dist_to_encoder().seq_encode(data)
+        for _ in range(int(max_its)):
+            accumulator = estimator.accumulator_factory().make()
+            accumulator.seq_update(encoded, row_weights, leaf)
+            leaf = estimator.estimate(float(row_weights.sum()), accumulator.value())
+        return leaf.module
     fitted = optimize(data, leaf, max_its=max_its, out=None)
     return fitted.module
+
+
+def _normalized_importance_weights(log_weights: Any, *, context: str) -> tuple[np.ndarray, float]:
+    """Normalize log importance ratios and return weights plus their ESS.
+
+    Non-finite entries receive zero mass. A block with no finite positive mass
+    cannot represent the target and fails closed.
+    """
+    log_w = np.asarray(log_weights, dtype=float).reshape(-1)
+    finite = np.isfinite(log_w)
+    if not finite.any():
+        raise ValueError(f"{context} produced no finite importance weights")
+    shifted = np.full_like(log_w, float("-inf"))
+    shifted[finite] = log_w[finite] - float(np.max(log_w[finite]))
+    weights = np.exp(shifted)
+    total = float(weights.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError(f"{context} produced no positive importance mass")
+    weights /= total
+    ess = float(1.0 / np.sum(weights**2))
+    return weights, ess
+
+
+def _scalar_log_value(value: Any, *, context: str) -> float:
+    """Accept scalar or length-one log-density results without lossy coercion."""
+    array = np.asarray(value, dtype=float)
+    if array.size != 1:
+        raise ValueError(f"{context} must return exactly one log-density value per parameter row")
+    result = float(array.reshape(-1)[0])
+    if np.isnan(result) or np.isposinf(result):
+        raise ValueError(f"{context} returned an invalid log-density value")
+    return result
 
 
 def _posterior_sharpness(module: Any, y_obs: np.ndarray, theta_dim: int, *, n: int, seed: int | None) -> float:
@@ -243,30 +296,32 @@ def _reweight_receipt(
     *,
     n: int,
     seed: int | None,
-) -> tuple[float, float, list[str]]:
+) -> tuple[np.ndarray, np.ndarray, float, float, list[str]]:
     """Self-normalized importance reweighting of ``q(theta | y_obs)`` against the true likelihood
     (same log-sum-exp construction as ``mixle.inference.condition``'s SIR fallback)."""
     thetas = _sample_given(module, y_obs, n, seed=seed)
     log_q = _log_density_given(module, y_obs, thetas)
-    log_prior = np.array([float(prior.log_density(theta)) for theta in thetas])
-    log_lik = np.array([float(true_log_likelihood(theta, y_obs)) for theta in thetas])
+    log_prior = np.array([_scalar_log_value(prior.log_density(theta), context="prior.log_density") for theta in thetas])
+    log_lik = np.array(
+        [
+            _scalar_log_value(
+                true_log_likelihood(theta, y_obs),
+                context="true_log_likelihood",
+            )
+            for theta in thetas
+        ]
+    )
     log_w = log_prior + log_lik - log_q
+    w_norm, ess = _normalized_importance_weights(log_w, context="inverse target correction")
 
-    warnings: list[str] = []
-    finite = np.isfinite(log_w)
-    if not finite.any():
-        ess = 0.0
-        warnings.append("reweight: all importance weights are zero/non-finite.")
-    else:
-        m = log_w[finite].max()
-        w = np.where(finite, np.exp(log_w - m), 0.0)
-        sw = w.sum()
-        w_norm = w / sw
-        ess = float(1.0 / np.sum(w_norm**2))
+    warnings = [
+        "reweight=True returns a finite-particle self-normalized importance posterior; "
+        "it is target-corrected but is not an exact continuous posterior density."
+    ]
     ess_ratio = ess / n
     if ess_ratio < 0.01:
         warnings.append(f"reweight ESS ratio {ess_ratio:.4f} < 0.01 -- reweighted posterior is not trustworthy.")
-    return ess, ess_ratio, warnings
+    return thetas, w_norm, ess, ess_ratio, warnings
 
 
 @dataclass
@@ -284,6 +339,7 @@ class InverseReceipts:
     prior_predictive: dict[str, Any]
     rounds_trained: int
     sharpness_by_round: list[float] = field(default_factory=list)
+    round_training: list[dict[str, Any]] = field(default_factory=list)
     ess: float | None = None
     ess_ratio: float | None = None
     warnings: list[str] = field(default_factory=list)
@@ -303,6 +359,9 @@ class InverseModel:
         y_dim: int,
         receipts: InverseReceipts,
         seed: int | None = None,
+        reweighted_y: np.ndarray | None = None,
+        reweighted_particles: np.ndarray | None = None,
+        reweighted_weights: np.ndarray | None = None,
     ) -> None:
         self.module = module
         self.prior = prior
@@ -312,6 +371,9 @@ class InverseModel:
         self.y_dim = y_dim
         self.receipts = receipts
         self._seed = seed
+        self._reweighted_y = reweighted_y
+        self._reweighted_particles = reweighted_particles
+        self._reweighted_weights = reweighted_weights
 
     def posterior(self, y: Any) -> Posterior:
         """Wrap ``q(theta | y)`` as an M0 :class:`~mixle.inference.condition.Posterior`: ``sample(n)``
@@ -319,8 +381,49 @@ class InverseModel:
         composition treats a learned inverse like an exactly-conditioned one, modulo the amortization
         warning on ``.receipt`` and the ``InverseReceipts`` pointer at ``.receipt.inverse_receipts``."""
         y_row = np.atleast_1d(np.asarray(y, dtype=float))
+        if y_row.shape != (self.y_dim,) or not np.all(np.isfinite(y_row)):
+            raise ValueError(f"posterior observation must be a finite vector of width {self.y_dim}")
         module = self.module
         base_seed = self._seed
+
+        if self._reweighted_particles is not None:
+            if self._reweighted_y is None or not np.array_equal(y_row, self._reweighted_y):
+                raise ValueError(
+                    "this target-corrected inverse is bound to the y_obs used by learn_inverse; "
+                    "fit another model or disable reweight for a different observation"
+                )
+            particles = self._reweighted_particles
+            weights = self._reweighted_weights
+            if weights is None:
+                raise RuntimeError("target-corrected inverse is missing its normalized weights")
+
+            def weighted_sample_fn(n: int, s: int | None) -> np.ndarray:
+                rng = np.random.RandomState(s if s is not None else base_seed)
+                indices = rng.choice(len(particles), size=n, replace=True, p=weights)
+                return np.asarray(particles[indices], dtype=float).copy()
+
+            def weighted_mean_fn(path: tuple[int, ...]) -> float:
+                idx = int(path[0]) if len(path) else 0
+                if idx < 0 or idx >= self.theta_dim:
+                    raise ValueError(f"posterior field must be in [0, {self.theta_dim})")
+                return float(np.dot(weights, particles[:, idx]))
+
+            receipt = ConditionReceipt(
+                method="sir",
+                sample_contract="theta_particles",
+                ess=self.receipts.ess,
+                ess_ratio=self.receipts.ess_ratio,
+                n_particles=len(particles),
+                warnings=list(self.receipts.warnings),
+            )
+            receipt.inverse_receipts = self.receipts
+            return Posterior(
+                sample_fn=weighted_sample_fn,
+                log_density_fn=None,
+                mean_fn=weighted_mean_fn,
+                receipt=receipt,
+                model=None,
+            )
 
         def sample_fn(n: int, s: int | None) -> np.ndarray:
             return _sample_given(module, y_row, n, seed=s if s is not None else base_seed)
@@ -331,6 +434,8 @@ class InverseModel:
 
         def mean_fn(path: tuple[int, ...]) -> float:
             idx = int(path[0]) if len(path) else 0
+            if idx < 0 or idx >= self.theta_dim:
+                raise ValueError(f"posterior field must be in [0, {self.theta_dim})")
             samples = _sample_given(module, y_row, 500, seed=base_seed)
             return float(np.mean(samples[:, idx]))
 
@@ -379,9 +484,14 @@ def learn_inverse(
     restriction (a mixture of per-component Gaussians is well-defined for scalar ``theta`` too, and
     is the more direct fit for asserting multimodality component-by-component).
 
-    ``rounds > 1`` (SNPE-style sequential refinement toward a SPECIFIC observation) requires
-    ``y_obs``: round 1 alone (unconditional pair generation) is the only round that has meaning
-    without an observation to sharpen against.
+    ``rounds > 1`` performs proposal-corrected SNPE toward a specific observation. Round-one prior
+    simulations are retained forever. Every later proposal block is weighted by
+    ``p(theta)/q_round(theta|y_obs)`` and the accumulated weighted objective continues to target the
+    declared prior posterior rather than the narrower proposal posterior.
+
+    ``reweight=True`` requires ``y_obs`` and returns an observation-bound, finite-particle
+    importance-resampled posterior. It improves the target measure when its ESS is healthy but does
+    not claim an exact continuous density.
     """
     if family not in ("flow", "mdn"):
         raise ValueError(f"family must be 'flow' or 'mdn', got {family!r}")
@@ -397,6 +507,8 @@ def learn_inverse(
         )
     if reweight and true_log_likelihood is None:
         raise ValueError("reweight=True requires true_log_likelihood(theta, y_obs) -> float (a LOG likelihood).")
+    if reweight and y_obs is None:
+        raise ValueError("reweight=True requires y_obs because importance weights are observation-specific.")
 
     rng = np.random.RandomState(seed)
     y_obs_arr = None if y_obs is None else np.atleast_1d(np.asarray(y_obs, dtype=float))
@@ -415,6 +527,19 @@ def learn_inverse(
 
     module = _build_student(family, x_dim=y_dim, y_dim=theta_dim, hidden=hidden, seed=_next_seed(rng))
     module = _fit_round(module, ys, thetas, m_steps=m_steps, lr=lr, max_its=max_its)
+    retained_thetas = [thetas]
+    retained_ys = [ys]
+    retained_weights = [np.ones(len(thetas), dtype=float)]
+    round_training: list[dict[str, Any]] = [
+        {
+            "round": 1,
+            "proposal": "declared_prior",
+            "target": "declared_prior_joint",
+            "correction": "none_required",
+            "rows": len(thetas),
+            "retained_rows": len(thetas),
+        }
+    ]
 
     sharpness_by_round: list[float] = []
     if y_obs_arr is not None:
@@ -422,8 +547,48 @@ def learn_inverse(
 
     for _r in range(2, int(rounds) + 1):
         theta_round = _sample_given(module, y_obs_arr, n_sims, seed=_next_seed(rng))
+        log_proposal = _log_density_given(module, y_obs_arr, theta_round)
+        log_prior = np.asarray(
+            [_scalar_log_value(prior.log_density(theta), context="prior.log_density") for theta in theta_round],
+            dtype=float,
+        )
+        block_weights, proposal_ess = _normalized_importance_weights(
+            log_prior - log_proposal,
+            context=f"inverse sequential round {_r}",
+        )
+        # Equal expected mass per round: round one has n_sims unit weights;
+        # each corrected proposal block is self-normalized then scaled to the
+        # same total. This is a multiple-proposal importance objective for the
+        # original prior joint, never an uncorrected proposal objective.
+        block_weights *= len(theta_round)
         y_round = np.asarray([np.atleast_1d(np.asarray(simulator(t), dtype=float)) for t in theta_round], dtype=float)
-        module = _fit_round(module, y_round, theta_round, m_steps=m_steps, lr=lr, max_its=max_its)
+        retained_thetas.append(theta_round)
+        retained_ys.append(y_round)
+        retained_weights.append(block_weights)
+        all_thetas = np.concatenate(retained_thetas, axis=0)
+        all_ys = np.concatenate(retained_ys, axis=0)
+        all_weights = np.concatenate(retained_weights)
+        module = _fit_round(
+            module,
+            all_ys,
+            all_thetas,
+            m_steps=m_steps,
+            lr=lr,
+            max_its=max_its,
+            weights=all_weights,
+        )
+        round_training.append(
+            {
+                "round": _r,
+                "proposal": "frozen_previous_q(theta|y_obs)",
+                "target": "declared_prior_joint",
+                "correction": "self_normalized_p(theta)/q_round(theta|y_obs)",
+                "rows": len(theta_round),
+                "retained_rows": len(all_thetas),
+                "proposal_ess": proposal_ess,
+                "proposal_ess_ratio": proposal_ess / len(theta_round),
+            }
+        )
         sharpness_by_round.append(_posterior_sharpness(module, y_obs_arr, theta_dim, n=500, seed=_next_seed(rng)))
 
     sbc_stat, sbc_pvalue, sbc_bins, coverage_emp = _calibration_receipts(
@@ -440,10 +605,11 @@ def learn_inverse(
     prior_pred = _prior_predictive_receipt(ys, y_obs_arr)
 
     ess = ess_ratio = None
+    reweighted_particles = reweighted_weights = None
     reweight_warnings: list[str] = []
     if reweight:
         assert true_log_likelihood is not None  # narrowed by the guard above
-        ess, ess_ratio, reweight_warnings = _reweight_receipt(
+        reweighted_particles, reweighted_weights, ess, ess_ratio, reweight_warnings = _reweight_receipt(
             module, prior, true_log_likelihood, y_obs_arr, n=n_reweight_samples, seed=_next_seed(rng)
         )
 
@@ -458,6 +624,7 @@ def learn_inverse(
         prior_predictive=prior_pred,
         rounds_trained=int(rounds),
         sharpness_by_round=sharpness_by_round,
+        round_training=round_training,
         ess=ess,
         ess_ratio=ess_ratio,
         warnings=reweight_warnings,
@@ -472,4 +639,7 @@ def learn_inverse(
         y_dim=y_dim,
         receipts=receipts,
         seed=seed,
+        reweighted_y=None if not reweight else y_obs_arr.copy(),
+        reweighted_particles=reweighted_particles,
+        reweighted_weights=reweighted_weights,
     )
