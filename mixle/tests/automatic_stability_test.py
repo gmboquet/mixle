@@ -21,6 +21,42 @@ from mixle.utils.automatic.factories import (
     get_lognormal_estimator,
     get_poisson_estimator,
 )
+from mixle.utils.automatic.profiling import _value_array_from_vdict
+
+
+class BoundedValueArrayTest(unittest.TestCase):
+    def test_high_cardinality_expansion_respects_cap_and_receipts_approximation(self):
+        values, receipt = _value_array_from_vdict(
+            {value: 1.0 for value in range(1000)}, cap=17, return_receipt=True
+        )
+        self.assertEqual(values.size, 17)
+        self.assertEqual(receipt.input_cardinality, 1000)
+        self.assertEqual(receipt.output_count, 17)
+        self.assertTrue(receipt.approximated)
+        self.assertEqual(receipt.method, "deterministic_midpoint_cdf")
+        self.assertAlmostEqual(receipt.max_cdf_error_bound, 0.5 / 17)
+
+    def test_bounded_expansion_is_order_independent_and_preserves_mass(self):
+        forward = {0: 750, 1: 200, 2: 50}
+        reverse = dict(reversed(tuple(forward.items())))
+        left = _value_array_from_vdict(forward, cap=100)
+        right = _value_array_from_vdict(reverse, cap=100)
+        np.testing.assert_array_equal(left, right)
+        np.testing.assert_array_equal(np.bincount(left.astype(int)), [75, 20, 5])
+
+    def test_exact_expansion_remains_exact_and_receipted(self):
+        values, receipt = _value_array_from_vdict({2: 2, 1: 1}, cap=3, return_receipt=True)
+        np.testing.assert_array_equal(values, [1.0, 2.0, 2.0])
+        self.assertFalse(receipt.approximated)
+        self.assertEqual(receipt.method, "exact")
+
+    def test_invalid_cap_and_counts_are_rejected(self):
+        for cap in (0, -1, 1.5, True):
+            with self.subTest(cap=cap), self.assertRaisesRegex(ValueError, "positive integer"):
+                _value_array_from_vdict({1: 1}, cap=cap)
+        for count in (-1.0, float("nan"), float("inf")):
+            with self.subTest(count=count), self.assertRaisesRegex(ValueError, "finite and nonnegative"):
+                _value_array_from_vdict({1: count})
 
 
 class DegenerateInputDoesNotCrashTest(unittest.TestCase):
