@@ -1,6 +1,7 @@
 """Tabular Q-learning over GridWorld: known-optimum recovery, beats-random, determinism."""
 
 import numpy as np
+import pytest
 
 from mixle.task.rl import GridWorld, random_policy, rollout, tabular_q_learning
 
@@ -66,3 +67,71 @@ def test_greedy_policy_covers_every_non_goal_state():
     result = tabular_q_learning(world, episodes=200, seed=0)
     policy = result.greedy_policy(world)
     assert set(policy.keys()) == set(world.states()) - {world.goal}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"size": 0, "goal": (0, 0)},
+        {"size": 3, "goal": (3, 0)},
+        {"size": 3, "goal": (2, 2), "obstacles": {(2, 2)}},
+        {"size": 3, "goal": (2, 2), "obstacles": {(0, 0)}},
+        {"size": 3, "goal": (2, 2), "obstacles": {(-1, 0)}},
+        {"size": 3, "goal": (2, 2), "max_steps": 0},
+        {"size": 3, "goal": (2, 2), "step_cost": float("nan")},
+        {"size": 3, "goal": (2, 2), "goal_reward": float("inf")},
+    ],
+)
+def test_invalid_worlds_are_rejected(kwargs):
+    with pytest.raises(ValueError):
+        GridWorld(**kwargs)
+
+
+def test_reset_and_coordinate_conversions_validate_states():
+    world = GridWorld(size=3, goal=(2, 2), obstacles={(1, 1)})
+    for start in ((3, 0), (-1, 0), (1, 1), (True, 0)):
+        with pytest.raises(ValueError):
+            world.reset(start)
+    for index in (-1, world.n_states, 1.5, True):
+        with pytest.raises(ValueError):
+            world.index_state(index)
+    with pytest.raises(ValueError):
+        world.transition((0, 0), "diagonal")
+
+
+def test_goal_is_absorbing_after_terminal_transition():
+    world = GridWorld(size=2, goal=(0, 1))
+    world.reset((0, 0))
+    state, reward, done = world.step("right")
+    assert (state, reward, done) == ((0, 1), world.goal_reward, True)
+    assert world.transition(world.goal, "left") == world.goal
+    assert world.step("left") == (world.goal, 0.0, True)
+
+
+def test_step_limit_is_absorbing():
+    world = GridWorld(size=3, goal=(2, 2), max_steps=1)
+    state, _, done = world.step("right")
+    assert done
+    assert world.step("down") == (state, 0.0, True)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("episodes", 0),
+        ("episodes", 1.5),
+        ("alpha", 0.0),
+        ("alpha", float("nan")),
+        ("gamma", -0.1),
+        ("gamma", float("inf")),
+        ("epsilon", -0.1),
+        ("epsilon", 1.1),
+        ("seed", -1),
+        ("seed", 2**32),
+    ],
+)
+def test_q_learning_rejects_invalid_hyperparameters(name, value):
+    world = GridWorld(size=3, goal=(2, 2))
+    kwargs = {name: value}
+    with pytest.raises(ValueError):
+        tabular_q_learning(world, **kwargs)
