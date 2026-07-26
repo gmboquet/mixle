@@ -787,6 +787,7 @@ __all__ = [
     "VonMisesFisherSampler",
     "VonMisesFisherEstimator",
     "VonMisesFisherDataEncoder",
+    "VonMisesFisherFitError",
     "MultivariateStudentTDistribution",
     "MultivariateStudentTSampler",
     "MultivariateStudentTEstimator",
@@ -1147,6 +1148,7 @@ from mixle.stats.directional.von_mises_fisher import (
     VonMisesFisherDataEncoder,
     VonMisesFisherDistribution,
     VonMisesFisherEstimator,
+    VonMisesFisherFitError,
     VonMisesFisherSampler,
 )
 from mixle.stats.directional.watson import (

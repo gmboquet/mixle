@@ -26,7 +26,6 @@ Numerical notes:
 Reference: Mardia & Jupp, *Directional Statistics* (Wiley, 2000).
 """
 
-import sys
 from collections.abc import Sequence
 from typing import Any
 
@@ -46,6 +45,125 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.matrix.wishart import (
+    _validated_dimension,
+    _validated_sample_size,
+    _validated_weight,
+    _validated_weights,
+)
+
+_UNIT_NORM_ATOL = 1.0e-8
+_RESULTANT_ATOL = 1.0e-10
+
+
+class VonMisesFisherFitError(RuntimeError):
+    """Raised when vMF sufficient statistics have no finite identifiable fit."""
+
+
+def _unit_vector(value: Any, dim: int, name: str = "vMF observation") -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("%s must be numeric" % name) from exc
+    if result.shape != (dim,):
+        raise ValueError("%s must have exact shape (%d,)" % (name, dim))
+    if np.any(~np.isfinite(result)):
+        raise ValueError("%s must be finite" % name)
+    norm = float(np.linalg.norm(result))
+    if not np.isclose(norm, 1.0, rtol=0.0, atol=_UNIT_NORM_ATOL):
+        raise ValueError("%s must have unit norm" % name)
+    return result.copy()
+
+
+def _unit_batch(value: Any, dim: int, name: str = "vMF observations") -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("%s must be numeric" % name) from exc
+    if result.shape == (0,):
+        return np.empty((0, dim), dtype=np.float64)
+    if result.ndim != 2 or result.shape[1] != dim:
+        raise ValueError("%s must have exact shape (N, %d)" % (name, dim))
+    if np.any(~np.isfinite(result)):
+        raise ValueError("%s must be finite" % name)
+    norms = np.linalg.norm(result, axis=1)
+    if not np.allclose(norms, 1.0, rtol=0.0, atol=_UNIT_NORM_ATOL):
+        raise ValueError("%s must contain only unit vectors" % name)
+    return result.copy()
+
+
+def _unit_backend_array(
+    value: Any,
+    dim: int,
+    name: str = "vMF backend observations",
+) -> np.ndarray:
+    """Validate row or broadcast-expanded backend vectors on their last axis."""
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("%s must be numeric" % name) from exc
+    if result.ndim not in (2, 3) or result.shape[-1] != dim:
+        raise ValueError(
+            "%s must have rank two or three with final dimension %d"
+            % (name, dim)
+        )
+    if np.any(~np.isfinite(result)):
+        raise ValueError("%s must be finite" % name)
+    norms = np.linalg.norm(result, axis=-1)
+    if not np.allclose(norms, 1.0, rtol=0.0, atol=_UNIT_NORM_ATOL):
+        raise ValueError("%s must contain only unit vectors" % name)
+    return result.copy()
+
+
+def _validated_vmf_statistics(
+    value: Any,
+    expected_dim: int | None,
+) -> tuple[float, np.ndarray | None, int | None]:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise ValueError("vMF sufficient statistics must be a two-item tuple")
+    if isinstance(value[0], (bool, np.bool_)) or np.ndim(value[0]) != 0:
+        raise TypeError("vMF sufficient-statistic count must be a real scalar")
+    try:
+        count = float(value[0])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("vMF sufficient-statistic count must be numeric") from exc
+    if not np.isfinite(count) or count < 0.0:
+        raise ValueError("vMF sufficient-statistic count must be finite and non-negative")
+    if value[1] is None:
+        if count != 0.0:
+            raise ValueError("vMF non-empty statistics require a vector sum")
+        return count, None, expected_dim
+    try:
+        vector_sum = np.asarray(value[1], dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("vMF vector sum must be numeric") from exc
+    if vector_sum.ndim != 1 or vector_sum.size < 2:
+        raise ValueError("vMF vector sum must be a vector of dimension at least two")
+    if expected_dim is not None and vector_sum.shape != (expected_dim,):
+        raise ValueError(
+            "vMF vector sum must have exact shape (%d,)" % expected_dim
+        )
+    if np.any(~np.isfinite(vector_sum)):
+        raise ValueError("vMF vector sum must be finite")
+    if count == 0.0 and np.any(vector_sum != 0.0):
+        raise ValueError("empty vMF statistics must have zero vector sum")
+    norm = float(np.linalg.norm(vector_sum))
+    if norm > count + _RESULTANT_ATOL * max(1.0, count):
+        raise ValueError("vMF vector sum violates the unit-vector resultant bound")
+    return count, vector_sum.copy(), len(vector_sum)
+
+
+def _mean_resultant_length(dim: int, kappa: float) -> float:
+    if kappa == 0.0:
+        return 0.0
+    log_kappa = np.log(kappa)
+    result = np.exp(
+        lniv(dim / 2.0, log_kappa)
+        - lniv((dim / 2.0) - 1.0, log_kappa)
+    )
+    if not np.isfinite(result) or result < 0.0 or result >= 1.0:
+        raise VonMisesFisherFitError("vMF Bessel ratio is not finite and interior")
+    return float(result)
 
 
 def lniv_uniform(v, ln_z):
@@ -145,14 +263,42 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
     @staticmethod
     def backend_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
         """Return row-wise legacy sufficient statistics for resident reductions."""
-        xx = engine.asarray(x)
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x):
+            xx = engine.asarray(x)
+            one = engine.sum(xx * 0.0, axis=1) + engine.asarray(1.0)
+            return one, xx
+        mu = np.asarray(params["mu"], dtype=np.float64)
+        xx = engine.asarray(_unit_backend_array(x, mu.shape[-1]))
         one = engine.sum(xx * 0.0, axis=1) + engine.asarray(1.0)
         return one, xx
 
     @staticmethod
     def backend_log_density_from_params(x: Any, mu: Any, kappa: Any, log_const: Any, engine: Any) -> Any:
         """Engine-neutral von Mises-Fisher log-density from fitted parameters."""
-        xx = engine.asarray(x)
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x) or is_symbolic_payload(mu):
+            xx = engine.asarray(x)
+            return engine.sum(xx * mu, axis=-1) * kappa + log_const
+        checked_mu = np.asarray(mu, dtype=np.float64)
+        if checked_mu.ndim not in (1, 2, 3) or checked_mu.shape[-1] < 2:
+            raise ValueError("vMF backend mean direction has invalid geometry")
+        if np.any(~np.isfinite(checked_mu)) or not np.allclose(
+            np.linalg.norm(checked_mu, axis=-1),
+            1.0,
+            rtol=0.0,
+            atol=_UNIT_NORM_ATOL,
+        ):
+            raise ValueError("vMF backend mean direction must contain unit vectors")
+        checked_kappa = np.asarray(kappa, dtype=np.float64)
+        checked_log_const = np.asarray(log_const, dtype=np.float64)
+        if np.any(~np.isfinite(checked_kappa)) or np.any(checked_kappa < 0.0):
+            raise ValueError("vMF backend concentration must be finite and non-negative")
+        if np.any(~np.isfinite(checked_log_const)):
+            raise ValueError("vMF backend normalizer must be finite")
+        xx = engine.asarray(_unit_backend_array(x, checked_mu.shape[-1]))
         return engine.sum(xx * mu, axis=-1) * kappa + log_const
 
     def __init__(
@@ -179,15 +325,27 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
-        dim = len(mu)
-        mu = np.asarray(mu).copy()
-
-        if not np.isfinite(mu).all():
-            raise ValueError("VonMisesFisherDistribution requires mu to be finite, got %r." % (mu.tolist(),))
-        mu_norm = float(np.linalg.norm(mu))
-        if abs(mu_norm - 1.0) > 1.0e-6:
-            raise ValueError("VonMisesFisherDistribution requires mu to have unit norm, got ||mu||=%r." % (mu_norm,))
-        if not np.isfinite(kappa) or kappa < 0:
+        try:
+            raw_mu = np.asarray(mu, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("VonMisesFisherDistribution requires numeric mu.") from exc
+        if raw_mu.ndim != 1 or raw_mu.size < 2:
+            raise ValueError(
+                "VonMisesFisherDistribution requires a vector of dimension at least two."
+            )
+        dim = len(raw_mu)
+        checked_mu = _unit_vector(raw_mu, dim, "vMF mean direction")
+        if isinstance(kappa, (bool, np.bool_)) or np.ndim(kappa) != 0:
+            raise TypeError(
+                "VonMisesFisherDistribution requires scalar concentration."
+            )
+        try:
+            checked_kappa = float(kappa)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                "VonMisesFisherDistribution requires scalar concentration."
+            ) from exc
+        if not np.isfinite(checked_kappa) or checked_kappa < 0:
             # kappa == 0 is the legitimate uniform-density limit (handled below); only reject what a
             # bare `kappa > 0` comparison silently lets through the "else: uniform" branch as if it were
             # that limit -- most importantly NaN, since `nan > 0` is False just like a genuine 0 is.
@@ -195,27 +353,36 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
                 "VonMisesFisherDistribution requires kappa to be finite and non-negative, got %r." % (kappa,)
             )
 
-        if kappa > 0:
+        if checked_kappa > 0:
             # log c_p(kappa) = (p/2 - 1) log kappa - (p/2) log(2 pi) - log I_{p/2-1}(kappa)
             v = (dim / 2.0) - 1.0
-            log_kappa = np.log(kappa)
+            log_kappa = np.log(checked_kappa)
             self.log_const = v * log_kappa - (dim / 2.0) * np.log(2.0 * pi) - lniv(v, log_kappa)
         else:
             # uniform density on the (p-1)-sphere: Gamma(p/2) / (2 pi^{p/2})
             self.log_const = gammaln(dim / 2.0) - np.log(2.0) - (dim / 2.0) * np.log(pi)
 
+        if not np.isfinite(self.log_const):
+            raise ValueError("VonMisesFisherDistribution normalizer must be finite.")
         self.name = name
-        self.dim = dim
-        self.mu = mu
-        self.kappa = kappa
+        self.dim = (
+            None
+            if dim is None
+            else _validated_dimension(dim, "vMF accumulator dimension")
+        )
+        if self.dim is not None and self.dim < 2:
+            raise ValueError("vMF accumulator dimension must be at least two")
+        self.mu = checked_mu
+        self.mu.setflags(write=False)
+        self.kappa = checked_kappa
         self.keys = keys
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the von Mises-Fisher distribution."""
-        s1 = repr(list(self.mu))
+        s1 = repr(self.mu.tolist())
         s2 = repr(self.kappa)
         s3 = repr(self.name)
-        s4 = self.keys
+        s4 = repr(self.keys)
         return "VonMisesFisherDistribution(%s, %s, name=%s, keys=%s)" % (s1, s2, s3, s4)
 
     def density(self, x: Sequence[float] | np.ndarray) -> float:
@@ -248,7 +415,7 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
             Log-density at observation x.
 
         """
-        z = np.asarray(x).copy()
+        z = _unit_vector(x, self.dim)
         return np.dot(z, self.mu) * self.kappa + self.log_const
 
     def density_cumulative(self, x: Sequence[float] | np.ndarray) -> float:
@@ -263,10 +430,9 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         """
         from scipy.integrate import quad
 
-        xx = np.asarray(x, dtype=float)
-        nrm = float(np.linalg.norm(xx))
-        if nrm > 0.0:
-            xx = xx / nrm
+        xx = _unit_vector(x, self.dim)
+        if self.kappa == 0.0:
+            return 1.0
         t = float(np.clip(np.dot(self.mu, xx), -1.0, 1.0))
         k = float(self.kappa)
         a = (self.dim - 3.0) / 2.0
@@ -292,6 +458,12 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         qf = float(q)
         if not 0.0 <= qf <= 1.0:
             raise ValueError("q must be in [0, 1].")
+        if self.kappa == 0.0:
+            if qf != 1.0:
+                raise ValueError(
+                    "uniform vMF density has no probability-ordered quantile below one"
+                )
+            return self.mu.copy()
         k = float(self.kappa)
         a = (self.dim - 3.0) / 2.0
 
@@ -331,13 +503,14 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of log-density (float) of length N.
 
         """
-        return np.dot(x, self.mu) * self.kappa + self.log_const
+        checked = _unit_batch(x, self.dim)
+        return np.dot(checked, self.mu) * self.kappa + self.log_const
 
     def backend_seq_log_density(self, x: np.ndarray, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded unit-vector observations."""
         return self.backend_log_density_from_params(
-            engine.asarray(x),
-            engine.asarray(self.mu),
+            _unit_batch(x, self.dim),
+            engine.asarray(self.mu.copy()),
             engine.asarray(self.kappa),
             engine.asarray(self.log_const),
             engine,
@@ -346,6 +519,10 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def backend_stacked_params(cls, dists: Sequence["VonMisesFisherDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked parameters for equal-dimensional von Mises-Fisher mixtures."""
+        if not dists:
+            raise ValueError("stacked vMF parameters require at least one component")
+        if any(not isinstance(dist, cls) for dist in dists):
+            raise TypeError("stacked vMF parameters require matching distributions")
         dim = int(dists[0].dim)
         if any(int(dist.dim) != dim for dist in dists):
             raise ValueError("Stacked VonMisesFisherDistribution components require equal dimension.")
@@ -359,7 +536,17 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def backend_stacked_log_density(cls, x: np.ndarray, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of von Mises-Fisher component log densities."""
-        xx = engine.asarray(x)
+        raw_mu = np.asarray(params["mu"], dtype=np.float64)
+        if raw_mu.ndim != 2 or raw_mu.shape[1] < 2:
+            raise ValueError("stacked vMF means must have shape (components, dimension)")
+        if np.any(~np.isfinite(raw_mu)) or not np.allclose(
+            np.linalg.norm(raw_mu, axis=1),
+            1.0,
+            rtol=0.0,
+            atol=_UNIT_NORM_ATOL,
+        ):
+            raise ValueError("stacked vMF means must be finite unit vectors")
+        xx = engine.asarray(_unit_batch(x, raw_mu.shape[1]))
         return engine.matmul(xx, params["mu"].T) * params["kappa"][None, :] + params["log_const"][None, :]
 
     @classmethod
@@ -367,8 +554,17 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         cls, x: np.ndarray, weights: Any, params: dict[str, Any], engine: Any
     ) -> tuple[Any, Any]:
         """Return component-stacked legacy ``(count, weighted_vector_sum)`` statistics."""
-        xx = engine.asarray(x)
-        ww = engine.asarray(weights)
+        dim = int(params["mu"].shape[1])
+        checked_x = _unit_batch(x, dim)
+        raw_weights = np.asarray(weights, dtype=np.float64)
+        if raw_weights.ndim != 2 or raw_weights.shape[0] != len(checked_x):
+            raise ValueError(
+                "vMF stacked weights must have exact shape (observations, components)"
+            )
+        if np.any(~np.isfinite(raw_weights)) or np.any(raw_weights < 0.0):
+            raise ValueError("vMF stacked weights must be finite and non-negative")
+        xx = engine.asarray(checked_x)
+        ww = engine.asarray(raw_weights)
         return engine.sum(ww, axis=0), engine.matmul(ww.T, xx)
 
     def sampler(self, seed: int | None = None) -> "VonMisesFisherSampler":
@@ -393,14 +589,17 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
             VonMisesFisherEstimator configured with this distribution's name and keys.
 
         """
-        if pseudo_count is None:
-            return VonMisesFisherEstimator(name=self.name, keys=self.keys)
-        else:
-            return VonMisesFisherEstimator(name=self.name, keys=self.keys)
+        if pseudo_count is not None:
+            raise ValueError("vMF pseudo-count regularization is not implemented")
+        return VonMisesFisherEstimator(
+            dim=self.dim,
+            name=self.name,
+            keys=self.keys,
+        )
 
     def dist_to_encoder(self) -> "VonMisesFisherDataEncoder":
         """Return the encoder for von Mises-Fisher observations."""
-        return VonMisesFisherDataEncoder()
+        return VonMisesFisherDataEncoder(self.dim)
 
 
 class VonMisesFisherSampler(DistributionSampler):
@@ -443,7 +642,9 @@ class VonMisesFisherSampler(DistributionSampler):
         m = (d - 1.0) / 2.0
         c = k * x0 + (d - 1.0) * np.log(1 - x0 * x0)
 
-        sz = 1 if size is None else size
+        sz = 1 if size is None else _validated_sample_size(size)
+        if sz == 0:
+            return np.empty((0, d), dtype=np.float64)
 
         QQ = np.zeros((d, d), dtype=float)
         QQ[0, :] = mu
@@ -506,7 +707,7 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = 0.0
 
         if dim is not None:
-            self.ssum = vec.zeros(dim)
+            self.ssum = vec.zeros(self.dim)
         else:
             self.ssum = None
 
@@ -525,11 +726,22 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         if self.dim is None:
-            self.dim = len(x)
-            self.ssum = vec.zeros(self.dim)
-
-        self.ssum += x * weight
-        self.count += weight
+            try:
+                candidate = np.asarray(x, dtype=np.float64)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("vMF observation must be numeric") from exc
+            if candidate.ndim != 1 or candidate.size < 2:
+                raise ValueError("vMF observation dimension must be at least two")
+            dim = len(candidate)
+        else:
+            dim = self.dim
+        checked_x = _unit_vector(x, dim)
+        checked_weight = _validated_weight(weight)
+        if self.dim is None:
+            self.dim = dim
+            self.ssum = vec.zeros(dim)
+        self.ssum += checked_x * checked_weight
+        self.count += checked_weight
 
     def initialize(self, x: Sequence[float] | np.ndarray, weight: float, rng: RandomState) -> None:
         """Initialize sufficient statistics with a weighted observation.
@@ -545,27 +757,26 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: VonMisesFisherDistribution | None) -> None:
         """Vectorized update of sufficient statistics from sequence encoded data.
 
-        Non-finite or negative weights are dropped from the vector sum.
-
         Args:
             x (np.ndarray): 2-d numpy array of N unit-norm vectors with p columns.
             weights (np.ndarray): Weights for each of the N observations.
             estimate (Optional[VonMisesFisherDistribution]): Previous estimate (unused).
 
         """
+        raw_x = np.asarray(x)
         if self.dim is None:
-            self.dim = x.shape[1]
-            self.ssum = vec.zeros(self.dim)
-
-        good_w = np.bitwise_and(np.isfinite(weights), weights >= 0)
-        if np.all(good_w):
-            x_weight = np.multiply(x.T, weights)
-            self.count += weights.sum()
+            if raw_x.ndim != 2 or raw_x.shape[1] < 2:
+                raise ValueError("vMF observations require dimension at least two")
+            dim = raw_x.shape[1]
         else:
-            x_weight = np.multiply(x[good_w, :].T, weights[good_w])
-            self.count += weights[good_w].sum()  # count only the kept rows, matching ssum (a NaN weight -> NaN count)
-
-        self.ssum += x_weight.sum(axis=1)
+            dim = self.dim
+        checked_x = _unit_batch(x, dim)
+        checked_weights = _validated_weights(weights, len(checked_x))
+        if self.dim is None:
+            self.dim = dim
+            self.ssum = vec.zeros(dim)
+        self.ssum += np.matmul(checked_weights, checked_x)
+        self.count += float(checked_weights.sum())
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState) -> None:
         """Vectorized initialization of sufficient statistics from sequence encoded data.
@@ -588,22 +799,26 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
             Self, with aggregated sufficient statistics.
 
         """
-        if suff_stat[1] is not None and self.ssum is not None:
-            self.ssum += suff_stat[1]
-            self.count += suff_stat[0]
-
-        elif suff_stat[1] is not None and self.ssum is None:
-            # copy on adopt: value() hands out the LIVE array, so adopting the caller's reference
-            # makes every later in-place += here mutate the DONOR accumulator too (chunk combines
-            # and keyed pooling both hit this -- caught by the keyed-protocol sweep)
-            self.ssum = np.asarray(suff_stat[1], dtype=np.float64).copy()
-            self.count = suff_stat[0]
+        count, vector_sum, dim = _validated_vmf_statistics(suff_stat, self.dim)
+        if vector_sum is not None and self.ssum is not None:
+            combined_count = self.count + count
+            combined_sum = self.ssum + vector_sum
+            _validated_vmf_statistics(
+                (combined_count, combined_sum),
+                self.dim,
+            )
+            self.ssum = combined_sum
+            self.count = combined_count
+        elif vector_sum is not None:
+            self.dim = dim
+            self.ssum = vector_sum
+            self.count = count
 
         return self
 
     def value(self) -> tuple[float, np.ndarray]:
         """Returns sufficient statistics as a Tuple of count and weighted vector sum."""
-        return self.count, self.ssum
+        return self.count, None if self.ssum is None else self.ssum.copy()
 
     def from_value(self, x: tuple[float, np.ndarray]) -> "VonMisesFisherAccumulator":
         """Set sufficient statistics of accumulator from value x.
@@ -612,14 +827,24 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
             x (Tuple[float, np.ndarray]): Tuple of count and weighted vector sum.
 
         """
-        self.ssum = None if x[1] is None else np.asarray(x[1], dtype=np.float64).copy()
-        self.count = x[0]
-        self.dim = None if self.ssum is None else len(self.ssum)
+        count, vector_sum, dim = _validated_vmf_statistics(x, self.dim)
+        self.ssum = vector_sum
+        self.count = count
+        if dim is not None:
+            self.dim = dim
+        return self
+
+    def scale(self, c: float) -> "VonMisesFisherAccumulator":
+        """Scale linear vMF sufficient statistics."""
+        checked_scale = _validated_weight(c)
+        self.count *= checked_scale
+        if self.ssum is not None:
+            self.ssum *= checked_scale
         return self
 
     def acc_to_encoder(self) -> "VonMisesFisherDataEncoder":
         """Return the encoder associated with this accumulator."""
-        return VonMisesFisherDataEncoder()
+        return VonMisesFisherDataEncoder(self.dim)
 
 
 class VonMisesFisherAccumulatorFactory(StatisticAccumulatorFactory):
@@ -634,13 +859,23 @@ class VonMisesFisherAccumulatorFactory(StatisticAccumulatorFactory):
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
-        self.dim = dim
+        self.dim = (
+            None
+            if dim is None
+            else _validated_dimension(dim, "vMF accumulator dimension")
+        )
+        if self.dim is not None and self.dim < 2:
+            raise ValueError("vMF accumulator dimension must be at least two")
         self.keys = keys
         self.name = name
 
     def make(self) -> "SequenceEncodableStatisticAccumulator":
         """Return a fresh von Mises-Fisher accumulator."""
-        return VonMisesFisherAccumulator(dim=self.dim, keys=self.keys)
+        return VonMisesFisherAccumulator(
+            dim=self.dim,
+            name=self.name,
+            keys=self.keys,
+        )
 
 
 class VonMisesFisherEstimator(ParameterEstimator):
@@ -662,10 +897,17 @@ class VonMisesFisherEstimator(ParameterEstimator):
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
-        self.dim = dim
+        self.dim = (
+            None
+            if dim is None
+            else _validated_dimension(dim, "vMF estimator dimension")
+        )
+        if self.dim is not None and self.dim < 2:
+            raise ValueError("vMF estimator dimension must be at least two")
+        if pseudo_count is not None:
+            raise ValueError("vMF pseudo-count regularization is not implemented")
         self.name = name
-        self.pseudo_count = pseudo_count
-        self.name = name
+        self.pseudo_count = None
         self.keys = keys
 
     def accumulator_factory(self):
@@ -675,64 +917,126 @@ class VonMisesFisherEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray]) -> "VonMisesFisherDistribution":
         """Estimate a VonMisesFisherDistribution from sufficient statistics.
 
-        The mean direction mu is the normalized weighted vector sum. The concentration kappa solves
-        A_p(kappa) = rhat (rhat = ||ssum|| / count), initialized with the closed-form Banerjee et al.
-        approximation and refined with up to three Newton steps. The Bessel-function ratio A_p(kappa)
-        is evaluated through lniv() so large orders p/2 fall back to the uniform large-order asymptotic
-        instead of underflowing. Two guards keep the solution finite: rhat is clamped below 1 (rhat -> 1
-        sends kappa -> inf), and Newton refinement is skipped within 1e-9 of 1 where A_p'(kappa) -> 0
-        makes the iteration ill-conditioned while the initializer is already accurate.
+        The mean direction is the normalized weighted vector sum. The
+        concentration solves ``A_p(kappa) = rhat`` using a finite bracket and
+        Brent root certificate. Boundary resultants with ``rhat=1`` have only
+        an infinite-concentration MLE and raise a typed fit error.
 
         Args:
             nobs (Optional[float]): Number of observations (unused).
             suff_stat (Tuple[float, np.ndarray]): Tuple of count and weighted vector sum.
 
         Returns:
-            VonMisesFisherDistribution object (uniform on the sphere, kappa = 0, if no data observed).
+            A fitted distribution carrying convergence and identifiability metadata.
 
         """
-        count, ssum = suff_stat
-        dim = len(ssum)
+        from scipy.optimize import brentq
 
-        def _newton(p, r, k):
-            k = max(sys.float_info.min, k)
-            # apk = scipy.special.iv(p/2.0, k)/scipy.special.iv((p/2.0)-1.0, k)
-            apk = np.exp(lniv(p / 2.0, np.log(k)) - lniv((p / 2.0) - 1.0, np.log(k)))
-
-            rv = k - (apk - r) / (1.0 - apk * apk - ((p - 1.0) / k) * apk)
-            rv = max(sys.float_info.min, rv)
-            return rv
-
-        ssum_norm = np.sqrt(np.dot(ssum, ssum))
-
-        if ssum_norm > 0 and count > 0:
-            # rhat -> 1 means kappa -> inf; clamp so the Banerjee initializer
-            # and Newton refinement stay finite
-            rhat = min(ssum_norm / count, 1.0 - 1.0e-10)
-            mu = ssum / ssum_norm
-
-            k = rhat * (dim - (rhat * rhat)) / (1.0 - (rhat * rhat))
-
-            # Newton refinement of A_p(k) = rhat; near rhat = 1 the Banerjee
-            # initializer is already accurate and Newton is ill-conditioned
-            # (A_p'(k) -> 0), so leave the closed-form value
-            if rhat < 1.0 - 1.0e-9:
-                for i in range(3):
-                    k = _newton(dim, rhat, k)
-
-        else:
+        count, ssum, dim = _validated_vmf_statistics(suff_stat, self.dim)
+        if count == 0.0 or ssum is None or dim is None:
+            raise VonMisesFisherFitError(
+                "vMF fitting requires positive observation weight"
+            )
+        ssum_norm = float(np.linalg.norm(ssum))
+        if ssum_norm == 0.0:
             mu = np.ones(dim) / np.sqrt(dim)
-            k = 0.0
+            fitted = VonMisesFisherDistribution(
+                mu,
+                0.0,
+                name=self.name,
+                keys=self.keys,
+            )
+            fitted.fit_metadata = {
+                "converged": True,
+                "solver": "uniform-resultant",
+                "identifiable_direction": False,
+                "resultant_length": 0.0,
+                "score": 0.0,
+                "repairs": (),
+            }
+            return fitted
 
-        return VonMisesFisherDistribution(mu, k, name=self.name, keys=self.keys)
+        rhat = ssum_norm / count
+        if rhat >= 1.0 - _RESULTANT_ATOL:
+            raise VonMisesFisherFitError(
+                "vMF resultant is on the unit boundary and has no finite concentration MLE"
+            )
+        mu = ssum / ssum_norm
+
+        def score(kappa: float) -> float:
+            return _mean_resultant_length(dim, kappa) - rhat
+
+        lower = 0.0
+        upper = max(
+            1.0,
+            rhat * (dim - rhat * rhat) / (1.0 - rhat * rhat),
+        )
+        upper_score = score(upper)
+        bracket_iterations = 0
+        while upper_score < 0.0 and upper < 1.0e12:
+            upper *= 2.0
+            upper_score = score(upper)
+            bracket_iterations += 1
+        if not np.isfinite(upper_score) or upper_score < 0.0:
+            raise VonMisesFisherFitError(
+                "vMF concentration fit has no certified finite bracket"
+            )
+        try:
+            kappa, result = brentq(
+                score,
+                lower,
+                upper,
+                xtol=1.0e-10,
+                full_output=True,
+                disp=False,
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise VonMisesFisherFitError(
+                "vMF concentration root solver failed"
+            ) from exc
+        residual = float(score(float(kappa)))
+        if (
+            not result.converged
+            or not np.isfinite(residual)
+            or abs(residual) > 1.0e-8
+        ):
+            raise VonMisesFisherFitError(
+                "vMF concentration fit lacks an optimality certificate"
+            )
+        fitted = VonMisesFisherDistribution(
+            mu,
+            float(kappa),
+            name=self.name,
+            keys=self.keys,
+        )
+        fitted.fit_metadata = {
+            "converged": True,
+            "solver": "brentq",
+            "identifiable_direction": True,
+            "resultant_length": rhat,
+            "score": residual,
+            "iterations": bracket_iterations + int(result.iterations),
+            "bracket": (lower, upper),
+            "repairs": (),
+        }
+        return fitted
 
 
 class VonMisesFisherDataEncoder(DataSequenceEncoder):
     """Data encoder for sequences of unit-norm vector observations."""
 
+    def __init__(self, dim: int | None = None) -> None:
+        self.dim = (
+            None
+            if dim is None
+            else _validated_dimension(dim, "vMF encoder dimension")
+        )
+        if self.dim is not None and self.dim < 2:
+            raise ValueError("vMF encoder dimension must be at least two")
+
     def __str__(self) -> str:
         """Return the von Mises-Fisher encoder's display name."""
-        return "VonMisesFisherDataEncoder"
+        return "VonMisesFisherDataEncoder(%s)" % repr(self.dim)
 
     def __eq__(self, other) -> bool:
         """Return true when ``other`` is a von Mises-Fisher data encoder.
@@ -744,7 +1048,10 @@ class VonMisesFisherDataEncoder(DataSequenceEncoder):
             True if other is a VonMisesFisherDataEncoder instance, else False.
 
         """
-        return isinstance(other, VonMisesFisherDataEncoder)
+        return (
+            isinstance(other, VonMisesFisherDataEncoder)
+            and self.dim == other.dim
+        )
 
     def seq_encode(self, x: Sequence[float] | np.ndarray) -> np.ndarray:
         """Encode a sequence of N unit-norm vectors for vectorized functions.
@@ -756,5 +1063,23 @@ class VonMisesFisherDataEncoder(DataSequenceEncoder):
             2-d numpy array with N rows and p columns.
 
         """
-        rv = np.asarray(x).copy()
-        return rv
+        if self.dim is None:
+            try:
+                raw = np.asarray(x, dtype=np.float64)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("vMF observations must be numeric") from exc
+            if raw.shape == (0,):
+                raise ValueError(
+                    "cannot infer vMF dimension from an empty observation batch"
+                )
+            if raw.ndim != 2 or raw.shape[1] < 2:
+                raise ValueError("vMF observations require dimension at least two")
+            return _unit_batch(raw, raw.shape[1])
+        return _unit_batch(x, self.dim)
+
+    def row_count(self, x: np.ndarray) -> int:
+        """Return the row count after validating unit-vector geometry."""
+        if self.dim is None:
+            encoded = self.seq_encode(x)
+            return len(encoded)
+        return len(_unit_batch(x, self.dim))
