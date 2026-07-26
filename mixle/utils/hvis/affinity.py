@@ -7,9 +7,26 @@ and converts a log-affinity matrix into row-conditional t-SNE probabilities.
 See the package docstring for the affinity definitions.
 """
 
+from typing import Any, Literal, TypedDict
+
 import numpy as np
 
 from mixle.utils.vector import ImpossibleEvidenceError
+
+
+class AffinityHealthReport(TypedDict):
+    """Machine-readable affinity-health measurement or explicit abstention."""
+
+    status: Literal["ok", "insufficient_evidence"]
+    sufficient_evidence: bool
+    reason: str | None
+    mode: str
+    n: int
+    n_sampled: int
+    fields: list[dict[str, Any]]
+    top_tie_fraction: float | None
+    row_entropy_deficit_nats: float | None
+    diagnosis: list[str]
 
 
 class AffinityCapabilityUnavailableError(RuntimeError):
@@ -1041,6 +1058,24 @@ def log_affinity_block(
     return log_s
 
 
+def _insufficient_affinity_health(
+    *, mode: str, n: int, n_sampled: int, fields: list[dict[str, Any]], reason: str
+) -> AffinityHealthReport:
+    """Build an affinity-health abstention without undefined numeric fields."""
+    return {
+        "status": "insufficient_evidence",
+        "sufficient_evidence": False,
+        "reason": reason,
+        "mode": mode,
+        "n": n,
+        "n_sampled": n_sampled,
+        "fields": fields,
+        "top_tie_fraction": None,
+        "row_entropy_deficit_nats": None,
+        "diagnosis": [reason],
+    }
+
+
 def affinity_health(
     mix_model,
     data,
@@ -1051,7 +1086,7 @@ def affinity_health(
     evidence_cap: float | None = 1.0,
     max_rows: int = 400,
     seed: int = 0,
-) -> dict:
+) -> AffinityHealthReport:
     """Receipts for "why does my embedding look like this": measure the affinity's degeneracies
     BEFORE spending an optimization on them.
 
@@ -1060,7 +1095,10 @@ def affinity_health(
     each cluster as a tiny structureless point. That is a property of the AFFINITY, measurable in
     milliseconds -- not a property of the optimizer, discoverable after a thousand iterations.
 
-    Returns a dict with per-field entries (``geometry``: ``'local'``/``'fisher'``/
+    Returns a typed dictionary with ``status='ok'`` when the diagnostic is
+    measurable or ``status='insufficient_evidence'`` with both numeric
+    diagnostic fields set to ``None``. Per-field entries contain
+    (``geometry``: ``'local'``/``'fisher'``/
     ``'posterior-only'``; ``posterior_sharpness``: mean max field-posterior, 1.0 = fully hard) and
     overall numbers on a row subsample of at most ``max_rows``:
 
@@ -1070,7 +1108,38 @@ def affinity_health(
       the entropy each row can actually reach (ties saturate the calibration). 0 is healthy.
     * ``diagnosis`` -- plain-language findings, empty when healthy.
     """
+    if isinstance(max_rows, (bool, np.bool_)) or not isinstance(max_rows, (int, np.integer)) or max_rows < 2:
+        raise ValueError("max_rows must be an integer of at least two.")
+    max_rows = int(max_rows)
+    if perplexity is not None:
+        if isinstance(perplexity, (bool, np.bool_)) or not isinstance(
+            perplexity, (int, float, np.integer, np.floating)
+        ):
+            raise ValueError("perplexity must be a finite number of at least one or None.")
+        perplexity = float(perplexity)
+        if not np.isfinite(perplexity) or perplexity < 1.0:
+            raise ValueError("perplexity must be a finite number of at least one or None.")
+    if evidence_cap is not None and (not np.isfinite(evidence_cap) or evidence_cap < 0.0):
+        raise ValueError("evidence_cap must be finite and non-negative or None.")
+    valid_named_affinities = {"auto", "coassign", "bhattacharyya", "likelihood", "local", "balanced", "fisher"}
+    if isinstance(affinity, str):
+        if affinity not in valid_named_affinities:
+            raise ValueError(
+                "affinity must be 'auto', 'coassign', 'bhattacharyya', 'likelihood', "
+                "'local', 'balanced', 'fisher', or a pre-built factor list."
+            )
+    elif not _is_prebuilt_affinity(affinity):
+        raise TypeError("affinity must be a named mode or a pre-built factor list.")
+
     data = list(data)
+    if isinstance(affinity, str) and len(data) < 2:
+        return _insufficient_affinity_health(
+            mode=affinity,
+            n=len(data),
+            n_sampled=len(data),
+            fields=[],
+            reason="affinity health requires at least two observations with one non-self neighbor each.",
+        )
     resolved = _resolve_affinity(affinity, mix_model, data, field_weights)
     if isinstance(resolved, str):
         z, ll = _posteriors_and_loglikes(mix_model, data=data)
@@ -1092,14 +1161,33 @@ def affinity_health(
         fields.append({"geometry": geometry, "posterior_sharpness": sharpness})
 
     n = _factor_n(factors[0])
+    if n < 2:
+        return _insufficient_affinity_health(
+            mode=mode,
+            n=n,
+            n_sampled=n,
+            fields=fields,
+            reason="affinity health requires at least two observations with one non-self neighbor each.",
+        )
     rng = np.random.RandomState(seed)
     idx = np.arange(n) if n <= max_rows else np.sort(rng.choice(n, size=max_rows, replace=False))
+    if perplexity is not None and perplexity > len(idx) - 1:
+        return _insufficient_affinity_health(
+            mode=mode,
+            n=n,
+            n_sampled=len(idx),
+            fields=fields,
+            reason=(
+                f"requested perplexity {perplexity:g} requires at least {int(np.ceil(perplexity)) + 1} "
+                f"sampled observations, but only {len(idx)} are available."
+            ),
+        )
     log_s = log_affinity_block(factors, idx, idx, evidence_cap)
     np.fill_diagonal(log_s, -np.inf)
 
     tie_fracs = np.empty(len(idx))
     deficits = np.empty(len(idx))
-    target = None if perplexity is None else np.log(min(float(perplexity), max(1.0, len(idx) - 1.0)))
+    target = None if perplexity is None else np.log(perplexity)
     for i in range(len(idx)):
         row = log_s[i]
         finite = np.isfinite(row)
@@ -1139,6 +1227,9 @@ def affinity_health(
             )
 
     return {
+        "status": "ok",
+        "sufficient_evidence": True,
+        "reason": None,
         "mode": mode,
         "n": n,
         "n_sampled": len(idx),
