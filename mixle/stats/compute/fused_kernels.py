@@ -63,6 +63,7 @@ from mixle.stats.combinator.ignored import IgnoredDistribution
 from mixle.stats.combinator.null_dist import NullDistribution
 from mixle.stats.combinator.optional import OptionalDistribution
 from mixle.stats.combinator.sequence import SequenceDistribution
+from mixle.stats.compute.capability_decline import KernelCapabilityDeclinedError
 from mixle.stats.compute.mixture_evidence import normalize_mixture_log_scores
 from mixle.stats.latent.mixture import MixtureDistribution
 from mixle.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
@@ -1180,11 +1181,11 @@ def build_kernel(dists: Sequence[Any]):
     """Build the fused kernel node for K same-structure distributions."""
     t = type(dists[0])
     if any(type(d) is not t for d in dists):
-        raise ValueError(
+        raise KernelCapabilityDeclinedError(
             "all components must have identical structure (got mixed %s)" % {type(d).__name__ for d in dists}
         )
     if t not in _BUILDERS:
-        raise ValueError("no numba kernel for distribution type %s" % t.__name__)
+        raise KernelCapabilityDeclinedError("no numba kernel for distribution type %s" % t.__name__)
     return _BUILDERS[t](dists)
 
 

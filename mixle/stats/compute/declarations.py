@@ -15,6 +15,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.stats.compute.capability_decline import KernelCapabilityDeclinedError
 from mixle.utils.optional_deps import numba
 
 
@@ -331,7 +332,9 @@ def generated_stacked_params(dists: Sequence[Any], engine: Any) -> dict[str, Any
             if _all_same(values):
                 params[spec.name] = values[0]
                 continue
-            raise ValueError("generated stacked fixed parameter %s must match across components." % spec.name)
+            raise KernelCapabilityDeclinedError(
+                "generated stacked fixed parameter %s must match across components." % spec.name
+            )
         if _all_same(values) and spec.constraint in ("fixed", "optional_integer"):
             params[spec.name] = values[0]
             continue
@@ -340,10 +343,12 @@ def generated_stacked_params(dists: Sequence[Any], engine: Any) -> dict[str, Any
             if _all_same(values):
                 params[spec.name] = values[0]
                 continue
-            raise ValueError("generated stacked parameter %s is not numeric." % spec.name)
+            raise KernelCapabilityDeclinedError("generated stacked parameter %s is not numeric." % spec.name)
         max_ndim = 3 if declaration.exponential_family is not None else 2
         if arr.ndim > max_ndim:
-            raise ValueError("generated stacked parameter %s has unsupported rank %d." % (spec.name, arr.ndim))
+            raise KernelCapabilityDeclinedError(
+                "generated stacked parameter %s has unsupported rank %d." % (spec.name, arr.ndim)
+            )
         params[spec.name] = engine.asarray(arr)
     return params
 

@@ -15,6 +15,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from mixle.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
+from mixle.stats.compute.capability_decline import KernelCapabilityDeclinedError
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -357,7 +358,9 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         n = dists[0].n
         min_val = dists[0].min_val
         if any(d.n != n or d.min_val != min_val for d in dists):
-            raise ValueError("Stacked BinomialDistribution components require shared n and min_val.")
+            raise KernelCapabilityDeclinedError(
+                "Stacked BinomialDistribution components require shared n and min_val."
+            )
         return {
             "p": engine.asarray([d.p for d in dists]),
             "n": engine.asarray(float(n)),
