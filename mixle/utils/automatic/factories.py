@@ -102,6 +102,25 @@ def _validate_positive_int(value: int, *, name: str, minimum: int = 1) -> int:
     return value
 
 
+def _expanded_weighted_values(values: dict[Any, float], cap: int = 200_000) -> np.ndarray:
+    """Materialize count-like weighted observations for initial-fit helpers."""
+    keys: list[float] = []
+    counts: list[int] = []
+    for key, mass in values.items():
+        if isinstance(key, Real) and not isinstance(key, bool) and math.isfinite(float(key)):
+            count = int(round(float(mass)))
+            if count > 0:
+                keys.append(float(key))
+                counts.append(count)
+    if not keys:
+        return np.empty(0, dtype=float)
+    total = sum(counts)
+    if total > cap:
+        scale = cap / total
+        counts = [max(1, int(round(count * scale))) for count in counts]
+    return np.repeat(np.asarray(keys, dtype=float), counts)
+
+
 # The conjugate prior families are reached through the ``mixle.stats`` package
 # namespace (an allowed high-level dependency) rather than importing concrete
 # distribution submodules here, keeping this builder free of concrete-class
@@ -432,29 +451,29 @@ def get_gamma_estimator(
     emp_suff_stat: bool = True,
     use_bstats: bool = False,
 ) -> "ParameterEstimator":
-    """Return a Gamma estimator initialized from the method-of-moments fit of positive values."""
+    """Return a Gamma estimator seeded with empirical mean/log-mean statistics."""
     _validate_pseudo_count(pseudo_count)
     _validate_mass_map(vdict, name="vdict")
     if use_bstats:
         raise NotImplementedError("the Gamma factory has no conjugate prior for jointly unknown shape and scale")
-    k = 1.0
-    theta = 1.0
+    mean = 1.0
+    mean_log = 0.0
     if emp_suff_stat:
-        ss_0 = 0.0
-        ss_1 = 0.0
-        ss_2 = 0.0
+        total = 0.0
+        value_sum = 0.0
+        log_sum = 0.0
         for key, v in vdict.items():
             if math.isfinite(key) and key > 0.0:
-                ss_0 += v
-                ss_1 += key * v
-                ss_2 += key * key * v
-        if ss_0 > 0.0:
-            mean = ss_1 / ss_0
-            var = (ss_2 / ss_0) - mean * mean
-            if mean > 0.0 and var > 0.0:
-                theta = var / mean
-                k = mean / theta
-    return _estimator_provider(False).GammaEstimator(suff_stat=(k, theta))
+                total += v
+                value_sum += key * v
+                log_sum += math.log(key) * v
+        if total > 0.0:
+            mean = value_sum / total
+            mean_log = log_sum / total
+    return _estimator_provider(False).GammaEstimator(
+        pseudo_count=(pseudo_count, pseudo_count),
+        suff_stat=(mean, mean_log),
+    )
 
 
 def get_student_t_estimator(
@@ -463,32 +482,35 @@ def get_student_t_estimator(
     emp_suff_stat: bool = True,
     use_bstats: bool = False,
 ) -> "ParameterEstimator":
-    """Return a fixed-df Student-t estimator; df is set from the excess kurtosis of the data."""
+    """Return a fixed-df Student-t estimator initialized from a likelihood fit."""
     _validate_pseudo_count(pseudo_count)
     _validate_mass_map(vdict, name="vdict")
     if use_bstats:
         raise NotImplementedError("the Student-t factory has no conjugate prior for its fitted parameters")
-    df = 5.0
-    ss_0 = 0.0
-    ss_1 = 0.0
-    ss_2 = 0.0
-    ss_4 = 0.0
-    for key, v in vdict.items():
-        if math.isfinite(key):
-            ss_0 += v
-            ss_1 += key * v
-            ss_2 += key * key * v
-    if ss_0 > 0.0:
-        mean = ss_1 / ss_0
-        var = (ss_2 / ss_0) - mean * mean
-        if var > 0.0:
-            for key, v in vdict.items():
-                if math.isfinite(key):
-                    ss_4 += v * (key - mean) ** 4
-            excess_kurtosis = (ss_4 / ss_0) / (var * var) - 3.0
-            if excess_kurtosis > 0.0:
-                df = min(max(4.0 + 6.0 / excess_kurtosis, 2.5), 100.0)
-    return _estimator_provider(False).StudentTEstimator(df=df)
+    df, loc, scale = 5.0, 0.0, 1.0
+    if emp_suff_stat:
+        values = _expanded_weighted_values(vdict)
+        if values.size >= 4 and float(values.var()) > 0.0:
+            from scipy import stats
+
+            try:
+                fit_df, fit_loc, fit_scale = stats.t.fit(values)
+            except (FloatingPointError, RuntimeError, ValueError):
+                pass
+            else:
+                if (
+                    math.isfinite(float(fit_df))
+                    and math.isfinite(float(fit_loc))
+                    and math.isfinite(float(fit_scale))
+                    and fit_df > 0.0
+                    and fit_scale > 0.0
+                ):
+                    df, loc, scale = float(fit_df), float(fit_loc), float(fit_scale)
+    return _estimator_provider(False).StudentTEstimator(
+        df=df,
+        pseudo_count=pseudo_count,
+        suff_stat=(loc, scale) if pseudo_count is not None else None,
+    )
 
 
 def get_gaussian_mixture_estimator(

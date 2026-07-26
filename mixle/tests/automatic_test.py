@@ -197,7 +197,10 @@ class AutomaticDetectionTestCase(unittest.TestCase):
         from mixle.inference.estimation import fit
         from mixle.stats.bayes.normal_gamma import NormalGammaDistribution
 
-        data = [(0.0, float(i % 4) + 0.25) for i in range(80)]
+        # Include negative support so the generic Bayesian request selects the
+        # supported Normal-Gamma path rather than an unsupported positive-only
+        # family whose factory must now fail explicitly.
+        data = [(0.0, float(i % 4) - 1.5) for i in range(80)]
         est = get_estimator(data, use_bstats=True)
         self.assertEqual(type(est.estimators[0]).__name__, "GaussianEstimator")
         # Bayesian path: each Gaussian leaf carries the conjugate default prior.
