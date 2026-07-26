@@ -23,6 +23,7 @@ import json
 import os
 import random
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,8 @@ from typing import Any
 import numpy as np
 
 _FORMAT_VERSION = 2
+_GLOBAL_METADATA_FIELDS = ("step", "scheduler", "scaler", "parallel_plan", "extra")
+_RANK_LOCAL_METADATA_FIELDS = ("loader_state", "typed_scheduler_state", "rng")
 
 
 def _rank_world() -> tuple[int, int]:
@@ -304,6 +307,13 @@ def _resolve_and_validate_generation(destination: Path) -> tuple[Path, dict[str,
         raise RuntimeError("checkpoint generation metadata is invalid") from exc
     if int(manifest.get("format_version", -1)) != _FORMAT_VERSION:
         raise RuntimeError("unsupported training checkpoint format version")
+    saved_world_size = manifest.get("world_size")
+    if isinstance(saved_world_size, bool) or not isinstance(saved_world_size, int) or saved_world_size <= 0:
+        raise RuntimeError("checkpoint manifest has an invalid world size")
+    declared_sidecars = manifest.get("rank_sidecars")
+    required_sidecars = ["rank-%05d.json" % rank for rank in range(saved_world_size)]
+    if declared_sidecars != required_sidecars:
+        raise RuntimeError("checkpoint manifest rank sidecars do not match its saved world size")
     listed: set[str] = set()
     for record in manifest.get("files", ()):
         relative_name = str(record.get("path", ""))
@@ -316,7 +326,7 @@ def _resolve_and_validate_generation(destination: Path) -> tuple[Path, dict[str,
             raise RuntimeError("checkpoint file is missing: %s" % relative_name)
         if candidate.stat().st_size != int(record["size"]) or _sha256(candidate) != record["sha256"]:
             raise RuntimeError("checkpoint file failed integrity validation: %s" % relative_name)
-    expected_sidecars = set(manifest.get("rank_sidecars", ()))
+    expected_sidecars = set(declared_sidecars)
     if not expected_sidecars or not expected_sidecars.issubset(listed):
         raise RuntimeError("checkpoint manifest does not cover every rank sidecar")
     actual = {
@@ -424,14 +434,11 @@ def save_frozen_training_state(
     )
 
 
-def _load_metadata_from_generation(source: Path, manifest: dict[str, Any]) -> dict[str, Any]:
-    """Decode metadata from the already-validated generation selected by a caller."""
-    rank, world_size = _rank_world()
-    saved_world_size = int(manifest["world_size"])
-    sidecar_rank = rank if world_size == saved_world_size else rank % saved_world_size
-    sidecar_name = "rank-%05d.json" % sidecar_rank
+def _decode_rank_metadata(source: Path, manifest: dict[str, Any], rank: int) -> dict[str, Any]:
+    """Decode one explicitly selected rank sidecar from a validated generation."""
+    sidecar_name = "rank-%05d.json" % rank
     if sidecar_name not in set(manifest["rank_sidecars"]):
-        raise RuntimeError("checkpoint has no metadata sidecar for rank %d" % sidecar_rank)
+        raise RuntimeError("checkpoint has no metadata sidecar for rank %d" % rank)
     try:
         encoded_payload = json.loads((source / sidecar_name).read_text(encoding="utf-8"))
         payload = _safe_decode(encoded_payload)
@@ -439,19 +446,97 @@ def _load_metadata_from_generation(source: Path, manifest: dict[str, Any]) -> di
         raise RuntimeError("checkpoint rank metadata is invalid") from exc
     if not isinstance(payload, dict) or int(payload.get("format_version", -1)) != _FORMAT_VERSION:
         raise RuntimeError("checkpoint rank metadata has an unsupported schema")
-    for required in ("step", "rng", "extra"):
-        if required not in payload:
-            raise RuntimeError("checkpoint rank metadata is missing %s" % required)
-    payload = dict(payload)
-    payload["world_size_changed"] = world_size != saved_world_size
+    required = (*_GLOBAL_METADATA_FIELDS, *_RANK_LOCAL_METADATA_FIELDS)
+    for field in required:
+        if field not in payload:
+            raise RuntimeError("checkpoint rank metadata is missing %s" % field)
+    return payload
+
+
+def _split_rank_metadata(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Separate topology-invariant metadata from rank-owned resume state."""
+    global_metadata = {field: payload[field] for field in _GLOBAL_METADATA_FIELDS}
+    rank_local_metadata = {field: payload[field] for field in _RANK_LOCAL_METADATA_FIELDS}
+    return global_metadata, rank_local_metadata
+
+
+def _load_metadata_from_generation(
+    source: Path,
+    manifest: dict[str, Any],
+    *,
+    rank_local_transform: Callable[
+        [tuple[dict[str, Any], ...], int, int, int], dict[str, Any]
+    ]
+    | None = None,
+) -> dict[str, Any]:
+    """Load global metadata and only topology-compatible or explicitly transformed local state."""
+    rank, world_size = _rank_world()
+    saved_world_size = int(manifest["world_size"])
+    changed = world_size != saved_world_size
+    if not changed:
+        payload = dict(_decode_rank_metadata(source, manifest, rank))
+        if rank_local_transform is not None:
+            raise ValueError("rank_local_transform is only valid when checkpoint world size changes")
+        payload["rank_local_state_status"] = "native"
+        payload["requires_rank_local_transform"] = False
+    else:
+        saved_payloads = tuple(
+            _decode_rank_metadata(source, manifest, old_rank) for old_rank in range(saved_world_size)
+        )
+        global_metadata, _ = _split_rank_metadata(saved_payloads[0])
+        canonical_global = json.dumps(_safe_encode(global_metadata), sort_keys=True, separators=(",", ":"))
+        rank_local_states = []
+        for old_rank, saved_payload in enumerate(saved_payloads):
+            candidate_global, candidate_local = _split_rank_metadata(saved_payload)
+            if json.dumps(_safe_encode(candidate_global), sort_keys=True, separators=(",", ":")) != canonical_global:
+                raise RuntimeError(
+                    "checkpoint global metadata differs across saved ranks; cannot choose an arbitrary copy"
+                )
+            rank_local_states.append(candidate_local)
+        if rank_local_transform is None:
+            rank_local_metadata = {field: None for field in _RANK_LOCAL_METADATA_FIELDS}
+            status = "transform_required"
+        else:
+            rank_local_metadata = rank_local_transform(
+                tuple(rank_local_states), saved_world_size, rank, world_size
+            )
+            if not isinstance(rank_local_metadata, dict):
+                raise TypeError("rank_local_transform must return a metadata dictionary")
+            missing = set(_RANK_LOCAL_METADATA_FIELDS) - set(rank_local_metadata)
+            unknown = set(rank_local_metadata) - set(_RANK_LOCAL_METADATA_FIELDS)
+            if missing or unknown:
+                raise ValueError(
+                    "rank_local_transform must return exactly loader_state, typed_scheduler_state, and rng"
+                )
+            rank_local_metadata = dict(rank_local_metadata)
+            status = "transformed"
+        payload = {
+            "format_version": _FORMAT_VERSION,
+            **global_metadata,
+            **rank_local_metadata,
+            "rank_local_state_status": status,
+            "requires_rank_local_transform": rank_local_transform is None,
+        }
+    payload["world_size_changed"] = changed
     payload["saved_world_size"] = saved_world_size
     return payload
 
 
-def load_training_metadata(path: str) -> dict[str, Any]:
-    """Validate one published generation and safely decode this rank's metadata."""
+def load_training_metadata(
+    path: str,
+    *,
+    rank_local_transform: Callable[
+        [tuple[dict[str, Any], ...], int, int, int], dict[str, Any]
+    ]
+    | None = None,
+) -> dict[str, Any]:
+    """Decode metadata without ever assigning an old rank's local state to a new rank."""
     source, manifest = _resolve_and_validate_generation(Path(path))
-    return _load_metadata_from_generation(source, manifest)
+    return _load_metadata_from_generation(
+        source,
+        manifest,
+        rank_local_transform=rank_local_transform,
+    )
 
 
 def load_training_state(
@@ -463,6 +548,10 @@ def load_training_state(
     scaler: Any = None,
     restore_rng: bool = True,
     allow_world_size_change: bool = False,
+    rank_local_transform: Callable[
+        [tuple[dict[str, Any], ...], int, int, int], dict[str, Any]
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     """Restore complete training state and return its non-tensor metadata."""
 
@@ -479,7 +568,16 @@ def load_training_state(
             "checkpoint world_size changed from %d to %d; pass allow_world_size_change=True to reshard "
             "model state and rebuild rank-local loader state." % (saved_world_size, world_size)
         )
-    payload = _load_metadata_from_generation(source, manifest)
+    if changed and rank_local_transform is None:
+        raise RuntimeError(
+            "world-size-changing restore requires rank_local_transform to explicitly repartition or "
+            "rebuild loader, typed scheduler, and RNG state for each new rank"
+        )
+    payload = _load_metadata_from_generation(
+        source,
+        manifest,
+        rank_local_transform=rank_local_transform,
+    )
 
     # All files and typed metadata have been authenticated and decoded before
     # any live model, optimizer, scheduler, scaler, or RNG state is mutated.
@@ -496,7 +594,7 @@ def load_training_state(
         scheduler.load_state_dict(payload["scheduler"])
     if scaler is not None and payload.get("scaler") is not None:
         scaler.load_state_dict(payload["scaler"])
-    if restore_rng and not changed:
+    if restore_rng and payload.get("rng") is not None:
         _restore_rng_state(payload["rng"])
     return payload
 

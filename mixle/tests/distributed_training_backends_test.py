@@ -242,6 +242,76 @@ def test_checkpoint_generations_are_fresh_and_integrity_is_checked_before_mutati
         torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
+def test_world_size_change_never_reuses_an_old_rank_local_sidecar(tmp_path, monkeypatch):
+    import mixle.utils.parallel.dcp_checkpoint as checkpoint
+
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    save_training_state(
+        model,
+        optimizer,
+        str(tmp_path),
+        step=3,
+        loader_state={"old_rank": 0},
+        typed_scheduler_state={"old_clock": 7},
+    )
+    monkeypatch.setattr(checkpoint, "_rank_world", lambda: (1, 2))
+
+    metadata = checkpoint.load_training_metadata(str(tmp_path))
+    assert metadata["world_size_changed"]
+    assert metadata["rank_local_state_status"] == "transform_required"
+    assert metadata["requires_rank_local_transform"]
+    assert metadata["loader_state"] is None
+    assert metadata["typed_scheduler_state"] is None
+    assert metadata["rng"] is None
+
+
+def test_world_size_change_requires_explicit_rank_local_transform_before_mutation(tmp_path, monkeypatch):
+    import mixle.utils.parallel.dcp_checkpoint as checkpoint
+
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    save_training_state(model, optimizer, str(tmp_path), step=4, loader_state={"old_rank": 0})
+    with torch.no_grad():
+        model.weight.fill_(23.0)
+        model.bias.fill_(29.0)
+    before = [parameter.detach().clone() for parameter in model.parameters()]
+    monkeypatch.setattr(checkpoint, "_rank_world", lambda: (1, 2))
+
+    with pytest.raises(RuntimeError, match="rank_local_transform"):
+        checkpoint.load_training_state(
+            model,
+            optimizer,
+            str(tmp_path),
+            allow_world_size_change=True,
+        )
+    for expected, actual in zip(before, model.parameters()):
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+    seen = {}
+
+    def repartition(saved_rank_states, saved_world_size, rank, world_size):
+        seen["call"] = (saved_rank_states, saved_world_size, rank, world_size)
+        return {
+            "loader_state": {"new_rank": rank, "world_size": world_size},
+            "typed_scheduler_state": {"rebuilt": True},
+            "rng": None,
+        }
+
+    payload = checkpoint.load_training_state(
+        model,
+        optimizer,
+        str(tmp_path),
+        allow_world_size_change=True,
+        rank_local_transform=repartition,
+    )
+    assert seen["call"][1:] == (1, 1, 2)
+    assert seen["call"][0][0]["loader_state"] == {"old_rank": 0}
+    assert payload["loader_state"] == {"new_rank": 1, "world_size": 2}
+    assert payload["typed_scheduler_state"] == {"rebuilt": True}
+    assert payload["rank_local_state_status"] == "transformed"
+
+
 def test_failed_replacement_save_leaves_the_old_checkpoint_fully_loadable(tmp_path, monkeypatch):
     """Regression: replacing an already-valid checkpoint at the same path must never remove its
     _SUCCESS marker before the new write has fully succeeded. Before the fix, save_training_state
