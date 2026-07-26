@@ -19,8 +19,8 @@ This module makes both choices searchable, and makes the search itself a model:
   surrogate learns task-similarity through the fingerprint coords, and a warm-started search -- even
   on a *different* task -- skips the designs that never work anywhere near it.
 * :func:`distill_for_edge` -- the front door: screen candidates at reduced fidelity, promote the
-  promising ones to full training, return the best student that *fits the device*, with the Pareto
-  front over (bytes, agreement) and the updated :class:`DesignModel`.
+  promising ones to full training, return the best student that *fits the device*, with an adaptive
+  selection Pareto front, an independent qualification score, and the updated :class:`DesignModel`.
 * :func:`distill_designer` -- distill the accumulated design ledger into a
   torch-free structured student that predicts whether a design is worth
   training.
@@ -354,9 +354,17 @@ class EdgeSpace:
 
     def decode(self, point: np.ndarray) -> tuple[str, dict[str, Any]]:
         """Unit-cube point -> ``(family, recipe kwargs)``; the mlp recipe carries a ``bits`` precision."""
-        p = np.clip(np.asarray(point, dtype=np.float64).reshape(-1), 0.0, 1.0)
+        if not self.families:
+            raise ValueError("edge space must contain at least one model family")
+        try:
+            p = np.asarray(point, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("design point must contain real numbers") from exc
         if p.size != self.dims():
             raise ValueError(f"design point must have {self.dims()} coordinates, got {p.size}")
+        if not np.all(np.isfinite(p)):
+            raise ValueError("design point must contain only finite coordinates")
+        p = np.clip(p, 0.0, 1.0)
         fam = self.families[min(len(self.families) - 1, int(p[0] * len(self.families)))]
         if fam == "mlp":
             dim = int(self.dim_choices[min(len(self.dim_choices) - 1, int(p[1] * len(self.dim_choices)))])
@@ -389,6 +397,12 @@ class DesignModel:
     """
 
     def __init__(self, signature: str, n_constraints: int, n_fingerprint: int = 0) -> None:
+        if not isinstance(signature, str) or not signature:
+            raise ValueError("design signature must be a non-empty string")
+        if isinstance(n_constraints, bool) or not isinstance(n_constraints, Integral) or n_constraints < 0:
+            raise ValueError("n_constraints must be a non-negative integer")
+        if isinstance(n_fingerprint, bool) or not isinstance(n_fingerprint, Integral) or n_fingerprint < 0:
+            raise ValueError("n_fingerprint must be a non-negative integer")
         self.signature = signature
         self.n_constraints = int(n_constraints)
         self.n_fingerprint = int(n_fingerprint)  # trailing task-fingerprint coords appended to each row
@@ -408,16 +422,60 @@ class DesignModel:
         **tag: Any,
     ) -> None:
         """Append one evaluated design point and its feasibility metadata."""
+        try:
+            vector = np.asarray(point, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("design point must contain real numbers") from exc
+        if vector.size == 0 or not np.all(np.isfinite(vector)):
+            raise ValueError("design point must be a non-empty finite vector")
+        quality = float(quality)
+        if not np.isfinite(quality):
+            raise ValueError("design quality must be finite")
         v = [float(t) for t in violations]
         if len(v) != self.n_constraints:
             raise ValueError(f"expected {self.n_constraints} violation values, got {len(v)}")
+        if not np.all(np.isfinite(v)):
+            raise ValueError("design violations must be finite")
         fp = [float(t) for t in (fingerprint or ())]
         if len(fp) != self.n_fingerprint:
             raise ValueError(f"expected {self.n_fingerprint} fingerprint values, got {len(fp)}")
-        self.X.append([float(t) for t in np.asarray(point, dtype=np.float64).reshape(-1)] + fp)
-        self.quality.append(float(quality))
+        if not np.all(np.isfinite(fp)):
+            raise ValueError("fingerprint values must be finite")
+        if not np.all(np.isfinite(fp)):
+            raise ValueError("design fingerprint values must be finite")
+        row = vector.tolist() + fp
+        if self.X and len(row) != len(self.X[0]):
+            raise ValueError(f"design row width {len(row)} does not match existing width {len(self.X[0])}")
+        self.X.append(row)
+        self.quality.append(quality)
         self.violations.append(v)
         self.tags.append(dict(tag))
+
+    def _validate_ledger(self) -> None:
+        lengths = {
+            len(self.X),
+            len(self.quality),
+            len(self.violations),
+            len(self.tags),
+        }
+        if len(lengths) != 1:
+            raise ValueError("design ledger arrays must have identical row counts")
+        if not self.X:
+            return
+        width = len(self.X[0])
+        if width <= self.n_fingerprint:
+            raise ValueError("design ledger rows must include at least one design coordinate")
+        for index, (row, quality, violations, tag) in enumerate(
+            zip(self.X, self.quality, self.violations, self.tags, strict=True)
+        ):
+            if len(row) != width or not np.all(np.isfinite(row)):
+                raise ValueError(f"design ledger row {index} has invalid width or values")
+            if not np.isfinite(quality):
+                raise ValueError(f"design ledger quality {index} is non-finite")
+            if len(violations) != self.n_constraints or not np.all(np.isfinite(violations)):
+                raise ValueError(f"design ledger violations {index} are invalid")
+            if not isinstance(tag, dict) or any(not isinstance(key, str) for key in tag):
+                raise ValueError(f"design ledger tag {index} must be a string-keyed dictionary")
 
     def __len__(self) -> int:
         return len(self.X)
@@ -435,6 +493,8 @@ class DesignModel:
         fp = [float(t) for t in (fingerprint or ())]
         if len(fp) != self.n_fingerprint:
             raise ValueError(f"expected {self.n_fingerprint} fingerprint values, got {len(fp)}")
+        if not np.all(np.isfinite(fp)):
+            raise ValueError("fingerprint values must be finite")
         # epsilon-wide, not degenerate: the doe samplers require low < high; 1e-9 is invisible to the GP
         return list(bounds) + [(v - 1e-9, v + 1e-9) for v in fp]
 
@@ -460,6 +520,7 @@ class DesignModel:
         task (see :meth:`_fingerprint_bounds`); the returned point has design coords only.
         """
         rng = seed if isinstance(seed, RandomState) else RandomState(seed)
+        self._validate_ledger()
         full_bounds = self._fingerprint_bounds(bounds, fingerprint)
         n_design = len(bounds)
 
@@ -509,6 +570,9 @@ class DesignModel:
         from mixle.models.gaussian_process import GaussianProcessRegressor
 
         pts = np.atleast_2d(np.asarray(points, dtype=np.float64))
+        if pts.ndim != 2 or pts.shape[1] == 0 or not np.all(np.isfinite(pts)):
+            raise ValueError("prediction points must be a finite two-dimensional array")
+        self._validate_ledger()
         fp = [float(t) for t in (fingerprint or ())]
         if len(fp) != self.n_fingerprint:
             raise ValueError(f"expected {self.n_fingerprint} fingerprint values, got {len(fp)}")
@@ -518,6 +582,9 @@ class DesignModel:
         y = np.asarray(self.quality)
         if len(self.X) < 2:
             raise ValueError("need at least two evaluated designs to predict")
+        expected_design_width = len(self.X[0]) - self.n_fingerprint
+        if pts.shape[1] - self.n_fingerprint != expected_design_width:
+            raise ValueError(f"prediction points must have {expected_design_width} design coordinates")
 
         def _posterior(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             scale = float(np.std(target)) or 1.0
@@ -542,6 +609,7 @@ class DesignModel:
     # -- persistence: design knowledge outlives the search --
     def to_json(self) -> dict[str, Any]:
         """Serialize the design ledger for reuse across search runs."""
+        self._validate_ledger()
         return {
             "signature": self.signature,
             "n_constraints": self.n_constraints,
@@ -555,11 +623,35 @@ class DesignModel:
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> DesignModel:
         """Reconstruct a design ledger from serialized JSON data."""
-        m = cls(d["signature"], int(d["n_constraints"]), int(d.get("n_fingerprint", 0)))
-        m.X = [list(map(float, r)) for r in d["X"]]
-        m.quality = [float(v) for v in d["quality"]]
-        m.violations = [list(map(float, r)) for r in d["violations"]]
-        m.tags = [dict(t) for t in d.get("tags", [])]
+        if not isinstance(d, dict):
+            raise TypeError("serialized design ledger must be a dictionary")
+        required = {"signature", "n_constraints", "X", "quality", "violations", "tags"}
+        missing = sorted(required - set(d))
+        if missing:
+            raise ValueError(f"serialized design ledger is missing keys {missing}")
+        m = cls(d["signature"], d["n_constraints"], d.get("n_fingerprint", 0))
+        for key in ("X", "quality", "violations", "tags"):
+            if not isinstance(d[key], list):
+                raise ValueError(f"serialized design ledger {key} must be a list")
+        counts = {len(d[key]) for key in ("X", "quality", "violations", "tags")}
+        if len(counts) != 1:
+            raise ValueError("serialized design ledger arrays must have identical row counts")
+        for index, (row, quality, violations, tag) in enumerate(
+            zip(d["X"], d["quality"], d["violations"], d["tags"], strict=True)
+        ):
+            if not isinstance(row, list) or len(row) <= m.n_fingerprint:
+                raise ValueError(f"serialized design row {index} has invalid width")
+            if not isinstance(violations, list) or not isinstance(tag, dict):
+                raise ValueError(f"serialized design row {index} has invalid metadata")
+            split = len(row) - m.n_fingerprint
+            m.add(
+                row[:split],
+                quality,
+                violations,
+                fingerprint=row[split:],
+                **tag,
+            )
+        m._validate_ledger()
         return m
 
 
@@ -600,14 +692,19 @@ def task_fingerprint(data: Sequence[Any], labels: Sequence[Any]) -> list[float]:
 
 @dataclass
 class EdgeDistillResult:
-    """Outcome of an edge search: the winning student (with measured footprint), whether it truly fits
-    the device, the (bytes, agreement) Pareto front over everything trained, and the updated
-    :class:`DesignModel` carrying the accumulated design knowledge."""
+    """Outcome of edge search and independent deployment qualification.
+
+    ``selection_agreement`` and ``pareto`` describe adaptive evidence from the
+    search panel. ``agreement`` is measured once for the frozen winner on a
+    disjoint test panel and is the only reported deployment-quality estimate.
+    """
 
     model: TaskModel
     family: str
     recipe: dict[str, Any]
     agreement: float
+    selection_agreement: float
+    test_size: int
     footprint: EdgeFootprint
     feasible: bool
     pareto: list[dict[str, Any]]
@@ -636,9 +733,12 @@ def distill_for_edge(
     val_data: Sequence[Any],
     device: DeviceSpec,
     *,
+    test_data: Sequence[Any] | None = None,
+    test_frac: float = 0.25,
     labels: Sequence[str] | None = None,
     train_labels: Sequence[Any] | None = None,
     val_labels: Sequence[Any] | None = None,
+    test_labels: Sequence[Any] | None = None,
     space: EdgeSpace | None = None,
     design: DesignModel | None = None,
     designer: Callable[[tuple], Any] | None = None,
@@ -649,21 +749,90 @@ def distill_for_edge(
     seed: int = 0,
     task: str = "",
 ) -> EdgeDistillResult:
-    """Search structure x training-process for the best student that fits ``device``.
+    """Search structure x process, then qualify the frozen winner independently.
 
-    The teacher labels ``train_data``/``val_data`` once (cached) -- or pass ``train_labels``/
-    ``val_labels`` when the labels already exist (a harvested dataset, an upstream ``solve`` split)
-    and the teacher is then never called (it may be ``None``). Candidates proposed by the
-    :class:`DesignModel` are trained at ``screen_fidelity`` (reduced cost), scored by held-out agreement,
-    and measured (:func:`footprint`); the top ``promote`` feasible screens are re-trained at full
-    fidelity and the best feasible one wins (ties -> smaller). Pass a previous search's ``design``
-    (same space + device shape) to warm-start: the surrogate already knows which regions blow the
-    budget. Pass ``designer`` (the compact judge from :func:`distill_designer`) to veto known-weak
-    proposals before any training is spent. If nothing fits the device, the least-infeasible student
-    is returned with ``feasible=False`` -- inspect ``result.pareto`` for the real trade-off frontier.
+    Candidate screening, promotion, winner selection, and the returned Pareto
+    front use only ``val_data`` (the *search* panel). The selected artifact is
+    then scored exactly once on untouched ``test_data``. If ``test_data`` is
+    omitted, ``val_data`` is deterministically split into disjoint search and
+    test panels. Accordingly, ``result.selection_agreement`` and every Pareto
+    point are adaptive search evidence; ``result.agreement`` is independent
+    deployment evidence.
+
+    The teacher labels each panel once, or callers may provide every matching
+    label panel and pass ``teacher=None``. Validation or test labels never
+    expand the class vocabulary: when ``labels`` is omitted it is derived from
+    training labels alone. Pass a previous compatible ``design`` to warm-start
+    or a distilled ``designer`` to prefilter known-weak proposals. If nothing
+    fits the device, the least-infeasible selected student is returned with
+    ``feasible=False``.
     """
+    if isinstance(train_data, (str, bytes)) or isinstance(val_data, (str, bytes)):
+        raise TypeError("train_data and val_data must be data sequences")
     train_data = list(train_data)
     val_data = list(val_data)
+    if not train_data:
+        raise ValueError("train_data must be non-empty")
+    if (
+        isinstance(test_frac, bool)
+        or not isinstance(test_frac, Real)
+        or not np.isfinite(test_frac)
+        or not 0.0 < float(test_frac) < 1.0
+    ):
+        raise ValueError("test_frac must be a finite fraction strictly between 0 and 1")
+    if isinstance(seed, bool) or not isinstance(seed, Integral) or not 0 <= int(seed) < 2**32:
+        raise ValueError("seed must be an integer in [0, 2**32)")
+    seed = int(seed)
+    for value, name, minimum in (
+        (n_init, "n_init", 1),
+        (n_iter, "n_iter", 0),
+        (promote, "promote", 1),
+    ):
+        if isinstance(value, bool) or not isinstance(value, Integral) or int(value) < minimum:
+            raise ValueError(f"{name} must be an integer >= {minimum}")
+    n_init, n_iter, promote = int(n_init), int(n_iter), int(promote)
+    if (
+        isinstance(screen_fidelity, bool)
+        or not isinstance(screen_fidelity, Real)
+        or not np.isfinite(screen_fidelity)
+        or not 0.0 < float(screen_fidelity) <= 1.0
+    ):
+        raise ValueError("screen_fidelity must be finite and in (0, 1]")
+    screen_fidelity = float(screen_fidelity)
+
+    if test_data is None:
+        if test_labels is not None:
+            raise ValueError("test_labels requires explicit test_data")
+        if len(val_data) < 4:
+            raise ValueError("val_data needs at least four rows for disjoint search and test panels")
+        n_test = max(2, int(round(len(val_data) * float(test_frac))))
+        if n_test >= len(val_data):
+            raise ValueError("test_frac leaves no edge-search rows")
+        order = RandomState(seed).permutation(len(val_data))
+        test_indices = order[:n_test]
+        search_indices = order[n_test:]
+        search_data = [val_data[int(index)] for index in search_indices]
+        independent_data = [val_data[int(index)] for index in test_indices]
+        if val_labels is not None:
+            if len(val_labels) != len(val_data):
+                raise ValueError("val_labels must match val_data length")
+            val_label_list = list(val_labels)
+            search_labels = [val_label_list[int(index)] for index in search_indices]
+            independent_labels = [val_label_list[int(index)] for index in test_indices]
+        else:
+            search_labels = independent_labels = None
+    else:
+        if isinstance(test_data, (str, bytes)):
+            raise TypeError("test_data must be a data sequence")
+        search_data = val_data
+        independent_data = list(test_data)
+        if not search_data:
+            raise ValueError("val_data must be non-empty")
+        if not independent_data:
+            raise ValueError("test_data must be non-empty")
+        search_labels = val_labels
+        independent_labels = test_labels
+
     records = _is_record_data(train_data)
     space = space or EdgeSpace(families=("mlp", "structured") if records else ("mlp",))
     if device.torch_free:
@@ -692,21 +861,40 @@ def distill_for_edge(
     ):
         raise ValueError("design model was built for a different space/device shape; start a fresh one")
 
-    # one teacher pass per dataset -- the search itself never re-queries the teacher; precomputed
-    # labels (train_labels=/val_labels=) skip the teacher entirely
-    if (train_labels is None) != (val_labels is None):
-        raise ValueError("pass both train_labels and val_labels, or neither")
-    if train_labels is not None:
-        if len(train_labels) != len(train_data) or len(val_labels) != len(val_data):
+    # One teacher pass per panel. The independent panel is deliberately not
+    # labeled until after selection has frozen the winning artifact.
+    supplied = (train_labels is not None, search_labels is not None, independent_labels is not None)
+    if any(supplied) and not all(supplied):
+        raise ValueError("pass train, validation, and test labels together, or none of them")
+    if all(supplied):
+        if (
+            len(train_labels) != len(train_data)
+            or len(search_labels) != len(search_data)
+            or len(independent_labels) != len(independent_data)
+        ):
             raise ValueError("precomputed labels must match their data lengths")
         train_y = [str(t) for t in train_labels]
-        val_truth = [str(t) for t in val_labels]
+        search_truth = [str(t) for t in search_labels]
     else:
-        if teacher is None:
-            raise ValueError("teacher may only be None when train_labels/val_labels are provided")
+        if not callable(teacher):
+            raise ValueError("teacher may only be None when every label panel is provided")
         train_y = [str(t) for t in _as_batched(teacher)(train_data)]
-        val_truth = [str(t) for t in _as_batched(teacher)(val_data)]
-    label_list = list(labels) if labels is not None else sorted(set(train_y) | set(val_truth))
+        search_truth = [str(t) for t in _as_batched(teacher)(search_data)]
+    if len(train_y) != len(train_data) or len(search_truth) != len(search_data):
+        raise ValueError("teacher must return exactly one label per input")
+    if labels is None:
+        label_list = sorted(set(train_y))
+    else:
+        if isinstance(labels, (str, bytes)):
+            raise TypeError("labels must be a sequence of class names")
+        label_list = [str(label) for label in labels]
+        if not label_list or any(not label for label in label_list) or len(set(label_list)) != len(label_list):
+            raise ValueError("labels must contain unique non-empty class names")
+        missing_train_labels = sorted(set(train_y) - set(label_list))
+        if missing_train_labels:
+            raise ValueError(f"labels omit training classes {missing_train_labels}")
+    if not label_list:
+        raise ValueError("training labels must contain at least one class")
     fingerprint = task_fingerprint(train_data, train_y)  # conditions the shared ledger on THIS task
 
     def _train(family: str, recipe: dict[str, Any]) -> TaskModel:
@@ -734,10 +922,12 @@ def distill_for_edge(
         family, recipe = space.decode(point)
         run = _scaled(recipe, family, screen_fidelity) if fidelity == "screen" else recipe
         student = _train(family, run)
-        agree = agreement(student, val_truth, val_data)
+        agree = agreement(student, search_truth, search_data)
+        if not np.isfinite(agree) or not 0.0 <= agree <= 1.0:
+            raise ValueError("edge candidate produced invalid selection agreement")
         fp = footprint(
             student,
-            probe_inputs=val_data[: min(16, len(val_data))],
+            probe_inputs=search_data[: min(16, len(search_data))],
             repeats=1,
         )
         viol = device.violations(fp)
@@ -746,7 +936,7 @@ def distill_for_edge(
             "point": np.asarray(point, dtype=float).tolist(),
             "family": family,
             "recipe": run,
-            "agreement": agree,
+            "selection_agreement": agree,
             "bytes": fp.bytes,
             "ops": fp.ops,
             "feasible": device.feasible(fp) and hard_ok,
@@ -756,7 +946,14 @@ def distill_for_edge(
         }
         trials.append(trial)
         design.add(
-            point, agree, viol, fingerprint=fingerprint, family=family, fidelity=fidelity, feasible=trial["feasible"]
+            point,
+            agree,
+            viol,
+            fingerprint=fingerprint,
+            family=family,
+            fidelity=fidelity,
+            feasible=trial["feasible"],
+            evidence_stage="adaptive_search",
         )
         return trial
 
@@ -771,36 +968,82 @@ def distill_for_edge(
 
     # -- promote: full-fidelity re-train of the best feasible screens (fall back to least-infeasible)
     screens = [t for t in trials if t["fidelity"] == "screen"]
-    ranked = sorted(screens, key=lambda t: (not t["feasible"], -t["agreement"], t["bytes"]))
+    ranked = sorted(
+        screens,
+        key=lambda t: (not t["feasible"], -t["selection_agreement"], t["bytes"]),
+    )
     seen: set[str] = set()
     finalists: list[dict[str, Any]] = []
-    for t in ranked:
-        key = json.dumps({"f": t["family"], "r": t["recipe"]}, sort_keys=True)
+
+    def _promote(trial: dict[str, Any]) -> None:
+        if len(finalists) >= promote:
+            return
+        key = json.dumps({"f": trial["family"], "r": trial["recipe"]}, sort_keys=True)
         if key not in seen:
             seen.add(key)
-            finalists.append(t)
-        if len(finalists) >= max(1, promote):
+            finalists.append(trial)
+
+    # When the promotion budget permits, qualify the best screen from each
+    # sampled structural family. Otherwise noisy low-fidelity ties can spend
+    # every full-training slot on one family and defeat the joint search.
+    sampled_families = tuple(dict.fromkeys(t["family"] for t in screens))
+    if promote >= len(sampled_families):
+        for family in sampled_families:
+            _promote(next(t for t in ranked if t["family"] == family))
+    for t in ranked:
+        _promote(t)
+        if len(finalists) >= promote:
             break
     fulls = [_evaluate(np.asarray(t["point"]), "full") for t in finalists]
 
-    best = min(fulls, key=lambda t: (not t["feasible"], -t["agreement"], t["bytes"]))
+    best = min(
+        fulls,
+        key=lambda t: (not t["feasible"], -t["selection_agreement"], t["bytes"]),
+    )
 
-    # -- Pareto front over (bytes, agreement), all fidelities, dominated points dropped
+    # Adaptive Pareto evidence is useful for future search, but is not an
+    # independent quality claim about any candidate.
     from mixle.doe import pareto_mask
 
-    pts = np.array([[t["bytes"], -t["agreement"]] for t in trials], dtype=float)
+    pts = np.array([[t["bytes"], -t["selection_agreement"]] for t in trials], dtype=float)
     front = [
-        {k: t[k] for k in ("family", "recipe", "agreement", "bytes", "ops", "feasible", "fidelity")}
+        {
+            **{
+                k: t[k]
+                for k in (
+                    "family",
+                    "recipe",
+                    "selection_agreement",
+                    "bytes",
+                    "ops",
+                    "feasible",
+                    "fidelity",
+                )
+            },
+            "evidence_stage": "adaptive_search",
+        }
         for t, keep in zip(trials, pareto_mask(pts))
         if keep
     ]
     front.sort(key=lambda d: d["bytes"])
 
+    if all(supplied):
+        independent_truth = [str(t) for t in independent_labels]
+    else:
+        independent_truth = [str(t) for t in _as_batched(teacher)(independent_data)]
+    if len(independent_truth) != len(independent_data):
+        raise ValueError("teacher must return exactly one label per independent input")
+    independent_agreement = agreement(best["model"], independent_truth, independent_data)
+    if not np.isfinite(independent_agreement) or not 0.0 <= independent_agreement <= 1.0:
+        raise ValueError("selected edge artifact produced invalid independent agreement")
+
     return EdgeDistillResult(
         model=best["model"],
         family=best["family"],
         recipe=best["recipe"],
-        agreement=best["agreement"],
+        agreement=independent_agreement,
+        selection_agreement=best["selection_agreement"],
+        test_size=len(independent_data),
         footprint=best["footprint"],
         feasible=bool(best["feasible"]),
         pareto=front,

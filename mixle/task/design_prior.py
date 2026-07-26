@@ -56,6 +56,18 @@ def rank_design_families(
     family gets ``default_score`` (``-inf`` by default: no evidence ranks strictly below any recorded
     family, however weak, rather than being silently omitted or tied with a proven winner).
     """
+    if not isinstance(design, DesignModel):
+        raise TypeError("design must be a DesignModel")
+    design._validate_ledger()
+    if not isinstance(tag_key, str) or not tag_key:
+        raise ValueError("tag_key must be a non-empty string")
+    if np.isnan(default_score) or np.isposinf(default_score):
+        raise ValueError("default_score must be finite or negative infinity")
+    if candidates is not None and (
+        isinstance(candidates, (str, bytes))
+        or any(not isinstance(candidate, str) or not candidate for candidate in candidates)
+    ):
+        raise ValueError("candidates must contain non-empty family strings")
     buckets: dict[str, list[float]] = defaultdict(list)
     for tag, q in zip(design.tags, design.quality):
         fam = tag.get(tag_key)
@@ -63,7 +75,7 @@ def rank_design_families(
             buckets[str(fam)].append(float(q))
 
     families = set(buckets) | (set(str(c) for c in candidates) if candidates else set())
-    scored = [(fam, float(np.mean(buckets[fam])) if fam in buckets else default_score) for fam in families]
+    scored = [(fam, float(np.mean(buckets[fam])) if fam in buckets else float(default_score)) for fam in families]
     return sorted(scored, key=lambda kv: kv[1], reverse=True)
 
 
