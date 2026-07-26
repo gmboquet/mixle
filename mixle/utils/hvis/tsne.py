@@ -16,6 +16,76 @@ from mixle.utils.hvis.affinity import _calibrate_row
 from mixle.utils.optional_deps import HAS_NUMBA, numba
 
 
+def _validate_dense_joint_probability(P: np.ndarray) -> np.ndarray:
+    """Return a normalized, validated dense joint-probability matrix."""
+    p = np.asarray(P, dtype=np.float64)
+    if p.ndim != 2 or p.shape[0] != p.shape[1] or p.shape[0] < 2:
+        raise ValueError("P must be a square matrix with at least two observations.")
+    if not np.all(np.isfinite(p)):
+        raise ValueError("P must contain only finite probabilities.")
+    if np.any(p < 0.0):
+        raise ValueError("P must contain only non-negative probabilities.")
+    if np.any(np.diag(p) != 0.0):
+        raise ValueError("P must have a zero diagonal.")
+    if not np.allclose(p, p.T, rtol=1.0e-10, atol=1.0e-15):
+        raise ValueError("P must be symmetric.")
+    total = float(p.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError("P must contain positive off-diagonal probability mass.")
+    return p.copy() / total
+
+
+def _validate_sparse_joint_probability(P: scipy.sparse.spmatrix) -> scipy.sparse.csr_matrix:
+    """Return a normalized, validated sparse joint-probability matrix."""
+    if not scipy.sparse.issparse(P):
+        raise TypeError("P must be a scipy sparse matrix.")
+    p = P.tocsr().astype(np.float64, copy=True)
+    p.sum_duplicates()
+    p.eliminate_zeros()
+    if p.shape[0] != p.shape[1] or p.shape[0] < 2:
+        raise ValueError("P must be a square matrix with at least two observations.")
+    if not np.all(np.isfinite(p.data)):
+        raise ValueError("P must contain only finite probabilities.")
+    if np.any(p.data < 0.0):
+        raise ValueError("P must contain only non-negative probabilities.")
+    if np.any(p.diagonal() != 0.0):
+        raise ValueError("P must have a zero diagonal.")
+    asymmetry = p - p.T
+    if asymmetry.nnz and not np.allclose(asymmetry.data, 0.0, rtol=1.0e-10, atol=1.0e-15):
+        raise ValueError("P must be symmetric.")
+    total = float(p.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError("P must contain positive off-diagonal probability mass.")
+    p *= 1.0 / total
+    return p
+
+
+def _convergence_update(
+    previous: float | None,
+    current: float,
+    tol: float,
+    worsening_checks: int,
+    *,
+    max_worsening_checks: int = 3,
+) -> tuple[bool, float, int]:
+    """Classify a checked objective without mistaking worsening for convergence."""
+    if not np.isfinite(current):
+        raise FloatingPointError("t-SNE objective became non-finite.")
+    if previous is None:
+        return False, current, 0
+    improvement = previous - current
+    threshold = tol * max(1.0, abs(previous))
+    if 0.0 <= improvement <= threshold:
+        return True, current, 0
+    if improvement < 0.0:
+        worsening_checks += 1
+        if worsening_checks >= max_worsening_checks:
+            raise RuntimeError("t-SNE objective increased at three consecutive convergence checks.")
+    else:
+        worsening_checks = 0
+    return False, current, worsening_checks
+
+
 def t_kernel(tx: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Heavy-tailed student-t kernel on embedding tx.
 
@@ -171,8 +241,7 @@ def tsne_exact(
     if out is None:
         out = sys.stdout
 
-    P = np.asarray(P, dtype=np.float64).copy()
-    P /= P.sum()
+    P = _validate_dense_joint_probability(P)
     n = P.shape[0]
 
     if eta is None:
@@ -189,13 +258,12 @@ def tsne_exact(
     gains = np.ones((n, emb_dim))
 
     P *= early_exaggeration
-    np.maximum(P, min_value, out=P)
 
-    last_kl = np.inf
+    last_kl = None
+    worsening_checks = 0
     for i in range(1, max_its + 1):
         if i == early_its + 1:
             P /= early_exaggeration
-            np.maximum(P, min_value, out=P)
 
         mom = 0.5 if i <= early_its else momentum
         Y, iY, gains, Q = update_embed(P, Y, iY, gains, mom, eta, alpha, min_gain, min_value, center=center)
@@ -212,9 +280,11 @@ def tsne_exact(
 
         if i > early_its and (i % check_every) == 0:
             kl = _kl(P, Q)
-            if last_kl - kl < tol * max(1.0, abs(last_kl)):
+            converged, last_kl, worsening_checks = _convergence_update(
+                last_kl, kl, tol, worsening_checks
+            )
+            if converged:
                 break
-            last_kl = kl
 
     return Y
 
@@ -658,11 +728,7 @@ def _tsne_barnes_hut_from_p(
     if out is None:
         out = sys.stdout
 
-    P = _csr_without_diagonal(P).astype(np.float64, copy=False)
-    total = P.sum()
-    if total <= 0:
-        raise ValueError("P must contain positive off-diagonal probabilities.")
-    P *= 1.0 / total
+    P = _validate_sparse_joint_probability(P)
 
     n = P.shape[0]
     if eta is None:
@@ -682,7 +748,8 @@ def _tsne_barnes_hut_from_p(
     iY = np.zeros_like(Y)
     gains = np.ones_like(Y)
     n_iter = max(int(max_its), 0)
-    last_kl = np.inf
+    last_kl = None
+    worsening_checks = 0
     p_edges = P.tocoo()
     p_rows, p_cols, p_data = p_edges.row, p_edges.col, p_edges.data
     p_upper = scipy.sparse.triu(P, k=1).tocoo()
@@ -735,9 +802,11 @@ def _tsne_barnes_hut_from_p(
                 exact_threshold=exact_repulsion_threshold,
             )
             kl = _sparse_tsne_kl_from_edges(p_rows, p_cols, p_data, Y, kl_z_sum)
-            if last_kl - kl < tol * max(1.0, abs(last_kl)):
+            converged, last_kl, worsening_checks = _convergence_update(
+                last_kl, kl, tol, worsening_checks
+            )
+            if converged:
                 break
-            last_kl = kl
 
     return Y
 
