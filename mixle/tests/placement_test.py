@@ -21,6 +21,8 @@ from mixle.utils.parallel.planner import (
     DeviceSpec,
     EncodedDataHandle,
     LocalEncodedData,
+    Placement,
+    PlacementShard,
     Resources,
     calibrate_resources,
     encoded_data,
@@ -43,6 +45,41 @@ else:
 
 
 class PlacementPlanningTestCase(unittest.TestCase):
+    def test_placement_requires_exact_nonoverlapping_coverage_and_known_devices(self):
+        resources = Resources.local(2)
+        common = {
+            "total_rows": 4,
+            "encoded_row_bytes": 8.0,
+            "transient_row_bytes": 4.0,
+            "model_bytes": 16,
+            "statistic_bytes": 16,
+            "dtype_bytes": 8,
+            "resources": resources,
+        }
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            Placement(
+                shards=(
+                    PlacementShard(resources.devices[0], 0, 3),
+                    PlacementShard(resources.devices[1], 2, 4),
+                ),
+                **common,
+            )
+        with self.assertRaisesRegex(ValueError, "gap"):
+            Placement(
+                shards=(
+                    PlacementShard(resources.devices[0], 0, 1),
+                    PlacementShard(resources.devices[1], 2, 4),
+                ),
+                **common,
+            )
+        with self.assertRaisesRegex(ValueError, "declared resources"):
+            Placement(
+                shards=(PlacementShard(DeviceSpec("foreign"), 0, 4),),
+                **common,
+            )
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            PlacementShard(resources.devices[0], 0, 4, encoded_bytes=-1)
+
     def test_resources_reject_nonfinite_throughput_and_duplicate_devices(self):
         with self.assertRaisesRegex(ValueError, "finite and positive"):
             Resources.from_specs((DeviceSpec("cpu:0", throughput=float("nan")),))
@@ -330,6 +367,21 @@ class PlacementPlanningTestCase(unittest.TestCase):
 
 
 class LocalEncodedDataTestCase(unittest.TestCase):
+    def test_execution_revalidates_external_placement_against_data_and_resources(self):
+        resources = Resources.single_cpu()
+        placement = Placement(
+            shards=(PlacementShard(resources.devices[0], 0, 4),),
+            total_rows=4,
+            encoded_row_bytes=8.0,
+            transient_row_bytes=4.0,
+            model_bytes=16,
+            statistic_bytes=16,
+            dtype_bytes=8,
+            resources=resources,
+        )
+        with self.assertRaisesRegex(ValueError, "data length"):
+            LocalEncodedData([0.0, 1.0, 2.0], model=GaussianDistribution(0.0, 1.0), placement=placement)
+
     def test_encoded_data_protocol_and_factory_preserve_existing_handles(self):
         model = GaussianDistribution(0.0, 1.0)
         data = list(np.linspace(-1.0, 1.0, 8))
