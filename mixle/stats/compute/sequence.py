@@ -21,6 +21,7 @@ from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
+    merge_accumulator_keys,
     validate_estimator_keys,
 )
 from mixle.utils.optional_deps import RDD_TYPES, pyspark
@@ -676,6 +677,7 @@ def estimate(
             nobs = nobs + nobs_for_split
             accumulator.combine(stats_for_split)
 
+        merge_accumulator_keys(accumulator)
         return estimator.estimate(nobs, accumulator.value())
 
     elif hasattr(data, "__iter__"):
@@ -687,4 +689,5 @@ def estimate(
             nobs += 1.0
             accumulator.update(x, 1.0, estimate=prev_estimate)
 
+        merge_accumulator_keys(accumulator)
         return estimator.estimate(nobs, accumulator.value())
