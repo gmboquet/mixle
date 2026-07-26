@@ -312,7 +312,10 @@ class _ClassifierIO:
         These sum to 1 but are *not* a describable random process; conformal calibration is what turns them
         into a coverage guarantee (see :mod:`mixle.task.calibrate`).
         """
-        z = self.logits_batch(module, raw_inputs)
+        # Evaluate the normalization in float64 even when the model emits float32.
+        # Downstream conformal validation deliberately checks row-stochastic input
+        # tightly; float32 accumulation can miss one by several ulps.
+        z = np.asarray(self.logits_batch(module, raw_inputs), dtype=np.float64)
         z = z - z.max(axis=1, keepdims=True)
         e = np.exp(z)
         return e / e.sum(axis=1, keepdims=True)

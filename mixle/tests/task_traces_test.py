@@ -93,6 +93,53 @@ class TraceHarvestTest(unittest.TestCase):
             (Path(tmp) / "junk.json").write_text("{not json")
             traces = harvest_agent_traces(tmp)
         self.assertEqual(len(traces), 4)
+        self.assertEqual(len(traces.rejections), 1)
+        self.assertIn("junk.json", traces.rejections[0].source)
+
+    def test_repeated_requests_keep_stable_ids_and_conflicts_are_explicit(self):
+        from mixle.task import AmbiguousTraceError, harvest_agent_traces
+
+        with tempfile.TemporaryDirectory() as tmp:
+            first = _convo(
+                "same",
+                [
+                    ("user", "repeat", []),
+                    ("assistant", "", [("ping", {})]),
+                    ("user", "repeat", []),
+                    ("assistant", "", [("pong", {})]),
+                ],
+            )
+            (Path(tmp) / "same.json").write_text(json.dumps(first))
+            traces = harvest_agent_traces(tmp)
+        self.assertEqual(len(traces), 2)
+        self.assertEqual([trace.trace_id for trace in traces.traces], ["same.json:0", "same.json:2"])
+        self.assertEqual(traces.by_id("same.json:2").plan[0]["tool"], "pong")
+        with self.assertRaises(AmbiguousTraceError):
+            traces.plan_teacher()("repeat")
+
+    def test_malformed_tool_input_is_rejected_without_losing_readable_turn(self):
+        from mixle.task import harvest_agent_traces
+
+        doc = {
+            "id": "bad-tool",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "do it"}]},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "bad", "input": ["not", "an", "object"]},
+                        {"type": "tool_use", "name": "good", "input": {"value": 0}},
+                    ],
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "bad-tool.json").write_text(json.dumps(doc))
+            traces = harvest_agent_traces(tmp)
+        self.assertEqual(len(traces), 1)
+        self.assertEqual(traces.traces[0].plan, [{"tool": "good", "args": {"value": 0}}])
+        self.assertEqual(len(traces.rejections), 1)
+        self.assertIn("input must be an object", traces.rejections[0].reason)
 
     @unittest.skipUnless(_HAS_TORCH, "torch not installed")
     def test_harvested_traces_feed_the_distillers(self):

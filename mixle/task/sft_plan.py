@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task.toolcall import ToolSpec
+from mixle.task.toolcall import ToolSpec, _tool_spec_map, _validated_args, _validated_call
 
 _EOS = "\n"
 _PROMPT_SEP = "\n=> "
@@ -62,7 +62,12 @@ def _parse_plan(text: str) -> list[dict] | None:
                 k, v = kv.split("=", 1)
                 v = v.strip()
                 # structural characters inside a VALUE mean the text was not a well-formed step list
-                if not k.strip().isidentifier() or not v or any(c in v for c in "()|="):
+                if (
+                    not k.strip().isidentifier()
+                    or not v
+                    or any(c in v for c in "()|=")
+                    or k.strip() in args
+                ):
                     return None
                 args[k.strip()] = v
         steps.append({"tool": name, "args": args})
@@ -121,14 +126,14 @@ class GenerativePlanner:
             spec = self.tools.get(step["tool"])
             if spec is None:
                 return False
-            if not all(step["args"].get(a) for a in spec.required_args):
-                return False
-            if any(k not in spec.args for k in step["args"]):
+            try:
+                args = _validated_args(spec, step["args"])
+            except ValueError:
                 return False
             # copy-fidelity: plan arguments are EXTRACTIVE — a generated value that does not literally
             # occur in the request (or the tool's own fixed vocabulary, e.g. kind=refund) is a silent
             # copy error (order 4242 -> order_id=4202) that spec validity cannot catch. Reject it.
-            for v in step["args"].values():
+            for v in args.values():
                 if str(v) not in request and str(v) not in step["tool"]:
                     return False
         return True
@@ -216,10 +221,14 @@ class GenerativePlanner:
         lm = LM(device=device, **cfg)
         module, _ = load_module(str(p / "lm"), device=device)
         lm.module = module
+        tools = _tool_spec_map(
+            [ToolSpec(n, list(t["args"]), t.get("required")) for n, t in manifest["tools"].items()],
+            reserved=(_EMPTY,),
+        )
         return cls(
             lm=lm,
             codec=_CharCodec.from_itos(manifest["itos"]),
-            tools={n: ToolSpec(n, list(t["args"]), t.get("required")) for n, t in manifest["tools"].items()},
+            tools=tools,
             teacher=teacher,
             plan_agreement=float(manifest.get("plan_agreement", float("nan"))),
             max_new=int(manifest.get("max_new", 160)),
@@ -272,7 +281,7 @@ def sft_planner(
     reqs = [str(r) for r in requests]
     if len(reqs) < 16:
         raise ValueError("sft_planner needs at least 16 example requests")
-    specs = {t.name: t for t in tools}
+    specs = _tool_spec_map(tools, reserved=(_EMPTY,))
 
     rng = np.random.RandomState(seed)
     order = rng.permutation(len(reqs))
@@ -280,11 +289,7 @@ def sft_planner(
     hold = [reqs[i] for i in order[:n_hold]]
     train = [reqs[i] for i in order[n_hold:]]
 
-    traces = {r: list(teacher(r)) for r in train}
-    for plan in traces.values():
-        for step in plan:
-            if step.get("tool") not in specs:
-                raise ValueError(f"teacher plan uses tool {step.get('tool')!r} not in the provided specs")
+    traces = {r: [_validated_call(step, specs) for step in teacher(r)] for r in train}
 
     prompts = {r: r + _PROMPT_SEP for r in train}
     completions = {r: _serialize_plan(traces[r]) for r in train}

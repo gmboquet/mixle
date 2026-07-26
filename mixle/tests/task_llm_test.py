@@ -7,15 +7,28 @@ so the request shape and response parsing are verified without a server.
 import unittest
 
 from mixle.task import llm as L
-from mixle.task.llm import CallableLLM, OpenAICompatLLM, llm_labeler, pick_label
+from mixle.task.llm import (
+    CallableLLM,
+    LLMParseError,
+    LLMResponseError,
+    OpenAICompatLLM,
+    extract_json_object,
+    llm_labeler,
+    pick_label,
+)
 
 
 class PickLabelTest(unittest.TestCase):
-    def test_exact_then_substring_then_fallback(self):
+    def test_exact_then_unique_bounded_reference(self):
         labels = ["spam", "ham"]
         self.assertEqual(pick_label("spam", labels), "spam")
         self.assertEqual(pick_label("This is clearly SPAM.", labels), "spam")
-        self.assertEqual(pick_label("no idea", labels), "spam")  # falls back to the first label
+        with self.assertRaises(LLMParseError):
+            pick_label("no idea", labels)
+        with self.assertRaises(LLMParseError):
+            pick_label("spam or ham", labels)
+        with self.assertRaises(ValueError):
+            pick_label("anything", [])
 
 
 class LabelerTest(unittest.TestCase):
@@ -62,6 +75,20 @@ class ExtractorTest(unittest.TestCase):
         teacher = llm_extractor(CallableLLM(fake), ["id", "vendor", "amount"])
         out = teacher(["INV-1234 Acme $5.00"])
         self.assertEqual(out, [{"id": "1234", "vendor": "Acme"}])  # off-schema 'missing' dropped, absent omitted
+
+    def test_json_decoder_handles_string_braces_and_recovers_after_malformed_candidate(self):
+        parsed = extract_json_object('bad: {"x": } later: {"value": "a } brace", "ok": true}')
+        self.assertEqual(parsed, {"value": "a } brace", "ok": True})
+
+    def test_extracted_values_must_satisfy_the_verbatim_string_contract(self):
+        from mixle.task.llm import llm_extractor
+
+        numeric = llm_extractor(CallableLLM(lambda *_: '{"amount": 5}'), ["amount"])
+        with self.assertRaises(LLMResponseError):
+            numeric(["amount 5"])
+        invented = llm_extractor(CallableLLM(lambda *_: '{"amount": "6"}'), ["amount"])
+        with self.assertRaises(LLMResponseError):
+            invented(["amount 5"])
 
 
 class CallableLLMTest(unittest.TestCase):
@@ -124,6 +151,15 @@ class OpenAICompatTest(unittest.TestCase):
         self.assertEqual(captured["payload"]["model"], "qwen2.5")
         self.assertEqual(captured["payload"]["messages"][0], {"role": "system", "content": "be terse"})
         self.assertEqual(captured["payload"]["messages"][1], {"role": "user", "content": "hi"})
+
+    def test_response_schema_is_validated(self):
+        orig = L._http_post_json
+        L._http_post_json = lambda *_args: {"choices": []}
+        try:
+            with self.assertRaises(LLMResponseError):
+                OpenAICompatLLM("http://localhost/v1", "model").complete("hi")
+        finally:
+            L._http_post_json = orig
 
 
 if __name__ == "__main__":

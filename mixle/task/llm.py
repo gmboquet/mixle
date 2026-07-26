@@ -16,9 +16,21 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
+import re
 import urllib.request
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, runtime_checkable
+
+_MAX_HTTP_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+class LLMResponseError(ValueError):
+    """Raised when an LLM response cannot satisfy the requested typed contract."""
+
+
+class LLMParseError(LLMResponseError):
+    """Raised when a required label or JSON value cannot be parsed unambiguously."""
 
 
 @runtime_checkable
@@ -56,10 +68,24 @@ class CallableLLM:
 
 def _http_post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     """POST JSON and parse JSON back, with only the standard library (monkeypatched in tests)."""
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be a finite positive number")
     data = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", **headers})
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - caller-provided trusted endpoint
-        return json.loads(resp.read().decode())
+        status = getattr(resp, "status", 200)
+        if not isinstance(status, int) or not 200 <= status < 300:
+            raise LLMResponseError(f"LLM endpoint returned HTTP status {status!r}")
+        raw = resp.read(_MAX_HTTP_RESPONSE_BYTES + 1)
+        if len(raw) > _MAX_HTTP_RESPONSE_BYTES:
+            raise LLMResponseError(f"LLM response exceeds {_MAX_HTTP_RESPONSE_BYTES} bytes")
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LLMParseError("LLM endpoint returned invalid UTF-8 JSON") from exc
+        if not isinstance(decoded, dict):
+            raise LLMResponseError("LLM endpoint response must be a JSON object")
+        return decoded
 
 
 class OpenAICompatLLM:
@@ -75,6 +101,29 @@ class OpenAICompatLLM:
         max_tokens: int = 512,
         timeout: float = 60.0,
     ) -> None:
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ValueError("base_url must be a non-empty string")
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("model must be a non-empty string")
+        if (
+            isinstance(max_tokens, bool)
+            or not isinstance(max_tokens, int)
+            or max_tokens <= 0
+        ):
+            raise ValueError("max_tokens must be a positive integer")
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or not math.isfinite(temperature)
+        ):
+            raise ValueError("temperature must be finite")
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
+            raise ValueError("timeout must be a finite positive number")
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
@@ -84,28 +133,63 @@ class OpenAICompatLLM:
 
     def complete(self, prompt: str, *, system: str | None = None, **kwargs: Any) -> str:
         """Call an OpenAI-compatible chat-completions endpoint and return message text."""
+        if not isinstance(prompt, str) or not prompt:
+            raise ValueError("prompt must be a non-empty string")
+        if system is not None and not isinstance(system, str):
+            raise ValueError("system must be a string or None")
+        temperature = kwargs.get("temperature", self.temperature)
+        max_tokens = kwargs.get("max_tokens", self.max_tokens)
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or not math.isfinite(temperature)
+        ):
+            raise ValueError("temperature must be finite")
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
+            raise ValueError("max_tokens must be a positive integer")
         messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
         payload = {
             "model": self.model,
             "messages": messages,
-            "temperature": kwargs.get("temperature", self.temperature),
-            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+            "temperature": temperature,
+            "max_tokens": max_tokens,
         }
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         out = _http_post_json(f"{self.base_url}/chat/completions", headers, payload, self.timeout)
-        return out["choices"][0]["message"]["content"]
+        choices = out.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise LLMResponseError("LLM response must contain a non-empty choices array")
+        message = choices[0].get("message")
+        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+            raise LLMResponseError("LLM response choice must contain string message.content")
+        return message["content"]
 
 
 def pick_label(text: str, labels: Sequence[str]) -> str:
-    """Map a free-text LLM reply to one of ``labels`` (exact, then substring, else the first label)."""
-    low = text.strip().lower()
+    """Map a reply to exactly one declared label, or raise :class:`LLMParseError`."""
+    if not isinstance(text, str):
+        raise LLMParseError("classification response must be text")
+    labels = list(labels)
+    if (
+        not labels
+        or any(not isinstance(label, str) or not label.strip() for label in labels)
+        or len({label.casefold() for label in labels}) != len(labels)
+    ):
+        raise ValueError("labels must be a non-empty sequence of case-insensitively unique strings")
+    normalized = text.strip().casefold()
     for label in labels:
-        if low == str(label).lower():
+        if normalized == label.casefold():
             return label
-    for label in labels:  # the model often answers in a sentence: "This looks like spam."
-        if str(label).lower() in low:
-            return label
-    return labels[0]
+    matches = [
+        label
+        for label in labels
+        if re.search(rf"(?<!\w){re.escape(label.casefold())}(?!\w)", normalized) is not None
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise LLMParseError(f"classification response ambiguously names labels {matches!r}")
+    raise LLMParseError("classification response does not name a declared label")
 
 
 def llm_labeler(
@@ -121,6 +205,8 @@ def llm_labeler(
     :func:`pick_label`. The returned callable has the batched-teacher shape the rest of ``mixle.task`` expects.
     """
     labels = list(labels)
+    # Validate once at construction, not after the provider has already been called.
+    pick_label(str(labels[0]) if labels else "", labels)
     options = ", ".join(str(label) for label in labels)
     instr = instruction or "Classify the following text."
     sys = system or f"You are a precise classifier. Answer with exactly one of: {options}. Output only the label."
@@ -135,22 +221,29 @@ def llm_labeler(
     return teacher
 
 
+def extract_json_object(text: str) -> dict[str, Any]:
+    """Decode the first valid JSON object in arbitrary surrounding text.
+
+    ``JSONDecoder.raw_decode`` provides real JSON string/escape semantics, so braces
+    inside strings do not corrupt the scan. A malformed earlier candidate does not
+    hide a later valid object.
+    """
+    if not isinstance(text, str):
+        raise LLMParseError("JSON response must be text")
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            value, _end = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise LLMParseError("LLM response contains no valid JSON object")
+
+
 def _extract_json_object(text: str) -> dict[str, Any]:
-    """Pull the first JSON object out of an LLM reply (tolerates code fences / surrounding prose)."""
-    start, depth = None, 0
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if start is None:
-                start = i
-            depth += 1
-        elif ch == "}" and start is not None:
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(text[start : i + 1])
-                except ValueError:
-                    return {}
-    return {}
+    """Backward-compatible private alias for :func:`extract_json_object`."""
+    return extract_json_object(text)
 
 
 def llm_extractor(
@@ -166,6 +259,12 @@ def llm_extractor(
     token spans during distillation). The returned callable has the batched-teacher shape the extractor expects.
     """
     fields = list(fields)
+    if (
+        not fields
+        or any(not isinstance(field, str) or not field for field in fields)
+        or len(set(fields)) != len(fields)
+    ):
+        raise ValueError("fields must be a non-empty sequence of unique strings")
     field_list = ", ".join(fields)
     instr = instruction or "Extract the fields from the text."
     sys = system or (
@@ -177,8 +276,17 @@ def llm_extractor(
         out = []
         for t in texts:
             reply = llm.complete(f"{instr}\n\nFields: {field_list}\n\nText: {t}\n\nJSON:", system=sys)
-            parsed = _extract_json_object(reply)
-            out.append({k: str(v) for k, v in parsed.items() if k in fields and v not in (None, "")})
+            parsed = extract_json_object(reply)
+            selected: dict[str, str] = {}
+            for key, value in parsed.items():
+                if key not in fields or value in (None, ""):
+                    continue
+                if not isinstance(value, str):
+                    raise LLMResponseError(f"extracted field {key!r} must be a string")
+                if value not in t:
+                    raise LLMResponseError(f"extracted field {key!r} must be a verbatim input substring")
+                selected[key] = value
+            out.append(selected)
         return out
 
     return teacher
