@@ -24,7 +24,11 @@ from mixle.stats.sets.bernoulli_set import (
     BernoulliSetEstimator,
     BernoulliSetFitError,
 )
-from mixle.stats.sets.integer_step_bernoulli_edit import IntegerStepBernoulliEditEstimator
+from mixle.stats.sets.integer_bernoulli_set import IntegerBernoulliSetDistribution
+from mixle.stats.sets.integer_step_bernoulli_edit import (
+    IntegerStepBernoulliEditDistribution,
+    IntegerStepBernoulliEditEstimator,
+)
 from mixle.stats.univariate.continuous.beta import BetaDistribution
 
 TOL = 1e-9
@@ -310,10 +314,10 @@ class StepBernoulliEditEstimatorTestCase(unittest.TestCase):
             ]
         )
         tot_sum = 10.0
-        est = IntegerStepBernoulliEditEstimator(num_vals=3, pseudo_count=4.0, min_prob=0.0)
-        dist = est.estimate(None, (count_mat, tot_sum, None))
-
         s1 = count_mat[:, 0] + count_mat[:, 2]
+        est = IntegerStepBernoulliEditEstimator(num_vals=3, pseudo_count=4.0, min_prob=0.0)
+        dist = est.estimate(None, (count_mat, tot_sum, (s1, tot_sum)))
+
         s0 = tot_sum - s1
         expected_removal = expected_two_level(count_mat[:, 0] + 1.0, s1 + 2.0)
         expected_addition = expected_two_level(count_mat[:, 1] + 1.0, s0 + 2.0)
@@ -340,10 +344,10 @@ class StepBernoulliEditEstimatorTestCase(unittest.TestCase):
         )
         tot_sum = 10.0
         alpha = 6.0
-        est = IntegerStepBernoulliEditEstimator(num_vals=3, pseudo_count=alpha, suff_stat=reference, min_prob=0.0)
-        dist = est.estimate(None, (count_mat, tot_sum, None))
-
         s1 = count_mat[:, 0] + count_mat[:, 2]
+        est = IntegerStepBernoulliEditEstimator(num_vals=3, pseudo_count=alpha, suff_stat=reference, min_prob=0.0)
+        dist = est.estimate(None, (count_mat, tot_sum, (s1, tot_sum)))
+
         s0 = tot_sum - s1
         expected_removal = expected_two_level(
             count_mat[:, 0] + alpha * reference[:, 1],
@@ -366,19 +370,53 @@ class StepBernoulliEditEstimatorTestCase(unittest.TestCase):
             ]
         )
         est = IntegerStepBernoulliEditEstimator(num_vals=3, pseudo_count=None, min_prob=0.05)
-        dist = est.estimate(None, (count_mat, 10.0, None))
+        s1 = count_mat[:, 0] + count_mat[:, 2]
+        dist = est.estimate(None, (count_mat, 10.0, (s1, 10.0)))
 
         probs = np.exp(dist.log_edit_pmat)
         self.assertGreaterEqual(float(np.min(probs)), 0.05 - 1.0e-12)
         self.assertLessEqual(float(np.max(probs)), 0.95 + 1.0e-12)
         np.testing.assert_allclose(probs[:, 0] + probs[:, 2], 1.0, atol=1.0e-12)
         np.testing.assert_allclose(probs[:, 1] + probs[:, 3], 1.0, atol=1.0e-12)
+        self.assertLessEqual(
+            len(np.unique(np.round(probs[:, 1], decimals=12))),
+            2,
+        )
 
     def test_invalid_step_estimator_regularization_raises(self):
         with self.assertRaises(ValueError):
             IntegerStepBernoulliEditEstimator(num_vals=3, pseudo_count=-1.0)
         with self.assertRaises(ValueError):
             IntegerStepBernoulliEditEstimator(num_vals=3, min_prob=0.75)
+
+    def test_step_round_trip_preserves_nested_model_keys_and_two_levels(self):
+        initial = IntegerBernoulliSetDistribution(np.log([0.2, 0.7, 0.4]))
+        dist = IntegerStepBernoulliEditDistribution(
+            np.log([[0.2, 0.8], [0.6, 0.3], [0.4, 0.7]]),
+            init_dist=initial,
+            name="steps",
+            keys="shared",
+        )
+        estimator = dist.estimator(pseudo_count=2.0)
+        self.assertEqual(estimator.keys, "shared")
+        self.assertIsInstance(
+            estimator.init_est,
+            type(initial.estimator()),
+        )
+        count_mat = np.asarray(
+            [[0.0, 0.0, 10.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]]
+        )
+        initial_counts = count_mat[:, 0] + count_mat[:, 2]
+        fitted = estimator.estimate(
+            None,
+            (count_mat, 10.0, (initial_counts, 10.0)),
+        )
+        self.assertEqual(fitted.keys, "shared")
+        self.assertEqual(fitted.name, "steps")
+        self.assertLessEqual(
+            len(np.unique(np.round(np.exp(fitted.log_edit_pmat[:, 1]), 12))),
+            2,
+        )
 
 
 class SetDistImportSmokeTestCase(unittest.TestCase):

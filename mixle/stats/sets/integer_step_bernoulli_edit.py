@@ -17,8 +17,7 @@ levels (a high level for the top-ranked elements and a low level for the rest), 
 Bernoulli likelihood of the per-element estimates.
 
 Every class here subclasses its non-step counterpart in mixle.stats.sets.integer_bernoulli_edit and
-overrides only what genuinely differs: the estimator's step-fit, the constructor signatures (the step
-distribution/estimator do not carry the non-step ``keys`` plumbing), and the class-name strings used in
+overrides only what genuinely differs: the estimator's step-fit and the class-name strings used in
 ``__str__`` and in the types returned by the distribution's factory methods.
 
 """
@@ -29,9 +28,6 @@ from typing import TypeVar
 import numpy as np
 
 from mixle.engines.arithmetic import *
-from mixle.stats.combinator.null_dist import (
-    NullEstimator,
-)
 from mixle.stats.compute.pdist import (
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -43,9 +39,11 @@ from mixle.stats.sets.integer_bernoulli_edit import (
     IntegerBernoulliEditDistribution,
     IntegerBernoulliEditEnumerator,
     IntegerBernoulliEditEstimator,
+    IntegerBernoulliEditFitError,
     IntegerBernoulliEditSampler,
+    _validated_edit_statistics,
 )
-from mixle.utils.aliasing import MISSING, coalesce_alias
+from mixle.utils.aliasing import MISSING
 
 T = tuple[Sequence[int] | np.ndarray, Sequence[int] | np.ndarray]
 E1 = TypeVar("E1")  ## encoded type for init
@@ -57,7 +55,7 @@ class IntegerStepBernoulliEditDistribution(IntegerBernoulliEditDistribution):
     """Step Bernoulli edit set distribution: each integer independently transitions in/out between two sets.
 
     Identical in form to :class:`IntegerBernoulliEditDistribution`; only the estimator (a two-level step
-    fit) differs. The step distribution does not carry the non-step ``keys`` plumbing.
+    fit) differs.
     """
 
     def __init__(
@@ -65,6 +63,7 @@ class IntegerStepBernoulliEditDistribution(IntegerBernoulliEditDistribution):
         log_edit_pmat: Sequence[tuple[float, float]] | np.ndarray,
         init_dist: SequenceEncodableProbabilityDistribution | None = None,
         name: str | None = None,
+        keys: str | None = None,
     ) -> None:
         """Create a stepwise Bernoulli-edit distribution over integer sets.
 
@@ -79,14 +78,23 @@ class IntegerStepBernoulliEditDistribution(IntegerBernoulliEditDistribution):
             name (Optional[str]): Optional distribution name.
 
         """
-        super().__init__(log_edit_pmat, init_dist=init_dist, name=name)
+        super().__init__(
+            log_edit_pmat,
+            init_dist=init_dist,
+            name=name,
+            keys=keys,
+        )
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the distribution."""
         s1 = repr(list(map(list, self.orig_log_edit_pmat)))
         s2 = repr(self.init_dist)
         s3 = repr(self.name)
-        return "IntegerStepBernoulliEditDistribution(%s, init_dist=%s, name=%s)" % (s1, s2, s3)
+        s4 = repr(self.keys)
+        return (
+            "IntegerStepBernoulliEditDistribution(%s, init_dist=%s, name=%s, keys=%s)"
+            % (s1, s2, s3, s4)
+        )
 
     def sampler(self, seed: int | None = None) -> "IntegerStepBernoulliEditSampler":
         """Create a sampler for this integer step Bernoulli edit distribution.
@@ -110,11 +118,25 @@ class IntegerStepBernoulliEditDistribution(IntegerBernoulliEditDistribution):
             IntegerStepBernoulliEditEstimator: Estimator configured with matching support size.
 
         """
-        return IntegerStepBernoulliEditEstimator(self.num_vals, pseudo_count=pseudo_count, name=self.name)
+        return IntegerStepBernoulliEditEstimator(
+            self.num_vals,
+            init_estimator=self.init_dist.estimator(
+                pseudo_count=pseudo_count,
+            ),
+            pseudo_count=pseudo_count,
+            suff_stat=(
+                None if pseudo_count is None else np.exp(self.log_edit_pmat)
+            ),
+            name=self.name,
+            keys=self.keys,
+        )
 
     def dist_to_encoder(self) -> "IntegerStepBernoulliEditDataEncoder":
         """Return a data encoder for integer step Bernoulli edit observations."""
-        return IntegerStepBernoulliEditDataEncoder(init_encoder=self.init_dist.dist_to_encoder())
+        return IntegerStepBernoulliEditDataEncoder(
+            init_encoder=self.init_dist.dist_to_encoder(),
+            num_vals=self.num_vals,
+        )
 
     def enumerator(self) -> "IntegerStepBernoulliEditEnumerator":
         """Returns IntegerStepBernoulliEditEnumerator iterating set-pairs in descending probability order."""
@@ -141,7 +163,10 @@ class IntegerStepBernoulliEditAccumulator(IntegerBernoulliEditAccumulator):
 
     def acc_to_encoder(self) -> "IntegerStepBernoulliEditDataEncoder":
         """Return a data encoder built from the previous-set accumulator."""
-        return IntegerStepBernoulliEditDataEncoder(init_encoder=self.init_acc.acc_to_encoder())
+        return IntegerStepBernoulliEditDataEncoder(
+            init_encoder=self.init_acc.acc_to_encoder(),
+            num_vals=self.num_vals,
+        )
 
 
 class IntegerStepBernoulliEditAccumulatorFactory(IntegerBernoulliEditAccumulatorFactory):
@@ -158,7 +183,7 @@ class IntegerStepBernoulliEditEstimator(IntegerBernoulliEditEstimator):
     def __init__(
         self,
         num_vals: int = MISSING,
-        init_estimator: ParameterEstimator | None = NullEstimator(),
+        init_estimator: ParameterEstimator | None = None,
         min_prob: float = 1.0e-128,
         pseudo_count: float | None = None,
         suff_stat: np.ndarray | None = None,
@@ -187,17 +212,16 @@ class IntegerStepBernoulliEditEstimator(IntegerBernoulliEditEstimator):
             init_est (ParameterEstimator): Estimator for the previous set x[0].
 
         """
-        self.num_vals = coalesce_alias("num_vals", num_vals, "num_values", num_values, default=MISSING)
-        if pseudo_count is not None and pseudo_count < 0.0:
-            raise ValueError("IntegerStepBernoulliEditEstimator requires a non-negative pseudo_count.")
-        if min_prob is not None and (min_prob < 0.0 or min_prob > 0.5):
-            raise ValueError("IntegerStepBernoulliEditEstimator requires 0 <= min_prob <= 0.5.")
-        self.keys = keys
-        self.pseudo_count = pseudo_count
-        self.suff_stat = suff_stat
-        self.name = name
-        self.min_prob = min_prob
-        self.init_est = init_estimator if init_estimator is not None else NullEstimator()
+        super().__init__(
+            num_vals=num_vals,
+            init_estimator=init_estimator,
+            min_prob=min_prob,
+            pseudo_count=pseudo_count,
+            suff_stat=suff_stat,
+            name=name,
+            keys=keys,
+            num_values=num_values,
+        )
 
     def accumulator_factory(self) -> "IntegerStepBernoulliEditAccumulatorFactory":
         """Return an accumulator factory configured from this estimator."""
@@ -244,8 +268,7 @@ class IntegerStepBernoulliEditEstimator(IntegerBernoulliEditEstimator):
         Sorts the elements by empirical rate, then for each split rank k assigns probability p to
         the top-k elements and q to the rest (estimated by pooled successes over pooled trials on
         each side), and keeps the split maximizing the binomial log-likelihood. Elements with no
-        trials are excluded from the split search and assigned the overall pooled rate (0.5 when
-        no element has trials).
+        trials join the low/background group, so the fitted family never acquires a third level.
 
         Args:
             successes (np.ndarray): Per-element success counts.
@@ -280,7 +303,7 @@ class IntegerStepBernoulliEditEstimator(IntegerBernoulliEditEstimator):
                 q = self.__clip_prob(sl / tl)
                 v2 = (sl * np.log(q) if sl > 0 else 0.0) + ((tl - sl) * np.log1p(-q) if tl > sl else 0.0)
             else:
-                q = 0.0
+                q = self.__clip_prob(0.0)
                 v2 = 0.0
             ll = v1 + v2
             if ll > max_ll:
@@ -289,7 +312,7 @@ class IntegerStepBernoulliEditEstimator(IntegerBernoulliEditEstimator):
 
         p, q, k = max_params
 
-        arr = np.full(N, self.__clip_prob(tot_s / tot_t))
+        arr = np.full(N, q)
         arr[sidx[: k + 1]] = p
         arr[sidx[k + 1 :]] = q
         return arr
@@ -310,20 +333,39 @@ class IntegerStepBernoulliEditEstimator(IntegerBernoulliEditEstimator):
             IntegerStepBernoulliEditDistribution object.
 
         """
-        init_dist = self.init_est.estimate(None, suff_stat[2])
-        count_mat, tot_sum, _ = suff_stat
+        count_mat, tot_sum, init_stats = _validated_edit_statistics(
+            suff_stat,
+            num_vals=self.num_vals,
+        )
+        prior_weight = 0.0 if self.pseudo_count is None else self.pseudo_count
+        if tot_sum == 0.0 and prior_weight == 0.0:
+            raise IntegerBernoulliEditFitError(
+                "Integer step Bernoulli-edit fitting requires positive observation or prior weight"
+            )
+        init_dist = self.init_est.estimate(None, init_stats)
         rem_success, rem_trials, add_success, add_trials = self.__effective_step_counts(count_mat, tot_sum)
         arr1 = self.__get_pqk(rem_success, rem_trials)
         arr2 = self.__get_pqk(add_success, add_trials)
 
-        log_pmat = np.empty((self.num_vals, 4), dtype=np.float64)
+        present_kernel = np.empty((self.num_vals, 2), dtype=np.float64)
         with np.errstate(divide="ignore"):
-            log_pmat[:, 2] = np.log(arr2)
-            log_pmat[:, 0] = np.log(1 - arr2)
-            log_pmat[:, 1] = np.log(arr1)
-            log_pmat[:, 3] = np.log(1 - arr1)
+            present_kernel[:, 0] = np.log(arr2)
+            present_kernel[:, 1] = np.log1p(-arr1)
 
-        return IntegerStepBernoulliEditDistribution(log_pmat, init_dist=init_dist, name=self.name)
+        result = IntegerStepBernoulliEditDistribution(
+            present_kernel,
+            init_dist=init_dist,
+            name=self.name,
+            keys=self.keys,
+        )
+        result.fit_metadata = {
+            "converged": True,
+            "solver": "two-level-weighted-transition-frequency",
+            "regularized": prior_weight > 0.0,
+            "support_size": self.num_vals,
+            "repairs": (),
+        }
+        return result
 
 
 class IntegerStepBernoulliEditDataEncoder(IntegerBernoulliEditDataEncoder):
@@ -334,11 +376,17 @@ class IntegerStepBernoulliEditDataEncoder(IntegerBernoulliEditDataEncoder):
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the encoder."""
-        return "IntegerStepBernoulliEditDataEncoder(init_encoder=" + str(self.init_encoder) + ")"
+        return (
+            "IntegerStepBernoulliEditDataEncoder(init_encoder=%s, num_vals=%r)"
+            % (self.init_encoder, self.num_vals)
+        )
 
     def __eq__(self, other: object) -> bool:
         """Return true when ``other`` is an equivalent integer step Bernoulli-edit encoder."""
         if isinstance(other, IntegerStepBernoulliEditDataEncoder):
-            return other.init_encoder == self.init_encoder
+            return (
+                other.init_encoder == self.init_encoder
+                and other.num_vals == self.num_vals
+            )
         else:
             return False
