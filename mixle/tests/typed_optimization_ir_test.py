@@ -23,8 +23,8 @@ from mixle.experimental.typed_runtime import (
     validate_update_graph,
 )
 from mixle.experimental.typed_runtime.compiler import _bind_child_estimators, _distribution_children
+from mixle.experimental.typed_runtime.contracts import ConvergenceCertificate
 from mixle.inference import optimize
-from mixle.models.energy import EnergyModel, EnergyModelEstimator
 from mixle.models.grad_leaf import GradLeaf
 from mixle.stats import (
     CompositeDistribution,
@@ -86,20 +86,27 @@ def _gaussian_prior():
 
 
 class ContractInferenceTest:
-    def test_closed_form_mle_compiles_without_touching_model(self):
+    def test_unregistered_subclass_compiles_unknown_without_touching_model(self):
         model = _NoTouchGaussian(0.0, 1.0)
         graph = compile_update_graph(model, GaussianEstimator(), nobs=100)
         root = graph.node(graph.root_node)
 
-        assert root.contract.objective_kind is ObjectiveKind.MLE
-        assert root.contract.update_kind is UpdateKind.EXACT_CLOSED_FORM
-        assert root.contract.merge_law is MergeLaw.ADDITIVE
-        assert root.contract.curvature_kind is CurvatureKind.FISHER
-        assert root.contract.state_semantics == frozenset({StateSemantics.IMMUTABLE_RESULT})
+        assert root.contract.objective_kind is ObjectiveKind.UNKNOWN
+        assert root.contract.update_kind is UpdateKind.UNKNOWN
+        assert root.contract.merge_law is MergeLaw.NON_MERGEABLE
+        assert root.contract.curvature_kind is CurvatureKind.UNAVAILABLE
+        assert root.contract.state_semantics == frozenset({StateSemantics.EXTERNAL_STATE})
+        assert not root.contract.exact
+        assert root.contract.convergence_certificate is ConvergenceCertificate.UNKNOWN
         assert root.cost.source == "structural_proxy"
         assert root.cost.compute_units > 0.0
 
-    def test_prior_and_variational_objectives_are_distinct(self):
+        audited = compile_update_graph(GaussianDistribution(0.0, 1.0), GaussianEstimator()).node("n0000").contract
+        assert audited.objective_kind is ObjectiveKind.MLE
+        assert audited.update_kind is UpdateKind.EXACT_CLOSED_FORM
+        assert audited.convergence_certificate is ConvergenceCertificate.UNKNOWN
+
+    def test_prior_is_audited_but_method_named_variational_objective_is_unknown(self):
         prior = _gaussian_prior()
         map_graph = compile_update_graph(GaussianDistribution(0.0, 1.0, prior=prior), GaussianEstimator(prior=prior))
         assert map_graph.node(map_graph.root_node).contract.objective_kind is ObjectiveKind.MAP
@@ -109,28 +116,24 @@ class ContractInferenceTest:
                 return np.zeros(len(enc))
 
         vb_graph = compile_update_graph(VariationalGaussian(0.0, 1.0), GaussianEstimator())
-        assert vb_graph.node(vb_graph.root_node).contract.objective_kind is ObjectiveKind.ELBO
+        variational_contract = vb_graph.node(vb_graph.root_node).contract
+        assert variational_contract.objective_kind is ObjectiveKind.UNKNOWN
+        assert variational_contract.update_kind is UpdateKind.UNKNOWN
 
-    def test_neural_and_surrogate_semantics_are_explicit_without_torch(self):
+    def test_neural_and_surrogate_semantics_are_not_guessed_from_names(self):
         module = _FakeModule()
         mle_leaf = GradLeaf(module)
         mle_graph = compile_update_graph(mle_leaf, mle_leaf.estimator())
         mle = mle_graph.node(mle_graph.root_node).contract
-        assert mle.objective_kind is ObjectiveKind.MLE
-        assert mle.update_kind is UpdateKind.FIRST_ORDER
+        assert mle.objective_kind is ObjectiveKind.UNKNOWN
+        assert mle.update_kind is UpdateKind.UNKNOWN
         assert mle.exact is False
-        assert mle.state_semantics == frozenset({StateSemantics.MUTABLE_PARAMETERS, StateSemantics.STOCHASTIC_RNG})
+        assert mle.state_semantics == frozenset({StateSemantics.EXTERNAL_STATE})
 
         custom_leaf = GradLeaf(module, loss=lambda *_: 0.0)
         surrogate = compile_update_graph(custom_leaf, custom_leaf.estimator()).node("n0000").contract
-        assert surrogate.objective_kind is ObjectiveKind.USER_SURROGATE
+        assert surrogate.objective_kind is ObjectiveKind.UNKNOWN
         assert surrogate.outer_objective_compatible is False
-
-        energy = EnergyModel(module)
-        energy_est = EnergyModelEstimator(module)
-        nce = compile_update_graph(energy, energy_est).node("n0000").contract
-        assert nce.objective_kind is ObjectiveKind.CONTRASTIVE
-        assert nce.outer_objective_compatible is False
 
 
 class DependencyGraphTest:
@@ -195,7 +198,21 @@ class DeclarationAndValidationTest:
     def test_validation_warns_for_mutable_and_surrogate_updates(self):
         module = _FakeModule()
         leaf = GradLeaf(module, loss=lambda *_: 0.0)
-        graph = compile_update_graph(leaf, leaf.estimator())
+        contract = UpdateContract(
+            objective_kind=ObjectiveKind.USER_SURROGATE,
+            update_kind=UpdateKind.FIRST_ORDER,
+            merge_law=MergeLaw.NON_MERGEABLE,
+            state_semantics=frozenset(
+                {
+                    StateSemantics.MUTABLE_PARAMETERS,
+                    StateSemantics.STOCHASTIC_RNG,
+                }
+            ),
+            outer_objective_compatible=False,
+            exact=False,
+            declared_by="test_explicit_neural_contract",
+        )
+        graph = compile_update_graph(leaf, leaf.estimator(), contract_overrides={"root": contract})
         issues = validate_update_graph(graph, strict=True)
         assert {issue.code for issue in issues} == {"transaction-required", "surrogate-objective"}
         assert all(issue.severity is IssueSeverity.WARNING for issue in issues)
@@ -305,8 +322,150 @@ class CapabilityProbeRobustnessTest:
 
         graph = compile_update_graph(_BrokenAttributeGaussian(0.0, 1.0), GaussianEstimator())
         contract = graph.node(graph.root_node).contract
-        assert contract.update_kind is UpdateKind.EXACT_CLOSED_FORM  # the conservative default
-        assert contract.state_semantics == frozenset({StateSemantics.IMMUTABLE_RESULT})
+        assert contract.update_kind is UpdateKind.UNKNOWN
+        assert contract.state_semantics == frozenset({StateSemantics.EXTERNAL_STATE})
+
+
+class FailClosedContractEvidenceTest:
+    def test_arbitrary_estimator_and_latent_method_names_remain_unknown(self):
+        class ArbitraryEstimator(ParameterEstimator):
+            def accumulator_factory(self):
+                raise AssertionError("compiler called accumulator_factory")
+
+            def estimate(self, nobs, suff_stat):
+                raise AssertionError("compiler called estimate")
+
+        class NamedLatentGaussian(GaussianDistribution):
+            def seq_posterior(self, values):
+                raise AssertionError("compiler called seq_posterior")
+
+        contract = compile_update_graph(NamedLatentGaussian(0.0, 1.0), ArbitraryEstimator()).node("n0000").contract
+        assert contract.objective_kind is ObjectiveKind.UNKNOWN
+        assert contract.update_kind is UpdateKind.UNKNOWN
+        assert not contract.exact
+        assert contract.convergence_certificate is ConvergenceCertificate.UNKNOWN
+
+    def test_invalid_partial_enum_is_rejected_instead_of_guessed(self):
+        estimator = GaussianEstimator()
+        estimator.objective_kind = "not-an-objective"
+        with pytest.raises(TypeError, match="invalid partial declaration"):
+            compile_update_graph(GaussianDistribution(0.0, 1.0), estimator)
+
+    def test_callable_contract_hook_and_estimator_factory_are_never_invoked(self):
+        class HookGaussian(GaussianDistribution):
+            hook_calls = 0
+            factory_calls = 0
+
+            def update_contract(self):
+                type(self).hook_calls += 1
+                raise AssertionError("contract hook executed")
+
+            def estimator(self, pseudo_count=None):
+                type(self).factory_calls += 1
+                raise AssertionError("estimator factory executed")
+
+        model = HookGaussian(0.0, 1.0)
+        with pytest.raises(TypeError, match="static UpdateContract"):
+            compile_update_graph(model, GaussianEstimator())
+        assert HookGaussian.hook_calls == 0
+
+        del HookGaussian.update_contract
+        graph = compile_update_graph(model)
+        assert graph.node("n0000").contract.update_kind is UpdateKind.FROZEN
+        assert HookGaussian.factory_calls == 0
+
+    def test_registry_rejects_factories_and_unproven_monotonicity(self):
+        registry = ContractRegistry()
+        with pytest.raises(TypeError, match="UpdateContract"):
+            registry.register(GaussianDistribution, lambda *_: None)
+
+        unsupported = UpdateContract(
+            objective_kind=ObjectiveKind.MLE,
+            update_kind=UpdateKind.EXACT_CLOSED_FORM,
+            merge_law=MergeLaw.ADDITIVE,
+            convergence_certificate=ConvergenceCertificate.MONOTONE_CERTIFIED,
+            declared_by="test_without_acceptance_proof",
+        )
+        with pytest.raises(ValueError, match="acceptance-proof"):
+            registry.register(GaussianDistribution, unsupported)
+
+        empty_proof = UpdateContract(
+            objective_kind=ObjectiveKind.MLE,
+            update_kind=UpdateKind.EXACT_CLOSED_FORM,
+            merge_law=MergeLaw.ADDITIVE,
+            convergence_certificate=ConvergenceCertificate.MONOTONE_CERTIFIED,
+            declared_by="test_empty_acceptance_proof",
+            notes=("acceptance-proof:   ",),
+        )
+        with pytest.raises(ValueError, match="acceptance-proof"):
+            registry.register(GaussianDistribution, empty_proof)
+
+        exact_unknown_objective = UpdateContract(
+            objective_kind=ObjectiveKind.UNKNOWN,
+            update_kind=UpdateKind.EXACT_CLOSED_FORM,
+            merge_law=MergeLaw.ADDITIVE,
+            outer_objective_compatible=False,
+            declared_by="test_unknown_objective",
+        )
+        with pytest.raises(ValueError, match="identify the objective"):
+            registry.register(GaussianDistribution, exact_unknown_objective)
+
+    def test_unused_paths_and_invalid_binding_values_are_rejected(self):
+        model = GaussianDistribution(0.0, 1.0)
+        with pytest.raises(TypeError, match="binding values"):
+            compile_update_graph(model, bindings={"root": object()})
+        with pytest.raises(ValueError, match="unused bindings"):
+            compile_update_graph(model, bindings={"root -> absent": GaussianEstimator()})
+        with pytest.raises(ValueError, match="unused contract overrides"):
+            compile_update_graph(
+                model,
+                contract_overrides={
+                    "root -> absent": UpdateContract(
+                        objective_kind=ObjectiveKind.MLE,
+                        update_kind=UpdateKind.FROZEN,
+                        merge_law=MergeLaw.REPLICATED,
+                        writes=frozenset(),
+                        declared_by="test_unused_path",
+                    )
+                },
+            )
+
+    def test_mapping_keys_cannot_execute_repr_str_or_equality_during_compilation(self):
+        calls = []
+
+        class HostileKey:
+            def __repr__(self):
+                calls.append("repr")
+                raise AssertionError("repr called")
+
+            def __str__(self):
+                calls.append("str")
+                raise AssertionError("str called")
+
+            def __eq__(self, other):
+                calls.append("eq")
+                raise AssertionError("equality called")
+
+            def __hash__(self):
+                return 1
+
+        class MappingModel(ProbabilityDistribution):
+            def __init__(self):
+                self.children = {HostileKey(): GaussianDistribution(0.0, 1.0)}
+
+            def log_density(self, x):
+                raise NotImplementedError
+
+            def sampler(self, seed=None):
+                raise NotImplementedError
+
+            def estimator(self, pseudo_count=None):
+                raise NotImplementedError
+
+        graph = compile_update_graph(MappingModel())
+        assert len(graph.nodes) == 2
+        assert "<key-0>" in graph.node("n0001").path
+        assert calls == []
 
 
 class _TwoLeafModel(ProbabilityDistribution):
