@@ -15,6 +15,7 @@ from mixle.experimental.typed_runtime import (
     ContextNode,
     ContextNodeKind,
     ContextSchedulerConfig,
+    ContextTokenizer,
     EffectiveContextRuntime,
     EvidenceStatus,
     MaterializationPolicy,
@@ -136,6 +137,7 @@ def test_runtime_creates_then_verifies_context_before_explicit_voi_stop():
     materialized = runtime.materialize(
         {"hypothesis": 10.0, "source": 5.0},
         MaterializationPolicy(token_budget=9),
+        ContextTokenizer("whitespace-v1", lambda text: tuple(range(len(text.split())))),
         source_horizon_tokens=1_000_000_000_000,
         required_node_ids=("hypothesis",),
     )
@@ -183,4 +185,8 @@ def test_materialize_requires_completed_run():
         lambda current, receipts: (),
     )
     with pytest.raises(RuntimeError, match="run context"):
-        runtime.materialize({}, MaterializationPolicy(token_budget=1))
+        runtime.materialize(
+            {},
+            MaterializationPolicy(token_budget=1),
+            ContextTokenizer("whitespace-v1", lambda text: tuple(range(len(text.split())))),
+        )

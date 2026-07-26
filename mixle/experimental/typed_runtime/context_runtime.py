@@ -14,6 +14,7 @@ from mixle.experimental.typed_runtime.context_ir import (
     ContextGraph,
 )
 from mixle.experimental.typed_runtime.context_materializer import (
+    ContextTokenizer,
     MaterializationPolicy,
     MaterializedContext,
     materialize_context,
@@ -107,6 +108,7 @@ class EffectiveContextRuntime:
         self,
         relevance: dict[str, float],
         policy: MaterializationPolicy,
+        tokenizer: ContextTokenizer,
         *,
         source_horizon_tokens: int | None = None,
         required_node_ids: tuple[str, ...] = (),
@@ -120,6 +122,7 @@ class EffectiveContextRuntime:
             self.graph,
             relevance,
             policy,
+            tokenizer,
             source_horizon_tokens=source_horizon_tokens,
             required_node_ids=required_node_ids,
             context_actions=len(rows),
