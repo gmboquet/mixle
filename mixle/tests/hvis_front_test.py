@@ -90,6 +90,16 @@ class FitHealthTest(unittest.TestCase):
         data, _ = _data3(n_per=40)
         report = model_fit_health(_MODEL3, data)
         self.assertEqual(report["diagnosis"], [])
+        for component in report["components"]:
+            if component["coverage"] is not None:
+                self.assertEqual(component["coverage_reference"], "held_out_predictive_f")
+                self.assertGreater(component["coverage_reference_points"], 0)
+                self.assertGreater(component["coverage_evaluation_points"], 0)
+                self.assertEqual(
+                    component["coverage_reference_points"] + component["coverage_evaluation_points"],
+                    component["n_points"],
+                )
+                self.assertIn("coverage_calibration_pvalue", component)
 
     def test_holdout_drop_is_reported(self):
         data, _ = _data3(n_per=40)
