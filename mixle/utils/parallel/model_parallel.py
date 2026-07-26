@@ -42,6 +42,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.utils.parallel.planner import EncodedDataHandle, _global_key_merge, register_encoded_data_backend
+from mixle.utils.vector import ImpossibleEvidenceError
 
 
 class UnrealizedModelPlacementError(RuntimeError):
@@ -184,6 +185,74 @@ def _component_encs(model: Any, enc: Any, k: int) -> list[Any]:
     return [_component_enc(enc, i) for i in range(k)]
 
 
+def _validated_mixture_state(model: Any, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return a consistent simplex/log-simplex pair for a component fold."""
+    components = getattr(model, "components", ())
+    if k <= 0 or len(components) != k:
+        raise ValueError("component fold requires a non-empty component list matching num_components")
+    weights = np.asarray(getattr(model, "w", None), dtype=np.float64)
+    log_weights = np.asarray(getattr(model, "log_w", None), dtype=np.float64)
+    zero = np.asarray(getattr(model, "zw", None))
+    if weights.shape != (k,) or log_weights.shape != (k,) or zero.shape != (k,):
+        raise ValueError("mixture weights, log weights, and zero mask must match num_components")
+    if zero.dtype.kind != "b":
+        raise ValueError("mixture zero-weight mask must be boolean")
+    if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
+        raise ValueError("mixture weights must be finite and non-negative")
+    if not np.isclose(float(weights.sum()), 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError("mixture weights must sum to one before component folding")
+    expected_zero = weights == 0.0
+    if not np.array_equal(zero, expected_zero):
+        raise ValueError("mixture zero-weight mask is inconsistent with its weights")
+    if np.any(np.isnan(log_weights)) or np.any(np.isposinf(log_weights)):
+        raise ValueError("mixture log weights may contain only finite values or -inf")
+    expected_log = np.full(k, -np.inf, dtype=np.float64)
+    np.log(weights, out=expected_log, where=~expected_zero)
+    if not np.array_equal(np.isneginf(log_weights), expected_zero) or not np.allclose(
+        log_weights[~expected_zero],
+        expected_log[~expected_zero],
+        rtol=1.0e-12,
+        atol=1.0e-14,
+    ):
+        raise ValueError("mixture log weights are inconsistent with its simplex weights")
+    return log_weights, zero
+
+
+def _weighted_component_responsibilities(log_joint: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """Normalize component log-joints with explicit non-finite semantics."""
+    scores = np.asarray(log_joint, dtype=np.float64).copy()
+    obs_weights = np.asarray(weights, dtype=np.float64)
+    if scores.ndim != 2 or scores.shape[1] == 0:
+        raise ValueError("component log-joints must be a non-empty two-dimensional matrix")
+    if obs_weights.shape != (scores.shape[0],):
+        raise ValueError("observation weights must align with component log-joint rows")
+    if np.any(~np.isfinite(obs_weights)) or np.any(obs_weights < 0.0):
+        raise ValueError("observation weights must be finite and non-negative")
+    if np.any(np.isnan(scores)):
+        raise ValueError("component log-likelihoods must not contain NaN")
+
+    positive = np.isposinf(scores)
+    has_positive = positive.any(axis=1)
+    all_negative = np.isneginf(scores).all(axis=1)
+    if np.any(all_negative):
+        rows = np.flatnonzero(all_negative).tolist()
+        raise ImpossibleEvidenceError("mixture evidence has zero probability at row(s) %s" % rows)
+
+    # A +inf log-joint dominates every finite entry. Multiple +inf branches
+    # split the limiting mass equally, matching a stable softmax's explicit
+    # extended-real convention.
+    if np.any(has_positive):
+        scores[has_positive] = np.where(positive[has_positive], 0.0, -np.inf)
+
+    maxima = scores.max(axis=1, keepdims=True)
+    scores -= maxima
+    np.exp(scores, out=scores)
+    np.sum(scores, axis=1, keepdims=True, out=maxima)
+    np.divide(obs_weights[:, None], maxima, out=maxima)
+    scores *= maxima
+    return scores
+
+
 def _fold_component_into(
     acc: Any, model: Any, enc: Any, weights: np.ndarray, parallel: bool, sub: frozenset[int], num_workers: int | None
 ) -> None:
@@ -193,26 +262,21 @@ def _fold_component_into(
     (which share this exact responsibility arithmetic and differ only in per-component encoding routing)."""
     k = int(model.num_components)
     cenc = _component_encs(model, enc, k)
-    log_w = np.asarray(model.log_w, dtype=np.float64)
-    zw = model.zw
+    log_w, zw = _validated_mixture_state(model, k)
     ll_mat = np.zeros((len(weights), k), dtype=np.float64)
     ll_mat.fill(-np.inf)
 
     def score(i: int) -> None:  # distributed: the expensive per-component emission scoring
         if not zw[i]:
-            ll_mat[:, i] = model.components[i].seq_log_density(cenc[i]) + log_w[i]
+            component_scores = np.asarray(model.components[i].seq_log_density(cenc[i]), dtype=np.float64)
+            if component_scores.shape != (len(weights),):
+                raise ValueError("component %d returned log-likelihood shape %r" % (i, component_scores.shape))
+            if np.any(np.isnan(component_scores)):
+                raise ValueError("component %d returned NaN log-likelihoods" % i)
+            ll_mat[:, i] = component_scores + log_w[i]
 
     _run(parallel, score, range(k), num_workers)
-
-    ll_max = ll_mat.max(axis=1, keepdims=True)  # central, exact (identical buffer reuse to the serial path)
-    bad_rows = np.isinf(ll_max.flatten())
-    ll_mat[bad_rows, :] = log_w.copy()
-    ll_max[bad_rows] = np.max(log_w)
-    ll_mat -= ll_max
-    np.exp(ll_mat, out=ll_mat)
-    np.sum(ll_mat, axis=1, keepdims=True, out=ll_max)
-    np.divide(weights[:, None], ll_max, out=ll_max)
-    ll_mat *= ll_max  # ll_mat[:, i] is now responsibility_i * weight
+    ll_mat = _weighted_component_responsibilities(ll_mat, weights)
 
     def accum(i: int) -> None:  # distributed: disjoint per-component statistics, recursing into the child
         w_loc = ll_mat[:, i]
@@ -276,6 +340,9 @@ def model_parallel_fold(
 ) -> None:
     """Run a component-parallel E-step over a fully resident model."""
 
+    weights = np.asarray(weights, dtype=np.float64)
+    if weights.ndim != 1 or np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
+        raise ValueError("fold weights must be a finite, non-negative one-dimensional array")
     selected = _parallel_ids(model, num_workers) if parallel_ids is None else parallel_ids
     _fold_into(acc, model, enc, weights, selected, num_workers)
 
@@ -334,11 +401,19 @@ class ModelParallelEncodedData(EncodedDataHandle):
         """Initialize a model by randomly selecting observations with probability ``p``."""
         from mixle.stats import validate_estimator_keys
 
+        try:
+            p = float(p)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("initialization probability must be a real scalar") from exc
+        if not np.isfinite(p) or p < 0.0 or p > 1.0:
+            raise ValueError("initialization probability must be finite and in [0, 1]")
         validate_estimator_keys(estimator)
         acc = estimator.accumulator_factory().make()
         rng_w = np.random.RandomState(seed=rng.randint(2**31))
         weights = np.zeros(self.size, dtype=np.float64)
         weights[rng_w.rand(self.size) <= p] = 1.0
+        if not np.any(weights):
+            raise ImpossibleEvidenceError("initialization selected no observations")
         acc.seq_initialize(self.enc, weights, rng)
         _global_key_merge(acc)
         return estimator.estimate(float(weights.sum()), acc.value())

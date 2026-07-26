@@ -120,6 +120,53 @@ class ComponentParallelTest(unittest.TestCase):
         self.assertEqual(str(local), str(mp))
 
 
+class ComponentResponsibilityValidationTest(unittest.TestCase):
+    def test_positive_infinity_dominates_and_ties_split_mass(self):
+        from mixle.utils.parallel.model_parallel import _weighted_component_responsibilities
+
+        result = _weighted_component_responsibilities(
+            np.asarray([[np.inf, np.inf, 0.0], [0.0, -np.inf, 0.0]]),
+            np.asarray([2.0, 3.0]),
+        )
+        np.testing.assert_equal(result, np.asarray([[1.0, 1.0, 0.0], [1.5, 0.0, 1.5]]))
+
+    def test_impossible_and_nan_evidence_are_rejected(self):
+        from mixle.utils.parallel.model_parallel import _weighted_component_responsibilities
+        from mixle.utils.vector import ImpossibleEvidenceError
+
+        with self.assertRaises(ImpossibleEvidenceError):
+            _weighted_component_responsibilities(np.asarray([[-np.inf, -np.inf]]), np.ones(1))
+        with self.assertRaises(ValueError):
+            _weighted_component_responsibilities(np.asarray([[0.0, np.nan]]), np.ones(1))
+
+    def test_mutated_mixture_simplex_is_rejected_before_folding(self):
+        est = stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(2)])
+        model = stats.MixtureDistribution(
+            [stats.GaussianDistribution(0.0, 1.0), stats.GaussianDistribution(1.0, 1.0)],
+            [0.5, 0.5],
+        )
+        data = [0.0, 1.0, 2.0]
+        model.w[0] = 0.5
+        model.w[1] = 0.75
+        encoded = model.dist_to_encoder().seq_encode(data)
+        acc = est.accumulator_factory().make()
+        from mixle.utils.parallel.model_parallel import model_parallel_fold
+
+        with self.assertRaisesRegex(ValueError, "sum to one"):
+            model_parallel_fold(acc, model, encoded, np.ones(3), num_workers=2)
+
+    def test_initialization_probability_and_empty_selection_are_rejected(self):
+        from mixle.utils.vector import ImpossibleEvidenceError
+
+        estimator = stats.GaussianEstimator()
+        handle = ModelParallelEncodedData([0.0, 1.0], estimator=estimator)
+        for p in (float("nan"), -0.1, 1.1):
+            with self.subTest(p=p), self.assertRaises(ValueError):
+                handle.pysp_seq_initialize(estimator, np.random.RandomState(0), p)
+        with self.assertRaises(ImpossibleEvidenceError):
+            handle.pysp_seq_initialize(estimator, np.random.RandomState(0), 0.0)
+
+
 class NestedRecursiveTest(unittest.TestCase):
     """Recursive fold: nested shardable models are model-parallel at the widest axis, still bit-identical."""
 
