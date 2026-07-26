@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pickle
 from collections.abc import Sequence
+from contextlib import suppress
 from typing import Any, TypeVar
 
 import numpy as np
@@ -29,6 +30,15 @@ from mixle.utils.vector import require_initialized_observations, validate_initia
 
 T = TypeVar("T")
 T_D = TypeVar("T_D", bound=SequenceEncodableProbabilityDistribution)
+
+
+def _release_broadcasts(*broadcasts: Any) -> None:
+    """Best-effort release of Spark broadcasts without masking the primary result or failure."""
+    for broadcast in broadcasts:
+        if broadcast is None:
+            continue
+        with suppress(Exception):
+            broadcast.destroy()
 
 
 def _checked_encode(encoder: DataSequenceEncoder, rows: Any, path: str) -> tuple[int, Any]:
@@ -164,12 +174,10 @@ def seq_encode(
         return _validate_encoded_chunks(chunks, encoder, type(data).__name__)
 
     if isinstance(data, RDD_TYPES):
-        sc = data.context
         temp_encoder = pickle.dumps(encoder, protocol=0)
-        encoder_broadcast = sc.broadcast(temp_encoder)
 
         def encode_partition(rows):
-            return _checked_encode(pickle.loads(encoder_broadcast.value), rows, "RDD partition")
+            return _checked_encode(pickle.loads(temp_encoder), rows, "RDD partition")
 
         enc_data = data.glom().map(lambda x: list(x)).map(encode_partition)
 
@@ -231,7 +239,10 @@ def seq_log_density_sum(
 
             return [(cnt, rv)]
 
-        return enc_data.mapPartitions(acc).reduce(lambda a, b: (a[0] + b[0], a[1] + b[1]))
+        try:
+            return enc_data.mapPartitions(acc).reduce(lambda a, b: (a[0] + b[0], a[1] + b[1]))
+        finally:
+            _release_broadcasts(estimate_broadcast)
 
     else:
         return sum([u[0] for u in enc_data]), sum([estimate.seq_log_density(u[1]).sum() for u in enc_data])
@@ -273,7 +284,10 @@ def seq_log_density(
             else:
                 return [loc_estimate.seq_log_density(x) for sz, x in itr]
 
-        return enc_data.mapPartitions(acc).collect()
+        try:
+            return enc_data.mapPartitions(acc).collect()
+        finally:
+            _release_broadcasts(estimate_broadcast)
 
     else:
         if is_list:
@@ -392,23 +406,22 @@ def seq_estimate(
 
             return rv
 
-        # Fold in Spark via treeReduce (O(log W) levels) rather than a single-root collect --
-        # the driver-memory/OOM risk at high partition counts flagged by the scaling audit and
-        # fixed the same way in mixle.inference.spark_executor's spark_em_step/spark_fit.
-        nobs, stats_value = pickle.loads(enc_data.mapPartitionsWithIndex(acc, True).treeReduce(red))
+        try:
+            # Fold in Spark via treeReduce (O(log W) levels) rather than a single-root collect --
+            # the driver-memory/OOM risk at high partition counts flagged by the scaling audit and
+            # fixed the same way in mixle.inference.spark_executor's spark_em_step/spark_fit.
+            nobs, stats_value = pickle.loads(enc_data.mapPartitionsWithIndex(acc, True).treeReduce(red))
 
-        accumulator = estimator.accumulator_factory().make()
-        accumulator.combine(stats_value)
+            accumulator = estimator.accumulator_factory().make()
+            accumulator.combine(stats_value)
 
-        stats_dict = dict()
-        accumulator.key_merge(stats_dict)
-        accumulator.key_replace(stats_dict)
+            stats_dict = dict()
+            accumulator.key_merge(stats_dict)
+            accumulator.key_replace(stats_dict)
 
-        estimate_broadcast.destroy()
-        estimator_broadcast.destroy()
-        enc_data.localCheckpoint()
-
-        return estimator.estimate(nobs, accumulator.value())
+            return estimator.estimate(nobs, accumulator.value())
+        finally:
+            _release_broadcasts(estimate_broadcast, estimator_broadcast)
 
     else:
         accumulator = estimator.accumulator_factory().make()
@@ -498,23 +511,22 @@ def seq_initialize(
 
             return rv
 
-        # Fold in Spark via treeReduce (O(log W) levels) rather than a single-root collect --
-        # the driver-memory/OOM risk at high partition counts flagged by the scaling audit and
-        # fixed the same way in mixle.inference.spark_executor's spark_em_step/spark_fit.
-        nobs, stats_value = pickle.loads(enc_data.mapPartitionsWithIndex(acc, True).treeReduce(red))
+        try:
+            # Fold in Spark via treeReduce (O(log W) levels) rather than a single-root collect --
+            # the driver-memory/OOM risk at high partition counts flagged by the scaling audit and
+            # fixed the same way in mixle.inference.spark_executor's spark_em_step/spark_fit.
+            nobs, stats_value = pickle.loads(enc_data.mapPartitionsWithIndex(acc, True).treeReduce(red))
 
-        accumulator = estimator.accumulator_factory().make()
-        accumulator.combine(stats_value)
+            accumulator = estimator.accumulator_factory().make()
+            accumulator.combine(stats_value)
 
-        stats_dict = dict()
-        accumulator.key_merge(stats_dict)
-        accumulator.key_replace(stats_dict)
+            stats_dict = dict()
+            accumulator.key_merge(stats_dict)
+            accumulator.key_replace(stats_dict)
 
-        seeds_broadcast.destroy()
-        estimator_broadcast.destroy()
-        enc_data.localCheckpoint()
-
-        return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
+            return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
+        finally:
+            _release_broadcasts(seeds_broadcast, estimator_broadcast)
 
     else:
         accumulator = estimator.accumulator_factory().make()
@@ -582,19 +594,22 @@ def initialize(
 
             return iter([(counts_for_split, accumulator_for_split.value())])
 
-        temp = data.mapPartitionsWithIndex(acc, True)
-        nobs = 0.0
-        accumulator = factory.make()
+        try:
+            temp = data.mapPartitionsWithIndex(acc, True)
+            nobs = 0.0
+            accumulator = factory.make()
 
-        for nobs_for_split, stats_for_split in temp.collect():
-            nobs = nobs + nobs_for_split
-            accumulator.combine(stats_for_split)
+            for nobs_for_split, stats_for_split in temp.collect():
+                nobs = nobs + nobs_for_split
+                accumulator.combine(stats_for_split)
 
-        stats_dict = dict()
-        accumulator.key_merge(stats_dict)
-        accumulator.key_replace(stats_dict)
+            stats_dict = dict()
+            accumulator.key_merge(stats_dict)
+            accumulator.key_replace(stats_dict)
 
-        return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
+            return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
+        finally:
+            _release_broadcasts(seeds_broadcast, estimator_broadcast)
 
     elif hasattr(data, "__iter__"):
         idata = iter(data)
@@ -669,16 +684,19 @@ def estimate(
 
             return iter([(counts_for_split, accumulator_for_split.value())])
 
-        temp = data.mapPartitionsWithIndex(acc, True)
-        nobs = 0.0
-        accumulator = factory.make()
+        try:
+            temp = data.mapPartitionsWithIndex(acc, True)
+            nobs = 0.0
+            accumulator = factory.make()
 
-        for nobs_for_split, stats_for_split in temp.collect():
-            nobs = nobs + nobs_for_split
-            accumulator.combine(stats_for_split)
+            for nobs_for_split, stats_for_split in temp.collect():
+                nobs = nobs + nobs_for_split
+                accumulator.combine(stats_for_split)
 
-        merge_accumulator_keys(accumulator)
-        return estimator.estimate(nobs, accumulator.value())
+            merge_accumulator_keys(accumulator)
+            return estimator.estimate(nobs, accumulator.value())
+        finally:
+            _release_broadcasts(temp_estimate_b, estimator_broadcast)
 
     elif hasattr(data, "__iter__"):
         idata = iter(data)
