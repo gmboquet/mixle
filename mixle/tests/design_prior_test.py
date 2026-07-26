@@ -6,6 +6,8 @@ un-tried one -- so the next round's structural-search proposal starts from a sha
 
 import unittest
 
+import numpy as np
+
 from mixle.task.design_prior import best_family, rank_design_families, record_accepted_recipe
 from mixle.task.edge import DesignModel
 
@@ -66,6 +68,16 @@ class RankDesignFamiliesTest(unittest.TestCase):
         design.add([2.0], 0.1, [0.0])  # no family tag: not a candidate for the prior
         ranked = rank_design_families(design)
         self.assertEqual(ranked, [("tracked", 0.9)])
+
+    def test_corrupt_nonfinite_ledger_cannot_control_ranking(self):
+        design = _design_with_two_families()
+        design.quality[0] = np.nan
+        with self.assertRaises(ValueError):
+            rank_design_families(design)
+
+    def test_nonfinite_default_score_is_rejected(self):
+        with self.assertRaises(ValueError):
+            rank_design_families(_design_with_two_families(), default_score=np.nan)
 
 
 if __name__ == "__main__":

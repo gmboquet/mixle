@@ -137,6 +137,10 @@ class EdgeSpaceTest(unittest.TestCase):
         self.assertIn(r0["dim"], sp.dim_choices)
         self.assertTrue(sp.components_range[0] <= r1["n_components"] <= sp.components_range[1])
 
+    def test_decode_rejects_nonfinite_coordinates(self):
+        with self.assertRaises(ValueError):
+            _tiny_space().decode(np.array([0.0, 0.5, np.nan, 0.5, 0.5, 0.0]))
+
     def test_bits_axis_decodes_both_precisions(self):
         sp = _tiny_space()
         _, fp32 = sp.decode(np.array([0.0, 0.5, 0.5, 0.5, 0.5, 0.0]))
@@ -180,6 +184,30 @@ class DesignModelTest(unittest.TestCase):
         self.assertEqual(len(clone), len(dm))
         self.assertEqual(clone.signature, dm.signature)
         np.testing.assert_allclose(clone.X, dm.X)
+
+    def test_ledger_rejects_nonfinite_and_ragged_rows(self):
+        dm = DesignModel("sig", 1)
+        with self.assertRaises(ValueError):
+            dm.add([0.1, np.nan], 0.5, [0.0])
+        with self.assertRaises(ValueError):
+            dm.add([0.1, 0.2], np.nan, [0.0])
+        with self.assertRaises(ValueError):
+            dm.add([0.1, 0.2], 0.5, [np.inf])
+        dm.add([0.1, 0.2], 0.5, [0.0])
+        with self.assertRaises(ValueError):
+            dm.add([0.3], 0.6, [0.0])
+        self.assertEqual(len(dm), 1)
+
+    def test_json_rejects_corrupt_parallel_arrays_and_widths(self):
+        payload = self._seeded().to_json()
+        payload["quality"] = payload["quality"][:-1]
+        with self.assertRaises(ValueError):
+            DesignModel.from_json(payload)
+
+        payload = self._seeded().to_json()
+        payload["X"][1] = payload["X"][1][:-1]
+        with self.assertRaises(ValueError):
+            DesignModel.from_json(payload)
 
     def test_cold_propose_is_random_in_bounds(self):
         dm = DesignModel("sig", 1)
@@ -332,17 +360,42 @@ class DistillForEdgeTest(unittest.TestCase):
         self.assertTrue(res.feasible)
         self.assertTrue(dev.feasible(res.footprint))
         self.assertGreater(res.agreement, 0.7)  # the rule is learnable
+        self.assertGreater(res.selection_agreement, 0.7)
+        self.assertGreater(res.test_size, 0)
         # the winner was re-trained at full fidelity
         self.assertIn("full", {t["fidelity"] for t in res.trials})
-        # Pareto front: sorted by bytes and non-dominated (agreement strictly improves with bytes)
+        # Pareto front: explicitly adaptive search evidence, sorted by bytes and non-dominated.
         front = res.pareto
         self.assertGreater(len(front), 0)
         byte_sizes = [f["bytes"] for f in front]
         self.assertEqual(byte_sizes, sorted(byte_sizes))
-        agrees = [f["agreement"] for f in front]
+        agrees = [f["selection_agreement"] for f in front]
         self.assertTrue(all(a2 >= a1 for a1, a2 in zip(agrees, agrees[1:])))
+        self.assertEqual({f["evidence_stage"] for f in front}, {"adaptive_search"})
         # the callable student actually classifies
         self.assertIn(res.model(self.val[0]), ("a", "b"))
+
+    def test_explicit_test_panel_is_the_reported_deployment_evidence(self):
+        test, _ = _make_records(40, 29)
+        dev = DeviceSpec(max_bytes=200_000)
+        res = distill_for_edge(
+            self.teacher,
+            self.train,
+            self.val,
+            dev,
+            test_data=test,
+            space=_fast_edge_space(),
+            n_init=1,
+            n_iter=0,
+            promote=1,
+            seed=0,
+        )
+        expected = sum(
+            predicted == truth for predicted, truth in zip(res.model.batch(test), self.teacher(test), strict=True)
+        ) / len(test)
+        self.assertAlmostEqual(res.agreement, expected)
+        self.assertEqual(res.test_size, len(test))
+        self.assertNotIn("agreement", res.trials[0])
 
     def test_torch_free_device_yields_torch_free_student(self):
         # a torch-free device admits structured students AND int8-quantized MLPs (numpy inference);
