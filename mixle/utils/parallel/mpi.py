@@ -51,6 +51,7 @@ import numpy as np
 
 from mixle.utils.optional_deps import HAS_MPI4PY, MPI, require
 from mixle.utils.parallel.planner import EncodedDataHandle
+from mixle.utils.vector import require_initialized_observations, validate_initialization_probability
 
 __all__ = ["MPIEncodedData", "mpi_out"]
 
@@ -194,6 +195,7 @@ class MPIEncodedData(EncodedDataHandle):
 
     def pysp_seq_initialize(self, estimator, rng: np.random.RandomState, p: float):
         """Distributed randomized initialization; identical model on all ranks."""
+        p = validate_initialization_probability(p)
         if self.rank == self.root:
             seeds = [int(s) for s in rng.randint(2**31, size=self.world)]
         else:
@@ -209,6 +211,8 @@ class MPIEncodedData(EncodedDataHandle):
             w[rng_w.rand(sz) <= p] = 1.0
             count += np.sum(w)
             accumulator.seq_initialize(x, w, rng_loc)
+        total = self.comm.allreduce(count, op=MPI.SUM)
+        require_initialized_observations(total)
         return self._fold_and_share(estimator, (count, accumulator.value()))
 
     def pysp_seq_log_density_sum(self, estimate) -> tuple[float, float]:

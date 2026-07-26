@@ -24,6 +24,7 @@ from mixle.stats.compute.pdist import (
     validate_estimator_keys,
 )
 from mixle.utils.optional_deps import RDD_TYPES, pyspark
+from mixle.utils.vector import require_initialized_observations, validate_initialization_probability
 
 T = TypeVar("T")
 T_D = TypeVar("T_D", bound=SequenceEncodableProbabilityDistribution)
@@ -374,6 +375,7 @@ def seq_initialize(
 
     """
     validate_estimator_keys(estimator)
+    p = validate_initialization_probability(p)
 
     if hasattr(enc_data, "pysp_seq_initialize"):
         # parallel-backend handle (mixle.utils.parallel.multiprocessing / mixle.utils.parallel.mpi)
@@ -430,7 +432,7 @@ def seq_initialize(
         estimator_broadcast.destroy()
         enc_data.localCheckpoint()
 
-        return estimator.estimate(nobs, accumulator.value())
+        return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
 
     else:
         accumulator = estimator.accumulator_factory().make()
@@ -446,7 +448,7 @@ def seq_initialize(
         accumulator.key_merge(stats_dict)
         accumulator.key_replace(stats_dict)
 
-        return estimator.estimate(nobs, accumulator.value())
+        return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
 
 
 def initialize(
@@ -473,6 +475,7 @@ def initialize(
 
     """
     validate_estimator_keys(estimator)
+    p = validate_initialization_probability(p)
 
     if isinstance(data, RDD_TYPES):
         factory = estimator.accumulator_factory()
@@ -509,7 +512,7 @@ def initialize(
         accumulator.key_merge(stats_dict)
         accumulator.key_replace(stats_dict)
 
-        return estimator.estimate(nobs, accumulator.value())
+        return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
 
     elif hasattr(data, "__iter__"):
         idata = iter(data)
@@ -526,7 +529,7 @@ def initialize(
         accumulator.key_merge(stats_dict)
         accumulator.key_replace(stats_dict)
 
-        return estimator.estimate(nobs, accumulator.value())
+        return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
 
 
 def estimate(

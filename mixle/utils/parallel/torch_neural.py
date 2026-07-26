@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 
 from mixle.utils.parallel.planner import EncodedDataHandle
+from mixle.utils.vector import validate_initialization_probability
 
 
 def _torch_dist() -> tuple[Any, Any]:
@@ -189,6 +190,7 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         """Return an initial streaming transformer leaf without distributed fitting."""
         from mixle.models.streaming_transformer_leaf import StreamingTransformerLeaf
 
+        validate_initialization_probability(p)
         return StreamingTransformerLeaf(estimator.module, getattr(estimator, "device", "cpu"))
 
     def close(self) -> None:

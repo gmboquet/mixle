@@ -42,6 +42,7 @@ from typing import Any
 import numpy as np
 
 from mixle.utils.parallel.planner import EncodedDataHandle
+from mixle.utils.vector import require_initialized_observations, validate_initialization_probability
 
 __all__ = ["MPEncodedData"]
 
@@ -290,6 +291,7 @@ class MPEncodedData(EncodedDataHandle):
 
     def pysp_seq_initialize(self, estimator, rng: np.random.RandomState, p: float):
         """Distributed randomized initialization (mirrors seq_initialize)."""
+        p = validate_initialization_probability(p)
         seeds = rng.randint(2**31, size=self.num_workers)
         estimator_b = pickle.dumps(estimator, protocol=_PROTO)
         try:
@@ -301,7 +303,7 @@ class MPEncodedData(EncodedDataHandle):
         deadline = time.monotonic() + self.response_timeout
         payloads = [self._recv_at(index, deadline, "init") for index in range(len(self._conns))]
         nobs, value = self._fold_stats(estimator, payloads)
-        return estimator.estimate(nobs, value)
+        return estimator.estimate(require_initialized_observations(nobs), value)
 
     def pysp_seq_log_density_sum(self, estimate) -> tuple[float, float]:
         """Total observation count and summed log density across all workers."""

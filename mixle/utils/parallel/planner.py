@@ -22,6 +22,7 @@ import numpy as np
 from mixle.engines import NUMPY_ENGINE, NumpyEngine, auto_precision, engine_with_precision, precision_name
 from mixle.stats import ResidentEncodedPayload, move_encoded_payload
 from mixle.stats.compute.pdist import DataSequenceEncoder
+from mixle.utils.vector import require_initialized_observations, validate_initialization_probability
 
 __all__ = [
     "CalibrationCatalog",
@@ -1325,6 +1326,7 @@ class LocalEncodedData(EncodedDataHandle):
         """Randomized initialization over resident encoded chunks."""
         from mixle.stats import validate_estimator_keys
 
+        p = validate_initialization_probability(p)
         validate_estimator_keys(estimator)
         accumulator = estimator.accumulator_factory().make()
         nobs = 0.0
@@ -1342,7 +1344,7 @@ class LocalEncodedData(EncodedDataHandle):
                 local_acc.seq_initialize(getattr(enc, "host_payload", enc), weights, rng_loc)
                 accumulator.combine(local_acc.value())
         _global_key_merge(accumulator)
-        return estimator.estimate(nobs, accumulator.value())
+        return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
 
     def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
         """Return globally tied batch sufficient statistics for streaming EM."""
@@ -1586,6 +1588,7 @@ class DaskEncodedData(EncodedDataHandle):
         """Initialize a model over persisted dask encoded partitions."""
         from mixle.stats import validate_estimator_keys
 
+        p = validate_initialization_probability(p)
         validate_estimator_keys(estimator)
         estimator_b = pickle.dumps(estimator, protocol=pickle.HIGHEST_PROTOCOL)
         seeds = rng.randint(2**31, size=max(1, len(self._partitions)))
@@ -1594,7 +1597,7 @@ class DaskEncodedData(EncodedDataHandle):
             for part, seed in zip(self._partitions, seeds)
         ]
         nobs, value = self._fold_stats(estimator, self.client.gather(futures))
-        return estimator.estimate(nobs, value)
+        return estimator.estimate(require_initialized_observations(nobs), value)
 
     def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
         """Return dask-folded sufficient statistics for streaming EM."""
