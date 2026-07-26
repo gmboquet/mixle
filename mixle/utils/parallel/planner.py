@@ -1448,8 +1448,11 @@ class SparkEncodedData(EncodedDataHandle):
 
         validate_estimator_keys(estimator)
         sc = self.enc_rdd.context
-        estimator_b = sc.broadcast(estimator)
-        model_b = sc.broadcast(pickle.dumps(model, protocol=0))
+        estimator_b = None
+        model_b = None
+        temp = None
+        operation_error: BaseException | None = None
+        result: tuple[float, Any] | None = None
 
         def acc(split_index, itr):
             del split_index
@@ -1462,18 +1465,48 @@ class SparkEncodedData(EncodedDataHandle):
                 accumulator.seq_update(enc, np.ones(sz), model_loc)
             return [pickle.dumps((count, accumulator.value()), protocol=0)]
 
-        temp = self.enc_rdd.mapPartitionsWithIndex(acc, True).cache()
-        nobs = 0.0
-        accumulator = estimator.accumulator_factory().make()
-        for raw in temp.collect():
-            count, value = pickle.loads(raw)
-            nobs += count
-            accumulator.combine(value)
-        _global_key_merge(accumulator)
-        estimator_b.destroy()
-        model_b.destroy()
-        temp.unpersist()
-        return nobs, accumulator.value()
+        try:
+            estimator_b = sc.broadcast(estimator)
+            model_b = sc.broadcast(pickle.dumps(model, protocol=0))
+            temp = self.enc_rdd.mapPartitionsWithIndex(acc, True)
+            temp.cache()
+            nobs = 0.0
+            accumulator = estimator.accumulator_factory().make()
+            for raw in temp.collect():
+                count, value = pickle.loads(raw)
+                nobs += count
+                accumulator.combine(value)
+            _global_key_merge(accumulator)
+            result = nobs, accumulator.value()
+        except BaseException as exc:  # noqa: BLE001 - cancellation must still release Spark resources
+            operation_error = exc
+
+        cleanup_errors: list[BaseException] = []
+        for label, resource, method in (
+            ("cached partition result", temp, "unpersist"),
+            ("model broadcast", model_b, "destroy"),
+            ("estimator broadcast", estimator_b, "destroy"),
+        ):
+            if resource is None:
+                continue
+            try:
+                getattr(resource, method)()
+            except BaseException as exc:  # noqa: BLE001 - attempt every cleanup even during cancellation
+                exc.add_note(f"while releasing Spark {label}")
+                cleanup_errors.append(exc)
+
+        if operation_error is not None:
+            if cleanup_errors:
+                raise BaseExceptionGroup(
+                    "Spark streaming accumulation failed and resource cleanup also failed",
+                    [operation_error, *cleanup_errors],
+                )
+            raise operation_error.with_traceback(operation_error.__traceback__)
+        if cleanup_errors:
+            raise BaseExceptionGroup("Spark streaming resource cleanup failed", cleanup_errors)
+        if result is None:  # defensive invariant: success always assigns the folded result
+            raise RuntimeError("Spark streaming accumulation completed without a result.")
+        return result
 
     @property
     def num_chunks(self) -> int:
