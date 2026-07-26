@@ -1,142 +1,266 @@
-"""``mixle.experimental`` -- exploratory surfaces that are not (yet) part of mixle's mature API.
+"""Experimental Mixle surfaces with explicit evidence boundaries.
 
-Code here is kept for exploration and may change or be removed without the usual stability guarantees.
+Nothing in this package is part of Mixle's stable API, and presence in this inventory is not a production,
+scaling, statistical-validity, or release-readiness guarantee.
 
-Current contents:
+The machine-readable :data:`EXPERIMENTAL_INVENTORY` uses four maturity labels:
 
-- :mod:`mixle.experimental.typed_runtime` -- the statistically typed optimization-runtime foundation: a
-  side-effect-free model compiler, explicit objective/update/merge/state contracts, dependency-aware invalidation,
-  gain-per-cost scheduling, benchmark and failure receipts, and the first objective-gated local mixture-EM adapter.
-  Compilation is broader than execution support; unsupported adapter semantics fail before fitting. See
-  ``mixle/experimental/typed_runtime/README.md`` for the current boundary.
-- :mod:`mixle.experimental.program` -- the optimization-*program* approach (moves + combinators: ``minimize`` /
-  ``maximize`` / ``em`` / ``alternate`` / ``weighted`` / ``constrain`` / ``reinforce`` / ``pareto`` / ``bilevel``
-  / ``gail`` / ``maxent_irl``) to fitting heterogeneous neural + stats models. A reasonable idea that wasn't
-  mature: its closure-taking surface (``minimize(lambda: loss, over=params)``) is exactly the PyTorch-style jank
-  it set out to avoid. For the common cases it is **superseded by the declarative neural surface** --
-  ``Categorical(logits=Net(...)).fit(y, given=...)``, ``Normal(Net(...), free).fit(...)``, and mixtures of
-  ``SoftmaxNeuralLeaf`` experts -- which compose into the PPL with no loss closures. It is kept here for the
-  genuinely game-shaped cases the declarative surface does not reach (GANs, on-policy RL).
-- :mod:`mixle.experimental.graduation` -- the bookkeeping ledger (:class:`~mixle.experimental.graduation.ExperimentalMechanism`,
-  ``REGISTRY``) that later long-context mechanisms register against to track graduation eligibility. See
-  ``mixle/experimental/README.md`` for the graduation contract itself.
-- :mod:`mixle.experimental.context_spine` -- E1, the chunked-recurrent training spine (TBPTT):
-  the :class:`~mixle.experimental.context_spine.ContextMechanism` protocol (``init_state``/``step``/``detach``),
-  the ``train_tbptt`` driver, and :class:`~mixle.experimental.context_spine.SlidingWindowSpine` -- the baseline
-  mechanism (RoPE + sliding-window attention with a stop-gradient carried KV cache, Transformer-XL style) every
-  later Track-E mechanism (E2-E6) is compared against. See ``notes/designs/E1.md`` for the design.
-- :mod:`mixle.experimental.context_parallel_spine` -- E8, context parallelism for
-  :class:`~mixle.experimental.context_spine.SlidingWindowSpine`: :func:`~mixle.experimental.context_parallel_spine.cp_shard_kv`
-  shards the current step's KV axis across ``cp_size`` simulated ranks and
-  :func:`~mixle.experimental.context_parallel_spine.cp_window_attention_forward` reconstructs the dense
-  sliding-window attention output from them (RoPE applied per shard, before its gather). It uses a
-  state-aware gather distinct from F1's block-streaming online-softmax reference because
-  ``SlidingWindowSpine.step`` carries state across calls. Exact-match tested at ``cp_size`` up to 8,
-  including a real multi-process ``torch.distributed`` (gloo) run -- not a wall-clock/MFU scaling
-  receipt (no GPUs here); see the module docstring.
-- :mod:`mixle.experimental.tensor_pipeline_context_parallel` -- F1, tensor/pipeline/context parallelism
-  (:func:`~mixle.experimental.tensor_pipeline_context_parallel.tp_shard_causal_lm` / ``tp_forward_causal_lm``,
-  :func:`~mixle.experimental.tensor_pipeline_context_parallel.pp_partition_causal_lm` / ``pipeline_forward``,
-  :func:`~mixle.experimental.tensor_pipeline_context_parallel.cp_shard_sequence` / ``cp_forward_causal_lm``)
-  for :class:`~mixle.models.transformer.CausalLM`, the three sharding dimensions a frontier trainer composes
-  orthogonally with the FSDP2 data-parallel axis :mod:`mixle.utils.parallel.torch_neural` already provides.
-  The local reference gives TP shards owned parameters and explicit optimizer ownership, preserves
-  pipeline/context autograd, and streams CP K/V blocks without per-rank full-K/V materialization. Dense
-  parity and gradients are tested at small scale (plus a real 2-GPU NCCL forward receipt where hardware
-  allows). Real composed per-axis process groups remain unavailable here, and the production fit surface
-  rejects those axes rather than pretending the local reference is a distributed trainer.
-- :mod:`mixle.experimental.retrieval_memory_spine` -- E6, retrieval memory over frozen past:
-  :class:`~mixle.experimental.retrieval_memory_spine.RetrievalMemorySpine` pairs E1's local sliding window
-  with a brute-force kNN index of detached past chunks, retrieving the top-k per query each step. Gradients
-  flow exactly through the retrieval softmax over the selected top-k; the archived index contents themselves
-  are stop-gradient -- that non-differentiable boundary is a receipt field on the returned state, not just a
-  docstring claim.
-- :mod:`mixle.experimental.selective_scan` -- E5 part 1, the S6/Mamba selective-scan module:
-  :class:`~mixle.experimental.selective_scan.SelectiveScan`, its ``_scan_layer`` recurrence (shared with
-  :mod:`mixle.experimental.ssm_hybrid`, not duplicated), and the S4D-real / dt-bias inits verified against
-  ``mamba-ssm`` source.
-- :mod:`mixle.experimental.ssm_hybrid` -- E5 part 2, the hybrid block:
-  :class:`~mixle.experimental.ssm_hybrid.HybridBlock` composes E1's local windowed attention, E5 part 1's
-  selective-scan SSM branch, and E2's moment-closure far field into one ``ContextMechanism``. Its
-  ``report()`` exposes descriptive routing mass, explicitly not output attribution. See
-  ``notes/designs/E5.md`` for the design.
-- :mod:`mixle.experimental.long_context_eval` -- E7, the long-context referee suite (needle / copy /
-  multi-hop / multi-scale-perplexity probes, a length curriculum, matched-FLOPs / matched-state-bytes
-  bookkeeping) every Track-E mechanism is measured against on the same terms.
-- :mod:`mixle.experimental.summary_tree` -- E4, the hierarchical summary tree: E1's exact near field
-  plus a persistent, bounded far-field tree of learned summaries built via mixed-radix carry
-  propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
-  encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
-  stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
-- :mod:`mixle.experimental.certified_bounds` -- P11, certified model properties by abstract interpretation:
-  :func:`~mixle.experimental.certified_bounds.certified_density_bounds` propagates intervals through a
-  Gaussian/mixture tree for sound density bounds over an input box, and
-  :func:`~mixle.experimental.certified_bounds.certify_density_monotonic` proves a monotonicity direction --
-  turning a *measured* receipt into a *proven* one, validated against dense grids.
-- :mod:`mixle.experimental.equation_discovery` -- P8, the closed-loop scientist (in-repo core):
-  :func:`~mixle.experimental.equation_discovery.discover` probes a scalar dynamical world, recovers the
-  governing operator by SINDy-style sparse regression over a term library, and is graded against the
-  exact operator (recovered form + coefficient error). Actively-chosen high-leverage probes beat random
-  probing on discovery-per-budget. The full flagship runs this loop in the mixle-pde PDE worlds (Track N).
-- :mod:`mixle.experimental.model_economy` -- P14 (speculative), model economies:
-  :func:`~mixle.experimental.model_economy.run_economy` has two agents with complementary data trade
-  fitted components (never data); the buyer verifies each offered component's gain on its own held-out set
-  (no trust in the seller), so verified trade recovers essentially all of the data-sharing oracle's gain
-  over isolation while a spurious offered component is rejected.
-- :mod:`mixle.experimental.cvi` -- P3, conjugate-computation VI: a natural-gradient step
-  (:func:`~mixle.experimental.cvi.cvi_step`) with unit step size reproduces the exact conjugate/EM
-  update for exponential-family leaves (verified on Normal-Normal, Beta-Bernoulli, Gamma-Poisson),
-  streaming is order-independent (additive natural parameters), and a damped step converges to the same
-  posterior -- the principle under the D-track's closed-form/gradient split.
-- :mod:`mixle.experimental.wake_sleep` -- P12, wake-sleep library learning over the model-structure
-  grammar: :func:`~mixle.experimental.wake_sleep.wake_sleep` solves a corpus by greedy MDL structure
-  search (WAKE), anti-unifies recurring subtrees into a reusable library fragment
-  (:func:`~mixle.experimental.wake_sleep.abstract_fragment`, SLEEP-ABSTRACTION), and measures that the
-  fragment cuts held-out median search cost >= 2x -- while returning no fragment when the tasks share no
-  motif (it does not invent structure).
-- :mod:`mixle.experimental.tensor_network` -- P4, matrix-product-state (tensor-train) leaves:
-  :class:`~mixle.experimental.tensor_network.MPS` is a Born-machine density over discrete sequences with
-  exact normalization / marginals / conditionals by contraction,
-  :func:`~mixle.experimental.tensor_network.entanglement_entropy` as the long-range-structure receipt
-  (bounded by ``log(bond)``), and :func:`~mixle.experimental.tensor_network.truncate_error` whose discarded
-  Schmidt weight tracks the truncation's distribution error.
-- :mod:`mixle.experimental.active_causal` -- P15, active causal discovery:
-  :func:`~mixle.experimental.active_causal.active_discovery` chooses ``do(.)`` interventions by expected
-  information gain over a posterior on candidate causal structures (chain/reverse/fork), identifying the
-  true structure in far fewer experiments than random or observation-only selection. Exact linear-Gaussian
-  so the ground truth is known and the design can be graded exactly.
-- :mod:`mixle.experimental.v_information` -- P13, usable-information receipts: V-information
-  (:func:`~mixle.experimental.v_information.v_information`) is a one-split finite-sample estimate of the
-  family's realized reduction in held-out predictive log-loss from conditioning on ``X``;
-  :func:`~mixle.experimental.v_information.estimate_v_information` repeats splits and reports
-  split-assignment uncertainty. Neither is presented as the population-optimal family ceiling.
-- :mod:`mixle.experimental.pac_bayes` -- P10, theorem-matched finite-hypothesis PAC-Bayes certificates:
-  an explicit data-independent prior and sample-dependent posterior over fixed predictors, bounded-loss
-  matrices, a finite-space categorical KL, the McAllester bound, and an assumption-bearing
-  :func:`~mixle.experimental.pac_bayes.certify_generalization` receipt for a ``1 - delta``-valid
-  Gibbs-risk bound with an exact per-hypothesis KL decomposition.
-- :mod:`mixle.experimental.ot_geometry` -- P6, optimal-transport geometry of model space:
-  :func:`~mixle.experimental.ot_geometry.bures_wasserstein` (closed-form ``W2`` between Gaussians),
-  :func:`~mixle.experimental.ot_geometry.gaussian_barycenter` (Bures barycenter fixed-point), and
-  :func:`~mixle.experimental.ot_geometry.mixture_barycenter` (Wasserstein barycenter of Gaussian mixtures
-  via Hungarian component alignment) -- merging models in distribution space instead of parameter space.
-- :mod:`mixle.experimental.unlearning` -- P5, exact machine unlearning for closed-form leaves:
-  :func:`~mixle.experimental.unlearning.prepare_unlearning` commits sufficient-statistic records while raw
-  shards exist; after deletion, :func:`~mixle.experimental.unlearning.certify_unlearning` accepts only the
-  retained records and an externally anchored manifest digest, verifies their integrity, and re-reduces them
-  in canonical ID order. It explicitly refuses unregistered or iterative/latent estimators and states the
-  certificate's integrity/erasure threat-model limits.
-- :mod:`mixle.experimental.spectral_health` -- P16, descriptive weight-spectrum receipts:
-  :func:`~mixle.experimental.spectral_health.spectral_health` reports stable/effective rank, spectral
-  outliers, and a goodness-of-fit-gated power-law tail estimate with a conditional bootstrap interval.
-  It explicitly abstains from training-quality or memorization diagnoses because weights alone have no
-  calibrated diagnostic model here.
-- :mod:`mixle.experimental.e_process` -- P9, anytime-valid receipts: :class:`~mixle.experimental.e_process.EProcess`
-  (the generic running-product e-process from per-step density ratios) and the closed-form Robbins
-  :func:`~mixle.experimental.e_process.normal_mixture_eprocess` / :class:`~mixle.experimental.e_process.MeanShiftDetector`
-  for drift. Because a mixle density ratio is an e-value, monitoring ``E_t >= 1/alpha`` gives type-I control
-  under continuous peeking and optional stopping (Ville's inequality) -- verified empirically in the test.
+``prototype``
+    Code and an executable focused specification exist, but this inventory asserts no validated guarantee.
+``locally_receipted``
+    Only the narrow ``purpose`` statement was exercised by the listed focused tests at the exact revision in
+    the cited durable status evidence. It is not a broader production or scientific-validity claim.
+``unvalidated``
+    Known audit blockers remain. No behavioral guarantee should be inferred from names, types, or docstrings.
+``bookkeeping_only``
+    Metadata machinery that records evidence; it does not perform or validate the underlying experiment.
 
-Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
-run and reported on distinctly from the stable-package suite.
+Evidence IDs refer to the separate durable ``status`` ledger. Test paths are executable acceptance
+specifications, not proof that an arbitrary checkout currently passes them. Callers must validate the exact
+revision they deploy.
 """
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ExperimentalSurface:
+    """One experimental surface's narrow scope and validation boundary."""
+
+    module: str
+    purpose: str
+    maturity: str
+    acceptance_tests: tuple[str, ...] = ()
+    evidence_id: str | None = None
+    limitations: tuple[str, ...] = ()
+
+
+EXPERIMENTAL_INVENTORY: tuple[ExperimentalSurface, ...] = (
+    ExperimentalSurface(
+        "active_causal",
+        "Synthetic three-graph active causal-discovery prototype.",
+        "prototype",
+        ("mixle/tests/active_causal_test.py", "mixle/tests/active_causal_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "certified_bounds",
+        "Interval propagation and monotonicity checks for a restricted Gaussian/mixture grammar.",
+        "prototype",
+        ("mixle/tests/certified_bounds_test.py", "mixle/tests/certified_bounds_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "context_parallel_spine",
+        "Small-scale context-parallel reference for the sliding-window spine.",
+        "prototype",
+        ("mixle/tests/context_parallel_spine_test.py",),
+        limitations=("No production multi-axis scaling guarantee.",),
+    ),
+    ExperimentalSurface(
+        "context_spine",
+        "Chunked-recurrent training protocol and local sliding-window baseline.",
+        "prototype",
+        ("mixle/tests/context_spine_test.py", "mixle/tests/context_spine_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "cvi",
+        "Conjugate-computation variational-update prototype for selected exponential families.",
+        "prototype",
+        ("mixle/tests/cvi_test.py", "mixle/tests/cvi_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "e_process",
+        "Anytime-monitoring primitives under their stated density-ratio assumptions.",
+        "prototype",
+        ("mixle/tests/e_process_test.py", "mixle/tests/e_process_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "equation_discovery",
+        "Synthetic scalar SINDy-style operator-discovery experiment.",
+        "prototype",
+        ("mixle/tests/equation_discovery_test.py", "mixle/tests/equation_discovery_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "graduation",
+        "Bookkeeping for locally supplied experiment receipts.",
+        "bookkeeping_only",
+        ("mixle/tests/experimental_scaffold_test.py",),
+        limitations=("Eligibility metadata does not execute an evaluation.",),
+    ),
+    ExperimentalSurface(
+        "growth_operators",
+        "Candidate transformer growth operators with local parity receipts.",
+        "prototype",
+        ("mixle/tests/growth_operators_test.py", "mixle/tests/growth_operators_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "kv_cache_quant",
+        "KV-cache quantization and tail-modeling prototypes.",
+        "prototype",
+        ("mixle/tests/kv_cache_quant_test.py", "mixle/tests/kv_cache_quant_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "law_discovery",
+        "Candidate functional-form selection for synthetic simulator input/output data.",
+        "prototype",
+        ("mixle/tests/law_discovery_test.py",),
+    ),
+    ExperimentalSurface(
+        "long_context_eval",
+        "Synthetic long-context probes and matched-budget bookkeeping.",
+        "prototype",
+        ("mixle/tests/long_context_eval_test.py", "mixle/tests/long_context_eval_contract_test.py"),
+        limitations=("Probe scores are not a general long-context capability certificate.",),
+    ),
+    ExperimentalSurface(
+        "model_economy",
+        "Synthetic held-out verification of exchanged fitted components.",
+        "prototype",
+        ("mixle/tests/model_economy_test.py", "mixle/tests/model_economy_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "moment_closure_attention",
+        "Learned moment-closure far-field attention prototype.",
+        "prototype",
+        ("mixle/tests/moment_closure_attention_test.py",),
+    ),
+    ExperimentalSurface(
+        "ot_geometry",
+        "Gaussian optimal-transport geometry and finite-mixture transport prototypes.",
+        "prototype",
+        ("mixle/tests/ot_geometry_test.py", "mixle/tests/ot_geometry_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "pac_bayes",
+        "Finite fixed-hypothesis categorical PAC-Bayes calculation under explicit assumptions.",
+        "locally_receipted",
+        ("mixle/tests/pac_bayes_test.py",),
+        "EVID-20260725-0133",
+        ("Not a certificate for fitted observation-mixture components or data-dependent priors.",),
+    ),
+    ExperimentalSurface(
+        "program",
+        "Legacy closure-based optimization-program prototype with fail-closed local contracts.",
+        "prototype",
+        ("mixle/tests/program_test.py", "mixle/tests/program_contract_test.py"),
+        limitations=("Superseded for common cases by declarative neural/statistical fitting.",),
+    ),
+    ExperimentalSurface(
+        "quantized_key_attention",
+        "Product-quantized-key attention prototype.",
+        "prototype",
+        ("mixle/tests/quantized_key_attention_test.py", "mixle/tests/quantized_key_attention_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "retrieval_memory_spine",
+        "Detached frozen-past retrieval-memory prototype.",
+        "prototype",
+        ("mixle/tests/retrieval_memory_spine_test.py", "mixle/tests/retrieval_memory_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "selective_scan",
+        "Selective-scan sequence-module prototype.",
+        "prototype",
+        ("mixle/tests/selective_scan_test.py", "mixle/tests/selective_scan_contract_test.py"),
+    ),
+    ExperimentalSurface(
+        "sketch_state_attention",
+        "Frequent-Directions and normalized TensorSketch far-state references.",
+        "locally_receipted",
+        ("mixle/tests/sketch_state_attention_test.py", "mixle/tests/sketch_state_attention_contract_test.py"),
+        "EVID-20260725-0138",
+        ("TensorSketch signed estimates are not non-negative attention probabilities.",),
+    ),
+    ExperimentalSurface(
+        "spectral_health",
+        "Descriptive weight-spectrum statistics with gated tail-fit uncertainty.",
+        "locally_receipted",
+        ("mixle/tests/spectral_health_test.py",),
+        "EVID-20260725-0139",
+        ("No training-quality or memorization diagnosis is certified.",),
+    ),
+    ExperimentalSurface(
+        "ssm_hybrid",
+        "Local-attention, selective-scan, and moment-bank hybrid with routing-mass accounting.",
+        "locally_receipted",
+        ("mixle/tests/ssm_hybrid_test.py",),
+        "EVID-20260725-0140",
+        ("Routing mass is not output attribution.",),
+    ),
+    ExperimentalSurface(
+        "structure_edit_schedule",
+        "Whole-model candidate edits with parity gating and optimizer-state migration.",
+        "locally_receipted",
+        ("mixle/tests/structure_edit_schedule_test.py",),
+        "EVID-20260725-0141",
+    ),
+    ExperimentalSurface(
+        "summary_tree",
+        "Test-scale non-overlapping mixed-radix summary frontier with conservation receipts.",
+        "locally_receipted",
+        ("mixle/tests/summary_tree_test.py",),
+        "EVID-20260725-0142",
+        ("Bounded-state evidence is focused and does not establish production quality or scaling.",),
+    ),
+    ExperimentalSurface(
+        "tensor_network",
+        "Finite discrete MPS/Born probability and marginal reference.",
+        "locally_receipted",
+        ("mixle/tests/tensor_network_test.py",),
+        "EVID-20260725-0143",
+        ("No large-scale tensor-network training guarantee.",),
+    ),
+    ExperimentalSurface(
+        "tensor_pipeline_context_parallel",
+        "Trainable in-process TP/PP/CP reference with explicit optimizer ownership and memory receipts.",
+        "locally_receipted",
+        ("mixle/tests/tensor_pipeline_context_parallel_test.py",),
+        "EVID-20260725-0144",
+        ("Not a production distributed multi-axis trainer.",),
+    ),
+    ExperimentalSurface(
+        "tying_discovery",
+        "Compatible weight-tie discovery and isolated parity-budget evaluation.",
+        "locally_receipted",
+        ("mixle/tests/tying_discovery_test.py",),
+        "EVID-20260725-0145",
+        ("Profile similarity is lossy and is not an exact permutation or parity certificate.",),
+    ),
+    ExperimentalSurface(
+        "unlearning",
+        "Commitment-backed retained-statistics re-reduction for three audited estimators.",
+        "locally_receipted",
+        ("mixle/tests/unlearning_test.py",),
+        "EVID-20260725-0146",
+        ("Does not prove physical erasure, truthful ingestion, or cleanup of other artifacts.",),
+    ),
+    ExperimentalSurface(
+        "v_information",
+        "Finite-sample polynomial-Gaussian usable-information estimates.",
+        "locally_receipted",
+        ("mixle/tests/v_information_test.py",),
+        "EVID-20260725-0147",
+        ("Repeated-split uncertainty covers holdout assignment only, not the population optimum.",),
+    ),
+    ExperimentalSurface(
+        "wake_sleep",
+        "Exact jointly supported fragments in a synthetic column-itemset grammar.",
+        "locally_receipted",
+        ("mixle/tests/wake_sleep_test.py",),
+        "EVID-20260725-0148",
+        ("Not a general program anti-unifier or external-task search-speed certificate.",),
+    ),
+    ExperimentalSurface(
+        "typed_runtime",
+        "Prototype typed optimization-runtime and coordination components.",
+        "unvalidated",
+        limitations=(
+            "Open exhaustive-audit findings beginning at MXR-080-0630 invalidate end-to-end guarantees.",
+            "Contract names and receipts must not be treated as proof until those findings are reconciled.",
+        ),
+    ),
+)
+
+
+__all__ = ["EXPERIMENTAL_INVENTORY", "ExperimentalSurface"]
