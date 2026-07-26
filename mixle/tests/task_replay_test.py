@@ -35,9 +35,20 @@ class ReplayTest(unittest.TestCase):
 
     def test_diff_detects_a_changed_seed(self):
         trace = self._record()
+        original = trace.steps[1]
         tampered = ExecutionTrace(
             request=trace.request,
-            steps=[trace.steps[0], TraceStep(tool="draw_normal", args={"n": 5}, seed=99, result=trace.steps[1].result)],
+            steps=[
+                trace.steps[0],
+                TraceStep(
+                    tool="draw_normal",
+                    args={"n": 5},
+                    seed=99,
+                    result=original.result,
+                    rng_state_before=original.rng_state_before,
+                    rng_state_after=original.rng_state_after,
+                ),
+            ],
         )
         replayed = replay(tampered, _TOOLS)
         mismatches = diff(tampered, replayed)
@@ -54,6 +65,34 @@ class ReplayTest(unittest.TestCase):
         shorter = ExecutionTrace(request=trace.request, steps=trace.steps[:1])
         mismatches = diff(trace, shorter)
         self.assertIn((1, "length_mismatch"), mismatches)
+
+    def test_request_arguments_and_seed_are_part_of_replay_identity(self):
+        trace = self._record()
+        changed_request = ExecutionTrace(request="different", steps=trace.steps)
+        self.assertIn((-1, "request_mismatch"), diff(trace, changed_request))
+
+        first = trace.steps[0]
+        changed_args = TraceStep(
+            tool=first.tool,
+            args={"text": "different"},
+            result=first.result,
+            rng_state_before=first.rng_state_before,
+            rng_state_after=first.rng_state_after,
+        )
+        self.assertEqual(diff(ExecutionTrace("x", [first]), ExecutionTrace("x", [changed_args])), [(0, "uppercase")])
+
+    def test_empty_trace_is_not_replay_evidence_and_seed_must_be_supported(self):
+        self.assertEqual(diff(ExecutionTrace("x"), ExecutionTrace("x")), [(0, "empty_trace")])
+        with self.assertRaisesRegex(ValueError, "does not accept"):
+            record_step(_TOOLS, "uppercase", {"text": "hello"}, seed=1)
+
+    def test_global_rng_state_is_captured_and_restored_for_replay(self):
+        tools = {"global": lambda: float(np.random.random())}
+        np.random.seed(123)
+        trace = ExecutionTrace("rng", [record_step(tools, "global", {})])
+        np.random.seed(999)
+        replayed = replay(trace, tools)
+        self.assertEqual(diff(trace, replayed), [])
 
 
 if __name__ == "__main__":
