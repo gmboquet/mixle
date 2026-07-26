@@ -5,6 +5,7 @@ fallback are tested without a network service.
 """
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -46,6 +47,16 @@ class SpecToEstimatorTest(unittest.TestCase):
             spec_to_estimator({"family": "definitely_not_a_real_family"})
         self.assertIn("gaussian", ALLOWED_FAMILIES)
 
+    def test_spec_schema_rejects_ambiguous_keys_and_inexact_sizes(self):
+        with self.assertRaises(ValueError):
+            spec_to_estimator({"family": "gaussian", "type": "mixture"})
+        with self.assertRaises(TypeError):
+            spec_to_estimator({"type": "mixture", "k": 2.5, "component": {"family": "gaussian"}})
+        with self.assertRaises(ValueError):
+            spec_to_estimator({"type": "mixture", "k": 1000, "component": {"family": "gaussian"}})
+        with self.assertRaises(TypeError):
+            spec_to_estimator({"type": "composite", "fields": ["gaussian"]})
+
 
 class DesignModelTest(unittest.TestCase):
     def test_llm_design_is_built_and_fit(self):
@@ -55,6 +66,11 @@ class DesignModelTest(unittest.TestCase):
         designed = design_model(data, llm)
         self.assertEqual(designed.source, "llm")
         self.assertEqual(type(designed.estimator).__name__, "CompositeEstimator")
+        self.assertTrue(designed.acceptance.accepted)
+        self.assertGreater(designed.acceptance.n_train, 0)
+        self.assertGreater(designed.acceptance.n_holdout, 0)
+        self.assertTrue(np.isfinite(designed.acceptance.holdout_mean_log_density))
+        self.assertIsNone(designed.failure)
         model = designed.fit(data, out=None)
         self.assertTrue(np.isfinite(model.log_density(data[0])))
 
@@ -70,6 +86,9 @@ class DesignModelTest(unittest.TestCase):
         self.assertEqual(designed.source, "fallback")
         self.assertIn("fallback", designed.note)
         self.assertIsNotNone(designed.estimator)
+        self.assertTrue(designed.acceptance.accepted)
+        self.assertEqual(designed.failure.stage, "json_parse")
+        self.assertIn("cannot help", designed.failure.reply_excerpt)
 
     def test_no_fallback_raises(self):
         llm = CallableLLM(lambda prompt, system=None: "nope")  # no JSON object in the reply
@@ -80,6 +99,44 @@ class DesignModelTest(unittest.TestCase):
         llm = CallableLLM(lambda prompt, system=None: '{"family":"not_real"}')
         designed = design_model(_reals(), llm, fallback=True)
         self.assertEqual(designed.source, "fallback")
+        self.assertEqual(designed.failure.proposed_spec, {"family": "not_real"})
+        self.assertEqual(designed.failure.stage, "spec_construction")
+
+    def test_schema_incompatible_proposal_is_retained_as_rejection_evidence(self):
+        llm = CallableLLM(lambda prompt, system=None: '{"family":"gaussian"}')
+        designed = design_model(_hetero(), llm)
+        self.assertEqual(designed.source, "fallback")
+        self.assertEqual(designed.failure.proposed_spec, {"family": "gaussian"})
+        self.assertEqual(designed.failure.stage, "independent_acceptance")
+        self.assertIn("structured observations", designed.failure.message)
+
+    def test_held_out_regression_rejects_candidate_and_preserves_receipt(self):
+        llm = CallableLLM(lambda prompt, system=None: '{"family":"gaussian"}')
+        with mock.patch(
+            "mixle.task.design._fit_scores",
+            side_effect=[(0.0, -10.0), (0.0, 0.0), (0.0, 0.0)],
+        ):
+            designed = design_model(_reals(), llm, max_holdout_regret=0.5)
+        self.assertEqual(designed.source, "fallback")
+        self.assertIsNotNone(designed.failure.acceptance)
+        self.assertFalse(designed.failure.acceptance.accepted)
+        self.assertEqual(designed.failure.acceptance.holdout_regret, 10.0)
+
+    def test_empty_or_too_small_data_cannot_be_certified(self):
+        llm = CallableLLM(lambda prompt, system=None: '{"family":"gaussian"}')
+        for data in ([], [1.0, 2.0, 3.0]):
+            with self.assertRaises(ValueError):
+                design_model(data, llm)
+
+    def test_broken_fallback_is_not_returned_unvalidated(self):
+        llm = CallableLLM(lambda prompt, system=None: "no model")
+
+        class _Recommendation:
+            estimator = object()
+
+        with mock.patch("mixle.task.recommend.recommend_model", return_value=_Recommendation()):
+            with self.assertRaises(AttributeError):
+                design_model(_reals(), llm)
 
 
 if __name__ == "__main__":
