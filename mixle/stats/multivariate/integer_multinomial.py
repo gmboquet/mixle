@@ -60,7 +60,9 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         child = capabilities_for(self.len_dist)
         return DistributionCapabilities(
-            engine_ready=child.engine_ready, kernel_status="generic_table", numpy_only_reason=child.numpy_only_reason
+            engine_ready=child.engine_ready,
+            kernel_status="numpy_only" if child.numpy_only_reason else "generic_table",
+            numpy_only_reason=child.numpy_only_reason,
         )
 
     def compute_declaration(self):
