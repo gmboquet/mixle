@@ -57,6 +57,28 @@ class DeviceSpec:
     engine: str = "numpy"
     throughput: float = 1.0
     precision: str | None = None
+    node_id: str | None = None
+    local_rank: int | None = None
+    global_rank: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("device name must be a non-empty string")
+        if not np.isfinite(self.throughput) or self.throughput <= 0.0:
+            raise ValueError("device throughput must be finite and positive")
+        if self.memory_bytes is not None and (
+            isinstance(self.memory_bytes, (bool, np.bool_))
+            or not isinstance(self.memory_bytes, (int, np.integer))
+            or self.memory_bytes <= 0
+        ):
+            raise ValueError("device memory_bytes must be a positive integer when supplied")
+        for label, value in (("local_rank", self.local_rank), ("global_rank", self.global_rank)):
+            if value is not None and (
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, np.integer))
+                or value < 0
+            ):
+                raise ValueError("%s must be a non-negative integer when supplied" % label)
 
     @property
     def is_gpu(self) -> bool:
@@ -72,6 +94,9 @@ class DeviceSpec:
             "engine": self.engine,
             "throughput": self.throughput,
             "precision": self.precision,
+            "node_id": self.node_id,
+            "local_rank": self.local_rank,
+            "global_rank": self.global_rank,
         }
 
     @classmethod
@@ -84,6 +109,9 @@ class DeviceSpec:
             engine=str(payload.get("engine", "numpy")),
             throughput=float(payload.get("throughput", 1.0)),
             precision=payload.get("precision"),
+            node_id=None if payload.get("node_id") is None else str(payload["node_id"]),
+            local_rank=None if payload.get("local_rank") is None else int(payload["local_rank"]),
+            global_rank=None if payload.get("global_rank") is None else int(payload["global_rank"]),
         )
 
 
@@ -96,11 +124,16 @@ class Resources:
     def __post_init__(self) -> None:
         if len(self.devices) == 0:
             raise ValueError("Resources requires at least one device.")
-        for device in self.devices:
-            if device.throughput <= 0.0:
-                raise ValueError("device throughput must be positive.")
-            if device.memory_bytes is not None and device.memory_bytes <= 0:
-                raise ValueError("device memory_bytes must be positive when supplied.")
+        names = [device.name for device in self.devices]
+        if len(set(names)) != len(names):
+            raise ValueError("resource device names must be globally unique")
+        physical = [
+            (device.node_id, device.kind, device.local_rank)
+            for device in self.devices
+            if device.node_id is not None and device.local_rank is not None
+        ]
+        if len(set(physical)) != len(physical):
+            raise ValueError("resources must not contain duplicate physical device identities")
 
     @classmethod
     def single_cpu(
@@ -278,43 +311,71 @@ class Resources:
 
     @classmethod
     def from_torchrun(cls, memory_bytes: int | None = None, precision: Any | None = None) -> Resources:
-        """Return torchrun rank/device slots from launcher environment hints."""
+        """Return globally identified slots from an attested torchrun topology."""
         world = int(os.environ.get("WORLD_SIZE") or 1)
-        world = max(1, world)
+        if world < 1:
+            raise ValueError("WORLD_SIZE must be a positive integer")
+        if world > 1 and "LOCAL_WORLD_SIZE" not in os.environ:
+            raise ValueError("multi-rank torchrun discovery requires LOCAL_WORLD_SIZE")
+        local_world = int(os.environ.get("LOCAL_WORLD_SIZE") or 1)
+        if local_world < 1 or world % local_world != 0:
+            raise ValueError("LOCAL_WORLD_SIZE must be positive and divide WORLD_SIZE")
+        if world > 1:
+            missing = [name for name in ("RANK", "LOCAL_RANK", "GROUP_RANK") if name not in os.environ]
+            if missing:
+                raise ValueError("multi-rank torchrun discovery requires %s" % ", ".join(missing))
+            rank = int(os.environ["RANK"])
+            local_rank = int(os.environ["LOCAL_RANK"])
+            group_rank = int(os.environ["GROUP_RANK"])
+            if rank < 0 or rank >= world:
+                raise ValueError("RANK must identify a member of WORLD_SIZE")
+            if local_rank != rank % local_world or group_rank != rank // local_world:
+                raise ValueError("torchrun rank, local-rank, and node-rank topology is inconsistent")
         dtype = None if precision is None else precision_name(precision)
         try:
             import torch
         except ImportError:
             torch = None
         cuda_count = int(torch.cuda.device_count()) if torch is not None and torch.cuda.is_available() else 0
+        if cuda_count and local_world > cuda_count:
+            raise ValueError("LOCAL_WORLD_SIZE exceeds local CUDA device count and would duplicate a physical GPU")
         per_device_memory = None if memory_bytes is None else max(1, int(memory_bytes) // world)
         devices = []
         for rank in range(world):
+            node_rank = rank // local_world
+            local_rank = rank % local_world
+            node_id = "torchrun-node:%d" % node_rank
             if cuda_count:
-                dev_idx = rank % cuda_count
+                dev_idx = local_rank
                 try:
                     mem = int(torch.cuda.get_device_properties(dev_idx).total_memory)
                 except Exception:  # noqa: BLE001
                     mem = per_device_memory
                 devices.append(
                     DeviceSpec(
-                        name="cuda:%d" % dev_idx,
+                        name="%s:cuda:%d" % (node_id, dev_idx),
                         kind="cuda",
                         memory_bytes=mem,
                         engine="torch",
                         throughput=10.0,
                         precision=dtype,
+                        node_id=node_id,
+                        local_rank=dev_idx,
+                        global_rank=rank,
                     )
                 )
             else:
                 devices.append(
                     DeviceSpec(
-                        name="torchrun:%d" % rank,
+                        name="%s:cpu:%d" % (node_id, local_rank),
                         kind="cpu",
                         memory_bytes=per_device_memory,
                         engine="torch",
                         throughput=1.0,
                         precision=dtype,
+                        node_id=node_id,
+                        local_rank=local_rank,
+                        global_rank=rank,
                     )
                 )
         return cls(tuple(devices))

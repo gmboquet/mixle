@@ -2,6 +2,7 @@ import importlib
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -42,6 +43,48 @@ else:
 
 
 class PlacementPlanningTestCase(unittest.TestCase):
+    def test_resources_reject_nonfinite_throughput_and_duplicate_devices(self):
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            Resources.from_specs((DeviceSpec("cpu:0", throughput=float("nan")),))
+        with self.assertRaisesRegex(ValueError, "globally unique"):
+            Resources.from_specs((DeviceSpec("cpu:0"), DeviceSpec("cpu:0")))
+        with self.assertRaisesRegex(ValueError, "physical device"):
+            Resources.from_specs(
+                (
+                    DeviceSpec("rank:0", kind="cuda", node_id="node:0", local_rank=0),
+                    DeviceSpec("rank:1", kind="cuda", node_id="node:0", local_rank=0),
+                )
+            )
+
+    def test_torchrun_resources_require_and_preserve_global_topology(self):
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "2"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "LOCAL_WORLD_SIZE"):
+                Resources.from_torchrun()
+
+        topology = {
+            "WORLD_SIZE": "4",
+            "LOCAL_WORLD_SIZE": "2",
+            "RANK": "2",
+            "LOCAL_RANK": "0",
+            "GROUP_RANK": "1",
+        }
+        with mock.patch.dict(os.environ, topology, clear=True):
+            if HAS_TORCH:
+                with mock.patch.object(torch.cuda, "is_available", return_value=False):
+                    resources = Resources.from_torchrun()
+            else:
+                resources = Resources.from_torchrun()
+        self.assertEqual(len({device.name for device in resources.devices}), 4)
+        self.assertEqual(
+            [(device.node_id, device.local_rank, device.global_rank) for device in resources.devices],
+            [
+                ("torchrun-node:0", 0, 0),
+                ("torchrun-node:0", 1, 1),
+                ("torchrun-node:1", 0, 2),
+                ("torchrun-node:1", 1, 3),
+            ],
+        )
+
     def test_resources_from_external_orchestrator_shapes_need_no_optional_imports(self):
         class FakeComm:
             def Get_size(self):
