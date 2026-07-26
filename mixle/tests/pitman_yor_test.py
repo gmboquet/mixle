@@ -7,6 +7,7 @@ import numpy as np
 
 from mixle.inference.estimation import fit
 from mixle.stats import PitmanYorProcessDistribution, PitmanYorProcessEstimator
+from mixle.stats.bayes.pitman_yor import PitmanYorProcessAccumulator
 
 
 def _set_partitions(collection):
@@ -92,10 +93,16 @@ class PitmanYorTestCase(unittest.TestCase):
 
     def test_estimator_reports_boundary_for_no_new_blocks(self):
         data = [[0, 0, 0], [1, 1]]
-        fitted = fit(data, PitmanYorProcessEstimator(discount=0.0), max_its=1, print_iter=0)
+        estimator = PitmanYorProcessEstimator(discount=0.0)
+        accumulator = estimator.accumulator_factory().make()
+        for row in data:
+            accumulator.update(row, 1.0, None)
+        fitted = estimator.estimate(None, accumulator.value())
         default = PitmanYorProcessDistribution(1.0, 0.0)
 
         self.assertLess(fitted.alpha, 1.0e-6)
+        self.assertEqual(fitted.fit_metadata["boundary"]["alpha"], "lower")
+        self.assertTrue(fitted.fit_metadata["converged"])
         self.assertGreaterEqual(
             sum(fitted.log_density(x) for x in data),
             sum(default.log_density(x) for x in data),
@@ -113,6 +120,123 @@ class PitmanYorTestCase(unittest.TestCase):
             PitmanYorProcessDistribution(1.0, 1.0)  # discount must be < 1
         with self.assertRaises(ValueError):
             PitmanYorProcessDistribution(-0.5, 0.3)  # alpha must be > -discount
+
+
+class PitmanYorContractTestCase(unittest.TestCase):
+    def test_fractional_and_string_labels_preserve_partition_identity(self):
+        dist = PitmanYorProcessDistribution(1.5, 0.3)
+        reference = dist.log_density([0, 1, 0])
+        self.assertAlmostEqual(dist.log_density([0.1, 0.9, 0.1]), reference)
+        self.assertAlmostEqual(dist.log_density(["left", "right", "left"]), reference)
+        encoded = dist.dist_to_encoder().seq_encode(
+            [[0.1, 0.9, 0.1], ["left", "right", "left"]]
+        )
+        np.testing.assert_array_equal(encoded[0], [2, 1])
+        np.testing.assert_array_equal(encoded[1], [2, 1])
+
+    def test_raw_partitions_reject_non_sequences_and_invalid_label_equality(self):
+        dist = PitmanYorProcessDistribution()
+        for value in (1, "abc", [[0], [0]], [np.nan, np.nan]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                dist.log_density(value)
+
+    def test_encoded_partitions_require_canonical_positive_integer_sizes(self):
+        dist = PitmanYorProcessDistribution()
+        invalid = (
+            [[0, 1]],
+            [[1.5, 1]],
+            [[True, 1]],
+            [[1, 2]],
+            [[[1, 2]]],
+        )
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                dist.seq_log_density(value)
+        np.testing.assert_allclose(
+            dist.seq_log_density([np.asarray([2, 1]), np.asarray([], dtype=int)]),
+            [dist.log_density([0, 0, 1]), 0.0],
+        )
+
+    def test_sequence_accumulation_requires_exact_finite_nonnegative_weights(self):
+        acc = PitmanYorProcessAccumulator()
+        encoded = [np.asarray([2, 1]), np.asarray([3])]
+        for weights in ([1.0], [[1.0], [1.0]], [1.0, -1.0], [1.0, np.nan]):
+            with self.subTest(weights=weights), self.assertRaises(ValueError):
+                acc.seq_update(encoded, weights, None)
+        self.assertEqual(acc.value(), (0.0, {}, {}, {}))
+        acc.seq_update(encoded, np.asarray([0.5, 2.0]), None)
+        scalar = PitmanYorProcessAccumulator()
+        scalar.update(["a", "a", "b"], 0.5, None)
+        scalar.update([0, 0, 0], 2.0, None)
+        self.assertEqual(acc.value(), scalar.value())
+
+    def test_accumulation_rejects_invalid_weights_atomically(self):
+        acc = PitmanYorProcessAccumulator()
+        before = acc.value()
+        for weight in (-1.0, np.nan, [1.0]):
+            with self.subTest(weight=weight), self.assertRaises(ValueError):
+                acc.update([0, 0, 1], weight, None)
+            self.assertEqual(acc.value(), before)
+
+    def test_serialized_histograms_are_validated_atomically(self):
+        acc = PitmanYorProcessAccumulator()
+        acc.update([0, 0, 1], 1.0, None)
+        before = acc.value()
+        malformed = (
+            (-1.0, {}, {}, {}),
+            (1.0, {0: 1.0}, {}, {1: 1.0}),
+            (1.0, {1: np.nan}, {}, {1: 1.0}),
+            (1.0, {1: 1.0}, {}, {}),
+            (1.0, {1: 0.5, 2: 1.0}, {}, {1: 1.0, 2: 0.5}),
+            (1.0, {1: 1.0}, {1: 2.0}, {}),
+        )
+        for value in malformed:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                acc.combine(value)
+            self.assertEqual(acc.value(), before)
+            with self.assertRaises(ValueError):
+                PitmanYorProcessAccumulator().from_value(value)
+
+    def test_estimator_validates_controls_and_statistics(self):
+        for kwargs in (
+            {"discount": np.nan},
+            {"discount": 1.0},
+            {"estimate_discount": 1},
+            {"max_alpha": 0.0},
+            {"max_alpha": -1.0},
+            {"max_alpha": np.inf},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                PitmanYorProcessEstimator(**kwargs)
+        estimator = PitmanYorProcessEstimator()
+        with self.assertRaises(ValueError):
+            estimator.estimate(None, (1.0, {1: 1.0}, {}, {}))
+
+    def test_estimator_reports_uninformative_and_upper_boundary_results(self):
+        empty = PitmanYorProcessEstimator().estimate(None, (3.0, {}, {}, {}))
+        self.assertEqual(empty.alpha, 1.0)
+        self.assertEqual(empty.fit_metadata["solver"], "none")
+        self.assertTrue(empty.fit_metadata["converged"])
+        self.assertEqual(empty.fit_metadata["repairs"], ())
+
+        accumulator = PitmanYorProcessAccumulator()
+        for _ in range(4):
+            accumulator.update([0, 1, 2], 1.0, None)
+        upper = PitmanYorProcessEstimator(max_alpha=2.0).estimate(None, accumulator.value())
+        self.assertEqual(upper.alpha, 2.0)
+        self.assertEqual(upper.fit_metadata["boundary"]["alpha"], "upper")
+        self.assertTrue(np.isfinite(upper.fit_metadata["objective"]))
+
+    def test_distribution_and_sampler_validate_sizes(self):
+        for value in (0, -1, 1.5, True):
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                PitmanYorProcessDistribution(num_elements=value)
+        sampler = PitmanYorProcessDistribution(num_elements=3).sampler(seed=1)
+        for value in (-1, 1.5, True):
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                sampler.sample(value)
+        with self.assertRaises(ValueError):
+            PitmanYorProcessDistribution().estimator(pseudo_count=1.0)
 
 
 if __name__ == "__main__":
