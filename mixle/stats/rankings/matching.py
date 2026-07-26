@@ -17,6 +17,7 @@ smoothed assignment frequencies to the model edge marginals by projected gradien
 log-weights.
 """
 
+import math
 from collections.abc import Sequence
 from itertools import combinations
 
@@ -157,6 +158,10 @@ class MatchingDistribution(SequenceEncodableProbabilityDistribution):
     def enumerator(self) -> "MatchingEnumerator":
         """Return an exact finite enumerator over all matchings in decreasing probability order."""
         return MatchingEnumerator(self)
+
+    def support_size(self) -> int:
+        """Return the number of perfect matchings."""
+        return math.factorial(self.dim)
 
     def estimator(self, pseudo_count: float | None = 1.0) -> "MatchingEstimator":
         """Return an estimator that keeps the node count fixed at this distribution's n."""

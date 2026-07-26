@@ -769,6 +769,27 @@ class DistributionSampler(ABC):
         ...
 
 
+class NucleusResult(list[tuple[Any, float]]):
+    """List-compatible nucleus prefix with explicit termination provenance."""
+
+    def __init__(
+        self,
+        items: list[tuple[Any, float]],
+        *,
+        target_probability: float,
+        cumulative_probability: float,
+        reached_target: bool,
+        capped: bool,
+        exhausted: bool,
+    ) -> None:
+        super().__init__(items)
+        self.target_probability = target_probability
+        self.cumulative_probability = cumulative_probability
+        self.reached_target = reached_target
+        self.capped = capped
+        self.exhausted = exhausted
+
+
 class DistributionEnumerator(ABC):
     """Lazy iterator over the support of dist in non-increasing probability order.
 
@@ -794,7 +815,7 @@ class DistributionEnumerator(ABC):
         """Return the k most probable (value, log_prob) pairs (fewer if the support is smaller)."""
         return list(itertools.islice(self, k))
 
-    def top_p(self, p: float, max_items: int | None = None) -> list[tuple[Any, float]]:
+    def top_p(self, p: float, max_items: int | None = None) -> NucleusResult:
         """Return the smallest descending-probability prefix whose total probability reaches ``p``.
 
         The nucleus / minimal high-probability set: because values are yielded in non-increasing
@@ -803,27 +824,84 @@ class DistributionEnumerator(ABC):
         sampling). Accumulation stops as soon as the cumulative probability reaches ``p``.
 
         ``max_items`` caps how many values are pulled so an infinite or heavy-tailed support cannot
-        run away; if the cap is hit before the threshold, the (sub-threshold) prefix gathered so far
-        is returned. ``p >= 1.0`` on an infinite support therefore requires ``max_items``.
+        run away. A cap is mandatory when the support has no known finite cardinality. The returned
+        list-compatible :class:`NucleusResult` reports whether the target was reached, the accumulated
+        mass, and whether a cap stopped the search.
 
         Args:
-            p (float): Target cumulative probability; ``p <= 0`` returns the empty set.
+            p (float): Target cumulative probability in ``[0, 1]``.
             max_items (Optional[int]): Hard cap on the number of values pulled.
 
         Returns:
-            List of (value, log_prob) pairs in non-increasing probability order.
+            A list-compatible nucleus result with termination provenance.
 
         """
-        if p <= 0.0:
-            return []
+        if isinstance(p, (bool, np.bool_)):
+            raise TypeError("p must be a finite real number in [0, 1].")
+        try:
+            target = float(p)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("p must be a finite real number in [0, 1].") from exc
+        if not math.isfinite(target) or not 0.0 <= target <= 1.0:
+            raise ValueError("p must be a finite real number in [0, 1].")
+        cap = None if max_items is None else _positive_budget(max_items, "max_items")
+        known_size = self.dist.support_size()
+        if known_size is not None:
+            if isinstance(known_size, (bool, np.bool_)) or not isinstance(known_size, (int, np.integer)):
+                raise TypeError("support_size() must return a non-negative integer or None.")
+            if known_size < 0:
+                raise ValueError("support_size() must return a non-negative integer or None.")
+        if target > 0.0 and cap is None and known_size is None:
+            raise ValueError("top_p on an unknown or infinite support requires max_items.")
+        if target == 0.0:
+            return NucleusResult(
+                [],
+                target_probability=target,
+                cumulative_probability=0.0,
+                reached_target=True,
+                capped=False,
+                exhausted=known_size == 0,
+            )
+
+        limit = cap
+        if known_size is not None:
+            limit = known_size if limit is None else min(limit, known_size)
         out: list[tuple[Any, float]] = []
         total = 0.0
-        for value, log_prob in self:
-            out.append((value, log_prob))
-            total += math.exp(log_prob)
-            if total >= p or (max_items is not None and len(out) >= max_items):
+        exhausted = False
+        iterator = iter(self)
+        while limit is None or len(out) < limit:
+            try:
+                value, raw_log_prob = next(iterator)
+            except StopIteration:
+                exhausted = True
                 break
-        return out
+            if isinstance(raw_log_prob, (bool, np.bool_)):
+                raise TypeError("enumerated log probabilities must be finite non-positive real numbers.")
+            try:
+                log_prob = float(raw_log_prob)
+            except (TypeError, ValueError) as exc:
+                raise TypeError("enumerated log probabilities must be finite non-positive real numbers.") from exc
+            if not math.isfinite(log_prob) or log_prob > 0.0:
+                raise ValueError("enumerated log probabilities must be finite and non-positive.")
+            out.append((value, log_prob))
+            total = math.fsum((total, math.exp(log_prob)))
+            if total > 1.0 + 1.0e-10:
+                raise ValueError("enumerated cumulative probability exceeds one.")
+            if total >= target:
+                break
+        reached = total >= target
+        if known_size is not None and len(out) >= known_size:
+            exhausted = True
+        capped = not reached and cap is not None and (known_size is None or cap < known_size) and len(out) >= cap
+        return NucleusResult(
+            out,
+            target_probability=target,
+            cumulative_probability=min(total, 1.0),
+            reached_target=reached,
+            capped=capped,
+            exhausted=exhausted,
+        )
 
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0):
         """Precompute a bounded bit-quantized index over this enumeration.

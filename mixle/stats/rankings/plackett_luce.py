@@ -23,6 +23,7 @@ increasing the likelihood.
 
 import heapq
 import itertools
+import math
 from collections.abc import Sequence
 from typing import Any
 
@@ -164,6 +165,10 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
     def enumerator(self) -> "PlackettLuceEnumerator":
         """Return an exact finite enumerator over all orderings in decreasing probability order."""
         return PlackettLuceEnumerator(self)
+
+    def support_size(self) -> int:
+        """Return the number of full rankings."""
+        return math.factorial(self.dim)
 
     def estimator(self, pseudo_count: float | None = None) -> "PlackettLuceEstimator":
         """Return an MM estimator that keeps the item count fixed at this distribution's K."""
