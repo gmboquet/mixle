@@ -265,8 +265,15 @@ def _field_log_density_features(dists, items):
             fill = items[int(np.argmax(~miss))]
             sub = [fill if m else x for x, m in zip(items, miss)]
             keep = (~miss).astype(np.float64)[:, None]
-            for l_in, _x, _nat in _field_log_density_features([d.dist for d in dists], sub):
-                yield np.where(keep > 0.0, l_in, 0.0), None, True
+            for l_in, x_in, _native_in in _field_log_density_features([d.dist for d in dists], sub):
+                if x_in is None:
+                    x_in = _typicality_coordinates(l_in, sub)
+                x_in = np.asarray(x_in, dtype=np.float64)
+                # Missing rows carry no invented inner value: zero the filled
+                # coordinate and append the presence state. Present rows retain
+                # every wrapped-field coordinate.
+                x_optional = np.column_stack((x_in * keep, keep))
+                yield np.where(keep > 0.0, l_in, 0.0), x_optional, False
         return
 
     if hasattr(dists[0], "dist_to_encoder"):
@@ -485,29 +492,52 @@ def fisher_factors(
         raise ValueError("affinity='fisher' requires raw data or encoded data.")
     if data is not None and enc_data is not None:
         raise ValueError("pass only one of data or enc_data for affinity='fisher'.")
-    if weight < 0:
-        raise ValueError("fisher affinity weight must be non-negative.")
+    try:
+        weight = float(weight)
+        ridge = float(ridge)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("fisher affinity weight and ridge must be finite real numbers.") from exc
+    if not np.isfinite(weight) or weight < 0:
+        raise ValueError("fisher affinity weight must be finite and non-negative.")
+    if not np.isfinite(ridge) or ridge <= 0.0:
+        raise ValueError("fisher affinity ridge must be finite and positive.")
+    if metric not in ("identity", "diagonal", "full"):
+        raise ValueError("metric must be 'identity', 'diagonal', or 'full'.")
     if information not in ("observed", "model"):
         raise ValueError("information must be 'observed' or 'model'.")
 
-    view = model.to_fisher()
+    to_fisher = getattr(model, "to_fisher", None)
+    if not callable(to_fisher):
+        raise AffinityCapabilityUnavailableError("the model does not expose Fisher geometry.")
+    try:
+        view = to_fisher()
+    except NotImplementedError as exc:
+        raise AffinityCapabilityUnavailableError("the model does not implement Fisher geometry.") from exc
     if data is not None:
-        stats = view.expected_statistics_matrix(data=list(data))
+        rows = list(data)
+        stats = view.expected_statistics_matrix(data=rows)
     else:
         stats = view.seq_expected_statistics(enc_data)
+    stats = np.asarray(stats, dtype=np.float64)
+    if stats.ndim != 2 or stats.shape[0] == 0 or stats.shape[1] == 0:
+        raise ValueError("Fisher statistics must be a non-empty two-dimensional array.")
+    if not np.all(np.isfinite(stats)):
+        raise ValueError("Fisher statistics must contain only finite values.")
     if information == "observed":
         x = _observed_fisher_vectors(view, stats=stats, metric=metric, ridge=ridge)
     else:
         x = view.fisher_vectors(stats=stats, metric=metric, ridge=ridge)
-    x = np.nan_to_num(np.asarray(x, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+    x = np.asarray(x, dtype=np.float64)
+    if x.shape != stats.shape or not np.all(np.isfinite(x)):
+        raise ValueError("Fisher-vector construction returned invalid geometry.")
 
     return [
         {
             "kind": "fisher",
             "x": x,
-            "weight": float(weight),
+            "weight": weight,
             "metric": metric,
-            "ridge": float(ridge),
+            "ridge": ridge,
             "information": information,
         }
     ]

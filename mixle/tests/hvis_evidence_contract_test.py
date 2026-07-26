@@ -5,11 +5,13 @@ from unittest.mock import patch
 
 import numpy as np
 
-from mixle.stats import GaussianDistribution, MixtureDistribution
+from mixle.stats import GaussianDistribution, MixtureDistribution, OptionalDistribution
 from mixle.utils.hvis import (
     AffinityCapabilityUnavailableError,
     _posteriors_and_loglikes,
     _resolve_affinity,
+    fisher_factors,
+    local_factors,
     model_log_affinity,
 )
 from mixle.utils.vector import ImpossibleEvidenceError
@@ -107,6 +109,53 @@ class AffinityAxiomTest(unittest.TestCase):
             model_log_affinity(None, None, affinity=[factor])
         with self.assertRaisesRegex(ValueError, "evidence_cap"):
             model_log_affinity(np.eye(2), evidence_cap=-1.0)
+
+
+class OptionalAndFisherGeometryContractTest(unittest.TestCase):
+    def test_optional_inner_field_retains_values_and_presence_state(self):
+        model = MixtureDistribution(
+            [
+                OptionalDistribution(GaussianDistribution(-2.0, 1.0), p=0.3),
+                OptionalDistribution(GaussianDistribution(2.0, 1.0), p=0.3),
+            ],
+            [0.5, 0.5],
+        )
+        data = [None, -2.0, -1.0, None, 1.0, 2.0]
+        factors = local_factors(model, data)
+        local = [factor for factor in factors if isinstance(factor, dict) and factor.get("kind") == "local"]
+        self.assertEqual(len(local), 2)
+        inner = max(local, key=lambda factor: factor["x"].shape[1])
+        self.assertEqual(inner["x"].shape, (len(data), 2))
+        np.testing.assert_array_equal(inner["x"][:, -1], [0.0, 1.0, 1.0, 0.0, 1.0, 1.0])
+        self.assertNotEqual(inner["x"][1, 0], inner["x"][2, 0])
+
+    def test_fisher_controls_must_be_finite_and_valid(self):
+        model = GaussianDistribution(0.0, 1.0)
+        for kwargs in (
+            {"weight": float("nan")},
+            {"weight": float("inf")},
+            {"ridge": float("nan")},
+            {"ridge": 0.0},
+            {"metric": "unknown"},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                fisher_factors(model, data=[-1.0, 1.0], **kwargs)
+
+    def test_nonfinite_fisher_statistics_are_rejected_not_zero_filled(self):
+        class BadView:
+            def expected_statistics_matrix(self, *, data):
+                return np.asarray([[0.0], [np.nan]])
+
+        class BadModel:
+            def to_fisher(self):
+                return BadView()
+
+        with self.assertRaisesRegex(ValueError, "statistics"):
+            fisher_factors(BadModel(), data=[0.0, 1.0])
+
+    def test_absent_fisher_capability_has_a_typed_result(self):
+        with self.assertRaises(AffinityCapabilityUnavailableError):
+            fisher_factors(object(), data=[0.0, 1.0])
 
 
 if __name__ == "__main__":
