@@ -73,6 +73,9 @@ class MegatronBridgeSession:
     def finish_accumulation(self) -> StepReceipt | None:
         return None
 
+    def discard_accumulation(self) -> StepReceipt | None:
+        return None
+
     def close(self) -> None:
         return None
 

@@ -101,6 +101,42 @@ def test_native_microbatch_and_accumulation_matches_one_full_sgd_update():
         torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
 
 
+def test_accumulation_is_weighted_by_actual_tokens_across_unequal_batches():
+    torch.manual_seed(14)
+    reference = build_causal_lm(13, d_model=16, n_layer=1, n_head=2, block=4)
+    distributed = copy.deepcopy(reference)
+    first_x = torch.randint(0, 13, (3, 4))
+    first_y = torch.randint(0, 13, (3, 4))
+    second_x = torch.randint(0, 13, (1, 4))
+    second_y = torch.randint(0, 13, (1, 4))
+
+    optimizer = torch.optim.SGD(reference.parameters(), lr=0.01, momentum=0.9)
+    all_x = torch.cat((first_x, second_x))
+    all_y = torch.cat((first_y, second_y))
+    loss = torch.nn.functional.cross_entropy(
+        reference(all_x, return_all_logits=True).reshape(-1, 13),
+        all_y.reshape(-1),
+    )
+    loss.backward()
+    optimizer.step()
+
+    session = TorchDistributedBackend().prepare(
+        distributed,
+        plan=ParallelPlan(microbatches=2, gradient_accumulation_steps=2),
+        device="cpu",
+        optimizer="sgd",
+        lr=0.01,
+        max_grad_norm=None,
+    )
+    session.train_batch(first_x, first_y)
+    receipt = session.train_batch(second_x, second_y)
+
+    assert receipt.local_tokens == 16
+    assert receipt.global_tokens == 16
+    for expected, actual in zip(reference.parameters(), distributed.parameters()):
+        torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
+
+
 def test_pending_gradients_cannot_be_omitted_from_a_checkpoint(tmp_path):
     module = build_causal_lm(13, d_model=16, n_layer=1, n_head=2, block=4)
     session = TorchDistributedBackend().prepare(
@@ -114,7 +150,34 @@ def test_pending_gradients_cannot_be_omitted_from_a_checkpoint(tmp_path):
 
     with pytest.raises(RuntimeError, match="finish gradient accumulation"):
         session.save_checkpoint(str(tmp_path))
+    session.discard_accumulation()
     session.close()
+
+
+def test_close_requires_an_explicit_pending_gradient_decision():
+    module = build_causal_lm(13, d_model=16, n_layer=1, n_head=2, block=4)
+    before = [parameter.detach().clone() for parameter in module.parameters()]
+    session = TorchDistributedBackend().prepare(
+        module,
+        plan=ParallelPlan(gradient_accumulation_steps=2),
+        device="cpu",
+        optimizer="sgd",
+    )
+    batch = torch.randint(0, 13, (2, 4))
+    session.train_batch(batch, batch)
+
+    with pytest.raises(RuntimeError, match="discard_accumulation"):
+        session.close()
+    assert session.step == 0
+    for expected, actual in zip(before, module.parameters()):
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+    discard = session.discard_accumulation()
+    assert discard is not None and discard.skipped
+    assert discard.extra["reason"] == "explicit_accumulation_discard"
+    session.close()
+    for expected, actual in zip(before, module.parameters()):
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
 def test_complete_checkpoint_restores_model_optimizer_rng_and_clocks(tmp_path):

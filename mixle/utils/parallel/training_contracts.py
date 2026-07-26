@@ -376,6 +376,8 @@ class StepReceipt:
     collective_bytes: int = 0
     skipped: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
+    global_examples_observed: int | None = None
+    global_tokens_observed: int | None = None
 
     def __post_init__(self) -> None:
         integer_domains = {
@@ -407,13 +409,23 @@ class StepReceipt:
             raise TypeError("skipped must be boolean.")
         if not isinstance(self.extra, dict):
             raise TypeError("extra must be a dictionary.")
+        for name in ("global_examples_observed", "global_tokens_observed"):
+            value = getattr(self, name)
+            if value is not None:
+                if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+                    raise ValueError(f"{name} must be None or an exact non-negative integer.")
+                object.__setattr__(self, name, int(value))
 
     @property
     def global_examples(self) -> int:
+        if self.global_examples_observed is not None:
+            return self.global_examples_observed
         return self.local_examples * self.data_parallel_size
 
     @property
     def global_tokens(self) -> int:
+        if self.global_tokens_observed is not None:
+            return self.global_tokens_observed
         return self.local_tokens * self.data_parallel_size
 
     def as_dict(self) -> dict[str, Any]:
@@ -446,6 +458,8 @@ class DistributedTrainingSession(Protocol):
     def train_batch(self, inputs: Any, targets: Any) -> StepReceipt: ...
 
     def finish_accumulation(self) -> StepReceipt | None: ...
+
+    def discard_accumulation(self) -> StepReceipt | None: ...
 
     def close(self) -> None: ...
 
