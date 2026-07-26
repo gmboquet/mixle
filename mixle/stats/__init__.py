@@ -700,6 +700,7 @@ __all__ = [
     "ContinuousTimeMarkovChainEstimator",
     "ContinuousTimeMarkovChainDataEncoder",
     "InhomogeneousPoissonProcessDistribution",
+    "InhomogeneousPoissonProcessStatistics",
     "InhomogeneousPoissonProcessSampler",
     "InhomogeneousPoissonProcessEstimator",
     "InhomogeneousPoissonProcessDataEncoder",
@@ -1556,6 +1557,7 @@ from mixle.stats.processes.inhomogeneous_poisson import (
     InhomogeneousPoissonProcessDistribution,
     InhomogeneousPoissonProcessEstimator,
     InhomogeneousPoissonProcessSampler,
+    InhomogeneousPoissonProcessStatistics,
 )
 from mixle.stats.processes.multivariate_hawkes import (
     MultivariateHawkesProcessDataEncoder,
