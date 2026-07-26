@@ -42,6 +42,27 @@ def test_profile_of_permuted_tensor_of_different_shape_is_still_identical():
     assert profile_distance(p_base, p_reshaped) < 1e-6
 
 
+def test_resampled_profile_equality_is_not_an_exact_multiset_certificate():
+    """Two lossy profiles may coincide even though their full value multisets differ."""
+    a = torch.tensor([0.0, 1.0, 2.0, 3.0])
+    b = torch.tensor([0.0, 0.5, 2.5, 3.0])
+    candidates = propose_ties({"a": a, "b": b}, n_quantiles=2)
+    assert candidates[0].distance == 0.0
+    assert not candidates[0].exact_value_multiset
+
+
+def test_proposals_exclude_shape_incompatible_pairs():
+    candidates = propose_ties(
+        {
+            "matrix": torch.arange(4.0).reshape(2, 2),
+            "vector": torch.arange(4.0),
+        },
+        n_quantiles=4,
+    )
+    assert candidates == []
+    assert propose_ties({"single": torch.ones(2), "double": torch.ones(2, dtype=torch.float64)}) == []
+
+
 def test_profile_distance_is_large_for_clearly_different_distributions():
     """N(0, 1) vs N(10, 5): very different scale/mean -> large profile distance."""
     torch.manual_seed(2)
@@ -186,12 +207,14 @@ def test_apply_tie_gives_bounded_parity_and_real_param_reduction():
     top = candidates[0]
     assert {top.name_a, top.name_b} == {"blocks.0.mlp[0].weight", "blocks.1.mlp[0].weight"}
 
-    receipt = apply_tie(
+    original_parameter_ids = tuple(id(parameter) for parameter in model.parameters())
+    candidate_model, receipt = apply_tie(
         model,
         "blocks.0.mlp.0.weight",
         "blocks.1.mlp.0.weight",
         inputs=x,
         strategy="average",
+        max_relative_l2=0.25,
     )
 
     print("H4 parity receipt: max_abs_diff=%.6g relative_l2=%.6g" % (receipt.max_abs_diff, receipt.relative_l2))
@@ -216,7 +239,69 @@ def test_apply_tie_gives_bounded_parity_and_real_param_reduction():
     assert np.isfinite(receipt.max_abs_diff)
     assert np.isfinite(receipt.relative_l2)
     assert receipt.relative_l2 < 0.25
+    assert receipt.accepted
 
     # Real, strictly non-zero parameter reduction: two (d_model, 4*d_model) tensors collapse to one.
     assert receipt.params_reduced > 0
     assert receipt.params_after < receipt.params_before
+    assert candidate_model is not model
+    assert candidate_model.blocks[0].mlp[0].weight is candidate_model.blocks[1].mlp[0].weight
+    assert tuple(id(parameter) for parameter in model.parameters()) == original_parameter_ids
+    assert model.blocks[0].mlp[0].weight is not model.blocks[1].mlp[0].weight
+
+
+class _ZeroBaseline(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.a = torch.nn.Parameter(torch.tensor([1.0]))
+        self.b = torch.nn.Parameter(torch.tensor([-1.0]))
+
+    def forward(self, inputs):
+        return inputs * (self.a + self.b)
+
+
+def test_rejected_tie_is_transactional_and_zero_baseline_error_is_infinite():
+    model = _ZeroBaseline()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    original_parameter_ids = tuple(id(parameter) for parameter in model.parameters())
+    original_optimizer_ids = tuple(id(parameter) for group in optimizer.param_groups for parameter in group["params"])
+    model.train()
+
+    selected, receipt = apply_tie(
+        model,
+        "a",
+        "b",
+        inputs=torch.ones(2),
+        strategy="keep_a",
+        max_relative_l2=0.0,
+    )
+
+    assert selected is model
+    assert not receipt.accepted
+    assert receipt.relative_l2 == float("inf")
+    assert model.training
+    assert tuple(id(parameter) for parameter in model.parameters()) == original_parameter_ids
+    assert tuple(id(parameter) for group in optimizer.param_groups for parameter in group["params"]) == (
+        original_optimizer_ids
+    )
+    assert torch.equal(model(torch.ones(2)), torch.zeros(2))
+
+
+def test_parity_evaluation_restores_each_modules_training_state():
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+    model.train()
+    model[1].eval()
+    states_before = tuple(submodule.training for submodule in model.modules())
+
+    selected, receipt = apply_tie(
+        model,
+        "0.weight",
+        "1.weight",
+        inputs=torch.ones(1, 2),
+        strategy="average",
+        max_relative_l2=0.0,
+    )
+
+    assert not receipt.accepted
+    assert selected is model
+    assert tuple(submodule.training for submodule in model.modules()) == states_before
