@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("safetensors")
 
-from mixle.task.extract import distill_extractor, extraction_f1, tokenize  # noqa: E402
+from mixle.task.extract import ExtractionIO, _bio_labels, distill_extractor, extraction_f1, tokenize  # noqa: E402
 
 FIELDS = ["id", "amount", "date", "vendor"]
 VENDORS = ["Acme", "Globex", "Initech", "Umbrella", "Soylent", "Hooli", "Stark", "Wayne"]
@@ -57,6 +57,63 @@ class TokenizeTest(unittest.TestCase):
         for tok, s, e in tokenize(text):
             self.assertEqual(text[s:e], tok)
 
+    def test_duplicate_teacher_value_abstains_instead_of_choosing_first(self):
+        text = "alice met alice"
+        io = ExtractionIO({"<pad>": 0, "<unk>": 1, "alice": 2, "met": 3}, ["name"])
+        labels, reasons = _bio_labels(text, tokenize(text), {"name": "alice"}, io, max_tokens=10)
+        self.assertIsNone(labels)
+        self.assertEqual(reasons, {"name": "ambiguous_duplicate"})
+
+    def test_overlapping_teacher_fields_abstain_instead_of_overwriting(self):
+        text = "invoice 123"
+        io = ExtractionIO({"<pad>": 0, "<unk>": 1, "invoice": 2, "123": 3}, ["record", "id"])
+        labels, reasons = _bio_labels(
+            text,
+            tokenize(text),
+            {"record": "invoice 123", "id": "123"},
+            io,
+            max_tokens=10,
+        )
+        self.assertIsNone(labels)
+        self.assertIn("overlapping_field", reasons.values())
+
+    def test_teacher_field_beyond_max_length_abstains_as_truncated(self):
+        text = "zero one two three target"
+        io = ExtractionIO({"<pad>": 0, "<unk>": 1}, ["name"], max_len=3)
+        labels, reasons = _bio_labels(text, tokenize(text), {"name": "target"}, io, max_tokens=3)
+        self.assertIsNone(labels)
+        self.assertEqual(reasons, {"name": "truncated"})
+
+    def test_duplicate_predicted_spans_remove_the_ambiguous_field(self):
+        text = "alice met alice"
+        spans = tokenize(text)
+        io = ExtractionIO({"<pad>": 0, "<unk>": 1}, ["name"])
+        begin_name = io.tag_index["B-name"]
+        self.assertEqual(io._decode(text, spans, np.asarray([begin_name, 0, begin_name])), {})
+
+
+class ExtractionMetricTest(unittest.TestCase):
+    class _Model:
+        def __init__(self, records):
+            self.records = records
+
+        def batch(self, texts):
+            return self.records
+
+    def test_wrong_value_counts_as_false_positive_and_false_negative(self):
+        model = self._Model([{"id": "wrong", "amount": "10"}])
+        score = extraction_f1(model, [{"id": "right", "amount": "10"}], ["record"])
+        self.assertEqual(score, 0.5)
+
+    def test_all_empty_comparison_is_not_reported_as_perfect(self):
+        self.assertEqual(extraction_f1(self._Model([{}]), [{}], ["record"]), 0.0)
+
+    def test_mismatched_prediction_gold_and_text_lengths_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "same length"):
+            extraction_f1(self._Model([{}]), [{}], [])
+        with self.assertRaisesRegex(ValueError, "same length"):
+            extraction_f1(self._Model([]), [{}], ["record"])
+
 
 class ExtractionTest(unittest.TestCase):
     def _train(self, seed=0, epochs=120):
@@ -65,6 +122,7 @@ class ExtractionTest(unittest.TestCase):
         teacher = _teacher_factory(gold)
         texts = [t for t, _ in rows]
         model = distill_extractor(teacher, texts, FIELDS, epochs=epochs, seed=0)
+        self.assertEqual(model.meta["alignment_abstentions"], 0)
         return model, teacher
 
     def test_learns_to_extract_held_out(self):

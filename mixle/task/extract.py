@@ -107,6 +107,7 @@ class ExtractionIO:
     # --- decoding ---
     def _decode(self, text: str, spans: list[tuple[str, int, int]], tag_ids: np.ndarray) -> dict[str, str]:
         out: dict[str, str] = {}
+        ambiguous: set[str] = set()
         i, n = 0, min(len(spans), len(tag_ids))
         while i < n:
             tag = self.tags[tag_ids[i]]
@@ -118,7 +119,12 @@ class ExtractionIO:
                 while j < n and self.tags[tag_ids[j]] == f"I-{field}":
                     end = spans[j][2]
                     j += 1
-                if field not in out:  # first occurrence wins
+                if field in out:
+                    # A single-valued schema cannot identify which predicted occurrence is meant.
+                    # Remove the field so callers see an abstention instead of an arbitrary first hit.
+                    out.pop(field)
+                    ambiguous.add(field)
+                elif field not in ambiguous:
                     out[field] = text[start:end]
                 i = j
             else:
@@ -140,7 +146,10 @@ class ExtractionIO:
         with torch.no_grad():
             logits = module(ids, feats).cpu().numpy()
         tag_ids = logits.argmax(axis=-1)
-        return [self._decode(texts[i], spans_per[i], tag_ids[i]) for i in range(len(texts))]
+        return [
+            {} if len(spans_per[i]) > self.max_len else self._decode(texts[i], spans_per[i], tag_ids[i])
+            for i in range(len(texts))
+        ]
 
     def predict_with_confidence(self, module: Any, texts: list[str]) -> list[tuple[dict[str, str], float]]:
         """Extract each record and a confidence in ``[0, 1]``: the min per-token tag probability over tagged tokens.
@@ -160,6 +169,9 @@ class ExtractionIO:
         tag_ids = probs.argmax(axis=-1)
         out = []
         for i in range(len(texts)):
+            if len(spans_per[i]) > self.max_len:
+                out.append(({}, 0.0))
+                continue
             n = min(len(spans_per[i]), tag_ids.shape[1])
             tagged = [probs[i, k, tag_ids[i, k]] for k in range(n) if tag_ids[i, k] != 0]
             conf = float(min(tagged)) if tagged else 0.0
@@ -188,21 +200,52 @@ def _as_batched(teacher: Callable[..., Any]) -> Callable[[list[str]], list[dict[
 
 
 def _bio_labels(
-    text: str, spans: list[tuple[str, int, int]], extraction: dict[str, str], io: ExtractionIO
-) -> list[int]:
-    """Turn a teacher's ``{field: value}`` into per-token BIO tag ids by locating each value's char span."""
-    labels = [0] * len(spans)
+    text: str,
+    spans: list[tuple[str, int, int]],
+    extraction: dict[str, str],
+    io: ExtractionIO,
+    *,
+    max_tokens: int,
+) -> tuple[list[int] | None, dict[str, str]]:
+    """Align a teacher extraction to BIO labels, abstaining on ambiguous supervision."""
+    labels = [0] * min(len(spans), max_tokens)
+    assignments: list[tuple[str, list[int]]] = []
+    abstentions: dict[str, str] = {}
     for field, value in extraction.items():
-        if field not in io.fields or not value:
+        if field not in io.fields:
+            abstentions[str(field)] = "unknown_field"
             continue
-        pos = text.find(value)
-        if pos < 0:
+        if value is None or value == "":
             continue
-        lo, hi = pos, pos + len(value)
-        inside = [k for k, (_t, s, e) in enumerate(spans) if s >= lo and e <= hi]
+        value = str(value)
+        occurrences = [(match.start(), match.end()) for match in re.finditer(re.escape(value), text)]
+        if not occurrences:
+            abstentions[field] = "not_grounded"
+            continue
+        if len(occurrences) != 1:
+            abstentions[field] = "ambiguous_duplicate"
+            continue
+        lo, hi = occurrences[0]
+        inside = [index for index, (_token, start, end) in enumerate(spans) if start >= lo and end <= hi]
+        if not inside or spans[inside[0]][1] != lo or spans[inside[-1]][2] != hi:
+            abstentions[field] = "not_token_aligned"
+            continue
+        if inside[-1] >= max_tokens:
+            abstentions[field] = "truncated"
+            continue
+        assignments.append((field, inside))
+
+    claimed: set[int] = set()
+    for field, inside in assignments:
+        if claimed.intersection(inside):
+            abstentions[field] = "overlapping_field"
+        claimed.update(inside)
+    if abstentions:
+        return None, abstentions
+    for field, inside in assignments:
         for rank, k in enumerate(inside):
             labels[k] = io.tag_index[f"{'B' if rank == 0 else 'I'}-{field}"]
-    return labels
+    return labels, {}
 
 
 def distill_extractor(
@@ -245,9 +288,16 @@ def distill_extractor(
     ids, feats, mask = io._batch(toks_per)
     m = ids.shape[1]
     y = np.zeros((len(texts), m), dtype=np.int64)
-    for i, (text, spans) in enumerate(zip(texts, spans_per)):
-        lab = _bio_labels(text, spans[:m], extractions[i], io)
+    alignment_abstentions: list[dict[str, str]] = []
+    for i, (text, spans) in enumerate(zip(texts, spans_per, strict=True)):
+        lab, abstentions = _bio_labels(text, spans, extractions[i], io, max_tokens=m)
+        if lab is None:
+            mask[i, :] = False
+            alignment_abstentions.append(abstentions)
+            continue
         y[i, : len(lab)] = lab
+    if not mask.any():
+        raise ValueError("every training extraction was ambiguous, ungrounded, overlapping, or truncated")
     yt = torch.from_numpy(y).to(device)
     maskt = torch.from_numpy(mask).to(device)
 
@@ -270,7 +320,14 @@ def distill_extractor(
         builder="mixle.seq_tagger",
         config=cfg,
         task=task or "distilled field extractor",
-        meta={"distilled": True, "fields": fields, "n_examples": len(texts), "vocab_size": len(vocab)},
+        meta={
+            "distilled": True,
+            "fields": fields,
+            "n_examples": len(texts),
+            "vocab_size": len(vocab),
+            "alignment_abstentions": len(alignment_abstentions),
+            "alignment_abstention_reasons": alignment_abstentions,
+        },
     )
     student.meta["train_f1"] = extraction_f1(student, extractions, texts)
     return student
@@ -278,16 +335,26 @@ def distill_extractor(
 
 def extraction_f1(model: TaskModel, gold: Sequence[dict[str, str]], texts: Sequence[str]) -> float:
     """Micro-averaged field-level F1: a field counts as correct when the extracted value exactly matches gold."""
-    pred = model.batch(list(texts))
+    gold = list(gold)
+    texts = list(texts)
+    if len(gold) != len(texts):
+        raise ValueError("gold and texts must have the same length")
+    pred = list(model.batch(texts))
+    if len(pred) != len(gold):
+        raise ValueError("model predictions, gold, and texts must have the same length")
     tp = fp = fn = 0
-    for p, g in zip(pred, gold):
-        for field, value in g.items():
-            if p.get(field) == value:
+    for p, g in zip(pred, gold, strict=True):
+        if not isinstance(p, dict) or not isinstance(g, dict):
+            raise ValueError("predictions and gold records must be dictionaries")
+        for field in set(p) | set(g):
+            predicted = field in p
+            expected = field in g
+            if predicted and expected and p[field] == g[field]:
                 tp += 1
             else:
-                fn += 1
-        for field in p:
-            if field not in g:
-                fp += 1
+                if predicted:
+                    fp += 1
+                if expected:
+                    fn += 1
     denom = 2 * tp + fp + fn
-    return (2 * tp / denom) if denom else 1.0
+    return (2 * tp / denom) if denom else 0.0

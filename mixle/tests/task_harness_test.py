@@ -38,6 +38,36 @@ class ExtractorHarnessTest(unittest.TestCase):
         self.assertGreaterEqual(ex.report()["fallbacks"], 0)
         self.assertEqual(ex.report()["requests"], 2)
 
+    def test_required_fields_check_presence_not_truthiness_and_truncation_falls_back(self):
+        from mixle.task.harness import ExtractorHarness
+
+        class Adapter:
+            max_len = 2
+
+        class Model:
+            adapter = Adapter()
+
+            def __call__(self, text):
+                return {"count": 0}
+
+        teacher_calls = []
+
+        def teacher(text):
+            teacher_calls.append(text)
+            return {"count": 99}
+
+        harness = ExtractorHarness(
+            model=Model(),
+            teacher=teacher,
+            fields=["count"],
+            required=["count"],
+            holdout_f1=1.0,
+        )
+        self.assertEqual(harness("one"), {"count": 0})
+        self.assertEqual(teacher_calls, [])
+        self.assertEqual(harness("one two three"), {"count": 99})
+        self.assertEqual(teacher_calls, ["one two three"])
+
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class AlerterHarnessTest(unittest.TestCase):
