@@ -51,6 +51,13 @@ def _fit_two_component_mixture(data):
     return optimize(list(data), est, out=None, max_its=100, rng=np.random.RandomState(2))
 
 
+def _has_separated_mixture(model):
+    components = getattr(model, "components", ())
+    return len(components) >= 2 and max(component.mu for component in components) - min(
+        component.mu for component in components
+    ) > 2.0
+
+
 class CeilingBoundInventionTest(unittest.TestCase):
     """The core acceptance criterion: a genuinely out-of-class phenomenon."""
 
@@ -69,6 +76,7 @@ class CeilingBoundInventionTest(unittest.TestCase):
                 "two_component_mixture",
                 _fit_two_component_mixture,
                 new_information="2-component mixture: represents a bimodal posterior a single Gaussian cannot",
+                capability_test=_has_separated_mixture,
             )
         ]
 

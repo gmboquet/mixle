@@ -52,11 +52,19 @@ def _fit_wider_single_gaussian(data):
     return optimize(data, GaussianEstimator(pseudo_count=(0.1, 0.1)), out=None)
 
 
+def _has_separated_mixture(model):
+    components = getattr(model, "components", ())
+    return len(components) >= 2 and max(component.mu for component in components) - min(
+        component.mu for component in components
+    ) > 2.0
+
+
 class ParadigmShiftCeilingTest(unittest.TestCase):
     def setUp(self):
         rng = np.random.RandomState(0)
         self.train = _bimodal_data(300, rng)
-        self.held_out = _bimodal_data(150, np.random.RandomState(1))
+        held_out = _bimodal_data(200, np.random.RandomState(1))
+        self.held_out, self.verification = held_out[:100], held_out[100:]
         # target: strictly between the single- and two-component held-out scores, so the benchmark
         # is honest by construction -- the single Gaussian provably cannot reach it, the mixture can.
         single_probe = _fit_single_gaussian(self.train)
@@ -95,9 +103,16 @@ class ParadigmShiftCeilingTest(unittest.TestCase):
                 "two_component_mixture",
                 _fit_two_component_mixture,
                 new_information="2-component mixture: represents a bimodal posterior a single Gaussian cannot",
+                capability_test=_has_separated_mixture,
             )
         ]
-        result = propose_structure(candidates, self.train, self.held_out, ceiling)
+        result = propose_structure(
+            candidates,
+            self.train,
+            self.verification,
+            ceiling,
+            baseline_model=single,
+        )
         self.assertEqual(result.breaks_ceiling, "two_component_mixture")
         self.assertTrue(result.verdicts[0].accepted)
 
@@ -107,10 +122,16 @@ class ParadigmShiftCeilingTest(unittest.TestCase):
         ceiling = ceiling_report(held_out_score, self.target)
 
         candidates = [StructuralCandidate("wider_single_gaussian", _fit_wider_single_gaussian, new_information="")]
-        result = propose_structure(candidates, self.train, self.held_out, ceiling)
+        result = propose_structure(
+            candidates,
+            self.train,
+            self.verification,
+            ceiling,
+            baseline_model=single,
+        )
         self.assertIsNone(result.breaks_ceiling)
         self.assertFalse(result.verdicts[0].accepted)
-        self.assertIn("no named new information source", result.verdicts[0].reason)
+        self.assertIn("no executable capability delta", result.verdicts[0].reason)
 
     def test_unnamed_information_source_is_rejected_even_if_it_would_have_improved_held_out(self):
         # the two-component mixture WOULD improve held-out -- but with new_information left empty,
@@ -120,9 +141,49 @@ class ParadigmShiftCeilingTest(unittest.TestCase):
         ceiling = ceiling_report(held_out_score, self.target)
 
         candidates = [StructuralCandidate("unnamed_mixture", _fit_two_component_mixture, new_information="")]
-        result = propose_structure(candidates, self.train, self.held_out, ceiling)
+        result = propose_structure(
+            candidates,
+            self.train,
+            self.verification,
+            ceiling,
+            baseline_model=single,
+        )
         self.assertFalse(result.verdicts[0].accepted)
         self.assertIsNone(result.breaks_ceiling)
+
+    def test_asserted_novelty_and_nonfinite_scores_are_rejected(self):
+        single = _fit_single_gaussian(self.train)
+        ceiling = ceiling_report(
+            float(np.mean([single.log_density(x) for x in self.held_out])),
+            self.target,
+        )
+        asserted = StructuralCandidate(
+            "asserted",
+            _fit_two_component_mixture,
+            new_information="trust me",
+        )
+        result = propose_structure(
+            [asserted],
+            self.train,
+            self.verification,
+            ceiling,
+            baseline_model=single,
+        )
+        self.assertFalse(result.verdicts[0].capability_delta_verified)
+        self.assertFalse(result.verdicts[0].accepted)
+
+        class NanModel:
+            def log_density(self, _x):
+                return float("nan")
+
+        with self.assertRaisesRegex(ValueError, "finite"):
+            propose_structure(
+                [StructuralCandidate("nan", lambda _data: NanModel(), capability_test=lambda _model: True)],
+                self.train,
+                self.verification,
+                ceiling,
+                baseline_model=single,
+            )
 
     def test_ceiling_report_reflects_held_out_not_train(self):
         report = ceiling_report(held_out_score=-5.0, target=-4.0)
