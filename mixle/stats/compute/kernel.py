@@ -14,6 +14,7 @@ import numpy as np
 
 from mixle.capability import EngineResidentEStep, SupportsBackendComponentScoring, supports
 from mixle.engines import NUMPY_ENGINE, ComputeEngine
+from mixle.stats.compute.capability_decline import KernelCapabilityDeclinedError
 from mixle.stats.compute.mixture_evidence import normalize_mixture_log_scores
 from mixle.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 
@@ -181,7 +182,7 @@ class NumbaKernel(Kernel):
         estimator: ParameterEstimator | None = None,
     ) -> None:
         if not getattr(engine, "supports_numba", False):
-            raise ValueError("NumbaKernel requires a numba-capable (host numpy) engine.")
+            raise KernelCapabilityDeclinedError("NumbaKernel requires a numba-capable (host numpy) engine.")
         from mixle.stats.compute.fused_kernels import CompiledMixture
 
         self.dist = dist
@@ -228,9 +229,13 @@ class GeneratedNumbaKernel(Kernel):
         estimator: ParameterEstimator | None = None,
     ) -> None:
         if not getattr(engine, "supports_numba", False):
-            raise ValueError("GeneratedNumbaKernel requires a numba-capable (host numpy) engine.")
+            raise KernelCapabilityDeclinedError(
+                "GeneratedNumbaKernel requires a numba-capable (host numpy) engine."
+            )
         if not _generated_numba_kernel_available(dist):
-            raise ValueError("%s has no declaration-generated numba scorer." % type(dist).__name__)
+            raise KernelCapabilityDeclinedError(
+                "%s has no declaration-generated numba scorer." % type(dist).__name__
+            )
         self.dist = dist
         self.engine = engine
         self.estimator = estimator
@@ -273,21 +278,18 @@ class GeneratedNumbaKernel(Kernel):
         resident_ok = _estimator_resident_supported(self.estimator)
         if self.components is not None:
             row_weights = np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
-            try:
-                if not resident_ok:
-                    raise ValueError("estimator requires host-side sufficient statistics")
+            if resident_ok and _generated_numba_component_stats_available(self.components):
                 gamma = self.posteriors(enc)
                 gamma *= row_weights.reshape(-1, 1)
                 component_stats = _generated_numba_component_stats(enc, gamma, self.components, self.engine)
                 component_counts = gamma.sum(axis=0)
                 return component_counts, _unstack_numba_component_stats(component_stats, len(component_counts))
-            except ValueError:
-                # A component family has no generated stacked scorer / sufficient-statistic hook (or
-                # a width mismatch), or its M-step needs more than resident statistics: fall back to the
-                # host mixture accumulator, which handles any component family.
-                accumulator = self.estimator.accumulator_factory().make()
-                accumulator.seq_update(getattr(enc, "host_payload", enc), row_weights, self.dist)
-                return accumulator.value()
+            # Capability negotiation is complete before any scoring or statistic
+            # execution. A statically unsupported M-step takes the host route;
+            # runtime ValueError from either route propagates unchanged.
+            accumulator = self.estimator.accumulator_factory().make()
+            accumulator.seq_update(getattr(enc, "host_payload", enc), row_weights, self.dist)
+            return accumulator.value()
         if resident_ok and generated_sufficient_statistics_available(self.dist):
             return generated_sufficient_statistics(self.dist, enc, weights, self.engine)
         # Scorer-only leaf (numba scorer but no generated suff-stat hook): accumulate via the host
@@ -313,7 +315,9 @@ class GeneratedNumbaKernel(Kernel):
     def refresh(self, dist: SequenceEncodableProbabilityDistribution) -> None:
         """Refresh the distribution and regenerated component metadata."""
         if not _generated_numba_kernel_available(dist):
-            raise ValueError("%s has no declaration-generated numba scorer." % type(dist).__name__)
+            raise KernelCapabilityDeclinedError(
+                "%s has no declaration-generated numba scorer." % type(dist).__name__
+            )
         self.dist = dist
         self.components = _generated_numba_components(dist)
 
@@ -332,7 +336,7 @@ class NumbaKernelFactory(KernelFactory):
             return GeneratedNumbaKernel(dist, engine=engine, estimator=estimator)
         try:
             return NumbaKernel(dist, engine=engine, estimator=estimator)
-        except ValueError:
+        except KernelCapabilityDeclinedError:
             stacked = _stacked_kernel_after_numba_decline(dist, engine, estimator)
             if stacked is not None:
                 return stacked
@@ -363,10 +367,7 @@ class GeneratedNumbaKernelFactory(KernelFactory):
     ) -> Kernel:
         """Build a generated numba kernel on numpy when available, else fall back."""
         if getattr(engine, "supports_numba", False) and _generated_numba_kernel_available(dist):
-            try:
-                return GeneratedNumbaKernel(dist, engine=engine, estimator=estimator)
-            except ValueError:
-                pass
+            return GeneratedNumbaKernel(dist, engine=engine, estimator=estimator)
         return self.fallback.build(dist, engine, estimator=estimator)
 
 
@@ -383,7 +384,7 @@ def _stacked_kernel_after_numba_decline(
         from mixle.stats.compute.stacked import StackedMixtureKernel
 
         return StackedMixtureKernel(dist, engine=engine, estimator=estimator)
-    except ValueError:
+    except KernelCapabilityDeclinedError:
         return None
 
 
@@ -418,7 +419,7 @@ def _generated_numba_components_available(components: tuple) -> bool:
     if generated_numba_stacked_available(components[0]):
         try:
             generated_stacked_params(components, NUMPY_ENGINE)
-        except ValueError:
+        except KernelCapabilityDeclinedError:
             return False
         return True
     sequence_child_sets = _generated_numba_sequence_child_sets(components)
@@ -432,6 +433,28 @@ def _generated_numba_components_available(components: tuple) -> bool:
         return _generated_numba_components_available(optional_child_set)
     child_sets = _generated_numba_child_component_sets(components)
     return bool(child_sets) and all(_generated_numba_components_available(child_set) for child_set in child_sets)
+
+
+def _generated_numba_component_stats_available(components: tuple) -> bool:
+    """Return whether a component tree has a fully resident statistic route."""
+    from mixle.stats.compute.declarations import (
+        generated_numba_stacked_available,
+        generated_stacked_sufficient_statistics_available,
+    )
+
+    if generated_numba_stacked_available(components[0]):
+        return generated_stacked_sufficient_statistics_available(type(components[0]))
+    sequence_child_sets = _generated_numba_sequence_child_sets(components)
+    if sequence_child_sets is not None:
+        element_set, length_set = sequence_child_sets
+        return _generated_numba_component_stats_available(element_set) and (
+            length_set is None or _generated_numba_component_stats_available(length_set)
+        )
+    optional_child_set = _generated_numba_optional_child_set(components)
+    if optional_child_set is not None:
+        return _generated_numba_component_stats_available(optional_child_set)
+    child_sets = _generated_numba_child_component_sets(components)
+    return bool(child_sets) and all(_generated_numba_component_stats_available(child_set) for child_set in child_sets)
 
 
 def _generated_numba_child_component_sets(components: tuple) -> tuple | None:

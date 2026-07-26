@@ -15,6 +15,7 @@ import numpy as np
 
 from mixle.capability import SupportsStackedBackend, supports
 from mixle.engines import ComputeEngine
+from mixle.stats.compute.capability_decline import KernelCapabilityDeclinedError
 from mixle.stats.compute.declarations import (
     declaration_for,
     generated_stacked_available,
@@ -281,7 +282,7 @@ def stacked_component_params(dists: Sequence[Any], engine: ComputeEngine) -> Sta
                 strategy="generated",
                 params=_place_stacked_params(generated_stacked_params(dists, engine), engine, default_axis=0),
             )
-        except ValueError:
+        except KernelCapabilityDeclinedError:
             if not has_explicit:
                 raise
     return StackedComponentParams(
@@ -513,7 +514,7 @@ class StackedMixtureKernelFactory(KernelFactory):
                 return self.fallback.build(dist, engine, estimator=estimator)
             try:
                 return StackedMixtureKernel(dist, engine=engine, estimator=estimator)
-            except ValueError:
+            except KernelCapabilityDeclinedError:
                 return self.fallback.build(dist, engine, estimator=estimator)
         return self.fallback.build(dist, engine, estimator=estimator)
 
