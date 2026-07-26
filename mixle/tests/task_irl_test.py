@@ -3,8 +3,16 @@ expert's optimal behavior -- never checked against the true reward the expert us
 (IRL never sees it; the recovered reward only ever sees expert STATE trajectories)."""
 
 import numpy as np
+import pytest
 
-from mixle.task.irl import max_ent_irl, rollout_states, state_features
+from mixle.task.irl import (
+    _expected_state_visitation,
+    _soft_value_iteration,
+    _transition_table,
+    max_ent_irl,
+    rollout_states,
+    state_features,
+)
 from mixle.task.rl import ACTIONS, GridWorld, tabular_q_learning
 
 
@@ -72,3 +80,77 @@ def test_determinism_given_same_demonstrations():
     result_a = max_ent_irl(world, demos, iterations=100, lr=0.5)
     result_b = max_ent_irl(world, demos, iterations=100, lr=0.5)
     np.testing.assert_array_equal(result_a.reward_weights, result_b.reward_weights)
+
+
+def test_variable_demonstration_starts_and_lengths_are_preserved():
+    world = GridWorld(size=3, goal=(2, 2))
+    demonstrations = [
+        [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2)],
+        [(1, 0), (1, 1), (1, 2), (2, 2)],
+    ]
+    result = max_ent_irl(world, demonstrations, iterations=5, lr=0.1)
+    assert np.all(np.isfinite(result.reward_weights))
+
+
+def test_terminal_mass_is_counted_once_not_repeated_to_the_horizon():
+    world = GridWorld(size=2, goal=(1, 1))
+    next_state = _transition_table(world)
+    policy = np.zeros((world.n_states, len(ACTIONS)))
+    policy[:, ACTIONS.index("right")] = 1.0
+    visitation = _expected_state_visitation(
+        policy,
+        next_state,
+        start_indices=[world.state_index((1, 0))],
+        horizons=[4],
+        terminal_index=world.state_index(world.goal),
+    )
+    assert visitation.sum() == 2.0
+    assert visitation[world.state_index(world.goal)] == 1.0
+
+
+def test_returned_policy_is_induced_by_the_final_returned_reward():
+    world = GridWorld(size=3, goal=(2, 2))
+    demonstrations = [[(0, 0), (0, 1), (0, 2), (1, 2), (2, 2)]]
+    features = state_features(world)
+    result = max_ent_irl(world, demonstrations, iterations=3, lr=0.2, features=features)
+    expected = _soft_value_iteration(
+        result.reward(features),
+        _transition_table(world),
+        gamma=0.9,
+        terminal_index=world.state_index(world.goal),
+    )
+    np.testing.assert_array_equal(result.policy, expected)
+
+
+@pytest.mark.parametrize(
+    "demonstrations",
+    [
+        [[]],
+        [[(0, 0), (2, 2), (2, 1)]],
+        [[(0, 0), (2, 2)]],
+        [[(0, 0), (3, 0)]],
+    ],
+)
+def test_invalid_demonstrations_are_rejected(demonstrations):
+    world = GridWorld(size=3, goal=(2, 2))
+    with pytest.raises(ValueError):
+        max_ent_irl(world, demonstrations)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"iterations": 0},
+        {"lr": 0.0},
+        {"lr": float("nan")},
+        {"gamma": -0.1},
+        {"gamma": 1.0},
+        {"features": np.ones((2, 2))},
+        {"features": np.full((9, 1), np.nan)},
+    ],
+)
+def test_invalid_irl_settings_are_rejected(kwargs):
+    world = GridWorld(size=3, goal=(2, 2))
+    demonstrations = [[(0, 0), (0, 1), (0, 2), (1, 2), (2, 2)]]
+    with pytest.raises(ValueError):
+        max_ent_irl(world, demonstrations, **kwargs)
