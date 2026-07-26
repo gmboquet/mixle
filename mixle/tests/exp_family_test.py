@@ -8,6 +8,7 @@ Composite / Sequence / conditional (GLM) closures.
 """
 
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
@@ -188,6 +189,38 @@ class CompositeExponentialFamilyTest(unittest.TestCase):
         ref = np.array([comp.log_density(x) for x in xs])
         np.testing.assert_allclose(recon, ref, atol=1e-9)
         np.testing.assert_allclose(np.asarray(form.log_density(xs)), ref, atol=1e-9)
+
+    def test_product_rejects_missing_or_misaligned_component_batches(self):
+        comp = CompositeDistribution((GaussianDistribution(1.0, 2.0), PoissonDistribution(3.0)))
+        form = to_exponential_family(comp)
+        rows = [(0.0, 1), (1.0, 2)]
+
+        short = replace(form, extract=lambda _: ([0.0, 1.0],))
+        with self.assertRaisesRegex(ValueError, "returned 1 component batches; expected 2"):
+            short.sufficient_statistics(rows)
+        with self.assertRaisesRegex(ValueError, "returned 1 component batches; expected 2"):
+            short.log_density(rows)
+        with self.assertRaisesRegex(ValueError, "returned 1 component batches; expected 2"):
+            short.log_base_measure(rows)
+
+        uneven = replace(form, extract=lambda _: ([0.0, 1.0], [1]))
+        with self.assertRaisesRegex(ValueError, "component batch 1 has 1 rows; expected 2"):
+            uneven.sufficient_statistics(rows)
+
+    def test_product_rejects_wrong_statistic_block_width(self):
+        comp = CompositeDistribution((GaussianDistribution(1.0, 2.0), PoissonDistribution(3.0)))
+        form = to_exponential_family(comp)
+
+        class WrongWidth:
+            dim = 1
+
+            @staticmethod
+            def sufficient_statistics(x):
+                return np.zeros((len(x), 2))
+
+        malformed = replace(form, components=(form.components[0], WrongWidth()))
+        with self.assertRaisesRegex(ValueError, r"statistic block 1 has shape \(2, 2\); expected \(2, 1\)"):
+            malformed.sufficient_statistics([(0.0, 1), (1.0, 2)])
 
     def test_non_exp_family_child_returns_none(self):
         from mixle.stats.univariate.continuous.laplace import LaplaceDistribution

@@ -426,11 +426,63 @@ class ProductExponentialFamilyForm:
     engine: Any = NUMPY_ENGINE
     extract: Any = None  # callable mapping batch x -> tuple(per-component batch)
 
-    def _split(self, x: Any) -> tuple[Any, ...]:
+    def __post_init__(self) -> None:
+        declared = getattr(self.distribution, "dists", None)
+        if declared is not None and len(declared) != len(self.components):
+            raise ValueError(
+                "product exponential-family component count %d does not match distribution count %d."
+                % (len(self.components), len(declared))
+            )
+
+    @staticmethod
+    def _batch_size(batch: Any, label: str) -> int:
+        try:
+            size = len(batch)
+        except TypeError as exc:
+            raise TypeError("%s must be a sized batch." % label) from exc
+        if size < 0:
+            raise ValueError("%s reported a negative batch size." % label)
+        return size
+
+    def _split(self, x: Any) -> tuple[tuple[Any, ...], int]:
         if self.extract is not None:
-            return tuple(self.extract(x))
-        rows = list(x)
-        return tuple([row[i] for row in rows] for i in range(len(self.components)))
+            try:
+                parts = tuple(self.extract(x))
+            except TypeError as exc:
+                raise TypeError("product extractor must return one sized batch per component.") from exc
+            expected_rows = self._batch_size(x, "product observations")
+        else:
+            rows = list(x)
+            expected_rows = len(rows)
+            for row_index, row in enumerate(rows):
+                try:
+                    width = len(row)
+                except TypeError as exc:
+                    raise TypeError("product observation row %d must be a sized sequence." % row_index) from exc
+                if width != len(self.components):
+                    raise ValueError(
+                        "product observation row %d has %d fields; expected %d."
+                        % (row_index, width, len(self.components))
+                    )
+            parts = tuple([row[i] for row in rows] for i in range(len(self.components)))
+        if len(parts) != len(self.components):
+            raise ValueError(
+                "product extractor returned %d component batches; expected %d."
+                % (len(parts), len(self.components))
+            )
+        for index, part in enumerate(parts):
+            rows = self._batch_size(part, "product component batch %d" % index)
+            if rows != expected_rows:
+                raise ValueError(
+                    "product component batch %d has %d rows; expected %d." % (index, rows, expected_rows)
+                )
+        return parts, expected_rows
+
+    @staticmethod
+    def _require_shape(value: Any, expected: tuple[int, ...], label: str) -> None:
+        shape = tuple(getattr(value, "shape", ()))
+        if shape != expected:
+            raise ValueError("%s has shape %s; expected %s." % (label, shape, expected))
 
     @property
     def dim(self) -> int:
@@ -439,12 +491,25 @@ class ProductExponentialFamilyForm:
 
     def natural_parameters(self) -> np.ndarray:
         """Return the concatenated natural parameters of all components."""
-        return np.concatenate([c.natural_parameters() for c in self.components])
+        if not self.components:
+            return np.empty(0, dtype=np.float64)
+        blocks = []
+        for index, component in enumerate(self.components):
+            block = np.asarray(component.natural_parameters(), dtype=np.float64)
+            self._require_shape(block, (component.dim,), "product natural-parameter block %d" % index)
+            blocks.append(block)
+        return np.concatenate(blocks)
 
     def sufficient_statistics(self, x: Any) -> Any:
         """Return concatenated per-component sufficient statistics ``(n, dim)``."""
-        parts = self._split(x)
-        blocks = [c.sufficient_statistics(part) for c, part in zip(self.components, parts)]
+        parts, rows = self._split(x)
+        if not self.components:
+            return self.engine.empty((rows, 0))
+        blocks = []
+        for index, component in enumerate(self.components):
+            block = component.sufficient_statistics(parts[index])
+            self._require_shape(block, (rows, component.dim), "product statistic block %d" % index)
+            blocks.append(block)
         return self.engine.concatenate(blocks, axis=1)
 
     def log_partition(self, eta: Any = None) -> Any:
@@ -455,25 +520,38 @@ class ProductExponentialFamilyForm:
 
     def log_base_measure(self, x: Any) -> np.ndarray:
         """Return ``log h(x) = sum_i log h_i(x_i)`` row-wise."""
-        parts = self._split(x)
+        parts, rows = self._split(x)
+        if not self.components:
+            return np.zeros(rows, dtype=np.float64)
         total = None
-        for c, part in zip(self.components, parts):
-            lh = np.asarray(self.engine.to_numpy(c.log_base_measure(part)), dtype=np.float64)
+        for index, component in enumerate(self.components):
+            lh = np.asarray(self.engine.to_numpy(component.log_base_measure(parts[index])), dtype=np.float64)
+            self._require_shape(lh, (rows,), "product base-measure block %d" % index)
             total = lh if total is None else total + lh
         return total
 
     def log_density(self, x: Any) -> np.ndarray:
         """Return the reconstructed log-density ``sum_i log p_i(x_i)`` row-wise."""
-        parts = self._split(x)
+        parts, rows = self._split(x)
+        if not self.components:
+            return np.zeros(rows, dtype=np.float64)
         total = None
-        for c, part in zip(self.components, parts):
-            lp = np.asarray(self.engine.to_numpy(c.log_density(part)), dtype=np.float64)
+        for index, component in enumerate(self.components):
+            lp = np.asarray(self.engine.to_numpy(component.log_density(parts[index])), dtype=np.float64)
+            self._require_shape(lp, (rows,), "product density block %d" % index)
             total = lp if total is None else total + lp
         return total
 
     def mean_parameters(self, **kwargs: Any) -> np.ndarray:
         """Return the concatenated mean parameters of all components."""
-        return np.concatenate([c.mean_parameters(**kwargs) for c in self.components])
+        if not self.components:
+            return np.empty(0, dtype=np.float64)
+        blocks = []
+        for index, component in enumerate(self.components):
+            block = np.asarray(component.mean_parameters(**kwargs), dtype=np.float64)
+            self._require_shape(block, (component.dim,), "product mean-parameter block %d" % index)
+            blocks.append(block)
+        return np.concatenate(blocks)
 
 
 @dataclass(frozen=True)
