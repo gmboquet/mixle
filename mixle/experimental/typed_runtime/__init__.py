@@ -44,6 +44,7 @@ from mixle.experimental.typed_runtime.clocks import (
 from mixle.experimental.typed_runtime.compiler import ContractRegistry, compile_update_graph, infer_update_contract
 from mixle.experimental.typed_runtime.compression import (
     CompressedDelta,
+    CompressionAcknowledgement,
     CompressionMethod,
     CompressionReceipt,
     ErrorFeedbackCompressor,
@@ -258,6 +259,7 @@ __all__ = [
     "CommitReceipt",
     "CommitStatus",
     "CompressedDelta",
+    "CompressionAcknowledgement",
     "CompressionMethod",
     "CompressionReceipt",
     "CorrectionProvider",
