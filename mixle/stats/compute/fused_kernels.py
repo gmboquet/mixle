@@ -53,7 +53,7 @@ kernel path streams each observation exactly once.
 """
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import numpy as np
@@ -86,9 +86,87 @@ from mixle.stats.univariate.discrete.negative_binomial import NegativeBinomialDi
 from mixle.stats.univariate.discrete.poisson import PoissonDistribution
 from mixle.utils.optional_deps import numba
 
-__all__ = ["CompiledMixture", "build_kernel"]
+__all__ = ["CompiledEncoding", "CompiledMixture", "build_kernel"]
 
 _NEG_INF = float("-inf")
+
+
+class CompiledEncoding(Sequence[Any]):
+    """Columnar data tied to one compiled distribution structure.
+
+    The object intentionally preserves the historical two-item sequence
+    interface (``n, columns = encoding``) while carrying the structure and
+    array-geometry fingerprints needed to reject incompatible dispatch.
+    """
+
+    __slots__ = ("_columns", "_geometry", "_n", "_structure")
+
+    def __init__(self, n: int, columns: Any, structure: Any):
+        self._n = n
+        self._columns = columns
+        self._structure = structure
+        self._geometry = _array_geometry(columns)
+
+    @property
+    def count(self) -> int:
+        return self._n
+
+    @property
+    def columns(self) -> Any:
+        return self._columns
+
+    def __getitem__(self, index):
+        if index in (0, -2):
+            return self._n
+        if index in (1, -1):
+            return self._columns
+        raise IndexError(index)
+
+    def __iter__(self) -> Iterator[Any]:
+        yield self._n
+        yield self._columns
+
+    def __len__(self) -> int:
+        return 2
+
+
+def _array_geometry(value: Any) -> Any:
+    """Return a comparison-safe description of a nested runtime buffer."""
+    if isinstance(value, np.ndarray):
+        return ("array", value.shape, value.dtype.str)
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_array_geometry(item) for item in value))
+    if isinstance(value, list):
+        return ("list", tuple(_array_geometry(item) for item in value))
+    if isinstance(value, np.generic):
+        return ("scalar", value.dtype.str)
+    return ("value", type(value).__module__, type(value).__qualname__)
+
+
+def _seal_arrays(value: Any) -> None:
+    """Make generated encoding arrays read-only after validation."""
+    if isinstance(value, np.ndarray):
+        value.setflags(write=False)
+    elif isinstance(value, (tuple, list)):
+        for item in value:
+            _seal_arrays(item)
+
+
+def _fingerprint_value(value: Any) -> Any:
+    """Canonicalize structural values without relying on their equality API."""
+    if isinstance(value, np.generic):
+        value = value.item()
+    if value is None or isinstance(value, (bool, int, str, bytes)):
+        return (type(value).__name__, value)
+    if isinstance(value, float):
+        if math.isnan(value):
+            return ("float", "nan")
+        if math.isinf(value):
+            return ("float", "inf" if value > 0 else "-inf")
+        return ("float", value)
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_fingerprint_value(item) for item in value))
+    return (type(value).__module__, type(value).__qualname__, repr(value))
 
 
 # ----------------------------------------------------------------------------
@@ -1177,15 +1255,124 @@ _BUILDERS = {
 }
 
 
+def _distribution_group_fingerprint(dists: Sequence[Any]) -> Any:
+    """Describe every compile-time assumption shared by a component group."""
+    if not dists:
+        raise KernelCapabilityDeclinedError("a fused kernel requires at least one distribution")
+
+    dist_type = type(dists[0])
+    if any(type(dist) is not dist_type for dist in dists):
+        names = sorted({type(dist).__name__ for dist in dists})
+        raise KernelCapabilityDeclinedError(
+            "all components must have identical structure (got mixed %s)" % names
+        )
+    if dist_type not in _BUILDERS:
+        raise KernelCapabilityDeclinedError("no numba kernel for distribution type %s" % dist_type.__name__)
+
+    type_id = (dist_type.__module__, dist_type.__qualname__)
+    if dist_type is CompositeDistribution:
+        child_counts = [len(dist.dists) for dist in dists]
+        if not child_counts[0]:
+            raise KernelCapabilityDeclinedError("fused CompositeDistribution components cannot be empty")
+        if any(count != child_counts[0] for count in child_counts):
+            raise KernelCapabilityDeclinedError("CompositeDistribution components must have equal arity")
+        return (
+            type_id,
+            tuple(
+                _distribution_group_fingerprint([dist.dists[index] for dist in dists])
+                for index in range(child_counts[0])
+            ),
+        )
+
+    if dist_type is SequenceDistribution:
+        if any(getattr(dist, "len_normalized", False) for dist in dists):
+            raise KernelCapabilityDeclinedError("kernels do not support len_normalized SequenceDistributions")
+        has_length = [
+            dist.len_dist is not None and not isinstance(dist.len_dist, NullDistribution)
+            for dist in dists
+        ]
+        if any(value != has_length[0] for value in has_length):
+            raise KernelCapabilityDeclinedError(
+                "SequenceDistribution components must agree on whether a length model is present"
+            )
+        length_structure = (
+            _distribution_group_fingerprint([dist.len_dist for dist in dists])
+            if has_length[0]
+            else None
+        )
+        return (
+            type_id,
+            _distribution_group_fingerprint([dist.dist for dist in dists]),
+            has_length[0],
+            length_structure,
+        )
+
+    if dist_type is OptionalDistribution:
+        first = dists[0]
+        missing = (
+            "nan"
+            if first.missing_value_is_nan
+            else _fingerprint_value(first.missing_value)
+        )
+        for dist in dists[1:]:
+            candidate = (
+                "nan"
+                if dist.missing_value_is_nan
+                else _fingerprint_value(dist.missing_value)
+            )
+            if candidate != missing:
+                raise KernelCapabilityDeclinedError(
+                    "OptionalDistribution components must share the same missing value"
+                )
+        return (
+            type_id,
+            missing,
+            _distribution_group_fingerprint([dist.dist for dist in dists]),
+        )
+
+    if dist_type is IgnoredDistribution:
+        return (
+            type_id,
+            tuple(str(dist.dist) for dist in dists),
+            tuple(
+                (
+                    type(dist.dist_to_encoder()).__module__,
+                    type(dist.dist_to_encoder()).__qualname__,
+                )
+                for dist in dists
+            ),
+        )
+
+    if dist_type is CategoricalDistribution:
+        vocabulary = list(dict.fromkeys(value for dist in dists for value in dist.pmap))
+        canonical_vocabulary = sorted(
+            (_fingerprint_value(value) for value in vocabulary),
+            key=repr,
+        )
+        return type_id, tuple(canonical_vocabulary)
+
+    if dist_type is IntegerCategoricalDistribution:
+        return (
+            type_id,
+            min(int(dist.min_val) for dist in dists),
+            max(int(dist.max_val) for dist in dists),
+        )
+
+    if dist_type is DiagonalGaussianDistribution:
+        dimensions = tuple(int(dist.dim) for dist in dists)
+        if any(dimension != dimensions[0] for dimension in dimensions):
+            raise KernelCapabilityDeclinedError(
+                "DiagonalGaussianDistribution components must share the same dimension"
+            )
+        return type_id, dimensions[0]
+
+    return (type_id,)
+
+
 def build_kernel(dists: Sequence[Any]):
     """Build the fused kernel node for K same-structure distributions."""
+    _distribution_group_fingerprint(dists)
     t = type(dists[0])
-    if any(type(d) is not t for d in dists):
-        raise KernelCapabilityDeclinedError(
-            "all components must have identical structure (got mixed %s)" % {type(d).__name__ for d in dists}
-        )
-    if t not in _BUILDERS:
-        raise KernelCapabilityDeclinedError("no numba kernel for distribution type %s" % t.__name__)
     return _BUILDERS[t](dists)
 
 
@@ -1235,8 +1422,14 @@ class CompiledMixture:
             comps = [model]
 
         self.model = model
+        self._structure = (
+            "mixture" if self.is_mixture else "single",
+            _distribution_group_fingerprint(comps),
+        )
+        self._encoder = model.dist_to_encoder()
         self.builder = build_kernel(comps)
         self.K = len(comps)
+        self._parameter_geometry = _array_geometry(self.builder.params(comps))
         self._score = _make_score_driver(self.builder.kernel)
         self._accumulate = _make_acc_driver(self.builder.acc_kernel)
         self._pool = None
@@ -1250,12 +1443,74 @@ class CompiledMixture:
         for x in data:
             add(x)
             n += 1
-        return n, self.builder.freeze(bufs)
+        columns = self.builder.freeze(bufs)
+        _seal_arrays(columns)
+        return CompiledEncoding(n, columns, self._structure)
 
     # -- scoring -----------------------------------------------------------
 
-    def _components(self, model):
-        return list(model.components) if self.is_mixture else [model]
+    @staticmethod
+    def _encoders_are_compatible(left, right) -> bool:
+        if type(left) is not type(right):
+            return False
+        try:
+            return bool(left == right) and bool(right == left)
+        except (TypeError, ValueError):
+            return False
+
+    def _validated_encoding(self, enc) -> tuple[int, Any]:
+        if not isinstance(enc, CompiledEncoding):
+            raise TypeError("enc must be produced by this CompiledMixture.encode() method")
+        if enc._structure != self._structure:
+            raise ValueError("encoded data were produced for an incompatible compiled model structure")
+        if enc._geometry != _array_geometry(enc.columns):
+            raise ValueError("encoded column geometry changed after encoding")
+        if isinstance(enc.count, (bool, np.bool_)) or not isinstance(enc.count, (int, np.integer)):
+            raise TypeError("encoded observation count must be an integer")
+        if enc.count < 0:
+            raise ValueError("encoded observation count must be non-negative")
+        return int(enc.count), enc.columns
+
+    def _validated_model(self, model) -> tuple[list[Any], Any]:
+        replacement_is_mixture = isinstance(model, MixtureDistribution)
+        if replacement_is_mixture != self.is_mixture:
+            expected = "a MixtureDistribution" if self.is_mixture else "a single distribution"
+            raise TypeError("compiled model replacement must be %s" % expected)
+
+        comps = list(model.components) if self.is_mixture else [model]
+        if len(comps) != self.K:
+            raise ValueError(
+                "compiled model replacement has %d components; expected %d" % (len(comps), self.K)
+            )
+        candidate_structure = (
+            "mixture" if self.is_mixture else "single",
+            _distribution_group_fingerprint(comps),
+        )
+        if candidate_structure != self._structure:
+            raise ValueError("compiled model replacement has an incompatible distribution structure")
+
+        candidate_encoder = model.dist_to_encoder()
+        if not self._encoders_are_compatible(self._encoder, candidate_encoder):
+            raise ValueError("compiled model replacement has an incompatible data encoder")
+
+        params = self.builder.params(comps)
+        if _array_geometry(params) != self._parameter_geometry:
+            raise ValueError("compiled model replacement has incompatible parameter geometry")
+        return comps, params
+
+    def _validated_mixture_arrays(self, model, width: int) -> tuple[np.ndarray, np.ndarray]:
+        try:
+            log_w = np.asarray(model.log_w, dtype=np.float64)
+            zw = np.asarray(model.zw, dtype=bool)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("mixture weights and zero-weight flags must be numeric arrays") from exc
+        if log_w.shape != (width,):
+            raise ValueError("mixture log_w must have shape (%d,)" % width)
+        if zw.shape != (width,):
+            raise ValueError("mixture zw must have shape (%d,)" % width)
+        if np.any(np.isnan(log_w)) or np.any(np.isposinf(log_w)):
+            raise ValueError("mixture log_w cannot contain NaN or positive infinity")
+        return log_w, zw
 
     _MIN_ROWS_PER_THREAD = 50000
 
@@ -1269,9 +1524,9 @@ class CompiledMixture:
     def seq_component_log_density(self, enc, model=None, n_threads: int | None = None) -> np.ndarray:
         """Return per-component log-density matrix for encoded observations."""
         model = self.model if model is None else model
-        n, cols = enc
+        n, cols = self._validated_encoding(enc)
+        _, params = self._validated_model(model)
         out = np.empty((n, self.K), dtype=np.float64)
-        params = self.builder.params(self._components(model))
 
         if n_threads is None:
             import os
@@ -1298,9 +1553,10 @@ class CompiledMixture:
         ll = self.seq_component_log_density(enc, model)
         if not self.is_mixture:
             return ll[:, 0]
-        active = ~np.asarray(model.zw, dtype=bool)
+        log_w, zw = self._validated_mixture_arrays(model, ll.shape[1])
+        active = ~zw
         weighted = np.full(ll.shape, -np.inf, dtype=np.float64)
-        weighted[:, active] = ll[:, active] + np.asarray(model.log_w)[active]
+        weighted[:, active] = ll[:, active] + log_w[active]
         return normalize_mixture_log_scores(weighted).log_evidence
 
     def posteriors(self, enc, model=None) -> np.ndarray:
@@ -1308,9 +1564,10 @@ class CompiledMixture:
         model = self.model if model is None else model
         ll = self.seq_component_log_density(enc, model)
         if self.is_mixture:
-            active = ~np.asarray(model.zw, dtype=bool)
+            log_w, zw = self._validated_mixture_arrays(model, ll.shape[1])
+            active = ~zw
             weighted = np.full(ll.shape, -np.inf, dtype=np.float64)
-            weighted[:, active] = ll[:, active] + np.asarray(model.log_w)[active]
+            weighted[:, active] = ll[:, active] + log_w[active]
             ll = weighted
         return normalize_mixture_log_scores(ll).responsibilities
 
@@ -1319,9 +1576,18 @@ class CompiledMixture:
     def weighted_suff_stats(self, enc, gamma: np.ndarray, model=None, n_threads: int | None = None):
         """Legacy-format sufficient statistics from per-row component weights."""
         model = self.model if model is None else model
-        n, cols = enc
-        gamma = np.ascontiguousarray(gamma, dtype=np.float64)
-        params = self.builder.params(self._components(model))
+        n, cols = self._validated_encoding(enc)
+        _, params = self._validated_model(model)
+        try:
+            gamma = np.ascontiguousarray(gamma, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("gamma must be a numeric matrix") from exc
+        if gamma.shape != (n, self.K):
+            raise ValueError("gamma must have shape (%d, %d)" % (n, self.K))
+        if np.any(~np.isfinite(gamma)):
+            raise ValueError("gamma must contain only finite values")
+        if np.any(gamma < 0.0):
+            raise ValueError("gamma cannot contain negative weights")
 
         if n_threads is None:
             import os
@@ -1356,15 +1622,23 @@ class CompiledMixture:
     def em_step(self, enc, estimator, model=None, weights: np.ndarray | None = None):
         """One fused EM step; returns the re-estimated model via the legacy M-step."""
         model = self.model if model is None else model
-        n, _ = enc
+        n, _ = self._validated_encoding(enc)
         gamma = self.posteriors(enc, model)
         if weights is not None:
-            gamma = gamma * np.asarray(weights, dtype=np.float64).reshape(-1, 1)
-        return estimator.estimate(n, self.weighted_suff_stats(enc, gamma))
+            try:
+                weights = np.asarray(weights, dtype=np.float64)
+            except (TypeError, ValueError) as exc:
+                raise TypeError("weights must be a numeric vector") from exc
+            if weights.shape != (n,):
+                raise ValueError("weights must have shape (%d,)" % n)
+            if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
+                raise ValueError("weights must contain finite non-negative values")
+            gamma = gamma * weights[:, None]
+        return estimator.estimate(n, self.weighted_suff_stats(enc, gamma, model=model))
 
     def initialize(self, enc, estimator, rng: np.random.RandomState, p: float = 0.1):
         """Random sparse-responsibility initialization (replaces seq_initialize)."""
-        n, _ = enc
+        n, _ = self._validated_encoding(enc)
         keep = (rng.rand(n) <= p).astype(np.float64)
         gamma = rng.dirichlet(np.ones(self.K) / (self.K**2), size=n) * keep[:, None]
         return estimator.estimate(n, self.weighted_suff_stats(enc, gamma))
