@@ -14,6 +14,7 @@ import numpy as np
 
 from mixle.capability import EngineResidentEStep, SupportsBackendComponentScoring, supports
 from mixle.engines import NUMPY_ENGINE, ComputeEngine
+from mixle.stats.compute.mixture_evidence import normalize_mixture_log_scores
 from mixle.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 
 
@@ -245,12 +246,11 @@ class GeneratedNumbaKernel(Kernel):
 
         enc = getattr(enc, "engine_payload", enc)  # unwrap resident payloads
         if self.components is not None:
-            ll = self.component_scores(enc) + np.asarray(self.dist.log_w, dtype=np.float64).reshape(1, -1)
-            mx = ll.max(axis=1, keepdims=True)
-            good = np.isfinite(mx[:, 0])
-            rv = np.full(ll.shape[0], -np.inf)
-            rv[good] = np.log(np.exp(ll[good] - mx[good]).sum(axis=1)) + mx[good, 0]
-            return rv
+            component_scores = self.component_scores(enc)
+            active = ~np.asarray(self.dist.zw, dtype=bool)
+            ll = np.full(component_scores.shape, -np.inf, dtype=np.float64)
+            ll[:, active] = component_scores[:, active] + np.asarray(self.dist.log_w, dtype=np.float64)[active]
+            return normalize_mixture_log_scores(ll).log_evidence
         return generated_numba_log_density(self.dist, enc)
 
     def component_scores(self, enc: Any) -> np.ndarray:
@@ -304,19 +304,11 @@ class GeneratedNumbaKernel(Kernel):
             ll = self.score(enc).reshape(-1, 1)
             logw = np.zeros((1, 1))
         else:
-            logw = np.asarray(self.dist.log_w, dtype=np.float64).reshape(1, -1)
-            ll = self.component_scores(enc) + logw
-        mx = ll.max(axis=1, keepdims=True)
-        # a row with no supporting component has max=-inf, so -inf-(-inf)=nan; fall back to the prior
-        # weights for those rows (matches StackedMixtureKernel.posteriors) instead of emitting NaN
-        bad = ~np.isfinite(mx[:, 0])
-        if bad.any():
-            ll[bad] = logw
-            mx[bad, 0] = ll[bad].max(axis=1)
-        ll = ll - mx
-        np.exp(ll, out=ll)
-        ll /= ll.sum(axis=1, keepdims=True)
-        return ll
+            component_scores = self.component_scores(enc)
+            active = ~np.asarray(self.dist.zw, dtype=bool)
+            ll = np.full(component_scores.shape, -np.inf, dtype=np.float64)
+            ll[:, active] = component_scores[:, active] + np.asarray(self.dist.log_w, dtype=np.float64)[active]
+        return normalize_mixture_log_scores(ll).responsibilities
 
     def refresh(self, dist: SequenceEncodableProbabilityDistribution) -> None:
         """Refresh the distribution and regenerated component metadata."""

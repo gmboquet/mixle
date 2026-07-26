@@ -33,6 +33,10 @@ from mixle.enumeration.algorithms import (
     freeze,
 )
 from mixle.inference.fisher import Path
+from mixle.stats.compute.mixture_evidence import (
+    normalize_engine_mixture_log_scores,
+    normalize_mixture_log_scores,
+)
 from mixle.stats.compute.pdist import (
     ContractError,
     DataSequenceEncoder,
@@ -46,7 +50,7 @@ from mixle.stats.compute.pdist import (
     child_enumerator,
     prefix_contract_error,
 )
-from mixle.stats.compute.posterior import CategoricalLatentPosterior
+from mixle.stats.compute.posterior import CategoricalLatentPosterior, ImpossiblePosteriorError
 from mixle.utils.aliasing import MISSING, coalesce_alias
 from mixle.utils.special import digamma
 
@@ -455,31 +459,21 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
     def posterior(self, x: T) -> np.ndarray:
         """Return component responsibilities for one raw observation.
 
-        Responsibilities are proportional to ``w[k] * p_k(x)``. If every
-        positive-weight component reports an impossible observation, the method
-        returns a copy of the prior mixture weights so callers receive a finite
-        responsibility vector rather than ``NaN``.
+        Responsibilities are proportional to ``w[k] * p_k(x)``. An observation
+        outside every component's support receives zero responsibility and
+        therefore cannot fabricate component statistics.
 
         Args:
             x: Observation accepted by every component family.
 
         Returns:
-            Probability vector over component labels.
+            Responsibility vector over component labels. It sums to one when
+            the evidence is possible and is all zero otherwise.
         """
         comp_log_density = np.asarray([m.log_density(x) for m in self.components])
         comp_log_density += self.log_w
         comp_log_density[self.w == 0] = -np.inf
-
-        max_val = np.max(comp_log_density)
-
-        if max_val == -np.inf:
-            return self.w.copy()
-        else:
-            comp_log_density -= max_val
-            np.exp(comp_log_density, out=comp_log_density)
-            comp_log_density /= comp_log_density.sum()
-
-            return comp_log_density
+        return normalize_mixture_log_scores(comp_log_density[None, :]).responsibilities[0]
 
     def seq_component_log_density(self, x: T1) -> np.ndarray:
         """Return vectorized component log densities for encoded observations.
@@ -522,46 +516,8 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         Returns:
             One log-density per encoded observation.
         """
-        enc_data = x
-        ll_mat_init = False
-
-        for i in range(self.num_components):
-            if not self.zw[i]:
-                temp = self.components[i].seq_log_density(_component_enc(enc_data, i))
-                if not ll_mat_init:
-                    ll_mat = np.zeros((len(temp), self.num_components))
-                    ll_mat.fill(-np.inf)
-                    ll_mat_init = True
-                ll_mat[:, i] = temp
-                ll_mat[:, i] += self.log_w[i]
-
-        ll_max = ll_mat.max(axis=1, keepdims=True)
-        good_rows = np.isfinite(ll_max.flatten())
-
-        if np.all(good_rows):
-            ll_mat -= ll_max
-            np.exp(ll_mat, out=ll_mat)
-            ll_sum = np.sum(ll_mat, axis=1, keepdims=True)
-            np.log(ll_sum, out=ll_sum)
-            ll_sum += ll_max
-
-            return ll_sum.flatten()
-
-        else:
-            ll_mat = ll_mat[good_rows, :]
-            ll_max = ll_max[good_rows]
-            ll_mat -= ll_max
-            np.exp(ll_mat, out=ll_mat)
-
-            ll_sum = np.sum(ll_mat, axis=1, keepdims=True)
-            np.log(ll_sum, out=ll_sum)
-            ll_sum += ll_max
-
-            rv = np.zeros(good_rows.shape, dtype=float)
-            rv[good_rows] = ll_sum.flatten()
-            rv[~good_rows] = -np.inf
-
-            return rv
+        weighted = self.seq_component_log_density(x) + self.log_w
+        return normalize_mixture_log_scores(weighted).log_evidence
 
     def backend_seq_component_log_density(self, x: T1, engine: Any) -> Any:
         """Engine-neutral component log densities for encoded data."""
@@ -571,7 +527,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         for i in range(self.num_components):
             if self.zw[i]:
                 base = backend_seq_log_density(self.components[0], _component_enc(x, 0), engine)
-                scores.append(base * 0.0 + engine.asarray(-np.inf))
+                scores.append(engine.zeros(base.shape) + engine.asarray(-np.inf))
             else:
                 scores.append(backend_seq_log_density(self.components[i], _component_enc(x, i), engine))
         return engine.stack(scores, axis=1)
@@ -580,7 +536,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         """Engine-neutral mixture log-density for encoded data."""
         ll_mat = self.backend_seq_component_log_density(x, engine)
         log_w = engine.asarray(self.log_w)
-        return engine.logsumexp(ll_mat + log_w, axis=1)
+        return normalize_engine_mixture_log_scores(ll_mat + log_w, engine).log_evidence
 
     def gradient_fit_state(self, engine: Any, torch: Any, leaves: list[Any], recurse: Any, tensor_param: Any) -> Any:
         """Return distribution-owned state for autograd fitting."""
@@ -595,15 +551,15 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         """Return vectorized component responsibilities for encoded observations.
 
         Each row is proportional to ``w[k] * p_k(x_i)``. Rows where all
-        positive-weight components are impossible fall back to the prior mixture
-        weights, matching :meth:`posterior` and avoiding ``NaN`` responsibility
-        rows during EM accumulation.
+        positive-weight components are impossible receive zero responsibility,
+        matching :meth:`posterior` without inventing latent assignments.
 
         Args:
             x: Encoded observation batch.
 
         Returns:
-            ``(n, k)`` probability matrix whose rows sum to one.
+            ``(n, k)`` responsibility matrix. Possible rows sum to one;
+            impossible rows sum to zero.
         """
         enc_data = x
         ll_mat_init = False
@@ -619,18 +575,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
                 ll_mat[:, i] = temp
                 ll_mat[:, i] += self.log_w[i]
 
-        ll_max = ll_mat.max(axis=1, keepdims=True)
-        bad_rows = np.isinf(ll_max.flatten())
-
-        ll_mat[bad_rows, :] = self.log_w.copy()
-        ll_max[bad_rows] = np.max(self.log_w)
-        ll_mat -= ll_max
-
-        np.exp(ll_mat, out=ll_mat)
-        np.sum(ll_mat, axis=1, keepdims=True, out=ll_max)
-        ll_mat /= ll_max
-
-        return ll_mat
+        return normalize_mixture_log_scores(ll_mat).responsibilities
 
     def latent_posterior(self, x: Sequence[T]) -> CategoricalLatentPosterior:
         """Return the latent posterior ``q(z | x)`` over component labels for raw observations ``x``.
@@ -641,7 +586,13 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         (the MAP labels), or ``.entropy()``.
         """
         enc = self.dist_to_encoder().seq_encode(list(x))
-        return CategoricalLatentPosterior(self.seq_posterior(enc))
+        responsibilities = self.seq_posterior(enc)
+        impossible = np.flatnonzero(responsibilities.sum(axis=1) == 0.0)
+        if impossible.size:
+            raise ImpossiblePosteriorError(
+                "mixture evidence has zero probability at observation rows %s." % tuple(int(i) for i in impossible)
+            )
+        return CategoricalLatentPosterior(responsibilities)
 
     def posterior_predictive(self, x: Sequence[T], seed: int | None = None) -> list[Any]:
         """Draw posterior-predictive observations conditioned on ``x``.
@@ -1092,9 +1043,9 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
         Responsibilities are computed from ``estimate`` using the same
         log-sum-exp normalization as ``MixtureDistribution.seq_posterior``.
-        Rows where every component is impossible fall back to the estimate's
-        mixture weights, so the accumulator receives finite responsibility
-        weights rather than ``NaN``.
+        Rows where every component is impossible receive zero responsibility,
+        so an observation with zero model probability cannot fabricate
+        component sufficient statistics.
 
         Args:
             x: Encoded observation batch.
@@ -1116,32 +1067,12 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
                 ll_mat[:, i] = temp
                 ll_mat[:, i] += estimate.log_w[i]
 
-        ll_max = ll_mat.max(axis=1, keepdims=True)
+        normalized = normalize_mixture_log_scores(ll_mat)
+        if self._track_ll and ll_mat_init:
+            included = np.asarray(weights) != 0
+            self._seq_ll += float(np.dot(np.asarray(weights)[included], normalized.log_evidence[included]))
 
-        bad_rows = np.isinf(ll_max.flatten())
-        ll_mat[bad_rows, :] = estimate.log_w.copy()
-        ll_max[bad_rows] = np.max(estimate.log_w)
-
-        # Capture the per-row data log-likelihood (== what seq_log_density returns) by reusing the
-        # rowmax and rowsum already computed for normalization: row_ll = rowmax + log(rowsum). This
-        # is the convergence likelihood, free except an O(n) copy/log, and only when the fused-EM
-        # fast path requests it (_track_ll), so the standard path is unaffected.
-        track = self._track_ll and ll_mat_init
-        rowmax = ll_max[:, 0].copy() if track else None
-
-        ll_mat -= ll_max
-        np.exp(ll_mat, out=ll_mat)
-        np.sum(ll_mat, axis=1, keepdims=True, out=ll_max)
-
-        if track:
-            with np.errstate(divide="ignore"):
-                row_ll = rowmax + np.log(ll_max[:, 0])
-            if np.any(bad_rows):
-                row_ll[bad_rows] = -np.inf
-            self._seq_ll += float(np.dot(weights, row_ll))
-
-        np.divide(weights[:, None], ll_max, out=ll_max)
-        ll_mat *= ll_max
+        ll_mat = normalized.responsibilities * np.asarray(weights)[:, None]
 
         for i in range(self.num_components):
             w_loc = ll_mat[:, i]

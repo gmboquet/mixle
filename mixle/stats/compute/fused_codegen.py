@@ -68,6 +68,11 @@ from typing import Any
 
 import numpy as np
 
+from mixle.stats.compute.mixture_evidence import (
+    InvalidMixtureEvidenceError,
+    raise_for_invalid_log_evidence,
+)
+
 # --- leaf templates -------------------------------------------------------------------------------
 
 
@@ -1281,18 +1286,36 @@ def clean_fused_cache(max_age_days: float = 30.0, dry_run: bool = False) -> dict
 
 def _score_body(indent: str, row_lines: list[str], llbuf_name: str) -> list[str]:
     """The per-row score+log-sum-exp block shared by the sequential and parallel scorers."""
-    lines = [f"{indent}for k in range(kc):", f"{indent}    acc = logw[k]"]
-    lines += [f"{indent}    {rt}" for rt in row_lines]
+    lines = [
+        f"{indent}for k in range(kc):",
+        f"{indent}    if logw[k] == -np.inf:",
+        f"{indent}        {llbuf_name}[k] = -np.inf",
+        f"{indent}    else:",
+        f"{indent}        acc = logw[k]",
+    ]
+    lines += [f"{indent}        {rt}" for rt in row_lines]
     lines += [
-        f"{indent}    {llbuf_name}[k] = acc",
+        f"{indent}        {llbuf_name}[k] = acc",
+        f"{indent}invalid_evidence = False",
+        f"{indent}positive_infinite = 0",
+        f"{indent}for k in range(kc):",
+        f"{indent}    invalid_evidence = invalid_evidence or np.isnan({llbuf_name}[k])",
+        f"{indent}    positive_infinite += 1 if {llbuf_name}[k] == np.inf else 0",
         f"{indent}m = {llbuf_name}[0]",
         f"{indent}for k in range(1, kc):",
         f"{indent}    if {llbuf_name}[k] > m:",
         f"{indent}        m = {llbuf_name}[k]",
-        f"{indent}s = 0.0",
-        f"{indent}for k in range(kc):",
-        f"{indent}    s += np.exp({llbuf_name}[k] - m)",
-        f"{indent}out[i] = (m + np.log(s)) if m > -np.inf else -np.inf",  # all components -inf (out of support)
+        f"{indent}if invalid_evidence or positive_infinite > 1:",
+        f"{indent}    out[i] = np.nan",
+        f"{indent}elif positive_infinite == 1:",
+        f"{indent}    out[i] = np.inf",
+        f"{indent}elif m > -np.inf:",
+        f"{indent}    s = 0.0",
+        f"{indent}    for k in range(kc):",
+        f"{indent}        s += np.exp({llbuf_name}[k] - m)",
+        f"{indent}    out[i] = m + np.log(s)",
+        f"{indent}else:",
+        f"{indent}    out[i] = -np.inf",
     ]
     return lines
 
@@ -1302,21 +1325,39 @@ def _score_tail_quantized(indent: str, row_lines: list[str], llbuf_name: str) ->
     mixle.engines.qlut.quantized_logsumexp's exact semantics (round to grid, clamp the deep tail into
     the bottom bin), emitted inline. Error bound: half a grid step (lse_error_bound), plus the
     negligible clipped-tail term the qlut docstring quantifies."""
-    lines = [f"{indent}for k in range(kc):", f"{indent}    acc = logw[k]"]
-    lines += [f"{indent}    {rt}" for rt in row_lines]
+    lines = [
+        f"{indent}for k in range(kc):",
+        f"{indent}    if logw[k] == -np.inf:",
+        f"{indent}        {llbuf_name}[k] = -np.inf",
+        f"{indent}    else:",
+        f"{indent}        acc = logw[k]",
+    ]
+    lines += [f"{indent}        {rt}" for rt in row_lines]
     lines += [
-        f"{indent}    {llbuf_name}[k] = acc",
+        f"{indent}        {llbuf_name}[k] = acc",
+        f"{indent}invalid_evidence = False",
+        f"{indent}positive_infinite = 0",
+        f"{indent}for k in range(kc):",
+        f"{indent}    invalid_evidence = invalid_evidence or np.isnan({llbuf_name}[k])",
+        f"{indent}    positive_infinite += 1 if {llbuf_name}[k] == np.inf else 0",
         f"{indent}m = {llbuf_name}[0]",
         f"{indent}for k in range(1, kc):",
         f"{indent}    if {llbuf_name}[k] > m:",
         f"{indent}        m = {llbuf_name}[k]",
-        f"{indent}s = 0.0",
-        f"{indent}for k in range(kc):",
-        f"{indent}    qi = int(np.rint(({llbuf_name}[k] - m) * lse_inv_delta)) + lse_levm1",
-        f"{indent}    if qi < 0:",
-        f"{indent}        qi = 0",  # scores more than `span` below the max clip into the bottom bin
-        f"{indent}    s += lse_lut[qi]",
-        f"{indent}out[i] = (m + np.log(s)) if m > -np.inf else -np.inf",
+        f"{indent}if invalid_evidence or positive_infinite > 1:",
+        f"{indent}    out[i] = np.nan",
+        f"{indent}elif positive_infinite == 1:",
+        f"{indent}    out[i] = np.inf",
+        f"{indent}elif m > -np.inf:",
+        f"{indent}    s = 0.0",
+        f"{indent}    for k in range(kc):",
+        f"{indent}        qi = int(np.rint(({llbuf_name}[k] - m) * lse_inv_delta)) + lse_levm1",
+        f"{indent}        if qi < 0:",
+        f"{indent}            qi = 0",  # scores more than `span` below the max clip into the bottom bin
+        f"{indent}        s += lse_lut[qi]",
+        f"{indent}    out[i] = m + np.log(s)",
+        f"{indent}else:",
+        f"{indent}    out[i] = -np.inf",
     ]
     return lines
 
@@ -1363,7 +1404,9 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
     if not parallel:
         extra = ["R"] if plan.has_bridge else []
         args = ", ".join(
-            data_args + f["param_args"] + ["weights", "logw", "comp_counts", *f["acc_args"], *extra, "llbuf", "out_ll"]
+            data_args
+            + f["param_args"]
+            + ["weights", "logw", "comp_counts", *f["acc_args"], *extra, "llbuf", "out_ll", "invalid_rows"]
         )
         lines = ["def _estep(%s):" % args, "    n = weights.shape[0]", "    kc = logw.shape[0]"]
         if plan.needs_responsibilities and not plan.has_bridge:
@@ -1373,33 +1416,47 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
             "    for i in range(n):",
             "        wi = weights[i]",
             "        for k in range(kc):",
-            "            acc = logw[k]",
+            "            if logw[k] == -np.inf:",
+            "                llbuf[k] = -np.inf",
+            "            else:",
+            "                acc = logw[k]",
         ]
-        lines += ["            " + rt for rt in f["row"]]
+        lines += ["                " + rt for rt in f["row"]]
         lines += [
-            "            llbuf[k] = acc",
+            "                llbuf[k] = acc",
+            "        invalid_evidence = False",
+            "        positive_infinite = 0",
+            "        for k in range(kc):",
+            "            invalid_evidence = invalid_evidence or np.isnan(llbuf[k])",
+            "            positive_infinite += 1 if llbuf[k] == np.inf else 0",
             "        m = llbuf[0]",
             "        for k in range(1, kc):",
             "            if llbuf[k] > m:",
             "                m = llbuf[k]",
-            # all components -inf (impossible row): -inf - (-inf) = NaN would poison every statistic.
-            # Mirror the legacy accumulator: responsibilities fall back to the prior mixture weights
-            # and the row's log-likelihood is -inf (the scorer's guard, E-step edition).
-            "        ok = m > -np.inf",
-            "        if not ok:",
-            "            for k in range(kc):",
-            "                llbuf[k] = logw[k]",
-            "                if llbuf[k] > m:",
-            "                    m = llbuf[k]",
+            "        invalid_evidence = invalid_evidence or positive_infinite > 1",
+            "        invalid_rows[i] = invalid_evidence",
+            "        ordinary = not invalid_evidence and positive_infinite == 0 and m > -np.inf",
             "        s = 0.0",
-            "        for k in range(kc):",
-            "            s += np.exp(llbuf[k] - m)",
+            "        if ordinary:",
+            "            for k in range(kc):",
+            "                s += np.exp(llbuf[k] - m)",
             # data log-likelihood, free as the posterior normalizer. A zero-weighted row must
-            # contribute exactly 0.0 regardless of ok -- 0.0 * -inf is NaN in IEEE arithmetic, which
+            # contribute exactly 0.0 regardless of support -- 0.0 * -inf is NaN in IEEE arithmetic, which
             # would poison out_ll[0] for the whole batch on a row that's both impossible AND excluded.
-            "        out_ll[0] += 0.0 if wi == 0.0 else (wi * (m + np.log(s)) if ok else wi * -np.inf)",
+            "        if wi != 0.0 and not invalid_evidence:",
+            "            if positive_infinite == 1:",
+            "                out_ll[0] += wi * np.inf",
+            "            elif ordinary:",
+            "                out_ll[0] += wi * (m + np.log(s))",
+            "            else:",
+            "                out_ll[0] += wi * -np.inf",
             "        for k in range(kc):",
-            "            r = np.exp(llbuf[k] - m) / s * wi",
+            "            if invalid_evidence or (positive_infinite == 0 and not ordinary):",
+            "                r = 0.0",
+            "            elif positive_infinite == 1:",
+            "                r = wi if llbuf[k] == np.inf else 0.0",
+            "            else:",
+            "                r = np.exp(llbuf[k] - m) / s * wi",
             "            comp_counts[k] += r",
         ]
         lines += ["            " + st for st in f["acc"]]
@@ -1424,7 +1481,16 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
         args = ", ".join(
             data_args
             + f["param_args"]
-            + ["weights", "logw", "comp_counts", *f["acc_args"], *extra, "out_ll", "n_chunks"]
+            + [
+                "weights",
+                "logw",
+                "comp_counts",
+                *f["acc_args"],
+                *extra,
+                "out_ll",
+                "invalid_rows",
+                "n_chunks",
+            ]
         )
         lines = ["def _estep_par(%s):" % args, "    n = weights.shape[0]", "    kc = logw.shape[0]"]
         if plan.needs_responsibilities and not plan.has_bridge:
@@ -1440,29 +1506,45 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
             "        for i in range(c * step, min(n, (c + 1) * step)):",
             "            wi = weights[i]",
             "            for k in range(kc):",
-            "                acc = logw[k]",
+            "                if logw[k] == -np.inf:",
+            "                    llbuf_c[k] = -np.inf",
+            "                else:",
+            "                    acc = logw[k]",
         ]
-        lines += ["                " + rt for rt in f["row"]]
+        lines += ["                    " + rt for rt in f["row"]]
         lines += [
-            "                llbuf_c[k] = acc",
+            "                    llbuf_c[k] = acc",
+            "            invalid_evidence = False",
+            "            positive_infinite = 0",
+            "            for k in range(kc):",
+            "                invalid_evidence = invalid_evidence or np.isnan(llbuf_c[k])",
+            "                positive_infinite += 1 if llbuf_c[k] == np.inf else 0",
             "            m = llbuf_c[0]",
             "            for k in range(1, kc):",
             "                if llbuf_c[k] > m:",
             "                    m = llbuf_c[k]",
-            # same all-components-impossible guard as the sequential kernel (prior-weight fallback)
-            "            ok = m > -np.inf",
-            "            if not ok:",
-            "                for k in range(kc):",
-            "                    llbuf_c[k] = logw[k]",
-            "                    if llbuf_c[k] > m:",
-            "                        m = llbuf_c[k]",
+            "            invalid_evidence = invalid_evidence or positive_infinite > 1",
+            "            invalid_rows[i] = invalid_evidence",
+            "            ordinary = not invalid_evidence and positive_infinite == 0 and m > -np.inf",
             "            s = 0.0",
-            "            for k in range(kc):",
-            "                s += np.exp(llbuf_c[k] - m)",
+            "            if ordinary:",
+            "                for k in range(kc):",
+            "                    s += np.exp(llbuf_c[k] - m)",
             # same zero-weight guard as the sequential kernel: 0.0 * -inf is NaN, not 0.0.
-            "            out_ll[c] += 0.0 if wi == 0.0 else (wi * (m + np.log(s)) if ok else wi * -np.inf)",
+            "            if wi != 0.0 and not invalid_evidence:",
+            "                if positive_infinite == 1:",
+            "                    out_ll[c] += wi * np.inf",
+            "                elif ordinary:",
+            "                    out_ll[c] += wi * (m + np.log(s))",
+            "                else:",
+            "                    out_ll[c] += wi * -np.inf",
             "            for k in range(kc):",
-            "                r = np.exp(llbuf_c[k] - m) / s * wi",
+            "                if invalid_evidence or (positive_infinite == 0 and not ordinary):",
+            "                    r = 0.0",
+            "                elif positive_infinite == 1:",
+            "                    r = wi if llbuf_c[k] == np.inf else 0.0",
+            "                else:",
+            "                    r = np.exp(llbuf_c[k] - m) / s * wi",
             "                comp_counts[c, k] += r",
         ]
         lines += ["                " + st for st in f["acc"]]
@@ -1618,6 +1700,7 @@ def fused_seq_log_density(
     else:
         llbuf = np.empty(plan.num_components, dtype=np.float64)
         _compile(plan, quantized_lse=quantized)(*data_arrays, *param_arrays, *lse_extra, logw, out, llbuf)
+    raise_for_invalid_log_evidence(out)
     return out
 
 
@@ -1762,6 +1845,7 @@ def fused_accumulate(
     if parallel:
         comp_counts = np.zeros((nc, K), dtype=np.float64)
         out_ll = np.zeros(nc, dtype=np.float64)
+        invalid_rows = np.zeros(n, dtype=np.bool_)
         _compile_estep(plan, parallel=True)(
             *data_arrays,
             *param_arrays,
@@ -1771,6 +1855,7 @@ def fused_accumulate(
             *acc_arrays,
             *bridge_R,
             out_ll,
+            invalid_rows,
             nc,
         )
         # fixed-order combine over the chunk axis (numpy's single-threaded pairwise reduce): the SAME
@@ -1786,6 +1871,7 @@ def fused_accumulate(
         comp_counts = np.zeros(K, dtype=np.float64)
         llbuf = np.empty(K, dtype=np.float64)
         out_ll = np.zeros(1, dtype=np.float64)
+        invalid_rows = np.zeros(n, dtype=np.bool_)
         _compile_estep(plan)(
             *data_arrays,
             *param_arrays,
@@ -1796,6 +1882,13 @@ def fused_accumulate(
             *bridge_R,
             llbuf,
             out_ll,
+            invalid_rows,
+        )
+
+    if invalid_rows.any():
+        raise InvalidMixtureEvidenceError(
+            np.flatnonzero(invalid_rows),
+            "component scores contain NaN or ambiguous +inf evidence",
         )
 
     bridge_values: dict[int, list[Any]] = {}
