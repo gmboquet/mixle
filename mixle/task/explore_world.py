@@ -19,6 +19,7 @@ world has learnable signal at all -- a policy that reads the evidence should bea
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from numbers import Integral
 from typing import Any
 
 import numpy as np
@@ -39,6 +40,21 @@ class ExplorationWorld:
     seed: int = 0
 
     def __post_init__(self) -> None:
+        for name, value in (("n_cells", self.n_cells), ("n_targets", self.n_targets), ("budget", self.budget)):
+            if isinstance(value, bool) or not isinstance(value, Integral):
+                raise ValueError(f"{name} must be an integer")
+        if self.n_cells <= 0:
+            raise ValueError("n_cells must be positive")
+        if self.n_targets < 0 or self.n_targets > self.n_cells:
+            raise ValueError("n_targets must be between zero and n_cells")
+        if self.budget < 0:
+            raise ValueError("budget must be non-negative")
+        if isinstance(self.seed, bool) or not isinstance(self.seed, Integral):
+            raise ValueError("seed must be an integer")
+        self.n_cells = int(self.n_cells)
+        self.n_targets = int(self.n_targets)
+        self.budget = int(self.budget)
+        self.seed = int(self.seed)
         rng = np.random.RandomState(self.seed)
         self._geology = rng.normal(size=self.n_cells)
         target_idx = rng.choice(self.n_cells, size=self.n_targets, replace=False)
@@ -51,7 +67,7 @@ class ExplorationWorld:
         self._drilled = np.zeros(self.n_cells, dtype=bool)
         self._rng = rng
         self.remaining_budget = self.budget
-        self.done = False
+        self.done = self.remaining_budget < min(SURVEY_COST, DRILL_COST)
         self.history: list[dict[str, Any]] = []
         self._correct_drills = 0
 
@@ -59,21 +75,48 @@ class ExplorationWorld:
         """The world's own current noisy read of ``cell`` -- what a policy actually gets to see."""
         return float(self._geology[cell] + self._rng.normal(scale=self._survey_noise[cell]))
 
+    @staticmethod
+    def action_cost(action: dict[str, Any]) -> int:
+        """Return an action's exact cost without changing world state."""
+        if not isinstance(action, dict):
+            raise ValueError("actions must be dictionaries")
+        kind = action.get("type")
+        if kind == "survey":
+            return SURVEY_COST
+        if kind == "drill":
+            return DRILL_COST
+        raise ValueError(f"unknown action type {kind!r}")
+
     def step(self, action: dict[str, Any]) -> dict[str, Any]:
         """Apply one typed action (plain dict, so a fitted plan model can score/sample over the same
         action vocabulary): ``{"type": "survey", "cell": i}`` or ``{"type": "drill", "cell": i}``.
         Returns a plain-dict observation. Raises nothing on an over-budget action -- it is simply
         refused (recorded, zero effect) once ``done``, so a policy that keeps acting past budget
         exhaustion degrades gracefully rather than crashing."""
-        cell = int(action["cell"])
-        kind = action["type"]
+        if not isinstance(action, dict):
+            return {"type": None, "cell": None, "accepted": False, "reason": "invalid_action"}
+        kind = action.get("type")
+        raw_cell = action.get("cell")
+        if isinstance(raw_cell, bool):
+            cell = -1
+        else:
+            try:
+                cell = int(raw_cell)
+            except (TypeError, ValueError):
+                cell = -1
         if self.done or not (0 <= cell < self.n_cells):
             obs = {"type": kind, "cell": cell, "accepted": False, "reason": "done_or_invalid_cell"}
             self.history.append(obs)
             return obs
 
-        cost = SURVEY_COST if kind == "survey" else DRILL_COST if kind == "drill" else None
-        if cost is None or cost > self.remaining_budget:
+        try:
+            cost = self.action_cost(action)
+        except ValueError:
+            obs = {"type": kind, "cell": cell, "accepted": False, "reason": "unknown_action_or_over_budget"}
+            self.history.append(obs)
+            self.done = self.remaining_budget < min(SURVEY_COST, DRILL_COST)
+            return obs
+        if cost > self.remaining_budget:
             obs = {"type": kind, "cell": cell, "accepted": False, "reason": "unknown_action_or_over_budget"}
             self.history.append(obs)
             self.done = self.remaining_budget < min(SURVEY_COST, DRILL_COST)
@@ -99,10 +142,20 @@ class ExplorationWorld:
         return self._correct_drills
 
     def action_menu(self) -> list[dict[str, Any]]:
-        """Every action a policy could take right now (undrilled cells only, for drills)."""
-        return [{"type": "survey", "cell": c} for c in range(self.n_cells)] + [
-            {"type": "drill", "cell": c} for c in range(self.n_cells) if not self._drilled[c]
-        ]
+        """Every currently affordable action (undrilled cells only for drills)."""
+        if self.done:
+            return []
+        surveys = (
+            [{"type": "survey", "cell": c} for c in range(self.n_cells)]
+            if self.remaining_budget >= SURVEY_COST
+            else []
+        )
+        drills = (
+            [{"type": "drill", "cell": c} for c in range(self.n_cells) if not self._drilled[c]]
+            if self.remaining_budget >= DRILL_COST
+            else []
+        )
+        return surveys + drills
 
 
 @dataclass
@@ -112,20 +165,48 @@ class EpisodeResult:
     score: int
     n_actions: int
     trace: list[dict[str, Any]] = field(default_factory=list)
+    n_attempts: int = 0
+    stop_reason: str = "unknown"
 
 
-def run_episode(policy, *, n_cells: int, n_targets: int, budget: int, seed: int) -> EpisodeResult:
+def run_episode(
+    policy,
+    *,
+    n_cells: int,
+    n_targets: int,
+    budget: int,
+    seed: int,
+    max_steps: int = 10_000,
+) -> EpisodeResult:
     """Drive ``policy(world) -> action`` (a plain dict, or ``None`` to end early) until the world's
-    budget is exhausted or the policy stops itself."""
+    budget is exhausted, the policy stops itself, an action is refused, or ``max_steps`` is
+    reached. The finite cap protects callers from non-progressing custom policies."""
+    if isinstance(max_steps, bool) or not isinstance(max_steps, Integral) or max_steps <= 0:
+        raise ValueError("max_steps must be a positive integer")
     world = ExplorationWorld(n_cells=n_cells, n_targets=n_targets, budget=budget, seed=seed)
     n_actions = 0
-    while not world.done:
+    n_attempts = 0
+    stop_reason = "environment_done" if world.done else "running"
+    while not world.done and n_attempts < max_steps:
         action = policy(world)
         if action is None:
+            stop_reason = "policy_stopped"
             break
-        world.step(action)
+        obs = world.step(action)
+        n_attempts += 1
+        if not obs.get("accepted", False):
+            stop_reason = "action_refused"
+            break
         n_actions += 1
-    return EpisodeResult(score=world.score(), n_actions=n_actions, trace=world.history)
+    else:
+        stop_reason = "environment_done" if world.done else "step_limit"
+    return EpisodeResult(
+        score=world.score(),
+        n_actions=n_actions,
+        trace=world.history,
+        n_attempts=n_attempts,
+        stop_reason=stop_reason,
+    )
 
 
 def random_policy(world: ExplorationWorld) -> dict[str, Any] | None:

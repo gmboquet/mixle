@@ -44,9 +44,62 @@ class BudgetAccountingTest(unittest.TestCase):
 
     def test_actions_past_done_are_refused_not_crashing(self):
         world = ExplorationWorld(n_cells=10, n_targets=2, budget=0, seed=0)
+        self.assertTrue(world.done)
+        self.assertEqual(world.action_menu(), [])
         obs = world.step({"type": "drill", "cell": 0})
         self.assertFalse(obs["accepted"])
         self.assertEqual(world.remaining_budget, 0)
+
+    def test_action_menu_excludes_unaffordable_drills(self):
+        world = ExplorationWorld(n_cells=10, n_targets=2, budget=DRILL_COST - 1, seed=0)
+        self.assertTrue(world.action_menu())
+        self.assertTrue(all(action["type"] == "survey" for action in world.action_menu()))
+
+    def test_episode_stops_after_a_refused_action(self):
+        def always_unaffordable_drill(world):
+            return {"type": "drill", "cell": 0}
+
+        result = run_episode(
+            always_unaffordable_drill,
+            n_cells=10,
+            n_targets=2,
+            budget=DRILL_COST - 1,
+            seed=0,
+        )
+        self.assertEqual(result.n_attempts, 1)
+        self.assertEqual(result.n_actions, 0)
+        self.assertEqual(result.stop_reason, "action_refused")
+
+    def test_episode_has_a_hard_step_cap(self):
+        result = run_episode(
+            lambda world: {"type": "survey", "cell": 0},
+            n_cells=2,
+            n_targets=1,
+            budget=100,
+            seed=0,
+            max_steps=3,
+        )
+        self.assertEqual(result.n_attempts, 3)
+        self.assertEqual(result.stop_reason, "step_limit")
+
+
+class InputValidationTest(unittest.TestCase):
+    def test_world_dimensions_and_budget_are_validated(self):
+        invalid = [
+            {"n_cells": 0, "n_targets": 0, "budget": 1},
+            {"n_cells": 2, "n_targets": -1, "budget": 1},
+            {"n_cells": 2, "n_targets": 3, "budget": 1},
+            {"n_cells": 2, "n_targets": 1, "budget": -1},
+            {"n_cells": 2.5, "n_targets": 1, "budget": 1},
+        ]
+        for kwargs in invalid:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                ExplorationWorld(seed=0, **kwargs)
+
+    def test_max_steps_must_be_positive_integer(self):
+        for max_steps in (0, -1, 1.5, True):
+            with self.subTest(max_steps=max_steps), self.assertRaisesRegex(ValueError, "max_steps"):
+                run_episode(random_policy, n_cells=2, n_targets=1, budget=1, seed=0, max_steps=max_steps)
 
 
 class LearnableSignalTest(unittest.TestCase):
