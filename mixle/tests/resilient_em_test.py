@@ -10,7 +10,11 @@ from mixle.inference import seq_estimate
 from mixle.inference.estimation import optimize
 from mixle.stats import seq_encode
 from mixle.tests.parallel_test import make_data, make_estimator, make_start_model
-from mixle.utils.parallel.resilient_em import ResilientMPEncodedData, checkpointed_fold
+from mixle.utils.parallel.resilient_em import (
+    ResilientMPEncodedData,
+    _canonical_shard_payloads,
+    checkpointed_fold,
+)
 
 
 def _model_signature(model):
@@ -20,6 +24,20 @@ def _model_signature(model):
         gauss, cat = comp.dists
         sig.append((float(w), float(gauss.mu), float(gauss.sigma2), tuple(sorted(cat.pmap.items()))))
     return tuple(sig)
+
+
+class CanonicalShardFoldTestCase(unittest.TestCase):
+    def test_migrated_shards_are_interleaved_by_logical_identity(self):
+        self.assertEqual(
+            _canonical_shard_payloads([(0, b"zero"), (3, b"three"), (1, b"one"), (2, b"two")], {0, 1, 2, 3}),
+            [b"zero", b"one", b"two", b"three"],
+        )
+
+    def test_duplicate_or_missing_logical_shards_are_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "duplicate"):
+            _canonical_shard_payloads([(0, b"a"), (0, b"b")], {0})
+        with self.assertRaisesRegex(RuntimeError, "no payload"):
+            _canonical_shard_payloads([(0, b"a")], {0, 1})
 
 
 class ChaosDeterminismTestCase(unittest.TestCase):
