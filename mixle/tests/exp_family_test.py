@@ -107,7 +107,7 @@ class LeafExponentialFamilyTest(unittest.TestCase):
                 np.testing.assert_allclose(np.asarray(form.log_density(x)), ref, atol=1e-9)
 
     def test_mean_parameters_match_empirical(self):
-        # Families with a closed-form dual map use the exact grad-A path; verify it
+        # Families with a closed-form dual map use the guarded finite-difference path; verify it
         # against a large empirical mean of T over independent samples.
         for dist in (
             InverseGammaDistribution(3.0, 2.0),
@@ -122,6 +122,35 @@ class LeafExponentialFamilyTest(unittest.TestCase):
                 samples = dist.sampler(7).sample(200000)
                 emp = np.asarray(form.sufficient_statistics(samples), dtype=np.float64).mean(axis=0)
                 np.testing.assert_allclose(mp, emp, rtol=0.05, atol=0.05)
+
+    def test_derivative_methods_validate_domain_budget_and_error(self):
+        form = to_exponential_family(GeometricDistribution(0.3))
+        estimate = form.estimate_mean_parameters(method="finite_difference", eps=1.0e-5)
+        self.assertEqual(estimate.method, "finite_difference")
+        self.assertEqual(estimate.value.shape, (1,))
+        self.assertTrue(np.all(np.isfinite(estimate.error_estimate)))
+
+        for invalid in (0.0, -1.0, np.inf, np.nan):
+            with self.subTest(eps=invalid):
+                with self.assertRaises(ValueError):
+                    form.finite_difference_mean_parameters(invalid)
+        with self.assertRaises(TypeError):
+            form.finite_difference_mean_parameters("small")
+        with self.assertRaises(ValueError):
+            form.monte_carlo_mean_parameters(0)
+        with self.assertRaises(TypeError):
+            form.monte_carlo_mean_parameters(2.5)
+        with self.assertRaises(ValueError):
+            to_exponential_family(GeometricDistribution(1.0e-10)).finite_difference_mean_parameters()
+
+    def test_monte_carlo_mean_receipt_reports_standard_error(self):
+        form = to_exponential_family(GaussianDistribution(0.0, 1.0))
+        estimate = form.estimate_mean_parameters(method="monte_carlo", n_samples=20, seed=3)
+        self.assertEqual(estimate.method, "monte_carlo")
+        self.assertEqual(estimate.n_samples, 20)
+        self.assertEqual(estimate.value.shape, (2,))
+        self.assertEqual(estimate.error_estimate.shape, (2,))
+        self.assertTrue(np.all(np.isfinite(estimate.error_estimate)))
 
     def test_from_natural_round_trip(self):
         for dist in (

@@ -495,6 +495,8 @@ class ComputeMetadataTestCase(unittest.TestCase):
             "mixle.stats.compute.capabilities",
             "mixle.stats.compute.declarations",
             "mixle.stats.compute.gradient",
+            # typed kernel-capability errors are protocol infrastructure, not a concrete family
+            "mixle.stats.compute.kernel",
             "mixle.stats.compute.pdist",
             # the vectorized seq_* drivers — pure pdist-protocol dispatch, not concrete distributions
             "mixle.stats.compute.sequence",
