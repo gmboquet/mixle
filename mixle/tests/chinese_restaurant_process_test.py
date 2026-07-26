@@ -60,6 +60,50 @@ class ChineseRestaurantProcessTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ChineseRestaurantProcessDistribution(0.0, 5)
 
+    def test_partition_size_and_shape_are_exact(self):
+        with self.assertRaises(TypeError):
+            ChineseRestaurantProcessDistribution(1.0, 2.9)
+        d = ChineseRestaurantProcessDistribution(1.0, 2)
+        self.assertEqual(d.log_density(np.array([[0, 1]])), -np.inf)
+        with self.assertRaises(ValueError):
+            d.dist_to_encoder().seq_encode([np.array([[0, 1]])])
+
+    def test_mixed_labels_and_encoding_preserve_partition(self):
+        d = ChineseRestaurantProcessDistribution(2.0, 2)
+        labels = [1, "one"]
+        scalar = d.log_density(labels)
+        encoded = d.dist_to_encoder().seq_encode([labels])
+        self.assertAlmostEqual(d.seq_log_density(encoded)[0], scalar)
+        floats = [0.1, 0.2]
+        self.assertAlmostEqual(
+            d.seq_log_density(d.dist_to_encoder().seq_encode([floats]))[0],
+            d.log_density(floats),
+        )
+        np.testing.assert_array_equal(encoded[0], [0, 1])
+
+    def test_accumulation_and_statistics_fail_closed(self):
+        estimator = self.d.estimator()
+        accumulator = estimator.accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            accumulator.update([0, 1], 1.0, None)
+        with self.assertRaises(ValueError):
+            accumulator.update([0, 0, 1, 2, 2], -1.0, None)
+        with self.assertRaises(ValueError):
+            accumulator.seq_update(
+                [[0, 0, 1, 2, 2], [0, 1, 2, 3, 4]],
+                [1.0],
+                None,
+            )
+        self.assertEqual(accumulator.value().schema_version, 1)
+        with self.assertRaises(ValueError):
+            estimator.estimate(None, (100.0, 1.0, self.n))
+        with self.assertRaises(ValueError):
+            estimator.estimate(None, (0.0, 0.0, self.n))
+
+    def test_nonzero_implicit_pseudo_count_is_rejected(self):
+        with self.assertRaises(NotImplementedError):
+            self.d.estimator(pseudo_count=1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
