@@ -187,11 +187,43 @@ class MixedFieldCoherenceTest(unittest.TestCase):
 
 
 class AffinityHealthTest(unittest.TestCase):
+    def test_empty_input_returns_typed_insufficient_evidence_without_nan(self):
+        report = affinity_health(None, [], affinity="auto")
+        self.assertEqual(report["status"], "insufficient_evidence")
+        self.assertFalse(report["sufficient_evidence"])
+        self.assertIsNone(report["top_tie_fraction"])
+        self.assertIsNone(report["row_entropy_deficit_nats"])
+        self.assertTrue(report["reason"])
+
+    def test_single_prebuilt_row_returns_typed_insufficient_evidence(self):
+        factor = (np.ones((1, 1)), np.ones((1, 1)))
+        report = affinity_health(None, [], affinity=[factor], perplexity=1.0)
+        self.assertEqual(report["status"], "insufficient_evidence")
+        self.assertEqual(report["n"], 1)
+        self.assertIsNone(report["top_tie_fraction"])
+
+    def test_infeasible_perplexity_abstains_instead_of_clipping(self):
+        factor = (np.ones((3, 1)), np.ones((3, 1)))
+        report = affinity_health(None, [], affinity=[factor], perplexity=3.0)
+        self.assertEqual(report["status"], "insufficient_evidence")
+        self.assertIn("requires at least 4", report["reason"])
+        self.assertIsNone(report["row_entropy_deficit_nats"])
+
+    def test_health_controls_are_validated_before_measurement(self):
+        factor = (np.ones((3, 1)), np.ones((3, 1)))
+        for max_rows in (0, 1, 1.5, True):
+            with self.subTest(max_rows=max_rows), self.assertRaisesRegex(ValueError, "at least two"):
+                affinity_health(None, [], affinity=[factor], max_rows=max_rows)
+        for perplexity in (0.0, -1.0, np.nan, np.inf, True):
+            with self.subTest(perplexity=perplexity), self.assertRaisesRegex(ValueError, "at least one"):
+                affinity_health(None, [], affinity=[factor], perplexity=perplexity)
+
     def test_healthy_local_view_has_empty_diagnosis(self):
         rng = np.random.RandomState(0)
         data = [float(v) for v in np.concatenate([rng.normal(0, 1, 30), rng.normal(8, 1, 30)])]
         model = MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(8.0, 1.0)], [0.5, 0.5])
         report = affinity_health(model, data, affinity="auto")
+        self.assertEqual(report["status"], "ok")
         self.assertLess(report["top_tie_fraction"], 0.05)
         self.assertEqual(report["diagnosis"], [])
 
