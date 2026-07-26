@@ -6,7 +6,11 @@ import numpy as np
 from scipy.stats import kstest, wrapcauchy
 
 from mixle.inference import estimate
-from mixle.stats import WrappedCauchyDistribution
+from mixle.stats import (
+    WrappedCauchyDistribution,
+    WrappedCauchyEstimator,
+    WrappedCauchyFitError,
+)
 
 
 class WrappedCauchyTest(unittest.TestCase):
@@ -42,6 +46,68 @@ class WrappedCauchyTest(unittest.TestCase):
     def test_invalid_rho_raises(self):
         with self.assertRaises(ValueError):
             WrappedCauchyDistribution(0.0, 1.0)
+        for parameters in ((np.nan, 0.5), (0.0, np.nan), (0.0, np.inf)):
+            with self.subTest(parameters=parameters), self.assertRaises(ValueError):
+                WrappedCauchyDistribution(*parameters)
+
+    def test_near_boundary_density_stays_finite(self):
+        from mixle.engines import NUMPY_ENGINE
+
+        d = WrappedCauchyDistribution(0.0, 1.0 - 1.0e-12)
+        encoded = d.dist_to_encoder().seq_encode([0.0])
+        scalar = d.log_density(0.0)
+        self.assertTrue(np.isfinite(scalar))
+        self.assertAlmostEqual(d.seq_log_density(encoded)[0], scalar, places=8)
+        self.assertAlmostEqual(
+            d.backend_seq_log_density(encoded, NUMPY_ENGINE)[0],
+            scalar,
+            places=8,
+        )
+
+    def test_forged_encoded_observations_are_rejected(self):
+        from mixle.engines import NUMPY_ENGINE
+
+        for encoded in (
+            (np.asarray([1.0]), np.asarray([1.0])),
+            (np.asarray([1.0, 0.0]), np.asarray([0.0])),
+            (np.asarray([np.nan]), np.asarray([0.0])),
+        ):
+            with self.subTest(encoded=encoded), self.assertRaises(ValueError):
+                self.d.seq_log_density(encoded)
+            with self.assertRaises(ValueError):
+                self.d.backend_seq_log_density(encoded, NUMPY_ENGINE)
+
+    def test_accumulator_and_estimator_reject_invalid_moments(self):
+        estimator = WrappedCauchyEstimator()
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.update(0.0, 1.0, None)
+        before = accumulator.value()
+        for weight in (-1.0, np.nan, np.inf):
+            with self.subTest(weight=weight), self.assertRaises(ValueError):
+                accumulator.update(1.0, weight, None)
+            self.assertEqual(accumulator.value(), before)
+        with self.assertRaises(WrappedCauchyFitError):
+            estimator.estimate(None, (0.0, 0.0, 0.0))
+        with self.assertRaises(WrappedCauchyFitError):
+            estimator.estimate(None, (1.0, 0.0, 1.0))
+        for statistics in (
+            (2.0, 0.0, 1.0),
+            (np.nan, 0.0, 1.0),
+            (0.0, 0.0, -1.0),
+        ):
+            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+                estimator.estimate(None, statistics)
+
+    def test_uniform_fit_records_non_identifiable_direction(self):
+        fitted = WrappedCauchyEstimator().estimate(None, (0.0, 0.0, 2.0))
+        self.assertEqual(fitted.rho, 0.0)
+        self.assertFalse(fitted.fit_metadata["identifiable_direction"])
+
+    def test_unsupported_regularization_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.d.estimator(pseudo_count=1.0)
+        with self.assertRaises(ValueError):
+            WrappedCauchyEstimator(rho_max=0.9)
 
 
 if __name__ == "__main__":

@@ -286,8 +286,14 @@ class ProjectedNormalDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def backend_stacked_log_density(cls, x: Any, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of projected-normal log densities."""
-        cos_t = engine.asarray(x[0])
-        sin_t = engine.asarray(x[1])
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x[0]) or is_symbolic_payload(x[1]):
+            cosine, sine = x
+        else:
+            cosine, sine = validated_trig(x)
+        cos_t = engine.asarray(cosine)
+        sin_t = engine.asarray(sine)
         return cls.backend_log_density_from_params(
             cos_t[:, None], sin_t[:, None], params["mu_x"][None, :], params["mu_y"][None, :], engine
         )
@@ -297,8 +303,14 @@ class ProjectedNormalDistribution(SequenceEncodableProbabilityDistribution):
         cls, x: Any, weights: Any, params: dict[str, Any], engine: Any
     ) -> tuple[Any, Any, Any]:
         """Stacked E-step resultants ``(sum r cos, sum r sin, count)`` under per-component parameters."""
-        cos_t = engine.asarray(x[0])
-        sin_t = engine.asarray(x[1])
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        if is_symbolic_payload(x[0]) or is_symbolic_payload(x[1]):
+            cosine, sine = x
+        else:
+            cosine, sine = validated_trig(x)
+        cos_t = engine.asarray(cosine)
+        sin_t = engine.asarray(sine)
         ww = engine.asarray(weights)
         a = cos_t[:, None] * params["mu_x"][None, :] + sin_t[:, None] * params["mu_y"][None, :]
         r = cls._engine_expected_radius(a, engine)

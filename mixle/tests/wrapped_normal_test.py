@@ -5,7 +5,13 @@ import unittest
 import numpy as np
 from scipy.integrate import quad
 
-from mixle.stats import WrappedNormalDistribution as WN
+from mixle.stats import (
+    WrappedNormalDistribution as WN,
+)
+from mixle.stats import (
+    WrappedNormalEstimator,
+    WrappedNormalFitError,
+)
 
 
 class WrappedNormalTest(unittest.TestCase):
@@ -47,6 +53,56 @@ class WrappedNormalTest(unittest.TestCase):
         d = WN(0.0, 1.0)
         s = np.asarray(d.sampler(seed=3).sample(400_000))
         self.assertAlmostEqual(float(np.mean(np.cos(s))), np.exp(-0.5), delta=0.01)
+
+    def test_parameters_and_observations_must_be_finite(self):
+        for parameters in (
+            (np.nan, 1.0),
+            (0.0, np.nan),
+            (0.0, np.inf),
+            (0.0, 0.0),
+            (0.0, 1.0e6 + 1.0),
+        ):
+            with self.subTest(parameters=parameters), self.assertRaises(ValueError):
+                WN(*parameters)
+        d = WN(0.0, 1.0)
+        with self.assertRaises(ValueError):
+            d.log_density(np.nan)
+        with self.assertRaises(ValueError):
+            d.seq_log_density(np.asarray([0.0, np.nan]))
+        with self.assertRaises(ValueError):
+            d.dist_to_encoder().seq_encode([0.0, np.nan])
+
+    def test_accumulator_and_estimator_reject_invalid_moments(self):
+        estimator = WrappedNormalEstimator()
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.update(0.0, 1.0, None)
+        before = accumulator.value()
+        for weight in (-1.0, np.nan, np.inf):
+            with self.subTest(weight=weight), self.assertRaises(ValueError):
+                accumulator.update(1.0, weight, None)
+            self.assertEqual(accumulator.value(), before)
+        for statistics in (
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (1.0, 0.0, 1.0),
+        ):
+            with self.subTest(statistics=statistics), self.assertRaises(
+                WrappedNormalFitError
+            ):
+                estimator.estimate(None, statistics)
+        for statistics in (
+            (2.0, 0.0, 1.0),
+            (np.nan, 0.0, 1.0),
+            (0.0, 0.0, -1.0),
+        ):
+            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+                estimator.estimate(None, statistics)
+
+    def test_unsupported_regularization_is_rejected(self):
+        with self.assertRaises(ValueError):
+            WN(0.0, 1.0).estimator(pseudo_count=1.0)
+        with self.assertRaises(ValueError):
+            WrappedNormalEstimator(sigma2_max=10.0)
 
 
 if __name__ == "__main__":

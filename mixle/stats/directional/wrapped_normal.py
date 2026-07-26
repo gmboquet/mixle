@@ -34,8 +34,20 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.directional._circular import (
+    validated_angle,
+    validated_angles,
+    validated_circular_statistics,
+    validated_sample_size,
+    validated_weight,
+    validated_weights,
+)
 
 _TWO_PI = 2.0 * math.pi
+
+
+class WrappedNormalFitError(RuntimeError):
+    """Raised when circular moments have no finite wrapped-normal fit."""
 
 
 def _wrap(theta: Any) -> Any:
@@ -47,10 +59,18 @@ class WrappedNormalDistribution(SequenceEncodableProbabilityDistribution):
     """Wrapped normal distribution with mean direction ``mu`` and wrapped variance ``sigma2`` > 0."""
 
     def __init__(self, mu: float, sigma2: float, name: str | None = None, keys: str | None = None) -> None:
-        if sigma2 <= 0.0:
+        checked_mu = validated_angle(mu, "wrapped-normal mean direction")
+        checked_sigma2 = validated_angle(sigma2, "wrapped-normal variance")
+        if checked_sigma2 <= 0.0:
             raise ValueError("WrappedNormalDistribution requires sigma2 > 0.")
-        self.mu = float(math.atan2(math.sin(mu), math.cos(mu)))  # wrap to (-pi, pi]
-        self.sigma2 = float(sigma2)
+        if checked_sigma2 > 1.0e6:
+            raise ValueError(
+                "WrappedNormalDistribution sigma2 exceeds the supported finite branch range"
+            )
+        self.mu = float(
+            math.atan2(math.sin(checked_mu), math.cos(checked_mu))
+        )
+        self.sigma2 = checked_sigma2
         self.name = name
         self.keys = keys
         self._sigma = math.sqrt(self.sigma2)
@@ -77,12 +97,12 @@ class WrappedNormalDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: float) -> float:
         """Return the log-density at a single angle (radians)."""
-        d = _wrap(float(x) - self.mu) + _TWO_PI * self._k
+        d = _wrap(validated_angle(x) - self.mu) + _TWO_PI * self._k
         return float(logsumexp(-0.5 * d * d / self.sigma2) - self._log_norm)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density for a sequence-encoded array of angles."""
-        d0 = _wrap(np.asarray(x, dtype=np.float64) - self.mu)  # (n,)
+        d0 = _wrap(validated_angles(x) - self.mu)  # (n,)
         d = d0[:, None] + _TWO_PI * self._k[None, :]  # (n, 2K+1)
         return logsumexp(-0.5 * d * d / self.sigma2, axis=1) - self._log_norm
 
@@ -113,12 +133,18 @@ class WrappedNormalDistribution(SequenceEncodableProbabilityDistribution):
     @staticmethod
     def backend_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
         """Per-row circular moments ``(sum_cos, sum_sin, count)`` — uses the engine trig tier."""
-        theta = engine.asarray(x)
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        checked = x if is_symbolic_payload(x) else validated_angles(x)
+        theta = engine.asarray(checked)
         return engine.cos(theta), engine.sin(theta), theta * 0.0 + engine.asarray(1.0)
 
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density: the (2K+1)-branch wrapped logsumexp on engine ops."""
-        theta = engine.asarray(x)
+        from mixle.engines.symbolic_engine import is_symbolic_payload
+
+        checked = x if is_symbolic_payload(x) else validated_angles(x)
+        theta = engine.asarray(checked)
         raw = theta - self.mu
         d0 = raw - _TWO_PI * engine.floor((raw + math.pi) / _TWO_PI)  # wrap to (-pi, pi]
         d = d0[:, None] + engine.asarray(_TWO_PI * self._k)[None, :]
@@ -130,6 +156,8 @@ class WrappedNormalDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "WrappedNormalEstimator":
         """Return a closed-form (mean-resultant) estimator for ``mu`` and ``sigma2``."""
+        if pseudo_count is not None:
+            raise ValueError("wrapped-normal pseudo-count regularization is not implemented")
         return WrappedNormalEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "WrappedNormalDataEncoder":
@@ -147,7 +175,7 @@ class WrappedNormalSampler(DistributionSampler):
     def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw one angle or an array of iid angles."""
         d = self.dist
-        n = 1 if size is None else int(size)
+        n = 1 if size is None else validated_sample_size(size)
         theta = _wrap(d.mu + d._sigma * self.rng.standard_normal(n))
         return float(theta[0]) if size is None else theta
 
@@ -164,9 +192,11 @@ class WrappedNormalAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: float, weight: float, estimate: WrappedNormalDistribution | None) -> None:
         """Accumulate one weighted circular resultant contribution."""
-        self.sum_cos += weight * math.cos(float(x))
-        self.sum_sin += weight * math.sin(float(x))
-        self.count += weight
+        theta = validated_angle(x)
+        checked_weight = validated_weight(weight)
+        self.sum_cos += checked_weight * math.cos(theta)
+        self.sum_sin += checked_weight * math.sin(theta)
+        self.count += checked_weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         """Initialize statistics from one angle."""
@@ -174,8 +204,8 @@ class WrappedNormalAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
         """Accumulate circular resultant statistics from encoded angles."""
-        theta = np.asarray(x, dtype=np.float64)
-        w = np.asarray(weights, dtype=np.float64)
+        theta = validated_angles(x)
+        w = validated_weights(weights, len(theta))
         self.sum_cos += float(np.dot(np.cos(theta), w))
         self.sum_sin += float(np.dot(np.sin(theta), w))
         self.count += float(w.sum())
@@ -186,9 +216,18 @@ class WrappedNormalAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "WrappedNormalAccumulator":
         """Merge another wrapped-normal sufficient-statistic tuple."""
-        self.sum_cos += suff_stat[0]
-        self.sum_sin += suff_stat[1]
-        self.count += suff_stat[2]
+        count, sum_cos, sum_sin = validated_circular_statistics(
+            suff_stat,
+            count_index=2,
+        )
+        combined = (
+            self.sum_cos + sum_cos,
+            self.sum_sin + sum_sin,
+            self.count + count,
+        )
+        self.count, self.sum_cos, self.sum_sin = (
+            validated_circular_statistics(combined, count_index=2)
+        )
         return self
 
     def value(self) -> tuple[float, float, float]:
@@ -197,7 +236,17 @@ class WrappedNormalAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: tuple[float, float, float]) -> "WrappedNormalAccumulator":
         """Replace accumulator contents from circular-resultant statistics."""
-        self.sum_cos, self.sum_sin, self.count = float(x[0]), float(x[1]), float(x[2])
+        self.count, self.sum_cos, self.sum_sin = (
+            validated_circular_statistics(x, count_index=2)
+        )
+        return self
+
+    def scale(self, c: float) -> "WrappedNormalAccumulator":
+        """Scale linear wrapped-normal sufficient statistics."""
+        checked_scale = validated_weight(c)
+        self.sum_cos *= checked_scale
+        self.sum_sin *= checked_scale
+        self.count *= checked_scale
         return self
 
     def acc_to_encoder(self) -> "WrappedNormalDataEncoder":
@@ -220,8 +269,16 @@ class WrappedNormalAccumulatorFactory(StatisticAccumulatorFactory):
 class WrappedNormalEstimator(ParameterEstimator):
     """Estimate ``mu`` and ``sigma2`` from the mean resultant (``rho = exp(-sigma2/2)``)."""
 
-    def __init__(self, sigma2_max: float = 1.0e6, name: str | None = None, keys: str | None = None) -> None:
-        self.sigma2_max = sigma2_max
+    def __init__(
+        self,
+        sigma2_max: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        if sigma2_max is not None:
+            raise ValueError(
+                "wrapped-normal boundary clipping is not a valid fit contract"
+            )
         self.name = name
         self.keys = keys
 
@@ -231,14 +288,39 @@ class WrappedNormalEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> WrappedNormalDistribution:
         """Estimate mean direction and variance from the mean resultant."""
-        sum_cos, sum_sin, count = suff_stat
-        if count <= 0.0:
-            return WrappedNormalDistribution(0.0, 1.0, name=self.name, keys=self.keys)
+        count, sum_cos, sum_sin = validated_circular_statistics(
+            suff_stat,
+            count_index=2,
+        )
+        if count == 0.0:
+            raise WrappedNormalFitError(
+                "wrapped-normal fitting requires positive observation weight"
+            )
         mu = math.atan2(sum_sin, sum_cos)
-        rbar = math.sqrt(sum_cos * sum_cos + sum_sin * sum_sin) / count
-        rbar = min(max(rbar, math.exp(-0.5 * self.sigma2_max)), 1.0 - 1.0e-12)
+        rbar = math.hypot(sum_cos, sum_sin) / count
+        if rbar <= 1.0e-12:
+            raise WrappedNormalFitError(
+                "wrapped-normal zero resultant has no finite variance or mean direction"
+            )
+        if rbar >= 1.0 - 1.0e-12:
+            raise WrappedNormalFitError(
+                "wrapped-normal unit resultant has no positive-variance fit"
+            )
         sigma2 = -2.0 * math.log(rbar)
-        return WrappedNormalDistribution(mu, sigma2, name=self.name, keys=self.keys)
+        result = WrappedNormalDistribution(
+            mu,
+            sigma2,
+            name=self.name,
+            keys=self.keys,
+        )
+        result.fit_metadata = {
+            "converged": True,
+            "solver": "circular-resultant",
+            "identifiable_direction": True,
+            "resultant_length": rbar,
+            "repairs": (),
+        }
+        return result
 
 
 class WrappedNormalDataEncoder(DataSequenceEncoder):
@@ -252,4 +334,8 @@ class WrappedNormalDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
         """Encode angles after wrapping them to ``(-pi, pi]``."""
-        return _wrap(np.asarray(x, dtype=np.float64))
+        return _wrap(validated_angles(x))
+
+    def row_count(self, x: np.ndarray) -> int:
+        """Return the encoded row count after finite-angle validation."""
+        return len(validated_angles(x))
