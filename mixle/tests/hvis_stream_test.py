@@ -13,7 +13,8 @@ import numpy as np
 
 from mixle.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator
 from mixle.utils.hvis import StreamingHvis, place_in_atlas
-from mixle.utils.hvis.stream import _mean_log_density
+from mixle.utils.hvis.stream import _mean_log_density, _row_probabilities
+from mixle.utils.vector import ImpossibleEvidenceError
 
 _MODEL = MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(8.0, 1.0)], [0.5, 0.5])
 
@@ -69,6 +70,19 @@ class PlacementTest(unittest.TestCase):
         y = place_in_atlas(p, atlas, max_its=500)
         self.assertLess(float(np.linalg.norm(y[0] - atlas[1])), 1.0)
 
+    def test_no_evidence_is_not_reported_as_uniform_placement(self):
+        with self.assertRaises(ImpossibleEvidenceError):
+            _row_probabilities(np.full((1, 3), -np.inf), perplexity=None)
+
+    def test_placement_rejects_invalid_geometry_and_controls(self):
+        atlas = np.zeros((3, 2))
+        with self.assertRaises(ValueError):
+            place_in_atlas(np.array([[0.5, 0.5, 0.5]]), atlas)
+        with self.assertRaises(ValueError):
+            place_in_atlas(np.array([[0.2, 0.3, 0.5]]), atlas, max_its=0)
+        with self.assertRaises(ValueError):
+            place_in_atlas(np.array([[0.2, 0.3, 0.5]]), np.full((3, 2), np.nan))
+
 
 class DriftTest(unittest.TestCase):
     def test_in_distribution_stream_does_not_trip(self):
@@ -121,6 +135,30 @@ class RefreshAndGrowthTest(unittest.TestCase):
         landmarks, _ = _draw(10, rng)
         with self.assertRaises(ValueError):
             StreamingHvis(_MODEL, landmarks, atlas=np.zeros((3, 2)))
+
+    def test_failed_explicit_refresh_preserves_all_live_state(self):
+        rng = np.random.RandomState(13)
+        landmarks, _ = _draw(10, rng)
+        atlas = rng.randn(len(landmarks), 2)
+        stream = StreamingHvis(_MODEL, landmarks, atlas=atlas, perplexity=5.0)
+        stream._recent_log_density = -123.0
+        old_model = stream.mix_model
+        old_atlas = stream.atlas.copy()
+        old_reference = stream._reference_log_density
+
+        def fail_embedding(*args, **kwargs):
+            raise RuntimeError("injected embedding failure")
+
+        stream._embed_landmarks = fail_embedding
+        replacement = MixtureDistribution(
+            [GaussianDistribution(0.0, 1.0), GaussianDistribution(9.0, 1.0)], [0.5, 0.5]
+        )
+        with self.assertRaisesRegex(RuntimeError, "injected"):
+            stream.refresh(mix_model=replacement)
+        self.assertIs(stream.mix_model, old_model)
+        np.testing.assert_array_equal(stream.atlas, old_atlas)
+        self.assertEqual(stream._reference_log_density, old_reference)
+        self.assertEqual(stream._recent_log_density, -123.0)
 
 
 class StreamingEstimatorTest(unittest.TestCase):
@@ -176,6 +214,25 @@ class StreamingEstimatorTest(unittest.TestCase):
         # the pending statistics were discarded: a follow-up refresh has nothing to consume
         follow_up = stream.refresh()
         self.assertIsNone(follow_up["model_updated"])
+
+    def test_failed_stream_em_refresh_retains_pending_evidence(self):
+        stream, rng = self._stream_with_estimator(seed=14)
+        stream.add([float(v) for v in rng.normal(20.0, 1.0, 12)])
+        old_model = stream.mix_model
+        old_acc = stream._stream_acc
+        old_nobs = stream._stream_nobs
+        old_atlas = stream.atlas.copy()
+
+        def fail_embedding(*args, **kwargs):
+            raise RuntimeError("injected embedding failure")
+
+        stream._embed_landmarks = fail_embedding
+        with self.assertRaisesRegex(RuntimeError, "injected"):
+            stream.refresh()
+        self.assertIs(stream.mix_model, old_model)
+        self.assertIs(stream._stream_acc, old_acc)
+        self.assertEqual(stream._stream_nobs, old_nobs)
+        np.testing.assert_array_equal(stream.atlas, old_atlas)
 
     def test_no_estimator_means_the_model_never_changes(self):
         stream, _, rng = _make_stream(seed=12)

@@ -48,6 +48,7 @@ from mixle.utils.hvis.affinity import (
     _resolve_affinity,
     log_affinity_block,
 )
+from mixle.utils.vector import ImpossibleEvidenceError
 
 __all__ = ["StreamingHvis", "place_in_atlas"]
 
@@ -64,15 +65,31 @@ def _row_probabilities(log_aff: np.ndarray, perplexity: float | None) -> np.ndar
     Row calibration only ever needs the row itself -- this is precisely why out-of-sample placement
     is well-posed here while global t-SNE symmetrization is not.
     """
+    log_aff = np.asarray(log_aff, dtype=np.float64)
+    if log_aff.ndim != 2 or log_aff.shape[0] == 0 or log_aff.shape[1] < 2:
+        raise ValueError("log_aff must be a non-empty matrix with at least two landmarks.")
+    if np.any(np.isnan(log_aff)) or np.any(np.isposinf(log_aff)):
+        raise ValueError("log_aff must contain only finite values or -inf.")
     b, n_landmarks = log_aff.shape
+    if perplexity is not None:
+        try:
+            perplexity = float(perplexity)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("perplexity must be a finite real number or None.") from exc
+        if not np.isfinite(perplexity) or not 1.0 <= perplexity <= n_landmarks:
+            raise ValueError(f"perplexity must be between 1 and {n_landmarks}.")
     p = np.zeros_like(log_aff)
-    target = None if perplexity is None else np.log(min(float(perplexity), max(1.0, n_landmarks - 1.0)))
+    target = None if perplexity is None else np.log(perplexity)
     for i in range(b):
         row = log_aff[i]
         finite = np.isfinite(row)
         if not np.any(finite):
-            p[i] = 1.0 / n_landmarks  # the model offers no information: honest uniform, not a crash
-            continue
+            raise ImpossibleEvidenceError(f"the model provides no landmark evidence for placement row {i}.")
+        if perplexity is not None and perplexity > int(finite.sum()):
+            raise ImpossibleEvidenceError(
+                f"placement row {i} has only {int(finite.sum())} possible landmarks, "
+                f"fewer than perplexity={perplexity}."
+            )
         if target is None:
             shifted = row[finite] - row[finite].max()
             q = np.exp(shifted)
@@ -101,6 +118,28 @@ def place_in_atlas(
     """
     p_rows = np.asarray(p_rows, dtype=np.float64)
     atlas = np.asarray(atlas, dtype=np.float64)
+    if p_rows.ndim != 2 or p_rows.shape[0] == 0:
+        raise ValueError("p_rows must be a non-empty two-dimensional probability matrix.")
+    if atlas.ndim != 2 or atlas.shape[0] < 2 or atlas.shape[1] == 0:
+        raise ValueError("atlas must be a two-dimensional coordinate matrix with at least two landmarks.")
+    if p_rows.shape[1] != atlas.shape[0]:
+        raise ValueError("p_rows columns must align with atlas landmarks.")
+    if not np.all(np.isfinite(p_rows)) or np.any(p_rows < 0.0):
+        raise ValueError("p_rows must contain only finite non-negative probabilities.")
+    if not np.allclose(p_rows.sum(axis=1), 1.0, rtol=1.0e-7, atol=1.0e-10):
+        raise ValueError("p_rows must be row-stochastic.")
+    if not np.all(np.isfinite(atlas)):
+        raise ValueError("atlas must contain only finite coordinates.")
+    if not np.isfinite(alpha) or alpha <= 0.0:
+        raise ValueError("alpha must be finite and positive.")
+    if isinstance(max_its, bool) or not isinstance(max_its, (int, np.integer)) or max_its <= 0:
+        raise ValueError("max_its must be a positive integer.")
+    if eta is not None and (not np.isfinite(eta) or eta <= 0.0):
+        raise ValueError("eta must be finite and positive or None.")
+    if not np.isfinite(momentum) or not 0.0 <= momentum < 1.0:
+        raise ValueError("momentum must be finite and in [0, 1).")
+    if not np.isfinite(tol) or tol < 0.0:
+        raise ValueError("tol must be finite and non-negative.")
     y = p_rows @ atlas  # barycentric init: already in the right neighborhood for sharp rows
     if eta is None:
         spread = float(atlas.std())
@@ -115,10 +154,14 @@ def place_in_atlas(
         q = w / np.maximum(w.sum(axis=1, keepdims=True), 1.0e-300)
         coeff = (p_rows - q) * u  # (B, L)
         grad = c * (y * coeff.sum(axis=1, keepdims=True) - coeff @ atlas)
+        if not np.all(np.isfinite(grad)):
+            raise FloatingPointError("atlas placement gradient became non-finite.")
         velocity = momentum * velocity - eta * grad
         y = y + velocity
         if float(np.abs(grad).max()) < tol:
             break
+    if not np.all(np.isfinite(y)):
+        raise FloatingPointError("atlas placement produced non-finite coordinates.")
     return y
 
 
@@ -130,6 +173,12 @@ def _procrustes_align(source: np.ndarray, target: np.ndarray) -> tuple[np.ndarra
     held. Returns ``(aligned, rms_residual, scale)``."""
     from scipy.linalg import orthogonal_procrustes
 
+    source = np.asarray(source, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    if source.ndim != 2 or source.shape != target.shape or source.shape[0] < 2 or source.shape[1] == 0:
+        raise ValueError("source and target must be aligned coordinate matrices with at least two rows.")
+    if not np.all(np.isfinite(source)) or not np.all(np.isfinite(target)):
+        raise ValueError("Procrustes coordinates must contain only finite values.")
     mu_s, mu_t = source.mean(axis=0), target.mean(axis=0)
     src, tgt = source - mu_s, target - mu_t
     rotation, trace = orthogonal_procrustes(src, tgt)
@@ -137,19 +186,28 @@ def _procrustes_align(source: np.ndarray, target: np.ndarray) -> tuple[np.ndarra
     scale = float(trace) / denom if denom > 0 else 1.0
     aligned = scale * (src @ rotation) + mu_t
     residual = float(np.sqrt(np.mean(np.sum((aligned - target) ** 2, axis=1))))
+    if not np.all(np.isfinite(aligned)) or not np.isfinite(residual) or not np.isfinite(scale):
+        raise FloatingPointError("Procrustes alignment produced a non-finite result.")
     return aligned, residual, scale
 
 
 def _mean_log_density(mix_model, data) -> float:
     """Mean per-observation log-density under the mixture -- the drift reference/score input."""
+    data = list(data)
+    if not data:
+        raise ValueError("log-density monitoring requires at least one observation.")
     if hasattr(mix_model, "dist_to_encoder") and hasattr(mix_model, "seq_log_density"):
-        enc = mix_model.dist_to_encoder().seq_encode(list(data))
-        return float(np.mean(np.asarray(mix_model.seq_log_density(enc), dtype=np.float64)))
-    _, ll_mat = _posteriors_and_loglikes(mix_model, data=list(data))
-    log_w = np.asarray(mix_model.log_w, dtype=np.float64).reshape(1, -1)
-    joint = ll_mat + log_w
-    mx = joint.max(axis=1, keepdims=True)
-    return float(np.mean(mx[:, 0] + np.log(np.exp(joint - mx).sum(axis=1))))
+        enc = mix_model.dist_to_encoder().seq_encode(data)
+        value = float(np.mean(np.asarray(mix_model.seq_log_density(enc), dtype=np.float64)))
+    else:
+        _, ll_mat = _posteriors_and_loglikes(mix_model, data=data)
+        log_w = np.asarray(mix_model.log_w, dtype=np.float64).reshape(1, -1)
+        joint = ll_mat + log_w
+        mx = joint.max(axis=1, keepdims=True)
+        value = float(np.mean(mx[:, 0] + np.log(np.exp(joint - mx).sum(axis=1))))
+    if not np.isfinite(value):
+        raise ImpossibleEvidenceError("the model assigns non-finite mean log density to the observations.")
+    return value
 
 
 class StreamingHvis:
@@ -196,14 +254,28 @@ class StreamingHvis:
         seed: int | None = None,
         **htsne_kwargs: Any,
     ) -> None:
+        if mix_model is None:
+            raise ValueError("mix_model is required.")
         self.mix_model = mix_model
         self.landmark_data = list(landmark_data)
+        if len(self.landmark_data) < 2:
+            raise ValueError("landmark_data must contain at least two observations.")
+        if isinstance(emb_dim, bool) or not isinstance(emb_dim, (int, np.integer)) or emb_dim <= 0:
+            raise ValueError("emb_dim must be a positive integer.")
         self.emb_dim = int(emb_dim)
+        if not np.isfinite(alpha) or alpha <= 0.0:
+            raise ValueError("alpha must be finite and positive.")
         self.alpha = float(alpha)
+        if perplexity is not None and (
+            not np.isfinite(perplexity) or not 1.0 <= float(perplexity) <= len(self.landmark_data)
+        ):
+            raise ValueError(f"perplexity must be between 1 and {len(self.landmark_data)}, or None.")
         self.perplexity = perplexity
         self.affinity = affinity
         self.evidence_cap = evidence_cap
         self.field_weights = field_weights
+        if not np.isfinite(drift_threshold_nats) or drift_threshold_nats < 0.0:
+            raise ValueError("drift_threshold_nats must be finite and non-negative.")
         self.drift_threshold_nats = float(drift_threshold_nats)
         self.seed = seed
         self._htsne_kwargs = dict(htsne_kwargs)
@@ -215,6 +287,8 @@ class StreamingHvis:
             atlas = np.asarray(atlas, dtype=np.float64)
             if atlas.shape != (len(self.landmark_data), self.emb_dim):
                 raise ValueError(f"atlas must have shape ({len(self.landmark_data)}, {self.emb_dim}).")
+            if not np.all(np.isfinite(atlas)):
+                raise ValueError("atlas must contain only finite coordinates.")
             self.atlas = atlas.copy()
         else:
             self.atlas = self._embed_landmarks(Y=None)
@@ -224,7 +298,7 @@ class StreamingHvis:
 
     # -- atlas ------------------------------------------------------------------------------------
 
-    def _embed_landmarks(self, Y: np.ndarray | None) -> np.ndarray:
+    def _embed_landmarks(self, Y: np.ndarray | None, *, mix_model=None) -> np.ndarray:
         import io
 
         from mixle.utils.hvis.embed import htsne
@@ -233,13 +307,13 @@ class StreamingHvis:
         kwargs.setdefault("out", io.StringIO())  # quiet by default; pass out=sys.stdout for progress
         if Y is not None:  # warm start: continuity comes from here, exaggeration would wreck it
             kwargs.setdefault("early_exaggeration", 1.0)
-        return np.asarray(
+        embedded = np.asarray(
             htsne(
                 self.landmark_data,
                 emb_dim=self.emb_dim,
                 alpha=self.alpha,
                 perplexity=self.perplexity,
-                mix_model=self.mix_model,
+                mix_model=self.mix_model if mix_model is None else mix_model,
                 affinity=self.affinity,
                 evidence_cap=self.evidence_cap,
                 field_weights=self.field_weights,
@@ -249,6 +323,13 @@ class StreamingHvis:
             ),
             dtype=np.float64,
         )
+        if embedded.shape != (len(self.landmark_data), self.emb_dim):
+            raise ValueError(
+                f"landmark embedding must have shape ({len(self.landmark_data)}, {self.emb_dim})."
+            )
+        if not np.all(np.isfinite(embedded)):
+            raise FloatingPointError("landmark embedding produced non-finite coordinates.")
+        return embedded
 
     def _placement_rows(self, batch: list) -> np.ndarray:
         combined = self.landmark_data + list(batch)
@@ -278,14 +359,20 @@ class StreamingHvis:
         p_rows = self._placement_rows(batch)
         coords = place_in_atlas(p_rows, self.atlas, alpha=self.alpha, max_its=max_its, eta=eta)
         batch_ll = _mean_log_density(self.mix_model, batch)
-        if self._recent_log_density is None:
-            self._recent_log_density = batch_ll
-        else:  # EWMA so one odd batch informs but does not own the verdict
-            self._recent_log_density = 0.7 * self._recent_log_density + 0.3 * batch_ll
-        if self._stream_acc is not None:  # incremental EM: E-step now, under the model of this moment
+        candidate_acc = None
+        if self._stream_acc is not None:  # build a replacement; never partially mutate live evidence
+            candidate_acc = self.estimator.accumulator_factory().make()
+            candidate_acc.combine(self._stream_acc.value())
             enc = self.mix_model.dist_to_encoder().seq_encode(batch)
-            self._stream_acc.seq_update(enc, np.ones(len(batch)), self.mix_model)
+            candidate_acc.seq_update(enc, np.ones(len(batch)), self.mix_model)
+        if self._recent_log_density is None:
+            recent_log_density = batch_ll
+        else:  # EWMA so one odd batch informs but does not own the verdict
+            recent_log_density = 0.7 * self._recent_log_density + 0.3 * batch_ll
+        if candidate_acc is not None:
+            self._stream_acc = candidate_acc
             self._stream_nobs += len(batch)
+        self._recent_log_density = recent_log_density
         return coords
 
     def extend_landmarks(self, data: list, coords: np.ndarray | None = None) -> None:
@@ -297,9 +384,14 @@ class StreamingHvis:
         coords = np.asarray(coords, dtype=np.float64)
         if coords.shape != (len(data), self.emb_dim):
             raise ValueError(f"coords must have shape ({len(data)}, {self.emb_dim}).")
-        self.landmark_data.extend(data)
-        self.atlas = np.vstack([self.atlas, coords])
-        self._reference_log_density = _mean_log_density(self.mix_model, self.landmark_data)
+        if not np.all(np.isfinite(coords)):
+            raise ValueError("coords must contain only finite coordinates.")
+        candidate_data = self.landmark_data + data
+        candidate_atlas = np.vstack([self.atlas, coords])
+        candidate_reference = _mean_log_density(self.mix_model, candidate_data)
+        self.landmark_data = candidate_data
+        self.atlas = candidate_atlas
+        self._reference_log_density = candidate_reference
 
     # -- drift ------------------------------------------------------------------------------------
 
@@ -334,13 +426,12 @@ class StreamingHvis:
         """
         model_updated = None
         n_consumed = 0.0
+        candidate_model = self.mix_model
+        clear_pending = False
         if mix_model is not None:
-            self.mix_model = mix_model
+            candidate_model = mix_model
             model_updated = "explicit"
-            if self._stream_acc is not None:  # stale-vintage stats must not survive an external model
-                n_consumed = 0.0
-                self._stream_acc = self.estimator.accumulator_factory().make()
-                self._stream_nobs = 0.0
+            clear_pending = self._stream_acc is not None
         elif self._stream_acc is not None and self._stream_nobs > 0:
             acc = self.estimator.accumulator_factory().make()
             enc = self.mix_model.dist_to_encoder().seq_encode(self.landmark_data)
@@ -349,21 +440,32 @@ class StreamingHvis:
             stats_dict: dict[Any, Any] = {}
             acc.key_merge(stats_dict)
             acc.key_replace(stats_dict)
-            self.mix_model = self.estimator.estimate(None, acc.value())
+            candidate_model = self.estimator.estimate(None, acc.value())
             model_updated = "stream_em"
             n_consumed = self._stream_nobs
-            self._stream_acc = self.estimator.accumulator_factory().make()
-            self._stream_nobs = 0.0
-        old = self.atlas
-        new = self._embed_landmarks(Y=old.copy())
+            clear_pending = True
+        candidate_acc = self.estimator.accumulator_factory().make() if clear_pending else self._stream_acc
+        old = self.atlas.copy()
+        new = self._embed_landmarks(Y=old.copy(), mix_model=candidate_model)
         aligned, residual, scale = _procrustes_align(new, old)
+        reference_log_density = _mean_log_density(candidate_model, self.landmark_data)
+        atlas_spread = float(old.std())
+        if not np.isfinite(atlas_spread):
+            raise FloatingPointError("atlas spread is non-finite.")
+
+        # Commit only after model estimation, embedding, alignment, reference
+        # scoring, and replacement-accumulator construction have all succeeded.
+        self.mix_model = candidate_model
         self.atlas = aligned
-        self._reference_log_density = _mean_log_density(self.mix_model, self.landmark_data)
+        self._reference_log_density = reference_log_density
         self._recent_log_density = None
+        self._stream_acc = candidate_acc
+        if clear_pending:
+            self._stream_nobs = 0.0
         return {
             "alignment_residual_rms": residual,
             "alignment_scale": scale,
-            "atlas_spread": float(old.std()),
+            "atlas_spread": atlas_spread,
             "n_landmarks": len(self.landmark_data),
             "model_updated": model_updated,
             "n_stream_obs_consumed": float(n_consumed),
