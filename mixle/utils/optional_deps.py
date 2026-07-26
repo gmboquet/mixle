@@ -30,6 +30,9 @@ imports pandas itself), but the write-side result-egress methods (``ParameterPos
     pip install mixle[pandas]
 """
 
+from importlib import import_module
+from types import ModuleType
+
 __all__ = [
     "numba",
     "HAS_NUMBA",
@@ -55,24 +58,32 @@ def require(name: str, extra: str):
     raise ImportError("%s is required for this feature; install it with pip install mixle[%s]" % (name, extra))
 
 
+def _import_optional(module_name: str) -> ModuleType | None:
+    """Import an optional top-level target without hiding a broken install.
+
+    Only absence of the exact requested module is converted to ``None``.
+    ``ImportError``/``ModuleNotFoundError`` for an internal dependency, binary
+    extension, or other import-time failure propagates to the caller.
+    """
+    try:
+        return import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name == module_name:
+            return None
+        raise
+
+
 # gmpy2: when installed, the structural count-DP routes its large histogram convolutions through GMP's
 # FFT-based big-integer multiply (Schoenhage-Strassen), ~100x faster than CPython's Karatsuba on the
 # multi-megabyte operands that wide deep-sequence convolutions produce. When missing, gmpy2 is None and
 # the convolution falls back to the exact CPython big-int path. Install with: pip install mixle[gmpy2]
-try:
-    import gmpy2
-
-    HAS_GMPY2 = True
-except ImportError:
-    gmpy2 = None
-    HAS_GMPY2 = False
+gmpy2 = _import_optional("gmpy2")
+HAS_GMPY2 = gmpy2 is not None
 
 
-try:
-    import numba
-
-    HAS_NUMBA = True
-except ImportError:
+numba = _import_optional("numba")
+HAS_NUMBA = numba is not None
+if numba is None:
     HAS_NUMBA = False
 
     class _NumbaShim:
@@ -94,53 +105,40 @@ except ImportError:
     numba = _NumbaShim()
 
 
-try:
-    import pyspark
-    import pyspark.rdd
-
+pyspark = _import_optional("pyspark")
+if pyspark is not None:
+    rdd = _import_optional("pyspark.rdd")
+    if rdd is None:
+        raise ImportError("installed pyspark package is missing its required pyspark.rdd module")
     HAS_PYSPARK = True
-    RDD_TYPES = (pyspark.rdd.RDD,)
-except ImportError:
-    pyspark = None
+    RDD_TYPES = (rdd.RDD,)
+else:
     HAS_PYSPARK = False
     RDD_TYPES = ()
 
 
-try:
-    import zarr
-
-    HAS_ZARR = True
-except ImportError:
-    zarr = None
-    HAS_ZARR = False
+zarr = _import_optional("zarr")
+HAS_ZARR = zarr is not None
 
 
-try:
-    import h5py
-
-    HAS_H5PY = True
-except ImportError:
-    h5py = None
-    HAS_H5PY = False
+h5py = _import_optional("h5py")
+HAS_H5PY = h5py is not None
 
 
-try:
-    import pandas
-
-    HAS_PANDAS = True
-except ImportError:
-    pandas = None
-    HAS_PANDAS = False
+pandas = _import_optional("pandas")
+HAS_PANDAS = pandas is not None
 
 
 # mpi4py: the "mpi" distributed backend (mixle.utils.parallel.mpi) needs an actual MPI runtime to do
 # anything useful, so MPI is None and HAS_MPI4PY is False when missing rather than a no-op shim -- the
 # backend raises via require(...) at its entry points instead of silently pretending to coordinate
 # ranks. Install with: pip install mixle[mpi]
-try:
-    from mpi4py import MPI
-
+_mpi4py = _import_optional("mpi4py")
+if _mpi4py is not None:
+    MPI = _import_optional("mpi4py.MPI")
+    if MPI is None:
+        raise ImportError("installed mpi4py package is missing its required mpi4py.MPI module")
     HAS_MPI4PY = True
-except ImportError:
+else:
     MPI = None
     HAS_MPI4PY = False
