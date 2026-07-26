@@ -7,10 +7,12 @@ stacked, and optional Numba scoring paths.
 
 from __future__ import annotations
 
+import dis
 import inspect
 import math
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any
 
 import numpy as np
@@ -130,11 +132,25 @@ class DistributionDeclaration:
 
 
 _DECLARATIONS: dict[type[Any], DistributionDeclaration] = {}
+_DECLARATION_LOCK = RLock()
 
 
 def register_declaration(declaration: DistributionDeclaration) -> None:
-    """Register a declaration for a distribution class."""
-    _DECLARATIONS[declaration.distribution_type] = declaration
+    """Validate and atomically register one declaration.
+
+    Re-registering the same declaration is idempotent. A different declaration
+    for an already registered type is rejected instead of silently changing
+    generated execution semantics process-wide.
+    """
+    validated = validate_declaration(declaration)
+    with _DECLARATION_LOCK:
+        existing = _DECLARATIONS.get(validated.distribution_type)
+        if existing is not None and existing != validated:
+            raise ValueError(
+                "Conflicting distribution declaration for %s is already registered."
+                % validated.distribution_type.__name__
+            )
+        _DECLARATIONS[validated.distribution_type] = validated
 
 
 def declaration_for(x: Any) -> DistributionDeclaration | None:
@@ -175,7 +191,13 @@ def declaration_issues(x: Any) -> tuple[str, ...]:
     if declaration is None:
         cls = x if isinstance(x, type) else type(x)
         return ("%s has no declaration." % cls.__name__,)
-    return tuple(_declaration_issues(declaration, path=declaration.name or "<unnamed>"))
+    return tuple(
+        _declaration_issues(
+            declaration,
+            path=declaration.name or "<unnamed>",
+            ancestors=frozenset(),
+        )
+    )
 
 
 def validate_declaration(x: Any) -> DistributionDeclaration:
@@ -302,6 +324,180 @@ def generated_log_density_diagnostics(x: Any, encoded_symbols: Sequence[str] | N
     return rv
 
 
+def _numeric_parameter_array(value: Any, name: str) -> np.ndarray:
+    try:
+        arr = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("declared parameter %s must be numeric." % name) from exc
+    if np.any(np.isnan(arr)) or np.any(np.isposinf(arr)):
+        raise ValueError("declared parameter %s cannot contain NaN or positive infinity." % name)
+    return arr
+
+
+def _parameter_value_issues(spec: ParameterSpec, value: Any) -> tuple[str, ...]:
+    constraint = spec.constraint
+    name = spec.name
+    if constraint in ("fixed", "metadata", "log_probability_tables"):
+        return ()
+    if constraint in ("optional_integer", "optional_log_unit_interval_vector") and value is None:
+        return ()
+    if constraint == "simplex_map":
+        if not isinstance(value, Mapping):
+            return ("%s must be a mapping." % name,)
+        try:
+            arr = _numeric_parameter_array(tuple(value.values()), name)
+        except ValueError as exc:
+            return (str(exc),)
+        if np.any(arr < 0.0) or np.any(arr > 1.0):
+            return ("%s mapping probabilities must lie in [0, 1]." % name,)
+        return ()
+    if constraint == "row_simplex_map":
+        if not isinstance(value, Mapping):
+            return ("%s must be a mapping of probability rows." % name,)
+        issues = []
+        for key, row in value.items():
+            if not isinstance(row, Mapping):
+                issues.append("%s[%r] must be a probability mapping." % (name, key))
+                continue
+            try:
+                arr = _numeric_parameter_array(tuple(row.values()), "%s[%r]" % (name, key))
+            except ValueError as exc:
+                issues.append(str(exc))
+                continue
+            if np.any(arr < 0.0) or np.any(arr > 1.0) or (
+                arr.size and not np.isclose(arr.sum(), 1.0, rtol=1.0e-7, atol=1.0e-10)
+            ):
+                issues.append("%s[%r] must be a probability simplex." % (name, key))
+        return tuple(issues)
+
+    try:
+        arr = _numeric_parameter_array(value, name)
+    except ValueError as exc:
+        return (str(exc),)
+
+    scalar_constraints = {
+        "real",
+        "positive",
+        "unit_interval",
+        "integer",
+        "positive_integer",
+        "non_negative_integer",
+        "optional_integer",
+    }
+    if constraint in scalar_constraints and arr.ndim != 0:
+        return ("%s must be scalar for constraint %s." % (name, constraint),)
+    if constraint in ("real_vector", "positive_vector", "simplex", "simplex_vector") and arr.ndim != 1:
+        return ("%s must be one-dimensional for constraint %s." % (name, constraint),)
+    if constraint in (
+        "positive_matrix",
+        "row_simplex_matrix",
+        "column_simplex_matrix",
+        "integer_matrix",
+    ) and arr.ndim != 2:
+        return ("%s must be two-dimensional for constraint %s." % (name, constraint),)
+    if constraint == "integer_vector" and arr.ndim != 1:
+        return ("%s must be one-dimensional for constraint integer_vector." % name,)
+    if _is_ordered_constraint(constraint) and (arr.ndim != 0 or not np.isfinite(arr)):
+        return ("%s must be a finite scalar for ordered constraint %s." % (name, constraint),)
+
+    finite_constraints = {
+        "real",
+        "real_vector",
+        "positive",
+        "positive_vector",
+        "positive_matrix",
+        "unit_interval",
+        "simplex",
+        "simplex_vector",
+        "row_simplex_matrix",
+        "column_simplex_matrix",
+        "integer",
+        "integer_vector",
+        "integer_matrix",
+        "positive_integer",
+        "non_negative_integer",
+        "optional_integer",
+    }
+    if constraint in finite_constraints and np.any(~np.isfinite(arr)):
+        return ("%s must contain only finite values." % name,)
+    if constraint in ("positive", "positive_vector") and np.any(arr <= 0.0):
+        return ("%s must be strictly positive." % name,)
+    if constraint == "positive_matrix":
+        if arr.shape[0] == arr.shape[1] and np.allclose(arr, arr.T):
+            if np.any(np.linalg.eigvalsh(arr) <= 0.0):
+                return ("%s must be positive definite." % name,)
+        elif np.any(arr <= 0.0):
+            return ("%s must contain strictly positive entries." % name,)
+    if constraint == "unit_interval" and (float(arr) < 0.0 or float(arr) > 1.0):
+        return ("%s must lie in [0, 1]." % name,)
+    if constraint in ("simplex", "simplex_vector"):
+        if np.any(arr < 0.0) or not np.isclose(arr.sum(), 1.0, rtol=1.0e-7, atol=1.0e-10):
+            return ("%s must be a probability simplex." % name,)
+    if constraint in ("row_simplex_matrix", "column_simplex_matrix"):
+        axis = 1 if constraint == "row_simplex_matrix" else 0
+        if np.any(arr < 0.0) or np.any(
+            ~np.isclose(arr.sum(axis=axis), 1.0, rtol=1.0e-7, atol=1.0e-10)
+        ):
+            return ("%s must contain probability-simplex %s." % (name, "rows" if axis == 1 else "columns"),)
+    if constraint in (
+        "integer",
+        "integer_vector",
+        "integer_matrix",
+        "positive_integer",
+        "non_negative_integer",
+        "optional_integer",
+    ) and np.any(arr != np.floor(arr)):
+        return ("%s must contain exact integers." % name,)
+    if constraint == "positive_integer" and np.any(arr <= 0):
+        return ("%s must be a positive integer." % name,)
+    if constraint == "non_negative_integer" and np.any(arr < 0):
+        return ("%s must be a non-negative integer." % name,)
+    if constraint in ("log_unit_interval_vector", "optional_log_unit_interval_vector"):
+        if constraint.startswith("optional") and value is None:
+            return ()
+        if arr.ndim != 1 or np.any(arr > 0.0):
+            return ("%s must be a one-dimensional log-probability vector." % name,)
+    return ()
+
+
+def _validated_parameter_values(dist: Any, declaration: DistributionDeclaration) -> dict[str, Any]:
+    if not isinstance(dist, declaration.distribution_type):
+        raise TypeError(
+            "expected %s, got %s" % (declaration.distribution_type.__name__, type(dist).__name__)
+        )
+    values = {}
+    issues = []
+    for spec in declaration.parameters:
+        if not hasattr(dist, spec.name):
+            issues.append("%s has no declared parameter %s." % (type(dist).__name__, spec.name))
+            continue
+        value = getattr(dist, spec.name)
+        values[spec.name] = value
+        issues.extend(_parameter_value_issues(spec, value))
+    for spec in declaration.parameters:
+        if not _is_ordered_constraint(spec.constraint) or spec.name not in values:
+            continue
+        anchor_name = _ordered_constraint_anchor(spec.constraint)
+        if anchor_name not in values:
+            continue
+        try:
+            value = float(values[spec.name])
+            anchor = float(values[anchor_name])
+        except (TypeError, ValueError):
+            issues.append("%s and ordered anchor %s must be scalar numeric values." % (spec.name, anchor_name))
+            continue
+        if spec.constraint.startswith("greater_than:") and not value > anchor:
+            issues.append("%s must be greater than %s." % (spec.name, anchor_name))
+        if spec.constraint.startswith("less_than:") and not value < anchor:
+            issues.append("%s must be less than %s." % (spec.name, anchor_name))
+    if issues:
+        raise ValueError(
+            "Invalid declared parameters for %s: %s"
+            % (type(dist).__name__, "; ".join(issues))
+        )
+    return values
+
+
 def generated_stacked_params(dists: Sequence[Any], engine: Any) -> dict[str, Any]:
     """Stack declared distribution parameters for generated homogeneous-mixture scoring.
 
@@ -325,9 +521,11 @@ def generated_stacked_params(dists: Sequence[Any], engine: Any) -> dict[str, Any
     params: dict[str, Any] = {
         "__pysp_dist_type__": dist_type,
         "__pysp_param_names__": tuple(spec.name for spec in declaration.parameters),
+        "__pysp_component_count__": len(dists),
     }
+    declared_values = [_validated_parameter_values(dist, declaration) for dist in dists]
     for spec in declaration.parameters:
-        values = [getattr(dist, spec.name) for dist in dists]
+        values = [values[spec.name] for values in declared_values]
         if not spec.differentiable and _generated_stacked_requires_shared_param(spec):
             if _all_same(values):
                 params[spec.name] = values[0]
@@ -358,28 +556,34 @@ def generated_stacked_log_density(enc: Any, params: dict[str, Any], engine: Any)
     dist_type = params["__pysp_dist_type__"]
     declaration = declaration_for(dist_type)
     if declaration is not None and _exp_family_stacked_scoring(declaration):
-        return _generated_exp_family_log_density(enc, params, declaration.exponential_family, engine)
-    fn = dist_type.backend_log_density_from_params
-    sig_names = tuple(inspect.signature(fn).parameters.keys())
-    if not sig_names or sig_names[-1] != "engine":
-        raise ValueError("%s backend_log_density_from_params must end with engine." % dist_type.__name__)
-    call_names = sig_names[:-1]
-    param_names = set(params.get("__pysp_param_names__", ()))
-    data_count = 0
-    for name in call_names:
-        if name in param_names:
-            break
-        data_count += 1
-    if data_count <= 0:
-        raise ValueError("%s generated scorer could not infer encoded arguments." % dist_type.__name__)
+        result = _generated_exp_family_log_density(enc, params, declaration.exponential_family, engine)
+    else:
+        fn = dist_type.backend_log_density_from_params
+        sig_names = tuple(inspect.signature(fn).parameters.keys())
+        if not sig_names or sig_names[-1] != "engine":
+            raise ValueError("%s backend_log_density_from_params must end with engine." % dist_type.__name__)
+        call_names = sig_names[:-1]
+        param_names = set(params.get("__pysp_param_names__", ()))
+        data_count = 0
+        for name in call_names:
+            if name in param_names:
+                break
+            data_count += 1
+        if data_count <= 0:
+            raise ValueError("%s generated scorer could not infer encoded arguments." % dist_type.__name__)
 
-    args = list(_generated_data_args(enc, data_count, engine))
-    for name in call_names[data_count:]:
-        if name not in param_names:
-            raise ValueError("%s generated scorer requires undeclared parameter %s." % (dist_type.__name__, name))
-        args.append(_generated_param_arg(params[name], engine))
-    args.append(engine)
-    return fn(*args)
+        args = list(_generated_data_args(enc, data_count, engine))
+        for name in call_names[data_count:]:
+            if name not in param_names:
+                raise ValueError("%s generated scorer requires undeclared parameter %s." % (dist_type.__name__, name))
+            args.append(_generated_param_arg(params[name], engine))
+        args.append(engine)
+        result = fn(*args)
+    return _validated_generated_score(
+        result,
+        "%s generated stacked score" % dist_type.__name__,
+        component_count=params.get("__pysp_component_count__"),
+    )
 
 
 def generated_log_density(dist: Any, enc: Any, engine: Any) -> Any:
@@ -396,8 +600,10 @@ def generated_log_density(dist: Any, enc: Any, engine: Any) -> Any:
         raise ValueError("%s has no declaration." % type(dist).__name__)
     params = _generated_scalar_params(dist, declaration, engine)
     if _exp_family_runtime_scoring(declaration):
-        return _generated_exp_family_scalar_expression(enc, params, declaration.exponential_family, engine)
-    return _generated_backend_log_density(dist, enc, params, declaration, engine)
+        result = _generated_exp_family_scalar_expression(enc, params, declaration.exponential_family, engine)
+    else:
+        result = _generated_backend_log_density(dist, enc, params, declaration, engine)
+    return _validated_generated_score(result, "%s generated score" % type(dist).__name__)
 
 
 def generated_log_density_available(x: Any) -> bool:
@@ -446,6 +652,7 @@ def generated_sufficient_statistics(dist: Any, enc: Any, weights: Any, engine: A
             % (type(dist).__name__, len(row_stats), len(declaration.statistics))
         )
     ww = engine.asarray(weights)
+    _validate_generated_statistic_rows(row_stats, declaration.statistics, ww)
     return tuple(
         _weighted_histogram(stat, ww, engine)
         if spec.kind == "histogram"
@@ -502,7 +709,7 @@ def generated_numba_log_density(dist: Any, enc: Any) -> np.ndarray:
         raise ValueError("generated numba statistic/natural-parameter widths differ.")
     out = np.empty(row_stats.shape[0], dtype=np.float64)
     _numba_exp_family_log_density(row_stats, base, eta, float(log_partition), out)
-    return out
+    return _validated_generated_score(out, "%s generated numba score" % type(dist).__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -687,11 +894,22 @@ def _generic_numba_data_arrays(enc: Any, n_data: int) -> tuple[np.ndarray, ...]:
     if len(raw) != n_data:
         raise ValueError("encoded payload does not contain %d generated arrays." % n_data)
     arrays = []
+    row_count = None
     for arg in raw:
         arr = np.asarray(arg)
         if arr.ndim != 1:
-            arr = arr.reshape(-1)
-        arrays.append(np.ascontiguousarray(arr, dtype=np.float64))
+            raise ValueError("generated generic numba encoded arrays must be one-dimensional.")
+        try:
+            arr = np.ascontiguousarray(arr, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("generated generic numba encoded arrays must be numeric.") from exc
+        if row_count is None:
+            row_count = arr.shape[0]
+        elif arr.shape[0] != row_count:
+            raise ValueError("generated generic numba encoded arrays have inconsistent row counts.")
+        if np.any(np.isnan(arr)) or np.any(np.isposinf(arr)):
+            raise ValueError("generated generic numba encoded arrays cannot contain NaN or positive infinity.")
+        arrays.append(arr)
     return tuple(arrays)
 
 
@@ -700,9 +918,10 @@ def _generated_generic_numba_log_density(dist: Any, enc: Any, declaration: Distr
     if built is None:
         raise ValueError("%s has no generated numba kernel." % type(dist).__name__)
     kernel, n_data, ordered_params = built
+    declared_values = _validated_parameter_values(dist, declaration)
     param_values = []
     for name in ordered_params:
-        value = getattr(dist, name, None)
+        value = declared_values.get(name)
         if value is None or not isinstance(value, (bool, int, float, np.number)):
             raise ValueError(
                 "%s parameter %r is not a scalar usable in the generated numba kernel." % (type(dist).__name__, name)
@@ -711,7 +930,7 @@ def _generated_generic_numba_log_density(dist: Any, enc: Any, declaration: Distr
     data_arrays = _generic_numba_data_arrays(enc, n_data)
     out = np.empty(data_arrays[0].shape[0], dtype=np.float64)
     kernel(*data_arrays, *param_values, out)
-    return out
+    return _validated_generated_score(out, "%s generated numba score" % type(dist).__name__)
 
 
 def generated_numba_stacked_log_density(enc: Any, params: dict[str, Any]) -> np.ndarray:
@@ -737,7 +956,11 @@ def generated_numba_stacked_log_density(enc: Any, params: dict[str, Any]) -> np.
         raise ValueError("generated numba base_measure component count differs from eta.")
     out = np.empty((row_stats.shape[0], k), dtype=np.float64)
     _numba_stacked_exp_family_log_density(row_stats, base, eta, log_partition, out)
-    return out
+    return _validated_generated_score(
+        out,
+        "%s generated stacked numba score" % dist_type.__name__,
+        component_count=params.get("__pysp_component_count__", k),
+    )
 
 
 def generated_stacked_sufficient_statistics(
@@ -758,6 +981,12 @@ def generated_stacked_sufficient_statistics(
             % (dist_type.__name__, len(row_stats), len(declaration.statistics))
         )
     ww = engine.asarray(weights)
+    _validate_generated_statistic_rows(
+        row_stats,
+        declaration.statistics,
+        ww,
+        component_count=params.get("__pysp_component_count__"),
+    )
     return tuple(
         _weighted_component_sum(stat, spec, ww, engine) for spec, stat in zip(declaration.statistics, row_stats)
     )
@@ -1084,8 +1313,9 @@ def _generated_numba_component_matrix(value: Any, name: str) -> np.ndarray:
 
 def _generated_scalar_params(dist: Any, declaration: DistributionDeclaration, engine: Any) -> dict[str, Any]:
     params: dict[str, Any] = {}
+    values = _validated_parameter_values(dist, declaration)
     for spec in declaration.parameters:
-        value = getattr(dist, spec.name)
+        value = values[spec.name]
         if value is None or isinstance(value, (str, bytes, bool, int, float, np.number, type)):
             params[spec.name] = value
         else:
@@ -1126,7 +1356,13 @@ def _generated_scalar_data_args(enc: Any, count: int, engine: Any) -> tuple[Any,
     raw_args = (enc,) if count == 1 else tuple(enc[:count])
     if len(raw_args) != count:
         raise ValueError("encoded payload does not contain %d generated arguments." % count)
-    return tuple(engine.asarray(arg) for arg in raw_args)
+    arrays = tuple(engine.asarray(arg) for arg in raw_args)
+    shapes = [tuple(getattr(arr, "shape", ())) for arr in arrays]
+    if any(not shape for shape in shapes):
+        raise ValueError("generated scalar scoring requires per-row encoded arrays.")
+    if any(shape[0] != shapes[0][0] for shape in shapes[1:]):
+        raise ValueError("generated scalar encoded arrays have inconsistent row counts.")
+    return arrays
 
 
 _KNOWN_PARAMETER_CONSTRAINTS = {
@@ -1167,21 +1403,86 @@ _SHARED_STACKED_PARAMETER_CONSTRAINTS = {
     "optional_integer",
 }
 
+_KNOWN_STATISTIC_KINDS = {
+    "child_stat",
+    "child_stats",
+    "choice_child_stats",
+    "count_map",
+    "count_maps",
+    "count_tensor",
+    "count_vector",
+    "histogram",
+    "mapping",
+    "matrix_moment",
+    "metadata",
+    "moment",
+    "none",
+    "pairwise_count_tensor",
+    "raw_observations",
+    "support_bound",
+    "tuple",
+    "vector_moment",
+    "weights",
+}
+
 
 def _generated_stacked_requires_shared_param(spec: ParameterSpec) -> bool:
     return spec.constraint in _SHARED_STACKED_PARAMETER_CONSTRAINTS
 
 
-def _declaration_issues(declaration: DistributionDeclaration, path: str) -> tuple[str, ...]:
+def _declared_parameter_exists(dist_type: type[Any], name: str) -> bool:
+    """Conservatively find constructor, descriptor, or initialized attributes."""
+    try:
+        signature = inspect.signature(dist_type.__init__)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None and name in signature.parameters:
+        return True
+    for base in dist_type.mro():
+        if name in getattr(base, "__dict__", {}):
+            return True
+        for member in getattr(base, "__dict__", {}).values():
+            if isinstance(member, (staticmethod, classmethod)):
+                member = member.__func__
+            elif isinstance(member, property):
+                member = member.fget
+            if not inspect.isfunction(member):
+                continue
+            try:
+                if any(
+                    instruction.opname == "STORE_ATTR" and instruction.argval == name
+                    for instruction in dis.get_instructions(member)
+                ):
+                    return True
+            except TypeError:
+                continue
+    return False
+
+
+def _declaration_issues(
+    declaration: DistributionDeclaration,
+    path: str,
+    ancestors: frozenset[int],
+) -> tuple[str, ...]:
+    if id(declaration) in ancestors:
+        return ("%s creates a child declaration cycle." % path,)
+    ancestors = ancestors | {id(declaration)}
     issues = []
     if not declaration.name:
         issues.append("%s has an empty name." % path)
     if not isinstance(declaration.distribution_type, type):
         issues.append("%s has a non-type distribution_type." % path)
+    if not isinstance(declaration.support, str) or not declaration.support:
+        issues.append("%s has an empty or non-string support." % path)
+    if not isinstance(declaration.differentiable, bool):
+        issues.append("%s differentiable must be bool." % path)
 
     param_names = []
     seen_params = set()
     for spec in declaration.parameters:
+        if not isinstance(spec, ParameterSpec):
+            issues.append("%s has a parameter that is not a ParameterSpec." % path)
+            continue
         if not spec.name:
             issues.append("%s has an empty parameter name." % path)
             continue
@@ -1196,20 +1497,34 @@ def _declaration_issues(declaration: DistributionDeclaration, path: str) -> tupl
             issues.append("%s parameter %s has unknown constraint %s." % (path, spec.name, constraint))
         seen_params.add(spec.name)
         param_names.append(spec.name)
+        if isinstance(declaration.distribution_type, type) and not _declared_parameter_exists(
+            declaration.distribution_type, spec.name
+        ):
+            issues.append(
+                "%s parameter %s is not exposed by %s."
+                % (path, spec.name, declaration.distribution_type.__name__)
+            )
 
     stat_names = set()
     for spec in declaration.statistics:
+        if not isinstance(spec, StatisticSpec):
+            issues.append("%s has a statistic that is not a StatisticSpec." % path)
+            continue
         if not spec.name:
             issues.append("%s has an empty statistic name." % path)
             continue
         if spec.name in stat_names:
             issues.append("%s has duplicate statistic %s." % (path, spec.name))
+        if spec.kind not in _KNOWN_STATISTIC_KINDS:
+            issues.append("%s statistic %s has unknown kind %s." % (path, spec.name, spec.kind))
         stat_names.add(spec.name)
 
     if declaration.child_roles and len(declaration.child_roles) != len(declaration.children):
         issues.append(
             "%s has %d child roles for %d children." % (path, len(declaration.child_roles), len(declaration.children))
         )
+    if len(set(declaration.child_roles)) != len(declaration.child_roles):
+        issues.append("%s has duplicate child roles." % path)
     for i, child in enumerate(declaration.children):
         role = declaration.child_roles[i] if i < len(declaration.child_roles) else str(i)
         child_path = "%s.%s" % (path, role)
@@ -1218,10 +1533,13 @@ def _declaration_issues(declaration: DistributionDeclaration, path: str) -> tupl
         elif not isinstance(child, DistributionDeclaration):
             issues.append("%s child is not a DistributionDeclaration." % child_path)
         else:
-            issues.extend(_declaration_issues(child, path=child_path))
+            issues.extend(_declaration_issues(child, path=child_path, ancestors=ancestors))
 
     if declaration.exponential_family is not None:
         spec = declaration.exponential_family
+        if not isinstance(spec, ExponentialFamilySpec):
+            issues.append("%s exponential_family is not an ExponentialFamilySpec." % path)
+            return tuple(issues)
         if not callable(spec.sufficient_statistics):
             issues.append("%s exponential-family sufficient_statistics is not callable." % path)
         if not callable(spec.natural_parameters):
@@ -1236,6 +1554,14 @@ def _declaration_issues(declaration: DistributionDeclaration, path: str) -> tupl
             issues.append("%s exponential-family base_measure_from_params is not callable." % path)
         if spec.legacy_sufficient_statistics is not None and not callable(spec.legacy_sufficient_statistics):
             issues.append("%s exponential-family legacy_sufficient_statistics is not callable." % path)
+        if not isinstance(spec.fixed_base, bool):
+            issues.append("%s exponential-family fixed_base must be bool." % path)
+        if not isinstance(spec.runtime_scoring, bool):
+            issues.append("%s exponential-family runtime_scoring must be bool." % path)
+        if spec.fixed_base is False and spec.base_measure_from_params is None:
+            issues.append(
+                "%s exponential-family fixed_base=False requires base_measure_from_params." % path
+            )
     if declaration.legacy_sufficient_statistics is not None and not callable(declaration.legacy_sufficient_statistics):
         issues.append("%s legacy_sufficient_statistics is not callable." % path)
     return tuple(issues)
@@ -1266,6 +1592,37 @@ def _statistic_value_issues(
 ) -> tuple[str, ...]:
     child_indices = _child_indices_for_stat(declaration, spec)
     if not child_indices:
+        if spec.kind == "count_map" and not isinstance(value, Mapping):
+            return ("%s expected a mapping." % path,)
+        if spec.kind == "count_maps" and not (
+            isinstance(value, Mapping)
+            or (
+                isinstance(value, (tuple, list))
+                and all(isinstance(item, Mapping) for item in value)
+            )
+        ):
+            return ("%s expected a mapping or sequence of mappings." % path,)
+        if spec.kind in ("count_vector", "vector_moment"):
+            try:
+                shape = np.asarray(value).shape
+            except (TypeError, ValueError):
+                return ("%s expected a one-dimensional statistic." % path,)
+            if len(shape) != 1:
+                return ("%s expected a one-dimensional statistic." % path,)
+        if spec.kind == "matrix_moment":
+            try:
+                shape = np.asarray(value).shape
+            except (TypeError, ValueError):
+                return ("%s expected a two-dimensional statistic." % path,)
+            if len(shape) != 2:
+                return ("%s expected a two-dimensional statistic." % path,)
+        if spec.kind in ("count_tensor", "pairwise_count_tensor"):
+            try:
+                shape = np.asarray(value).shape
+            except (TypeError, ValueError):
+                return ("%s expected a tensor statistic." % path,)
+            if len(shape) < 2:
+                return ("%s expected a tensor statistic with rank at least two." % path,)
         return ()
 
     if spec.kind == "child_stat":
@@ -1419,16 +1776,45 @@ def _generated_backend_hook_supported(dist_type: type[Any], declaration: Distrib
     return all(name in param_names for name in sig_names[data_count:-1])
 
 
+def _validated_generated_score(
+    value: Any,
+    name: str,
+    component_count: int | None = None,
+) -> Any:
+    shape = tuple(getattr(value, "shape", ()))
+    expected_rank = 2 if component_count is not None else 1
+    if len(shape) != expected_rank:
+        raise ValueError("%s must have rank %d, got shape %r." % (name, expected_rank, shape))
+    if component_count is not None and shape[1] != component_count:
+        raise ValueError(
+            "%s must have %d component columns, got shape %r."
+            % (name, component_count, shape)
+        )
+    if isinstance(value, np.ndarray):
+        try:
+            numeric = np.asarray(value, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("%s must be numeric." % name) from exc
+        if np.any(np.isnan(numeric)) or np.any(np.isposinf(numeric)):
+            raise ValueError("%s cannot contain NaN or positive infinity." % name)
+    return value
+
+
 def _generated_data_args(enc: Any, count: int, engine: Any) -> tuple[Any, ...]:
     raw_args = (enc,) if count == 1 else tuple(enc[:count])
     if len(raw_args) != count:
         raise ValueError("encoded payload does not contain %d generated arguments." % count)
     rv = []
+    row_count = None
     for arg in raw_args:
         arr = engine.asarray(arg)
         shape = tuple(getattr(arr, "shape", ()))
         if len(shape) == 0:
             raise ValueError("generated stacked scoring requires per-row encoded arrays.")
+        if row_count is None:
+            row_count = shape[0]
+        elif shape[0] != row_count:
+            raise ValueError("generated stacked encoded arrays have inconsistent row counts.")
         rv.append(arr[:, None] if len(shape) == 1 else arr[:, None, ...])
     return tuple(rv)
 
@@ -1458,6 +1844,52 @@ def _astype(x: Any, dtype: Any) -> Any:
     if hasattr(x, "astype"):  # numpy / jax
         return x.astype(dtype)
     return x.to(dtype)  # torch
+
+
+def _validate_generated_statistic_rows(
+    row_stats: Sequence[Any],
+    specs: Sequence[StatisticSpec],
+    weights: Any,
+    component_count: int | None = None,
+) -> None:
+    weight_shape = tuple(getattr(weights, "shape", ()))
+    expected_weight_rank = 2 if component_count is not None else 1
+    if len(weight_shape) != expected_weight_rank:
+        raise ValueError(
+            "generated statistic weights must have rank %d, got shape %r."
+            % (expected_weight_rank, weight_shape)
+        )
+    if component_count is not None and weight_shape[1] != component_count:
+        raise ValueError(
+            "generated statistic weights must have %d component columns."
+            % component_count
+        )
+    if isinstance(weights, np.ndarray):
+        numeric_weights = np.asarray(weights, dtype=np.float64)
+        if np.any(~np.isfinite(numeric_weights)) or np.any(numeric_weights < 0.0):
+            raise ValueError("generated statistic weights must be finite and non-negative.")
+
+    row_count = weight_shape[0]
+    for index, (stat, spec) in enumerate(zip(row_stats, specs)):
+        shape = tuple(getattr(stat, "shape", ()))
+        if not shape or shape[0] != row_count:
+            raise ValueError(
+                "generated %s statistic %d must have a matching row axis."
+                % (spec.kind, index)
+            )
+        if spec.kind == "vector_moment" and len(shape) < 2:
+            raise ValueError("generated vector_moment statistics require a feature axis.")
+        if spec.kind == "matrix_moment" and len(shape) < 3:
+            raise ValueError("generated matrix_moment statistics require two feature axes.")
+        if isinstance(stat, np.ndarray):
+            try:
+                numeric_stat = np.asarray(stat, dtype=np.float64)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("generated statistic %d must be numeric." % index) from exc
+            if np.any(np.isnan(numeric_stat)) or np.any(np.isposinf(numeric_stat)):
+                raise ValueError(
+                    "generated statistic %d cannot contain NaN or positive infinity." % index
+                )
 
 
 def _weighted_component_sum(stat: Any, spec: StatisticSpec, weights: Any, engine: Any) -> Any:
