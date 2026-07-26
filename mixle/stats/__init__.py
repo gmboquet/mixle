@@ -760,6 +760,8 @@ __all__ = [
     "WatsonSampler",
     "WatsonEstimator",
     "WatsonDataEncoder",
+    "WatsonFitError",
+    "WatsonSamplingError",
     "WishartDistribution",
     "WishartSampler",
     "WishartEstimator",
@@ -1163,7 +1165,9 @@ from mixle.stats.directional.watson import (
     WatsonDataEncoder,
     WatsonDistribution,
     WatsonEstimator,
+    WatsonFitError,
     WatsonSampler,
+    WatsonSamplingError,
 )
 from mixle.stats.directional.wrapped_cauchy import (
     WrappedCauchyDataEncoder,
