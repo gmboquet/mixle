@@ -728,28 +728,58 @@ def _bic_weights(scores: dict[str, float], nobs: int) -> dict[str, float]:
 GOF_ABSTAIN_PVALUE = 0.01
 
 
-def _numeric_pit(arr: np.ndarray, recommendation: str, gmean: float, gvar: float):
-    """Return the probability-integral-transform F(x) of the data under the recommended fit, or None."""
+def _validation_numeric_pit(
+    train: Sequence[float], validation: Sequence[float], recommendation: str
+) -> np.ndarray | None:
+    """Fit on ``train`` and return PIT values only for untouched validation rows."""
     from scipy import stats
 
-    if recommendation == "gaussian" and gvar > 0.0:
-        return stats.norm.cdf(arr, loc=gmean, scale=math.sqrt(gvar))
+    arr = np.asarray(train, dtype=np.float64)
+    val = np.asarray(validation, dtype=np.float64)
+    if arr.size < 2 or val.size < 2 or not np.all(np.isfinite(arr)) or not np.all(np.isfinite(val)):
+        return None
+    mean = float(arr.mean())
+    var = float(arr.var())
+    if recommendation == "gaussian" and var > 0.0:
+        return stats.norm.cdf(val, loc=mean, scale=math.sqrt(var))
+    if recommendation == "student_t":
+        params = _student_t_params(arr)
+        if params is not None:
+            df, loc, scale = params
+            return stats.t.cdf(val, df, loc=loc, scale=scale)
+        return None
+    if recommendation == "mixture":
+        fit = _fit_gaussian_mixture2(arr)
+        if fit is None:
+            return None
+        _, (weights, means, variances) = fit
+        return sum(
+            weight * stats.norm.cdf(val, loc=component_mean, scale=math.sqrt(component_var))
+            for weight, component_mean, component_var in zip(weights, means, variances)
+        )
     if recommendation == "lognormal":
         logs = np.log(arr)
         lvar = float(logs.var())
-        if lvar > 0.0:
-            return stats.norm.cdf(logs, loc=float(logs.mean()), scale=math.sqrt(lvar))
+        if lvar > 0.0 and np.all(val > 0.0):
+            return stats.norm.cdf(np.log(val), loc=float(logs.mean()), scale=math.sqrt(lvar))
         return None
     if recommendation == "gamma":
         moments = _gamma_moments(arr)
         if moments is not None:
             k, theta = moments
-            return stats.gamma.cdf(arr, a=k, scale=theta)
+            return stats.gamma.cdf(val, a=k, scale=theta)
     from mixle.utils.automatic.detectors import get_detector
 
     detector = get_detector(recommendation)
-    if detector is not None and detector.cdf is not None:
-        return detector.cdf(arr)
+    if detector is not None:
+        model = _fit_detector_model(detector, train)
+        cdf = None if model is None else getattr(model, "cdf", None)
+        if callable(cdf):
+            try:
+                values = np.asarray([cdf(value) for value in val], dtype=np.float64)
+            except Exception:  # noqa: BLE001
+                return None
+            return values if np.all(np.isfinite(values)) else None
     return None
 
 
@@ -972,9 +1002,9 @@ def _validation_integer_gaussian_bits(train: Sequence[int], validation: Sequence
     return -ll / (float(len(validation)) * math.log(2.0))
 
 
-def _validation_detector_bits(detector: Any, train: Sequence[Any], validation: Sequence[Any]) -> float | None:
-    """Fit one registered family on train only and score untouched validation data."""
-    if not train or not validation:
+def _fit_detector_model(detector: Any, train: Sequence[Any]) -> Any | None:
+    """Fit one registered detector family using only the supplied training rows."""
+    if not train:
         return None
     vdict: dict[Any, float] = defaultdict(float)
     for value in train:
@@ -985,7 +1015,19 @@ def _validation_detector_bits(detector: Any, train: Sequence[Any], validation: S
         encoder = accumulator.acc_to_encoder()
         encoded = encoder.seq_encode(train)
         accumulator.seq_update(encoded, np.ones(len(train), dtype=np.float64), None)
-        model = estimator.estimate(float(len(train)), accumulator.value())
+        return estimator.estimate(float(len(train)), accumulator.value())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _validation_detector_bits(detector: Any, train: Sequence[Any], validation: Sequence[Any]) -> float | None:
+    """Fit one registered family on train only and score untouched validation data."""
+    if not validation:
+        return None
+    try:
+        model = _fit_detector_model(detector, train)
+        if model is None:
+            return None
         scores = np.asarray([model.log_density(value) for value in validation], dtype=np.float64)
     except Exception:  # noqa: BLE001
         return None
@@ -1082,6 +1124,16 @@ def _validate_marginal_profile(
             profile.validation_notes.append(
                 "gap is decisive -- robust_recommendation() overrides to %s" % recommendation
             )
+    if profile.kind == "numeric":
+        pit = _validation_numeric_pit(train, validation, profile.robust_recommendation())
+        gof = None if pit is None else _pit_goodness_of_fit(pit)
+        if gof is not None:
+            profile.gof_ks, profile.gof_pvalue = gof
+            if profile.gof_pvalue < GOF_ABSTAIN_PVALUE:
+                profile.notes.append(
+                    "poor calibration on held-out data: PIT-vs-uniform KS p=%.3g for %s; "
+                    "consider another family" % (profile.gof_pvalue, profile.robust_recommendation())
+                )
     return profile
 
 
@@ -1305,20 +1357,6 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
         else:
             bits_per_obs = _gaussian_bits(var)
 
-        # Goodness-of-fit gate: the PIT of the data under the recommended fit should be Uniform(0,1);
-        # a small KS p-value flags miscalibration (none of the candidate families fit) -> abstain note.
-        gof_ks = None
-        gof_pvalue = None
-        pit = _numeric_pit(arr, recommendation, mean, var)
-        if pit is not None:
-            gof = _pit_goodness_of_fit(pit)
-            if gof is not None:
-                gof_ks, gof_pvalue = gof
-                if gof_pvalue < GOF_ABSTAIN_PVALUE:
-                    notes.append(
-                        "poor calibration: PIT-vs-uniform KS p=%.3g for %s; consider another family"
-                        % (gof_pvalue, recommendation)
-                    )
         return MarginalFieldProfile(
             path,
             role,
@@ -1339,8 +1377,6 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
             numeric_var=var,
             model_scores_bits=model_scores,
             model_score_gap_bits=_score_gap_bits(model_scores, recommendation),
-            gof_ks=gof_ks,
-            gof_pvalue=gof_pvalue,
             notes=notes,
         )
 
