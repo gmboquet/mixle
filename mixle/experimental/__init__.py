@@ -121,11 +121,11 @@ Current contents:
   :func:`~mixle.experimental.ot_geometry.mixture_barycenter` (Wasserstein barycenter of Gaussian mixtures
   via Hungarian component alignment) -- merging models in distribution space instead of parameter space.
 - :mod:`mixle.experimental.unlearning` -- P5, exact machine unlearning for closed-form leaves:
-  :func:`~mixle.experimental.unlearning.certify_unlearning` re-reduces the retained shards' stored
-  sufficient statistics (via each accumulator's ``combine``) in canonical order and certifies the result
-  equals the never-saw-it fit bit-for-bit. NOT by subtraction -- ``T_all - T_j`` is not bitwise and can
-  catastrophically cancel to a negative variance (both shown in the test). Exact for closed-form leaves;
-  iterative-EM latent models are out of scope for the exact certificate.
+  :func:`~mixle.experimental.unlearning.prepare_unlearning` commits sufficient-statistic records while raw
+  shards exist; after deletion, :func:`~mixle.experimental.unlearning.certify_unlearning` accepts only the
+  retained records and an externally anchored manifest digest, verifies their integrity, and re-reduces them
+  in canonical ID order. It explicitly refuses unregistered or iterative/latent estimators and states the
+  certificate's integrity/erasure threat-model limits.
 - :mod:`mixle.experimental.spectral_health` -- P16, descriptive weight-spectrum receipts:
   :func:`~mixle.experimental.spectral_health.spectral_health` reports stable/effective rank, spectral
   outliers, and a goodness-of-fit-gated power-law tail estimate with a conditional bootstrap interval.

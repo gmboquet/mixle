@@ -59,6 +59,9 @@ since an omission from both files at once is a real gap, not a formatting choice
 - `tying_discovery.py` — the R1 profile/permutation (copula-style) decomposition of a weight tensor's
   flattened values, surfacing compatible tying candidates in trained weights and evaluating each tie on an
   isolated model under an explicit output-error budget.
+- `unlearning.py` — a two-phase exact-unlearning protocol for audited additive single-step estimators:
+  committed sufficient statistics at ingestion, then retained-record-only deterministic certification after
+  deletion against an externally anchored manifest digest.
 
 Whether these eight should graduate into `__init__.py`'s exports, stay reachable only by full path, or get
 folded elsewhere is a separate decision from documenting that they exist; this list makes that decision
