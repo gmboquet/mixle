@@ -155,10 +155,21 @@ class TorchRunEncodedData(EncodedDataHandle):
         return pickle.loads(box[0])
 
     def _gather_object(self, value: Any) -> Sequence[Any] | None:
+        """Gather a payload only on root; non-root ranks never materialize peers."""
         if self.world == 1:
             return [value]
-        gathered = [None for _ in range(self.world)]
-        self.dist.all_gather_object(gathered, pickle.dumps(value, protocol=_PROTO), group=self.group)
+        if not hasattr(self.dist, "gather_object"):
+            raise RuntimeError(
+                "this torch.distributed runtime lacks gather_object; refusing all_gather_object "
+                "because it replicates full sufficient statistics on every rank"
+            )
+        gathered = [None for _ in range(self.world)] if self.rank == self.root else None
+        self.dist.gather_object(
+            pickle.dumps(value, protocol=_PROTO),
+            object_gather_list=gathered,
+            dst=self.root,
+            group=self.group,
+        )
         if self.rank != self.root:
             return None
         return [pickle.loads(raw) for raw in gathered]
@@ -180,7 +191,8 @@ class TorchRunEncodedData(EncodedDataHandle):
             accumulator.seq_update(enc, np.ones(sz, dtype=np.float64), model)
         return count, accumulator.value()
 
-    def _fold_value_and_share(self, estimator, local: tuple[float, Any]) -> tuple[float, Any]:
+    def _fold_value_on_root(self, estimator, local: tuple[float, Any]) -> tuple[float, Any] | None:
+        """Gather and combine sufficient statistics only on the root rank."""
         gathered = self._gather_object(local)
         if self.rank == self.root:
             accumulator = estimator.accumulator_factory().make()
@@ -191,14 +203,13 @@ class TorchRunEncodedData(EncodedDataHandle):
             stats_dict = {}
             accumulator.key_merge(stats_dict)
             accumulator.key_replace(stats_dict)
-            payload = nobs, accumulator.value()
-        else:
-            payload = None
-        return self._broadcast_object(payload)
+            return nobs, accumulator.value()
+        return None
 
     def _fold_model_and_share(self, estimator, local: tuple[float, Any]):
-        nobs, value = self._fold_value_and_share(estimator, local)
+        folded = self._fold_value_on_root(estimator, local)
         if self.rank == self.root:
+            nobs, value = folded
             model = estimator.estimate(nobs, value)
         else:
             model = None
@@ -237,9 +248,13 @@ class TorchRunEncodedData(EncodedDataHandle):
         return self._all_reduce_pair(count, total)
 
     def pysp_stream_accumulate(self, estimator, model) -> tuple[float, Any]:
-        """Globally folded batch sufficient statistics for streaming EM."""
+        """Return folded statistics on every rank for the streaming-update contract."""
         model = self._broadcast_object(model)
-        return self._fold_value_and_share(estimator, self._local_update(estimator, model))
+        folded = self._fold_value_on_root(estimator, self._local_update(estimator, model))
+        # Unlike an ordinary M-step, the public streaming contract returns the
+        # statistic itself to its caller on every rank. This broadcast is
+        # therefore deliberate; ordinary EM broadcasts only the fitted model.
+        return self._broadcast_object(folded)
 
     def __len__(self) -> int:
         return int(self.size)

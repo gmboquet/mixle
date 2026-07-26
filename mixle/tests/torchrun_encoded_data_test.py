@@ -25,6 +25,44 @@ else:
 
 @unittest.skipUnless(HAS_TORCH, "torch is not installed")
 class TorchRunEncodedDataTestCase(unittest.TestCase):
+    def test_object_gather_materializes_payloads_only_on_root(self):
+        class RootOnlyCollectives:
+            def __init__(self):
+                self.calls = 0
+
+            def gather_object(self, obj, object_gather_list, dst, group):
+                self.calls += 1
+                self.assert_root = (dst, group)
+                object_gather_list[:] = [obj, obj]
+
+            def all_gather_object(self, *args, **kwargs):
+                raise AssertionError("full-state all_gather_object must not be used")
+
+        handle = object.__new__(TorchRunEncodedData)
+        handle.world = 2
+        handle.rank = 0
+        handle.root = 0
+        handle.group = "group"
+        handle.dist = RootOnlyCollectives()
+        gathered = handle._gather_object({"stat": 1})
+        self.assertEqual(gathered, [{"stat": 1}, {"stat": 1}])
+        self.assertEqual(handle.dist.calls, 1)
+
+    def test_em_broadcasts_only_the_fitted_model(self):
+        class Estimator:
+            def estimate(self, nobs, value):
+                return ("model", nobs, value)
+
+        handle = object.__new__(TorchRunEncodedData)
+        handle.rank = 0
+        handle.root = 0
+        handle._fold_value_on_root = lambda estimator, local: (3.0, "folded-stat")
+        broadcasts = []
+        handle._broadcast_object = lambda value: broadcasts.append(value) or value
+        model = handle._fold_model_and_share(Estimator(), (1.0, "local-stat"))
+        self.assertEqual(model, ("model", 3.0, "folded-stat"))
+        self.assertEqual(broadcasts, [model])
+
     def test_single_rank_handle_matches_local_scoring_and_estimate(self):
         data = list(np.linspace(-2.0, 2.0, 40))
         model = GaussianDistribution(0.25, 1.5)
