@@ -78,6 +78,7 @@ from mixle.experimental.typed_runtime.context_ir import (
     Provenance,
 )
 from mixle.experimental.typed_runtime.context_materializer import (
+    ContextTokenizer,
     MaterializationPolicy,
     MaterializedContext,
     materialize_context,
@@ -286,6 +287,7 @@ __all__ = [
     "ContextNodeKind",
     "ContextScheduleDecision",
     "ContextSchedulerConfig",
+    "ContextTokenizer",
     "ContractRegistry",
     "CostEstimate",
     "CounterSemantics",
