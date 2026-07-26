@@ -21,8 +21,10 @@ from mixle.stats.compute.gradient import (
     dirichlet_alpha_tensor,
     markov_chain_priors,
     mixture_priors,
+    normal_gamma_log_prior,
     record_child_priors,
     sequence_priors,
+    validated_prior_scalar,
 )
 
 
@@ -119,6 +121,62 @@ class GradientPriorAlignmentTest(unittest.TestCase):
             dirichlet_alpha_tensor({"a": 2.0}, ("a", "b"), np.zeros(2), np, None)
         with self.assertRaisesRegex(ValueError, "unknown keys"):
             dirichlet_alpha_tensor({"a": 2.0, "b": 2.0, "typo": 1.0}, ("a", "b"), np.zeros(2), np, None)
+
+    def test_dirichlet_concentrations_require_exact_positive_finite_shape(self):
+        logits = np.zeros(2)
+        for alpha in ([1.0], [1.0, 0.0], [1.0, -1.0], [1.0, np.inf], [1.0, np.nan]):
+            with self.subTest(alpha=alpha):
+                with self.assertRaises(ValueError):
+                    dirichlet_alpha_tensor(alpha, None, logits, np, np)
+        with self.assertRaises(TypeError):
+            dirichlet_alpha_tensor([True, True], None, logits, np, np)
+        np.testing.assert_allclose(
+            dirichlet_alpha_tensor([2.0, 3.0], None, logits, np, np),
+            [2.0, 3.0],
+        )
+
+    def test_scalar_hyperparameters_reject_invalid_and_unreceipted_improper_values(self):
+        for value in (0.0, -1.0, np.inf, np.nan):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    validated_prior_scalar({"family": "gamma", "shape": value}, "shape")
+        with self.assertRaises(TypeError):
+            validated_prior_scalar({"family": "gamma", "shape": True}, "shape")
+        with self.assertRaises(ValueError):
+            validated_prior_scalar({"family": "gamma", "shape": [1.0]}, "shape")
+        with self.assertRaisesRegex(ValueError, "aliases.*disagree"):
+            validated_prior_scalar({"family": "normalgamma", "alpha": 2.0, "a": 3.0}, "alpha", aliases=("a",))
+
+        acknowledged = {
+            "family": "gamma",
+            "shape": 0.0,
+            "proper": False,
+            "improper_receipt": {
+                "status": "improper_limit_acknowledged",
+                "rationale": "evaluate a documented limiting posterior",
+            },
+        }
+        self.assertEqual(validated_prior_scalar(acknowledged, "shape"), 0.0)
+
+    def test_normal_gamma_requires_all_finite_proper_controls(self):
+        valid = {
+            "family": "normalgamma",
+            "alpha": 2.0,
+            "beta": 1.0,
+            "kappa": 0.5,
+            "mu0": 0.0,
+        }
+        self.assertTrue(np.isfinite(normal_gamma_log_prior(1.0, 2.0, valid, np)))
+        for key, value in (("alpha", 0.0), ("beta", -1.0), ("kappa", np.inf), ("mu0", np.nan)):
+            malformed = dict(valid)
+            malformed[key] = value
+            with self.subTest(key=key, value=value):
+                with self.assertRaises(ValueError):
+                    normal_gamma_log_prior(1.0, 2.0, malformed, np)
+        missing = dict(valid)
+        del missing["kappa"]
+        with self.assertRaisesRegex(ValueError, "requires hyperparameter 'kappa'"):
+            normal_gamma_log_prior(1.0, 2.0, missing, np)
 
 
 if __name__ == "__main__":

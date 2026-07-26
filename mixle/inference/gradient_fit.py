@@ -13,7 +13,7 @@ from typing import IO, Any, TypeVar
 import numpy as np
 
 from mixle.inference.priors import as_prior_dict
-from mixle.stats.compute.gradient import GradientFitError
+from mixle.stats.compute.gradient import GradientFitError, dirichlet_alpha_tensor, validated_prior_scalar
 from mixle.stats.compute.pdist import SequenceEncodableProbabilityDistribution
 
 T = TypeVar("T")
@@ -588,8 +588,8 @@ def _gradient_log_prior_state(state, priors, prior_strength: float, torch, engin
                 pfam = _prior_family(param_prior)
                 if pfam == "gamma":
                     value = torch.exp(raw[_coupled_raw_name(spec.name, anchor, spec.constraint)])
-                    shape = engine.asarray(param_prior.get("shape", 1.0))
-                    rate = engine.asarray(param_prior.get("rate", 0.0))
+                    shape = engine.asarray(validated_prior_scalar(param_prior, "shape"))
+                    rate = engine.asarray(validated_prior_scalar(param_prior, "rate"))
                     # Clamp away from 0: a saturated Adam tail can drive exp(raw) to underflow to
                     # exactly 0.0, making log(value) == -inf so (shape-1)*log(value) becomes NaN
                     # (shape == 1) or diverges (shape < 1), poisoning the whole MAP objective.
@@ -603,8 +603,8 @@ def _gradient_log_prior_state(state, priors, prior_strength: float, torch, engin
             value = _canonical_value(raw_name, spec.name, spec.constraint, raw, torch)
             pfam = _prior_family(param_prior)
             if pfam == "gamma" and spec.constraint in ("positive", "positive_vector", "positive_matrix"):
-                shape = engine.asarray(param_prior.get("shape", 1.0))
-                rate = engine.asarray(param_prior.get("rate", 0.0))
+                shape = engine.asarray(validated_prior_scalar(param_prior, "shape"))
+                rate = engine.asarray(validated_prior_scalar(param_prior, "rate"))
                 # Clamp away from 0: a saturated Adam tail can drive exp(raw) to underflow to
                 # exactly 0.0, making log(value) == -inf so (shape-1)*log(value) becomes NaN
                 # (shape == 1) or diverges (shape < 1), poisoning the whole MAP objective.
@@ -612,8 +612,8 @@ def _gradient_log_prior_state(state, priors, prior_strength: float, torch, engin
                 lp = lp + torch.sum((shape - 1.0) * torch.log(value_safe) - rate * value)
                 matched = True
             elif pfam == "beta" and spec.constraint == "unit_interval":
-                alpha = engine.asarray(param_prior.get("alpha", 1.0))
-                beta = engine.asarray(param_prior.get("beta", 1.0))
+                alpha = engine.asarray(validated_prior_scalar(param_prior, "alpha"))
+                beta = engine.asarray(validated_prior_scalar(param_prior, "beta"))
                 # Clamp away from {0, 1}: a saturated sigmoid tail (raw >~ 37) gives value == 1.0
                 # exactly, making log1p(-value) == -inf and poisoning the whole MAP objective.
                 value = torch.clamp(value, 1.0e-12, 1.0 - 1.0e-12)
@@ -626,7 +626,14 @@ def _gradient_log_prior_state(state, priors, prior_strength: float, torch, engin
                 "column_simplex_matrix",
             ):
                 labels = _simplex_labels(shadow, declaration, value)
-                alpha = _dirichlet_alpha_tensor(param_prior.get("alpha"), labels, value, engine, torch)
+                alpha = dirichlet_alpha_tensor(
+                    param_prior.get("alpha"),
+                    labels,
+                    value,
+                    engine,
+                    torch,
+                    prior=param_prior,
+                )
                 # Clamp away from 0: a saturated softmax tail can drive a component to exactly 0,
                 # making log(value) == -inf and poisoning the whole MAP objective.
                 value = torch.clamp(value, 1.0e-12, 1.0 - 1.0e-12)
@@ -667,19 +674,6 @@ def _parameter_prior(priors, name: str):
         if name in priors:
             return as_prior_dict(priors[name])
     return None
-
-
-def _dirichlet_alpha_tensor(alpha, labels, logits, engine, torch):
-    if alpha is None:
-        alpha = 1.0
-    if isinstance(alpha, Mapping):
-        if labels is None:
-            raise ValueError("Dirichlet alpha mappings require categorical labels.")
-        alpha = [alpha.get(label, 1.0) for label in labels]
-    alpha_t = engine.asarray(alpha)
-    if alpha_t.ndim == 0:
-        return alpha_t + torch.zeros_like(logits)
-    return alpha_t
 
 
 def _simplex_labels(shadow, declaration, value):
