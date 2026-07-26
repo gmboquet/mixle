@@ -40,7 +40,7 @@ from mixle.stats import (
 )
 from mixle.stats.univariate.discrete.geometric import GeometricEstimator
 from mixle.utils.evaluation import empirical_kl_divergence
-from mixle.utils.special import digammainv, logpdet, trigamma
+from mixle.utils.special import digammainv, logpdet, softmax, trigamma
 from mixle.utils.vector import (
     log_posterior,
     log_posterior_sum,
@@ -148,6 +148,33 @@ class SpecialUtilsTestCase(unittest.TestCase):
         y = scipy.special.digamma(v)
         rv = digammainv(y)
         self.assertTrue(np.allclose(rv, v, rtol=1e-6))
+
+    def test_digammainv_preserves_nonfinite_limits(self):
+        values = np.asarray([np.nan, -np.inf, np.inf])
+        result = digammainv(values)
+        self.assertTrue(np.isnan(result[0]))
+        self.assertEqual(result[1], 0.0)
+        self.assertEqual(result[2], np.inf)
+        self.assertTrue(np.isnan(digammainv(np.nan)))
+        self.assertEqual(digammainv(-np.inf), 0.0)
+        self.assertEqual(digammainv(np.inf), np.inf)
+
+    def test_softmax_distinguishes_nan_and_infinite_limits(self):
+        result = softmax(
+            np.asarray(
+                [
+                    [0.0, np.inf, -np.inf],
+                    [np.inf, 2.0, np.inf],
+                    [-np.inf, -np.inf, -np.inf],
+                    [0.0, np.nan, 1.0],
+                ]
+            ),
+            axis=1,
+        )
+        np.testing.assert_array_equal(result[0], [0.0, 1.0, 0.0])
+        np.testing.assert_array_equal(result[1], [0.5, 0.0, 0.5])
+        np.testing.assert_allclose(result[2], [1.0 / 3.0] * 3)
+        self.assertTrue(np.isnan(result[3]).all())
 
     def test_trigamma_matches_polygamma(self):
         v = np.array([0.2, 1.0, 4.5, 30.0])

@@ -7,6 +7,7 @@ the numerically-careful versions stay in one place.
 """
 
 import math
+import operator
 from collections.abc import Iterable
 from typing import Any
 
@@ -170,14 +171,17 @@ def digammainv(y: np.ndarray | float) -> np.ndarray | float:
 
     """
     if isinstance(y, np.ndarray):
-        rv = np.zeros(y.shape, dtype=float)
-        rv[np.isposinf(y)] = np.inf
+        values = np.asarray(y, dtype=float)
+        rv = np.full(values.shape, np.nan, dtype=float)
+        rv[np.isneginf(values)] = 0.0
+        rv[np.isposinf(values)] = np.inf
 
-        Q = np.isfinite(y)
-        z = y[Q]
+        Q = np.isfinite(values)
+        z = values[Q]
         M = z >= -2.22
         x = np.empty(z.shape, dtype=float)
-        x[M] = exp(z[M]) + 0.5
+        with np.errstate(over="ignore"):
+            x[M] = exp(z[M]) + 0.5
         x[~M] = -1.0 / (z[~M] - D1)
 
         t1 = np.zeros(x.shape, dtype=float)
@@ -195,6 +199,10 @@ def digammainv(y: np.ndarray | float) -> np.ndarray | float:
         x = rv
 
     else:
+        if math.isnan(y):
+            return math.nan
+        if math.isinf(y):
+            return math.inf if y > 0.0 else 0.0
         x = (exp(y) + 0.5) if y >= -2.22 else (-1.0 / (y - D1))
 
         x -= (digamma(x) - y) / trigamma(x)
@@ -276,11 +284,10 @@ def logsumexp(a: Any, axis: int | None = None) -> Any:
 
 
 def softmax(log_scores: np.ndarray, axis: int = -1) -> np.ndarray:
-    """Numerically stable softmax of ``log_scores`` along ``axis``, with an all-``-inf`` guard.
+    """Numerically stable softmax with explicit non-finite limiting behavior.
 
-    Subtracts the per-slice maximum before exponentiating. A slice that is entirely ``-inf`` (no
-    finite log-score) has no defined softmax and would otherwise yield ``nan``; it is filled with a
-    uniform distribution ``1 / n`` over that axis instead.
+    Positive-infinite entries split all mass equally, NaN propagates across its
+    slice, and an entirely negative-infinite slice is filled uniformly.
 
     Args:
         log_scores: Array of log-scores.
@@ -291,17 +298,42 @@ def softmax(log_scores: np.ndarray, axis: int = -1) -> np.ndarray:
 
     """
     log_scores = np.asarray(log_scores, dtype=np.float64)
+    if log_scores.ndim == 0:
+        raise ValueError("softmax requires at least one dimension")
+    try:
+        axis = operator.index(axis)
+    except TypeError as exc:
+        raise TypeError("softmax axis must be an integer") from exc
+    if axis < 0:
+        axis += log_scores.ndim
+    if axis < 0 or axis >= log_scores.ndim:
+        raise np.exceptions.AxisError(axis, ndim=log_scores.ndim)
+    n = log_scores.shape[axis]
+    if n == 0:
+        raise ValueError("softmax cannot normalize an empty axis")
+
+    nan_slice = np.any(np.isnan(log_scores), axis=axis, keepdims=True)
+    positive = np.isposinf(log_scores)
+    positive_count = positive.sum(axis=axis, keepdims=True)
+    has_positive = positive_count > 0
+
     mx = np.max(log_scores, axis=axis, keepdims=True)
-    good = np.isfinite(mx)
-    shifted = np.where(good, log_scores - np.where(good, mx, 0.0), -np.inf)
+    finite_slice = np.isfinite(mx)
+    with np.errstate(invalid="ignore"):
+        shifted = np.where(finite_slice, log_scores - np.where(finite_slice, mx, 0.0), -np.inf)
     e = np.exp(shifted)
     denom = e.sum(axis=axis, keepdims=True)
     rv = np.divide(e, denom, out=np.zeros_like(e), where=denom > 0.0)
-    # Slices whose max was non-finite (all -inf) get a uniform distribution.
-    n = log_scores.shape[axis]
-    bad_slice = ~good
-    if np.any(bad_slice):
-        rv = np.where(np.broadcast_to(bad_slice, rv.shape), 1.0 / n, rv)
+    all_negative = ~finite_slice & ~has_positive & ~nan_slice
+    rv = np.where(np.broadcast_to(all_negative, rv.shape), 1.0 / n, rv)
+    positive_mass = np.divide(
+        positive.astype(np.float64),
+        positive_count,
+        out=np.zeros_like(rv),
+        where=positive_count > 0,
+    )
+    rv = np.where(np.broadcast_to(has_positive, rv.shape), positive_mass, rv)
+    rv = np.where(np.broadcast_to(nan_slice, rv.shape), np.nan, rv)
     return rv
 
 
