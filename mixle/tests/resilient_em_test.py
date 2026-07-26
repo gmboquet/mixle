@@ -2,6 +2,7 @@
 checkpointing, and the chaos-test determinism receipt."""
 
 import io
+import time
 import unittest
 
 import numpy as np
@@ -38,6 +39,57 @@ class CanonicalShardFoldTestCase(unittest.TestCase):
             _canonical_shard_payloads([(0, b"a"), (0, b"b")], {0})
         with self.assertRaisesRegex(RuntimeError, "no payload"):
             _canonical_shard_payloads([(0, b"a")], {0, 1})
+
+
+class WorkerDeadlineAndOperationRecoveryTestCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.data = make_data()
+        cls.est = make_estimator()
+        cls.m_start = make_start_model()
+
+    def test_stalled_live_connection_has_a_bounded_receive(self):
+        observed_timeouts: list[float] = []
+
+        class _StalledConnection:
+            def poll(self, timeout):
+                observed_timeouts.append(timeout)
+                return False
+
+        class _LiveProcess:
+            def is_alive(self):
+                return True
+
+        encoded = ResilientMPEncodedData.__new__(ResilientMPEncodedData)
+        encoded.worker_timeout_s = 0.01
+        encoded._conns = {0: _StalledConnection()}
+        encoded._procs = {0: _LiveProcess()}
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, "did not reply"):
+            encoded._recv_raw(0)
+        self.assertLess(time.monotonic() - started, 0.1)
+        self.assertEqual(len(observed_timeouts), 1)
+        encoded._conns = {}
+        encoded._procs = {}
+
+    def test_initialize_and_scoring_recover_a_worker_dead_before_the_operation(self):
+        seed = 17
+        with ResilientMPEncodedData(self.data, estimator=self.est, num_workers=3) as reference:
+            expected_initial = reference.pysp_seq_initialize(self.est, np.random.RandomState(seed), 0.5)
+            expected_score = reference.pysp_seq_log_density_sum(self.m_start)
+
+        with ResilientMPEncodedData(self.data, estimator=self.est, num_workers=3) as recovered:
+            recovered._procs[1].kill()
+            recovered._procs[1].join(timeout=5)
+            actual_initial = recovered.pysp_seq_initialize(self.est, np.random.RandomState(seed), 0.5)
+            self.assertEqual(_model_signature(actual_initial), _model_signature(expected_initial))
+            self.assertIn(1, recovered._conns)
+
+            recovered._procs[2].kill()
+            recovered._procs[2].join(timeout=5)
+            actual_score = recovered.pysp_seq_log_density_sum(self.m_start)
+            self.assertEqual(actual_score, expected_score)
+            self.assertIn(2, recovered._conns)
 
 
 class ChaosDeterminismTestCase(unittest.TestCase):

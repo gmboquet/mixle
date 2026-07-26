@@ -33,10 +33,13 @@ distributed EM.
 
 from __future__ import annotations
 
+import math
 import multiprocessing as mp
 import os
 import pickle
+import time
 from collections.abc import Callable, Sequence
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -147,6 +150,25 @@ def _worker_main(conn) -> None:
             payloads.append((sid, pickle.dumps((count, accumulator.value()), protocol=_PROTO)))
         return payloads
 
+    def _initialize_shard(estimator: Any, chunks: list[tuple[int, Any]], p: float, seed: int) -> bytes:
+        accumulator = estimator.accumulator_factory().make()
+        rng_loc = np.random.RandomState(seed)
+        rng_w = np.random.RandomState(seed=rng_loc.randint(2**31))
+        count = 0.0
+        for sz, x in chunks:
+            weights = np.zeros(sz, dtype=float)
+            weights[rng_w.rand(sz) <= p] = 1.0
+            count += np.sum(weights)
+            accumulator.seq_initialize(x, weights, rng_loc)
+        return pickle.dumps((count, accumulator.value()), protocol=_PROTO)
+
+    def _score_shard(model: Any, chunks: list[tuple[int, Any]]) -> tuple[float, float]:
+        count, log_density = 0.0, 0.0
+        for size, encoded in chunks:
+            count += size
+            log_density += model.seq_log_density(encoded).sum()
+        return count, log_density
+
     while True:
         msg = conn.recv()
         cmd = msg[0]
@@ -186,27 +208,28 @@ def _worker_main(conn) -> None:
             elif cmd == "init":
                 _, estimator_b, p, seeds_by_shard = msg
                 estimator = pickle.loads(estimator_b)
-                accumulator = estimator.accumulator_factory().make()
-                count = 0.0
-                for sid in sorted(resident):
-                    rng_loc = np.random.RandomState(int(seeds_by_shard[sid]))
-                    rng_w = np.random.RandomState(seed=rng_loc.randint(2**31))
-                    for sz, x in resident[sid]:
-                        w = np.zeros(sz, dtype=float)
-                        w[rng_w.rand(sz) <= p] = 1.0
-                        count += np.sum(w)
-                        accumulator.seq_initialize(x, w, rng_loc)
-                conn.send(("ok", pickle.dumps((count, accumulator.value()), protocol=_PROTO)))
+                payloads = [
+                    (sid, _initialize_shard(estimator, resident[sid], p, int(seeds_by_shard[sid])))
+                    for sid in sorted(resident)
+                ]
+                conn.send(("ok", payloads))
+
+            elif cmd == "init_shard":
+                _, estimator_b, p, seed, shard_id, shard_b, sub_chunks = msg
+                estimator = pickle.loads(estimator_b)
+                chunks = _encode_shard(encoder, shard_b, sub_chunks)
+                conn.send(("ok", (shard_id, _initialize_shard(estimator, chunks, p, int(seed)))))
 
             elif cmd == "llsum":
                 _, model_b = msg
                 model = pickle.loads(model_b)
-                cnt, ll = 0.0, 0.0
-                for sid in sorted(resident):
-                    for sz, x in resident[sid]:
-                        cnt += sz
-                        ll += model.seq_log_density(x).sum()
-                conn.send(("ok", (cnt, ll)))
+                conn.send(("ok", [(sid, *_score_shard(model, resident[sid])) for sid in sorted(resident)]))
+
+            elif cmd == "llsum_shard":
+                _, model_b, shard_id, shard_b, sub_chunks = msg
+                model = pickle.loads(model_b)
+                chunks = _encode_shard(encoder, shard_b, sub_chunks)
+                conn.send(("ok", (shard_id, *_score_shard(model, chunks))))
 
             elif cmd == "stop":
                 conn.send(("ok", None))
@@ -248,6 +271,8 @@ class ResilientMPEncodedData(EncodedDataHandle):
             summation order -- matches what the shard's original owner would have done.
         max_retries (int): A rank is blacklisted once its cumulative failure count reaches
             this threshold; below it, a dead rank is respawned and keeps its place.
+        worker_timeout_s (float): Maximum time to wait for one distributed-operation phase
+            before a nonresponsive worker is retired and its logical shards are recovered.
 
     Testing hook:
         :meth:`arm_kill` registers a one-shot callback invoked, for every worker, right after
@@ -265,6 +290,7 @@ class ResilientMPEncodedData(EncodedDataHandle):
         num_workers: int | None = None,
         sub_chunks: int = 1,
         max_retries: int = 2,
+        worker_timeout_s: float = 30.0,
     ) -> None:
         if encoder is None:
             if estimator is None:
@@ -276,13 +302,25 @@ class ResilientMPEncodedData(EncodedDataHandle):
             raise ValueError("ResilientMPEncodedData requires non-empty data.")
         if num_workers is None:
             num_workers = mp.cpu_count()
+        if isinstance(num_workers, bool) or not isinstance(num_workers, Integral):
+            raise TypeError("num_workers must be an integer")
         num_workers = max(1, min(int(num_workers), n))
-        if max_retries < 1:
+        if isinstance(sub_chunks, bool) or not isinstance(sub_chunks, Integral) or sub_chunks < 1:
+            raise ValueError("sub_chunks must be a positive integer")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, Integral) or max_retries < 1:
             raise ValueError("max_retries must be at least 1.")
+        if (
+            isinstance(worker_timeout_s, bool)
+            or not isinstance(worker_timeout_s, Real)
+            or not math.isfinite(worker_timeout_s)
+            or worker_timeout_s <= 0
+        ):
+            raise ValueError("worker_timeout_s must be finite and positive")
 
         self.num_workers = num_workers
         self.sub_chunks = int(sub_chunks)
         self.max_retries = int(max_retries)
+        self.worker_timeout_s = float(worker_timeout_s)
         self._ctx = mp.get_context("spawn")
         self._encoder_b = pickle.dumps(encoder, protocol=_PROTO)
 
@@ -325,10 +363,23 @@ class ResilientMPEncodedData(EncodedDataHandle):
     def _send_raw(self, worker_id: int, msg: tuple) -> None:
         self._conns[worker_id].send(msg)
 
-    def _recv_raw(self, worker_id: int) -> tuple[str, Any]:
-        status, payload = self._conns[worker_id].recv()
+    def _deadline(self) -> float:
+        return time.monotonic() + self.worker_timeout_s
+
+    def _recv_raw(self, worker_id: int, *, deadline: float | None = None) -> tuple[str, Any]:
+        deadline = self._deadline() if deadline is None else deadline
+        remaining = max(0.0, deadline - time.monotonic())
+        conn = self._conns[worker_id]
+        if not conn.poll(remaining):
+            proc = self._procs.get(worker_id)
+            if proc is not None and not proc.is_alive():
+                raise EOFError(f"worker {worker_id} exited without replying")
+            raise TimeoutError(f"worker {worker_id} did not reply within {self.worker_timeout_s:g} seconds")
+        status, payload = conn.recv()
         if status == "err":
             raise RuntimeError("worker %d failed:\n%s" % (worker_id, payload))
+        if status not in {"ok", "started"}:
+            raise RuntimeError(f"worker {worker_id} returned invalid status {status!r}")
         return status, payload
 
     def _spawn_worker(self, worker_id: int, initial_shards: list[int]) -> None:
@@ -338,11 +389,15 @@ class ResilientMPEncodedData(EncodedDataHandle):
         child.close()
         self._conns[worker_id] = parent
         self._procs[worker_id] = proc
-        self._send_raw(worker_id, ("load_encoder", self._encoder_b))
-        self._recv_raw(worker_id)
-        for shard_id in initial_shards:
-            self._send_raw(worker_id, ("add_shard", shard_id, self._shard_raw[shard_id], self.sub_chunks))
+        try:
+            self._send_raw(worker_id, ("load_encoder", self._encoder_b))
             self._recv_raw(worker_id)
+            for shard_id in initial_shards:
+                self._send_raw(worker_id, ("add_shard", shard_id, self._shard_raw[shard_id], self.sub_chunks))
+                self._recv_raw(worker_id)
+        except BaseException:
+            self._retire_worker(worker_id)
+            raise
         self._worker_shards[worker_id] = set(initial_shards)
 
     def _retire_worker(self, worker_id: int) -> None:
@@ -354,10 +409,10 @@ class ResilientMPEncodedData(EncodedDataHandle):
             except OSError:
                 pass
         if proc is not None:
-            proc.join(timeout=5)
+            proc.join(timeout=min(5.0, self.worker_timeout_s))
             if proc.is_alive():
                 proc.terminate()
-                proc.join(timeout=5)
+                proc.join(timeout=min(5.0, self.worker_timeout_s))
 
     def _respawn_worker(self, worker_id: int, shard_ids: set[int]) -> None:
         """Retry: bring rank ``worker_id`` back with the SAME shard assignment."""
@@ -373,19 +428,86 @@ class ResilientMPEncodedData(EncodedDataHandle):
         self._recv_raw(target)
         self._worker_shards.setdefault(target, set()).add(shard_id)
 
-    def _recover_shard(self, estimator_b: bytes, model_b: bytes, shard_id: int) -> bytes:
+    def _retire_failed_workers(self, failed: set[int]) -> dict[int, set[int]]:
+        assignments: dict[int, set[int]] = {}
+        for worker_id in sorted(failed):
+            self._failures[worker_id] = self._failures.get(worker_id, 0) + 1
+            assignments[worker_id] = self._worker_shards.pop(worker_id, set())
+            self._retire_worker(worker_id)
+        return assignments
+
+    def _restore_failed_workers(self, assignments: dict[int, set[int]]) -> set[int]:
+        blacklisted_now: set[int] = set()
+        retryable: list[int] = []
+        for worker_id in sorted(assignments):
+            if self._failures[worker_id] >= self.max_retries:
+                self._blacklist.add(worker_id)
+                blacklisted_now.add(worker_id)
+            else:
+                retryable.append(worker_id)
+        for worker_id in retryable:
+            if worker_id not in self._conns:
+                self._respawn_worker(worker_id, assignments[worker_id])
+        for worker_id in sorted(blacklisted_now):
+            for shard_id in assignments[worker_id]:
+                self._migrate_shard_permanently(shard_id)
+        return blacklisted_now
+
+    def _request_recovery(
+        self,
+        message: tuple,
+        shard_id: int,
+        failed_assignments: dict[int, set[int]],
+        *,
+        rendezvous: bool = False,
+    ) -> Any:
+        """Execute one shard-local recovery request, retiring any target that fails."""
+        attempted: set[int] = set()
+        while True:
+            candidates = sorted(
+                worker_id
+                for worker_id in self._conns
+                if worker_id not in self._blacklist and worker_id not in attempted
+            )
+            if not candidates:
+                retryable = sorted(
+                    worker_id
+                    for worker_id in failed_assignments
+                    if worker_id not in attempted
+                    and worker_id not in self._blacklist
+                    and self._failures[worker_id] < self.max_retries
+                )
+                if not retryable:
+                    raise RuntimeError("no surviving worker available to recover shard %d." % shard_id)
+                worker_id = retryable[0]
+                self._respawn_worker(worker_id, failed_assignments[worker_id])
+                continue
+            target = candidates[0]
+            attempted.add(target)
+            try:
+                self._send_raw(target, message)
+                if rendezvous:
+                    self._recv_raw(target)
+                    self._send_raw(target, ("go",))
+                _, payload = self._recv_raw(target)
+                return payload
+            except _WORKER_DEAD_ERRORS + (RuntimeError, TimeoutError):
+                failed_assignments.update(self._retire_failed_workers({target}))
+
+    def _recover_shard(
+        self,
+        estimator_b: bytes,
+        model_b: bytes,
+        shard_id: int,
+        failed_assignments: dict[int, set[int]],
+    ) -> bytes:
         """Recompute one shard's E-step contribution on a surviving worker, ad hoc."""
-        candidates = sorted(w for w in self._conns if w not in self._blacklist)
-        if not candidates:
-            raise RuntimeError("no surviving worker available to recover shard %d." % shard_id)
-        target = candidates[0]
-        self._send_raw(
-            target, ("update_shard", estimator_b, model_b, shard_id, self._shard_raw[shard_id], self.sub_chunks)
+        return self._request_recovery(
+            ("update_shard", estimator_b, model_b, shard_id, self._shard_raw[shard_id], self.sub_chunks),
+            shard_id,
+            failed_assignments,
+            rendezvous=True,
         )
-        self._recv_raw(target)  # "started" ack
-        self._send_raw(target, ("go",))
-        _, payload = self._recv_raw(target)
-        return payload
 
     # -- resilient E-step / streaming-accumulate round -----------------------
 
@@ -411,19 +533,25 @@ class ResilientMPEncodedData(EncodedDataHandle):
         if not live_workers:
             raise RuntimeError("ResilientMPEncodedData has no live workers left.")
 
+        failed: set[int] = set()
         for w in live_workers:
-            self._send_raw(w, ("update", estimator_b, model_b))
+            try:
+                self._send_raw(w, ("update", estimator_b, model_b))
+            except _WORKER_DEAD_ERRORS:
+                failed.add(w)
 
         # Phase 1: wait for every worker to ack it has started, then let the kill hook look at
         # it. Each worker BLOCKS after its ack waiting for an explicit "go" (see _worker_main),
         # so this is a real rendezvous, not a race: a kill issued here is guaranteed to land
         # before that worker does any accumulation.
-        failed: set[int] = set()
         started: list[int] = []
+        ack_deadline = self._deadline()
         for w in live_workers:
+            if w in failed:
+                continue
             try:
-                self._recv_raw(w)
-            except _WORKER_DEAD_ERRORS + (RuntimeError,):
+                self._recv_raw(w, deadline=ack_deadline)
+            except _WORKER_DEAD_ERRORS + (RuntimeError, TimeoutError):
                 failed.add(w)
                 continue
             started.append(w)
@@ -442,12 +570,13 @@ class ResilientMPEncodedData(EncodedDataHandle):
 
         # Phase 2: collect final results from whichever workers are still alive.
         worker_payload: dict[int, list[tuple[int, bytes]]] = {}
+        result_deadline = self._deadline()
         for w in started:
             if w in failed:
                 continue
             try:
-                _, payload = self._recv_raw(w)
-            except _WORKER_DEAD_ERRORS + (RuntimeError,):
+                _, payload = self._recv_raw(w, deadline=result_deadline)
+            except _WORKER_DEAD_ERRORS + (RuntimeError, TimeoutError):
                 failed.add(w)
                 continue
             worker_payload[w] = payload
@@ -456,33 +585,17 @@ class ResilientMPEncodedData(EncodedDataHandle):
         reused_shards = {shard_id for shard_id, _ in groups}
 
         recomputed_shards: set[int] = set()
-        blacklisted_now: set[int] = set()
-        failed_assignments: dict[int, set[int]] = {}
+        # Retire the complete failed set before choosing any recovery target.
+        failed_assignments = self._retire_failed_workers(failed)
+        recovery_shards = sorted(shard_id for shard_ids in failed_assignments.values() for shard_id in shard_ids)
 
-        # Retire the complete failed set before choosing any recovery target. Otherwise a
-        # worker already known to have failed later in this same round remains in _conns and
-        # can be selected to recover an earlier worker's shard.
-        for w in sorted(failed):
-            self._failures[w] = self._failures.get(w, 0) + 1
-            failed_assignments[w] = self._worker_shards.pop(w, set())
-            self._retire_worker(w)
+        for shard_id in recovery_shards:
+            payload = self._recover_shard(estimator_b, model_b, shard_id, failed_assignments)
+            groups.append((shard_id, payload))
+            recomputed_shards.add(shard_id)
 
-        for w in sorted(failed):
-            shard_ids = failed_assignments[w]
-            for sid in shard_ids:
-                payload = self._recover_shard(estimator_b, model_b, sid)
-                groups.append((sid, payload))
-                recomputed_shards.add(sid)
-
-        for w in sorted(failed):
-            shard_ids = failed_assignments[w]
-            if self._failures[w] >= self.max_retries:
-                self._blacklist.add(w)
-                blacklisted_now.add(w)
-                for sid in shard_ids:
-                    self._migrate_shard_permanently(sid)
-            else:
-                self._respawn_worker(w, shard_ids)
+        blacklisted_now = self._restore_failed_workers(failed_assignments)
+        failed = set(failed_assignments)
 
         payloads = _canonical_shard_payloads(groups, set(self._shard_raw))
 
@@ -509,10 +622,45 @@ class ResilientMPEncodedData(EncodedDataHandle):
         seeds = rng.randint(2**31, size=self.num_workers)
         seeds_by_shard = {sid: int(seeds[sid]) for sid in range(self.num_workers)}
         live_workers = sorted(w for w in self._conns if w not in self._blacklist)
+        failed: set[int] = set()
         for w in live_workers:
             my_seeds = {sid: seeds_by_shard[sid] for sid in self._worker_shards.get(w, set())}
-            self._send_raw(w, ("init", estimator_b, float(p), my_seeds))
-        payloads = [self._recv_raw(w)[1] for w in live_workers]
+            try:
+                self._send_raw(w, ("init", estimator_b, float(p), my_seeds))
+            except _WORKER_DEAD_ERRORS:
+                failed.add(w)
+        groups: list[tuple[int, bytes]] = []
+        deadline = self._deadline()
+        for worker_id in live_workers:
+            if worker_id in failed:
+                continue
+            try:
+                _, worker_groups = self._recv_raw(worker_id, deadline=deadline)
+                groups.extend(worker_groups)
+            except _WORKER_DEAD_ERRORS + (RuntimeError, TimeoutError):
+                failed.add(worker_id)
+        failed_assignments = self._retire_failed_workers(failed)
+        recovery_shards = sorted(shard_id for shard_ids in failed_assignments.values() for shard_id in shard_ids)
+        for shard_id in recovery_shards:
+            payload = self._request_recovery(
+                (
+                    "init_shard",
+                    estimator_b,
+                    float(p),
+                    seeds_by_shard[shard_id],
+                    shard_id,
+                    self._shard_raw[shard_id],
+                    self.sub_chunks,
+                ),
+                shard_id,
+                failed_assignments,
+            )
+            recovered_shard, recovered_payload = payload
+            if recovered_shard != shard_id:
+                raise RuntimeError(f"worker recovered shard {recovered_shard!r} instead of {shard_id}")
+            groups.append((shard_id, recovered_payload))
+        self._restore_failed_workers(failed_assignments)
+        payloads = _canonical_shard_payloads(groups, set(self._shard_raw))
         nobs, value = checkpointed_fold(estimator, payloads)
         return estimator.estimate(require_initialized_observations(nobs), value)
 
@@ -520,14 +668,49 @@ class ResilientMPEncodedData(EncodedDataHandle):
         """Total observation count and summed log density across all live workers."""
         model_b = pickle.dumps(estimate, protocol=_PROTO)
         live_workers = sorted(w for w in self._conns if w not in self._blacklist)
+        failed: set[int] = set()
         for w in live_workers:
-            self._send_raw(w, ("llsum", model_b))
-        cnt, ll = 0.0, 0.0
-        for w in live_workers:
-            _, (c, s) = self._recv_raw(w)
-            cnt += c
-            ll += s
-        return cnt, ll
+            try:
+                self._send_raw(w, ("llsum", model_b))
+            except _WORKER_DEAD_ERRORS:
+                failed.add(w)
+        shard_scores: list[tuple[int, float, float]] = []
+        deadline = self._deadline()
+        for worker_id in live_workers:
+            if worker_id in failed:
+                continue
+            try:
+                _, scores = self._recv_raw(worker_id, deadline=deadline)
+                shard_scores.extend(scores)
+            except _WORKER_DEAD_ERRORS + (RuntimeError, TimeoutError):
+                failed.add(worker_id)
+        failed_assignments = self._retire_failed_workers(failed)
+        recovery_shards = sorted(shard_id for shard_ids in failed_assignments.values() for shard_id in shard_ids)
+        for shard_id in recovery_shards:
+            recovered = self._request_recovery(
+                ("llsum_shard", model_b, shard_id, self._shard_raw[shard_id], self.sub_chunks),
+                shard_id,
+                failed_assignments,
+            )
+            if recovered[0] != shard_id:
+                raise RuntimeError(f"worker recovered shard {recovered[0]!r} instead of {shard_id}")
+            shard_scores.append(recovered)
+        self._restore_failed_workers(failed_assignments)
+
+        by_shard: dict[int, tuple[float, float]] = {}
+        for shard_id, count, score in shard_scores:
+            if shard_id not in self._shard_raw or shard_id in by_shard:
+                raise RuntimeError(f"invalid or duplicate log-density result for shard {shard_id!r}")
+            by_shard[shard_id] = (count, score)
+        missing = set(self._shard_raw).difference(by_shard)
+        if missing:
+            raise RuntimeError(f"workers returned no log-density result for shards {sorted(missing)}")
+        count, score = 0.0, 0.0
+        for shard_id in sorted(by_shard):
+            shard_count, shard_score = by_shard[shard_id]
+            count += shard_count
+            score += shard_score
+        return count, score
 
     def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
         """Return globally folded batch sufficient statistics for streaming EM, chaos-tolerant."""
@@ -543,22 +726,22 @@ class ResilientMPEncodedData(EncodedDataHandle):
                 self._send_raw(w, ("stop",))
             except (BrokenPipeError, OSError):
                 pass
+        deadline = self._deadline()
         for w in list(self._conns):
-            conn = self._conns.pop(w, None)
             try:
-                if conn is not None:
-                    conn.recv()
-            except (EOFError, OSError):
+                self._recv_raw(w, deadline=deadline)
+            except (EOFError, OSError, RuntimeError, TimeoutError):
                 pass
-            finally:
-                if conn is not None:
-                    conn.close()
+            conn = self._conns.pop(w, None)
+            if conn is not None:
+                conn.close()
         for w in list(self._procs):
             proc = self._procs.pop(w, None)
             if proc is not None:
-                proc.join(timeout=5)
+                proc.join(timeout=min(5.0, self.worker_timeout_s))
                 if proc.is_alive():
                     proc.terminate()
+                    proc.join(timeout=min(5.0, self.worker_timeout_s))
 
     def __len__(self) -> int:
         return int(self.size)
