@@ -106,10 +106,10 @@ Current contents:
   true structure in far fewer experiments than random or observation-only selection. Exact linear-Gaussian
   so the ground truth is known and the design can be graded exactly.
 - :mod:`mixle.experimental.v_information` -- P13, usable-information receipts: V-information
-  (:func:`~mixle.experimental.v_information.v_information`) is the family's realized reduction in held-out
-  predictive log-loss from conditioning on ``X``, and the usability gap
-  ``I(X;Y) - I_V`` (against the closed-form Gaussian ``I(X;Y)``) is a receipt on the *library's* ceiling --
-  large when the generative law sits outside the current grammar, closing when the missing feature is added.
+  (:func:`~mixle.experimental.v_information.v_information`) is a one-split finite-sample estimate of the
+  family's realized reduction in held-out predictive log-loss from conditioning on ``X``;
+  :func:`~mixle.experimental.v_information.estimate_v_information` repeats splits and reports
+  split-assignment uncertainty. Neither is presented as the population-optimal family ceiling.
 - :mod:`mixle.experimental.pac_bayes` -- P10, theorem-matched finite-hypothesis PAC-Bayes certificates:
   an explicit data-independent prior and sample-dependent posterior over fixed predictors, bounded-loss
   matrices, a finite-space categorical KL, the McAllester bound, and an assumption-bearing

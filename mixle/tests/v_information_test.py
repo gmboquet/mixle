@@ -10,8 +10,10 @@ across seeds -- the card's kill criterion (a gap estimate too noisy to rank cann
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from mixle.experimental.v_information import (
+    estimate_v_information,
     gaussian_mutual_information,
     usability_gap,
     v_information,
@@ -34,6 +36,14 @@ def test_gaussian_mutual_information_closed_form() -> None:
     assert gaussian_mutual_information(0.0) == 0.0
     assert np.isclose(gaussian_mutual_information(0.7), -0.5 * np.log(1 - 0.49))
     assert gaussian_mutual_information(0.99) > gaussian_mutual_information(0.9)
+    assert gaussian_mutual_information(1.0) == float("inf")
+    assert gaussian_mutual_information(-1.0) == float("inf")
+
+
+@pytest.mark.parametrize("rho", [2.0, -1.01, np.nan, np.inf, True])
+def test_gaussian_mutual_information_rejects_invalid_correlations(rho) -> None:
+    with pytest.raises(ValueError, match="correlation"):
+        gaussian_mutual_information(rho)
 
 
 def test_linear_family_captures_available_information() -> None:
@@ -76,3 +86,31 @@ def test_determinism() -> None:
     rng = np.random.default_rng(3)
     x, y = _quadratic_task(rng, 2000)
     assert v_information(x, y, degree=2, seed=7) == v_information(x, y, degree=2, seed=7)
+
+
+def test_repeated_split_estimate_reports_scoped_uncertainty() -> None:
+    x, y = _linear_task(np.random.default_rng(4), 500, rho=0.5)
+    receipt = estimate_v_information(x, y, degree=1, n_splits=5, confidence=0.9, seed=3)
+    assert len(receipt.split_estimates) == 5
+    assert receipt.standard_error >= 0.0
+    assert receipt.interval[0] <= receipt.estimate <= receipt.interval[1]
+    assert receipt.uncertainty_scope == "random_holdout_assignment_only"
+    assert receipt.estimate == np.mean(receipt.split_estimates)
+
+
+@pytest.mark.parametrize(
+    ("x", "y", "kwargs", "message"),
+    [
+        (np.ones((3, 1)), np.ones(3), {}, "one-dimensional"),
+        (np.ones(4), np.ones(3), {}, "same number"),
+        (np.array([1.0, np.nan, 2.0]), np.ones(3), {}, "finite"),
+        (np.ones(3), np.ones(3), {"holdout": 0.0}, "holdout"),
+        (np.ones(3), np.ones(3), {"holdout": 1.0}, "holdout"),
+        (np.ones(10), np.ones(10), {"degree": -1}, "degree"),
+        (np.ones(10), np.ones(10), {"degree": 1.5}, "degree"),
+        (np.ones(3), np.ones(3), {"degree": 1, "holdout": 0.3}, "training split"),
+    ],
+)
+def test_v_information_rejects_invalid_or_unidentifiable_inputs(x, y, kwargs, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        v_information(x, y, **kwargs)
