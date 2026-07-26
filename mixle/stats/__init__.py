@@ -694,6 +694,7 @@ __all__ = [
     "BirthDeathSamplingEstimator",
     "BirthDeathSamplingDataEncoder",
     "ContinuousTimeMarkovChainDistribution",
+    "ContinuousTimeMarkovChainStatistics",
     "ContinuousTimeMarkovChainSampler",
     "ContinuousTimeMarkovChainEstimator",
     "ContinuousTimeMarkovChainDataEncoder",
@@ -1539,6 +1540,7 @@ from mixle.stats.processes.ctmc import (
     ContinuousTimeMarkovChainDistribution,
     ContinuousTimeMarkovChainEstimator,
     ContinuousTimeMarkovChainSampler,
+    ContinuousTimeMarkovChainStatistics,
 )
 from mixle.stats.processes.hawkes_process import (
     HawkesProcessDataEncoder,

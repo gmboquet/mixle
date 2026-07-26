@@ -186,6 +186,135 @@ class CTMCTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             d.log_density((0, 5.0, [(1.0, 5)]))  # bad jump target
 
+    def test_configuration_requires_exact_states_and_sampling_bounds(self):
+        rates = np.array([[0.0, 2.0], [3.0, 0.0]])
+        for initial_state in (True, 0.5, -1, 2):
+            with self.subTest(initial_state=initial_state), self.assertRaises(
+                (TypeError, ValueError)
+            ):
+                st.ContinuousTimeMarkovChainDistribution(
+                    rates,
+                    initial_state=initial_state,
+                )
+        for horizon in (True, -1.0, np.nan, np.inf):
+            with self.subTest(horizon=horizon), self.assertRaises(
+                (TypeError, ValueError)
+            ):
+                st.ContinuousTimeMarkovChainDistribution(
+                    rates,
+                    horizon=horizon,
+                )
+        with self.assertRaises(ValueError):
+            st.ContinuousTimeMarkovChainDistribution(np.empty((0, 0)))
+
+    def test_trajectory_states_are_exact_and_jumps_change_state(self):
+        dist = st.ContinuousTimeMarkovChainDistribution(_true())
+        malformed = (
+            (0.5, 1.0, []),
+            (0, 1.0, [(0.5, 1.5)]),
+            (0, 1.0, [(0.0, 1)]),
+            (0, 1.0, [(0.5, 0)]),
+            (0, 1.0, [(0.5,)]),
+        )
+        for trajectory in malformed:
+            with self.subTest(trajectory=trajectory), self.assertRaises(
+                (TypeError, ValueError)
+            ):
+                dist.log_density(trajectory)
+
+    def test_encoded_statistics_fail_closed_before_accumulation(self):
+        from mixle.stats.processes.ctmc import ContinuousTimeMarkovChainAccumulator
+
+        dist = st.ContinuousTimeMarkovChainDistribution(
+            np.array([[0.0, 2.0], [3.0, 0.0]])
+        )
+        valid = (np.array([[0.0, 1.0], [0.0, 0.0]]), np.array([1.0, 0.0]))
+        malformed = (
+            (np.zeros((3, 3)), np.zeros(3)),
+            (np.array([[0.0, -1.0], [0.0, 0.0]]), np.ones(2)),
+            (np.array([[1.0, 0.0], [0.0, 0.0]]), np.ones(2)),
+            (np.array([[0.0, 1.0], [0.0, 0.0]]), np.zeros(2)),
+            (np.zeros((2, 2)), np.array([np.nan, 0.0])),
+        )
+        for statistic in malformed:
+            with self.subTest(statistic=statistic):
+                with self.assertRaises(ValueError):
+                    dist.seq_log_density([statistic])
+                with self.assertRaises(ValueError):
+                    dist.estimator().estimate(None, statistic)
+                with self.assertRaises(ValueError):
+                    ContinuousTimeMarkovChainAccumulator(2).combine(statistic)
+
+        accumulator = ContinuousTimeMarkovChainAccumulator(2)
+        before = accumulator.value()
+        for weights in ([], [-1.0], [np.nan]):
+            with self.subTest(weights=weights), self.assertRaises(ValueError):
+                accumulator.seq_update([valid], weights, None)
+            np.testing.assert_array_equal(
+                accumulator.counts,
+                before.transition_counts,
+            )
+            np.testing.assert_array_equal(
+                accumulator.dwell,
+                before.dwell_times,
+            )
+
+    def test_statistics_restore_defensively_and_preserve_schema(self):
+        from mixle.stats.processes.ctmc import ContinuousTimeMarkovChainAccumulator
+
+        source = ContinuousTimeMarkovChainAccumulator(2)
+        source.update((0, 2.0, [(1.0, 1)]), 1.0, None)
+        value = source.value()
+        self.assertEqual(value.schema_version, 1)
+        restored = ContinuousTimeMarkovChainAccumulator(2).from_value(value)
+        value.transition_counts[0, 1] = 99.0
+        value.dwell_times[0] = 99.0
+        self.assertEqual(restored.counts[0, 1], 1.0)
+        self.assertEqual(restored.dwell[0], 1.0)
+
+    def test_explicit_gamma_prior_has_coherent_edgewise_map_update(self):
+        prior_shape = np.array([[1.0, 3.0], [2.0, 1.0]])
+        prior_rate = np.array([[0.0, 6.0], [7.0, 0.0]])
+        estimator = st.ContinuousTimeMarkovChainEstimator(
+            2,
+            prior_shape=prior_shape,
+            prior_rate=prior_rate,
+            initial_state=1,
+            horizon=12.0,
+            keys="shared",
+            name="ctmc",
+        )
+        counts = np.array([[0.0, 2.0], [3.0, 0.0]])
+        dwell = np.array([4.0, 5.0])
+        model = estimator.estimate(None, (counts, dwell))
+        self.assertAlmostEqual(model.rates[0, 1], 0.4)
+        self.assertAlmostEqual(model.rates[1, 0], 1.0 / 3.0)
+        self.assertEqual(model.initial_state, 1)
+        self.assertEqual(model.horizon, 12.0)
+        self.assertEqual(model.keys, "shared")
+        round_trip = model.estimator()
+        np.testing.assert_array_equal(round_trip.prior_shape, prior_shape)
+        np.testing.assert_array_equal(round_trip.prior_rate, prior_rate)
+
+    def test_pseudo_count_maps_to_a_documented_gamma_prior(self):
+        from mixle.utils.serialization import from_json, to_json
+
+        estimator = st.ContinuousTimeMarkovChainEstimator(2, pseudo_count=2.0)
+        counts = np.array([[0.0, 2.0], [0.0, 0.0]])
+        dwell = np.array([4.0, 0.0])
+        model = estimator.estimate(None, (counts, dwell))
+        self.assertAlmostEqual(model.rates[0, 1], 4.0 / 6.0)
+        self.assertAlmostEqual(model.rates[1, 0], 1.0)
+        loaded = from_json(to_json(estimator))
+        np.testing.assert_array_equal(loaded.prior_shape, estimator.prior_shape)
+        np.testing.assert_array_equal(loaded.prior_rate, estimator.prior_rate)
+        with self.assertRaises(ValueError):
+            st.ContinuousTimeMarkovChainEstimator(
+                2,
+                pseudo_count=1.0,
+                prior_shape=2.0,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
