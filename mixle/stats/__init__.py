@@ -72,6 +72,7 @@ __all__ = [
     "declaration_issues",
     "declaration_for",
     "declared_distribution_types",
+    "GeneratedKernelCompilationError",
     "generated_log_density_diagnostics",
     "generated_log_density",
     "generated_stacked_available",
@@ -1030,6 +1031,7 @@ from mixle.stats.compute.capabilities import (
 from mixle.stats.compute.declarations import (
     DistributionDeclaration,
     ExponentialFamilySpec,
+    GeneratedKernelCompilationError,
     ParameterSpec,
     StatisticSpec,
     declaration_for,
