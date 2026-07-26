@@ -222,6 +222,19 @@ class PlacementPlanningTestCase(unittest.TestCase):
         self.assertEqual(sum(shard.size for shard in placement.shards), len(data))
         self.assertTrue(all(shard.size > 0 for shard in placement.shards))
 
+    def test_fixed_state_that_cannot_fit_fails_instead_of_emitting_one_row_shards(self):
+        model = MixtureDistribution(
+            [GaussianDistribution(-1.0, 1.0), GaussianDistribution(1.0, 1.0)],
+            [0.5, 0.5],
+        )
+        with self.assertRaisesRegex(MemoryError, "fixed model/statistic state"):
+            plan(
+                data=[0.0, 1.0],
+                model=model,
+                estimator=model.estimator(),
+                resources=Resources.single_cpu(memory_bytes=1),
+            )
+
     def test_estimate_model_nbytes_sees_distribution_parameters(self):
         model = MixtureDistribution(
             [
@@ -364,6 +377,28 @@ class PlacementPlanningTestCase(unittest.TestCase):
     def test_model_sharding_plan_requires_component_model(self):
         with self.assertRaises(ValueError):
             model_sharding_plan(GaussianDistribution(0.0, 1.0), Resources.single_cpu())
+
+    def test_model_sharding_honors_minimum_size_and_memory(self):
+        model = MixtureDistribution(
+            [GaussianDistribution(float(i), 1.0) for i in range(5)],
+            [0.2] * 5,
+        )
+        shards = model_sharding_plan(
+            model,
+            Resources.local(4),
+            estimator=model.estimator(),
+            min_components_per_shard=2,
+        )
+        self.assertEqual(sum(shard.num_components for shard in shards), 5)
+        self.assertTrue(all(shard.num_components >= 2 for shard in shards))
+        with self.assertRaisesRegex(ValueError, "cannot exceed"):
+            model_sharding_plan(model, Resources.local(2), min_components_per_shard=6)
+        with self.assertRaisesRegex(MemoryError, "capacity"):
+            model_sharding_plan(
+                model,
+                Resources.from_specs((DeviceSpec("tiny", memory_bytes=1),)),
+                estimator=model.estimator(),
+            )
 
 
 class LocalEncodedDataTestCase(unittest.TestCase):
