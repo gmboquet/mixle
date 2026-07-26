@@ -93,6 +93,7 @@ class ImagineResult:
     ceiling: CeilingReport
     verdicts: list[ProposalVerdict] = field(default_factory=list)
     breaks_ceiling: str | None = None  # name of the first verified candidate that reaches target, if any
+    fitted_models: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
 
 def _mean_log_density(model: Any, data: Sequence[Any]) -> float:
@@ -129,10 +130,15 @@ def propose_structure(
         raise ValueError("structural candidate names must be unique")
     if candidates and len(verification) < len(candidates):
         raise ValueError("verification must provide at least one independent row per candidate")
-    panels = np.array_split(np.random.RandomState(seed).permutation(len(verification)), len(candidates)) if candidates else []
+    panels = (
+        np.array_split(np.random.RandomState(seed).permutation(len(verification)), len(candidates))
+        if candidates
+        else []
+    )
     result = ImagineResult(ceiling=ceiling)
     for cand, panel in zip(candidates, panels):
         model = cand.fit(train)
+        result.fitted_models[cand.name] = model
         train_score = _mean_log_density(model, train)
         rows = [verification[int(i)] for i in panel]
         held_out_score = _mean_log_density(model, rows)

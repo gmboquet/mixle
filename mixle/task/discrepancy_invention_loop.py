@@ -57,8 +57,12 @@ def _sample_one(dist: Any, rng: np.random.RandomState) -> float:
     sampler_fn = getattr(dist, "sampler", None)
     if callable(sampler_fn):
         seed = int(rng.randint(0, 2**31 - 1))
-        return float(np.asarray(sampler_fn(seed).sample(1)).reshape(-1)[0])
-    return float(np.asarray(dist.sample(1)).reshape(-1)[0])
+        result = float(np.asarray(sampler_fn(seed).sample(1)).reshape(-1)[0])
+    else:
+        result = float(np.asarray(dist.sample(1)).reshape(-1)[0])
+    if not np.isfinite(result):
+        raise ValueError("probe simulations must produce finite scalar observations")
+    return result
 
 
 def _record_stage(
@@ -95,7 +99,11 @@ def default_probe_action_space(data: Sequence[Any], *, n_probes: int = 5) -> lis
     Querying near a quantile of the already-observed data is the natural default "where would the
     next observation land" grid when the caller has no domain-specific probe design of their own.
     """
+    if isinstance(n_probes, bool) or not isinstance(n_probes, (int, np.integer)) or n_probes < 1:
+        raise ValueError("n_probes must be a positive integer")
     arr = np.asarray(list(data), dtype=np.float64)
+    if arr.ndim != 1 or arr.size == 0 or not np.all(np.isfinite(arr)):
+        raise ValueError("probe data must be a non-empty sequence of finite scalars")
     qs = np.linspace(0.15, 0.85, n_probes)
     return [float(np.quantile(arr, q)) for q in qs]
 
@@ -106,15 +114,25 @@ def default_probe_simulate_fn(
     """Simulate "if we probed near ``action``, what would ``hypothesis`` predict we'd observe?"
 
     Rejection-samples from ``hypothesis.payload`` (a fitted distribution) until a draw lands within
-    ``window`` of ``action``; falls back to ``action`` itself (an honest degraded value, not a crash)
-    if the budget is exhausted -- e.g. a hypothesis that assigns near-zero mass to that region, which is
-    itself exactly the kind of information a distinguishing probe should surface.
+    ``window`` of ``action``. If the budget is exhausted, returns the closest *actual model draw*;
+    returning ``action`` itself would fabricate identical evidence for every hypothesis precisely
+    where their predictive mass does not support the requested action.
     """
+    if not np.isfinite(action) or not np.isfinite(window) or window < 0.0:
+        raise ValueError("probe action and window must be finite, with window non-negative")
+    closest: float | None = None
+    closest_distance = float("inf")
     for _ in range(200):
         y = _sample_one(hypothesis.payload, rng)
-        if abs(y - action) <= window:
+        distance = abs(y - action)
+        if distance < closest_distance:
+            closest = y
+            closest_distance = distance
+        if distance <= window:
             return y
-    return float(action)
+    if closest is None:  # pragma: no cover - the fixed positive loop count makes this unreachable
+        raise RuntimeError("probe simulation produced no draws")
+    return closest
 
 
 @dataclass
@@ -132,6 +150,7 @@ class InventionResult:
     probe_eig: float | None = None
     gate_verdict: Verdict | None = None
     adopted_structure: str | None = None
+    evidence_indices: dict[str, tuple[int, ...]] = field(default_factory=dict)
     journal: EpistemicJournal = field(default_factory=EpistemicJournal)
 
 
@@ -199,16 +218,43 @@ def run_discrepancy_invention_loop(
     returned journal with a plain-English ``rationale`` -- ``journal.records`` (or
     :func:`reconstruct_reasoning_chain`) is the full, ordered, replayable audit trail.
     """
-    rng = np.random.RandomState(seed)
+    if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)) or not 0 <= int(seed) < 2**32:
+        raise ValueError("seed must be an integer in [0, 2**32)")
+    if not np.isfinite(target):
+        raise ValueError("target must be finite")
+    if not np.isfinite(plateau_tol) or not 0.0 <= plateau_tol <= 1.0:
+        raise ValueError("plateau_tol must be finite and in [0, 1]")
+    if (
+        isinstance(probe_reweight_n, bool)
+        or not isinstance(probe_reweight_n, (int, np.integer))
+        or probe_reweight_n < 1
+    ):
+        raise ValueError("probe_reweight_n must be a positive integer")
+    train = list(train)
+    if not train:
+        raise ValueError("train must be non-empty")
+    candidates = list(candidates)
+    rng = np.random.RandomState(int(seed))
     journal = EpistemicJournal()
     design = design if design is not None else DesignModel(signature="discrepancy-invention-loop", n_constraints=0)
     held_out = list(held_out)
-    if len(held_out) < 6:
-        raise ValueError("held_out needs at least six rows for disjoint ceiling, proposal, and gate evidence")
-    evidence_panels = np.array_split(rng.permutation(len(held_out)), 3)
+    minimum_panel = max(2, len(candidates))
+    if len(held_out) < 4 * minimum_panel:
+        raise ValueError(
+            "held_out needs four disjoint evidence panels with at least "
+            f"{minimum_panel} rows each (got {len(held_out)} rows)"
+        )
+    evidence_panels = np.array_split(rng.permutation(len(held_out)), 4)
     ceiling_panel = [held_out[int(i)] for i in evidence_panels[0]]
     proposal_panel = [held_out[int(i)] for i in evidence_panels[1]]
-    gate_panel = [held_out[int(i)] for i in evidence_panels[2]]
+    probe_panel = [held_out[int(i)] for i in evidence_panels[2]]
+    gate_panel = [held_out[int(i)] for i in evidence_panels[3]]
+    evidence_indices = {
+        "ceiling": tuple(int(i) for i in evidence_panels[0]),
+        "proposal": tuple(int(i) for i in evidence_panels[1]),
+        "probe": tuple(int(i) for i in evidence_panels[2]),
+        "gate": tuple(int(i) for i in evidence_panels[3]),
+    }
 
     champion_model = champion_fit(train)
     champion_score = _mean_log_density(champion_model, ceiling_panel)
@@ -272,6 +318,7 @@ def run_discrepancy_invention_loop(
         ceiling_bound=ceiling_bound,
         capacity_ladder_scores=tuning_scores,
         imagine=None,
+        evidence_indices=evidence_indices,
         journal=journal,
     )
     if not ceiling_bound:
@@ -284,7 +331,7 @@ def run_discrepancy_invention_loop(
         proposal_panel,
         ceiling,
         baseline_model=champion_model,
-        seed=seed,
+        seed=int(seed),
     )
     result.imagine = imagine
     _record_stage(
@@ -312,25 +359,32 @@ def run_discrepancy_invention_loop(
     result.novelty_scores = {v.name: score_design_prior_surprise(v.name, v.held_out_score, design) for v in accepted}
 
     winning_name = imagine.breaks_ceiling or max(accepted, key=lambda v: v.held_out_score).name
-    winning_candidate = next(c for c in candidates if c.name == winning_name)
-    winning_model = winning_candidate.fit(train)
+    winning_model = imagine.fitted_models[winning_name]
 
     # 4. EIG probe: which experiment would most efficiently distinguish champion from the surviving
     #    proposals? Reweight on the real held-out evidence, then let ACT pick the highest-EIG probe.
-    accepted_models = {v.name: next(c for c in candidates if c.name == v.name).fit(train) for v in accepted}
+    accepted_models = {verdict.name: imagine.fitted_models[verdict.name] for verdict in accepted}
     hyps = [Hypothesis("champion", champion_model)] + [Hypothesis(name, m) for name, m in accepted_models.items()]
     portfolio = HypothesisPortfolio(hyps, np.full(len(hyps), 1.0 / len(hyps)), w_open=0.0)
 
     def likelihood_fn(h: Hypothesis, y: Any) -> float:
         return float(np.exp(h.payload.log_density(y)))
 
-    action_space = list(probe_action_space) if probe_action_space is not None else default_probe_action_space(held_out)
-    window = probe_window if probe_window is not None else float(np.std(np.asarray(held_out, dtype=np.float64))) * 0.5
+    action_space = (
+        list(probe_action_space) if probe_action_space is not None else default_probe_action_space(probe_panel)
+    )
+    if not action_space or not np.all(np.isfinite(np.asarray(action_space, dtype=np.float64))):
+        raise ValueError("probe_action_space must contain finite scalar actions")
+    window = (
+        probe_window if probe_window is not None else float(np.std(np.asarray(probe_panel, dtype=np.float64))) * 0.5
+    )
+    if not np.isfinite(window) or window < 0.0:
+        raise ValueError("probe_window must be finite and non-negative")
 
     def simulate_fn(h: Hypothesis, action: Any, r: np.random.RandomState) -> Any:
         return default_probe_simulate_fn(h, action, r, window=window)
 
-    subsample = list(held_out)[: max(1, probe_reweight_n)]
+    subsample = probe_panel[: min(len(probe_panel), int(probe_reweight_n))]
     probe_outcome = None
     for i, y in enumerate(subsample):
         is_last = i == len(subsample) - 1

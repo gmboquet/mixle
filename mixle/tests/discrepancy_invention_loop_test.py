@@ -14,11 +14,13 @@ import unittest
 
 import numpy as np
 
+from mixle.epistemic.portfolio import Hypothesis
 from mixle.evolve import nll_objective
 from mixle.inference import optimize
 from mixle.stats import GaussianEstimator, MixtureEstimator
 from mixle.task.design_prior import record_accepted_recipe
 from mixle.task.discrepancy_invention_loop import (
+    default_probe_simulate_fn,
     reconstruct_reasoning_chain,
     run_discrepancy_invention_loop,
     score_design_prior_surprise,
@@ -44,18 +46,18 @@ def _fit_wider_single_gaussian(data):
 
 
 def _fit_two_component_mixture(data):
-    # seeded: EM mixture init is random, and this fit is called more than once (this test's own probe,
-    # then again inside the loop's propose_structure/probe/gate stages) -- must land in the same, truly
-    # bimodal optimum every time (some seeds collapse to a degenerate near-unimodal local optimum).
+    # Seeded because EM mixture initialization is random; the loop must retain
+    # this one scored fit through proposal, probe, and promotion.
     est = MixtureEstimator([GaussianEstimator(), GaussianEstimator()])
     return optimize(list(data), est, out=None, max_its=100, rng=np.random.RandomState(2))
 
 
 def _has_separated_mixture(model):
     components = getattr(model, "components", ())
-    return len(components) >= 2 and max(component.mu for component in components) - min(
-        component.mu for component in components
-    ) > 2.0
+    return (
+        len(components) >= 2
+        and max(component.mu for component in components) - min(component.mu for component in components) > 2.0
+    )
 
 
 class CeilingBoundInventionTest(unittest.TestCase):
@@ -116,6 +118,43 @@ class CeilingBoundInventionTest(unittest.TestCase):
         result = self._run()
         self.assertIsNotNone(result.probe_action)
         self.assertIsNotNone(result.probe_eig)
+
+    def test_decision_stages_use_disjoint_evidence_panels(self):
+        result = self._run()
+        panels = [set(indices) for indices in result.evidence_indices.values()]
+        self.assertEqual(set(result.evidence_indices), {"ceiling", "proposal", "probe", "gate"})
+        for i, left in enumerate(panels):
+            for right in panels[i + 1 :]:
+                self.assertTrue(left.isdisjoint(right))
+        self.assertEqual(len(set().union(*panels)), len(self.held_out))
+
+    def test_scored_stochastic_candidate_is_fit_only_once(self):
+        fit_calls = 0
+
+        def counted_fit(data):
+            nonlocal fit_calls
+            fit_calls += 1
+            return _fit_two_component_mixture(data)
+
+        candidate = StructuralCandidate(
+            "counted_mixture",
+            counted_fit,
+            new_information="a separated two-component mixture",
+            capability_test=_has_separated_mixture,
+        )
+        result = run_discrepancy_invention_loop(
+            _fit_single_gaussian,
+            self.train,
+            self.held_out,
+            self.target,
+            [candidate],
+            objective=nll_objective(),
+            tuning_variants=[_fit_wider_single_gaussian],
+            seed=0,
+        )
+        self.assertEqual(fit_calls, 1)
+        self.assertIsNotNone(result.imagine)
+        self.assertIn("counted_mixture", result.imagine.fitted_models)
 
     def test_journal_reconstructs_the_full_reasoning_chain_in_order(self):
         result = self._run()
@@ -218,6 +257,21 @@ class TuneItContrastTest(unittest.TestCase):
         self.assertIn("ceiling verdict: tune", chain[1])
         self.assertIn("no invention needed", chain[1])
         self.assertNotIn("ceiling_bound", chain[1].split("--")[0])  # the verdict itself isn't ceiling_bound
+
+
+class ProbeSimulationTest(unittest.TestCase):
+    def test_exhausted_local_rejection_returns_a_real_model_draw(self):
+        class PointMass:
+            def sample(self, n):
+                return np.full(n, 7.0)
+
+        result = default_probe_simulate_fn(
+            Hypothesis("point", PointMass()),
+            action=0.0,
+            rng=np.random.RandomState(0),
+            window=0.1,
+        )
+        self.assertEqual(result, 7.0)
 
 
 if __name__ == "__main__":
