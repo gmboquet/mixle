@@ -36,7 +36,7 @@ import numpy as np
 from mixle.inference.estimation import harmonic
 from mixle.inference.streaming import StreamingEstimator
 from mixle.stats import GaussianDistribution, GaussianEstimator
-from mixle.task.explore_world import DRILL_COST, SURVEY_COST, ExplorationWorld
+from mixle.task.explore_world import ExplorationWorld
 from mixle.task.probe_policy import myopic_eig_policy
 from mixle.task.replay import ExecutionTrace, is_bit_identical_replay, record_step
 
@@ -106,14 +106,9 @@ class ExplorationEnvironment:
 
     def action_cost(self, action: dict[str, Any]) -> float:
         """Return the exact cost of a supported action without mutating the world."""
-        if not isinstance(action, dict):
-            raise ValueError("exploration actions must be dictionaries")
-        kind = action.get("type")
-        if kind == "survey":
-            return float(SURVEY_COST)
-        if kind == "drill":
-            return float(DRILL_COST)
-        raise ValueError(f"unknown exploration action type {kind!r}")
+        if self.world is None:
+            raise RuntimeError("ExplorationEnvironment.action_cost called before reset().")
+        return float(self.world.action_cost(action))
 
     def action_space(self) -> list[dict[str, Any]]:
         if self.world is None:
