@@ -57,7 +57,7 @@ class DirichletEstimatorStabilityTestCase(unittest.TestCase):
         ss = (0.0, np.zeros(3), np.zeros(3), np.zeros(3))
         self.assert_valid_dirichlet(DirichletEstimator(dim=3).estimate(None, ss))
 
-    def test_stats_dirichlet_zero_entries_stay_finite(self):
+    def test_stats_dirichlet_zero_entries_are_rejected_for_fitting(self):
         data = np.asarray(
             [
                 [1.0, 0.0, 0.0],
@@ -65,10 +65,11 @@ class DirichletEstimatorStabilityTestCase(unittest.TestCase):
                 [0.2, 0.3, 0.5],
             ]
         )
-        self.assert_valid_dirichlet(DirichletEstimator(dim=3).estimate(None, self.dirichlet_suff_stat(data)))
-        self.assert_valid_dirichlet(
-            DirichletEstimator(dim=3, use_mpe=True).estimate(None, self.dirichlet_suff_stat(data))
-        )
+        statistics = self.dirichlet_suff_stat(data)
+        with self.assertRaises(ValueError):
+            DirichletEstimator(dim=3).estimate(None, statistics)
+        with self.assertRaises(ValueError):
+            DirichletEstimator(dim=3, use_mpe=True).estimate(None, statistics)
 
     def test_stats_dirichlet_pseudo_count_without_data_stays_finite(self):
         dist = DirichletDistribution([2.0, 3.0, 4.0])
@@ -81,9 +82,9 @@ class DirichletEstimatorStabilityTestCase(unittest.TestCase):
         data = np.vstack([base + [0.0, 0.0, 0.0], base + [1.0e-12, -1.0e-12, 0.0]] * 20)
         self.assert_valid_dirichlet(DirichletEstimator(dim=3).estimate(None, self.dirichlet_suff_stat(data)))
 
-    def test_dirichlet_conjugate_map_zero_count_and_zero_entries_stay_finite(self):
-        # The pseudo_count-regularized (conjugate-MAP) path must also stay finite on
-        # zero-count and degenerate-entry data.
+    def test_dirichlet_conjugate_map_zero_count_and_boundary_policy(self):
+        # A prior-only estimate is valid, while exact-boundary observations are
+        # rejected because their log sufficient statistics are infinite.
         est0 = DirichletDistribution([2.0, 3.0, 4.0]).estimator(pseudo_count=2.0)
         ss0 = (0.0, np.zeros(3), np.zeros(3), np.zeros(3))
         self.assert_valid_dirichlet(est0.estimate(None, ss0))
@@ -96,8 +97,10 @@ class DirichletEstimatorStabilityTestCase(unittest.TestCase):
             ]
         )
         ss = self.dirichlet_suff_stat(data)
-        self.assert_valid_dirichlet(DirichletEstimator(dim=3, pseudo_count=2.0).estimate(None, ss))
-        self.assert_valid_dirichlet(DirichletEstimator(dim=3, pseudo_count=2.0, use_mpe=True).estimate(None, ss))
+        with self.assertRaises(ValueError):
+            DirichletEstimator(dim=3, pseudo_count=2.0).estimate(None, ss)
+        with self.assertRaises(ValueError):
+            DirichletEstimator(dim=3, pseudo_count=2.0, use_mpe=True).estimate(None, ss)
 
 
 if __name__ == "__main__":

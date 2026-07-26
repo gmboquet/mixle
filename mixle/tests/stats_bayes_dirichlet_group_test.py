@@ -306,45 +306,29 @@ class DirichletFamilySimplexValidationTestCase(unittest.TestCase):
 
 
 class DirichletAccumulatorUpdateTestCase(unittest.TestCase):
-    """DirichletAccumulator.update's zero-mask branch (some x_i == 0) previously indexed/multiplied
-    the raw `x` argument instead of the converted `xx = np.asarray(x)`, so a plain Python list
-    containing an exact 0.0 entry crashed even though x is documented/typed as np.ndarray |
-    list[float]. An all-positive x never hit the buggy branch, which is why it went unnoticed.
-    """
+    """Boundary observations have infinite log statistics and cannot be fitted."""
 
-    def test_list_input_with_zero_entry_matches_ndarray_input(self):
+    def test_list_and_ndarray_boundary_inputs_are_rejected(self):
         x_list = [0.0, 0.5, 0.5]
-        acc_list = DirichletAccumulator(dim=3)
-        acc_list.update(x_list, 1.0, None)  # must not raise TypeError
+        for value in (x_list, np.asarray(x_list)):
+            with self.assertRaisesRegex(ValueError, "strictly positive"):
+                DirichletAccumulator(dim=3).update(value, 1.0, None)
 
-        acc_arr = DirichletAccumulator(dim=3)
-        acc_arr.update(np.asarray(x_list), 1.0, None)
-
-        np.testing.assert_allclose(acc_list.sum_of_logs, acc_arr.sum_of_logs)
-        np.testing.assert_allclose(acc_list.sum, acc_arr.sum)
-        np.testing.assert_allclose(acc_list.sum2, acc_arr.sum2)
-        self.assertEqual(acc_list.counts, acc_arr.counts)
-
-    def test_list_input_with_zero_entry_excludes_it_from_sum_of_logs(self):
+    def test_boundary_rejection_is_atomic(self):
         acc = DirichletAccumulator(dim=3)
-        acc.update([0.0, 0.5, 0.5], 1.0, None)
-        # the zero entry must be excluded from sum_of_logs (log(0) = -inf would otherwise poison it)
-        # but still contributes to sum / sum2 / counts like any other entry.
-        self.assertEqual(acc.sum_of_logs[0], 0.0)
-        self.assertAlmostEqual(acc.sum_of_logs[1], np.log(0.5))
-        self.assertAlmostEqual(acc.sum_of_logs[2], np.log(0.5))
-        np.testing.assert_allclose(acc.sum, [0.0, 0.5, 0.5])
-        np.testing.assert_allclose(acc.sum2, [0.0, 0.25, 0.25])
-        self.assertEqual(acc.counts, 1.0)
+        before = acc.value()
+        with self.assertRaises(ValueError):
+            acc.update([0.0, 0.5, 0.5], 1.0, None)
+        after = acc.value()
+        self.assertEqual(after[0], before[0])
+        for actual, expected in zip(after[1:], before[1:]):
+            np.testing.assert_array_equal(actual, expected)
 
-    def test_list_input_with_zero_entry_and_nondefault_weight(self):
-        # weight=2.5 (a float) is exactly what turns "weight * x" into a TypeError for a plain
-        # list pre-fix (list * float is not defined; list * int would silently repeat instead).
+    def test_boundary_rejection_with_nondefault_weight(self):
         acc = DirichletAccumulator(dim=2)
-        acc.update([0.0, 1.0], 2.5, None)  # must not raise
-        np.testing.assert_allclose(acc.sum, [0.0, 2.5])
-        np.testing.assert_allclose(acc.sum2, [0.0, 2.5])
-        self.assertEqual(acc.counts, 2.5)
+        with self.assertRaises(ValueError):
+            acc.update([0.0, 1.0], 2.5, None)
+        self.assertEqual(acc.counts, 0.0)
 
 
 if __name__ == "__main__":
