@@ -541,10 +541,29 @@ class PlacementShard:
     encoded_bytes: int = 0
     transient_bytes: int = 0
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.device, DeviceSpec):
+            raise TypeError("placement shard device must be a DeviceSpec")
+        for label, value in (
+            ("start", self.start),
+            ("stop", self.stop),
+            ("sub_chunks", self.sub_chunks),
+            ("encoded_bytes", self.encoded_bytes),
+            ("transient_bytes", self.transient_bytes),
+        ):
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+                raise TypeError("placement shard %s must be an integer" % label)
+        if self.start < 0 or self.stop < self.start:
+            raise ValueError("placement shard ranges must satisfy 0 <= start <= stop")
+        if self.sub_chunks < 1:
+            raise ValueError("placement shard sub_chunks must be positive")
+        if self.encoded_bytes < 0 or self.transient_bytes < 0:
+            raise ValueError("placement shard byte estimates must be non-negative")
+
     @property
     def size(self) -> int:
         """Return the number of rows assigned to this shard."""
-        return max(0, int(self.stop) - int(self.start))
+        return int(self.stop) - int(self.start)
 
     @property
     def total_bytes(self) -> int:
@@ -563,6 +582,69 @@ class Placement:
     model_bytes: int
     statistic_bytes: int
     dtype_bytes: int
+    resources: Resources | None = None
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(
+        self,
+        *,
+        total_rows: int | None = None,
+        resources: Resources | None = None,
+    ) -> Placement:
+        """Validate exact row coverage and declared resource membership."""
+        for label, value in (
+            ("total_rows", self.total_rows),
+            ("model_bytes", self.model_bytes),
+            ("statistic_bytes", self.statistic_bytes),
+            ("dtype_bytes", self.dtype_bytes),
+        ):
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+                raise TypeError("placement %s must be an integer" % label)
+        if self.total_rows < 0:
+            raise ValueError("placement total_rows must be non-negative")
+        if self.model_bytes < 0 or self.statistic_bytes < 0 or self.dtype_bytes < 1:
+            raise ValueError("placement byte fields must be non-negative and dtype_bytes must be positive")
+        for label, value in (
+            ("encoded_row_bytes", self.encoded_row_bytes),
+            ("transient_row_bytes", self.transient_row_bytes),
+        ):
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError("placement %s must be finite and non-negative" % label)
+        if total_rows is not None and self.total_rows != total_rows:
+            raise ValueError(
+                "placement total_rows=%d does not match execution data length=%d" % (self.total_rows, total_rows)
+            )
+
+        declared = self.resources
+        if declared is not None and resources is not None and declared != resources:
+            raise ValueError("execution resources conflict with the placement's declared resources")
+        declared = resources if resources is not None else declared
+        if declared is not None:
+            known = {device.name: device for device in declared.devices}
+            for shard in self.shards:
+                if known.get(shard.device.name) != shard.device:
+                    raise ValueError("placement shard device %r is not in declared resources" % shard.device.name)
+
+        ordered = sorted(self.shards, key=lambda shard: (shard.start, shard.stop))
+        if self.total_rows == 0:
+            if any(shard.start != 0 or shard.stop != 0 for shard in ordered):
+                raise ValueError("zero-row placement may contain only the empty [0:0] range")
+            return self
+        if not ordered:
+            raise ValueError("non-empty placement requires at least one shard")
+        cursor = 0
+        for shard in ordered:
+            if shard.start != cursor:
+                problem = "overlap" if shard.start < cursor else "gap"
+                raise ValueError("placement row coverage has a %s at row %d" % (problem, cursor))
+            if shard.stop == shard.start:
+                raise ValueError("non-empty placement cannot contain empty shards")
+            cursor = shard.stop
+        if cursor != self.total_rows:
+            raise ValueError("placement row coverage stops at %d, expected %d" % (cursor, self.total_rows))
+        return self
 
     def __str__(self) -> str:
         parts = [
@@ -598,6 +680,7 @@ class Placement:
             "model_bytes": self.model_bytes,
             "statistic_bytes": self.statistic_bytes,
             "dtype_bytes": self.dtype_bytes,
+            "resources": None if self.resources is None else self.resources.to_dict(),
             "shards": [
                 {
                     "device": shard.device.name,
@@ -965,9 +1048,12 @@ class LocalEncodedData(EncodedDataHandle):
                 num_chunks=num_chunks,
                 sub_chunks=sub_chunks,
             )
+        placement.validate(total_rows=len(data), resources=resources)
+        if placement.resources is None and resources is None:
+            raise ValueError("external placement must declare resources or receive execution resources")
         self.placement = placement
         self.encoder = encoder
-        self.size = int(len(data))
+        self.size = int(placement.total_rows)
         self.shards: tuple[_LocalShard, ...] = tuple(
             self._encode_shard(data, shard, engine=engine, precision=precision)
             for shard in placement.shards
@@ -1548,6 +1634,7 @@ def plan(
         model_bytes=int(model_bytes),
         statistic_bytes=int(statistic_bytes),
         dtype_bytes=int(dtype_bytes),
+        resources=resources,
     )
 
 
