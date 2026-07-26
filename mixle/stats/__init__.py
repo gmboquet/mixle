@@ -690,6 +690,7 @@ __all__ = [
     "TweedieEstimator",
     "TweedieDataEncoder",
     "BirthDeathSamplingDistribution",
+    "BirthDeathSamplingStatistics",
     "BirthDeathSamplingSampler",
     "BirthDeathSamplingEstimator",
     "BirthDeathSamplingDataEncoder",
@@ -1528,6 +1529,7 @@ from mixle.stats.processes.birth_death import (
     BirthDeathSamplingDistribution,
     BirthDeathSamplingEstimator,
     BirthDeathSamplingSampler,
+    BirthDeathSamplingStatistics,
 )
 from mixle.stats.processes.chinese_restaurant_process import (
     ChineseRestaurantProcessDataEncoder,

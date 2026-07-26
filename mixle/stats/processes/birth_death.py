@@ -25,8 +25,9 @@ Reference: Feller, *An Introduction to Probability Theory and Its Applications*,
 """
 
 import math
+import operator
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from numpy.random import RandomState
@@ -40,25 +41,217 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 
-_MIN_RATE = 1.0e-12
 _BIRTH, _DEATH, _SAMPLING = 0, 1, 2
 
 
-def _trajectory_stats(traj: Any) -> tuple[float, float, float, float, float]:
-    """Replay a trajectory ``(n0, T, events)`` -> (n_births, n_deaths, n_samplings, integral_n, sum_log_n)."""
-    n0, horizon, events = traj
-    n = int(n0)
-    if n < 0:
-        raise ValueError("BirthDeathSampling trajectory requires a non-negative initial population.")
+class BirthDeathSamplingStatistics(NamedTuple):
+    """Versioned, tuple-compatible aggregate birth-death statistics."""
+
+    births: float
+    deaths: float
+    samplings: float
+    population_exposure: float
+    trajectory_weight: float
+    horizon_weight: float
+
+    @property
+    def schema_version(self) -> int:
+        """Return the serialized statistic schema version."""
+        return 1
+
+
+def _exact_integer(value: Any, *, label: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{label} must be an exact integer")
+    try:
+        return operator.index(value)
+    except TypeError as exc:
+        raise TypeError(f"{label} must be an exact integer") from exc
+
+
+def _nonnegative_scalar(value: Any, *, label: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or np.ndim(value) != 0:
+        raise TypeError(f"{label} must be a real scalar")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{label} must be a real scalar") from exc
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{label} must be finite and non-negative")
+    return result
+
+
+def _initial_population(value: Any, *, label: str) -> int:
+    result = _exact_integer(value, label=label)
+    if result < 0:
+        raise ValueError(f"{label} must be non-negative")
+    return result
+
+
+def _validated_rows(value: Any) -> np.ndarray:
+    try:
+        rows = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("BirthDeathSampling encoded rows must be numeric") from exc
+    if rows.shape == (0,):
+        rows = rows.reshape((0, 6))
+    if rows.ndim != 2 or rows.shape[1] != 6:
+        raise ValueError(
+            "BirthDeathSampling encoded data must have exact shape (N, 6)"
+        )
+    if np.any(~np.isfinite(rows)) or np.any(rows < 0.0):
+        raise ValueError(
+            "BirthDeathSampling encoded statistics must be finite and non-negative"
+        )
+    counts = rows[:, :3]
+    if np.any(counts != np.floor(counts)):
+        raise ValueError(
+            "BirthDeathSampling per-trajectory event counts must be exact integers"
+        )
+    if np.any((counts.sum(axis=1) > 0.0) & (rows[:, 3] == 0.0)):
+        raise ValueError(
+            "BirthDeathSampling positive event counts require population exposure"
+        )
+    return rows.copy()
+
+
+def _validated_weights(value: Any, rows: int) -> np.ndarray:
+    try:
+        weights = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("BirthDeathSampling weights must be numeric") from exc
+    if weights.shape != (rows,):
+        raise ValueError(
+            f"BirthDeathSampling weights must have exact shape ({rows},)"
+        )
+    if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
+        raise ValueError(
+            "BirthDeathSampling weights must be finite and non-negative"
+        )
+    return weights
+
+
+def _validated_statistics(value: Any) -> BirthDeathSamplingStatistics:
+    if not isinstance(value, (tuple, list)) or len(value) != 6:
+        raise ValueError(
+            "BirthDeathSampling sufficient statistics must contain six fields"
+        )
+    fields = tuple(
+        _nonnegative_scalar(
+            item,
+            label=f"BirthDeathSampling statistic field {index}",
+        )
+        for index, item in enumerate(value)
+    )
+    births, deaths, samplings, integral, count, horizon_sum = fields
+    if count == 0.0 and any(
+        item != 0.0
+        for item in (births, deaths, samplings, integral, horizon_sum)
+    ):
+        raise ValueError(
+            "Zero BirthDeathSampling trajectory weight requires zero statistics"
+        )
+    if births + deaths + samplings > 0.0 and integral == 0.0:
+        raise ValueError(
+            "BirthDeathSampling positive events require population exposure"
+        )
+    return BirthDeathSamplingStatistics(*fields)
+
+
+def _prior_vector(
+    value: Any,
+    *,
+    label: str,
+    minimum: float,
+) -> np.ndarray:
+    if np.ndim(value) == 0:
+        if isinstance(value, (bool, np.bool_)):
+            raise TypeError(f"BirthDeathSampling {label} must be real-valued")
+        try:
+            scalar = float(value)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"BirthDeathSampling {label} must be real-valued"
+            ) from exc
+        result = np.full(3, scalar, dtype=np.float64)
+    else:
+        try:
+            result = np.asarray(value, dtype=np.float64).copy()
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"BirthDeathSampling {label} must be numeric"
+            ) from exc
+        if result.shape != (3,):
+            raise ValueError(
+                f"BirthDeathSampling {label} must have shape (3,)"
+            )
+    if np.any(~np.isfinite(result)) or np.any(result < minimum):
+        raise ValueError(
+            f"BirthDeathSampling {label} must be finite and at least {minimum}"
+        )
+    result.setflags(write=False)
+    return result
+
+
+def _trajectory_row(traj: Any) -> np.ndarray:
+    """Validate and encode one ``(n0, T, events)`` trajectory."""
+    try:
+        fields = tuple(traj)
+    except TypeError as exc:
+        raise TypeError(
+            "BirthDeathSampling trajectory must be an iterable record"
+        ) from exc
+    if len(fields) != 3:
+        raise ValueError(
+            "BirthDeathSampling trajectory must be (n0, horizon, events)"
+        )
+    n = _initial_population(
+        fields[0],
+        label="BirthDeathSampling trajectory initial population",
+    )
+    horizon = _nonnegative_scalar(
+        fields[1],
+        label="BirthDeathSampling trajectory horizon",
+    )
+    try:
+        events = tuple(fields[2])
+    except TypeError as exc:
+        raise TypeError(
+            "BirthDeathSampling trajectory events must be iterable"
+        ) from exc
     t_prev = 0.0
     integral = 0.0
     sum_log_n = 0.0
     counts = [0.0, 0.0, 0.0]
-    for time, etype in events:
-        time = float(time)
-        etype = int(etype)
-        if time < t_prev or time > float(horizon):
-            raise ValueError("BirthDeathSampling events must be time-ordered within [0, T].")
+    for index, event in enumerate(events):
+        try:
+            event_fields = tuple(event)
+        except TypeError as exc:
+            raise TypeError(
+                f"BirthDeathSampling event {index} must be a two-field record"
+            ) from exc
+        if len(event_fields) != 2:
+            raise ValueError(
+                f"BirthDeathSampling event {index} must contain time and type"
+            )
+        time = _nonnegative_scalar(
+            event_fields[0],
+            label=f"BirthDeathSampling event {index} time",
+        )
+        etype = _exact_integer(
+            event_fields[1],
+            label=f"BirthDeathSampling event {index} type",
+        )
+        if etype not in (_BIRTH, _DEATH, _SAMPLING):
+            raise ValueError(
+                "BirthDeathSampling event type must be 0 (birth), "
+                "1 (death), or 2 (sampling)"
+            )
+        if time <= t_prev or time > horizon:
+            raise ValueError(
+                "BirthDeathSampling events must have strictly increasing "
+                "times in (0, T]"
+            )
         if n <= 0:
             raise ValueError("BirthDeathSampling event occurred at zero population.")
         integral += n * (time - t_prev)
@@ -68,11 +261,25 @@ def _trajectory_stats(traj: Any) -> tuple[float, float, float, float, float]:
             n += 1
         elif etype == _DEATH:
             n -= 1
-        elif etype != _SAMPLING:
-            raise ValueError("BirthDeathSampling event type must be 0 (birth), 1 (death), or 2 (sampling).")
         t_prev = time
-    integral += n * (float(horizon) - t_prev)
-    return counts[_BIRTH], counts[_DEATH], counts[_SAMPLING], integral, sum_log_n
+    integral += n * (horizon - t_prev)
+    return np.asarray(
+        (
+            counts[_BIRTH],
+            counts[_DEATH],
+            counts[_SAMPLING],
+            integral,
+            sum_log_n,
+            horizon,
+        ),
+        dtype=np.float64,
+    )
+
+
+def _trajectory_stats(traj: Any) -> tuple[float, float, float, float, float]:
+    """Return the five likelihood statistics for one validated trajectory."""
+    row = _trajectory_row(traj)
+    return tuple(float(value) for value in row[:5])
 
 
 class BirthDeathSamplingDistribution(SequenceEncodableProbabilityDistribution):
@@ -87,6 +294,8 @@ class BirthDeathSamplingDistribution(SequenceEncodableProbabilityDistribution):
         horizon: float = 10.0,
         name: str | None = None,
         keys: str | None = None,
+        prior_shape: Any = 1.0,
+        prior_rate: Any = 0.0,
     ) -> None:
         """Create a birth-death-sampling process with per-capita rates.
 
@@ -98,36 +307,46 @@ class BirthDeathSamplingDistribution(SequenceEncodableProbabilityDistribution):
             horizon (float): Observation window ``[0, horizon]`` used when sampling.
             name, keys: optional object name / parameter key.
         """
-        # horizon is folded into the same finite/non-negative check as the three rates: it bounds the
-        # observation window `[0, horizon]` used by the sampler and is the upper integration limit in
-        # _trajectory_stats(). Before this, a NaN horizon constructed silently and made
-        # `t >= d.horizon` in BirthDeathSamplingSampler._sample_one() always False (`x >= nan` is
-        # always False in IEEE 754), dropping the loop's only time-based stop condition and leaving
-        # population hitting zero as the sole remaining exit -- effectively unbounded for any
-        # supercritical (birth_rate > death_rate) process. A negative horizon constructed silently too
-        # and produced a negative population-time integral, silently corrupting log_density().
-        for label, value in (
-            ("birth_rate", birth_rate),
-            ("death_rate", death_rate),
-            ("sampling_rate", sampling_rate),
-            ("horizon", horizon),
-        ):
-            if value < 0.0 or not np.isfinite(value):
-                raise ValueError(f"BirthDeathSamplingDistribution requires finite {label} >= 0.")
-        self.birth_rate = float(birth_rate)
-        self.death_rate = float(death_rate)
-        self.sampling_rate = float(sampling_rate)
-        self.initial_population = int(initial_population)
-        self.horizon = float(horizon)
+        self.birth_rate = _nonnegative_scalar(
+            birth_rate,
+            label="BirthDeathSampling birth rate",
+        )
+        self.death_rate = _nonnegative_scalar(
+            death_rate,
+            label="BirthDeathSampling death rate",
+        )
+        self.sampling_rate = _nonnegative_scalar(
+            sampling_rate,
+            label="BirthDeathSampling sampling rate",
+        )
+        self.initial_population = _initial_population(
+            initial_population,
+            label="BirthDeathSampling initial population",
+        )
+        self.horizon = _nonnegative_scalar(
+            horizon,
+            label="BirthDeathSampling sampling horizon",
+        )
         self.name = name
         self.keys = keys
+        self.prior_shape = _prior_vector(
+            prior_shape,
+            label="Gamma prior shape",
+            minimum=1.0,
+        )
+        self.prior_rate = _prior_vector(
+            prior_rate,
+            label="Gamma prior rate",
+            minimum=0.0,
+        )
         with np.errstate(divide="ignore"):
             self._log_rates = np.log(np.array([self.birth_rate, self.death_rate, self.sampling_rate], dtype=np.float64))
+        self._log_rates.setflags(write=False)
         self._total_rate = self.birth_rate + self.death_rate + self.sampling_rate
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the birth-death sampling distribution."""
-        return "BirthDeathSamplingDistribution(%s, %s, %s, initial_population=%s, horizon=%s, name=%s, keys=%s)" % (
+        return "BirthDeathSamplingDistribution(%s, %s, %s, initial_population=%s, horizon=%s, name=%s, keys=%s, prior_shape=%s, prior_rate=%s)" % (
             repr(self.birth_rate),
             repr(self.death_rate),
             repr(self.sampling_rate),
@@ -135,6 +354,8 @@ class BirthDeathSamplingDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.horizon),
             repr(self.name),
             repr(self.keys),
+            repr(self.prior_shape.tolist()),
+            repr(self.prior_rate.tolist()),
         )
 
     def density(self, x: Any) -> float:
@@ -159,16 +380,31 @@ class BirthDeathSamplingDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
-        """Vectorized log-likelihood for an ``(N, 5)`` array of per-trajectory sufficient statistics."""
-        return self._stats_log_density(np.asarray(x, dtype=np.float64))
+        """Vectorized log-likelihood for validated ``(N, 6)`` encoded rows."""
+        return self._stats_log_density(_validated_rows(x))
 
     def sampler(self, seed: int | None = None) -> "BirthDeathSamplingSampler":
         """Return a BirthDeathSamplingSampler for this distribution."""
         return BirthDeathSamplingSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "BirthDeathSamplingEstimator":
-        """Return a BirthDeathSamplingEstimator (closed-form rate MLE)."""
-        return BirthDeathSamplingEstimator(name=self.name, keys=self.keys)
+        """Return a fixed-configuration closed-form MLE or Gamma MAP estimator."""
+        if pseudo_count is None:
+            return BirthDeathSamplingEstimator(
+                name=self.name,
+                keys=self.keys,
+                initial_population=self.initial_population,
+                horizon=self.horizon,
+                prior_shape=self.prior_shape,
+                prior_rate=self.prior_rate,
+            )
+        return BirthDeathSamplingEstimator(
+            name=self.name,
+            keys=self.keys,
+            pseudo_count=pseudo_count,
+            initial_population=self.initial_population,
+            horizon=self.horizon,
+        )
 
     def dist_to_encoder(self) -> "BirthDeathSamplingDataEncoder":
         """Return the encoder for birth-death samples."""
@@ -208,7 +444,15 @@ class BirthDeathSamplingSampler(DistributionSampler):
         """Draw one trajectory ``(n0, T, events)`` or a list of ``size`` trajectories."""
         if size is None:
             return self._sample_one()
-        return [self._sample_one() for _ in range(int(size))]
+        checked_size = _exact_integer(
+            size,
+            label="BirthDeathSampling sample size",
+        )
+        if checked_size < 0:
+            raise ValueError(
+                "BirthDeathSampling sample size must be non-negative"
+            )
+        return [self._sample_one() for _ in range(checked_size)]
 
 
 class BirthDeathSamplingAccumulator(SequenceEncodableStatisticAccumulator):
@@ -225,13 +469,17 @@ class BirthDeathSamplingAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def _add(self, traj: Any, weight: float) -> None:
-        nb, nd, ns, integral, _ = _trajectory_stats(traj)
-        self.births += weight * nb
-        self.deaths += weight * nd
-        self.samplings += weight * ns
-        self.integral += weight * integral
-        self.horizon_sum += weight * float(traj[1])
-        self.count += weight
+        row = _trajectory_row(traj)
+        checked_weight = _nonnegative_scalar(
+            weight,
+            label="BirthDeathSampling weight",
+        )
+        self.births += checked_weight * row[0]
+        self.deaths += checked_weight * row[1]
+        self.samplings += checked_weight * row[2]
+        self.integral += checked_weight * row[3]
+        self.horizon_sum += checked_weight * row[5]
+        self.count += checked_weight
 
     def update(self, x: Any, weight: float, estimate: BirthDeathSamplingDistribution | None) -> None:
         """Accumulate weighted event counts and exposure for one trajectory."""
@@ -243,8 +491,8 @@ class BirthDeathSamplingAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any | None) -> None:
         """Accumulate weighted event counts and exposure from encoded trajectories."""
-        rows = np.asarray(x, dtype=np.float64)
-        ww = np.asarray(weights, dtype=np.float64)
+        rows = _validated_rows(x)
+        ww = _validated_weights(weights, rows.shape[0])
         self.births += float(np.dot(rows[:, 0], ww))
         self.deaths += float(np.dot(rows[:, 1], ww))
         self.samplings += float(np.dot(rows[:, 2], ww))
@@ -258,32 +506,66 @@ class BirthDeathSamplingAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, float, float, float, float, float]) -> "BirthDeathSamplingAccumulator":
         """Merge serialized birth-death-sampling statistics into this accumulator."""
-        self.births += suff_stat[0]
-        self.deaths += suff_stat[1]
-        self.samplings += suff_stat[2]
-        self.integral += suff_stat[3]
-        self.count += suff_stat[4]
-        self.horizon_sum += suff_stat[5]
+        checked = _validated_statistics(suff_stat)
+        self.births += checked.births
+        self.deaths += checked.deaths
+        self.samplings += checked.samplings
+        self.integral += checked.population_exposure
+        self.count += checked.trajectory_weight
+        self.horizon_sum += checked.horizon_weight
         return self
 
     def value(self) -> tuple[float, float, float, float, float, float]:
         """Return event counts, exposure, trajectory count, and horizon total."""
-        return self.births, self.deaths, self.samplings, self.integral, self.count, self.horizon_sum
+        return BirthDeathSamplingStatistics(
+            self.births,
+            self.deaths,
+            self.samplings,
+            self.integral,
+            self.count,
+            self.horizon_sum,
+        )
 
     def from_value(self, x: tuple[float, float, float, float, float, float]) -> "BirthDeathSamplingAccumulator":
         """Restore the accumulator from serialized birth-death-sampling statistics."""
-        self.births, self.deaths, self.samplings, self.integral, self.count, self.horizon_sum = x
+        checked = _validated_statistics(x)
+        (
+            self.births,
+            self.deaths,
+            self.samplings,
+            self.integral,
+            self.count,
+            self.horizon_sum,
+        ) = checked
         return self
 
     def scale(self, c: float) -> "BirthDeathSamplingAccumulator":
         """Scale accumulated sufficient statistics by a constant."""
-        self.births *= c
-        self.deaths *= c
-        self.samplings *= c
-        self.integral *= c
-        self.count *= c
-        self.horizon_sum *= c
+        checked_scale = _nonnegative_scalar(
+            c,
+            label="BirthDeathSampling scale",
+        )
+        self.births *= checked_scale
+        self.deaths *= checked_scale
+        self.samplings *= checked_scale
+        self.integral *= checked_scale
+        self.count *= checked_scale
+        self.horizon_sum *= checked_scale
         return self
+
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into its configured shared statistic."""
+        if self.keys is None:
+            return
+        if self.keys in stats_dict:
+            stats_dict[self.keys].combine(self.value())
+        else:
+            stats_dict[self.keys] = self
+
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator with its configured shared statistic."""
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "BirthDeathSamplingDataEncoder":
         """Return an encoder for trajectory sufficient statistics."""
@@ -303,11 +585,94 @@ class BirthDeathSamplingAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class BirthDeathSamplingEstimator(ParameterEstimator):
-    """Closed-form rate MLE: ``rate = (total events of that type) / integral_n``."""
+    """Closed-form per-channel MLE or Gamma-prior MAP estimator."""
 
-    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        name: str | None = None,
+        keys: str | None = None,
+        pseudo_count: float | None = None,
+        initial_population: int = 1,
+        horizon: float = 10.0,
+        prior_shape: Any | None = None,
+        prior_rate: Any | None = None,
+    ) -> None:
+        if pseudo_count is not None and (
+            prior_shape is not None or prior_rate is not None
+        ):
+            raise ValueError(
+                "BirthDeathSampling pseudo_count cannot be combined with "
+                "explicit Gamma priors"
+            )
+        self.pseudo_count = (
+            None
+            if pseudo_count is None
+            else _nonnegative_scalar(
+                pseudo_count,
+                label="BirthDeathSampling pseudo-count",
+            )
+        )
+        if self.pseudo_count is not None:
+            shape_value: Any = 1.0 + self.pseudo_count
+            rate_value: Any = self.pseudo_count
+        else:
+            shape_value = 1.0 if prior_shape is None else prior_shape
+            rate_value = 0.0 if prior_rate is None else prior_rate
+        self.prior_shape = _prior_vector(
+            shape_value,
+            label="Gamma prior shape",
+            minimum=1.0,
+        )
+        self.prior_rate = _prior_vector(
+            rate_value,
+            label="Gamma prior rate",
+            minimum=0.0,
+        )
+        self.initial_population = _initial_population(
+            initial_population,
+            label="BirthDeathSampling estimator initial population",
+        )
+        self.horizon = _nonnegative_scalar(
+            horizon,
+            label="BirthDeathSampling estimator sampling horizon",
+        )
         self.name = name
         self.keys = keys
+
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Serialize the fixed configuration and effective explicit prior."""
+        return {
+            "name": self.name,
+            "keys": self.keys,
+            "initial_population": self.initial_population,
+            "horizon": self.horizon,
+            "prior_shape": self.prior_shape,
+            "prior_rate": self.prior_rate,
+        }
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Validate and restore fixed estimator configuration."""
+        required = {
+            "name",
+            "keys",
+            "initial_population",
+            "horizon",
+            "prior_shape",
+            "prior_rate",
+        }
+        if set(state) != required:
+            raise ValueError(
+                "invalid BirthDeathSampling estimator state fields: "
+                "expected %r, got %r" % (sorted(required), sorted(state))
+            )
+        self.__init__(
+            name=state["name"],
+            keys=state["keys"],
+            initial_population=state["initial_population"],
+            horizon=state["horizon"],
+            prior_shape=state["prior_shape"],
+            prior_rate=state["prior_rate"],
+        )
 
     def accumulator_factory(self) -> "BirthDeathSamplingAccumulatorFactory":
         """Return a factory for birth-death-sampling sufficient-statistic accumulators."""
@@ -316,18 +681,45 @@ class BirthDeathSamplingEstimator(ParameterEstimator):
     def estimate(
         self, nobs: float | None, suff_stat: tuple[float, float, float, float, float, float]
     ) -> "BirthDeathSamplingDistribution":
-        """Estimate per-capita rates from accumulated event counts and population time-integral."""
-        births, deaths, samplings, integral, count, horizon_sum = suff_stat
-        denom = max(integral, _MIN_RATE)
-        horizon = horizon_sum / count if count > 0.0 else 10.0
+        """Estimate per-capita rates while preserving fixed sampling configuration."""
+        checked = _validated_statistics(suff_stat)
+        if checked.trajectory_weight <= 0.0:
+            raise ValueError(
+                "Cannot estimate BirthDeathSampling without positive trajectory weight"
+            )
+        if nobs is not None:
+            _nonnegative_scalar(
+                nobs,
+                label="BirthDeathSampling observation count",
+            )
+        counts = np.asarray(
+            (checked.births, checked.deaths, checked.samplings),
+            dtype=np.float64,
+        )
+        numerator = counts + self.prior_shape - 1.0
+        denominator = checked.population_exposure + self.prior_rate
+        if np.any((numerator > 0.0) & (denominator == 0.0)):
+            raise ValueError(
+                "BirthDeathSampling positive event evidence or prior shape "
+                "requires population exposure or prior rate"
+            )
+        rates = np.zeros(3, dtype=np.float64)
+        np.divide(
+            numerator,
+            denominator,
+            out=rates,
+            where=denominator > 0.0,
+        )
         return BirthDeathSamplingDistribution(
-            births / denom,
-            deaths / denom,
-            samplings / denom,
-            initial_population=1,
-            horizon=horizon,
+            rates[0],
+            rates[1],
+            rates[2],
+            initial_population=self.initial_population,
+            horizon=self.horizon,
             name=self.name,
             keys=self.keys,
+            prior_shape=self.prior_shape,
+            prior_rate=self.prior_rate,
         )
 
 
@@ -342,8 +734,13 @@ class BirthDeathSamplingDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[Any]) -> np.ndarray:
         """Encode trajectories as sufficient-statistic rows."""
-        rows = []
-        for traj in x:
-            nb, nd, ns, integral, sum_log_n = _trajectory_stats(traj)
-            rows.append((nb, nd, ns, integral, sum_log_n, float(traj[1])))
-        return np.asarray(rows, dtype=np.float64) if rows else np.zeros((0, 6), dtype=np.float64)
+        rows = [_trajectory_row(traj) for traj in x]
+        return (
+            np.asarray(rows, dtype=np.float64)
+            if rows
+            else np.zeros((0, 6), dtype=np.float64)
+        )
+
+    def row_count(self, x: np.ndarray) -> int:
+        """Return the number of validated encoded trajectory rows."""
+        return int(_validated_rows(x).shape[0])
