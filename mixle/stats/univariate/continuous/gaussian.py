@@ -442,7 +442,7 @@ class GaussianSuffStat(tuple):
 
     Behaves exactly like the plain 4-tuple everywhere it is indexed, unpacked, or iterated (it *is*
     one); ``receipt`` is extra payload that :meth:`GaussianAccumulator.combine` reads to fold the
-    Kahan error-bound bookkeeping (``abs_total``, ``n`` for ``sum`` and ``sum2``) into the receiving
+    Kahan round-off bookkeeping (``abs_total``, ``n`` for ``sum`` and ``sum2``) into the receiving
     accumulator when both sides are ``compensated``. Code that doesn't know about ``compensated``
     accumulation (serialization, generic ``scale_suff_stat``, ...) sees an ordinary tuple.
     """
@@ -463,7 +463,7 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             keys: Optional key for merging sufficient statistics.
             name: Optional diagnostic name.
             compensated: Opt-in Kahan-compensated accumulation of ``sum``/``sum2`` with a
-                running numerics-error bound (see :mod:`mixle.stats.compute.error_receipts`), read
+                running numerics-error estimate (see :mod:`mixle.stats.compute.error_receipts`), read
                 back via :meth:`error_bound`. ``False`` (the default) is the plain float64
                 accumulation this class always used -- that code path is untouched, so it carries no
                 measurable overhead over the pre-existing behavior.
@@ -578,9 +578,8 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             suff_stat[3] (float): Sum of weighted observations (sum_i w_i).
 
         When this accumulator is ``compensated`` and ``suff_stat`` carries a numerics-error
-        receipt (see :meth:`value` / :class:`GaussianSuffStat`), the receipt is folded in too --
-        its ``(abs_total, n)`` fields add exactly, just like ``sum``/``count`` above, so
-        :meth:`error_bound` composes correctly across combined partitions.
+        receipt (see :meth:`value` / :class:`GaussianSuffStat`), its float64 magnitude and exact
+        term-count fields are folded in too.
 
         Args:
             suff_stat (Tuple[float, float, float, float]): See above for details.
@@ -610,10 +609,11 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def error_bound(self) -> dict[str, float] | None:
-        """Return the running numerics-error bound receipt for ``sum``/``sum2``.
+        """Return historical round-off diagnostics for ``sum``/``sum2``.
 
         ``None`` when this accumulator was not constructed with ``compensated=True`` -- the
-        disabled default carries no receipt to report.
+        disabled default carries no receipt to report. The compensated values are asymptotic
+        estimates, not certified error bounds; the method name is retained for compatibility.
         """
         if not self.compensated:
             return None
@@ -726,7 +726,7 @@ class GaussianEstimator(ParameterEstimator):
                 relative ``1e-6 * sigma2`` to keep the safeguard data-scaled. Set explicitly to widen
                 the floor for hard / high-dimensional cases. Bias is negligible at the default.
             compensated (bool): Opt-in Kahan-compensated accumulation with a running numerics-error
-                bound for the accumulators this estimator makes; see
+                estimate for the accumulators this estimator makes; see
                 :class:`GaussianAccumulator`. ``False`` by default (no overhead).
 
         Attributes:

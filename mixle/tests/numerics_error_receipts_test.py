@@ -1,15 +1,14 @@
 """K2: numerics-error receipts through accumulators.
 
-Optional compensated (Kahan) accumulation carries a running numerics-error bound alongside the
-accumulated sufficient statistics; the bound composes through ``combine()`` the same way the
-statistics themselves do. ``MultivariateGaussianEstimator.estimate()`` grows an opt-in conditioning
+Optional compensated (Kahan) accumulation carries a running numerics-error estimate alongside the
+accumulated sufficient statistics. ``MultivariateGaussianEstimator.estimate()`` grows an opt-in conditioning
 receipt (covariance eigenvalue ratio / near-degenerate-variance flag). Both are OFF by default with
 no measurable overhead over the pre-existing behavior.
 
 Acceptance criteria under test:
   1. Planted ill-conditioning (and a well-conditioned control) is correctly flagged.
-  2. Planted catastrophic cancellation is flagged with correct bound ORDERING, verified against a
-     high-precision (``math.fsum``) reference -- not just naive-bound > kahan-bound in isolation.
+  2. Planted catastrophic cancellation is flagged with correct diagnostic ordering, compared with a
+     high-precision (``math.fsum``) reference.
   3. The disabled/default path is unaffected: behaviorally identical to the pre-existing
      implementation, and a large-workload timing check confirms no measurable regression.
 """
@@ -20,7 +19,13 @@ import unittest
 
 import numpy as np
 
-from mixle.stats.compute.error_receipts import CompensatedAccumulator, conditioning_receipt, error_bound
+from mixle.stats.compute.error_receipts import (
+    EPS,
+    CompensatedAccumulator,
+    conditioning_receipt,
+    error_bound,
+    kahan_reduce,
+)
 from mixle.stats.multivariate.multivariate_gaussian import MultivariateGaussianEstimator
 from mixle.stats.univariate.continuous.gaussian import GaussianAccumulator, GaussianEstimator
 
@@ -94,9 +99,32 @@ class ConditioningReceiptTest(unittest.TestCase):
         self.assertAlmostEqual(receipt.condition_number, 4.0 / 1.0e-9, delta=4.0 / 1.0e-9 * 1e-6)
         self.assertTrue(receipt.near_degenerate)
 
+    def test_conditioning_receipt_rejects_invalid_covariance_contracts(self):
+        invalid = (
+            np.array([]),
+            np.ones(3),
+            np.ones((2, 3)),
+            np.array([[1.0, np.nan], [np.nan, 1.0]]),
+            np.array([[1.0, 0.25], [0.0, 1.0]]),
+            np.array([[1.0 + 0.0j, 0.0], [0.0, 1.0]]),
+        )
+        for covar in invalid:
+            with self.subTest(shape=covar.shape), self.assertRaises((TypeError, ValueError)):
+                conditioning_receipt(covar)
+        for threshold in (False, 0.0, -1.0, 1.1, np.nan, np.inf):
+            with self.subTest(threshold=threshold), self.assertRaises((TypeError, ValueError)):
+                conditioning_receipt(np.eye(2), threshold)
+
+    def test_roundoff_sized_asymmetry_is_reported_before_projection(self):
+        covar = np.array([[2.0, 0.5 + 1.0e-15], [0.5, 1.0]])
+        receipt = conditioning_receipt(covar)
+        self.assertGreater(receipt.symmetry_error, 0.0)
+        self.assertLessEqual(receipt.symmetry_error, receipt.symmetry_tolerance)
+        self.assertIn("symmetry_error", receipt.to_dict())
+
 
 # --------------------------------------------------------------------------------------------------
-# 2. Planted catastrophic cancellation: bound ordering + validity against a high-precision reference
+# 2. Planted catastrophic cancellation: diagnostic behavior against a high-precision reference
 # --------------------------------------------------------------------------------------------------
 class CatastrophicCancellationTest(unittest.TestCase):
     @staticmethod
@@ -132,12 +160,12 @@ class CatastrophicCancellationTest(unittest.TestCase):
         # under naive vs compensated summation (otherwise the ordering claim would be vacuous).
         self.assertNotEqual(naive_acc.total, kahan_acc.total)
 
-        # (a) the reported bound is a genuinely valid, non-violated upper bound on the real error,
-        #     for BOTH accumulation modes, verified against the high-precision reference.
+        # On this planted fixture both diagnostics exceed the realized errors. This is empirical
+        # coverage, not a claim that the compensated asymptotic estimate is a certificate.
         self.assertLessEqual(naive_error, naive_bound, "naive bound must not be violated")
         self.assertLessEqual(kahan_error, kahan_bound, "kahan bound must not be violated")
 
-        # (b) bound ORDERING: the naive path's reported bound is larger than the compensated path's.
+        # Diagnostic ordering: the naive path reports more potential error than the compensated path.
         self.assertGreater(naive_bound, kahan_bound)
 
         # (c) the ordering matches reality, not just the formula: Kahan's actual error is also
@@ -153,6 +181,39 @@ class CatastrophicCancellationTest(unittest.TestCase):
         for v in values:
             acc.add(v)
         self.assertAlmostEqual(acc.bound(), error_bound(acc.n, acc.abs_total, compensated=True))
+
+    def test_plain_sum_uses_gamma_factor_not_first_order_approximation(self):
+        n, abs_total = 1000, 7.5
+        scaled = (n - 1) * EPS
+        self.assertEqual(error_bound(n, abs_total, False), scaled / (1.0 - scaled) * abs_total)
+        self.assertGreater(error_bound(n, abs_total, False), scaled * abs_total)
+
+    def test_receipts_reject_invalid_state_inputs_and_mode_merges(self):
+        invalid_states = (
+            {"n": -1},
+            {"n": True},
+            {"abs_total": -1.0},
+            {"abs_total": np.nan},
+            {"total": np.inf},
+            {"compensation": np.nan},
+            {"compensated": False, "compensation": 1.0},
+            {"n": 0, "total": 1.0},
+            {"n": 1, "total": 1.0, "abs_total": 0.0},
+        )
+        for kwargs in invalid_states:
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                CompensatedAccumulator(**kwargs)
+        acc = CompensatedAccumulator(compensated=True)
+        for value, weight in ((np.nan, 1.0), (1.0, np.inf), (1.0e308, 1.0e308)):
+            with self.subTest(value=value, weight=weight), self.assertRaises((TypeError, ValueError)):
+                acc.add(value, weight)
+        with self.assertRaisesRegex(ValueError, "compensated and uncompensated"):
+            acc.combine(CompensatedAccumulator(compensated=False))
+
+    def test_weighted_reduce_requires_equal_cardinality(self):
+        for values, weights in (([1.0, 2.0], [1.0]), ([1.0], [1.0, 2.0])):
+            with self.subTest(values=values, weights=weights), self.assertRaisesRegex(ValueError, "equal cardinality"):
+                kahan_reduce(values, weights)
 
     def test_gaussian_accumulator_compensated_bound_ordering(self):
         # The same catastrophic-cancellation scenario through the real GaussianAccumulator wiring
@@ -180,10 +241,9 @@ class CatastrophicCancellationTest(unittest.TestCase):
         self.assertGreater(naive_bound, kahan_bound)
 
     def test_bounds_compose_through_combine(self):
-        # split the planted workload into two partitions, accumulate each separately (as two
-        # workers would), then combine() -- the resulting bound must equal what a single
-        # accumulator over the whole stream would report (bounds compose exactly through the
-        # additive (abs_total, n) receipt, like the roadmap requires).
+        # Split the planted workload into two partitions, accumulate each separately (as two
+        # workers would), then combine(). The same term count and nearly identical float64
+        # magnitude receipt should produce nearly identical diagnostics.
         values = self._planted_values(n=20000, seed=5)
         half = len(values) // 2
 
