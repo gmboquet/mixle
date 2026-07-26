@@ -70,6 +70,7 @@ def run(
         sol,
         oracle,
         test_texts[:n_test],
+        task_truth=[gold[text] for text in test_texts[:n_test]],
         student_cost=0.0001,
         teacher_cost=0.03,
         task="banking77 intents (77 classes)",
