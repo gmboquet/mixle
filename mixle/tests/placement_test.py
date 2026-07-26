@@ -23,6 +23,7 @@ from mixle.utils.parallel.planner import (
     LocalEncodedData,
     Placement,
     PlacementShard,
+    ResourceCalibrationError,
     Resources,
     UnknownMemoryFootprintError,
     calibrate_resources,
@@ -285,6 +286,44 @@ class PlacementPlanningTestCase(unittest.TestCase):
         self.assertGreater(calibrated.devices[0].throughput, 0.0)
         self.assertTrue(np.isfinite(calibrated.devices[0].throughput))
 
+    def test_calibration_uses_median_timing_and_records_each_repetition(self):
+        model = GaussianDistribution(0.0, 1.0)
+        catalog = CalibrationCatalog()
+        clock = [0.0, 1.0, 10.0, 12.0, 20.0, 120.0]
+        with mock.patch("mixle.utils.parallel.planner.time.perf_counter", side_effect=clock):
+            calibrated = calibrate_resources(
+                list(np.linspace(-1.0, 1.0, 10)),
+                model,
+                resources=Resources.single_cpu(),
+                sample_size=10,
+                repeats=3,
+                catalog=catalog,
+            )
+        self.assertEqual(calibrated.devices[0].throughput, 5.0)
+        result = catalog.records[0].device_results[0]
+        self.assertEqual(result.elapsed_seconds, (1.0, 2.0, 100.0))
+        self.assertTrue(catalog.records[0].fully_successful)
+
+    def test_calibration_failure_is_recorded_and_raised(self):
+        model = GaussianDistribution(0.0, 1.0)
+        catalog = CalibrationCatalog()
+        with mock.patch(
+            "mixle.utils.parallel.planner._engine_for_device",
+            side_effect=RuntimeError("unavailable"),
+        ):
+            with self.assertRaises(ResourceCalibrationError) as caught:
+                calibrate_resources(
+                    [0.0, 1.0],
+                    model,
+                    resources=Resources.single_cpu(),
+                    repeats=1,
+                    catalog=catalog,
+                )
+        self.assertFalse(caught.exception.results[0].success)
+        self.assertIn("unavailable", caught.exception.results[0].error)
+        self.assertFalse(catalog.records[0].fully_successful)
+        self.assertIsNone(catalog.resources_for(model_type="GaussianDistribution", workload="score"))
+
     def test_calibrate_resources_can_time_estep_and_em_workloads(self):
         model = GaussianDistribution(0.0, 1.0)
         data = list(np.linspace(-2.0, 2.0, 20))
@@ -376,6 +415,16 @@ class PlacementPlanningTestCase(unittest.TestCase):
         self.assertEqual(record.estimator_type, "GaussianEstimator")
         self.assertGreater(record.statistic_bytes, 0)
         self.assertEqual(record.resources.devices, calibrated.devices)
+        self.assertTrue(record.fully_successful)
+
+    def test_calibration_catalog_save_replaces_atomically(self):
+        catalog = CalibrationCatalog()
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "calibration.json")
+            with mock.patch("mixle.utils.parallel.planner.os.replace", wraps=os.replace) as replace:
+                catalog.save(path)
+            replace.assert_called_once()
+            self.assertEqual(CalibrationCatalog.load(path).records, ())
 
     def test_model_sharding_plan_covers_components_by_throughput(self):
         model = MixtureDistribution(

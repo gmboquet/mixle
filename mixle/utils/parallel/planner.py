@@ -11,6 +11,7 @@ import json
 import os
 import pickle
 import sys
+import tempfile
 import time
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from mixle.stats.compute.pdist import DataSequenceEncoder
 
 __all__ = [
     "CalibrationCatalog",
+    "DeviceCalibration",
     "CalibrationRecord",
     "DeviceSpec",
     "DaskEncodedData",
@@ -36,6 +38,7 @@ __all__ = [
     "Placement",
     "PlacementShard",
     "Resources",
+    "ResourceCalibrationError",
     "SparkEncodedData",
     "available_encoded_data_backends",
     "calibrate_resources",
@@ -60,6 +63,16 @@ class MemorySized(Protocol):
     def mixle_memory_nbytes(self) -> int:
         """Return the object's complete resident byte footprint."""
         ...
+
+
+class ResourceCalibrationError(RuntimeError):
+    """Raised when one or more declared devices fail the calibration workload."""
+
+    def __init__(self, results: tuple[DeviceCalibration, ...], resources: Resources) -> None:
+        self.results = results
+        self.resources = resources
+        failed = [result.device_name for result in results if not result.success]
+        super().__init__("resource calibration failed for device(s): %s" % ", ".join(failed))
 
 
 @dataclass(frozen=True)
@@ -433,6 +446,55 @@ class Resources:
 
 
 @dataclass(frozen=True)
+class DeviceCalibration:
+    """Measured timing distribution or explicit failure for one device."""
+
+    device_name: str
+    success: bool
+    elapsed_seconds: tuple[float, ...] = ()
+    throughput: float | None = None
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.device_name:
+            raise ValueError("device calibration requires a device name")
+        if not isinstance(self.success, (bool, np.bool_)):
+            raise TypeError("device calibration success must be boolean")
+        elapsed = tuple(float(value) for value in self.elapsed_seconds)
+        if any(not np.isfinite(value) or value <= 0.0 for value in elapsed):
+            raise ValueError("device calibration timings must be finite and positive")
+        object.__setattr__(self, "elapsed_seconds", elapsed)
+        if self.success:
+            if not elapsed:
+                raise ValueError("successful device calibration requires timing evidence")
+            if self.throughput is None or not np.isfinite(self.throughput) or self.throughput <= 0.0:
+                raise ValueError("successful device calibration requires finite positive throughput")
+            if self.error is not None:
+                raise ValueError("successful device calibration cannot carry an error")
+        elif not self.error:
+            raise ValueError("failed device calibration requires an error")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "device_name": self.device_name,
+            "success": bool(self.success),
+            "elapsed_seconds": list(self.elapsed_seconds),
+            "throughput": self.throughput,
+            "error": self.error,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> DeviceCalibration:
+        return cls(
+            device_name=str(payload["device_name"]),
+            success=bool(payload["success"]),
+            elapsed_seconds=tuple(float(value) for value in payload.get("elapsed_seconds", ())),
+            throughput=None if payload.get("throughput") is None else float(payload["throughput"]),
+            error=payload.get("error"),
+        )
+
+
+@dataclass(frozen=True)
 class CalibrationRecord:
     """One persisted calibration measurement for a model/workload/resource set."""
 
@@ -447,6 +509,15 @@ class CalibrationRecord:
     model_bytes: int | None = None
     statistic_bytes: int | None = None
     timestamp: float = 0.0
+    device_results: tuple[DeviceCalibration, ...] = ()
+
+    @property
+    def fully_successful(self) -> bool:
+        """Return whether every declared device has successful timing evidence."""
+        return (
+            len(self.device_results) == len(self.resources.devices)
+            and all(result.success for result in self.device_results)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable calibration record."""
@@ -462,6 +533,7 @@ class CalibrationRecord:
             "statistic_bytes": self.statistic_bytes,
             "timestamp": float(self.timestamp),
             "resources": self.resources.to_dict(),
+            "device_results": [result.to_dict() for result in self.device_results],
         }
 
     @classmethod
@@ -479,6 +551,9 @@ class CalibrationRecord:
             statistic_bytes=None if payload.get("statistic_bytes") is None else int(payload["statistic_bytes"]),
             timestamp=float(payload.get("timestamp", 0.0)),
             resources=Resources.from_dict(payload["resources"]),
+            device_results=tuple(
+                DeviceCalibration.from_dict(result) for result in payload.get("device_results", ())
+            ),
         )
 
 
@@ -513,7 +588,7 @@ class CalibrationCatalog:
     ) -> Resources | None:
         """Return calibrated resources from the newest matching record."""
         record = self.latest(model_type=model_type, workload=workload, precision=precision)
-        return None if record is None else record.resources
+        return None if record is None or not record.fully_successful else record.resources
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable calibration catalog."""
@@ -534,9 +609,32 @@ class CalibrationCatalog:
         return cls.from_dict(json.loads(text))
 
     def save(self, path: Any, **kwargs: Any) -> None:
-        """Persist the catalog to a JSON file."""
-        with open(path, "w") as f:
-            f.write(self.to_json(**kwargs))
+        """Atomically persist the catalog to a JSON file."""
+        target = os.path.abspath(os.fspath(path))
+        directory = os.path.dirname(target)
+        os.makedirs(directory, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=directory,
+                prefix=".%s." % os.path.basename(target),
+                suffix=".tmp",
+                delete=False,
+            ) as stream:
+                temporary = stream.name
+                stream.write(self.to_json(**kwargs))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            temporary = None
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
 
     @classmethod
     def load(cls, path: Any) -> CalibrationCatalog:
@@ -1766,12 +1864,12 @@ def calibrate_resources(
     catalog: CalibrationCatalog | None = None,
     catalog_path: Any | None = None,
 ) -> Resources:
-    """Time model scoring on each resource and return updated throughputs.
+    """Time model scoring on every resource and return robust throughputs.
 
-    Calibration is deliberately advisory and local.  It runs a small scoring
-    or E-step pass through ``model.kernel(engine=...)`` where possible and
-    leaves a device's previous throughput unchanged if that device cannot run
-    the requested workload.  ``workload`` may be ``score``, ``estep`` /
+    Every repetition is retained as evidence and the median elapsed time drives
+    throughput. A device failure is recorded and then raises
+    :class:`ResourceCalibrationError`; an unmeasured device is never returned
+    as though it were calibrated. ``workload`` may be ``score``, ``estep`` /
     ``accumulate``, or ``em``.  The ``em`` workload includes the estimator's
     M-step on the sampled sufficient statistics.  Pass ``catalog`` and/or
     ``catalog_path`` to append a persisted model/workload calibration record.
@@ -1789,17 +1887,24 @@ def calibrate_resources(
         estimator = model.estimator()
     if workload_name in ("estep", "em") and estimator is None:
         raise ValueError("calibrate_resources workload=%r requires an estimator or model.estimator()." % workload)
-    m = min(max(1, int(sample_size)), len(data))
+    if isinstance(sample_size, (bool, np.bool_)) or not isinstance(sample_size, (int, np.integer)):
+        raise TypeError("sample_size must be an integer")
+    if isinstance(repeats, (bool, np.bool_)) or not isinstance(repeats, (int, np.integer)):
+        raise TypeError("repeats must be an integer")
+    if sample_size < 1 or repeats < 1:
+        raise ValueError("sample_size and repeats must be positive")
+    m = min(int(sample_size), len(data))
     sample = [data[i] for i in range(m)]
     enc = encoder.seq_encode(sample)
     updated = []
+    results: list[DeviceCalibration] = []
     for device in resources.devices:
         try:
             engine = _engine_for_device(device, precision)
             enc_loc = move_encoded_payload(enc, engine)
             kernel = model.kernel(engine=engine, estimator=estimator)
-            best = None
-            for _ in range(max(1, int(repeats))):
+            timings: list[float] = []
+            for _ in range(int(repeats)):
                 _synchronize(device)
                 start = time.perf_counter()
                 if workload_name == "score":
@@ -1812,8 +1917,9 @@ def calibrate_resources(
                         estimator.estimate(float(m), stats)
                 _synchronize(device)
                 elapsed = max(time.perf_counter() - start, 1.0e-12)
-                best = elapsed if best is None else min(best, elapsed)
-            throughput = float(m) / float(best)
+                timings.append(elapsed)
+            robust_elapsed = float(np.median(np.asarray(timings, dtype=np.float64)))
+            throughput = float(m) / robust_elapsed
             updated.append(
                 DeviceSpec(
                     name=device.name,
@@ -1822,10 +1928,28 @@ def calibrate_resources(
                     engine=device.engine,
                     throughput=throughput,
                     precision=device.precision if precision is None else precision_name(precision),
+                    node_id=device.node_id,
+                    local_rank=device.local_rank,
+                    global_rank=device.global_rank,
                 )
             )
-        except Exception:  # noqa: BLE001
+            results.append(
+                DeviceCalibration(
+                    device_name=device.name,
+                    success=True,
+                    elapsed_seconds=tuple(timings),
+                    throughput=throughput,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
             updated.append(device)
+            results.append(
+                DeviceCalibration(
+                    device_name=device.name,
+                    success=False,
+                    error="%s: %s" % (type(exc).__name__, exc),
+                )
+            )
     calibrated = Resources(tuple(updated))
     _record_calibration(
         catalog=catalog,
@@ -1834,11 +1958,14 @@ def calibrate_resources(
         estimator=estimator,
         workload=workload_name,
         sample_size=m,
-        repeats=max(1, int(repeats)),
+        repeats=int(repeats),
         precision=precision,
         resources=calibrated,
         row_count=len(data),
+        device_results=tuple(results),
     )
+    if any(not result.success for result in results):
+        raise ResourceCalibrationError(tuple(results), calibrated)
     return calibrated
 
 
@@ -1853,6 +1980,7 @@ def _record_calibration(
     precision: Any | None,
     resources: Resources,
     row_count: int,
+    device_results: tuple[DeviceCalibration, ...],
 ) -> None:
     if catalog is None and catalog_path is None:
         return
@@ -1874,6 +2002,7 @@ def _record_calibration(
         statistic_bytes=estimate_estimator_stat_nbytes(estimator) if estimator is not None else None,
         timestamp=time.time(),
         resources=resources,
+        device_results=device_results,
     )
     target.add(record)
     if catalog_path is not None:
