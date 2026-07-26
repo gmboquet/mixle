@@ -82,6 +82,12 @@ class UpdateGraph:
         known = set(identifiers)
         if self.root_node not in known:
             raise UpdateGraphError("root_node does not identify a graph node.")
+        edge_keys = [
+            (edge.source_node, edge.target_node, edge.artifact)
+            for edge in self.edges
+        ]
+        if len(edge_keys) != len(set(edge_keys)):
+            raise UpdateGraphError("update graph dependency edges must be unique.")
         for edge in self.edges:
             if edge.source_node not in known or edge.target_node not in known:
                 raise UpdateGraphError("dependency edge refers to an unknown node.")
