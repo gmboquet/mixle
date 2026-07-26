@@ -115,6 +115,50 @@ class SoftDistillTest(unittest.TestCase):
             distill_from_soft_labels(self.train_texts, self.train_probs, labels=_LABELS, hard_weight=1.5)
         with self.assertRaises(ValueError):
             distill_from_soft_labels(self.train_texts[:5], self.train_probs, labels=_LABELS)  # length mismatch
+        for bad_probs in (
+            np.asarray([[np.nan, 0.5, 0.5]]),
+            np.asarray([[np.inf, 0.0, 0.0]]),
+            np.asarray([[-0.1, 0.5, 0.6]]),
+            np.asarray([[0.2, 0.2, 0.2]]),
+        ):
+            with self.subTest(bad_probs=bad_probs), self.assertRaises(ValueError):
+                distill_from_soft_labels(["one"], bad_probs, labels=_LABELS, epochs=1)
+        for kwargs in (
+            {"temperature": float("nan")},
+            {"temperature": float("inf")},
+            {"hard_weight": float("nan")},
+            {"hard_weight": float("inf")},
+            {"labels": ["A", "A", "C"]},
+            {"labels": []},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                distill_from_soft_labels(
+                    self.train_texts,
+                    self.train_probs,
+                    labels=kwargs.pop("labels", _LABELS),
+                    **kwargs,
+                )
+
+    def test_soft_agreement_requires_exact_compatible_shapes(self):
+        class Adapter:
+            def __init__(self, probabilities):
+                self.probabilities = probabilities
+
+            def proba_batch(self, model, texts):
+                return self.probabilities
+
+        class Student:
+            model = object()
+
+            def __init__(self, probabilities):
+                self.adapter = Adapter(probabilities)
+
+        with self.assertRaisesRegex(ValueError, "one row per text"):
+            soft_agreement(Student([[0.2, 0.3, 0.5]]), self.test_probs[:2], ["one"])
+        with self.assertRaises(ValueError):
+            soft_agreement(Student([[0.5, 0.5]]), [[0.2, 0.3, 0.5]], ["one"])
+        with self.assertRaises(ValueError):
+            soft_agreement(Student([[np.nan, 0.0, 1.0]]), [[0.2, 0.3, 0.5]], ["one"])
 
 
 if __name__ == "__main__":
