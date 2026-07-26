@@ -5,12 +5,16 @@ Ray is optional; the distributed tests skip when it is not installed. The backen
 """
 
 import importlib.util
+import sys
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from numpy.random import RandomState
 
 from mixle.stats import GaussianDistribution, GaussianEstimator
 from mixle.utils.parallel.planner import available_encoded_data_backends, encoded_data
+from mixle.utils.parallel.ray_data import RayEncodedData
 
 HAS_RAY = importlib.util.find_spec("ray") is not None
 
@@ -18,6 +22,55 @@ HAS_RAY = importlib.util.find_spec("ray") is not None
 class RayBackendRegistrationTest(unittest.TestCase):
     def test_backend_is_registered(self):
         self.assertIn("ray", available_encoded_data_backends())
+
+
+class RayLifecycleOwnershipTest(unittest.TestCase):
+    class _Encoder:
+        def seq_encode(self, rows):
+            return tuple(rows)
+
+    def _fake_ray(self, *, initialized: bool):
+        state = {"initialized": initialized, "init": 0, "shutdown": 0, "puts": []}
+
+        def init(**kwargs):
+            state["initialized"] = True
+            state["init"] += 1
+
+        def shutdown():
+            state["initialized"] = False
+            state["shutdown"] += 1
+
+        def put(value):
+            reference = SimpleNamespace(value=value)
+            state["puts"].append(reference)
+            return reference
+
+        fake = SimpleNamespace(
+            is_initialized=lambda: state["initialized"],
+            init=init,
+            shutdown=shutdown,
+            put=put,
+        )
+        return fake, state
+
+    def test_owned_runtime_is_released_idempotently(self):
+        ray, state = self._fake_ray(initialized=False)
+        with mock.patch.dict(sys.modules, {"ray": ray}):
+            handle = RayEncodedData([1, 2, 3], encoder=self._Encoder(), num_partitions=2)
+            self.assertEqual(state["init"], 1)
+            self.assertEqual(handle.num_chunks, 2)
+            handle.close()
+            handle.close()
+        self.assertEqual(state["shutdown"], 1)
+        self.assertEqual(handle.num_chunks, 0)
+
+    def test_shared_runtime_is_never_shutdown(self):
+        ray, state = self._fake_ray(initialized=True)
+        with mock.patch.dict(sys.modules, {"ray": ray}):
+            handle = RayEncodedData([1, 2], encoder=self._Encoder(), num_partitions=1)
+            handle.close()
+        self.assertEqual(state["init"], 0)
+        self.assertEqual(state["shutdown"], 0)
 
 
 @unittest.skipUnless(HAS_RAY, "ray is not installed")

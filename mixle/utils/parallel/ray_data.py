@@ -14,6 +14,7 @@ so the rest of mixle (and CI without Ray installed) is unaffected.
 
 from __future__ import annotations
 
+import gc
 from typing import Any
 
 import numpy as np
@@ -77,6 +78,8 @@ class RayEncodedData(EncodedDataHandle):
         self.encoder = _resolve_encoder(estimator, model, encoder)
         self.size = len(rows)
         self._owns_ray = not ray.is_initialized()
+        self._closed = False
+        self._chunks: list[tuple[int, Any]] = []
         if self._owns_ray:
             ray.init(
                 address=address,
@@ -86,17 +89,22 @@ class RayEncodedData(EncodedDataHandle):
                 log_to_driver=False,
                 num_cpus=num_workers,
             )
-        nparts = int(num_partitions or num_workers or 4)
-        self._chunks: list[tuple[int, Any]] = []
-        for start, stop in _split_range(0, self.size, max(1, nparts)):
-            if stop <= start:
-                continue
-            enc = self.encoder.seq_encode(rows[start:stop])
-            self._chunks.append((stop - start, ray.put(enc)))
+        try:
+            nparts = int(num_partitions or num_workers or 4)
+            for start, stop in _split_range(0, self.size, max(1, nparts)):
+                if stop <= start:
+                    continue
+                enc = self.encoder.seq_encode(rows[start:stop])
+                self._chunks.append((stop - start, ray.put(enc)))
+        except BaseException:
+            self.close()
+            raise
 
     def _map(self, fn: Any, *args: Any) -> list[Any]:
         import ray
 
+        if self._closed:
+            raise RuntimeError("RayEncodedData is closed")
         remote = ray.remote(fn)
         futures = [remote.remote(ref, size, *args) for size, ref in self._chunks]
         return ray.get(futures)
@@ -126,6 +134,8 @@ class RayEncodedData(EncodedDataHandle):
 
         from mixle.stats import validate_estimator_keys
 
+        if self._closed:
+            raise RuntimeError("RayEncodedData is closed")
         p = validate_initialization_probability(p)
         validate_estimator_keys(estimator)
         seeds = rng.randint(2**31, size=max(1, len(self._chunks)))
@@ -162,5 +172,17 @@ class RayEncodedData(EncodedDataHandle):
         return self.size
 
     def close(self) -> None:
-        """No-op: the Ray runtime is left running (shared across handles); the process tears it down."""
-        return None
+        """Release owned object references and shut down only a runtime this handle started."""
+        if self._closed:
+            return
+        import ray
+
+        references = self._chunks
+        self._chunks = []
+        references.clear()
+        del references
+        gc.collect()  # make Ray's distributed reference-count release prompt
+        if self._owns_ray and ray.is_initialized():
+            ray.shutdown()
+        self._owns_ray = False
+        self._closed = True
