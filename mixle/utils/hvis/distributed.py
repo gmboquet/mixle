@@ -45,6 +45,7 @@ import numpy as np
 from mixle.utils.hvis.affinity import (
     _component_map_core,
     _field_log_density_features,
+    _posterior_from_log_joint,
     _posteriors_and_loglikes,
 )
 from mixle.utils.hvis.direct import (
@@ -149,14 +150,10 @@ class FiberStats:
 
 def _field_posteriors(l_f: np.ndarray, log_w: np.ndarray) -> np.ndarray:
     """The field-restricted posterior exactly as :func:`local_factors` computes it."""
-    z_f = np.asarray(l_f, dtype=np.float64) + log_w
-    finite_rows = np.isfinite(z_f).any(axis=1)
-    if not np.all(finite_rows):
-        z_f[~finite_rows] = log_w
-    z_f -= z_f.max(axis=1, keepdims=True)
-    np.exp(z_f, out=z_f)
-    z_f /= z_f.sum(axis=1, keepdims=True)
-    return z_f
+    return _posterior_from_log_joint(
+        np.asarray(l_f, dtype=np.float64) + log_w,
+        name="field-restricted model evidence",
+    )
 
 
 def fiber_stats(mix_model, chunk, *, nerve_triple: bool = False) -> FiberStats:

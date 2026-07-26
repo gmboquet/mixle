@@ -9,6 +9,56 @@ See the package docstring for the affinity definitions.
 
 import numpy as np
 
+from mixle.utils.vector import ImpossibleEvidenceError
+
+
+class AffinityCapabilityUnavailableError(RuntimeError):
+    """Raised when a requested affinity cannot be represented by a model."""
+
+
+def _validate_posterior_matrix(posterior_mat, *, name: str = "posterior_mat") -> np.ndarray:
+    z = np.asarray(posterior_mat, dtype=np.float64)
+    if z.ndim != 2 or z.shape[0] == 0 or z.shape[1] == 0:
+        raise ValueError(f"{name} must be a non-empty two-dimensional array.")
+    if not np.all(np.isfinite(z)):
+        raise ValueError(f"{name} must contain only finite values.")
+    if np.any(z < 0.0):
+        raise ValueError(f"{name} must contain non-negative probabilities.")
+    totals = z.sum(axis=1)
+    if not np.allclose(totals, 1.0, rtol=1.0e-6, atol=1.0e-10):
+        raise ValueError(f"{name} rows must sum to one.")
+    return z
+
+
+def _validate_log_likelihood_matrix(ll_mat, *, shape: tuple[int, int] | None = None) -> np.ndarray:
+    ll = np.asarray(ll_mat, dtype=np.float64)
+    if ll.ndim != 2 or ll.shape[0] == 0 or ll.shape[1] == 0:
+        raise ValueError("ll_mat must be a non-empty two-dimensional array.")
+    if shape is not None and ll.shape != shape:
+        raise ValueError("ll_mat must have the same shape as posterior_mat.")
+    if np.any(np.isnan(ll)) or np.any(np.isposinf(ll)):
+        raise ValueError("ll_mat must contain only finite values or -inf.")
+    return ll
+
+
+def _posterior_from_log_joint(log_joint, *, name: str = "model evidence") -> np.ndarray:
+    joint = np.asarray(log_joint, dtype=np.float64)
+    if joint.ndim != 2 or joint.shape[0] == 0 or joint.shape[1] == 0:
+        raise ValueError(f"{name} must be a non-empty two-dimensional array.")
+    if np.any(np.isnan(joint)) or np.any(np.isposinf(joint)):
+        raise ValueError(f"{name} must contain only finite values or -inf.")
+    possible = np.isfinite(joint).any(axis=1)
+    if not np.all(possible):
+        rows = np.flatnonzero(~possible).tolist()
+        raise ImpossibleEvidenceError(f"{name} has zero probability for row(s) {rows}.")
+    result = joint - joint.max(axis=1, keepdims=True)
+    np.exp(result, out=result)
+    totals = result.sum(axis=1, keepdims=True)
+    if not np.all(np.isfinite(totals)) or np.any(totals <= 0.0):
+        raise ImpossibleEvidenceError(f"{name} cannot be normalized.")
+    result /= totals
+    return _validate_posterior_matrix(result)
+
 
 def _affinity_factors(posterior_mat, ll_mat, affinity):
     """Factor the log-affinity as log S = sum_f log(G_f H_f^T), returned as a
@@ -26,9 +76,7 @@ def _affinity_factors(posterior_mat, ll_mat, affinity):
     if affinity == "fisher":
         raise ValueError("affinity='fisher' requires fisher_factors(model, data=...) or htsne/humap with a model.")
 
-    z = np.asarray(posterior_mat, dtype=np.float64)
-    if z.ndim != 2:
-        raise ValueError("posterior_mat must be a two-dimensional array.")
+    z = _validate_posterior_matrix(posterior_mat)
 
     if affinity == "coassign":
         return [(z, z)]
@@ -38,9 +86,9 @@ def _affinity_factors(posterior_mat, ll_mat, affinity):
     if affinity == "likelihood":
         if ll_mat is None:
             raise ValueError("affinity='likelihood' requires the component log-likelihood matrix.")
-        l = np.asarray(ll_mat, dtype=np.float64)
-        if l.shape != z.shape:
-            raise ValueError("ll_mat must have the same shape as posterior_mat.")
+        l = _validate_log_likelihood_matrix(ll_mat, shape=z.shape)
+        if not np.all(np.isfinite(l).any(axis=1)):
+            raise ImpossibleEvidenceError("ll_mat has zero probability for at least one row.")
         return [(np.exp(l - l.max(axis=1, keepdims=True)), z)]
 
     raise ValueError(
@@ -272,7 +320,9 @@ def balanced_factors(mix_model, data, field_weights=None):
 
     l_fields = list(_field_log_densities(comps, list(data)))
     if not l_fields:
-        raise ValueError("affinity='balanced' found no scorable fields in the mixture components.")
+        raise AffinityCapabilityUnavailableError(
+            "affinity='balanced' found no scorable fields in the mixture components."
+        )
 
     if field_weights is None:
         field_weights = [1.0] * len(l_fields)
@@ -284,15 +334,12 @@ def balanced_factors(mix_model, data, field_weights=None):
 
     factors = []
     for l_f, w_f in zip(l_fields, field_weights):
-        if w_f < 0:
-            raise ValueError("field_weights must be non-negative.")
-        z_f = np.asarray(l_f, dtype=np.float64) + log_w
-        finite_rows = np.isfinite(z_f).any(axis=1)
-        if not np.all(finite_rows):
-            z_f[~finite_rows] = log_w
-        z_f -= z_f.max(axis=1, keepdims=True)
-        np.exp(z_f, out=z_f)
-        z_f /= z_f.sum(axis=1, keepdims=True)
+        if not np.isfinite(w_f) or w_f < 0:
+            raise ValueError("field_weights must be finite and non-negative.")
+        z_f = _posterior_from_log_joint(
+            np.asarray(l_f, dtype=np.float64) + log_w,
+            name="field-restricted model evidence",
+        )
 
         sq = np.sqrt(z_f)
         factors.append((sq, sq) if w_f == 1.0 else (sq, sq, float(w_f)))
@@ -369,7 +416,9 @@ def local_factors(mix_model, data, field_weights=None):
 
     terms = list(_field_log_density_features(comps, list(data)))
     if not terms:
-        raise ValueError("affinity='local' found no scorable fields in the mixture components.")
+        raise AffinityCapabilityUnavailableError(
+            "affinity='local' found no scorable fields in the mixture components."
+        )
 
     if field_weights is None:
         field_weights = [1.0] * len(terms)
@@ -380,15 +429,12 @@ def local_factors(mix_model, data, field_weights=None):
 
     factors = []
     for (l_f, x_f, native_f), w_f in zip(terms, field_weights):
-        if w_f < 0:
-            raise ValueError("field_weights must be non-negative.")
-        z_f = np.asarray(l_f, dtype=np.float64) + log_w
-        finite_rows = np.isfinite(z_f).any(axis=1)
-        if not np.all(finite_rows):
-            z_f[~finite_rows] = log_w
-        z_f -= z_f.max(axis=1, keepdims=True)
-        np.exp(z_f, out=z_f)
-        z_f /= z_f.sum(axis=1, keepdims=True)
+        if not np.isfinite(w_f) or w_f < 0:
+            raise ValueError("field_weights must be finite and non-negative.")
+        z_f = _posterior_from_log_joint(
+            np.asarray(l_f, dtype=np.float64) + log_w,
+            name="field-restricted model evidence",
+        )
 
         sq = np.sqrt(z_f)
         if x_f is None or np.asarray(x_f).ndim != 2 or np.asarray(x_f).shape[1] == 0:
@@ -478,9 +524,23 @@ def _factor_parts(factor):
     else:
         raise ValueError("affinity factors must be (G, H) or (G, H, weight) tuples.")
 
-    if weight < 0:
-        raise ValueError("affinity factor weights must be non-negative.")
-    return np.asarray(g, dtype=np.float64), np.asarray(h, dtype=np.float64), float(weight)
+    try:
+        weight = float(weight)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("affinity factor weights must be finite non-negative real numbers.") from exc
+    if not np.isfinite(weight) or weight < 0:
+        raise ValueError("affinity factor weights must be finite and non-negative.")
+    g = np.asarray(g, dtype=np.float64)
+    h = np.asarray(h, dtype=np.float64)
+    if g.ndim != 2 or h.ndim != 2 or g.shape[0] == 0 or h.shape[0] == 0:
+        raise ValueError("affinity factor arrays must be non-empty two-dimensional arrays.")
+    if g.shape[1] == 0 or h.shape[1] == 0 or g.shape[1] != h.shape[1]:
+        raise ValueError("affinity factor arrays must have the same non-zero feature width.")
+    if g.shape[0] != h.shape[0]:
+        raise ValueError("affinity factor arrays must have the same row count.")
+    if not np.all(np.isfinite(g)) or not np.all(np.isfinite(h)):
+        raise ValueError("affinity factor arrays must contain only finite values.")
+    return g, h, weight
 
 
 def _is_local_factor(factor) -> bool:
@@ -493,16 +553,37 @@ def _is_fisher_factor(factor) -> bool:
 
 def _factor_n(factor) -> int:
     if _is_local_factor(factor):
-        return int(factor["sqrt_z"].shape[0])
+        sqrt_z = np.asarray(factor["sqrt_z"], dtype=np.float64)
+        if np.any(sqrt_z < 0.0):
+            raise ValueError("local affinity square-root responsibilities must be non-negative.")
+        return int(_validate_posterior_matrix(np.square(sqrt_z)).shape[0])
     if _is_fisher_factor(factor):
-        return int(factor["x"].shape[0])
+        x = np.asarray(factor["x"], dtype=np.float64)
+        if x.ndim != 2 or x.shape[0] == 0 or x.shape[1] == 0 or not np.all(np.isfinite(x)):
+            raise ValueError("fisher affinity coordinates must be a finite non-empty matrix.")
+        return int(x.shape[0])
     return int(_factor_parts(factor)[0].shape[0])
 
 
 def _factor_weight(factor) -> float:
     if _is_local_factor(factor) or _is_fisher_factor(factor):
-        return float(factor.get("weight", 1.0))
+        try:
+            weight = float(factor.get("weight", 1.0))
+        except (TypeError, ValueError) as exc:
+            raise TypeError("affinity factor weights must be finite non-negative real numbers.") from exc
+        if not np.isfinite(weight) or weight < 0.0:
+            raise ValueError("affinity factor weights must be finite and non-negative.")
+        return weight
     return _factor_parts(factor)[2]
+
+
+def _validate_similarity(similarity: np.ndarray) -> np.ndarray:
+    similarity = np.asarray(similarity, dtype=np.float64)
+    if not np.all(np.isfinite(similarity)):
+        raise ValueError("affinity similarities must be finite.")
+    if np.any(similarity < 0.0):
+        raise ValueError("affinity similarities must be non-negative.")
+    return similarity
 
 
 def _local_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray) -> np.ndarray:
@@ -510,6 +591,19 @@ def _local_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray) ->
     x = np.asarray(factor["x"], dtype=np.float64)
     inv_cov = np.asarray(factor["inv_cov"], dtype=np.float64)
     delta_scale = float(factor.get("delta_scale", 1.0))
+    if np.any(sq < 0.0):
+        raise ValueError("local affinity square-root responsibilities must be non-negative.")
+    _validate_posterior_matrix(np.square(sq), name="local affinity responsibilities")
+    if x.ndim != 2 or x.shape[0] != sq.shape[0] or x.shape[1] == 0 or not np.all(np.isfinite(x)):
+        raise ValueError("local affinity coordinates must be a finite matrix aligned to responsibilities.")
+    if inv_cov.shape != (sq.shape[1], x.shape[1], x.shape[1]) or not np.all(np.isfinite(inv_cov)):
+        raise ValueError("local affinity inverse covariances have incompatible shape or non-finite values.")
+    if not np.allclose(inv_cov, np.swapaxes(inv_cov, 1, 2), rtol=1.0e-7, atol=1.0e-10):
+        raise ValueError("local affinity inverse covariances must be symmetric.")
+    if any(float(np.linalg.eigvalsh(matrix).min()) < -1.0e-8 for matrix in inv_cov):
+        raise ValueError("local affinity inverse covariances must be positive semidefinite.")
+    if not np.isfinite(delta_scale) or delta_scale <= 0.0:
+        raise ValueError("local affinity delta_scale must be finite and positive.")
 
     zr, zc = sq[row_idx], sq[col_idx]
     xr, xc = x[row_idx], x[col_idx]
@@ -533,6 +627,8 @@ def _local_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray) ->
 
 def _fisher_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray) -> np.ndarray:
     x = np.asarray(factor["x"], dtype=np.float64)
+    if x.ndim != 2 or x.shape[0] == 0 or x.shape[1] == 0 or not np.all(np.isfinite(x)):
+        raise ValueError("fisher affinity coordinates must be a finite non-empty matrix.")
     xr = x[row_idx]
     xc = x[col_idx]
 
@@ -551,23 +647,27 @@ def _factor_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray | 
         col_idx = np.asarray(col_idx, dtype=np.int64)
 
     if _is_local_factor(factor):
-        return _local_similarity_block(factor, row_idx, col_idx)
+        return _validate_similarity(_local_similarity_block(factor, row_idx, col_idx))
     if _is_fisher_factor(factor):
-        return _fisher_similarity_block(factor, row_idx, col_idx)
+        return _validate_similarity(_fisher_similarity_block(factor, row_idx, col_idx))
 
     g, h, _ = _factor_parts(factor)
-    return np.dot(g[row_idx], h[col_idx].T)
+    return _validate_similarity(np.dot(g[row_idx], h[col_idx].T))
 
 
 def _factor_similarity_candidates(factor, i: int, candidates: np.ndarray) -> np.ndarray:
     candidates = np.asarray(candidates, dtype=np.int64)
     if _is_local_factor(factor):
-        return _local_similarity_block(factor, np.asarray([i], dtype=np.int64), candidates)[0]
+        return _validate_similarity(
+            _local_similarity_block(factor, np.asarray([i], dtype=np.int64), candidates)[0]
+        )
     if _is_fisher_factor(factor):
-        return _fisher_similarity_block(factor, np.asarray([i], dtype=np.int64), candidates)[0]
+        return _validate_similarity(
+            _fisher_similarity_block(factor, np.asarray([i], dtype=np.int64), candidates)[0]
+        )
 
     g, h, _ = _factor_parts(factor)
-    return np.dot(h[candidates], g[i])
+    return _validate_similarity(np.dot(h[candidates], g[i]))
 
 
 def _resolve_affinity(
@@ -583,15 +683,15 @@ def _resolve_affinity(
     """Resolve named affinity modes to a concrete affinity for the model.
 
     'auto' uses local statistical factors whenever raw data is available to
-    split into the model's leaf fields; if the data cannot be decomposed (or
-    no raw data was given) it falls back to 'bhattacharyya' on the joint
-    posterior.
+    split into the model's leaf fields. It falls back to joint-posterior
+    geometry only when local geometry is explicitly unavailable; invalid input
+    and implementation failures are never converted into another method.
     """
     if affinity == "auto":
         if getattr(mix_model, "components", None) is not None and data is not None:
             try:
                 return local_factors(mix_model, data, field_weights=field_weights)
-            except Exception:  # noqa: BLE001
+            except AffinityCapabilityUnavailableError:
                 return "bhattacharyya"
         return "bhattacharyya"
 
@@ -633,30 +733,38 @@ def _posteriors_and_loglikes(mix_model, data=None, enc_data=None) -> tuple[np.nd
             enc_data = mix_model.seq_encode(data)
 
     if hasattr(mix_model, "seq_component_log_density"):
-        ll_mat = np.asarray(mix_model.seq_component_log_density(enc_data), dtype=np.float64)
+        ll_mat = _validate_log_likelihood_matrix(mix_model.seq_component_log_density(enc_data))
         log_w = getattr(mix_model, "log_w", None)
         if log_w is not None:
             # The component posterior is softmax(ll + log_w); deriving it here avoids a second
             # full model evaluation. seq_posterior re-scores every component, which doubles the
             # work for expensive components (HMM forward-backward, PCFG inside-outside).
-            z_mat = ll_mat + np.asarray(log_w, dtype=np.float64).reshape(1, -1)
-            z_mat -= z_mat.max(axis=1, keepdims=True)
-            np.exp(z_mat, out=z_mat)
-            z_mat /= z_mat.sum(axis=1, keepdims=True)
+            log_w = np.asarray(log_w, dtype=np.float64)
+            if log_w.ndim != 1 or log_w.size != ll_mat.shape[1]:
+                raise ValueError("mix_model.log_w must align with the component log-likelihood columns.")
+            if np.any(np.isnan(log_w)) or np.any(np.isposinf(log_w)) or not np.any(np.isfinite(log_w)):
+                raise ValueError("mix_model.log_w must contain at least one finite log weight and otherwise only -inf.")
+            z_mat = _posterior_from_log_joint(ll_mat + log_w.reshape(1, -1))
             return z_mat, ll_mat
         if hasattr(mix_model, "seq_posterior"):
-            z_mat = np.asarray(mix_model.seq_posterior(enc_data), dtype=np.float64)
+            z_mat = _validate_posterior_matrix(mix_model.seq_posterior(enc_data))
+            if z_mat.shape != ll_mat.shape:
+                raise ValueError("seq_posterior must have the same shape as component log likelihoods.")
             return z_mat, ll_mat
 
-    ll_mat = np.asarray([u.seq_log_density(enc_data) for u in mix_model.components], dtype=np.float64).T
-    log_w = np.asarray(mix_model.log_w, dtype=np.float64).reshape(1, -1)
+    components = list(mix_model.components)
+    if not components:
+        raise ValueError("mix_model must contain at least one component.")
+    ll_mat = _validate_log_likelihood_matrix(
+        np.asarray([component.seq_log_density(enc_data) for component in components], dtype=np.float64).T
+    )
+    log_w = np.asarray(mix_model.log_w, dtype=np.float64)
+    if log_w.ndim != 1 or log_w.size != len(components):
+        raise ValueError("mix_model.log_w must align with mix_model.components.")
+    if np.any(np.isnan(log_w)) or np.any(np.isposinf(log_w)) or not np.any(np.isfinite(log_w)):
+        raise ValueError("mix_model.log_w must contain at least one finite log weight and otherwise only -inf.")
 
-    z_mat = ll_mat + log_w
-    z_mat -= z_mat.max(axis=1, keepdims=True)
-    np.exp(z_mat, out=z_mat)
-    z_mat /= z_mat.sum(axis=1, keepdims=True)
-
-    return z_mat, ll_mat
+    return _posterior_from_log_joint(ll_mat + log_w.reshape(1, -1)), ll_mat
 
 
 def model_log_affinity(
@@ -681,6 +789,8 @@ def model_log_affinity(
     """
     factors = _affinity_factors(posterior_mat, ll_mat, affinity)
     n = _factor_n(factors[0])
+    if evidence_cap is not None and (not np.isfinite(evidence_cap) or evidence_cap < 0.0):
+        raise ValueError("evidence_cap must be finite and non-negative or None.")
     cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
 
     log_s = np.zeros((n, n))
@@ -692,7 +802,7 @@ def model_log_affinity(
                 continue
             if _factor_n(factor) != n:
                 raise ValueError("affinity factor arrays must have compatible row counts.")
-            term = np.log(np.maximum(_factor_similarity_block(factor, idx), 1.0e-300))
+            term = np.log(_factor_similarity_block(factor, idx))
             if cap is not None:
                 np.maximum(term, -cap, out=term)
             log_s += weight * term
@@ -782,7 +892,7 @@ def component_map(
     components' responsibility profiles. These vertices anchor :func:`barycentric_init` and
     :func:`mixle.utils.hvis.direct.model_map`.
     """
-    z = np.asarray(z, dtype=np.float64)
+    z = _validate_posterior_matrix(z, name="responsibilities")
     k = z.shape[1]
     if k == 1:
         return np.zeros((1, emb_dim))
@@ -856,7 +966,7 @@ def barycentric_init(z: np.ndarray, emb_dim: int = 2, *, jitter: float = 0.15, s
     makes real. Rescaled to the conventional 1e-4 standard deviation so optimizer dynamics (early
     exaggeration, learning rates) match the random-init path.
     """
-    z = np.asarray(z, dtype=np.float64)
+    z = _validate_posterior_matrix(z, name="responsibilities")
     vertices = component_map(z, emb_dim=emb_dim)
     y = z @ vertices
     gaps = [
@@ -885,6 +995,8 @@ def log_affinity_block(
     """
     row_idx = np.asarray(row_idx, dtype=np.int64)
     col_idx = np.asarray(col_idx, dtype=np.int64)
+    if evidence_cap is not None and (not np.isfinite(evidence_cap) or evidence_cap < 0.0):
+        raise ValueError("evidence_cap must be finite and non-negative or None.")
     cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
     log_s = np.zeros((len(row_idx), len(col_idx)))
     with np.errstate(divide="ignore"):
@@ -892,7 +1004,7 @@ def log_affinity_block(
             weight = _factor_weight(factor)
             if weight == 0.0:
                 continue
-            term = np.log(np.maximum(_factor_similarity_block(factor, row_idx, col_idx), 1.0e-300))
+            term = np.log(_factor_similarity_block(factor, row_idx, col_idx))
             if cap is not None:
                 np.maximum(term, -cap, out=term)
             log_s += weight * term
