@@ -5,6 +5,7 @@ Empirical KL divergence between a fitted model and data, plus index/data partiti
 """
 
 from collections.abc import Sequence
+from operator import index
 from typing import Any, TypeVar
 
 import numpy as np
@@ -23,11 +24,13 @@ def empirical_kl_divergence(
     dist1: SequenceEncodableProbabilityDistribution,
     dist2: SequenceEncodableProbabilityDistribution,
     enc_data: list[tuple[int, Any]],
-) -> tuple[float, float, float]:
-    """Computes the emirical KL-divergence between two densities.
+) -> tuple[float, int, int]:
+    """Estimate ``E[log dist1(X) - log dist2(X)]`` on encoded observations.
 
-    Compute the KL-divergence between dist1 and dist2, for encoded sequence of data. Dists must both have the
-    same encodings.
+    The estimator is the arithmetic mean of per-observation log-density
+    differences on rows where both scores are finite. Invalid-score counts for
+    each model are returned separately. At least one jointly finite row is
+    required; positive infinity, negative infinity, and NaN are all invalid.
 
     Args:
         dist1 (SequenceEncodableProbabilityDistribution): Distribution compatible with enc_data.
@@ -35,33 +38,60 @@ def empirical_kl_divergence(
         enc_data (List[Tuple[int, Any]]): List of Tuple containing chunk size and encoded sequence for chunked data.
 
     Returns:
-        Tuple of KL-divergence estimate and counts of invalid likelihood values for each distribution.
+        Estimate followed by invalid-score counts for ``dist1`` and ``dist2``.
 
     """
 
-    ll = seq_log_density(enc_data, estimate=(dist1, dist2))
-    ll = np.hstack(ll)
+    if not enc_data:
+        raise ValueError("empirical_kl_divergence requires non-empty encoded data")
+    chunks = seq_log_density(enc_data, estimate=(dist1, dist2))
+    if not chunks:
+        raise ValueError("density evaluation returned no score chunks")
+    try:
+        ll = np.hstack(chunks)
+    except ValueError as exc:
+        raise ValueError("density score chunks must have one aligned row per model") from exc
+    if ll.ndim != 2 or ll.shape[0] != 2 or ll.shape[1] == 0:
+        raise ValueError("density evaluation must return a non-empty 2 by n score matrix")
 
-    l1 = ll[0, :]
-    l2 = ll[1, :]
-    g1 = np.bitwise_and(l1 != -np.inf, ~np.isnan(l1))
-    g2 = np.bitwise_and(l2 != -np.inf, ~np.isnan(l2))
-    gg = np.bitwise_and(g1, g2)
+    l1, l2 = np.asarray(ll[0], dtype=float), np.asarray(ll[1], dtype=float)
+    finite1, finite2 = np.isfinite(l1), np.isfinite(l2)
+    jointly_finite = finite1 & finite2
+    if not jointly_finite.any():
+        raise ValueError("empirical KL has no observations with two finite log densities")
+    estimate = float(np.mean(l1[jointly_finite] - l2[jointly_finite]))
+    if not np.isfinite(estimate):
+        raise ValueError("empirical KL produced a non-finite estimate")
+    return estimate, int((~finite1).sum()), int((~finite2).sum())
 
-    max_l1 = np.max(l1[gg])
-    max_l2 = np.max(l2[gg])
 
-    p1 = np.exp(l1[gg] - max_l1)
-    p1 /= p1.sum()
+def _exact_integer(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be an integer")
+    try:
+        return int(index(value))
+    except TypeError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
 
-    p2 = np.exp(l2[gg] - max_l2)
-    p2 /= p2.sum()
 
-    r1 = (p1 * (np.log(p1) - np.log(p2))).sum()
-    r2 = (~g1).sum()
-    r3 = (~g2).sum()
+def _scalar_probability(value: Any, name: str) -> float:
+    array = np.asarray(value, dtype=float)
+    if array.size != 1:
+        raise ValueError(f"{name} must return exactly one scalar value")
+    result = float(array.reshape(-1)[0])
+    if not np.isfinite(result) or not 0.0 <= result <= 1.0:
+        raise ValueError(f"{name} must return a finite probability in [0, 1]")
+    return result
 
-    return r1, r2, r3
+
+def _scalar_log_probability(value: Any, name: str) -> float:
+    array = np.asarray(value, dtype=float)
+    if array.size != 1:
+        raise ValueError(f"{name} must return exactly one scalar value")
+    result = float(array.reshape(-1)[0])
+    if np.isnan(result) or np.isposinf(result):
+        raise ValueError(f"{name} must return a finite log probability or negative infinity")
+    return result
 
 
 def ks_test(data: Sequence[float], dist: Any) -> tuple[float, float]:
@@ -96,25 +126,51 @@ def chi_square_test(
     Returns ``(chi2, dof, p_value)`` with ``dof = #cells - 1`` and the upper-tail chi-square p-value;
     ``lo``/``hi`` default to the data's min/max. A small p-value is evidence of misfit.
     """
-    import math
-
     from scipy.stats import chi2 as _chi2
 
-    x = np.asarray(data)
-    n = x.size
-    if n == 0:
+    if isinstance(data, (str, bytes)):
+        raise TypeError("chi_square_test data must be a sequence of integers")
+    raw = list(data)
+    if not raw:
         raise ValueError("chi_square_test requires at least one observation.")
-    lo = int(np.min(x)) if lo is None else int(lo)
-    hi = int(np.max(x)) if hi is None else int(hi)
+    x = np.asarray([_exact_integer(value, "observations") for value in raw], dtype=np.int64)
+    n = x.size
+    lo = int(np.min(x)) if lo is None else _exact_integer(lo, "lo")
+    hi = int(np.max(x)) if hi is None else _exact_integer(hi, "hi")
+    if lo > hi:
+        raise ValueError("lo must be less than or equal to hi")
+    if not callable(getattr(dist, "cdf", None)) or not callable(getattr(dist, "log_density", None)):
+        raise TypeError("dist must expose callable cdf and log_density methods")
     ks = list(range(lo, hi + 1))
-    observed = np.array([np.sum(x == k) for k in ks] + [np.sum((x < lo) | (x > hi))], dtype=np.float64)
-    tail_p = max(0.0, 1.0 - (float(dist.cdf(hi)) - float(dist.cdf(lo - 1))))
-    probs = np.array([math.exp(dist.log_density(k)) for k in ks] + [tail_p], dtype=np.float64)
+    observed = np.array(
+        [np.sum(x == k) for k in ks] + [np.sum((x < lo) | (x > hi))],
+        dtype=np.float64,
+    )
+    cdf_hi = _scalar_probability(dist.cdf(hi), "dist.cdf")
+    cdf_before = _scalar_probability(dist.cdf(lo - 1), "dist.cdf")
+    if cdf_before > cdf_hi:
+        raise ValueError("dist.cdf must be non-decreasing over the requested bounds")
+    tail_p = 1.0 - (cdf_hi - cdf_before)
+    log_probs = [_scalar_log_probability(dist.log_density(k), "dist.log_density") for k in ks]
+    probs = np.array(
+        [0.0 if np.isneginf(log_p) else float(np.exp(log_p)) for log_p in log_probs] + [tail_p],
+        dtype=np.float64,
+    )
+    if (
+        not np.all(np.isfinite(probs))
+        or np.any(probs < 0.0)
+        or not np.isclose(float(probs.sum()), 1.0, rtol=1e-8, atol=1e-10)
+    ):
+        raise ValueError("discrete cell probabilities must be finite, non-negative, and sum to one")
     expected = n * probs
-    mask = expected > 0.0
-    chi2 = float(np.sum((observed[mask] - expected[mask]) ** 2 / expected[mask]))
-    dof = int(mask.sum()) - 1
-    return chi2, dof, float(_chi2.sf(chi2, dof))
+    positive = expected > 0.0
+    dof = int(positive.sum()) - 1
+    if np.any((observed > 0.0) & ~positive):
+        return float("inf"), max(dof, 0), 0.0
+    if dof < 1:
+        raise ValueError("chi-square p-value requires at least two positive-probability cells")
+    statistic = float(np.sum((observed[positive] - expected[positive]) ** 2 / expected[positive]))
+    return statistic, dof, float(_chi2.sf(statistic, dof))
 
 
 def k_fold_split_index(sz: int, k: int, rng: RandomState) -> np.ndarray:
