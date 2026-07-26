@@ -1,15 +1,15 @@
 """The fuzzy nerve of the learned cover, and map-fidelity receipts (design review R3/R2, partial).
 
-The fitted mixture is a parametrized cover of the data manifold: components are cover elements and
-the posterior is a partition of unity subordinate to it. By the nerve theorem, the topology of the
-data (for a good cover) is the homotopy type of the cover's NERVE -- the simplicial complex whose
-k-simplices are (k+1)-wise overlapping components. :func:`fuzzy_nerve` computes its weighted 1- and
-2-skeleton directly from the posteriors (this is soft Mapper with an EM-learned cover), and
+The fitted mixture defines a heuristic overlap cover: components are cover elements and the
+posterior is a partition of unity. The nerve theorem would identify its nerve with data topology
+only after establishing a good cover (contractible elements and intersections), which HVis does
+not prove. :func:`fuzzy_nerve` computes a weighted 1- and 2-skeleton directly from the posteriors
+(soft Mapper with an EM-learned cover), labels that limitation explicitly, and
 :func:`nerve_report` turns it into receipts a 2-D map cannot give on its own:
 
-* **holes** -- an unfilled cycle of strongly-overlapping components (e.g. a ring-shaped manifold)
-  is a loop in the data's topology. A plane embedding may render it faithfully or may distort it;
-  either way the user should KNOW the loop exists rather than infer it from blob positions.
+* **candidate holes** -- an unfilled cycle of strongly-overlapping components (e.g. a ring-shaped
+  cover) is a loop in the overlap complex. It is not certified data topology without a good-cover
+  proof.
 * **disconnection** -- a cover that splits into multiple connected pieces.
 
 Cycle classification is deliberately conservative: a 3-cycle is "filled" exactly when its triple
@@ -71,6 +71,12 @@ def fuzzy_nerve(z: np.ndarray, *, edge_threshold: float = 0.02, triangle_thresho
         "triangles": triangles,
         "edge_threshold": float(edge_threshold),
         "triangle_threshold": float(triangle_threshold),
+        "topology_status": "heuristic_overlap_complex",
+        "good_cover_verified": False,
+        "limitations": [
+            "good-cover conditions (contractible components and intersections) were not established; "
+            "cycles are overlap-complex candidates, not certified data topology"
+        ],
     }
 
 
@@ -122,8 +128,8 @@ def nerve_report(nerve: dict) -> dict:
 
     A hole is an independent cycle of strong edges not directly filled by a strong 2-simplex
     (3-cycles are checked exactly; longer cycles are conservatively reported as candidates). The
-    ``diagnosis`` strings are the user-facing half: a loop in the cover is real data topology that
-    a 2-D layout may distort silently.
+    The receipt is explicitly heuristic: a loop in the overlap complex is only
+    a candidate topological feature until good-cover conditions are proved.
     """
     strong_edges = [e for e, w in nerve["edges"].items() if w >= nerve["edge_threshold"]]
     strong_triangles = {t for t, w in nerve["triangles"].items() if w >= nerve["triangle_threshold"]}
@@ -144,9 +150,9 @@ def nerve_report(nerve: dict) -> dict:
         )
     for hole in holes:
         diagnosis.append(
-            f"the cover contains an unfilled cycle through components {hole}: the data topology has a loop "
-            "(ring/period-like structure) that a 2-D layout may distort -- verify it deliberately rather "
-            "than reading it off blob positions."
+            f"the heuristic overlap complex contains an unfilled cycle through components {hole}: this is "
+            "a candidate loop (ring/period-like structure), not certified data topology because good-cover "
+            "conditions were not established."
         )
 
     return {
@@ -154,6 +160,14 @@ def nerve_report(nerve: dict) -> dict:
         "n_strong_edges": len(strong_edges),
         "cycles": [sorted(c) for c in cycles],
         "holes": holes,
+        "topology_status": nerve.get("topology_status", "heuristic_overlap_complex"),
+        "good_cover_verified": bool(nerve.get("good_cover_verified", False)),
+        "limitations": list(
+            nerve.get(
+                "limitations",
+                ["good-cover conditions were not established; topology is heuristic"],
+            )
+        ),
         "diagnosis": diagnosis,
     }
 
@@ -202,10 +216,12 @@ def model_fit_health(
     data it is about to be a map of? Measured from the model's own residual structure -- no raw
     feature space is assumed, which is the whole point of HViS.
 
-    * **fiber calibration** -- per component, the squared Mahalanobis of its dominant points'
-      whitened fiber coordinates should look chi-squared: the fraction inside the ``coverage_q``
-      ball is compared against ``coverage_q``. A large gap means the component's shape claim is
-      wrong (too wide, too narrow, or mis-shaped).
+    * **fiber calibration** -- dominant points are deterministically split into
+      reference and evaluation rows. Center/covariance are fitted only on the
+      reference split; evaluation Mahalanobis distances use the exact
+      finite-sample multivariate-normal predictive F threshold. This avoids
+      comparing in-sample fitted distances with an inapplicable fixed-parameter
+      chi-square law.
     * **merged-regime detector** -- a deterministic 2-means split (top-PC sign init) of each
       component's dominant fiber coordinates; a separation ratio above the threshold with a
       non-trivial minority says one component is covering what the data treats as two regimes
@@ -220,11 +236,26 @@ def model_fit_health(
     * **held-out check** -- with ``holdout`` data, a mean log-density drop > 1 nat vs training is
       flagged (memorization / drift).
     """
-    from scipy.stats import chi2
+    from scipy.stats import binomtest
+    from scipy.stats import f as f_distribution
 
     from mixle.utils.hvis.direct import component_fiber_coords
 
     data = list(data)
+    if not np.isfinite(coverage_q) or not 0.0 < coverage_q < 1.0:
+        raise ValueError("coverage_q must be finite and strictly between zero and one.")
+    if (
+        isinstance(min_component_points, bool)
+        or not isinstance(min_component_points, (int, np.integer))
+        or min_component_points < 2
+    ):
+        raise ValueError("min_component_points must be an integer of at least two.")
+    if merged_sep_threshold is not None and (
+        not np.isfinite(merged_sep_threshold) or merged_sep_threshold <= 0.0
+    ):
+        raise ValueError("merged_sep_threshold must be finite and positive or None.")
+    if not np.isfinite(shattered_weight) or not 0.0 <= shattered_weight <= 1.0:
+        raise ValueError("shattered_weight must be a finite probability.")
     z, us, _labels, _t = component_fiber_coords(mix_model, data, field_weights=field_weights)
     k_count = z.shape[1]
     dominant = z.argmax(axis=1)
@@ -233,22 +264,65 @@ def model_fit_health(
     diagnosis = []
     for k in range(k_count):
         mine = us[k][dominant == k]
-        entry: dict = {"n_points": int(len(mine)), "coverage": None, "merged_separation": None}
+        if mine.ndim != 2 or not np.all(np.isfinite(mine)):
+            raise ValueError("component fiber coordinates must be finite two-dimensional arrays.")
+        entry: dict = {
+            "n_points": int(len(mine)),
+            "coverage": None,
+            "coverage_reference": "held_out_predictive_f",
+            "coverage_reference_points": 0,
+            "coverage_evaluation_points": 0,
+            "merged_separation": None,
+        }
         if len(mine) >= min_component_points:
-            mu = mine.mean(axis=0)
-            centered = mine - mu
             dim = mine.shape[1]
-            cov = centered.T @ centered / max(len(mine) - 1, 1) + 1.0e-9 * np.eye(dim)
-            m2 = np.einsum("ij,jk,ik->i", centered, np.linalg.pinv(cov), centered)
-            coverage = float(np.mean(m2 <= chi2.ppf(coverage_q, df=dim)))
-            entry["coverage"] = coverage
-            if abs(coverage - coverage_q) > 0.15:
-                diagnosis.append(
-                    f"component {k}: fiber calibration off (coverage {coverage:.2f} vs nominal {coverage_q}) -- "
-                    "its shape claim does not match its points."
-                )
+            evaluation_mask = np.arange(len(mine)) % 3 == 0
+            reference = mine[~evaluation_mask]
+            evaluation = mine[evaluation_mask]
+            entry["coverage_reference_points"] = int(len(reference))
+            entry["coverage_evaluation_points"] = int(len(evaluation))
+            if dim > 0 and len(reference) > dim and len(evaluation) > 0:
+                reference_mu = reference.mean(axis=0)
+                reference_centered = reference - reference_mu
+                reference_cov = reference_centered.T @ reference_centered / float(len(reference) - 1)
+                eigvals = np.linalg.eigvalsh(reference_cov)
+                scale = max(float(np.max(np.abs(eigvals))), 1.0)
+                if float(eigvals.min()) > np.finfo(np.float64).eps * scale * max(dim, 1):
+                    evaluation_centered = evaluation - reference_mu
+                    m2 = np.einsum(
+                        "ij,jk,ik->i",
+                        evaluation_centered,
+                        np.linalg.inv(reference_cov),
+                        evaluation_centered,
+                    )
+                    n_ref = len(reference)
+                    threshold = (
+                        dim
+                        * (n_ref + 1)
+                        * (n_ref - 1)
+                        / (n_ref * (n_ref - dim))
+                        * f_distribution.ppf(coverage_q, dim, n_ref - dim)
+                    )
+                    coverage = float(np.mean(m2 <= threshold))
+                    entry["coverage"] = coverage
+                    entry["coverage_threshold"] = float(threshold)
+                    successes = int(np.sum(m2 <= threshold))
+                    calibration_p = float(binomtest(successes, len(evaluation), p=coverage_q).pvalue)
+                    entry["coverage_calibration_pvalue"] = calibration_p
+                    if calibration_p < 0.01:
+                        diagnosis.append(
+                            f"component {k}: held-out fiber calibration off (coverage {coverage:.2f} vs "
+                            f"nominal {coverage_q}) under the finite-sample predictive F reference -- "
+                            "its shape claim does not match evaluation points."
+                        )
 
             # deterministic 2-means on the top principal axis: split by sign, then Lloyd iterations
+            if dim == 0:
+                components.append(entry)
+                continue
+            mu = mine.mean(axis=0)
+            centered = mine - mu
+            cov = centered.T @ centered / max(len(mine) - 1, 1) + 1.0e-9 * np.eye(dim)
             vals, vecs = np.linalg.eigh(cov)
             axis = vecs[:, np.argmax(vals)]
             proj = centered @ axis

@@ -44,6 +44,10 @@ class FuzzyNerveTest(unittest.TestCase):
         self.assertEqual(len(report["holes"]), 1)  # one independent loop, unfilled
         self.assertEqual(sorted(report["holes"][0]), list(range(8)))
         self.assertTrue(any("loop" in d for d in report["diagnosis"]))
+        self.assertEqual(report["topology_status"], "heuristic_overlap_complex")
+        self.assertFalse(report["good_cover_verified"])
+        self.assertTrue(report["limitations"])
+        self.assertIn("candidate", report["diagnosis"][0])
 
     def test_chain_cover_has_no_cycles(self):
         model = MixtureDistribution(
