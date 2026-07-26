@@ -17,6 +17,8 @@ from mixle.experimental.typed_runtime import (
     ObjectiveKind,
     StateSemantics,
     UpdateContract,
+    UpdateGraph,
+    UpdateGraphError,
     UpdateKind,
     WorkMeasurement,
     compile_update_graph,
@@ -162,8 +164,20 @@ class DependencyGraphTest:
         assert len(graph.nodes) == 2
         child = next(node for node in graph.nodes if node.node_id != graph.root_node)
         shared_edges = [edge for edge in graph.edges if edge.source_node == child.node_id]
-        assert len(shared_edges) == 2
+        assert len(shared_edges) == 1
         assert graph.invalidated_by(child.node_id) == (child.node_id, graph.root_node)
+
+    def test_duplicate_dependency_edges_are_rejected(self):
+        graph = compile_update_graph(
+            MixtureDistribution(
+                [GaussianDistribution(-1.0, 1.0), GaussianDistribution(1.0, 1.0)],
+                [0.5, 0.5],
+            ),
+            MixtureEstimator([GaussianEstimator(), GaussianEstimator()]),
+        )
+        edge = graph.edges[0]
+        with pytest.raises(UpdateGraphError, match="edges must be unique"):
+            UpdateGraph(graph.nodes, (edge, edge), graph.root_node)
 
     def test_graph_is_json_explainable_without_runtime_objects(self):
         graph = compile_update_graph(GaussianDistribution(0.0, 1.0), GaussianEstimator())

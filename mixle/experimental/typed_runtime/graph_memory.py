@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +19,18 @@ class GraphPartition:
     node_ids: tuple[str, ...]
     token_count: int
     source_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.partition_id or not self.node_ids:
+            raise ValueError("graph partition id and node ownership must be non-empty.")
+        if len(set(self.node_ids)) != len(self.node_ids) or any(not node_id for node_id in self.node_ids):
+            raise ValueError("graph partition node ids must be unique and non-empty.")
+        if isinstance(self.token_count, bool) or not isinstance(self.token_count, int) or self.token_count < 0:
+            raise ValueError("graph partition token_count must be a non-negative integer.")
+        if len(set(self.source_ids)) != len(self.source_ids) or any(not source_id for source_id in self.source_ids):
+            raise ValueError("graph partition source ids must be unique and non-empty.")
+        object.__setattr__(self, "node_ids", tuple(sorted(self.node_ids)))
+        object.__setattr__(self, "source_ids", tuple(sorted(self.source_ids)))
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible partition descriptor."""
@@ -37,15 +50,31 @@ class GraphPartitionPlan:
     partitions: tuple[GraphPartition, ...]
     boundary_edge_ids: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        partition_ids = [partition.partition_id for partition in self.partitions]
+        if len(partition_ids) != len(set(partition_ids)):
+            raise ValueError("graph partition ids must be unique.")
+        node_ids = [node_id for partition in self.partitions for node_id in partition.node_ids]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("graph partition ownership must be unique.")
+        if len(self.boundary_edge_ids) != len(set(self.boundary_edge_ids)):
+            raise ValueError("graph boundary edge ids must be unique.")
+
     def partition(self, partition_id: str) -> GraphPartition:
         """Return a partition by id."""
 
-        return next(row for row in self.partitions if row.partition_id == partition_id)
+        for row in self.partitions:
+            if row.partition_id == partition_id:
+                return row
+        raise KeyError(partition_id)
 
     def owner(self, node_id: str) -> str:
         """Return the unique partition that owns a node."""
 
-        return next(row.partition_id for row in self.partitions if node_id in row.node_ids)
+        for row in self.partitions:
+            if node_id in row.node_ids:
+                return row.partition_id
+        raise KeyError(node_id)
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible partition plan."""
@@ -128,6 +157,8 @@ class CachedGraphPartition:
     partition: GraphPartition
     content_hash: str
     graph_version: int
+    measured_token_count: int
+    boundary_edge_ids: tuple[str, ...]
     pinned: bool = False
 
 
@@ -151,16 +182,59 @@ class GraphPrefetchReceipt:
         }
 
 
+def _canonical_partition(
+    partition: GraphPartition,
+    graph: ContextGraph,
+) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
+    missing = sorted(set(partition.node_ids) - set(graph.nodes))
+    if missing:
+        raise KeyError("graph partition refers to missing nodes: %s" % ", ".join(missing))
+    measured_tokens = sum(graph.nodes[node_id].token_count for node_id in partition.node_ids)
+    source_ids = tuple(
+        sorted(
+            {
+                provenance.source_id
+                for node_id in partition.node_ids
+                for provenance in graph.nodes[node_id].provenance
+            }
+        )
+    )
+    if partition.token_count != measured_tokens:
+        raise ValueError(
+            "graph partition token_count does not match canonical node content: declared %d, measured %d."
+            % (partition.token_count, measured_tokens)
+        )
+    if partition.source_ids != source_ids:
+        raise ValueError("graph partition source_ids do not match canonical node provenance.")
+    owned = set(partition.node_ids)
+    boundary_edge_ids = tuple(
+        sorted(
+            edge.edge_id
+            for edge in graph.edges.values()
+            if (edge.source_node in owned) != (edge.target_node in owned)
+        )
+    )
+    return measured_tokens, source_ids, boundary_edge_ids
+
+
 def _partition_hash(partition: GraphPartition, graph: ContextGraph) -> str:
+    measured_tokens, source_ids, boundary_edge_ids = _canonical_partition(partition, graph)
     node_hashes = tuple((node_id, graph.nodes[node_id].content_hash) for node_id in partition.node_ids)
     edge_rows = tuple(
         sorted(
             (edge.edge_id, edge.as_dict())
             for edge in graph.edges.values()
-            if edge.source_node in partition.node_ids and edge.target_node in partition.node_ids
+            if edge.source_node in partition.node_ids or edge.target_node in partition.node_ids
         )
     )
-    return payload_fingerprint((partition.as_dict(), node_hashes, edge_rows))
+    canonical = (
+        partition.partition_id,
+        partition.node_ids,
+        measured_tokens,
+        source_ids,
+        boundary_edge_ids,
+    )
+    return payload_fingerprint((canonical, node_hashes, edge_rows))
 
 
 class GraphMemoryCache:
@@ -172,54 +246,85 @@ class GraphMemoryCache:
         self.maximum_tokens = maximum_tokens
         self.maximum_partitions = maximum_partitions
         self._entries: OrderedDict[str, CachedGraphPartition] = OrderedDict()
+        self._lock = threading.RLock()
 
     @property
     def resident_tokens(self) -> int:
         """Total tokens in resident partitions."""
 
-        return sum(entry.partition.token_count for entry in self._entries.values())
+        with self._lock:
+            return self._resident_tokens(self._entries)
+
+    @staticmethod
+    def _resident_tokens(entries: OrderedDict[str, CachedGraphPartition]) -> int:
+        return sum(entry.measured_token_count for entry in entries.values())
+
+    @staticmethod
+    def _entry(
+        partition: GraphPartition,
+        graph: ContextGraph,
+        *,
+        pinned: bool,
+    ) -> CachedGraphPartition:
+        measured_tokens, _, boundary_edge_ids = _canonical_partition(partition, graph)
+        return CachedGraphPartition(
+            partition,
+            _partition_hash(partition, graph),
+            graph.version,
+            measured_tokens,
+            boundary_edge_ids,
+            pinned,
+        )
+
+    @staticmethod
+    def _get_from(
+        entries: OrderedDict[str, CachedGraphPartition],
+        partition_id: str,
+        graph: ContextGraph,
+    ) -> CachedGraphPartition | None:
+        entry = entries.get(partition_id)
+        if entry is None:
+            return None
+        try:
+            current_hash = _partition_hash(entry.partition, graph)
+        except (KeyError, ValueError):
+            del entries[partition_id]
+            return None
+        if current_hash != entry.content_hash:
+            del entries[partition_id]
+            return None
+        entries.move_to_end(partition_id)
+        return entry
 
     def get(self, partition_id: str, graph: ContextGraph) -> CachedGraphPartition | None:
         """Return a current partition, dropping stale content fingerprints."""
 
-        entry = self._entries.get(partition_id)
-        if entry is None:
-            return None
-        if any(node_id not in graph.nodes for node_id in entry.partition.node_ids):
-            del self._entries[partition_id]
-            return None
-        if _partition_hash(entry.partition, graph) != entry.content_hash:
-            del self._entries[partition_id]
-            return None
-        self._entries.move_to_end(partition_id)
-        return entry
+        with self._lock, graph.transaction():
+            return self._get_from(self._entries, partition_id, graph)
 
-    def _evict(self) -> tuple[str, ...]:
+    def _evict(self, entries: OrderedDict[str, CachedGraphPartition]) -> tuple[str, ...]:
         evicted = []
-        while len(self._entries) > self.maximum_partitions or self.resident_tokens > self.maximum_tokens:
-            victim = next((key for key, entry in self._entries.items() if not entry.pinned), None)
+        while len(entries) > self.maximum_partitions or self._resident_tokens(entries) > self.maximum_tokens:
+            victim = next((key for key, entry in entries.items() if not entry.pinned), None)
             if victim is None:
                 raise MemoryError("pinned graph partitions exceed cache bounds.")
-            del self._entries[victim]
+            del entries[victim]
             evicted.append(victim)
         return tuple(evicted)
 
     def put(self, partition: GraphPartition, graph: ContextGraph, *, pinned: bool = False) -> tuple[str, ...]:
         """Insert/refresh one partition and return evicted ids."""
 
-        if partition.token_count > self.maximum_tokens:
-            raise MemoryError("graph partition is larger than the entire cache token budget.")
-        if any(node_id not in graph.nodes for node_id in partition.node_ids):
-            raise KeyError("graph partition refers to missing nodes.")
-        previous = self._entries.copy()
-        entry = CachedGraphPartition(partition, _partition_hash(partition, graph), graph.version, pinned)
-        self._entries[partition.partition_id] = entry
-        self._entries.move_to_end(partition.partition_id)
-        try:
-            return self._evict()
-        except MemoryError:
-            self._entries = previous
-            raise
+        with self._lock, graph.transaction():
+            entry = self._entry(partition, graph, pinned=pinned)
+            if entry.measured_token_count > self.maximum_tokens:
+                raise MemoryError("graph partition is larger than the entire cache token budget.")
+            staged = self._entries.copy()
+            staged[partition.partition_id] = entry
+            staged.move_to_end(partition.partition_id)
+            evicted = self._evict(staged)
+            self._entries = staged
+            return evicted
 
     def prefetch(
         self,
@@ -229,33 +334,69 @@ class GraphMemoryCache:
     ) -> GraphPrefetchReceipt:
         """Load requested partitions in order under LRU bounds."""
 
-        loaded = []
-        evicted = []
-        for partition_id in partition_ids:
-            partition = plan.partition(partition_id)
-            if self.get(partition_id, graph) is None:
-                evicted.extend(self.put(partition, graph))
-                loaded.append(partition_id)
-        return GraphPrefetchReceipt(partition_ids, tuple(loaded), tuple(evicted), self.resident_tokens)
+        if len(partition_ids) != len(set(partition_ids)):
+            raise ValueError("graph prefetch partition ids must be unique.")
+        with self._lock, graph.transaction():
+            owned = {node_id for partition in plan.partitions for node_id in partition.node_ids}
+            if owned != set(graph.nodes):
+                raise ValueError("graph partition plan must own every current graph node exactly once.")
+            owner = {
+                node_id: partition.partition_id
+                for partition in plan.partitions
+                for node_id in partition.node_ids
+            }
+            boundary = tuple(
+                sorted(
+                    edge.edge_id
+                    for edge in graph.edges.values()
+                    if owner[edge.source_node] != owner[edge.target_node]
+                )
+            )
+            if boundary != plan.boundary_edge_ids:
+                raise ValueError("graph partition plan boundary edges do not match the current graph.")
+
+            staged = self._entries.copy()
+            loaded = []
+            evicted = []
+            for partition_id in partition_ids:
+                partition = plan.partition(partition_id)
+                if self._get_from(staged, partition_id, graph) is None:
+                    entry = self._entry(partition, graph, pinned=False)
+                    if entry.measured_token_count > self.maximum_tokens:
+                        raise MemoryError("graph partition is larger than the entire cache token budget.")
+                    staged[partition.partition_id] = entry
+                    staged.move_to_end(partition.partition_id)
+                    evicted.extend(self._evict(staged))
+                    loaded.append(partition_id)
+            self._entries = staged
+            return GraphPrefetchReceipt(
+                partition_ids,
+                tuple(loaded),
+                tuple(evicted),
+                self._resident_tokens(staged),
+            )
 
     def as_dict(self) -> dict[str, Any]:
         """Return resident cache metadata in LRU order."""
 
-        return {
-            "maximum_tokens": self.maximum_tokens,
-            "maximum_partitions": self.maximum_partitions,
-            "resident_tokens": self.resident_tokens,
-            "entries": [
-                {
-                    "partition_id": entry.partition.partition_id,
-                    "token_count": entry.partition.token_count,
-                    "content_hash": entry.content_hash,
-                    "graph_version": entry.graph_version,
-                    "pinned": entry.pinned,
-                }
-                for entry in self._entries.values()
-            ],
-        }
+        with self._lock:
+            return {
+                "maximum_tokens": self.maximum_tokens,
+                "maximum_partitions": self.maximum_partitions,
+                "resident_tokens": self._resident_tokens(self._entries),
+                "entries": [
+                    {
+                        "partition_id": entry.partition.partition_id,
+                        "declared_token_count": entry.partition.token_count,
+                        "measured_token_count": entry.measured_token_count,
+                        "boundary_edge_ids": list(entry.boundary_edge_ids),
+                        "content_hash": entry.content_hash,
+                        "graph_version": entry.graph_version,
+                        "pinned": entry.pinned,
+                    }
+                    for entry in self._entries.values()
+                ],
+            }
 
 
 __all__ = [

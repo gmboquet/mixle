@@ -552,16 +552,23 @@ def compile_update_graph(
 
     nodes: list[UpdateNode] = []
     edges: list[DependencyEdge] = []
+    edge_keys: set[tuple[str, str, ArtifactKind]] = set()
     by_identity: dict[int, str] = {}
     used_bindings: set[str] = set()
     used_overrides: set[str] = set()
+
+    def add_edge(edge: DependencyEdge) -> None:
+        key = (edge.source_node, edge.target_node, edge.artifact)
+        if key not in edge_keys:
+            edge_keys.add(key)
+            edges.append(edge)
 
     def visit(current: Any, current_estimator: Any | None, path: str, parent_id: str | None) -> str:
         ident = id(current)
         if ident in by_identity:
             node_id = by_identity[ident]
             if parent_id is not None:
-                edges.append(
+                add_edge(
                     DependencyEdge(
                         node_id,
                         parent_id,
@@ -606,7 +613,7 @@ def compile_update_graph(
             )
         )
         if parent_id is not None:
-            edges.append(DependencyEdge(node_id, parent_id))
+            add_edge(DependencyEdge(node_id, parent_id))
 
         children = _distribution_children(current)
         child_estimators = _bind_child_estimators(children, current_estimator)
