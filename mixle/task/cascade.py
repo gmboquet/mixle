@@ -67,6 +67,40 @@ class Cascade:
         """Serve a batch of requests through the cascade."""
         return [self(t) for t in texts]
 
+    def serve_with_teacher_labels(
+        self,
+        texts: Sequence[Any],
+        teacher_labels: Sequence[Any],
+    ) -> list[Any]:
+        """Serve a batch against one immutable snapshot of teacher outcomes.
+
+        This is the evaluation/replay counterpart to :meth:`serve`: the caller
+        obtains exactly one teacher label per request up front, and this method
+        uses those labels only for local deferrals while updating the same
+        traffic and harvest accounting as live serving.
+        """
+        if isinstance(texts, (str, bytes)) or isinstance(teacher_labels, (str, bytes)):
+            raise TypeError("texts and teacher_labels must be sequences, not scalar strings")
+        rows = list(texts)
+        labels = list(teacher_labels)
+        if len(rows) != len(labels):
+            raise ValueError("texts and teacher_labels must have identical lengths")
+        local_decisions = self.model.batch_decide(rows)
+        if len(local_decisions) != len(rows):
+            raise ValueError("the calibrated model must return one decision per request")
+
+        answers: list[Any] = []
+        for text, local, teacher_label in zip(rows, local_decisions, labels):
+            self.stats.n_requests += 1
+            if local is not ESCALATE:
+                answers.append(local)
+                continue
+            self.stats.n_escalated += 1
+            self.stats.escalated_texts.append(text)
+            self.stats.escalated_labels.append(teacher_label)
+            answers.append(teacher_label)
+        return answers
+
     def harvested(self) -> tuple[list[Any], list[Any]]:
         """Return escalated ``(texts, teacher_labels)`` as targeted retraining data."""
         return list(self.stats.escalated_texts), list(self.stats.escalated_labels)
