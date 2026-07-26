@@ -72,6 +72,10 @@ class RobustRecommendationIntegrationTest(unittest.TestCase):
         self.assertEqual(field.recommendation, "integer_categorical")
         self.assertEqual(field.validation_recommendation, "poisson")
         self.assertEqual(field.robust_recommendation(), "poisson")
+        self.assertEqual(type(profile.recommend()).__name__, "PoissonEstimator")
+        self.assertIs(profile.selection.estimator, profile.recommend())
+        self.assertEqual(profile.selection.decisions[0].selected_recommendation, "poisson")
+        self.assertTrue(profile.selection.decisions[0].validation_overrode)
         self.assertIn("gap is decisive -- robust_recommendation() overrides to poisson", field.validation_notes)
 
     def test_robust_recommendation_is_serialized_in_summary(self):
@@ -100,6 +104,15 @@ class RobustRecommendationIntegrationTest(unittest.TestCase):
         self.assertIn(
             "validation prefers poisson over marginal recommendation integer_categorical", field.validation_notes
         )
+
+    def test_registered_family_participates_in_validation_and_deployment(self):
+        data = list(np.random.RandomState(9).laplace(2.0, 1.5, 1000))
+        profile = analyze_structure(data, pairwise=False)
+        field = profile.fields[0]
+        self.assertEqual(field.recommendation, "laplace")
+        self.assertIn("laplace", field.validation_scores_bits)
+        self.assertEqual(field.robust_recommendation(), "laplace")
+        self.assertEqual(type(profile.recommend()).__name__, "LaplaceEstimator")
 
 
 if __name__ == "__main__":
