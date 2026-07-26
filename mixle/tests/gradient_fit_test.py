@@ -23,6 +23,7 @@ from mixle.inference.priors import (
     NormalGammaPrior,
     OptionalPrior,
     RecordPrior,
+    partial_alignment,
 )
 from mixle.stats import (
     AffineTransform,
@@ -498,7 +499,10 @@ class GradientFitTestCase(unittest.TestCase):
         mapped, lp = fit_map(
             enc,
             start,
-            priors=MixturePrior(weights=DirichletPrior([1.0, 20.0])),
+            priors=MixturePrior(
+                weights=DirichletPrior([1.0, 20.0]),
+                alignment_receipt=partial_alignment("regularize mixture weights only"),
+            ),
             prior_strength=0.0,
             max_its=300,
             lr=0.04,
@@ -523,7 +527,10 @@ class GradientFitTestCase(unittest.TestCase):
         mapped, lp = fit_map(
             enc,
             start,
-            priors=RecordPrior({"x": NormalGammaPrior(mu0=0.0, kappa=80.0, alpha=3.0, beta=2.0)}),
+            priors=RecordPrior(
+                {"x": NormalGammaPrior(mu0=0.0, kappa=80.0, alpha=3.0, beta=2.0)},
+                alignment_receipt=partial_alignment("regularize field x only"),
+            ),
             prior_strength=0.0,
             max_its=250,
             lr=0.05,
@@ -548,7 +555,10 @@ class GradientFitTestCase(unittest.TestCase):
         mapped, lp = fit_map(
             enc,
             start,
-            priors=ConditionalPrior({"a": NormalGammaPrior(mu0=0.0, kappa=80.0, alpha=3.0, beta=2.0)}),
+            priors=ConditionalPrior(
+                {"a": NormalGammaPrior(mu0=0.0, kappa=80.0, alpha=3.0, beta=2.0)},
+                alignment_receipt=partial_alignment("regularize condition a only"),
+            ),
             prior_strength=0.0,
             max_its=250,
             lr=0.05,
@@ -571,7 +581,10 @@ class GradientFitTestCase(unittest.TestCase):
         mapped, lp = fit_map(
             enc,
             start,
-            priors=MarkovChainPrior(transitions={"a": DirichletPrior({"a": 1.0, "b": 15.0})}),
+            priors=MarkovChainPrior(
+                transitions={"a": DirichletPrior({"a": 1.0, "b": 15.0})},
+                alignment_receipt=partial_alignment("regularize transition row a only"),
+            ),
             prior_strength=0.0,
             max_its=300,
             lr=0.05,
