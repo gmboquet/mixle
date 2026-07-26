@@ -704,6 +704,7 @@ __all__ = [
     "InhomogeneousPoissonProcessEstimator",
     "InhomogeneousPoissonProcessDataEncoder",
     "RenewalProcessDistribution",
+    "RenewalProcessStatistics",
     "RenewalProcessSampler",
     "RenewalProcessEstimator",
     "RenewalProcessDataEncoder",
@@ -1567,6 +1568,7 @@ from mixle.stats.processes.renewal_process import (
     RenewalProcessDistribution,
     RenewalProcessEstimator,
     RenewalProcessSampler,
+    RenewalProcessStatistics,
 )
 from mixle.stats.rankings.bradley_terry import (
     BradleyTerryAccumulator,
