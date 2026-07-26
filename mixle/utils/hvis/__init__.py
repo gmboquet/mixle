@@ -96,6 +96,9 @@ This package preserves the public API of the former single-module
 # __all__ plus the private helpers that mixle.tests.htsne_test imports directly).
 # The `name as name` redundant-alias form marks these as deliberate re-exports.
 from mixle.utils.hvis.affinity import (
+    AffinityCapabilityUnavailableError as AffinityCapabilityUnavailableError,
+)
+from mixle.utils.hvis.affinity import (
     _affinity_factors as _affinity_factors,
 )
 from mixle.utils.hvis.affinity import (
@@ -364,6 +367,7 @@ __all__ = [
     "humap",
     "dpmsne",
     "model_log_affinity",
+    "AffinityCapabilityUnavailableError",
     "affinity_health",
     "log_affinity_block",
     "mixture_coordinates",
