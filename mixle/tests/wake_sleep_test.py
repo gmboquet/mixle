@@ -9,6 +9,7 @@ the tasks share no motif, the abstraction returns no fragment -- it does not inv
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from mixle.experimental.wake_sleep import (
     Atom,
@@ -50,6 +51,20 @@ def test_abstraction_finds_the_common_set() -> None:
     assert frag is not None and set(frag.cols) == {1, 3}
 
 
+def test_abstraction_never_unions_individually_frequent_but_rarely_joint_columns() -> None:
+    # Each column appears in 60% of solutions, but the pair appears in only 20%.
+    solutions = [(0, 1), (0,), (0,), (1,), (1,)]
+    assert abstract_fragment(solutions, min_support=0.6, min_size=2) is None
+
+
+def test_abstraction_selects_a_fragment_with_exact_joint_support() -> None:
+    solutions = [(0, 1, 2), (0, 1), (0, 1, 3), (0, 2), (1, 3)]
+    fragment = abstract_fragment(solutions, min_support=0.6, min_size=2)
+    assert fragment is not None
+    assert fragment.cols == (0, 1)
+    assert sum(set(fragment.cols).issubset(solution) for solution in map(set, solutions)) == 3
+
+
 def test_greedy_recovers_planted_structure() -> None:
     rng = np.random.default_rng(0)
     q, _ = np.linalg.qr(rng.standard_normal((100, 10)))
@@ -73,3 +88,32 @@ def test_determinism() -> None:
     a = wake_sleep(seed=3, motif=MOTIF)
     b = wake_sleep(seed=3, motif=MOTIF)
     assert (a.speedup, a.fragment_reuse, a.fragment.cols) == (b.speedup, b.fragment_reuse, b.fragment.cols)
+
+
+@pytest.mark.parametrize(
+    ("y", "features", "library", "message"),
+    [
+        (np.ones(3), np.ones((2, 1)), primitive_library(1), "one row per target"),
+        (np.ones((3, 1)), np.ones((3, 1)), primitive_library(1), "one-dimensional"),
+        (np.ones(3), np.ones((3, 1)), [Atom("bad", (1,))], "outside"),
+        (np.ones(3), np.array([[1.0], [np.nan], [2.0]]), primitive_library(1), "finite"),
+    ],
+)
+def test_greedy_search_validates_target_design_and_library(y, features, library, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        greedy_search(y, features, library)
+
+
+def test_wake_sleep_validates_orthonormal_design_and_task_dimensions() -> None:
+    with pytest.raises(ValueError, match="at least n_primitives"):
+        wake_sleep(n_t=4, n_primitives=5)
+    with pytest.raises(ValueError, match="outside"):
+        wake_sleep(n_primitives=4, motif=(0, 4))
+    with pytest.raises(ValueError, match="n_specific"):
+        wake_sleep(n_primitives=4, motif=(0, 1, 2), n_specific=2)
+
+
+@pytest.mark.parametrize(("support", "size"), [(0.0, 2), (1.1, 2), (0.6, 0)])
+def test_abstraction_validates_thresholds(support, size) -> None:
+    with pytest.raises(ValueError):
+        abstract_fragment([(0, 1)], min_support=support, min_size=size)
