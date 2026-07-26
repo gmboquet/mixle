@@ -33,8 +33,9 @@ class DegenerateInputDoesNotCrashTest(unittest.TestCase):
     def test_lognormal_empty_vdict(self):
         get_lognormal_estimator({})
 
-    def test_poisson_all_nan_keys(self):
-        get_poisson_estimator({float("nan"): 5.0})
+    def test_poisson_rejects_non_count_keys(self):
+        with self.assertRaisesRegex(ValueError, "non-negative integers"):
+            get_poisson_estimator({float("nan"): 5.0})
 
     def test_lognormal_all_non_positive_keys(self):
         # every key filtered out (log-normal needs k > 0), same empty-accumulator shape as an empty dict
