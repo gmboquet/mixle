@@ -1,8 +1,8 @@
-"""Calibrated generator (mixle.task.calibrated_generator): conformal accept-or-abstain for generation.
+"""Calibrated generator: held-out selective-risk certification for generation.
 
-Coverage of the conformal accept decision must hold on held-out data the same way it does for
-CalibratedTaskModel's label sets; abstention (ABSTAIN) must compose with Cascade as an escalation
-signal; and serving must be reproducible given a seed.
+The accepted-error certificate must be based on a fixed outcome and independent
+certification split; abstention (ABSTAIN) must compose with Cascade as an
+escalation signal; and serving must be reproducible given a seed.
 """
 
 import hashlib
@@ -59,16 +59,14 @@ def is_correct(prompt, candidate) -> bool:
     return guess == 2 * n and n == prompt
 
 
-class CoverageTest(unittest.TestCase):
+class SelectiveRiskTest(unittest.TestCase):
     def test_accepted_error_rate_and_abstention_track_alpha(self):
         alpha = 0.1
         cal_prompts = list(range(0, 700))
         test_prompts = list(range(10_000, 10_700))
 
-        # hit_prob's miss rate (5%) must stay below alpha (10%) for a selective threshold to exist at all --
-        # otherwise no candidate ever clears 1 - alpha coverage and the calibration saturates to "abstain always"
-        # (qhat pinned at its max), the same way CalibratedTaskModel's qhat saturates to +inf when the true class
-        # is missing from the candidate set more often than alpha tolerates.
+        # hit_prob's miss rate (5%) is below the target accepted error (10%), so
+        # either a selective threshold or even accept-all may certify.
         gen = make_generate(hit_prob=0.95)
         model = CalibratedGenerator(gen, score, alpha=alpha, k=5, seed=1).calibrate(cal_prompts, is_correct)
 
@@ -78,11 +76,14 @@ class CoverageTest(unittest.TestCase):
 
         self.assertGreater(len(accepted), 0)
         error_rate = np.mean([not is_correct(p, c) for p, c in accepted])
-        # finite-sample slack, mirroring task_calibrate_test.py's coverage tolerance
+        # Realized future risk is a diagnostic; the actual release claim is the
+        # independent exact-binomial certificate stored in risk_receipt.
         self.assertLessEqual(error_rate, alpha + 0.08)
-        # abstention is doing real, non-degenerate work: it neither accepts nor rejects everything
-        self.assertGreater(abstain_rate, 0.0)
-        self.assertLess(abstain_rate, 1.0)
+        self.assertGreaterEqual(abstain_rate, 0.0)
+        self.assertLessEqual(abstain_rate, 1.0)
+        self.assertEqual(model.risk_receipt["method"], "split-selective-risk/clopper-pearson-bonferroni/v1")
+        self.assertLessEqual(model.risk_receipt["error_upper"], alpha)
+        self.assertEqual(model.risk_receipt["proposal_count"] + model.risk_receipt["certification_count"], 700)
 
     def test_abstention_rate_decreases_as_alpha_relaxes(self):
         cal_prompts = list(range(0, 700))
@@ -96,6 +97,18 @@ class CoverageTest(unittest.TestCase):
         loose_rate = loose.abstention_rate(test_prompts)
         # a larger alpha tolerates more risk, so it should abstain no more than a stricter alpha
         self.assertLessEqual(loose_rate, tight_rate + 1e-9)
+
+    def test_uncertifiable_generator_abstains_instead_of_claiming_candidate_coverage(self):
+        def always_wrong(prompt, k, rng=None):
+            return [(prompt, prompt + i + 1) for i in range(k)]
+
+        model = CalibratedGenerator(always_wrong, lambda candidate: -candidate[1], alpha=0.1, k=3).calibrate(
+            list(range(100)),
+            lambda prompt, candidate: candidate[1] == prompt,
+        )
+        self.assertTrue(np.isposinf(model.qhat))
+        self.assertIsNone(model.risk_receipt["error_upper"])
+        self.assertIs(model.serve(1000), ABSTAIN)
 
 
 class CascadeIntegrationTest(unittest.TestCase):

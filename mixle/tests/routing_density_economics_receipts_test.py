@@ -178,6 +178,8 @@ class CalibratedAlphaBeatsFixedDefaultReceiptsTest(unittest.TestCase):
         cal_texts = _id_corpus(n_per_class=60, seed=31)
         cal_labels = _teacher(cal_texts)
         probe_texts = _id_corpus(n_per_class=60, seed=32)
+        certification_texts = _id_corpus(n_per_class=60, seed=33)
+        certification_labels = _teacher(certification_texts)
 
         cost = CostModel(c_frontier=1.0, c_local=0.01, c_label=0.02, train_cost=5.0)
         volume, n_label = 20_000, len(train)
@@ -196,6 +198,8 @@ class CalibratedAlphaBeatsFixedDefaultReceiptsTest(unittest.TestCase):
             cal_labels,
             probe_texts,
             cost,
+            certification_texts=certification_texts,
+            certification_labels=certification_labels,
             volume=volume,
             n_label=n_label,
             alphas=(0.01, 0.05, 0.1, 0.15, 0.2, 0.3),

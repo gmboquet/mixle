@@ -31,23 +31,50 @@ from mixle.task.model import ImpossibleEvidenceError, TaskModel
 ESCALATE = None  # the sentinel a decision returns when the conformal set is not a confident singleton
 
 
+def _validated_alpha(alpha: Any) -> float:
+    if (
+        isinstance(alpha, (bool, np.bool_))
+        or not isinstance(alpha, (int, float, np.integer, np.floating))
+        or not np.isfinite(alpha)
+        or not 0.0 <= float(alpha) <= 1.0
+    ):
+        raise ValueError("alpha must be a finite number in [0, 1]")
+    return float(alpha)
+
+
+def _validated_qhat(qhat: Any, *, allow_none: bool = True) -> float | None:
+    if qhat is None and allow_none:
+        return None
+    if (
+        isinstance(qhat, (bool, np.bool_))
+        or not isinstance(qhat, (int, float, np.integer, np.floating))
+    ):
+        raise ValueError("qhat must be a finite number in [0, 1], positive infinity, or None")
+    result = float(qhat)
+    if np.isnan(result) or np.isneginf(result) or result < 0.0 or (np.isfinite(result) and result > 1.0):
+        raise ValueError("qhat must be a finite number in [0, 1], positive infinity, or None")
+    return result
+
+
 def _qhat_to_json(qhat: float | None) -> Any:
     """Serialize a threshold to a strict-JSON-safe value: ``+inf`` -> ``"inf"``, else the plain float/None."""
-    if qhat is None:
+    validated = _validated_qhat(qhat)
+    if validated is None:
         return None
-    if not np.isfinite(qhat):
+    if np.isposinf(validated):
         return "inf"
-    return float(qhat)
+    return validated
 
 
 def _qhat_from_json(value: Any) -> float | None:
-    """Inverse of :func:`_qhat_to_json`: ``"inf"`` (or a non-finite float) -> ``float('inf')``; else float/None."""
+    """Inverse of :func:`_qhat_to_json`, rejecting corrupt/non-canonical thresholds."""
     if value is None:
         return None
     if isinstance(value, str):
-        return float("inf") if value == "inf" else float(value)
-    q = float(value)
-    return float("inf") if not np.isfinite(q) else q
+        if value != "inf":
+            raise ValueError("serialized qhat string must be the canonical 'inf' sentinel")
+        return float("inf")
+    return _validated_qhat(value, allow_none=False)
 
 
 class CalibratedTaskModel:
@@ -59,8 +86,8 @@ class CalibratedTaskModel:
         if not hasattr(task.adapter, "proba_batch"):
             raise TypeError("CalibratedTaskModel needs an adapter exposing proba_batch (e.g. TextClassifierIO)")
         self.task = task
-        self.alpha = float(alpha)
-        self.qhat = qhat
+        self.alpha = _validated_alpha(alpha)
+        self.qhat = _validated_qhat(qhat)
         self.density_gate = density_gate  # optional p(x) OOD gate: escalate atypical inputs softmax can't see
 
     @property
@@ -73,17 +100,35 @@ class CalibratedTaskModel:
 
     def calibrate(self, texts: Sequence[Any], teacher_labels: Sequence[Any]) -> CalibratedTaskModel:
         """Set the conformal threshold from held-out ``(texts, teacher_labels)`` for ``1 - alpha`` set coverage."""
+        if isinstance(texts, (str, bytes)) or isinstance(teacher_labels, (str, bytes)):
+            raise TypeError("texts and teacher_labels must be sequences of rows, not scalar strings")
+        rows = list(texts)
+        observed = [str(label) for label in teacher_labels]
+        if not rows:
+            raise ValueError("calibration data must be non-empty")
+        if len(rows) != len(observed):
+            raise ValueError("texts and teacher_labels must have identical non-zero lengths")
         index = {label: i for i, label in enumerate(self.labels)}
-        prob = self._proba(list(texts))
-        # A held-out label the student's model has no class for cannot be scored -- the student assigns it
-        # probability 0, so it is a calibration point the student is guaranteed to miss. Record 0.0 rather
-        # than raising KeyError on an unseen level: the conformal threshold must see these misses (they
-        # make the set-valued predictor correctly more conservative), not crash the calibration pass.
-        cal_true = np.array(
-            [prob[i, index[str(y)]] if str(y) in index else 0.0 for i, y in enumerate(teacher_labels)],
-            dtype=float,
-        )
-        self.qhat = conformal_label_threshold(cal_true, alpha=self.alpha)
+        unknown = sorted(set(observed) - set(index))
+        if unknown:
+            raise ValueError(
+                f"calibration labels {unknown!r} are outside the model label space; "
+                "finite-sample label coverage cannot be claimed"
+            )
+        prob = np.asarray(self._proba(rows), dtype=float)
+        if prob.shape != (len(rows), len(self.labels)):
+            raise ValueError(
+                f"adapter probabilities must have shape ({len(rows)}, {len(self.labels)}), got {prob.shape}"
+            )
+        if (
+            np.any(~np.isfinite(prob))
+            or np.any((prob < 0.0) | (prob > 1.0))
+            or not np.allclose(prob.sum(axis=1), 1.0, rtol=1e-7, atol=1e-9)
+        ):
+            raise ValueError("adapter probabilities must be finite row-stochastic values in [0, 1]")
+        cal_true = np.array([prob[i, index[label]] for i, label in enumerate(observed)], dtype=float)
+        qhat = conformal_label_threshold(cal_true, alpha=self.alpha)
+        self.qhat = _validated_qhat(qhat, allow_none=False)
         return self
 
     def predict_sets(self, texts: Sequence[Any]) -> list[list[str]]:
@@ -162,6 +207,8 @@ class CalibratedTaskModel:
         """Rebuild a calibrated model (with its density gate, if any) from an artifact; decisions match exactly."""
         task = TaskModel.load(path, device=device)
         cal = task.meta.get("calibration", {})
+        if not isinstance(cal, dict):
+            raise ValueError("artifact calibration metadata must be a dictionary")
         gate = None
         if cal.get("density_gate") is not None:
             from mixle.task.density import DensityGate
