@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from mixle.experimental.typed_runtime.benchmark import FailureKind
 from mixle.experimental.typed_runtime.frontier_pilot import GraphMemoryPilotReceipt
+from mixle.experimental.typed_runtime.proposal import payload_fingerprint
 
 
 class ClaimKind(StrEnum):
@@ -111,6 +113,37 @@ class AcceptanceGateReceipt:
     claims: tuple[ClaimKind, ...]
     observed: str
     evidence_uri: str | None = None
+    required_evidence_count: int = 1
+    observed_evidence_count: int = 0
+    required_fields: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.gate or not self.observed:
+            raise ValueError("acceptance gates require a name and observation.")
+        if not isinstance(self.status, GateStatus):
+            raise TypeError("acceptance-gate status must be GateStatus.")
+        if (
+            not isinstance(self.claims, tuple)
+            or not self.claims
+            or any(not isinstance(claim, ClaimKind) for claim in self.claims)
+            or len(set(self.claims)) != len(self.claims)
+        ):
+            raise ValueError("acceptance gates require unique affected claims.")
+        counts = (self.required_evidence_count, self.observed_evidence_count)
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in counts):
+            raise TypeError("acceptance-gate evidence cardinalities must be integers.")
+        if self.required_evidence_count < 1 or self.observed_evidence_count < 0:
+            raise ValueError("acceptance-gate evidence cardinalities must be positive/non-negative.")
+        if (
+            not self.required_fields
+            or any(not isinstance(name, str) or not name for name in self.required_fields)
+            or len(set(self.required_fields)) != len(self.required_fields)
+        ):
+            raise ValueError("acceptance gates must declare unique non-empty required evidence fields.")
+        if self.status is GateStatus.PASSED and (
+            self.observed_evidence_count < self.required_evidence_count or not self.evidence_uri
+        ):
+            raise ValueError("a passed acceptance gate requires its declared evidence count and evidence URI.")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -119,6 +152,9 @@ class AcceptanceGateReceipt:
             "claims": [claim.value for claim in self.claims],
             "observed": self.observed,
             "evidence_uri": self.evidence_uri,
+            "required_evidence_count": self.required_evidence_count,
+            "observed_evidence_count": self.observed_evidence_count,
+            "required_fields": list(self.required_fields),
         }
 
 
@@ -128,9 +164,16 @@ class FrontierClaimAssessment:
 
     gates: tuple[AcceptanceGateReceipt, ...]
 
+    def __post_init__(self) -> None:
+        names = [gate.gate for gate in self.gates]
+        if len(names) != len(set(names)):
+            raise ValueError("frontier claim assessments cannot contain duplicate gates.")
+
     def claim_allowed(self, claim: ClaimKind) -> bool:
         relevant = tuple(gate for gate in self.gates if claim in gate.claims)
-        return bool(relevant) and all(gate.status is GateStatus.PASSED for gate in relevant)
+        expected = _REQUIRED_GATES_BY_CLAIM[claim]
+        observed = {gate.gate for gate in relevant}
+        return expected.issubset(observed) and all(gate.status is GateStatus.PASSED for gate in relevant)
 
     @property
     def frontier_training_allowed(self) -> bool:
@@ -156,10 +199,61 @@ def _gate(
     claims: tuple[ClaimKind, ...],
     observed: str,
     evidence_uri: str | None = None,
+    *,
+    required_evidence_count: int = 1,
+    observed_evidence_count: int = 1,
+    required_fields: tuple[str, ...],
 ) -> AcceptanceGateReceipt:
     return AcceptanceGateReceipt(
-        name, GateStatus.PASSED if passed else GateStatus.FAILED, claims, observed, evidence_uri
+        name,
+        GateStatus.PASSED if passed else GateStatus.FAILED,
+        claims,
+        observed,
+        evidence_uri,
+        required_evidence_count,
+        observed_evidence_count,
+        required_fields,
     )
+
+
+_LOCAL_INTEGRATED_GATE = "local-integrated-pilot"
+_LOCAL_CONTROLS_GATE = "local-negative-controls"
+_REQUIRED_FAILURE_CASES = {
+    "local-window-negative-control": (
+        FailureKind.QUALITY_REGRESSION,
+        "held-out-accuracy-target",
+        True,
+    ),
+    "graph-retrieval-quality-control": (
+        FailureKind.QUALITY_REGRESSION,
+        "held-out-accuracy-target",
+        False,
+    ),
+    "checkpoint-restart-control": (
+        FailureKind.REPLAY_MISMATCH,
+        "model-optimizer-rng-fingerprints",
+        False,
+    ),
+}
+_REQUIRED_GATES_BY_CLAIM = {
+    ClaimKind.FRONTIER_TRAINING: frozenset(
+        {
+            _LOCAL_INTEGRATED_GATE,
+            _LOCAL_CONTROLS_GATE,
+            "real-8-gpu-transport",
+            "multi-host-recovery-replay",
+            "one-billion-parameter-quality-and-efficiency",
+        }
+    ),
+    ClaimKind.EFFECTIVE_TRILLION_CONTEXT: frozenset(
+        {
+            _LOCAL_INTEGRATED_GATE,
+            _LOCAL_CONTROLS_GATE,
+            "trillion-token-source-horizon",
+            "bounded-active-context-with-provenance",
+        }
+    ),
+}
 
 
 def assess_frontier_claims(
@@ -171,30 +265,81 @@ def assess_frontier_claims(
     frontier = (ClaimKind.FRONTIER_TRAINING,)
     context = (ClaimKind.EFFECTIVE_TRILLION_CONTEXT,)
     both = frontier + context
+    pilot_evidence = "sha256:" + payload_fingerprint(pilot.as_dict())
+    failure_cases = [receipt.case_id for receipt in pilot.failure_receipts]
+    controls_by_case = {receipt.case_id: receipt for receipt in pilot.failure_receipts}
+    controls_complete = (
+        len(failure_cases) == len(_REQUIRED_FAILURE_CASES)
+        and len(controls_by_case) == len(_REQUIRED_FAILURE_CASES)
+        and set(controls_by_case) == set(_REQUIRED_FAILURE_CASES)
+        and all(
+            receipt.benchmark_id == "graph-memory-pilot"
+            and (receipt.kind, receipt.oracle, receipt.expected_failure) == specification
+            and receipt.oracle_passed
+            for case_id, specification in _REQUIRED_FAILURE_CASES.items()
+            for receipt in (controls_by_case[case_id],)
+        )
+    )
     gates = [
         _gate(
-            "local-integrated-pilot",
+            _LOCAL_INTEGRATED_GATE,
             pilot.graph_quality_gain > 0.0 and pilot.recovery.passed,
             both,
             "quality_gain=%.6f recovery=%s" % (pilot.graph_quality_gain, pilot.recovery.passed),
+            pilot_evidence,
+            required_fields=("graph_quality_gain", "recovery.passed"),
         ),
         _gate(
-            "local-negative-controls",
-            all(receipt.oracle_passed for receipt in pilot.failure_receipts),
+            _LOCAL_CONTROLS_GATE,
+            controls_complete,
             both,
             "passed=%d/%d"
             % (sum(receipt.oracle_passed for receipt in pilot.failure_receipts), len(pilot.failure_receipts)),
+            pilot_evidence,
+            required_evidence_count=len(_REQUIRED_FAILURE_CASES),
+            observed_evidence_count=len(failure_cases),
+            required_fields=("case_id", "oracle", "expected_failure", "detected", "oracle_passed"),
         ),
     ]
     if scale_run is None:
         gates.extend(
-            AcceptanceGateReceipt(name, GateStatus.NOT_RUN, claims, "no external scale receipt supplied")
-            for name, claims in (
-                ("real-8-gpu-transport", frontier),
-                ("multi-host-recovery-replay", frontier),
-                ("one-billion-parameter-quality-and-efficiency", frontier),
-                ("trillion-token-source-horizon", context),
-                ("bounded-active-context-with-provenance", context),
+            AcceptanceGateReceipt(
+                name,
+                GateStatus.NOT_RUN,
+                claims,
+                "no external scale receipt supplied",
+                required_evidence_count=1,
+                observed_evidence_count=0,
+                required_fields=required_fields,
+            )
+            for name, claims, required_fields in (
+                ("real-8-gpu-transport", frontier, ("accelerator_count", "real_distributed_transport")),
+                (
+                    "multi-host-recovery-replay",
+                    frontier,
+                    ("host_count", "worker_loss_recovered", "replay_verified"),
+                ),
+                (
+                    "one-billion-parameter-quality-and-efficiency",
+                    frontier,
+                    (
+                        "model_parameters",
+                        "quality_target_achieved",
+                        "baseline_time_to_target_seconds|baseline_peak_memory_bytes",
+                        "candidate_time_to_target_seconds|candidate_peak_memory_bytes",
+                    ),
+                ),
+                ("trillion-token-source-horizon", context, ("source_horizon_tokens",)),
+                (
+                    "bounded-active-context-with-provenance",
+                    context,
+                    (
+                        "maximum_active_context_tokens",
+                        "source_horizon_tokens",
+                        "quality_target_achieved",
+                        "provenance_complete",
+                    ),
+                ),
             )
         )
         return FrontierClaimAssessment(tuple(gates))
@@ -209,6 +354,7 @@ def assess_frontier_claims(
                 "accelerators=%d real_transport=%s"
                 % (scale_run.accelerator_count, scale_run.real_distributed_transport),
                 evidence,
+                required_fields=("accelerator_count", "real_distributed_transport"),
             ),
             _gate(
                 "multi-host-recovery-replay",
@@ -217,6 +363,7 @@ def assess_frontier_claims(
                 "hosts=%d recovered=%s replay=%s"
                 % (scale_run.host_count, scale_run.worker_loss_recovered, scale_run.replay_verified),
                 evidence,
+                required_fields=("host_count", "worker_loss_recovered", "replay_verified"),
             ),
             _gate(
                 "one-billion-parameter-quality-and-efficiency",
@@ -231,6 +378,12 @@ def assess_frontier_claims(
                     scale_run.resource_improvement_measured,
                 ),
                 evidence,
+                required_fields=(
+                    "model_parameters",
+                    "quality_target_achieved",
+                    "baseline_time_to_target_seconds|baseline_peak_memory_bytes",
+                    "candidate_time_to_target_seconds|candidate_peak_memory_bytes",
+                ),
             ),
             _gate(
                 "trillion-token-source-horizon",
@@ -238,6 +391,7 @@ def assess_frontier_claims(
                 context,
                 "source_horizon_tokens=%d" % scale_run.source_horizon_tokens,
                 evidence,
+                required_fields=("source_horizon_tokens",),
             ),
             _gate(
                 "bounded-active-context-with-provenance",
@@ -253,6 +407,12 @@ def assess_frontier_claims(
                     scale_run.provenance_complete,
                 ),
                 evidence,
+                required_fields=(
+                    "maximum_active_context_tokens",
+                    "source_horizon_tokens",
+                    "quality_target_achieved",
+                    "provenance_complete",
+                ),
             ),
         )
     )
