@@ -14,9 +14,12 @@ import random
 import string
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 import numpy as np
+
+from mixle.task.calibrate import ESCALATE
 
 
 @dataclass
@@ -33,6 +36,15 @@ class CapabilitySuite:
     corruptions: dict[str, Callable[[str], str]] = field(default_factory=dict)
     invariances: dict[str, Callable[[str], str]] = field(default_factory=dict)
     probes: list[str] = field(default_factory=list)
+
+
+class CapabilityAbstention(StrEnum):
+    """Typed decision value used inside capability evaluation."""
+
+    ESCALATE = "escalate"
+
+
+CAPABILITY_ESCALATE = CapabilityAbstention.ESCALATE
 
 
 def keyboard_typo_corruption(rate: float, *, seed: int = 0) -> Callable[[str], str]:
@@ -60,51 +72,82 @@ def whitespace_invariance(text: str) -> str:
     return " ".join(text.split())
 
 
-def _predict(model: Any, texts: list[str]) -> list[Any]:
+def _exact_outputs(outputs: Any, n: int, *, context: str) -> list[Any]:
+    if isinstance(outputs, (str, bytes)) or not isinstance(outputs, Sequence):
+        raise ValueError(f"{context} must return a sequence with exactly one output per input")
+    result = list(outputs)
+    if len(result) != n:
+        raise ValueError(f"{context} returned {len(result)} outputs for {n} inputs")
+    return result
+
+
+def _predict(model: Any, texts: list[str], *, callable_mode: str = "batch") -> list[Any]:
     """Batch-predict labels from ``model``, which may be a ``CalibratedTaskModel``, a ``TaskModel``-like object
     exposing ``batch``, or a bare ``teacher(texts) -> labels`` / ``teacher(text) -> label`` callable.
 
     Checks ``batch`` before ``task`` so bare ``TaskModel`` instances and
     ``CalibratedTaskModel`` wrappers both use the appropriate batch interface.
     """
-    if hasattr(model, "batch"):
-        return list(model.batch(texts))
-    if hasattr(model, "task"):
-        return list(model.task.batch(texts))
-    out = model(texts)
-    if isinstance(out, (list, tuple)) and len(out) == len(texts):
-        return list(out)
-    return [model(t) for t in texts]
+    if callable_mode not in {"batch", "item"}:
+        raise ValueError("callable_mode must be 'batch' or 'item'")
+    if callable(getattr(model, "batch", None)):
+        return _exact_outputs(model.batch(texts), len(texts), context="model.batch")
+    task = getattr(model, "task", None)
+    if callable(getattr(task, "batch", None)):
+        return _exact_outputs(task.batch(texts), len(texts), context="model.task.batch")
+    if not callable(model):
+        raise TypeError("profile model must expose batch/task.batch or be callable")
+    if callable_mode == "item":
+        return [model(text) for text in texts]
+    return _exact_outputs(model(texts), len(texts), context="batch callable")
 
 
 def _decide(model: Any, texts: list[str]) -> list[Any] | None:
     """Batch decisions (label or ``ESCALATE``) if ``model`` exposes a decision API, else ``None``."""
-    if hasattr(model, "batch_decide"):
-        return list(model.batch_decide(texts))
-    if hasattr(model, "decide"):
-        return [model.decide(t) for t in texts]
-    return None
+    if callable(getattr(model, "batch_decide", None)):
+        decisions = _exact_outputs(
+            model.batch_decide(texts),
+            len(texts),
+            context="model.batch_decide",
+        )
+    elif callable(getattr(model, "decide", None)):
+        decisions = [model.decide(text) for text in texts]
+    else:
+        return None
+    return [CAPABILITY_ESCALATE if decision is ESCALATE else decision for decision in decisions]
 
 
 def _agreement(a: Sequence[Any], b: Sequence[Any]) -> float:
-    if not a:
-        return 0.0
-    return float(np.mean([str(x) == str(y) for x, y in zip(a, b)]))
+    if len(a) != len(b):
+        raise ValueError("agreement inputs must have identical cardinality")
+    if len(a) == 0:
+        raise ValueError("agreement requires at least one evaluated row")
+    return float(np.mean([str(x) == str(y) for x, y in zip(a, b, strict=True)]))
 
 
 def _violation_rate(before: Sequence[Any], after: Sequence[Any]) -> float:
-    if not before:
-        return 0.0
-    return float(np.mean([str(x) != str(y) for x, y in zip(before, after)]))
+    if len(before) != len(after):
+        raise ValueError("invariance inputs must have identical cardinality")
+    if len(before) == 0:
+        raise ValueError("invariance evaluation requires at least one row")
+    return float(np.mean([str(x) != str(y) for x, y in zip(before, after, strict=True)]))
 
 
 def _escalation_rate(decisions: Sequence[Any]) -> float:
-    if not decisions:
-        return 0.0
-    return float(np.mean([d is None for d in decisions]))
+    if len(decisions) == 0:
+        raise ValueError("abstention evaluation requires at least one decision")
+    return float(np.mean([decision is CAPABILITY_ESCALATE for decision in decisions]))
 
 
-def capture_profile(student: Any, teacher: Any, texts: Sequence[str], suite: CapabilitySuite) -> dict[str, Any]:
+def capture_profile(
+    student: Any,
+    teacher: Any,
+    texts: Sequence[str],
+    suite: CapabilitySuite,
+    *,
+    student_callable_mode: str = "batch",
+    teacher_callable_mode: str = "batch",
+) -> dict[str, Any]:
     """Run ``student`` and ``teacher`` through ``suite`` and return a profile.
 
     Returns a plain, ``json.dumps``-safe dict:
@@ -122,30 +165,65 @@ def capture_profile(student: Any, teacher: Any, texts: Sequence[str], suite: Cap
 
     There is deliberately no single aggregate score field.
     """
+    if not isinstance(suite, CapabilitySuite):
+        raise TypeError("suite must be a CapabilitySuite")
+    if isinstance(texts, (str, bytes)):
+        raise TypeError("texts must be a sequence of evaluation strings")
     texts = [str(t) for t in texts]
-    profile: dict[str, Any] = {"clean_agreement": _agreement(_predict(student, texts), _predict(teacher, texts))}
+    if not texts or any(not text for text in texts):
+        raise ValueError("capability profiles require non-empty evaluation text")
+    for kind, transforms in (
+        ("corruption", suite.corruptions),
+        ("invariance", suite.invariances),
+    ):
+        if any(
+            not isinstance(name, str) or not name or not callable(transform) for name, transform in transforms.items()
+        ):
+            raise ValueError(f"{kind} entries require non-empty names and callable transforms")
+    if any(not isinstance(probe, str) or not probe for probe in suite.probes):
+        raise ValueError("probes must contain non-empty strings")
+
+    def student_predictions(rows: list[str]) -> list[Any]:
+        return _predict(student, rows, callable_mode=student_callable_mode)
+
+    def teacher_predictions(rows: list[str]) -> list[Any]:
+        return _predict(teacher, rows, callable_mode=teacher_callable_mode)
+
+    student_clean = student_predictions(texts)
+    teacher_clean = teacher_predictions(texts)
+    profile: dict[str, Any] = {
+        "n_evaluated": len(texts),
+        "clean_agreement": _agreement(student_clean, teacher_clean),
+    }
 
     corruptions: dict[str, float] = {}
     for name, corrupt in suite.corruptions.items():
         corrupted = [corrupt(t) for t in texts]
-        corruptions[name] = _agreement(_predict(student, corrupted), _predict(teacher, corrupted))
+        corruptions[name] = _agreement(
+            student_predictions(corrupted),
+            teacher_predictions(corrupted),
+        )
     profile["corruptions"] = corruptions
 
     invariances: dict[str, dict[str, float]] = {}
-    student_clean = _predict(student, texts)
-    teacher_clean = _predict(teacher, texts)
     for name, rewrite in suite.invariances.items():
         rewritten = [rewrite(t) for t in texts]
         invariances[name] = {
-            "student_violation_rate": _violation_rate(student_clean, _predict(student, rewritten)),
-            "teacher_violation_rate": _violation_rate(teacher_clean, _predict(teacher, rewritten)),
+            "student_violation_rate": _violation_rate(
+                student_clean,
+                student_predictions(rewritten),
+            ),
+            "teacher_violation_rate": _violation_rate(
+                teacher_clean,
+                teacher_predictions(rewritten),
+            ),
         }
     profile["invariances"] = invariances
 
     if suite.probes:
         profile["probes"] = {
-            "student": _predict(student, list(suite.probes)),
-            "teacher": _predict(teacher, list(suite.probes)),
+            "student": student_predictions(list(suite.probes)),
+            "teacher": teacher_predictions(list(suite.probes)),
         }
 
     student_decisions = _decide(student, texts)

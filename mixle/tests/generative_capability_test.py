@@ -82,7 +82,8 @@ class ValidateExtractionSchemaTest(unittest.TestCase):
         self.assertEqual(_field_f1([{}], [{}]), 0.0)
         with self.assertRaisesRegex(ValueError, "counts must match"):
             _field_f1([{}], [])
-        self.assertEqual(_schema_validity_rate([], [], ["id"]), 0.0)
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            _schema_validity_rate([], [], ["id"])
         with self.assertRaisesRegex(ValueError, "counts must match"):
             _schema_validity_rate([{}], [], ["id"])
 

@@ -13,8 +13,12 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("safetensors")
 
+from mixle.task.calibrate import ESCALATE  # noqa: E402
 from mixle.task.capability import (  # noqa: E402
+    CAPABILITY_ESCALATE,
     CapabilitySuite,
+    _decide,
+    _escalation_rate,
     capture_profile,
     case_jitter_invariance,
     keyboard_typo_corruption,
@@ -54,6 +58,37 @@ def _suite():
         },
         invariances={"case_jitter": case_jitter_invariance},
     )
+
+
+class CapabilityContractTest(unittest.TestCase):
+    def test_short_batch_output_fails_instead_of_scoring_the_prefix(self):
+        class Short:
+            def batch(self, texts):
+                return ["x"] * (len(texts) - 1)
+
+        with self.assertRaisesRegex(ValueError, "outputs for 2 inputs"):
+            capture_profile(Short(), lambda rows: ["x"] * len(rows), ["a", "b"], CapabilitySuite())
+
+    def test_empty_profile_is_insufficient_evidence(self):
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            capture_profile(lambda rows: [], lambda rows: [], [], CapabilitySuite())
+
+    def test_decisions_normalize_the_serving_sentinel_to_a_typed_abstention(self):
+        class Decider:
+            def batch_decide(self, texts):
+                return [ESCALATE, "answer"]
+
+        decisions = _decide(Decider(), ["a", "b"])
+        self.assertIs(decisions[0], CAPABILITY_ESCALATE)
+        self.assertEqual(_escalation_rate(decisions), 0.5)
+
+    def test_short_decision_batch_fails_closed(self):
+        class ShortDecider:
+            def batch_decide(self, texts):
+                return [ESCALATE]
+
+        with self.assertRaisesRegex(ValueError, "outputs for 2 inputs"):
+            _decide(ShortDecider(), ["a", "b"])
 
 
 class CapabilitySuiteTest(unittest.TestCase):
