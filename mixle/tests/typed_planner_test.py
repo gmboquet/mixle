@@ -28,12 +28,14 @@ class PlanDerivationTest:
         assert "float64" in plan.explain()
         assert "unknown" in plan.explain()
 
-    def test_unvalidated_family_plans_float64_and_names_the_weakest_link(self):
+    def test_unvalidated_family_blocks_execution_instead_of_inventing_assurance(self):
         model = MixtureDistribution([GaussianDistribution(-4.0, 1.0), LaplaceDistribution(4.0, 2.0)], [0.5, 0.5])
         plan = plan_execution(model, model.estimator(), nobs=500)
         assert plan.precision is None
-        assert "precision" not in plan.optimize_kwargs
-        assert any("weakest link" in n for n in plan.notes)
+        assert plan.blockers
+        assert any("unknown-" in blocker for blocker in plan.blockers)
+        with pytest.raises(RuntimeError, match="blockers"):
+            _ = plan.optimize_kwargs
 
     def test_mutable_leaf_is_not_assigned_a_certificate_from_structure(self):
         torch = pytest.importorskip("torch")
@@ -55,7 +57,8 @@ class PlanDerivationTest:
         )
         plan = plan_execution(model, model.estimator(), nobs=500)
         assert plan.monotone is None
-        assert any("certificate is unknown" in note for note in plan.notes)
+        assert plan.blockers
+        assert any("contract validation failed" in note for note in plan.notes)
 
     def test_shared_components_surface_the_adapter_refusal_as_a_note(self):
         shared = GaussianDistribution(0.0, 1.0)

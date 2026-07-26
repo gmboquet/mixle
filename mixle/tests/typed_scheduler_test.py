@@ -5,6 +5,7 @@ import json
 import pytest
 
 from mixle.experimental.typed_runtime import (
+    ContractEvidenceKind,
     CostEstimate,
     DependencyEdge,
     GainEvidence,
@@ -40,6 +41,8 @@ def _contract(
         outer_objective_compatible=compatible,
         exact=update is not UpdateKind.UNKNOWN and compatible,
         declared_by="test",
+        evidence_kind=ContractEvidenceKind.EXPLICIT_DECLARATION,
+        evidence_id="test:scheduler-contract-v1",
     )
 
 

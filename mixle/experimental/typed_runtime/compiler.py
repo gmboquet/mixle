@@ -12,6 +12,7 @@ from mixle.experimental.typed_runtime.contracts import (
     ArtifactKind,
     ComputeBand,
     ConsistencyRequirement,
+    ContractEvidenceKind,
     ConvergenceCertificate,
     CostEstimate,
     CurvatureKind,
@@ -229,7 +230,7 @@ def _static_attribute(owner: Any, attr: str) -> Any:
     return _MISSING
 
 
-def _validate_contract(contract: Any) -> UpdateContract:
+def _validate_contract(contract: Any, *, require_explicit: bool = True) -> UpdateContract:
     """Validate every runtime contract field before the compiler trusts it."""
     if type(contract) is not UpdateContract:
         raise TypeError("contract must be an UpdateContract.")
@@ -241,6 +242,7 @@ def _validate_contract(contract: Any) -> UpdateContract:
         ("curvature_kind", CurvatureKind),
         ("convergence_certificate", ConvergenceCertificate),
         ("compute_band", ComputeBand),
+        ("evidence_kind", ContractEvidenceKind),
     )
     for field_name, enum_type in enum_fields:
         if not isinstance(getattr(contract, field_name), enum_type):
@@ -267,6 +269,11 @@ def _validate_contract(contract: Any) -> UpdateContract:
         raise TypeError("contract declared_by must be a non-empty provenance string.")
     if contract.declared_by in {"compiler_default", "structural_inference"}:
         raise ValueError("explicit contracts cannot claim compiler-default or structural-inference provenance.")
+    if require_explicit:
+        if contract.evidence_kind is not ContractEvidenceKind.EXPLICIT_DECLARATION:
+            raise ValueError("caller-supplied contracts require explicit_declaration evidence.")
+        if not isinstance(contract.evidence_id, str) or not contract.evidence_id.strip():
+            raise ValueError("caller-supplied contracts require a non-empty evidence_id.")
     if not isinstance(contract.notes, tuple) or any(not isinstance(note, str) for note in contract.notes):
         raise TypeError("contract notes must be a tuple of strings.")
     proof_prefix = "acceptance-proof:"
@@ -359,6 +366,8 @@ def _audited_builtin_contract(model: Any, estimator: Any | None) -> UpdateContra
             convergence_certificate=ConvergenceCertificate.UNKNOWN,
             compute_band=ComputeBand.FLOAT64,
             declared_by="audited_builtin_catalog:gaussian-v1",
+            evidence_kind=ContractEvidenceKind.AUDITED_CATALOG,
+            evidence_id="catalog:gaussian-v1",
             notes=("Exactness covers the one-step parameter map, not objective monotonicity.",),
         )
 
@@ -395,6 +404,8 @@ def _audited_builtin_contract(model: Any, estimator: Any | None) -> UpdateContra
             convergence_certificate=ConvergenceCertificate.UNKNOWN,
             compute_band=ComputeBand.FLOAT64,
             declared_by="audited_builtin_catalog:finite-mixture-em-v1",
+            evidence_kind=ContractEvidenceKind.AUDITED_CATALOG,
+            evidence_id="catalog:finite-mixture-em-v1",
             notes=("No monotonicity certificate is inferred; acceptance evidence is required separately.",),
         )
     return None
@@ -415,6 +426,8 @@ def _unknown_contract(*, no_estimator: bool) -> UpdateContract:
             convergence_certificate=ConvergenceCertificate.UNKNOWN,
             compute_band=ComputeBand.FLOAT64,
             declared_by="compiler:no-estimator",
+            evidence_kind=ContractEvidenceKind.CONSERVATIVE_FALLBACK,
+            evidence_id="compiler:no-estimator-v1",
             notes=("No estimator was supplied; the node is preserved but its objective is unknown.",),
         )
     return UpdateContract(
@@ -430,6 +443,8 @@ def _unknown_contract(*, no_estimator: bool) -> UpdateContract:
         convergence_certificate=ConvergenceCertificate.UNKNOWN,
         compute_band=ComputeBand.FLOAT64,
         declared_by="compiler:unknown",
+        evidence_kind=ContractEvidenceKind.CONSERVATIVE_FALLBACK,
+        evidence_id="compiler:unknown-v1",
         notes=("No explicit or audited contract evidence was available.",),
     )
 
@@ -593,7 +608,7 @@ def compile_update_graph(
             or registry.resolve(current, current_estimator)
             or infer_update_contract(current, current_estimator)
         )
-        _validate_contract(contract)
+        _validate_contract(contract, require_explicit=False)
         parameter_count = _parameter_count(current)
         cost = None
         if measurements is not None:

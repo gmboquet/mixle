@@ -24,6 +24,7 @@ from mixle.experimental.typed_runtime.scheduler import (
     SchedulerConfig,
     ScheduleReceipt,
 )
+from mixle.experimental.typed_runtime.validation import validate_update_graph
 from mixle.inference.freeze_rollup import (
     FreezeRollupCache,
     _combine,
@@ -199,12 +200,24 @@ def run_typed_mixture_em(
         raise TypeError("run_typed_mixture_em requires a MixtureDistribution and MixtureEstimator.")
     if getattr(estimator, "has_conj_prior", False) and estimator.fixed_weights is None:
         raise NotImplementedError("typed local mixture EM currently supports the observed-data MLE path only.")
-    if max_its < 1:
+    if isinstance(max_its, bool) or not isinstance(max_its, int) or max_its < 1:
         raise ValueError("max_its must be at least one.")
-    if delta is not None and delta < 0.0:
-        raise ValueError("delta must be non-negative when supplied.")
+    if isinstance(stall_patience, bool) or not isinstance(stall_patience, int) or stall_patience < 1:
+        raise ValueError("stall_patience must be at least one.")
+    if delta is not None and (
+        isinstance(delta, bool) or not isinstance(delta, (int, float)) or not math.isfinite(delta) or delta < 0.0
+    ):
+        raise ValueError("delta must be finite and non-negative when supplied.")
+    if (
+        isinstance(accept_tolerance, bool)
+        or not isinstance(accept_tolerance, (int, float))
+        or not math.isfinite(accept_tolerance)
+        or accept_tolerance < 0.0
+    ):
+        raise ValueError("accept_tolerance must be finite and non-negative.")
 
     graph = compile_update_graph(initial_model, estimator)
+    validate_update_graph(graph, strict=True)
     if graph.node(graph.root_node).contract.objective_kind is not ObjectiveKind.MLE:
         raise NotImplementedError("typed local mixture EM currently supports MLE objective semantics only.")
     node_to_component = _component_node_map(graph, initial_model)

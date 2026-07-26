@@ -26,6 +26,7 @@ from typing import Any
 from mixle.experimental.typed_runtime.compiler import compile_update_graph
 from mixle.experimental.typed_runtime.contracts import ComputeBand, ConvergenceCertificate
 from mixle.experimental.typed_runtime.graph import UpdateGraph
+from mixle.experimental.typed_runtime.validation import IssueSeverity, validate_update_graph
 
 __all__ = ["ExecutionPlan", "plan_execution"]
 
@@ -90,9 +91,18 @@ def plan_execution(model: Any, estimator: Any, *, nobs: int) -> ExecutionPlan:
     """
     graph = compile_update_graph(model, estimator, nobs=nobs)
     notes: list[str] = []
+    validation_issues = validate_update_graph(graph)
+    blockers = tuple(
+        f"{issue.node_id} {issue.code}: {issue.message}"
+        for issue in validation_issues
+        if issue.severity is IssueSeverity.ERROR
+    )
 
     band = graph.compute_band
-    if band is ComputeBand.FLOAT32_ELIGIBLE:
+    if blockers:
+        precision: str | None = None
+        notes.append("contract validation failed; no precision assurance was derived.")
+    elif band is ComputeBand.FLOAT32_ELIGIBLE:
         precision: str | None = "minimal"
         notes.append(
             "every leaf family is in the validated float32 set and the tree is fusible; the runtime "
@@ -104,7 +114,10 @@ def plan_execution(model: Any, estimator: Any, *, nobs: int) -> ExecutionPlan:
         notes.append("compute band is float64 (weakest link: %s)." % ", ".join(dropped[:4]))
 
     certificate = graph.convergence_certificate
-    if certificate is ConvergenceCertificate.MONOTONE_CERTIFIED:
+    if blockers:
+        monotone: bool | None = None
+        notes.append("contract validation failed; no convergence policy was derived.")
+    elif certificate is ConvergenceCertificate.MONOTONE_CERTIFIED:
         monotone: bool | None = True
         notes.append("every update is monotone-certified: planning the strict generalized-EM gate.")
     elif certificate in (ConvergenceCertificate.BEST_VISITED, ConvergenceCertificate.ROBBINS_MONRO_SCHEDULE):
@@ -122,5 +135,6 @@ def plan_execution(model: Any, estimator: Any, *, nobs: int) -> ExecutionPlan:
         monotone=monotone,
         notes=tuple(notes),
         adapter_notes=_adapter_notes(model),
+        blockers=blockers,
         graph=graph,
     )

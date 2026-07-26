@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from mixle.experimental.typed_runtime.contracts import (
+    ComputeBand,
+    ContractEvidenceKind,
+    ConvergenceCertificate,
     MergeLaw,
     ObjectiveKind,
     StateSemantics,
@@ -45,6 +48,43 @@ def validate_update_graph(graph: UpdateGraph, *, strict: bool = False) -> tuple[
     issues: list[ValidationIssue] = []
     for node in graph.nodes:
         contract = node.contract
+        if contract.evidence_kind is ContractEvidenceKind.UNVERIFIED:
+            issues.append(
+                ValidationIssue(
+                    IssueSeverity.ERROR,
+                    "unverified-contract",
+                    node.node_id,
+                    "supply an audited catalog entry or an explicit declaration with an evidence identifier",
+                )
+            )
+        elif contract.evidence_kind is ContractEvidenceKind.CONSERVATIVE_FALLBACK:
+            issues.append(
+                ValidationIssue(
+                    IssueSeverity.WARNING,
+                    "conservative-contract",
+                    node.node_id,
+                    "the compiler found no verified semantic declaration and preserved conservative semantics",
+                )
+            )
+        positive_assurance = (
+            contract.exact
+            or contract.outer_objective_compatible
+            or contract.convergence_certificate is not ConvergenceCertificate.UNKNOWN
+            or contract.compute_band is ComputeBand.FLOAT32_ELIGIBLE
+            or bool(contract.decomposition_axes)
+        )
+        if positive_assurance and contract.evidence_kind in {
+            ContractEvidenceKind.CONSERVATIVE_FALLBACK,
+            ContractEvidenceKind.UNVERIFIED,
+        }:
+            issues.append(
+                ValidationIssue(
+                    IssueSeverity.ERROR,
+                    "unsupported-assurance",
+                    node.node_id,
+                    "positive semantic assurances require audited or explicit evidence",
+                )
+            )
         if contract.objective_kind is ObjectiveKind.UNKNOWN:
             issues.append(
                 ValidationIssue(IssueSeverity.ERROR, "unknown-objective", node.node_id, "declare an objective kind")
