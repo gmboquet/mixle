@@ -66,7 +66,9 @@ class TuneTest(unittest.TestCase):
         # history holds every evaluated point (n_init + n_iter)
         self.assertEqual(len(res.history.y), 7)
         # and the winner is the best-scoring trial
-        self.assertAlmostEqual(res.score, float(np.max(res.history.y)), places=9)
+        self.assertAlmostEqual(res.selection_score, float(np.max(res.history.y)), places=9)
+        self.assertGreater(res.test_size, 0)
+        self.assertGreaterEqual(res.selection_agreement, 0.0)
 
     def test_cost_penalty_prefers_cheaper(self):
         train = _make_corpus(seed=3)
@@ -80,6 +82,20 @@ class TuneTest(unittest.TestCase):
         thrifty = tune_recipe(_teacher, train, val, n_init=2, n_iter=2, cost_weight=1.0, seed=5)
         self.assertLessEqual(thrifty.cost, free.cost + 1e-9)
 
+    def test_invalid_search_contracts_fail_before_training(self):
+        train = _make_corpus(n_per_class=4, seed=30)
+        val = _make_corpus(n_per_class=4, seed=31)
+        with self.assertRaisesRegex(ValueError, "n_init"):
+            tune_recipe(_teacher, train, val, n_init=0)
+        with self.assertRaisesRegex(ValueError, "n_iter"):
+            tune_recipe(_teacher, train, val, n_iter=-1)
+        with self.assertRaisesRegex(ValueError, "cost_weight"):
+            tune_recipe(_teacher, train, val, cost_weight=float("nan"))
+        with self.assertRaisesRegex(ValueError, "dim_choices"):
+            RecipeSpace(dim_choices=())
+        with self.assertRaisesRegex(ValueError, "recipe point"):
+            RecipeSpace().decode(np.array([0.1, 0.2]))
+
 
 class TuneRecipeForRoutingTest(unittest.TestCase):
     def test_returns_a_calibrated_decideable_model(self):
@@ -91,6 +107,7 @@ class TuneRecipeForRoutingTest(unittest.TestCase):
         self.assertIsInstance(res, CalibratedTuneResult)
         self.assertIsNotNone(res.model.qhat)
         self.assertIn(res.recipe["dim"], RecipeSpace().dim_choices)
+        self.assertGreater(res.test_size, 0)
 
         test = _make_corpus(seed=101)
         decisions = [res.model.decide(t) for t in test]
