@@ -20,6 +20,7 @@ failure-injection tests for that contract on the two torch-free payloads (the to
 """
 
 import glob
+import json
 import os
 import tempfile
 import unittest
@@ -111,6 +112,42 @@ class SaveJsonAtomicityTest(unittest.TestCase):
             self.assertAlmostEqual(
                 loaded.log_density(0.3), st.GaussianDistribution(1.5, 2.0).log_density(0.3), places=12
             )
+
+    def test_interrupted_directory_swap_is_recovered_on_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "art")
+            save_json(path, st.GaussianDistribution(1.5, 2.0))
+            backup = os.path.join(d, ".art.prev-interrupted")
+            os.replace(path, backup)
+
+            loaded, manifest = load_json(path)
+
+            self.assertTrue(os.path.isdir(path))
+            self.assertFalse(os.path.exists(backup))
+            self.assertEqual(manifest.schema_version, "2")
+            self.assertAlmostEqual(loaded.log_density(0.3), st.GaussianDistribution(1.5, 2.0).log_density(0.3))
+
+    def test_payload_corruption_is_rejected_before_decode(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "art")
+            save_json(path, st.GaussianDistribution(1.5, 2.0))
+            with open(os.path.join(path, JSON_MODEL_NAME), "ab") as stream:
+                stream.write(b" ")
+            with self.assertRaisesRegex(ValueError, "payload digest"):
+                load_json(path)
+
+    def test_manifest_corruption_is_rejected_before_rebuild(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "art")
+            save_json(path, st.GaussianDistribution(1.5, 2.0), task="before")
+            manifest_path = os.path.join(path, MANIFEST_NAME)
+            with open(manifest_path, encoding="utf-8") as stream:
+                data = json.load(stream)
+            data["task"] = "tampered"
+            with open(manifest_path, "w", encoding="utf-8") as stream:
+                json.dump(data, stream)
+            with self.assertRaisesRegex(ValueError, "manifest integrity"):
+                load_json(path)
 
 
 class SaveJsonAtomicUpdateTest(unittest.TestCase):

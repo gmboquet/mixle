@@ -422,6 +422,15 @@ Task artifacts are durable. Relevant helpers include:
 Use artifact helpers when adding a new student payload type. Ordinary users
 usually call ``TaskModel.save`` and ``TaskModel.load``.
 
+Artifact schema version 2 binds the payload bytes, builder configuration, I/O
+contract, and provenance metadata with SHA-256 digests that are verified
+before decoding or rebuilding a model. Replacement generations are staged as
+siblings and directory-renamed; if a process stops after moving the previous
+generation aside but before publishing the replacement, the next load or save
+restores that backup before continuing. Schema version 1 artifacts do not
+carry these integrity fields and must be regenerated rather than loaded as
+verified artifacts.
+
 Calibrated artifacts preserve non-finite conformal thresholds such as
 ``qhat=inf`` with a JSON-safe sentinel and restore them as ``float("inf")``.
 That keeps small or difficult calibration splits loadable without pretending
