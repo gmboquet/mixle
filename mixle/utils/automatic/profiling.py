@@ -155,6 +155,26 @@ class MarginalFieldProfile:
         }
 
 
+@dataclass(frozen=True)
+class MarginalSelectionDecision:
+    """Immutable evidence and final family choice for one marginal field."""
+
+    path: tuple[Any, ...]
+    training_recommendation: str
+    validation_recommendation: str | None
+    validation_score_gap_bits: float | None
+    selected_recommendation: str
+    validation_overrode: bool
+
+
+@dataclass(frozen=True)
+class AutomaticSelectionResult:
+    """The estimator returned to callers together with every decision that produced it."""
+
+    estimator: ParameterEstimator
+    decisions: tuple[MarginalSelectionDecision, ...]
+
+
 @dataclass
 class PairwiseDependencyHint:
     """Unconditional pairwise dependency hint measured from encoded values."""
@@ -208,10 +228,11 @@ class StructureProfile:
     pairwise_pairs_available: int = 0
     pairwise_pairs_checked: int = 0
     pairwise_pair_strategy: str = "none"
+    selection: AutomaticSelectionResult | None = None
 
     def recommend(self) -> ParameterEstimator:
         """Return the estimator selected by the structure-analysis pass."""
-        return self.estimator
+        return self.estimator if self.selection is None else self.selection.estimator
 
     def summary(self) -> dict[str, Any]:
         """Return a JSON-serializable summary of the structure profile."""
@@ -948,6 +969,28 @@ def _validation_integer_gaussian_bits(train: Sequence[int], validation: Sequence
     return -ll / (float(len(validation)) * math.log(2.0))
 
 
+def _validation_detector_bits(detector: Any, train: Sequence[Any], validation: Sequence[Any]) -> float | None:
+    """Fit one registered family on train only and score untouched validation data."""
+    if not train or not validation:
+        return None
+    vdict: dict[Any, float] = defaultdict(float)
+    for value in train:
+        vdict[value] += 1.0
+    try:
+        estimator = detector.factory(vdict, None, True, False)
+        accumulator = estimator.accumulator_factory().make()
+        encoder = accumulator.acc_to_encoder()
+        encoded = encoder.seq_encode(train)
+        accumulator.seq_update(encoded, np.ones(len(train), dtype=np.float64), None)
+        model = estimator.estimate(float(len(train)), accumulator.value())
+        scores = np.asarray([model.log_density(value) for value in validation], dtype=np.float64)
+    except Exception:  # noqa: BLE001
+        return None
+    if scores.shape != (len(validation),) or not np.all(np.isfinite(scores)):
+        return None
+    return -float(scores.mean()) / math.log(2.0)
+
+
 def _validate_marginal_profile(
     profile: MarginalFieldProfile,
     values: Sequence[Any],
@@ -990,6 +1033,12 @@ def _validate_marginal_profile(
             scores["gaussian"] = _validation_integer_gaussian_bits(
                 [int(value) for value in train], [int(value) for value in validation]
             )
+        from mixle.utils.automatic.detectors import get_detector
+
+        for name in sorted(candidates):
+            detector = get_detector(name)
+            if detector is not None and detector.kind == "discrete":
+                scores[name] = _validation_detector_bits(detector, train, validation)
 
     elif profile.kind == "numeric":
         train_f = [float(value) for value in train]
@@ -1003,6 +1052,12 @@ def _validate_marginal_profile(
             scores["lognormal"] = _validation_lognormal_bits(train_f, val_f)
         if "gamma" in profile.model_scores_bits:
             scores["gamma"] = _validation_gamma_bits(train_f, val_f)
+        from mixle.utils.automatic.detectors import get_detector
+
+        for name in sorted(profile.model_scores_bits):
+            detector = get_detector(name)
+            if detector is not None and detector.kind == "continuous":
+                scores[name] = _validation_detector_bits(detector, train_f, val_f)
 
     clean = _clean_scores(scores)
     if not clean:
@@ -1477,7 +1532,6 @@ def analyze_structure(
     rows = list(normalize_input(data))  # accept a DataFrame / RDD / DataSource, not only a bare list
     total_rows = len(rows)
     root = DatumNode(data=rows)  # built directly (not via get_estimator) so its modality checks are inspectable
-    estimator = root.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats)
     field_series = _extract_field_series(rows)
     fields = [
         _profile_series(path, role, values)
@@ -1489,6 +1543,27 @@ def analyze_structure(
             _validate_marginal_profile(
                 field_profile, values, validation_fraction, max_validation_rows, validation_min_count, validation_seed
             )
+    deployed_recommendations = {profile.path: profile.robust_recommendation() for profile in fields}
+    estimator = root.get_estimator(
+        pseudo_count,
+        emp_suff_stat,
+        use_bstats=use_bstats,
+        recommendations=deployed_recommendations,
+    )
+    selection = AutomaticSelectionResult(
+        estimator=estimator,
+        decisions=tuple(
+            MarginalSelectionDecision(
+                path=profile.path,
+                training_recommendation=profile.recommendation,
+                validation_recommendation=profile.validation_recommendation,
+                validation_score_gap_bits=profile.validation_score_gap_bits,
+                selected_recommendation=profile.robust_recommendation(),
+                validation_overrode=profile.robust_recommendation() != profile.recommendation,
+            )
+            for profile in fields
+        ),
+    )
 
     warnings = ["pairwise hints are unconditional; latent mixture/state/topic structure can explain or hide them"]
     vec_dim = root._fixed_numeric_vector_dim()
@@ -1662,6 +1737,7 @@ def analyze_structure(
         pairwise_pairs_available=pairwise_pairs_available,
         pairwise_pairs_checked=pairwise_pairs_checked,
         pairwise_pair_strategy=pairwise_pair_strategy,
+        selection=selection,
     )
 
 
@@ -1836,7 +1912,7 @@ class DatumNode:
         else:
             self.obj_count += v
 
-    def _leaf_estimator(self, pseudo_count, emp_suff_stat, use_bstats):
+    def _leaf_estimator(self, pseudo_count, emp_suff_stat, use_bstats, recommendation: str | None = None):
         if self.obj_count > 0 or len(self.vdict) == 0:
             return get_ignored_estimator(use_bstats=use_bstats)
 
@@ -1845,6 +1921,8 @@ class DatumNode:
             # density information; ignore them instead of fitting a
             # one-bucket-per-row categorical
             if self.count >= ID_MIN_COUNT and len(self.vdict) >= ID_DISTINCT_FRACTION * self.count:
+                return get_ignored_estimator(use_bstats=use_bstats)
+            if recommendation == "ignored":
                 return get_ignored_estimator(use_bstats=use_bstats)
             return get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
@@ -1870,12 +1948,17 @@ class DatumNode:
             if arr.size:
                 bics = _numeric_candidate_bics(arr, arr.size)
                 if bics:
-                    best = _numeric_model_recommendation(bics)
+                    best = recommendation if recommendation in bics and recommendation in builders else None
+                    if best is None:
+                        best = _numeric_model_recommendation(bics)
                     return builders[best](self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
             return get_gaussian_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
         if self.int_count > 0:
-            recommendation, _ = _recommended_integer_model(self.vdict)
+            inferred, scores = _recommended_integer_model(self.vdict)
+            if recommendation not in scores and recommendation != "ignored":
+                recommendation = inferred
+            recommendation = inferred if recommendation is None else recommendation
             if recommendation == "ignored":
                 return get_ignored_estimator(use_bstats=use_bstats)
             if recommendation == "integer_categorical":
@@ -1940,8 +2023,17 @@ class DatumNode:
             child = child.merge(u)
         return child
 
-    def get_estimator(self, pseudo_count: float | None = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
+    def get_estimator(
+        self,
+        pseudo_count: float | None = 1.0,
+        emp_suff_stat: bool = True,
+        use_bstats: bool = False,
+        *,
+        recommendations: dict[tuple[Any, ...], str] | None = None,
+        path: tuple[Any, ...] = (),
+    ):
         """Infer and return an estimator for the profiled observations."""
+        recommendations = {} if recommendations is None else recommendations
         structured = self.tuple_count + self.seq_count + self.set_count + self.dict_count
         typed = self.count - self.none_count
         container_kinds = sum(u > 0 for u in (self.tuple_count, self.seq_count, self.set_count, self.dict_count))
@@ -1964,7 +2056,13 @@ class DatumNode:
                 rv = get_dict_record_estimator(
                     keys,
                     [
-                        self.dict_children[k].get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats)
+                        self.dict_children[k].get_estimator(
+                            pseudo_count,
+                            emp_suff_stat,
+                            use_bstats=use_bstats,
+                            recommendations=recommendations,
+                            path=path + ("key", k),
+                        )
                         for k in keys
                     ],
                 )
@@ -1974,7 +2072,16 @@ class DatumNode:
             if self.tuple_count > 0 and self.seq_count == 0 and fixed_arity:
                 # records: positional composite
                 rv = get_composite_estimator(
-                    [u.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats) for u in self.children],
+                    [
+                        u.get_estimator(
+                            pseudo_count,
+                            emp_suff_stat,
+                            use_bstats=use_bstats,
+                            recommendations=recommendations,
+                            path=path + (index,),
+                        )
+                        for index, u in enumerate(self.children)
+                    ],
                     use_bstats=use_bstats,
                 )
             elif self._fixed_numeric_vector_dim() is not None:
@@ -1993,14 +2100,29 @@ class DatumNode:
             elif fixed_arity and self.tuple_count == 0 and not self._children_homogeneous():
                 # fixed-length lists/vectors with positionally distinct types
                 rv = get_composite_estimator(
-                    [u.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats) for u in self.children],
+                    [
+                        u.get_estimator(
+                            pseudo_count,
+                            emp_suff_stat,
+                            use_bstats=use_bstats,
+                            recommendations=recommendations,
+                            path=path + (index,),
+                        )
+                        for index, u in enumerate(self.children)
+                    ],
                     use_bstats=use_bstats,
                 )
             else:
                 # variable-length (or homogeneous fixed-length) sequences
                 child = self._merged_child()
                 rv = get_sequence_estimator(
-                    child.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats),
+                    child.get_estimator(
+                        pseudo_count,
+                        emp_suff_stat,
+                        use_bstats=use_bstats,
+                        recommendations=recommendations,
+                        path=path + ("element",),
+                    ),
                     len_dict=self.len_dict,
                     pseudo_count=pseudo_count,
                     emp_suff_stat=emp_suff_stat,
@@ -2008,7 +2130,12 @@ class DatumNode:
                 )
 
         else:
-            rv = self._leaf_estimator(pseudo_count, emp_suff_stat, use_bstats)
+            rv = self._leaf_estimator(
+                pseudo_count,
+                emp_suff_stat,
+                use_bstats,
+                recommendation=recommendations.get(path),
+            )
 
         if self.none_count > 0:
             rv = get_optional_estimator(rv, None, use_bstats=use_bstats)
