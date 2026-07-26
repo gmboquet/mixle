@@ -8,6 +8,8 @@ from mixle.utils.hvis.tsne import (
     _convergence_update,
     _validate_dense_joint_probability,
     _validate_sparse_joint_probability,
+    tsne_exact,
+    update_alpha,
 )
 
 pytestmark = pytest.mark.fast
@@ -61,6 +63,39 @@ class ConvergenceContractTest(unittest.TestCase):
     def test_nonfinite_objective_fails(self):
         with self.assertRaises(FloatingPointError):
             _convergence_update(1.0, np.nan, 1.0e-7, 0)
+
+
+class OptimizerControlContractTest(unittest.TestCase):
+    def setUp(self):
+        self.p = np.array([[0.0, 0.5], [0.5, 0.0]])
+        self.y = np.array([[-1.0, 0.0], [1.0, 0.0]])
+
+    def test_alpha_search_is_bounded_and_never_increases_its_objective(self):
+        alpha = update_alpha(self.p, self.y, 1.0, 0.1, 1.0e-128, max_its=20, step=0.25)
+        self.assertGreaterEqual(alpha, 0.75)
+        self.assertLessEqual(alpha, 1.25)
+
+    def test_alpha_search_rejects_invalid_domains_and_controls(self):
+        for kwargs in (
+            {"max_its": 0},
+            {"step": 0.0},
+            {"eps": -1.0},
+            {"max_alpha": 0.01},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                update_alpha(self.p, self.y, 1.0, 0.1, 1.0e-128, **kwargs)
+
+    def test_exact_optimizer_rejects_modulo_zero_controls(self):
+        with self.assertRaises(ValueError):
+            tsne_exact(self.p, max_its=1, print_iter=0)
+        with self.assertRaises(ValueError):
+            tsne_exact(self.p, max_its=1, check_every=0)
+
+    def test_kernel_rejects_invalid_alpha_and_coordinates(self):
+        with self.assertRaises(ValueError):
+            update_alpha(self.p, self.y, 0.0, 0.1, 1.0e-128)
+        with self.assertRaises(ValueError):
+            update_alpha(self.p, np.array([[np.nan], [0.0]]), 1.0, 0.1, 1.0e-128)
 
 
 if __name__ == "__main__":
