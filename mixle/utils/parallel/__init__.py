@@ -35,7 +35,12 @@ from mixle.utils.parallel.training_contracts import (  # noqa: E402
     get_training_backend,
     register_training_backend,
 )
-from mixle.utils.parallel.training_launchers import LightningFabricLauncher, RayTrainLauncher  # noqa: E402
+from mixle.utils.parallel.training_launchers import (  # noqa: E402
+    LightningFabricLauncher,
+    RayTrainLauncher,
+    WorkerTopologyAttestation,
+    attest_worker_coordinate,
+)
 
 register_training_backend(
     "torch_native",
@@ -77,4 +82,6 @@ __all__ = [
     "register_training_backend",
     "LightningFabricLauncher",
     "RayTrainLauncher",
+    "WorkerTopologyAttestation",
+    "attest_worker_coordinate",
 ]
