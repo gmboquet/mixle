@@ -1,31 +1,29 @@
-"""``solve_multilabel`` -- replace rigid code that returns a set of labels, with per-label honesty.
+"""``solve_multilabel`` -- replace rigid code that returns a set of labels, with joint-set honesty.
 
 The multi-label shape of the solve loop: ``teacher(x) -> list[str]`` (tags, flags, categories -- any
 subset of a label universe). The student is one shared-feature net with a sigmoid head per label; the
-calibration is per-label conformal thresholds from the held-out slice:
-
-  * ``A_l`` -- the ``1 - alpha`` quantile of label ``l``'s scores among calibration inputs where ``l``
-    is absent: a score above it is confidently-present (at most ``~alpha`` of absents score that high);
-  * ``P_l`` -- the ``alpha`` quantile among inputs where ``l`` is present: a score below it is
-    confidently-absent.
-
-A label is *decided* when its score clears one of those bars; anything in between is ambiguous. The
-input is answered locally only when every label is decided -- one ambiguous tag escalates the whole
-request to the teacher (whose answer is harvested), so a locally-returned set never contains a guess.
-Labels with too few calibration examples on either side are never decided locally (their bars are
-``inf``/``-inf``): under-calibrated is treated as ambiguous, not as confident.
+calibration uses one joint nonconformity score: the largest binary-label error across the whole label
+vector. Its split-conformal quantile covers the complete teacher set with probability at least
+``1 - alpha`` under exchangeability. A request is answered locally only when that joint prediction set
+contains exactly one label vector; multiple or zero admissible vectors escalate to the teacher.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import Any
 
 import numpy as np
 
 from mixle.task.model import HashedNGram
-from mixle.task.regress import RecordRegressionFeaturizer, featurizer_from_spec, featurizer_spec
+from mixle.task.regress import (
+    RecordRegressionFeaturizer,
+    _validated_features,
+    featurizer_from_spec,
+    featurizer_spec,
+)
 from mixle.task.solve import _input_kind, _label_with
 
 
@@ -36,7 +34,7 @@ def _fit_multilabel_mlp(x: np.ndarray, y: np.ndarray, hidden: Sequence[int], epo
     dims = [x.shape[1], *hidden, y.shape[1]]
     layers: list[Any] = []
     for i in range(len(dims) - 1):
-        layers.append(torch.nn.Linear(dims[i], dims[i + 1]))
+        layers.append(torch.nn.Linear(dims[i], dims[i + 1], dtype=torch.float32))
         if i < len(dims) - 2:
             layers.append(torch.nn.ReLU())
     net = torch.nn.Sequential(*layers)
@@ -61,6 +59,92 @@ def _quantile_upper(scores: np.ndarray, alpha: float) -> float:
     return float(np.sort(scores)[rank - 1])
 
 
+def _score_net(net: Any, feats: np.ndarray, n_labels: int) -> np.ndarray:
+    import torch
+
+    params = list(net.parameters())
+    if not params:
+        raise ValueError("multilabel network has no parameters")
+    tensor = torch.as_tensor(feats, dtype=params[0].dtype, device=params[0].device)
+    with torch.no_grad():
+        scores = torch.sigmoid(net(tensor)).detach().to(device="cpu", dtype=torch.float64).numpy()
+    if (
+        scores.shape != (len(feats), n_labels)
+        or not np.all(np.isfinite(scores))
+        or np.any(scores < 0.0)
+        or np.any(scores > 1.0)
+    ):
+        raise ValueError("multilabel network returned invalid probabilities")
+    return scores
+
+
+def _indicator_matrix(label_sets: Sequence[Sequence[str]], labels: Sequence[str]) -> np.ndarray:
+    index = {label: j for j, label in enumerate(labels)}
+    matrix = np.zeros((len(label_sets), len(labels)), dtype=bool)
+    for i, tags in enumerate(label_sets):
+        for tag in tags:
+            if tag not in index:
+                raise ValueError(f"label {tag!r} is outside the declared multilabel support")
+            matrix[i, index[tag]] = True
+    return matrix
+
+
+def _joint_decisions(scores: np.ndarray, qhat: float) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(uniquely_decided, predicted_present)`` for a joint conformal set."""
+    present_allowed = (1.0 - scores) <= qhat
+    absent_allowed = scores <= qhat
+    unique = np.all(np.logical_xor(present_allowed, absent_allowed), axis=1)
+    return unique, present_allowed & ~absent_allowed
+
+
+def _set_agreement(
+    net: Any,
+    featurizer: Any,
+    inputs: Sequence[Any],
+    label_sets: Sequence[Sequence[str]],
+    labels: Sequence[str],
+    qhat: float,
+) -> float:
+    if not inputs or len(inputs) != len(label_sets):
+        raise ValueError("evaluation inputs and label sets must be nonempty and aligned")
+    scores = _score_net(net, _validated_features(featurizer, inputs), len(labels))
+    unique, predicted = _joint_decisions(scores, qhat)
+    truth = _indicator_matrix(label_sets, labels)
+    return float(np.mean(unique & np.all(predicted == truth, axis=1)))
+
+
+def _raw_set_agreement(
+    net: Any,
+    featurizer: Any,
+    inputs: Sequence[Any],
+    label_sets: Sequence[Sequence[str]],
+    labels: Sequence[str],
+) -> float:
+    if not inputs or len(inputs) != len(label_sets):
+        raise ValueError("evaluation inputs and label sets must be nonempty and aligned")
+    scores = _score_net(net, _validated_features(featurizer, inputs), len(labels))
+    truth = _indicator_matrix(label_sets, labels)
+    return float(np.mean(np.all((scores >= 0.5) == truth, axis=1)))
+
+
+def _normalize_label_sets(values: Sequence[Any], *, name: str) -> list[list[str]]:
+    result: list[list[str]] = []
+    for row in values:
+        if row is None:
+            tags: list[Any] = []
+        elif isinstance(row, (str, bytes)) or not isinstance(row, Sequence):
+            raise ValueError(f"{name} rows must be sequences of labels, not {type(row).__name__}")
+        else:
+            tags = list(row)
+        normalized = [str(tag) for tag in tags]
+        if any(not tag for tag in normalized):
+            raise ValueError(f"{name} labels must be nonempty strings")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError(f"{name} rows must not contain duplicate labels")
+        result.append(normalized)
+    return result
+
+
 @dataclass
 class MultiLabelSolution:
     """A per-label-calibrated tagger in front of the routine it replaces."""
@@ -71,12 +155,15 @@ class MultiLabelSolution:
     teacher: Callable[..., Any]
     upper_absent: np.ndarray  # A_l: above -> confidently present
     lower_present: np.ndarray  # P_l: below -> confidently absent
+    joint_qhat: float
     alpha: float
     holdout_set_agreement: float
     train_inputs: list = field(default_factory=list)
     train_sets: list = field(default_factory=list)
     cal_inputs: list = field(default_factory=list)
     cal_sets: list = field(default_factory=list)
+    eval_inputs: list = field(default_factory=list)
+    eval_sets: list = field(default_factory=list)
     hidden: tuple = (64,)
     epochs: int = 300
     lr: float = 1e-2
@@ -85,21 +172,17 @@ class MultiLabelSolution:
     n_escalated: int = 0
     harvested_inputs: list = field(default_factory=list)
     harvested_sets: list = field(default_factory=list)
+    calibration_receipt: dict[str, Any] = field(default_factory=dict)
 
     def _scores(self, xs: list) -> np.ndarray:
-        import torch
-
-        feats = np.asarray(self.featurizer.transform(list(xs)), dtype=np.float32)
-        with torch.no_grad():
-            return torch.sigmoid(self.net(torch.as_tensor(feats))).numpy()
+        return _score_net(self.net, _validated_features(self.featurizer, xs), len(self.labels))
 
     def try_local(self, x: Any) -> list[str] | None:
         """The decided label set, or ``None`` when any label is ambiguous (= must escalate)."""
         s = self._scores([x])[0]
-        present = s > self.upper_absent
-        absent = s < self.lower_present
-        if bool(np.all(present | absent)):
-            return [lab for lab, p in zip(self.labels, present) if p]
+        unique, present = _joint_decisions(s[None, :], self.joint_qhat)
+        if bool(unique[0]):
+            return [lab for lab, is_present in zip(self.labels, present[0]) if is_present]
         return None
 
     def decide(self, x: Any) -> list[str] | None:
@@ -113,7 +196,7 @@ class MultiLabelSolution:
             return local
         self.n_escalated += 1
         got = _label_with(self.teacher, [x])[0]
-        tags = [str(v) for v in (got or [])]
+        tags = _normalize_label_sets([got], name="teacher output")[0]
         self.harvested_inputs.append(x)
         self.harvested_sets.append(tags)
         return tags
@@ -124,6 +207,8 @@ class MultiLabelSolution:
             "labels": len(self.labels),
             "holdout_set_agreement": round(self.holdout_set_agreement, 4),
             "alpha": self.alpha,
+            "coverage_contract": "joint_exact_set",
+            "joint_qhat": self.joint_qhat,
             "requests": self.n_requests,
             "escalated": self.n_escalated,
             "escalation_rate": (self.n_escalated / self.n_requests) if self.n_requests else 0.0,
@@ -152,12 +237,14 @@ class MultiLabelSolution:
                     "labels": list(self.labels),
                     "upper_absent": [float(v) for v in self.upper_absent],
                     "lower_present": [float(v) for v in self.lower_present],
+                    "joint_qhat": self.joint_qhat,
                     "alpha": self.alpha,
                     "holdout_set_agreement": self.holdout_set_agreement,
                     "hidden": [int(h) for h in self.hidden],
                     "epochs": self.epochs,
                     "lr": self.lr,
                     "seed": self.seed,
+                    "calibration_receipt": self.calibration_receipt,
                 }
             },
         )
@@ -176,16 +263,18 @@ class MultiLabelSolution:
             teacher=teacher,
             upper_absent=np.asarray(m["upper_absent"], dtype=np.float64),
             lower_present=np.asarray(m["lower_present"], dtype=np.float64),
+            joint_qhat=float(m["joint_qhat"]),
             alpha=float(m["alpha"]),
             holdout_set_agreement=float(m["holdout_set_agreement"]),
             hidden=tuple(m["hidden"]),
             epochs=int(m["epochs"]),
             lr=float(m["lr"]),
             seed=int(m["seed"]),
+            calibration_receipt=dict(m.get("calibration_receipt", {})),
         )
 
-    def improve(self) -> bool:
-        """Re-fit with harvested sets; promote only if held-out set agreement does not regress."""
+    def improve(self, evidence_inputs: Sequence[Any] | None = None) -> bool:
+        """Re-fit harvested sets and use a fresh, single-use evidence batch for promotion and calibration."""
         if not self.harvested_inputs:
             return False
         if not self.cal_inputs:
@@ -193,13 +282,36 @@ class MultiLabelSolution:
                 "this MultiLabelSolution was loaded from an artifact and has no calibration data; "
                 "collect the harvested pairs and re-solve_multilabel() to improve."
             )
+        if evidence_inputs is None:
+            raise ValueError("improve() requires fresh evidence_inputs; prior calibration data cannot be reused")
+        fresh_inputs = list(evidence_inputs)
+        min_cal = int(np.ceil(1.0 / self.alpha)) - 1
+        if len(fresh_inputs) < min_cal + 2:
+            raise ValueError(f"fresh evidence needs at least {min_cal + 2} examples")
+        fresh_sets = _normalize_label_sets(_label_with(self.teacher, fresh_inputs), name="fresh evidence")
+        unknown = sorted({tag for tags in fresh_sets for tag in tags} - set(self.labels))
+        if unknown:
+            raise ValueError(f"fresh evidence contains labels outside the fitted support: {unknown}")
+        order = np.random.RandomState(self.seed + len(self.calibration_receipt.get("improvements", [])) + 1).permutation(
+            len(fresh_inputs)
+        )
+        cal_idx, eval_idx = order[:min_cal], order[min_cal:]
+        fresh_cal_inputs = [fresh_inputs[i] for i in cal_idx]
+        fresh_cal_sets = [fresh_sets[i] for i in cal_idx]
+        fresh_eval_inputs = [fresh_inputs[i] for i in eval_idx]
+        fresh_eval_sets = [fresh_sets[i] for i in eval_idx]
         inputs = self.train_inputs + list(self.harvested_inputs)
         sets = self.train_sets + [list(v) for v in self.harvested_sets]
+        unknown_harvest = sorted({tag for tags in sets for tag in tags} - set(self.labels))
+        if unknown_harvest:
+            raise ValueError(f"harvested evidence contains labels outside the fitted support: {unknown_harvest}")
         cand = _fit_and_calibrate(
             inputs,
             sets,
-            self.cal_inputs,
-            self.cal_sets,
+            fresh_cal_inputs,
+            fresh_cal_sets,
+            fresh_eval_inputs,
+            fresh_eval_sets,
             self.labels,
             self.featurizer,
             self.alpha,
@@ -208,48 +320,72 @@ class MultiLabelSolution:
             self.lr,
             self.seed,
         )
-        if cand["agreement"] < self.holdout_set_agreement - 1e-12:
+        incumbent_agreement = _raw_set_agreement(
+            self.net, self.featurizer, fresh_eval_inputs, fresh_eval_sets, self.labels
+        )
+        if cand["agreement"] < incumbent_agreement - 1e-12:
             return False
         self.net = cand["net"]
         self.upper_absent, self.lower_present = cand["upper_absent"], cand["lower_present"]
+        self.joint_qhat = float(cand["joint_qhat"])
         self.holdout_set_agreement = float(cand["agreement"])
         self.train_inputs, self.train_sets = inputs, sets
+        self.cal_inputs, self.cal_sets = fresh_cal_inputs, fresh_cal_sets
+        self.eval_inputs, self.eval_sets = fresh_eval_inputs, fresh_eval_sets
+        self.calibration_receipt.setdefault("improvements", []).append(
+            {
+                "calibration_count": len(fresh_cal_inputs),
+                "evaluation_count": len(fresh_eval_inputs),
+                "evidence_sha256": sha256(repr(list(zip(fresh_inputs, fresh_sets))).encode("utf-8")).hexdigest(),
+                "incumbent_agreement": incumbent_agreement,
+                "candidate_agreement": cand["agreement"],
+            }
+        )
         self.harvested_inputs.clear()
         self.harvested_sets.clear()
         return True
 
 
 def _fit_and_calibrate(
-    train_inputs, train_sets, cal_inputs, cal_sets, labels, featurizer, alpha, hidden, epochs, lr, seed
+    train_inputs,
+    train_sets,
+    cal_inputs,
+    cal_sets,
+    eval_inputs,
+    eval_sets,
+    labels,
+    featurizer,
+    alpha,
+    hidden,
+    epochs,
+    lr,
+    seed,
 ) -> dict:
-    import torch
-
-    idx = {lab: j for j, lab in enumerate(labels)}
-    y = np.zeros((len(train_inputs), len(labels)), dtype=np.float32)
-    for i, tags in enumerate(train_sets):
-        for t in tags:
-            if t in idx:
-                y[i, idx[t]] = 1.0
-    feats = np.asarray(featurizer.transform(list(train_inputs)), dtype=np.float32)
+    if len(train_inputs) != len(train_sets) or len(cal_inputs) != len(cal_sets):
+        raise ValueError("multilabel inputs and label sets must be aligned")
+    y = _indicator_matrix(train_sets, labels).astype(np.float32)
+    feats = _validated_features(featurizer, train_inputs)
     net = _fit_multilabel_mlp(feats, y, hidden, epochs, lr, seed)
 
-    cal_feats = np.asarray(featurizer.transform(list(cal_inputs)), dtype=np.float32)
-    with torch.no_grad():
-        s = torch.sigmoid(net(torch.as_tensor(cal_feats))).numpy()
-    y_cal = np.zeros_like(s, dtype=bool)
-    for i, tags in enumerate(cal_sets):
-        for t in tags:
-            if t in idx:
-                y_cal[i, idx[t]] = True
-
-    upper_absent = np.array([_quantile_upper(s[~y_cal[:, j], j], alpha) for j in range(len(labels))])
-    lower_present = np.array([-_quantile_upper(-s[y_cal[:, j], j], alpha) for j in range(len(labels))])
-
-    present = s > upper_absent[None, :]
-    absent = s < lower_present[None, :]
-    decided = np.all(present | absent, axis=1)
-    agree = float(np.mean([bool(d) and bool(np.array_equal(p, t)) for d, p, t in zip(decided, present, y_cal)]))
-    return {"net": net, "upper_absent": upper_absent, "lower_present": lower_present, "agreement": agree}
+    s = _score_net(net, _validated_features(featurizer, cal_inputs), len(labels))
+    y_cal = _indicator_matrix(cal_sets, labels)
+    joint_scores = np.max(np.where(y_cal, 1.0 - s, s), axis=1)
+    qhat = _quantile_upper(joint_scores, alpha)
+    if not np.isfinite(qhat):
+        raise ValueError(
+            f"{len(cal_inputs)} calibration examples are insufficient for finite {1.0 - alpha:.6g} joint coverage"
+        )
+    agree = _raw_set_agreement(net, featurizer, eval_inputs, eval_sets, labels)
+    # Retained for artifact/API compatibility; the serving decision uses joint_qhat.
+    upper_absent = np.full(len(labels), 1.0 - qhat)
+    lower_present = np.full(len(labels), qhat)
+    return {
+        "net": net,
+        "upper_absent": upper_absent,
+        "lower_present": lower_present,
+        "joint_qhat": qhat,
+        "agreement": agree,
+    }
 
 
 def solve_multilabel(
@@ -273,17 +409,39 @@ def solve_multilabel(
     fresh split of ``inputs``, so the per-label bars keep their finite-sample rank guarantee). Labels
     seen only in ``prelabeled`` still enter the label space.
     """
+    if not callable(teacher):
+        raise TypeError("teacher must be callable")
+    if not np.isfinite(alpha) or not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be finite and in (0, 1)")
+    if not np.isfinite(holdout) or not 0.0 < holdout < 1.0:
+        raise ValueError("holdout must be finite and in (0, 1)")
+    if kind not in (None, "text", "record"):
+        raise ValueError("kind must be None, 'text', or 'record'")
+    if isinstance(epochs, bool) or not isinstance(epochs, int) or epochs <= 0:
+        raise ValueError("epochs must be a positive integer")
+    if not np.isfinite(lr) or lr <= 0.0:
+        raise ValueError("lr must be finite and positive")
+    if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+        raise ValueError("dim must be a positive integer")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed must be an integer")
+    hidden = tuple(hidden)
+    if any(isinstance(width, bool) or not isinstance(width, int) or width <= 0 for width in hidden):
+        raise ValueError("hidden widths must be positive integers")
+
     items = list(inputs)
     if len(items) < 12:
         raise ValueError("solve_multilabel needs at least 12 example inputs")
     k = kind or _input_kind(items[0])
     raw = _label_with(teacher, items)
-    sets = [[str(v) for v in (tags or [])] for tags in raw]
+    if len(raw) != len(items):
+        raise ValueError("teacher must return exactly one label set per input")
+    sets = _normalize_label_sets(raw, name="teacher output")
     pre_in: list = []
     pre_sets: list[list[str]] = []
     if prelabeled is not None:
         pre_in = list(prelabeled[0])
-        pre_sets = [[str(v) for v in (tags or [])] for tags in prelabeled[1]]
+        pre_sets = _normalize_label_sets(prelabeled[1], name="prelabeled")
         if len(pre_in) != len(pre_sets):
             raise ValueError("prelabeled inputs and label sets must have equal length")
     labels = sorted({t for tags in sets for t in tags} | {t for tags in pre_sets for t in tags})
@@ -292,12 +450,21 @@ def solve_multilabel(
 
     rng = np.random.RandomState(seed)
     order = rng.permutation(len(items))
-    n_cal = max(4, int(round(len(items) * holdout)))
-    cal_idx, train_idx = order[:n_cal], order[n_cal:]
+    n_holdout = max(4, int(round(len(items) * holdout)))
+    min_cal = int(np.ceil(1.0 / alpha)) - 1
+    n_cal = max(min_cal, n_holdout // 2)
+    n_eval = n_holdout - n_cal
+    if n_eval < 2 or n_holdout >= len(items):
+        raise ValueError(
+            f"holdout must leave training data, at least {min_cal} calibration rows, and two evaluation rows"
+        )
+    cal_idx, eval_idx, train_idx = order[:n_cal], order[n_cal:n_holdout], order[n_holdout:]
     train_inputs = [items[i] for i in train_idx] + pre_in
     train_sets = [sets[i] for i in train_idx] + pre_sets
     cal_inputs = [items[i] for i in cal_idx]
     cal_sets = [sets[i] for i in cal_idx]
+    eval_inputs = [items[i] for i in eval_idx]
+    eval_sets = [sets[i] for i in eval_idx]
 
     # records: standardized numeric pass-through + hashed categoricals (HashedRecord's tanh squash
     # saturates and erases the magnitude signal threshold-flags like "high-value" depend on)
@@ -311,11 +478,13 @@ def solve_multilabel(
         train_sets,
         cal_inputs,
         cal_sets,
+        eval_inputs,
+        eval_sets,
         labels,
         featurizer,
         float(alpha),
-        tuple(hidden),
-        int(epochs),
+        hidden,
+        epochs,
         float(lr),
         int(seed),
     )
@@ -326,14 +495,26 @@ def solve_multilabel(
         teacher=teacher,
         upper_absent=cand["upper_absent"],
         lower_present=cand["lower_present"],
+        joint_qhat=float(cand["joint_qhat"]),
         alpha=float(alpha),
         holdout_set_agreement=float(cand["agreement"]),
         train_inputs=train_inputs,
         train_sets=train_sets,
         cal_inputs=cal_inputs,
         cal_sets=cal_sets,
-        hidden=tuple(hidden),
-        epochs=int(epochs),
+        eval_inputs=eval_inputs,
+        eval_sets=eval_sets,
+        hidden=hidden,
+        epochs=epochs,
         lr=float(lr),
-        seed=int(seed),
+        seed=seed,
+        calibration_receipt={
+            "contract": "joint_exact_set",
+            "calibration_indices": [int(i) for i in cal_idx],
+            "evaluation_indices": [int(i) for i in eval_idx],
+            "calibration_count": len(cal_inputs),
+            "evaluation_count": len(eval_inputs),
+            "evidence_sha256": sha256(repr(list(zip(items, sets))).encode("utf-8")).hexdigest(),
+            "improvements": [],
+        },
     )
