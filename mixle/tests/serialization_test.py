@@ -236,8 +236,16 @@ class DistributionSerializationTestCase(unittest.TestCase):
 
         dpm = DirichletProcessMixtureDistribution(
             [
-                stats.GaussianDistribution(0.0, 1.0),
-                stats.GaussianDistribution(3.0, 2.0),
+                stats.GaussianDistribution(
+                    0.0,
+                    1.0,
+                    prior=NormalGammaDistribution(0.0, 2.0, 2.0, 1.0),
+                ),
+                stats.GaussianDistribution(
+                    3.0,
+                    2.0,
+                    prior=NormalGammaDistribution(3.0, 2.0, 2.0, 1.0),
+                ),
             ],
             np.asarray([0.55, 0.45]),
             1.5,

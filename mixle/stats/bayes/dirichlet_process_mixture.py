@@ -30,15 +30,17 @@ exactly; only the surrounding object protocol is adapted to mixle.stats:
 signature, and ``seq_initialize`` on the accumulator.
 """
 
+import copy
+import operator
 from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
 
-import mixle.utils.vector as vec
 from mixle.engines.arithmetic import maxrandint
 from mixle.stats.compute._sampling import scatter_component_draws
+from mixle.stats.compute.mixture_evidence import normalize_mixture_log_scores
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -47,10 +49,246 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.compute.posterior import CategoricalLatentPosterior, ImpossiblePosteriorError
 from mixle.stats.univariate.continuous.gamma import GammaDistribution
 from mixle.utils.special import betaln, digamma
 
 default_prior = GammaDistribution(2, 1)
+_SIMPLEX_RTOL = 1.0e-10
+_SIMPLEX_ATOL = 1.0e-12
+
+
+def _type_id(value: Any) -> str:
+    cls = value if isinstance(value, type) else type(value)
+    return "%s.%s" % (cls.__module__, cls.__qualname__)
+
+
+def _prior_structure(prior: Any) -> tuple[Any, ...]:
+    if prior is None:
+        return ("none",)
+    if isinstance(prior, (tuple, list)):
+        return ("sequence", len(prior), *(_prior_structure(child) for child in prior))
+    return ("leaf", _type_id(prior))
+
+
+def _validated_hyperprior(prior: Any) -> GammaDistribution | None:
+    if prior is not None and not isinstance(prior, GammaDistribution):
+        raise TypeError("Dirichlet-process concentration prior must be GammaDistribution or None.")
+    return prior
+
+
+def _validated_concentration(value: Any) -> float:
+    if np.ndim(value) != 0:
+        raise ValueError("Dirichlet-process concentration must be a finite positive scalar.")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Dirichlet-process concentration must be a finite positive scalar.") from exc
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError("Dirichlet-process concentration must be a finite positive scalar.")
+    return result
+
+
+def _validated_weights(value: Any, component_count: int) -> np.ndarray:
+    try:
+        weights = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Dirichlet-process weights must be numeric.") from exc
+    if weights.shape != (component_count,):
+        raise ValueError(
+            "Dirichlet-process weights must have exact shape (%d,)." % component_count
+        )
+    if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
+        raise ValueError("Dirichlet-process weights must be finite and non-negative.")
+    if not np.isclose(
+        float(weights.sum()),
+        1.0,
+        rtol=_SIMPLEX_RTOL,
+        atol=_SIMPLEX_ATOL,
+    ):
+        raise ValueError("Dirichlet-process weights must sum to one.")
+    return weights.copy()
+
+
+def _validated_sticks(value: Any, component_count: int) -> np.ndarray:
+    try:
+        sticks = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Dirichlet-process stick parameters must be numeric.") from exc
+    if sticks.shape != (component_count, 2):
+        raise ValueError(
+            "Dirichlet-process stick parameters must have exact shape (%d, 2)."
+            % component_count
+        )
+    if np.any(~np.isfinite(sticks)) or np.any(sticks <= 0.0):
+        raise ValueError("Dirichlet-process stick parameters must be finite and positive.")
+    return sticks.copy()
+
+
+def _validated_component_sequence(value: Any, name: str) -> list[Any]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError("Dirichlet-process %s must be a sequence." % name)
+    result = list(value)
+    if not result:
+        raise ValueError("Dirichlet-process mixtures require at least one component.")
+    return result
+
+
+def _compatible_component_encoder(components: Sequence[Any]) -> DataSequenceEncoder:
+    encoders: list[DataSequenceEncoder] = []
+    for component in components:
+        if not callable(getattr(component, "dist_to_encoder", None)):
+            raise TypeError("Every Dirichlet-process component must provide dist_to_encoder().")
+        encoder = component.dist_to_encoder()
+        if not isinstance(encoder, DataSequenceEncoder):
+            raise TypeError("Every Dirichlet-process component encoder must satisfy DataSequenceEncoder.")
+        encoders.append(encoder)
+    reference = encoders[0]
+    for index, encoder in enumerate(encoders[1:], start=1):
+        try:
+            compatible = reference == encoder and encoder == reference
+        except Exception as exc:
+            raise ValueError(
+                "Dirichlet-process component encoder compatibility check failed at component %d."
+                % index
+            ) from exc
+        if not compatible:
+            raise ValueError(
+                "Dirichlet-process components must use compatible encoders; component %d differs."
+                % index
+            )
+    return reference
+
+
+def _component_structure_fingerprint(components: Sequence[Any]) -> tuple[Any, ...]:
+    encoder = _compatible_component_encoder(components)
+    return (
+        len(components),
+        _type_id(encoder),
+        str(encoder),
+        tuple(_type_id(component) for component in components),
+        tuple(_prior_structure(component.get_prior()) for component in components),
+    )
+
+
+def _validated_component_priors(components: Sequence[Any], priors: Any) -> list[Any]:
+    if isinstance(priors, (str, bytes)) or not isinstance(priors, Sequence):
+        raise TypeError("Dirichlet-process component_priors must be a sequence.")
+    result = list(priors)
+    if len(result) != len(components):
+        raise ValueError(
+            "Dirichlet-process component_priors must contain exactly one entry per component."
+        )
+    for index, (component, prior) in enumerate(zip(components, result)):
+        if _prior_structure(component.get_prior()) != _prior_structure(prior):
+            raise ValueError(
+                "Dirichlet-process component prior structure differs at component %d." % index
+            )
+    return result
+
+
+def _validated_observation_weight(value: Any) -> float:
+    if np.ndim(value) != 0:
+        raise ValueError("Dirichlet-process observation weight must be a finite non-negative scalar.")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Dirichlet-process observation weight must be a finite non-negative scalar."
+        ) from exc
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError("Dirichlet-process observation weight must be a finite non-negative scalar.")
+    return result
+
+
+def _validated_observation_weights(value: Any, row_count: int) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Dirichlet-process observation weights must be numeric.") from exc
+    if result.shape != (row_count,):
+        raise ValueError(
+            "Dirichlet-process observation weights must have exact shape (%d,)." % row_count
+        )
+    if np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError("Dirichlet-process observation weights must be finite and non-negative.")
+    return result
+
+
+def _weighted_scores(component_scores: Any, log_weights: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    scores = np.asarray(component_scores, dtype=np.float64).copy()
+    positive = weights > 0.0
+    scores[..., positive] += log_weights[positive]
+    scores[..., ~positive] = -np.inf
+    return scores
+
+
+def _validated_dpm_statistics(
+    value: Any,
+    component_count: int,
+) -> tuple[np.ndarray, np.ndarray, float, float, tuple[Any, ...]]:
+    if not isinstance(value, (tuple, list)) or len(value) != 5:
+        raise ValueError("Dirichlet-process sufficient statistics must be a five-item tuple.")
+    try:
+        component_counts = np.asarray(value[0], dtype=np.float64)
+        beta_counts = np.asarray(value[1], dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Dirichlet-process count statistics must be numeric.") from exc
+    if component_counts.shape != (component_count,):
+        raise ValueError(
+            "Dirichlet-process component counts must have exact shape (%d,)."
+            % component_count
+        )
+    if beta_counts.shape != (component_count, 2):
+        raise ValueError(
+            "Dirichlet-process beta counts must have exact shape (%d, 2)."
+            % component_count
+        )
+    if np.any(~np.isfinite(component_counts)) or np.any(component_counts < 0.0):
+        raise ValueError("Dirichlet-process component counts must be finite and non-negative.")
+    if np.any(~np.isfinite(beta_counts)) or np.any(beta_counts < 0.0):
+        raise ValueError("Dirichlet-process beta counts must be finite and non-negative.")
+    if not np.allclose(
+        beta_counts[:, 0],
+        component_counts,
+        rtol=_SIMPLEX_RTOL,
+        atol=_SIMPLEX_ATOL,
+    ):
+        raise ValueError("Dirichlet-process beta success counts must match component counts.")
+    expected_remaining = component_counts.sum() - np.cumsum(component_counts)
+    expected_remaining[-1] = 0.0
+    if not np.allclose(
+        beta_counts[:, 1],
+        expected_remaining,
+        rtol=_SIMPLEX_RTOL,
+        atol=_SIMPLEX_ATOL,
+    ):
+        raise ValueError(
+            "Dirichlet-process beta failure counts violate remaining-stick conservation."
+        )
+    concentration = _validated_concentration(value[2])
+    if np.ndim(value[3]) != 0:
+        raise ValueError("Dirichlet-process previous log-stick statistic must be finite.")
+    try:
+        previous_log_stick = float(value[3])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Dirichlet-process previous log-stick statistic must be finite.") from exc
+    if not np.isfinite(previous_log_stick):
+        raise ValueError("Dirichlet-process previous log-stick statistic must be finite.")
+    if isinstance(value[4], (str, bytes)) or not isinstance(value[4], Sequence):
+        raise TypeError("Dirichlet-process component statistics must be a sequence.")
+    component_statistics = tuple(value[4])
+    if len(component_statistics) != component_count:
+        raise ValueError(
+            "Dirichlet-process component statistics must match the component count."
+        )
+    return (
+        component_counts.copy(),
+        beta_counts.copy(),
+        concentration,
+        previous_log_stick,
+        component_statistics,
+    )
 
 
 def _prior_cross_entropy(p: Any, q: Any) -> float:
@@ -62,9 +300,17 @@ def _prior_cross_entropy(p: Any, q: Any) -> float:
     factors over the children, so the cross entropy is the sum over the matching
     children. ``p`` and ``q`` always share the same nested structure here.
     """
-    if p is None or q is None:
+    if p is None and q is None:
         return 0.0
-    if isinstance(p, (tuple, list)):
+    if (p is None) != (q is None):
+        raise ValueError("Variational and reference prior trees must have identical structure.")
+    p_sequence = isinstance(p, (tuple, list))
+    q_sequence = isinstance(q, (tuple, list))
+    if p_sequence != q_sequence:
+        raise TypeError("Variational and reference prior trees must have identical structure.")
+    if p_sequence:
+        if len(p) != len(q):
+            raise ValueError("Variational and reference prior trees must have identical arity.")
         return float(sum(_prior_cross_entropy(pc, qc) for pc, qc in zip(p, q)))
     return float(p.cross_entropy(q))
 
@@ -153,18 +399,42 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
             prior: Gamma hyper-prior (or hyper-posterior) on alpha.
 
         """
-        self.set_parameters((a, w, components))
+        checked_components = _validated_component_sequence(components, "components")
+        checked_weights = _validated_weights(w, len(checked_components))
+        checked_concentration = _validated_concentration(a)
+        checked_sticks = _validated_sticks(g, len(checked_components))
+        checked_component_priors = copy.deepcopy(
+            _validated_component_priors(
+                checked_components,
+                component_priors,
+            )
+        )
+        checked_prior = _validated_hyperprior(prior)
+        fingerprint = _component_structure_fingerprint(checked_components)
+
+        self.components = checked_components
+        self.max_components = len(checked_components)
+        self.num_components = len(checked_components)
+        self.w = checked_weights
+        self.v = self.w
+        self.a = checked_concentration
+        with np.errstate(divide="ignore"):
+            self.log_w = np.log(self.w)
+        self.expected_log_nw = self.log_w[-1]
+        self.g = checked_sticks
+        self.component_priors = checked_component_priors
+        self.prior = checked_prior
+        self._structure_fingerprint = fingerprint
         self.name = name
-        self.prior = prior
-        self.g = np.asarray(g, dtype=float)
-        self.component_priors = list(component_priors)
 
     def __str__(self) -> str:
-        return "DirichletProcessMixtureDistribution([%s], [%s], %s, name=%s, prior=%s)" % (
+        return "DirichletProcessMixtureDistribution([%s], %s, %s, %s, [%s], name=%s, prior=%s)" % (
             ",".join([str(u) for u in self.components]),
-            ",".join(map(str, self.v)),
-            str(self.a),
-            str(self.name),
+            repr(list(self.v)),
+            repr(self.a),
+            repr(self.g.tolist()),
+            ",".join(str(prior) for prior in self.component_priors),
+            repr(self.name),
             str(self.prior),
         )
 
@@ -174,29 +444,76 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
 
     def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
         """Set the Gamma hyper-prior (or hyper-posterior) on alpha."""
-        self.prior = prior
+        self.prior = _validated_hyperprior(prior)
 
     def get_parameters(self) -> tuple[float, np.ndarray, list[Any]]:
-        """Returns the parameter tuple (alpha, weights, component parameters)."""
-        return self.a, self.v, [u.get_parameters() for u in self.components]
+        """Return concentration, weights, and independent component snapshots."""
+        return self.a, self.v.copy(), copy.deepcopy(self.components)
+
+    def _assert_structure(self) -> None:
+        """Reject externally mutated component geometry before it reaches inference."""
+        if (
+            self.num_components != len(self.components)
+            or self.max_components != self.num_components
+        ):
+            raise RuntimeError(
+                "Dirichlet-process component structure changed after model construction."
+            )
+        current = _component_structure_fingerprint(self.components)
+        if current != self._structure_fingerprint:
+            raise RuntimeError(
+                "Dirichlet-process component structure changed after model construction."
+            )
+        _validated_component_priors(self.components, self.component_priors)
+        checked_weights = _validated_weights(self.w, self.num_components)
+        _validated_sticks(self.g, self.num_components)
+        _validated_concentration(self.a)
+        _validated_hyperprior(self.prior)
+        if np.asarray(self.v).shape != checked_weights.shape or not np.array_equal(
+            self.v,
+            checked_weights,
+        ):
+            raise RuntimeError("Dirichlet-process cached weights are inconsistent.")
+        with np.errstate(divide="ignore"):
+            expected_log_weights = np.log(checked_weights)
+        if (
+            np.asarray(self.log_w).shape != expected_log_weights.shape
+            or not np.array_equal(self.log_w, expected_log_weights)
+            or self.expected_log_nw != self.log_w[-1]
+        ):
+            raise RuntimeError("Dirichlet-process cached log weights are inconsistent.")
 
     def set_parameters(self, params: tuple[float, np.ndarray, Sequence[Any]]) -> None:
-        """Set the parameters and refresh the cached log-weights.
+        """Atomically set concentration, weights, and component snapshots.
 
         Args:
-            params: Tuple (alpha, weights, components).
+            params: Tuple ``(alpha, weights, components)`` matching
+                :meth:`get_parameters`.
 
         """
+        if not isinstance(params, (tuple, list)) or len(params) != 3:
+            raise ValueError("Dirichlet-process parameters must be a three-item tuple.")
+        self._assert_structure()
         a, w, components = params
+        checked_a = _validated_concentration(a)
+        checked_w = _validated_weights(w, self.num_components)
+        checked_components = _validated_component_sequence(components, "components")
+        if len(checked_components) != self.num_components:
+            raise ValueError(
+                "Dirichlet-process replacement components must match the component count."
+            )
+        checked_components = copy.deepcopy(checked_components)
+        if _component_structure_fingerprint(checked_components) != self._structure_fingerprint:
+            raise ValueError("Dirichlet-process replacement components changed model structure.")
+        _validated_component_priors(checked_components, self.component_priors)
 
-        self.components = list(components)
-        self.max_components = len(components)
-        self.num_components = len(components)
-        self.w = np.asarray(w, dtype=float)
-        self.a = a
-        self.log_w = np.log(self.w)
-        self.expected_log_nw = self.log_w[-1]
+        self.components = checked_components
+        self.a = checked_a
+        self.w = checked_w
         self.v = self.w
+        with np.errstate(divide="ignore"):
+            self.log_w = np.log(self.w)
+        self.expected_log_nw = self.log_w[-1]
 
     def density(self, x: Any) -> float:
         """Density of the mixture at observation x; see log_density()."""
@@ -204,70 +521,65 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
 
     def log_density(self, x: Any) -> float:
         """Mixture log-density log sum_k w_k p(x | theta_k) at observation x."""
-        return vec.log_sum(np.asarray([u.log_density(x) for u in self.components]) + self.log_w)
+        self._assert_structure()
+        scores = _weighted_scores(
+            [u.log_density(x) for u in self.components],
+            self.log_w,
+            self.w,
+        )
+        return float(normalize_mixture_log_scores(scores[None, :]).log_evidence[0])
 
     def expected_log_density(self, x: Any) -> float:
         """Mixture log-density with each component's plug-in log-density
         replaced by its variational expectation E_q[log p(x | theta_k)]."""
-        return vec.log_sum(np.asarray([u.expected_log_density(x) for u in self.components]) + self.log_w)
+        self._assert_structure()
+        scores = _weighted_scores(
+            [u.expected_log_density(x) for u in self.components],
+            self.log_w,
+            self.w,
+        )
+        return float(normalize_mixture_log_scores(scores[None, :]).log_evidence[0])
 
     def seq_log_density(self, x: Any) -> np.ndarray:
         """Vectorized log-density at sequence-encoded input x."""
-        ll_mat = np.asarray([u.seq_log_density(x) for u in self.components]).T + self.log_w
-        ll_max = ll_mat.max(axis=1, keepdims=True)
-
-        good_rows = np.isfinite(ll_max.flatten())
-
-        if np.all(good_rows):
-            ll_mat -= ll_max
-            np.exp(ll_mat, out=ll_mat)
-            ll_sum = np.sum(ll_mat, axis=1, keepdims=True)
-            np.log(ll_sum, out=ll_sum)
-            ll_sum += ll_max
-            return ll_sum.flatten()
-        else:
-            rv = np.zeros(len(good_rows), dtype=float)
-            rv[~good_rows] = -np.inf
-            if np.any(good_rows):
-                ll_loc = ll_mat[good_rows, :] - ll_max[good_rows]
-                rv[good_rows] = (np.log(np.sum(np.exp(ll_loc), axis=1, keepdims=True)) + ll_max[good_rows]).flatten()
-            return rv
+        self._assert_structure()
+        ll_mat = _weighted_scores(
+            np.asarray([u.seq_log_density(x) for u in self.components]).T,
+            self.log_w,
+            self.w,
+        )
+        return normalize_mixture_log_scores(ll_mat).log_evidence
 
     def posterior(self, x: Any) -> np.ndarray:
         """Return the component posterior ``p(z = k | x)`` at a single observation.
 
         This is the plug-in mixture posterior consistent with :meth:`log_density`:
         ``softmax_k( log p(x | theta_k) + log w_k )``. An observation with no support under any
-        component falls back to the mixture weights ``w``. Returns a length-K array summing to 1.
+        component returns an all-zero responsibility vector. Returns a
+        length-K array summing to one for possible evidence and zero otherwise.
         """
-        comp_log_density = np.asarray([u.log_density(x) for u in self.components]) + self.log_w
-        max_val = np.max(comp_log_density)
-        if max_val == -np.inf:
-            return self.w.copy()
-        comp_log_density -= max_val
-        np.exp(comp_log_density, out=comp_log_density)
-        comp_log_density /= comp_log_density.sum()
-        return comp_log_density
+        self._assert_structure()
+        comp_log_density = _weighted_scores(
+            [u.log_density(x) for u in self.components],
+            self.log_w,
+            self.w,
+        )
+        return normalize_mixture_log_scores(comp_log_density[None, :]).responsibilities[0]
 
     def seq_posterior(self, x: Any) -> np.ndarray:
         """Vectorized component posterior over a sequence-encoded input.
 
         Returns an ``(sz, K)`` array whose row ``i`` is the plug-in posterior ``p(z = k | x_i)``
-        (see :meth:`posterior`); rows for observations with no support under any component fall back
-        to the mixture weights. A row-wise log-sum-exp keeps the softmax numerically stable.
+        (see :meth:`posterior`); rows for observations with no support under any
+        component receive zero responsibility.
         """
-        ll_mat = np.asarray([u.seq_log_density(x) for u in self.components]).T + self.log_w
-        ll_max = ll_mat.max(axis=1, keepdims=True)
-
-        bad_rows = np.isinf(ll_max.flatten())
-        if np.any(bad_rows):
-            ll_mat[bad_rows, :] = self.log_w
-            ll_max[bad_rows] = np.max(self.log_w)
-
-        ll_mat = ll_mat - ll_max
-        np.exp(ll_mat, out=ll_mat)
-        ll_mat /= np.sum(ll_mat, axis=1, keepdims=True)
-        return ll_mat
+        self._assert_structure()
+        ll_mat = _weighted_scores(
+            np.asarray([u.seq_log_density(x) for u in self.components]).T,
+            self.log_w,
+            self.w,
+        )
+        return normalize_mixture_log_scores(ll_mat).responsibilities
 
     def seq_local_elbo(self, x: Any) -> np.ndarray:
         """Per-observation local ELBO contributions.
@@ -280,29 +592,34 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
         (data-independent) ELBO terms are returned by
         ``DirichletProcessMixtureEstimator.model_log_density``.
         """
-        exp_ll = np.asarray([u.seq_expected_log_density(x) for u in self.components]).T + self.log_w
-        max_ell = exp_ll.max(axis=1, keepdims=True)
-
-        phi = np.exp(exp_ll - max_ell)
-        phi /= phi.sum(axis=1, keepdims=True)
-
-        # E_q[log p(z_i | v)] via truncated stick-breaking expectations.
-        rv = np.sum(phi * _expected_log_stick_weights(self.g), axis=1)
-
-        # E_q[log p(x_i | theta_k)] under the variational assignments
-        rv += np.sum(phi * (exp_ll - self.log_w), axis=1)
-
-        # entropy of the local variational multinomials
-        log_phi = np.log(phi, out=np.zeros_like(phi), where=phi > 0)
-        rv -= np.sum(phi * log_phi, axis=1)
-
-        return rv
+        self._assert_structure()
+        component_scores = np.asarray(
+            [u.seq_expected_log_density(x) for u in self.components]
+        ).T
+        weighted = component_scores + _expected_log_stick_weights(self.g)
+        return normalize_mixture_log_scores(weighted).log_evidence
 
     def seq_expected_log_density(self, x: Any) -> np.ndarray:
         """Vectorized expected_log_density() at sequence-encoded input x."""
-        ll = np.asarray([u.seq_expected_log_density(x) for u in self.components]).T + self.log_w
-        ml = np.max(ll, axis=1, keepdims=True)
-        return (np.log(np.sum(np.exp(ll - ml), axis=1, keepdims=True)) + ml).flatten()
+        self._assert_structure()
+        ll = _weighted_scores(
+            np.asarray([u.seq_expected_log_density(x) for u in self.components]).T,
+            self.log_w,
+            self.w,
+        )
+        return normalize_mixture_log_scores(ll).log_evidence
+
+    def latent_posterior(self, x: Sequence[Any]) -> CategoricalLatentPosterior:
+        """Return a typed latent posterior or reject zero-probability evidence."""
+        encoded = self.dist_to_encoder().seq_encode(list(x))
+        responsibilities = self.seq_posterior(encoded)
+        impossible = np.flatnonzero(responsibilities.sum(axis=1) == 0.0)
+        if impossible.size:
+            raise ImpossiblePosteriorError(
+                "Dirichlet-process mixture evidence has zero probability at rows %s."
+                % tuple(int(index) for index in impossible)
+            )
+        return CategoricalLatentPosterior(responsibilities)
 
     def density_semantics(self):
         """Return exact-or-approximate density semantics joined from component models."""
@@ -319,15 +636,16 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
     def estimator(self, pseudo_count: float | None = None) -> "DirichletProcessMixtureEstimator":
         """Create a DirichletProcessMixtureEstimator from this distribution's components."""
         if pseudo_count is not None:
-            return DirichletProcessMixtureEstimator(
-                [u.estimator(pseudo_count=1.0 / self.num_components) for u in self.components],
-                pseudo_count=pseudo_count,
-            )
-        else:
-            return DirichletProcessMixtureEstimator([u.estimator() for u in self.components])
+            raise ValueError("Dirichlet-process pseudo-count regularization is not implemented.")
+        return DirichletProcessMixtureEstimator(
+            [u.estimator() for u in self.components],
+            name=self.name,
+            prior=self.prior,
+        )
 
     def dist_to_encoder(self) -> "DirichletProcessMixtureDataEncoder":
         """Returns a DirichletProcessMixtureDataEncoder delegating to the components."""
+        self._assert_structure()
         return DirichletProcessMixtureDataEncoder(self.components[0].dist_to_encoder())
 
 
@@ -364,7 +682,24 @@ class DirichletProcessMixtureSampler(DistributionSampler):
             A single observation if size is None, else a list of size observations.
 
         """
-        comp_state = self.rng.choice(range(0, len(self.dist.w)), size=size, replace=True, p=self.dist.w)
+        self.dist._assert_structure()
+        if size is not None:
+            if isinstance(size, (bool, np.bool_)):
+                raise TypeError("Dirichlet-process sample size must be a non-negative integer.")
+            try:
+                size = operator.index(size)
+            except TypeError as exc:
+                raise TypeError(
+                    "Dirichlet-process sample size must be a non-negative integer."
+                ) from exc
+            if size < 0:
+                raise ValueError("Dirichlet-process sample size must be non-negative.")
+        comp_state = self.rng.choice(
+            range(0, len(self.dist.w)),
+            size=size,
+            replace=True,
+            p=self.dist.w,
+        )
 
         if size is None:
             return self.comp_samplers[comp_state].sample()
@@ -387,10 +722,18 @@ class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         Args:
             accumulators: List of K component accumulators.
             keys (Tuple[Optional[str], Optional[str]]): Keys for sharing the
-                stick-fraction counts and the component accumulators.
+            stick-fraction counts and the component accumulators.
 
         """
         self.accumulators = list(accumulators)
+        if not self.accumulators:
+            raise ValueError("Dirichlet-process accumulators require at least one component.")
+        if (
+            not isinstance(keys, tuple)
+            or len(keys) != 2
+            or any(key is not None and not isinstance(key, str) for key in keys)
+        ):
+            raise TypeError("Dirichlet-process accumulator keys must be a two-item string/None tuple.")
         self.num_components = len(accumulators)
         self.comp_counts = np.zeros(self.num_components, dtype=float)
         self.beta_counts = np.zeros((self.num_components, 2), dtype=float)
@@ -411,38 +754,77 @@ class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         phi to the component and stick-fraction counts and pushes phi-weighted
         updates into the component accumulators.
         """
-        exp_ll = np.asarray([estimate.components[i].expected_log_density(x) for i in range(self.num_components)])
-        exp_ll += estimate.log_w
-        exp_ll -= exp_ll.max()
+        checked_weight = _validated_observation_weight(weight)
+        if not isinstance(estimate, DirichletProcessMixtureDistribution):
+            raise TypeError("Dirichlet-process accumulation requires a matching model estimate.")
+        estimate._assert_structure()
+        if estimate.num_components != self.num_components:
+            raise ValueError("Dirichlet-process accumulator and estimate component counts differ.")
+        exp_ll = _weighted_scores(
+            np.asarray(
+                [
+                    estimate.components[i].expected_log_density(x)
+                    for i in range(self.num_components)
+                ]
+            ),
+            estimate.log_w,
+            estimate.w,
+        )
+        phi = normalize_mixture_log_scores(exp_ll[None, :]).responsibilities[0]
+        weighted_phi = phi * checked_weight
+        possible = float(phi.sum()) > 0.0
+        remaining = (
+            np.maximum(0.0, 1.0 - np.cumsum(phi))
+            * checked_weight
+            * float(possible)
+        )
+        remaining[-1] = 0.0
 
-        phi = np.exp(exp_ll)
-        phi /= phi.sum()
-
-        self.comp_counts += phi * weight
-        self.beta_counts[:, 0] += phi * weight
-        self.beta_counts[:, 1] += (1 - np.cumsum(phi)) * weight
+        self.comp_counts += weighted_phi
+        self.beta_counts[:, 0] += weighted_phi
+        self.beta_counts[:, 1] += remaining
+        self.a = estimate.a
+        self.prev_nw = float(_expected_log_stick_weights(estimate.g)[-1])
 
         for i in range(self.num_components):
-            self.accumulators[i].update(x, phi[i] * weight, estimate.components[i])
+            self.accumulators[i].update(x, weighted_phi[i], estimate.components[i])
 
     def seq_update(self, x: Any, weights: np.ndarray, estimate: DirichletProcessMixtureDistribution) -> None:
         """Vectorized update() on sequence-encoded data."""
-        exp_ll = np.asarray([u.seq_expected_log_density(x) for u in estimate.components]).T
-        exp_ll += estimate.log_w
-        exp_ll -= exp_ll.max(axis=1, keepdims=True)
+        if not isinstance(estimate, DirichletProcessMixtureDistribution):
+            raise TypeError("Dirichlet-process accumulation requires a matching model estimate.")
+        estimate._assert_structure()
+        if estimate.num_components != self.num_components:
+            raise ValueError("Dirichlet-process accumulator and estimate component counts differ.")
+        exp_ll = _weighted_scores(
+            np.asarray([u.seq_expected_log_density(x) for u in estimate.components]).T,
+            estimate.log_w,
+            estimate.w,
+        )
+        normalized = normalize_mixture_log_scores(exp_ll)
+        phi = normalized.responsibilities
+        checked_weights = _validated_observation_weights(weights, phi.shape[0])
+        weighted_phi = phi * checked_weights[:, None]
+        possible = phi.sum(axis=1) > 0.0
+        remaining = (
+            np.maximum(0.0, 1.0 - np.cumsum(phi, axis=1))
+            * possible[:, None]
+        )
+        remaining[:, -1] = 0.0
+        weighted_remaining = remaining * checked_weights[:, None]
 
-        phi = np.exp(exp_ll.T)
-        phi /= phi.sum(axis=0, keepdims=True)
-
-        cc_loc = np.dot(phi, weights)
-        cs_loc = np.dot((1 - np.cumsum(phi, axis=0)), weights)
-
-        self.comp_counts += cc_loc
-        self.beta_counts[:, 0] += cc_loc
-        self.beta_counts[:, 1] += cs_loc
+        self.comp_counts += weighted_phi.sum(axis=0)
+        self.beta_counts[:, 0] += weighted_phi.sum(axis=0)
+        self.beta_counts[:, 1] += weighted_remaining.sum(axis=0)
+        self.a = estimate.a
+        self.prev_nw = float(_expected_log_stick_weights(estimate.g)[-1])
 
         for i in range(self.num_components):
-            self.accumulators[i].seq_update(x, phi[i, :] * weights, estimate.components[i])
+            self.accumulators[i].seq_update(
+                x,
+                weighted_phi[:, i],
+                estimate.components[i],
+            )
 
     def _rng_initialize(self, rng: RandomState) -> None:
         """Initialize child RandomState objects for consistent (seq_)initialize."""
@@ -453,43 +835,74 @@ class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
     def initialize(self, x: Any, weight: float, rng: RandomState) -> None:
         """Initialize with a random Dirichlet assignment of observation x."""
+        checked_weight = _validated_observation_weight(weight)
+        if not isinstance(rng, RandomState):
+            raise TypeError("Dirichlet-process initialization requires numpy.random.RandomState.")
         if not self._init_rng:
             self._rng_initialize(rng)
 
         p = self._w_rng.dirichlet(np.ones(self.num_components))
+        weighted_p = p * checked_weight
+        remaining = np.maximum(0.0, 1.0 - np.cumsum(p)) * checked_weight
+        remaining[-1] = 0.0
 
-        self.comp_counts += p * weight
-        self.beta_counts[:, 0] += p * weight
-        self.beta_counts[:, 1] += (1 - np.cumsum(p)) * weight
+        self.comp_counts += weighted_p
+        self.beta_counts[:, 0] += weighted_p
+        self.beta_counts[:, 1] += remaining
 
         for i in range(self.num_components):
-            self.accumulators[i].initialize(x, p[i] * weight, self._acc_rng[i])
+            self.accumulators[i].initialize(x, weighted_p[i], self._acc_rng[i])
 
     def seq_initialize(self, x: Any, weights: np.ndarray, rng: RandomState) -> None:
         """Vectorized initialize() with random Dirichlet assignments."""
+        if not isinstance(rng, RandomState):
+            raise TypeError("Dirichlet-process initialization requires numpy.random.RandomState.")
+        row_count = self.accumulators[0].acc_to_encoder().row_count(x)
+        checked_weights = _validated_observation_weights(weights, row_count)
         if not self._init_rng:
             self._rng_initialize(rng)
 
-        sz = len(weights)
+        sz = len(checked_weights)
         p = self._w_rng.dirichlet(np.ones(self.num_components), size=sz)
-        p *= np.reshape(weights, (sz, 1))
+        weighted_p = p * checked_weights[:, None]
+        remaining = np.maximum(0.0, 1.0 - np.cumsum(p, axis=1))
+        remaining[:, -1] = 0.0
+        weighted_remaining = remaining * checked_weights[:, None]
 
-        self.comp_counts += p.sum(axis=0)
-        self.beta_counts[:, 0] += p.sum(axis=0)
-        self.beta_counts[:, 1] += np.dot((1 - np.cumsum(p, axis=1)).T, np.ones(sz))
+        self.comp_counts += weighted_p.sum(axis=0)
+        self.beta_counts[:, 0] += weighted_p.sum(axis=0)
+        self.beta_counts[:, 1] += weighted_remaining.sum(axis=0)
 
         for i in range(self.num_components):
-            self.accumulators[i].seq_initialize(x, p[:, i], self._acc_rng[i])
+            self.accumulators[i].seq_initialize(x, weighted_p[:, i], self._acc_rng[i])
 
     def combine(self, suff_stat: tuple) -> "DirichletProcessMixtureAccumulator":
         """Add another accumulator's sufficient-statistic value into this one."""
-        self.comp_counts += suff_stat[0]
-        self.beta_counts += suff_stat[1]
-        self.a = suff_stat[2]
-        self.prev_nw = suff_stat[3]
-
+        comp_counts, beta_counts, concentration, prev_nw, component_stats = (
+            _validated_dpm_statistics(suff_stat, self.num_components)
+        )
+        if self.comp_counts.sum() > 0.0 and comp_counts.sum() > 0.0:
+            if not np.isclose(self.a, concentration, rtol=_SIMPLEX_RTOL, atol=_SIMPLEX_ATOL):
+                raise ValueError(
+                    "Cannot merge Dirichlet-process statistics from different concentrations."
+                )
+            if not np.isclose(
+                self.prev_nw,
+                prev_nw,
+                rtol=_SIMPLEX_RTOL,
+                atol=_SIMPLEX_ATOL,
+            ):
+                raise ValueError(
+                    "Cannot merge Dirichlet-process statistics from different stick states."
+                )
+        new_accumulators = copy.deepcopy(self.accumulators)
         for i in range(self.num_components):
-            self.accumulators[i].combine(suff_stat[4][i])
+            new_accumulators[i].combine(component_stats[i])
+        self.comp_counts += comp_counts
+        self.beta_counts += beta_counts
+        self.a = concentration
+        self.prev_nw = prev_nw
+        self.accumulators = new_accumulators
         return self
 
     def scale(self, c: float) -> "DirichletProcessMixtureAccumulator":
@@ -497,24 +910,36 @@ class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         # Scale only the linear count statistics (and the component accumulators); ``a`` (the alpha
         # hyper-posterior) and ``prev_nw`` are non-linear scalar metadata that must stay untouched --
         # the inherited default would multiply them and corrupt the state.
-        self.comp_counts *= c
-        self.beta_counts *= c
+        checked_scale = _validated_observation_weight(c)
+        self.comp_counts *= checked_scale
+        self.beta_counts *= checked_scale
         for u in self.accumulators:
-            u.scale(c)
+            u.scale(checked_scale)
         return self
 
     def value(self) -> tuple:
         """Returns (comp_counts, beta_counts, alpha, prev_nw, component values)."""
-        return self.comp_counts, self.beta_counts, self.a, self.prev_nw, tuple([u.value() for u in self.accumulators])
+        return (
+            self.comp_counts.copy(),
+            self.beta_counts.copy(),
+            self.a,
+            self.prev_nw,
+            tuple(u.value() for u in self.accumulators),
+        )
 
     def from_value(self, x: tuple) -> "DirichletProcessMixtureAccumulator":
         """Set the sufficient statistics from a value() tuple."""
-        self.comp_counts = x[0]
-        self.beta_counts = x[1]
-        self.a = x[2]
-        self.prev_nw = x[3]
+        comp_counts, beta_counts, concentration, prev_nw, component_stats = (
+            _validated_dpm_statistics(x, self.num_components)
+        )
+        new_accumulators = copy.deepcopy(self.accumulators)
         for i in range(self.num_components):
-            self.accumulators[i].from_value(x[4][i])
+            new_accumulators[i].from_value(component_stats[i])
+        self.comp_counts = comp_counts
+        self.beta_counts = beta_counts
+        self.a = concentration
+        self.prev_nw = prev_nw
+        self.accumulators = new_accumulators
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -570,7 +995,27 @@ class DirichletProcessMixtureAccumulatorFactory(StatisticAccumulatorFactory):
 
         """
         self.factories = list(factories)
-        self.dim = dim
+        if not self.factories:
+            raise ValueError("Dirichlet-process factories require at least one component.")
+        if isinstance(dim, (bool, np.bool_)):
+            raise TypeError("Dirichlet-process factory dimension must be a positive integer.")
+        try:
+            checked_dim = operator.index(dim)
+        except TypeError as exc:
+            raise TypeError(
+                "Dirichlet-process factory dimension must be a positive integer."
+            ) from exc
+        if checked_dim <= 0 or checked_dim != len(self.factories):
+            raise ValueError(
+                "Dirichlet-process factory dimension must match its non-empty factory list."
+            )
+        if (
+            not isinstance(keys, tuple)
+            or len(keys) != 2
+            or any(key is not None and not isinstance(key, str) for key in keys)
+        ):
+            raise TypeError("Dirichlet-process factory keys must be a two-item string/None tuple.")
+        self.dim = int(checked_dim)
         self.keys = keys
 
     def make(self) -> "DirichletProcessMixtureAccumulator":
@@ -602,12 +1047,25 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
                 stick-fraction counts and the component accumulators.
 
         """
+        if isinstance(estimators, (str, bytes)) or not isinstance(estimators, Sequence):
+            raise TypeError("Dirichlet-process estimators must be a sequence.")
+        checked_estimators = list(estimators)
+        if not checked_estimators:
+            raise ValueError("Dirichlet-process estimators require at least one component.")
+        if pseudo_count is not None:
+            raise ValueError("Dirichlet-process pseudo-count regularization is not implemented.")
+        if (
+            not isinstance(keys, tuple)
+            or len(keys) != 2
+            or any(key is not None and not isinstance(key, str) for key in keys)
+        ):
+            raise TypeError("Dirichlet-process estimator keys must be a two-item string/None tuple.")
         self.name = name
-        self.num_components = len(estimators)
-        self.estimators = list(estimators)
+        self.num_components = len(checked_estimators)
+        self.estimators = checked_estimators
         self.keys = keys
-        self.prior = prior
-        self.pseudo_count = pseudo_count
+        self.prior = _validated_hyperprior(prior)
+        self.pseudo_count = None
 
     def accumulator_factory(self) -> "DirichletProcessMixtureAccumulatorFactory":
         """Returns a DirichletProcessMixtureAccumulatorFactory for this estimator."""
@@ -620,7 +1078,7 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
 
     def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
         """Set the Gamma hyper-prior on the concentration alpha."""
-        self.prior = prior
+        self.prior = _validated_hyperprior(prior)
 
     def model_log_density(self, model: DirichletProcessMixtureDistribution) -> float:
         """Data-independent ELBO terms of the variational approximation.
@@ -631,34 +1089,62 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
         ``DirichletProcessMixtureDistribution.seq_local_elbo`` this forms the full
         ELBO maximized by the fit driver.
         """
+        if not isinstance(model, DirichletProcessMixtureDistribution):
+            raise TypeError("Dirichlet-process ELBO requires a matching mixture model.")
+        model._assert_structure()
+        if model.num_components != self.num_components:
+            raise ValueError("Dirichlet-process estimator and model component counts differ.")
         gam = model.g[:-1, :] if model.g.shape[0] > 1 else model.g[:0, :]
         gams = gam[:, 0] + gam[:, 1]
-        a = model.a
-
-        # cross entropy of beta and variational betas
-        if gam.shape[0] == 0:
-            temp1 = 0.0
-            temp41 = 0.0
+        if self.prior is None:
+            if model.prior is not None:
+                raise ValueError(
+                    "A point-estimated concentration model cannot carry a variational hyper-posterior."
+                )
+            expected_alpha = model.a
+            expected_log_alpha = float(np.log(model.a))
+            concentration_term = 0.0
         else:
-            temp1 = np.sum(-betaln(1, a) + (digamma(gam[:, 1]) - digamma(gams)) * (a - 1))
-            # entropy of variational betas
-            temp41 = -(
-                betaln(gam[:, 0], gam[:, 1]).sum()
-                - ((gam - 1) * digamma(gam)).sum()
-                + ((gams - 2) * digamma(gams)).sum()
+            if not isinstance(model.prior, GammaDistribution):
+                raise ValueError(
+                    "Gamma concentration prior requires a Gamma variational hyper-posterior."
+                )
+            expected_alpha = model.prior.k * model.prior.theta
+            expected_log_alpha = float(
+                digamma(model.prior.k) + np.log(model.prior.theta)
+            )
+            concentration_term = float(
+                -model.prior.cross_entropy(self.prior) + model.prior.entropy()
             )
 
-        # cross entropy of component priors and variational priors
-        temp2 = 0.0
+        if gam.shape[0] == 0:
+            stick_prior_term = 0.0
+            stick_entropy = 0.0
+        else:
+            expected_log_remaining = digamma(gam[:, 1]) - digamma(gams)
+            stick_prior_term = float(
+                np.sum(expected_log_alpha + (expected_alpha - 1.0) * expected_log_remaining)
+            )
+            stick_entropy = float(
+                np.sum(
+                    betaln(gam[:, 0], gam[:, 1])
+                    - (gam[:, 0] - 1.0) * digamma(gam[:, 0])
+                    - (gam[:, 1] - 1.0) * digamma(gam[:, 1])
+                    + (gams - 2.0) * digamma(gams)
+                )
+            )
+
+        component_term = 0.0
         for i in range(model.max_components):
-            temp2 += -_prior_cross_entropy(model.components[i].get_prior(), model.component_priors[i])
+            posterior = model.components[i].get_prior()
+            reference = model.component_priors[i]
+            component_term += -_prior_cross_entropy(posterior, reference)
+            component_term += _prior_entropy(posterior)
 
-        # entropy of the variational approximation
-        # entropy of variational component priors
-        temp42 = np.sum([-_prior_entropy(u.get_prior()) for u in model.components])
-        temp4 = temp41 + temp42
-
-        return temp1 + temp2 - temp4
+        result = stick_prior_term + stick_entropy + component_term + concentration_term
+        if not np.isfinite(result):
+            raise ValueError("Dirichlet-process global ELBO terms must be finite.")
+        return float(result)
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> DirichletProcessMixtureDistribution:
         """Estimate a DirichletProcessMixtureDistribution by one VB M-step.
@@ -682,7 +1168,9 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
 
         """
         num_components = self.num_components
-        comp_counts, beta_counts, alpha, prev_nw, comp_suff_stats = suff_stat
+        comp_counts, beta_counts, alpha, prev_nw, comp_suff_stats = (
+            _validated_dpm_statistics(suff_stat, num_components)
+        )
 
         component_priors = [u.get_prior() for u in self.estimators]
         components = [self.estimators[i].estimate(comp_counts[i], comp_suff_stats[i]) for i in range(num_components)]
@@ -699,24 +1187,18 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
             s1 = 0.0
             s2 = 0.0
             hyper_posterior = None
-
-        elif isinstance(self.prior, GammaDistribution):
+        else:
             s1 = self.prior.k
             s2 = 1 / self.prior.theta
 
-        else:
-            s1 = 0.0
-            s2 = 0.0
-            hyper_posterior = None
-
         if num_components <= 1:
-            if isinstance(self.prior, GammaDistribution):
+            if self.prior is not None:
                 new_alpha = s1 / s2
                 hyper_posterior = self.prior
             else:
                 new_alpha = alpha
         else:
-            old_alpha = max(float(alpha), 1.0e-12)
+            old_alpha = alpha
             old_gammas = np.copy(beta_counts)
             old_gammas[:, 0] += 1.0
             old_gammas[:, 1] += old_alpha
@@ -724,9 +1206,19 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
 
             gw1 = s1 + num_components - 1.0
             gw2 = s2 - expected_log_remaining
-            new_alpha = gw1 / max(gw2, 1.0e-300)
+            if (
+                not np.isfinite(gw1)
+                or not np.isfinite(gw2)
+                or gw1 <= 0.0
+                or gw2 <= 0.0
+            ):
+                raise ValueError(
+                    "Dirichlet-process concentration update produced invalid Gamma parameters."
+                )
+            new_alpha = gw1 / gw2
+            _validated_concentration(new_alpha)
 
-            if isinstance(self.prior, GammaDistribution):
+            if self.prior is not None:
                 hyper_posterior = GammaDistribution(gw1, 1 / gw2)
 
         gammas = np.copy(beta_counts)
@@ -737,9 +1229,18 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
         w = np.exp(expected_log_w - np.max(expected_log_w))
         w /= w.sum()
 
-        return DirichletProcessMixtureDistribution(
+        result = DirichletProcessMixtureDistribution(
             components, w, new_alpha, gammas, component_priors, name=self.name, prior=hyper_posterior
         )
+        result.fit_metadata = {
+            "converged": True,
+            "repairs": (),
+            "component_order": tuple(int(index) for index in sidx),
+            "previous_concentration": alpha,
+            "previous_log_remaining_stick": prev_nw,
+            "concentration_variational": hyper_posterior is not None,
+        }
+        return result
 
 
 class DirichletProcessMixtureDataEncoder(DataSequenceEncoder):
@@ -752,6 +1253,8 @@ class DirichletProcessMixtureDataEncoder(DataSequenceEncoder):
             encoder (DataSequenceEncoder): Encoder for the component distributions.
 
         """
+        if not isinstance(encoder, DataSequenceEncoder):
+            raise TypeError("Dirichlet-process data encoder requires a DataSequenceEncoder child.")
         self.encoder = encoder
 
     def __str__(self) -> str:
@@ -765,3 +1268,7 @@ class DirichletProcessMixtureDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[Any]) -> Any:
         """Encode a sequence of observations with the component encoder."""
         return self.encoder.seq_encode(x)
+
+    def row_count(self, x: Any) -> int:
+        """Delegate encoded-row accounting to the shared component encoder."""
+        return self.encoder.row_count(x)

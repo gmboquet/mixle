@@ -537,7 +537,7 @@ def _bayes_only_distribution_catalog():
         np.asarray([0.55, 0.45]),
         1.5,
         np.asarray([[2.0, 3.0], [1.0, 1.0]]),
-        [NormalGammaDistribution(0.0, 1.0, 1.0, 1.0), NormalGammaDistribution(3.0, 1.0, 1.0, 1.0)],
+        [None, None],
         name="dpm",
     )
 
