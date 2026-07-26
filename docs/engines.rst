@@ -75,12 +75,12 @@ engine-agnostic route instead:
 
 .. code-block:: python
 
-   model = optimize(data, estimator, backend="model_parallel", out=None)
+   model = optimize(data, estimator, backend="component_parallel", out=None)
 
-The native model-parallel backend is the portable choice across Torch versions
-and devices. Use DTensor sharding only when the Torch runtime is new enough and
-you have a specific reason to keep component tensors resident in a distributed
-Torch mesh.
+The native component-parallel backend is portable across Torch versions
+because it uses a fully resident model and in-process threads. It is not a
+substitute for DTensor storage sharding when the model cannot fit on one
+process.
 
 Record the Torch version, device type, mesh shape, and fallback route when
 DTensor behavior is part of release evidence. A CPU-only smoke check does not
@@ -175,7 +175,7 @@ Practical Guidance
 * Start with the default NumPy path until the model shape is correct.
 * Use ``TorchEngine`` for neural leaves and GPU-backed numeric work.
 * Use ``backend=`` for parallel or distributed data folding.
-* Use ``backend="model_parallel"`` for portable component parallelism across
+* Use ``backend="component_parallel"`` for portable component threading across
   Torch versions.
 * Use symbolic export for inspection, not for production scoring.
 * Keep host/device boundaries explicit with ``to_numpy``.

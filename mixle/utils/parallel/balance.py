@@ -226,21 +226,19 @@ def balance_plan(model: Any, resources: Resources, *, n_data: int) -> BalancePla
 def auto_balanced_estimator(
     estimator: Any, model: Any, resources: Any = None, *, n_data: int
 ) -> tuple[Any, BalancePlan]:
-    """Realize :func:`balance_plan` -- return ``(estimator, plan)`` ready to drive ``optimize``.
+    """Return an estimator only when :func:`balance_plan` needs no model placement.
 
-    When the plan is model-parallel the estimator is wrapped in :class:`ModelParallelEstimator` sized to
-    ``plan.model_parallel`` (the model axis distributes inside each worker / across the model shards);
-    otherwise the plain estimator is returned (pure data-parallel). The *data* degree ``plan.data_parallel``
-    is realized by the data backend you pass to ``optimize`` (``"local"|"mp"|"spark"|"mpi"``), so
-    ``optimize(data, returned_estimator, backend=...)`` runs the full ``D x M`` grid. ``resources`` defaults
-    to the local CPU slots; pass ``Resources.from_spark(sc)`` / ``from_mpi()`` to plan for a real cluster."""
-    from mixle.utils.parallel.model_parallel import ModelParallelEstimator
+    Data-parallel plans return the original estimator. Plans that require model
+    storage to be sharded raise ``UnrealizedModelPlacementError`` because the
+    in-process component-thread runtime does not execute their cuts.
+    """
+    from mixle.utils.parallel.model_parallel import UnrealizedModelPlacementError
     from mixle.utils.parallel.planner import Resources
 
     resources = Resources.local() if resources is None else resources
     plan = balance_plan(model, resources, n_data=n_data)
     if plan.is_model_parallel:
-        return ModelParallelEstimator(estimator, num_workers=plan.model_parallel), plan
+        raise UnrealizedModelPlacementError(plan)
     return estimator, plan
 
 
