@@ -45,6 +45,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -58,6 +60,52 @@ from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube, rand
 __all__ = ["Emulator", "EmulatorReceipt", "emulate"]
 
 _COVERAGE_Z = 1.0  # +/- 1 std -> the nominal two-sided coverage of a calibrated Gaussian error bar
+
+
+def _exact_int(value: Any, name: str, *, minimum: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return result
+
+
+def _finite_real(value: Any, name: str, *, minimum: float, lower_open: bool = False) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a real number")
+    result = float(value)
+    too_small = result <= minimum if lower_open else result < minimum
+    if not np.isfinite(result) or too_small:
+        relation = "greater than" if lower_open else "at least"
+        raise ValueError(f"{name} must be finite and {relation} {minimum}")
+    return result
+
+
+class _BudgetLedger:
+    """Decimal reservation ledger: a simulator call cannot begin until its cost is reserved."""
+
+    def __init__(self, limit: float) -> None:
+        self._limit = Decimal(str(limit))
+        self._remaining = self._limit
+
+    def can_afford(self, cost: float) -> bool:
+        return Decimal(str(cost)) <= self._remaining
+
+    def reserve(self, cost: float) -> bool:
+        amount = Decimal(str(cost))
+        if amount > self._remaining:
+            return False
+        self._remaining -= amount
+        return True
+
+    @property
+    def remaining(self) -> float:
+        return float(self._remaining)
+
+    @property
+    def spent(self) -> float:
+        return float(self._limit - self._remaining)
 
 
 def _surrogate_fit_error_types() -> tuple[type[BaseException], ...]:
@@ -158,7 +206,7 @@ def emulate(
     simulator: Callable[..., float],
     bounds: Bounds,
     *,
-    budget: int,
+    budget: float,
     fidelities: Sequence[float] | None = None,
     costs: Sequence[float] | None = None,
     seed: int | RandomState | None = None,
@@ -186,21 +234,29 @@ def emulate(
     well-defined numerical failure during multi-fidelity training instead of silently returning a
     surrogate fit on less data than the budget implies.
     """
-    if int(budget) <= 0:
-        raise ValueError("budget must be positive.")
+    if not callable(simulator):
+        raise TypeError("simulator must be callable")
     if method not in ("alc", "alm", "random"):
         raise ValueError("method must be 'alc', 'alm', or 'random'.")
+    if fit_kwargs is not None and not isinstance(fit_kwargs, dict):
+        raise TypeError("fit_kwargs must be a dictionary or None")
     b = _as_bounds(bounds)
     d = b.shape[0]
     rng = _as_rng(seed)
-    n_init = int(n_init) if n_init else 2 * d
+    n_init = 2 * d if n_init is None else _exact_int(n_init, "n_init", minimum=1)
+    n_candidates = _exact_int(n_candidates, "n_candidates", minimum=1)
+    n_reference = _exact_int(n_reference, "n_reference", minimum=1)
+    holdout_frac = _finite_real(holdout_frac, "holdout_frac", minimum=0.0, lower_open=True)
+    if holdout_frac >= 1.0:
+        raise ValueError("holdout_frac must be less than 1")
 
     if fidelities is None:
+        budget = _exact_int(budget, "budget", minimum=1)
         gp, x_train, y_train, x_hold, y_hold, cost_spent = _fit_single_fidelity(
             simulator,
             b,
             d,
-            budget=int(budget),
+            budget=budget,
             n_init=n_init,
             holdout_frac=holdout_frac,
             method=method,
@@ -215,6 +271,7 @@ def emulate(
         # fallback below when no surrogate ever fits at all.
         stopped_reason, error = "budget_exhausted", None
     else:
+        budget = _finite_real(budget, "budget", minimum=0.0, lower_open=True)
         gp, x_train, y_train, x_hold, y_hold, cost_spent, target_fidelity, stopped_reason, error = _fit_multi_fidelity(
             simulator,
             b,
@@ -296,27 +353,53 @@ def _fit_multi_fidelity(
     rng: RandomState,
     fit_kwargs: dict[str, Any] | None,
 ) -> tuple[Any, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float, str, str | None]:
-    fids = np.asarray(fidelities, dtype=np.float64).ravel()
+    if isinstance(fidelities, (str, bytes)):
+        raise TypeError("fidelities must be a sequence of real values")
+    try:
+        fids = np.asarray(fidelities, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("fidelities must be a sequence of real values") from exc
+    if fids.ndim != 1:
+        raise ValueError("fidelities must be one-dimensional")
     if fids.size < 2:
         raise ValueError("fidelities must list at least two fidelity levels.")
+    if not np.all(np.isfinite(fids)):
+        raise ValueError("fidelities must contain only finite values")
+    if np.unique(fids).size != fids.size:
+        raise ValueError("fidelities must not contain duplicates")
     target = float(fids.max())  # always a member of fids by construction -- there is no separate
     # caller-supplied target parameter here to decouple from fidelities (unlike
     # mixle.doe.multifidelity.multi_fidelity_minimize's `target`), so the MXR-080-0181-style
     # substitution risk (a target never evaluated because it was never in the queryable set) cannot
     # arise structurally: whatever fids.max() is, seeding below always evaluates it at least once,
     # budget permitting.
-    cost_arr = fids if costs is None else np.asarray(costs, dtype=np.float64).ravel()
+    if costs is None:
+        cost_arr = fids.copy()
+    else:
+        if isinstance(costs, (str, bytes)):
+            raise TypeError("costs must be a sequence of real values")
+        try:
+            cost_arr = np.asarray(costs, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("costs must be a sequence of real values") from exc
+        if cost_arr.ndim != 1:
+            raise ValueError("costs must be one-dimensional")
+        if cost_arr.size != fids.size:
+            raise ValueError(
+                f"costs must have exactly one entry per fidelity: got {cost_arr.size} "
+                f"costs for {fids.size} fidelities"
+            )
+    if not np.all(np.isfinite(cost_arr)) or np.any(cost_arr <= 0.0):
+        raise ValueError("every fidelity cost must be finite and positive")
     cost_map = {float(s): float(c) for s, c in zip(fids, cost_arr)}
-    if any(c <= 0.0 for c in cost_map.values()):
-        raise ValueError(f"emulate requires every fidelity cost > 0, got {cost_map}")
 
     n_holdout = max(d + 1, int(round(holdout_frac * budget / cost_map[target])))
     hold_cost = n_holdout * cost_map[target]
     if hold_cost >= budget:
         raise ValueError(f"budget={budget} is too small to reserve a target-fidelity holdout costing {hold_cost}.")
-    max_cost = budget - hold_cost
+    training_budget = budget - hold_cost
     cheapest = min(cost_map.values())
-    if cheapest > max_cost:
+    if cheapest > training_budget:
         # Reserve before spend, taken to its logical conclusion: if not even the cheapest fidelity fits
         # in what's left after the holdout reservation, reject up front instead of letting seeding spend
         # anyway. Without this, seeding below can overshoot max_cost by far more than the sequential
@@ -325,24 +408,28 @@ def _fit_multi_fidelity(
         # fidelities, not by a single evaluation (MXR-080-0182 pattern, same root cause as
         # mixle.doe.multifidelity.multi_fidelity_minimize's pre-fix budget overshoot).
         raise ValueError(
-            f"budget={budget} leaves only {max_cost} for multi-fidelity training after the holdout "
+            f"budget={budget} leaves only {training_budget} for multi-fidelity training after the holdout "
             f"reservation; the cheapest fidelity ({cheapest}) alone exceeds it."
         )
 
     x_hold = latin_hypercube(b, n_holdout, rng)
-    y_hold = np.array([float(simulator(np.asarray(p, dtype=np.float64), target)) for p in x_hold], dtype=np.float64)
+    ledger = _BudgetLedger(budget)
+    hold_values: list[float] = []
+    for point in x_hold:
+        if not ledger.reserve(cost_map[target]):  # protected by hold_cost < budget above
+            raise RuntimeError("internal budget reservation failure for holdout")
+        hold_values.append(float(simulator(np.asarray(point, dtype=np.float64), target)))
+    y_hold = np.asarray(hold_values, dtype=np.float64)
 
     rows: list[np.ndarray] = []
     y: list[float] = []
-    spent = 0.0
     for s in fids:  # seed every fidelity, budget permitting (mirrors multi_fidelity_minimize's fix)
         c = cost_map[float(s)]
         for xx in latin_hypercube(b, n_init, rng):
-            if spent + c > max_cost:
+            if not ledger.reserve(c):
                 break  # this fidelity's next seed point would overshoot the remaining training budget
             rows.append(np.append(xx, s))
             y.append(float(simulator(np.asarray(xx, dtype=np.float64), float(s))))
-            spent += c
     x_aug = np.asarray(rows, dtype=np.float64)
     y_arr = np.asarray(y, dtype=np.float64)
 
@@ -350,7 +437,7 @@ def _fit_multi_fidelity(
     stopped_reason = "budget_exhausted"
     error: str | None = None
     gp: Any = None
-    while spent < max_cost:
+    while ledger.can_afford(cheapest):
         try:
             gp = _fit_surrogate(x_aug, y_arr, None, fit_kwargs)
         except fit_error_types as exc:
@@ -373,7 +460,7 @@ def _fit_multi_fidelity(
         best_s, best_score = None, -np.inf
         for s in fids:
             c = cost_map[float(s)]
-            if spent + c > max_cost:
+            if not ledger.can_afford(c):
                 continue  # would overshoot the remaining budget; not eligible this round
             pts = np.array([np.append(xstar, target), np.append(xstar, float(s))])
             _, c2 = gp.predict(x_aug, y_arr, pts, return_cov=True)
@@ -385,10 +472,11 @@ def _fit_multi_fidelity(
         if best_s is None:
             break  # nothing affordable in the remaining budget; stopped_reason stays "budget_exhausted"
 
+        if not ledger.reserve(cost_map[best_s]):  # selected only from affordable fidelities above
+            raise RuntimeError("internal budget reservation failure for acquired point")
         yn = float(simulator(np.asarray(xstar, dtype=np.float64), best_s))
         x_aug = np.vstack([x_aug, np.append(xstar, best_s)])
         y_arr = np.append(y_arr, yn)
-        spent += cost_map[best_s]
 
     if stopped_reason == "budget_exhausted":
         # The loop's own last successful fit (if any) is one point stale relative to the final
@@ -407,7 +495,9 @@ def _fit_multi_fidelity(
             stopped_reason = "surrogate_fit_failed"
             error = f"{type(exc).__name__}: {exc}"
 
-    return gp, x_aug, y_arr, x_hold, y_hold, spent + hold_cost, target, stopped_reason, error
+    if ledger.spent > budget:
+        raise RuntimeError("internal simulator budget invariant violated")
+    return gp, x_aug, y_arr, x_hold, y_hold, ledger.spent, target, stopped_reason, error
 
 
 def _build_receipt(
