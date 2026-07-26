@@ -55,10 +55,14 @@ class RecordRegressionFeaturizer:
 
     def fit(self, records: list[Any]) -> RecordRegressionFeaturizer:
         """Learn numeric-key normalization statistics from sample records."""
+        if not records:
+            raise ValueError("regression featurizer needs at least one record")
         cols: dict[str, list[float]] = {}
         for r in records:
             for k, v in self._items(r):
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    if not np.isfinite(v):
+                        raise ValueError(f"numeric feature {k!r} must be finite")
                     cols.setdefault(k, []).append(float(v))
         self.num_keys = sorted(cols)
         for k in self.num_keys:
@@ -75,6 +79,8 @@ class RecordRegressionFeaturizer:
             cat = {}
             for k, v in self._items(r):
                 if k in self.num_mean and isinstance(v, (int, float)) and not isinstance(v, bool):
+                    if not np.isfinite(v):
+                        raise ValueError(f"numeric feature {k!r} must be finite")
                     num[i, self.num_keys.index(k)] = (float(v) - self.num_mean[k]) / self.num_std[k]
                 else:
                     cat[k] = v
@@ -147,6 +153,38 @@ def _fit_reg_mlp(x: np.ndarray, y: np.ndarray, hidden: Sequence[int], epochs: in
     return net
 
 
+def _network_prediction(net: Any, feats: np.ndarray) -> np.ndarray:
+    """Run a regression network on the network's own device and return validated CPU values."""
+    import torch
+
+    params = list(net.parameters())
+    if not params:
+        raise ValueError("regression network has no parameters")
+    tensor = torch.as_tensor(feats, dtype=params[0].dtype, device=params[0].device)
+    with torch.no_grad():
+        raw = net(tensor).detach().to(device="cpu", dtype=torch.float64).numpy()
+    if raw.shape != (len(feats), 1) or not np.all(np.isfinite(raw)):
+        raise ValueError(f"regression network must return finite shape {(len(feats), 1)}, got {raw.shape}")
+    return raw[:, 0]
+
+
+def _validated_features(featurizer: Any, inputs: Sequence[Any]) -> np.ndarray:
+    feats = np.asarray(featurizer.transform(list(inputs)), dtype=np.float32)
+    if feats.ndim != 2 or feats.shape[0] != len(inputs) or feats.shape[1] == 0 or not np.all(np.isfinite(feats)):
+        raise ValueError("regression features must be a finite, nonempty matrix with one row per input")
+    return feats
+
+
+def _validated_finite_values(values: Sequence[Any], *, name: str) -> list[float]:
+    try:
+        result = [float(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must contain only numeric values") from exc
+    if not result or not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} must be nonempty and contain only finite values")
+    return result
+
+
 @dataclass
 class RegressionSolution:
     """A calibrated numeric student in front of the routine it replaces."""
@@ -174,12 +212,11 @@ class RegressionSolution:
     harvested_ys: list = field(default_factory=list)
 
     def _predict(self, xs: list) -> np.ndarray:
-        import torch
-
-        feats = np.asarray(self.featurizer.transform(list(xs)), dtype=np.float32)
-        with torch.no_grad():
-            out = self.net(torch.as_tensor(feats)).numpy()[:, 0]
-        return out * self.y_scale + self.y_mean
+        feats = _validated_features(self.featurizer, xs)
+        out = _network_prediction(self.net, feats) * self.y_scale + self.y_mean
+        if not np.all(np.isfinite(out)):
+            raise ValueError("regression prediction is non-finite after restoring target scale")
+        return out
 
     def interval(self, x: Any) -> tuple[float, float, float]:
         """Return ``(yhat, lo, hi)`` with calibrated teacher-answer coverage."""
@@ -305,24 +342,35 @@ class RegressionSolution:
 
 
 def _fit_scaled(inputs: list, ys: list, featurizer: Any, hidden, epochs, lr, seed):
-    y = np.asarray(ys, dtype=np.float64)
+    if len(inputs) != len(ys):
+        raise ValueError("regression inputs and targets must have the same length")
+    y = np.asarray(_validated_finite_values(ys, name="regression targets"), dtype=np.float64)
     mean, scale = float(y.mean()), float(y.std() or 1.0)
-    feats = np.asarray(featurizer.transform(list(inputs)), dtype=np.float32)
+    feats = _validated_features(featurizer, inputs)
     net = _fit_reg_mlp(feats, ((y - mean) / scale).astype(np.float32), hidden, epochs, lr, seed)
     return net, (mean, scale)
 
 
 def _calibrate(cand, featurizer, cal_inputs, cal_ys, alpha) -> tuple[float, float]:
-    import torch
-
+    if not np.isfinite(alpha) or not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be finite and in (0, 1)")
+    if len(cal_inputs) != len(cal_ys):
+        raise ValueError("calibration inputs and targets must have the same length")
+    targets = np.asarray(_validated_finite_values(cal_ys, name="calibration targets"), dtype=np.float64)
     net, (mean, scale) = cand
-    feats = np.asarray(featurizer.transform(list(cal_inputs)), dtype=np.float32)
-    with torch.no_grad():
-        pred = net(torch.as_tensor(feats)).numpy()[:, 0] * scale + mean
-    resid = np.abs(np.asarray(cal_ys, dtype=np.float64) - pred)
+    feats = _validated_features(featurizer, cal_inputs)
+    pred = _network_prediction(net, feats) * scale + mean
+    resid = np.abs(targets - pred)
+    if not np.all(np.isfinite(resid)):
+        raise ValueError("calibration residuals must be finite")
     n = len(resid)
     rank = int(np.ceil((n + 1) * (1.0 - alpha)))
-    qhat = float(np.sort(resid)[min(rank, n) - 1]) if rank <= n else float("inf")
+    if rank < 1 or rank > n:
+        raise ValueError(
+            f"{n} calibration examples are insufficient for finite {1.0 - alpha:.6g} coverage; "
+            f"need at least {int(np.ceil(1.0 / alpha)) - 1}"
+        )
+    qhat = float(np.sort(resid)[rank - 1])
     return qhat, float(resid.mean())
 
 
@@ -353,15 +401,44 @@ def solve_regression(
             a fresh split of ``inputs``, so ``qhat`` keeps its finite-sample guarantee). The re-solve
             half of the serving loop.
     """
+    if not callable(teacher):
+        raise TypeError("teacher must be callable")
+    if not np.isfinite(tol) or tol < 0.0:
+        raise ValueError("tol must be finite and nonnegative")
+    if not np.isfinite(alpha) or not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be finite and in (0, 1)")
+    if not np.isfinite(holdout) or not 0.0 < holdout < 1.0:
+        raise ValueError("holdout must be finite and in (0, 1)")
+    if kind not in (None, "text", "record"):
+        raise ValueError("kind must be None, 'text', or 'record'")
+    if isinstance(epochs, bool) or not isinstance(epochs, int) or epochs <= 0:
+        raise ValueError("epochs must be a positive integer")
+    if not np.isfinite(lr) or lr <= 0.0:
+        raise ValueError("lr must be finite and positive")
+    if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+        raise ValueError("dim must be a positive integer")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed must be an integer")
+    hidden = tuple(hidden)
+    if any(isinstance(width, bool) or not isinstance(width, int) or width <= 0 for width in hidden):
+        raise ValueError("hidden widths must be positive integers")
+
     items = list(inputs)
     if len(items) < 12:
         raise ValueError("solve_regression needs at least 12 example inputs")
     k = kind or _input_kind(items[0])
-    ys = [float(v) for v in _label_with(teacher, items)]
+    ys = _validated_finite_values(_label_with(teacher, items), name="teacher targets")
 
     rng = np.random.RandomState(seed)
     order = rng.permutation(len(items))
     n_cal = max(4, int(round(len(items) * holdout)))
+    if n_cal >= len(items):
+        raise ValueError("holdout leaves no regression training examples")
+    min_cal = int(np.ceil(1.0 / alpha)) - 1
+    if n_cal < min_cal:
+        raise ValueError(
+            f"holdout yields {n_cal} calibration examples, but alpha={alpha} requires at least {min_cal}"
+        )
     cal_idx, train_idx = order[:n_cal], order[n_cal:]
     train_inputs = [items[i] for i in train_idx]
     train_ys = [ys[i] for i in train_idx]
@@ -373,14 +450,14 @@ def solve_regression(
         if len(pre_in) != len(pre_ys):
             raise ValueError("prelabeled inputs and values must have equal length")
         train_inputs = train_inputs + list(pre_in)
-        train_ys = train_ys + [float(v) for v in pre_ys]
+        train_ys = train_ys + _validated_finite_values(pre_ys, name="prelabeled targets")
 
     featurizer = (
         HashedNGram(n=3, dim=dim, seed=seed)
         if k == "text"
         else RecordRegressionFeaturizer(dim=dim, seed=seed).fit(train_inputs)
     )
-    cand = _fit_scaled(train_inputs, train_ys, featurizer, tuple(hidden), int(epochs), float(lr), int(seed))
+    cand = _fit_scaled(train_inputs, train_ys, featurizer, hidden, epochs, float(lr), seed)
     qhat, mae = _calibrate(cand, featurizer, cal_inputs, cal_ys, float(alpha))
 
     return RegressionSolution(
