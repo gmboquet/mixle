@@ -393,6 +393,16 @@ def generated_log_density(dist: Any, enc: Any, engine: Any) -> Any:
     return _generated_backend_log_density(dist, enc, params, declaration, engine)
 
 
+def generated_log_density_available(x: Any) -> bool:
+    """Return whether declaration metadata exposes a scalar runtime scorer."""
+    declaration = declaration_for(x)
+    if declaration is None:
+        return False
+    return _exp_family_runtime_scoring(declaration) or _generated_backend_hook_supported(
+        declaration.distribution_type, declaration
+    )
+
+
 def generated_stacked_sufficient_statistics_available(x: Any) -> bool:
     """Return true when a declaration can generate resident stacked stats."""
     dist_type = x.get("__pysp_dist_type__") if isinstance(x, dict) else x

@@ -20,7 +20,13 @@ from mixle.engines import NUMPY_ENGINE, ComputeEngine
 
 
 class BackendScoringError(NotImplementedError):
-    """Raised when a distribution has no backend scoring hook."""
+    """Compatibility base for an explicit backend-scoring capability decline."""
+
+    pass
+
+
+class BackendCapabilityUnavailableError(BackendScoringError):
+    """Raised only when neither a backend hook nor generated scorer exists."""
 
     pass
 
@@ -47,14 +53,17 @@ def backend_seq_log_density(dist: Any, enc: Any, engine: ComputeEngine = NUMPY_E
     enc = getattr(enc, "engine_payload", enc)
     if supports(dist, SupportsBackendScoring):
         return dist.backend_seq_log_density(enc, engine)
-    try:
-        from mixle.stats.compute.declarations import generated_log_density
+    from mixle.stats.compute.declarations import generated_log_density, generated_log_density_available
 
-        return generated_log_density(dist, enc, engine)
-    except Exception as exc:
-        raise BackendScoringError(
-            "%s does not implement backend_seq_log_density and could not be generated: %s" % (type(dist).__name__, exc)
-        ) from exc
+    if not generated_log_density_available(dist):
+        raise BackendCapabilityUnavailableError(
+            "%s has neither backend_seq_log_density nor a declaration-generated scorer."
+            % type(dist).__name__
+        )
+    # Once a scorer is declared available, every shape/data/arithmetic/formula
+    # failure is an execution failure. Preserve its original type and traceback
+    # so callers cannot mistake a broken scorer for a capability decline.
+    return generated_log_density(dist, enc, engine)
 
 
 def backend_seq_component_log_density(dist: Any, enc: Any, engine: ComputeEngine = NUMPY_ENGINE) -> Any:
