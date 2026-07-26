@@ -85,6 +85,15 @@ class DiagnosisVsBlindSearchTest(unittest.TestCase):
         for trial in outcome.history:
             if set(trial.edge) != {1, 2}:
                 self.assertFalse(trial.verified)
+            if trial.verified:
+                self.assertGreater(trial.improvement, 0.0)
+
+    def test_each_adaptive_trial_consumes_disjoint_verification_evidence(self):
+        outcome = blind_structure_search(self.baseline, self.train_data, self.held_out, _EDIT_SPACE, target=self.target)
+        seen: set[int] = set()
+        for trial in outcome.history:
+            self.assertTrue(seen.isdisjoint(trial.verification_indices))
+            seen.update(trial.verification_indices)
 
 
 class NoFaultFoundTest(unittest.TestCase):

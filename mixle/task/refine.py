@@ -63,7 +63,10 @@ class EditTrial:
 
     edge: tuple[int, int]
     held_out_score: float
-    verified: bool  # cleared the held-out target
+    baseline_score: float
+    improvement: float
+    verification_indices: tuple[int, ...]
+    verified: bool  # cleared both the absolute target and champion-relative improvement
 
 
 @dataclass
@@ -83,10 +86,36 @@ def _try_edge(
     held_out: Sequence[tuple],
     *,
     target: float,
+    min_improvement: float,
+    verification_indices: Sequence[int],
 ) -> EditTrial:
     candidate = apply_edge(model, edge, train_data)
     score = _mean_log_density(candidate, held_out)
-    return EditTrial(edge=edge, held_out_score=score, verified=score >= target)
+    baseline = _mean_log_density(model, held_out)
+    improvement = score - baseline
+    return EditTrial(
+        edge=edge,
+        held_out_score=score,
+        baseline_score=baseline,
+        improvement=improvement,
+        verification_indices=tuple(int(i) for i in verification_indices),
+        verified=bool(score >= target and improvement > min_improvement),
+    )
+
+
+def _verification_slices(
+    held_out: Sequence[tuple], n_trials: int, seed: int
+) -> list[tuple[list[tuple], list[int]]]:
+    rows = list(held_out)
+    if n_trials <= 0:
+        return []
+    if len(rows) < n_trials:
+        raise ValueError("held_out must provide at least one fresh verification row per candidate")
+    permutation = np.random.RandomState(seed).permutation(len(rows))
+    return [
+        ([rows[int(i)] for i in indices], [int(i) for i in indices])
+        for indices in np.array_split(permutation, n_trials)
+    ]
 
 
 def _dominant_pair(dominant: str) -> tuple[int, int] | None:
@@ -109,6 +138,8 @@ def diagnosis_directed_correction(
     *,
     background: Sequence[tuple] | None = None,
     target: float,
+    min_improvement: float = 0.0,
+    seed: int = 0,
 ) -> SearchOutcome:
     """Diagnose the fault from ``failing_cases``, apply only its suggested edge (trying both parent-child
     orientations of the named pair, since ``diagnose`` reports an undirected co-anomaly), and verify held-out
@@ -123,8 +154,20 @@ def diagnosis_directed_correction(
     if pair is None:
         return SearchOutcome(trials=0, found_edge=None, final_model=model, history=history)
 
-    for edge in (pair, (pair[1], pair[0])):
-        trial = _try_edge(model, edge, train_data, held_out, target=target)
+    if not np.isfinite(target) or not np.isfinite(min_improvement) or min_improvement < 0.0:
+        raise ValueError("target must be finite and min_improvement must be finite and nonnegative")
+    edges = (pair, (pair[1], pair[0]))
+    evidence = _verification_slices(held_out, len(edges), seed)
+    for edge, (verification_rows, verification_indices) in zip(edges, evidence):
+        trial = _try_edge(
+            model,
+            edge,
+            train_data,
+            verification_rows,
+            target=target,
+            min_improvement=min_improvement,
+            verification_indices=verification_indices,
+        )
         history.append(trial)
         if trial.verified:
             return SearchOutcome(
@@ -140,11 +183,25 @@ def blind_structure_search(
     edit_space: Sequence[tuple[int, int]],
     *,
     target: float,
+    min_improvement: float = 0.0,
+    seed: int = 0,
 ) -> SearchOutcome:
     """Try candidate edges in order and accept only verified held-out gains."""
+    if not np.isfinite(target) or not np.isfinite(min_improvement) or min_improvement < 0.0:
+        raise ValueError("target must be finite and min_improvement must be finite and nonnegative")
+    edges = list(edit_space)
+    evidence = _verification_slices(held_out, len(edges), seed)
     history: list[EditTrial] = []
-    for edge in edit_space:
-        trial = _try_edge(model, edge, train_data, held_out, target=target)
+    for edge, (verification_rows, verification_indices) in zip(edges, evidence):
+        trial = _try_edge(
+            model,
+            edge,
+            train_data,
+            verification_rows,
+            target=target,
+            min_improvement=min_improvement,
+            verification_indices=verification_indices,
+        )
         history.append(trial)
         if trial.verified:
             return SearchOutcome(
