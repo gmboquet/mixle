@@ -11,6 +11,7 @@ W = 1/(2b)). It is a parameter prior: it is scored on ``(mu, Lambda)`` parameter
 pairs, not fit from data by EM.
 """
 
+import operator
 from typing import Any, Optional
 
 import numpy as np
@@ -77,7 +78,93 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
 
     def get_parameters(self):
         """Returns the parameter tuple (mu, kappa, w_mat, nu)."""
-        return self.mu, self.kappa, self.w_mat, self.nu
+        return self.mu.copy(), self.kappa, self.w_mat.copy(), self.nu
+
+    @staticmethod
+    def _validated_parameters(params):
+        if not isinstance(params, (tuple, list)) or len(params) != 4:
+            raise ValueError("NormalWishartDistribution parameters must be a four-item tuple.")
+        mu_raw, kappa_raw, w_raw, nu_raw = params
+        try:
+            mu = np.asarray(mu_raw, dtype=np.float64)
+            w_mat = np.asarray(w_raw, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("NormalWishartDistribution mean and scale must be numeric arrays.") from exc
+        if mu.ndim != 1 or mu.size == 0:
+            raise ValueError("NormalWishartDistribution requires mu to be a non-empty vector.")
+        if np.any(~np.isfinite(mu)):
+            raise ValueError("NormalWishartDistribution requires mu to be finite.")
+        dimension = len(mu)
+        if w_mat.shape != (dimension, dimension):
+            raise ValueError(
+                "NormalWishartDistribution requires w_mat shape (%d, %d)." % (dimension, dimension)
+            )
+        if np.any(~np.isfinite(w_mat)):
+            raise ValueError("NormalWishartDistribution requires a finite scale matrix w_mat.")
+        if not np.allclose(w_mat, w_mat.T, rtol=1.0e-10, atol=1.0e-12):
+            raise ValueError("NormalWishartDistribution requires a symmetric scale matrix w_mat.")
+        w_mat = 0.5 * (w_mat + w_mat.T)
+        if np.ndim(kappa_raw) != 0 or np.ndim(nu_raw) != 0:
+            raise ValueError("NormalWishartDistribution kappa and nu must be scalars.")
+        try:
+            kappa = float(kappa_raw)
+            nu = float(nu_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("NormalWishartDistribution kappa and nu must be numeric scalars.") from exc
+        if kappa <= 0.0 or not np.isfinite(kappa):
+            raise ValueError("NormalWishartDistribution requires finite kappa > 0.")
+        if not nu > dimension - 1 or not np.isfinite(nu):
+            raise ValueError(
+                "NormalWishartDistribution requires a finite nu > dim - 1 (got nu=%s, dim=%d)."
+                % (nu, dimension)
+            )
+        log_det_w = cholesky_logdet(w_mat)
+        if log_det_w is None:
+            raise ValueError("NormalWishartDistribution requires a positive-definite scale matrix w_mat.")
+        w_inv = np.linalg.inv(w_mat)
+        log_z = (
+            (nu * dimension / 2.0) * np.log(2.0)
+            + (nu / 2.0) * log_det_w
+            + _multigammaln(nu / 2.0, dimension)
+        )
+        if not np.isfinite(log_z):
+            raise ValueError("NormalWishartDistribution parameters produced a non-finite normalizer.")
+        return (
+            mu.copy(),
+            kappa,
+            w_mat.copy(),
+            nu,
+            dimension,
+            float(log_det_w),
+            w_inv,
+            float(log_z),
+        )
+
+    def _validated_state(self):
+        return self._validated_parameters((self.mu, self.kappa, self.w_mat, self.nu))
+
+    @staticmethod
+    def _validated_observation(value: Any, dimension: int):
+        if not isinstance(value, (tuple, list, np.ndarray)) or len(value) != 2:
+            raise ValueError("NormalWishartDistribution observations must be (mu, Lambda) pairs.")
+        try:
+            mu = np.asarray(value[0], dtype=np.float64)
+            precision = np.asarray(value[1], dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("NormalWishartDistribution observations must be numeric.") from exc
+        if mu.shape != (dimension,) or np.any(~np.isfinite(mu)):
+            raise ValueError(
+                "NormalWishartDistribution observation mu must be a finite vector of length %d."
+                % dimension
+            )
+        if precision.shape != (dimension, dimension) or np.any(~np.isfinite(precision)):
+            raise ValueError(
+                "NormalWishartDistribution observation precision must be a finite (%d, %d) matrix."
+                % (dimension, dimension)
+            )
+        if not np.allclose(precision, precision.T, rtol=1.0e-10, atol=1.0e-12):
+            raise ValueError("NormalWishartDistribution observation precision must be symmetric.")
+        return mu, 0.5 * (precision + precision.T)
 
     def set_parameters(self, params) -> None:
         """Set the parameters and refresh the cached Wishart log-normalizer.
@@ -87,46 +174,34 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
                 definite and nu > d - 1.
 
         """
-        mu, kappa, w_mat, nu = params
-
-        self.mu = np.asarray(mu, dtype=float)
-        self.kappa = float(kappa)
-        self.w_mat = np.asarray(w_mat, dtype=float)
-        self.nu = float(nu)
-        self.dim = len(self.mu)
-
-        d = self.dim
-        if not np.isfinite(self.mu).all():
-            raise ValueError("NormalWishartDistribution requires mu to be finite, got %r." % (self.mu.tolist(),))
-        if self.kappa <= 0.0 or not np.isfinite(self.kappa):
-            raise ValueError("NormalWishartDistribution requires finite kappa > 0.")
-        if not self.nu > d - 1 or not np.isfinite(self.nu):
-            raise ValueError(
-                "NormalWishartDistribution requires a finite nu > dim - 1 (got nu=%s, dim=%d)." % (self.nu, d)
-            )
-        if not np.isfinite(self.w_mat).all():
-            raise ValueError("NormalWishartDistribution requires a finite scale matrix w_mat.")
-        if not np.allclose(self.w_mat, self.w_mat.T):
-            raise ValueError("NormalWishartDistribution requires a symmetric scale matrix w_mat.")
-
-        log_det_w = cholesky_logdet(self.w_mat)
-        if log_det_w is None:
-            raise ValueError("NormalWishartDistribution requires a positive-definite scale matrix w_mat.")
+        (
+            mu,
+            kappa,
+            w_mat,
+            nu,
+            dimension,
+            log_det_w,
+            w_inv,
+            log_z,
+        ) = self._validated_parameters(params)
+        self.mu = mu
+        self.kappa = kappa
+        self.w_mat = w_mat
+        self.nu = nu
+        self.dim = dimension
         self.log_det_w = log_det_w
-        self.w_inv = np.linalg.inv(self.w_mat)
-
-        # log normalizer of the Wishart factor
-        self.log_z = (
-            (self.nu * d / 2.0) * np.log(2.0) + (self.nu / 2.0) * self.log_det_w + _multigammaln(self.nu / 2.0, d)
-        )
+        self.w_inv = w_inv
+        self.log_z = log_z
 
     def expected_log_det(self) -> float:
         """E[ln |Lambda|] under the Wishart factor."""
-        return _multidigamma(self.nu / 2.0, self.dim) + self.dim * np.log(2.0) + self.log_det_w
+        _, _, _, nu, dimension, log_det_w, _, _ = self._validated_state()
+        return _multidigamma(nu / 2.0, dimension) + dimension * np.log(2.0) + log_det_w
 
     def expected_precision(self) -> np.ndarray:
         """E[Lambda] = nu * W."""
-        return self.nu * self.w_mat
+        _, _, w_mat, nu, _, _, _, _ = self._validated_state()
+        return nu * w_mat
 
     def density(self, x) -> float:
         """Density at x = (mu, Lambda); see log_density()."""
@@ -137,22 +212,20 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
 
         Returns -inf when Lambda is not positive definite.
         """
-        mu, lam = x
-        mu = np.asarray(mu, dtype=float)
-        lam = np.asarray(lam, dtype=float)
-        d = self.dim
+        model_mu, kappa, _, nu, d, _, w_inv, log_z = self._validated_state()
+        mu, lam = self._validated_observation(x, d)
 
         log_det_lam = cholesky_logdet(lam)
         if log_det_lam is None:
             return -np.inf
 
-        diff = mu - self.mu
+        diff = mu - model_mu
         c_norm = (
-            (d / 2.0) * np.log(self.kappa / (2.0 * np.pi))
+            (d / 2.0) * np.log(kappa / (2.0 * np.pi))
             + 0.5 * log_det_lam
-            - 0.5 * self.kappa * float(np.dot(diff, np.dot(lam, diff)))
+            - 0.5 * kappa * float(np.dot(diff, np.dot(lam, diff)))
         )
-        c_wish = ((self.nu - d - 1.0) / 2.0) * log_det_lam - 0.5 * float(np.trace(np.dot(self.w_inv, lam))) - self.log_z
+        c_wish = ((nu - d - 1.0) / 2.0) * log_det_lam - 0.5 * float(np.trace(np.dot(w_inv, lam))) - log_z
 
         return c_norm + c_wish
 
@@ -164,16 +237,23 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
                 % type(dist).__name__
             )
 
-        d = self.dim
-        e_log_det = self.expected_log_det()
-        e_lam = self.expected_precision()
+        self_mu, self_kappa, self_w, self_nu, d, self_log_det, _, _ = self._validated_state()
+        dist_mu, dist_kappa, _, dist_nu, dist_d, _, dist_w_inv, dist_log_z = dist._validated_state()
+        if d != dist_d:
+            raise ValueError("NormalWishartDistribution cross-entropy requires equal dimensions.")
+        e_log_det = _multidigamma(self_nu / 2.0, d) + d * np.log(2.0) + self_log_det
+        e_lam = self_nu * self_w
 
         # E[(mu - m_p)' Lambda (mu - m_p)] under self
-        diff = self.mu - dist.mu
-        e_quad = d / self.kappa + self.nu * float(np.dot(diff, np.dot(self.w_mat, diff)))
+        diff = self_mu - dist_mu
+        e_quad = d / self_kappa + self_nu * float(np.dot(diff, np.dot(self_w, diff)))
 
-        c_norm = (d / 2.0) * np.log(dist.kappa / (2.0 * np.pi)) + 0.5 * e_log_det - 0.5 * dist.kappa * e_quad
-        c_wish = ((dist.nu - d - 1.0) / 2.0) * e_log_det - 0.5 * float(np.trace(np.dot(dist.w_inv, e_lam))) - dist.log_z
+        c_norm = (d / 2.0) * np.log(dist_kappa / (2.0 * np.pi)) + 0.5 * e_log_det - 0.5 * dist_kappa * e_quad
+        c_wish = (
+            ((dist_nu - d - 1.0) / 2.0) * e_log_det
+            - 0.5 * float(np.trace(np.dot(dist_w_inv, e_lam)))
+            - dist_log_z
+        )
 
         return -(c_norm + c_wish)
 
@@ -183,6 +263,7 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
 
     def seq_log_density(self, x) -> np.ndarray:
         """Vectorized log-density over a sequence of (mu, Lambda) pairs."""
+        self._validated_state()
         return np.asarray([self.log_density(xx) for xx in x], dtype=float)
 
     def sampler(self, seed: int | None = None) -> "NormalWishartSampler":
@@ -195,7 +276,7 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> "NormalWishartDataEncoder":
         """Return the encoder for ``(mu, Lambda)`` normal-Wishart observations."""
-        return NormalWishartDataEncoder()
+        return NormalWishartDataEncoder(self.dim)
 
 
 class NormalWishartSampler(DistributionSampler):
@@ -211,13 +292,21 @@ class NormalWishartSampler(DistributionSampler):
         Lambda is drawn from the Wishart factor, then mu from
         N(m, (kappa*Lambda)^-1).
         """
+        model_mu, kappa, w_mat, nu, _, _, _, _ = self.dist._validated_state()
         if size is None:
-            lam = scipy_wishart_sample(self.rng, self.dist.nu, self.dist.w_mat)
-            covar = np.linalg.inv(lam * self.dist.kappa)
-            mu = self.rng.multivariate_normal(self.dist.mu, covar)
+            lam = scipy_wishart_sample(self.rng, nu, w_mat)
+            covar = np.linalg.inv(lam * kappa)
+            mu = self.rng.multivariate_normal(model_mu, covar)
             return mu, lam
-        else:
-            return [self.sample() for _ in range(size)]
+        if isinstance(size, (bool, np.bool_)):
+            raise TypeError("NormalWishartSampler size must be a non-negative integer.")
+        try:
+            count = operator.index(size)
+        except TypeError as exc:
+            raise TypeError("NormalWishartSampler size must be a non-negative integer.") from exc
+        if count < 0:
+            raise ValueError("NormalWishartSampler size must be non-negative.")
+        return [self.sample() for _ in range(count)]
 
 
 def scipy_wishart_sample(rng: np.random.RandomState, nu: float, w_mat: np.ndarray) -> np.ndarray:
@@ -236,12 +325,31 @@ def scipy_wishart_sample(rng: np.random.RandomState, nu: float, w_mat: np.ndarra
 class NormalWishartDataEncoder(DataSequenceEncoder):
     """Encodes a sequence of (mu, Lambda) parameter pairs (identity passthrough)."""
 
+    def __init__(self, dimension: int | None = None) -> None:
+        self.dimension = dimension
+
     def __str__(self) -> str:
         return "NormalWishartDataEncoder"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, NormalWishartDataEncoder)
+        return isinstance(other, NormalWishartDataEncoder) and self.dimension == other.dimension
 
     def seq_encode(self, x: Any) -> Any:
         """Encode Normal-Wishart observations as a list payload."""
-        return list(x)
+        values = list(x)
+        if self.dimension is None:
+            if not values:
+                raise ValueError("NormalWishartDataEncoder needs a dimension to encode an empty batch.")
+            first = values[0]
+            if not isinstance(first, (tuple, list, np.ndarray)) or len(first) != 2:
+                raise ValueError("NormalWishartDataEncoder observations must be (mu, Lambda) pairs.")
+            try:
+                dimension = len(first[0])
+            except TypeError as exc:
+                raise ValueError("NormalWishartDataEncoder observation means must be vectors.") from exc
+        else:
+            dimension = self.dimension
+        return [
+            NormalWishartDistribution._validated_observation(value, dimension)
+            for value in values
+        ]
