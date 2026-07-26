@@ -85,6 +85,26 @@ def checkpointed_fold(
     return nobs, accumulator.value()
 
 
+def _canonical_shard_payloads(groups: Sequence[tuple[int, bytes]], expected_shards: set[int]) -> list[bytes]:
+    """Validate exact logical-shard coverage and return payloads in canonical shard order."""
+    by_shard: dict[int, bytes] = {}
+    for shard_id, payload in groups:
+        if isinstance(shard_id, bool) or not isinstance(shard_id, (int, np.integer)):
+            raise RuntimeError(f"worker returned invalid shard identity {shard_id!r}")
+        shard_id = int(shard_id)
+        if shard_id not in expected_shards:
+            raise RuntimeError(f"worker returned unknown shard {shard_id}")
+        if shard_id in by_shard:
+            raise RuntimeError(f"worker returned duplicate payload for shard {shard_id}")
+        if not isinstance(payload, bytes):
+            raise RuntimeError(f"worker returned a non-bytes payload for shard {shard_id}")
+        by_shard[shard_id] = payload
+    missing = expected_shards.difference(by_shard)
+    if missing:
+        raise RuntimeError(f"workers returned no payload for shards {sorted(missing)}")
+    return [by_shard[shard_id] for shard_id in sorted(expected_shards)]
+
+
 def _encode_shard(encoder: Any, shard_b: bytes, sub_chunks: int) -> list[tuple[int, Any]]:
     shard = pickle.loads(shard_b)
     n = len(shard)
@@ -116,14 +136,16 @@ def _worker_main(conn) -> None:
     encoder: Any = None
     resident: dict[int, list[tuple[int, Any]]] = {}
 
-    def _fold_resident(estimator: Any, model: Any) -> tuple[float, Any]:
-        accumulator = estimator.accumulator_factory().make()
-        count = 0.0
+    def _fold_resident(estimator: Any, model: Any) -> list[tuple[int, bytes]]:
+        payloads: list[tuple[int, bytes]] = []
         for sid in sorted(resident):
+            accumulator = estimator.accumulator_factory().make()
+            count = 0.0
             for sz, x in resident[sid]:
                 count += sz
                 accumulator.seq_update(x, np.ones(sz), model)
-        return count, accumulator.value()
+            payloads.append((sid, pickle.dumps((count, accumulator.value()), protocol=_PROTO)))
+        return payloads
 
     while True:
         msg = conn.recv()
@@ -145,8 +167,7 @@ def _worker_main(conn) -> None:
                 conn.recv()  # block for the driver's "go" -- the deterministic kill rendezvous
                 estimator = pickle.loads(estimator_b)
                 model = pickle.loads(model_b)
-                count, value = _fold_resident(estimator, model)
-                conn.send(("ok", pickle.dumps((count, value), protocol=_PROTO)))
+                conn.send(("ok", _fold_resident(estimator, model)))
 
             elif cmd == "update_shard":
                 _, estimator_b, model_b, shard_id, shard_b, sub_chunks = msg
@@ -420,7 +441,7 @@ class ResilientMPEncodedData(EncodedDataHandle):
                 failed.add(w)
 
         # Phase 2: collect final results from whichever workers are still alive.
-        worker_payload: dict[int, bytes] = {}
+        worker_payload: dict[int, list[tuple[int, bytes]]] = {}
         for w in started:
             if w in failed:
                 continue
@@ -431,16 +452,8 @@ class ResilientMPEncodedData(EncodedDataHandle):
                 continue
             worker_payload[w] = payload
 
-        reused_shards: set[int] = set()
-        for w in worker_payload:
-            reused_shards |= self._worker_shards.get(w, set())
-
-        # (sort_key, payload) pairs; sort_key anchors each group to its lowest shard id so the
-        # final fold order matches the canonical 0..num_workers-1 shard order a failure-free
-        # run would have used, regardless of which worker (or recovery path) produced it.
-        groups: list[tuple[int, bytes]] = [
-            (min(self._worker_shards.get(w, {w})), payload) for w, payload in worker_payload.items()
-        ]
+        groups = [shard_payload for payloads in worker_payload.values() for shard_payload in payloads]
+        reused_shards = {shard_id for shard_id, _ in groups}
 
         recomputed_shards: set[int] = set()
         blacklisted_now: set[int] = set()
@@ -471,8 +484,7 @@ class ResilientMPEncodedData(EncodedDataHandle):
             else:
                 self._respawn_worker(w, shard_ids)
 
-        groups.sort(key=lambda g: g[0])
-        payloads = [payload for _, payload in groups]
+        payloads = _canonical_shard_payloads(groups, set(self._shard_raw))
 
         self.last_round_reused_shards = reused_shards
         self.last_round_recomputed_shards = recomputed_shards
