@@ -24,15 +24,34 @@ class TraceStep:
     args: dict[str, Any] = field(default_factory=dict)
     seed: int | None = None
     result: Any = None
+    action: dict[str, Any] | None = None
+    state_before: Any = None
+    state_after: Any = None
 
     def to_json(self) -> dict[str, Any]:
         """Serialize this trace step to JSON-compatible data."""
-        return {"tool": self.tool, "args": self.args, "seed": self.seed, "result": self.result}
+        return {
+            "tool": self.tool,
+            "args": self.args,
+            "seed": self.seed,
+            "result": self.result,
+            "action": self.action,
+            "state_before": self.state_before,
+            "state_after": self.state_after,
+        }
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> TraceStep:
         """Reconstruct a trace step from JSON-compatible data."""
-        return cls(tool=d["tool"], args=dict(d.get("args") or {}), seed=d.get("seed"), result=d.get("result"))
+        return cls(
+            tool=d["tool"],
+            args=dict(d.get("args") or {}),
+            seed=d.get("seed"),
+            result=d.get("result"),
+            action=d.get("action"),
+            state_before=d.get("state_before"),
+            state_after=d.get("state_after"),
+        )
 
 
 @dataclass

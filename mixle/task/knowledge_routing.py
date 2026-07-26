@@ -322,6 +322,7 @@ class _RoutingWorld:
     # when the first call raises (its re-plan-on-failure path); only counting completed calls here
     # keeps `done` from firing before every gap has actually had a real, terminal attempt.
     _cursor: int = 0
+    failure_atomic: bool = True
 
     @property
     def done(self) -> bool:

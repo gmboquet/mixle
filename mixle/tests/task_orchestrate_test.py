@@ -19,6 +19,7 @@ class _GridWorld:
         self.target = target
         self.position = 0
         self._done = done
+        self.failure_atomic = True
 
     def step(self, action):
         if action["tool"] != "move":
@@ -79,9 +80,10 @@ class OrchestrateTest(unittest.TestCase):
         world = _GridWorld(target=2)
         result = orchestrate("reach 2", _greedy_planner(2, poison_first_step=True), world, budget=10)
         # the poisoned dx=0 step is recorded as a failure, then the retry succeeds and progress continues
-        self.assertEqual(result.trace.steps[0].result, {"error": "dx=0 is not a valid move"})
+        self.assertEqual(result.trace.steps[0].result["error"]["message"], "dx=0 is not a valid move")
         self.assertEqual(result.answer, 0)
         self.assertEqual(result.stopped_reason, "plan_stop")
+        self.assertEqual(result.trace.steps[0].action, {"tool": "move", "args": {"dx": 0}})
 
     def test_stops_immediately_on_explicit_stop(self):
         world = _GridWorld(target=5)  # not yet reached, not done -- the plan model alone decides to stop
@@ -104,6 +106,58 @@ class OrchestrateTest(unittest.TestCase):
         result = orchestrate("noop", _greedy_planner(5), world, budget=10)
         self.assertEqual(result.stopped_reason, "world_done")
         self.assertEqual(len(result.trace.steps), 0)
+
+    def test_failed_and_retry_actions_each_consume_budget(self):
+        world = _GridWorld(target=2)
+        result = orchestrate("reach 2", _greedy_planner(2, poison_first_step=True), world, budget=1)
+        self.assertEqual(result.stopped_reason, "budget_exhausted")
+        self.assertEqual(len(result.trace.steps), 1)
+        self.assertEqual(world.position, 0)
+
+    def test_retry_is_confidence_gated(self):
+        world = _GridWorld(target=2)
+        calls = {"n": 0}
+
+        def planner(_question, _history):
+            calls["n"] += 1
+            return {
+                "tool": "move",
+                "args": {"dx": 0 if calls["n"] == 1 else 1},
+                "confidence": 1.0 if calls["n"] == 1 else 0.1,
+            }
+
+        result = orchestrate("reach 2", planner, world, budget=3, confidence_threshold=0.5)
+        self.assertEqual(result.stopped_reason, "low_confidence")
+        self.assertEqual(len(result.trace.steps), 1)
+        self.assertEqual(world.position, 0)
+
+    def test_non_atomic_failure_is_never_retried(self):
+        class MutatingWorld(_GridWorld):
+            failure_atomic = False
+
+            def __init__(self):
+                super().__init__(target=2)
+                self.failure_atomic = False
+
+            def step(self, action):
+                self.position += 1
+                raise RuntimeError("failed after mutation")
+
+            def snapshot(self):
+                return {"position": self.position}
+
+        world = MutatingWorld()
+        calls = {"n": 0}
+
+        def planner(_question, _history):
+            calls["n"] += 1
+            return {"tool": "move", "args": {"dx": 1}}
+
+        result = orchestrate("reach 2", planner, world, budget=3)
+        self.assertEqual(result.stopped_reason, "partial_failure")
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(result.trace.steps[0].state_before, {"position": 0})
+        self.assertEqual(result.trace.steps[0].state_after, {"position": 1})
 
 
 if __name__ == "__main__":
