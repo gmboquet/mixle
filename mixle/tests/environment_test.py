@@ -31,6 +31,14 @@ class EnvironmentProtocolTest(unittest.TestCase):
         _, cost = env.step({"type": "drill", "cell": 1})
         self.assertEqual(cost, 5.0)
 
+    def test_action_cost_quotes_without_mutating_the_world(self):
+        env = ExplorationEnvironment(n_cells=5, n_targets=1, budget=10)
+        env.reset(seed=0)
+        before = env.world.remaining_budget
+        self.assertEqual(env.action_cost({"type": "survey", "cell": 0}), 1.0)
+        self.assertEqual(env.action_cost({"type": "drill", "cell": 0}), 5.0)
+        self.assertEqual(env.world.remaining_budget, before)
+
 
 def _random_policy_fn(env, belief, menu):
     return random_policy(env.world)
@@ -126,6 +134,84 @@ class DeterministicReplayTest(unittest.TestCase):
 
         self.assertIsInstance(log, InteractionLog)
         self.assertTrue(log.is_deterministic(env, GaussianStreamingBelief()))
+
+
+class _NoopBelief:
+    def __init__(self):
+        self.observations = []
+
+    def update(self, observation):
+        self.observations.append(observation)
+
+
+class _CostEnvironment:
+    def __init__(self, quote=1.0, actual=1.0):
+        self.quote = quote
+        self.actual = actual
+        self.step_calls = 0
+
+    def reset(self, seed=None):
+        self.step_calls = 0
+        return {"seed": seed}
+
+    def action_space(self):
+        return [{"type": "act"}]
+
+    def action_cost(self, action):
+        return self.quote
+
+    def step(self, action):
+        self.step_calls += 1
+        return {"accepted": True, "step": self.step_calls}, self.actual
+
+
+def _first_policy(env, belief, menu):
+    return menu[0]
+
+
+class BudgetContractTest(unittest.TestCase):
+    def test_unaffordable_action_is_never_executed(self):
+        env = _CostEnvironment(quote=5.0, actual=5.0)
+        log = interact(env, _NoopBelief(), policy=_first_policy, budget=4.0)
+        self.assertEqual(env.step_calls, 0)
+        self.assertEqual(log.total_cost, 0.0)
+        self.assertEqual(log.stop_reason, "unaffordable_action")
+
+    def test_invalid_quote_is_rejected_before_mutation(self):
+        for quote in (-1.0, float("nan"), float("inf")):
+            with self.subTest(quote=quote):
+                env = _CostEnvironment(quote=quote)
+                with self.assertRaisesRegex(ValueError, "quoted action cost"):
+                    interact(env, _NoopBelief(), policy=_first_policy, budget=2.0)
+                self.assertEqual(env.step_calls, 0)
+
+    def test_invalid_actual_cost_retains_the_reservation(self):
+        env = _CostEnvironment(quote=1.0, actual=float("nan"))
+        with self.assertRaisesRegex(ValueError, "reported action cost"):
+            interact(env, _NoopBelief(), policy=_first_policy, budget=2.0)
+        self.assertEqual(env.step_calls, 1)
+
+    def test_actual_cost_cannot_exceed_reserved_quote(self):
+        env = _CostEnvironment(quote=1.0, actual=2.0)
+        with self.assertRaisesRegex(RuntimeError, "above its reserved upper bound"):
+            interact(env, _NoopBelief(), policy=_first_policy, budget=2.0)
+        self.assertEqual(env.step_calls, 1)
+
+    def test_zero_cost_nonterminal_environment_stops_at_step_limit(self):
+        env = _CostEnvironment(quote=0.0, actual=0.0)
+        log = interact(env, _NoopBelief(), policy=_first_policy, budget=2.0, max_steps=3)
+        self.assertEqual(env.step_calls, 3)
+        self.assertEqual(log.n_attempts, 3)
+        self.assertEqual(log.stop_reason, "step_limit")
+
+    def test_budget_and_step_limit_are_validated(self):
+        env = _CostEnvironment()
+        for budget in (-1.0, float("nan"), float("inf")):
+            with self.subTest(budget=budget), self.assertRaisesRegex(ValueError, "budget"):
+                interact(env, _NoopBelief(), policy=_first_policy, budget=budget)
+        for max_steps in (0, -1, 1.5, True):
+            with self.subTest(max_steps=max_steps), self.assertRaisesRegex(ValueError, "max_steps"):
+                interact(env, _NoopBelief(), policy=_first_policy, budget=1.0, max_steps=max_steps)
 
 
 if __name__ == "__main__":

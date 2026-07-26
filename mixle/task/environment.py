@@ -36,7 +36,7 @@ import numpy as np
 from mixle.inference.estimation import harmonic
 from mixle.inference.streaming import StreamingEstimator
 from mixle.stats import GaussianDistribution, GaussianEstimator
-from mixle.task.explore_world import ExplorationWorld
+from mixle.task.explore_world import DRILL_COST, SURVEY_COST, ExplorationWorld
 from mixle.task.probe_policy import myopic_eig_policy
 from mixle.task.replay import ExecutionTrace, is_bit_identical_replay, record_step
 
@@ -54,12 +54,16 @@ class Environment(Protocol):
     """Generic act-observe world.
 
     ``reset`` starts (or restarts) an episode from a seed and returns an initial observation;
-    ``step`` applies one action and returns ``(observation, cost)``; ``action_space`` lists the
-    actions currently legal to take. Costs are returned per step (not tracked internally) so
-    :func:`interact` can enforce ONE budget semantics uniformly across arbitrary environments.
+    ``action_cost`` quotes a finite, non-negative upper bound before mutation; ``step`` applies
+    one action and returns ``(observation, actual_cost)``; ``action_space`` lists the actions
+    currently legal to take. The actual cost must not exceed the quote. This reservation
+    contract lets :func:`interact` enforce one budget semantics across arbitrary environments
+    without executing an action first and discovering afterward that it was unaffordable.
     """
 
     def reset(self, seed: int | None = None) -> Any: ...
+
+    def action_cost(self, action: Any) -> float: ...
 
     def step(self, action: Any) -> tuple[Any, float]: ...
 
@@ -99,6 +103,17 @@ class ExplorationEnvironment:
         obs = self.world.step(action)
         cost = float(before - self.world.remaining_budget) if obs.get("accepted") else 0.0
         return obs, cost
+
+    def action_cost(self, action: dict[str, Any]) -> float:
+        """Return the exact cost of a supported action without mutating the world."""
+        if not isinstance(action, dict):
+            raise ValueError("exploration actions must be dictionaries")
+        kind = action.get("type")
+        if kind == "survey":
+            return float(SURVEY_COST)
+        if kind == "drill":
+            return float(DRILL_COST)
+        raise ValueError(f"unknown exploration action type {kind!r}")
 
     def action_space(self) -> list[dict[str, Any]]:
         if self.world is None:
@@ -209,6 +224,9 @@ class InteractionLog:
     trace: ExecutionTrace
     total_cost: float
     n_actions: int
+    n_attempts: int
+    max_steps: int
+    stop_reason: str
 
     def is_deterministic(self, env: Environment, belief_model: Any) -> bool:
         """Replay this log against a fresh ``env``/``belief_model`` pair (same policy name, same
@@ -219,35 +237,96 @@ class InteractionLog:
         policy_fn, policy_name = _resolve_policy(self.policy)
         if policy_name != self.policy:
             raise ValueError(f"cannot reconstruct a callable policy for replay (recorded name {self.policy!r}).")
-        tools, _state = _build_tools(env, belief_model, policy_fn, self.budget)
+        tools, _state = _build_tools(env, belief_model, policy_fn, self.budget, self.max_steps)
         return is_bit_identical_replay(self.trace, tools)
 
 
+def _validated_cost(value: Any, *, name: str) -> float:
+    try:
+        cost = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite, non-negative number") from exc
+    if not math.isfinite(cost) or cost < 0:
+        raise ValueError(f"{name} must be a finite, non-negative number")
+    return cost
+
+
 def _build_tools(
-    env: Environment, belief_model: Any, policy_fn: Callable[[Environment, Any, list[Any]], Any], budget: float
-) -> tuple[dict[str, Callable[..., Any]], dict[str, float]]:
-    state = {"remaining": float(budget), "n_actions": 0}
+    env: Environment,
+    belief_model: Any,
+    policy_fn: Callable[[Environment, Any, list[Any]], Any],
+    budget: float,
+    max_steps: int,
+) -> tuple[dict[str, Callable[..., Any]], dict[str, Any]]:
+    state: dict[str, Any] = {
+        "remaining": budget,
+        "n_actions": 0,
+        "n_attempts": 0,
+        "stop_reason": "not_started",
+    }
 
     def _reset(seed: int | None = None) -> Any:
         return env.reset(seed=seed)
 
     def _act() -> dict[str, Any] | None:
         if state["remaining"] <= 0:
+            state["stop_reason"] = "budget_exhausted"
+            return None
+        if state["n_attempts"] >= max_steps:
+            state["stop_reason"] = "step_limit"
             return None
         menu = env.action_space()
         if not menu:
+            state["stop_reason"] = "no_actions"
             return None
         action = policy_fn(env, belief_model, menu)
         if action is None:
+            state["stop_reason"] = "policy_stopped"
             return None
-        obs, cost = env.step(action)
-        cost = float(cost)
-        accepted = bool(obs.get("accepted", True)) and cost <= state["remaining"]
+
+        quoted_cost = _validated_cost(env.action_cost(action), name="quoted action cost")
+        if quoted_cost > state["remaining"]:
+            state["stop_reason"] = "unaffordable_action"
+            return {
+                "action": action,
+                "obs": None,
+                "cost": 0.0,
+                "reserved_cost": quoted_cost,
+                "accepted": False,
+                "reason": "unaffordable_action",
+            }
+
+        # Reserve before the external call. If the environment violates its upper-bound quote,
+        # retain the full reservation rather than crediting an untrustworthy reported cost.
+        state["remaining"] -= quoted_cost
+        state["n_attempts"] += 1
+        obs, reported_cost = env.step(action)
+        try:
+            cost = _validated_cost(reported_cost, name="reported action cost")
+        except ValueError:
+            state["stop_reason"] = "invalid_reported_cost"
+            raise
+        if cost > quoted_cost:
+            state["stop_reason"] = "cost_quote_exceeded"
+            raise RuntimeError(
+                f"environment reported action cost {cost} above its reserved upper bound {quoted_cost}"
+            )
+        state["remaining"] += quoted_cost - cost
+
+        accepted = bool(obs.get("accepted", True))
         if accepted:
-            state["remaining"] -= cost
             belief_model.update(obs)
             state["n_actions"] += 1
-        return {"action": action, "obs": obs, "cost": cost, "accepted": accepted}
+            state["stop_reason"] = "running"
+        else:
+            state["stop_reason"] = "environment_refused"
+        return {
+            "action": action,
+            "obs": obs,
+            "cost": cost,
+            "reserved_cost": quoted_cost,
+            "accepted": accepted,
+        }
 
     return {"reset": _reset, "act": _act}, state
 
@@ -289,6 +368,7 @@ def interact(
     policy: str | Callable[[Environment, Any, list[Any]], Any] = "eig",
     budget: float,
     seed: int | None = None,
+    max_steps: int = 1_000,
 ) -> InteractionLog:
     """Drive the act-observe-update loop.
 
@@ -300,22 +380,30 @@ def interact(
     :class:`InteractionLog` for why policy decision + step are bundled into one ``"act"`` unit)
     so the returned :class:`InteractionLog` replays deterministically via :mod:`mixle.task.replay`.
     """
+    validated_budget = _validated_cost(budget, name="budget")
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps <= 0:
+        raise ValueError("max_steps must be a positive integer")
     policy_fn, policy_name = _resolve_policy(policy)
-    tools, state = _build_tools(env, belief_model, policy_fn, budget)
+    tools, state = _build_tools(env, belief_model, policy_fn, validated_budget, max_steps)
     trace = ExecutionTrace(request="interact")
     trace.steps.append(record_step(tools, "reset", {}, seed=seed))
 
-    while state["remaining"] > 0:
+    while state["remaining"] > 0 and state["n_attempts"] < max_steps:
         step_result = record_step(tools, "act", {})
         trace.steps.append(step_result)
         if step_result.result is None or not step_result.result.get("accepted", True):
             break
+    if state["n_attempts"] >= max_steps and state["stop_reason"] == "running":
+        state["stop_reason"] = "step_limit"
 
     return InteractionLog(
         seed=seed,
-        budget=float(budget),
+        budget=validated_budget,
         policy=policy_name,
         trace=trace,
-        total_cost=float(budget) - state["remaining"],
+        total_cost=validated_budget - state["remaining"],
         n_actions=state["n_actions"],
+        n_attempts=state["n_attempts"],
+        max_steps=max_steps,
+        stop_reason=state["stop_reason"],
     )
