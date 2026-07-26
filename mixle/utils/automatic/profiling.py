@@ -176,6 +176,20 @@ class AutomaticSelectionResult:
 
 
 @dataclass(frozen=True)
+class ValueArraySamplingReceipt:
+    """Evidence describing a bounded expansion of weighted numeric values."""
+
+    input_weight: float
+    input_cardinality: int
+    output_count: int
+    output_cardinality: int
+    cap: int
+    approximated: bool
+    method: str
+    max_cdf_error_bound: float
+
+
+@dataclass(frozen=True)
 class _SequenceObservation(Sequence[Any]):
     """Reusable immutable form of a list/array/generator-valued observation."""
 
@@ -723,23 +737,69 @@ def _numeric_candidate_bics(arr: np.ndarray, nobs: int) -> dict[str, float]:
     return _clean_scores(candidates)
 
 
-def _value_array_from_vdict(vdict: dict[Any, float], cap: int = 200000) -> np.ndarray:
-    """Expand a value->count map into a representative numeric value array (capped for memory)."""
-    keys: list[float] = []
-    counts: list[int] = []
+def _value_array_from_vdict(
+    vdict: dict[Any, float], cap: int = 200000, *, return_receipt: bool = False
+) -> np.ndarray | tuple[np.ndarray, ValueArraySamplingReceipt]:
+    """Expand weighted numeric values without exceeding ``cap``.
+
+    Integral weights whose total fits within the cap are expanded exactly.
+    Larger or fractional weighted samples use deterministic midpoint
+    stratification over the empirical CDF. That preserves mass without
+    forcing one copy of every support value and bounds the CDF error by
+    ``1 / (2 * output_count)``.
+    """
+    if isinstance(cap, (bool, np.bool_)) or not isinstance(cap, (int, np.integer)) or int(cap) <= 0:
+        raise ValueError("cap must be a positive integer")
+    cap = int(cap)
+    pairs: list[tuple[float, float]] = []
     for k, v in vdict.items():
-        if isinstance(k, (int, float, np.integer, np.floating)) and math.isfinite(float(k)):
-            c = int(round(float(v)))
-            if c > 0:
-                keys.append(float(k))
-                counts.append(c)
-    if not keys:
-        return np.empty(0, dtype=float)
-    total = sum(counts)
-    if total > cap:
-        scale = cap / total
-        counts = [max(1, int(round(c * scale))) for c in counts]
-    return np.repeat(np.asarray(keys, dtype=float), counts)
+        if not isinstance(k, (int, float, np.integer, np.floating)) or not math.isfinite(float(k)):
+            continue
+        weight = float(v)
+        if not math.isfinite(weight) or weight < 0.0:
+            raise ValueError("numeric value counts must be finite and nonnegative")
+        if weight > 0.0:
+            pairs.append((float(k), weight))
+    pairs.sort(key=lambda item: item[0])
+    total = math.fsum(weight for _, weight in pairs)
+    if not pairs:
+        values = np.empty(0, dtype=float)
+        receipt = ValueArraySamplingReceipt(0.0, 0, 0, 0, cap, False, "empty", 0.0)
+    elif total <= cap and all(weight.is_integer() for _, weight in pairs):
+        values = np.repeat(
+            np.asarray([key for key, _ in pairs], dtype=float),
+            np.asarray([int(weight) for _, weight in pairs], dtype=np.int64),
+        )
+        receipt = ValueArraySamplingReceipt(
+            total,
+            len(pairs),
+            int(values.size),
+            int(np.unique(values).size),
+            cap,
+            False,
+            "exact",
+            0.0,
+        )
+    else:
+        output_count = min(cap, max(1, int(round(total))))
+        cumulative = np.cumsum(np.asarray([weight for _, weight in pairs], dtype=np.float64))
+        positions = (np.arange(output_count, dtype=np.float64) + 0.5) * (total / output_count)
+        indices = np.searchsorted(cumulative, positions, side="right")
+        keys = np.asarray([key for key, _ in pairs], dtype=float)
+        values = keys[np.minimum(indices, keys.size - 1)]
+        receipt = ValueArraySamplingReceipt(
+            total,
+            len(pairs),
+            output_count,
+            int(np.unique(values).size),
+            cap,
+            True,
+            "deterministic_midpoint_cdf",
+            0.5 / output_count,
+        )
+    if return_receipt:
+        return values, receipt
+    return values
 
 
 def _clean_scores(scores: dict[str, float | None]) -> dict[str, float]:
