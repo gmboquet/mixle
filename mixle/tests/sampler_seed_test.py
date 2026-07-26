@@ -5,6 +5,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 
 import mixle.stats as stats
+from mixle.enumeration.algorithms import freeze
 from mixle.stats.combinator.transform import AffineTransform
 
 
@@ -260,8 +261,8 @@ def _stats_public_distribution_catalog():
             [
                 None,
                 {
-                    "a": stats.CategoricalDistribution({0: 0.7, 1: 0.3}),
-                    "b": stats.CategoricalDistribution({0: 0.2, 1: 0.8}),
+                    freeze("a"): stats.CategoricalDistribution({0: 0.7, 1: 0.3}),
+                    freeze("b"): stats.CategoricalDistribution({0: 0.2, 1: 0.8}),
                 },
             ],
         ),

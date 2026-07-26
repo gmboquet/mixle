@@ -186,6 +186,7 @@ __all__ = [
     "ConditionalDataEncoder",
     "ConditionalEnumerator",
     "ChowLiuTreeDistribution",
+    "ChowLiuStatistics",
     "ChowLiuTreeEstimator",
     "ChowLiuTreeSampler",
     "ChowLiuTreeDataEncoder",
@@ -1702,6 +1703,7 @@ from mixle.stats.sets.integer_step_bernoulli_edit import (
     IntegerStepBernoulliEditSampler,
 )
 from mixle.stats.trees.chow_liu_tree import (
+    ChowLiuStatistics,
     ChowLiuTreeDataEncoder,
     ChowLiuTreeDistribution,
     ChowLiuTreeEnumerator,
