@@ -29,6 +29,11 @@ except Exception:  # pragma: no cover - scipy is a package dependency in normal 
 
 
 TAG = "__pysp_type__"
+MAX_DECODE_DEPTH = 128
+MAX_DECODE_NODES = 1_000_000
+MAX_DECODE_CONTAINER_ITEMS = 1_000_000
+MAX_DECODE_BINARY_BYTES = 256 * 1024 * 1024
+MAX_JSON_CHARS = 384 * 1024 * 1024
 
 _CLASS_REGISTRY: dict[str, type[Any]] = {}
 _CLASS_IDS: dict[type[Any], str] = {}
@@ -302,10 +307,15 @@ def _exact_int(value: Any, *, name: str, minimum: int | None = None) -> int:
 def _decode_base64(value: Any, *, name: str) -> bytes:
     if not isinstance(value, str):
         raise SerializationError("%s must be an ASCII base64 string" % name)
+    if len(value) > ((MAX_DECODE_BINARY_BYTES + 2) // 3) * 4:
+        raise SerializationError("%s exceeds the %d-byte decode limit" % (name, MAX_DECODE_BINARY_BYTES))
     try:
-        return base64.b64decode(value.encode("ascii"), validate=True)
+        decoded = base64.b64decode(value.encode("ascii"), validate=True)
     except (UnicodeEncodeError, ValueError) as exc:
         raise SerializationError("%s is not valid base64" % name) from exc
+    if len(decoded) > MAX_DECODE_BINARY_BYTES:
+        raise SerializationError("%s exceeds the %d-byte decode limit" % (name, MAX_DECODE_BINARY_BYTES))
+    return decoded
 
 
 def _canonical_sort_key(value: Any) -> bytes:
@@ -338,13 +348,15 @@ def _encode_ndarray(value: np.ndarray, active: set[int], memo: dict[int, str]) -
         _cycle_leave(obj_id, active)
 
 
-def _decode_ndarray(payload: dict[str, Any], references: dict[str, Any]) -> np.ndarray:
+def _decode_ndarray(
+    payload: dict[str, Any], references: dict[str, Any], depth: int, budget: list[int]
+) -> np.ndarray:
     _require_fields(payload, {TAG, "dtype", "shape", "data"}, {"id"})
     dtype_payload = payload["dtype"]
     if isinstance(dtype_payload, str):  # legacy v0.7/v0.8 payload
         dtype = np.dtype(dtype_payload)
         shape = tuple(_exact_int(u, name="ndarray shape", minimum=0) for u in payload["shape"])
-        data = _decode(payload["data"], references)
+        data = _decode(payload["data"], references, depth + 1, budget)
         try:
             return np.asarray(data, dtype=dtype).reshape(shape)
         except (TypeError, ValueError) as exc:
@@ -355,14 +367,18 @@ def _decode_ndarray(payload: dict[str, Any], references: dict[str, Any]) -> np.n
     if dtype_payload["kind"] == "str" and isinstance(dtype_payload["value"], str):
         dtype = np.dtype(dtype_payload["value"])
     elif dtype_payload["kind"] == "descr":
-        dtype = np.dtype(_decode(dtype_payload["value"], references))
+        dtype = np.dtype(_decode(dtype_payload["value"], references, depth + 1, budget))
     else:
         raise SerializationError("invalid ndarray dtype descriptor")
     if not isinstance(payload["shape"], list):
         raise SerializationError("ndarray shape must be a list")
+    if len(payload["shape"]) > MAX_DECODE_DEPTH:
+        raise SerializationError("ndarray has too many dimensions")
     shape = tuple(_exact_int(u, name="ndarray shape", minimum=0) for u in payload["shape"])
     raw = _decode_base64(payload["data"], name="ndarray data")
-    expected = int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
+    expected = math.prod(shape) * dtype.itemsize
+    if expected > MAX_DECODE_BINARY_BYTES:
+        raise SerializationError("ndarray exceeds the %d-byte decode limit" % MAX_DECODE_BINARY_BYTES)
     if len(raw) != expected:
         raise SerializationError("ndarray byte length %d does not match expected %d" % (len(raw), expected))
     return np.frombuffer(raw, dtype=dtype).copy().reshape(shape)
@@ -385,13 +401,13 @@ def _encode_sparse(value: Any, active: set[int], memo: dict[int, str]) -> dict[s
         _cycle_leave(obj_id, active)
 
 
-def _decode_sparse(payload: dict[str, Any], references: dict[str, Any]) -> Any:
+def _decode_sparse(payload: dict[str, Any], references: dict[str, Any], depth: int, budget: list[int]) -> Any:
     _require_fields(payload, {TAG, "format", "shape", "dtype", "row", "col", "data"}, {"id"})
     if sp is None:
         raise SerializationError("scipy.sparse is required to decode sparse matrices")
-    row = np.asarray(_decode(payload["row"], references), dtype=np.int64)
-    col = np.asarray(_decode(payload["col"], references), dtype=np.int64)
-    data = np.asarray(_decode(payload["data"], references), dtype=np.dtype(payload["dtype"]))
+    row = np.asarray(_decode(payload["row"], references, depth + 1, budget), dtype=np.int64)
+    col = np.asarray(_decode(payload["col"], references, depth + 1, budget), dtype=np.int64)
+    data = np.asarray(_decode(payload["data"], references, depth + 1, budget), dtype=np.dtype(payload["dtype"]))
     if not isinstance(payload["shape"], list) or len(payload["shape"]) != 2:
         raise SerializationError("sparse shape must contain exactly two dimensions")
     shape = tuple(_exact_int(u, name="sparse shape", minimum=0) for u in payload["shape"])
@@ -419,22 +435,26 @@ def _encode_dict(value: dict[Any, Any], active: set[int], memo: dict[int, str]) 
         _cycle_leave(obj_id, active)
 
 
-def _decode_dict(payload: dict[str, Any], references: dict[str, Any]) -> dict[Any, Any]:
+def _decode_dict(
+    payload: dict[str, Any], references: dict[str, Any], depth: int, budget: list[int]
+) -> dict[Any, Any]:
     _require_fields(payload, {TAG, "items"}, {"id"})
     if not isinstance(payload["items"], list):
         raise SerializationError("dict items must be a list")
+    if len(payload["items"]) > MAX_DECODE_CONTAINER_ITEMS:
+        raise SerializationError("dict exceeds the %d-item decode limit" % MAX_DECODE_CONTAINER_ITEMS)
     result: dict[Any, Any] = {}
     for pair in payload["items"]:
         if not isinstance(pair, list) or len(pair) != 2:
             raise SerializationError("each serialized dict item must be a [key, value] pair")
-        key = _decode(pair[0], references)
+        key = _decode(pair[0], references, depth + 1, budget)
         try:
             duplicate = key in result
         except TypeError as exc:
             raise SerializationError("decoded dictionary key is unhashable") from exc
         if duplicate:
             raise SerializationError("serialized dictionary contains duplicate decoded keys")
-        result[key] = _decode(pair[1], references)
+        result[key] = _decode(pair[1], references, depth + 1, budget)
     return result
 
 
@@ -474,7 +494,60 @@ def _encode_object(value: Any, active: set[int], memo: dict[int, str]) -> dict[s
         _cycle_leave(obj_id, active)
 
 
-def _decode_object(payload: dict[str, Any], references: dict[str, Any]) -> Any:
+def _constructor_decode(cls: type[Any], state: dict[str, Any], tid: str) -> Any:
+    """Construct and validate a registered object without bypassing its invariants."""
+    try:
+        signature = inspect.signature(cls)
+    except (TypeError, ValueError) as exc:
+        raise SerializationError("registered class %r has no safe decode hook or inspectable constructor" % tid) from exc
+
+    kwargs: dict[str, Any] = {}
+    missing: list[str] = []
+    accepts_kwargs = False
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            accepts_kwargs = True
+        elif parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            if parameter.name in state:
+                kwargs[parameter.name] = state[parameter.name]
+            elif parameter.default is inspect.Parameter.empty:
+                missing.append(parameter.name)
+        elif parameter.kind == inspect.Parameter.POSITIONAL_ONLY and parameter.default is inspect.Parameter.empty:
+            missing.append(parameter.name)
+    if missing:
+        raise SerializationError(
+            "registered class %r requires a class-owned __pysp_setstate__ hook; "
+            "constructor fields are absent: %s" % (tid, ", ".join(missing))
+        )
+    if accepts_kwargs:
+        kwargs.update({key: value for key, value in state.items() if key not in kwargs})
+
+    try:
+        obj = cls(**kwargs)
+    except Exception as exc:
+        raise SerializationError("constructor rejected serialized state for %r" % tid) from exc
+    if not hasattr(obj, "__dict__"):
+        raise SerializationError("constructor for registered class %r produced no state dictionary" % tid)
+
+    # The constructor owns both validation and normalization. Its resulting
+    # state must exactly match the artifact, including the field set; otherwise
+    # accepting the artifact would reintroduce an invariant-bypassing update.
+    try:
+        encoded_artifact = json.dumps(to_serializable(state), sort_keys=True, separators=(",", ":"), allow_nan=False)
+        encoded_constructed = json.dumps(
+            to_serializable(dict(obj.__dict__)), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        raise SerializationError("cannot validate serialized state schema for %r" % tid) from exc
+    if encoded_artifact != encoded_constructed:
+        raise SerializationError(
+            "serialized state for %r does not match its constructor-owned schema; "
+            "define __pysp_setstate__ for validated custom state" % tid
+        )
+    return obj
+
+
+def _decode_object(payload: dict[str, Any], references: dict[str, Any], depth: int, budget: list[int]) -> Any:
     _require_fields(payload, {TAG, "type", "state"}, {"id"})
     ensure_pysp_serialization_registry()
     tid = payload["type"]
@@ -483,22 +556,22 @@ def _decode_object(payload: dict[str, Any], references: dict[str, Any]) -> Any:
     cls = _CLASS_REGISTRY.get(tid)
     if cls is None:
         raise SerializationError("type id %r is not registered for mixle JSON deserialization" % tid)
-    obj = cls.__new__(cls)
     reference_id = payload.get("id")
     if reference_id is not None:
         if not isinstance(reference_id, str) or not reference_id:
             raise SerializationError("serialized object reference id must be a non-empty string")
         if reference_id in references:
             raise SerializationError("duplicate serialized object reference id %r" % reference_id)
-        references[reference_id] = obj
-    state = _decode(payload["state"], references)
+    state = _decode(payload["state"], references, depth + 1, budget)
     if not isinstance(state, dict):
         raise SerializationError("serialized object state for %r is not a dict" % tid)
-    state_setter = getattr(obj, "__pysp_setstate__", None)
-    if callable(state_setter):
-        state_setter(state)
+    if callable(getattr(cls, "__pysp_setstate__", None)):
+        obj = cls.__new__(cls)
+        obj.__pysp_setstate__(state)
     else:
-        obj.__dict__.update(state)
+        obj = _constructor_decode(cls, state, tid)
+    if reference_id is not None:
+        references[reference_id] = obj
     return obj
 
 
@@ -568,7 +641,12 @@ def _encode(value: Any, active: set[int], memo: dict[int, str]) -> Any:
     raise SerializationError("objects of type %s are not JSON serializable by mixle" % _type_id(value.__class__))
 
 
-def _decode(payload: Any, references: dict[str, Any]) -> Any:
+def _decode(payload: Any, references: dict[str, Any], depth: int, budget: list[int]) -> Any:
+    if depth > MAX_DECODE_DEPTH:
+        raise SerializationError("serialized value exceeds the maximum decode depth of %d" % MAX_DECODE_DEPTH)
+    budget[0] += 1
+    if budget[0] > MAX_DECODE_NODES:
+        raise SerializationError("serialized value exceeds the maximum decode node count of %d" % MAX_DECODE_NODES)
     if payload is None or isinstance(payload, (bool, str, int)):
         return payload
     if isinstance(payload, float):
@@ -576,7 +654,9 @@ def _decode(payload: Any, references: dict[str, Any]) -> Any:
             raise SerializationError("raw non-finite JSON numbers are forbidden; use the tagged float form")
         return payload
     if isinstance(payload, list):
-        return [_decode(v, references) for v in payload]
+        if len(payload) > MAX_DECODE_CONTAINER_ITEMS:
+            raise SerializationError("list exceeds the %d-item decode limit" % MAX_DECODE_CONTAINER_ITEMS)
+        return [_decode(v, references, depth + 1, budget) for v in payload]
     if not isinstance(payload, dict):
         raise SerializationError("unexpected serialized value of type %s" % type(payload).__name__)
 
@@ -592,21 +672,25 @@ def _decode(payload: Any, references: dict[str, Any]) -> Any:
         _require_fields(payload, {TAG, "data"})
         return _decode_base64(payload["data"], name="bytes data")
     if tag == "ndarray":
-        return _decode_ndarray(payload, references)
+        return _decode_ndarray(payload, references, depth, budget)
     if tag == "sparse":
-        return _decode_sparse(payload, references)
+        return _decode_sparse(payload, references, depth, budget)
     if tag == "dict":
-        return _decode_dict(payload, references)
+        return _decode_dict(payload, references, depth, budget)
     if tag == "tuple":
         _require_fields(payload, {TAG, "items"}, {"id"})
         if not isinstance(payload["items"], list):
             raise SerializationError("tuple items must be a list")
-        return tuple(_decode(v, references) for v in payload["items"])
+        if len(payload["items"]) > MAX_DECODE_CONTAINER_ITEMS:
+            raise SerializationError("tuple exceeds the %d-item decode limit" % MAX_DECODE_CONTAINER_ITEMS)
+        return tuple(_decode(v, references, depth + 1, budget) for v in payload["items"])
     if tag == "set":
         _require_fields(payload, {TAG, "items"}, {"id"})
         if not isinstance(payload["items"], list):
             raise SerializationError("set items must be a list")
-        values = [_decode(v, references) for v in payload["items"]]
+        if len(payload["items"]) > MAX_DECODE_CONTAINER_ITEMS:
+            raise SerializationError("set exceeds the %d-item decode limit" % MAX_DECODE_CONTAINER_ITEMS)
+        values = [_decode(v, references, depth + 1, budget) for v in payload["items"]]
         try:
             result = set(values)
         except TypeError as exc:
@@ -618,7 +702,9 @@ def _decode(payload: Any, references: dict[str, Any]) -> Any:
         _require_fields(payload, {TAG, "items"}, {"id"})
         if not isinstance(payload["items"], list):
             raise SerializationError("frozenset items must be a list")
-        values = [_decode(v, references) for v in payload["items"]]
+        if len(payload["items"]) > MAX_DECODE_CONTAINER_ITEMS:
+            raise SerializationError("frozenset exceeds the %d-item decode limit" % MAX_DECODE_CONTAINER_ITEMS)
+        values = [_decode(v, references, depth + 1, budget) for v in payload["items"]]
         try:
             result = frozenset(values)
         except TypeError as exc:
@@ -637,7 +723,7 @@ def _decode(payload: Any, references: dict[str, Any]) -> Any:
     if tag == "callable":
         return _decode_callable(payload)
     if tag == "object":
-        return _decode_object(payload, references)
+        return _decode_object(payload, references, depth, budget)
     if tag == "ref":
         _require_fields(payload, {TAG, "id"})
         reference_id = payload["id"]
@@ -654,7 +740,7 @@ def to_serializable(value: Any) -> Any:
 
 def from_serializable(payload: Any) -> Any:
     """Decode a value produced by ``to_serializable``."""
-    return _decode(payload, {})
+    return _decode(payload, {}, 0, [0])
 
 
 def to_json(value: Any, **kwargs: Any) -> str:
@@ -669,6 +755,11 @@ def to_json(value: Any, **kwargs: Any) -> str:
 
 def from_json(text: str) -> Any:
     """Deserialize a value produced by ``to_json``."""
+    if not isinstance(text, str):
+        raise TypeError("serialized JSON input must be a string")
+    if len(text) > MAX_JSON_CHARS:
+        raise SerializationError("serialized JSON exceeds the %d-character decode limit" % MAX_JSON_CHARS)
+
     def reject_constant(value: str) -> Any:
         raise SerializationError("non-standard JSON constant %r is forbidden" % value)
 
