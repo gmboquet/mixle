@@ -9,7 +9,12 @@ import unittest
 import numpy as np
 
 from mixle.tests.parallel_test import make_data, make_estimator, make_start_model
-from mixle.utils.parallel.sdc_audit import AuditedMPEncodedData, finite_guarded_fold, inject_bit_flip
+from mixle.utils.parallel.sdc_audit import (
+    AuditedMPEncodedData,
+    _compare_statistic_payloads,
+    finite_guarded_fold,
+    inject_bit_flip,
+)
 
 
 class _CountingAccumulator:
@@ -100,6 +105,33 @@ class BitFlipInjectionTestCase(unittest.TestCase):
         self.assertNotEqual(payload, corrupted)
         diff_bits = sum(bin(a ^ b).count("1") for a, b in zip(payload, corrupted))
         self.assertEqual(diff_bits, 1)
+
+
+class TypedStatisticComparisonTestCase(unittest.TestCase):
+    def _payload(self, statistic):
+        return pickle.dumps((3.0, statistic), protocol=pickle.HIGHEST_PROTOCOL)
+
+    def test_serialization_order_is_not_treated_as_corruption(self):
+        primary = self._payload({"a": np.array([1.0, 2.0]), "b": 4})
+        audit = self._payload({"b": 4, "a": np.array([1.0, 2.0])})
+        self.assertNotEqual(primary, audit)
+
+        comparison = _compare_statistic_payloads(primary, audit, rtol=1.0e-12, atol=1.0e-12)
+        self.assertTrue(comparison.equivalent)
+        self.assertEqual(comparison.primary_canonical_sha256, comparison.audit_canonical_sha256)
+
+    def test_numeric_tolerance_is_explicit_and_receiptable(self):
+        primary = self._payload(np.array([1.0, 2.0]))
+        within = self._payload(np.array([1.0 + 1.0e-13, 2.0]))
+        outside = self._payload(np.array([1.0 + 1.0e-6, 2.0]))
+
+        close = _compare_statistic_payloads(primary, within, rtol=1.0e-12, atol=1.0e-12)
+        far = _compare_statistic_payloads(primary, outside, rtol=1.0e-12, atol=1.0e-12)
+        self.assertTrue(close.equivalent)
+        self.assertGreater(close.max_abs_error, 0.0)
+        self.assertNotEqual(close.primary_canonical_sha256, close.audit_canonical_sha256)
+        self.assertFalse(far.equivalent)
+        self.assertIn("exceeds tolerance", far.reason)
 
 
 class SDCAuditTestCase(unittest.TestCase):
@@ -273,21 +305,8 @@ class SDCAuditTestCase(unittest.TestCase):
             self.assertGreater(len(per_eval_times), 1)
             self.assertLess(max(per_eval_times) / min(per_eval_times), 4.0)
 
-    def test_zero_false_positives_on_clean_runs(self):
-        """On genuinely uncorrupted runs the bitwise comparison must NEVER flag a mismatch.
-
-        This holds BY CONSTRUCTION, not merely empirically: the primary and audit recompute of
-        a shard both start from the identical raw shard bytes (self._shard_raw[shard_id]),
-        both go through the SAME "update_shard" code path with the SAME sub_chunks (so
-        floating-point summation order -- not associative in general -- is identical on both
-        ranks), and seq_update/seq_initialize are pure deterministic functions of (encoded
-        data, weights, model) with no per-rank randomness. Two evaluations of the same pure,
-        deterministic computation on identical inputs must produce identical IEEE-754 bit
-        patterns regardless of which physical rank executes them -- there is no tolerance band
-        here, no "close enough": a clean run has literally nothing that could make the two
-        payloads differ. This test verifies that argument empirically across enough trials to
-        be a meaningful receipt, not just an assertion.
-        """
+    def test_no_mismatches_on_clean_local_workers_within_declared_envelope(self):
+        """Clean workers in this recorded local environment agree under the configured envelope."""
         num_workers = self.num_workers
         n_rounds = 300
 
