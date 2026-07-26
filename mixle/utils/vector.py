@@ -14,6 +14,21 @@ import scipy.special
 from mixle.engines.arithmetic import *
 
 
+class ImpossibleEvidenceError(ValueError):
+    """Raised when log evidence has zero mass and no posterior exists."""
+
+
+def _validated_log_evidence(value: np.ndarray, *, name: str = "log evidence") -> np.ndarray:
+    result = np.asarray(value, dtype=np.float64)
+    if result.ndim != 1 or result.size == 0:
+        raise ValueError("%s must be a non-empty one-dimensional array" % name)
+    if np.any(np.isnan(result)) or np.any(np.isposinf(result)):
+        raise ValueError("%s must contain only finite values or -inf" % name)
+    if not np.any(np.isfinite(result)):
+        raise ImpossibleEvidenceError("%s has zero total probability" % name)
+    return result
+
+
 @overload
 def gammaln(x: np.ndarray) -> np.ndarray:
     """Return log-gamma values for an ndarray input."""
@@ -131,15 +146,10 @@ def make_pdf(x: np.ndarray | Sequence[float] | list[np.ndarray]):
     Returns:
         Returns an ndarray that s.t. np.exp(rv).sum() == 1.0.
     """
-    rv = np.array(x, dtype=np.float64)
-    n = len(rv)
+    rv = _validated_log_evidence(np.asarray(x, dtype=np.float64), name="log weights").copy()
     rv_max = rv.max()
-
-    if rv_max == -inf:
-        rv = zeros(n) - log(n)
-    else:
-        rv_sum = np.log(np.sum(np.exp(rv - rv_max))) + rv_max
-        rv -= rv_sum
+    rv_sum = np.log(np.sum(np.exp(rv - rv_max))) + rv_max
+    rv -= rv_sum
 
     return rv
 
@@ -352,14 +362,10 @@ def log_sum(x: np.ndarray) -> float:
     Returns:
         Float value log(sum(exp(x)), or -np.inf if max(x) is -np.inf.
     """
-    max_val = np.max(x)
-
-    if max_val == -np.inf:
-        return -np.inf
-    else:
-        rv = x - max_val
-        np.exp(rv, out=rv)
-        return np.log(rv.sum()) + max_val
+    values = np.asarray(x, dtype=np.float64)
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError("log_sum input must be a non-empty one-dimensional array")
+    return float(scipy.special.logsumexp(values))
 
 
 def weighted_log_sum(x: np.ndarray, w: np.ndarray) -> float:
@@ -377,10 +383,18 @@ def weighted_log_sum(x: np.ndarray, w: np.ndarray) -> float:
         and log-weights (<= 0); +inf terms are not supported (this is a hot EM path).
 
     """
-    y = x + w
-    y[np.bitwise_or(np.isinf(x), np.isinf(w))] = -np.inf
-
-    return log_sum(y)
+    values = np.asarray(x, dtype=np.float64)
+    weights = np.asarray(w, dtype=np.float64)
+    if values.ndim != 1 or weights.ndim != 1 or values.size == 0 or values.shape != weights.shape:
+        raise ValueError("x and w must be non-empty one-dimensional arrays with identical shape")
+    if np.any(np.isnan(values)) or np.any(np.isnan(weights)):
+        raise ValueError("x and w must not contain NaN")
+    if np.any(np.isposinf(weights)):
+        raise ValueError("log weights must not contain +inf")
+    terms = np.full(values.shape, -np.inf, dtype=np.float64)
+    active = ~np.isneginf(weights)
+    terms[active] = values[active] + weights[active]
+    return log_sum(terms)
 
 
 def log_posterior(x: np.ndarray) -> np.ndarray:
@@ -407,13 +421,9 @@ def log_posterior(x: np.ndarray) -> np.ndarray:
             [log(p_mat(theta_0| obs_i)),...,log(p_mat(theta_{n-1}|obs_i))]. Returns numpy array of [-log(len(x))]
             if nan or inf detected in x.
     """
-    max_val = x.max()
-
-    if isinf(max_val) or isnan(max_val):
-        return zeros(len(x)) - log(len(x))
-
-    mass = log(exp(x - max_val).sum()) + max_val
-    return x - mass
+    values = _validated_log_evidence(x)
+    mass = scipy.special.logsumexp(values)
+    return values - mass
 
 
 def posterior(
@@ -442,23 +452,20 @@ def posterior(
          Optional tuple with ([p_mat(obs_i|theta_j)], log(p_mat(obs_i))) if log_sum true.
     """
 
+    values = _validated_log_evidence(log_x)
     if out is None:
-        rv = np.zeros(len(log_x))
+        rv = np.zeros(len(values))
     else:
+        if out.shape != values.shape or not np.issubdtype(out.dtype, np.floating):
+            raise ValueError("out must be a floating-point array with the same shape as log_x")
         rv = out
 
-    max_val = log_x.max()
-    rv_sum = 0.0
-
-    if isinf(max_val) or isnan(max_val):
-        rv.fill(1.0 / float(len(log_x)))
-
-    else:
-        np.subtract(log_x, max_val, out=rv)
-        np.exp(rv, out=rv)
-        rv_sum = rv.sum()
-        rv /= rv_sum
-        rv_sum = np.log(rv_sum) + max_val
+    max_val = values.max()
+    np.subtract(values, max_val, out=rv)
+    np.exp(rv, out=rv)
+    total = rv.sum()
+    rv /= total
+    rv_sum = np.log(total) + max_val
 
     if log_sum:
         return rv, rv_sum
@@ -489,12 +496,9 @@ def log_posterior_sum(x: np.ndarray) -> tuple[np.ndarray, float]:
 
     """
 
-    max_val = x.max()
-    if isinf(max_val) or isnan(max_val):
-        return zeros(len(x)) - log(len(x)), -inf
-
-    mass = log(exp(x - max_val).sum()) + max_val
-    return x - mass, mass
+    values = _validated_log_evidence(x)
+    mass = float(scipy.special.logsumexp(values))
+    return values - mass, mass
 
 
 def weighted_log_posterior(x: np.ndarray, w: np.ndarray) -> list[float]:
@@ -517,29 +521,17 @@ def weighted_log_posterior(x: np.ndarray, w: np.ndarray) -> list[float]:
         [log(p_mat(theta_0| obs_i)),...,log(p_mat(theta_{n-1}|obs_i))].
 
     """
-    max_val = -inf
-
-    rv = [0.0] * len(x)
-
-    for i in range(len(x)):
-        r = w[i] + x[i]
-        if r > max_val:
-            max_val = r
-        rv[i] = r
-
-    if isinf(max_val) or isnan(max_val):  # every component impossible -> uniform posterior (matches log_posterior)
-        return [-log(len(x))] * len(x)
-
-    e_sum = 0.0
-    for i in range(len(x)):
-        e_sum += exp(rv[i] - max_val)
-
-    mass = log(e_sum) + max_val
-
-    for i in range(len(x)):
-        rv[i] -= mass
-
-    return rv
+    values = np.asarray(x, dtype=np.float64)
+    weights = np.asarray(w, dtype=np.float64)
+    if values.shape != weights.shape or values.ndim != 1 or values.size == 0:
+        raise ValueError("x and w must be non-empty one-dimensional arrays with identical shape")
+    if np.any(np.isnan(values)) or np.any(np.isposinf(values)):
+        raise ValueError("log evidence must contain only finite values or -inf")
+    if np.any(np.isnan(weights)) or np.any(np.isposinf(weights)):
+        raise ValueError("log weights must contain only finite values or -inf")
+    combined = _validated_log_evidence(values + weights, name="weighted log evidence")
+    mass = scipy.special.logsumexp(combined)
+    return list(combined - mass)
 
 
 def weighted_log_posterior_sum(x: np.ndarray, w: np.ndarray) -> tuple[list[float], float]:
@@ -566,29 +558,17 @@ def weighted_log_posterior_sum(x: np.ndarray, w: np.ndarray) -> tuple[list[float
         [log(p_mat(theta_0| obs_i)),...,log(p_mat(theta_{n-1}|obs_i))] and log(p_mat(obs_i).
 
     """
-    max_val = -inf
-
-    rv = [0.0] * len(x)
-
-    for i in range(len(x)):
-        r = w[i] + x[i]
-        if r > max_val:
-            max_val = r
-        rv[i] = r
-
-    if isinf(max_val) or isnan(max_val):  # every component impossible -> uniform posterior, zero evidence
-        return [-log(len(x))] * len(x), -inf
-
-    e_sum = 0.0
-    for i in range(len(x)):
-        e_sum += exp(rv[i] - max_val)
-
-    mass = log(e_sum) + max_val
-
-    for i in range(len(x)):
-        rv[i] -= mass
-
-    return rv, mass
+    values = np.asarray(x, dtype=np.float64)
+    weights = np.asarray(w, dtype=np.float64)
+    if values.shape != weights.shape or values.ndim != 1 or values.size == 0:
+        raise ValueError("x and w must be non-empty one-dimensional arrays with identical shape")
+    if np.any(np.isnan(values)) or np.any(np.isposinf(values)):
+        raise ValueError("log evidence must contain only finite values or -inf")
+    if np.any(np.isnan(weights)) or np.any(np.isposinf(weights)):
+        raise ValueError("log weights must contain only finite values or -inf")
+    combined = _validated_log_evidence(values + weights, name="weighted log evidence")
+    mass = float(scipy.special.logsumexp(combined))
+    return list(combined - mass), mass
 
 
 # tuple[float[:, :, :], float[:], float]
@@ -600,8 +580,16 @@ def matrix_log_posteriors(x: np.ndarray, u_mat: np.ndarray, u: np.ndarray) -> tu
     :param u:
     :return:
     """
-    h = u_mat.shape[0]
-    w = u_mat.shape[1]
+    x = np.asarray(x, dtype=np.float64)
+    u_mat = np.asarray(u_mat, dtype=np.float64)
+    u = np.asarray(u, dtype=np.float64)
+    if x.ndim != 2 or u_mat.ndim != 2 or u.ndim != 1:
+        raise ValueError("x and u_mat must be matrices and u must be a vector")
+    h, w = u_mat.shape
+    if h == 0 or w == 0 or x.shape[0] != w or u.shape != (h,):
+        raise ValueError("matrix_log_posteriors inputs have incompatible or empty shapes")
+    if any(np.any(np.isnan(value)) or np.any(np.isposinf(value)) for value in (x, u_mat, u)):
+        raise ValueError("matrix_log_posteriors inputs must contain only finite values or -inf")
     z = x.shape[1]
 
     row_posteriors = zeros((h, w, z))
@@ -614,10 +602,8 @@ def matrix_log_posteriors(x: np.ndarray, u_mat: np.ndarray, u: np.ndarray) -> tu
         for j in range(z):
             temp = u_mat[i, :] + x[:, j]
             inner_max = temp.max()
-            if isinf(inner_max) or isnan(inner_max):  # this slice impossible -> uniform, no evidence
-                row_posteriors[i, :, j] = 1.0 / w
-                row_sum += -inf
-                continue
+            if np.isneginf(inner_max):
+                raise ImpossibleEvidenceError("matrix posterior has zero probability at column %d" % j)
             temp = exp(temp - inner_max)
             inner_sum = temp.sum()
 
@@ -629,8 +615,8 @@ def matrix_log_posteriors(x: np.ndarray, u_mat: np.ndarray, u: np.ndarray) -> tu
             outer_max = row_sum
         outer_posterior[i] = row_sum
 
-    if isinf(outer_max) or isnan(outer_max):  # every row impossible -> uniform outer posterior, zero evidence
-        return row_posteriors, zeros(h) + 1.0 / h, -inf
+    if np.isneginf(outer_max):
+        raise ImpossibleEvidenceError("matrix posterior has zero outer probability")
 
     outer_posterior = exp(outer_posterior - outer_max)
     outer_sum = outer_posterior.sum()
@@ -658,7 +644,17 @@ def row_choice(p_mat: np.ndarray, rng: np.random.RandomState | None) -> np.ndarr
         N dim numpy array of ints.
 
     """
+    p_mat = np.asarray(p_mat, dtype=np.float64)
+    if p_mat.ndim != 2 or p_mat.shape[1] == 0:
+        raise ValueError("p_mat must be a two-dimensional matrix with at least one column")
+    if not np.all(np.isfinite(p_mat)) or np.any(p_mat < 0.0):
+        raise ValueError("p_mat must contain finite non-negative probabilities")
+    row_sums = p_mat.sum(axis=1)
+    if not np.allclose(row_sums, 1.0, rtol=1e-7, atol=1e-12):
+        raise ValueError("each p_mat row must sum to 1")
     N, m = p_mat.shape
+    if rng is None:
+        rng = np.random
     u = rng.rand(N)
 
     bins = np.cumsum(p_mat, axis=1)

@@ -42,12 +42,16 @@ from mixle.stats.univariate.discrete.geometric import GeometricEstimator
 from mixle.utils.evaluation import empirical_kl_divergence
 from mixle.utils.special import digammainv, logpdet, softmax, trigamma
 from mixle.utils.vector import (
+    ImpossibleEvidenceError,
     log_posterior,
     log_posterior_sum,
     log_sum,
     make_pdf,
+    matrix_log_posteriors,
     posterior,
     row_choice,
+    weighted_log_posterior,
+    weighted_log_posterior_sum,
     weighted_log_sum,
 )
 
@@ -83,9 +87,16 @@ class VectorUtilsTestCase(unittest.TestCase):
             ref = np.exp(x - scipy.special.logsumexp(x))
             self.assertTrue(np.allclose(p, ref))
 
-    def test_posterior_degenerate_uniform(self):
-        p = posterior(np.array([-np.inf, -np.inf, -np.inf]))
-        self.assertTrue(np.allclose(p, np.ones(3) / 3))
+    def test_posterior_rejects_impossible_or_invalid_evidence(self):
+        for values, error in (
+            ([-np.inf, -np.inf], ImpossibleEvidenceError),
+            ([0.0, np.nan], ValueError),
+            ([0.0, np.inf], ValueError),
+        ):
+            with self.subTest(values=values), self.assertRaises(error):
+                posterior(np.asarray(values))
+            with self.subTest(values=values), self.assertRaises(error):
+                log_posterior(np.asarray(values))
 
     def test_posterior_log_sum_value(self):
         x = np.log(np.array([0.1, 0.4]))
@@ -97,11 +108,9 @@ class VectorUtilsTestCase(unittest.TestCase):
         lp = log_posterior(x.copy())
         self.assertAlmostEqual(np.exp(lp).sum(), 1.0, places=10)
 
-    def test_log_posterior_sum_returns_tuple_when_degenerate(self):
-        rv = log_posterior_sum(np.array([-np.inf, -np.inf]))
-        self.assertIsInstance(rv, tuple)
-        lp, mass = rv
-        self.assertAlmostEqual(np.exp(lp).sum(), 1.0, places=10)
+    def test_log_posterior_sum_rejects_impossible_evidence(self):
+        with self.assertRaises(ImpossibleEvidenceError):
+            log_posterior_sum(np.array([-np.inf, -np.inf]))
 
     def test_make_pdf_normalizes(self):
         log_p = np.log(np.array([0.2, 0.3, 0.5])) + 7.3  # unnormalized
@@ -109,9 +118,29 @@ class VectorUtilsTestCase(unittest.TestCase):
         self.assertAlmostEqual(np.exp(rv).sum(), 1.0, places=12)
         self.assertTrue(np.allclose(np.exp(rv), [0.2, 0.3, 0.5]))
 
-    def test_make_pdf_all_neg_inf(self):
-        rv = make_pdf(np.array([-np.inf, -np.inf]))
-        self.assertTrue(np.allclose(rv, -np.log(2.0)))
+    def test_make_pdf_rejects_impossible_weights(self):
+        with self.assertRaises(ImpossibleEvidenceError):
+            make_pdf(np.array([-np.inf, -np.inf]))
+
+    def test_weighted_log_sum_omits_zero_weight_infinite_density(self):
+        result = weighted_log_sum(
+            np.asarray([np.inf, np.log(0.5)]),
+            np.asarray([-np.inf, np.log(0.5)]),
+        )
+        self.assertAlmostEqual(result, np.log(0.25))
+
+    def test_weighted_posteriors_reject_impossible_evidence(self):
+        for function in (weighted_log_posterior, weighted_log_posterior_sum):
+            with self.subTest(function=function.__name__), self.assertRaises(ImpossibleEvidenceError):
+                function(np.asarray([-np.inf, -np.inf]), np.asarray([0.0, -np.inf]))
+
+    def test_matrix_posterior_rejects_impossible_slice(self):
+        with self.assertRaises(ImpossibleEvidenceError):
+            matrix_log_posteriors(
+                np.asarray([[-np.inf], [-np.inf]]),
+                np.asarray([[0.0, 0.0]]),
+                np.asarray([0.0]),
+            )
 
     def test_row_choice_matches_inverse_cdf(self):
         for m in [2, 5, 17]:
@@ -122,6 +151,16 @@ class VectorUtilsTestCase(unittest.TestCase):
             u = np.random.RandomState(m + 100).rand(n)
             ref = np.array([min(np.searchsorted(np.cumsum(p_mat[i]), u[i], side="right"), m - 1) for i in range(n)])
             self.assertTrue(np.array_equal(idx, ref), "row_choice disagrees with inverse-CDF sampling for m=%d" % m)
+
+    def test_row_choice_rejects_non_probability_rows(self):
+        for p_mat in (
+            [[0.2, 0.2]],
+            [[0.5, -0.5]],
+            [[0.5, np.nan]],
+            [[0.5, np.inf]],
+        ):
+            with self.subTest(p_mat=p_mat), self.assertRaises(ValueError):
+                row_choice(np.asarray(p_mat), np.random.RandomState(1))
 
 
 class SpecialUtilsTestCase(unittest.TestCase):

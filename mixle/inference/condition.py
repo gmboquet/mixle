@@ -35,6 +35,7 @@ from mixle.stats.compute.posterior import MarkovChainLatentPosterior
 from mixle.stats.latent.hidden_markov import HiddenMarkovModelDistribution
 from mixle.stats.latent.mixture import MixtureDistribution
 from mixle.stats.univariate.discrete.point_mass import PointMassDistribution
+from mixle.utils.vector import ImpossibleEvidenceError
 
 __all__ = ["FieldPath", "ConditionReceipt", "ImpossibleEvidenceError", "Posterior", "condition", "do"]
 
@@ -43,10 +44,6 @@ FieldPath = tuple[int, ...]
 
 class _NoExactRule(Exception):
     """Internal: raised when a combinator has no closed-form conditioning rule -- triggers SIR."""
-
-
-class ImpossibleEvidenceError(ValueError):
-    """Raised when an operation requires a posterior for evidence with zero model probability."""
 
 
 def _norm_path(key: Any) -> FieldPath:
