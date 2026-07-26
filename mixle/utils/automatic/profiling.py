@@ -485,16 +485,27 @@ def _lognormal_bic_bits(values: Sequence[float], nobs: int) -> float | None:
     return bits + _bic_penalty_bits(2, nobs)
 
 
-def _gamma_moments(arr: np.ndarray) -> tuple[float, float] | None:
-    """Return the method-of-moments ``(shape k, scale theta)`` for positive data, or None."""
+def _gamma_mle(arr: np.ndarray) -> tuple[float, float] | None:
+    """Return the maximum-likelihood Gamma ``(shape, scale)`` with location fixed at zero."""
     if arr.size == 0 or not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
         return None
-    mean = float(arr.mean())
-    var = float(arr.var())
-    if mean <= 0.0 or var <= 0.0:
+    if float(arr.var()) <= 0.0:
         return None
-    theta = var / mean
-    return mean / theta, theta
+    from scipy import stats
+
+    try:
+        shape, location, scale = stats.gamma.fit(arr, floc=0.0)
+    except (FloatingPointError, RuntimeError, ValueError):
+        return None
+    if (
+        location != 0.0
+        or not math.isfinite(float(shape))
+        or not math.isfinite(float(scale))
+        or shape <= 0.0
+        or scale <= 0.0
+    ):
+        return None
+    return float(shape), float(scale)
 
 
 def _gamma_nll_bits(arr: np.ndarray, k: float, theta: float) -> float:
@@ -506,18 +517,18 @@ def _gamma_nll_bits(arr: np.ndarray, k: float, theta: float) -> float:
 
 def _gamma_bic_bits(values: Sequence[float], nobs: int) -> float | None:
     arr = np.asarray(values, dtype=float)
-    moments = _gamma_moments(arr)
-    if moments is None:
+    params = _gamma_mle(arr)
+    if params is None:
         return None
-    k, theta = moments
+    k, theta = params
     return _gamma_nll_bits(arr, k, theta) + _bic_penalty_bits(2, nobs)
 
 
-def _student_t_params(arr: np.ndarray) -> tuple[float, float, float] | None:
-    """Return Student-t ``(df, loc, scale)`` from moments, or None when not heavier-tailed.
+def _student_t_mle(arr: np.ndarray) -> tuple[float, float, float] | None:
+    """Return maximum-likelihood Student-t ``(df, loc, scale)``.
 
-    df is set from the excess kurtosis (``excess = 6/(df-4)`` for a t, so ``df = 4 + 6/excess``);
-    light-tailed data (non-positive excess) returns None so the candidate is skipped.
+    The candidate remains gated to empirically heavy-tailed data; once admitted,
+    all three charged parameters are fitted by likelihood rather than moments.
     """
     if arr.size < 4 or not np.all(np.isfinite(arr)):
         return None
@@ -528,21 +539,36 @@ def _student_t_params(arr: np.ndarray) -> tuple[float, float, float] | None:
     excess = float(np.mean((arr - mean) ** 4)) / (var * var) - 3.0
     if excess <= 0.0:
         return None
-    df = min(max(4.0 + 6.0 / excess, 2.5), 100.0)
-    scale = math.sqrt(var * (df - 2.0) / df) if df > 2.0 else math.sqrt(var)
-    return df, mean, scale
+    from scipy import stats
+
+    try:
+        df, loc, scale = stats.t.fit(arr)
+    except (FloatingPointError, RuntimeError, ValueError):
+        return None
+    if (
+        not math.isfinite(float(df))
+        or not math.isfinite(float(loc))
+        or not math.isfinite(float(scale))
+        or df <= 0.0
+        or scale <= 0.0
+    ):
+        return None
+    return float(df), float(loc), float(scale)
+
+
+def _student_t_nll_bits(arr: np.ndarray, params: tuple[float, float, float]) -> float:
+    from scipy import stats
+
+    df, loc, scale = params
+    return -float(np.mean(stats.t.logpdf(arr, df, loc=loc, scale=scale))) / math.log(2.0)
 
 
 def _student_t_bic_bits(values: Sequence[float], nobs: int) -> float | None:
-    from scipy import stats
-
     arr = np.asarray(values, dtype=float)
-    params = _student_t_params(arr)
+    params = _student_t_mle(arr)
     if params is None:
         return None
-    df, loc, scale = params
-    nll = -float(np.mean(stats.t.logpdf(arr, df, loc=loc, scale=scale)))
-    return nll / math.log(2.0) + _bic_penalty_bits(3, nobs)
+    return _student_t_nll_bits(arr, params) + _bic_penalty_bits(3, nobs)
 
 
 def _validation_student_t_bits(train: Sequence[float], validation: Sequence[float]) -> float | None:
@@ -550,7 +576,7 @@ def _validation_student_t_bits(train: Sequence[float], validation: Sequence[floa
 
     if not train or not validation:
         return None
-    params = _student_t_params(np.asarray(train, dtype=float))
+    params = _student_t_mle(np.asarray(train, dtype=float))
     if params is None:
         return None
     df, loc, scale = params
@@ -775,7 +801,7 @@ def _validation_numeric_pit(
     if recommendation == "gaussian" and var > 0.0:
         return stats.norm.cdf(val, loc=mean, scale=math.sqrt(var))
     if recommendation == "student_t":
-        params = _student_t_params(arr)
+        params = _student_t_mle(arr)
         if params is not None:
             df, loc, scale = params
             return stats.t.cdf(val, df, loc=loc, scale=scale)
@@ -796,9 +822,9 @@ def _validation_numeric_pit(
             return stats.norm.cdf(np.log(val), loc=float(logs.mean()), scale=math.sqrt(lvar))
         return None
     if recommendation == "gamma":
-        moments = _gamma_moments(arr)
-        if moments is not None:
-            k, theta = moments
+        params = _gamma_mle(arr)
+        if params is not None:
+            k, theta = params
             return stats.gamma.cdf(val, a=k, scale=theta)
     from mixle.utils.automatic.detectors import get_detector
 
@@ -1006,10 +1032,10 @@ def _validation_gamma_bits(train: Sequence[float], validation: Sequence[float]) 
     """Held-out predictive code length (bits/obs) of a Gamma fit; positive data only."""
     if not train or not validation:
         return None
-    moments = _gamma_moments(np.asarray(train, dtype=float))
-    if moments is None:
+    params = _gamma_mle(np.asarray(train, dtype=float))
+    if params is None:
         return None
-    k, theta = moments
+    k, theta = params
     const = math.lgamma(k) + k * math.log(theta)
     ll = 0.0
     for value in validation:
@@ -1432,9 +1458,12 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
         if recommendation == "lognormal":
             bits_per_obs = _lognormal_bits(arr)
         elif recommendation == "gamma":
-            moments = _gamma_moments(arr)
-            bits_per_obs = None if moments is None else _gamma_nll_bits(arr, *moments)
-        elif recommendation in ("student_t", "mixture"):
+            params = _gamma_mle(arr)
+            bits_per_obs = None if params is None else _gamma_nll_bits(arr, *params)
+        elif recommendation == "student_t":
+            params = _student_t_mle(arr)
+            bits_per_obs = None if params is None else _student_t_nll_bits(arr, params)
+        elif recommendation == "mixture":
             bits_per_obs = model_scores.get(recommendation)
         else:
             bits_per_obs = _gaussian_bits(var)
