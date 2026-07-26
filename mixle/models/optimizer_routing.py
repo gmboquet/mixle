@@ -157,7 +157,17 @@ class RoutedNeuralOptimizer(_OptimizerBase):
 
     @staticmethod
     def _inverse_quarter(factor: Any, damping: float) -> Any:
-        values, vectors = _TORCH.linalg.eigh(0.5 * (factor + factor.T))
+        if not _TORCH.isfinite(factor).all() or not _TORCH.allclose(
+            factor,
+            factor.T,
+            rtol=1.0e-5,
+            atol=1.0e-7,
+        ):
+            raise ValueError("Kronecker factors must be finite and symmetric.")
+        values, vectors = _TORCH.linalg.eigh(factor)
+        tolerance = 1.0e-6 * values.abs().max().clamp_min(1.0)
+        if values.min() < -tolerance:
+            raise ValueError("Kronecker factors must be positive semidefinite.")
         powers = values.clamp_min(0.0).add(damping).pow(-0.25)
         return (vectors * powers.unsqueeze(0)) @ vectors.T
 
@@ -221,6 +231,14 @@ class RoutedNeuralOptimizer(_OptimizerBase):
                         flat = gradient.float().reshape(-1)
                         if fisher.shape != (flat.numel(), flat.numel()) or not _TORCH.isfinite(fisher).all():
                             raise ValueError("fisher_provider returned an invalid value for %s." % group["name"])
+                        if not _TORCH.allclose(fisher, fisher.T, rtol=1.0e-5, atol=1.0e-7):
+                            raise ValueError("fisher_provider returned a non-symmetric value for %s." % group["name"])
+                        eigenvalues = _TORCH.linalg.eigvalsh(fisher)
+                        tolerance = 1.0e-6 * eigenvalues.abs().max().clamp_min(1.0)
+                        if eigenvalues.min() < -tolerance:
+                            raise ValueError(
+                                "fisher_provider returned an indefinite value for %s." % group["name"]
+                            )
                         direction = _TORCH.linalg.solve(
                             0.5 * (fisher + fisher.T)
                             + group["eps"] * _TORCH.eye(flat.numel(), device=flat.device),

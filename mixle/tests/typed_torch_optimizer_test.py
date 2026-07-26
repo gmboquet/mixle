@@ -83,6 +83,26 @@ def test_all_adamw_plan_uses_native_optimizer_without_changing_update():
         torch.testing.assert_close(routed_parameter, reference_parameter, rtol=0.0, atol=0.0)
 
 
+def test_tied_parameter_aliases_receive_one_executable_route():
+    class TiedWeights(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.token_embedding = torch.nn.Embedding(8, 4)
+            self.lm_head = torch.nn.Linear(4, 8, bias=False)
+            self.lm_head.weight = self.token_embedding.weight
+
+    module = TiedWeights()
+    descriptors = describe_parameters(module)
+    assert len(descriptors) == 1
+    assert descriptors[0].aliases == (
+        "token_embedding.weight",
+        "lm_head.weight",
+    )
+    plan = route_optimizer_geometry(descriptors, _contract())
+    optimizer = build_routed_torch_optimizer(module, plan)
+    assert len(optimizer.param_groups[0]["params"]) == 1
+
+
 def test_newton_schulz_muon_tracks_exact_polar_reference_without_svd(monkeypatch):
     torch.manual_seed(12)
     module = torch.nn.Linear(32, 64, bias=False)
@@ -168,6 +188,16 @@ def test_natural_gradient_requires_and_uses_fisher_provider():
     module(torch.ones(1, 2)).sum().backward()
     optimizer.step()
     assert not torch.equal(module.router.weight, before)
+
+    indefinite = build_routed_torch_optimizer(
+        module,
+        plan,
+        fisher_provider=lambda name, parameter: np.diag([1.0, -1.0]),
+    )
+    indefinite.zero_grad()
+    module(torch.ones(1, 2)).sum().backward()
+    with pytest.raises(ValueError, match="indefinite"):
+        indefinite.step()
 
 
 def test_proximal_route_applies_projection_after_gradient_step():
