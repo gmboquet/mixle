@@ -17,6 +17,15 @@ class DetectorRegistryTest(unittest.TestCase):
         names = [d.name for d in continuous_detectors()]
         self.assertIn("laplace", names)
         self.assertIsNotNone(get_detector("laplace"))
+        expected_parameter_counts = {
+            "binomial": 2,
+            "beta_binomial": 3,
+            "pareto": 2,
+            "generalized_pareto": 3,
+        }
+        for name, count in expected_parameter_counts.items():
+            with self.subTest(name=name):
+                self.assertEqual(get_detector(name).n_params, count)
 
     def test_detector_constructs_and_register_returns_it(self):
         # NB: never register a real family name (or an always-applying detector) from a test -- the

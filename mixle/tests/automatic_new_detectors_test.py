@@ -61,6 +61,15 @@ class DiscreteDetectorTest(unittest.TestCase):
         vals = list(stats.binom.rvs(8, 0.5, size=4000, random_state=self.rng))
         self.assertEqual(_winner(vals), "binomial")
 
+    def test_unknown_support_parameters_are_profiled_not_set_to_sample_max(self):
+        from mixle.utils.automatic.detectors.beta_binomial import _params as beta_binomial_params
+        from mixle.utils.automatic.detectors.binomial import _params as binomial_params
+
+        binomial = stats.binom.rvs(40, 0.12, size=5000, random_state=np.random.RandomState(40))
+        beta_binomial = stats.betabinom.rvs(40, 2.0, 12.0, size=5000, random_state=np.random.RandomState(41))
+        self.assertGreater(binomial_params(binomial)[0], int(binomial.max()))
+        self.assertGreater(beta_binomial_params(beta_binomial)[0], int(beta_binomial.max()))
+
 
 class NoRegressionTest(unittest.TestCase):
     def setUp(self):
