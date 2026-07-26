@@ -93,12 +93,9 @@ class EffectiveContextRuntime:
                 break
             self.scheduler.record(receipt)
         else:
-            stop = ContextAction(
-                "stop:max-iterations:v%d" % self.graph.version,
-                ContextActionKind.STOP,
-                expected_graph_version=self.graph.version,
-            )
-            receipts.append(self.executor.execute(stop))
+            decision = self.scheduler.stop_decision(self.graph, "maximum-iterations")
+            decisions.append(decision)
+            receipts.append(self.executor.execute(decision.selected))
 
         result = EffectiveContextRun(tuple(decisions), tuple(receipts), stopping_reason, self.graph.version)
         self.last_run = result

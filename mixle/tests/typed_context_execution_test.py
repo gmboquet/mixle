@@ -8,6 +8,7 @@ from mixle.experimental.typed_runtime import (
     ContextAction,
     ContextActionExecutor,
     ContextActionKind,
+    ContextActionLimits,
     ContextActionResult,
     ContextEdge,
     ContextEdgeKind,
@@ -24,6 +25,10 @@ pytestmark = [pytest.mark.experimental, pytest.mark.fast]
 
 def _provenance():
     return Provenance("source", "v1", "row=10", "sha256:10")
+
+
+def _limits():
+    return ContextActionLimits(10.0, 1_000, 10.0, 10)
 
 
 def test_retrieve_generate_and_verify_are_separate_receipted_actions():
@@ -86,7 +91,13 @@ def test_retrieve_generate_and_verify_are_separate_receipted_actions():
         },
     )
     retrieval = executor.execute(
-        ContextAction("retrieve", ContextActionKind.RETRIEVE, expected_graph_version=0, query="evidence")
+        ContextAction(
+            "retrieve",
+            ContextActionKind.RETRIEVE,
+            expected_graph_version=0,
+            query="evidence",
+            resource_limits=_limits(),
+        )
     )
     generation = executor.execute(
         ContextAction(
@@ -95,6 +106,7 @@ def test_retrieve_generate_and_verify_are_separate_receipted_actions():
             expected_graph_version=1,
             input_nodes=("source",),
             generated_output=True,
+            resource_limits=_limits(),
         )
     )
     verification = executor.execute(
@@ -103,6 +115,7 @@ def test_retrieve_generate_and_verify_are_separate_receipted_actions():
             ContextActionKind.VERIFY,
             expected_graph_version=3,
             input_nodes=("hypothesis",),
+            resource_limits=_limits(),
         )
     )
 
@@ -134,6 +147,7 @@ def test_malformed_generated_output_rolls_back_graph_but_charges_actual_work():
             ContextActionKind.GENERATE_HYPOTHESIS,
             expected_graph_version=0,
             generated_output=True,
+            resource_limits=_limits(),
         )
     )
     assert receipt.rolled_back
@@ -156,7 +170,12 @@ def test_invalid_edge_rolls_back_nodes_added_earlier_in_same_action():
 
     executor = ContextActionExecutor(graph, {ContextActionKind.LINK: invalid_edge})
     receipt = executor.execute(
-        ContextAction("link", ContextActionKind.LINK, expected_graph_version=0)
+        ContextAction(
+            "link",
+            ContextActionKind.LINK,
+            expected_graph_version=0,
+            resource_limits=_limits(),
+        )
     )
     assert receipt.rolled_back
     assert graph.nodes == {}
@@ -189,6 +208,7 @@ def test_adapter_receives_detached_read_only_view_and_cannot_mutate_live_graph()
         ContextActionKind.LINK,
         expected_graph_version=graph.version,
         input_nodes=("known",),
+        resource_limits=_limits(),
     )
     receipt = ContextActionExecutor(graph, {ContextActionKind.LINK: malicious}).execute(action)
 
@@ -205,7 +225,12 @@ def test_captured_live_graph_mutation_is_detected_and_rolled_back():
         graph.add_node(ContextNode("injected", ContextNodeKind.MEMORY, "Injected", 1))
         return ContextActionResult()
 
-    action = ContextAction("captured", ContextActionKind.LINK, expected_graph_version=0)
+    action = ContextAction(
+        "captured",
+        ContextActionKind.LINK,
+        expected_graph_version=0,
+        resource_limits=_limits(),
+    )
     receipt = ContextActionExecutor(graph, {ContextActionKind.LINK: malicious}).execute(action)
 
     assert receipt.rolled_back
@@ -226,7 +251,12 @@ def test_action_id_is_an_at_most_once_idempotency_key():
         )
 
     executor = ContextActionExecutor(graph, {ContextActionKind.LINK: adapter})
-    action = ContextAction("once", ContextActionKind.LINK, expected_graph_version=0)
+    action = ContextAction(
+        "once",
+        ContextActionKind.LINK,
+        expected_graph_version=0,
+        resource_limits=_limits(),
+    )
     first = executor.execute(action)
     repeated = executor.execute(action)
 
@@ -247,7 +277,14 @@ def test_stale_action_is_rejected_before_external_adapter_work():
 
     executor = ContextActionExecutor(graph, {ContextActionKind.LINK: adapter})
     with pytest.raises(RuntimeError, match="expected graph version"):
-        executor.execute(ContextAction("stale", ContextActionKind.LINK, expected_graph_version=0))
+        executor.execute(
+            ContextAction(
+                "stale",
+                ContextActionKind.LINK,
+                expected_graph_version=0,
+                resource_limits=_limits(),
+            )
+        )
     assert not called
     assert executor.receipts == []
 
@@ -259,3 +296,31 @@ def test_non_stop_action_requires_explicit_or_scheduler_bound_version():
     )
     with pytest.raises(ValueError, match="expected_graph_version"):
         executor.execute(ContextAction("unbound", ContextActionKind.LINK))
+
+
+def test_over_limit_action_result_is_receipted_but_graph_mutation_rolls_back():
+    graph = ContextGraph()
+
+    def expensive(action, current):
+        return ContextActionResult(
+            nodes=(ContextNode("result", ContextNodeKind.MEMORY, "Result", 1),),
+            materialized_tokens=11,
+            monetary_cost=2.0,
+        )
+
+    executor = ContextActionExecutor(graph, {ContextActionKind.LINK: expensive})
+    receipt = executor.execute(
+        ContextAction(
+            "over-limit",
+            ContextActionKind.LINK,
+            expected_graph_version=0,
+            resource_limits=ContextActionLimits(10.0, 10, 1.0, 0),
+        )
+    )
+
+    assert receipt.rolled_back
+    assert "materialized_tokens, monetary_cost" in receipt.outcome
+    assert receipt.materialized_tokens == 11
+    assert receipt.monetary_cost == 2.0
+    assert graph.nodes == {}
+    assert graph.version == 0

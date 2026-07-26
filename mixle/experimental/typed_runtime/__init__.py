@@ -66,6 +66,7 @@ from mixle.experimental.typed_runtime.context_execution import (
 from mixle.experimental.typed_runtime.context_ir import (
     ContextAction,
     ContextActionKind,
+    ContextActionLimits,
     ContextActionReceipt,
     ContextEdge,
     ContextEdgeKind,
@@ -270,6 +271,7 @@ __all__ = [
     "ConsistencyRequirement",
     "ContextAction",
     "ContextActionKind",
+    "ContextActionLimits",
     "ContextActionAdapter",
     "ContextActionExecutor",
     "ContextActionResult",

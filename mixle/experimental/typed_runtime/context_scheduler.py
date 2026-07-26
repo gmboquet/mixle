@@ -25,15 +25,14 @@ class ContextBudget:
     maximum_actions: int = 2**31 - 1
 
     def __post_init__(self) -> None:
-        values = (
-            self.latency_seconds,
-            self.materialized_tokens,
-            self.monetary_cost,
-            self.tool_calls,
-            self.maximum_actions,
-        )
-        if any(value < 0 for value in values):
-            raise ValueError("context budgets must be non-negative.")
+        if any(
+            math.isnan(value) or value < 0.0
+            for value in (self.latency_seconds, self.monetary_cost)
+        ):
+            raise ValueError("context latency and monetary budgets must be non-negative and not NaN.")
+        counts = (self.materialized_tokens, self.tool_calls, self.maximum_actions)
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
+            raise ValueError("context count budgets must be non-negative integers.")
 
 
 @dataclass(frozen=True)
@@ -110,6 +109,12 @@ class ValueOfInformationScheduler:
         self.tool_calls_spent = 0
         self.actions_completed = 0
         self._completed_action_ids: set[str] = set()
+        self._reservations: dict[str, ContextAction] = {}
+        self._reserved_latency = 0.0
+        self._reserved_tokens = 0
+        self._reserved_money = 0.0
+        self._reserved_tool_calls = 0
+        self.budget_breached = False
 
     def _expected_cost(self, action: ContextAction) -> float:
         return (
@@ -120,19 +125,60 @@ class ValueOfInformationScheduler:
         )
 
     def _admissible(self, action: ContextAction) -> str | None:
+        if self.budget_breached:
+            return "actual-budget-breached"
         if action.action_id in self._completed_action_ids:
             return "already-completed"
-        if self.actions_completed + 1 > self.budget.maximum_actions:
+        if action.action_id in self._reservations:
+            return "already-reserved"
+        limits = action.resource_limits
+        if limits is None:
+            return "missing-resource-limits"
+        if self.actions_completed + len(self._reservations) + 1 > self.budget.maximum_actions:
             return "action-budget"
-        if self.latency_spent + action.expected_latency_seconds > self.budget.latency_seconds:
+        if (
+            self.latency_spent + self._reserved_latency + limits.latency_seconds
+            > self.budget.latency_seconds
+        ):
             return "latency-budget"
-        if self.tokens_spent + action.expected_tokens > self.budget.materialized_tokens:
+        if (
+            self.tokens_spent + self._reserved_tokens + limits.materialized_tokens
+            > self.budget.materialized_tokens
+        ):
             return "token-budget"
-        if self.money_spent + action.expected_monetary_cost > self.budget.monetary_cost:
+        if (
+            self.money_spent + self._reserved_money + limits.monetary_cost
+            > self.budget.monetary_cost
+        ):
             return "monetary-budget"
-        if self.tool_calls_spent + action.expected_tool_calls > self.budget.tool_calls:
+        if (
+            self.tool_calls_spent + self._reserved_tool_calls + limits.tool_calls
+            > self.budget.tool_calls
+        ):
             return "tool-call-budget"
         return None
+
+    def _reserve(self, action: ContextAction) -> None:
+        limits = action.resource_limits
+        if limits is None:
+            raise ValueError("cannot reserve an action without resource_limits.")
+        self._reservations[action.action_id] = action
+        self._reserved_latency += limits.latency_seconds
+        self._reserved_tokens += limits.materialized_tokens
+        self._reserved_money += limits.monetary_cost
+        self._reserved_tool_calls += limits.tool_calls
+
+    def stop_decision(self, graph: ContextGraph, reason: str) -> ContextScheduleDecision:
+        """Create an explicit zero-work scheduling decision for termination."""
+
+        if not reason:
+            raise ValueError("context stopping reason must be non-empty.")
+        stop = ContextAction(
+            action_id="stop:%s:v%d:a%d" % (reason, graph.version, self.actions_completed),
+            kind=ContextActionKind.STOP,
+            expected_graph_version=graph.version,
+        )
+        return ContextScheduleDecision(stop, (), {}, {}, {}, {}, reason)
 
     def choose(self, actions: tuple[ContextAction, ...], graph: ContextGraph) -> ContextScheduleDecision:
         """Choose the highest positive net VOI action or stop explicitly."""
@@ -157,6 +203,9 @@ class ValueOfInformationScheduler:
             reason = self._admissible(action)
             if reason is not None:
                 inadmissible[action.action_id] = reason
+                continue
+            if action.gain_sample_count <= 0:
+                inadmissible[action.action_id] = "missing-gain-evidence"
                 continue
             lower[action.action_id] = action.expected_information_gain - (
                 self.config.confidence_z * action.gain_standard_error
@@ -184,15 +233,19 @@ class ValueOfInformationScheduler:
         elif net[selected.action_id] <= self.config.minimum_net_value:
             stopping_reason = "expected-value-below-cost"
         if stopping_reason is not None:
-            selected = ContextAction(
-                action_id="stop:v%d:a%d" % (graph.version, self.actions_completed),
-                kind=ContextActionKind.STOP,
-                expected_graph_version=graph.version,
-                expected_information_gain=0.0,
+            decision = self.stop_decision(graph, stopping_reason)
+            return replace(
+                decision,
+                ranked_action_ids=ranked,
+                lower_confidence_gains=lower,
+                expected_costs=costs,
+                net_values=net,
+                inadmissible=inadmissible,
             )
-        elif selected.expected_graph_version is None:
+        if selected.expected_graph_version is None:
             selected = replace(selected, expected_graph_version=graph.version)
-        return ContextScheduleDecision(selected, ranked, lower, costs, net, inadmissible, stopping_reason)
+        self._reserve(selected)
+        return ContextScheduleDecision(selected, ranked, lower, costs, net, inadmissible, None)
 
     def record(self, receipt: ContextActionReceipt) -> None:
         """Debit actual work once; rejected/rolled-back work still costs resources."""
@@ -200,12 +253,33 @@ class ValueOfInformationScheduler:
         action_id = receipt.action.action_id
         if action_id in self._completed_action_ids:
             raise ValueError("context action receipt was already recorded: %s" % action_id)
+        reserved = self._reservations.pop(action_id, None)
+        if reserved is None:
+            raise ValueError("context action receipt has no matching resource reservation: %s" % action_id)
+        if reserved != receipt.action:
+            self._reservations[action_id] = reserved
+            raise ValueError("context action receipt does not match its resource reservation.")
+        limits = reserved.resource_limits
+        self._reserved_latency -= limits.latency_seconds
+        self._reserved_tokens -= limits.materialized_tokens
+        self._reserved_money -= limits.monetary_cost
+        self._reserved_tool_calls -= limits.tool_calls
         self._completed_action_ids.add(action_id)
         self.latency_spent += receipt.latency_seconds
         self.tokens_spent += receipt.materialized_tokens
         self.money_spent += receipt.monetary_cost
         self.tool_calls_spent += receipt.tool_calls
         self.actions_completed += 1
+        self.budget_breached = (
+            self.latency_spent > self.budget.latency_seconds
+            or self.tokens_spent > self.budget.materialized_tokens
+            or self.money_spent > self.budget.monetary_cost
+            or self.tool_calls_spent > self.budget.tool_calls
+            or receipt.latency_seconds > limits.latency_seconds
+            or receipt.materialized_tokens > limits.materialized_tokens
+            or receipt.monetary_cost > limits.monetary_cost
+            or receipt.tool_calls > limits.tool_calls
+        )
 
     def as_dict(self) -> dict[str, Any]:
         """Return cumulative actual context-construction spend."""
@@ -217,6 +291,12 @@ class ValueOfInformationScheduler:
             "tool_calls_spent": self.tool_calls_spent,
             "actions_completed": self.actions_completed,
             "completed_action_ids": sorted(self._completed_action_ids),
+            "reserved_action_ids": sorted(self._reservations),
+            "reserved_latency_seconds": self._reserved_latency,
+            "reserved_tokens": self._reserved_tokens,
+            "reserved_monetary_cost": self._reserved_money,
+            "reserved_tool_calls": self._reserved_tool_calls,
+            "budget_breached": self.budget_breached,
         }
 
 
