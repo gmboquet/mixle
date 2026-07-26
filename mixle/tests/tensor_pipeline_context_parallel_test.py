@@ -1,8 +1,9 @@
 """TP/PP/CP correctness for :class:`~mixle.models.transformer.CausalLM` (F1: parallelism atop FSDP2).
 
-What this test module DOES verify (exact/near-exact, small-scale, in-process): the actual sharding /
-partition / reconciliation MATH for tensor, pipeline, and context parallelism is correct -- the sharded
-forward reproduces the dense (un-sharded) model's forward, for real ``CausalLM`` weights.
+What this test module DOES verify (exact/near-exact, small-scale, in-process): sharded modules own
+trainable parameters, pipeline and context paths retain end-to-end autograd, context attention obeys
+its per-rank memory bound, cardinality failures are explicit, and every sharded forward reproduces the
+dense model.
 
 What this test module DOES NOT and CANNOT verify: the roadmap's F1 acceptance criterion ("70B-config
 across >=512 GPUs at published-comparable MFU") requires 512+ real accelerators and a multi-week training
@@ -24,6 +25,7 @@ receipt, not a speedup claim).
 
 import os
 import unittest
+from itertools import chain
 from unittest import mock
 
 import numpy as np
@@ -80,8 +82,69 @@ class TensorParallelTest(unittest.TestCase):
         from mixle.models.transformer import CausalAttention
 
         attn = CausalAttention(32, 4)
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             tp_shard_attention(attn, 3)  # 4 heads not divisible by 3 ranks
+
+    def test_tp_shards_are_owned_parameters_with_gradients_and_optimizer_updates(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import (
+            tp_attention_forward,
+            tp_shard_attention,
+        )
+        from mixle.models.transformer import CausalAttention
+
+        torch.manual_seed(10)
+        attention = CausalAttention(16, 4)
+        shards = tp_shard_attention(attention, 2)
+        parameters = list(chain.from_iterable(shard.parameters() for shard in shards))
+        self.assertTrue(parameters)
+        self.assertTrue(
+            all(isinstance(parameter, torch.nn.Parameter) and parameter.is_leaf for parameter in parameters)
+        )
+        optimizer = torch.optim.SGD(parameters, lr=0.1)
+        x = torch.randn(2, 5, 16)
+        before = shards[0].qkv_weight.detach().clone()
+        loss = tp_attention_forward(x, shards).square().mean()
+        loss.backward()
+        self.assertTrue(all(parameter.grad is not None for parameter in parameters))
+        optimizer.step()
+        self.assertFalse(torch.equal(before, shards[0].qkv_weight))
+
+    def test_tp_forward_rejects_missing_block_shards(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import (
+            tp_forward_causal_lm,
+            tp_shard_causal_lm,
+        )
+        from mixle.models.transformer import build_causal_lm
+
+        model = build_causal_lm(11, d_model=16, n_layer=2, n_head=2, block=4)
+        shard = tp_shard_causal_lm(model, 2)
+        del shard.blocks[-1]
+        with self.assertRaises(ValueError):
+            tp_forward_causal_lm(model, torch.ones((1, 4)), shard)
+
+    def test_tp_full_model_optimizer_ownership_is_unique_and_end_to_end(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import (
+            tp_forward_causal_lm,
+            tp_shard_causal_lm,
+            tp_trainable_parameters,
+        )
+        from mixle.models.transformer import build_causal_lm
+
+        torch.manual_seed(13)
+        model = build_causal_lm(11, d_model=16, n_layer=2, n_head=2, block=4)
+        shard = tp_shard_causal_lm(model, 2)
+        parameters = tp_trainable_parameters(model, shard)
+        self.assertEqual(len(parameters), len({id(parameter) for parameter in parameters}))
+        self.assertNotIn(id(model.blocks[0].attn.qkv.weight), {id(parameter) for parameter in parameters})
+        self.assertIn(id(shard.blocks[0].attn[0].qkv_weight), {id(parameter) for parameter in parameters})
+
+        optimizer = torch.optim.SGD(parameters, lr=0.01)
+        x = torch.randint(0, 11, (2, 4))
+        before = shard.blocks[0].attn[0].qkv_weight.detach().clone()
+        tp_forward_causal_lm(model, x, shard).square().mean().backward()
+        self.assertTrue(all(parameter.grad is not None for parameter in parameters))
+        optimizer.step()
+        self.assertFalse(torch.equal(before, shard.blocks[0].attn[0].qkv_weight))
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
@@ -120,6 +183,21 @@ class PipelineParallelTest(unittest.TestCase):
         self.assertIsNone(stages[-1].tok)
         self.assertIsNotNone(stages[-1].head)
         self.assertIsNone(stages[0].head)
+
+    def test_pipeline_forward_retains_end_to_end_autograd(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import (
+            pipeline_forward,
+            pp_partition_causal_lm,
+        )
+        from mixle.models.transformer import build_causal_lm
+
+        torch.manual_seed(11)
+        model = build_causal_lm(13, d_model=16, n_layer=4, n_head=2, block=6)
+        stages = pp_partition_causal_lm(model, 2)
+        x = torch.randint(0, 13, (4, 6))
+        loss = pipeline_forward(stages, x, 2).square().mean()
+        loss.backward()
+        self.assertTrue(all(parameter.grad is not None for parameter in model.parameters()))
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
@@ -162,6 +240,35 @@ class ContextParallelTest(unittest.TestCase):
                     torch.allclose(dense, sharded, atol=1e-4, rtol=1e-4),
                     "cp_size=%d full-model output diverges from dense at some position" % cp_size,
                 )
+
+    def test_cp_streaming_attention_is_differentiable_and_receipts_memory_bound(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import (
+            cp_attention_forward,
+            cp_shard_sequence,
+        )
+        from mixle.models.transformer import CausalAttention
+
+        torch.manual_seed(12)
+        attention = CausalAttention(16, 4)
+        x = torch.randn(2, 9, 16, requires_grad=True)
+        chunks = cp_shard_sequence(x, 3)
+        outputs, receipt = cp_attention_forward(attention, chunks, return_receipt=True)
+        torch.cat(outputs, dim=1).square().mean().backward()
+
+        self.assertIsNotNone(x.grad)
+        self.assertIsNotNone(attention.qkv.weight.grad)
+        self.assertIsNotNone(attention.proj.weight.grad)
+        self.assertEqual(receipt.algorithm, "block_streaming_online_softmax")
+        self.assertFalse(receipt.materialized_full_kv_per_rank)
+        self.assertEqual(receipt.full_sequence_tokens, 9)
+        self.assertEqual(receipt.peak_key_block_tokens_per_rank, 3)
+        self.assertLess(receipt.peak_key_block_tokens_per_rank, receipt.full_sequence_tokens)
+
+    def test_cp_sharding_rejects_empty_rank_chunks(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import cp_shard_sequence
+
+        with self.assertRaises(ValueError):
+            cp_shard_sequence(torch.ones((1, 2, 3)), 3)
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
@@ -240,16 +347,11 @@ def _tp_real_worker(rank, world_size, model_state, x_cpu, cfg, result_queue):
     model.to(device)
     x = x_cpu.to(device)
     for sh in my_attn:
-        sh.qkv_weight = sh.qkv_weight.to(device)
-        sh.qkv_bias = sh.qkv_bias.to(device) if sh.qkv_bias is not None else None
-        sh.proj_weight = sh.proj_weight.to(device)
-        sh.proj_bias = sh.proj_bias.to(device) if sh.proj_bias is not None else None
+        sh.to(device)
     for sh in my_fc1:
-        sh.weight = [w.to(device) for w in sh.weight]
-        sh.bias = [b.to(device) for b in sh.bias] if sh.bias is not None else None
+        sh.to(device)
     for sh in my_fc2:
-        sh.weight = [w.to(device) for w in sh.weight]
-        sh.bias = sh.bias.to(device) if sh.bias is not None else None
+        sh.to(device)
 
     with torch.no_grad():
         xt = x.long()
