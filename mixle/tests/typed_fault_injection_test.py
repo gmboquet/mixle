@@ -25,7 +25,7 @@ def _runtime():
     return BoundaryInbox(graph, run_id="run", model_id="model"), RuntimeVersions(2, {"n0000": 0})
 
 
-def _message(message_id="message", sequence=0):
+def _message(message_id="message", sequence=0, model_version=2):
     return BoundaryMessage(
         message_id,
         "run",
@@ -33,7 +33,7 @@ def _message(message_id="message", sequence=0):
         "n0000",
         "worker-a",
         "coordinator",
-        2,
+        model_version,
         0,
         (("n0000", 0),),
         sequence,
@@ -50,6 +50,9 @@ def test_duplicate_is_delivered_twice_but_consumed_once():
     assert len(deliveries) == 2
     assert receipts[0].accepted
     assert receipts[1].reason == "duplicate-message-id"
+    assert injector.receipts[0].applied
+    assert injector.receipts[0].target_state_before == "deliveries:1"
+    assert injector.receipts[0].target_state_after == "deliveries:2"
 
 
 def test_corruption_is_caught_and_clean_retry_can_commit_same_sequence():
@@ -78,6 +81,21 @@ def test_stale_version_is_rejected_and_retry_is_current():
     stale = injector.intercept(_message(), step=0)[0]
     assert inbox.receive(stale, versions).reason == "model-version-mismatch"
     assert inbox.receive(injector.intercept(_message(), step=1)[0], versions).accepted
+
+
+def test_stale_version_at_zero_is_rejected_as_a_no_op_and_not_consumed():
+    injector = BoundaryFaultInjector((FaultEvent("message", FaultKind.STALE_VERSION),))
+    with pytest.raises(ValueError, match="below model version zero"):
+        injector.intercept(_message(model_version=0), step=0)
+    assert injector.receipts == []
+    assert injector.as_dict()["consumed_event_message_ids"] == []
+
+    stale = injector.intercept(_message(model_version=2), step=1)[0]
+    assert stale.model_version == 1
+    receipt = injector.receipts[0]
+    assert receipt.applied
+    assert receipt.target_state_before == "model-version:2"
+    assert receipt.target_state_after == "model-version:1"
 
 
 def test_worker_loss_blocks_other_messages_until_recovery_without_double_counting():

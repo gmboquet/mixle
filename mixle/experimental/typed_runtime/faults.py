@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from mixle.experimental.typed_runtime.boundary import BoundaryMessage
+from mixle.experimental.typed_runtime.proposal import payload_fingerprint
 
 
 class FaultKind(StrEnum):
@@ -52,6 +53,21 @@ class FaultInjectionReceipt:
     step: int
     emitted_messages: int
     reason: str
+    applied: bool
+    target_state_before: str
+    target_state_after: str
+
+    def __post_init__(self) -> None:
+        if not self.message_id or self.step < 0 or self.emitted_messages < 0 or not self.reason:
+            raise ValueError("fault receipt identity, step, deliveries, and reason must be valid.")
+        if not self.target_state_before or not self.target_state_after:
+            raise ValueError("fault receipt must identify target state before and after interception.")
+        if self.kind is None and self.applied:
+            raise ValueError("ordinary delivery receipts cannot claim a fault was applied.")
+        if self.kind is not None and (
+            not self.applied or self.target_state_before == self.target_state_after
+        ):
+            raise ValueError("an injected fault must demonstrate a target-state transition.")
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible fault receipt."""
@@ -62,6 +78,9 @@ class FaultInjectionReceipt:
             "step": self.step,
             "emitted_messages": self.emitted_messages,
             "reason": self.reason,
+            "applied": self.applied,
+            "target_state_before": self.target_state_before,
+            "target_state_after": self.target_state_after,
         }
 
 
@@ -114,43 +133,83 @@ class BoundaryFaultInjector:
         if message.source_shard in self._dead_shards:
             receipt = FaultInjectionReceipt(
                 message.message_id,
-                FaultKind.WORKER_LOSS,
+                None,
                 step,
                 0,
                 "source-shard-unavailable",
+                False,
+                "source-shard:unavailable",
+                "source-shard:unavailable",
             )
             self.receipts.append(receipt)
             return ()
         event = self._events.get(message.message_id)
         if event is None or message.message_id in self._consumed:
-            receipt = FaultInjectionReceipt(message.message_id, None, step, 1, "delivered")
+            receipt = FaultInjectionReceipt(
+                message.message_id,
+                None,
+                step,
+                1,
+                "delivered",
+                False,
+                "delivery:ready",
+                "delivery:ready",
+            )
             self.receipts.append(receipt)
             return (message,)
-        self._consumed.add(message.message_id)
 
         emitted: tuple[BoundaryMessage, ...]
         reason: str
+        target_before: str
+        target_after: str
         if event.kind is FaultKind.DROP:
             emitted, reason = (), "scripted-drop"
+            target_before, target_after = "deliveries:1", "deliveries:0"
         elif event.kind is FaultKind.DUPLICATE:
             emitted, reason = (message, copy.deepcopy(message)), "scripted-duplicate"
+            target_before, target_after = "deliveries:1", "deliveries:2"
         elif event.kind is FaultKind.DELAY:
             if event.release_step is None or event.release_step <= step:
                 raise ValueError("delay release_step must be greater than interception step.")
             self._delayed.append((event.release_step, copy.deepcopy(message)))
             emitted, reason = (), "queued-until-step-%d" % event.release_step
+            target_before = "delivery:immediate"
+            target_after = "delivery:queued-until-%d" % event.release_step
         elif event.kind is FaultKind.CORRUPT:
             corrupted = copy.deepcopy(message)
+            before_hash = payload_fingerprint(corrupted.payload)
             object.__setattr__(corrupted, "payload", _corrupt_payload(corrupted.payload))
+            after_hash = payload_fingerprint(corrupted.payload)
+            if before_hash == after_hash:
+                raise RuntimeError("corruption fault did not change the payload fingerprint.")
             emitted, reason = (corrupted,), "payload-corrupted-after-hash"
+            target_before = "payload:%s" % before_hash
+            target_after = "payload:%s" % after_hash
         elif event.kind is FaultKind.STALE_VERSION:
+            if event.version_delta > message.model_version:
+                raise ValueError("stale-version fault cannot rewind below model version zero.")
             stale = copy.deepcopy(message)
-            object.__setattr__(stale, "model_version", max(0, stale.model_version - event.version_delta))
+            original_version = stale.model_version
+            object.__setattr__(stale, "model_version", original_version - event.version_delta)
             emitted, reason = (stale,), "model-version-rewound"
+            target_before = "model-version:%d" % original_version
+            target_after = "model-version:%d" % stale.model_version
         else:
             self._dead_shards.add(message.source_shard)
             emitted, reason = (), "source-shard-marked-unavailable"
-        receipt = FaultInjectionReceipt(message.message_id, event.kind, step, len(emitted), reason)
+            target_before = "source-shard:available"
+            target_after = "source-shard:unavailable"
+        self._consumed.add(message.message_id)
+        receipt = FaultInjectionReceipt(
+            message.message_id,
+            event.kind,
+            step,
+            len(emitted),
+            reason,
+            True,
+            target_before,
+            target_after,
+        )
         self.receipts.append(receipt)
         return emitted
 

@@ -9,6 +9,7 @@ Megatron integration from pretending to be an ``EncodedDataHandle``.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
@@ -232,7 +233,7 @@ class ParameterLayout:
 
 @dataclass(frozen=True)
 class DistributedUpdate:
-    """Executable communication declaration for one typed update node."""
+    """Executable communication declaration with explicit numerical evidence."""
 
     node_id: str
     payload: PayloadKind
@@ -241,6 +242,32 @@ class DistributedUpdate:
     state_layout: StateLayout
     exact: bool
     notes: tuple[str, ...] = ()
+    contract_exact: bool = False
+    determinism_observed: bool | None = None
+    maximum_absolute_error: float | None = None
+    maximum_relative_error: float | None = None
+    numerics_evidence_id: str | None = None
+    numerics_sample_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.node_id:
+            raise ValueError("distributed update node_id must be non-empty.")
+        if self.exact and self.collective is not CollectiveKind.NONE:
+            raise ValueError("a distributed collective cannot claim guaranteed numerical exactness.")
+        errors = (self.maximum_absolute_error, self.maximum_relative_error)
+        if any(value is not None and (not math.isfinite(value) or value < 0.0) for value in errors):
+            raise ValueError("observed collective errors must be finite and non-negative.")
+        if self.numerics_sample_count < 0:
+            raise ValueError("numerics_sample_count must be non-negative.")
+        has_evidence = self.numerics_evidence_id is not None
+        if has_evidence != (self.numerics_sample_count > 0):
+            raise ValueError("collective numerical evidence requires both an id and positive sample count.")
+        if has_evidence and (
+            self.determinism_observed is None
+            or self.maximum_absolute_error is None
+            or self.maximum_relative_error is None
+        ):
+            raise ValueError("collective numerical evidence must report determinism and both error bounds.")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -250,6 +277,12 @@ class DistributedUpdate:
             "mesh_axes": [axis.value for axis in self.mesh_axes],
             "state_layout": self.state_layout.value,
             "exact": self.exact,
+            "contract_exact": self.contract_exact,
+            "determinism_observed": self.determinism_observed,
+            "maximum_absolute_error": self.maximum_absolute_error,
+            "maximum_relative_error": self.maximum_relative_error,
+            "numerics_evidence_id": self.numerics_evidence_id,
+            "numerics_sample_count": self.numerics_sample_count,
             "notes": list(self.notes),
         }
 
