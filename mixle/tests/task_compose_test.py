@@ -58,28 +58,45 @@ class ComposeTest(unittest.TestCase):
 
     def test_receipt_attributes_the_answer_to_both_stages(self):
         composed = compose(
-            _taxon_classifier(), _habitat_classifier(), name_a="species_to_taxon", name_b="taxon_to_habitat"
+            _taxon_classifier(),
+            _habitat_classifier(),
+            name_a="species_to_taxon",
+            name_b="taxon_to_habitat",
+            evidence_a="log_evidence",
+            evidence_b="log_evidence",
+            combination_rule="sum_log_evidence",
         )
         result = composed.answer("shark")
 
         self.assertIsInstance(result, ComposedAnswer)
         self.assertEqual(result.answer, "water")
         self.assertEqual(result.intermediate, "fish")
-        self.assertEqual([name for name, _, _ in result.stages], ["species_to_taxon", "taxon_to_habitat"])
-        self.assertEqual([out for _, out, _ in result.stages], ["fish", "water"])
+        self.assertEqual([stage.name for stage in result.stages], ["species_to_taxon", "taxon_to_habitat"])
+        self.assertEqual([stage.output for stage in result.stages], ["fish", "water"])
         # both stages contributed a nonzero, distinct piece of evidence to the final answer
-        contributions = [c for _, _, c in result.stages]
+        contributions = [stage.evidence.value for stage in result.stages]
         self.assertTrue(all(c != 0.0 for c in contributions))
         self.assertTrue(result.check())
-        self.assertAlmostEqual(sum(contributions), result.total_contribution)
+        self.assertAlmostEqual(sum(contributions), result.combined_evidence)
 
     def test_unscored_stage_contributes_zero_honestly(self):
         # a plain function has no .score/.confidence -- the ledger must not fabricate a number for it
         composed = compose(lambda x: x.upper(), lambda x: f"{x}!")
         result = composed.answer("hi")
         self.assertEqual(result.answer, "HI!")
-        self.assertEqual([c for _, _, c in result.stages], [0.0, 0.0])
+        self.assertEqual([stage.evidence.kind for stage in result.stages], ["unscored", "unscored"])
+        self.assertIsNone(result.combined_evidence)
         self.assertTrue(result.check())
+
+    def test_incommensurate_evidence_cannot_be_combined(self):
+        with self.assertRaisesRegex(ValueError, "requires every stage"):
+            compose(
+                _taxon_classifier(),
+                _habitat_classifier(),
+                evidence_a="confidence",
+                evidence_b="reward",
+                combination_rule="sum_log_evidence",
+            )
 
     def test_chained_composition_of_composed_models(self):
         stage1 = compose(_taxon_classifier(), _habitat_classifier())
