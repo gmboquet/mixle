@@ -6,6 +6,7 @@ binary outcome.
 """
 
 import itertools
+from operator import index
 
 import numpy as np
 from scipy.special import gammaln
@@ -38,17 +39,79 @@ def binomial_rank(
     Returns:
         log_density array, corresponding probs array, Tuple[ll0, dll, total_count]
     """
-    entries = []
+    try:
+        log_p_vec = np.asarray(log_p_vec, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("log_p_vec must be a one-dimensional log-probability vector") from exc
+    if log_p_vec.ndim != 1 or log_p_vec.size == 0:
+        raise ValueError("log_p_vec must be a non-empty one-dimensional vector")
+    if np.any(np.isnan(log_p_vec)) or np.any(np.isposinf(log_p_vec)) or np.any(log_p_vec > 0.0):
+        raise ValueError("log_p_vec must contain log probabilities in [-inf, 0]")
 
     if log_p1_vec is None:
-        log_p1_vec = np.log1p(-np.exp(log_p_vec))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_p1_vec = np.log1p(-np.exp(log_p_vec))
+    else:
+        try:
+            log_p1_vec = np.asarray(log_p1_vec, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("log_p1_vec must be a one-dimensional log-probability vector") from exc
+        if log_p1_vec.shape != log_p_vec.shape:
+            raise ValueError("log_p_vec and log_p1_vec must have identical lengths")
+        if np.any(np.isnan(log_p1_vec)) or np.any(np.isposinf(log_p1_vec)) or np.any(log_p1_vec > 0.0):
+            raise ValueError("log_p1_vec must contain log probabilities in [-inf, 0]")
+        probability_sums = np.exp(log_p_vec) + np.exp(log_p1_vec)
+        if not np.allclose(probability_sums, 1.0, rtol=1e-10, atol=1e-12):
+            raise ValueError("log_p_vec and log_p1_vec must encode complementary probabilities")
 
     if count_vec is None:
-        count_vec = np.ones(len(log_p_vec))
+        counts = np.ones(len(log_p_vec), dtype=int)
+    else:
+        if isinstance(count_vec, (str, bytes)):
+            raise TypeError("count_vec must be a sequence of non-negative integers")
+        raw_counts = list(count_vec)
+        if len(raw_counts) != len(log_p_vec):
+            raise ValueError("count_vec must have exactly one count per probability")
+        counts = np.empty(len(raw_counts), dtype=int)
+        for position, count in enumerate(raw_counts):
+            if isinstance(count, (bool, np.bool_)):
+                raise ValueError("count_vec must contain non-negative integers")
+            try:
+                counts[position] = index(count)
+            except TypeError as exc:
+                raise ValueError("count_vec must contain non-negative integers") from exc
+            if counts[position] < 0:
+                raise ValueError("count_vec must contain non-negative integers")
+    if (
+        isinstance(ll_eps, (bool, np.bool_))
+        or not isinstance(ll_eps, (int, float, np.integer, np.floating))
+        or not np.isfinite(ll_eps)
+        or float(ll_eps) <= 0.0
+    ):
+        raise ValueError("ll_eps must be a positive finite number")
+    ll_eps = float(ll_eps)
+    if max_len is not None:
+        if isinstance(max_len, (bool, np.bool_)):
+            raise ValueError("max_len must be a positive integer")
+        try:
+            max_len = index(max_len)
+        except TypeError as exc:
+            raise ValueError("max_len must be a positive integer") from exc
+        if max_len <= 0:
+            raise ValueError("max_len must be a positive integer")
+
+    entries = []
 
     # Compute binomial log-densities and probabilities
-    for log_p, log_p1, n in zip(log_p_vec, log_p1_vec, count_vec):
-        if n == 0 or log_p == -np.inf or log_p1 == -np.inf:
+    for log_p, log_p1, n in zip(log_p_vec, log_p1_vec, counts, strict=True):
+        if n == 0:
+            entries.append((np.array([0.0]), np.array([1.0]), 0))
+            continue
+        if np.isneginf(log_p) or np.isneginf(log_p1):
+            # A deterministic Bernoulli contributes one possible finite
+            # likelihood, zero, but its draw count must remain in the rank
+            # receipt instead of disappearing from the experiment.
+            entries.append((np.array([0.0]), np.array([1.0]), int(n)))
             continue
         nn = np.arange(0, n + 1)
         llv = log_p * nn + log_p1 * (n - nn)
@@ -58,30 +121,31 @@ def binomial_rank(
         llv = llv[ell > 0]
         ell = ell[ell > 0]
 
-        entries.append((llv, ell, n))
-
-    if not entries:
-        # every term was skipped (n == 0 or a -inf log probability for every entry): np.concatenate
-        # below would otherwise raise "need at least one array to concatenate" (or, depending on the
-        # exact inputs, an IndexError on entries[0] further down) -- a confusing low-level failure for
-        # what is really just "there is nothing to build a histogram from."
-        raise ValueError(
-            "binomial_rank: no usable binomial terms (every entry had n == 0 or a -inf log "
-            "probability); cannot build a log-density histogram from an empty term set."
-        )
+        entries.append((llv, ell, int(n)))
 
     # Find parameters for a common fixed-space grid [ll0, ll0 + dll, ll0 + 2*dll, ...]
     min_vec = np.asarray([entry[0].min() for entry in entries])
     llv_vec = np.concatenate([entry[0] - entry[0].min() for entry in entries])
     llv_vec = np.sort(np.unique(llv_vec))
 
-    if max_len is not None:
-        mll = np.sum([entry[0].max() - entry[0].min() for entry in entries])
-        dll = mll / max_len
+    mll = float(np.sum([entry[0].max() - entry[0].min() for entry in entries]))
+    if mll == 0.0:
+        dll = ll_eps
+    elif max_len is not None:
+        if max_len == 1:
+            raise ValueError("max_len=1 is only feasible when every likelihood is identical")
+        dll = mll / (max_len - 1)
     else:
-        dll = np.diff(llv_vec).min()
-        while np.abs(llv_vec - np.floor(llv_vec / dll) * dll).max() > ll_eps:
-            dll /= 2
+        differences = np.diff(llv_vec)
+        differences = differences[differences > 0.0]
+        if differences.size == 0:
+            dll = ll_eps
+        else:
+            dll = float(differences.min())
+            if dll > ll_eps:
+                dll /= 2.0 ** int(np.ceil(np.log2(dll / ll_eps)))
+    if not np.isfinite(dll) or dll <= 0.0:
+        raise ValueError("binomial likelihood grid has no positive finite spacing")
 
     # Adjust log-density histograms to a common grid and convolve
     temp_idx = np.floor((entries[0][0] - entries[0][0].min()) / dll).astype(int)
