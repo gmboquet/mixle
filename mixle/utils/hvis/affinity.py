@@ -1151,6 +1151,11 @@ def affinity_health(
 
 def _hbeta(neg_d: np.ndarray, beta: float) -> tuple[float, np.ndarray]:
     """Entropy (nats) and probabilities of p_j ~ exp(neg_d_j * beta) for one row."""
+    neg_d = np.asarray(neg_d, dtype=np.float64)
+    if neg_d.ndim != 1 or neg_d.size == 0 or not np.all(np.isfinite(neg_d)):
+        raise ValueError("affinity calibration rows must be finite non-empty vectors.")
+    if not np.isfinite(beta) or beta <= 0.0:
+        raise ValueError("affinity calibration beta must be finite and positive.")
     p = neg_d * beta
     p -= p.max()
     np.exp(p, out=p)
@@ -1168,6 +1173,17 @@ def _calibrate_row(
     case entropies below log(tie-group size) are unreachable; beta is capped so
     the search saturates gracefully at the sharpest achievable distribution.
     """
+    neg_d = np.asarray(neg_d, dtype=np.float64)
+    if neg_d.ndim != 1 or neg_d.size == 0 or not np.all(np.isfinite(neg_d)):
+        raise ValueError("affinity calibration rows must be finite non-empty vectors.")
+    if not np.isfinite(target_entropy) or target_entropy < 0.0 or target_entropy > np.log(neg_d.size):
+        raise ValueError("target entropy must be finite and feasible for the row width.")
+    if not np.isfinite(tol) or tol <= 0.0:
+        raise ValueError("calibration tolerance must be finite and positive.")
+    if isinstance(max_iter, bool) or not isinstance(max_iter, (int, np.integer)) or max_iter <= 0:
+        raise ValueError("max_iter must be a positive integer.")
+    if not np.isfinite(beta_cap) or beta_cap < 1.0:
+        raise ValueError("beta_cap must be finite and at least one.")
     beta, beta_min, beta_max = 1.0, 0.0, np.inf
     h, p = _hbeta(neg_d, beta)
 
@@ -1196,42 +1212,44 @@ def conditional_pmat(log_aff: np.ndarray, perplexity: float | None = None) -> np
     log(perplexity); otherwise the raw row softmax is used.
     """
     log_aff = np.asarray(log_aff, dtype=np.float64)
-    n = log_aff.shape[0]
-    if log_aff.ndim != 2 or log_aff.shape[1] != n:
+    if log_aff.ndim != 2 or log_aff.shape[0] != log_aff.shape[1]:
         raise ValueError("log_aff must be a square matrix.")
+    n = log_aff.shape[0]
     if n < 2:
         raise ValueError("at least two observations are required.")
-
+    if np.any(np.isnan(log_aff)) or np.any(np.isposinf(log_aff)):
+        raise ValueError("log_aff must contain finite off-diagonal values and a finite or -inf diagonal.")
+    off_diagonal = ~np.eye(n, dtype=bool)
+    if not np.all(np.isfinite(log_aff[off_diagonal])):
+        raise ValueError("log_aff must contain finite off-diagonal values.")
+    # Self-neighbors are excluded by definition, regardless of what a caller
+    # supplied on the diagonal.
+    log_aff = log_aff.copy()
+    np.fill_diagonal(log_aff, -np.inf)
     finite = np.isfinite(log_aff)
 
     if perplexity is None:
         p = np.zeros((n, n), dtype=np.float64)
         for i in range(n):
             cols = finite[i]
-            if np.any(cols):
-                row = log_aff[i, cols] - log_aff[i, cols].max()
-                p[i, cols] = np.exp(row)
-                p[i, cols] /= p[i, cols].sum()
-            else:
-                p[i, :] = 1.0 / (n - 1)
-                p[i, i] = 0.0
+            row = log_aff[i, cols] - log_aff[i, cols].max()
+            p[i, cols] = np.exp(row)
+            p[i, cols] /= p[i, cols].sum()
         return p
 
-    if perplexity <= 0:
-        raise ValueError("perplexity must be positive.")
+    try:
+        perplexity = float(perplexity)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("perplexity must be a finite real number.") from exc
+    if not np.isfinite(perplexity) or perplexity < 1.0 or perplexity > n - 1:
+        raise ValueError("perplexity must be finite and between 1 and n - 1.")
 
     target_entropy = np.log(perplexity)
     p = np.zeros((n, n), dtype=np.float64)
     idx = np.arange(n)
     for i in range(n):
         cols = idx[finite[i]]
-        if len(cols) == 0:
-            # the model gives this row no information (e.g. a posterior with
-            # support disjoint from every other point): fall back to uniform
-            p[i, :] = 1.0 / (n - 1)
-            p[i, i] = 0.0
-        else:
-            p[i, cols] = _calibrate_row(log_aff[i, cols].copy(), target_entropy)
+        p[i, cols] = _calibrate_row(log_aff[i, cols].copy(), target_entropy)
     return p
 
 
