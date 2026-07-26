@@ -72,6 +72,7 @@ class MultiLabelSolutionDecideTest(unittest.TestCase):
     def test_decide_is_an_alias_of_try_local(self):
         sol = object.__new__(MultiLabelSolution)
         sol.labels = ["a", "b"]
+        sol.joint_qhat = 0.3
         sol.upper_absent = np.array([0.7, 0.7])
         sol.lower_present = np.array([0.3, 0.3])
         sol._scores = lambda xs: np.array([[0.9, 0.1]])  # confidently present / confidently absent

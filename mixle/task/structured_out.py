@@ -1,4 +1,4 @@
-"""``solve_structured`` -- replace rigid code that returns a dict, field by field.
+"""``solve_structured`` -- replace rigid code that returns a dict with one joint coverage contract.
 
 The structured-output shape of the solve loop: ``teacher(x) -> {"field": value, ...}`` with a consistent
 schema (an enricher, a triager, a quote builder). Rather than inventing new machinery, each output field
@@ -8,10 +8,10 @@ decomposes onto the shape that already carries guarantees:
   * a numeric field -> a :func:`~mixle.task.regress.solve_regression` student (conformal interval +
     the caller's ``tol`` precision rule -- required per numeric field).
 
-The composition rule is strict: the input is answered locally only when **every** field's sub-solution
-answers locally; one unsure field escalates the whole request to the teacher (harvested), so a
-locally-returned dict never contains a guessed field. The teacher is called exactly once per training
-example -- per-field sub-teachers are lookups over that single pass.
+The composition rule is strict: a separate held-out slice calibrates the maximum nonconformity across
+all fields. The input is answered locally only when every categorical prediction set is a singleton and
+every numeric interval meets its tolerance. Thus the complete record, rather than each field
+marginally, has the advertised ``1 - alpha`` split-conformal coverage contract.
 
 ``improve()`` pushes each harvested ``(input, dict)`` down into every field's own harvest buffer and
 runs each sub-solution's anti-regression improve. No structured-level OOD gate yet (the classifier
@@ -22,7 +22,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import Any
+
+import numpy as np
 
 from mixle.task.regress import RegressionSolution, solve_regression
 from mixle.task.solve import Solution, _label_with, solve
@@ -39,6 +42,10 @@ class StructuredSolution:
     fields_cat: dict[str, Solution]
     fields_num: dict[str, RegressionSolution]
     teacher: Callable[..., Any]
+    joint_qhat: float = float("inf")
+    alpha: float = 0.1
+    numeric_tolerances: dict[str, float] = field(default_factory=dict)
+    calibration_receipt: dict[str, Any] = field(default_factory=dict)
     n_requests: int = 0
     n_escalated: int = 0
     harvested_inputs: list = field(default_factory=list)
@@ -53,12 +60,23 @@ class StructuredSolution:
         """The fully-decided output dict, or ``None`` when ANY field is unsure (= must escalate)."""
         out: dict[str, Any] = {}
         for key, sub in self.fields_cat.items():
-            label = sub.cascade.model.decide(x)
-            if label is None:
+            labels = list(sub.cascade.model.task.adapter.labels)
+            probabilities = np.asarray(
+                sub.cascade.model.task.adapter.proba_batch(sub.cascade.model.task.model, [x]), dtype=np.float64
+            )
+            if (
+                probabilities.shape != (1, len(labels))
+                or not np.all(np.isfinite(probabilities))
+                or not np.allclose(probabilities.sum(axis=1), 1.0, atol=1e-6)
+            ):
+                raise ValueError(f"categorical field {key!r} returned invalid probabilities")
+            admissible = [label for label, p in zip(labels, probabilities[0]) if 1.0 - p <= self.joint_qhat]
+            if len(admissible) != 1:
                 return None
-            out[key] = label
+            out[key] = admissible[0]
         for key, sub in self.fields_num.items():
-            if not sub.answers_locally:
+            tolerance = self.numeric_tolerances[key]
+            if not np.isfinite(self.joint_qhat) or self.joint_qhat * tolerance > tolerance:
                 return None
             out[key] = float(sub._predict([x])[0])
         return out
@@ -74,7 +92,7 @@ class StructuredSolution:
         if local is not None:
             return local
         self.n_escalated += 1
-        got = dict(_label_with(self.teacher, [x])[0])
+        got = _validated_outputs(_label_with(self.teacher, [x]), self.schema)[0]
         self.harvested_inputs.append(x)
         self.harvested_outputs.append(got)
         return got
@@ -88,6 +106,9 @@ class StructuredSolution:
             per_field[key] = {"kind": "numeric", "qhat": round(float(sub.qhat), 6), "tol": sub.tol}
         return {
             "fields": per_field,
+            "coverage_contract": "joint_structured",
+            "joint_qhat": self.joint_qhat,
+            "alpha": self.alpha,
             "requests": self.n_requests,
             "escalated": self.n_escalated,
             "escalation_rate": (self.n_escalated / self.n_requests) if self.n_requests else 0.0,
@@ -106,7 +127,17 @@ class StructuredSolution:
         for key, sub in self.fields_num.items():
             sub.save(str(out / "num" / key))
         (out / "structured.json").write_text(
-            json.dumps({"kind": "structured/v1", "cat": sorted(self.fields_cat), "num": sorted(self.fields_num)})
+            json.dumps(
+                {
+                    "kind": "structured/v2",
+                    "cat": sorted(self.fields_cat),
+                    "num": sorted(self.fields_num),
+                    "joint_qhat": self.joint_qhat,
+                    "alpha": self.alpha,
+                    "numeric_tolerances": self.numeric_tolerances,
+                    "calibration_receipt": self.calibration_receipt,
+                }
+            )
         )
         return str(out)
 
@@ -127,30 +158,90 @@ class StructuredSolution:
 
         fields_cat = {k: _S.load(str(p / "cat" / k), _never, device=device) for k in manifest["cat"]}
         fields_num = {k: _RS.load(str(p / "num" / k), _never, device=device) for k in manifest["num"]}
-        return cls(fields_cat=fields_cat, fields_num=fields_num, teacher=teacher)
+        return cls(
+            fields_cat=fields_cat,
+            fields_num=fields_num,
+            teacher=teacher,
+            joint_qhat=float(manifest.get("joint_qhat", float("inf"))),
+            alpha=float(manifest.get("alpha", 0.1)),
+            numeric_tolerances={k: float(v) for k, v in manifest.get("numeric_tolerances", {}).items()},
+            calibration_receipt=dict(manifest.get("calibration_receipt", {})),
+        )
 
     def improve(self) -> bool:
-        """Push the harvested dicts down into every field's buffer; each sub improves anti-regressively."""
+        """Refuse unsafe adaptive reuse of the joint calibration slice.
+
+        Re-solve with the harvested rows as ``prelabeled=`` and a fresh base sample. That path creates a
+        new untouched joint calibration slice; silently recycling the old one would void coverage.
+        """
         if not self.harvested_inputs:
             return False
-        promoted = False
-        for key, sub in self.fields_cat.items():
-            sub.cascade.stats.escalated_texts.extend(self.harvested_inputs)
-            sub.cascade.stats.escalated_labels.extend(str(o.get(key)) for o in self.harvested_outputs)
-            promoted = bool(sub.improve()) or promoted
-        for key, sub in self.fields_num.items():
-            sub.harvested_inputs.extend(self.harvested_inputs)
-            sub.harvested_ys.extend(float(o.get(key)) for o in self.harvested_outputs)
-            promoted = bool(sub.improve()) or promoted
-        self.harvested_inputs.clear()
-        self.harvested_outputs.clear()
-        return promoted
+        raise RuntimeError(
+            "structured improvement requires re-solving with fresh base inputs and "
+            "prelabeled=(harvested_inputs, harvested_outputs)"
+        )
+
+
+def _validated_outputs(values: Sequence[Any], schema: dict[str, str]) -> list[dict[str, Any]]:
+    outputs: list[dict[str, Any]] = []
+    expected = set(schema)
+    for row in values:
+        if not isinstance(row, dict):
+            raise ValueError(f"structured teacher rows must be dictionaries, got {type(row).__name__}")
+        if set(row) != expected:
+            raise ValueError(f"structured output schema mismatch: expected {sorted(expected)}, got {sorted(row)}")
+        normalized: dict[str, Any] = {}
+        for key, kind in schema.items():
+            value = row[key]
+            if kind == "numeric":
+                if not _is_number(value) or not np.isfinite(value):
+                    raise ValueError(f"numeric structured field {key!r} must be finite")
+                normalized[key] = float(value)
+            else:
+                if isinstance(value, (dict, list, tuple, set)):
+                    raise ValueError(f"categorical structured field {key!r} must be scalar")
+                normalized[key] = str(value)
+        outputs.append(normalized)
+    return outputs
+
+
+def _joint_scores(
+    fields_cat: dict[str, Solution],
+    fields_num: dict[str, RegressionSolution],
+    inputs: Sequence[Any],
+    outputs: Sequence[dict[str, Any]],
+    tolerances: dict[str, float],
+) -> np.ndarray:
+    scores = np.zeros(len(inputs), dtype=np.float64)
+    for key, sub in fields_cat.items():
+        labels = list(sub.cascade.model.task.adapter.labels)
+        probabilities = np.asarray(
+            sub.cascade.model.task.adapter.proba_batch(sub.cascade.model.task.model, list(inputs)), dtype=np.float64
+        )
+        if probabilities.shape != (len(inputs), len(labels)) or not np.all(np.isfinite(probabilities)):
+            raise ValueError(f"categorical field {key!r} returned invalid calibration probabilities")
+        index = {label: j for j, label in enumerate(labels)}
+        try:
+            field_scores = np.asarray(
+                [1.0 - probabilities[i, index[str(row[key])]] for i, row in enumerate(outputs)]
+            )
+        except KeyError as exc:
+            raise ValueError(f"joint calibration observed an unknown label for field {key!r}") from exc
+        scores = np.maximum(scores, field_scores)
+    for key, sub in fields_num.items():
+        predictions = sub._predict(list(inputs))
+        residual = np.abs(np.asarray([row[key] for row in outputs], dtype=np.float64) - predictions)
+        scores = np.maximum(scores, residual / tolerances[key])
+    if scores.shape != (len(inputs),) or not np.all(np.isfinite(scores)):
+        raise ValueError("joint structured calibration scores must be finite and aligned")
+    return scores
 
 
 def solve_structured(
     teacher: Callable[..., Any],
     inputs: Sequence[Any],
     *,
+    schema: dict[str, str] | None = None,
     tol: dict[str, float] | float | None = None,
     alpha: float = 0.1,
     prelabeled: tuple[Sequence[Any], Sequence[dict]] | None = None,
@@ -172,11 +263,33 @@ def solve_structured(
             skipped for that field.
         **sub_kw: knobs forwarded to every sub-solve (``epochs``, ``hidden``, ``dim``, …).
     """
+    if not callable(teacher):
+        raise TypeError("teacher must be callable")
+    if not np.isfinite(alpha) or not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be finite and in (0, 1)")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed must be an integer")
     items = list(inputs)
     if len(items) < 12:
         raise ValueError("solve_structured needs at least 12 example inputs")
-    outs = [dict(o) for o in _label_with(teacher, items)]
-    keys = sorted({k for o in outs for k in o})
+    raw_outputs = _label_with(teacher, items)
+    if len(raw_outputs) != len(items):
+        raise ValueError("teacher must return exactly one structured output per input")
+    if schema is None:
+        if not raw_outputs or not isinstance(raw_outputs[0], dict) or not raw_outputs[0]:
+            raise ValueError("the teacher must produce a nonempty dictionary schema")
+        schema = {
+            str(key): "numeric" if _is_number(value) else "categorical"
+            for key, value in raw_outputs[0].items()
+        }
+    else:
+        schema = dict(schema)
+        if not schema or any(not isinstance(key, str) or not key for key in schema):
+            raise ValueError("schema keys must be nonempty strings")
+        if any(kind not in ("categorical", "numeric") for kind in schema.values()):
+            raise ValueError("schema values must be 'categorical' or 'numeric'")
+    outs = _validated_outputs(raw_outputs, schema)
+    keys = sorted(schema)
     if not keys:
         raise ValueError("the teacher produced empty dicts on the example inputs")
 
@@ -184,42 +297,90 @@ def solve_structured(
     pre_outs: list[dict] = []
     if prelabeled is not None:
         pre_in = list(prelabeled[0])
-        pre_outs = [dict(o) for o in prelabeled[1]]
+        pre_outs = _validated_outputs(prelabeled[1], schema)
         if len(pre_in) != len(pre_outs):
             raise ValueError("prelabeled inputs and output dicts must have equal length")
 
-    numeric = {k for k in keys if all(_is_number(o.get(k)) for o in outs)}
+    numeric = {key for key, field_kind in schema.items() if field_kind == "numeric"}
     if numeric and tol is None:
         raise ValueError(f"numeric output fields {sorted(numeric)} need tol= (a scalar or per-field dict)")
-    tol_of = (lambda k: float(tol[k])) if isinstance(tol, dict) else (lambda k: float(tol))  # type: ignore[index,arg-type]
+    if isinstance(tol, dict):
+        missing = numeric - set(tol)
+        if missing:
+            raise ValueError(f"tol is missing numeric fields {sorted(missing)}")
+        numeric_tolerances = {key: float(tol[key]) for key in numeric}
+    else:
+        numeric_tolerances = {key: float(tol) for key in numeric}  # type: ignore[arg-type]
+    if any(not np.isfinite(value) or value <= 0.0 for value in numeric_tolerances.values()):
+        raise ValueError("numeric structured tolerances must be finite and positive")
 
-    table = {repr(x): o for x, o in zip(items, outs)}
+    order = np.random.RandomState(seed).permutation(len(items))
+    n_joint_cal = int(np.ceil(1.0 / alpha)) - 1
+    if n_joint_cal < 1 or len(items) - n_joint_cal < 12:
+        raise ValueError(
+            f"solve_structured needs at least {n_joint_cal + 12} inputs for joint calibration and sub-model fitting"
+        )
+    joint_idx, sub_idx = order[:n_joint_cal], order[n_joint_cal:]
+    joint_inputs = [items[i] for i in joint_idx]
+    joint_outputs = [outs[i] for i in joint_idx]
+    sub_inputs = [items[i] for i in sub_idx]
+    sub_outputs = [outs[i] for i in sub_idx]
 
     def _field_pre(key: str, cast: Callable[[Any], Any]) -> tuple[list, list] | None:
-        pairs = [(x, cast(o[key])) for x, o in zip(pre_in, pre_outs) if key in o]
+        pairs = [(x, cast(o[key])) for x, o in zip(pre_in, pre_outs)]
         return ([p[0] for p in pairs], [p[1] for p in pairs]) if pairs else None
+
+    def _known_teacher(values: list[Any]) -> Callable[[Any], Any]:
+        def lookup(batch: Any) -> list[Any]:
+            if isinstance(batch, list) and len(batch) == len(values):
+                return list(values)
+            raise ValueError("structured field teacher is defined only for the preserved training rows")
+
+        return lookup
 
     fields_cat: dict[str, Solution] = {}
     fields_num: dict[str, RegressionSolution] = {}
     for key in keys:
         if key in numeric:
+            values = [float(output[key]) for output in sub_outputs]
             fields_num[key] = solve_regression(
-                lambda x, _k=key: float(table[repr(x)][_k]),
-                items,
-                tol=tol_of(key),
+                _known_teacher(values),
+                sub_inputs,
+                tol=numeric_tolerances[key],
                 alpha=alpha,
                 prelabeled=_field_pre(key, float),
                 seed=seed,
                 **sub_kw,
             )
         else:
+            values = [str(output[key]) for output in sub_outputs]
             fields_cat[key] = solve(
-                lambda x, _k=key: str(table[repr(x)][_k]),
-                items,
+                _known_teacher(values),
+                sub_inputs,
                 alpha=alpha,
                 ood=None,
                 prelabeled=_field_pre(key, str),
                 seed=seed,
                 **sub_kw,
             )
-    return StructuredSolution(fields_cat=fields_cat, fields_num=fields_num, teacher=teacher)
+    joint_scores = _joint_scores(fields_cat, fields_num, joint_inputs, joint_outputs, numeric_tolerances)
+    rank = int(np.ceil((len(joint_scores) + 1) * (1.0 - alpha)))
+    if rank < 1 or rank > len(joint_scores):
+        raise ValueError("joint structured calibration slice is too small for the requested alpha")
+    joint_qhat = float(np.sort(joint_scores)[rank - 1])
+    return StructuredSolution(
+        fields_cat=fields_cat,
+        fields_num=fields_num,
+        teacher=teacher,
+        joint_qhat=joint_qhat,
+        alpha=float(alpha),
+        numeric_tolerances=numeric_tolerances,
+        calibration_receipt={
+            "contract": "joint_structured",
+            "calibration_count": len(joint_inputs),
+            "calibration_indices": [int(i) for i in joint_idx],
+            "calibration_sha256": sha256(
+                repr(list(zip(joint_inputs, joint_outputs))).encode("utf-8")
+            ).hexdigest(),
+        },
+    )

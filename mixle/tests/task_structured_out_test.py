@@ -60,6 +60,8 @@ class SolveStructuredTest(unittest.TestCase):
         self.assertLess(wrong_queue / max(local, 1), 0.2)
 
         rep = sol.report()
+        self.assertEqual(rep["coverage_contract"], "joint_structured")
+        self.assertTrue(np.isfinite(rep["joint_qhat"]))
         self.assertEqual(rep["requests"], 200)  # only __call__ counts; try_local probes are free
         self.assertEqual(rep["harvested"], rep["escalated"])
 
@@ -76,8 +78,40 @@ class SolveStructuredTest(unittest.TestCase):
         for t in _tickets(200, seed=3):
             sol(t)
         if sol.harvested_inputs:
-            sol.improve()
-            self.assertEqual(len(sol.harvested_inputs), 0)  # harvest consumed by the field buffers
+            with self.assertRaisesRegex(RuntimeError, "fresh base inputs"):
+                sol.improve()
+            self.assertGreater(len(sol.harvested_inputs), 0)  # unsafe reuse does not consume evidence
+
+    def test_schema_is_exact_and_duplicate_inputs_keep_row_identity(self):
+        from mixle.task import solve_structured
+
+        rows = ["same input"] * 60
+
+        def batched_teacher(batch):
+            return [{"label": "even" if i % 2 == 0 else "odd"} for i in range(len(batch))]
+
+        sol = solve_structured(
+            batched_teacher,
+            rows,
+            schema={"label": "categorical"},
+            alpha=0.1,
+            seed=0,
+            epochs=20,
+        )
+        self.assertEqual(sol.schema, {"label": "categorical"})
+
+        broken = _tickets(40)
+        with self.assertRaisesRegex(ValueError, "schema mismatch"):
+            solve_structured(
+                lambda batch: [
+                    _triage(row) if i else {"queue": "billing"}
+                    for i, row in enumerate(batch)
+                ],
+                broken,
+                schema={"queue": "categorical", "priority": "numeric"},
+                tol={"priority": 2.0},
+                epochs=10,
+            )
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
@@ -124,18 +158,30 @@ class StructuredResolveTest(unittest.TestCase):
         base = _tickets(100, seed=0)
         harvested = _tickets(60, seed=11)
         pre_outs = [_triage(t) for t in harvested]
-        pre_outs[0] = {"queue": pre_outs[0]["queue"]}  # a partial dict: skipped for the missing field
+        broken = list(pre_outs)
+        broken[0] = {"queue": broken[0]["queue"]}
+        with self.assertRaisesRegex(ValueError, "schema mismatch"):
+            solve_structured(
+                counting_teacher,
+                base,
+                tol=1e6,
+                alpha=0.1,
+                prelabeled=(harvested, broken),
+                seed=0,
+                epochs=20,
+            )
+        calls["n"] = 0
 
         sol = solve_structured(
             counting_teacher, base, tol=1e6, alpha=0.1, prelabeled=(harvested, pre_outs), seed=0, epochs=150
         )
         self.assertEqual(calls["n"], len(base))  # prelabeled pairs came in free
         self.assertEqual(sol.schema, {"queue": "categorical", "priority": "numeric"})
-        # the numeric field got one fewer prelabeled pair (the partial dict), the categorical got all
         num = sol.fields_num["priority"]
         cat = sol.fields_cat["queue"]
-        self.assertEqual(len(num.train_inputs), len(base) - len(num.cal_inputs) + len(harvested) - 1)
-        self.assertEqual(len(cat.train_inputs), len(base) - len(cat.cal_inputs) + len(harvested))
+        joint_count = sol.calibration_receipt["calibration_count"]
+        self.assertEqual(len(num.train_inputs), len(base) - joint_count - len(num.cal_inputs) + len(harvested))
+        self.assertEqual(len(cat.train_inputs), len(base) - joint_count - len(cat.cal_inputs) + len(harvested))
         for t in harvested:
             self.assertNotIn(repr(t), [repr(c) for c in num.cal_inputs])
             self.assertNotIn(repr(t), [repr(c) for c in cat.cal_inputs])
