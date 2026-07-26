@@ -1,9 +1,4 @@
-"""Convergence-certificate axis of the typed update graph (worklist Q5.4 reporting).
-
-The compiler types update MECHANICS (exact / generalized-EM / first-order); this axis types the
-GUARANTEE class each mechanism carries, and the graph reports the tree-level certificate as the
-weakest node's -- guarantees compose by minimum along the update path.
-"""
+"""Convergence certificates require explicit acceptance evidence and compose by weakest link."""
 
 import pytest
 
@@ -45,39 +40,31 @@ def _neural_mixture(lr_decay=None):
 
 
 class TreeCertificateTest:
-    def test_classical_tree_is_monotone_certified(self):
+    def test_classical_tree_does_not_infer_monotonicity_from_update_names(self):
         model = MixtureDistribution([GaussianDistribution(float(m), 1.0) for m in (-4.0, 0.0, 4.0)], [1 / 3] * 3)
         graph = _graph(model)
-        assert graph.convergence_certificate is ConvergenceCertificate.MONOTONE_CERTIFIED
-        assert all(
-            node.contract.convergence_certificate is ConvergenceCertificate.MONOTONE_CERTIFIED for node in graph.nodes
-        )
+        assert graph.convergence_certificate is ConvergenceCertificate.UNKNOWN
+        assert all(node.contract.convergence_certificate is ConvergenceCertificate.UNKNOWN for node in graph.nodes)
 
-    def test_constant_lr_neural_leaf_drops_tree_to_best_visited(self):
+    def test_neural_method_and_schedule_names_do_not_fabricate_certificates(self):
         graph = _graph(_neural_mixture(lr_decay=None))
         certs = {node.node_id: node.contract.convergence_certificate for node in graph.nodes}
-        assert ConvergenceCertificate.BEST_VISITED in certs.values()
-        assert ConvergenceCertificate.MONOTONE_CERTIFIED in certs.values()  # the classical sibling
-        assert graph.convergence_certificate is ConvergenceCertificate.BEST_VISITED
+        assert set(certs.values()) == {ConvergenceCertificate.UNKNOWN}
+        assert graph.convergence_certificate is ConvergenceCertificate.UNKNOWN
 
-    def test_saem_window_schedule_upgrades_to_robbins_monro(self):
-        graph = _graph(_neural_mixture(lr_decay=0.75))
-        assert graph.convergence_certificate is ConvergenceCertificate.ROBBINS_MONRO_SCHEDULE
-
-    def test_schedule_outside_the_window_stays_best_visited(self):
-        graph = _graph(_neural_mixture(lr_decay=0.4))
-        assert graph.convergence_certificate is ConvergenceCertificate.BEST_VISITED
+        for decay in (0.4, 0.75):
+            scheduled = _graph(_neural_mixture(lr_decay=decay))
+            assert scheduled.convergence_certificate is ConvergenceCertificate.UNKNOWN
 
     def test_explain_reports_certificates_per_node_and_tree_level(self):
         text = _graph(_neural_mixture(lr_decay=0.75)).explain()
-        assert "convergence certificate (weakest link): robbins_monro_schedule" in text
-        assert "cert=robbins_monro_schedule" in text
-        assert "cert=monotone_certified" in text
+        assert "convergence certificate (weakest link): unknown" in text
+        assert "cert=unknown" in text
 
     def test_as_dict_carries_the_certificate(self):
         graph = _graph(_neural_mixture(lr_decay=0.75))
         payloads = [node.contract.as_dict() for node in graph.nodes]
-        assert any(p["convergence_certificate"] == "robbins_monro_schedule" for p in payloads)
+        assert all(p["convergence_certificate"] == "unknown" for p in payloads)
 
     def test_weakest_certificate_ordering_and_empty_case(self):
         c = ConvergenceCertificate

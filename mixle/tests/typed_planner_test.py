@@ -1,21 +1,16 @@
-"""The typed update graph drives execution: plan_execution turns contracts into optimize() knobs.
+"""The typed update graph drives execution only when contracts carry validated evidence.
 
-This is the checker-to-planner step: compute band -> precision, convergence certificate -> monotone
-gate, compile failures still raising before any fitting, and the (narrower) typed-adapter limits
-surfaced as notes rather than silently ignored. The end-to-end test actually RUNS optimize with the
-planned kwargs and checks the receipts agree with the plan.
+Unknown compute bands and convergence certificates leave ``optimize`` settings unset rather than
+fabricating them from model names or method presence. Compile failures still raise before fitting,
+and the narrower typed-adapter limits surface as notes rather than being silently ignored.
 """
 
 import numpy as np
 import pytest
 
-# float32 eligibility exists only where the fused numba kernel does; without numba every band is
-# float64 and the discriminating assertions would be vacuous (same gate as typed_compute_band_test).
-pytest.importorskip("numba")
-
-from mixle.experimental.typed_runtime import plan_execution  # noqa: E402
-from mixle.inference import optimize  # noqa: E402
-from mixle.stats import GaussianDistribution, LaplaceDistribution, MixtureDistribution  # noqa: E402
+from mixle.experimental.typed_runtime import plan_execution
+from mixle.inference import optimize
+from mixle.stats import GaussianDistribution, LaplaceDistribution, MixtureDistribution
 
 
 def _gauss_mixture():
@@ -23,14 +18,15 @@ def _gauss_mixture():
 
 
 class PlanDerivationTest:
-    def test_fp32_safe_monotone_tree_plans_minimal_precision_and_the_strict_gate(self):
+    def test_builtin_tree_defers_precision_and_gate_without_acceptance_evidence(self):
         model = _gauss_mixture()
         plan = plan_execution(model, model.estimator(), nobs=500)
-        assert plan.precision == "minimal"
-        assert plan.monotone is True
+        assert plan.precision is None
+        assert plan.monotone is None
         assert plan.blockers == ()
-        assert plan.optimize_kwargs == {"monotone": True, "precision": "minimal"}
-        assert "float32" in plan.explain() or "minimal" in plan.explain()
+        assert plan.optimize_kwargs == {"monotone": None}
+        assert "float64" in plan.explain()
+        assert "unknown" in plan.explain()
 
     def test_unvalidated_family_plans_float64_and_names_the_weakest_link(self):
         model = MixtureDistribution([GaussianDistribution(-4.0, 1.0), LaplaceDistribution(4.0, 2.0)], [0.5, 0.5])
@@ -39,7 +35,7 @@ class PlanDerivationTest:
         assert "precision" not in plan.optimize_kwargs
         assert any("weakest link" in n for n in plan.notes)
 
-    def test_mutable_leaf_plans_best_visited(self):
+    def test_mutable_leaf_is_not_assigned_a_certificate_from_structure(self):
         torch = pytest.importorskip("torch")
         from mixle.models import GradLeaf
 
@@ -58,7 +54,8 @@ class PlanDerivationTest:
             [GradLeaf(DiagGauss(), m_steps=3, lr=0.05), GaussianDistribution(1.0, 1.0)], [0.5, 0.5]
         )
         plan = plan_execution(model, model.estimator(), nobs=500)
-        assert plan.monotone is False, "a mutable leaf's certificate must plan best-visited selection"
+        assert plan.monotone is None
+        assert any("certificate is unknown" in note for note in plan.notes)
 
     def test_shared_components_surface_the_adapter_refusal_as_a_note(self):
         shared = GaussianDistribution(0.0, 1.0)
@@ -70,7 +67,7 @@ class PlanDerivationTest:
 
 
 class PlanExecutionTest:
-    def test_optimize_runs_with_the_planned_kwargs_and_receipts_agree(self):
+    def test_optimize_runs_without_claiming_an_unplanned_precision_receipt(self):
         rng = np.random.RandomState(0)
         data = [float(v) for v in np.concatenate([rng.normal(-4, 1, 800), rng.normal(4, 1, 800)])]
         model = MixtureDistribution([GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)], [0.5, 0.5])
@@ -79,8 +76,8 @@ class PlanExecutionTest:
         fit = optimize(data, estimator=est, prev_estimate=model, max_its=6, delta=None, **plan.optimize_kwargs)
         assert np.isfinite(sum(fit.log_density(x) for x in data[:10]))
         recorded = getattr(est, "last_precision_plan", None)
-        assert recorded is not None, "precision='minimal' must engage the runtime precision planner"
-        assert np.dtype(recorded.compute_dtype) in (np.float32, np.float64)
+        assert plan.precision is None
+        assert recorded is None
 
     def test_blockers_make_optimize_kwargs_refuse(self):
         from mixle.experimental.typed_runtime.planner import ExecutionPlan

@@ -80,7 +80,7 @@ def test_shortest_transfer_route_can_use_an_intermediate_device():
     assert unreachable.seconds == float("inf")
 
 
-def test_exact_component_shards_stay_in_fast_island_and_cross_islands_are_replicas():
+def test_component_shards_stay_in_fast_island_and_cross_islands_are_replicas():
     model = MixtureDistribution(
         [GaussianDistribution(float(index), 1.0) for index in range(4)],
         [0.25] * 4,
@@ -96,7 +96,7 @@ def test_exact_component_shards_stay_in_fast_island_and_cross_islands_are_replic
     assert len(root.shards) == 2
     assert {shard.device_id for shard in root.shards} == {"a0", "a1"}
     assert {shard.axis for shard in root.shards} == {"component"}
-    assert all(shard.exact for shard in root.shards)
+    assert all(not shard.exact for shard in root.shards)
     assert sum(shard.stop - shard.start for shard in root.shards) == 4
     assert all(shard.island == "island-a" for placement in plan.placements for shard in placement.shards)
     json.dumps(plan.as_dict(), allow_nan=False)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,22 +25,20 @@ from mixle.experimental.typed_runtime.graph import DependencyEdge, UpdateGraph, 
 from mixle.experimental.typed_runtime.measurement import MeasurementCatalog
 from mixle.stats.compute.pdist import ParameterEstimator, ProbabilityDistribution
 
-ContractFactory = Callable[[Any, Any | None], UpdateContract]
-
 
 @dataclass(frozen=True)
 class _Child:
     attr: str
     label: str
     value: Any
-    index: int | str | None = None
+    index: Any = None
 
 
 @dataclass(frozen=True)
 class _RegisteredContract:
     model_type: type[Any]
     estimator_type: type[Any] | None
-    factory: ContractFactory
+    contract: UpdateContract
 
 
 class ContractRegistry:
@@ -56,47 +54,86 @@ class ContractRegistry:
     def register(
         self,
         model_type: type[Any],
-        contract: UpdateContract | ContractFactory,
+        contract: UpdateContract,
         *,
         estimator_type: type[Any] | None = None,
     ) -> None:
-        """Register a constant contract or factory for a model/estimator pair."""
+        """Register one immutable, already constructed contract for a model/estimator pair."""
 
-        if isinstance(contract, UpdateContract):
-            factory = lambda _model, _estimator, value=contract: value
-        elif callable(contract):
-            factory = contract
-        else:
-            raise TypeError("contract must be an UpdateContract or callable factory.")
-        self._entries.append(_RegisteredContract(model_type, estimator_type, factory))
+        if not isinstance(model_type, type):
+            raise TypeError("model_type must be a type.")
+        if estimator_type is not None and not isinstance(estimator_type, type):
+            raise TypeError("estimator_type must be a type or None.")
+        _validate_contract(contract)
+        self._entries.append(_RegisteredContract(model_type, estimator_type, contract))
 
     def resolve(self, model: Any, estimator: Any | None) -> UpdateContract | None:
         """Resolve the most recently registered matching adapter."""
 
         for entry in reversed(self._entries):
-            if not isinstance(model, entry.model_type):
+            if not _nominal_instance(model, entry.model_type):
                 continue
-            if entry.estimator_type is not None and not isinstance(estimator, entry.estimator_type):
+            if entry.estimator_type is not None and not _nominal_instance(estimator, entry.estimator_type):
                 continue
-            return entry.factory(model, estimator)
+            return entry.contract
         return None
+
+
+def _nominal_instance(value: Any, expected_type: type[Any]) -> bool:
+    """Test ordinary inheritance without invoking a metaclass ``__instancecheck__`` hook."""
+    if value is None:
+        return False
+    try:
+        return any(cls is expected_type for cls in type.__getattribute__(type(value), "__mro__"))
+    except (AttributeError, TypeError):
+        return False
+
+
+def _instance_state(value: Any) -> dict[str, Any]:
+    """Return a real instance dictionary without dispatching to an overridden ``__getattribute__``."""
+    try:
+        state = object.__getattribute__(value, "__dict__")
+    except (AttributeError, TypeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _type_attribute(value: Any, attr: str) -> str:
+    """Read a type's built-in identity metadata without custom metaclass dispatch."""
+    return type.__getattribute__(type(value), attr)
+
+
+def _mapping_child(attr: str, ordinal: int, key: Any, child: Any, *, owner: str | None) -> _Child:
+    """Describe a mapping child without invoking arbitrary key ``repr``/``str`` methods."""
+    if type(key) in (str, int):
+        index: Any = key
+        key_label = repr(key)
+    else:
+        # Never infer a semantic match for arbitrary keys: equality itself can execute user code,
+        # and matching model/estimator mappings by insertion position can silently swap children.
+        index = object()
+        key_label = f"<key-{ordinal}>"
+    prefix = f"{owner}.{attr}" if owner is not None else attr
+    return _Child(attr, f"{prefix}[{key_label}]", child, index)
 
 
 def _distribution_children(model: Any) -> list[_Child]:
     children: list[_Child] = []
-    for attr, value in sorted(vars(model).items()):
+    for attr, value in sorted(_instance_state(model).items()):
         if attr.startswith("_"):
             continue
         if isinstance(value, ProbabilityDistribution):
-            children.append(_Child(attr, "%s.%s" % (type(model).__name__, attr), value))
+            children.append(_Child(attr, "%s.%s" % (_type_attribute(model, "__name__"), attr), value))
         elif isinstance(value, (list, tuple)):
             for index, child in enumerate(value):
                 if isinstance(child, ProbabilityDistribution):
-                    children.append(_Child(attr, "%s.%s[%d]" % (type(model).__name__, attr, index), child, index))
+                    children.append(
+                        _Child(attr, "%s.%s[%d]" % (_type_attribute(model, "__name__"), attr, index), child, index)
+                    )
         elif isinstance(value, dict):
-            for key, child in sorted(value.items(), key=lambda item: repr(item[0])):
+            for ordinal, (key, child) in enumerate(value.items()):
                 if isinstance(child, ProbabilityDistribution):
-                    children.append(_Child(attr, "%s.%s[%r]" % (type(model).__name__, attr, key), child, str(key)))
+                    children.append(_mapping_child(attr, ordinal, key, child, owner=_type_attribute(model, "__name__")))
     return children
 
 
@@ -104,7 +141,7 @@ def _estimator_children(estimator: Any | None) -> list[_Child]:
     if estimator is None:
         return []
     children: list[_Child] = []
-    for attr, value in sorted(vars(estimator).items()):
+    for attr, value in sorted(_instance_state(estimator).items()):
         if attr.startswith("_"):
             continue
         if isinstance(value, ParameterEstimator):
@@ -114,9 +151,9 @@ def _estimator_children(estimator: Any | None) -> list[_Child]:
                 if isinstance(child, ParameterEstimator):
                     children.append(_Child(attr, "%s[%d]" % (attr, index), child, index))
         elif isinstance(value, dict):
-            for key, child in sorted(value.items(), key=lambda item: repr(item[0])):
+            for ordinal, (key, child) in enumerate(value.items()):
                 if isinstance(child, ParameterEstimator):
-                    children.append(_Child(attr, "%s[%r]" % (attr, key), child, str(key)))
+                    children.append(_mapping_child(attr, ordinal, key, child, owner=None))
     return children
 
 
@@ -162,290 +199,268 @@ def _bind_child_estimators(model_children: list[_Child], estimator: Any | None) 
     return bound
 
 
-def _declared_enum(owner: Any, attr: str, enum_type: type[Any]) -> Any | None:
-    if owner is None or not hasattr(owner, attr):
-        return None
-    value = getattr(owner, attr)
-    if callable(value):
-        value = value()
-    if isinstance(value, enum_type):
-        return value
-    try:
-        return enum_type(str(value))
-    except ValueError:
-        return None
+_MISSING = object()
+_PARTIAL_DECLARATION_FIELDS = (
+    "objective_kind",
+    "update_kind",
+    "merge_law",
+    "state_semantics",
+    "consistency_requirement",
+    "curvature_kind",
+    "decomposition_axes",
+    "convergence_certificate",
+    "compute_band",
+    "outer_objective_compatible",
+    "update_exact",
+)
+
+
+def _static_attribute(owner: Any, attr: str) -> Any:
+    """Read an instance/class dictionary entry without invoking descriptors."""
+    if owner is None:
+        return _MISSING
+    instance_state = _instance_state(owner)
+    if attr in instance_state:
+        return instance_state[attr]
+    for cls in type.__getattribute__(type(owner), "__mro__"):
+        namespace = type.__getattribute__(cls, "__dict__")
+        if attr in namespace:
+            return namespace[attr]
+    return _MISSING
+
+
+def _validate_contract(contract: Any) -> UpdateContract:
+    """Validate every runtime contract field before the compiler trusts it."""
+    if type(contract) is not UpdateContract:
+        raise TypeError("contract must be an UpdateContract.")
+    enum_fields = (
+        ("objective_kind", ObjectiveKind),
+        ("update_kind", UpdateKind),
+        ("merge_law", MergeLaw),
+        ("consistency", ConsistencyRequirement),
+        ("curvature_kind", CurvatureKind),
+        ("convergence_certificate", ConvergenceCertificate),
+        ("compute_band", ComputeBand),
+    )
+    for field_name, enum_type in enum_fields:
+        if not isinstance(getattr(contract, field_name), enum_type):
+            raise TypeError(f"contract {field_name} must be {enum_type.__name__}.")
+    for field_name, enum_type in (
+        ("state_semantics", StateSemantics),
+        ("reads", ArtifactKind),
+        ("writes", ArtifactKind),
+    ):
+        values = getattr(contract, field_name)
+        if not isinstance(values, frozenset) or any(not isinstance(value, enum_type) for value in values):
+            raise TypeError(f"contract {field_name} must be a frozenset of {enum_type.__name__}.")
+    if (
+        not isinstance(contract.decomposition_axes, tuple)
+        or any(not isinstance(axis, str) or not axis for axis in contract.decomposition_axes)
+        or len(set(contract.decomposition_axes)) != len(contract.decomposition_axes)
+    ):
+        raise TypeError("contract decomposition_axes must be unique non-empty strings.")
+    if not isinstance(contract.outer_objective_compatible, bool) or not isinstance(contract.exact, bool):
+        raise TypeError("contract compatibility and exactness flags must be bool.")
+    if contract.exact and contract.objective_kind is ObjectiveKind.UNKNOWN:
+        raise ValueError("an exact contract must identify the objective it solves.")
+    if not isinstance(contract.declared_by, str) or not contract.declared_by:
+        raise TypeError("contract declared_by must be a non-empty provenance string.")
+    if contract.declared_by in {"compiler_default", "structural_inference"}:
+        raise ValueError("explicit contracts cannot claim compiler-default or structural-inference provenance.")
+    if not isinstance(contract.notes, tuple) or any(not isinstance(note, str) for note in contract.notes):
+        raise TypeError("contract notes must be a tuple of strings.")
+    proof_prefix = "acceptance-proof:"
+    if contract.convergence_certificate is ConvergenceCertificate.MONOTONE_CERTIFIED and not any(
+        note.startswith(proof_prefix) and note[len(proof_prefix) :].strip() for note in contract.notes
+    ):
+        raise ValueError("monotone_certified contracts require an acceptance-proof note.")
+    return contract
 
 
 def _declared_contract(model: Any, estimator: Any | None) -> UpdateContract | None:
     for owner in (estimator, model):
+        value = _static_attribute(owner, "update_contract")
+        if value is _MISSING:
+            continue
+        if not isinstance(value, UpdateContract):
+            raise TypeError(
+                "update_contract must be a static UpdateContract value; callable hooks and descriptors "
+                "are not executed during compilation."
+            )
+        return _validate_contract(value)
+    return None
+
+
+def _validate_partial_declarations(model: Any, estimator: Any | None) -> tuple[str, ...]:
+    """Reject malformed fragments but never promote valid fragments into a full contract."""
+    validators = {
+        "objective_kind": lambda value: isinstance(value, ObjectiveKind),
+        "update_kind": lambda value: isinstance(value, UpdateKind),
+        "merge_law": lambda value: isinstance(value, MergeLaw),
+        "state_semantics": lambda value: (
+            isinstance(value, frozenset) and all(isinstance(item, StateSemantics) for item in value)
+        ),
+        "consistency_requirement": lambda value: isinstance(value, ConsistencyRequirement),
+        "curvature_kind": lambda value: isinstance(value, CurvatureKind),
+        "decomposition_axes": lambda value: (
+            isinstance(value, tuple) and all(isinstance(item, str) and item for item in value)
+        ),
+        "convergence_certificate": lambda value: isinstance(value, ConvergenceCertificate),
+        "compute_band": lambda value: isinstance(value, ComputeBand),
+        "outer_objective_compatible": lambda value: isinstance(value, bool),
+        "update_exact": lambda value: isinstance(value, bool),
+    }
+    declared: list[str] = []
+    for owner in (estimator, model):
         if owner is None:
             continue
-        hook = getattr(owner, "update_contract", None)
-        if isinstance(hook, UpdateContract):
-            return hook
-        if callable(hook):
-            contract = hook()
-            if not isinstance(contract, UpdateContract):
-                raise TypeError("update_contract() must return UpdateContract.")
-            return contract
+        for field in _PARTIAL_DECLARATION_FIELDS:
+            value = _static_attribute(owner, field)
+            if value is _MISSING:
+                continue
+            label = f"{_type_attribute(owner, '__name__')}.{field}"
+            if not validators[field](value):
+                raise TypeError(
+                    f"invalid partial declaration {label}; supply the documented enum/value type inside "
+                    "one complete UpdateContract."
+                )
+            declared.append(label)
+    return tuple(declared)
+
+
+def _type_id(value: Any) -> str:
+    return f"{_type_attribute(value, '__module__')}.{_type_attribute(value, '__qualname__')}"
+
+
+def _audited_builtin_contract(model: Any, estimator: Any | None) -> UpdateContract | None:
+    """Resolve narrowly audited built-ins by exact type and inert instance state only."""
+    pair = (_type_id(model), _type_id(estimator) if estimator is not None else None)
+    gaussian_pair = (
+        "mixle.stats.univariate.continuous.gaussian.GaussianDistribution",
+        "mixle.stats.univariate.continuous.gaussian.GaussianEstimator",
+    )
+    if pair == gaussian_pair:
+        model_prior = _instance_state(model).get("prior")
+        estimator_prior = _instance_state(estimator).get("prior")
+        if (model_prior is None) != (estimator_prior is None):
+            return None
+        objective = ObjectiveKind.MAP if estimator_prior is not None else ObjectiveKind.MLE
+        return UpdateContract(
+            objective_kind=objective,
+            update_kind=UpdateKind.EXACT_CLOSED_FORM,
+            merge_law=MergeLaw.ADDITIVE,
+            state_semantics=frozenset({StateSemantics.IMMUTABLE_RESULT}),
+            consistency=ConsistencyRequirement.STRICT_SYNCHRONOUS,
+            curvature_kind=CurvatureKind.FISHER,
+            reads=frozenset({ArtifactKind.OBSERVATIONS, ArtifactKind.PARAMETERS}),
+            writes=frozenset({ArtifactKind.SUFFICIENT_STATISTICS, ArtifactKind.PARAMETERS}),
+            outer_objective_compatible=True,
+            exact=True,
+            convergence_certificate=ConvergenceCertificate.UNKNOWN,
+            compute_band=ComputeBand.FLOAT64,
+            declared_by="audited_builtin_catalog:gaussian-v1",
+            notes=("Exactness covers the one-step parameter map, not objective monotonicity.",),
+        )
+
+    mixture_pair = (
+        "mixle.stats.latent.mixture.MixtureDistribution",
+        "mixle.stats.latent.mixture.MixtureEstimator",
+    )
+    if pair == mixture_pair:
+        return UpdateContract(
+            objective_kind=ObjectiveKind.MLE,
+            update_kind=UpdateKind.GENERALIZED_EM,
+            merge_law=MergeLaw.ASSOCIATIVE_MONOID,
+            state_semantics=frozenset({StateSemantics.IMMUTABLE_RESULT}),
+            consistency=ConsistencyRequirement.STRICT_SYNCHRONOUS,
+            curvature_kind=CurvatureKind.UNAVAILABLE,
+            decomposition_axes=("component",),
+            reads=frozenset(
+                {
+                    ArtifactKind.OBSERVATIONS,
+                    ArtifactKind.PARAMETERS,
+                    ArtifactKind.SCORES,
+                    ArtifactKind.POSTERIORS,
+                }
+            ),
+            writes=frozenset(
+                {
+                    ArtifactKind.SUFFICIENT_STATISTICS,
+                    ArtifactKind.PARAMETERS,
+                    ArtifactKind.POSTERIORS,
+                }
+            ),
+            outer_objective_compatible=True,
+            exact=False,
+            convergence_certificate=ConvergenceCertificate.UNKNOWN,
+            compute_band=ComputeBand.FLOAT64,
+            declared_by="audited_builtin_catalog:finite-mixture-em-v1",
+            notes=("No monotonicity certificate is inferred; acceptance evidence is required separately.",),
+        )
     return None
 
 
-def _has_torch_like_module(*roots: Any) -> bool:
-    seen: set[int] = set()
-    stack = list(roots)
-    while stack:
-        obj = stack.pop()
-        if obj is None or isinstance(obj, (str, bytes, bytearray, int, float, complex, bool, np.ndarray)):
-            continue
-        ident = id(obj)
-        if ident in seen:
-            continue
-        seen.add(ident)
-        if (
-            callable(getattr(obj, "state_dict", None))
-            and callable(getattr(obj, "load_state_dict", None))
-            and callable(getattr(obj, "parameters", None))
-        ):
-            return True
-        if isinstance(obj, dict):
-            stack.extend(obj.values())
-        elif isinstance(obj, (list, tuple, set, frozenset)):
-            stack.extend(obj)
-        elif hasattr(obj, "__dict__"):
-            stack.extend(vars(obj).values())
-    return False
-
-
-def _surrogate_objective(estimator: Any | None) -> ObjectiveKind | None:
-    if estimator is None:
-        return None
-    module = getattr(estimator, "module", None)
-    if getattr(estimator, "loss", None) is not None:
-        return ObjectiveKind.USER_SURROGATE
-    if all(hasattr(estimator, attr) for attr in ("policy", "ref", "beta")):
-        return ObjectiveKind.PREFERENCE
-    if (
-        module is not None
-        and callable(getattr(module, "energy", None))
-        and hasattr(module, "log_norm")
-        and hasattr(estimator, "noise_ratio")
-    ):
-        return ObjectiveKind.CONTRASTIVE
-    if callable(getattr(estimator, "residual_fn", None)) and hasattr(estimator, "residual_weight"):
-        return ObjectiveKind.CONSTRAINT
-    return None
-
-
-def _objective_kind(model: Any, estimator: Any | None) -> tuple[ObjectiveKind, bool, tuple[str, ...]]:
-    declared = _declared_enum(estimator, "objective_kind", ObjectiveKind) or _declared_enum(
-        model, "objective_kind", ObjectiveKind
+def _unknown_contract(*, no_estimator: bool) -> UpdateContract:
+    if no_estimator:
+        return UpdateContract(
+            objective_kind=ObjectiveKind.UNKNOWN,
+            update_kind=UpdateKind.FROZEN,
+            merge_law=MergeLaw.REPLICATED,
+            state_semantics=frozenset({StateSemantics.IMMUTABLE_RESULT}),
+            consistency=ConsistencyRequirement.LOCAL_ONLY,
+            reads=frozenset({ArtifactKind.PARAMETERS}),
+            writes=frozenset(),
+            outer_objective_compatible=False,
+            exact=False,
+            convergence_certificate=ConvergenceCertificate.UNKNOWN,
+            compute_band=ComputeBand.FLOAT64,
+            declared_by="compiler:no-estimator",
+            notes=("No estimator was supplied; the node is preserved but its objective is unknown.",),
+        )
+    return UpdateContract(
+        objective_kind=ObjectiveKind.UNKNOWN,
+        update_kind=UpdateKind.UNKNOWN,
+        merge_law=MergeLaw.NON_MERGEABLE,
+        state_semantics=frozenset({StateSemantics.EXTERNAL_STATE}),
+        consistency=ConsistencyRequirement.LOCAL_ONLY,
+        reads=frozenset({ArtifactKind.OBSERVATIONS, ArtifactKind.PARAMETERS, ArtifactKind.EXTERNAL_STATE}),
+        writes=frozenset({ArtifactKind.EXTERNAL_STATE}),
+        outer_objective_compatible=False,
+        exact=False,
+        convergence_certificate=ConvergenceCertificate.UNKNOWN,
+        compute_band=ComputeBand.FLOAT64,
+        declared_by="compiler:unknown",
+        notes=("No explicit or audited contract evidence was available.",),
     )
-    if declared is not None:
-        compatible = bool(getattr(estimator, "outer_objective_compatible", True))
-        return declared, compatible, ("objective declared by model/estimator",)
-
-    surrogate = _surrogate_objective(estimator)
-    if surrogate is not None:
-        return surrogate, False, ("surrogate objective inferred from structural estimator protocol",)
-    if callable(getattr(model, "seq_local_elbo", None)):
-        return ObjectiveKind.ELBO, True, ("model exposes seq_local_elbo",)
-    get_prior = getattr(estimator, "get_prior", None)
-    prior = get_prior() if callable(get_prior) else getattr(estimator, "prior", None)
-    if prior is not None:
-        return ObjectiveKind.MAP, True, ("estimator carries a parameter prior",)
-    return ObjectiveKind.MLE, True, ()
-
-
-def _update_kind(model: Any, estimator: Any | None) -> tuple[UpdateKind, bool, tuple[str, ...]]:
-    declared = _declared_enum(estimator, "update_kind", UpdateKind) or _declared_enum(model, "update_kind", UpdateKind)
-    if declared is not None:
-        exact = bool(getattr(estimator, "update_exact", declared is UpdateKind.EXACT_CLOSED_FORM))
-        return declared, exact, ("update kind declared by model/estimator",)
-
-    if estimator is None:
-        return UpdateKind.FROZEN, True, ("no usable estimator; preserved as a frozen dependency",)
-
-    try:
-        from mixle.capability import ConjugateUpdatable, LatentStructured, Neutral, supports
-
-        if supports(model, Neutral):
-            return UpdateKind.FROZEN, True, ()
-        if callable(getattr(model, "seq_posterior", None)) or supports(model, LatentStructured):
-            return UpdateKind.GENERALIZED_EM, True, ()
-        if _has_torch_like_module(model, estimator):
-            return UpdateKind.FIRST_ORDER, False, ()
-        if supports(model, ConjugateUpdatable):
-            return UpdateKind.EXACT_CLOSED_FORM, True, ()
-    except Exception:  # noqa: BLE001 - capability probing must never break compilation (mirrors _compute_band)
-        pass
-    return UpdateKind.EXACT_CLOSED_FORM, True, ("conservative accumulator-backed default",)
-
-
-def _merge_law(model: Any, estimator: Any | None, update_kind: UpdateKind) -> MergeLaw:
-    declared = _declared_enum(estimator, "merge_law", MergeLaw) or _declared_enum(model, "merge_law", MergeLaw)
-    if declared is not None:
-        return declared
-    if update_kind is UpdateKind.FROZEN:
-        return MergeLaw.REPLICATED
-    try:
-        from mixle.capability import ExponentialFamily, supports
-
-        if supports(model, ExponentialFamily):
-            return MergeLaw.ADDITIVE
-    except Exception:  # noqa: BLE001 - capability probing must never break compilation (mirrors _compute_band)
-        pass
-    if estimator is not None and callable(getattr(estimator, "accumulator_factory", None)):
-        return MergeLaw.ASSOCIATIVE_MONOID
-    return MergeLaw.NON_MERGEABLE
-
-
-def _state_semantics(model: Any, estimator: Any | None, update_kind: UpdateKind) -> frozenset[StateSemantics]:
-    if update_kind is UpdateKind.FROZEN:
-        return frozenset({StateSemantics.IMMUTABLE_RESULT})
-    states: set[StateSemantics] = set()
-    try:
-        if _has_torch_like_module(model, estimator):
-            states.add(StateSemantics.MUTABLE_PARAMETERS)
-        if hasattr(estimator, "_rng") or update_kind in (UpdateKind.MONTE_CARLO, UpdateKind.FIRST_ORDER):
-            states.add(StateSemantics.STOCHASTIC_RNG)
-        if getattr(estimator, "persistent_optimizer", False):
-            states.add(StateSemantics.MUTABLE_OPTIMIZER)
-    except Exception:  # noqa: BLE001 - capability probing must never break compilation (mirrors _compute_band)
-        pass
-    return frozenset(states or {StateSemantics.IMMUTABLE_RESULT})
-
-
-def _curvature_kind(model: Any, estimator: Any | None) -> CurvatureKind:
-    declared = _declared_enum(estimator, "curvature_kind", CurvatureKind) or _declared_enum(
-        model, "curvature_kind", CurvatureKind
-    )
-    if declared is not None:
-        return declared
-    try:
-        from mixle.capability import ExponentialFamily, supports
-
-        if supports(model, ExponentialFamily):
-            return CurvatureKind.FISHER
-    except Exception:  # noqa: BLE001 - capability probing must never break compilation (mirrors _compute_band)
-        pass
-    return CurvatureKind.UNAVAILABLE
-
-
-def _decomposition(model: Any) -> tuple[tuple[str, ...], bool]:
-    try:
-        from mixle.stats.compute.decomposition import decomposition_for
-
-        descriptor = decomposition_for(model)
-        axes = (descriptor.axis.value,) if descriptor.is_shardable else ()
-        return axes, bool(descriptor.exact)
-    except Exception:  # noqa: BLE001 - capability probing must never break compilation (mirrors _compute_band)
-        return (), True
-
-
-def _compute_band(model: Any) -> ComputeBand:
-    """Float32 eligibility of this node's scoring subtree: it must fuse (the validated
-    reduced-precision path is the fused kernel's) and every leaf family must be in the
-    runtime planner's validated set. Data-side safety stays a runtime decision."""
-    try:
-        from mixle.inference.precision_plan import FP32_SAFE_FAMILIES, _leaf_components
-        from mixle.stats.compute.fused_codegen import fusible
-        from mixle.utils.optional_deps import HAS_NUMBA
-
-        if not HAS_NUMBA or model is None or not fusible(model):
-            return ComputeBand.FLOAT64
-        for leaf in _leaf_components(model):
-            if type(leaf).__name__ not in FP32_SAFE_FAMILIES:
-                return ComputeBand.FLOAT64
-        return ComputeBand.FLOAT32_ELIGIBLE
-    except Exception:  # noqa: BLE001 - eligibility probing must never break compilation
-        return ComputeBand.FLOAT64
-
-
-def _convergence_certificate(
-    update_kind: UpdateKind, exact_update: bool, estimator: Any | None
-) -> ConvergenceCertificate:
-    """Guarantee class for one node: certified for exact/GEM updates, Robbins--Monro for
-    first-order updates whose ``lr_decay`` schedule lies in the SAEM window, best-visited for
-    other stochastic updates. Frozen nodes are vacuously monotone (they never propose)."""
-    if update_kind is UpdateKind.FROZEN:
-        return ConvergenceCertificate.MONOTONE_CERTIFIED
-    if update_kind is UpdateKind.UNKNOWN:
-        return ConvergenceCertificate.UNKNOWN
-    if exact_update:
-        return ConvergenceCertificate.MONOTONE_CERTIFIED
-    lr_decay = getattr(estimator, "lr_decay", None)
-    if lr_decay is not None and 0.5 < float(lr_decay) <= 1.0:
-        return ConvergenceCertificate.ROBBINS_MONRO_SCHEDULE
-    return ConvergenceCertificate.BEST_VISITED
 
 
 def infer_update_contract(model: Any, estimator: Any | None) -> UpdateContract:
-    """Infer a conservative contract without scoring, sampling, or mutating the model."""
+    """Return a static/audited contract or an explicit ``UNKNOWN`` contract.
 
-    objective, compatible, objective_notes = _objective_kind(model, estimator)
-    update, exact_update, update_notes = _update_kind(model, estimator)
-    merge = _merge_law(model, estimator, update)
-    states = _state_semantics(model, estimator, update)
-    axes, exact_decomposition = _decomposition(model)
-
-    reads = {ArtifactKind.OBSERVATIONS, ArtifactKind.PARAMETERS}
-    writes = {ArtifactKind.SUFFICIENT_STATISTICS, ArtifactKind.PARAMETERS}
-    if update is UpdateKind.GENERALIZED_EM:
-        reads.update((ArtifactKind.SCORES, ArtifactKind.POSTERIORS))
-        writes.add(ArtifactKind.POSTERIORS)
-    if StateSemantics.MUTABLE_OPTIMIZER in states:
-        reads.add(ArtifactKind.OPTIMIZER_STATE)
-        writes.add(ArtifactKind.OPTIMIZER_STATE)
-    if StateSemantics.STOCHASTIC_RNG in states:
-        reads.add(ArtifactKind.RNG_STATE)
-        writes.add(ArtifactKind.RNG_STATE)
-    if update is UpdateKind.FROZEN:
-        writes.clear()
-
-    consistency = ConsistencyRequirement.STRICT_SYNCHRONOUS
-    declared_consistency = _declared_enum(estimator, "consistency_requirement", ConsistencyRequirement)
-    if declared_consistency is not None:
-        consistency = declared_consistency
-
-    return UpdateContract(
-        objective_kind=objective,
-        update_kind=update,
-        merge_law=merge,
-        state_semantics=states,
-        consistency=consistency,
-        curvature_kind=_curvature_kind(model, estimator),
-        decomposition_axes=axes,
-        reads=frozenset(reads),
-        writes=frozenset(writes),
-        convergence_certificate=_convergence_certificate(update, exact_update, estimator),
-        compute_band=_compute_band(model),
-        outer_objective_compatible=compatible,
-        exact=exact_update and exact_decomposition and compatible,
-        declared_by="structural_inference",
-        notes=objective_notes + update_notes,
-    )
+    No factories, descriptors, methods, capability predicates, scoring functions, or estimator hooks are
+    called. Names and method presence are not semantic evidence.
+    """
+    declared = _declared_contract(model, estimator)
+    if declared is not None:
+        return declared
+    partial = _validate_partial_declarations(model, estimator)
+    builtin = _audited_builtin_contract(model, estimator)
+    if builtin is not None:
+        return builtin
+    unknown = _unknown_contract(no_estimator=estimator is None)
+    if partial:
+        return UpdateContract(
+            **{
+                **vars(unknown),
+                "notes": unknown.notes + ("Ignored incomplete declaration fragments: " + ", ".join(partial) + ".",),
+            }
+        )
+    return unknown
 
 
 def _parameter_count(model: Any) -> int:
-    try:
-        from mixle.stats.compute.declarations import declaration_for
-
-        declaration = declaration_for(model)
-        if declaration is not None and declaration.parameters:
-            total = 0
-            for spec in declaration.parameters:
-                value = getattr(model, spec.name, None)
-                if isinstance(value, np.ndarray):
-                    total += int(value.size)
-                elif value is not None:
-                    total += 1
-            if total:
-                return total
-    except (AttributeError, ImportError, TypeError):
-        pass
-
-    modules_seen: set[int] = set()
+    """Count inert numeric instance state without calling declarations or module hooks."""
+    values_seen: set[int] = set()
     total = 0
     stack = [model]
     while stack:
@@ -460,19 +475,16 @@ def _parameter_count(model: Any) -> int:
             total += 1
             continue
         ident = id(value)
-        if ident in modules_seen:
+        if ident in values_seen:
             continue
-        modules_seen.add(ident)
-        parameters = getattr(value, "parameters", None)
-        if callable(parameters) and callable(getattr(value, "state_dict", None)):
-            total += sum(int(parameter.numel()) for parameter in parameters())
-            continue
+        values_seen.add(ident)
         if isinstance(value, dict):
             stack.extend(value.values())
         elif isinstance(value, (list, tuple)):
             stack.extend(value)
-        elif hasattr(value, "__dict__"):
-            stack.extend(child for name, child in vars(value).items() if not name.startswith("_"))
+        else:
+            state = _instance_state(value)
+            stack.extend(child for name, child in state.items() if not name.startswith("_"))
     return max(total, 1)
 
 
@@ -495,16 +507,6 @@ def _proxy_cost(contract: UpdateContract, parameter_count: int, nobs: float) -> 
     )
 
 
-def _fallback_estimator(model: Any) -> Any | None:
-    factory = getattr(model, "estimator", None)
-    if not callable(factory):
-        return None
-    try:
-        return factory()
-    except (NotImplementedError, TypeError, ValueError):
-        return None
-
-
 def compile_update_graph(
     model: ProbabilityDistribution,
     estimator: ParameterEstimator | None = None,
@@ -518,24 +520,41 @@ def compile_update_graph(
 ) -> UpdateGraph:
     """Compile a model into an immutable typed update and invalidation graph.
 
-    Compilation is introspective only. It never calls ``sampler``,
-    ``log_density``, ``estimate``, or an accumulator update. Child estimators are
-    aligned structurally where possible and otherwise constructed from the child
-    model's ordinary ``estimator()`` factory. Explicit path bindings always win.
+    Compilation reads inert instance/class dictionaries only. It never calls factories, descriptors,
+    capability predicates, contract hooks, ``parameters()``, scoring/sampling methods, estimators, or
+    accumulators. Child estimators are aligned from the supplied estimator's stored child objects where the
+    binding is unambiguous; otherwise the child contract is ``UNKNOWN``/frozen unless an explicit path binding
+    is supplied.
     """
 
     if not isinstance(model, ProbabilityDistribution):
         raise TypeError("compile_update_graph requires a ProbabilityDistribution model.")
-    if nobs < 0.0:
-        raise ValueError("nobs must be non-negative.")
+    if estimator is not None and not isinstance(estimator, ParameterEstimator):
+        raise TypeError("estimator must be a ParameterEstimator or None.")
+    if isinstance(nobs, bool) or not isinstance(nobs, (int, float)) or not np.isfinite(nobs) or nobs < 0.0:
+        raise ValueError("nobs must be finite and non-negative.")
+    if not isinstance(backend, str) or not backend:
+        raise ValueError("backend must be a non-empty string.")
+    if registry is not None and not isinstance(registry, ContractRegistry):
+        raise TypeError("registry must be a ContractRegistry or None.")
     registry = ContractRegistry() if registry is None else registry
     bindings = dict(bindings or {})
     overrides = dict(contract_overrides or {})
-    root_estimator = estimator if estimator is not None else _fallback_estimator(model)
+    if any(not isinstance(path, str) or not path for path in bindings):
+        raise ValueError("binding paths must be non-empty strings.")
+    if any(not isinstance(value, ParameterEstimator) for value in bindings.values()):
+        raise TypeError("binding values must be ParameterEstimator instances.")
+    if any(not isinstance(path, str) or not path for path in overrides):
+        raise ValueError("contract override paths must be non-empty strings.")
+    for contract in overrides.values():
+        _validate_contract(contract)
+    root_estimator = estimator
 
     nodes: list[UpdateNode] = []
     edges: list[DependencyEdge] = []
     by_identity: dict[int, str] = {}
+    used_bindings: set[str] = set()
+    used_overrides: set[str] = set()
 
     def visit(current: Any, current_estimator: Any | None, path: str, parent_id: str | None) -> str:
         ident = id(current)
@@ -554,24 +573,31 @@ def compile_update_graph(
 
         node_id = "n%04d" % len(nodes)
         by_identity[ident] = node_id
-        current_estimator = bindings.get(path, current_estimator)
-        explicit = overrides.get(path) or _declared_contract(current, current_estimator)
+        if path in bindings:
+            current_estimator = bindings[path]
+            used_bindings.add(path)
+        explicit = None
+        if path in overrides:
+            explicit = overrides[path]
+            used_overrides.add(path)
+        explicit = explicit or _declared_contract(current, current_estimator)
         contract = (
             explicit
             or registry.resolve(current, current_estimator)
             or infer_update_contract(current, current_estimator)
         )
+        _validate_contract(contract)
         parameter_count = _parameter_count(current)
         cost = None
         if measurements is not None:
-            cost = measurements.estimate(type(current).__name__, contract.update_kind, backend)
+            cost = measurements.estimate(_type_attribute(current, "__name__"), contract.update_kind, backend)
         cost = cost or _proxy_cost(contract, parameter_count, nobs)
         nodes.append(
             UpdateNode(
                 node_id=node_id,
                 path=path,
-                model_type=type(current).__name__,
-                estimator_type=type(current_estimator).__name__ if current_estimator is not None else None,
+                model_type=_type_attribute(current, "__name__"),
+                estimator_type=_type_attribute(current_estimator, "__name__") if current_estimator is not None else None,
                 contract=contract,
                 cost=cost,
                 parameter_count=parameter_count,
@@ -586,13 +612,20 @@ def compile_update_graph(
         child_estimators = _bind_child_estimators(children, current_estimator)
         for index, child in enumerate(children):
             child_path = "%s -> %s" % (path, child.label)
-            child_estimator = (
-                child_estimators.get(index) or bindings.get(child_path) or _fallback_estimator(child.value)
-            )
+            child_estimator = child_estimators.get(index)
             visit(child.value, child_estimator, child_path, node_id)
         return node_id
 
     root_id = visit(model, root_estimator, "root", None)
+    unused_bindings = sorted(set(bindings) - used_bindings)
+    unused_overrides = sorted(set(overrides) - used_overrides)
+    if unused_bindings or unused_overrides:
+        details = []
+        if unused_bindings:
+            details.append("unused bindings: " + ", ".join(unused_bindings))
+        if unused_overrides:
+            details.append("unused contract overrides: " + ", ".join(unused_overrides))
+        raise ValueError("; ".join(details))
     return UpdateGraph.from_parts(nodes, edges, root_node=root_id)
 
 
