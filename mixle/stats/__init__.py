@@ -769,6 +769,7 @@ __all__ = [
     "LKJSampler",
     "LKJEstimator",
     "LKJDataEncoder",
+    "LKJFitError",
     "KentDistribution",
     "KentSampler",
     "KentEstimator",
@@ -1392,6 +1393,7 @@ from mixle.stats.matrix.lkj import (
     LKJDataEncoder,
     LKJDistribution,
     LKJEstimator,
+    LKJFitError,
     LKJSampler,
 )
 from mixle.stats.matrix.matrix_normal import (

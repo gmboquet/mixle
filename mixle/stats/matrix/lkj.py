@@ -38,9 +38,22 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.utils.vector import batched_pd_logdet, cholesky_logdet
+from mixle.stats.matrix.wishart import (
+    _matrix_batch,
+    _matrix_event,
+    _support_mask_and_logdet,
+    _validated_dimension,
+    _validated_sample_size,
+    _validated_weight,
+    _validated_weights,
+)
+from mixle.utils.vector import cholesky_logdet
 
 _LOG_SQRT_PI = 0.5 * math.log(math.pi)
+
+
+class LKJFitError(RuntimeError):
+    """Raised when an LKJ concentration fit has no certified solution."""
 
 
 def _is_corr_like(r: np.ndarray, dim: int | None = None) -> bool:
@@ -54,14 +67,104 @@ def _is_corr_like(r: np.ndarray, dim: int | None = None) -> bool:
         return False
     if dim is not None and r.shape[0] != dim:
         return False
-    return bool(np.allclose(r, r.T) and np.allclose(np.diag(r), 1.0))
+    return bool(
+        np.all(np.isfinite(r))
+        and np.array_equal(r, r.T)
+        and np.array_equal(np.diag(r), np.ones(r.shape[0]))
+    )
 
 
-def _batched_is_corr_like(x: np.ndarray) -> np.ndarray:
-    """Vectorized symmetric + unit-diagonal check for a stack of matrices, shape (n, d, d)."""
-    sym = np.all(np.isclose(x, np.swapaxes(x, -1, -2)), axis=(-1, -2))
-    unit_diag = np.all(np.isclose(np.diagonal(x, axis1=-2, axis2=-1), 1.0), axis=-1)
-    return sym & unit_diag
+def _correlation_batch(
+    value: Any,
+    dim: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return matrix data, exact support mask, and safe log determinants."""
+    result = _matrix_batch(value, dim, "LKJ observations")
+    spd, logdet = _support_mask_and_logdet(result)
+    unit_diag = np.all(
+        np.diagonal(result, axis1=-2, axis2=-1) == 1.0,
+        axis=-1,
+    )
+    valid = spd & unit_diag & (logdet <= 1.0e-10)
+    checked_logdet = np.where(valid, np.minimum(logdet, 0.0), -np.inf)
+    return result, valid, checked_logdet
+
+
+def _validated_correlation(
+    value: Any,
+    dim: int,
+    name: str = "LKJ observation",
+) -> tuple[np.ndarray, float]:
+    result = _matrix_event(value, dim, name)
+    if not _is_corr_like(result, dim):
+        raise ValueError(
+            "%s must be a finite, exactly symmetric matrix with unit diagonal"
+            % name
+        )
+    logdet = cholesky_logdet(result)
+    if logdet is None:
+        raise ValueError("%s must be positive definite" % name)
+    if logdet > 1.0e-10:
+        raise ValueError("%s has an invalid positive log determinant" % name)
+    return result.copy(), min(float(logdet), 0.0)
+
+
+def _validated_encoded_lkj(
+    value: Any,
+    expected_dim: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if not isinstance(value, (tuple, list)) or len(value) != 3:
+        raise ValueError(
+            "LKJ encoded data must be (dimension, log determinants, validity mask)"
+        )
+    encoded_dim = _validated_dimension(value[0], "LKJ encoded dimension")
+    if encoded_dim != expected_dim:
+        raise ValueError(
+            "LKJ encoded dimension %d does not match model dimension %d"
+            % (encoded_dim, expected_dim)
+        )
+    try:
+        logdet = np.asarray(value[1], dtype=np.float64)
+        valid = np.asarray(value[2])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("LKJ encoded data must be numeric") from exc
+    if logdet.ndim != 1 or valid.shape != logdet.shape or valid.dtype != np.bool_:
+        raise ValueError(
+            "LKJ encoded log determinants and boolean validity mask must be aligned vectors"
+        )
+    if np.any(np.isnan(logdet)) or np.any(np.isposinf(logdet)):
+        raise ValueError("LKJ encoded log determinants cannot contain NaN or +inf")
+    if np.any(valid & ~np.isfinite(logdet)):
+        raise ValueError("valid LKJ encoded rows require finite log determinants")
+    if np.any(valid & (logdet > 1.0e-10)):
+        raise ValueError("valid LKJ log determinants cannot exceed zero")
+    if np.any(~valid & ~np.isneginf(logdet)):
+        raise ValueError("invalid LKJ encoded rows must carry -inf log determinant")
+    return logdet.copy(), valid.copy()
+
+
+def _validated_lkj_statistics(value: Any) -> tuple[float, float]:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise ValueError("LKJ sufficient statistics must be a two-item tuple")
+    if any(
+        isinstance(item, (bool, np.bool_)) or np.ndim(item) != 0
+        for item in value
+    ):
+        raise TypeError("LKJ sufficient statistics must be real scalars")
+    try:
+        count = float(value[0])
+        sum_log_det = float(value[1])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("LKJ sufficient statistics must be numeric") from exc
+    if not np.isfinite(count) or count < 0.0:
+        raise ValueError("LKJ count must be finite and non-negative")
+    if not np.isfinite(sum_log_det):
+        raise ValueError("LKJ log-determinant statistic must be finite")
+    if sum_log_det > 0.0:
+        raise ValueError("LKJ log-determinant statistic cannot exceed zero")
+    if count == 0.0 and sum_log_det != 0.0:
+        raise ValueError("empty LKJ sufficient statistics must have zero log determinant")
+    return count, sum_log_det
 
 
 def _log_beta_half(a: float) -> float:
@@ -78,15 +181,24 @@ class LKJDistribution(SequenceEncodableProbabilityDistribution):
     """LKJ distribution over ``dim x dim`` correlation matrices with concentration ``eta > 0``."""
 
     def __init__(self, dim: int, eta: float, name: str | None = None, keys: str | None = None) -> None:
-        if dim < 2:
+        checked_dim = _validated_dimension(dim, "LKJ dimension")
+        if checked_dim < 2:
             raise ValueError("LKJDistribution requires dim >= 2.")
-        if eta <= 0.0 or not np.isfinite(eta):
+        if isinstance(eta, (bool, np.bool_)) or np.ndim(eta) != 0:
+            raise TypeError("LKJDistribution requires scalar eta.")
+        try:
+            checked_eta = float(eta)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("LKJDistribution requires scalar eta.") from exc
+        if checked_eta <= 0.0 or not np.isfinite(checked_eta):
             raise ValueError("LKJDistribution requires finite eta > 0.")
-        self.dim = int(dim)
-        self.eta = float(eta)
+        self.dim = checked_dim
+        self.eta = checked_eta
         self.name = name
         self.keys = keys
         self._log_c = _log_normalizer(self.dim, self.eta)
+        if not np.isfinite(self._log_c):
+            raise ValueError("LKJ normalizer must be finite")
 
     def __str__(self) -> str:
         return "LKJDistribution(%s, %s, name=%s, keys=%s)" % (
@@ -103,24 +215,30 @@ class LKJDistribution(SequenceEncodableProbabilityDistribution):
     def log_density(self, x: Any) -> float:
         """Return the log-density at a ``dim x dim`` correlation matrix (``-inf`` if ``x`` is the
         wrong size, not symmetric, does not have a unit diagonal, or is not positive definite)."""
-        r = np.asarray(x, dtype=np.float64)
+        try:
+            r = np.asarray(x, dtype=np.float64)
+        except (TypeError, ValueError):
+            return -math.inf
         if not _is_corr_like(r, self.dim):
             return -math.inf
         logdet = cholesky_logdet(r)
         if logdet is None:
             return -math.inf
+        if logdet > 1.0e-10:
+            return -math.inf
+        logdet = min(float(logdet), 0.0)
         return self._log_c + (self.eta - 1.0) * logdet
 
-    def seq_log_density(self, x: np.ndarray) -> np.ndarray:
-        """Return vectorized log-density for a sequence-encoded array of ``log det(R)`` values.
+    def seq_log_density(self, x: Any) -> np.ndarray:
+        """Return vectorized log density for dimension-bound encoded LKJ data.
 
-        The encoder marks an invalid (wrong-shape/non-symmetric/non-unit-diagonal/non-PD) input
-        as -inf; that must stay -inf here regardless of sign, since (eta - 1) is negative for
-        eta < 1 and would otherwise flip a -inf log-determinant to +inf density.
+        Invalid rows remain ``-inf`` regardless of eta, including at eta=1
+        where direct multiplication by their ``-inf`` sentinel would be NaN.
         """
-        log_det = np.asarray(x, dtype=np.float64)
-        rv = self._log_c + (self.eta - 1.0) * log_det
-        return np.where(np.isneginf(log_det), -np.inf, rv)
+        log_det, valid = _validated_encoded_lkj(x, self.dim)
+        safe_log_det = np.where(valid, log_det, 0.0)
+        rv = self._log_c + (self.eta - 1.0) * safe_log_det
+        return np.where(valid, rv, -np.inf)
 
     def sampler(self, seed: int | None = None) -> "LKJSampler":
         """Return an onion-method sampler for correlation matrices."""
@@ -132,7 +250,7 @@ class LKJDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> "LKJDataEncoder":
         """Return the data encoder (a correlation matrix is encoded as its log-determinant)."""
-        return LKJDataEncoder()
+        return LKJDataEncoder(self.dim)
 
 
 class LKJSampler(DistributionSampler):
@@ -170,13 +288,21 @@ class LKJSampler(DistributionSampler):
         """Draw one correlation matrix or a list of independent correlation matrices."""
         if size is None:
             return self._batch(1)[0]
-        return list(self._batch(int(size)))
+        return list(self._batch(_validated_sample_size(size)))
 
 
 class LKJAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate ``(count, sum of log det(R))`` -- the sufficient statistics for the eta-MLE."""
 
-    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        dim: int,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        self.dim = _validated_dimension(dim, "LKJ accumulator dimension")
+        if self.dim < 2:
+            raise ValueError("LKJ accumulator dimension must be at least two")
         self.count = 0.0
         self.sum_log_det = 0.0
         self.name = name
@@ -185,32 +311,25 @@ class LKJAccumulator(SequenceEncodableStatisticAccumulator):
     def update(self, x: Any, weight: float, estimate: LKJDistribution | None) -> None:
         """Accumulate the weighted log determinant for one correlation matrix.
 
-        An invalid matrix (not symmetric, not unit diagonal, or not positive definite --
-        the accumulator has no dimension of its own to check shape against) contributes -inf,
-        poisoning sum_log_det, unless its weight is exactly 0 (0 * -inf would otherwise be nan).
+        Invalid events are rejected before either statistic is mutated.
         """
-        r = np.asarray(x, dtype=np.float64)
-        logdet = cholesky_logdet(r) if _is_corr_like(r) else None
-        contribution = logdet if logdet is not None else -np.inf
-        self.count += weight
-        self.sum_log_det += 0.0 if weight == 0.0 else weight * contribution
+        _, logdet = _validated_correlation(x, self.dim)
+        checked_weight = _validated_weight(weight)
+        self.count += checked_weight
+        self.sum_log_det += checked_weight * logdet
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
         """Initialize the sufficient statistics with one weighted matrix."""
         self.update(x, weight, None)
 
-    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
-        """Accumulate weighted log determinants from encoded matrices.
-
-        log_det entries are -inf for matrices the encoder flagged invalid; guard the zero-weight
-        case the same way update() does, since np.dot would otherwise turn a single 0 * -inf term
-        into a nan that poisons the entire weighted sum.
-        """
-        log_det = np.asarray(x, dtype=np.float64)
-        w = np.asarray(weights, dtype=np.float64)
+    def seq_update(self, x: Any, weights: np.ndarray, estimate: Any) -> None:
+        """Accumulate valid, dimension-bound encoded log determinants."""
+        log_det, valid = _validated_encoded_lkj(x, self.dim)
+        if not np.all(valid):
+            raise ValueError("LKJ accumulation rejects invalid encoded observations")
+        w = _validated_weights(weights, len(log_det))
         self.count += float(w.sum())
-        with np.errstate(invalid="ignore"):  # the w == 0 branch of np.where still computes 0 * -inf
-            self.sum_log_det += float(np.sum(np.where(w == 0.0, 0.0, w * log_det)))
+        self.sum_log_det += float(np.dot(w, log_det))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize the sufficient statistics from encoded log determinants."""
@@ -218,8 +337,9 @@ class LKJAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, float]) -> "LKJAccumulator":
         """Merge serialized LKJ sufficient statistics into this accumulator."""
-        self.count += suff_stat[0]
-        self.sum_log_det += suff_stat[1]
+        count, sum_log_det = _validated_lkj_statistics(suff_stat)
+        self.count += count
+        self.sum_log_det += sum_log_det
         return self
 
     def value(self) -> tuple[float, float]:
@@ -228,24 +348,39 @@ class LKJAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: tuple[float, float]) -> "LKJAccumulator":
         """Restore the accumulator from serialized LKJ sufficient statistics."""
-        self.count, self.sum_log_det = float(x[0]), float(x[1])
+        self.count, self.sum_log_det = _validated_lkj_statistics(x)
+        return self
+
+    def scale(self, c: float) -> "LKJAccumulator":
+        """Scale LKJ sufficient statistics by a non-negative factor."""
+        checked_scale = _validated_weight(c)
+        self.count *= checked_scale
+        self.sum_log_det *= checked_scale
         return self
 
     def acc_to_encoder(self) -> "LKJDataEncoder":
         """Return an encoder that reduces correlation matrices to log determinants."""
-        return LKJDataEncoder()
+        return LKJDataEncoder(self.dim)
 
 
 class LKJAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for LKJAccumulator."""
 
-    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        dim: int,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        self.dim = _validated_dimension(dim, "LKJ accumulator dimension")
+        if self.dim < 2:
+            raise ValueError("LKJ accumulator dimension must be at least two")
         self.name = name
         self.keys = keys
 
     def make(self) -> LKJAccumulator:
         """Create an empty LKJ accumulator."""
-        return LKJAccumulator(name=self.name, keys=self.keys)
+        return LKJAccumulator(self.dim, name=self.name, keys=self.keys)
 
 
 class LKJEstimator(ParameterEstimator):
@@ -258,23 +393,40 @@ class LKJEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.dim = int(dim)
-        self.eta_bounds = eta_bounds
+        self.dim = _validated_dimension(dim, "LKJ estimator dimension")
+        if self.dim < 2:
+            raise ValueError("LKJ estimator dimension must be at least two")
+        if not isinstance(eta_bounds, (tuple, list)) or len(eta_bounds) != 2:
+            raise ValueError("LKJ eta_bounds must be a two-item sequence")
+        try:
+            lower, upper = (float(value) for value in eta_bounds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("LKJ eta_bounds must be numeric") from exc
+        if (
+            not np.isfinite(lower)
+            or not np.isfinite(upper)
+            or lower <= 0.0
+            or lower >= upper
+        ):
+            raise ValueError(
+                "LKJ eta_bounds must be finite, positive, and strictly ordered"
+            )
+        self.eta_bounds = (lower, upper)
         self.name = name
         self.keys = keys
 
     def accumulator_factory(self) -> LKJAccumulatorFactory:
         """Return a factory for LKJ sufficient-statistic accumulators."""
-        return LKJAccumulatorFactory(name=self.name, keys=self.keys)
+        return LKJAccumulatorFactory(self.dim, name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> LKJDistribution:
         """Estimate the LKJ concentration from the mean log determinant."""
         from scipy.optimize import brentq
         from scipy.special import digamma
 
-        count, sum_log_det = suff_stat
-        if count <= 0.0:
-            return LKJDistribution(self.dim, 1.0, name=self.name, keys=self.keys)
+        count, sum_log_det = _validated_lkj_statistics(suff_stat)
+        if count == 0.0:
+            raise LKJFitError("LKJ fitting requires positive observation weight")
         mean_log_det = sum_log_det / count
         d = self.dim
 
@@ -286,29 +438,80 @@ class LKJEstimator(ParameterEstimator):
             )
 
         lo, hi = self.eta_bounds
-        if score(lo) < 0.0:
+        lower_score = float(score(lo))
+        upper_score = float(score(hi))
+        if not np.isfinite(lower_score) or not np.isfinite(upper_score):
+            raise LKJFitError("LKJ profile score is non-finite at its bounds")
+        if lower_score <= 0.0:
             eta = lo
-        elif score(hi) > 0.0:
+            boundary = "lower"
+            iterations = 0
+            residual = lower_score
+        elif upper_score >= 0.0:
             eta = hi
+            boundary = "upper"
+            iterations = 0
+            residual = upper_score
         else:
-            eta = float(brentq(score, lo, hi, xtol=1.0e-8))
-        return LKJDistribution(self.dim, eta, name=self.name, keys=self.keys)
+            try:
+                eta, result = brentq(
+                    score,
+                    lo,
+                    hi,
+                    xtol=1.0e-10,
+                    full_output=True,
+                    disp=False,
+                )
+            except (ValueError, RuntimeError) as exc:
+                raise LKJFitError("LKJ profile root solver failed") from exc
+            if not result.converged:
+                raise LKJFitError("LKJ profile root solver did not converge")
+            eta = float(eta)
+            boundary = None
+            iterations = int(result.iterations)
+            residual = float(score(eta))
+            if not np.isfinite(residual) or abs(residual) > 1.0e-7:
+                raise LKJFitError(
+                    "LKJ profile root lacks a finite optimality certificate"
+                )
+        fitted = LKJDistribution(
+            self.dim,
+            eta,
+            name=self.name,
+            keys=self.keys,
+        )
+        fitted.fit_metadata = {
+            "converged": True,
+            "solver": "profile-boundary" if boundary is not None else "brentq",
+            "boundary": boundary,
+            "iterations": iterations,
+            "score": residual,
+            "bracket": self.eta_bounds,
+            "repairs": (),
+        }
+        return fitted
 
 
 class LKJDataEncoder(DataSequenceEncoder):
     """Encode each correlation matrix as its log-determinant (the only data the density depends on)."""
 
+    def __init__(self, dim: int) -> None:
+        self.dim = _validated_dimension(dim, "LKJ encoder dimension")
+        if self.dim < 2:
+            raise ValueError("LKJ encoder dimension must be at least two")
+
     def __str__(self) -> str:
-        return "LKJDataEncoder"
+        return "LKJDataEncoder(%d)" % self.dim
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, LKJDataEncoder)
+        return isinstance(other, LKJDataEncoder) and self.dim == other.dim
 
-    def seq_encode(self, x: Sequence[Any]) -> np.ndarray:
-        """Encode correlation matrices as their log determinants (-inf for a matrix that is not
-        symmetric, not unit diagonal, or not positive definite -- this encoder has no dimension of
-        its own to check shape against; that check happens in LKJDistribution.log_density)."""
-        xx = np.asarray(x, dtype=np.float64)
-        is_valid = _batched_is_corr_like(xx)
-        is_pd, logdet = batched_pd_logdet(xx)
-        return np.where(is_valid & is_pd, logdet, -np.inf)
+    def seq_encode(self, x: Sequence[Any]) -> tuple[int, np.ndarray, np.ndarray]:
+        """Encode dimension, log determinants, and a per-row support mask."""
+        _xx, valid, logdet = _correlation_batch(x, self.dim)
+        return self.dim, logdet, valid
+
+    def row_count(self, x: Any) -> int:
+        """Return the row count after validating dimension-bound encoded data."""
+        logdet, _valid = _validated_encoded_lkj(x, self.dim)
+        return len(logdet)
