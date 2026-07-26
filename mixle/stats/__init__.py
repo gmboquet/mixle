@@ -374,6 +374,7 @@ __all__ = [
     "IgnoredEstimator",
     "IgnoredDataEncoder",
     "IntegerBernoulliEditDistribution",
+    "IntegerBernoulliEditFitError",
     "IntegerBernoulliEditSampler",
     "IntegerBernoulliEditEstimator",
     "IntegerBernoulliEditDataEncoder",
@@ -1681,6 +1682,7 @@ from mixle.stats.sets.integer_bernoulli_edit import (
     IntegerBernoulliEditDistribution,
     IntegerBernoulliEditEnumerator,
     IntegerBernoulliEditEstimator,
+    IntegerBernoulliEditFitError,
     IntegerBernoulliEditSampler,
 )
 from mixle.stats.sets.integer_bernoulli_set import (
