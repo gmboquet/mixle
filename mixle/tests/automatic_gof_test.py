@@ -25,11 +25,11 @@ class GoodnessOfFitGateTest(unittest.TestCase):
         self.assertIsNotNone(field.gof_pvalue)
         self.assertGreater(field.gof_pvalue, 0.01)
 
-    def test_misfit_uniform_data_is_flagged(self):
-        # Uniform data is unimodal (no mixture) but fits no parametric family well, so whichever
-        # unimodal model wins is poorly calibrated -> low PIT p-value + abstain note.
+    def test_misfit_gapped_data_is_flagged_on_held_out_rows(self):
+        # Two separated uniform slabs have hard edges and a broad zero-density
+        # gap; even the selected two-Gaussian approximation is visibly wrong.
         rng = np.random.RandomState(2)
-        data = list(rng.uniform(0.0, 10.0, size=800))
+        data = list(np.concatenate([rng.uniform(0.0, 1.0, size=400), rng.uniform(9.0, 10.0, size=400)]))
         field = analyze_structure(data, pairwise=False).fields[0]
         self.assertIsNotNone(
             field.recommendation
