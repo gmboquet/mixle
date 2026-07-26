@@ -183,6 +183,7 @@ class AxisCandidate:
     reduction: ReductionOp
     num_units: int
     unit_works: tuple[float, ...]  # subtree compute weight of each unit -> drives the cost-balanced split
+    unit_bytes: tuple[int, ...] = ()  # subtree bytes of each unit; state outside the axis is replicated
 
     @property
     def total_work(self) -> float:
@@ -202,8 +203,16 @@ def tree_axes(model: Any) -> list[AxisCandidate]:
         dc = decomposition_for(node)
         kids = shard_children(node, dc)
         if dc.is_shardable and len(kids) == dc.num_units and dc.num_units >= 2:
+            unit_costs = [compute_cost(k) for k in kids]
             out.append(
-                AxisCandidate(path or "/", dc.axis, dc.reduction, dc.num_units, tuple(subtree_work(k) for k in kids))
+                AxisCandidate(
+                    path or "/",
+                    dc.axis,
+                    dc.reduction,
+                    dc.num_units,
+                    tuple(cost[0] for cost in unit_costs),
+                    tuple(cost[1] for cost in unit_costs),
+                )
             )
         for i, child in enumerate(kids):
             if child is not None:
