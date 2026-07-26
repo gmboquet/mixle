@@ -8,10 +8,23 @@ docstring and compute_metadata_test's guard) are architecturally barred from doi
 
 from __future__ import annotations
 
+import copy
+import math
 from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+
+
+def _categorical_coordinate_keys(dist: Any) -> list[Any]:
+    return sorted(
+        dist.pmap,
+        key=lambda key: (
+            type(key).__module__,
+            type(key).__qualname__,
+            repr(key),
+        ),
+    )
 
 
 def _squarem_leaf_handlers() -> dict[type, tuple[Callable[[Any], list[float]], Callable[[Any, list[float]], Any]]]:
@@ -31,34 +44,101 @@ def _squarem_leaf_handlers() -> dict[type, tuple[Callable[[Any], list[float]], C
     )
 
     def cat_extract(d: Any) -> list[float]:
-        return [float(np.log(max(d.pmap[key], 1e-300))) for key in sorted(d.pmap)]
+        keys = _categorical_coordinate_keys(d)
+        probs = np.asarray([d.pmap[key] for key in keys], dtype=np.float64)
+        if not np.isclose(float(probs.sum()), 1.0, rtol=1.0e-7, atol=1.0e-10):
+            raise ValueError("squarem_packer requires categorical probabilities to sum to 1.")
+        if not np.any(probs > 0.0):
+            raise ValueError("squarem_packer requires at least one positive categorical probability.")
+        return [float(np.log(value)) for value in probs if value > 0.0]
 
     def cat_rebuild(d: Any, vals: list[float]) -> Any:
-        logs = np.asarray(vals)
-        p = np.exp(logs - logs.max())
-        p /= p.sum()
-        pmap = dict(zip(sorted(d.pmap), (float(v) for v in p)))
-        return CategoricalDistribution(pmap, default_value=d.default_value, name=d.name)
+        coordinate_keys = _categorical_coordinate_keys(d)
+        active = [key for key in coordinate_keys if d.pmap[key] > 0.0]
+        p = _normalized_positive_coordinates(vals, "categorical probabilities")
+        if len(p) != len(active):
+            raise ValueError("squarem_packer categorical coordinate width changed.")
+        by_key = dict(zip(active, (float(value) for value in p)))
+        pmap = {key: by_key.get(key, 0.0) for key in d.pmap}
+        return CategoricalDistribution(
+            pmap,
+            default_value=d.default_value,
+            name=d.name,
+            keys=d.keys,
+        )
 
     return {
         GaussianDistribution: (
             lambda d: [float(d.mu), float(np.log(d.sigma2))],
-            lambda d, v: GaussianDistribution(float(v[0]), float(np.exp(v[1])), name=d.name),
+            lambda d, v: GaussianDistribution(
+                float(v[0]),
+                _positive_from_log(v[1], "Gaussian sigma2"),
+                name=d.name,
+                keys=d.keys,
+            ),
         ),
         ExponentialDistribution: (
             lambda d: [float(np.log(d.beta))],
-            lambda d, v: ExponentialDistribution(float(np.exp(v[0])), name=d.name),
+            lambda d, v: ExponentialDistribution(
+                _positive_from_log(v[0], "Exponential beta"),
+                name=d.name,
+                keys=d.keys,
+            ),
         ),
         PoissonDistribution: (
             lambda d: [float(np.log(d.lam))],
-            lambda d, v: PoissonDistribution(float(np.exp(v[0])), name=d.name),
+            lambda d, v: PoissonDistribution(
+                _positive_from_log(v[0], "Poisson lambda"),
+                name=d.name,
+                keys=d.keys,
+            ),
         ),
         LaplaceDistribution: (
             lambda d: [float(d.mu), float(np.log(d.b))],
-            lambda d, v: LaplaceDistribution(float(v[0]), float(np.exp(v[1])), name=d.name, keys=d.keys),
+            lambda d, v: LaplaceDistribution(
+                float(v[0]),
+                _positive_from_log(v[1], "Laplace scale"),
+                name=d.name,
+                keys=d.keys,
+            ),
         ),
         CategoricalDistribution: (cat_extract, cat_rebuild),
     }
+
+
+def _positive_from_log(value: float, name: str) -> float:
+    try:
+        result = math.exp(float(value))
+    except OverflowError as exc:
+        raise ValueError("%s coordinate overflowed." % name) from exc
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError("%s coordinate did not produce a finite positive value." % name)
+    return result
+
+
+def _normalized_positive_coordinates(values: Any, name: str) -> np.ndarray:
+    logs = np.asarray(values, dtype=np.float64)
+    if logs.ndim != 1 or logs.size == 0:
+        raise ValueError("%s require a non-empty coordinate vector." % name)
+    if np.any(~np.isfinite(logs)):
+        raise ValueError("%s coordinates must be finite." % name)
+    shifted = logs - logs.max()
+    probs = np.exp(shifted)
+    total = float(probs.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError("%s coordinates could not be normalized." % name)
+    return probs / total
+
+
+def _preserve_sequence_type(original: Any, values: list[Any]) -> Any:
+    if isinstance(original, tuple):
+        return tuple(values)
+    if isinstance(original, list):
+        return list(values)
+    try:
+        return type(original)(values)
+    except (TypeError, ValueError):
+        return list(values)
 
 
 def squarem_packer(
@@ -75,7 +155,11 @@ def squarem_packer(
     ``pack(model) -> theta`` and ``unpack(theta) -> model`` round-trip losslessly (asserted in
     tests); mixture weights travel as log-weights re-normalized on unpack.
     """
-    from mixle.stats import CompositeDistribution, MixtureDistribution
+    from mixle.stats import (
+        CategoricalDistribution,
+        CompositeDistribution,
+        MixtureDistribution,
+    )
 
     handlers = _squarem_leaf_handlers()
 
@@ -112,10 +196,49 @@ def squarem_packer(
             "packer=(pack, unpack) to SquaremEM for %s." % type(model).__name__
         )
 
+    def structure_fingerprint(node: Any) -> Any:
+        ensure_no_prior(node)
+        if isinstance(node, MixtureDistribution):
+            weights = np.asarray(node.w, dtype=np.float64)
+            return (
+                "mixture",
+                type(node),
+                node.name,
+                tuple(bool(value == 0.0) for value in weights),
+                tuple(structure_fingerprint(child) for child in node.components),
+            )
+        if isinstance(node, CompositeDistribution):
+            return (
+                "composite",
+                type(node),
+                type(node.dists),
+                tuple(structure_fingerprint(child) for child in node.dists),
+            )
+        leaf_pair(node)
+        common = (
+            "leaf",
+            type(node),
+            getattr(node, "name", None),
+            getattr(node, "keys", None),
+        )
+        if isinstance(node, CategoricalDistribution):
+            coordinate_keys = _categorical_coordinate_keys(node)
+            return common + (
+                tuple(coordinate_keys),
+                tuple(bool(node.pmap[key] == 0.0) for key in coordinate_keys),
+                float(node.default_value),
+            )
+        return common
+
+    expected_structure = structure_fingerprint(model)
+
     def width(node: Any) -> int:
         ensure_no_prior(node)
         if isinstance(node, MixtureDistribution):
-            return sum(width(child) for child in node.components) + node.num_components
+            active_count = int(np.count_nonzero(np.asarray(node.w, dtype=np.float64) > 0.0))
+            if active_count == 0:
+                raise ValueError("squarem_packer requires at least one active mixture component.")
+            return sum(width(child) for child in node.components) + active_count
         if isinstance(node, CompositeDistribution):
             return sum(width(child) for child in node.dists)
         return leaf_pair(node)[2]
@@ -133,7 +256,8 @@ def squarem_packer(
                 raise ValueError("squarem_packer mixture arity changed.")
             for child, child_template in zip(node.components, template.components):
                 pack_node(child, child_template, theta)
-            theta.extend(float(v) for v in np.log(np.maximum(np.asarray(node.w, dtype=np.float64), 1e-300)))
+            weights = np.asarray(node.w, dtype=np.float64)
+            theta.extend(float(np.log(value)) for value in weights if value > 0.0)
             return
         if isinstance(template, CompositeDistribution):
             if len(node.dists) != len(template.dists):
@@ -149,31 +273,58 @@ def squarem_packer(
             for child in template.components:
                 rebuilt, pos = unpack_node(child, theta, pos)
                 components.append(rebuilt)
-            logw = theta[pos : pos + template.num_components]
-            pos += template.num_components
-            weights = np.exp(logw - np.max(logw))
-            weights /= weights.sum()
-            return MixtureDistribution(components, weights, name=template.name), pos
+            active = np.asarray(template.w, dtype=np.float64) > 0.0
+            active_count = int(np.count_nonzero(active))
+            logw = theta[pos : pos + active_count]
+            pos += active_count
+            weights = np.zeros(template.num_components, dtype=np.float64)
+            weights[active] = _normalized_positive_coordinates(logw, "mixture weights")
+            rebuilt = copy.copy(template)
+            rebuilt.components = _preserve_sequence_type(template.components, components)
+            rebuilt.num_components = len(components)
+            rebuilt.w = weights
+            rebuilt.zw = weights == 0.0
+            rebuilt.log_w = np.full(weights.shape, -np.inf, dtype=np.float64)
+            rebuilt.log_w[~rebuilt.zw] = np.log(weights[~rebuilt.zw])
+            return rebuilt, pos
         if isinstance(template, CompositeDistribution):
             dists = []
             for child in template.dists:
                 rebuilt, pos = unpack_node(child, theta, pos)
                 dists.append(rebuilt)
-            return CompositeDistribution(tuple(dists)), pos
+            rebuilt = copy.copy(template)
+            rebuilt.dists = _preserve_sequence_type(template.dists, dists)
+            rebuilt.count = len(dists)
+            return rebuilt, pos
         extract, rebuild, leaf_width = leaf_pair(template)
         del extract
         values = [float(value) for value in theta[pos : pos + leaf_width]]
         return rebuild(template, values), pos + leaf_width
 
     def pack(m: Any) -> np.ndarray:
+        if structure_fingerprint(m) != expected_structure:
+            raise ValueError("squarem_packer model structure or fixed support changed.")
         theta: list[float] = []
         pack_node(m, model, theta)
-        return np.asarray(theta, dtype=np.float64)
+        values = np.asarray(theta, dtype=np.float64)
+        if values.shape != (expected_width,):
+            raise ValueError(
+                "squarem_packer packed %d coordinates; expected %d."
+                % (values.size, expected_width)
+            )
+        if np.any(~np.isfinite(values)):
+            raise ValueError("squarem_packer produced non-finite coordinates.")
+        return values
 
     def unpack(theta: np.ndarray) -> Any:
-        values = np.asarray(theta, dtype=np.float64)
+        try:
+            values = np.asarray(theta, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("squarem_packer coordinates must be numeric.") from exc
         if values.ndim != 1 or len(values) != expected_width:
             raise ValueError("squarem_packer expected a vector of length %d." % expected_width)
+        if np.any(~np.isfinite(values)):
+            raise ValueError("squarem_packer coordinates must be finite.")
         rebuilt, pos = unpack_node(model, values, 0)
         if pos != expected_width:  # pragma: no cover - recursive width and rebuild are paired
             raise RuntimeError("squarem_packer internal width mismatch.")
