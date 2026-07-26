@@ -190,8 +190,19 @@ def run_graph_memory_pilot(
     candidates = []
     for index in range(source_nodes):
         node_id = "memory-%05d" % index
-        graph.add_node(ContextNode(node_id, ContextNodeKind.MEMORY, "bit=%d" % bits[index], 1))
-        candidates.append(AttentionCandidate(node_id, keys[index], np.array([float(bits[index])]), index))
+        node = ContextNode(node_id, ContextNodeKind.MEMORY, "bit=%d" % bits[index], 1)
+        graph.add_node(node)
+        candidates.append(
+            AttentionCandidate(
+                node_id,
+                keys[index],
+                np.array([float(bits[index])]),
+                index,
+                (int(bits[index]),),
+                "pilot-bit-tokenizer-v1",
+                node.content_hash,
+            )
+        )
     candidates = tuple(candidates)
 
     def dataset(size: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -203,8 +214,22 @@ def run_graph_memory_pilot(
 
     train_queries, train_regimes, train_labels = dataset(train_examples)
     test_queries, test_regimes, test_labels = dataset(test_examples)
-    local_config = ContextAttentionConfig(exact_near_tokens=8, retrieved_nodes=0, maximum_active_tokens=8)
-    graph_config = ContextAttentionConfig(exact_near_tokens=8, retrieved_nodes=1, maximum_active_tokens=9)
+    local_config = ContextAttentionConfig(
+        "pilot-bit-tokenizer-v1",
+        exact_near_tokens=8,
+        exact_near_nodes=8,
+        retrieved_nodes=0,
+        maximum_active_tokens=8,
+        maximum_active_nodes=8,
+    )
+    graph_config = ContextAttentionConfig(
+        "pilot-bit-tokenizer-v1",
+        exact_near_tokens=8,
+        exact_near_nodes=8,
+        retrieved_nodes=1,
+        maximum_active_tokens=9,
+        maximum_active_nodes=9,
+    )
 
     def features(queries: np.ndarray, config: ContextAttentionConfig) -> tuple[np.ndarray, int]:
         values = []
