@@ -71,6 +71,24 @@ class HawkesLikelihoodTest(unittest.TestCase):
             HawkesProcessDistribution(mu=1.0, alpha=0.5, beta=-1.0, window=10.0)
         with self.assertRaises(ValueError):
             HawkesProcessDistribution(mu=1.0, alpha=0.5, beta=1.0, window=0.0)
+        for field in ("mu", "alpha", "beta", "window"):
+            values = dict(mu=1.0, alpha=0.5, beta=1.0, window=10.0)
+            values[field] = np.inf
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                HawkesProcessDistribution(**values)
+
+    def test_encoded_schema_is_bound_to_model(self):
+        encoded = self.dist.dist_to_encoder().seq_encode([[1.0, 2.0], []])
+        with self.assertRaises(ValueError):
+            self.dist.seq_log_density((encoded[0], encoded[1], 500.0))
+        bad_padding = encoded[0].copy()
+        bad_padding[1, 0] = 0.0
+        with self.assertRaises(ValueError):
+            self.dist.seq_log_density((bad_padding, encoded[1], encoded[2]))
+        with self.assertRaises(ValueError):
+            self.dist.seq_log_density(
+                (encoded[0], np.array([3, 0]), encoded[2])
+            )
 
     def test_string_round_trip(self):
         d = HawkesProcessDistribution(0.6, 0.7, 1.3, 50.0, name="h", keys="k")
@@ -97,6 +115,59 @@ class HawkesSamplerTest(unittest.TestCase):
         for s in d.sampler(seed=0).sample(10):
             self.assertTrue(np.all(np.diff(s) >= 0.0))
             self.assertTrue(s.size == 0 or (s[0] >= 0.0 and s[-1] <= 100.0))
+
+    def test_event_budget_fails_with_receipt(self):
+        sampler = HawkesProcessDistribution(
+            100.0,
+            0.0,
+            1.0,
+            1.0,
+            max_events=0,
+        ).sampler(seed=0)
+        with self.assertRaises(RuntimeError):
+            sampler.sample()
+        self.assertIsNotNone(sampler.last_receipt)
+        self.assertFalse(sampler.last_receipt["complete"])
+        self.assertEqual(
+            sampler.last_receipt["termination_reason"],
+            "event_budget_exhausted",
+        )
+
+
+class HawkesEvidenceTest(unittest.TestCase):
+    def setUp(self):
+        self.estimator = HawkesProcessEstimator(window=10.0)
+        self.accumulator = self.estimator.accumulator_factory().make()
+
+    def test_statistics_are_validated_versioned_snapshots(self):
+        events = np.array([1.0, 2.0])
+        self.accumulator.update(events, 1.0, None)
+        events[0] = 9.0
+        value = self.accumulator.value()
+        self.assertEqual(value.schema_version, 1)
+        np.testing.assert_array_equal(value.realizations[0], [1.0, 2.0])
+        self.assertFalse(value.realizations[0].flags.writeable)
+        self.assertFalse(value.weights.flags.writeable)
+        with self.assertRaises(ValueError):
+            self.accumulator.combine((value.realizations, value.weights, 20.0))
+
+    def test_invalid_evidence_and_absent_fit_fail_closed(self):
+        with self.assertRaises(ValueError):
+            self.accumulator.update([2.0, 1.0], 1.0, None)
+        with self.assertRaises(ValueError):
+            self.accumulator.update([1.0], -1.0, None)
+        with self.assertRaises(ValueError):
+            self.estimator.estimate(None, self.accumulator.value())
+        self.accumulator.update([], 1.0, None)
+        with self.assertRaises(ValueError):
+            self.estimator.estimate(None, self.accumulator.value())
+
+    def test_encoded_weight_alignment_is_exact(self):
+        encoded = HawkesProcessDataEncoder(10.0).seq_encode(
+            [[1.0], [2.0]]
+        )
+        with self.assertRaises(ValueError):
+            self.accumulator.seq_update(encoded, np.ones(1), None)
 
 
 class HawkesEMTest(unittest.TestCase):
@@ -130,7 +201,12 @@ class HawkesEMTest(unittest.TestCase):
         # 0.15 budget here, and checked across many alternate data seeds to stay <=0.09 with the branching
         # ratio staying >0.4), so 45 iterations gives the same recovery claim as 100 for a fraction of the cost.
         fit = optimize(
-            big, HawkesProcessEstimator(window=2000.0), max_its=45, rng=np.random.RandomState(0), print_iter=0
+            big,
+            HawkesProcessEstimator(window=2000.0),
+            max_its=45,
+            init_p=1.0,
+            rng=np.random.RandomState(0),
+            print_iter=0,
         )
         # the branching-floor lets EM escape the alpha=0 Poisson absorbing state even from a sparse init
         self.assertGreater(fit.branching_ratio, 0.3)

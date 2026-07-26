@@ -22,24 +22,24 @@ point-process log-likelihood ``sum_i log lambda(t_i) - integral_0^window lambda(
 where ``R_i = sum_{j<i} exp(-beta (t_i - t_j))`` obeys the O(n) recursion
 ``R_i = exp(-beta (t_i - t_{i-1})) (R_{i-1} + 1)`` (``R_1 = 0``).
 
-Fitting uses the Veen-Schoenberg / Lewis-Mohler EM over the latent branching structure (each event
-is an immigrant from ``mu`` or an offspring of an earlier event). The E-step responsibilities and
-the offspring-delay statistic are accumulated in O(n) via a companion recursion, giving finite
-sufficient statistics ``(S0, G, W, n_events, total_window)`` and the closed-form M-step
-``mu = S0/total_window``, ``beta = G/W``, ``alpha = beta * G / n_events`` (the standard
-edge-effect-free branching estimator; exact as ``window -> inf``).
+Fitting retains the weighted realizations and maximizes this exact finite-window
+likelihood, including the edge-dependent integrated-kernel term. This is not
+the common edge-free branching approximation: a Poisson boundary fit
+(``alpha=0``) and an unconstrained finite-window supercritical fit are both
+representable.
 
 
 Reference: Hawkes, 'Spectra of some self-exciting and mutually exciting point processes', Biometrika (1971).
 """
 
 import math
-import warnings
+import operator
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from numpy.random import RandomState
+from scipy.optimize import minimize
 
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -50,7 +50,178 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 
-_MIN = 1.0e-12
+_DEFAULT_MAX_EVENTS = 100_000
+_WINDOW_TOLERANCE = 1.0e-12
+
+
+class HawkesProcessStatistics(NamedTuple):
+    """Versioned weighted event evidence for exact finite-window fitting."""
+
+    realizations: tuple[np.ndarray, ...]
+    weights: np.ndarray
+    window: float
+
+    @property
+    def schema_version(self) -> int:
+        """Return the serialized-statistic schema version."""
+        return 1
+
+
+def _exact_integer(value: Any, *, label: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{label} must be an exact integer")
+    try:
+        return operator.index(value)
+    except TypeError as exc:
+        raise TypeError(f"{label} must be an exact integer") from exc
+
+
+def _finite_nonnegative_scalar(value: Any, *, label: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or np.ndim(value) != 0:
+        raise TypeError(f"{label} must be a real scalar")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{label} must be a real scalar") from exc
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{label} must be finite and non-negative")
+    return result
+
+
+def _validated_events(
+    value: Any,
+    *,
+    window: float,
+    fail_closed: bool,
+) -> np.ndarray | None:
+    try:
+        events = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        if fail_closed:
+            raise ValueError("Hawkes event times must be numeric") from exc
+        return None
+    invalid = (
+        events.ndim != 1
+        or np.any(~np.isfinite(events))
+        or np.any(events < 0.0)
+        or np.any(events > window)
+        or (events.size > 1 and np.any(np.diff(events) <= 0.0))
+    )
+    if invalid:
+        if fail_closed:
+            raise ValueError(
+                "Hawkes event times must be a one-dimensional, finite, "
+                "strictly increasing sequence inside [0, window]"
+            )
+        return None
+    result = events.copy()
+    result.setflags(write=False)
+    return result
+
+
+def _validated_weights(value: Any, rows: int) -> np.ndarray:
+    try:
+        weights = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Hawkes weights must be numeric") from exc
+    if weights.shape != (rows,):
+        raise ValueError(f"Hawkes weights must have exact shape ({rows},)")
+    if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
+        raise ValueError("Hawkes weights must be finite and non-negative")
+    return weights
+
+
+def _validated_payload(
+    value: Any,
+    *,
+    window: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if not isinstance(value, (tuple, list)) or len(value) != 3:
+        raise ValueError(
+            "Hawkes encoded payload must be (times, lengths, window)"
+        )
+    times_raw, lengths_raw, encoded_window = value
+    try:
+        times = np.asarray(times_raw, dtype=np.float64)
+        lengths = np.asarray(lengths_raw)
+        encoded_window = float(encoded_window)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Hawkes encoded payload must be numeric") from exc
+    if (
+        not np.isfinite(encoded_window)
+        or not math.isclose(
+            encoded_window,
+            window,
+            rel_tol=0.0,
+            abs_tol=_WINDOW_TOLERANCE * max(1.0, window),
+        )
+    ):
+        raise ValueError("Hawkes encoded window does not match the model window")
+    if times.ndim != 2:
+        raise ValueError("Hawkes encoded times must be a two-dimensional matrix")
+    if (
+        lengths.ndim != 1
+        or lengths.shape[0] != times.shape[0]
+        or lengths.dtype == np.bool_
+        or not np.issubdtype(lengths.dtype, np.integer)
+    ):
+        raise ValueError(
+            "Hawkes encoded lengths must be an aligned exact-integer vector"
+        )
+    lengths = lengths.astype(np.int64, copy=False)
+    if np.any(lengths < 0) or np.any(lengths > times.shape[1]):
+        raise ValueError("Hawkes encoded length is outside the padded matrix")
+    for row, length in zip(times, lengths):
+        checked = _validated_events(
+            row[: int(length)],
+            window=window,
+            fail_closed=True,
+        )
+        if checked is None:  # pragma: no cover - fail_closed always raises
+            raise AssertionError("unreachable")
+        padding = row[int(length) :]
+        if np.any(~np.isfinite(padding)) or np.any(padding != window):
+            raise ValueError(
+                "Hawkes padding must equal the fixed observation window"
+            )
+    return times, lengths
+
+
+def _validated_statistics(
+    value: Any,
+    *,
+    window: float,
+) -> HawkesProcessStatistics:
+    if not isinstance(value, (tuple, list)) or len(value) != 3:
+        raise ValueError(
+            "Hawkes statistics must contain realizations, weights, and window"
+        )
+    raw_realizations, raw_weights, raw_window = value
+    try:
+        statistic_window = float(raw_window)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Hawkes statistic window must be numeric") from exc
+    if (
+        not np.isfinite(statistic_window)
+        or not math.isclose(
+            statistic_window,
+            window,
+            rel_tol=0.0,
+            abs_tol=_WINDOW_TOLERANCE * max(1.0, window),
+        )
+    ):
+        raise ValueError("Hawkes statistic window does not match the estimator")
+    if not isinstance(raw_realizations, (tuple, list)):
+        raise ValueError("Hawkes realizations must be a sequence")
+    realizations = tuple(
+        _validated_events(item, window=window, fail_closed=True)
+        for item in raw_realizations
+    )
+    if any(item is None for item in realizations):  # pragma: no cover
+        raise AssertionError("unreachable")
+    weights = _validated_weights(raw_weights, len(realizations)).copy()
+    weights.setflags(write=False)
+    return HawkesProcessStatistics(realizations, weights, window)
 
 
 class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
@@ -64,6 +235,7 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
         window: float,
         name: str | None = None,
         keys: str | None = None,
+        max_events: int = _DEFAULT_MAX_EVENTS,
     ) -> None:
         """Create an exponential-kernel Hawkes process.
 
@@ -79,21 +251,40 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
         self.alpha = float(alpha)
         self.beta = float(beta)
         self.window = float(window)
-        if not (self.mu > 0.0 and self.alpha >= 0.0 and self.beta > 0.0 and self.window > 0.0):
-            raise ValueError("Hawkes process requires mu>0, alpha>=0, beta>0, window>0.")
+        if not (
+            np.all(np.isfinite([self.mu, self.alpha, self.beta, self.window]))
+            and self.mu > 0.0
+            and self.alpha >= 0.0
+            and self.beta > 0.0
+            and self.window > 0.0
+        ):
+            raise ValueError(
+                "Hawkes process requires finite mu>0, alpha>=0, beta>0, "
+                "and window>0."
+            )
+        self.max_events = _exact_integer(
+            max_events,
+            label="Hawkes maximum event count",
+        )
+        if self.max_events < 0:
+            raise ValueError("Hawkes maximum event count must be non-negative")
         self.name = name
         self.keys = keys
         self.branching_ratio = self.alpha / self.beta
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the Hawkes process distribution."""
-        return "HawkesProcessDistribution(%s, %s, %s, %s, name=%s, keys=%s)" % (
+        return (
+            "HawkesProcessDistribution(%s, %s, %s, %s, name=%s, keys=%s, "
+            "max_events=%s)"
+        ) % (
             repr(self.mu),
             repr(self.alpha),
             repr(self.beta),
             repr(self.window),
             repr(self.name),
             repr(self.keys),
+            repr(self.max_events),
         )
 
     def intensity(self, t: float, times: Any, marks: Any = None) -> float:
@@ -102,20 +293,52 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
         ``times`` is the event history; ``marks`` is accepted for ``TemporalPointProcess`` signature
         parity (the univariate Hawkes process is unmarked) and is ignored.
         """
-        ti = np.asarray(times, dtype=np.float64).reshape(-1)
-        past = ti[ti < t]
-        return float(self.mu + self.alpha * np.sum(np.exp(-self.beta * (t - past))))
+        query = _finite_nonnegative_scalar(t, label="Hawkes query time")
+        if query > self.window:
+            raise ValueError("Hawkes query time must lie inside [0, window]")
+        ti = _validated_events(
+            times,
+            window=self.window,
+            fail_closed=True,
+        )
+        if ti is None:  # pragma: no cover
+            raise AssertionError("unreachable")
+        past = ti[ti < query]
+        return float(
+            self.mu
+            + self.alpha * np.sum(np.exp(-self.beta * (query - past)))
+        )
 
     def expected_count(self, t_start: float, t_end: float, times: Any, marks: Any = None) -> float:
         """Compensator ``integral_{t_start}^{t_end} lambda(s) ds`` of the intensity given the history.
 
         ``marks`` is accepted for signature parity and ignored (the univariate process is unmarked).
         """
-        ti = np.asarray(times, dtype=np.float64).reshape(-1)
-        tp = ti[ti < t_end]
-        lo = np.maximum(t_start, tp)
-        kernel = np.exp(-self.beta * (lo - tp)) - np.exp(-self.beta * (t_end - tp))
-        return float(self.mu * (t_end - t_start) + (self.alpha / self.beta) * np.sum(kernel))
+        start = _finite_nonnegative_scalar(
+            t_start,
+            label="Hawkes interval start",
+        )
+        end = _finite_nonnegative_scalar(t_end, label="Hawkes interval end")
+        if start > end or end > self.window:
+            raise ValueError(
+                "Hawkes interval must satisfy 0 <= start <= end <= window"
+            )
+        ti = _validated_events(
+            times,
+            window=self.window,
+            fail_closed=True,
+        )
+        if ti is None:  # pragma: no cover
+            raise AssertionError("unreachable")
+        tp = ti[ti < end]
+        lo = np.maximum(start, tp)
+        kernel = np.exp(-self.beta * (lo - tp)) - np.exp(
+            -self.beta * (end - tp)
+        )
+        return float(
+            self.mu * (end - start)
+            + (self.alpha / self.beta) * np.sum(kernel)
+        )
 
     def density(self, x: Any) -> float:
         """Probability density of one realization ``x`` (a sequence of event times)."""
@@ -129,8 +352,12 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
         ... < t_n`` history -- like any other malformed ordering, it scores ``-inf`` rather than silently
         letting one of the tied events excite the other.
         """
-        t = np.asarray(x, dtype=np.float64).reshape(-1)
-        if t.size and (np.any(~np.isfinite(t)) or t[0] < 0.0 or t[-1] > self.window or np.any(np.diff(t) <= 0.0)):
+        t = _validated_events(
+            x,
+            window=self.window,
+            fail_closed=False,
+        )
+        if t is None:
             return -np.inf
         mu, alpha, beta, w = self.mu, self.alpha, self.beta, self.window
         loglam = 0.0
@@ -145,9 +372,7 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
 
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray, float]) -> np.ndarray:
         """Vectorized exact log-likelihood over a padded ``(num_realizations, max_len)`` time matrix."""
-        times, lengths, window = x
-        times = np.asarray(times, dtype=np.float64)
-        lengths = np.asarray(lengths, dtype=np.int64)
+        times, lengths = _validated_payload(x, window=self.window)
         n = lengths.shape[0]
         if n == 0:
             return np.zeros(0, dtype=np.float64)
@@ -166,7 +391,15 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
             loglam += np.where(active, np.log(mu + alpha * ri), 0.0)
             r = ri
         # padding entries are set to ``window`` by the encoder, so window-t == 0 contributes nothing
-        compensator = mu * window + (alpha / beta) * np.sum(1.0 - np.exp(-beta * (window - times)), axis=1)
+        active = np.arange(max_len)[None, :] < lengths[:, None]
+        compensator = mu * self.window + (alpha / beta) * np.sum(
+            np.where(
+                active,
+                1.0 - np.exp(-beta * (self.window - times)),
+                0.0,
+            ),
+            axis=1,
+        )
         return loglam - compensator
 
     def sampler(self, seed: int | None = None) -> "HawkesProcessSampler":
@@ -175,7 +408,23 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "HawkesProcessEstimator":
         """Return a HawkesProcessEstimator over the same observation window."""
-        return HawkesProcessEstimator(window=self.window, name=self.name, keys=self.keys)
+        if pseudo_count is not None:
+            checked_pseudo = _finite_nonnegative_scalar(
+                pseudo_count,
+                label="Hawkes pseudo-count",
+            )
+            if checked_pseudo != 0.0:
+                raise NotImplementedError(
+                    "HawkesProcessDistribution does not define an implicit "
+                    "pseudo-count prior; fit explicit penalized likelihood "
+                    "instead"
+                )
+        return HawkesProcessEstimator(
+            window=self.window,
+            name=self.name,
+            keys=self.keys,
+            max_events=self.max_events,
+        )
 
     def dist_to_encoder(self) -> "HawkesProcessDataEncoder":
         """Returns a HawkesProcessDataEncoder bound to this window."""
@@ -188,13 +437,7 @@ class HawkesProcessSampler(DistributionSampler):
     def __init__(self, dist: HawkesProcessDistribution, seed: int | None = None) -> None:
         self.rng = RandomState(seed)
         self.dist = dist
-        if dist.branching_ratio >= 1.0:
-            warnings.warn(
-                "super-critical Hawkes process (branching_ratio = alpha/beta = %g >= 1): the process is "
-                "non-stationary and self-perpetuating, so realizations may explode and hit the event cap."
-                % dist.branching_ratio,
-                stacklevel=2,
-            )
+        self.last_receipt: dict[str, Any] | None = None
 
     def _sample_one(self) -> np.ndarray:
         # Ogata thinning: between events the intensity only decays, so lam(t+) = mu + alpha*excitation
@@ -202,166 +445,152 @@ class HawkesProcessSampler(DistributionSampler):
         # sum_j exp(-beta (t - t_j)) incrementally.
         d = self.dist
         mu, alpha, beta, w = d.mu, d.alpha, d.beta, d.window
-        cap = 10_000_000  # runaway guard for near/super-critical processes
         events: list[float] = []
         t = 0.0
         last = 0.0
         excitation = 0.0
-        while len(events) < cap:
+        candidates = 0
+        while True:
             lam_bar = mu + alpha * excitation
             t = t + self.rng.exponential(1.0 / lam_bar)
+            candidates += 1
             if t >= w:
+                self.last_receipt = {
+                    "complete": True,
+                    "events_generated": len(events),
+                    "candidate_draws": candidates,
+                    "event_budget": d.max_events,
+                    "reached_time": t,
+                    "window": w,
+                    "branching_ratio": d.branching_ratio,
+                    "termination_reason": "window_crossed",
+                }
                 break
             excitation *= math.exp(-beta * (t - last))  # decay to the candidate time
             last = t
             lam_t = mu + alpha * excitation
             if self.rng.uniform() <= lam_t / lam_bar:
+                if len(events) >= d.max_events:
+                    self.last_receipt = {
+                        "complete": False,
+                        "events_generated": len(events),
+                        "candidate_draws": candidates,
+                        "event_budget": d.max_events,
+                        "reached_time": t,
+                        "window": w,
+                        "branching_ratio": d.branching_ratio,
+                        "termination_reason": "event_budget_exhausted",
+                    }
+                    raise RuntimeError(
+                        "Hawkes sampling event budget exhausted before the "
+                        "observation window was completed"
+                    )
                 events.append(t)
                 excitation += 1.0  # the new event contributes exp(0) = 1 to future excitation
-        if len(events) >= cap:
-            warnings.warn(
-                "Hawkes realization hit the %d-event cap and was truncated before the window end; the "
-                "process is likely near- or super-critical." % cap,
-                stacklevel=2,
-            )
         return np.asarray(events, dtype=np.float64)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray | list[np.ndarray]:
         """Draw one realization (event-time array) or a list of ``size`` realizations."""
         if size is None:
             return self._sample_one()
-        return [self._sample_one() for _ in range(int(size))]
+        checked_size = _exact_integer(size, label="Hawkes sample size")
+        if checked_size < 0:
+            raise ValueError("Hawkes sample size must be non-negative")
+        return [self._sample_one() for _ in range(checked_size)]
 
 
 class HawkesProcessAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulate the EM branching sufficient statistics ``(S0, G, W, n_events, total_window)``."""
+    """Retain validated weighted realizations for exact finite-window MLE."""
 
     def __init__(self, window: float, name: str | None = None, keys: str | None = None) -> None:
+        if not np.isfinite(window) or window <= 0.0:
+            raise ValueError("Hawkes accumulator requires a finite window > 0")
         self.window = float(window)
-        self.s0 = 0.0  # expected immigrant count  (sum of immigrant responsibilities)
-        self.g = 0.0  # expected offspring count   (sum of offspring responsibilities)
-        self.w = 0.0  # responsibility-weighted offspring delay  (sum p_ij (t_i - t_j))
-        self.n_events = 0.0
-        self.total_window = 0.0
+        self.realizations: list[np.ndarray] = []
+        self.weights: list[float] = []
         self.name = name
         self.keys = keys
 
-    def _accumulate_seq(
-        self, times: np.ndarray, length: int, weight: float, estimate: HawkesProcessDistribution
-    ) -> None:
-        mu, alpha, beta = estimate.mu, estimate.alpha, estimate.beta
-        r = 0.0  # R_i = sum_{j<i} exp(-beta (t_i - t_j))
-        s = 0.0  # S_i = sum_{j<i} exp(-beta (t_i - t_j)) (t_i - t_j)
-        prev = 0.0
-        for i in range(length):
-            if i > 0:
-                dt = times[i] - prev
-                e = math.exp(-beta * dt)
-                s = e * (dt * (r + 1.0) + s)
-                r = e * (r + 1.0)
-            lam = mu + alpha * r
-            self.s0 += weight * mu / lam  # p_i0
-            self.g += weight * alpha * r / lam  # sum_{j<i} p_ij
-            self.w += weight * alpha * s / lam  # sum_{j<i} p_ij (t_i - t_j)
-            prev = times[i]
-        self.n_events += weight * length
-        self.total_window += weight * self.window
+    def _store(self, value: Any, weight: Any) -> None:
+        events = _validated_events(
+            value,
+            window=self.window,
+            fail_closed=True,
+        )
+        if events is None:  # pragma: no cover
+            raise AssertionError("unreachable")
+        checked_weight = _finite_nonnegative_scalar(
+            weight,
+            label="Hawkes weight",
+        )
+        self.realizations.append(events)
+        self.weights.append(checked_weight)
 
     def update(self, x: Any, weight: float, estimate: HawkesProcessDistribution | None) -> None:
-        """Accumulate EM branching statistics for one event-time realization."""
-        t = np.asarray(x, dtype=np.float64).reshape(-1)
-        if estimate is None:
-            self._initialize_seq(t, weight)
-        else:
-            self._accumulate_seq(t, t.size, weight, estimate)
-
-    def _initialize_seq(self, times: np.ndarray, weight: float) -> None:
-        # branching-ratio-0.5 heuristic: half the events are immigrants, offspring delays ~ the span.
-        n = times.size
-        span = float(times[-1] - times[0]) if n > 1 else self.window
-        self.s0 += weight * 0.5 * n
-        self.g += weight * 0.5 * n
-        self.w += weight * 0.5 * span
-        self.n_events += weight * n
-        self.total_window += weight * self.window
+        """Store one validated weighted realization."""
+        self._store(x, weight)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
-        """Initialize branching statistics with one weighted realization."""
-        self._initialize_seq(np.asarray(x, dtype=np.float64).reshape(-1), weight)
+        """Store one validated weighted realization during initialization."""
+        self._store(x, weight)
 
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray, float], weights: np.ndarray, estimate: HawkesProcessDistribution
     ) -> None:
-        """Accumulate EM branching statistics from encoded realizations."""
-        # Vectorized across sequences: one loop over event index (<= max_len), each step updating the
-        # R_i / S_i recursion and the (s0, g, w) responsibility sums for all sequences at once -- the
-        # same scheme as seq_log_density. Bit-identical to summing _accumulate_seq per sequence.
-        times, lengths, _ = x
-        times = np.asarray(times, dtype=np.float64)
-        lengths = np.asarray(lengths, dtype=np.int64)
-        n_seq = lengths.shape[0]
-        if n_seq == 0:
-            return
-        w = np.asarray(weights, dtype=np.float64)
-        mu, alpha, beta = estimate.mu, estimate.alpha, estimate.beta
-        max_len = times.shape[1]
-        r = np.zeros(n_seq, dtype=np.float64)  # R_i per sequence
-        s = np.zeros(n_seq, dtype=np.float64)  # S_i per sequence
-        for i in range(max_len):
-            active = i < lengths
-            if i == 0:
-                ri = np.zeros(n_seq, dtype=np.float64)
-                si = np.zeros(n_seq, dtype=np.float64)
-            else:
-                dt = times[:, i] - times[:, i - 1]
-                e = np.exp(-beta * dt)
-                si = e * (dt * (r + 1.0) + s)
-                ri = e * (r + 1.0)
-            lam = mu + alpha * ri
-            base = np.where(active, w / lam, 0.0)
-            self.s0 += float(np.sum(base * mu))
-            self.g += float(np.sum(base * alpha * ri))
-            self.w += float(np.sum(base * alpha * si))
-            r, s = ri, si
-        self.n_events += float(np.dot(w, lengths))
-        self.total_window += float(np.sum(w) * self.window)
+        """Store validated encoded realizations and aligned weights."""
+        times, lengths = _validated_payload(x, window=self.window)
+        checked_weights = _validated_weights(weights, len(lengths))
+        for row, length, weight in zip(times, lengths, checked_weights):
+            self._store(row[: int(length)], float(weight))
 
     def seq_initialize(
         self, x: tuple[np.ndarray, np.ndarray, float], weights: np.ndarray, rng: RandomState | None
     ) -> None:
-        """Initialize branching statistics from encoded realizations."""
-        times, lengths, _ = x
-        for k in range(len(lengths)):
-            n = int(lengths[k])
-            self._initialize_seq(times[k, :n], float(weights[k]))
+        """Store validated encoded realizations during initialization."""
+        self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: tuple[float, float, float, float, float]) -> "HawkesProcessAccumulator":
-        """Merge serialized Hawkes EM sufficient statistics into this accumulator."""
-        s0, g, w, ne, tw = suff_stat
-        self.s0 += s0
-        self.g += g
-        self.w += w
-        self.n_events += ne
-        self.total_window += tw
+    def combine(self, suff_stat: Any) -> "HawkesProcessAccumulator":
+        """Merge validated serialized Hawkes evidence."""
+        checked = _validated_statistics(suff_stat, window=self.window)
+        self.realizations.extend(checked.realizations)
+        self.weights.extend(checked.weights.tolist())
         return self
 
-    def value(self) -> tuple[float, float, float, float, float]:
-        """Return the EM branching statistics and exposure totals."""
-        return self.s0, self.g, self.w, self.n_events, self.total_window
+    def value(self) -> HawkesProcessStatistics:
+        """Return owned, versioned weighted realization evidence."""
+        weights = np.asarray(self.weights, dtype=np.float64)
+        weights.setflags(write=False)
+        return HawkesProcessStatistics(
+            tuple(self.realizations),
+            weights,
+            self.window,
+        )
 
-    def from_value(self, x: tuple[float, float, float, float, float]) -> "HawkesProcessAccumulator":
-        """Restore the accumulator from serialized Hawkes EM statistics."""
-        self.s0, self.g, self.w, self.n_events, self.total_window = (float(v) for v in x)
+    def from_value(self, x: Any) -> "HawkesProcessAccumulator":
+        """Restore validated serialized Hawkes evidence."""
+        checked = _validated_statistics(x, window=self.window)
+        self.realizations = list(checked.realizations)
+        self.weights = checked.weights.tolist()
         return self
 
     def scale(self, c: float) -> "HawkesProcessAccumulator":
-        """Scale accumulated sufficient statistics by a constant."""
-        self.s0 *= c
-        self.g *= c
-        self.w *= c
-        self.n_events *= c
-        self.total_window *= c
+        """Scale realization weights by a finite non-negative constant."""
+        checked = _finite_nonnegative_scalar(c, label="Hawkes scale")
+        self.weights = [checked * weight for weight in self.weights]
         return self
+
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this evidence under its shared parameter key."""
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
+            else:
+                stats_dict[self.keys] = self
+
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this evidence from its shared parameter key."""
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "HawkesProcessDataEncoder":
         """Return an encoder that pads event-time realizations for this window."""
@@ -382,36 +611,165 @@ class HawkesProcessAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class HawkesProcessEstimator(ParameterEstimator):
-    """EM branching M-step: ``mu=S0/total_window``, ``beta=G/W``, ``alpha=beta*G/n_events``."""
+    """Exact weighted finite-window maximum-likelihood estimator."""
 
-    def __init__(self, window: float, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        window: float,
+        name: str | None = None,
+        keys: str | None = None,
+        max_events: int = _DEFAULT_MAX_EVENTS,
+    ) -> None:
+        if not np.isfinite(window) or window <= 0.0:
+            raise ValueError("Hawkes estimator requires a finite window > 0")
         self.window = float(window)
         self.name = name
         self.keys = keys
+        self.max_events = _exact_integer(
+            max_events,
+            label="Hawkes maximum event count",
+        )
+        if self.max_events < 0:
+            raise ValueError("Hawkes maximum event count must be non-negative")
 
     def accumulator_factory(self) -> "HawkesProcessAccumulatorFactory":
         """Return a factory for Hawkes EM sufficient-statistic accumulators."""
         return HawkesProcessAccumulatorFactory(self.window, name=self.name, keys=self.keys)
 
     def estimate(
-        self, nobs: float | None, suff_stat: tuple[float, float, float, float, float]
+        self,
+        nobs: float | None,
+        suff_stat: Any,
     ) -> "HawkesProcessDistribution":
-        """Estimate ``(mu, alpha, beta)`` from the accumulated branching sufficient statistics."""
-        s0, g, w, n_events, total_window = suff_stat
-        mu = max(s0, _MIN) / max(total_window, _MIN)
-        beta = max(g, _MIN) / max(w, _MIN)
-        # Branching ratio alpha/beta = expected offspring per event. Floor it away from 0: alpha == 0 is
-        # an absorbing fixed point of the EM (no excitation -> no offspring responsibilities -> alpha
-        # stays 0), so a tiny floor lets EM escape a Poisson-like start. Cap below 1 to stay sub-critical.
-        branching = min(max(g / max(n_events, _MIN), 1.0e-3), 1.0 - 1.0e-6)
-        alpha = beta * branching
-        return HawkesProcessDistribution(mu, alpha, beta, self.window, name=self.name, keys=self.keys)
+        """Maximize the exact compensator-aware weighted log-likelihood."""
+        checked = _validated_statistics(suff_stat, window=self.window)
+        total_weight = float(np.sum(checked.weights))
+        event_weight = float(
+            sum(
+                weight * events.size
+                for events, weight in zip(
+                    checked.realizations,
+                    checked.weights,
+                )
+            )
+        )
+        if total_weight <= 0.0:
+            raise ValueError("Hawkes fitting requires positive realization weight")
+        if event_weight <= 0.0:
+            raise ValueError(
+                "Hawkes evidence with no positively weighted events has no "
+                "finite interior baseline-rate MLE"
+            )
+
+        empirical_rate = event_weight / (total_weight * self.window)
+        gap_arrays = [
+            np.diff(events)
+            for events in checked.realizations
+            if events.size > 1
+        ]
+        positive_gaps = (
+            np.concatenate(gap_arrays)
+            if gap_arrays
+            else np.empty(0, dtype=np.float64)
+        )
+        beta_seed = (
+            1.0 / float(np.median(positive_gaps))
+            if positive_gaps.size
+            else 1.0 / self.window
+        )
+        beta_seed = max(beta_seed, 1.0 / self.window)
+
+        def objective(parameters: np.ndarray) -> float:
+            mu = math.exp(float(parameters[0]))
+            alpha = float(parameters[1])
+            beta = math.exp(float(parameters[2]))
+            total = 0.0
+            for events, weight in zip(
+                checked.realizations,
+                checked.weights,
+            ):
+                if weight == 0.0:
+                    continue
+                loglam = 0.0
+                excitation = 0.0
+                previous = 0.0
+                for index, event in enumerate(events):
+                    if index:
+                        excitation = math.exp(
+                            -beta * (float(event) - previous)
+                        ) * (excitation + 1.0)
+                    intensity = mu + alpha * excitation
+                    if not np.isfinite(intensity) or intensity <= 0.0:
+                        return np.inf
+                    loglam += math.log(intensity)
+                    previous = float(event)
+                compensator = mu * self.window
+                if events.size and alpha:
+                    compensator += (alpha / beta) * float(
+                        np.sum(
+                            1.0
+                            - np.exp(
+                                -beta * (self.window - events)
+                            )
+                        )
+                    )
+                total += float(weight) * (loglam - compensator)
+            return -total if np.isfinite(total) else np.inf
+
+        starts = [
+            np.asarray(
+                [
+                    math.log(max(empirical_rate * immigrant_share, 1.0e-12)),
+                    beta_seed * branching,
+                    math.log(beta_seed),
+                ],
+                dtype=np.float64,
+            )
+            for immigrant_share, branching in (
+                (1.0, 0.0),
+                (0.75, 0.25),
+                (0.5, 0.5),
+                (0.25, 0.9),
+            )
+        ]
+        candidates = []
+        bounds = [(-40.0, 40.0), (0.0, None), (-40.0, 40.0)]
+        for start in starts:
+            result = minimize(
+                objective,
+                start,
+                method="L-BFGS-B",
+                bounds=bounds,
+                options={"maxiter": 500, "ftol": 1.0e-12},
+            )
+            if result.success and np.isfinite(result.fun):
+                candidates.append(result)
+        if not candidates:
+            raise RuntimeError(
+                "Hawkes finite-window likelihood optimization failed to "
+                "converge to a finite candidate"
+            )
+        best = min(candidates, key=lambda result: float(result.fun))
+        mu = math.exp(float(best.x[0]))
+        alpha = max(0.0, float(best.x[1]))
+        beta = math.exp(float(best.x[2]))
+        return HawkesProcessDistribution(
+            mu,
+            alpha,
+            beta,
+            self.window,
+            name=self.name,
+            keys=self.keys,
+            max_events=self.max_events,
+        )
 
 
 class HawkesProcessDataEncoder(DataSequenceEncoder):
     """Encode realizations (event-time arrays) into a padded ``(num_realizations, max_len)`` matrix."""
 
     def __init__(self, window: float) -> None:
+        if not np.isfinite(window) or window <= 0.0:
+            raise ValueError("Hawkes encoder requires a finite window > 0")
         self.window = float(window)
 
     def __str__(self) -> str:
@@ -430,9 +788,13 @@ class HawkesProcessDataEncoder(DataSequenceEncoder):
         """
         seqs = []
         for events in x:
-            t = np.asarray(events, dtype=np.float64).reshape(-1)
-            if t.size and (np.any(~np.isfinite(t)) or t[0] < 0.0 or t[-1] > self.window or np.any(np.diff(t) <= 0.0)):
-                raise ValueError("event times must be finite, strictly increasing (no ties), and within [0, window].")
+            t = _validated_events(
+                events,
+                window=self.window,
+                fail_closed=True,
+            )
+            if t is None:  # pragma: no cover
+                raise AssertionError("unreachable")
             seqs.append(t)
         lengths = np.asarray([s.size for s in seqs], dtype=np.int64)
         max_len = int(lengths.max()) if lengths.size and lengths.max() > 0 else 0
@@ -441,3 +803,8 @@ class HawkesProcessDataEncoder(DataSequenceEncoder):
         for k, s in enumerate(seqs):
             times[k, : s.size] = s
         return times, lengths, self.window
+
+    def row_count(self, x: Any) -> int:
+        """Return the validated number of encoded realizations."""
+        _, lengths = _validated_payload(x, window=self.window)
+        return int(lengths.size)
