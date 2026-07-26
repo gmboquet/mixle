@@ -1,5 +1,6 @@
 """int8 post-training quantization of distilled students (mixle.task.quantize): real bytes, real fidelity."""
 
+import copy
 import tempfile
 import unittest
 
@@ -15,6 +16,7 @@ from mixle.task import (  # noqa: E402
     footprint,
     quantize_mlp,
 )
+from mixle.task.quantize import QuantizedMLP, quantize_dequantize_array  # noqa: E402
 
 
 def _record_task(n, seed):
@@ -94,6 +96,66 @@ class QuantizeMLPTest(unittest.TestCase):
             quantize_mlp(self.fp32, bits=2)  # LNS/sub-4-bit rungs are explicitly not wired
         with self.assertRaises(ValueError):
             quantize_mlp(self.q)  # already-quantized (arrays payload) is not a torch student
+
+    def test_conversion_rejects_graphs_it_cannot_preserve(self):
+        import torch
+
+        first = next(module for module in self.fp32.model.modules() if isinstance(module, torch.nn.Linear))
+        output_width = len(self.fp32.adapter.labels)
+
+        class Branched(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.left = torch.nn.Linear(first.in_features, output_width)
+                self.right = torch.nn.Linear(first.in_features, output_width)
+
+            def forward(self, values):
+                return self.left(values) + self.right(values)
+
+        for model in (
+            Branched(),
+            torch.nn.Sequential(
+                torch.nn.Linear(first.in_features, 4),
+                torch.nn.Tanh(),
+                torch.nn.Linear(4, output_width),
+            ),
+        ):
+            with self.subTest(model=type(model).__name__):
+                candidate = copy.copy(self.fp32)
+                candidate.model = model
+                with self.assertRaisesRegex(ValueError, "flat|alternate"):
+                    quantize_mlp(candidate)
+
+    def test_nonfinite_source_weights_are_rejected(self):
+        import torch
+
+        candidate = copy.deepcopy(self.fp32)
+        linear = next(module for module in candidate.model.modules() if isinstance(module, torch.nn.Linear))
+        with torch.no_grad():
+            linear.weight[0, 0] = float("nan")
+        with self.assertRaisesRegex(ValueError, "finite"):
+            quantize_mlp(candidate)
+
+    def test_conversion_records_an_executed_graph_parity_proof(self):
+        receipt = self.q.meta["quantized"]
+        self.assertEqual(receipt["verified_architecture"], "flat_linear_relu")
+        self.assertLessEqual(receipt["dequantized_graph_parity_max_abs_error"], 1e-5)
+
+    def test_quantized_layer_shape_scale_and_weight_contracts(self):
+        valid_w = np.ones((2, 3), dtype=np.int8)
+        valid_b = np.zeros(2, dtype=np.float32)
+        invalid_layers = (
+            [(valid_w, 0.0, valid_b)],
+            [(valid_w, float("nan"), valid_b)],
+            [(valid_w, 1.0, np.zeros(3))],
+            [(np.full((2, 3), 200, dtype=np.int16), 1.0, valid_b)],
+            [(valid_w, 1.0, valid_b), (np.ones((2, 4), dtype=np.int8), 1.0, valid_b)],
+        )
+        for layers in invalid_layers:
+            with self.subTest(layers=layers), self.assertRaises(ValueError):
+                QuantizedMLP(layers)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            quantize_dequantize_array(np.asarray([1.0, np.nan]))
 
 
 class Int4Test(unittest.TestCase):
@@ -321,6 +383,19 @@ class LNSIntegerTablesTest(unittest.TestCase):
         from mixle.task.quantize import _LOG_ZERO_INT
 
         self.assertTrue((ints <= _LOG_ZERO_INT // 2).all())  # no invented mass for unseen values
+
+    def test_compiled_tables_are_invalidated_after_factor_mutation(self):
+        tree = self.lns_student.model
+        factor = next(factor for factor in tree.factors if isinstance(getattr(factor, "pmap", None), dict))
+        key = next(iter(factor.pmap))
+        original = factor.pmap[key]
+        before = copy.deepcopy(self.lns_student.adapter._compiled_tables(tree))
+        try:
+            factor.pmap[key] = original * 0.5
+            after = self.lns_student.adapter._compiled_tables(tree)
+            self.assertNotEqual(before, after)
+        finally:
+            factor.pmap[key] = original
 
 
 if __name__ == "__main__":
