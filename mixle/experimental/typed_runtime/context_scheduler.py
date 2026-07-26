@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from mixle.experimental.typed_runtime.context_ir import (
@@ -144,6 +144,12 @@ class ValueOfInformationScheduler:
         net: dict[str, float] = {}
         inadmissible: dict[str, str] = {}
         for action in actions:
+            if (
+                action.expected_graph_version is not None
+                and action.expected_graph_version != graph.version
+            ):
+                inadmissible[action.action_id] = "stale-graph-version"
+                continue
             missing = sorted(set(action.input_nodes) - set(graph.nodes))
             if missing:
                 inadmissible[action.action_id] = "missing-input:%s" % ",".join(missing)
@@ -181,8 +187,11 @@ class ValueOfInformationScheduler:
             selected = ContextAction(
                 action_id="stop:v%d:a%d" % (graph.version, self.actions_completed),
                 kind=ContextActionKind.STOP,
+                expected_graph_version=graph.version,
                 expected_information_gain=0.0,
             )
+        elif selected.expected_graph_version is None:
+            selected = replace(selected, expected_graph_version=graph.version)
         return ContextScheduleDecision(selected, ranked, lower, costs, net, inadmissible, stopping_reason)
 
     def record(self, receipt: ContextActionReceipt) -> None:

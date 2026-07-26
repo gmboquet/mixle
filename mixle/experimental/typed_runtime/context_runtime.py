@@ -95,6 +95,7 @@ class EffectiveContextRuntime:
             stop = ContextAction(
                 "stop:max-iterations:v%d" % self.graph.version,
                 ContextActionKind.STOP,
+                expected_graph_version=self.graph.version,
             )
             receipts.append(self.executor.execute(stop))
 
