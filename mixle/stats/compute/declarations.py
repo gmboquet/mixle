@@ -55,6 +55,8 @@ class ExponentialFamilySpec:
     sufficient_statistics_from_params: Callable[[Any, dict[str, Any], Any], tuple[Any, ...]] | None = None
     base_measure_from_params: Callable[[Any, dict[str, Any], Any], Any] | None = None
     legacy_sufficient_statistics: Callable[[Any, dict[str, Any], Any], tuple[Any, ...]] | None = None
+    analytic_mean_parameters: Callable[[dict[str, Any], Any], Any] | None = None
+    log_partition_from_natural: Callable[[Any, Any], Any] | None = None
     fixed_base: bool = True
     runtime_scoring: bool = True
     """Whether the generated exp-family form may drive *runtime* scoring (scalar + stacked + numba).

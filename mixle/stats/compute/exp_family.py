@@ -12,12 +12,13 @@ lives in each distribution's :class:`~mixle.stats.compute.declarations.Exponenti
 ``base_measure`` h); :func:`to_exponential_family` reads that declaration and wraps it,
 so adding a family is a matter of providing its spec -- there is no type switch here.
 
-The container threads a compute engine (numpy by default) so the map works under numpy
-and torch and stays autograd-friendly for :meth:`ExponentialFamilyForm.mean_parameters`.
+The container threads a compute engine (numpy by default) so sufficient-statistic
+maps preserve the selected backend, including its device and gradient lineage.
 """
 
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,6 +31,52 @@ from mixle.stats.compute.declarations import (
     declaration_for,
 )
 from mixle.stats.compute.pdist import ProbabilityDistribution
+
+
+@dataclass(frozen=True)
+class NumericalEstimate:
+    """A numerical value together with its method and elementwise error estimate."""
+
+    value: np.ndarray
+    error_estimate: np.ndarray | None
+    method: str
+    evaluations: int
+    n_samples: int | None = None
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("%s must be a finite positive real number." % name) from exc
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError("%s must be a finite positive real number." % name)
+    return result
+
+
+def _sample_count(value: Any, *, minimum: int = 2) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("n_samples must be an integer greater than or equal to %d." % minimum)
+    try:
+        result = operator.index(value)
+    except TypeError as exc:
+        raise TypeError("n_samples must be an integer greater than or equal to %d." % minimum) from exc
+    if result < minimum:
+        raise ValueError("n_samples must be greater than or equal to %d." % minimum)
+    return result
+
+
+def _enforce_error_tolerance(estimate: NumericalEstimate, tolerance: Any) -> None:
+    if tolerance is None:
+        return
+    limit = _positive_finite(tolerance, "error_tolerance")
+    if estimate.error_estimate is None:
+        raise ValueError("%s does not provide a numerical error estimate." % estimate.method)
+    observed = float(np.max(np.asarray(estimate.error_estimate, dtype=np.float64), initial=0.0))
+    if not np.isfinite(observed) or observed > limit:
+        raise ArithmeticError(
+            "%s error estimate %.6g exceeds tolerance %.6g." % (estimate.method, observed, limit)
+        )
 
 
 def _flatten_statistics(statistics: tuple[Any, ...], engine: Any) -> Any:
@@ -161,32 +208,155 @@ class ExponentialFamilyForm:
 
     # -- derived / conveniences -------------------------------------------
 
-    def mean_parameters(self, eps: float = 1.0e-6, n_samples: int = 200000, seed: int | None = 0) -> np.ndarray:
-        """Return the mean (expectation) parameters ``grad A(eta) = E[T(x)]``.
+    def analytic_mean_parameters(self) -> np.ndarray:
+        """Return an explicitly declared analytic ``grad A`` implementation."""
+        fn = self.spec.analytic_mean_parameters
+        if fn is None:
+            raise NotImplementedError(
+                "%s does not declare analytic mean parameters." % type(self.distribution).__name__
+            )
+        value = np.asarray(self.engine.to_numpy(fn(self._params(), self.engine)), dtype=np.float64).reshape(-1)
+        if value.shape != (self.dim,) or not np.all(np.isfinite(value)):
+            raise ValueError("analytic mean parameters must be a finite vector of length %d." % self.dim)
+        return value
 
-        When the family exposes a closed-form dual map (``exp_family_from_natural``)
-        this is the exact gradient of ``A`` by central finite differences in natural
-        coordinates.  Otherwise it falls back to a Monte-Carlo estimate of ``E[T(x)]``
-        over ``n_samples`` draws -- approximate, but universal for any samplable family.
-        """
-        if self.from_natural(self.natural_parameters()) is not None:
-            eta = self.natural_parameters()
-            grad = np.empty_like(eta)
-            for i in range(eta.shape[0]):
-                step = eps * (abs(float(eta[i])) + 1.0)
+    def autodiff_mean_parameters(self) -> np.ndarray:
+        """Return ``grad A`` through an explicitly declared natural-space autodiff map."""
+        fn = self.spec.log_partition_from_natural
+        gradient = getattr(self.engine, "gradient", None)
+        if fn is None or not callable(gradient):
+            raise NotImplementedError(
+                "%s has no natural-space log-partition/autodiff declaration for engine %s."
+                % (type(self.distribution).__name__, getattr(self.engine, "name", type(self.engine).__name__))
+            )
+        eta = self.engine.asarray(self.natural_parameters())
+        value = gradient(lambda natural: fn(natural, self.engine))(eta)
+        result = np.asarray(self.engine.to_numpy(value), dtype=np.float64).reshape(-1)
+        if result.shape != (self.dim,) or not np.all(np.isfinite(result)):
+            raise ValueError("autodiff mean parameters must be a finite vector of length %d." % self.dim)
+        return result
+
+    def finite_difference_mean_parameters(self, eps: float = 1.0e-6) -> NumericalEstimate:
+        """Estimate ``grad A`` by guarded central differences with a truncation-error estimate."""
+        epsilon = _positive_finite(eps, "eps")
+        eta = np.asarray(self.natural_parameters(), dtype=np.float64)
+        if eta.shape != (self.dim,) or not np.all(np.isfinite(eta)):
+            raise ValueError("natural parameters must be a finite vector before finite differencing.")
+        if not callable(getattr(type(self.distribution), "exp_family_from_natural", None)):
+            raise NotImplementedError(
+                "%s has no natural-parameter inverse required for finite differences."
+                % type(self.distribution).__name__
+            )
+
+        def evaluate(natural: np.ndarray) -> float:
+            try:
+                value = float(self.engine.to_numpy(self.log_partition(natural)))
+            except Exception as exc:
+                raise ValueError(
+                    "finite-difference step left the natural-parameter domain; reduce eps or use another method."
+                ) from exc
+            if not np.isfinite(value):
+                raise FloatingPointError("log_partition produced a non-finite finite-difference value.")
+            return value
+
+        coarse = np.empty_like(eta)
+        fine = np.empty_like(eta)
+        for i in range(eta.shape[0]):
+            step = epsilon * (abs(float(eta[i])) + 1.0)
+            for target, width in ((coarse, step), (fine, step / 2.0)):
                 up = eta.copy()
-                up[i] += step
                 down = eta.copy()
-                down[i] -= step
-                a_up = float(self.engine.to_numpy(self.log_partition(up)))
-                a_down = float(self.engine.to_numpy(self.log_partition(down)))
-                grad[i] = (a_up - a_down) / (2.0 * step)
-            return grad
-        samples = self.distribution.sampler(seed).sample(int(n_samples))
-        stats = np.asarray(self.engine.to_numpy(self.sufficient_statistics(samples)), dtype=np.float64)
-        return stats.mean(axis=0)
+                up[i] += width
+                down[i] -= width
+                target[i] = (evaluate(up) - evaluate(down)) / (2.0 * width)
+        value = fine + (fine - coarse) / 3.0
+        error = np.abs(value - fine)
+        if not np.all(np.isfinite(value)) or not np.all(np.isfinite(error)):
+            raise FloatingPointError("finite-difference derivative or error estimate is non-finite.")
+        return NumericalEstimate(value=value, error_estimate=error, method="finite_difference", evaluations=4 * self.dim)
 
-    def fisher_information(self, n_samples: int = 200000, seed: int | None = 0) -> np.ndarray:
+    def monte_carlo_mean_parameters(
+        self, n_samples: int = 200000, seed: int | None = 0
+    ) -> NumericalEstimate:
+        """Estimate ``E[T]`` by sampling and report its elementwise standard error."""
+        count = _sample_count(n_samples)
+        samples = self.distribution.sampler(seed).sample(count)
+        stats = np.asarray(self.engine.to_numpy(self.sufficient_statistics(samples)), dtype=np.float64)
+        if stats.shape != (count, self.dim) or not np.all(np.isfinite(stats)):
+            raise ValueError("sufficient statistics must be a finite (n_samples, dim) matrix.")
+        value = stats.mean(axis=0)
+        error = stats.std(axis=0, ddof=1) / np.sqrt(float(count))
+        return NumericalEstimate(
+            value=value,
+            error_estimate=error,
+            method="monte_carlo",
+            evaluations=count,
+            n_samples=count,
+        )
+
+    def estimate_mean_parameters(
+        self,
+        *,
+        method: str = "auto",
+        eps: float = 1.0e-6,
+        n_samples: int = 200000,
+        seed: int | None = 0,
+        error_tolerance: float | None = None,
+    ) -> NumericalEstimate:
+        """Return mean parameters with explicit method and numerical-error provenance."""
+        selected = str(method).strip().lower()
+        if selected == "auto":
+            if self.spec.analytic_mean_parameters is not None:
+                selected = "analytic"
+            elif self.spec.log_partition_from_natural is not None and callable(getattr(self.engine, "gradient", None)):
+                selected = "autodiff"
+            elif callable(getattr(type(self.distribution), "exp_family_from_natural", None)):
+                selected = "finite_difference"
+            else:
+                selected = "monte_carlo"
+        if selected == "analytic":
+            estimate = NumericalEstimate(self.analytic_mean_parameters(), np.zeros(self.dim), selected, 1)
+        elif selected == "autodiff":
+            estimate = NumericalEstimate(self.autodiff_mean_parameters(), None, selected, 1)
+        elif selected == "finite_difference":
+            estimate = self.finite_difference_mean_parameters(eps)
+        elif selected == "monte_carlo":
+            estimate = self.monte_carlo_mean_parameters(n_samples, seed)
+        else:
+            raise ValueError("method must be one of: auto, analytic, autodiff, finite_difference, monte_carlo.")
+        _enforce_error_tolerance(estimate, error_tolerance)
+        return estimate
+
+    def mean_parameters(
+        self,
+        eps: float = 1.0e-6,
+        n_samples: int = 200000,
+        seed: int | None = 0,
+        *,
+        method: str = "auto",
+        error_tolerance: float | None = None,
+    ) -> np.ndarray:
+        """Return ``grad A = E[T]`` using an explicit or automatically selected method.
+
+        Use :meth:`estimate_mean_parameters` when method/error provenance is needed.
+        ``auto`` prefers declared analytic and autodiff maps, then guarded finite
+        differences, and finally Monte Carlo.
+        """
+        return self.estimate_mean_parameters(
+            method=method,
+            eps=eps,
+            n_samples=n_samples,
+            seed=seed,
+            error_tolerance=error_tolerance,
+        ).value
+
+    def estimate_fisher_information(
+        self,
+        n_samples: int = 200000,
+        seed: int | None = 0,
+        *,
+        error_tolerance: float | None = None,
+    ) -> NumericalEstimate:
         """Return the Fisher information in natural coordinates, ``I(eta) = Cov[T(x)] = grad^2 A(eta)``.
 
         For an exponential family the Fisher information with respect to the natural parameters is
@@ -196,10 +366,38 @@ class ExponentialFamilyForm:
         approximate, but universal for any samplable family -- and returned as a ``(dim, dim)``
         symmetric positive-semidefinite matrix.
         """
-        samples = self.distribution.sampler(seed).sample(int(n_samples))
+        count = _sample_count(n_samples)
+        samples = self.distribution.sampler(seed).sample(count)
         stats = np.asarray(self.engine.to_numpy(self.sufficient_statistics(samples)), dtype=np.float64)
-        cov = np.cov(stats, rowvar=False)
-        return np.asarray(cov, dtype=np.float64).reshape(self.dim, self.dim)
+        if stats.shape != (count, self.dim) or not np.all(np.isfinite(stats)):
+            raise ValueError("sufficient statistics must be a finite (n_samples, dim) matrix.")
+        centered = stats - stats.mean(axis=0)
+        products = centered[:, :, None] * centered[:, None, :]
+        cov = products.sum(axis=0) / float(count - 1)
+        error = products.std(axis=0, ddof=1) / np.sqrt(float(count))
+        estimate = NumericalEstimate(
+            value=cov,
+            error_estimate=error,
+            method="monte_carlo",
+            evaluations=count,
+            n_samples=count,
+        )
+        _enforce_error_tolerance(estimate, error_tolerance)
+        return estimate
+
+    def fisher_information(
+        self,
+        n_samples: int = 200000,
+        seed: int | None = 0,
+        *,
+        error_tolerance: float | None = None,
+    ) -> np.ndarray:
+        """Return a Monte-Carlo Fisher estimate; use ``estimate_fisher_information`` for its error."""
+        return self.estimate_fisher_information(
+            n_samples=n_samples,
+            seed=seed,
+            error_tolerance=error_tolerance,
+        ).value
 
     def from_natural(self, eta: Any) -> ProbabilityDistribution | None:
         """Return ``theta(eta)`` as a reconstructed distribution, or ``None``.

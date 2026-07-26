@@ -18,6 +18,20 @@ from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 
 
 class ExponentialFamilyFisherTest(unittest.TestCase):
+    def test_sample_budget_and_error_receipt(self):
+        form = to_exponential_family(ExponentialDistribution(1.0))
+        for invalid in (0, 1, -1):
+            with self.subTest(n_samples=invalid):
+                with self.assertRaises(ValueError):
+                    form.fisher_information(n_samples=invalid)
+        with self.assertRaises(TypeError):
+            form.fisher_information(n_samples=2.5)
+
+        estimate = form.estimate_fisher_information(n_samples=10, seed=4)
+        self.assertEqual(estimate.value.shape, (1, 1))
+        self.assertEqual(estimate.error_estimate.shape, (1, 1))
+        self.assertTrue(np.all(np.isfinite(estimate.error_estimate)))
+
     def test_exponential_matches_closed_form(self):
         # ExponentialDistribution is parameterized by its mean beta, so Var[x] = beta^2.
         beta = 1.5
