@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
@@ -153,6 +154,29 @@ def test_incomplete_checkpoint_is_never_loaded(tmp_path):
 
     with pytest.raises(RuntimeError, match="incomplete"):
         load_training_state(model, optimizer, str(tmp_path))
+
+
+def test_checkpoint_generations_are_fresh_and_integrity_is_checked_before_mutation(tmp_path):
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    save_training_state(model, optimizer, str(tmp_path), step=1)
+    first = json.loads((tmp_path / "CURRENT").read_text())["generation"]
+    save_training_state(model, optimizer, str(tmp_path), step=2)
+    second = json.loads((tmp_path / "CURRENT").read_text())["generation"]
+    assert first != second
+    assert (tmp_path / first / "_SUCCESS").is_file()
+    assert (tmp_path / second / "_SUCCESS").is_file()
+
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+    before = [parameter.detach().clone() for parameter in model.parameters()]
+    sidecar = tmp_path / second / "rank-00000.json"
+    sidecar.write_bytes(sidecar.read_bytes() + b" ")
+    with pytest.raises(RuntimeError, match="integrity validation"):
+        load_training_state(model, optimizer, str(tmp_path))
+    for expected, actual in zip(before, model.parameters()):
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
 def test_failed_replacement_save_leaves_the_old_checkpoint_fully_loadable(tmp_path, monkeypatch):
