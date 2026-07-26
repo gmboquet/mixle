@@ -1046,6 +1046,24 @@ def _auto_parallel(n: int) -> bool:
     return numba.get_num_threads() > 1
 
 
+def _validated_fused_weights(weights: Any, n_rows: int) -> np.ndarray:
+    """Return a finite one-dimensional weight vector aligned with encoded rows."""
+    try:
+        result = np.asarray(weights, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("fused accumulation weights must be a numeric one-dimensional array.") from exc
+    if result.ndim != 1:
+        raise ValueError("fused accumulation weights must be one-dimensional.")
+    if result.shape[0] != int(n_rows):
+        raise ValueError(
+            "fused accumulation has %d encoded rows but %d weights."
+            % (n_rows, result.shape[0])
+        )
+    if not np.all(np.isfinite(result)):
+        raise ValueError("fused accumulation weights must contain only finite values.")
+    return np.ascontiguousarray(result)
+
+
 def _emit(plan: FusedPlan, acc_suffix: str = "") -> dict[str, list[str]]:
     """Per-leaf source fragments shared by the scorer and the E-step.
 
@@ -1408,7 +1426,7 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
             + f["param_args"]
             + ["weights", "logw", "comp_counts", *f["acc_args"], *extra, "llbuf", "out_ll", "invalid_rows"]
         )
-        lines = ["def _estep(%s):" % args, "    n = weights.shape[0]", "    kc = logw.shape[0]"]
+        lines = ["def _estep(%s):" % args, "    n = invalid_rows.shape[0]", "    kc = logw.shape[0]"]
         if plan.needs_responsibilities and not plan.has_bridge:
             lines.append("    R = np.empty((n, kc))")  # read back by the matrix BLAS / chain post passes
         lines += ["    " + ln for ln in f["precompute"]]
@@ -1492,7 +1510,7 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
                 "n_chunks",
             ]
         )
-        lines = ["def _estep_par(%s):" % args, "    n = weights.shape[0]", "    kc = logw.shape[0]"]
+        lines = ["def _estep_par(%s):" % args, "    n = invalid_rows.shape[0]", "    kc = logw.shape[0]"]
         if plan.needs_responsibilities and not plan.has_bridge:
             lines.append("    R = np.empty((n, kc))")
         lines += ["    " + ln for ln in f["precompute"]]
@@ -1770,6 +1788,7 @@ def fused_accumulate(
         raise ValueError("%s is not a fusible E-step (an unsupported leaf)." % type(model).__name__)
     K = plan.num_components
     data_arrays, param_arrays, tab_ctx, n = _data_and_params(model, plan, enc, compute_dtype)
+    weights = _validated_fused_weights(weights, n)
     if parallel is None:
         parallel = _auto_parallel(n)
     nc = _n_chunks(n) if parallel else 0
@@ -1849,7 +1868,7 @@ def fused_accumulate(
         _compile_estep(plan, parallel=True)(
             *data_arrays,
             *param_arrays,
-            np.asarray(weights, dtype=np.float64),
+            weights,
             logw,
             comp_counts,
             *acc_arrays,
@@ -1875,7 +1894,7 @@ def fused_accumulate(
         _compile_estep(plan)(
             *data_arrays,
             *param_arrays,
-            np.asarray(weights, dtype=np.float64),
+            weights,
             logw,
             comp_counts,
             *acc_arrays,
