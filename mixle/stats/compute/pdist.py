@@ -4,6 +4,7 @@ ConditionalSampler, and DistributionSampler for classes of the mixle.stats.
 
 """
 
+import hashlib
 import itertools
 import math
 import operator
@@ -1339,41 +1340,100 @@ def _encoded_nbytes(x: Any, seen: set[int]) -> int:
 _KEY_ATTRS = ("key", "keys", "weight_key", "comp_key", "init_key", "trans_key", "state_key")
 
 
+def _canonical_key(x: Any) -> tuple[str, Any]:
+    """Return a typed, equality-stable representation of one permitted scalar key."""
+    if isinstance(x, np.generic):
+        x = x.item()
+    if isinstance(x, str):
+        return "str", x
+    if isinstance(x, bytes):
+        return "bytes", x
+    if isinstance(x, bool):
+        return "bool", x
+    if isinstance(x, int):
+        return "int", x
+    if isinstance(x, float):
+        if math.isnan(x):
+            return "float", "nan"
+        if math.isinf(x):
+            return "float", "+inf" if x > 0.0 else "-inf"
+        if x == 0.0:
+            return "float", "0"
+        return "float", x.hex()
+    raise KeyValidationError(
+        "Key values must be scalar str, bytes, bool, int, float, or NumPy scalar; got %s."
+        % type(x).__name__
+    )
+
+
 def _is_key_value(x: Any) -> bool:
-    """Return True for scalar key values used by accumulator key_merge methods."""
+    """Return True for permitted scalar key values used by key_merge methods."""
     if x is None:
         return False
-    if isinstance(x, (str, int, float, bytes)):
-        return True
-    return False
+    try:
+        _canonical_key(x)
+    except KeyValidationError:
+        return False
+    return True
 
 
-def _freeze_for_signature(x: Any) -> Any:
-    """Convert common mutable/numpy values into a hashable compatibility shape."""
+def _freeze_for_signature(x: Any, seen: set[int] | None = None) -> Any:
+    """Convert result-affecting state into a deterministic hashable signature."""
+    if seen is None:
+        seen = set()
+    if isinstance(x, np.generic):
+        x = x.item()
     if isinstance(x, np.ndarray):
-        return ("ndarray", tuple(x.shape), str(x.dtype))
+        if x.dtype.hasobject:
+            content = _freeze_for_signature(x.tolist(), seen)
+        else:
+            contiguous = np.ascontiguousarray(x)
+            content = hashlib.sha256(memoryview(contiguous).cast("B")).hexdigest()
+        return "ndarray", tuple(x.shape), x.dtype.str, content
+    if isinstance(x, float):
+        return "float", _canonical_key(x)[1]
+    if isinstance(x, (str, bytes, bool, int, type(None))):
+        return type(x).__name__, x
+
+    obj_id = id(x)
+    if obj_id in seen:
+        return "cycle", type(x).__module__, type(x).__qualname__
     if isinstance(x, dict):
-        return ("dict", tuple(sorted((repr(k), _freeze_for_signature(v)) for k, v in x.items())))
+        seen.add(obj_id)
+        items = [(_freeze_for_signature(k, seen), _freeze_for_signature(v, seen)) for k, v in x.items()]
+        seen.remove(obj_id)
+        return "dict", tuple(sorted(items, key=repr))
     if isinstance(x, (list, tuple)):
-        return (type(x).__name__, tuple(_freeze_for_signature(v) for v in x))
-    if isinstance(x, set):
-        return ("set", tuple(sorted(repr(v) for v in x)))
-    if isinstance(x, (str, int, float, bool, type(None))):
-        return (type(x).__name__, repr(x))
+        seen.add(obj_id)
+        values = tuple(_freeze_for_signature(v, seen) for v in x)
+        seen.remove(obj_id)
+        return type(x).__name__, values
+    if isinstance(x, (set, frozenset)):
+        seen.add(obj_id)
+        values = tuple(sorted((_freeze_for_signature(v, seen) for v in x), key=repr))
+        seen.remove(obj_id)
+        return type(x).__name__, values
+    if callable(x):
+        return "callable", getattr(x, "__module__", None), getattr(x, "__qualname__", type(x).__qualname__)
     if hasattr(x, "__dict__"):
-        return _object_signature(x)
-    return (type(x).__module__, type(x).__qualname__, repr(x))
+        return _object_signature(x, seen)
+    return type(x).__module__, type(x).__qualname__, repr(x)
 
 
-def _object_signature(x: Any) -> Any:
-    """Best-effort structural signature for estimator compatibility checks."""
+def _object_signature(x: Any, seen: set[int] | None = None) -> Any:
+    """Structural signature containing all result-affecting object state."""
+    if seen is None:
+        seen = set()
+    obj_id = id(x)
+    if obj_id in seen:
+        return "cycle", type(x).__module__, type(x).__qualname__
+    seen.add(obj_id)
     values = []
     for name, value in sorted(vars(x).items()):
         if name in ("name", "key", "keys", "weight_key", "comp_key", "init_key", "trans_key", "state_key"):
             continue
-        if name.startswith("_"):
-            continue
-        values.append((name, _freeze_for_signature(value)))
+        values.append((name, _freeze_for_signature(value, seen)))
+    seen.remove(obj_id)
     return (type(x).__module__, type(x).__qualname__, tuple(values))
 
 
@@ -1385,17 +1445,19 @@ def _accumulator_signature(accumulator: StatisticAccumulator, role: str) -> Any:
     return (type(accumulator).__module__, type(accumulator).__qualname__, role, value_sig)
 
 
-def _register_key(registry: dict[Any, tuple[Any, str]], key: Any, signature: Any, path: str) -> None:
-    old = registry.get(key)
+def _register_key(registry: dict[Any, tuple[Any, str, int, Any]], key: Any, signature: Any, path: str) -> None:
+    canonical = _canonical_key(key)
+    old = registry.get(canonical)
     if old is None:
-        registry[key] = (signature, path)
+        registry[canonical] = (signature, path, 1, key)
         return
-    old_signature, old_path = old
+    old_signature, old_path, count, original = old
     if old_signature != signature:
         raise KeyValidationError(
             "Incompatible keyed sufficient-statistic sites for key %r: %s has %r, "
-            "but %s has %r." % (key, old_path, old_signature, path, signature)
+            "but %s has %r." % (original, old_path, old_signature, path, signature)
         )
+    registry[canonical] = (old_signature, old_path, count + 1, original)
 
 
 def _iter_children(x: Any) -> list[Any]:
@@ -1407,7 +1469,7 @@ def _iter_children(x: Any) -> list[Any]:
 
 
 def _collect_estimator_keys(
-    estimator: ParameterEstimator, registry: dict[Any, tuple[Any, str]], path: str, visited: set[int]
+    estimator: ParameterEstimator, registry: dict[Any, tuple[Any, str, int, Any]], path: str, visited: set[int]
 ) -> None:
     obj_id = id(estimator)
     if obj_id in visited:
@@ -1419,6 +1481,8 @@ def _collect_estimator_keys(
         if not hasattr(estimator, attr):
             continue
         keys = getattr(estimator, attr)
+        if keys is None:
+            continue
         if _is_key_value(keys):
             _register_key(
                 registry,
@@ -1428,6 +1492,8 @@ def _collect_estimator_keys(
             )
         elif isinstance(keys, (list, tuple)):
             for i, key in enumerate(keys):
+                if key is None or isinstance(key, (list, tuple)):
+                    continue
                 if _is_key_value(key):
                     _register_key(
                         registry,
@@ -1435,6 +1501,10 @@ def _collect_estimator_keys(
                         (type(estimator).__module__, type(estimator).__qualname__, "%s[%d]" % (attr, i), estimator_sig),
                         "%s.%s[%d]" % (path, attr, i),
                     )
+                else:
+                    _canonical_key(key)
+        else:
+            _canonical_key(keys)
 
     for name, value in sorted(vars(estimator).items()):
         for i, child in enumerate(_iter_children(value)):
@@ -1445,7 +1515,7 @@ def _collect_estimator_keys(
 
 
 def _collect_accumulator_keys(
-    accumulator: StatisticAccumulator, registry: dict[Any, tuple[Any, str]], path: str, visited: set[int]
+    accumulator: StatisticAccumulator, registry: dict[Any, tuple[Any, str, int, Any]], path: str, visited: set[int]
 ) -> None:
     obj_id = id(accumulator)
     if obj_id in visited:
@@ -1456,8 +1526,25 @@ def _collect_accumulator_keys(
         if not hasattr(accumulator, attr):
             continue
         key = getattr(accumulator, attr)
+        if key is None:
+            continue
         if _is_key_value(key):
             _register_key(registry, key, _accumulator_signature(accumulator, attr), "%s.%s" % (path, attr))
+        elif isinstance(key, (list, tuple)):
+            for index, item in enumerate(key):
+                if item is None or isinstance(item, (list, tuple)):
+                    continue
+                if _is_key_value(item):
+                    _register_key(
+                        registry,
+                        item,
+                        _accumulator_signature(accumulator, "%s[%d]" % (attr, index)),
+                        "%s.%s[%d]" % (path, attr, index),
+                    )
+                else:
+                    _canonical_key(item)
+        else:
+            _canonical_key(key)
 
     for name, value in sorted(vars(accumulator).items()):
         if isinstance(value, StatisticAccumulator):
@@ -1514,12 +1601,54 @@ def validate_estimator_keys(estimator: ParameterEstimator) -> None:
     family can still perform stricter checks in its own factory if needed.
     """
     _flag_annotation_mismatched_keys(estimator, type(estimator).__name__, set())
-    estimator_registry: dict[Any, tuple[Any, str]] = {}
+    estimator_registry: dict[Any, tuple[Any, str, int, Any]] = {}
     _collect_estimator_keys(estimator, estimator_registry, type(estimator).__name__, set())
 
-    accumulator_registry: dict[Any, tuple[Any, str]] = {}
+    accumulator_registry: dict[Any, tuple[Any, str, int, Any]] = {}
     accumulator = estimator.accumulator_factory().make()
     _collect_accumulator_keys(accumulator, accumulator_registry, type(accumulator).__name__, set())
+
+    missing_from_accumulator = set(estimator_registry) - set(accumulator_registry)
+    missing_from_estimator = set(accumulator_registry) - set(estimator_registry)
+    if missing_from_accumulator or missing_from_estimator:
+        def describe(registry: dict[Any, tuple[Any, str, int, Any]], keys: set[Any]) -> list[str]:
+            return ["%r at %s" % (registry[key][3], registry[key][1]) for key in sorted(keys, key=repr)]
+
+        raise KeyValidationError(
+            "Estimator/accumulator keyed sites disagree: estimator-only=%s; accumulator-only=%s."
+            % (
+                describe(estimator_registry, missing_from_accumulator),
+                describe(accumulator_registry, missing_from_estimator),
+            )
+        )
+
+    def protocol_family(signature: Any) -> tuple[str, str]:
+        module, qualname = signature[0], signature[1]
+        for suffix in ("Estimator", "Accumulator", "AccumulatorFactory"):
+            if qualname.endswith(suffix):
+                qualname = qualname[: -len(suffix)]
+                break
+        return module, qualname
+
+    for canonical in estimator_registry:
+        estimator_signature, estimator_path, estimator_count, original = estimator_registry[canonical]
+        accumulator_signature, accumulator_path, accumulator_count, _ = accumulator_registry[canonical]
+        if estimator_count != accumulator_count:
+            raise KeyValidationError(
+                "Key %r appears at %d estimator sites but %d accumulator merge sites (%s versus %s)."
+                % (original, estimator_count, accumulator_count, estimator_path, accumulator_path)
+            )
+        if protocol_family(estimator_signature) != protocol_family(accumulator_signature):
+            raise KeyValidationError(
+                "Key %r routes estimator family %r at %s to accumulator family %r at %s."
+                % (
+                    original,
+                    protocol_family(estimator_signature),
+                    estimator_path,
+                    protocol_family(accumulator_signature),
+                    accumulator_path,
+                )
+            )
 
 
 def estimator_has_keys(estimator: ParameterEstimator) -> bool:
@@ -1529,14 +1658,14 @@ def estimator_has_keys(estimator: ParameterEstimator) -> bool:
     cannot run it (or whose update decomposition conflicts with pooling, e.g. block-EM's sparse
     per-component M-steps) must refuse or reroute keyed estimators rather than silently untie them.
     """
-    registry: dict[Any, tuple[Any, str]] = {}
+    registry: dict[Any, tuple[Any, str, int, Any]] = {}
     _collect_estimator_keys(estimator, registry, type(estimator).__name__, set())
     return bool(registry)
 
 
 def validate_accumulator_keys(accumulator: StatisticAccumulator) -> None:
     """Validate keyed sites in an already-created accumulator tree."""
-    accumulator_registry: dict[Any, tuple[Any, str]] = {}
+    accumulator_registry: dict[Any, tuple[Any, str, int, Any]] = {}
     _collect_accumulator_keys(accumulator, accumulator_registry, type(accumulator).__name__, set())
 
 
