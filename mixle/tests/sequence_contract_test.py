@@ -2,13 +2,15 @@
 
 import pickle
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
-from mixle.inference import seq_estimate
+from mixle.inference import estimate, initialize, seq_estimate, seq_initialize
 from mixle.stats import GaussianDistribution, GaussianEstimator, log_density, seq_encode
+from mixle.stats.compute import sequence as sequence_module
 from mixle.stats.compute.pdist import DataSequenceEncoder
-from mixle.stats.compute.sequence import _partition_random_states
+from mixle.stats.compute.sequence import _partition_random_states, seq_log_density, seq_log_density_sum
 
 
 class _DroppingEncoder(DataSequenceEncoder):
@@ -17,6 +19,68 @@ class _DroppingEncoder(DataSequenceEncoder):
 
     def __eq__(self, other):
         return isinstance(other, _DroppingEncoder)
+
+
+class _FakeBroadcast:
+    def __init__(self, value):
+        self.value = value
+        self.destroyed = False
+
+    def destroy(self):
+        self.destroyed = True
+
+
+class _FakeSparkContext:
+    def __init__(self):
+        self.broadcasts = []
+
+    def broadcast(self, value):
+        broadcast = _FakeBroadcast(value)
+        self.broadcasts.append(broadcast)
+        return broadcast
+
+
+class _FakeRDD:
+    def __init__(self, partitions, context=None):
+        self.partitions = [list(partition) for partition in partitions]
+        self.context = context or _FakeSparkContext()
+        self.checkpointed = False
+
+    def _with(self, partitions):
+        return type(self)(partitions, self.context)
+
+    def getNumPartitions(self):
+        return len(self.partitions)
+
+    def glom(self):
+        return self._with([[list(partition)] for partition in self.partitions])
+
+    def map(self, function):
+        return self._with([[function(value) for value in partition] for partition in self.partitions])
+
+    def mapPartitions(self, function):
+        return self._with([list(function(iter(partition))) for partition in self.partitions])
+
+    def mapPartitionsWithIndex(self, function, _preserves_partitioning=False):
+        return self._with(
+            [list(function(index, iter(partition))) for index, partition in enumerate(self.partitions)]
+        )
+
+    def collect(self):
+        return [value for partition in self.partitions for value in partition]
+
+    def reduce(self, function):
+        values = self.collect()
+        result = values[0]
+        for value in values[1:]:
+            result = function(result, value)
+        return result
+
+    def treeReduce(self, function):
+        return self.reduce(function)
+
+    def localCheckpoint(self):
+        self.checkpointed = True
 
 
 class SequenceContractTest(unittest.TestCase):
@@ -93,6 +157,54 @@ class SequenceContractTest(unittest.TestCase):
             _partition_random_states(seeds, 3)
         with self.assertRaises(TypeError):
             _partition_random_states(pickle.dumps(seeds), 0)
+
+    def test_spark_drivers_release_broadcasts_without_mutating_input_lineage(self):
+        raw = _FakeRDD([[1.0, 2.0], [3.0]])
+        estimator = GaussianEstimator()
+        with patch.object(sequence_module, "RDD_TYPES", (_FakeRDD,)):
+            encoded = seq_encode(raw, model=self.model)
+            self.assertEqual(raw.context.broadcasts, [])
+
+            operations = (
+                lambda: seq_log_density(encoded, self.model),
+                lambda: seq_log_density_sum(encoded, self.model),
+                lambda: seq_estimate(encoded, estimator, self.model),
+                lambda: seq_initialize(encoded, estimator, np.random.RandomState(3), p=1.0),
+                lambda: initialize(raw, estimator, np.random.RandomState(3), p=1.0),
+                lambda: estimate(raw, estimator, self.model),
+            )
+            for operation in operations:
+                before = len(raw.context.broadcasts)
+                operation()
+                owned = raw.context.broadcasts[before:]
+                self.assertTrue(owned)
+                self.assertTrue(all(broadcast.destroyed for broadcast in owned))
+
+        self.assertFalse(raw.checkpointed)
+        self.assertFalse(encoded.checkpointed)
+
+    def test_broadcast_cleanup_does_not_mask_the_primary_failure(self):
+        class BrokenBroadcast(_FakeBroadcast):
+            def destroy(self):
+                raise RuntimeError("cleanup failed")
+
+        class BrokenContext(_FakeSparkContext):
+            def broadcast(self, value):
+                broadcast = BrokenBroadcast(value)
+                self.broadcasts.append(broadcast)
+                return broadcast
+
+        class BrokenRDD(_FakeRDD):
+            def mapPartitions(self, _function):
+                return self
+
+            def collect(self):
+                raise ValueError("primary failure")
+
+        raw = BrokenRDD([[1.0]], BrokenContext())
+        with patch.object(sequence_module, "RDD_TYPES", (BrokenRDD,)):
+            with self.assertRaisesRegex(ValueError, "primary failure"):
+                seq_log_density(raw, self.model)
 
 
 if __name__ == "__main__":
