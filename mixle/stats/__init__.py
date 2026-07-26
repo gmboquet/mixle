@@ -63,6 +63,7 @@ __all__ = [
     "ExponentialFamilySpec",
     "ParameterSpec",
     "StatisticSpec",
+    "BackendCapabilityUnavailableError",
     "BackendScoringError",
     "backend_log_density_sum",
     "backend_seq_component_log_density",
@@ -1008,6 +1009,7 @@ from mixle.stats.combinator.zero_inflated import (
     ZeroInflatedSampler,
 )
 from mixle.stats.compute.backend import (
+    BackendCapabilityUnavailableError,
     BackendScoringError,
     backend_log_density_sum,
     backend_seq_component_log_density,
