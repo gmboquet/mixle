@@ -65,6 +65,96 @@ def _spark_context():
     return spark.sparkContext
 
 
+class _TrackedBroadcast:
+    def __init__(self, value, *, destroy_error=None):
+        self.value = value
+        self.destroy_error = destroy_error
+        self.destroyed = 0
+
+    def destroy(self):
+        self.destroyed += 1
+        if self.destroy_error is not None:
+            raise self.destroy_error
+
+
+class _FailingCollectedRDD:
+    def __init__(self, *, collect_error, cache_error=None, unpersist_error=None):
+        self.collect_error = collect_error
+        self.cache_error = cache_error
+        self.unpersist_error = unpersist_error
+        self.unpersisted = 0
+
+    def cache(self):
+        if self.cache_error is not None:
+            raise self.cache_error
+        return self
+
+    def collect(self):
+        raise self.collect_error
+
+    def unpersist(self):
+        self.unpersisted += 1
+        if self.unpersist_error is not None:
+            raise self.unpersist_error
+
+
+class _TrackedSparkContext:
+    def __init__(self):
+        self.broadcasts = []
+
+    def broadcast(self, value):
+        broadcast = _TrackedBroadcast(value)
+        self.broadcasts.append(broadcast)
+        return broadcast
+
+
+class _StreamingFailureRDD:
+    def __init__(self, temp):
+        self.context = _TrackedSparkContext()
+        self.temp = temp
+
+    def mapPartitionsWithIndex(self, _function, _preserves_partitioning):
+        return self.temp
+
+
+class SparkCleanupContractTest(unittest.TestCase):
+    def _handle(self, temp):
+        handle = SparkEncodedData.__new__(SparkEncodedData)
+        handle.enc_rdd = _StreamingFailureRDD(temp)
+        return handle
+
+    def test_collect_failure_releases_all_owned_spark_resources(self):
+        temp = _FailingCollectedRDD(collect_error=RuntimeError("collect failed"))
+        handle = self._handle(temp)
+        with self.assertRaisesRegex(RuntimeError, "collect failed"):
+            handle.pysp_stream_accumulate(GaussianEstimator(), GaussianDistribution(0.0, 1.0))
+        self.assertEqual(temp.unpersisted, 1)
+        self.assertEqual([item.destroyed for item in handle.enc_rdd.context.broadcasts], [1, 1])
+
+    def test_cache_failure_still_releases_the_intermediate_and_broadcasts(self):
+        temp = _FailingCollectedRDD(
+            collect_error=AssertionError("collect must not run"),
+            cache_error=RuntimeError("cache failed"),
+        )
+        handle = self._handle(temp)
+        with self.assertRaisesRegex(RuntimeError, "cache failed"):
+            handle.pysp_stream_accumulate(GaussianEstimator(), GaussianDistribution(0.0, 1.0))
+        self.assertEqual(temp.unpersisted, 1)
+        self.assertEqual([item.destroyed for item in handle.enc_rdd.context.broadcasts], [1, 1])
+
+    def test_computation_and_cleanup_failures_are_reported_together(self):
+        temp = _FailingCollectedRDD(
+            collect_error=RuntimeError("collect failed"),
+            unpersist_error=RuntimeError("unpersist failed"),
+        )
+        handle = self._handle(temp)
+        with self.assertRaises(BaseExceptionGroup) as raised:
+            handle.pysp_stream_accumulate(GaussianEstimator(), GaussianDistribution(0.0, 1.0))
+        messages = [str(error) for error in raised.exception.exceptions]
+        self.assertEqual(messages, ["collect failed", "unpersist failed"])
+        self.assertEqual([item.destroyed for item in handle.enc_rdd.context.broadcasts], [1, 1])
+
+
 class SparkEncodedDataTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
