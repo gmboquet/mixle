@@ -1,25 +1,31 @@
-"""``scorecard`` measures a deployed task route against its teacher.
+"""``scorecard`` measures a deployed task route against teacher and task truth.
 
 Point it at a deployed :class:`~mixle.task.solve.Solution` (or a Router), the
-teacher it replaces, and a held-out test set. The result measures end-to-end
-accuracy against the teacher, local-answer agreement, escalation rate,
-wall-clock latency for both sides, artifact size, and, when costs are supplied,
-realized dollars per thousand requests::
+teacher it replaces, and a held-out test set. Optionally provide an independent
+``task_truth`` callable or aligned label panel to measure real end-to-end
+accuracy. Teacher agreement remains a separate distillation metric. Teacher
+outputs are cached from the same calls used for latency, and realized cost
+charges the student attempt on every request plus the teacher on escalations::
 
-    card = scorecard(sol, teacher, test_inputs, student_cost=0.0001, teacher_cost=0.03)
+    card = scorecard(
+        sol, teacher, test_inputs, task_truth=gold_labels,
+        student_cost=0.0001, teacher_cost=0.03,
+    )
     print(card.table())
 
     metric                     student      teacher
-    end-to-end accuracy         1.000          —      (escalations answered by the teacher)
-    local agreement             0.964          —
+    end-to-end accuracy         0.982          —      (against task truth)
+    served teacher agreement    0.991          —
+    local teacher agreement     0.964          —
     escalation rate             0.11           —
     p50 latency                 0.08 ms      2.1 ms
     artifact size               210 KB         —
     cost / 1k requests          $3.41        $30.00
 
-"End-to-end accuracy" counts escalated requests as correct because the teacher
-answered them. "Local agreement" is the student alone on requests it chose to
-answer. Reporting both avoids hiding local-model errors behind the fallback.
+Without ``task_truth``, end-to-end accuracy is explicitly unmeasured rather
+than declaring every teacher escalation correct by construction. ``teacher_agreement``
+reports agreement of the served route (local answer or teacher fallback) with
+the cached teacher output; ``local_agreement`` covers locally answered rows only.
 
 Every solve shape gets receipts, with agreement meaning that shape's own promise: classification =
 exact label match; :class:`~mixle.task.regress.RegressionSolution` = within the caller's ``tol``;
@@ -31,7 +37,9 @@ numeric field within its own ``tol``.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from numbers import Real
 from typing import Any
 
 import numpy as np
@@ -51,8 +59,11 @@ class Scorecard:
 
     task: str
     n_test: int
-    end_to_end_accuracy: float
+    end_to_end_accuracy: float | None
+    teacher_agreement: float
     local_agreement: float
+    local_accuracy: float | None
+    truth_source: str
     escalation_rate: float
     student_p50_ms: float
     student_p95_ms: float
@@ -67,13 +78,17 @@ class Scorecard:
 
     def table(self) -> str:
         """Render a compact comparison table for local and teacher service metrics."""
+        accuracy = "not measured" if self.end_to_end_accuracy is None else f"{self.end_to_end_accuracy:.3f}"
         rows: list[tuple[str, str, str]] = [
-            ("end-to-end accuracy", f"{self.end_to_end_accuracy:.3f}", "—"),
-            ("local agreement", f"{self.local_agreement:.3f}", "—"),
+            ("end-to-end accuracy (task truth)", accuracy, "—"),
+            ("served teacher agreement", f"{self.teacher_agreement:.3f}", "—"),
+            ("local teacher agreement", f"{self.local_agreement:.3f}", "—"),
             ("escalation rate", f"{self.escalation_rate:.3f}", "—"),
             ("p50 latency", f"{self.student_p50_ms:.2f} ms", f"{self.teacher_p50_ms:.2f} ms"),
             ("p95 latency", f"{self.student_p95_ms:.2f} ms", "—"),
         ]
+        if self.local_accuracy is not None:
+            rows.insert(3, ("local accuracy (task truth)", f"{self.local_accuracy:.3f}", "—"))
         if self.artifact_bytes is not None:
             rows.append(("artifact size", _fmt_bytes(float(self.artifact_bytes)), "—"))
         if self.student_cost_per_1k is not None and self.teacher_cost_per_1k is not None:
@@ -139,31 +154,70 @@ def scorecard(
     teacher: Any,
     test_inputs: Any,
     *,
+    task_truth: Callable[[Any], Any] | Sequence[Any] | None = None,
     student_cost: float | None = None,
     teacher_cost: float | None = None,
     task: str = "task",
 ) -> Scorecard:
-    """Measure a deployed student against the teacher it replaces on held-out inputs (see module docstring).
+    """Measure a deployed route against its teacher and optional independent truth.
 
     Args:
         student: any solve shape — :class:`~mixle.task.solve.Solution`,
             :class:`~mixle.task.regress.RegressionSolution`, :class:`~mixle.task.multilabel.MultiLabelSolution`,
             :class:`~mixle.task.structured_out.StructuredSolution` (or anything exposing
             ``cascade.model.decide``) — the escalate-aware system under test.
-        teacher: the callable being replaced; also the accuracy reference.
-        test_inputs: held-out inputs (the teacher is called once per input for the reference labels).
-        student_cost / teacher_cost: optional per-request costs for the $/1k rows. The blended student
-            cost prices escalated requests at ``teacher_cost``.
+        teacher: the callable being replaced; used only as the distillation-agreement reference.
+        test_inputs: held-out inputs. The teacher is called exactly once per input; that call supplies
+            both the cached reference output and its latency.
+        task_truth: independent truth callable or an aligned sequence of gold outputs. When omitted,
+            ``end_to_end_accuracy`` is ``None`` rather than a tautological teacher-fallback score.
+        student_cost / teacher_cost: optional non-negative per-request costs. A served route costs
+            ``student_cost`` on every attempted request plus ``teacher_cost`` on every escalation.
         task: a label for the table header.
     """
+    if not callable(teacher):
+        raise TypeError("teacher must be callable")
+    if not isinstance(task, str) or not task:
+        raise ValueError("task must be a non-empty string")
+    if isinstance(test_inputs, (str, bytes)):
+        raise TypeError("test_inputs must be a sequence of requests")
     xs = list(test_inputs)
     if not xs:
         raise ValueError("scorecard needs a non-empty test set")
+    if (student_cost is None) != (teacher_cost is None):
+        raise ValueError("student_cost and teacher_cost must be provided together")
+    if student_cost is not None:
+        for value, name in ((student_cost, "student_cost"), (teacher_cost, "teacher_cost")):
+            if isinstance(value, bool) or not isinstance(value, Real) or not np.isfinite(value) or float(value) < 0.0:
+                raise ValueError(f"{name} must be a finite non-negative number")
+        student_cost, teacher_cost = float(student_cost), float(teacher_cost)
 
-    truth = [teacher(x) for x in xs]
+    teacher_outputs: list[Any] = []
+    t_lat: list[float] = []
+    for x in xs:
+        t0 = time.perf_counter()
+        teacher_outputs.append(teacher(x))
+        t_lat.append(time.perf_counter() - t0)
+
+    gold: list[Any] | None
+    if task_truth is None:
+        gold = None
+        truth_source = "not_measured"
+    elif callable(task_truth):
+        gold = [task_truth(x) for x in xs]
+        truth_source = "callable"
+    else:
+        if isinstance(task_truth, (str, bytes)):
+            raise TypeError("task_truth must be a callable or an aligned output sequence")
+        gold = list(task_truth)
+        if len(gold) != len(xs):
+            raise ValueError("task_truth must contain exactly one output per test input")
+        truth_source = "provided_panel"
 
     model = student.cascade.model if hasattr(student, "cascade") else student
     decide = _local_decider(student)
+    if not callable(decide):
+        raise TypeError("student must expose a callable local decision surface")
     local: list[Any] = []
     lat: list[float] = []
     for x in xs:
@@ -171,27 +225,72 @@ def scorecard(
         local.append(decide(x))
         lat.append(time.perf_counter() - t0)
 
-    t_lat: list[float] = []
-    for x in xs[: min(len(xs), 50)]:
-        t0 = time.perf_counter()
-        teacher(x)
-        t_lat.append(time.perf_counter() - t0)
-
     escalated = np.asarray([a is None for a in local])
     answered = ~escalated
     agree = (
-        float(np.mean([_agrees(student, a, y) for a, y, m in zip(local, truth, answered) if m]))
+        float(
+            np.mean(
+                [
+                    _agrees(student, answer, reference)
+                    for answer, reference, is_answered in zip(
+                        local,
+                        teacher_outputs,
+                        answered,
+                        strict=True,
+                    )
+                    if is_answered
+                ]
+            )
+        )
         if answered.any()
         else float("nan")
     )
-    end_to_end = float(np.mean([True if e else _agrees(student, a, y) for a, y, e in zip(local, truth, escalated)]))
+    served = [
+        reference if is_escalated else answer
+        for answer, reference, is_escalated in zip(
+            local,
+            teacher_outputs,
+            escalated,
+            strict=True,
+        )
+    ]
+    teacher_agreement = float(
+        np.mean(
+            [_agrees(student, output, reference) for output, reference in zip(served, teacher_outputs, strict=True)]
+        )
+    )
+    if gold is None:
+        end_to_end = None
+        local_accuracy = None
+    else:
+        end_to_end = float(
+            np.mean([_agrees(student, output, target) for output, target in zip(served, gold, strict=True)])
+        )
+        local_accuracy = (
+            float(
+                np.mean(
+                    [
+                        _agrees(student, answer, target)
+                        for answer, target, is_answered in zip(
+                            local,
+                            gold,
+                            answered,
+                            strict=True,
+                        )
+                        if is_answered
+                    ]
+                )
+            )
+            if answered.any()
+            else float("nan")
+        )
     esc_rate = float(escalated.mean())
 
     artifact_bytes = _artifact_bytes(student, model)
 
     s_1k = t_1k = None
     if student_cost is not None and teacher_cost is not None:
-        blended = (1.0 - esc_rate) * student_cost + esc_rate * teacher_cost
+        blended = student_cost + esc_rate * teacher_cost
         s_1k, t_1k = 1000.0 * blended, 1000.0 * teacher_cost
 
     lat_ms = 1e3 * np.asarray(lat)
@@ -199,7 +298,10 @@ def scorecard(
         task=task,
         n_test=len(xs),
         end_to_end_accuracy=end_to_end,
+        teacher_agreement=teacher_agreement,
         local_agreement=agree,
+        local_accuracy=local_accuracy,
+        truth_source=truth_source,
         escalation_rate=esc_rate,
         student_p50_ms=float(np.percentile(lat_ms, 50)),
         student_p95_ms=float(np.percentile(lat_ms, 95)),
