@@ -1097,8 +1097,44 @@ class DataSequenceEncoder(ABC):
         """Return the approximate in-memory byte size of an encoded payload."""
         return encoded_nbytes(x)
 
+    def row_count(self, x: Any) -> int:
+        """Return the number of observations represented by ``x``.
+
+        The default covers simple array/list encodings and structurally
+        aligned tuples/dicts. Encoders with flattened, ragged, or otherwise
+        specialized layouts must override this method so metadata wrappers can
+        verify counts instead of trusting a caller assertion.
+        """
+        count = _infer_encoded_row_count(x)
+        if count is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} must implement row_count() for its encoded payload layout"
+            )
+        return count
+
     @abstractmethod
     def __eq__(self, other: object) -> bool: ...
+
+
+def _infer_encoded_row_count(x: Any) -> int | None:
+    """Infer a leading observation count only when a payload is unambiguous."""
+    shape = getattr(x, "shape", None)
+    if shape is not None:
+        shape = tuple(shape)
+        return int(shape[0]) if shape else None
+    if isinstance(x, list) and all(
+        not isinstance(value, (dict, list, tuple, np.ndarray)) and not hasattr(value, "shape")
+        for value in x
+    ):
+        return len(x)
+    if isinstance(x, dict):
+        children = x.values()
+    elif isinstance(x, (list, tuple)):
+        children = x
+    else:
+        return None
+    counts = {count for value in children if (count := _infer_encoded_row_count(value)) is not None}
+    return counts.pop() if len(counts) == 1 else None
 
 
 def encoded_nbytes(x: Any) -> int:
