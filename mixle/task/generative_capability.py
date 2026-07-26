@@ -34,7 +34,19 @@ def validate_extraction_schema(record: dict[str, Any], source_text: str, fields:
     Returns a plain dict (``complete``, ``grounded``, ``missing``, ``ungrounded``) -- never a single
     pass/fail bit, so a caller can see exactly what failed.
     """
+    if not isinstance(record, dict):
+        raise TypeError("extracted record must be a dictionary")
+    if not isinstance(source_text, str):
+        raise TypeError("source_text must be a string")
+    if isinstance(fields, (str, bytes)):
+        raise TypeError("fields must be a sequence of field names")
     fields = list(fields)
+    if (
+        not fields
+        or any(not isinstance(field, str) or not field for field in fields)
+        or len(set(fields)) != len(fields)
+    ):
+        raise ValueError("fields must contain unique non-empty names")
     missing = [f for f in fields if f not in record or not record.get(f)]
     ungrounded = [f for f, v in record.items() if f in fields and v and str(v) not in source_text]
     return {
@@ -53,6 +65,8 @@ def _field_f1(pred: Sequence[dict[str, Any]], gold: Sequence[dict[str, Any]]) ->
     gold = list(gold)
     if len(pred) != len(gold):
         raise ValueError("prediction and gold record counts must match")
+    if not pred:
+        raise ValueError("field F1 requires at least one evaluated record")
     tp = fp = fn = 0
     for p, g in zip(pred, gold, strict=True):
         if not isinstance(p, dict) or not isinstance(g, dict):
@@ -77,13 +91,20 @@ def _schema_validity_rate(records: Sequence[dict[str, Any]], texts: Sequence[str
     if len(records) != len(texts):
         raise ValueError("record and source-text counts must match")
     if not records:
-        return 0.0
+        raise ValueError("schema validity requires at least one evaluated record")
     checks = [validate_extraction_schema(record, text, fields) for record, text in zip(records, texts, strict=True)]
     return float(np.mean([c["complete"] and c["grounded"] for c in checks]))
 
 
 def extractive_capture_profile(
-    student: Any, teacher: Any, texts: Sequence[str], suite: CapabilitySuite, *, fields: Sequence[str]
+    student: Any,
+    teacher: Any,
+    texts: Sequence[str],
+    suite: CapabilitySuite,
+    *,
+    fields: Sequence[str],
+    student_callable_mode: str = "batch",
+    teacher_callable_mode: str = "batch",
 ) -> dict[str, Any]:
     """The extraction-student capture profile: F1-against-gold and schema validity, not exact-match agreement.
 
@@ -101,12 +122,42 @@ def extractive_capture_profile(
     * ``"abstention"`` -- as in :func:`~mixle.task.capability.capture_profile`, if either side exposes a
       decision API.
     """
+    if not isinstance(suite, CapabilitySuite):
+        raise TypeError("suite must be a CapabilitySuite")
+    if isinstance(texts, (str, bytes)):
+        raise TypeError("texts must be a sequence of evaluation strings")
     texts = [str(t) for t in texts]
+    if not texts or any(not text for text in texts):
+        raise ValueError("extraction profiles require non-empty evaluation text")
+    if isinstance(fields, (str, bytes)):
+        raise TypeError("fields must be a sequence of field names")
     fields = list(fields)
-    gold = _predict(teacher, texts)
+    if (
+        not fields
+        or any(not isinstance(field, str) or not field for field in fields)
+        or len(set(fields)) != len(fields)
+    ):
+        raise ValueError("fields must contain unique non-empty names")
+    for kind, transforms in (
+        ("corruption", suite.corruptions),
+        ("invariance", suite.invariances),
+    ):
+        if any(
+            not isinstance(name, str) or not name or not callable(transform) for name, transform in transforms.items()
+        ):
+            raise ValueError(f"{kind} entries require non-empty names and callable transforms")
 
-    student_clean = _predict(student, texts)
+    def student_predictions(rows: list[str]) -> list[Any]:
+        return _predict(student, rows, callable_mode=student_callable_mode)
+
+    def teacher_predictions(rows: list[str]) -> list[Any]:
+        return _predict(teacher, rows, callable_mode=teacher_callable_mode)
+
+    gold = teacher_predictions(texts)
+
+    student_clean = student_predictions(texts)
     profile: dict[str, Any] = {
+        "n_evaluated": len(texts),
         "clean_f1": _field_f1(student_clean, gold),
         "schema_validity": {
             "student": _schema_validity_rate(student_clean, texts, fields),
@@ -118,8 +169,8 @@ def extractive_capture_profile(
     for name, corrupt in suite.corruptions.items():
         corrupted = [corrupt(t) for t in texts]
         corruptions[name] = {
-            "student_f1": _field_f1(_predict(student, corrupted), gold),
-            "teacher_f1": _field_f1(_predict(teacher, corrupted), gold),
+            "student_f1": _field_f1(student_predictions(corrupted), gold),
+            "teacher_f1": _field_f1(teacher_predictions(corrupted), gold),
         }
     profile["corruptions"] = corruptions
 
@@ -128,8 +179,8 @@ def extractive_capture_profile(
     for name, rewrite in suite.invariances.items():
         rewritten = [rewrite(t) for t in texts]
         invariances[name] = {
-            "student_f1": _field_f1(_predict(student, rewritten), student_clean),
-            "teacher_f1": _field_f1(_predict(teacher, rewritten), teacher_clean),
+            "student_f1": _field_f1(student_predictions(rewritten), student_clean),
+            "teacher_f1": _field_f1(teacher_predictions(rewritten), teacher_clean),
         }
     profile["invariances"] = invariances
 
