@@ -18,6 +18,7 @@ posterior/imputation over the missing entries (see those methods).
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Sequence
 from typing import Any
 
@@ -51,7 +52,9 @@ def marginalized(dist: Any, missing_value: Any = MISSING) -> Any:
     case."""
     from mixle.stats.combinator.optional import OptionalDistribution
 
-    return OptionalDistribution(dist, p=None, missing_value=missing_value)
+    wrapped = OptionalDistribution(dist, p=None, missing_value=missing_value)
+    wrapped._marginalized_by_helper = True
+    return wrapped
 
 
 def composite_with_missing(dists: Sequence[Any], missing_value: Any = MISSING) -> Any:
@@ -76,8 +79,17 @@ def marginalize_estimator_leaves(estimator: Any, missing_value: Any = MISSING) -
     from mixle.stats.combinator.optional import OptionalEstimator
 
     if isinstance(estimator, CompositeEstimator):
-        return CompositeEstimator([marginalize_estimator_leaves(c, missing_value) for c in estimator.estimators])
-    return OptionalEstimator(estimator, missing_value=missing_value, est_prob=False)
+        wrapped = copy.copy(estimator)
+        children = [
+            marginalize_estimator_leaves(child, missing_value)
+            for child in estimator.estimators
+        ]
+        wrapped.estimators = _preserve_sequence_type(estimator.estimators, children)
+        wrapped.count = len(children)
+        return wrapped
+    wrapped = OptionalEstimator(estimator, missing_value=missing_value, est_prob=False)
+    wrapped._marginalized_by_helper = True
+    return wrapped
 
 
 def unwrap_marginalized(dist: Any) -> Any:
@@ -88,7 +100,25 @@ def unwrap_marginalized(dist: Any) -> Any:
     from mixle.stats.combinator.optional import OptionalDistribution
 
     if isinstance(dist, CompositeDistribution):
-        return CompositeDistribution([unwrap_marginalized(d) for d in dist.dists])
-    if isinstance(dist, OptionalDistribution):
-        return dist.dist
+        unwrapped = copy.copy(dist)
+        children = [unwrap_marginalized(child) for child in dist.dists]
+        unwrapped.dists = _preserve_sequence_type(dist.dists, children)
+        unwrapped.count = len(children)
+        return unwrapped
+    if isinstance(dist, OptionalDistribution) and getattr(
+        dist, "_marginalized_by_helper", False
+    ):
+        return unwrap_marginalized(dist.dist)
     return dist
+
+
+def _preserve_sequence_type(original: Sequence[Any], values: Sequence[Any]) -> Sequence[Any]:
+    """Preserve tuple/list identity when replacing structural children."""
+    if isinstance(original, tuple):
+        return tuple(values)
+    if isinstance(original, list):
+        return list(values)
+    try:
+        return type(original)(values)
+    except (TypeError, ValueError):
+        return list(values)

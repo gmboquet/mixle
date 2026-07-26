@@ -384,7 +384,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
     def estimator(self, pseudo_count: float | None = None) -> OptionalEstimator:
         """Return an estimator for fitting this distribution from data."""
         prior = None if self.prior is None else (self.prior, self.dist.get_prior())
-        return OptionalEstimator(
+        estimator = OptionalEstimator(
             self.dist.estimator(pseudo_count=pseudo_count),
             missing_value=self.missing_value,
             pseudo_count=pseudo_count,
@@ -392,6 +392,9 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             name=self.name,
             prior=prior,
         )
+        if getattr(self, "_marginalized_by_helper", False):
+            estimator._marginalized_by_helper = True
+        return estimator
 
     def dist_to_encoder(self) -> OptionalDataEncoder:
         """Return the data encoder used by this distribution for vectorized methods."""
@@ -713,6 +716,14 @@ class OptionalEstimator(ParameterEstimator):
             rv += float(self.prior.log_density(model.p))
         return rv
 
+    def _preserve_marginalization_provenance(
+        self, dist: OptionalDistribution
+    ) -> OptionalDistribution:
+        """Carry the MAR-helper marker through an estimator update."""
+        if getattr(self, "_marginalized_by_helper", False):
+            dist._marginalized_by_helper = True
+        return dist
+
     def _validate_suff_stat(self, suff_stat: tuple[list[float], SS] | None) -> None:
         if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 2:
             raise ContractError(
@@ -760,12 +771,14 @@ class OptionalEstimator(ParameterEstimator):
         new_b = b + nsum
         new_p = (psum + a - 1.0) / (psum + nsum + a + b - 2.0)
         new_prior = BetaDistribution(new_a, new_b)
-        return OptionalDistribution(
-            dist,
-            p=new_p,
-            missing_value=self.missing_value,
-            name=self.name,
-            prior=(new_prior, dist.get_prior()),
+        return self._preserve_marginalization_provenance(
+            OptionalDistribution(
+                dist,
+                p=new_p,
+                missing_value=self.missing_value,
+                name=self.name,
+                prior=(new_prior, dist.get_prior()),
+            )
         )
 
     def estimate(self, nobs: float | None, suff_stat: tuple[list[float], SS] | None) -> OptionalDistribution:
@@ -780,11 +793,14 @@ class OptionalEstimator(ParameterEstimator):
             raise prefix_contract_error("OptionalDistribution.dist", e) from None
 
         if self.pseudo_count is not None and self.est_prob:
-            return OptionalDistribution(
-                dist,
-                (suff_stat[0][0] + self.pseudo_count) / ((2 * self.pseudo_count) + suff_stat[0][0] + suff_stat[0][1]),
-                missing_value=self.missing_value,
-                name=self.name,
+            return self._preserve_marginalization_provenance(
+                OptionalDistribution(
+                    dist,
+                    (suff_stat[0][0] + self.pseudo_count)
+                    / ((2 * self.pseudo_count) + suff_stat[0][0] + suff_stat[0][1]),
+                    missing_value=self.missing_value,
+                    name=self.name,
+                )
             )
 
         elif self.est_prob:
@@ -792,11 +808,26 @@ class OptionalEstimator(ParameterEstimator):
             z_nobs = suff_stat[0][0]
 
             if nobs_loc == 0:
-                return OptionalDistribution(dist, None, missing_value=self.missing_value, name=self.name)
+                result = OptionalDistribution(
+                    dist, None, missing_value=self.missing_value, name=self.name
+                )
             else:
-                return OptionalDistribution(dist, p=z_nobs / nobs_loc, missing_value=self.missing_value, name=self.name)
+                result = OptionalDistribution(
+                    dist,
+                    p=z_nobs / nobs_loc,
+                    missing_value=self.missing_value,
+                    name=self.name,
+                )
+            return self._preserve_marginalization_provenance(result)
         else:
-            return OptionalDistribution(dist, p=None, missing_value=self.missing_value, name=self.name)
+            return self._preserve_marginalization_provenance(
+                OptionalDistribution(
+                    dist,
+                    p=None,
+                    missing_value=self.missing_value,
+                    name=self.name,
+                )
+            )
 
 
 class OptionalDataEncoder(DataSequenceEncoder):
