@@ -185,14 +185,22 @@ def k_fold_split_index(sz: int, k: int, rng: RandomState) -> np.ndarray:
         1-d np.ndarray[int] of indices for each data points fold-id.
 
     """
-    idx = rng.rand(sz)
-    sidx = np.argsort(idx)
+    sz = _exact_integer(sz, "sz")
+    k = _exact_integer(k, "k")
+    if sz <= 0:
+        raise ValueError("sz must be a positive integer")
+    if k < 2 or k > sz:
+        raise ValueError("k must be between 2 and sz so every fold is non-empty")
+    if not isinstance(rng, RandomState):
+        raise TypeError("rng must be a numpy RandomState")
 
-    rv = np.zeros(sz, dtype=int)
-    for i in range(k):
-        rv[sidx[np.arange(start=i, stop=sz, step=k, dtype=int)]] = i
-
-    return rv
+    order = rng.permutation(sz)
+    result = np.empty(sz, dtype=int)
+    result[order] = np.arange(sz, dtype=int) % k
+    counts = np.bincount(result, minlength=k)
+    if result.shape != (sz,) or counts.min() < 1 or counts.max() - counts.min() > 1:
+        raise RuntimeError("internal k-fold assignment violated row-conservation invariants")
+    return result
 
 
 def partition_data_index(sz: int, pvec: list[float] | np.ndarray, rng: RandomState) -> list[np.ndarray]:
@@ -207,20 +215,44 @@ def partition_data_index(sz: int, pvec: list[float] | np.ndarray, rng: RandomSta
         List of numpy arrays containing indexes of each partition.
 
     """
-    idx = rng.rand(sz)
-    sidx = np.argsort(idx)
+    sz = _exact_integer(sz, "sz")
+    if sz <= 0:
+        raise ValueError("sz must be a positive integer")
+    if isinstance(pvec, (str, bytes)):
+        raise TypeError("pvec must be a one-dimensional sequence of proportions")
+    proportions = np.asarray(pvec, dtype=float)
+    if (
+        proportions.ndim != 1
+        or proportions.size == 0
+        or not np.all(np.isfinite(proportions))
+        or np.any(proportions < 0.0)
+    ):
+        raise ValueError("pvec must be a non-empty finite non-negative vector")
+    total = float(proportions.sum())
+    if not np.isclose(total, 1.0, rtol=0.0, atol=1e-12):
+        raise ValueError("pvec proportions must sum to one")
+    if not isinstance(rng, RandomState):
+        raise TypeError("rng must be a numpy RandomState")
 
-    rv = []
-    p_tot = 0
-    prev_idx = 0
+    proportions = proportions / total
+    raw_counts = sz * proportions
+    counts = np.floor(raw_counts).astype(int)
+    remainder = sz - int(counts.sum())
+    if remainder:
+        # Hamilton/largest-remainder allocation: exact total, deterministic
+        # tie-breaking by partition order, and at most one-row rounding error.
+        priority = np.argsort(-(raw_counts - counts), kind="stable")
+        counts[priority[:remainder]] += 1
 
-    for p in pvec:
-        next_idx = int(round(sz * (p_tot + p), 0))
-        rv.append(sidx[prev_idx:next_idx])
-        p_tot += p
-        prev_idx = next_idx
-
-    return rv
+    order = rng.permutation(sz)
+    boundaries = np.concatenate(([0], np.cumsum(counts)))
+    partitions = [
+        np.asarray(order[start:stop], dtype=int) for start, stop in zip(boundaries[:-1], boundaries[1:], strict=True)
+    ]
+    flattened = np.concatenate(partitions) if partitions else np.empty(0, dtype=int)
+    if boundaries[-1] != sz or flattened.size != sz or not np.array_equal(np.sort(flattened), np.arange(sz)):
+        raise RuntimeError("internal proportional split violated row-conservation invariants")
+    return partitions
 
 
 def partition_data(data: Sequence[T], pvec: list[float] | np.ndarray, rng: RandomState) -> list[list[T]]:
@@ -237,6 +269,8 @@ def partition_data(data: Sequence[T], pvec: list[float] | np.ndarray, rng: Rando
         List of List containing data partitions of proportion equal to pvec.
 
     """
+    if isinstance(data, (str, bytes)):
+        raise TypeError("data must be a sequence of observations")
     idx_list = partition_data_index(len(data), pvec, rng)
 
     return [[data[i] for i in u] for u in idx_list]
