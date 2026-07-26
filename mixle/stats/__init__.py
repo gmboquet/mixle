@@ -266,6 +266,7 @@ __all__ = [
     "ProjectedNormalSampler",
     "ProjectedNormalEstimator",
     "ProjectedNormalDataEncoder",
+    "ProjectedNormalFitError",
     "WrappedNormalDistribution",
     "WrappedNormalSampler",
     "WrappedNormalEstimator",
@@ -1146,6 +1147,7 @@ from mixle.stats.directional.projected_normal import (
     ProjectedNormalDataEncoder,
     ProjectedNormalDistribution,
     ProjectedNormalEstimator,
+    ProjectedNormalFitError,
     ProjectedNormalSampler,
 )
 from mixle.stats.directional.von_mises import (
