@@ -164,7 +164,14 @@ class Planner:
             ex.save(str(out / "extractors" / name))
         manifest = {
             "kind": "planner/v1",
-            "tools": {n: {"args": t.args, "required": t.required} for n, t in self.tools.items()},
+            "tools": {
+                n: {
+                    "args": t.args,
+                    "required": t.required,
+                    "vocabulary": t.vocabulary,
+                }
+                for n, t in self.tools.items()
+            },
             "extractors": sorted(self.extractors),
             "plan_agreement": self.plan_agreement,
             "max_steps": self.max_steps,
@@ -188,7 +195,15 @@ class Planner:
             name: TaskModel.load(str(p / "extractors" / name), device=device) for name in manifest["extractors"]
         }
         tools = _tool_spec_map(
-            [ToolSpec(n, list(t["args"]), t.get("required")) for n, t in manifest["tools"].items()],
+            [
+                ToolSpec(
+                    n,
+                    list(t["args"]),
+                    t.get("required"),
+                    t.get("vocabulary"),
+                )
+                for n, t in manifest["tools"].items()
+            ],
             reserved=(_STOP,),
         )
         return cls(

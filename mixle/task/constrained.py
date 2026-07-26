@@ -31,6 +31,7 @@ class _State:
     mode: str  # "name" | "key" | "value" | "step_end" | "terminal"
     prefix: str = ""
     tool: str | None = None
+    arg: str | None = None
     used: frozenset = frozenset()
     val_pos: tuple = ()  # live substring-match start positions in the request
     val_len: int = 0
@@ -84,9 +85,18 @@ class PlanGrammar:
                 cont = set(self.request)
             else:
                 cont = {self.request[p + s.val_len] for p in s.val_pos if p + s.val_len < len(self.request)}
+            fixed_values = [
+                value
+                for value in self.specs[s.tool or ""].fixed_values(s.arg or "")
+                if isinstance(value, str) and value and not any(char in value for char in "()|=;\n")
+            ]
+            for value in fixed_values:
+                if value.startswith(s.prefix) and len(value) > len(s.prefix):
+                    cont.add(value[len(s.prefix)])
             cont -= set("()|=;\n")  # the parser bans structural characters inside values
             out = set(cont)
-            if s.val_len > 0:  # a non-empty value may terminate: ")" ends the step, "; " starts the next key
+            value_complete = bool(s.val_pos) or s.prefix in fixed_values
+            if s.val_len > 0 and value_complete:
                 required = set(self.specs[s.tool or ""].required_args)
                 if required.issubset(s.used):
                     out.add(")")
@@ -116,24 +126,32 @@ class PlanGrammar:
             return replace(s, prefix=s.prefix + c)
         if s.mode == "key":
             if c == "=":
-                return replace(s, mode="value", used=s.used | {s.prefix}, prefix="", val_pos=(), val_len=0)
+                return replace(
+                    s,
+                    mode="value",
+                    arg=s.prefix,
+                    used=s.used | {s.prefix},
+                    prefix="",
+                    val_pos=(),
+                    val_len=0,
+                )
             return replace(s, prefix=s.prefix + c)
         if s.mode == "value":
             if c == ")":
-                return replace(s, mode="step_end", val_pos=(), val_len=0)
+                return replace(s, mode="step_end", arg=None, prefix="", val_pos=(), val_len=0)
             if c == ";":
-                return replace(s, mode="key", prefix="", val_pos=(), val_len=0, pending=" ")
+                return replace(s, mode="key", arg=None, prefix="", val_pos=(), val_len=0, pending=" ")
             if s.val_len == 0:
                 pos = tuple(i for i, ch in enumerate(self.request) if ch == c)
             else:
                 pos = tuple(
                     p for p in s.val_pos if p + s.val_len < len(self.request) and self.request[p + s.val_len] == c
                 )
-            return replace(s, val_pos=pos, val_len=s.val_len + 1)
+            return replace(s, prefix=s.prefix + c, val_pos=pos, val_len=s.val_len + 1)
         if s.mode == "step_end":
             if c == _EOS:
                 return replace(s, mode="terminal")
-            return replace(s, mode="name", prefix="", tool=None, first_step=False, pending="| ")
+            return replace(s, mode="name", prefix="", tool=None, arg=None, first_step=False, pending="| ")
         raise AssertionError(f"cannot advance mode {s.mode!r}")
 
 
