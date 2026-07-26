@@ -1,6 +1,7 @@
 """Immutable proposal, fingerprint, conflict, and merge tests."""
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -28,6 +29,7 @@ def _proposal(
     update=UpdateKind.EXACT_CLOSED_FORM,
     objective=ObjectiveKind.MLE,
     shard="s0",
+    **metadata,
 ):
     return ProposalPacket(
         proposal_id=proposal_id,
@@ -43,6 +45,7 @@ def _proposal(
         observations=5,
         predicted_gain=1.0,
         data_fingerprint="data-%s" % shard,
+        **metadata,
     )
 
 
@@ -110,6 +113,114 @@ class CompositionTest:
         assert left.payload["count"] == 10
         assert left.observations == 10
         assert left.predicted_gain == pytest.approx(2.0)
+        assert left.data_contribution_ids == ("data-s0", "data-s1")
+        assert left.merge_error_bound is not None and left.merge_error_bound > 0.0
+
+    def test_duplicate_data_contribution_is_rejected_even_under_different_proposal_ids(self):
+        first = _proposal("p-1", "n0", {"count": 1}, shard="same-data")
+        duplicate = _proposal("p-2", "n0", {"count": 1}, shard="same-data")
+        with pytest.raises(ValueError, match="appears in proposals"):
+            merge_same_node_proposals(
+                (first, duplicate),
+                merged_proposal_id="merged",
+                merge_law=compile_update_graph(GaussianDistribution(0.0, 1.0), GaussianEstimator())
+                .node("n0000")
+                .contract.merge_law,
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("precision", "float32"),
+            ("rollback_reference", "rollback-2"),
+            ("invalidates", ("dependent",)),
+            ("staleness_semantics", "bounded_stale_approximation"),
+        ],
+    )
+    def test_execution_contract_mismatch_is_rejected(self, field, value):
+        first = _proposal(
+            "p-1",
+            "n0",
+            {"count": 1},
+            shard="s1",
+            precision="float64",
+            rollback_reference="rollback-1",
+        )
+        second = _proposal(
+            "p-2",
+            "n0",
+            {"count": 2},
+            shard="s2",
+            precision="float64",
+            rollback_reference="rollback-1",
+        )
+        second = replace(second, **{field: value})
+        with pytest.raises(ValueError, match="complete execution contract"):
+            merge_same_node_proposals(
+                (first, second),
+                merged_proposal_id="merged",
+                merge_law=compile_update_graph(GaussianDistribution(0.0, 1.0), GaussianEstimator())
+                .node("n0000")
+                .contract.merge_law,
+            )
+
+    def test_integer_array_overflow_is_rejected_instead_of_wrapping(self):
+        first = _proposal("p-1", "n0", np.array([120], dtype=np.int8), shard="s1")
+        second = _proposal("p-2", "n0", np.array([10], dtype=np.int8), shard="s2")
+        with pytest.raises(OverflowError, match="overflow"):
+            merge_same_node_proposals(
+                (first, second),
+                merged_proposal_id="merged",
+                merge_law=compile_update_graph(GaussianDistribution(0.0, 1.0), GaussianEstimator())
+                .node("n0000")
+                .contract.merge_law,
+            )
+
+    def test_nonfinite_or_mistyped_telemetry_is_rejected_at_packet_boundary(self):
+        packet = _proposal("p-1", "n0", 1, shard="s1")
+        with pytest.raises(ValueError, match="observations must be finite"):
+            replace(packet, observations=float("nan"))
+        with pytest.raises(TypeError, match="tokens must be an integer"):
+            replace(packet, tokens=1.5)
+
+    def test_merge_preserves_objective_error_precision_and_rollback_evidence(self):
+        first = replace(
+            _proposal("p-1", "n0", 1.0, shard="s1"),
+            local_objective_before=-5.0,
+            local_objective_after=-4.0,
+            global_objective_before=-10.0,
+            global_objective_after=-8.0,
+            gain_standard_error=0.2,
+            precision="float64",
+            rollback_reference="rollback",
+            wall_time_seconds=2.0,
+        )
+        second = replace(
+            _proposal("p-2", "n0", 2.0, shard="s2"),
+            local_objective_before=-6.0,
+            local_objective_after=-5.0,
+            global_objective_before=-10.0,
+            global_objective_after=-8.0,
+            gain_standard_error=0.3,
+            precision="float64",
+            rollback_reference="rollback",
+            wall_time_seconds=3.0,
+        )
+        merged = merge_same_node_proposals(
+            (first, second),
+            merged_proposal_id="merged",
+            merge_law=compile_update_graph(GaussianDistribution(0.0, 1.0), GaussianEstimator())
+            .node("n0000")
+            .contract.merge_law,
+        )
+        assert merged.local_objective_before == -11.0
+        assert merged.local_objective_after == -9.0
+        assert merged.global_objective_before == -10.0
+        assert merged.global_objective_after == -8.0
+        assert merged.gain_standard_error == pytest.approx(0.5)
+        assert merged.precision == "float64"
+        assert merged.rollback_reference == "rollback"
+        assert merged.wall_time_seconds == 3.0
 
     def test_graph_conflicts_parent_child_but_not_siblings(self):
         model = MixtureDistribution(

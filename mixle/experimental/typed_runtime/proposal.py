@@ -7,6 +7,7 @@ import math
 import struct
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -116,6 +117,7 @@ class ProposalPacket:
     overflow_count: int = 0
     underflow_count: int = 0
     data_fingerprint: str | None = None
+    data_contribution_ids: tuple[str, ...] = ()
     ordering_fingerprint: str | None = None
     rng_fingerprint: str | None = None
     invalidates: tuple[str, ...] = ()
@@ -123,6 +125,7 @@ class ProposalPacket:
     surrogate_disclosed: bool = False
     staleness_semantics: str | None = None
     correction_fingerprint: str | None = None
+    merge_error_bound: float | None = None
     payload_hash: str = ""
 
     def __post_init__(self) -> None:
@@ -137,20 +140,30 @@ class ProposalPacket:
             object.__setattr__(self, "dependency_versions", versions)
         if len({key for key, _ in versions}) != len(versions) or any(version < 0 for _, version in versions):
             raise ValueError("dependency versions must have unique keys and non-negative values.")
-        nonnegative = (
-            self.observations,
-            self.tokens,
-            self.responsibility_mass,
-            self.optimizer_steps,
-            self.effective_batch_size,
-            self.wall_time_seconds,
-            self.compute_units,
-            self.communication_bytes,
-            self.overflow_count,
-            self.underflow_count,
-        )
-        if any(value < 0 for value in nonnegative):
-            raise ValueError("proposal work, mass, and telemetry values must be non-negative.")
+        for name in (
+            "observations",
+            "responsibility_mass",
+            "effective_batch_size",
+            "wall_time_seconds",
+            "compute_units",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise TypeError("%s must be a real number." % name)
+            if not math.isfinite(float(value)) or value < 0:
+                raise ValueError("%s must be finite and non-negative." % name)
+        for name in (
+            "tokens",
+            "optimizer_steps",
+            "communication_bytes",
+            "overflow_count",
+            "underflow_count",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Integral):
+                raise TypeError("%s must be an integer." % name)
+            if value < 0:
+                raise ValueError("%s must be non-negative." % name)
         optional_numeric = (
             self.local_objective_before,
             self.local_objective_after,
@@ -159,13 +172,31 @@ class ProposalPacket:
             self.predicted_gain,
             self.measured_gain,
             self.gain_standard_error,
+            self.merge_error_bound,
         )
-        if any(value is not None and not math.isfinite(value) for value in optional_numeric):
-            raise ValueError("proposal objective and gain values must be finite when supplied.")
+        if any(
+            value is not None and (isinstance(value, bool) or not isinstance(value, Real)) for value in optional_numeric
+        ):
+            raise TypeError("proposal objective, gain, and error values must be real when supplied.")
+        if any(value is not None and not math.isfinite(float(value)) for value in optional_numeric):
+            raise ValueError("proposal objective, gain, and error values must be finite when supplied.")
         if self.gain_standard_error is not None and self.gain_standard_error < 0.0:
             raise ValueError("gain_standard_error must be non-negative.")
+        if self.merge_error_bound is not None and self.merge_error_bound < 0.0:
+            raise ValueError("merge_error_bound must be non-negative.")
         if not self.writes:
             raise ValueError("an update proposal must declare at least one written artifact.")
+        contributions = self.data_contribution_ids
+        if not contributions and self.data_fingerprint is not None:
+            contributions = (self.data_fingerprint,)
+            object.__setattr__(self, "data_contribution_ids", contributions)
+        if any(not isinstance(value, str) or not value for value in contributions) or len(set(contributions)) != len(
+            contributions
+        ):
+            raise ValueError("data contribution ids must be unique non-empty strings.")
+        normalized_contributions = tuple(sorted(contributions))
+        if contributions != normalized_contributions:
+            object.__setattr__(self, "data_contribution_ids", normalized_contributions)
         computed_hash = payload_fingerprint(self.payload)
         if self.payload_hash and self.payload_hash != computed_hash:
             raise ValueError("payload_hash does not match the proposal payload.")
@@ -231,6 +262,7 @@ class ProposalPacket:
             "overflow_count": self.overflow_count,
             "underflow_count": self.underflow_count,
             "data_fingerprint": self.data_fingerprint,
+            "data_contribution_ids": list(self.data_contribution_ids),
             "ordering_fingerprint": self.ordering_fingerprint,
             "rng_fingerprint": self.rng_fingerprint,
             "invalidates": list(self.invalidates),
@@ -238,6 +270,7 @@ class ProposalPacket:
             "surrogate_disclosed": self.surrogate_disclosed,
             "staleness_semantics": self.staleness_semantics,
             "correction_fingerprint": self.correction_fingerprint,
+            "merge_error_bound": self.merge_error_bound,
         }
 
 
@@ -295,9 +328,27 @@ def _additive_payload(left: Any, right: Any) -> Any:
     if isinstance(left, np.ndarray) and isinstance(right, np.ndarray):
         if left.shape != right.shape or left.dtype != right.dtype:
             raise ValueError("additive array payloads must have matching shape and dtype.")
-        return left + right
-    if isinstance(left, (int, float, np.number)) and isinstance(right, (int, float, np.number)):
-        return left + right
+        if np.issubdtype(left.dtype, np.bool_):
+            raise TypeError("boolean arrays do not have a supported additive merge.")
+        if np.issubdtype(left.dtype, np.integer):
+            limits = np.iinfo(left.dtype)
+            exact = left.astype(object) + right.astype(object)
+            if np.any(exact < limits.min) or np.any(exact > limits.max):
+                raise OverflowError("additive integer array payload overflow.")
+        with np.errstate(over="ignore", invalid="ignore"):
+            result = left + right
+        if np.issubdtype(result.dtype, np.inexact) and not np.all(np.isfinite(result)):
+            raise OverflowError("additive floating array payload produced a non-finite value.")
+        return result
+    if isinstance(left, (Integral, np.integer)) and isinstance(right, (Integral, np.integer)):
+        if isinstance(left, bool) or isinstance(right, bool):
+            raise TypeError("booleans do not have a supported additive merge.")
+        return int(left) + int(right)
+    if isinstance(left, (Real, np.floating)) and isinstance(right, (Real, np.floating)):
+        result = float(left) + float(right)
+        if not math.isfinite(result):
+            raise OverflowError("additive floating payload produced a non-finite value.")
+        return result
     if isinstance(left, Mapping) and isinstance(right, Mapping):
         if left.keys() != right.keys():
             raise ValueError("additive mapping payloads must have identical keys.")
@@ -307,8 +358,28 @@ def _additive_payload(left: Any, right: Any) -> Any:
     if isinstance(left, list) and isinstance(right, list) and len(left) == len(right):
         return [_additive_payload(a, b) for a, b in zip(left, right)]
     raise TypeError(
-        "no exact additive merge for payload types %s and %s." % (type(left).__name__, type(right).__name__)
+        "no supported additive merge for payload types %s and %s." % (type(left).__name__, type(right).__name__)
     )
+
+
+def _additive_roundoff_bound(left: Any, right: Any) -> float:
+    """Conservative absolute error introduced by one built-in floating addition."""
+
+    if isinstance(left, np.ndarray) and isinstance(right, np.ndarray):
+        if np.issubdtype(left.dtype, np.inexact):
+            epsilon = float(np.finfo(left.dtype).eps)
+            magnitudes = np.abs(left.astype(np.complex128)) + np.abs(right.astype(np.complex128))
+            return epsilon * float(np.max(magnitudes, initial=0.0))
+        return 0.0
+    if isinstance(left, (Integral, np.integer)) and isinstance(right, (Integral, np.integer)):
+        return 0.0
+    if isinstance(left, (Real, np.floating)) and isinstance(right, (Real, np.floating)):
+        return math.ulp(1.0) * (abs(float(left)) + abs(float(right)))
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return max((_additive_roundoff_bound(left[key], right[key]) for key in left), default=0.0)
+    if isinstance(left, (tuple, list)) and isinstance(right, (tuple, list)):
+        return max((_additive_roundoff_bound(a, b) for a, b in zip(left, right)), default=0.0)
+    return 0.0
 
 
 PayloadMerger = Callable[[Any, Any], Any]
@@ -327,6 +398,21 @@ def merge_same_node_proposals(
     if not rows:
         raise ValueError("at least one proposal is required for merging.")
     anchor = rows[0]
+    if len({row.proposal_id for row in rows}) != len(rows):
+        raise ValueError("merged proposal ids must be unique.")
+    if any(payload_fingerprint(row.payload) != row.payload_hash for row in rows):
+        raise ValueError("a proposal payload changed after its evidence was created.")
+    if any(not row.data_contribution_ids for row in rows):
+        raise ValueError("merged proposals require explicit data contribution ids.")
+    contribution_owners: dict[str, str] = {}
+    for row in rows:
+        for contribution_id in row.data_contribution_ids:
+            previous = contribution_owners.setdefault(contribution_id, row.proposal_id)
+            if previous != row.proposal_id:
+                raise ValueError(
+                    "data contribution %s appears in proposals %s and %s."
+                    % (contribution_id, previous, row.proposal_id)
+                )
     comparable = {
         (
             row.run_id,
@@ -337,11 +423,20 @@ def merge_same_node_proposals(
             row.update_kind,
             row.objective_kind,
             row.writes,
+            row.precision,
+            row.invalidates,
+            row.rollback_reference,
+            row.surrogate_disclosed,
+            row.staleness_semantics,
         )
         for row in rows
     }
     if len(comparable) != 1:
-        raise ValueError("merged proposals must share node, versions, semantics, and write set.")
+        raise ValueError("merged proposals must share their complete execution contract.")
+    if anchor.staleness_semantics in {"corrected_statistical_approximation", "exact_rebase"} and len(
+        {row.correction_fingerprint for row in rows}
+    ) != len(rows):
+        raise ValueError("corrected proposals must carry distinct source-bound correction evidence.")
     if merge_law is MergeLaw.ADDITIVE:
         merger = payload_merger or _additive_payload
     elif payload_merger is not None and merge_law in (
@@ -354,17 +449,46 @@ def merge_same_node_proposals(
     else:
         raise ValueError("merge law %s requires an explicit payload merger." % merge_law.value)
 
-    ordered = sorted(rows, key=lambda row: row.proposal_id)
+    ordered = sorted(rows, key=lambda row: (row.data_contribution_ids, row.proposal_id))
     payload = ordered[0].payload
+    built_in_addition = payload_merger is None and merge_law is MergeLaw.ADDITIVE
+    merge_error_bound = (ordered[0].merge_error_bound or 0.0) if built_in_addition else math.nan
     for row in ordered[1:]:
+        if built_in_addition:
+            merge_error_bound += _additive_roundoff_bound(payload, row.payload)
+        if not math.isnan(merge_error_bound):
+            merge_error_bound += row.merge_error_bound or 0.0
         payload = merger(payload, row.payload)
 
     def optional_sum(name: str) -> float | None:
         values = [getattr(row, name) for row in rows]
-        return sum(values) if all(value is not None for value in values) else None
+        if all(value is None for value in values):
+            return None
+        if any(value is None for value in values):
+            raise ValueError("%s must be present on every merged proposal or none." % name)
+        return math.fsum(float(value) for value in values)
 
-    combined_fingerprint = payload_fingerprint(tuple(row.data_fingerprint for row in ordered))
+    def shared_optional(name: str) -> float | None:
+        values = [getattr(row, name) for row in rows]
+        if any(value is None for value in values):
+            if all(value is None for value in values):
+                return None
+            raise ValueError("%s must be present on every merged proposal or none." % name)
+        anchor_value = values[0]
+        if any(value != anchor_value for value in values[1:]):
+            raise ValueError("%s must agree across merged proposals." % name)
+        return anchor_value
+
+    combined_contributions = tuple(contribution_id for row in ordered for contribution_id in row.data_contribution_ids)
+    combined_fingerprint = payload_fingerprint(
+        tuple((row.data_contribution_ids, row.data_fingerprint) for row in ordered)
+    )
     combined_rng = payload_fingerprint(tuple(row.rng_fingerprint for row in ordered))
+    correction_fingerprint = (
+        payload_fingerprint(tuple(row.correction_fingerprint for row in ordered))
+        if anchor.staleness_semantics in {"corrected_statistical_approximation", "exact_rebase"}
+        else None
+    )
     return ProposalPacket(
         proposal_id=merged_proposal_id,
         run_id=anchor.run_id,
@@ -377,24 +501,36 @@ def merge_same_node_proposals(
         objective_kind=anchor.objective_kind,
         payload=payload,
         writes=anchor.writes,
-        observations=sum(row.observations for row in rows),
+        observations=math.fsum(float(row.observations) for row in rows),
         tokens=sum(row.tokens for row in rows),
-        responsibility_mass=sum(row.responsibility_mass for row in rows),
+        responsibility_mass=math.fsum(float(row.responsibility_mass) for row in rows),
+        local_objective_before=optional_sum("local_objective_before"),
+        local_objective_after=optional_sum("local_objective_after"),
+        global_objective_before=shared_optional("global_objective_before"),
+        global_objective_after=shared_optional("global_objective_after"),
         predicted_gain=optional_sum("predicted_gain"),
         measured_gain=optional_sum("measured_gain"),
+        gain_standard_error=optional_sum("gain_standard_error"),
         optimizer_steps=sum(row.optimizer_steps for row in rows),
-        effective_batch_size=sum(row.effective_batch_size for row in rows),
-        wall_time_seconds=sum(row.wall_time_seconds for row in rows),
-        compute_units=sum(row.compute_units for row in rows),
+        effective_batch_size=math.fsum(float(row.effective_batch_size) for row in rows),
+        wall_time_seconds=max(float(row.wall_time_seconds) for row in rows),
+        compute_units=math.fsum(float(row.compute_units) for row in rows),
         communication_bytes=sum(row.communication_bytes for row in rows),
+        precision=anchor.precision,
         overflow_count=sum(row.overflow_count for row in rows),
         underflow_count=sum(row.underflow_count for row in rows),
         data_fingerprint=combined_fingerprint,
-        ordering_fingerprint=payload_fingerprint(tuple(row.ordering_fingerprint for row in ordered)),
+        data_contribution_ids=combined_contributions,
+        ordering_fingerprint=payload_fingerprint(
+            tuple((row.data_contribution_ids, row.ordering_fingerprint) for row in ordered)
+        ),
         rng_fingerprint=combined_rng,
-        invalidates=tuple(sorted({node for row in rows for node in row.invalidates})),
+        invalidates=anchor.invalidates,
         rollback_reference=anchor.rollback_reference,
         surrogate_disclosed=anchor.surrogate_disclosed,
+        staleness_semantics=anchor.staleness_semantics,
+        correction_fingerprint=correction_fingerprint,
+        merge_error_bound=None if math.isnan(merge_error_bound) else merge_error_bound,
     )
 
 
