@@ -1,14 +1,13 @@
-"""Model-parallel estimation: distribute a model's shardable axis across workers.
+"""In-process component-parallel estimation over a fully resident model.
 
-The inversion of the data-parallel backends: there the *model* is replicated and the *data* sharded.
-Here the model's shardable axis is distributed. Two entry points share one recursive fold:
+This runtime parallelizes independent model *work* across threads. It does not
+partition model storage or execute a planner's device placements: every caller
+must be able to hold the full model and statistic state in one process.
 
-* ``optimize(..., backend="model_parallel")`` -- the :class:`ModelParallelEncodedData` handle: the data
-  is replicated in-process and the model axis is threaded. Simplest, single-machine.
-* ``optimize(ModelParallelEstimator(est), backend="spark"|"mpi"|"mp"|"local")`` -- the estimator wrapper:
-  composes with **any** data backend, so the *data* is sharded by that backend (Spark partitions, MPI
-  ranks, mp pool) while the *model* axis is distributed inside each partition's accumulator. This is the
-  data x model composition -- both axes at once.
+* ``optimize(..., backend="component_parallel")`` uses a replicated in-process
+  data handle and threads independent factors/components.
+* ``optimize(ComponentParallelEstimator(est), backend=...)`` composes that
+  threading with a data backend. Each backend process still owns the full model.
 
 The fold (:func:`model_parallel_fold`) is **recursive**: it walks the whole model tree and threads the
 axes that a per-node **compute-cost** model says save the most wall-time (``_parallel_ids``, consistent
@@ -45,7 +44,20 @@ from mixle.stats.compute.pdist import (
 from mixle.utils.parallel.planner import EncodedDataHandle, _global_key_merge, register_encoded_data_backend
 
 
-# --- the recursive model-parallel fold (module-level so both entry points share it) ---------------
+class UnrealizedModelPlacementError(RuntimeError):
+    """A planner selected model shards for which this runtime has no placement executor."""
+
+    def __init__(self, plan: Any) -> None:
+        self.plan = plan
+        super().__init__(
+            "the planner selected distributed model shards, but the in-process "
+            "component-parallel runtime keeps the full model resident and cannot "
+            "execute device placement; use an executor with an explicit placement "
+            "contract or revise the resources/workload"
+        )
+
+
+# --- the recursive component-parallel fold (module-level so both entry points share it) -----------
 def _run(parallel: bool, fn: Any, items: Any, num_workers: int | None) -> None:
     """Run ``fn`` over ``items`` -- across a thread pool when ``parallel``, else serially."""
     items = list(items)
@@ -262,7 +274,7 @@ def model_parallel_fold(
     *,
     parallel_ids: frozenset[int] | None = None,
 ) -> None:
-    """Run a model-parallel E-step, optionally enforcing an admitted node set."""
+    """Run a component-parallel E-step over a fully resident model."""
 
     selected = _parallel_ids(model, num_workers) if parallel_ids is None else parallel_ids
     _fold_into(acc, model, enc, weights, selected, num_workers)
@@ -270,7 +282,9 @@ def model_parallel_fold(
 
 # --- entry point 1: the in-process handle (data replicated, model distributed) --------------------
 class ModelParallelEncodedData(EncodedDataHandle):
-    """Replicate the data, distribute the model's shardable axis across threads (single machine)."""
+    """Compatibility name for a fully resident, component-threaded data handle."""
+
+    execution_kind = "component_parallel_threads"
 
     def __init__(
         self,
@@ -353,7 +367,7 @@ def _model_parallel_backend(
 
 # --- entry point 2: the estimator wrapper (composes with any data backend -> data x model) --------
 class ModelParallelAccumulator(SequenceEncodableStatisticAccumulator):
-    """Wrap an accumulator so its E-step ``seq_update`` runs the recursive model-parallel fold.
+    """Wrap an accumulator so its E-step threads independent component work.
 
     All sufficient-statistic methods delegate to the wrapped (``inner``) accumulator unchanged, so the
     value/combine/from_value/key-merge contract -- and thus every data backend's reduce -- is preserved;
@@ -422,12 +436,15 @@ class ModelParallelAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class ModelParallelEstimator(ParameterEstimator):
-    """Wrap an estimator so EM distributes the model axis -- composing with any ``backend=`` for the data.
+    """Compatibility wrapper for fully resident component-parallel EM.
 
     ``optimize(ModelParallelEstimator(est), backend="spark"|"mpi"|"mp"|"local")`` shards the data through
-    that backend while each partition's E-step distributes the model axis. The M-step
+    that backend while each partition's E-step threads independent model work.
+    The full model remains resident in every process. The M-step
     (``estimate``) and the accumulator's value/combine contract are the wrapped estimator's, unchanged.
     """
+
+    execution_kind = "component_parallel_threads"
 
     def __init__(self, inner: ParameterEstimator, num_workers: int | None = None) -> None:
         self.inner = inner
@@ -443,29 +460,39 @@ class ModelParallelEstimator(ParameterEstimator):
         return self.inner.estimate(nobs, suff_stat)
 
 
-register_encoded_data_backend("model_parallel", _model_parallel_backend, aliases=("mp_model",))
+ComponentParallelEncodedData = ModelParallelEncodedData
+ComponentParallelAccumulator = ModelParallelAccumulator
+ComponentParallelAccumulatorFactory = ModelParallelAccumulatorFactory
+ComponentParallelEstimator = ModelParallelEstimator
+component_parallel_fold = model_parallel_fold
+
+
+register_encoded_data_backend(
+    "component_parallel",
+    _model_parallel_backend,
+    aliases=("model_parallel", "mp_model"),
+)
 
 
 # --- C2 -> C3 wiring: let the planner choose the axis and size the model split --------------------
 def auto_parallel_estimator(
     estimator: Any, model: Any, resources: Any = None, *, n_data: int | None = None, min_components_per_shard: int = 1
 ) -> tuple[Any, Any]:
-    """Consult the C2 planner (:func:`decompose_model`) and return ``(estimator, decomposition)``.
+    """Return a plain estimator when no distributed model placement is required.
 
-    When the planner picks model-parallelism for ``model`` on ``resources``, the estimator is wrapped in
-    :class:`ModelParallelEstimator` sized to the planner's cuts; otherwise the plain estimator is returned
-    (replicate the model, shard the data -- already optimal when N dominates). Either way, run the returned
-    estimator through ``optimize(data, est, backend=<data backend>)``: the data axis is handled by
-    ``backend`` and the model axis, if any, by the wrapper -- composing into the data x model split. The
-    ``decomposition``'s ``rationale`` explains the choice. ``resources`` defaults to the local CPU slots
-    (use ``Resources.from_spark(sc)`` / ``Resources.from_mpi()`` to size the split to a real cluster)."""
+    The structural planner is advisory. If it selects cuts that require model
+    storage to be partitioned across devices, this helper raises
+    :class:`UnrealizedModelPlacementError`: the local component-thread runtime
+    cannot truthfully realize those cuts. Callers may explicitly choose
+    :class:`ComponentParallelEstimator` when the full model fits in each process.
+    """
     from mixle.utils.parallel.model_decomposition import decompose_model
     from mixle.utils.parallel.planner import Resources
 
     resources = Resources.local() if resources is None else resources
     dec = decompose_model(model, resources, n_data=n_data, min_components_per_shard=min_components_per_shard)
     if dec.is_model_parallel:
-        return ModelParallelEstimator(estimator, num_workers=len(dec.cuts)), dec
+        raise UnrealizedModelPlacementError(dec)
     return estimator, dec
 
 
@@ -474,7 +501,13 @@ __all__ = [
     "ModelParallelEstimator",
     "ModelParallelAccumulator",
     "ModelParallelAccumulatorFactory",
+    "ComponentParallelEncodedData",
+    "ComponentParallelEstimator",
+    "ComponentParallelAccumulator",
+    "ComponentParallelAccumulatorFactory",
     "model_parallel_fold",
+    "component_parallel_fold",
     "auto_parallel_estimator",
+    "UnrealizedModelPlacementError",
     "_model_parallel_backend",
 ]

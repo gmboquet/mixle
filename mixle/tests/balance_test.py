@@ -201,18 +201,16 @@ class DriverCorrectnessTest(unittest.TestCase):
         self.assertIs(chosen, est)
         self.assertFalse(plan.is_model_parallel)
 
-    def test_model_parallel_branch_is_bit_identical(self):
-        from mixle.utils.parallel.model_parallel import ModelParallelEstimator
+    def test_model_parallel_branch_requires_a_placement_executor(self):
+        from mixle.utils.parallel.model_parallel import UnrealizedModelPlacementError
 
         est = stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(8)])
         init = stats.MixtureDistribution([stats.GaussianDistribution(float(i) - 4, 1.0) for i in range(8)], [1 / 8] * 8)
         rng = np.random.RandomState(0)
         data = [float(rng.randn() + 3 * (rng.randint(8) - 4)) for _ in range(6)]  # N=6 < P=8 -> model-parallel
-        base = optimize(data, est, prev_estimate=init, max_its=6, out=None, backend="local")
-        chosen, plan = auto_balanced_estimator(est, init, _cluster(8), n_data=len(data))
-        self.assertIsInstance(chosen, ModelParallelEstimator)
-        fit = optimize(data, chosen, prev_estimate=init, max_its=6, out=None, backend="local")
-        self.assertEqual(str(base), str(fit))  # realized grid is exactly the serial fit
+        with self.assertRaises(UnrealizedModelPlacementError) as caught:
+            auto_balanced_estimator(est, init, _cluster(8), n_data=len(data))
+        self.assertTrue(caught.exception.plan.is_model_parallel)
 
     def test_heterogeneous_nested_dag_is_bit_identical(self):
         # an unbalanced, deeply heterogeneous nest: composite of [MVG mixture, mixture-of-composites, leaf]

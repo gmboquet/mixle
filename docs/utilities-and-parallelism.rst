@@ -147,28 +147,30 @@ fit before under these resource constraints."
 Calibration records should expire or be revalidated when hardware, dependency
 versions, model shape, or encoded payload size changes materially.
 
-Model Parallelism
------------------
+Component-Parallel Threads
+--------------------------
 
-``mixle.utils.parallel.model_parallel`` supports splitting model work rather
-than only splitting data:
+``mixle.utils.parallel.model_parallel`` is the compatibility module for
+threading independent component work while the full model remains resident in
+one process:
 
-``ModelParallelEstimator``
-    Wraps an estimator so folds can be computed over model shards.
+``ComponentParallelEstimator``
+    Wraps an estimator so independent fold work can be threaded.
 
-``ModelParallelEncodedData``
-    Encoded data handle aware of model-parallel folding.
+``ComponentParallelEncodedData``
+    Replicated encoded-data handle aware of component-parallel folding.
 
-``model_parallel_fold``
-    Execute a fold across model shards.
+``component_parallel_fold``
+    Execute a fully resident fold across threads.
 
 ``auto_parallel_estimator``
-    Choose a model-parallel wrapper when the estimated model and data footprint
-    call for it.
+    Returns the plain estimator for data-parallel plans and fails closed when
+    the planner requires device model placement that this runtime cannot execute.
 
-Use model parallelism when the model has large independent or nearly
-independent component work, such as mixture components, ensembles, or structured
-children that can be reduced safely.
+The legacy ``ModelParallel*`` names and ``backend="model_parallel"`` remain
+compatibility aliases. They do not partition model storage or realize
+``ModelCut`` device placements. Use them only when every process can hold the
+full model and sufficient-statistic state.
 
 The reduction must be associative and semantically equivalent to the local
 estimator path. If a model shard changes the meaning of sufficient statistics,

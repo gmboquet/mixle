@@ -48,6 +48,7 @@ def _composite():
 
 class RegistrationTest(unittest.TestCase):
     def test_backend_is_registered(self):
+        self.assertIn("component_parallel", available_encoded_data_backends())
         self.assertIn("model_parallel", available_encoded_data_backends())
         self.assertIsInstance(
             encoded_data(_composite()[2], model=_composite()[1], backend="model_parallel"), ModelParallelEncodedData
@@ -379,21 +380,18 @@ class SparkDataModelTest(unittest.TestCase):
         except OSError:
             self.skipTest("no functional Java runtime for Spark")
 
-        from mixle.utils.parallel import auto_parallel_estimator
+        from mixle.utils.parallel import UnrealizedModelPlacementError, auto_parallel_estimator
         from mixle.utils.parallel.planner import Resources
 
         est, init, data = _mixture_data(k=10, n=1000)
-        base = optimize(data, est, prev_estimate=init, max_its=8, out=None, backend="local")
         sc = SparkContext(conf=SparkConf().setMaster("local[3]").setAppName("mp-cap").set("spark.ui.enabled", "false"))
         try:
             sc.setLogLevel("ERROR")
-            chosen, dec = auto_parallel_estimator(est, init, Resources.from_spark(sc), n_data=len(data))
-            self.assertTrue(dec.is_model_parallel)  # 10 components over a multi-executor cluster
-            rdd = sc.parallelize(data, 4)
-            fit = optimize(rdd, chosen, prev_estimate=init, max_its=8, out=None, backend="spark")
+            with self.assertRaises(UnrealizedModelPlacementError) as caught:
+                auto_parallel_estimator(est, init, Resources.from_spark(sc), n_data=len(data))
+            self.assertTrue(caught.exception.plan.is_model_parallel)
         finally:
             sc.stop()
-        self.assertTrue(np.isclose(_ll(base, data), _ll(fit, data), rtol=1e-6), (_ll(base, data), _ll(fit, data)))
 
 
 class SparkSequenceFoldTest(unittest.TestCase):
@@ -518,18 +516,17 @@ class MPIDataModelTest(unittest.TestCase):
 
 
 class AutoWiringTest(unittest.TestCase):
-    """auto_parallel_estimator consults the C2 planner to pick the axis and size the model split."""
+    """Automatic wiring never misrepresents threaded work as executed model placement."""
 
-    def test_wide_mixture_picks_model_parallel(self):
-        from mixle.utils.parallel import auto_parallel_estimator
+    def test_wide_mixture_requires_a_placement_executor(self):
+        from mixle.utils.parallel import UnrealizedModelPlacementError, auto_parallel_estimator
         from mixle.utils.parallel.planner import Resources
 
         est = stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(12)])
         model = stats.MixtureDistribution([stats.GaussianDistribution(float(i), 1.0) for i in range(12)], [1 / 12] * 12)
-        chosen, dec = auto_parallel_estimator(est, model, Resources.local(4), n_data=40)
-        self.assertTrue(dec.is_model_parallel)
-        self.assertIsInstance(chosen, ModelParallelEstimator)
-        self.assertEqual(chosen.num_workers, len(dec.cuts))
+        with self.assertRaises(UnrealizedModelPlacementError) as caught:
+            auto_parallel_estimator(est, model, Resources.local(4), n_data=40)
+        self.assertTrue(caught.exception.plan.is_model_parallel)
 
     def test_small_model_large_n_picks_data_parallel(self):
         from mixle.utils.parallel import auto_parallel_estimator
@@ -551,16 +548,14 @@ class AutoWiringTest(unittest.TestCase):
         self.assertFalse(dec.is_model_parallel)
         self.assertIs(chosen, est)
 
-    def test_auto_chosen_estimator_matches_base(self):
-        from mixle.utils.parallel import auto_parallel_estimator
+    def test_auto_model_cut_is_not_silently_replaced_by_threads(self):
+        from mixle.utils.parallel import UnrealizedModelPlacementError, auto_parallel_estimator
         from mixle.utils.parallel.planner import Resources
 
         est, init, data = _mixture_data(k=8, n=400)
-        base = optimize(data, est, prev_estimate=init, max_its=8, out=None, backend="local")
-        chosen, dec = auto_parallel_estimator(est, init, Resources.local(4), n_data=len(data))
-        self.assertTrue(dec.is_model_parallel)  # 8 components over 4 cpus, small N
-        auto = optimize(data, chosen, prev_estimate=init, max_its=8, out=None, backend="local")
-        self.assertEqual(str(base), str(auto))  # single-partition local -> bit-identical
+        with self.assertRaises(UnrealizedModelPlacementError) as caught:
+            auto_parallel_estimator(est, init, Resources.local(4), n_data=len(data))
+        self.assertTrue(caught.exception.plan.is_model_parallel)
 
 
 if __name__ == "__main__":
