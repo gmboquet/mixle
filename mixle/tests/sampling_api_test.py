@@ -7,6 +7,12 @@ import numpy as np
 from mixle.relations import Assignment
 from mixle.stats import BernoulliDistribution, GaussianDistribution, MixtureDistribution, sample
 from mixle.stats.bayes.conjugate import conjugate_posterior
+from mixle.stats.compute.sampling_api import (
+    SAMPLE_UNHANDLED,
+    register_sample_dispatch,
+    replace_sample_dispatch,
+    unregister_sample_dispatch,
+)
 
 
 class SamplingApiTest(unittest.TestCase):
@@ -70,6 +76,43 @@ class SamplingApiTest(unittest.TestCase):
     def test_unknown_object_raises(self):
         with self.assertRaises(TypeError):
             sample(42)
+
+    def test_extension_registration_has_stable_identity_and_explicit_lifecycle(self):
+        dispatch_id = "mixle.tests.sampling-api"
+        calls = []
+
+        def first(model, size, **kwargs):
+            calls.append(("first", model, size))
+            return SAMPLE_UNHANDLED
+
+        def second(model, size, **kwargs):
+            calls.append(("second", model, size))
+            return "handled" if model == "owned" else SAMPLE_UNHANDLED
+
+        register_sample_dispatch(dispatch_id, first)
+        try:
+            with self.assertRaisesRegex(KeyError, "exists"):
+                register_sample_dispatch(dispatch_id, second)
+            replace_sample_dispatch(dispatch_id, second)
+            self.assertEqual(sample("owned", 0), "handled")
+            self.assertEqual(calls, [("second", "owned", 0)])
+            registration = unregister_sample_dispatch(dispatch_id)
+            self.assertEqual(registration.dispatch_id, dispatch_id)
+            self.assertIs(registration.handler, second)
+            with self.assertRaisesRegex(KeyError, "not registered"):
+                unregister_sample_dispatch(dispatch_id)
+        finally:
+            # Keep the process-global extension registry isolated if an assertion above fails.
+            try:
+                unregister_sample_dispatch(dispatch_id)
+            except KeyError:
+                pass
+
+    def test_extension_registration_validates_identity_and_handler(self):
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            register_sample_dispatch("", lambda *args, **kwargs: SAMPLE_UNHANDLED)
+        with self.assertRaisesRegex(TypeError, "callable"):
+            register_sample_dispatch("mixle.tests.invalid-handler", 42)
 
 
 if __name__ == "__main__":
