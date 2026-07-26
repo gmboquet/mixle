@@ -30,8 +30,9 @@ drop-in replacement for :func:`~mixle.utils.parallel.resilient_em.checkpointed_f
 checks finiteness of the running accumulator's ``value()`` immediately after EVERY
 ``combine()`` call, not just once at the end -- so a NaN/Inf introduced while folding payload
 ``i`` is caught at payload ``i``'s ``combine()`` boundary, before it silently propagates into
-payload ``i+1..n``. Scope note: this wraps ``combine()`` calls made by THIS module's own fold
-loop only (mirroring ``checkpointed_fold``'s loop) -- it deliberately does NOT touch
+payload ``i+1..n``. The fully tied value is checked again after ``key_merge``/``key_replace``
+so shared-key transformations cannot introduce an unchecked invalid state. Scope note: this
+wraps operations made by THIS module's own fold loop only -- it deliberately does NOT touch
 ``SequenceEncodableStatisticAccumulator.combine()``'s contract itself, which every other
 caller in the codebase still uses unguarded, exactly as before.
 """
@@ -41,14 +42,13 @@ from __future__ import annotations
 import hashlib
 import pickle
 import struct
-from collections.abc import Sequence
-from dataclasses import dataclass, field
-from numbers import Complex, Integral, Real
+from collections.abc import Mapping, Sequence, Set
+from dataclasses import dataclass, field, fields, is_dataclass
+from numbers import Complex, Integral, Number, Real
 from typing import Any
 
 import numpy as np
 
-from mixle.models._neural_serial import check_finite
 from mixle.utils.parallel.resilient_em import ResilientMPEncodedData
 
 __all__ = [
@@ -250,20 +250,70 @@ def inject_bit_flip(payload: bytes, bit_offset: int | None = None) -> bytes:
     return bytes(corrupted)
 
 
-def _assert_finite_value(value: Any, where: str) -> None:
-    """Recursively walk a (possibly nested list/tuple/dict) accumulator ``value()`` payload and
-    raise via :func:`check_finite` at the first non-finite numeric leaf found."""
+def _assert_finite_value(value: Any, where: str, _seen: set[int] | None = None) -> None:
+    """Traverse a typed statistic graph and reject every non-finite numeric leaf."""
+    if _seen is None:
+        _seen = set()
+
+    def _reject() -> None:
+        raise ValueError(f"{where} contains a non-finite statistic (NaN or inf)")
+
+    if value is None or isinstance(value, (str, bytes, bool)):
+        return
+    if isinstance(value, np.generic):
+        _assert_finite_value(value.item(), where, _seen)
+        return
+    if isinstance(value, Number):
+        numeric = complex(value)
+        if not np.isfinite(numeric.real) or not np.isfinite(numeric.imag):
+            _reject()
+        return
     if isinstance(value, np.ndarray):
-        check_finite(value, where)
-    elif isinstance(value, (int, float, np.floating, np.integer)) and not isinstance(value, bool):
-        check_finite(np.asarray([float(value)]), where)
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            _assert_finite_value(v, where)
-    elif isinstance(value, dict):
-        for v in value.values():
-            _assert_finite_value(v, where)
-    # else: non-numeric leaf (str, bool, None, categorical support metadata, ...) -- nothing to check.
+        if value.dtype.kind in "biufc":
+            if not np.all(np.isfinite(value)):
+                _reject()
+        elif value.dtype.kind == "O":
+            identity = id(value)
+            if identity in _seen:
+                return
+            _seen.add(identity)
+            for item in value.flat:
+                _assert_finite_value(item, where, _seen)
+        return
+    try:
+        import torch
+
+        if torch.is_tensor(value):
+            if not bool(torch.all(torch.isfinite(value)).item()):
+                _reject()
+            return
+    except ImportError:  # pragma: no cover - torch is optional
+        pass
+
+    identity = id(value)
+    if identity in _seen:
+        return
+    _seen.add(identity)
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _assert_finite_value(key, where, _seen)
+            _assert_finite_value(item, where, _seen)
+    elif isinstance(value, (Sequence, Set)):
+        for item in value:
+            _assert_finite_value(item, where, _seen)
+    elif is_dataclass(value) and not isinstance(value, type):
+        for descriptor in fields(value):
+            _assert_finite_value(getattr(value, descriptor.name), where, _seen)
+    elif hasattr(value, "__dict__"):
+        for item in vars(value).values():
+            _assert_finite_value(item, where, _seen)
+    else:
+        slots = getattr(type(value), "__slots__", ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        for name in slots:
+            if hasattr(value, name):
+                _assert_finite_value(getattr(value, name), where, _seen)
 
 
 def finite_guarded_fold(
@@ -276,7 +326,9 @@ def finite_guarded_fold(
     nobs = 0.0
     for i, raw in enumerate(payloads):
         count, stats = pickle.loads(raw)
+        _assert_finite_value(count, "%s (payload index %d count)" % (where, i))
         nobs += count
+        _assert_finite_value(nobs, "%s (running observation count)" % where)
         accumulator.combine(stats)
         _assert_finite_value(
             accumulator.value(), "%s (payload index %d, %d combine() calls so far)" % (where, i, i + 1)
@@ -284,7 +336,9 @@ def finite_guarded_fold(
     stats_dict: dict[str, Any] = {}
     accumulator.key_merge(stats_dict)
     accumulator.key_replace(stats_dict)
-    return nobs, accumulator.value()
+    final_value = accumulator.value()
+    _assert_finite_value(final_value, "%s (after key_merge/key_replace)" % where)
+    return nobs, final_value
 
 
 @dataclass

@@ -5,12 +5,14 @@ end-to-end quarantine + receipt behavior built on top of K4's retry/blacklist ma
 import pickle
 import time
 import unittest
+from dataclasses import dataclass
 
 import numpy as np
 
 from mixle.tests.parallel_test import make_data, make_estimator, make_start_model
 from mixle.utils.parallel.sdc_audit import (
     AuditedMPEncodedData,
+    _assert_finite_value,
     _compare_statistic_payloads,
     finite_guarded_fold,
     inject_bit_flip,
@@ -62,6 +64,28 @@ class _FakeEstimator:
         return self._factory
 
 
+class _KeyTyingAccumulator(_CountingAccumulator):
+    def key_replace(self, stats_dict):
+        self.total = {"tied": complex(float("inf"), 0.0)}
+
+
+class _KeyTyingFactory(_CountingFactory):
+    def make(self):
+        acc = _KeyTyingAccumulator()
+        self.made.append(acc)
+        return acc
+
+
+class _KeyTyingEstimator(_FakeEstimator):
+    def __init__(self):
+        self._factory = _KeyTyingFactory()
+
+
+@dataclass
+class _NestedStatistic:
+    values: set[complex]
+
+
 class FiniteWatchdogTestCase(unittest.TestCase):
     """K5 acceptance criterion 4: the NaN/Inf watchdog fires at the FIRST combine() boundary
     where a non-finite value appears, not at the end of the fold and not on some later shard."""
@@ -96,6 +120,15 @@ class FiniteWatchdogTestCase(unittest.TestCase):
         nobs, value = finite_guarded_fold(est, payloads)
         self.assertEqual(nobs, 4.0)
         self.assertEqual(value, 10.0)
+
+    def test_final_value_is_checked_after_key_tying(self):
+        with self.assertRaisesRegex(ValueError, "after key_merge/key_replace"):
+            finite_guarded_fold(_KeyTyingEstimator(), self._payloads([1.0]))
+
+    def test_complex_sets_dataclasses_and_object_arrays_are_traversed(self):
+        nested = np.array([_NestedStatistic({1.0 + 0.0j, complex(float("nan"), 1.0)})], dtype=object)
+        with self.assertRaises(ValueError):
+            _assert_finite_value(nested, "nested statistic")
 
 
 class BitFlipInjectionTestCase(unittest.TestCase):
