@@ -25,6 +25,26 @@ from mixle.utils.hvis.neighbors import (
 from mixle.utils.hvis.tsne import _tsne_barnes_hut, tsne_exact
 
 
+def _materialize_one_shot_data(data):
+    """Make a single-pass sample source safely reusable by the HVis pipeline."""
+    if data is None:
+        return None
+    try:
+        iterator = iter(data)
+    except TypeError as exc:
+        raise TypeError("data must be an iterable of observations or None.") from exc
+    if iterator is data or not hasattr(data, "__len__"):
+        return list(iterator)
+    return data
+
+
+def _validate_sample_cardinality(n: int, data) -> None:
+    if n < 2:
+        raise ValueError("HVis requires at least two observations.")
+    if data is not None and len(data) != n:
+        raise ValueError("data length does not match the model or pre-built affinity row count.")
+
+
 def htsne(
     data,
     emb_dim: int = 2,
@@ -151,6 +171,21 @@ def htsne(
 
     Returns the n x emb_dim embedding.
     """
+    if method not in ("auto", "exact", "barnes_hut"):
+        raise ValueError("method must be 'auto', 'exact', or 'barnes_hut'.")
+    if method == "barnes_hut" and optimize_alpha:
+        raise ValueError("optimize_alpha is supported only by method='exact' (or method='auto').")
+    if method == "barnes_hut" and alpha != 1.0:
+        raise ValueError("method='barnes_hut' supports only the standard alpha=1 kernel.")
+    if method == "exact" and neighbor_method != "auto":
+        raise ValueError("neighbor_method applies only to method='barnes_hut' (or method='auto').")
+    if method == "exact" and repulsion_method != "auto":
+        raise ValueError("repulsion_method applies only to method='barnes_hut' (or method='auto').")
+    data = _materialize_one_shot_data(data)
+    if data is None and enc_data is None and mix_model is None and not _is_prebuilt_affinity(affinity):
+        raise ValueError("data is required when neither a model encoding nor pre-built affinity is supplied.")
+    if data is not None and len(data) < 2:
+        raise ValueError("HVis requires at least two observations.")
     if out is None:
         out = sys.stdout
 
@@ -186,6 +221,7 @@ def htsne(
     else:
         z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
         n = z_ij.shape[0]
+    _validate_sample_cardinality(n, data)
 
     informative_init = Y is not None
     if isinstance(Y, str):
@@ -209,7 +245,7 @@ def htsne(
         early_exaggeration = 1.0 if informative_init else 12.0
 
     if method == "auto":
-        method = "exact" if (optimize_alpha or n <= 10) else "barnes_hut"
+        method = "exact" if (optimize_alpha or alpha != 1.0 or n <= 10) else "barnes_hut"
 
     if method == "barnes_hut":
         px = 30.0 if perplexity is None else float(perplexity)
@@ -328,6 +364,16 @@ def humap(
     """
     if engine not in ("auto", "umap-learn", "internal"):
         raise ValueError("engine must be 'auto', 'umap-learn', or 'internal'.")
+    if engine == "umap-learn" and goals:
+        raise ValueError(
+            "goals require engine='internal' (or 'auto'): umap-learn's layout loop cannot honor them, "
+            "and silently dropping a stated goal would be worse than refusing."
+        )
+    data = _materialize_one_shot_data(data)
+    if data is None and enc_data is None and mix_model is None and not _is_prebuilt_affinity(affinity):
+        raise ValueError("data is required when neither a model encoding nor pre-built affinity is supplied.")
+    if data is not None and len(data) < 2:
+        raise ValueError("HVis requires at least two observations.")
 
     umap = None
     if engine in ("auto", "umap-learn"):
@@ -347,11 +393,6 @@ def humap(
 
                 require("umap-learn", "umap")
 
-    if engine == "umap-learn" and goals:
-        raise ValueError(
-            "goals require engine='internal' (or 'auto'): umap-learn's layout loop cannot honor them, "
-            "and silently dropping a stated goal would be worse than refusing."
-        )
     if engine == "auto":
         engine = "umap-learn" if (umap is not None and not goals) else "internal"
 
@@ -390,7 +431,10 @@ def humap(
     else:
         z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
         n = z_ij.shape[0]
-    k = min(n_neighbors, n - 1)
+    _validate_sample_cardinality(n, data)
+    if isinstance(n_neighbors, bool) or not isinstance(n_neighbors, (int, np.integer)) or not 1 <= n_neighbors < n:
+        raise ValueError(f"n_neighbors must be an integer between 1 and {n - 1}.")
+    k = n_neighbors
 
     knn_idx, knn_dist = model_knn(z_ij, l_ij, k=k, affinity=affinity, evidence_cap=evidence_cap)
 

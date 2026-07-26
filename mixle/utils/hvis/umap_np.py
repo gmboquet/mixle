@@ -201,7 +201,7 @@ def simplicial_set_layout(
     n = graph.shape[0]
     if n_epochs is None:
         n_epochs = 500 if n < 10000 else 200
-    keep = graph.data > graph.data.max() / float(n_epochs)
+    keep = graph.data >= graph.data.max() / float(n_epochs)
     heads, tails, weights = graph.row[keep], graph.col[keep], graph.data[keep]
     if weights.size == 0:
         raise ValueError("no graph edges survive the epoch-sampling threshold.")
