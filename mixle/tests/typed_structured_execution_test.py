@@ -11,6 +11,7 @@ from mixle.experimental.typed_runtime import (
     TopologyDevice,
     run_structured_estimation_step,
 )
+from mixle.experimental.typed_runtime.structured_execution import _model_hash
 from mixle.stats import (
     CompositeDistribution,
     CompositeEstimator,
@@ -35,7 +36,7 @@ def _topology():
             "local-island",
             "local",
             "local",
-            DeviceSpec("cpu:%d" % index, throughput=1.0),
+            DeviceSpec("cpu:%d" % index, memory_bytes=1_000_000_000, throughput=1.0),
         )
         for index in range(3)
     )
@@ -64,19 +65,40 @@ def test_component_parallel_step_is_bitwise_equal_to_serial_statistics_and_model
     assert result.receipt.parallel_statistics_hash == result.receipt.reference_statistics_hash
     assert result.receipt.parallel_model_hash == result.receipt.reference_model_hash
     assert result.receipt.parallel_node_ids == ("n0000",)
+    assert result.receipt.worker_device_ids == ("cpu:0", "cpu:1", "cpu:2")
+    assert result.receipt.execution_backend == "local_numpy_thread_pool"
     assert len(result.receipt.placement.placement("n0000").shards) == 3
     assert result.receipt.work.backend == "typed_model_parallel"
     json.dumps(result.receipt.as_dict(), allow_nan=False)
 
 
-def test_factor_parallel_step_is_bitwise_equal_to_serial_path():
+def test_undeclared_factor_axis_runs_atomically_and_matches_serial_path():
     rng = np.random.RandomState(8)
     model = CompositeDistribution((GaussianDistribution(0.0, 1.0), PoissonDistribution(1.0)))
     estimator = CompositeEstimator((GaussianEstimator(), PoissonEstimator()))
     data = [(float(rng.randn()), int(rng.poisson(3.0))) for _ in range(120)]
     result = run_structured_estimation_step(seq_encode(data, model=model), estimator, model, _topology())
     assert result.receipt.exact_parity is True
-    assert result.receipt.parallel_node_ids == ("n0000",)
+    assert result.receipt.parallel_node_ids == ()
+    assert result.receipt.num_workers == 1
+
+
+def test_worker_count_must_be_positive_and_within_placed_capacity():
+    model = MixtureDistribution(
+        [GaussianDistribution(float(index), 1.0) for index in range(4)],
+        [0.25] * 4,
+    )
+    estimator = MixtureEstimator([GaussianEstimator() for _ in range(4)])
+    encoded = seq_encode([0.0, 1.0], model=model)
+    with pytest.raises(ValueError, match="positive"):
+        run_structured_estimation_step(encoded, estimator, model, _topology(), num_workers=0)
+    with pytest.raises(ValueError, match="placement capacity"):
+        run_structured_estimation_step(encoded, estimator, model, _topology(), num_workers=4)
+
+
+def test_model_hash_has_no_unstable_string_fallback():
+    with pytest.raises(TypeError, match="deterministic to_json"):
+        _model_hash(object())
 
 
 def test_bare_encoding_requires_explicit_weights_and_can_skip_reference():

@@ -212,9 +212,19 @@ def _fold_into(
         acc.seq_update(enc, weights, model)
 
 
-def model_parallel_fold(acc: Any, model: Any, enc: Any, weights: np.ndarray, num_workers: int | None = None) -> None:
-    """Run a model-parallel E-step of ``model`` over encoded ``enc`` into accumulator ``acc`` (in place)."""
-    _fold_into(acc, model, enc, weights, _parallel_ids(model, num_workers), num_workers)
+def model_parallel_fold(
+    acc: Any,
+    model: Any,
+    enc: Any,
+    weights: np.ndarray,
+    num_workers: int | None = None,
+    *,
+    parallel_ids: frozenset[int] | None = None,
+) -> None:
+    """Run a model-parallel E-step, optionally enforcing an admitted node set."""
+
+    selected = _parallel_ids(model, num_workers) if parallel_ids is None else parallel_ids
+    _fold_into(acc, model, enc, weights, selected, num_workers)
 
 
 # --- entry point 1: the in-process handle (data replicated, model distributed) --------------------
