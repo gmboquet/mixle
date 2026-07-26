@@ -5,9 +5,8 @@ Every case pins fused-vs-host parity in a regime where a naive kernel silently d
 * scoring parity with a leaf whose expr carries a real ``-np.inf`` branch (Pareto below its scale):
   full ``fastmath=True`` (ninf/nnan) genuinely miscompiled this -- positive log-densities -- so the
   parity here is the regression net for the no-ninf/nnan compile policy;
-* a row impossible under EVERY component: the E-step must fall back to the prior mixture weights
-  (the legacy accumulator's convention) and score the row -inf instead of NaN-poisoning counts,
-  statistics, and the fused-EM normalizer;
+* a row impossible under EVERY component: the E-step must assign zero responsibility and score
+  the row -inf instead of fabricating statistics or NaN-poisoning the fused-EM normalizer;
 * nested mixture-of-mixtures: the same guarantees at every mixture NODE, and ``wants_minmax``
   leaves (Pareto) must decline nested fusion cleanly instead of crashing mid-fit;
 * the fused Pareto E-step's support minimum is PER-COMPONENT over rows with responsibility > 0
@@ -84,7 +83,7 @@ class EstepImpossibleRowTest(unittest.TestCase):
             w=[0.5, 0.5],
         )
 
-    def test_impossible_row_falls_back_to_prior_weights_and_minus_inf_ll(self):
+    def test_impossible_row_has_zero_responsibility_and_minus_inf_ll(self):
         model = self._model()
         data = ["a", "b", "c", "a"]  # "c" is impossible under BOTH components
         enc = model.dist_to_encoder().seq_encode(data)
@@ -95,7 +94,7 @@ class EstepImpossibleRowTest(unittest.TestCase):
         self.assertTrue(np.isneginf(host_ll))
         for parallel in (False, True):
             suff, ll = fc.fused_accumulate(model, enc, w, return_ll=True, parallel=parallel)
-            # counts: finite, and exactly the legacy prior-weight fallback for the impossible row
+            # counts: finite, and exactly the host zero-responsibility policy for the impossible row
             np.testing.assert_allclose(suff[0], legacy[0], rtol=1e-12, err_msg=f"parallel={parallel}")
             # the row's log-likelihood is -inf, matching seq_log_density (not NaN, not finite)
             self.assertTrue(np.isneginf(ll), f"parallel={parallel}: ll={ll}")
@@ -160,7 +159,7 @@ class NestedImpossibleRowTest(unittest.TestCase):
             fused = fn.fused_nested_seq_log_density(model, enc, parallel=parallel)
             np.testing.assert_allclose(fused, host, rtol=1e-12, err_msg=f"parallel={parallel}")
 
-    def test_estep_impossible_row_falls_back_to_prior_weights_recursively(self):
+    def test_estep_impossible_row_has_zero_responsibility_recursively(self):
         model = self._model()
         data = [0.5, 1.0e200, 3.2]
         enc = model.dist_to_encoder().seq_encode(data)
@@ -168,8 +167,8 @@ class NestedImpossibleRowTest(unittest.TestCase):
         with np.errstate(over="ignore"):
             est, legacy = _legacy_suff_stats(model, enc, w)
             suff, ll = fn.fused_nested_accumulate(model, enc, w, return_ll=True)
-        # root and inner mixture counts: the impossible row contributes the PRIOR weights at every
-        # level (0.7/0.3 outer times 0.6/0.4 and 0.5/0.5 inner), exactly as the legacy accumulator
+        # Root and inner mixture counts match the host policy: the impossible row contributes
+        # no latent assignment at any level.
         np.testing.assert_allclose(np.asarray(suff[0]), np.asarray(legacy[0]), rtol=1e-12)
         for j in range(2):
             np.testing.assert_allclose(np.asarray(suff[1][j][0]), np.asarray(legacy[1][j][0]), rtol=1e-12)

@@ -63,6 +63,7 @@ from mixle.stats.combinator.ignored import IgnoredDistribution
 from mixle.stats.combinator.null_dist import NullDistribution
 from mixle.stats.combinator.optional import OptionalDistribution
 from mixle.stats.combinator.sequence import SequenceDistribution
+from mixle.stats.compute.mixture_evidence import normalize_mixture_log_scores
 from mixle.stats.latent.mixture import MixtureDistribution
 from mixle.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
 from mixle.stats.univariate.continuous.exponential import ExponentialDistribution
@@ -1296,38 +1297,21 @@ class CompiledMixture:
         ll = self.seq_component_log_density(enc, model)
         if not self.is_mixture:
             return ll[:, 0]
-        ll = ll + np.asarray(model.log_w).reshape(1, -1)
-        mx = ll.max(axis=1, keepdims=True)
-        good = np.isfinite(mx[:, 0])
-        rv = np.full(ll.shape[0], -np.inf)
-        rv[good] = np.log(np.exp(ll[good] - mx[good]).sum(axis=1)) + mx[good, 0]
-        return rv
+        active = ~np.asarray(model.zw, dtype=bool)
+        weighted = np.full(ll.shape, -np.inf, dtype=np.float64)
+        weighted[:, active] = ll[:, active] + np.asarray(model.log_w)[active]
+        return normalize_mixture_log_scores(weighted).log_evidence
 
     def posteriors(self, enc, model=None) -> np.ndarray:
         """Return posterior component weights for encoded observations."""
         model = self.model if model is None else model
         ll = self.seq_component_log_density(enc, model)
         if self.is_mixture:
-            ll = ll + np.asarray(model.log_w).reshape(1, -1)
-        mx = ll.max(axis=1, keepdims=True)
-        # Rows whose component log-densities are all -inf (out-of-support
-        # observations) have a non-finite max; the softmax would produce NaN
-        # responsibilities. Match the legacy seq_posterior convention and assign
-        # those rows a uniform 1/K instead (mirrors the seq_log_density guard).
-        bad = ~np.isfinite(mx[:, 0])
-        if bad.any():
-            # zero the shift so the exp/sum below stays finite; the row is
-            # overwritten with a uniform 1/K afterward.
-            mx[bad] = 0.0
-        ll -= mx
-        np.exp(ll, out=ll)
-        denom = ll.sum(axis=1, keepdims=True)
-        if bad.any():
-            denom[bad] = 1.0
-        ll /= denom
-        if bad.any():
-            ll[bad] = 1.0 / ll.shape[1]
-        return ll
+            active = ~np.asarray(model.zw, dtype=bool)
+            weighted = np.full(ll.shape, -np.inf, dtype=np.float64)
+            weighted[:, active] = ll[:, active] + np.asarray(model.log_w)[active]
+            ll = weighted
+        return normalize_mixture_log_scores(ll).responsibilities
 
     # -- estimation ----------------------------------------------------------
 

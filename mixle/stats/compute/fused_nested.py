@@ -25,6 +25,10 @@ from typing import Any
 import numpy as np
 
 from mixle.stats.compute.fused_codegen import LeafTemplate, _auto_parallel, _n_chunks, _njit, _template_for
+from mixle.stats.compute.mixture_evidence import (
+    InvalidMixtureEvidenceError,
+    raise_for_invalid_log_evidence,
+)
 
 
 @dataclass
@@ -159,25 +163,39 @@ def _emit_score(node: Any, lines: list[str], quantized_lse: bool = False) -> str
     cvars = []
     for j, c in enumerate(node.children):
         e = _emit_score(c, lines, quantized_lse)
-        lines.append(f"    s{node.node_id}_{j} = logw{node.node_id}[{j}] + ({e})")
+        lines.append(
+            f"    s{node.node_id}_{j} = (-np.inf if logw{node.node_id}[{j}] == -np.inf "
+            f"else logw{node.node_id}[{j}] + ({e}))"
+        )
         cvars.append(f"s{node.node_id}_{j}")
+    lines.append(f"    bad{node.node_id} = False")
+    lines.append(f"    pinf{node.node_id} = 0")
+    for v in cvars:
+        lines.append(f"    bad{node.node_id} = bad{node.node_id} or np.isnan({v})")
+        lines.append(f"    pinf{node.node_id} += 1 if {v} == np.inf else 0")
     lines.append(f"    mx{node.node_id} = {cvars[0]}")
     for v in cvars[1:]:
         lines.append(f"    mx{node.node_id} = max(mx{node.node_id}, {v})")
-    lines.append(f"    sm{node.node_id} = 0.0")
+    lines.append(f"    if bad{node.node_id} or pinf{node.node_id} > 1:")
+    lines.append(f"        ns{node.node_id} = np.nan")
+    lines.append(f"    elif pinf{node.node_id} == 1:")
+    lines.append(f"        ns{node.node_id} = np.inf")
+    lines.append(f"    elif mx{node.node_id} > -np.inf:")
+    lines.append(f"        sm{node.node_id} = 0.0")
     for v in cvars:
         if quantized_lse:
-            lines.append(f"    qi{node.node_id} = int(np.rint(({v} - mx{node.node_id}) * lse_inv_delta)) + lse_levm1")
-            lines.append(f"    if qi{node.node_id} < 0:")
-            lines.append(f"        qi{node.node_id} = 0")
-            lines.append(f"    sm{node.node_id} += lse_lut[qi{node.node_id}]")
+            lines.append(
+                f"        qi{node.node_id} = "
+                f"int(np.rint(({v} - mx{node.node_id}) * lse_inv_delta)) + lse_levm1"
+            )
+            lines.append(f"        if qi{node.node_id} < 0:")
+            lines.append(f"            qi{node.node_id} = 0")
+            lines.append(f"        sm{node.node_id} += lse_lut[qi{node.node_id}]")
         else:
-            lines.append(f"    sm{node.node_id} += np.exp({v} - mx{node.node_id})")
-    # finite-max guard at EVERY mixture node (the flat compiler's guard, nested edition): when all
-    # children score -inf, -inf - (-inf) = NaN above; the host scores such rows -inf.
-    lines.append(
-        f"    ns{node.node_id} = (mx{node.node_id} + np.log(sm{node.node_id})) if mx{node.node_id} > -np.inf else -np.inf"
-    )
+            lines.append(f"        sm{node.node_id} += np.exp({v} - mx{node.node_id})")
+    lines.append(f"        ns{node.node_id} = mx{node.node_id} + np.log(sm{node.node_id})")
+    lines.append("    else:")
+    lines.append(f"        ns{node.node_id} = -np.inf")
     return f"ns{node.node_id}"
 
 
@@ -196,11 +214,11 @@ def _emit_backward(node: Any, rho: str, lines: list[str]) -> None:
     lines.append(f"    {rv} = {rho}")
     for j, c in enumerate(node.children):
         crv = f"{rv}_{j}"
-        # impossible subtree (ns = -inf, so s_j - ns = NaN): mirror the legacy accumulator -- the
-        # responsibility falls back to the prior mixture weights (a zero rho stays exactly zero).
         lines.append(
-            f"    {crv} = {rv} * (np.exp(s{node.node_id}_{j} - ns{node.node_id}) "
-            f"if ns{node.node_id} > -np.inf else np.exp(logw{node.node_id}[{j}]))"
+            f"    {crv} = (0.0 if np.isnan(ns{node.node_id}) or ns{node.node_id} == -np.inf "
+            f"else ({rv} if ns{node.node_id} == np.inf and s{node.node_id}_{j} == np.inf "
+            f"else (0.0 if ns{node.node_id} == np.inf "
+            f"else {rv} * np.exp(s{node.node_id}_{j} - ns{node.node_id}))))"
         )
         lines.append(f"    cc{node.node_id}[{j}] += {crv}")
         _emit_backward(c, crv, lines)
@@ -305,7 +323,9 @@ def _compile_estep(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> 
     _emit_backward(root, "wi", bwd)
     cc_args, leaf_acc = _acc_names(root)
     if not parallel:
-        args = ", ".join(_data_args(ctx) + _param_args(root) + ["weights", *cc_args, *leaf_acc, "out_ll"])
+        args = ", ".join(
+            _data_args(ctx) + _param_args(root) + ["weights", *cc_args, *leaf_acc, "out_ll", "invalid_rows"]
+        )
         lines = [
             f"def _es({args}):",
             "    n = weights.shape[0]",
@@ -314,6 +334,7 @@ def _compile_estep(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> 
             "        wi = weights[i]",
         ]
         lines += ["    " + ln for ln in fwd]
+        lines.append(f"        invalid_rows[i] = np.isnan({root_expr})")
         # root_expr can legitimately be -inf (an impossible row, propagated up through the per-node
         # finite-max guards in _emit_score); a zero-weighted such row must contribute exactly 0.0, not
         # 0.0 * -inf (NaN in IEEE arithmetic), which would poison out_ll[0] for the whole batch.
@@ -327,7 +348,11 @@ def _compile_estep(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> 
         # and worker counts. The emitted statements are IDENTICAL to the sequential kernel's -- the
         # rebinding is pure text substitution on the accumulator names.
         acc_all = [*cc_args, *leaf_acc]
-        args = ", ".join(_data_args(ctx) + _param_args(root) + ["weights", *acc_all, "out_ll", "n_chunks"])
+        args = ", ".join(
+            _data_args(ctx)
+            + _param_args(root)
+            + ["weights", *acc_all, "out_ll", "invalid_rows", "n_chunks"]
+        )
         lines = [
             f"def _es_par({args}):",
             "    n = weights.shape[0]",
@@ -341,6 +366,7 @@ def _compile_estep(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> 
             "            wi = weights[i]",
         ]
         lines += ["        " + ln for ln in fwd]
+        lines.append(f"            invalid_rows[i] = np.isnan({root_expr})")
         # same zero-weight guard as the sequential kernel: 0.0 * -inf is NaN, not 0.0.
         lines.append(f"            out_ll[c] += 0.0 if wi == 0.0 else wi * ({root_expr})")
         bwd_sub = bwd
@@ -436,6 +462,7 @@ def fused_nested_seq_log_density(
         )
     else:
         _compile_score(root, ctx, _sig(root, ctx), quantized_lse=quantized)(*data, *params, *lse_extra, out)
+    raise_for_invalid_log_evidence(out)
     return out
 
 
@@ -489,14 +516,34 @@ def fused_nested_accumulate(
         leaf_acc += [accs[f"a{lf.node_id}_{an}"] for an in lf.template.acc_names] + [accs[f"ct{lf.node_id}"]]
     if parallel:
         out_ll = np.zeros(nc, dtype=np.float64)
+        invalid_rows = np.zeros(n, dtype=np.bool_)
         _compile_estep(root, ctx, _sig(root, ctx), parallel=True)(
-            *data, *params, np.asarray(weights, dtype=np.float64), *cc_arrays, *leaf_acc, out_ll, nc
+            *data,
+            *params,
+            np.asarray(weights, dtype=np.float64),
+            *cc_arrays,
+            *leaf_acc,
+            out_ll,
+            invalid_rows,
+            nc,
         )
         accs = {name: arr.sum(axis=0) for name, arr in accs.items()}  # fixed-order combine
     else:
         out_ll = np.zeros(1, dtype=np.float64)
+        invalid_rows = np.zeros(n, dtype=np.bool_)
         _compile_estep(root, ctx, _sig(root, ctx))(
-            *data, *params, np.asarray(weights, dtype=np.float64), *cc_arrays, *leaf_acc, out_ll
+            *data,
+            *params,
+            np.asarray(weights, dtype=np.float64),
+            *cc_arrays,
+            *leaf_acc,
+            out_ll,
+            invalid_rows,
+        )
+    if invalid_rows.any():
+        raise InvalidMixtureEvidenceError(
+            np.flatnonzero(invalid_rows),
+            "component scores contain NaN or ambiguous +inf evidence",
         )
     suff = _node_value(root, accs)
     return (suff, float(out_ll.sum())) if return_ll else suff

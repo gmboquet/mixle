@@ -26,6 +26,7 @@ from mixle.stats.compute.declarations import (
     generated_stacked_sufficient_statistics_available,
 )
 from mixle.stats.compute.kernel import Kernel, KernelFactory
+from mixle.stats.compute.mixture_evidence import normalize_engine_mixture_log_scores
 from mixle.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 
 _COMPONENT_AXIS_KEY = "__pysp_component_axis__"
@@ -364,21 +365,19 @@ class StackedMixtureKernel(Kernel):
         zw = getattr(self.dist, "zw", None)
         if zw is not None and np.any(zw):
             mask = self.engine.asarray(np.asarray(zw))
-            ll = self.engine.where(mask[None, :], ll * 0.0 + self.engine.asarray(-np.inf), ll)
+            impossible = self.engine.zeros(ll.shape) + self.engine.asarray(-np.inf)
+            ll = self.engine.where(mask[None, :], impossible, ll)
         return ll
 
     def score(self, enc: Any) -> Any:
         """Return row log densities after adding mixture log weights."""
-        return self.engine.logsumexp(self.component_scores(enc) + self.log_w, axis=1)
+        weighted = self.component_scores(enc) + self.log_w
+        return normalize_engine_mixture_log_scores(weighted, self.engine).log_evidence
 
     def posteriors(self, enc: Any) -> Any:
         """Return posterior component weights for each encoded row."""
         weighted = self.component_scores(enc) + self.log_w
-        denom = self.engine.logsumexp(weighted, axis=1)
-        bad_rows = self.engine.isinf(denom) & (denom < self.engine.asarray(0.0))
-        weighted = self.engine.where(bad_rows[:, None], self.log_w + self.engine.zeros(weighted.shape), weighted)
-        denom = self.engine.where(bad_rows, self.engine.asarray(0.0), denom)
-        return self.engine.exp(weighted - denom[:, None])
+        return normalize_engine_mixture_log_scores(weighted, self.engine).responsibilities
 
     @property
     def has_resident_accumulate(self) -> bool:

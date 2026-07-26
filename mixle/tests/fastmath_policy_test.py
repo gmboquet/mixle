@@ -138,12 +138,14 @@ class NestedEmitterGuardTest(unittest.TestCase):
         for mx in fused_nested._mixtures(root):
             nid = mx.node_id
             self.assertIn(
-                f"if mx{nid} > -np.inf else -np.inf",
+                f"if bad{nid} or pinf{nid} > 1:",
                 src,
-                f"mixture node {nid} lacks the all-children--inf log-sum-exp guard",
+                f"mixture node {nid} lacks the invalid-evidence guard",
             )
+            self.assertIn(f"elif pinf{nid} == 1:", src)
+            self.assertIn(f"ns{nid} = -np.inf", src)
 
-    def test_backward_emitter_falls_back_to_prior_weights(self):
+    def test_backward_emitter_zeros_impossible_responsibilities(self):
         root, _ = self._built_tree()
         fwd: list[str] = []
         fused_nested._emit_score(root, fwd)
@@ -154,10 +156,11 @@ class NestedEmitterGuardTest(unittest.TestCase):
             nid = mx.node_id
             for j in range(len(mx.children)):
                 self.assertIn(
-                    f"if ns{nid} > -np.inf else np.exp(logw{nid}[{j}])",
+                    f"0.0 if np.isnan(ns{nid}) or ns{nid} == -np.inf",
                     src,
-                    f"mixture node {nid} child {j} lacks the prior-weight responsibility fallback",
+                    f"mixture node {nid} child {j} lacks the zero-responsibility guard",
                 )
+                self.assertIn(f"ns{nid} == np.inf and s{nid}_{j} == np.inf", src)
 
 
 if __name__ == "__main__":
