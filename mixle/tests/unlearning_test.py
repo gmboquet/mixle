@@ -1,19 +1,16 @@
-"""P5 (experimental) -- exact unlearning certificates for closed-form leaves.
-
-The certified operation is *re-reduce the retained shards' stored statistics*, not *subtract the
-deleted shard's statistics*. These tests pin both halves of the card's finding:
-
-  * re-reduce yields the never-saw-it fit bit-for-bit across closed-form families;
-  * subtraction is neither bitwise nor even safe -- under an adversarial large-magnitude shard it
-    catastrophically cancels and returns a negative variance, while re-reduce stays exact.
-"""
+"""P5 commitment-backed exact unlearning tests."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
+import pytest
 
 from mixle.experimental.unlearning import (
     certify_unlearning,
+    prepare_unlearning,
+    retained_records,
     shard_statistic,
     unlearn,
 )
@@ -29,81 +26,198 @@ def _shards(rng, kind):
     return [rng.poisson(4.0, 30).tolist() for _ in range(4)]
 
 
-def test_certificate_is_bitwise_exact_for_closed_form_leaves() -> None:
-    for kind, est in [
+def _prepare(estimator, shards, excluded):
+    records, manifest = prepare_unlearning(estimator, shards)
+    retained = retained_records(records, exclude=excluded)
+    return retained, manifest
+
+
+def test_certificate_is_bitwise_exact_for_audited_closed_form_leaves() -> None:
+    for kind, estimator in [
         ("gaussian", GaussianEstimator()),
         ("categorical", CategoricalEstimator()),
         ("poisson", PoissonEstimator()),
     ]:
-        rng = np.random.default_rng(0)
-        shards = _shards(rng, kind)
-        _, cert = certify_unlearning(est, shards, exclude={1})
-        assert cert.bitwise_exact, f"{kind}: re-reduce unlearning was not bitwise exact"
-        assert cert.method == "re-reduce"
-        assert cert.n_excluded == 1 and cert.n_retained_shards == 3 and cert.n_shards_total == 4
+        shards = _shards(np.random.default_rng(0), kind)
+        excluded = {"shard-00000001"}
+        retained, manifest = _prepare(estimator, shards, excluded)
+        _, certificate = certify_unlearning(
+            estimator,
+            retained,
+            manifest=manifest,
+            exclude=excluded,
+            expected_manifest_digest=manifest.digest,
+        )
+
+        assert certificate.bitwise_exact, f"{kind}: retained re-reduction was not bitwise exact"
+        assert certificate.method == "commitment-rereduce-v1"
+        assert certificate.n_excluded == 1
+        assert certificate.n_retained_shards == 3
+        assert certificate.n_shards_total == 4
+        assert not certificate.raw_data_accessed
+        assert not certificate.excluded_statistics_accessed
 
 
 def test_unlearn_matches_the_never_saw_it_fit() -> None:
-    rng = np.random.default_rng(1)
-    shards = _shards(rng, "gaussian")
-    stored = [shard_statistic(GaussianEstimator(), s) for s in shards]
-    unlearned = unlearn(GaussianEstimator(), stored, exclude={2})
-    # Reference: fit from scratch on the concatenation of the retained shards.
-    retained = [x for i, s in enumerate(shards) if i != 2 for x in s]
-    scratch = optimize(retained, GaussianEstimator(), out=None)
+    shards = _shards(np.random.default_rng(1), "gaussian")
+    estimator = GaussianEstimator()
+    excluded = {"shard-00000002"}
+    retained, manifest = _prepare(estimator, shards, excluded)
+    unlearned = unlearn(
+        estimator,
+        retained,
+        manifest=manifest,
+        exclude=excluded,
+        expected_manifest_digest=manifest.digest,
+    )
+
+    raw_retained = [value for index, shard in enumerate(shards) if index != 2 for value in shard]
+    scratch = optimize(raw_retained, GaussianEstimator(), out=None)
     assert np.isclose(unlearned.mu, scratch.mu)
     assert np.isclose(unlearned.sigma2, scratch.sigma2)
 
 
-def test_subtraction_is_not_the_certified_method_and_can_go_invalid() -> None:
-    """Adversarial shard: subtract catastrophically cancels to a negative variance; re-reduce is fine."""
-    # Retained shards: small, well-conditioned. Excluded shard: huge magnitude.
-    rng = np.random.default_rng(7)
-    retained = [rng.normal(0.0, 1.0, 200) for _ in range(3)]
-    excluded = rng.normal(1e10, 1.0, 200)  # huge magnitude -> Q's ULP swamps the retained sum-of-squares
+def test_certification_never_rereads_raw_or_excluded_statistics() -> None:
+    class OneShotShard:
+        def __init__(self, values):
+            self.values = values
+            self.reads = 0
 
-    def stats(x):
-        x = np.asarray(x, dtype=float)
-        return float(x.size), float(x.sum()), float((x * x).sum())
+        def __iter__(self):
+            self.reads += 1
+            if self.reads > 1:
+                raise AssertionError("raw shard was reread after ingestion")
+            return iter(self.values)
 
-    # total over ALL shards, then subtract the excluded shard (the WRONG method).
-    all_shards = [*retained, excluded]
-    N = sum(stats(s)[0] for s in all_shards)
-    S = sum(stats(s)[1] for s in all_shards)
-    Q = sum(stats(s)[2] for s in all_shards)
-    n_e, s_e, q_e = stats(excluded)
-    n_sub, s_sub, q_sub = N - n_e, S - s_e, Q - q_e
-    mu_sub = s_sub / n_sub
-    var_subtract = q_sub / n_sub - mu_sub**2
+    raw = {
+        "alice": OneShotShard([1.0, 2.0]),
+        "bob": OneShotShard([3.0, 4.0]),
+        "carol": OneShotShard([5.0, 6.0]),
+    }
+    estimator = GaussianEstimator()
+    records, manifest = prepare_unlearning(estimator, raw)
+    retained = retained_records(records, exclude={"bob"})
+    del records
 
-    # re-reduce over only the retained shards (the CERTIFIED method).
-    n_r = sum(stats(s)[0] for s in retained)
-    s_r = sum(stats(s)[1] for s in retained)
-    q_r = sum(stats(s)[2] for s in retained)
-    mu_re = s_r / n_r
-    var_rereduce = q_r / n_r - mu_re**2
-
-    # Re-reduce recovers the true retained variance (~1). Subtraction catastrophically cancels:
-    # the excluded shard's ~1e20 sum-of-squares has a ULP far larger than the retained ~600, so the
-    # subtracted result is dominated by rounding noise -- materially wrong, and here negative.
-    assert 0.5 < var_rereduce < 2.0, f"re-reduce variance {var_rereduce:.3f} should be ~1"
-    assert var_subtract < 0.0 or abs(var_subtract - var_rereduce) > 0.5, (
-        f"subtraction should be materially wrong; got {var_subtract:.3e} vs re-reduce {var_rereduce:.3f}"
+    _, certificate = certify_unlearning(
+        estimator,
+        retained,
+        manifest=manifest,
+        exclude={"bob"},
+        expected_manifest_digest=manifest.digest,
     )
 
-
-def test_per_user_unlearning_of_multiple_shards() -> None:
-    rng = np.random.default_rng(3)
-    shards = _shards(rng, "gaussian")
-    _, cert = certify_unlearning(GaussianEstimator(), shards, exclude={0, 3})
-    assert cert.bitwise_exact
-    assert cert.n_excluded == 2 and cert.n_retained_shards == 2
+    assert certificate.bitwise_exact
+    assert all(shard.reads == 1 for shard in raw.values())
+    assert set(retained) == {"alice", "carol"}
 
 
-def test_determinism() -> None:
-    rng = np.random.default_rng(5)
-    shards = _shards(rng, "gaussian")
-    m1, c1 = certify_unlearning(GaussianEstimator(), shards, exclude={1})
-    m2, c2 = certify_unlearning(GaussianEstimator(), shards, exclude={1})
-    assert m1.to_json() == m2.to_json()
-    assert c1.as_dict() == c2.as_dict()
+def test_unknown_exclusion_ids_and_incomplete_retained_store_are_rejected() -> None:
+    estimator = GaussianEstimator()
+    records, manifest = prepare_unlearning(estimator, {"a": [1.0], "b": [2.0], "c": [3.0]})
+
+    with pytest.raises(ValueError, match="unknown exclusion IDs"):
+        retained_records(records, exclude={"missing"})
+
+    retained = retained_records(records, exclude={"b"})
+    del retained["a"]
+    with pytest.raises(ValueError, match="missing=.*a"):
+        certify_unlearning(
+            estimator,
+            retained,
+            manifest=manifest,
+            exclude={"b"},
+            expected_manifest_digest=manifest.digest,
+        )
+
+
+def test_tampered_record_or_manifest_anchor_is_rejected() -> None:
+    estimator = GaussianEstimator()
+    records, manifest = prepare_unlearning(estimator, {"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    retained = retained_records(records, exclude={"b"})
+    retained["a"] = replace(retained["a"], value=(999.0, 999.0, 2.0, 2.0))
+
+    with pytest.raises(ValueError, match="commitment check"):
+        certify_unlearning(
+            estimator,
+            retained,
+            manifest=manifest,
+            exclude={"b"},
+            expected_manifest_digest=manifest.digest,
+        )
+
+    retained = retained_records(records, exclude={"b"})
+    with pytest.raises(ValueError, match="external digest anchor"):
+        certify_unlearning(
+            estimator,
+            retained,
+            manifest=manifest,
+            exclude={"b"},
+            expected_manifest_digest="0" * 64,
+        )
+
+
+def test_iterative_or_unregistered_estimator_is_refused_before_ingestion() -> None:
+    class IterativeEstimator:
+        pass
+
+    with pytest.raises(TypeError, match="not an audited additive single-step estimator"):
+        prepare_unlearning(IterativeEstimator(), [[1.0], [2.0]])
+
+
+def test_subtraction_is_not_the_certified_method_and_can_go_invalid() -> None:
+    """Adversarial shard: subtract catastrophically cancels while re-reduction remains well conditioned."""
+    rng = np.random.default_rng(7)
+    retained = [rng.normal(0.0, 1.0, 200) for _ in range(3)]
+    excluded = rng.normal(1e10, 1.0, 200)
+
+    def stats(values):
+        values = np.asarray(values, dtype=float)
+        return float(values.size), float(values.sum()), float((values * values).sum())
+
+    all_shards = [*retained, excluded]
+    count = sum(stats(shard)[0] for shard in all_shards)
+    total = sum(stats(shard)[1] for shard in all_shards)
+    squares = sum(stats(shard)[2] for shard in all_shards)
+    excluded_count, excluded_total, excluded_squares = stats(excluded)
+    sub_count = count - excluded_count
+    sub_total = total - excluded_total
+    sub_squares = squares - excluded_squares
+    sub_mean = sub_total / sub_count
+    variance_subtract = sub_squares / sub_count - sub_mean**2
+
+    retained_count = sum(stats(shard)[0] for shard in retained)
+    retained_total = sum(stats(shard)[1] for shard in retained)
+    retained_squares = sum(stats(shard)[2] for shard in retained)
+    retained_mean = retained_total / retained_count
+    variance_rereduce = retained_squares / retained_count - retained_mean**2
+
+    assert 0.5 < variance_rereduce < 2.0
+    assert variance_subtract < 0.0 or abs(variance_subtract - variance_rereduce) > 0.5
+
+
+def test_determinism_and_public_single_shard_ingestion() -> None:
+    estimator = GaussianEstimator()
+    record = shard_statistic(estimator, [1.0, 2.0], shard_id="direct")
+    assert record.shard_id == "direct"
+    assert len(record.commitment) == 64
+
+    shards = _shards(np.random.default_rng(5), "gaussian")
+    excluded = {"shard-00000001"}
+    retained, manifest = _prepare(estimator, shards, excluded)
+    model_one, certificate_one = certify_unlearning(
+        estimator,
+        retained,
+        manifest=manifest,
+        exclude=excluded,
+        expected_manifest_digest=manifest.digest,
+    )
+    model_two, certificate_two = certify_unlearning(
+        estimator,
+        retained,
+        manifest=manifest,
+        exclude=excluded,
+        expected_manifest_digest=manifest.digest,
+    )
+    assert vars(model_one) == vars(model_two)
+    assert certificate_one.as_dict() == certificate_two.as_dict()
