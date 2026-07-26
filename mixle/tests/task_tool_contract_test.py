@@ -67,6 +67,53 @@ class ToolSpecContractTest(unittest.TestCase):
         )
         self.assertEqual(executed, [True])
 
+    def test_planner_never_replays_committed_steps_after_partial_failure(self):
+        tools = {"first": ToolSpec("first", []), "second": ToolSpec("second", [])}
+        teacher_calls = []
+        planner = Planner(
+            selector=_sequence_selector("first", "second", "__stop__"),
+            extractors={},
+            tools=tools,
+            teacher=lambda request: teacher_calls.append(request)
+            or [{"tool": "first", "args": {}}, {"tool": "second", "args": {}}],
+            plan_agreement=1.0,
+            max_steps=3,
+        )
+        committed = []
+
+        def fail():
+            raise RuntimeError("boom")
+
+        result = planner(
+            "do it",
+            execute={"first": lambda: committed.append("first") or "ok", "second": fail},
+        )
+        self.assertTrue(result["partial"])
+        self.assertTrue(result["escalate"])
+        self.assertEqual(result["committed_steps"], 1)
+        self.assertEqual(committed, ["first"])
+        self.assertEqual(teacher_calls, [])  # no fallback plan can replay the committed action
+
+    def test_complete_execution_policy_and_teacher_plan_are_validated_before_actions(self):
+        tools = {"first": ToolSpec("first", []), "second": ToolSpec("second", ["value"])}
+        committed = []
+        planner = Planner(
+            selector=_sequence_selector("first", "second", "__stop__"),
+            extractors={"second": lambda _request: {"value": 1}},
+            tools=tools,
+            teacher=lambda _request: [{"tool": "second", "args": {}}],
+            plan_agreement=1.0,
+            max_steps=3,
+        )
+        with self.assertRaisesRegex(ValueError, "no callable"):
+            planner.try_plan("do it", execute={"first": lambda: committed.append("first")})
+        self.assertEqual(committed, [])
+
+        planner.selector = _selector(None)
+        with self.assertRaisesRegex(ValueError, "missing required"):
+            planner("fallback", execute={"second": lambda value: committed.append(value)})
+        self.assertEqual(committed, [])
+
 
 class GenerativePlanContractTest(unittest.TestCase):
     def test_falsey_required_value_is_valid_and_duplicate_argument_text_is_not(self):
