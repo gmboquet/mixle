@@ -87,6 +87,20 @@ def _validated_update_chunk(
     return count, weights
 
 
+def _partition_random_states(seeds: Any, split_index: int) -> tuple[np.random.RandomState, np.random.RandomState]:
+    seed_values = np.asarray(seeds)
+    if seed_values.ndim != 1 or not np.issubdtype(seed_values.dtype, np.integer):
+        raise TypeError("partition seeds must be a one-dimensional integer array.")
+    if isinstance(split_index, bool) or not isinstance(split_index, (int, np.integer)):
+        raise TypeError("partition index must be an integer.")
+    index = int(split_index)
+    if not 0 <= index < len(seed_values):
+        raise IndexError("partition index %d is outside the %d generated seeds." % (index, len(seed_values)))
+    rng = np.random.RandomState(int(seed_values[index]))
+    weight_rng = np.random.RandomState(seed=int(rng.randint(2**31)))
+    return rng, weight_rng
+
+
 def seq_encode(
     data: Sequence[T] | pyspark.rdd.RDD,
     encoder: DataSequenceEncoder | None = None,
@@ -455,13 +469,12 @@ def seq_initialize(
         seeds = rng.randint(2**31, size=num_partitions)
 
         estimator_broadcast = sc.broadcast(estimator)
-        seeds_broadcast = sc.broadcast(pickle.dumps(seeds, protocol=0))
+        seeds_broadcast = sc.broadcast(seeds)
 
         def acc(split_index, itr):
             accumulator_for_split = estimator_broadcast.value.accumulator_factory().make()
             counts_for_split = 0.0
-            rng_loc = np.random.RandomState(seeds_broadcast.value[split_index])
-            rng_loc_w = np.random.RandomState(seed=rng_loc.randint(2**31))
+            rng_loc, rng_loc_w = _partition_random_states(seeds_broadcast.value, split_index)
 
             for sz, x in itr:
                 w = np.zeros(sz, dtype=float)

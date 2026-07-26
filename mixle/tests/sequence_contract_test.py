@@ -1,5 +1,6 @@
 """Edge contracts for sequence encoding and convenience scoring."""
 
+import pickle
 import unittest
 
 import numpy as np
@@ -7,6 +8,7 @@ import numpy as np
 from mixle.inference import seq_estimate
 from mixle.stats import GaussianDistribution, GaussianEstimator, log_density, seq_encode
 from mixle.stats.compute.pdist import DataSequenceEncoder
+from mixle.stats.compute.sequence import _partition_random_states
 
 
 class _DroppingEncoder(DataSequenceEncoder):
@@ -76,6 +78,21 @@ class SequenceContractTest(unittest.TestCase):
             with self.subTest(declared=declared):
                 with self.assertRaises(TypeError):
                     seq_estimate([(declared, encoded)], GaussianEstimator(), self.model)
+
+    def test_partition_seed_streams_are_deterministic_and_distinct(self):
+        seeds = np.random.RandomState(7).randint(2**31, size=3)
+        first = [_partition_random_states(seeds, index) for index in range(3)]
+        replay = [_partition_random_states(seeds.copy(), index) for index in range(3)]
+
+        first_draws = [(rng.randint(2**31), weights.randint(2**31)) for rng, weights in first]
+        replay_draws = [(rng.randint(2**31), weights.randint(2**31)) for rng, weights in replay]
+        self.assertEqual(first_draws, replay_draws)
+        self.assertEqual(len(set(first_draws)), 3)
+
+        with self.assertRaises(IndexError):
+            _partition_random_states(seeds, 3)
+        with self.assertRaises(TypeError):
+            _partition_random_states(pickle.dumps(seeds), 0)
 
 
 if __name__ == "__main__":
