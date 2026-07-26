@@ -184,33 +184,59 @@ def measure_cascade_receipt(
     directly comparable). ``teacher_bytes`` is the caller-supplied measured/declared footprint of the frontier
     model (opaque to mixle -- it is not a mixle artifact) used only for the reported compression ratio.
     """
+    if not isinstance(cascade, Cascade):
+        raise TypeError("cascade must be a Cascade")
     if cascade.cost is None:
         raise ValueError("measure_cascade_receipt needs a Cascade built with a CostModel (cascade.cost)")
-
+    if isinstance(test_data, (str, bytes)) or isinstance(truth_labels, (str, bytes)):
+        raise TypeError("test_data and truth_labels must be sequences, not scalar strings")
     test_data = list(test_data)
     truth = [str(t) for t in truth_labels]
     if len(test_data) != len(truth):
         raise ValueError("test_data and truth_labels must be the same length")
+    if not test_data:
+        raise ValueError("test_data and truth_labels must be non-empty")
+    if teacher_bytes is not None and (
+        isinstance(teacher_bytes, bool) or not isinstance(teacher_bytes, (int, np.integer)) or int(teacher_bytes) <= 0
+    ):
+        raise ValueError("teacher_bytes must be a positive integer or None")
+    teacher_bytes = None if teacher_bytes is None else int(teacher_bytes)
 
     student = cascade.model.task  # the underlying (LNS-compressed) TaskModel wrapped by CalibratedTaskModel
     student_preds = [str(p) for p in student.batch(test_data)]
+    if len(student_preds) != len(test_data):
+        raise ValueError("student must return one prediction per test item")
+    # Obtain one immutable teacher outcome per item. The same outcomes define
+    # teacher quality and resolve every cascade escalation below.
     teacher_preds = [str(p) for p in _as_batched(cascade.teacher)(test_data)]
 
     student_quality = float(np.mean([p == t for p, t in zip(student_preds, truth)]))
     teacher_quality = float(np.mean([p == t for p, t in zip(teacher_preds, truth)]))
     agreement_rate = float(np.mean([s == t for s, t in zip(student_preds, teacher_preds)]))
 
-    cascade_preds = [str(p) for p in cascade.serve(test_data)]  # real serving: updates cascade.stats
+    requests_before = cascade.stats.n_requests
+    escalations_before = cascade.stats.n_escalated
+    cascade_preds = [
+        str(p)
+        for p in cascade.serve_with_teacher_labels(
+            test_data,
+            teacher_preds,
+        )
+    ]
     cascade_quality = float(np.mean([p == t for p, t in zip(cascade_preds, truth)]))
 
-    n_requests = cascade.stats.n_requests
-    cascade_cost_per_request = cascade.realized_cost() / n_requests if n_requests else 0.0
+    n_requests = cascade.stats.n_requests - requests_before
+    n_escalated = cascade.stats.n_escalated - escalations_before
+    if n_requests != len(test_data) or not 0 <= n_escalated <= n_requests:
+        raise RuntimeError("cascade evaluation accounting did not match the immutable evaluation batch")
+    realized_cost = n_requests * cascade.cost.c_local + n_escalated * cascade.cost.c_frontier
+    cascade_cost_per_request = realized_cost / n_requests
 
     student_bytes = footprint(student).bytes
 
     return CascadeReceipt(
         n_requests=n_requests,
-        n_escalated=cascade.stats.n_escalated,
+        n_escalated=n_escalated,
         student_cost_per_request=cascade.cost.c_local,
         teacher_cost_per_request=cascade.cost.c_frontier,
         cascade_cost_per_request=cascade_cost_per_request,
@@ -219,6 +245,6 @@ def measure_cascade_receipt(
         cascade_quality=cascade_quality,
         student_bytes=student_bytes,
         teacher_bytes=teacher_bytes,
-        compression_ratio=(teacher_bytes / student_bytes) if teacher_bytes else None,
+        compression_ratio=(teacher_bytes / student_bytes) if teacher_bytes is not None else None,
         agreement_rate=agreement_rate,
     )
