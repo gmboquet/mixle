@@ -7,6 +7,7 @@ MLE path is checked for likelihood improvement and parameter recovery.
 import importlib
 import io
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -26,6 +27,7 @@ from mixle.stats import (
 )
 
 if HAS_TORCH:
+    from mixle.stats.compute.kernel import EngineNotSupportedError
     from mixle.stats.compute.torch_mixture import TorchMixture
 else:
     TorchMixture = None
@@ -69,6 +71,35 @@ class TorchEngineTestCase(unittest.TestCase):
         ll = tm.seq_log_density(tm.encode(self.data))
         ll_legacy = comp.seq_log_density(comp.dist_to_encoder().seq_encode(self.data))
         self.assertTrue(np.allclose(ll, ll_legacy, atol=1.0e-10))
+
+    def test_selected_kernel_failures_are_never_reinterpreted_as_capability_declines(self):
+        class BrokenKernel:
+            def score(self, payload):
+                raise ArithmeticError("score execution failed")
+
+            def component_scores(self, payload):
+                raise RuntimeError("component execution failed")
+
+            def accumulate(self, payload, weights):
+                raise LookupError("accumulation execution failed")
+
+        with mock.patch.object(self.model, "kernel", return_value=BrokenKernel()):
+            with self.assertRaisesRegex(ArithmeticError, "score execution failed"):
+                self.tm.seq_log_density(self.enc)
+            with self.assertRaisesRegex(RuntimeError, "component execution failed"):
+                self.tm.seq_component_log_density(self.enc)
+            with self.assertRaisesRegex(RuntimeError, "component execution failed"):
+                self.tm.posteriors(self.enc)
+            with self.assertRaisesRegex(LookupError, "accumulation execution failed"):
+                self.tm.em_step(self.enc, make_estimator())
+
+    def test_typed_kernel_selection_decline_uses_legacy_compatibility_path(self):
+        component = self.model.components[0]
+        tm = TorchMixture(component)
+        enc = tm.encode(self.data)
+        expected = component.seq_log_density(enc[1])
+        with mock.patch.object(component, "kernel", side_effect=EngineNotSupportedError("unsupported")):
+            np.testing.assert_array_equal(tm.seq_log_density(enc), expected)
 
     # -- EM parity -------------------------------------------------------------
 

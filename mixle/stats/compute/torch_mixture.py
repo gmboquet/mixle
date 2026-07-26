@@ -8,8 +8,8 @@ is a small adapter over the modular compute-engine stack:
 * data are encoded with the model's normal ``dist_to_encoder`` protocol;
 * scoring and accumulation dispatch through ``dist.kernel(engine=...)`` when a
   Torch kernel is available;
-* unsupported object-valued models fall back to the legacy ``seq_*`` protocol
-  as fixed, CPU-scored compatibility paths;
+* a typed engine-capability decline during kernel selection may fall back to
+  the legacy ``seq_*`` protocol as a fixed CPU compatibility path;
 * gradient fitting delegates to the declaration/objective-based generic
   optimizers in ``mixle.inference.estimation``.
 """
@@ -23,6 +23,7 @@ import numpy as np
 from mixle.engines import TorchEngine
 from mixle.inference.gradient_fit import fit_map as _fit_map
 from mixle.inference.gradient_fit import fit_mle as _fit_mle
+from mixle.stats.compute.kernel import EngineNotSupportedError
 from mixle.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
 
 __all__ = ["TorchMixture"]
@@ -57,14 +58,11 @@ class TorchMixture:
         self._validate_ignored_structure(model)
         payload = enc[1]
         if _is_mixture_model(model):
-            try:
-                scores = model.kernel(engine=self.engine).component_scores(payload)
-                return np.asarray(self.engine.to_numpy(scores), dtype=np.float64)
-            except Exception:  # noqa: BLE001
-                # Fall back to the legacy numpy path if the model has no modular kernel for this
-                # engine (or the kernel raises). This intentionally swallows kernel errors; set a
-                # breakpoint here when debugging a silently-degraded engine path.
+            kernel = self._select_kernel(model)
+            if kernel is None:
                 return np.asarray(model.seq_component_log_density(payload), dtype=np.float64)
+            scores = kernel.component_scores(payload)
+            return np.asarray(self.engine.to_numpy(scores), dtype=np.float64)
         scores = self._score(model, payload)
         return scores.reshape((-1, 1))
 
@@ -82,17 +80,14 @@ class TorchMixture:
         if not _is_mixture_model(model):
             return self.engine.asarray(np.ones((n, 1), dtype=np.float64))
         payload = enc[1]
-        try:
-            kernel = model.kernel(engine=self.engine)
-            if callable(getattr(kernel, "posteriors", None)):
-                return kernel.posteriors(payload)
-            comp = kernel.component_scores(payload) + self.engine.asarray(model.log_w)[None, :]
-            denom = self.engine.logsumexp(comp, axis=1)
-            return self.engine.exp(comp - denom[:, None])
-        except Exception:  # noqa: BLE001
-            # Fall back to the legacy numpy posterior if no modular kernel is available (or it
-            # raises). Intentionally swallows kernel errors to keep the engine path optional.
+        kernel = self._select_kernel(model)
+        if kernel is None:
             return self.engine.asarray(model.seq_posterior(payload))
+        if callable(getattr(kernel, "posteriors", None)):
+            return kernel.posteriors(payload)
+        comp = kernel.component_scores(payload) + self.engine.asarray(model.log_w)[None, :]
+        denom = self.engine.logsumexp(comp, axis=1)
+        return self.engine.exp(comp - denom[:, None])
 
     def weighted_suff_stats(self, enc: tuple[int, Any], gamma: Any, model: Any | None = None) -> Any:
         """Return legacy-format sufficient statistics for posterior weights."""
@@ -129,16 +124,13 @@ class TorchMixture:
             if weights is None
             else np.asarray(self.engine.to_numpy(weights), dtype=np.float64)
         )
-        try:
-            stats = model.kernel(engine=self.engine, estimator=estimator).accumulate(
-                payload, self.engine.asarray(row_weights)
-            )
-        except Exception:  # noqa: BLE001
-            # Fall back to the legacy accumulator M-step if no modular kernel exists for this
-            # (model, estimator, engine) combination (or it raises). Swallows kernel errors by design.
+        kernel = self._select_kernel(model, estimator=estimator)
+        if kernel is None:
             acc = estimator.accumulator_factory().make()
             acc.seq_update(payload, row_weights, model)
             stats = acc.value()
+        else:
+            stats = kernel.accumulate(payload, self.engine.asarray(row_weights))
         return estimator.estimate(n, stats)
 
     def initialize(
@@ -237,13 +229,18 @@ class TorchMixture:
         )
 
     def _score(self, model: Any, payload: Any) -> np.ndarray:
-        try:
-            scores = model.kernel(engine=self.engine).score(payload)
-            return np.asarray(self.engine.to_numpy(scores), dtype=np.float64)
-        except Exception:  # noqa: BLE001
-            # Fall back to the legacy numpy scorer when no modular kernel is available (or it
-            # raises). Intentionally swallows kernel errors to keep the engine path optional.
+        kernel = self._select_kernel(model)
+        if kernel is None:
             return np.asarray(model.seq_log_density(payload), dtype=np.float64)
+        scores = kernel.score(payload)
+        return np.asarray(self.engine.to_numpy(scores), dtype=np.float64)
+
+    def _select_kernel(self, model: Any, estimator: ParameterEstimator | None = None) -> Any | None:
+        """Select a Torch kernel, returning ``None`` only for a typed pre-execution capability decline."""
+        try:
+            return model.kernel(engine=self.engine, estimator=estimator)
+        except EngineNotSupportedError:
+            return None
 
     def _validate_ignored_structure(self, model: Any) -> None:
         if _ignored_signature(model) != _ignored_signature(self.model):
