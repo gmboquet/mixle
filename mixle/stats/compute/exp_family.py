@@ -43,7 +43,7 @@ def _flatten_statistics(statistics: tuple[Any, ...], engine: Any) -> Any:
         arr = engine.asarray(stat)
         shape = tuple(getattr(arr, "shape", ()))
         if len(shape) == 0:
-            arr = engine.asarray(np.reshape(engine.to_numpy(arr), (1, 1)))
+            arr = arr.reshape((1, 1))
         elif len(shape) == 1:
             arr = arr[:, None]
         else:
@@ -51,7 +51,7 @@ def _flatten_statistics(statistics: tuple[Any, ...], engine: Any) -> Any:
         columns.append(arr)
     if len(columns) == 1:
         return columns[0]
-    return np.concatenate([engine.to_numpy(c) for c in columns], axis=1)
+    return engine.concatenate(columns, axis=1)
 
 
 def _flatten_natural(natural: tuple[Any, ...], engine: Any) -> np.ndarray:
@@ -243,14 +243,11 @@ class ProductExponentialFamilyForm:
         """Return the concatenated natural parameters of all components."""
         return np.concatenate([c.natural_parameters() for c in self.components])
 
-    def sufficient_statistics(self, x: Any) -> np.ndarray:
+    def sufficient_statistics(self, x: Any) -> Any:
         """Return concatenated per-component sufficient statistics ``(n, dim)``."""
         parts = self._split(x)
-        blocks = [
-            np.asarray(self.engine.to_numpy(c.sufficient_statistics(part)), dtype=np.float64)
-            for c, part in zip(self.components, parts)
-        ]
-        return np.concatenate(blocks, axis=1)
+        blocks = [c.sufficient_statistics(part) for c, part in zip(self.components, parts)]
+        return self.engine.concatenate(blocks, axis=1)
 
     def log_partition(self, eta: Any = None) -> Any:
         """Return ``A = sum_i A_i`` (current parameters only; ``eta`` override unsupported)."""

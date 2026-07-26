@@ -173,6 +173,10 @@ class TorchEngine(ComputeEngine):
         """Stack tensors with ``torch.stack`` and apply default placement."""
         return self._replicate_tensor(torch.stack(tuple(arrays), dim=axis))
 
+    def concatenate(self, arrays: Any, axis: int = 0) -> Any:
+        """Join tensors with ``torch.cat`` without leaving the selected device."""
+        return self._replicate_tensor(torch.cat(tuple(arrays), dim=axis))
+
     def replicate(self, x: Any) -> Any:
         """Return ``x`` replicated across the configured DeviceMesh."""
         if self.mesh is None:

@@ -78,6 +78,10 @@ class NumpyEngine(ComputeEngine):
         """Stack arrays with ``np.stack`` along the requested axis."""
         return np.stack(arrays, axis=axis)
 
+    def concatenate(self, arrays: Any, axis: int = 0) -> np.ndarray:
+        """Join arrays with ``np.concatenate`` along the requested axis."""
+        return np.concatenate(tuple(arrays), axis=axis)
+
     log = staticmethod(np.log)
     exp = staticmethod(np.exp)
     sqrt = staticmethod(np.sqrt)
