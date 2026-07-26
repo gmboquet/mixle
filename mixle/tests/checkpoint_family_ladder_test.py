@@ -13,13 +13,15 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
 
-from mixle.models.eval_harness import markov_transition_matrix
+from mixle.models.eval_harness import EvalReport, TaskResult, markov_transition_matrix
 from mixle.models.transformer import build_causal_lm
 from mixle.task.checkpoint_family_ladder import RungSpec, build_checkpoint_family, count_params
 
@@ -210,6 +212,104 @@ class EvalBudgetViolationTest(unittest.TestCase):
         self.assertFalse(result.rungs[0].within_eval_budget)
         self.assertGreater(len(result.rungs[0].regression_flags), 0)
         self.assertNotIn("never_reached_rung", [r.name for r in result.rungs])
+
+
+class LadderContractTest(unittest.TestCase):
+    class ToyModel(torch.nn.Module):
+        vocab = 12
+        block = 8
+
+        def __init__(self, n_params):
+            super().__init__()
+            self.values = torch.nn.Parameter(torch.zeros(n_params))
+
+        def forward(self, inputs):
+            return torch.zeros(inputs.shape[0], self.vocab)
+
+    @staticmethod
+    def _report(checkpoint_id, seed, metadata):
+        return EvalReport(
+            checkpoint_id=checkpoint_id,
+            seed=seed,
+            metadata=metadata,
+            tasks=[TaskResult("quality", 1.0, True, 2)],
+        )
+
+    def test_declared_eval_set_is_bound_to_every_evaluator_and_receipt(self):
+        headline = self.ToyModel(10)
+        eval_data = np.arange(16, dtype=np.int64).reshape(2, 8) % headline.vocab
+        calibration_data = eval_data.copy()
+        compressed_models = iter([self.ToyModel(8), self.ToyModel(7)])
+        eval_calls = []
+
+        def fake_compress(*args, **kwargs):
+            return SimpleNamespace(
+                model=next(compressed_models),
+                receipt=SimpleNamespace(sample_count=0),
+                non_sampling_receipts={},
+            )
+
+        def fake_evaluate(model, *, checkpoint_id, seed, n_examples, eval_data, metadata):
+            eval_calls.append((checkpoint_id, eval_data, metadata))
+            return self._report(checkpoint_id, seed, metadata)
+
+        specs = [RungSpec("a", "small"), RungSpec("b", "smaller")]
+        with (
+            patch("mixle.task.checkpoint_family_ladder.compress", side_effect=fake_compress),
+            patch("mixle.task.checkpoint_family_ladder.evaluate_checkpoint", side_effect=fake_evaluate),
+        ):
+            result = build_checkpoint_family(
+                headline,
+                specs,
+                calibration_data=calibration_data,
+                eval_data=eval_data,
+                eval_n_examples=2,
+            )
+        self.assertEqual([call[0] for call in eval_calls], ["headline", "a", "b"])
+        self.assertTrue(all(call[1] is eval_data for call in eval_calls))
+        self.assertTrue(
+            all(call[2]["evaluation_set_sha256"] == result.evaluation_set_digest for call in eval_calls)
+        )
+        self.assertEqual(result.evaluation_set_size, 2)
+        self.assertTrue(all(rung.evaluation_set_digest == result.evaluation_set_digest for rung in result.rungs))
+
+    def test_parameter_increase_is_a_no_go_even_when_quality_scores_pass(self):
+        headline = self.ToyModel(10)
+        eval_data = np.arange(16, dtype=np.int64).reshape(2, 8) % headline.vocab
+        compressed_models = iter([self.ToyModel(6), self.ToyModel(7)])
+
+        def fake_compress(*args, **kwargs):
+            return SimpleNamespace(
+                model=next(compressed_models),
+                receipt=SimpleNamespace(sample_count=0),
+                non_sampling_receipts={},
+            )
+
+        def fake_evaluate(model, *, checkpoint_id, seed, n_examples, eval_data, metadata):
+            return self._report(checkpoint_id, seed, metadata)
+
+        with (
+            patch("mixle.task.checkpoint_family_ladder.compress", side_effect=fake_compress),
+            patch("mixle.task.checkpoint_family_ladder.evaluate_checkpoint", side_effect=fake_evaluate),
+        ):
+            result = build_checkpoint_family(
+                headline,
+                [RungSpec("a", "small"), RungSpec("b", "incorrectly larger")],
+                calibration_data=eval_data,
+                eval_data=eval_data,
+                eval_n_examples=2,
+            )
+        self.assertEqual(result.halted_at, "b")
+        self.assertFalse(result.rungs[-1].within_eval_budget)
+        self.assertIn("parameter count increased", result.rungs[-1].reason)
+
+    def test_empty_evaluation_inputs_are_rejected_before_lower_layers(self):
+        headline = self.ToyModel(10)
+        spec = [RungSpec("a", "small")]
+        with self.assertRaisesRegex(ValueError, "calibration_data"):
+            build_checkpoint_family(headline, spec, calibration_data=[], eval_data=[[1, 2]])
+        with self.assertRaisesRegex(ValueError, "eval_data"):
+            build_checkpoint_family(headline, spec, calibration_data=[[1, 2]], eval_data=[])
 
 
 if __name__ == "__main__":

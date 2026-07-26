@@ -12,33 +12,9 @@ scores against the previous rung's (or the headline's) via F10's own :func:`trac
 "score, don't just threshold" GO/NO-GO shape :mod:`mixle.task.pilot_ladder` (F7) and
 :mod:`mixle.task.capacity` use for their own rung ladders.
 
-**Which of J2's named dependencies this module can actually reach, from this worktree's base**
-(``origin/pilot-ladder``) **and which it cannot:**
-
-* **J1** (unified ``compress()`` front door, PR #170) and **F10** (eval harness, PR #184) are NOT
-  ancestors of ``origin/pilot-ladder`` -- both live on their own divergent branches
-  (``origin/compress-front-door``, ``origin/eval-harness``) that were never merged into this worktree's
-  base. Both are REQUIRED foundations for J2 (not optional opt-ins like F2/F5 were for F7), so unlike
-  :mod:`mixle.task.pilot_ladder`'s treatment of its own unreachable pieces (document + raise
-  ``NotImplementedError`` on opt-in), this module cannot merely skip them. Instead the exact files this
-  module imports were pulled across via ``git show <branch>:<path>`` and committed alongside this module,
-  byte-for-byte, from:
-
-    - ``mixle/models/compress.py``           <- ``origin/compress-front-door`` (PR #170)
-    - ``mixle/models/coarsening.py``         <- ``origin/compress-front-door`` (G3, PR #170's own dependency)
-    - ``mixle/models/sigma_weighted_projection.py`` <- ``origin/compress-front-door`` (G2, transitive dependency)
-    - ``mixle/models/eval_harness.py``       <- ``origin/eval-harness`` (PR #184)
-
-  plus their own test files (``compress_test.py``, ``coarsening_test.py``,
-  ``sigma_weighted_projection_test.py``, ``eval_harness_test.py``), run unmodified in this worktree to
-  confirm the vendored copies are the exact, already-reviewed versions. Before vendoring, every OTHER
-  transitive dependency ``compress.py`` needs (``mixle/models/moment_propagation.py``,
-  ``mixle/task/acquire.py``, ``mixle/task/bandit.py``, ``mixle/task/distill_methods.py``,
-  ``mixle/models/transformer.py``) was diffed against ``origin/compress-front-door``'s copies and found
-  byte-identical to what already lives on ``origin/pilot-ladder`` -- so nothing else needed vendoring, and
-  there is no version-skew risk between the vendored files and this branch's existing ones.
-  ``mixle/models/eval_harness.py`` has no repo-internal imports beyond ``numpy`` and is entirely
-  self-contained.
+The implementation depends only on the released in-tree compression and evaluation APIs. Historical
+branch and review provenance is intentionally kept out of runtime documentation; release records belong
+in repository governance, not durable model receipts.
 
 **A real constraint this discovered, not papered over**: :func:`~mixle.models.coarsening.coarsen`'s output
 (:class:`~mixle.models.coarsening.CoarsenedLM`) may contain ``MergedBlock`` instances in place of plain
@@ -61,6 +37,7 @@ below that floor without a different method for that rung (a documented extensio
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -153,6 +130,7 @@ class FamilyRung:
     within_eval_budget: bool
     regression_flags: list[RegressionFlag] = field(default_factory=list)
     reason: str = ""
+    evaluation_set_digest: str = ""
 
 
 @dataclass
@@ -167,6 +145,8 @@ class FamilyLadderResult:
     halted_at: str | None
     total_calibration_samples: int
     calibration_pool_size: int
+    evaluation_set_size: int
+    evaluation_set_digest: str
 
     def passed_rungs(self) -> list[str]:
         return [r.name for r in self.rungs if r.within_eval_budget]
@@ -204,19 +184,64 @@ def build_checkpoint_family(
     :func:`mixle.task.pilot_ladder.run_pilot_ladder`.
     """
     _require_torch()
+    rung_specs = list(rung_specs)
     if not rung_specs:
         raise ValueError("build_checkpoint_family requires at least one RungSpec")
+    if not all(isinstance(spec, RungSpec) for spec in rung_specs):
+        raise TypeError("rung_specs must contain only RungSpec values")
+    names = [spec.name for spec in rung_specs]
+    if any(not isinstance(name, str) or not name for name in names) or len(set(names)) != len(names):
+        raise ValueError("rung names must be nonempty and unique")
+    if any(not isinstance(spec.real_target, str) or not spec.real_target for spec in rung_specs):
+        raise ValueError("every rung must declare a nonempty real_target")
 
     eval_data = eval_data if eval_data is not None else calibration_data
+    try:
+        calibration_pool_size = len(calibration_data)
+        evaluation_set_size = len(eval_data)
+    except TypeError as exc:
+        raise ValueError("calibration_data and eval_data must be sized collections") from exc
+    if calibration_pool_size <= 0:
+        raise ValueError("calibration_data must be nonempty")
+    if evaluation_set_size <= 0:
+        raise ValueError("eval_data must be nonempty")
+
+    def data_digest(data: Any) -> str:
+        import numpy as np
+
+        if hasattr(data, "detach"):
+            array = data.detach().cpu().contiguous().numpy()
+        else:
+            array = np.asarray(data)
+        if array.dtype == object:
+            raise ValueError("eval_data must be a rectangular numeric array")
+        contiguous = np.ascontiguousarray(array)
+        return hashlib.sha256(
+            contiguous.tobytes()
+            + str(tuple(contiguous.shape)).encode()
+            + str(contiguous.dtype).encode()
+        ).hexdigest()
+
+    evaluation_set_digest = data_digest(eval_data)
     headline_n_params = count_params(headline_model)
+    if headline_n_params <= 0:
+        raise ValueError("headline_model must contain at least one parameter")
     headline_eval = evaluate_checkpoint(
-        headline_model, checkpoint_id="headline", seed=eval_seed, n_examples=eval_n_examples
+        headline_model,
+        checkpoint_id="headline",
+        seed=eval_seed,
+        n_examples=eval_n_examples,
+        eval_data=eval_data,
+        metadata={"evaluation_set_sha256": evaluation_set_digest},
     )
+    if not headline_eval.tasks or any(not task.succeeded for task in headline_eval.tasks):
+        raise RuntimeError("headline evaluation must complete every declared check")
 
     reports: list[EvalReport] = [headline_eval]
     rungs: list[FamilyRung] = []
     halted_at: str | None = None
     total_calibration_samples = 0
+    prior_n_params = headline_n_params
 
     for spec in rung_specs:
         compressed = compress(
@@ -244,7 +269,12 @@ def build_checkpoint_family(
         ratio = n_params / headline_n_params if headline_n_params > 0 else float("nan")
 
         eval_report = evaluate_checkpoint(
-            compressed.model, checkpoint_id=spec.name, seed=eval_seed, n_examples=eval_n_examples
+            compressed.model,
+            checkpoint_id=spec.name,
+            seed=eval_seed,
+            n_examples=eval_n_examples,
+            eval_data=eval_data,
+            metadata={"evaluation_set_sha256": evaluation_set_digest},
         )
         trial_reports = [*reports, eval_report]
         regression = track_regression(
@@ -252,9 +282,15 @@ def build_checkpoint_family(
         )
         this_index = len(trial_reports) - 1
         rung_flags = [f for f in regression.flags if f.checkpoint_index == this_index]
-        within_budget = not rung_flags
+        failed_tasks = [task.name for task in eval_report.tasks if not task.succeeded]
+        resource_increased = n_params > prior_n_params
+        within_budget = not rung_flags and not failed_tasks and not resource_increased
 
-        if within_budget:
+        if resource_increased:
+            reason = f"parameter count increased from {prior_n_params} to {n_params}"
+        elif failed_tasks:
+            reason = f"evaluation failed for: {', '.join(failed_tasks)}"
+        elif within_budget:
             reason = (
                 f"all {len(eval_report.tasks)} eval tasks within "
                 f"{spec.max_relative_eval_regression:.2%} of the {spec.regression_reference!r} reference"
@@ -279,6 +315,7 @@ def build_checkpoint_family(
                 within_eval_budget=within_budget,
                 regression_flags=rung_flags,
                 reason=reason,
+                evaluation_set_digest=evaluation_set_digest,
             )
         )
         reports.append(eval_report)
@@ -286,6 +323,7 @@ def build_checkpoint_family(
         if not within_budget:
             halted_at = spec.name
             break
+        prior_n_params = n_params
 
     return FamilyLadderResult(
         headline_eval=headline_eval,
@@ -293,5 +331,7 @@ def build_checkpoint_family(
         rungs=rungs,
         halted_at=halted_at,
         total_calibration_samples=total_calibration_samples,
-        calibration_pool_size=int(len(calibration_data)),
+        calibration_pool_size=calibration_pool_size,
+        evaluation_set_size=evaluation_set_size,
+        evaluation_set_digest=evaluation_set_digest,
     )

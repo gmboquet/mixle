@@ -77,6 +77,22 @@ class EvaluateCheckpointTest(unittest.TestCase):
         r2 = evaluate_checkpoint(model, seed=7, n_examples=32)
         self.assertEqual(r1.scores(), r2.scores())
 
+    def test_declared_evaluation_data_is_scored_and_receipted(self):
+        model = _tiny_model()
+        data = np.arange(24, dtype=np.int64).reshape(3, 8) % VOCAB
+        report = evaluate_checkpoint(model, seed=7, n_examples=8, eval_data=data)
+        declared = next(task for task in report.tasks if task.name == "declared_eval_perplexity")
+        self.assertTrue(declared.succeeded)
+        self.assertEqual(declared.n_examples, len(data))
+        self.assertEqual(len(declared.details["evaluation_set_sha256"]), 64)
+        self.assertTrue(np.isfinite(declared.score))
+
+    def test_malformed_declared_evaluation_data_is_an_explicit_failure(self):
+        report = evaluate_checkpoint(_tiny_model(), n_examples=4, eval_data=[])
+        declared = next(task for task in report.tasks if task.name == "declared_eval_perplexity")
+        self.assertFalse(declared.succeeded)
+        self.assertIsNone(declared.score)
+
     def test_induction_instances_are_unambiguous_and_recorded(self):
         report = evaluate_checkpoint(_tiny_model(), seed=9, n_examples=24)
         task = next(task for task in report.tasks if task.name == "in_context_induction")

@@ -46,6 +46,7 @@ Integration points for later roadmap items (neither is required to exist for F10
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -356,6 +357,41 @@ def _induction_task(model: Any, vocab: int, block: int, rng: Any, n_examples: in
     )
 
 
+def _declared_eval_task(model: Any, data: Any, vocab: int, block: int, device: Any) -> TaskResult:
+    """Next-token perplexity on the caller's exact declared evaluation tensor."""
+    import torch
+
+    try:
+        values = torch.as_tensor(data)
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise ValueError("eval_data must be a rectangular integer token matrix") from exc
+    if values.ndim != 2 or values.shape[0] == 0 or not 2 <= values.shape[1] <= block:
+        raise ValueError(f"eval_data must have nonempty shape (rows, length) with 2 <= length <= {block}")
+    if values.dtype == torch.bool or torch.is_floating_point(values) or torch.is_complex(values):
+        raise ValueError("eval_data must contain integer token ids")
+    values = values.to(device=device, dtype=torch.long)
+    if bool((values < 0).any()) or bool((values >= vocab).any()):
+        raise ValueError("eval_data token ids must lie in [0, model.vocab)")
+    with torch.no_grad():
+        logits = _validated_logits(model(values[:, :-1]), values.shape[0], vocab, "declared_eval_perplexity")
+        loss = torch.nn.functional.cross_entropy(logits, values[:, -1])
+    loss_value = _finite_score(float(loss.item()), "declared_eval_perplexity cross_entropy")
+    score = float(np.exp(min(loss_value, 50.0)))
+    raw = values.detach().cpu().contiguous().numpy()
+    digest = hashlib.sha256(raw.tobytes() + str(tuple(raw.shape)).encode() + str(raw.dtype).encode()).hexdigest()
+    return TaskResult(
+        name="declared_eval_perplexity",
+        score=score,
+        higher_is_better=False,
+        n_examples=int(values.shape[0]),
+        details={
+            "cross_entropy": loss_value,
+            "sequence_length": int(values.shape[1]),
+            "evaluation_set_sha256": digest,
+        },
+    )
+
+
 _TASKS = (
     (_held_out_perplexity_task, "held_out_perplexity", False),
     (_arithmetic_task, "modular_arithmetic", True),
@@ -376,6 +412,7 @@ def evaluate_checkpoint(
     seed: int = 0,
     n_examples: int = 256,
     metadata: dict[str, Any] | None = None,
+    eval_data: Any = None,
 ) -> EvalReport:
     """Run the full synthetic capability suite on ``model`` and return one structured :class:`EvalReport`.
 
@@ -415,6 +452,21 @@ def evaluate_checkpoint(
                         score=None,
                         higher_is_better=higher_is_better,
                         n_examples=n_examples,
+                        details={"device": str(device)},
+                        succeeded=False,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                )
+        if eval_data is not None:
+            try:
+                results.append(_declared_eval_task(model, eval_data, vocab, block, device))
+            except Exception as exc:  # noqa: BLE001 - failure belongs in the evaluation receipt
+                results.append(
+                    TaskResult(
+                        name="declared_eval_perplexity",
+                        score=None,
+                        higher_is_better=False,
+                        n_examples=0,
                         details={"device": str(device)},
                         succeeded=False,
                         error=f"{type(exc).__name__}: {exc}",
