@@ -15,6 +15,7 @@ for ``torch.distributed.fsdp.fully_shard`` (ZeRO-3) -- the architecture is ident
 from __future__ import annotations
 
 import os
+from numbers import Integral
 from typing import Any
 
 import numpy as np
@@ -31,11 +32,50 @@ def _torch_dist() -> tuple[Any, Any]:
     return torch, torch.distributed
 
 
+def _positive_int(value: Any, name: str, *, allow_zero: bool = False) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    minimum = 0 if allow_zero else 1
+    if result < minimum:
+        qualifier = "nonnegative" if allow_zero else "positive"
+        raise ValueError(f"{name} must be {qualifier}")
+    return result
+
+
+def _rank_window_schedule(
+    n_tokens: int,
+    world_size: int,
+    *,
+    block: int,
+    batch_size: int,
+    shard_by_rank: bool,
+) -> tuple[tuple[int, ...], int]:
+    """Return real target counts per rank and one equal step count for every rank."""
+    if shard_by_rank and world_size > 1:
+        shard_lengths = tuple(
+            ((rank + 1) * n_tokens // world_size) - (rank * n_tokens // world_size)
+            for rank in range(world_size)
+        )
+    else:
+        shard_lengths = (n_tokens,) * world_size
+    windows = tuple(max(0, length - block) for length in shard_lengths)
+    steps = max(((count + batch_size - 1) // batch_size for count in windows), default=0)
+    return windows, steps
+
+
+def _global_targets_for_step(window_counts: tuple[int, ...], step: int, batch_size: int) -> int:
+    return sum(min(batch_size, max(0, count - step * batch_size)) for count in window_counts)
+
+
 class StreamingTokenEncodedData(EncodedDataHandle):
     """Per-rank streamed token shard; ``pysp_seq_estimate`` trains the module SPMD with no gather-to-root.
 
     Pass a token-id array; with ``shard_by_rank`` each rank keeps a disjoint slice. The estimator is a
     :class:`~mixle.models.streaming_transformer_leaf.StreamingTransformerLeafEstimator` carrying the module + lr.
+    All ranks execute the same globally derived step schedule. Short and partial shards use masked padding,
+    so no rank can leave a DDP/FSDP collective early; :attr:`schedule_receipt` discloses real, masked, and
+    shard-boundary-excluded target counts.
     """
 
     def __init__(
@@ -77,15 +117,44 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         self._maybe_init_process_group(init_process_group, backend)
         self.rank = self.dist.get_rank() if self.dist.is_initialized() else 0
         self.world = self.dist.get_world_size() if self.dist.is_initialized() else 1
+        self.block = _positive_int(block, "block")
+        self.batch_size = _positive_int(batch_size, "batch_size")
+        self.epochs = _positive_int(epochs, "epochs", allow_zero=True)
         ids = np.asarray(token_ids)
+        if ids.ndim != 1:
+            raise ValueError(f"token_ids must be one-dimensional, got shape {ids.shape}")
+        n_tokens = len(ids)
         if shard_by_rank and self.world > 1:  # each rank keeps its own disjoint slice resident
-            n = len(ids)
-            ids = ids[self.rank * n // self.world : (self.rank + 1) * n // self.world]
+            ids = ids[self.rank * n_tokens // self.world : (self.rank + 1) * n_tokens // self.world]
         self._ids = ids
-        self.block = int(block)
-        self.batch_size = int(batch_size)
-        self.epochs = int(epochs)
         self.shuffle = bool(shuffle)
+        self._window_counts, self.steps_per_epoch = _rank_window_schedule(
+            n_tokens,
+            self.world,
+            block=self.block,
+            batch_size=self.batch_size,
+            shard_by_rank=shard_by_rank,
+        )
+        self.local_target_tokens = self._window_counts[self.rank]
+        self.masked_target_tokens = (
+            self.steps_per_epoch * self.batch_size - self.local_target_tokens
+        ) * self.epochs
+        global_unsharded_targets = max(0, n_tokens - self.block)
+        self.excluded_target_tokens = (
+            max(0, global_unsharded_targets - sum(self._window_counts)) * self.epochs
+            if shard_by_rank
+            else 0
+        )
+        self.schedule_receipt = {
+            "world_size": self.world,
+            "window_counts_by_rank": self._window_counts,
+            "steps_per_epoch": self.steps_per_epoch,
+            "epochs": self.epochs,
+            "local_masked_target_tokens": self.masked_target_tokens,
+            "global_real_target_tokens_per_epoch": sum(self._window_counts),
+            "excluded_target_tokens": self.excluded_target_tokens,
+            "policy": "pad-and-mask-to-global-max-steps",
+        }
 
     def _maybe_init_process_group(self, init_process_group: bool, backend: str | None) -> None:
         if self.dist.is_initialized() or not init_process_group:
@@ -170,20 +239,57 @@ class StreamingTokenEncodedData(EncodedDataHandle):
                 )
         wrapped = self._wrap_for_scale(module, device)
         opt = torch.optim.AdamW(wrapped.parameters(), lr=lr)
-        ce = torch.nn.CrossEntropyLoss()
         autocast_dev = "cuda" if device.startswith("cuda") else "cpu"
-        src = stream_token_source(
-            self._ids, block=self.block, batch_size=self.batch_size, epochs=self.epochs, shuffle=self.shuffle
-        )
-        for x, y in src:
-            opt.zero_grad()
-            with torch.autocast(device_type=autocast_dev, dtype=torch.bfloat16, enabled=(self.precision == "bf16")):
-                loss = ce(
-                    wrapped(torch.as_tensor(x, dtype=torch.float32).to(device)),
-                    torch.as_tensor(y, dtype=torch.long).to(device),
+        distributed_scale = float(self.world if self.dist.is_initialized() and self.world > 1 else 1)
+        for epoch in range(self.epochs):
+            source = iter(
+                stream_token_source(
+                    self._ids,
+                    block=self.block,
+                    batch_size=self.batch_size,
+                    epochs=1,
+                    shuffle=self.shuffle,
+                    seed=epoch,
                 )
-            loss.backward()  # <-- the SOLE cross-rank collective (gradient all-reduce / reduce-scatter)
-            opt.step()
+            )
+            for step in range(self.steps_per_epoch):
+                try:
+                    x, y = next(source)
+                except StopIteration:
+                    x = np.empty((0, self.block), dtype=np.int64)
+                    y = np.empty((0,), dtype=np.int64)
+                real_targets = len(y)
+                padded_x = np.zeros((self.batch_size, self.block), dtype=np.int64)
+                padded_y = np.zeros((self.batch_size,), dtype=np.int64)
+                mask = np.zeros((self.batch_size,), dtype=np.float32)
+                if real_targets:
+                    padded_x[:real_targets] = x
+                    padded_y[:real_targets] = y
+                    mask[:real_targets] = 1.0
+                global_targets = _global_targets_for_step(self._window_counts, step, self.batch_size)
+                if global_targets <= 0:
+                    raise RuntimeError("distributed token schedule produced an empty synchronized step")
+
+                opt.zero_grad()
+                with torch.autocast(
+                    device_type=autocast_dev,
+                    dtype=torch.bfloat16,
+                    enabled=(self.precision == "bf16"),
+                ):
+                    logits = wrapped(torch.as_tensor(padded_x, dtype=torch.float32).to(device))
+                    per_target = torch.nn.functional.cross_entropy(
+                        logits,
+                        torch.as_tensor(padded_y, dtype=torch.long).to(device),
+                        reduction="none",
+                    )
+                    local_sum = (
+                        per_target * torch.as_tensor(mask, dtype=per_target.dtype).to(device)
+                    ).sum()
+                    # DDP/FSDP averages rank gradients. Scaling each local sum by world/global
+                    # count makes the post-collective gradient the exact global target mean.
+                    loss = local_sum * (distributed_scale / float(global_targets))
+                loss.backward()
+                opt.step()
         return StreamingTransformerLeaf(module, device)  # consistent across ranks -- no gather, no broadcast
 
     def pysp_seq_initialize(self, estimator: Any, rng: Any, p: float) -> Any:
