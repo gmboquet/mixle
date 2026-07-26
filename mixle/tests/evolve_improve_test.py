@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -13,6 +14,8 @@ from mixle.evolve import (
     improve,
     nll_objective,
 )
+from mixle.evolve.operators import Candidate
+from mixle.evolve.verify import Verdict
 from mixle.inference import bayes_action, posterior
 from mixle.inference.estimation import optimize
 from mixle.stats import GaussianDistribution
@@ -65,6 +68,41 @@ class ImproveTest(unittest.TestCase):
         # budget below AutoSelect.cost_hint (3.0) -> AutoSelect must be skipped (no ledger row for it).
         improve(champion, self.data, objective=self.nll, ledger=ledger, seed=3, budget=1.5)
         self.assertNotIn("auto_select", [row["operator"] for row in ledger])
+
+    def test_simultaneous_challengers_use_one_selection_aware_fwer_gate(self):
+        class Operator:
+            cost_hint = 1.0
+
+            def __init__(self, name):
+                self.name = name
+
+            def applicable(self, model, data, *, ctx):
+                return True
+
+            def propose(self, model, data, *, ctx):
+                return Candidate(object(), self.name)
+
+        verdicts = [
+            Verdict("challenger", 2.0, 0.03, (0.1, 1.0), "unavailable"),
+            Verdict("challenger", 1.0, 0.04, (0.1, 1.0), "unavailable"),
+        ]
+        ledger = EvolutionLedger()
+        champion = object()
+        with patch("mixle.evolve.improve.challenger_beats_champion", side_effect=verdicts):
+            result = improve(
+                champion,
+                [0.0, 1.0, 2.0, 3.0],
+                objective=self.nll,
+                operators=[Operator("a"), Operator("b")],
+                ledger=ledger,
+                require_calibration=False,
+            )
+
+        self.assertFalse(result.verified)
+        self.assertIs(result.model, champion)
+        adjusted = [row["verdict"]["p_value"] for row in ledger]
+        self.assertEqual(adjusted, [0.06, 0.06])
+        self.assertTrue(all(row["verdict"]["evidence"]["multiplicity"]["method"] == "holm" for row in ledger))
 
 
 class AutoSelectTest(unittest.TestCase):

@@ -149,6 +149,37 @@ class DistillationDesignTest(unittest.TestCase):
             distillation_design(np.empty((0, 2)), 1)  # empty pool
         with self.assertRaises(ValueError):
             distillation_design(x, 1, cost=np.array([1.0, 0.0, 1.0, 1.0]))  # non-positive cost
+        with self.assertRaises(ValueError):
+            distillation_design(x, 1.5)
+        with self.assertRaises(ValueError):
+            distillation_design(np.array([[0.0], [np.nan]]), 1)
+        with self.assertRaises(ValueError):
+            distillation_design(x, 1, reference_features=np.array([[np.inf]]))
+        with self.assertRaises(ValueError):
+            distillation_design(x, 1, eligible=np.array([0.5, 2.0]))
+        with self.assertRaises(ValueError):
+            distillation_design(x, 1, eligible=np.array([1, 1]))
+        with self.assertRaises(ValueError):
+            distillation_design(x, 1, task_labels=np.array([[1.0], [0.0], [np.nan], [0.0]]))
+        with self.assertRaises(ValueError):
+            distillation_design(x, 1, task_labels=np.array([[1.0], [0.0], [-1.0], [0.0]]))
+
+    def test_missing_data_policies_are_explicit_in_design_metadata(self):
+        plain = distillation_design(np.arange(4, dtype=np.float64).reshape(-1, 1), 1)
+        self.assertEqual(plain.metadata["feature_missing_policy"], "reject_nonfinite")
+        self.assertEqual(plain.metadata["incidence_policy"], "finite_binary")
+
+        text = np.array([[0.0], [np.nan], [2.0]])
+        image = np.array([[0.0], [1.0], [2.0]])
+        multimodal = cross_modal_distillation_design(
+            {"text": text, "image": image},
+            1,
+            min_modalities=1,
+        )
+        self.assertEqual(
+            multimodal.metadata["source_feature_missing_policy"],
+            "row_missing_if_any_coordinate_nonfinite",
+        )
 
     def test_selection_is_unique(self):
         x = np.random.RandomState(2).normal(size=(20, 3))

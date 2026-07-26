@@ -13,7 +13,7 @@ tried and why it won or lost.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -22,6 +22,7 @@ from mixle.evolve.ledger import EvolutionLedger
 from mixle.evolve.objective import Objective
 from mixle.evolve.operators import ImprovementOperator, default_operators
 from mixle.evolve.verify import Verdict, challenger_beats_champion
+from mixle.inference.multiple_testing import adjust_pvalues
 
 
 @dataclass(frozen=True)
@@ -101,7 +102,7 @@ def improve(
     # Cost-aware ordering: lower-cost operators first so a budget cuts the expensive tail.
     ops = sorted(ops, key=lambda op: getattr(op, "cost_hint", 1.0))
 
-    best: ImprovementResult | None = None
+    attempts: list[tuple[ImprovementOperator, Any, Verdict, float]] = []
     spent = 0.0
     for op in ops:
         cost = float(getattr(op, "cost_hint", 1.0))
@@ -137,6 +138,42 @@ def improve(
             nonnested=nonnested,
             seed=seed,
         )
+        attempts.append((op, candidate, verdict, cost))
+
+    # These are simultaneous challenger hypotheses and one winner will be selected from them.
+    # Correct the complete finite-p-value family once with Holm's dependence-robust FWER procedure;
+    # the resulting verdict is the selection-aware final gate. Scalar-only comparisons carry NaN
+    # p-values and are excluded because they already cannot promote without statistical evidence.
+    finite = [index for index, (_, _, verdict, _) in enumerate(attempts) if np.isfinite(verdict.p_value)]
+    adjusted: dict[int, float] = {}
+    if finite:
+        correction = adjust_pvalues(
+            np.asarray([attempts[index][2].p_value for index in finite], dtype=np.float64),
+            method="holm",
+            alpha=alpha,
+        )
+        adjusted = {
+            attempt_index: float(p_value)
+            for attempt_index, p_value in zip(finite, correction["pvals_adjusted"])
+        }
+
+    best: ImprovementResult | None = None
+    for index, (op, candidate, raw_verdict, cost) in enumerate(attempts):
+        verdict = raw_verdict
+        if index in adjusted:
+            adjusted_p = adjusted[index]
+            evidence = dict(raw_verdict.evidence)
+            evidence["multiplicity"] = {
+                "method": "holm",
+                "family_size": len(finite),
+                "raw_p_value": raw_verdict.p_value,
+                "adjusted_p_value": adjusted_p,
+                "alpha": alpha,
+            }
+            favored = raw_verdict.favored
+            if favored == "challenger" and adjusted_p >= alpha:
+                favored = "tie"
+            verdict = replace(raw_verdict, favored=favored, p_value=adjusted_p, evidence=evidence)
         if ledger is not None:
             ledger.record(
                 operator=op.name,
@@ -154,7 +191,11 @@ def improve(
                 op.name,
                 verdict.delta,
                 verdict,
-                {"candidate_meta": candidate.meta, "cost": cost},
+                {
+                    "candidate_meta": candidate.meta,
+                    "cost": cost,
+                    "multiplicity": verdict.evidence.get("multiplicity"),
+                },
                 parent_hash,
             )
             # keep the largest verified delta; ties -> the cheaper operator (already cost-sorted, so
