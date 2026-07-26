@@ -93,6 +93,8 @@ class DiscoverDecompositionBeatsMonolithicTest(unittest.TestCase):
             forest = discover_decomposition(train, spec["candidates"], seed=0)
             self.assertTrue(forest.is_decomposed, f"{name}: expected a real decomposition, got monolithic")
             self.assertGreater(forest.mdl_gain, 0.0, f"{name}: decomposition should compress (positive MDL gain)")
+            self.assertEqual(forest.feature_sources, ["intermediate"] * len(forest.chosen))
+            self.assertTrue(set(forest.chosen) <= set(spec["candidates"]))
 
             decomposed_pred = [forest.predict(ex.inputs, spec["candidates"]) for ex in test]
             monolithic_pred = monolithic_predict(train, test)
@@ -112,6 +114,22 @@ class DiscoverDecompositionBeatsMonolithicTest(unittest.TestCase):
 
         for name, (chosen, dmse, mmse) in results.items():
             print(f"[L4] {name}: chosen={chosen} decomposed_mse={dmse:.4f} monolithic_mse={mmse:.4f}")
+
+    def test_raw_regression_without_intermediates_remains_monolithic(self):
+        examples = [TaskExample(inputs={"x": float(x)}, output=2.0 * x + 1.0) for x in range(-10, 11)]
+
+        forest = discover_decomposition(examples, {})
+
+        self.assertEqual(forest.chosen, [])
+        self.assertFalse(forest.is_decomposed)
+        self.assertEqual(forest.feature_sources, [])
+        predictions = [forest.predict(example.inputs, {}) for example in examples]
+        np.testing.assert_allclose(predictions, [example.output for example in examples])
+
+    def test_intermediate_names_cannot_shadow_raw_input_fields(self):
+        examples = [TaskExample(inputs={"x": float(x)}, output=float(x**2)) for x in range(-5, 6)]
+        with self.assertRaisesRegex(ValueError, "collide"):
+            discover_decomposition(examples, {"x": lambda inputs: inputs["x"] ** 2})
 
 
 class MdlGainCorrelatesWithOutcomeTest(unittest.TestCase):

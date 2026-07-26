@@ -42,7 +42,6 @@ import numpy as np
 
 from mixle.inference.structure import (
     LinearGaussianEdge,
-    dependency_gain,
     fit_linear_gaussian_edge,
     regression_gain,
 )
@@ -69,16 +68,61 @@ CandidateIntermediates = Mapping[str, Callable[[Mapping[str, float]], float]]
 
 
 def _materialize(examples: Sequence[TaskExample], fn: Callable[[Mapping[str, float]], float]) -> list[float]:
-    return [float(fn(ex.inputs)) for ex in examples]
+    values = [float(fn(ex.inputs)) for ex in examples]
+    if not np.all(np.isfinite(values)):
+        raise ValueError("candidate intermediate values must be finite")
+    return values
 
 
 def _input_columns(examples: Sequence[TaskExample]) -> dict[str, list[float]]:
-    keys = sorted({k for ex in examples for k in ex.inputs})
+    if not examples:
+        raise ValueError("task_examples must be non-empty")
+    keys = sorted(examples[0].inputs)
+    if not keys:
+        raise ValueError("task examples must have at least one input field")
+    expected = set(keys)
+    for index, example in enumerate(examples):
+        if set(example.inputs) != expected:
+            raise ValueError(f"task example {index} has a different input schema")
     return {k: [float(ex.inputs[k]) for ex in examples] for k in keys}
 
 
 def _output_column(examples: Sequence[TaskExample]) -> list[float]:
-    return [float(ex.output) for ex in examples]
+    values = [float(ex.output) for ex in examples]
+    if not np.all(np.isfinite(values)):
+        raise ValueError("task outputs must be finite")
+    return values
+
+
+def _validate_intermediate_names(
+    input_names: set[str],
+    candidate_intermediates: CandidateIntermediates,
+) -> None:
+    if not isinstance(candidate_intermediates, Mapping):
+        raise TypeError("candidate_intermediates must be a mapping")
+    collisions = sorted(input_names & set(candidate_intermediates))
+    if collisions:
+        raise ValueError(f"intermediate names collide with raw input fields: {collisions}")
+    for name, fn in candidate_intermediates.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("intermediate names must be non-empty strings")
+        if not callable(fn):
+            raise TypeError(f"intermediate {name!r} must be callable")
+
+
+def _fit_raw_backbone(
+    examples: Sequence[TaskExample],
+    input_names: Sequence[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    x = np.asarray(
+        [[1.0] + [float(example.inputs[name]) for name in input_names] for example in examples],
+        dtype=float,
+    )
+    y = np.asarray(_output_column(examples), dtype=float)
+    if not np.all(np.isfinite(x)):
+        raise ValueError("task inputs must be finite")
+    beta, *_ = np.linalg.lstsq(x, y, rcond=None)
+    return beta, x @ beta
 
 
 def _best_gain(
@@ -89,10 +133,11 @@ def _best_gain(
     max_its: int,
     rng: np.random.RandomState,
 ) -> tuple[str | None, float, LinearGaussianEdge | None]:
-    """The single candidate field with the highest :func:`regression_gain` (falling back to
-    :func:`dependency_gain` when a regression edge is undefined, e.g. a near-constant column) against
-    ``residual`` -- one greedy forward-selection step. Reuses the fitted edge (no re-fitting) so the
-    caller can residualize immediately."""
+    """Return the best executable linear-Gaussian intermediate edge.
+
+    A score without a fitted prediction edge is not a usable decomposition and
+    therefore cannot enter the discovered structure.
+    """
     from mixle.stats import GaussianEstimator
 
     best_name, best_gain, best_edge = None, 0.0, None
@@ -100,12 +145,11 @@ def _best_gain(
         if name in exclude:
             continue
         gain = regression_gain(col, residual, GaussianEstimator(), max_its=max_its, rng=rng)
-        edge = None
         if np.isfinite(gain):
             edge = fit_linear_gaussian_edge(list(zip(col, residual)))
         else:
-            gain = dependency_gain([round(v, 6) for v in col], residual, GaussianEstimator(), max_its=max_its, rng=rng)
-        if gain > best_gain:
+            continue
+        if gain > best_gain and edge is not None:
             best_name, best_gain, best_edge = name, gain, edge
     return best_name, best_gain, best_edge
 
@@ -123,7 +167,10 @@ class DependencyForest:
     chosen: list[str]
     edge_gains: list[float]
     mdl_gain: float
-    edges: list[LinearGaussianEdge | None] = field(default_factory=list)
+    edges: list[LinearGaussianEdge] = field(default_factory=list)
+    feature_sources: list[str] = field(default_factory=list)
+    raw_feature_names: tuple[str, ...] = ()
+    raw_coefficients: tuple[float, ...] = ()
 
     @property
     def is_decomposed(self) -> bool:
@@ -132,13 +179,35 @@ class DependencyForest:
     def predict(self, inputs: Mapping[str, float], candidate_intermediates: CandidateIntermediates) -> float:
         """Sum of each chosen edge's prediction from its own parent field -- the decomposed model's
         point estimate, used to compare predictive accuracy against the monolithic baseline."""
-        total = 0.0
-        for name, edge in zip(self.chosen, self.edges):
-            if edge is None:
-                continue
-            value = float(inputs[name]) if name in inputs else float(candidate_intermediates[name](inputs))
+        if len(self.chosen) != len(self.edges) or len(self.chosen) != len(self.feature_sources):
+            raise RuntimeError("dependency forest feature metadata is inconsistent")
+        if self.raw_feature_names:
+            if len(self.raw_coefficients) != len(self.raw_feature_names) + 1:
+                raise RuntimeError("dependency forest raw backbone metadata is inconsistent")
+            missing = [name for name in self.raw_feature_names if name not in inputs]
+            if missing:
+                raise KeyError(f"prediction inputs are missing raw fields {missing}")
+            total = self.raw_coefficients[0] + sum(
+                coefficient * float(inputs[name])
+                for name, coefficient in zip(self.raw_feature_names, self.raw_coefficients[1:])
+            )
+        else:
+            total = 0.0
+        for name, edge, source in zip(self.chosen, self.edges, self.feature_sources):
+            if source == "raw":
+                if name not in inputs:
+                    raise KeyError(f"prediction inputs are missing raw field {name!r}")
+                value = float(inputs[name])
+            elif source == "intermediate":
+                if name not in candidate_intermediates:
+                    raise KeyError(f"prediction is missing intermediate function {name!r}")
+                value = float(candidate_intermediates[name](inputs))
+            else:
+                raise RuntimeError(f"unknown fitted feature source {source!r}")
+            if not np.isfinite(value):
+                raise ValueError(f"prediction feature {name!r} is non-finite")
             total += edge.a + edge.b * value
-        return total
+        return float(total)
 
 
 def discover_decomposition(
@@ -158,32 +227,56 @@ def discover_decomposition(
     their own edge, not just the single best one (a plain :class:`~mixle.inference.structure.DependencyTreeDistribution`
     forest allows one parent per field; a task's output routinely needs several).
 
-    Every raw input is itself a candidate parent, so a task with NO real decomposable structure
-    correctly comes back with ``chosen == []`` (monolithic: the raw inputs already explain ``output``
-    as well as anything) rather than inventing intermediates that do not pay for themselves.
+    Raw inputs form an explicit monolithic linear backbone. Forward selection
+    then considers only proposed intermediate functions against that
+    backbone's residual. Thus ``chosen`` can never contain a raw column, and a
+    task with no proposed or useful intermediate correctly returns
+    ``is_decomposed=False`` while retaining an executable monolithic predictor.
     """
+    task_examples = list(task_examples)
+    if isinstance(max_parents, bool) or not isinstance(max_parents, (int, np.integer)) or max_parents < 0:
+        raise ValueError("max_parents must be a non-negative integer")
+    if not np.isfinite(min_gain):
+        raise ValueError("min_gain must be finite")
     rng = np.random.RandomState(seed)
     inputs_cols = _input_columns(task_examples)
+    input_names = tuple(inputs_cols)
+    _validate_intermediate_names(set(input_names), candidate_intermediates)
     intermediate_cols = {name: _materialize(task_examples, fn) for name, fn in candidate_intermediates.items()}
-    candidates: dict[str, list[float]] = {**inputs_cols, **intermediate_cols}
-    residual = _output_column(task_examples)
+    raw_coefficients, raw_prediction = _fit_raw_backbone(task_examples, input_names)
+    residual = (np.asarray(_output_column(task_examples)) - raw_prediction).tolist()
 
     chosen: list[str] = []
     gains: list[float] = []
-    edges: list[LinearGaussianEdge | None] = []
+    edges: list[LinearGaussianEdge] = []
     for _ in range(max_parents):
-        name, gain, edge = _best_gain(candidates, residual, exclude=set(chosen), max_its=max_its, rng=rng)
+        name, gain, edge = _best_gain(
+            intermediate_cols,
+            residual,
+            exclude=set(chosen),
+            max_its=max_its,
+            rng=rng,
+        )
         if name is None or gain <= min_gain:
             break
+        if edge is None:  # pragma: no cover - _best_gain only returns executable edges
+            raise RuntimeError("selected intermediate has no fitted prediction edge")
         chosen.append(name)
         gains.append(gain)
         edges.append(edge)
-        if edge is not None:
-            col = np.asarray(candidates[name], dtype=float)
-            pred = edge.a + edge.b * col
-            residual = (np.asarray(residual, dtype=float) - pred).tolist()
+        col = np.asarray(intermediate_cols[name], dtype=float)
+        pred = edge.a + edge.b * col
+        residual = (np.asarray(residual, dtype=float) - pred).tolist()
 
-    return DependencyForest(chosen=chosen, edge_gains=gains, mdl_gain=float(sum(gains)), edges=edges)
+    return DependencyForest(
+        chosen=chosen,
+        edge_gains=gains,
+        mdl_gain=float(sum(gains)),
+        edges=edges,
+        feature_sources=["intermediate"] * len(chosen),
+        raw_feature_names=input_names,
+        raw_coefficients=tuple(float(value) for value in raw_coefficients),
+    )
 
 
 def fit_decomposition(
@@ -199,30 +292,43 @@ def fit_decomposition(
     forward selection does. Lets a caller both score (:attr:`DependencyForest.mdl_gain`) and predict
     with (:meth:`DependencyForest.predict`) a decomposition it did not necessarily search for -- e.g.
     a deliberately-worse candidate, for the MDL-gain/outcome correlation check."""
+    task_examples = list(task_examples)
+    decomposition = list(decomposition)
+    if len(set(decomposition)) != len(decomposition):
+        raise ValueError("decomposition feature names must be unique")
     rng = np.random.RandomState(seed)
     inputs_cols = _input_columns(task_examples)
+    _validate_intermediate_names(set(inputs_cols), candidate_intermediates)
     intermediate_cols = {name: _materialize(task_examples, fn) for name, fn in candidate_intermediates.items()}
-    candidates: dict[str, list[float]] = {**inputs_cols, **intermediate_cols}
+    unknown = sorted(set(decomposition) - set(inputs_cols) - set(intermediate_cols))
+    if unknown:
+        raise ValueError(f"unknown decomposition features: {unknown}")
     residual = _output_column(task_examples)
 
     from mixle.stats import GaussianEstimator
 
     gains: list[float] = []
-    edges: list[LinearGaussianEdge | None] = []
+    edges: list[LinearGaussianEdge] = []
+    sources: list[str] = []
     for name in decomposition:
-        col = candidates[name]
+        source = "raw" if name in inputs_cols else "intermediate"
+        col = inputs_cols[name] if source == "raw" else intermediate_cols[name]
         gain = regression_gain(col, residual, GaussianEstimator(), max_its=max_its, rng=rng)
         if not np.isfinite(gain):
-            gain = dependency_gain([round(v, 6) for v in col], residual, GaussianEstimator(), max_its=max_its, rng=rng)
-            gains.append(gain)
-            edges.append(None)
-            continue
+            raise ValueError(f"decomposition feature {name!r} has no executable regression edge")
         edge = fit_linear_gaussian_edge(list(zip(col, residual)))
         gains.append(gain)
         edges.append(edge)
+        sources.append(source)
         pred = edge.a + edge.b * np.asarray(col, dtype=float)
         residual = (np.asarray(residual, dtype=float) - pred).tolist()
-    return DependencyForest(chosen=list(decomposition), edge_gains=gains, mdl_gain=float(sum(gains)), edges=edges)
+    return DependencyForest(
+        chosen=decomposition,
+        edge_gains=gains,
+        mdl_gain=float(sum(gains)),
+        edges=edges,
+        feature_sources=sources,
+    )
 
 
 def mdl_score(
