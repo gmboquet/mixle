@@ -8,8 +8,11 @@ scored, mutated, placed, or communicated.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from numbers import Real
 from typing import Any
 
 
@@ -103,7 +106,7 @@ class CounterSemantics(StrEnum):
     HIGH_WATER_MARK = "high_water_mark"
 
 
-def weakest_band(bands: Any) -> ComputeBand:
+def weakest_band(bands: Iterable[ComputeBand]) -> ComputeBand:
     """FLOAT32_ELIGIBLE only when every node is eligible; FLOAT64 otherwise (or when empty)."""
     result: ComputeBand | None = None
     for band in bands:
@@ -113,7 +116,9 @@ def weakest_band(bands: Any) -> ComputeBand:
     return result if result is not None else ComputeBand.FLOAT64
 
 
-def weakest_certificate(certificates: Any) -> ConvergenceCertificate:
+def weakest_certificate(
+    certificates: Iterable[ConvergenceCertificate],
+) -> ConvergenceCertificate:
     """The minimum certificate over an iterable (the tree-level guarantee); UNKNOWN when empty."""
     result: ConvergenceCertificate | None = None
     for certificate in certificates:
@@ -183,6 +188,20 @@ class ArtifactKind(StrEnum):
     EXTERNAL_STATE = "external_state"
 
 
+def _require_finite_nonnegative(name: str, value: Real) -> None:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError("%s must be a real number." % name)
+    if not math.isfinite(float(value)) or value < 0:
+        raise ValueError("%s must be finite and non-negative." % name)
+
+
+def _require_nonnegative_int(name: str, value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("%s must be an integer." % name)
+    if value < 0:
+        raise ValueError("%s must be non-negative." % name)
+
+
 @dataclass(frozen=True)
 class CostEstimate:
     """Planning cost with provenance separating measured data from a proxy."""
@@ -195,11 +214,14 @@ class CostEstimate:
     sample_count: int = 0
 
     def __post_init__(self) -> None:
-        numeric = (self.compute_units, self.communication_bytes, self.peak_memory_bytes, self.sample_count)
-        if any(value < 0 for value in numeric):
-            raise ValueError("cost estimates must be non-negative.")
-        if self.wall_time_seconds is not None and self.wall_time_seconds < 0.0:
-            raise ValueError("wall_time_seconds must be non-negative when supplied.")
+        _require_finite_nonnegative("compute_units", self.compute_units)
+        if self.wall_time_seconds is not None:
+            _require_finite_nonnegative("wall_time_seconds", self.wall_time_seconds)
+        _require_nonnegative_int("communication_bytes", self.communication_bytes)
+        _require_nonnegative_int("peak_memory_bytes", self.peak_memory_bytes)
+        _require_nonnegative_int("sample_count", self.sample_count)
+        if not isinstance(self.source, str) or not self.source:
+            raise ValueError("cost estimate source must be a non-empty string.")
 
     @property
     def measured(self) -> bool:
@@ -292,6 +314,8 @@ class UpdateContract:
 
 __all__ = [
     "ArtifactKind",
+    "ComputeBand",
+    "ConvergenceCertificate",
     "ConsistencyRequirement",
     "CostEstimate",
     "CounterSemantics",
@@ -301,4 +325,6 @@ __all__ = [
     "StateSemantics",
     "UpdateContract",
     "UpdateKind",
+    "weakest_band",
+    "weakest_certificate",
 ]
