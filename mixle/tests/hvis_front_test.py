@@ -13,6 +13,7 @@ import pytest
 import mixle.utils.hvis as hvis
 from mixle.stats import GaussianDistribution, MixtureDistribution
 from mixle.utils.hvis import component_tree, fuzzy_nerve, hvis_map, model_fit_health, model_map
+from mixle.utils.hvis.front import _average_percentile_ranks
 
 _MODEL3 = MixtureDistribution(
     [GaussianDistribution(0.0, 1.0), GaussianDistribution(4.0, 1.0), GaussianDistribution(20.0, 1.0)],
@@ -27,6 +28,14 @@ def _data3(n_per=25, seed=0):
 
 
 class FrontDoorTest(unittest.TestCase):
+    def test_typicality_uses_equal_average_ranks_for_ties(self):
+        ranks = _average_percentile_ranks([1.0, 1.0, 3.0, 5.0])
+        self.assertEqual(ranks[0], ranks[1])
+        self.assertAlmostEqual(ranks[0], 1.0 / 6.0)
+        self.assertEqual(ranks[-1], 1.0)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            _average_percentile_ranks([0.0, float("nan")])
+
     def test_one_call_returns_coords_and_all_receipts(self):
         data, _ = _data3()
         m = hvis_map(data, _MODEL3)
