@@ -6,6 +6,8 @@ model distance d_ij = -log s_ij. The dense affinity matrix is never
 materialized.
 """
 
+import math
+
 import numpy as np
 import scipy.sparse
 
@@ -19,6 +21,55 @@ from mixle.utils.hvis.affinity import (
     _is_fisher_factor,
     _is_local_factor,
 )
+from mixle.utils.vector import ImpossibleEvidenceError
+
+
+def _validated_neighbor_request(
+    posterior_mat,
+    ll_mat,
+    affinity,
+    *,
+    k,
+    evidence_cap,
+) -> tuple[list, int, int, float | None]:
+    factors = _affinity_factors(posterior_mat, ll_mat, affinity)
+    n = _factor_n(factors[0])
+    if n < 2:
+        raise ValueError("neighbor construction requires at least two observations.")
+    weights = []
+    probe = np.asarray([0], dtype=np.int64)
+    for factor in factors:
+        if _factor_n(factor) != n:
+            raise ValueError("all affinity factors must have identical observation counts.")
+        weights.append(_factor_weight(factor))
+        _factor_similarity_block(factor, probe, probe)
+    try:
+        total_weight = math.fsum(weights)
+    except OverflowError as exc:
+        raise ValueError("total affinity weight must be finite.") from exc
+    if not np.isfinite(total_weight) or total_weight <= 0.0:
+        raise ImpossibleEvidenceError("neighbor construction requires a positive finite total affinity weight.")
+    if isinstance(k, bool) or not isinstance(k, (int, np.integer)) or not 1 <= k < n:
+        raise ValueError(f"k must be an integer between 1 and {n - 1}.")
+    if evidence_cap is not None and (not np.isfinite(evidence_cap) or evidence_cap <= 0.0):
+        raise ValueError("evidence_cap must be finite and positive or None.")
+    cap = float(evidence_cap) if evidence_cap is not None and len(factors) > 1 else None
+    return factors, n, int(k), cap
+
+
+def _validate_block_size(block_size) -> int:
+    if isinstance(block_size, bool) or not isinstance(block_size, (int, np.integer)) or block_size <= 0:
+        raise ValueError("block_size must be a positive integer.")
+    return int(block_size)
+
+
+def _require_feasible_rows(log_s: np.ndarray, k: int, row_offset: int) -> None:
+    counts = np.isfinite(log_s).sum(axis=1)
+    if np.any(counts < k):
+        rows = (np.flatnonzero(counts < k) + row_offset).tolist()
+        raise ImpossibleEvidenceError(
+            f"affinity evidence cannot provide {k} finite non-self neighbors for row(s) {rows}."
+        )
 
 
 def sparse_model_distances(
@@ -35,13 +86,10 @@ def sparse_model_distances(
     the dense n x n affinity matrix is never materialized. Distances are
     non-negative. evidence_cap as in model_log_affinity.
     """
-    factors = _affinity_factors(posterior_mat, ll_mat, affinity)
-    n = _factor_n(factors[0])
-    k = min(k, n - 1)
-    cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
-
-    if k <= 0:
-        return scipy.sparse.csr_matrix((n, n), dtype=np.float64)
+    factors, n, k, cap = _validated_neighbor_request(
+        posterior_mat, ll_mat, affinity, k=k, evidence_cap=evidence_cap
+    )
+    block_size = _validate_block_size(block_size)
 
     rows = np.repeat(np.arange(n), k)
     cols = np.empty(n * k, dtype=np.int64)
@@ -56,12 +104,13 @@ def sparse_model_distances(
                 weight = _factor_weight(factor)
                 if weight == 0.0:
                     continue
-                term = np.log(np.maximum(_factor_similarity_block(factor, row_idx), 1.0e-300))
+                term = np.log(_factor_similarity_block(factor, row_idx))
                 if cap is not None:
                     np.maximum(term, -cap, out=term)
                 log_s += weight * term
         log_s[np.arange(s1 - s0), np.arange(s0, s1)] = -np.inf
         s_blk = log_s
+        _require_feasible_rows(s_blk, k, s0)
 
         nbr = np.argpartition(-s_blk, k - 1, axis=1)[:, :k]
         log_s = s_blk
@@ -129,10 +178,6 @@ def _candidate_features(factors) -> tuple[np.ndarray, np.ndarray]:
         scale = np.sqrt(weight)
         row_blocks.append(scale * rg)
         col_blocks.append(scale * ch)
-
-    if not row_blocks:
-        z = np.zeros((n, 1), dtype=np.float64)
-        return z, z.copy()
 
     return np.hstack(row_blocks), np.hstack(col_blocks)
 
@@ -213,7 +258,7 @@ def _candidate_log_affinity(factors, i: int, candidates: np.ndarray, cap: float 
             weight = _factor_weight(factor)
             if weight == 0.0:
                 continue
-            term = np.log(np.maximum(_factor_similarity_candidates(factor, i, candidates), 1.0e-300))
+            term = np.log(_factor_similarity_candidates(factor, i, candidates))
             if cap is not None:
                 np.maximum(term, -cap, out=term)
             log_s += weight * term
@@ -240,19 +285,29 @@ def approx_sparse_model_distances(
     proposal/evaluation split is the intended boundary for future distributed
     graph construction.
     """
-    factors = _affinity_factors(posterior_mat, ll_mat, affinity)
-    n = _factor_n(factors[0])
-    k = min(k, n - 1)
-    cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
-
-    if k <= 0:
-        return scipy.sparse.csr_matrix((n, n), dtype=np.float64)
+    factors, n, k, cap = _validated_neighbor_request(
+        posterior_mat, ll_mat, affinity, k=k, evidence_cap=evidence_cap
+    )
 
     if leaf_size is None:
-        leaf_size = max(64, 2 * k)
-    leaf_size = min(max(int(leaf_size), k), n)
-    n_trees = max(int(n_trees), 1)
-    target_candidates = min(n - 1, max(k, int(candidate_multiplier) * k, leaf_size * n_trees))
+        leaf_size = min(n, max(64, 2 * k))
+    elif (
+        isinstance(leaf_size, bool)
+        or not isinstance(leaf_size, (int, np.integer))
+        or not k <= leaf_size <= n
+    ):
+        raise ValueError(f"leaf_size must be an integer between k={k} and n={n}, or None.")
+    if isinstance(n_trees, bool) or not isinstance(n_trees, (int, np.integer)) or n_trees <= 0:
+        raise ValueError("n_trees must be a positive integer.")
+    if (
+        isinstance(candidate_multiplier, bool)
+        or not isinstance(candidate_multiplier, (int, np.integer))
+        or candidate_multiplier <= 0
+    ):
+        raise ValueError("candidate_multiplier must be a positive integer.")
+    leaf_size = int(leaf_size)
+    n_trees = int(n_trees)
+    target_candidates = min(n - 1, max(k, candidate_multiplier * k, leaf_size * n_trees))
 
     row_feat, col_feat = _candidate_features(factors)
     rng = np.random.RandomState(seed)
@@ -270,6 +325,10 @@ def approx_sparse_model_distances(
         candidates = _augment_candidates(candidates, i, n, target_candidates, rng)
 
         log_s = _candidate_log_affinity(factors, i, candidates, cap)
+        if int(np.isfinite(log_s).sum()) < k:
+            raise ImpossibleEvidenceError(
+                f"affinity evidence cannot provide {k} finite non-self neighbors for row {i}."
+            )
         nbr = np.argpartition(-log_s, k - 1)[:k]
         c = candidates[nbr]
         d = -log_s[nbr]
@@ -297,13 +356,10 @@ def model_knn(
     matrix is never materialized.
     evidence_cap as in model_log_affinity.
     """
-    factors = _affinity_factors(posterior_mat, ll_mat, affinity)
-    n = _factor_n(factors[0])
-    if isinstance(k, bool) or not isinstance(k, (int, np.integer)) or not 1 <= k < n:
-        raise ValueError(f"k must be an integer between 1 and {n - 1}.")
-    if isinstance(block_size, bool) or not isinstance(block_size, (int, np.integer)) or block_size <= 0:
-        raise ValueError("block_size must be a positive integer.")
-    cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
+    factors, n, k, cap = _validated_neighbor_request(
+        posterior_mat, ll_mat, affinity, k=k, evidence_cap=evidence_cap
+    )
+    block_size = _validate_block_size(block_size)
 
     knn_idx = np.empty((n, k), dtype=np.int64)
     knn_dist = np.empty((n, k), dtype=np.float64)
@@ -317,12 +373,13 @@ def model_knn(
                 weight = _factor_weight(factor)
                 if weight == 0.0:
                     continue
-                term = np.log(np.maximum(_factor_similarity_block(factor, row_idx), 1.0e-300))
+                term = np.log(_factor_similarity_block(factor, row_idx))
                 if cap is not None:
                     np.maximum(term, -cap, out=term)
                 log_s += weight * term
         log_s[np.arange(s1 - s0), np.arange(s0, s1)] = -np.inf
         s_blk = log_s
+        _require_feasible_rows(s_blk, k, s0)
 
         nbr = np.argpartition(-s_blk, k - 1, axis=1)[:, :k]
 
