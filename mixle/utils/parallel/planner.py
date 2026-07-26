@@ -29,6 +29,7 @@ __all__ = [
     "CalibrationRecord",
     "DeviceSpec",
     "DaskEncodedData",
+    "EncodedDataControlConflictError",
     "EncodedDataHandle",
     "EncodedFold",
     "LocalEncodedData",
@@ -73,6 +74,10 @@ class ResourceCalibrationError(RuntimeError):
         self.resources = resources
         failed = [result.device_name for result in results if not result.success]
         super().__init__("resource calibration failed for device(s): %s" % ", ".join(failed))
+
+
+class EncodedDataControlConflictError(ValueError):
+    """Raised when controls request mutation of an already encoded handle."""
 
 
 @dataclass(frozen=True)
@@ -941,7 +946,7 @@ def encoded_data(
     precision: Any | None = None,
     num_chunks: int | None = None,
     sub_chunks: int = 1,
-    backend: str = "local",
+    backend: str | None = None,
     num_workers: int | None = None,
     client: Any | None = None,
     comm: Any | None = None,
@@ -950,7 +955,7 @@ def encoded_data(
     parallel_chunks: bool = False,
     chunk_workers: int | None = None,
 ) -> EncodedDataHandle:
-    """Return an encoded-data handle, preserving existing compatible handles.
+    """Create an encoded-data handle or explicitly reuse an unchanged handle.
 
     Backend dispatch goes through a registry (see :func:`register_encoded_data_backend`)
     rather than a hard-coded branch, so a new distributed framework (Lightning, Ray, JAX,
@@ -958,6 +963,34 @@ def encoded_data(
     compute engines use -- without editing this function.
     """
     if is_encoded_data_handle(data):
+        conflicts = [
+            name
+            for name, active in (
+                ("estimator", estimator is not None),
+                ("model", model is not None),
+                ("encoder", encoder is not None),
+                ("placement", placement is not None),
+                ("resources", resources is not None),
+                ("engine", engine is not None),
+                ("precision", precision is not None),
+                ("num_chunks", num_chunks is not None),
+                ("sub_chunks", sub_chunks != 1),
+                ("backend", backend is not None),
+                ("num_workers", num_workers is not None),
+                ("client", client is not None),
+                ("comm", comm is not None),
+                ("root", root != 0),
+                ("root_only", root_only),
+                ("parallel_chunks", parallel_chunks),
+                ("chunk_workers", chunk_workers is not None),
+            )
+            if active
+        ]
+        if conflicts:
+            raise EncodedDataControlConflictError(
+                "existing encoded handle cannot apply control(s): %s; omit controls to reuse it unchanged"
+                % ", ".join(conflicts)
+            )
         return data
     backend_name = str(backend or "local").lower()
     factory = _ENCODED_DATA_BACKENDS.get(backend_name)

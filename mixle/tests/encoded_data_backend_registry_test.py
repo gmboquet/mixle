@@ -116,8 +116,14 @@ class EncodedDataBackendRegistryTestCase(unittest.TestCase):
             _ENCODED_DATA_BACKENDS.pop("fake-test-backend-4", None)
 
     def test_passthrough_of_existing_handle(self):
+        from mixle.utils.parallel.planner import EncodedDataControlConflictError
+
         handle = encoded_data(self.data, encoder=self.encoder, backend="local")
-        self.assertIs(encoded_data(handle, backend="mpi"), handle)  # already a handle: returned as-is
+        self.assertIs(encoded_data(handle), handle)
+        with self.assertRaisesRegex(EncodedDataControlConflictError, "backend"):
+            encoded_data(handle, backend="mpi")
+        with self.assertRaisesRegex(EncodedDataControlConflictError, "precision"):
+            encoded_data(handle, precision="float32")
 
 
 if __name__ == "__main__":
