@@ -140,6 +140,24 @@ class EmbeddingHealthTest(unittest.TestCase):
         self.assertEqual(report["n_sampled"], 100)
         self.assertEqual(len(report["per_point_trust_penalty"]), 100)
 
+    def test_invalid_geometry_and_small_sample_domains_are_rejected(self):
+        data = self._data(n_per=2)
+        fitted = model_map(data, mix_model=self._MODEL3)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            bad = fitted.coords.copy()
+            bad[0, 0] = np.nan
+            embedding_health(bad, self._MODEL3, data, k=1)
+        with self.assertRaisesRegex(ValueError, "same number"):
+            embedding_health(fitted.coords[:-1], self._MODEL3, data, k=1)
+        for kwargs in ({"k": 0}, {"k": 3}, {"k": 1.5}, {"max_rows": 2}):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                embedding_health(fitted.coords, self._MODEL3, data, **kwargs)
+
+        tiny = data[:2]
+        tiny_coords = fitted.coords[:2]
+        with self.assertRaisesRegex(ValueError, "at least three"):
+            embedding_health(tiny_coords, self._MODEL3, tiny, k=1)
+
 
 if __name__ == "__main__":
     unittest.main()

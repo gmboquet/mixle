@@ -329,13 +329,24 @@ def embedding_health(
     """
     from mixle.utils.hvis.affinity import (
         _affinity_factors,
+        _factor_n,
         _posteriors_and_loglikes,
         _resolve_affinity,
         log_affinity_block,
     )
 
     coords = np.asarray(coords, dtype=np.float64)
+    if coords.ndim != 2 or coords.shape[0] == 0 or coords.shape[1] == 0:
+        raise ValueError("coords must be a non-empty two-dimensional array.")
+    if not np.all(np.isfinite(coords)):
+        raise ValueError("coords must contain only finite values.")
     data = list(data)
+    if len(data) != coords.shape[0]:
+        raise ValueError("coords and data must contain the same number of observations.")
+    if len(data) < 3:
+        raise ValueError("embedding_health requires at least three observations.")
+    if isinstance(max_rows, bool) or not isinstance(max_rows, (int, np.integer)) or max_rows < 3:
+        raise ValueError("max_rows must be an integer of at least three.")
     resolved = _resolve_affinity(affinity, mix_model, data, field_weights)
     if isinstance(resolved, str):
         z, ll = _posteriors_and_loglikes(mix_model, data=data)
@@ -344,27 +355,44 @@ def embedding_health(
         factors = _affinity_factors(None, None, resolved)
 
     n = coords.shape[0]
+    if _factor_n(factors[0]) != n:
+        raise ValueError("affinity factors must have one row per coordinate.")
     rng = np.random.RandomState(seed)
     idx = np.arange(n) if n <= max_rows else np.sort(rng.choice(n, size=max_rows, replace=False))
     m = len(idx)
-    k = min(int(k), m - 2)
+    if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
+        raise TypeError("k must be an integer.")
+    k = int(k)
+    if k < 1 or k >= m / 2.0:
+        raise ValueError("k must be positive and strictly less than half the sampled observations.")
 
     log_s = log_affinity_block(factors, idx, idx, evidence_cap)
     np.fill_diagonal(log_s, -np.inf)
+    off_diagonal = ~np.eye(m, dtype=bool)
+    if not np.all(np.isfinite(log_s[off_diagonal])):
+        raise ValueError("model affinity must be finite between distinct sampled observations.")
     d2 = np.square(coords[idx][:, None, :] - coords[idx][None, :, :]).sum(axis=2)
     np.fill_diagonal(d2, np.inf)
 
-    # rank matrices: rank_data[i, j] = position of j in i's model-affinity ordering (1 = nearest)
+    # Average ranks give equal distances/affinities equal penalty ranks. The
+    # stable order still chooses exactly k neighbors at a boundary tie so the
+    # standard normalization remains defined.
+    from scipy.stats import rankdata
+
     order_data = np.argsort(-log_s, axis=1, kind="stable")
     order_map = np.argsort(d2, axis=1, kind="stable")
-    rank_data = np.empty((m, m), dtype=np.int64)
-    rank_map = np.empty((m, m), dtype=np.int64)
-    rows = np.arange(m)[:, None]
-    rank_data[rows, order_data] = np.arange(m)[None, :] + 1
-    rank_map[rows, order_map] = np.arange(m)[None, :] + 1
+    rank_data = np.full((m, m), float(m), dtype=np.float64)
+    rank_map = np.full((m, m), float(m), dtype=np.float64)
+    for row in range(m):
+        others = np.arange(m) != row
+        rank_data[row, others] = rankdata(-log_s[row, others], method="average")
+        rank_map[row, others] = rankdata(d2[row, others], method="average")
 
-    knn_data = rank_data <= k
-    knn_map = rank_map <= k
+    knn_data = np.zeros((m, m), dtype=bool)
+    knn_map = np.zeros((m, m), dtype=bool)
+    rows = np.arange(m)[:, None]
+    knn_data[rows, order_data[:, :k]] = True
+    knn_map[rows, order_map[:, :k]] = True
     norm = 2.0 / (m * k * (2.0 * m - 3.0 * k - 1.0))
 
     trust_pen = np.where(knn_map & ~knn_data, rank_data - k, 0).sum(axis=1).astype(np.float64)

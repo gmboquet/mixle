@@ -30,6 +30,20 @@ from mixle.utils.hvis.topology import component_tree, embedding_health, fuzzy_ne
 __all__ = ["Map", "hvis_map"]
 
 
+def _average_percentile_ranks(values) -> np.ndarray:
+    """Finite percentile ranks with equal values assigned their average rank."""
+    from scipy.stats import rankdata
+
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError("typicality scores must be a non-empty one-dimensional array.")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("typicality scores must contain only finite values.")
+    if values.size == 1:
+        return np.zeros(1, dtype=np.float64)
+    return (rankdata(values, method="average") - 1.0) / float(values.size - 1)
+
+
 @dataclass
 class Map:
     """A finished map: coordinates, anchors, per-point uncertainty, and every receipt."""
@@ -185,7 +199,9 @@ def hvis_map(
         joint = ll_mat + log_w
         mx = joint.max(axis=1, keepdims=True)
         ll = mx[:, 0] + np.log(np.exp(joint - mx).sum(axis=1))
-    typicality = np.argsort(np.argsort(ll)).astype(np.float64) / max(len(ll) - 1, 1)  # percentile: low = odd
+    # Average-rank percentiles make equal-likelihood observations genuinely
+    # tied instead of assigning arbitrary order-dependent typicalities.
+    typicality = _average_percentile_ranks(ll)  # low = odd
 
     nerve = fuzzy_nerve(z)
     result = Map(
