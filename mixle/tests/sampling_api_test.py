@@ -17,6 +17,24 @@ class SamplingApiTest(unittest.TestCase):
         self.assertEqual(arr.shape, (1000,))
         self.assertEqual(np.ndim(sample(g, seed=1)), 0)  # size=None -> scalar
 
+    def test_size_contract_is_shared_across_model_kinds(self):
+        g = GaussianDistribution(0.0, 1.0)
+        mix = MixtureDistribution([g, GaussianDistribution(3.0, 1.0)], [0.5, 0.5])
+        latent = mix.latent_posterior([0.0, 3.0])
+        relation = Assignment(np.array([[4.0, 1.0], [2.0, 0.0]]))
+
+        self.assertEqual(sample(g, np.int64(0), seed=0).shape, (0,))
+        self.assertEqual(sample(latent, 0, seed=0), [])
+        self.assertEqual(sample(relation, 0, seed=0), [])
+        for model in (g, latent, relation):
+            with self.subTest(model=type(model).__name__, size=-1):
+                with self.assertRaisesRegex(ValueError, "non-negative"):
+                    sample(model, -1, seed=0)
+            for invalid in (True, 1.5, "2"):
+                with self.subTest(model=type(model).__name__, size=invalid):
+                    with self.assertRaises(TypeError):
+                        sample(model, invalid, seed=0)
+
     def test_shared_rng_is_reproducible_and_advances(self):
         g = GaussianDistribution(0.0, 1.0)
         r1, r2 = np.random.RandomState(42), np.random.RandomState(42)

@@ -17,6 +17,7 @@ per-call stream is seeded from it, so one ``rng`` drives independent reproducibl
 
 from __future__ import annotations
 
+from operator import index
 from typing import Any
 
 import numpy as np
@@ -30,6 +31,21 @@ def _resolve_rng(seed: int | None, rng: np.random.RandomState | None) -> np.rand
     if rng is not None:
         return rng
     return np.random.RandomState(seed)
+
+
+def _validate_size(size: Any) -> int | None:
+    """Return one exact, non-negative sample count, preserving ``None`` as a scalar draw."""
+    if size is None:
+        return None
+    if isinstance(size, (bool, np.bool_)):
+        raise TypeError("sample size must be an integer or None, not a boolean.")
+    try:
+        count = index(size)
+    except TypeError as exc:
+        raise TypeError("sample size must be an integer or None.") from exc
+    if count < 0:
+        raise ValueError("sample size must be non-negative.")
+    return count
 
 
 # Out-of-core samplable handlers. A higher layer (e.g. ``mixle.ppl`` for ``FieldPosterior``) registers a
@@ -59,8 +75,9 @@ def sample(
     Args:
         model: a distribution, conjugate posterior, :class:`~mixle.relations.Relation`,
             ``FieldPosterior`` or ``LatentPosterior``.
-        size: ``None`` returns a single draw in the object's natural type; an int returns a collection
-            (an array for homogeneous leaves, a list / dict-of-arrays for structured draws).
+        size: ``None`` returns a single draw in the object's natural type; a non-negative integer
+            returns a collection (an array for homogeneous leaves, a list / dict-of-arrays for
+            structured draws). Zero returns an empty collection in that natural collection type.
         seed: scalar seed for the draw. Mutually exclusive with ``rng``.
         rng: a shared ``RandomState`` for reproducible, composable streams. Mutually exclusive
             with ``seed``.
@@ -71,12 +88,14 @@ def sample(
         A single draw (``size=None``) or a collection of ``size`` draws.
 
     Raises:
-        TypeError: if ``model`` is not a recognized samplable object, or if both ``seed`` and
-            ``rng`` are supplied (two randomness sources are ambiguous -- the same double-supply
-            policy as the constructor keyword aliases).
+        TypeError: if ``model`` is not a recognized samplable object, if ``size`` is not an integer
+            or ``None``, or if both ``seed`` and ``rng`` are supplied (two randomness sources are
+            ambiguous -- the same double-supply policy as the constructor keyword aliases).
+        ValueError: if ``size`` is negative.
     """
     if seed is not None and rng is not None:
         raise TypeError("'seed' and 'rng' are mutually exclusive; pass only one")
+    size = _validate_size(size)
     # Relation -- a sampler under a Gibbs measure over its members (temperature/k/uniform are sampler args).
     from mixle.relations import Relation
 
