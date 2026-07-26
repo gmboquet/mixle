@@ -9,7 +9,13 @@ import numpy as np
 
 from mixle.inference.estimation import fit
 from mixle.stats import SpanningTreeDistribution
-from mixle.stats.trees.spanning_tree import _edge_marginals, _smoothed_edge_target
+from mixle.stats.trees.spanning_tree import (
+    SpanningTreeAccumulator,
+    SpanningTreeEstimator,
+    SpanningTreeFitError,
+    _edge_marginals,
+    _smoothed_edge_target,
+)
 
 
 def _all_trees(n):
@@ -84,10 +90,14 @@ class SpanningTreeTestCase(unittest.TestCase):
         self.assertAlmostEqual(float(np.logaddexp.reduce([lp for _, lp in items])), 0.0, places=10)
 
     def test_enumerator_is_lazy_and_complete(self):
-        # the enumerator now streams trees in increasing cost (Gabow k-best), so max_edge_subsets no longer
-        # caps it -- both the legacy argument and the default yield the full Cayley count of n^(n-2) trees.
         dist = SpanningTreeDistribution(_W)
-        self.assertEqual(len(list(dist.enumerator(max_edge_subsets=1))), 4 ** (4 - 2))
+        capped = dist.enumerator(max_edge_subsets=1)
+        self.assertEqual(len(list(capped)), 1)
+        self.assertTrue(capped.receipt["truncated"])
+        self.assertEqual(
+            capped.receipt["termination_reason"],
+            "item_budget_exhausted",
+        )
         self.assertEqual(len(list(dist.enumerator(max_edge_subsets=None))), 4 ** (4 - 2))
         # lazily taking only the top few does not enumerate everything
         top = list(itertools.islice(dist.enumerator(), 3))
@@ -153,6 +163,102 @@ class SpanningTreeTestCase(unittest.TestCase):
     def test_invalid_weights_raise(self):
         with self.assertRaises(ValueError):
             SpanningTreeDistribution([[0.0, -1.0], [-1.0, 0.0]])
+        with self.assertRaises(ValueError):
+            SpanningTreeDistribution([[0.0, 1.0], [2.0, 0.0]])
+        with self.assertRaises(ValueError):
+            SpanningTreeDistribution([[1.0, 1.0], [1.0, 0.0]])
+
+    def test_endpoints_require_exact_integers_at_every_scoring_boundary(self):
+        dist = SpanningTreeDistribution(_W)
+        invalid = [(0.9, 1), (1, 2), (2, 3)]
+        with self.assertRaises(TypeError):
+            dist.log_density(invalid)
+        with self.assertRaises(TypeError):
+            dist.dist_to_encoder().seq_encode([invalid])
+        duplicate_non_tree = np.asarray([(0, 1), (0, 1), (2, 3)])
+        with self.assertRaises(ValueError):
+            dist.seq_log_density([duplicate_non_tree])
+
+    def test_accumulator_validates_batches_statistics_and_restored_state(self):
+        acc = SpanningTreeAccumulator(4)
+        tree = [(0, 1), (1, 2), (2, 3)]
+        acc.update(tree, 2.0, None)
+        before = acc.value()
+        for weight in (-1.0, np.nan):
+            with self.subTest(weight=weight), self.assertRaises(ValueError):
+                acc.update(tree, weight, None)
+            np.testing.assert_array_equal(acc.value()[1], before[1])
+        encoded = SpanningTreeDistribution(_W).dist_to_encoder().seq_encode([tree])
+        with self.assertRaises(ValueError):
+            acc.seq_update(encoded, np.asarray([1.0, 2.0]), None)
+        restored = acc.value()
+        acc.from_value(restored)
+        restored[1][0, 1] = 99.0
+        self.assertNotEqual(acc.value()[1][0, 1], 99.0)
+        invalid_counts = before[1].copy()
+        invalid_counts[0, 1] = -1.0
+        with self.assertRaises(ValueError):
+            acc.from_value((before[0], invalid_counts))
+
+    def test_estimator_preserves_candidate_support_and_reports_fit_status(self):
+        source = SpanningTreeDistribution(
+            np.asarray(
+                [
+                    [0.0, 1.0, 1.0],
+                    [1.0, 0.0, 1.0],
+                    [1.0, 1.0, 0.0],
+                ]
+            )
+        )
+        accumulator = source.estimator(pseudo_count=1.0).accumulator_factory().make()
+        accumulator.update([(0, 1), (1, 2)], 1.0, None)
+        fitted = source.estimator(pseudo_count=1.0).estimate(
+            None,
+            accumulator.value(),
+        )
+        self.assertGreater(fitted.weights[0, 2], 0.0)
+        self.assertEqual(set(fitted.fit_metadata), {
+            "converged",
+            "solver",
+            "iterations",
+            "max_steps",
+            "residual",
+            "tolerance",
+            "regularized",
+            "candidate_edges",
+            "repairs",
+        })
+        self.assertTrue(np.isfinite(fitted.fit_metadata["residual"]))
+
+    def test_estimator_rejects_bad_controls_no_data_and_infeasible_stats(self):
+        for kwargs in (
+            {"max_steps": 0},
+            {"learning_rate": 0.0},
+            {"learning_rate": np.nan},
+            {"tol": 0.0},
+            {"tol": np.inf},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                SpanningTreeEstimator(3, **kwargs)
+        estimator = SpanningTreeEstimator(3)
+        with self.assertRaises(SpanningTreeFitError):
+            estimator.estimate(None, (0.0, np.zeros((3, 3))))
+        asymmetric = np.zeros((3, 3))
+        asymmetric[0, 1] = 1.0
+        with self.assertRaises(ValueError):
+            estimator.estimate(None, (1.0, asymmetric))
+        wrong_mass = np.zeros((3, 3))
+        wrong_mass[0, 1] = wrong_mass[1, 0] = 1.0
+        with self.assertRaises(ValueError):
+            estimator.estimate(None, (1.0, wrong_mass))
+
+    def test_positive_prior_identifies_a_no_data_fit(self):
+        fitted = SpanningTreeEstimator(3, pseudo_count=2.0).estimate(
+            None,
+            (0.0, np.zeros((3, 3))),
+        )
+        self.assertTrue(fitted.fit_metadata["converged"])
+        self.assertTrue(fitted.fit_metadata["regularized"])
 
 
 if __name__ == "__main__":
