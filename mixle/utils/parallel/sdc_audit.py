@@ -309,6 +309,9 @@ class SDCAuditReceipt:
     mismatch_reason: str = ""
     primary_canonical_sha256: str = ""
     audit_canonical_sha256: str = ""
+    witness_worker: int | None = None
+    suspected_workers: tuple[int, ...] = ()
+    quarantine_status: str = "not_requested"
     primary_value_repr: str = field(default="", repr=False)
     audit_value_repr: str = field(default="", repr=False)
 
@@ -316,7 +319,7 @@ class SDCAuditReceipt:
         return (
             "SDC audit mismatch: shard=%d primary_rank=%d audit_rank=%d "
             "primary=%dB (sha256 %s) audit=%dB (sha256 %s) first_diff_byte=%s "
-            "comparison=%s rtol=%g atol=%g reason=%s"
+            "comparison=%s rtol=%g atol=%g reason=%s suspects=%s quarantine=%s"
             % (
                 self.shard_id,
                 self.primary_worker,
@@ -330,6 +333,8 @@ class SDCAuditReceipt:
                 self.audit_rtol,
                 self.audit_atol,
                 self.mismatch_reason,
+                self.suspected_workers,
+                self.quarantine_status,
             )
         )
 
@@ -345,6 +350,9 @@ def _receipt(
     *,
     rtol: float,
     atol: float,
+    witness_worker: int | None = None,
+    suspected_workers: tuple[int, ...] = (),
+    quarantine_status: str = "not_requested",
 ) -> SDCAuditReceipt:
     n = min(len(primary), len(audit))
     first_diff = next((i for i in range(n) if primary[i] != audit[i]), None)
@@ -374,6 +382,9 @@ def _receipt(
         mismatch_reason=comparison.reason,
         primary_canonical_sha256=comparison.primary_canonical_sha256,
         audit_canonical_sha256=comparison.audit_canonical_sha256,
+        witness_worker=witness_worker,
+        suspected_workers=suspected_workers,
+        quarantine_status=quarantine_status,
         primary_value_repr=_safe_repr(primary),
         audit_value_repr=_safe_repr(audit),
     )
@@ -391,12 +402,11 @@ class AuditedMPEncodedData(ResilientMPEncodedData):
 
         1. is recorded as a structured :class:`SDCAuditReceipt` (``self.audit_receipts``,
            ``self.last_round_audit_mismatches``);
-        2. quarantines BOTH ranks that produced the disagreeing payloads via K4's existing
-           ``_blacklist`` / ``_retire_worker`` / ``_migrate_shard_permanently`` machinery --
-           this is a deliberately conservative policy: a single 2-way mismatch cannot, by
-           itself, prove which of the two ranks is the corrupted one (that needs a third
-           witness / majority vote), so both are treated as suspect and the shard is migrated
-           to a clean survivor rather than risk silently trusting either.
+        2. obtains a third independent witness before identifying a suspect. A two-way
+           disagreement alone is recorded but never used to quarantine either worker;
+        3. stages every affected shard on validated survivors before atomically committing
+           the suspect's retirement. If no safe witness or placement exists, quarantine is
+           deferred and that decision is recorded in the receipt.
 
     The main EM round itself (retry, blacklisting on repeated *failure*, checkpointed fold) is
     entirely K4's, untouched, reused via inheritance -- K5 only adds the audit phase (run
@@ -433,17 +443,10 @@ class AuditedMPEncodedData(ResilientMPEncodedData):
         rng: np.random.RandomState | None = None,
         worker_timeout_s: float = 30.0,
     ) -> None:
-        super().__init__(
-            data,
-            estimator=estimator,
-            encoder=encoder,
-            num_workers=num_workers,
-            sub_chunks=sub_chunks,
-            max_retries=max_retries,
-            worker_timeout_s=worker_timeout_s,
-        )
-        if not (0.0 <= float(audit_rate) <= 1.0):
-            raise ValueError("audit_rate must be within [0, 1].")
+        if isinstance(audit_rate, bool) or not isinstance(audit_rate, Real) or not np.isfinite(audit_rate):
+            raise ValueError("audit_rate must be finite and within [0, 1]")
+        if not 0.0 <= audit_rate <= 1.0:
+            raise ValueError("audit_rate must be finite and within [0, 1]")
         if (
             isinstance(audit_rtol, bool)
             or not isinstance(audit_rtol, Real)
@@ -458,6 +461,15 @@ class AuditedMPEncodedData(ResilientMPEncodedData):
             or audit_atol < 0.0
         ):
             raise ValueError("audit_atol must be finite and nonnegative")
+        super().__init__(
+            data,
+            estimator=estimator,
+            encoder=encoder,
+            num_workers=num_workers,
+            sub_chunks=sub_chunks,
+            max_retries=max_retries,
+            worker_timeout_s=worker_timeout_s,
+        )
         self.audit_rate = float(audit_rate)
         self.audit_rtol = float(audit_rtol)
         self.audit_atol = float(audit_atol)
@@ -498,18 +510,48 @@ class AuditedMPEncodedData(ResilientMPEncodedData):
             payload = self._corrupt_hook(worker_id, shard_id, role, payload)
         return payload
 
-    def _quarantine(self, worker_a: int, worker_b: int, shard_id: int) -> None:
-        """Blacklist both suspect ranks and permanently migrate whatever they held (see class
-        docstring for why both, not just one, are quarantined on a single mismatch)."""
-        for w in (worker_a, worker_b):
-            if w not in self._conns or w in self._blacklist:
-                continue
-            self._failures[w] = self.max_retries  # SDC evidence skips the normal retry grace period
-            self._blacklist.add(w)
-            shard_ids = self._worker_shards.pop(w, set())
-            self._retire_worker(w)
-            for sid in shard_ids:
-                self._migrate_shard_permanently(sid)
+    def _quarantine(self, suspects: set[int]) -> str:
+        """Stage a complete survivor placement, then commit suspect retirement."""
+        suspects = {worker for worker in suspects if worker in self._conns and worker not in self._blacklist}
+        if not suspects:
+            return "not_needed"
+        survivors = sorted(worker for worker in self._conns if worker not in suspects and worker not in self._blacklist)
+        if not survivors:
+            return "deferred:no_safe_survivor"
+        assignments = {worker: set(self._worker_shards.get(worker, set())) for worker in suspects}
+        shard_ids = sorted(shard for owned in assignments.values() for shard in owned)
+        if len(shard_ids) != len(set(shard_ids)):
+            return "deferred:ambiguous_shard_ownership"
+        placement = {
+            shard_id: survivors[index % len(survivors)]
+            for index, shard_id in enumerate(shard_ids)
+        }
+        if any(shard_id in self._worker_shards.get(target, set()) for shard_id, target in placement.items()):
+            return "deferred:duplicate_survivor_placement"
+
+        staged: list[tuple[int, int]] = []
+        try:
+            for shard_id, target in placement.items():
+                self._send_raw(target, ("add_shard", shard_id, self._shard_raw[shard_id], self.sub_chunks))
+                staged.append((target, shard_id))
+                self._recv_raw(target)
+        except (EOFError, OSError, RuntimeError, TimeoutError):
+            for target, shard_id in staged:
+                try:
+                    self._send_raw(target, ("remove_shard", shard_id))
+                    self._recv_raw(target)
+                except (EOFError, OSError, RuntimeError, TimeoutError):
+                    pass
+            return "deferred:staging_failed"
+
+        for worker in sorted(suspects):
+            self._failures[worker] = self.max_retries
+            self._blacklist.add(worker)
+            self._worker_shards.pop(worker, None)
+            self._retire_worker(worker)
+        for shard_id, target in placement.items():
+            self._worker_shards.setdefault(target, set()).add(shard_id)
+        return "committed"
 
     def _audit_shards(
         self, estimator: Any, model: Any, shard_ids: set[int], quarantine_on_mismatch: bool = True
@@ -563,6 +605,43 @@ class AuditedMPEncodedData(ResilientMPEncodedData):
                 atol=self.audit_atol,
             )
             if not comparison.equivalent:
+                witness_worker: int | None = None
+                suspects: tuple[int, ...] = ()
+                quarantine_status = "disabled" if not quarantine_on_mismatch else "deferred:insufficient_witnesses"
+                if quarantine_on_mismatch:
+                    witness_candidates = [worker for worker in live if worker not in {owner, secondary}]
+                    if witness_candidates:
+                        witness_worker = witness_candidates[int(self._audit_rng.randint(len(witness_candidates)))]
+                        witness_payload = self._update_shard_on(
+                            witness_worker,
+                            estimator_b,
+                            model_b,
+                            shard_id,
+                            "witness",
+                        )
+                        eval_count += 1
+                        primary_witness = _compare_statistic_payloads(
+                            primary_payload,
+                            witness_payload,
+                            rtol=self.audit_rtol,
+                            atol=self.audit_atol,
+                        )
+                        audit_witness = _compare_statistic_payloads(
+                            audit_payload,
+                            witness_payload,
+                            rtol=self.audit_rtol,
+                            atol=self.audit_atol,
+                        )
+                        if primary_witness.equivalent and not audit_witness.equivalent:
+                            suspects = (secondary,)
+                        elif audit_witness.equivalent and not primary_witness.equivalent:
+                            suspects = (owner,)
+                        elif primary_witness.equivalent and audit_witness.equivalent:
+                            quarantine_status = "deferred:nontransitive_envelope"
+                        else:
+                            quarantine_status = "deferred:three_way_disagreement"
+                        if suspects:
+                            quarantine_status = self._quarantine(set(suspects))
                 receipt = _receipt(
                     self._round,
                     shard_id,
@@ -573,11 +652,12 @@ class AuditedMPEncodedData(ResilientMPEncodedData):
                     comparison,
                     rtol=self.audit_rtol,
                     atol=self.audit_atol,
+                    witness_worker=witness_worker,
+                    suspected_workers=suspects,
+                    quarantine_status=quarantine_status,
                 )
                 mismatches.append(receipt)
                 self.audit_receipts.append(receipt)
-                if quarantine_on_mismatch:
-                    self._quarantine(owner, secondary, shard_id)
 
         self.last_round_audited_shards = audited
         self.last_round_audit_mismatches = mismatches
