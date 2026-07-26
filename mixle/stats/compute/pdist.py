@@ -6,6 +6,7 @@ ConditionalSampler, and DistributionSampler for classes of the mixle.stats.
 
 import itertools
 import math
+import operator
 import sys
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -16,6 +17,36 @@ import numpy as np
 from mixle.engines.arithmetic import *
 
 SS = TypeVar("SS")
+
+
+def _positive_budget(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("%s must be a positive integer." % name)
+    try:
+        result = operator.index(value)
+    except TypeError as exc:
+        raise TypeError("%s must be a positive integer." % name) from exc
+    if result <= 0:
+        raise ValueError("%s must be a positive integer." % name)
+    return result
+
+
+def _density_index(value: Any) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("q must be a finite real number in [0, 1].")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("q must be a finite real number in [0, 1].") from exc
+    if not math.isfinite(result) or not 0.0 <= result <= 1.0:
+        raise ValueError("q must be a finite real number in [0, 1].")
+    return result
+
+
+def _invalid_score_policy(value: Any) -> str:
+    if value not in ("raise", "omit"):
+        raise ValueError("invalid_score must be 'raise' or 'omit'.")
+    return value
 
 
 class DensitySemantics(Enum):
@@ -352,7 +383,14 @@ class ProbabilityDistribution(ABC):
         """
         return self.enumerator().quantized_index(max_bits=max_bits, bin_width_bits=bin_width_bits)
 
-    def density_quantile(self, q: float, n_samples: int = 20000, seed: int | None = None) -> Any:
+    def density_quantile(
+        self,
+        q: float,
+        n_samples: int = 20000,
+        seed: int | None = None,
+        *,
+        invalid_score: str = "raise",
+    ) -> Any:
         """Return a representative value at cumulative-density index ``q`` (descending-density order).
 
         The arbitrary-index / inverse of the probability-ordered cumulative that
@@ -369,18 +407,36 @@ class ProbabilityDistribution(ABC):
             q (float): Cumulative-density index in ``[0, 1]``.
             n_samples (int): Monte-Carlo sample budget.
             seed (Optional[int]): Sampler seed (reproducible).
+            invalid_score (str): ``"raise"`` for non-finite sampled scores, or
+                ``"omit"`` to discard them explicitly.
         """
-        if not 0.0 <= q <= 1.0:
-            raise ValueError("q must be in [0, 1].")
-        samples = self.sampler(seed).sample(int(n_samples))
+        index = _density_index(q)
+        count = _positive_budget(n_samples, "n_samples")
+        policy = _invalid_score_policy(invalid_score)
+        samples = self.sampler(seed).sample(count)
+        if not hasattr(samples, "__len__") or len(samples) != count:
+            raise ValueError("sampler returned %s values for n_samples=%d." % (getattr(samples, "__len__", lambda: "?")(), count))
         with np.errstate(divide="ignore"):
-            lps = np.asarray([float(self.log_density(y)) for y in samples], dtype=np.float64)
-        order = np.argsort(-lps, kind="stable")
-        pick = int(round(q * (len(order) - 1))) if len(order) > 1 else 0
-        return samples[int(order[pick])]
+            scored = [(float(self.log_density(y)), y) for y in samples]
+        invalid = [lp for lp, _ in scored if not math.isfinite(lp)]
+        if invalid and policy == "raise":
+            raise ValueError("density representative sampling produced %d non-finite log densities." % len(invalid))
+        if invalid:
+            scored = [(lp, y) for lp, y in scored if math.isfinite(lp)]
+        if not scored:
+            raise ValueError("density representative sampling produced no finite log densities.")
+        scored.sort(key=lambda item: -item[0])
+        pick = int(round(index * (len(scored) - 1))) if len(scored) > 1 else 0
+        return scored[pick][1]
 
     def density_enumeration(
-        self, num_points: int, n_samples: int = 20000, seed: int | None = None
+        self,
+        num_points: int,
+        n_samples: int = 20000,
+        seed: int | None = None,
+        *,
+        dedup_key: Any = None,
+        invalid_score: str = "raise",
     ) -> list[tuple[Any, float]]:
         """Return ``num_points`` representative ``(value, log_density)`` pairs in descending density.
 
@@ -395,26 +451,46 @@ class ProbabilityDistribution(ABC):
             num_points (int): Number of representatives to return.
             n_samples (int): Monte-Carlo sample budget.
             seed (Optional[int]): Sampler seed (reproducible).
+            dedup_key (Optional[Callable]): Stable equality key for values not
+                supported by the default canonical ``freeze`` operation.
+            invalid_score (str): ``"raise"`` for non-finite sampled scores, or
+                ``"omit"`` to discard them explicitly.
         """
         from mixle.enumeration.algorithms import freeze
 
-        samples = self.sampler(seed).sample(int(n_samples))
+        points = _positive_budget(num_points, "num_points")
+        count = _positive_budget(n_samples, "n_samples")
+        if points > count:
+            raise ValueError("num_points cannot exceed n_samples.")
+        if dedup_key is not None and not callable(dedup_key):
+            raise TypeError("dedup_key must be callable.")
+        policy = _invalid_score_policy(invalid_score)
+        samples = self.sampler(seed).sample(count)
+        if not hasattr(samples, "__len__") or len(samples) != count:
+            raise ValueError("sampler returned %s values for n_samples=%d." % (getattr(samples, "__len__", lambda: "?")(), count))
         with np.errstate(divide="ignore"):
-            scored = sorted(((float(self.log_density(y)), y) for y in samples), key=lambda t: -t[0])
+            scored = [(float(self.log_density(y)), y) for y in samples]
+        invalid = [lp for lp, _ in scored if not math.isfinite(lp)]
+        if invalid and policy == "raise":
+            raise ValueError("density representative sampling produced %d non-finite log densities." % len(invalid))
+        if invalid:
+            scored = [(lp, y) for lp, y in scored if math.isfinite(lp)]
+        scored.sort(key=lambda item: -item[0])
         out: list[tuple[Any, float]] = []
         seen: set = set()
         for lp, y in scored:
-            if lp == -np.inf:
-                continue
             try:
-                key = freeze(y)
-            except TypeError:
-                key = id(y)
+                key = freeze(y if dedup_key is None else dedup_key(y))
+            except TypeError as exc:
+                raise TypeError(
+                    "density representative values require a stable deduplication key; "
+                    "supply dedup_key for type %s." % type(y).__name__
+                ) from exc
             if key in seen:
                 continue
             seen.add(key)
             out.append((y, lp))
-            if len(out) >= int(num_points):
+            if len(out) >= points:
                 break
         return out
 
