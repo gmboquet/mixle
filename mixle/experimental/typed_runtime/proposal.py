@@ -121,6 +121,8 @@ class ProposalPacket:
     invalidates: tuple[str, ...] = ()
     rollback_reference: str | None = None
     surrogate_disclosed: bool = False
+    staleness_semantics: str | None = None
+    correction_fingerprint: str | None = None
     payload_hash: str = ""
 
     def __post_init__(self) -> None:
@@ -176,6 +178,18 @@ class ProposalPacket:
         )
         if surrogate and not self.surrogate_disclosed:
             raise ValueError("surrogate proposals must set surrogate_disclosed=True.")
+        allowed_staleness = {
+            None,
+            "bounded_stale_approximation",
+            "corrected_statistical_approximation",
+            "exact_rebase",
+        }
+        if self.staleness_semantics not in allowed_staleness:
+            raise ValueError("unsupported proposal staleness_semantics.")
+        if (self.correction_fingerprint is not None) != (
+            self.staleness_semantics in {"corrected_statistical_approximation", "exact_rebase"}
+        ):
+            raise ValueError("corrected proposal semantics require exactly one correction_fingerprint.")
 
     @property
     def dependency_version_map(self) -> dict[str, int]:
@@ -222,6 +236,8 @@ class ProposalPacket:
             "invalidates": list(self.invalidates),
             "rollback_reference": self.rollback_reference,
             "surrogate_disclosed": self.surrogate_disclosed,
+            "staleness_semantics": self.staleness_semantics,
+            "correction_fingerprint": self.correction_fingerprint,
         }
 
 

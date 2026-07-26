@@ -9,6 +9,8 @@ import pytest
 from mixle.experimental.typed_runtime import (
     CanaryVerdict,
     ConsistencyRequirement,
+    CorrectionResult,
+    CorrectionSemantics,
     CostEstimate,
     HierarchicalProposalCoordinator,
     MergeLaw,
@@ -86,13 +88,13 @@ def test_stale_exact_statistics_are_rejected_before_merge():
     assert receipt.rejected == {"proposal": "exact-update-requires-current-version"}
 
 
-def _bounded_graph():
+def _bounded_graph(consistency=ConsistencyRequirement.BOUNDED_STALE):
     contract = UpdateContract(
         objective_kind=ObjectiveKind.MLE,
         update_kind=UpdateKind.FIRST_ORDER,
         merge_law=MergeLaw.NON_MERGEABLE,
         state_semantics=frozenset({StateSemantics.MUTABLE_PARAMETERS}),
-        consistency=ConsistencyRequirement.BOUNDED_STALE,
+        consistency=consistency,
         exact=False,
     )
     return UpdateGraph(
@@ -140,6 +142,91 @@ def test_bounded_stale_neural_delta_is_shrunk_rebased_and_committed():
     assert receipt.commit is not None and receipt.commit.accepted
     np.testing.assert_allclose(state["parameters"], np.array([2.0, -2.0]) * np.exp(-2.0))
     assert coordinator.versions.model_version == 3
+
+
+def test_corrected_eventual_provider_returns_identity_bound_exact_rebase():
+    graph = _bounded_graph(ConsistencyRequirement.CORRECTED_EVENTUAL)
+    state = {"parameters": np.zeros(2)}
+    participant = TransactionParticipant(
+        "parameters",
+        frozenset({StateSemantics.MUTABLE_PARAMETERS}),
+        lambda: state["parameters"].copy(),
+        lambda value: state.__setitem__("parameters", value.copy()),
+        lambda: payload_fingerprint(state["parameters"]),
+    )
+    coordinator = TransactionalCoordinator(
+        graph,
+        lambda proposal: state.__setitem__("parameters", state["parameters"] + proposal.payload["delta"]),
+        lambda batch: CanaryVerdict(True, "probe improved", 0.0, 0.1),
+        participants=(participant,),
+        versions=RuntimeVersions(2, {"node": 2}),
+    )
+    proposal = ProposalPacket(
+        "stale",
+        "run",
+        "model",
+        "node",
+        "remote-island",
+        1,
+        {"node": 1},
+        UpdateKind.FIRST_ORDER,
+        ObjectiveKind.MLE,
+        {"delta": np.array([100.0, -100.0])},
+    )
+
+    def correct(source, preflight):
+        assert preflight.reason == "missing-drift-correction"
+        return CorrectionResult(
+            source.proposal_id,
+            source.payload_hash,
+            source.run_id,
+            source.model_id,
+            source.node_id,
+            preflight.target_model_version,
+            preflight.target_dependency_versions,
+            CorrectionSemantics.EXACT_REBASE,
+            "recompute-at-current-state",
+            "correction-evidence",
+            {"delta": np.array([1.0, -1.0])},
+        )
+
+    receipt = HierarchicalProposalCoordinator(
+        coordinator,
+        default_staleness_policy=StalenessPolicy(max_model_lag=1, max_node_lag=1),
+        correction_provider=correct,
+    ).submit("round", (proposal,))
+    assert receipt.commit is not None and receipt.commit.accepted
+    np.testing.assert_array_equal(state["parameters"], [1.0, -1.0])
+    assert receipt.staleness[0].reason == "exact-drift-rebase"
+
+
+def test_invalid_correction_provider_result_is_rejected_without_apply():
+    graph = _bounded_graph(ConsistencyRequirement.CORRECTED_EVENTUAL)
+    coordinator = TransactionalCoordinator(
+        graph,
+        lambda proposal: pytest.fail("invalid correction was applied"),
+        lambda batch: CanaryVerdict(True, "unreachable", 0.0, 1.0),
+        versions=RuntimeVersions(1, {"node": 1}),
+    )
+    proposal = ProposalPacket(
+        "stale",
+        "run",
+        "model",
+        "node",
+        "remote",
+        0,
+        {"node": 0},
+        UpdateKind.FIRST_ORDER,
+        ObjectiveKind.MLE,
+        {"delta": np.ones(2)},
+    )
+    receipt = HierarchicalProposalCoordinator(
+        coordinator,
+        default_staleness_policy=StalenessPolicy(max_model_lag=1, max_node_lag=1),
+        correction_provider=lambda source, preflight: {"delta": np.zeros(2)},
+    ).submit("round", (proposal,))
+    assert receipt.commit is None
+    assert receipt.rejected["stale"].startswith("correction-failed:TypeError")
 
 
 def test_nonmergeable_same_node_proposals_are_rejected_without_apply():

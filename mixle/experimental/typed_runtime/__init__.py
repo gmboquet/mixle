@@ -198,6 +198,8 @@ from mixle.experimental.typed_runtime.scheduler import (
     ScheduleReceipt,
 )
 from mixle.experimental.typed_runtime.staleness import (
+    CorrectionResult,
+    CorrectionSemantics,
     StalenessAction,
     StalenessPolicy,
     StalenessReceipt,
@@ -276,6 +278,8 @@ __all__ = [
     "CompressionMethod",
     "CompressionReceipt",
     "CorrectionProvider",
+    "CorrectionResult",
+    "CorrectionSemantics",
     "ConsistencyRequirement",
     "ComputeBand",
     "ConvergenceCertificate",
