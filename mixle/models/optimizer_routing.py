@@ -492,11 +492,11 @@ def build_routed_optimizer(
             }
         )
     expected_trainable = {id(parameter) for parameter in named.values() if parameter.requires_grad}
-    routed_trainable = {
-        parameter_id
-        for parameter_id, family in parameter_families.items()
-        if family not in skipped
-    }
+    # Exact/frozen/discrete routes are intentionally not handed to a gradient optimizer, but they
+    # still account for their parameters in the complete plan. Treating them as *unrouted* made the
+    # more precise "no executable gradient-routed parameters" guard below unreachable for an
+    # all-exact plan and incorrectly rejected valid mixed plans before their executable groups ran.
+    routed_trainable = set(parameter_families) & expected_trainable
     if routed_trainable != expected_trainable:
         missing_names = [
             name
