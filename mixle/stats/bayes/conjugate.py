@@ -6,9 +6,10 @@ posterior is simply
 
     chi' = chi + sum_i T(x_i),    nu' = nu + n.
 
-This module realises that posterior in *closed form, full-Bayesian* terms for every exponential-family
-leaf that has a tractable conjugate -- exact parameter samples, marginal likelihood (evidence),
-posterior mean / point estimate, and a posterior predictive:
+This module realises that parameter posterior in closed form for every supported exponential-family
+leaf: exact parameter samples, marginal likelihood (evidence), and posterior mean / point estimate.
+Posterior predictives are exact when Mixle has the compound distribution; otherwise the returned
+plug-in distribution is explicitly marked with machine-readable approximation metadata:
 
 * fully (all parameters): Gaussian, multivariate & diagonal Gaussian, LogGaussian, Poisson,
   Exponential, Bernoulli/Binomial/Geometric, Categorical, Rayleigh, half-normal;
@@ -25,6 +26,7 @@ conjugates (Diaconis-Ylvisaker). The public entry point is :func:`conjugate_post
 from __future__ import annotations
 
 import math
+import operator
 from collections import Counter
 from typing import Any
 
@@ -54,26 +56,148 @@ def is_conjugate_family(dist: Any) -> bool:
     return cls in _registry()
 
 
-def _as_weighted_array(data: Any, weights: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
-    x = np.asarray(list(data), dtype=np.float64) if not isinstance(data, np.ndarray) else data.astype(np.float64)
-    if not np.all(np.isfinite(x)):
-        # A NaN/Inf observation silently propagates into the posterior hyperparameters (and from
-        # there into every downstream mean/sample/predictive), so reject it here -- the single
-        # choke point almost every _build_* family routes through -- rather than in each builder.
-        raise ValueError("conjugate_posterior requires finite observations (no NaN/Inf).")
+def _validate_sample_size(size: Any) -> int:
+    if isinstance(size, (bool, np.bool_)):
+        raise TypeError("sample size must be a non-negative integer, not bool.")
+    try:
+        result = operator.index(size)
+    except TypeError as exc:
+        raise TypeError("sample size must be a non-negative integer.") from exc
+    if result < 0:
+        raise ValueError("sample size must be non-negative.")
+    return int(result)
+
+
+def _as_weight_vector(weights: Any, count: int) -> np.ndarray:
     if weights is None:
-        w = np.ones(len(x), dtype=np.float64)
-    else:
-        w = np.asarray(weights, dtype=np.float64)
-        if w.shape[0] != x.shape[0]:
-            raise ValueError("weights length does not match data length")
-        if not np.all(np.isfinite(w)):
-            raise ValueError("conjugate_posterior requires finite weights (no NaN/Inf).")
-        if np.any(w < 0.0):
-            # A negative weight silently subtracts from the posterior counts (e.g. driving a Beta
-            # posterior's a/b negative), which is not a valid observation multiplicity.
-            raise ValueError("conjugate_posterior requires non-negative weights.")
-    return x, w
+        return np.ones(count, dtype=np.float64)
+    try:
+        result = np.asarray(weights, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("conjugate_posterior weights must be numeric.") from exc
+    if result.shape != (count,):
+        raise ValueError(
+            "conjugate_posterior weights must have exact shape (%d,), got %r." % (count, result.shape)
+        )
+    if not np.all(np.isfinite(result)):
+        raise ValueError("conjugate_posterior requires finite weights (no NaN/Inf).")
+    if np.any(result < 0.0):
+        raise ValueError("conjugate_posterior requires non-negative weights.")
+    return result
+
+
+def _as_weighted_array(data: Any, weights: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+    try:
+        x = np.asarray(list(data), dtype=np.float64) if not isinstance(data, np.ndarray) else data.astype(np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("conjugate_posterior observations must be numeric.") from exc
+    if x.ndim != 1:
+        raise ValueError(
+            "univariate conjugate_posterior requires a one-dimensional observation vector, got shape %r."
+            % (x.shape,)
+        )
+    if not np.all(np.isfinite(x)):
+        raise ValueError("conjugate_posterior requires finite observations (no NaN/Inf).")
+    return x, _as_weight_vector(weights, len(x))
+
+
+def _finite_scalar(value: Any, name: str) -> float:
+    if np.ndim(value) != 0:
+        raise ValueError("%s must be a finite scalar." % name)
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("%s must be a finite scalar." % name) from exc
+    if not math.isfinite(result):
+        raise ValueError("%s must be a finite scalar." % name)
+    return result
+
+
+def _positive_scalar(value: Any, name: str) -> float:
+    result = _finite_scalar(value, name)
+    if result <= 0.0:
+        raise ValueError("%s must be positive." % name)
+    return result
+
+
+def _nonnegative_scalar(value: Any, name: str) -> float:
+    result = _finite_scalar(value, name)
+    if result < 0.0:
+        raise ValueError("%s must be non-negative." % name)
+    return result
+
+
+def _positive_vector(value: Any, name: str, *, length: int | None = None) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("%s must be a numeric vector." % name) from exc
+    if result.ndim != 1 or (length is not None and result.shape != (length,)):
+        expected = " of length %d" % length if length is not None else ""
+        raise ValueError("%s must be a one-dimensional vector%s." % (name, expected))
+    if result.size == 0 or np.any(~np.isfinite(result)) or np.any(result <= 0.0):
+        raise ValueError("%s must contain finite positive values." % name)
+    return result
+
+
+def _probability_vector(value: Any, length: int, name: str, *, normalize: bool) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("%s must be a numeric vector." % name) from exc
+    if result.shape != (length,):
+        raise ValueError("%s must have exact shape (%d,), got %r." % (name, length, result.shape))
+    if np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError("%s must contain finite non-negative values." % name)
+    total = float(result.sum())
+    if not math.isfinite(total) or total <= 0.0:
+        raise ValueError("%s must have positive finite total mass." % name)
+    if normalize:
+        return result / total
+    if not np.isclose(total, 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError("%s must sum to 1.0." % name)
+    return result
+
+
+def _spd_matrix(value: Any, dimension: int, name: str) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("%s must be a numeric matrix." % name) from exc
+    if result.shape != (dimension, dimension):
+        raise ValueError("%s must have exact shape (%d, %d)." % (name, dimension, dimension))
+    if np.any(~np.isfinite(result)):
+        raise ValueError("%s must contain only finite values." % name)
+    if not np.allclose(result, result.T, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError("%s must be symmetric." % name)
+    result = 0.5 * (result + result.T)
+    try:
+        np.linalg.cholesky(result)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError("%s must be positive definite." % name) from exc
+    return result
+
+
+def _mark_approximate_predictive(distribution: Any, posterior_family: str, reason: str) -> Any:
+    distribution.is_exact_posterior_predictive = False
+    distribution.posterior_predictive_kind = "posterior_mean_plugin"
+    distribution.approximation_receipt = {
+        "method": "posterior_mean_plugin",
+        "posterior_family": posterior_family,
+        "reason": reason,
+    }
+    return distribution
+
+
+def _mark_exact_predictive(distribution: Any, posterior_family: str, method: str) -> Any:
+    distribution.is_exact_posterior_predictive = True
+    distribution.posterior_predictive_kind = "exact"
+    distribution.approximation_receipt = {
+        "method": method,
+        "posterior_family": posterior_family,
+        "exact": True,
+    }
+    return distribution
 
 
 class ConjugatePosterior:
@@ -140,7 +264,7 @@ class ConjugatePosteriorSampler:
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> dict[str, Any]:
         """Draw one parameter set when ``size`` is ``None`` or a batch otherwise."""
-        draws = self.posterior.sample(n=1 if size is None else int(size), rng=self.rng)
+        draws = self.posterior.sample(n=1 if size is None else _validate_sample_size(size), rng=self.rng)
         if size is None:
             return {
                 k: (v[0] if isinstance(v, np.ndarray) and v.shape and v.shape[0] == 1 else v) for k, v in draws.items()
@@ -157,8 +281,8 @@ class BetaPosterior(ConjugatePosterior):
     family = "Beta"
 
     def __init__(self, a: float, b: float, kind: str = "bernoulli", n_trials: int = 1):
-        self.a = float(a)
-        self.b = float(b)
+        self.a = _positive_scalar(a, "Beta posterior a")
+        self.b = _positive_scalar(b, "Beta posterior b")
         self.kind = kind
         self.n_trials = int(n_trials)
         self._a0 = None  # prior hyperparameters, set by the builder for the evidence term
@@ -175,6 +299,7 @@ class BetaPosterior(ConjugatePosterior):
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
         """Draw success-probability samples from the Beta posterior."""
+        n = _validate_sample_size(n)
         rng = rng or np.random.RandomState()
         return {"p": rng.beta(self.a, self.b, size=n)}
 
@@ -210,8 +335,22 @@ class BetaPosterior(ConjugatePosterior):
         if self.kind == "binomial" and self.n_trials > 1:
             from mixle.stats.univariate.discrete.beta_binomial import BetaBinomialDistribution
 
-            return BetaBinomialDistribution(self.n_trials, self.a, self.b)
-        return self.point_estimate()
+            return _mark_exact_predictive(
+                BetaBinomialDistribution(self.n_trials, self.a, self.b),
+                self.family,
+                "Beta-Binomial compound law",
+            )
+        if self.kind in {"geometric", "negative_binomial"}:
+            return _mark_approximate_predictive(
+                self.point_estimate(),
+                self.family,
+                "the exact compound predictive is not implemented for %s" % self.kind,
+            )
+        return _mark_exact_predictive(
+            self.point_estimate(),
+            self.family,
+            "single-observation marginal equals the posterior-mean probability",
+        )
 
     def hyper(self) -> dict[str, Any]:
         """Return the Beta shape hyperparameters."""
@@ -260,6 +399,8 @@ def _build_bernoulli(dist, data, weights, prior) -> BetaPosterior:
 def _build_geometric(dist, data, weights, prior) -> BetaPosterior:
     # Geometric(p) on {1,2,...}: likelihood propto p^N (1-p)^(sum_x - N).
     x, w = _as_weighted_array(data, weights)
+    if np.any(x < 1.0) or np.any(x != np.floor(x)):
+        raise ValueError("Geometric conjugate update requires integer observations in {1, 2, ...}.")
     n = float(w.sum())
     sx = float(np.dot(w, x))
     a0, b0 = _beta_prior(prior)
@@ -297,10 +438,10 @@ class GammaRatePosterior(ConjugatePosterior):
     family = "Gamma"
 
     def __init__(self, shape: float, rate: float, kind: str = "poisson", known_shape: float = 1.0):
-        self.shape = float(shape)  # posterior Gamma shape (A)
-        self.rate = float(rate)  # posterior Gamma rate (B)
+        self.shape = _positive_scalar(shape, "Gamma posterior shape")
+        self.rate = _positive_scalar(rate, "Gamma posterior rate")
         self.kind = kind
-        self.known_shape = float(known_shape)
+        self.known_shape = _positive_scalar(known_shape, "known Gamma shape")
         self._a0 = None
 
     def mean(self) -> dict[str, Any]:
@@ -309,6 +450,7 @@ class GammaRatePosterior(ConjugatePosterior):
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
         """Draw rate samples from the Gamma posterior."""
+        n = _validate_sample_size(n)
         rng = rng or np.random.RandomState()
         return {"rate": rng.gamma(self.shape, 1.0 / self.rate, size=n)}
 
@@ -328,13 +470,21 @@ class GammaRatePosterior(ConjugatePosterior):
         return GammaDistribution(self.known_shape, 1.0 / lam)  # k=shape, theta=scale=1/rate
 
     def posterior_predictive(self):
-        """Return the closed-form predictive when available, otherwise the plug-in predictive."""
+        """Return an exact closed-form predictive or an explicitly marked plug-in."""
         if self.kind == "poisson":
             # Poisson-Gamma predictive is Negative-Binomial(r=A, p=B/(B+1)).
             from mixle.stats.univariate.discrete.negative_binomial import NegativeBinomialDistribution
 
-            return NegativeBinomialDistribution(self.shape, self.rate / (self.rate + 1.0))
-        return self.point_estimate()
+            return _mark_exact_predictive(
+                NegativeBinomialDistribution(self.shape, self.rate / (self.rate + 1.0)),
+                self.family,
+                "Poisson-Gamma compound law",
+            )
+        return _mark_approximate_predictive(
+            self.point_estimate(),
+            self.family,
+            "the exact exponential-Gamma compound predictive is not implemented",
+        )
 
     def hyper(self) -> dict[str, Any]:
         """Return the Gamma shape and rate hyperparameters."""
@@ -360,9 +510,11 @@ class GammaRatePosterior(ConjugatePosterior):
 
 def _build_poisson(dist, data, weights, prior) -> GammaRatePosterior:
     x, w = _as_weighted_array(data, weights)
+    if np.any(x < 0.0) or np.any(x != np.floor(x)):
+        raise ValueError("Poisson conjugate update requires non-negative integer observations.")
     n = float(w.sum())
     sx = float(np.dot(w, x))
-    a0, b0 = (prior or {}).get("shape", 1e-3), (prior or {}).get("rate", 1e-3)
+    a0, b0 = _gamma_prior(prior)
     post = GammaRatePosterior(a0 + sx, b0 + n, kind="poisson")
     post.log_base = float(-np.dot(w, gammaln(x + 1.0)))  # sum_i log(1/x_i!)
     post._set_prior(a0, b0, n, sx)
@@ -371,9 +523,11 @@ def _build_poisson(dist, data, weights, prior) -> GammaRatePosterior:
 
 def _build_exponential(dist, data, weights, prior) -> GammaRatePosterior:
     x, w = _as_weighted_array(data, weights)
+    if np.any(x < 0.0):
+        raise ValueError("Exponential conjugate update requires non-negative observations.")
     n = float(w.sum())
     sx = float(np.dot(w, x))
-    a0, b0 = (prior or {}).get("shape", 1e-3), (prior or {}).get("rate", 1e-3)
+    a0, b0 = _gamma_prior(prior)
     post = GammaRatePosterior(a0 + n, b0 + sx, kind="exponential")
     post._set_prior(a0, b0, n, sx)
     return post
@@ -388,8 +542,8 @@ class DirichletPosterior(ConjugatePosterior):
     family = "Dirichlet"
 
     def __init__(self, alpha: np.ndarray, support: list, kind: str = "categorical", min_val: int = 0):
-        self.alpha = np.asarray(alpha, dtype=np.float64)
         self.support = list(support)
+        self.alpha = _positive_vector(alpha, "Dirichlet posterior alpha", length=len(self.support))
         self.kind = kind
         self.min_val = int(min_val)
         self._alpha0 = None
@@ -401,6 +555,7 @@ class DirichletPosterior(ConjugatePosterior):
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
         """Draw categorical probability vectors from the Dirichlet posterior."""
+        n = _validate_sample_size(n)
         rng = rng or np.random.RandomState()
         return {"probs": rng.dirichlet(self.alpha, size=n)}
 
@@ -416,8 +571,12 @@ class DirichletPosterior(ConjugatePosterior):
         return CategoricalDistribution(dict(zip(self.support, p)))
 
     def posterior_predictive(self):
-        """Return the plug-in categorical predictive at posterior mean probabilities."""
-        return self.point_estimate()
+        """Return the exact one-observation categorical posterior predictive."""
+        return _mark_exact_predictive(
+            self.point_estimate(),
+            self.family,
+            "single-observation marginal equals the posterior-mean probability vector",
+        )
 
     def hyper(self) -> dict[str, Any]:
         """Return the Dirichlet concentration vector."""
@@ -437,12 +596,23 @@ class DirichletPosterior(ConjugatePosterior):
 
 def _categorical_counts(dist, data, weights):
     x = list(data)
-    if weights is None:
-        weights = np.ones(len(x))
+    weights = _as_weight_vector(weights, len(x))
     counts: Counter = Counter()
-    for v, w in zip(x, np.asarray(weights, dtype=np.float64)):
+    for v, w in zip(x, weights):
+        try:
+            hash(v)
+        except TypeError as exc:
+            raise ValueError("Categorical conjugate observations must be hashable.") from exc
         counts[v] += float(w)
     return counts
+
+
+def _dirichlet_prior(prior: dict | None, width: int) -> np.ndarray:
+    raw = (prior or {}).get("alpha", 1.0)
+    if np.ndim(raw) == 0:
+        value = _positive_scalar(raw, "Dirichlet prior alpha")
+        return np.full(width, value, dtype=np.float64)
+    return _positive_vector(raw, "Dirichlet prior alpha", length=width)
 
 
 def _build_categorical(dist, data, weights, prior) -> DirichletPosterior:
@@ -450,9 +620,24 @@ def _build_categorical(dist, data, weights, prior) -> DirichletPosterior:
     support = list(getattr(dist, "pmap", {}).keys()) if getattr(dist, "pmap", None) else None
     counts = _categorical_counts(dist, data, weights)
     if support is None:
-        support = sorted(counts.keys(), key=lambda v: (str(type(v)), v))
-    a0_scalar = (prior or {}).get("alpha", 1.0)
-    alpha0 = np.full(len(support), float(a0_scalar))
+        support = sorted(
+            counts,
+            key=lambda value: (
+                type(value).__module__,
+                type(value).__qualname__,
+                repr(value),
+            ),
+        )
+    else:
+        unsupported = [value for value in counts if value not in dist.pmap]
+        if unsupported:
+            raise ValueError(
+                "Categorical conjugate update received observations outside its explicit support: %r."
+                % unsupported
+            )
+    if not support:
+        raise ValueError("Categorical conjugate update requires a non-empty support.")
+    alpha0 = _dirichlet_prior(prior, len(support))
     cvec = np.array([counts.get(s, 0.0) for s in support], dtype=np.float64)
     post = DirichletPosterior(alpha0 + cvec, support, kind="categorical")
     post._set_prior(alpha0)
@@ -466,9 +651,16 @@ def _build_integer_categorical(dist, data, weights, prior) -> DirichletPosterior
         # x.astype(int) below silently did exactly that) folds it into the next-lower category
         # instead of rejecting the malformed observation.
         raise ValueError("IntegerCategoricalDistribution conjugate update requires integer-valued observations.")
-    min_val = int(getattr(dist, "min_val", int(x.min())))
+    if hasattr(dist, "min_val"):
+        min_val = int(dist.min_val)
+    elif x.size:
+        min_val = int(x.min())
+    else:
+        raise ValueError("Integer-categorical conjugate update cannot infer support from empty data.")
     k = len(getattr(dist, "p_vec", getattr(dist, "prob_vec", [])))
     if k == 0:
+        if not x.size:
+            raise ValueError("Integer-categorical conjugate update requires a non-empty support.")
         k = int(x.max()) - min_val + 1
     support = list(range(min_val, min_val + k))
     cvec = np.zeros(k, dtype=np.float64)
@@ -486,8 +678,7 @@ def _build_integer_categorical(dist, data, weights, prior) -> DirichletPosterior
         )
     for xi, wi in zip(xi_arr, w):
         cvec[xi - min_val] += wi
-    a0_scalar = (prior or {}).get("alpha", 1.0)
-    alpha0 = np.full(k, float(a0_scalar))
+    alpha0 = _dirichlet_prior(prior, k)
     post = DirichletPosterior(alpha0 + cvec, support, kind="integer_categorical", min_val=min_val)
     post._set_prior(alpha0)
     return post
@@ -502,10 +693,10 @@ class NormalInverseGammaPosterior(ConjugatePosterior):
     family = "NormalInverseGamma"
 
     def __init__(self, m: float, kappa: float, a: float, b: float, kind: str = "gaussian"):
-        self.m = float(m)  # posterior mean location
-        self.kappa = float(kappa)  # mean pseudo-count
-        self.a = float(a)  # inverse-gamma shape
-        self.b = float(b)  # inverse-gamma scale
+        self.m = _finite_scalar(m, "Normal-Inverse-Gamma posterior m")
+        self.kappa = _positive_scalar(kappa, "Normal-Inverse-Gamma posterior kappa")
+        self.a = _positive_scalar(a, "Normal-Inverse-Gamma posterior a")
+        self.b = _positive_scalar(b, "Normal-Inverse-Gamma posterior b")
         self.kind = kind  # "gaussian" or "log_gaussian" (the latter models log x)
         self._prior = None
 
@@ -515,6 +706,7 @@ class NormalInverseGammaPosterior(ConjugatePosterior):
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
         """Draw paired ``mu`` and ``sigma2`` samples from the posterior."""
+        n = _validate_sample_size(n)
         rng = rng or np.random.RandomState()
         sigma2 = 1.0 / rng.gamma(self.a, 1.0 / self.b, size=n)  # InvGamma(a,b)
         mu = rng.normal(self.m, np.sqrt(sigma2 / self.kappa))
@@ -537,11 +729,19 @@ class NormalInverseGammaPosterior(ConjugatePosterior):
         # For log_gaussian the predictive is that Student-t in log-space (a log-Student-t in x); the
         # plug-in LogGaussian is returned as a usable mixle distribution.
         if self.kind == "log_gaussian":
-            return self.point_estimate()
+            return _mark_approximate_predictive(
+                self.point_estimate(),
+                self.family,
+                "the exact log-Student-t predictive distribution is not implemented",
+            )
         from mixle.stats.univariate.continuous.student_t import StudentTDistribution
 
         scale = math.sqrt(self.b * (self.kappa + 1.0) / (self.a * self.kappa))
-        return StudentTDistribution(2.0 * self.a, self.m, scale)
+        return _mark_exact_predictive(
+            StudentTDistribution(2.0 * self.a, self.m, scale),
+            self.family,
+            "Normal-Inverse-Gamma Student-t compound law",
+        )
 
     def hyper(self) -> dict[str, Any]:
         """Return Normal-Inverse-Gamma posterior hyperparameters."""
@@ -572,10 +772,10 @@ def _build_gaussian(dist, data, weights, prior) -> NormalInverseGammaPosterior:
     sx = float(np.dot(w, x))
     xbar = sx / n if n > 0 else 0.0
     p = prior or {}
-    m0 = float(p.get("m", 0.0))
-    k0 = float(p.get("kappa", 1e-3))
-    a0 = float(p.get("a", 1e-3))
-    b0 = float(p.get("b", 1e-3))
+    m0 = _finite_scalar(p.get("m", 0.0), "Normal-Inverse-Gamma prior m")
+    k0 = _positive_scalar(p.get("kappa", 1e-3), "Normal-Inverse-Gamma prior kappa")
+    a0 = _positive_scalar(p.get("a", 1e-3), "Normal-Inverse-Gamma prior a")
+    b0 = _positive_scalar(p.get("b", 1e-3), "Normal-Inverse-Gamma prior b")
     kn = k0 + n
     mn = (k0 * m0 + sx) / kn
     an = a0 + 0.5 * n
@@ -598,11 +798,18 @@ class NormalInverseWishartPosterior(ConjugatePosterior):
     family = "NormalInverseWishart"
 
     def __init__(self, m: np.ndarray, kappa: float, nu: float, psi: np.ndarray):
-        self.m = np.asarray(m, dtype=np.float64)
-        self.kappa = float(kappa)
-        self.nu = float(nu)
-        self.psi = np.asarray(psi, dtype=np.float64)
+        try:
+            self.m = np.asarray(m, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Normal-Inverse-Wishart posterior m must be a numeric vector.") from exc
+        if self.m.ndim != 1 or self.m.size == 0 or np.any(~np.isfinite(self.m)):
+            raise ValueError("Normal-Inverse-Wishart posterior m must be a non-empty finite vector.")
         self.d = self.m.shape[0]
+        self.kappa = _positive_scalar(kappa, "Normal-Inverse-Wishart posterior kappa")
+        self.nu = _finite_scalar(nu, "Normal-Inverse-Wishart posterior nu")
+        if self.nu <= self.d - 1.0:
+            raise ValueError("Normal-Inverse-Wishart posterior nu must exceed dimension - 1.")
+        self.psi = _spd_matrix(psi, self.d, "Normal-Inverse-Wishart posterior psi")
         self._prior = None
 
     def mean(self) -> dict[str, Any]:
@@ -612,6 +819,7 @@ class NormalInverseWishartPosterior(ConjugatePosterior):
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
         """Draw paired mean and covariance samples from the posterior."""
+        n = _validate_sample_size(n)
         rng = rng or np.random.RandomState()
         means = np.empty((n, self.d))
         covs = np.empty((n, self.d, self.d))
@@ -635,7 +843,11 @@ class NormalInverseWishartPosterior(ConjugatePosterior):
 
         df = self.nu - self.d + 1.0
         shape = self.psi * (self.kappa + 1.0) / (self.kappa * df)
-        return MultivariateStudentTDistribution(df, self.m, shape)
+        return _mark_exact_predictive(
+            MultivariateStudentTDistribution(df, self.m, shape),
+            self.family,
+            "Normal-Inverse-Wishart multivariate Student-t compound law",
+        )
 
     def hyper(self) -> dict[str, Any]:
         """Return Normal-Inverse-Wishart posterior hyperparameters."""
@@ -661,8 +873,9 @@ class NormalInverseWishartPosterior(ConjugatePosterior):
 
 
 def _logdet(a: np.ndarray) -> float:
-    sign, ld = np.linalg.slogdet(a)
-    return float(ld)
+    matrix = _spd_matrix(a, len(a), "log-determinant matrix")
+    chol = np.linalg.cholesky(matrix)
+    return float(2.0 * np.log(np.diag(chol)).sum())
 
 
 def _sample_inverse_wishart(nu: float, psi_inv: np.ndarray, rng: np.random.RandomState) -> np.ndarray:
@@ -679,20 +892,39 @@ def _sample_inverse_wishart(nu: float, psi_inv: np.ndarray, rng: np.random.Rando
 
 
 def _build_mvn(dist, data, weights, prior) -> NormalInverseWishartPosterior:
-    x = np.asarray(list(data), dtype=np.float64)
-    if x.ndim == 1:
-        x = x[:, None]
-    d = x.shape[1]
-    w = np.ones(x.shape[0]) if weights is None else np.asarray(weights, dtype=np.float64)
+    d = int(getattr(dist, "dim", len(dist.mu)))
+    if d <= 0:
+        raise ValueError("Multivariate Gaussian conjugate update requires a positive dimension.")
+    try:
+        x = np.asarray(list(data), dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Multivariate Gaussian conjugate observations must be numeric vectors.") from exc
+    if x.size == 0:
+        x = np.empty((0, d), dtype=np.float64)
+    if x.ndim != 2 or x.shape[1] != d:
+        raise ValueError(
+            "Multivariate Gaussian conjugate observations must have exact shape (n, %d), got %r."
+            % (d, x.shape)
+        )
+    if np.any(~np.isfinite(x)):
+        raise ValueError("Multivariate Gaussian conjugate observations must be finite.")
+    w = _as_weight_vector(weights, x.shape[0])
     n = float(w.sum())
-    xbar = (w[:, None] * x).sum(axis=0) / n
+    p = prior or {}
+    try:
+        m0 = np.asarray(p.get("m", np.zeros(d)), dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Normal-Inverse-Wishart prior m must be a numeric vector.") from exc
+    if m0.shape != (d,) or np.any(~np.isfinite(m0)):
+        raise ValueError("Normal-Inverse-Wishart prior m must be a finite vector of length %d." % d)
+    k0 = _positive_scalar(p.get("kappa", 1e-3), "Normal-Inverse-Wishart prior kappa")
+    nu0 = _finite_scalar(p.get("nu", d + 2.0), "Normal-Inverse-Wishart prior nu")
+    if nu0 <= d - 1.0:
+        raise ValueError("Normal-Inverse-Wishart prior nu must exceed dimension - 1.")
+    psi0 = _spd_matrix(p.get("psi", np.eye(d) * 1e-3), d, "Normal-Inverse-Wishart prior psi")
+    xbar = (w[:, None] * x).sum(axis=0) / n if n > 0.0 else m0.copy()
     diff = x - xbar
     scatter = (w[:, None] * diff).T @ diff
-    p = prior or {}
-    m0 = np.asarray(p.get("m", np.zeros(d)), dtype=np.float64)
-    k0 = float(p.get("kappa", 1e-3))
-    nu0 = float(p.get("nu", d + 2.0))
-    psi0 = np.asarray(p.get("psi", np.eye(d) * 1e-3), dtype=np.float64)
     kn = k0 + n
     mn = (k0 * m0 + n * xbar) / kn
     nun = nu0 + n
@@ -707,6 +939,8 @@ def _build_log_gaussian(dist, data, weights, prior) -> NormalInverseGammaPosteri
     # LogGaussian models log x ~ Normal(mu, sigma2): apply the Normal-Inverse-Gamma update to log(data),
     # then add the change-of-variables Jacobian sum_i -log x_i to the evidence.
     x, w = _as_weighted_array(data, weights)
+    if np.any(x <= 0.0):
+        raise ValueError("Log-Gaussian conjugate update requires strictly positive observations.")
     logx = np.log(x)
     post = _build_gaussian(dist, list(logx), w, prior)
     post.kind = "log_gaussian"
@@ -727,8 +961,8 @@ class InverseGammaVariancePosterior(ConjugatePosterior):
     family = "InverseGamma(variance)"
 
     def __init__(self, a: float, b: float, kind: str):
-        self.a = float(a)  # inverse-gamma shape
-        self.b = float(b)  # inverse-gamma scale
+        self.a = _positive_scalar(a, "Inverse-Gamma posterior a")
+        self.b = _positive_scalar(b, "Inverse-Gamma posterior b")
         self.kind = kind  # "rayleigh" or "half_normal"
         self._prior = None
 
@@ -742,6 +976,7 @@ class InverseGammaVariancePosterior(ConjugatePosterior):
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
         """Draw squared-scale and scale samples from the posterior."""
+        n = _validate_sample_size(n)
         rng = rng or np.random.RandomState()
         s2 = 1.0 / rng.gamma(self.a, 1.0 / self.b, size=n)
         return {"sigma2": s2, "sigma": np.sqrt(s2)}
@@ -758,9 +993,12 @@ class InverseGammaVariancePosterior(ConjugatePosterior):
         return RayleighDistribution(sigma)
 
     def posterior_predictive(self):
-        """Return the plug-in scale-family predictive distribution."""
-        # the exact predictive is a compound (non-standard) density; the plug-in is returned.
-        return self.point_estimate()
+        """Return an explicitly marked plug-in scale-family predictive distribution."""
+        return _mark_approximate_predictive(
+            self.point_estimate(),
+            self.family,
+            "the exact inverse-Gamma scale-mixture predictive is not implemented",
+        )
 
     def hyper(self) -> dict[str, Any]:
         """Return inverse-gamma scale hyperparameters."""
@@ -775,10 +1013,20 @@ class InverseGammaVariancePosterior(ConjugatePosterior):
         return float(self.log_base + a0 * math.log(b0) - gammaln(a0) + gammaln(self.a) - self.a * math.log(self.b))
 
 
+def _inverse_gamma_prior(prior: dict | None) -> tuple[float, float]:
+    p = prior or {}
+    return (
+        _positive_scalar(p.get("a", 1e-3), "Inverse-Gamma prior a"),
+        _positive_scalar(p.get("b", 1e-3), "Inverse-Gamma prior b"),
+    )
+
+
 def _build_rayleigh(dist, data, weights, prior) -> InverseGammaVariancePosterior:
     x, w = _as_weighted_array(data, weights)
+    if np.any(x < 0.0):
+        raise ValueError("Rayleigh conjugate update requires non-negative observations.")
     n, sx2 = float(w.sum()), float(np.dot(w, x * x))
-    a0, b0 = (prior or {}).get("a", 1e-3), (prior or {}).get("b", 1e-3)
+    a0, b0 = _inverse_gamma_prior(prior)
     post = InverseGammaVariancePosterior(a0 + n, b0 + 0.5 * sx2, kind="rayleigh")
     post.log_base = float(np.dot(w, np.log(x)))  # h(x) = x
     post._set_prior(a0, b0)
@@ -787,8 +1035,10 @@ def _build_rayleigh(dist, data, weights, prior) -> InverseGammaVariancePosterior
 
 def _build_half_normal(dist, data, weights, prior) -> InverseGammaVariancePosterior:
     x, w = _as_weighted_array(data, weights)
+    if np.any(x < 0.0):
+        raise ValueError("Half-normal conjugate update requires non-negative observations.")
     n, sx2 = float(w.sum()), float(np.dot(w, x * x))
-    a0, b0 = (prior or {}).get("a", 1e-3), (prior or {}).get("b", 1e-3)
+    a0, b0 = _inverse_gamma_prior(prior)
     post = InverseGammaVariancePosterior(a0 + 0.5 * n, b0 + 0.5 * sx2, kind="half_normal")
     post.log_base = float(0.5 * n * math.log(2.0 / math.pi))  # h(x) = sqrt(2/pi)
     post._set_prior(a0, b0)
@@ -811,10 +1061,10 @@ class GammaParameterPosterior(ConjugatePosterior):
     family = "Gamma(parameter)"
 
     def __init__(self, shape: float, rate: float, kind: str, fixed: float, param: str):
-        self.shape = float(shape)  # posterior Gamma shape A
-        self.rate = float(rate)  # posterior Gamma rate B
+        self.shape = _positive_scalar(shape, "Gamma parameter posterior shape")
+        self.rate = _positive_scalar(rate, "Gamma parameter posterior rate")
         self.kind = kind
-        self.fixed = fixed  # the known parameter (shape / mean / scale)
+        self.fixed = _positive_scalar(fixed, "known %s parameter" % kind)
         self.param = param  # the name of psi for reporting
         self._prior = None
 
@@ -824,6 +1074,7 @@ class GammaParameterPosterior(ConjugatePosterior):
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
         """Draw positive-parameter samples from the Gamma posterior."""
+        n = _validate_sample_size(n)
         rng = rng or np.random.RandomState()
         return {self.param: rng.gamma(self.shape, 1.0 / self.rate, size=n)}
 
@@ -847,8 +1098,12 @@ class GammaParameterPosterior(ConjugatePosterior):
         return ParetoDistribution(self.fixed, psi)  # known xm, alpha = psi
 
     def posterior_predictive(self):
-        """Return the plug-in predictive distribution for the known-parameter family."""
-        return self.point_estimate()  # compound predictive is non-standard; plug-in returned
+        """Return an explicitly marked plug-in for the known-parameter family."""
+        return _mark_approximate_predictive(
+            self.point_estimate(),
+            self.family,
+            "the exact compound predictive is not implemented for %s" % self.kind,
+        )
 
     def hyper(self) -> dict[str, Any]:
         """Return Gamma posterior hyperparameters and posterior mean parameter."""
@@ -867,13 +1122,18 @@ class GammaParameterPosterior(ConjugatePosterior):
 
 def _gamma_prior(prior):
     p = prior or {}
-    return float(p.get("shape", 1e-3)), float(p.get("rate", 1e-3))
+    return (
+        _positive_scalar(p.get("shape", 1e-3), "Gamma prior shape"),
+        _positive_scalar(p.get("rate", 1e-3), "Gamma prior rate"),
+    )
 
 
 def _build_gamma(dist, data, weights, prior) -> GammaParameterPosterior:
     # Gamma(k, theta): known shape k -> rate=1/theta has a Gamma posterior.
-    k = float(dist.k)
+    k = _positive_scalar(dist.k, "known Gamma likelihood shape")
     x, w = _as_weighted_array(data, weights)
+    if np.any(x <= 0.0):
+        raise ValueError("Gamma conjugate update requires strictly positive observations.")
     n, sx = float(w.sum()), float(np.dot(w, x))
     a0, b0 = _gamma_prior(prior)
     post = GammaParameterPosterior(a0 + n * k, b0 + sx, kind="gamma", fixed=k, param="rate")
@@ -884,8 +1144,10 @@ def _build_gamma(dist, data, weights, prior) -> GammaParameterPosterior:
 
 def _build_inverse_gamma(dist, data, weights, prior) -> GammaParameterPosterior:
     # InverseGamma(alpha, beta): known alpha -> beta has a Gamma posterior (suff stat 1/x).
-    alpha = float(dist.alpha)
+    alpha = _positive_scalar(dist.alpha, "known inverse-Gamma likelihood shape")
     x, w = _as_weighted_array(data, weights)
+    if np.any(x <= 0.0):
+        raise ValueError("Inverse-Gamma conjugate update requires strictly positive observations.")
     n, s_inv = float(w.sum()), float(np.dot(w, 1.0 / x))
     a0, b0 = _gamma_prior(prior)
     post = GammaParameterPosterior(a0 + n * alpha, b0 + s_inv, kind="inverse_gamma", fixed=alpha, param="beta")
@@ -896,8 +1158,10 @@ def _build_inverse_gamma(dist, data, weights, prior) -> GammaParameterPosterior:
 
 def _build_inverse_gaussian(dist, data, weights, prior) -> GammaParameterPosterior:
     # InverseGaussian(mu, lam): known mu -> lam has a Gamma posterior.
-    mu = float(dist.mu)
+    mu = _positive_scalar(dist.mu, "known inverse-Gaussian likelihood mean")
     x, w = _as_weighted_array(data, weights)
+    if np.any(x <= 0.0):
+        raise ValueError("Inverse-Gaussian conjugate update requires strictly positive observations.")
     n = float(w.sum())
     c = float(np.dot(w, (x - mu) ** 2 / (2.0 * mu * mu * x)))
     a0, b0 = _gamma_prior(prior)
@@ -909,8 +1173,10 @@ def _build_inverse_gaussian(dist, data, weights, prior) -> GammaParameterPosteri
 
 def _build_pareto(dist, data, weights, prior) -> GammaParameterPosterior:
     # Pareto(xm, alpha): known scale xm -> tail index alpha has a Gamma posterior.
-    xm = float(dist.xm)
+    xm = _positive_scalar(dist.xm, "known Pareto likelihood scale")
     x, w = _as_weighted_array(data, weights)
+    if np.any(x < xm):
+        raise ValueError("Pareto conjugate update requires observations greater than or equal to its scale.")
     n = float(w.sum())
     c = float(np.dot(w, np.log(x / xm)))
     a0, b0 = _gamma_prior(prior)
@@ -922,8 +1188,10 @@ def _build_pareto(dist, data, weights, prior) -> GammaParameterPosterior:
 
 def _build_negative_binomial(dist, data, weights, prior) -> BetaPosterior:
     # NegativeBinomial(r, p): known r -> success prob p has a Beta posterior (likelihood p^{nr}(1-p)^{sum x}).
-    r = float(dist.r)
+    r = _positive_scalar(dist.r, "known negative-binomial likelihood r")
     x, w = _as_weighted_array(data, weights)
+    if np.any(x < 0.0) or np.any(x != np.floor(x)):
+        raise ValueError("Negative-binomial conjugate update requires non-negative integer observations.")
     n, sx = float(w.sum()), float(np.dot(w, x))
     a0, b0 = _beta_prior(prior)
     post = BetaPosterior(a0 + n * r, b0 + sx, kind="negative_binomial", n_trials=int(r))
@@ -943,7 +1211,9 @@ class DiagonalNIGPosterior(ConjugatePosterior):
     family = "DiagonalNormalInverseGamma"
 
     def __init__(self, per_dim: list[NormalInverseGammaPosterior]):
-        self.per_dim = per_dim
+        if not per_dim or not all(isinstance(item, NormalInverseGammaPosterior) for item in per_dim):
+            raise ValueError("Diagonal Gaussian posterior requires at least one proper per-dimension posterior.")
+        self.per_dim = list(per_dim)
         self.d = len(per_dim)
 
     def mean(self) -> dict[str, Any]:
@@ -955,6 +1225,7 @@ class DiagonalNIGPosterior(ConjugatePosterior):
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
         """Draw diagonal Gaussian parameter samples coordinate by coordinate."""
+        n = _validate_sample_size(n)
         rng = rng or np.random.RandomState()
         mus = np.empty((n, self.d))
         s2 = np.empty((n, self.d))
@@ -973,8 +1244,12 @@ class DiagonalNIGPosterior(ConjugatePosterior):
         return DiagonalGaussianDistribution(mu, s2)
 
     def posterior_predictive(self):
-        """Return the plug-in diagonal Gaussian predictive distribution."""
-        return self.point_estimate()  # product of per-dim Student-t; plug-in returned
+        """Return an explicitly marked plug-in diagonal Gaussian predictive."""
+        return _mark_approximate_predictive(
+            self.point_estimate(),
+            self.family,
+            "the exact product-of-Student-t predictive distribution is not implemented",
+        )
 
     def hyper(self) -> dict[str, Any]:
         """Return per-coordinate posterior hyperparameters."""
@@ -986,11 +1261,44 @@ class DiagonalNIGPosterior(ConjugatePosterior):
 
 
 def _build_diagonal_gaussian(dist, data, weights, prior) -> DiagonalNIGPosterior:
-    x = np.asarray(list(data), dtype=np.float64)
-    if x.ndim == 1:
-        x = x[:, None]
-    d = x.shape[1]
-    per_dim = [_build_gaussian(None, list(x[:, j]), weights, prior) for j in range(d)]
+    d = int(getattr(dist, "dim", len(dist.mu)))
+    if d <= 0:
+        raise ValueError("Diagonal Gaussian conjugate update requires a positive dimension.")
+    try:
+        x = np.asarray(list(data), dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Diagonal Gaussian conjugate observations must be numeric vectors.") from exc
+    if x.size == 0:
+        x = np.empty((0, d), dtype=np.float64)
+    if x.ndim != 2 or x.shape[1] != d:
+        raise ValueError(
+            "Diagonal Gaussian conjugate observations must have exact shape (n, %d), got %r."
+            % (d, x.shape)
+        )
+    if np.any(~np.isfinite(x)):
+        raise ValueError("Diagonal Gaussian conjugate observations must be finite.")
+    checked_weights = _as_weight_vector(weights, x.shape[0])
+    p = prior or {}
+    per_dim_priors: list[dict[str, float]] = [dict() for _ in range(d)]
+    for key, default in (("m", 0.0), ("kappa", 1e-3), ("a", 1e-3), ("b", 1e-3)):
+        raw = p.get(key, default)
+        if np.ndim(raw) == 0:
+            values = np.full(d, float(raw), dtype=np.float64)
+        else:
+            try:
+                values = np.asarray(raw, dtype=np.float64)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Diagonal Normal-Inverse-Gamma prior %s must be numeric." % key) from exc
+            if values.shape != (d,):
+                raise ValueError(
+                    "Diagonal Normal-Inverse-Gamma prior %s must be scalar or length %d." % (key, d)
+                )
+        for j, value in enumerate(values):
+            per_dim_priors[j][key] = float(value)
+    per_dim = [
+        _build_gaussian(None, list(x[:, j]), checked_weights, per_dim_priors[j])
+        for j in range(d)
+    ]
     return DiagonalNIGPosterior(per_dim)
 
 
@@ -1007,9 +1315,9 @@ class VonMisesMeanPosterior(ConjugatePosterior):
     family = "vonMises(mean)"
 
     def __init__(self, m: float, r: float, kappa: float):
-        self.m = float(m)  # posterior mean direction
-        self.r = float(r)  # posterior concentration
-        self.kappa = float(kappa)  # known likelihood concentration
+        self.m = _finite_scalar(m, "von Mises posterior mean direction")
+        self.r = _nonnegative_scalar(r, "von Mises posterior concentration")
+        self.kappa = _nonnegative_scalar(kappa, "known von Mises concentration")
         self._prior = None
 
     def mean(self) -> dict[str, Any]:
@@ -1018,6 +1326,7 @@ class VonMisesMeanPosterior(ConjugatePosterior):
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
         """Draw mean-direction samples from the von Mises posterior."""
+        n = _validate_sample_size(n)
         rng = rng or np.random.RandomState()
         return {"mu": rng.vonmises(self.m, self.r, size=n)}
 
@@ -1028,8 +1337,12 @@ class VonMisesMeanPosterior(ConjugatePosterior):
         return VonMisesDistribution(self.m, self.kappa)
 
     def posterior_predictive(self):
-        """Return the plug-in von Mises predictive distribution."""
-        return self.point_estimate()
+        """Return an explicitly marked plug-in von Mises predictive."""
+        return _mark_approximate_predictive(
+            self.point_estimate(),
+            self.family,
+            "the exact von-Mises compound predictive distribution is not implemented",
+        )
 
     def hyper(self) -> dict[str, Any]:
         """Return von Mises posterior hyperparameters."""
@@ -1050,11 +1363,11 @@ class VonMisesMeanPosterior(ConjugatePosterior):
 
 
 def _build_von_mises(dist, data, weights, prior) -> VonMisesMeanPosterior:
-    kappa = float(dist.kappa)
+    kappa = _nonnegative_scalar(dist.kappa, "known von Mises likelihood concentration")
     x, w = _as_weighted_array(data, weights)
     p = prior or {}
-    m0 = float(p.get("m", 0.0))
-    r0 = float(p.get("R", 1e-6))  # near-uniform prior direction
+    m0 = _finite_scalar(p.get("m", 0.0), "von Mises prior mean direction")
+    r0 = _nonnegative_scalar(p.get("R", 1e-6), "von Mises prior concentration")
     cx = float(np.dot(w, np.cos(x)))
     sx = float(np.dot(w, np.sin(x)))
     rc = kappa * cx + r0 * math.cos(m0)
@@ -1129,8 +1442,10 @@ _NO_CLOSED_FORM = {
 def conjugate_posterior(dist, data, prior: dict | None = None, weights: np.ndarray | None = None) -> ConjugatePosterior:
     """Closed-form conjugate posterior over the parameters of ``dist`` given ``data``.
 
-    Every supported family returns a *closed-form, full-Bayesian* posterior: exact parameter
-    samples, marginal likelihood, posterior mean / point estimate, and a posterior predictive. For
+    Every supported family returns an exact closed-form parameter posterior: exact parameter
+    samples, marginal likelihood, and posterior mean / point estimate. A posterior predictive is
+    exact where its compound law is implemented; otherwise the returned distribution carries
+    ``is_exact_posterior_predictive=False`` and a machine-readable ``approximation_receipt``. For
     families with a multi-parameter likelihood whose conjugate is conditional (Gamma, InverseGamma,
     InverseGaussian, Pareto, NegativeBinomial, vonMises), the *non-target* parameter (shape /
     location / scale / number-of-trials / concentration) is taken as known from ``dist`` -- exactly
@@ -1148,6 +1463,8 @@ def conjugate_posterior(dist, data, prior: dict | None = None, weights: np.ndarr
         A :class:`ConjugatePosterior` exposing ``mean``, ``sample``, ``point_estimate``,
         ``log_marginal_likelihood``, ``posterior_predictive`` and ``summary``.
     """
+    if prior is not None and not isinstance(prior, dict):
+        raise TypeError("conjugate_posterior prior must be a hyperparameter dictionary or None.")
     builder = _registry().get(type(dist))
     if builder is not None:
         return builder(dist, data, weights, prior)
@@ -1164,6 +1481,34 @@ def conjugate_posterior(dist, data, prior: dict | None = None, weights: np.ndarr
 # ---------------------------------------------------------------------------
 # Mixtures of conjugate priors (Diaconis-Ylvisaker: a mixture of conjugates is conjugate)
 # ---------------------------------------------------------------------------
+def _weighted_parameter_mean(values: list[Any], weights: np.ndarray, name: str) -> Any:
+    if all(isinstance(value, dict) for value in values):
+        keys = set(values[0])
+        if any(set(value) != keys for value in values[1:]):
+            raise ValueError("%s dictionaries do not have matching keys." % name)
+        return {
+            key: _weighted_parameter_mean(
+                [value[key] for value in values],
+                weights,
+                "%s[%r]" % (name, key),
+            )
+            for key in values[0]
+        }
+    try:
+        arrays = [np.asarray(value, dtype=np.float64) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise TypeError("%s is not numerically averageable." % name) from exc
+    shape = arrays[0].shape
+    if any(value.shape != shape for value in arrays[1:]):
+        raise ValueError("%s values have incompatible shapes." % name)
+    if any(np.any(~np.isfinite(value)) for value in arrays):
+        raise ValueError("%s values must be finite to compute a mixture mean." % name)
+    result = np.zeros(shape, dtype=np.float64)
+    for weight, value in zip(weights, arrays):
+        result += weight * value
+    return float(result) if result.ndim == 0 else result
+
+
 class MixtureConjugatePosterior(ConjugatePosterior):
     """Posterior under a prior that is itself a mixture of conjugate priors.
 
@@ -1182,26 +1527,48 @@ class MixtureConjugatePosterior(ConjugatePosterior):
 
     def __init__(self, components, post_weights, prior_weights, comp_log_evidence):
         self.components: list[ConjugatePosterior] = list(components)
-        self.weights = np.asarray(post_weights, dtype=np.float64)  # posterior mixing weights (normalised)
-        self.prior_weights = np.asarray(prior_weights, dtype=np.float64)
-        self.comp_log_evidence = np.asarray(comp_log_evidence, dtype=np.float64)
+        if not self.components or not all(isinstance(item, ConjugatePosterior) for item in self.components):
+            raise ValueError("MixtureConjugatePosterior requires at least one conjugate-posterior component.")
+        count = len(self.components)
+        self.weights = _probability_vector(
+            post_weights,
+            count,
+            "posterior mixture weights",
+            normalize=False,
+        )
+        self.prior_weights = _probability_vector(
+            prior_weights,
+            count,
+            "prior mixture weights",
+            normalize=False,
+        )
+        try:
+            self.comp_log_evidence = np.asarray(comp_log_evidence, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("component log evidence must be a numeric vector.") from exc
+        if self.comp_log_evidence.shape != (count,):
+            raise ValueError("component log evidence must have exact shape (%d,)." % count)
+        if np.any(np.isnan(self.comp_log_evidence)) or np.any(np.isposinf(self.comp_log_evidence)):
+            raise ValueError("component log evidence may be finite or -inf, but not NaN or +inf.")
+        mean_keys = set(self.components[0].mean())
+        if any(set(component.mean()) != mean_keys for component in self.components[1:]):
+            raise ValueError("mixture posterior components must expose identical mean parameter keys.")
 
     def mean(self) -> dict[str, Any]:
         """Return the posterior-weighted mean of component posterior means."""
-        # posterior mean of theta = sum_m w'_m E_m[theta]; per-key weighted average of the components.
         out: dict[str, Any] = {}
         keys = self.components[0].mean().keys()
         for k in keys:
             vals = [c.mean()[k] for c in self.components]
-            try:
-                out[k] = sum(w * np.asarray(v, dtype=np.float64) for w, v in zip(self.weights, vals))
-            except (TypeError, ValueError):
-                out[k] = vals[int(np.argmax(self.weights))]  # non-numeric (e.g. dicts): take the MAP component
+            out[k] = _weighted_parameter_mean(vals, self.weights, "posterior mean parameter %r" % k)
         return out
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
         """Draw parameter samples from the posterior mixture."""
+        n = _validate_sample_size(n)
         rng = rng or np.random.RandomState()
+        if n == 0:
+            return self.components[0].sample(0, rng)
         counts = rng.multinomial(n, self.weights)  # how many draws come from each component
         gathered: dict[str, list] = {}
         for m, cm in enumerate(counts):
@@ -1220,12 +1587,27 @@ class MixtureConjugatePosterior(ConjugatePosterior):
         """A mixle MixtureDistribution of the component predictives, weighted by the posterior weights."""
         from mixle.stats.latent.mixture import MixtureDistribution
 
-        return MixtureDistribution([c.posterior_predictive() for c in self.components], list(self.weights))
+        predictives = [c.posterior_predictive() for c in self.components]
+        result = MixtureDistribution(predictives, list(self.weights))
+        if any(getattr(item, "is_exact_posterior_predictive", True) is False for item in predictives):
+            return _mark_approximate_predictive(
+                result,
+                self.family,
+                "one or more mixture component predictives use a posterior-mean plug-in",
+            )
+        return _mark_exact_predictive(
+            result,
+            self.family,
+            "mixture of exact component posterior predictives",
+        )
 
     def log_marginal_likelihood(self) -> float:
         """Return the mixture-prior log evidence by log-summing component evidences."""
         # evidence of the whole data under the mixture prior: sum_m w_m Z_m
-        return float(logsumexp(np.log(self.prior_weights) + self.comp_log_evidence))
+        log_prior = np.full(len(self.prior_weights), -np.inf, dtype=np.float64)
+        positive = self.prior_weights > 0.0
+        log_prior[positive] = np.log(self.prior_weights[positive])
+        return float(logsumexp(log_prior + self.comp_log_evidence))
 
     def hyper(self) -> dict[str, Any]:
         """Return posterior weights and component hyperparameters."""
@@ -1257,16 +1639,42 @@ def mixture_conjugate_posterior(
     m = len(priors)
     if m == 0:
         raise ValueError("need at least one prior component")
-    pw = np.ones(m) / m if prior_weights is None else np.asarray(prior_weights, dtype=np.float64)
-    pw = pw / pw.sum()
-    components = [conjugate_posterior(dist, data, prior=pr, weights=weights) for pr in priors]
+    if not all(isinstance(prior, dict) for prior in priors):
+        raise TypeError("mixture conjugate priors must be dictionaries.")
+    pw = (
+        np.ones(m, dtype=np.float64) / m
+        if prior_weights is None
+        else _probability_vector(prior_weights, m, "prior mixture weights", normalize=True)
+    )
+    materialized_data = list(data)
+    materialized_weights = None if weights is None else list(weights)
+    components = [
+        conjugate_posterior(
+            dist,
+            materialized_data,
+            prior=pr,
+            weights=materialized_weights,
+        )
+        for pr in priors
+    ]
     try:
-        log_evidence = np.array([c.log_marginal_likelihood() for c in components])
+        log_evidence = np.asarray(
+            [c.log_marginal_likelihood() for c in components],
+            dtype=np.float64,
+        )
     except NotImplementedError as exc:
         raise TypeError(
             "mixture_conjugate_posterior needs a closed-form family (it reweights by each "
             "component's marginal likelihood); %s has only the generic posterior." % type(dist).__name__
         ) from exc
-    log_post = np.log(pw) + log_evidence
-    post_weights = np.exp(log_post - logsumexp(log_post))
+    if log_evidence.shape != (m,) or np.any(np.isnan(log_evidence)) or np.any(np.isposinf(log_evidence)):
+        raise ValueError("component log evidence must be finite or -inf.")
+    log_prior_weights = np.full(m, -np.inf, dtype=np.float64)
+    positive = pw > 0.0
+    log_prior_weights[positive] = np.log(pw[positive])
+    log_post = log_prior_weights + log_evidence
+    normalizer = float(logsumexp(log_post))
+    if not math.isfinite(normalizer):
+        raise ValueError("all conjugate-mixture components assign zero evidence to the observations.")
+    post_weights = np.exp(log_post - normalizer)
     return MixtureConjugatePosterior(components, post_weights, pw, log_evidence)
