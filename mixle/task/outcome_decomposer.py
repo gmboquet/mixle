@@ -17,6 +17,7 @@ before any outcome refitting) and the greedy heuristic on held-out world seeds a
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from numbers import Integral
 
 import numpy as np
 
@@ -65,12 +66,23 @@ def execute_plan(plan_types: list[str], *, n_cells: int, n_targets: int, budget:
 
 @dataclass
 class RoundStats:
-    """Candidate-generation statistics for one outcome-decomposition round."""
+    """Candidate-generation and independent promotion audit for one training round."""
 
     round: int
     mean_score: float
     n_candidates: int
     n_kept: int
+    candidates: tuple[tuple[str, ...], ...]
+    candidate_scores: tuple[float, ...]
+    kept_indices: tuple[int, ...]
+    selection_seeds: tuple[int, ...]
+    threshold: float
+    audit_seeds: tuple[int, ...]
+    audit_plan_seed: int
+    incumbent_audit_score: float
+    proposed_audit_score: float
+    promoted: bool
+    proposal_error: str | None
 
 
 @dataclass
@@ -80,6 +92,35 @@ class OutcomeTrainedDecomposer:
     plan_model: PlanModel
     imitation_model: PlanModel  # round-0, kept for the acceptance comparison
     rounds: list[RoundStats] = field(default_factory=list)
+    imitation_seeds: tuple[int, ...] = ()
+
+
+def _draw_unique_seeds(rng: np.random.RandomState, count: int, used: set[int]) -> tuple[int, ...]:
+    seeds: list[int] = []
+    while len(seeds) < count:
+        candidate = int(rng.randint(0, 2**31 - 1))
+        if candidate not in used:
+            used.add(candidate)
+            seeds.append(candidate)
+    return tuple(seeds)
+
+
+def _score_plan_panel(
+    plan: list[str],
+    *,
+    seeds: tuple[int, ...],
+    n_cells: int,
+    n_targets: int,
+    budget: int,
+) -> float:
+    return float(
+        np.mean(
+            [
+                execute_plan(plan, n_cells=n_cells, n_targets=n_targets, budget=budget, seed=world_seed)
+                for world_seed in seeds
+            ]
+        )
+    )
 
 
 def train_outcome_decomposer(
@@ -92,29 +133,125 @@ def train_outcome_decomposer(
     success_quantile: float = 0.6,
     rounds: int = 3,
     seed: int = 0,
+    selection_worlds: int = 5,
+    audit_worlds: int = 10,
 ) -> OutcomeTrainedDecomposer:
-    """Train a plan model by sampling, executing, keeping high-outcome plans, and refitting."""
+    """Train by selection on common worlds and promotion on an independent audit panel."""
+    for name, value in (
+        ("seed_worlds", seed_worlds),
+        ("k_candidates", k_candidates),
+        ("rounds", rounds),
+        ("selection_worlds", selection_worlds),
+        ("audit_worlds", audit_worlds),
+    ):
+        if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    try:
+        success_quantile = float(success_quantile)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("success_quantile must be finite and in [0, 1]") from exc
+    if not np.isfinite(success_quantile) or not 0 <= success_quantile <= 1:
+        raise ValueError("success_quantile must be finite and in [0, 1]")
+    if isinstance(seed, bool) or not isinstance(seed, Integral) or not 0 <= seed < 2**32:
+        raise ValueError("seed must be an integer in [0, 2**32)")
+    if seed_worlds >= 2**31 - 1:
+        raise ValueError("seed_worlds is too large for the available independent seed range")
+    # Validate the shared world configuration before any training work or partial receipts exist.
+    ExplorationWorld(n_cells=n_cells, n_targets=n_targets, budget=budget, seed=0)
+
     rng = np.random.RandomState(seed)
+    used_world_seeds: set[int] = set()
+    imitation_seed_base = int(rng.randint(0, 2**31 - 1 - seed_worlds))
+    imitation_seeds = tuple(imitation_seed_base + index for index in range(seed_worlds))
+    used_world_seeds.update(imitation_seeds)
     imitation = imitation_traces(
-        greedy_prospectivity_policy, n_worlds=seed_worlds, n_cells=n_cells, n_targets=n_targets, budget=budget
+        greedy_prospectivity_policy,
+        n_worlds=seed_worlds,
+        n_cells=n_cells,
+        n_targets=n_targets,
+        budget=budget,
+        seed_offset=imitation_seed_base,
     )
     imitation_model = fit_plan_model(_as_traces(imitation))
     model = imitation_model
     history = []
     for r in range(rounds):
         candidates = [model.sample(rng) for _ in range(k_candidates)]
+        selection_seeds = _draw_unique_seeds(rng, int(selection_worlds), used_world_seeds)
         scores = [
-            execute_plan(c, n_cells=n_cells, n_targets=n_targets, budget=budget, seed=int(rng.randint(0, 2**31 - 1)))
-            for c in candidates
+            _score_plan_panel(
+                candidate,
+                seeds=selection_seeds,
+                n_cells=n_cells,
+                n_targets=n_targets,
+                budget=budget,
+            )
+            for candidate in candidates
         ]
-        threshold = float(np.quantile(scores, success_quantile)) if scores else 0.0
-        kept = [c for c, s in zip(candidates, scores) if s >= threshold and s > 0 and c]
-        history.append(
-            RoundStats(round=r, mean_score=float(np.mean(scores)), n_candidates=len(candidates), n_kept=len(kept))
+        threshold = float(np.quantile(scores, success_quantile))
+        kept_indices = tuple(
+            index
+            for index, (candidate, score) in enumerate(zip(candidates, scores, strict=True))
+            if score >= threshold and score > 0 and candidate
         )
-        if kept:
-            model = fit_plan_model(_as_traces(kept))
-    return OutcomeTrainedDecomposer(plan_model=model, imitation_model=imitation_model, rounds=history)
+        kept = [candidates[index] for index in kept_indices]
+        audit_seeds = _draw_unique_seeds(rng, int(audit_worlds), used_world_seeds)
+        audit_plan_seed = int(rng.randint(0, 2**31 - 1))
+        incumbent_audit_score = evaluate_plan_model(
+            model,
+            seeds=audit_seeds,
+            n_cells=n_cells,
+            n_targets=n_targets,
+            budget=budget,
+            rng_seed=audit_plan_seed,
+        )
+        proposal_error = None
+        proposed_model = model
+        if len(kept) >= 2:
+            try:
+                proposed_model = fit_plan_model(_as_traces(kept))
+            except ValueError as exc:
+                proposal_error = str(exc)
+        proposed_audit_score = evaluate_plan_model(
+            proposed_model,
+            seeds=audit_seeds,
+            n_cells=n_cells,
+            n_targets=n_targets,
+            budget=budget,
+            rng_seed=audit_plan_seed,
+        )
+        promoted = (
+            len(kept) >= 2
+            and proposal_error is None
+            and proposed_audit_score > incumbent_audit_score
+        )
+        history.append(
+            RoundStats(
+                round=r,
+                mean_score=float(np.mean(scores)),
+                n_candidates=len(candidates),
+                n_kept=len(kept),
+                candidates=tuple(tuple(candidate) for candidate in candidates),
+                candidate_scores=tuple(float(score) for score in scores),
+                kept_indices=kept_indices,
+                selection_seeds=selection_seeds,
+                threshold=threshold,
+                audit_seeds=audit_seeds,
+                audit_plan_seed=audit_plan_seed,
+                incumbent_audit_score=incumbent_audit_score,
+                proposed_audit_score=proposed_audit_score,
+                promoted=promoted,
+                proposal_error=proposal_error,
+            )
+        )
+        if promoted:
+            model = proposed_model
+    return OutcomeTrainedDecomposer(
+        plan_model=model,
+        imitation_model=imitation_model,
+        rounds=history,
+        imitation_seeds=imitation_seeds,
+    )
 
 
 def evaluate_plan_model(
