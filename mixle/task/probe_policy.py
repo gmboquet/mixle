@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from numbers import Integral
 
 import numpy as np
 
@@ -97,14 +98,28 @@ def head_to_head_probe(
 ) -> ProbeHeadToHead:
     """Compare the non-myopic (outcome-trained) plan model against the myopic EIG policy on the same
     held-out seeds at matched budget."""
+    try:
+        seed_panel = tuple(held_out_seeds)
+    except TypeError as exc:
+        raise ValueError("held_out_seeds must be an iterable of integer seeds") from exc
+    if not seed_panel:
+        raise ValueError("held_out_seeds must contain at least one seed")
+    if any(isinstance(seed, bool) or not isinstance(seed, Integral) for seed in seed_panel):
+        raise ValueError("held_out_seeds must contain only integer seeds")
+    seed_panel = tuple(int(seed) for seed in seed_panel)
+    if any(seed < 0 or seed >= 2**32 for seed in seed_panel):
+        raise ValueError("held_out_seeds must be in NumPy's [0, 2**32) seed range")
+    if len(set(seed_panel)) != len(seed_panel):
+        raise ValueError("held_out_seeds must not contain duplicates")
+
     non_myopic_score = evaluate_plan_model(
-        plan_model, seeds=held_out_seeds, n_cells=n_cells, n_targets=n_targets, budget=budget
+        plan_model, seeds=seed_panel, n_cells=n_cells, n_targets=n_targets, budget=budget
     )
     myopic_scores = [
         run_episode(myopic_eig_policy, n_cells=n_cells, n_targets=n_targets, budget=budget, seed=s).score
-        for s in held_out_seeds
+        for s in seed_panel
     ]
-    myopic_score = float(np.mean(myopic_scores)) if myopic_scores else 0.0
+    myopic_score = float(np.mean(myopic_scores))
     return ProbeHeadToHead(
         non_myopic_score=non_myopic_score, myopic_score=myopic_score, non_myopic_wins=non_myopic_score > myopic_score
     )

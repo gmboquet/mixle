@@ -65,6 +65,36 @@ class HeadToHeadTest(unittest.TestCase):
         # so a future change to either policy that silently flips the verdict is caught, not missed.
         self.assertFalse(self.result.non_myopic_wins)
 
+    def test_one_shot_seed_iterable_uses_the_same_panel_for_both_policies(self):
+        seed_panel = [20_100, 20_101, 20_102]
+        from_list = head_to_head_probe(
+            self.decomposer.plan_model,
+            held_out_seeds=seed_panel,
+            n_cells=N_CELLS,
+            n_targets=N_TARGETS,
+            budget=BUDGET,
+        )
+        from_generator = head_to_head_probe(
+            self.decomposer.plan_model,
+            held_out_seeds=(seed for seed in seed_panel),
+            n_cells=N_CELLS,
+            n_targets=N_TARGETS,
+            budget=BUDGET,
+        )
+        self.assertEqual(from_generator, from_list)
+
+    def test_seed_panel_must_be_nonempty_unique_valid_integers(self):
+        invalid_panels = ([], [1, 1], [True], [1.5], [-1], [2**32])
+        for panel in invalid_panels:
+            with self.subTest(panel=panel), self.assertRaisesRegex(ValueError, "held_out_seeds"):
+                head_to_head_probe(
+                    self.decomposer.plan_model,
+                    held_out_seeds=panel,
+                    n_cells=N_CELLS,
+                    n_targets=N_TARGETS,
+                    budget=BUDGET,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
