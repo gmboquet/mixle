@@ -180,7 +180,8 @@ def test_adapter_receives_detached_read_only_view_and_cannot_mutate_live_graph()
             current.nodes["injected"] = ContextNode(
                 "injected", ContextNodeKind.MEMORY, "Injected", 1
             )
-        current.nodes["known"].metadata["attempt"] = True
+        with pytest.raises(TypeError):
+            current.nodes["known"].metadata["attempt"] = True
         return ContextActionResult()
 
     action = ContextAction(

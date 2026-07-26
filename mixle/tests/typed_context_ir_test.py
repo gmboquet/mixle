@@ -93,6 +93,68 @@ def test_node_id_collision_cannot_rewrite_provenance():
         graph.add_node(ContextNode("source", ContextNodeKind.SOURCE_CHUNK, "Rewritten", 1, provenance=(_provenance(),)))
 
 
+def test_context_node_deep_freezes_metadata_and_binds_confidence_to_identity():
+    supplied = {"nested": {"values": [1, 2]}}
+    node = ContextNode(
+        "claim",
+        ContextNodeKind.CLAIM,
+        "Claim",
+        1,
+        confidence=0.4,
+        metadata=supplied,
+    )
+    original_hash = node.content_hash
+    supplied["nested"]["values"].append(3)
+
+    assert node.metadata["nested"]["values"] == (1, 2)
+    assert node.content_hash == original_hash
+    with pytest.raises(TypeError):
+        node.metadata["new"] = True
+    with pytest.raises(TypeError):
+        node.metadata["nested"]["new"] = True
+
+    graph = ContextGraph()
+    graph.add_node(node)
+    with pytest.raises(ValueError, match="collision"):
+        graph.add_node(
+            ContextNode(
+                "claim",
+                ContextNodeKind.CLAIM,
+                "Claim",
+                1,
+                confidence=0.9,
+                metadata={"nested": {"values": [1, 2]}},
+            )
+        )
+
+
+def test_verification_appends_versioned_evidence_history():
+    graph = ContextGraph()
+    graph.add_node(ContextNode("claim", ContextNodeKind.CLAIM, "Claim", 1))
+    first_hash = graph.nodes["claim"].content_hash
+    supported = graph.verify(
+        "claim",
+        EvidenceStatus.SUPPORTED,
+        provenance=(_provenance(),),
+        confidence=0.8,
+    )
+    contradicted = graph.verify(
+        "claim",
+        EvidenceStatus.CONTRADICTED,
+        confidence=0.2,
+    )
+
+    assert [row.status for row in contradicted.evidence_history] == [
+        EvidenceStatus.UNVERIFIED,
+        EvidenceStatus.SUPPORTED,
+        EvidenceStatus.CONTRADICTED,
+    ]
+    assert [row.graph_version for row in contradicted.evidence_history] == [0, 2, 3]
+    assert contradicted.evidence_history[1].provenance == (_provenance(),)
+    assert contradicted.content_hash != supported.content_hash != first_hash
+    assert graph.version == 3
+
+
 def test_context_action_and_receipt_keep_expected_and_actual_work_separate():
     action = ContextAction(
         "retrieve-1",

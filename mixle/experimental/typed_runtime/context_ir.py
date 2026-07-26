@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import math
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -34,6 +34,60 @@ class EvidenceStatus(StrEnum):
     SUPPORTED = "supported"
     CONTRADICTED = "contradicted"
     INCONCLUSIVE = "inconclusive"
+
+
+def _freeze_metadata_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return FrozenMetadata(value)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_metadata_value(item) for item in value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(
+        "context metadata values must be JSON scalars, mappings, lists, or tuples; found %s."
+        % type(value).__name__
+    )
+
+
+def _thaw_metadata_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_metadata_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_metadata_value(item) for item in value]
+    return value
+
+
+class FrozenMetadata(Mapping[str, Any]):
+    """Deterministic, recursively immutable context metadata."""
+
+    def __init__(self, values: Mapping[str, Any] | None = None) -> None:
+        values = values or {}
+        if any(not isinstance(key, str) or not key for key in values):
+            raise TypeError("context metadata keys must be non-empty strings.")
+        self._items = tuple(
+            (key, _freeze_metadata_value(value)) for key, value in sorted(values.items())
+        )
+        payload_fingerprint(self._items)
+
+    def __getitem__(self, key: str) -> Any:
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return (key for key, _ in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        return dict(self.items()) == dict(other.items())
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> FrozenMetadata:
+        return self
 
 
 class ContextEdgeKind(StrEnum):
@@ -78,6 +132,36 @@ class Provenance:
 
 
 @dataclass(frozen=True)
+class EvidenceTransition:
+    """One immutable, graph-versioned evidentiary state."""
+
+    graph_version: int
+    status: EvidenceStatus
+    provenance: tuple[Provenance, ...] = ()
+    confidence: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.graph_version < 0:
+            raise ValueError("evidence transition graph_version must be non-negative.")
+        if self.confidence is not None and (
+            not math.isfinite(self.confidence) or not 0.0 <= self.confidence <= 1.0
+        ):
+            raise ValueError("evidence transition confidence must be in [0, 1].")
+        if self.status is EvidenceStatus.SUPPORTED and not self.provenance:
+            raise ValueError("supported evidence transitions require source provenance.")
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible evidence transition."""
+
+        return {
+            "graph_version": self.graph_version,
+            "status": self.status.value,
+            "provenance": [item.as_dict() for item in self.provenance],
+            "confidence": self.confidence,
+        }
+
+
+@dataclass(frozen=True)
 class ContextNode:
     """One source, claim, generated artifact, summary, result, or memory unit."""
 
@@ -90,7 +174,8 @@ class ContextNode:
     confidence: float | None = None
     generated: bool = False
     source_horizon_position: int | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=FrozenMetadata)
+    evidence_history: tuple[EvidenceTransition, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.node_id or not self.text:
@@ -110,6 +195,30 @@ class ContextNode:
             raise ValueError("generated hypotheses, queries, and summaries must set generated=True.")
         if self.evidence_status is EvidenceStatus.SUPPORTED and not self.provenance:
             raise ValueError("supported context nodes require source provenance.")
+        object.__setattr__(self, "metadata", FrozenMetadata(self.metadata))
+        history = self.evidence_history
+        if not history:
+            history = (
+                EvidenceTransition(
+                    0,
+                    self.evidence_status,
+                    self.provenance,
+                    self.confidence,
+                ),
+            )
+            object.__setattr__(self, "evidence_history", history)
+        latest = history[-1]
+        if (
+            latest.status is not self.evidence_status
+            or latest.provenance != self.provenance
+            or latest.confidence != self.confidence
+        ):
+            raise ValueError("context node evidence fields must match its latest evidence history entry.")
+        if any(
+            later.graph_version <= earlier.graph_version
+            for earlier, later in zip(history, history[1:], strict=False)
+        ):
+            raise ValueError("context node evidence history versions must increase strictly.")
 
     @property
     def content_hash(self) -> str:
@@ -122,9 +231,11 @@ class ContextNode:
                 self.token_count,
                 tuple(item.as_dict() for item in self.provenance),
                 self.evidence_status.value,
+                self.confidence,
                 self.generated,
                 self.source_horizon_position,
                 self.metadata,
+                tuple(item.as_dict() for item in self.evidence_history),
             )
         )
 
@@ -141,7 +252,8 @@ class ContextNode:
             "confidence": self.confidence,
             "generated": self.generated,
             "source_horizon_position": self.source_horizon_position,
-            "metadata": dict(self.metadata),
+            "metadata": _thaw_metadata_value(self.metadata),
+            "evidence_history": [item.as_dict() for item in self.evidence_history],
             "content_hash": self.content_hash,
         }
 
@@ -196,6 +308,8 @@ class ContextGraph:
                 if existing.content_hash != node.content_hash:
                     raise ValueError("context node id collision with different content: %s" % node.node_id)
                 return
+            if node.evidence_history[-1].graph_version > self.version:
+                raise ValueError("context node evidence history is ahead of the target graph.")
             self.nodes[node.node_id] = node
             self.version += 1
 
@@ -226,7 +340,19 @@ class ContextGraph:
         with self._lock:
             node = self.nodes[node_id]
             combined = tuple(dict.fromkeys(node.provenance + provenance))
-            updated = replace(node, evidence_status=status, provenance=combined, confidence=confidence)
+            transition = EvidenceTransition(
+                self.version + 1,
+                status,
+                combined,
+                confidence,
+            )
+            updated = replace(
+                node,
+                evidence_status=status,
+                provenance=combined,
+                confidence=confidence,
+                evidence_history=node.evidence_history + (transition,),
+            )
             self.nodes[node_id] = updated
             self.version += 1
             return updated
@@ -461,6 +587,8 @@ __all__ = [
     "ContextGraph",
     "ContextNode",
     "ContextNodeKind",
+    "EvidenceTransition",
     "EvidenceStatus",
+    "FrozenMetadata",
     "Provenance",
 ]
