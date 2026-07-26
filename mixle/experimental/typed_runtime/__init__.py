@@ -60,6 +60,7 @@ from mixle.experimental.typed_runtime.context_execution import (
     ContextActionAdapter,
     ContextActionExecutor,
     ContextActionResult,
+    ContextGraphView,
     VerificationUpdate,
 )
 from mixle.experimental.typed_runtime.context_ir import (
@@ -269,6 +270,7 @@ __all__ = [
     "ContextActionAdapter",
     "ContextActionExecutor",
     "ContextActionResult",
+    "ContextGraphView",
     "ContextAttentionConfig",
     "ContextAttentionReceipt",
     "ContextAttentionResult",

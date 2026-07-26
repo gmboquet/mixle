@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import copy
 import math
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
@@ -182,30 +185,33 @@ class ContextGraph:
         self.nodes: dict[str, ContextNode] = {}
         self.edges: dict[str, ContextEdge] = {}
         self.version = 0
+        self._lock = threading.RLock()
 
     def add_node(self, node: ContextNode) -> None:
         """Add an immutable node or accept an idempotent duplicate."""
 
-        existing = self.nodes.get(node.node_id)
-        if existing is not None:
-            if existing.content_hash != node.content_hash:
-                raise ValueError("context node id collision with different content: %s" % node.node_id)
-            return
-        self.nodes[node.node_id] = node
-        self.version += 1
+        with self._lock:
+            existing = self.nodes.get(node.node_id)
+            if existing is not None:
+                if existing.content_hash != node.content_hash:
+                    raise ValueError("context node id collision with different content: %s" % node.node_id)
+                return
+            self.nodes[node.node_id] = node
+            self.version += 1
 
     def add_edge(self, edge: ContextEdge) -> None:
         """Add an immutable edge after endpoint validation."""
 
-        if edge.source_node not in self.nodes or edge.target_node not in self.nodes:
-            raise KeyError("context edge endpoints must exist before the edge is added.")
-        existing = self.edges.get(edge.edge_id)
-        if existing is not None:
-            if existing != edge:
-                raise ValueError("context edge id collision with different content: %s" % edge.edge_id)
-            return
-        self.edges[edge.edge_id] = edge
-        self.version += 1
+        with self._lock:
+            if edge.source_node not in self.nodes or edge.target_node not in self.nodes:
+                raise KeyError("context edge endpoints must exist before the edge is added.")
+            existing = self.edges.get(edge.edge_id)
+            if existing is not None:
+                if existing != edge:
+                    raise ValueError("context edge id collision with different content: %s" % edge.edge_id)
+                return
+            self.edges[edge.edge_id] = edge
+            self.version += 1
 
     def verify(
         self,
@@ -217,57 +223,97 @@ class ContextGraph:
     ) -> ContextNode:
         """Replace verification fields without erasing generated provenance."""
 
-        node = self.nodes[node_id]
-        combined = tuple(dict.fromkeys(node.provenance + provenance))
-        updated = replace(node, evidence_status=status, provenance=combined, confidence=confidence)
-        self.nodes[node_id] = updated
-        self.version += 1
-        return updated
+        with self._lock:
+            node = self.nodes[node_id]
+            combined = tuple(dict.fromkeys(node.provenance + provenance))
+            updated = replace(node, evidence_status=status, provenance=combined, confidence=confidence)
+            self.nodes[node_id] = updated
+            self.version += 1
+            return updated
+
+    def remove_node(self, node_id: str) -> None:
+        """Remove one node and all incident edges as one versioned mutation."""
+
+        with self._lock:
+            if node_id not in self.nodes:
+                raise KeyError(node_id)
+            self.edges = {
+                edge_id: edge
+                for edge_id, edge in self.edges.items()
+                if edge.source_node != node_id and edge.target_node != node_id
+            }
+            del self.nodes[node_id]
+            self.version += 1
 
     def neighbors(self, node_id: str, *, kinds: tuple[ContextEdgeKind, ...] | None = None) -> tuple[str, ...]:
         """Return both incoming and outgoing neighbors for revisitation."""
 
-        if node_id not in self.nodes:
-            raise KeyError(node_id)
-        selected = set(kinds) if kinds is not None else None
-        result = set()
-        for edge in self.edges.values():
-            if selected is not None and edge.kind not in selected:
-                continue
-            if edge.source_node == node_id:
-                result.add(edge.target_node)
-            elif edge.target_node == node_id:
-                result.add(edge.source_node)
-        return tuple(sorted(result))
+        with self._lock:
+            if node_id not in self.nodes:
+                raise KeyError(node_id)
+            selected = set(kinds) if kinds is not None else None
+            result = set()
+            for edge in self.edges.values():
+                if selected is not None and edge.kind not in selected:
+                    continue
+                if edge.source_node == node_id:
+                    result.add(edge.target_node)
+                elif edge.target_node == node_id:
+                    result.add(edge.source_node)
+            return tuple(sorted(result))
 
     def unresolved_nodes(self) -> tuple[ContextNode, ...]:
         """Generated hypotheses/claims that still need verification."""
 
-        return tuple(
-            node
-            for node in self.nodes.values()
-            if node.kind in (ContextNodeKind.CLAIM, ContextNodeKind.GENERATED_HYPOTHESIS)
-            and node.evidence_status is EvidenceStatus.UNVERIFIED
-        )
+        with self._lock:
+            return tuple(
+                node
+                for node in self.nodes.values()
+                if node.kind in (ContextNodeKind.CLAIM, ContextNodeKind.GENERATED_HYPOTHESIS)
+                and node.evidence_status is EvidenceStatus.UNVERIFIED
+            )
 
     def snapshot(self) -> tuple[int, dict[str, ContextNode], dict[str, ContextEdge]]:
         """Capture graph state for transactional context actions."""
 
-        return self.version, copy.deepcopy(self.nodes), copy.deepcopy(self.edges)
+        with self._lock:
+            return self.version, copy.deepcopy(self.nodes), copy.deepcopy(self.edges)
 
     def restore(self, snapshot: tuple[int, dict[str, ContextNode], dict[str, ContextEdge]]) -> None:
         """Restore an action snapshot after failure."""
 
-        self.version, self.nodes, self.edges = copy.deepcopy(snapshot)
+        with self._lock:
+            self.version, self.nodes, self.edges = copy.deepcopy(snapshot)
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Exclude concurrent graph mutations while a staged transaction is prepared."""
+
+        with self._lock:
+            yield
+
+    def replace_if_unchanged(
+        self,
+        expected: tuple[int, dict[str, ContextNode], dict[str, ContextEdge]],
+        replacement: tuple[int, dict[str, ContextNode], dict[str, ContextEdge]],
+    ) -> None:
+        """Install a staged state only when the complete base snapshot still matches."""
+
+        with self._lock:
+            current = (self.version, self.nodes, self.edges)
+            if current != expected:
+                raise RuntimeError("context graph changed while the action adapter was running.")
+            self.version, self.nodes, self.edges = copy.deepcopy(replacement)
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible graph sorted by stable ids."""
 
-        return {
-            "version": self.version,
-            "nodes": [self.nodes[node_id].as_dict() for node_id in sorted(self.nodes)],
-            "edges": [self.edges[edge_id].as_dict() for edge_id in sorted(self.edges)],
-        }
+        with self._lock:
+            return {
+                "version": self.version,
+                "nodes": [self.nodes[node_id].as_dict() for node_id in sorted(self.nodes)],
+                "edges": [self.edges[edge_id].as_dict() for edge_id in sorted(self.edges)],
+            }
 
 
 class ContextActionKind(StrEnum):
@@ -292,6 +338,7 @@ class ContextAction:
 
     action_id: str
     kind: ContextActionKind
+    expected_graph_version: int | None = None
     input_nodes: tuple[str, ...] = ()
     query: str | None = None
     source_scope: tuple[str, ...] = ()
@@ -308,6 +355,8 @@ class ContextAction:
     def __post_init__(self) -> None:
         if not self.action_id:
             raise ValueError("context action id must be non-empty.")
+        if self.expected_graph_version is not None and self.expected_graph_version < 0:
+            raise ValueError("expected_graph_version must be non-negative when supplied.")
         numeric = (
             self.expected_information_gain,
             self.gain_standard_error,
@@ -339,6 +388,7 @@ class ContextAction:
         return {
             "action_id": self.action_id,
             "kind": self.kind.value,
+            "expected_graph_version": self.expected_graph_version,
             "input_nodes": list(self.input_nodes),
             "query": self.query,
             "source_scope": list(self.source_scope),
@@ -374,6 +424,8 @@ class ContextActionReceipt:
     def __post_init__(self) -> None:
         if self.graph_version_before < 0 or self.graph_version_after < 0:
             raise ValueError("context action graph versions must be non-negative.")
+        if not math.isfinite(self.latency_seconds) or not math.isfinite(self.monetary_cost):
+            raise ValueError("context action actual work and cost must be finite.")
         if self.latency_seconds < 0.0 or self.materialized_tokens < 0 or self.tool_calls < 0:
             raise ValueError("context action actual work must be non-negative.")
         if self.monetary_cost < 0.0 or not self.outcome:

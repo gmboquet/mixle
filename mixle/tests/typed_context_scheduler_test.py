@@ -43,7 +43,8 @@ def test_lower_confidence_value_not_raw_mean_selects_action():
     reliable = _action("reliable", 0.6, 0.0)
     decision = scheduler.choose((uncertain, reliable), graph)
 
-    assert decision.selected is reliable
+    assert decision.selected.action_id == reliable.action_id
+    assert decision.selected.expected_graph_version == graph.version
     assert decision.lower_confidence_gains == {"uncertain": pytest.approx(0.4), "reliable": 0.6}
     assert decision.net_values["reliable"] > decision.net_values["uncertain"]
     json.dumps(decision.as_dict(), allow_nan=False)
@@ -68,7 +69,8 @@ def test_expected_budget_filters_actions_and_actual_receipt_debits_once():
     too_many_tokens = _action("large", 10.0, 0.0, tokens=101)
     allowed = _action("small", 1.0, 0.0, tokens=80, tools=1)
     decision = scheduler.choose((too_many_tokens, allowed), graph)
-    assert decision.selected is allowed
+    assert decision.selected.action_id == allowed.action_id
+    assert decision.selected.expected_graph_version == graph.version
     assert decision.inadmissible == {"large": "token-budget"}
 
     receipt = ContextActionReceipt(allowed, 0, 1, (), (), 0.8, 90, 1, 0.5, 0.7, "done")
@@ -88,3 +90,17 @@ def test_missing_input_node_is_inadmissible_not_silently_ignored():
     decision = ValueOfInformationScheduler().choose((action,), graph)
     assert decision.stopped
     assert decision.inadmissible == {"expand": "missing-input:missing"}
+
+
+def test_stale_prebound_action_is_inadmissible():
+    graph = ContextGraph()
+    graph.add_node(ContextNode("new", ContextNodeKind.MEMORY, "New", 1))
+    stale = ContextAction(
+        "stale",
+        ContextActionKind.RETRIEVE,
+        expected_graph_version=0,
+        expected_information_gain=1.0,
+    )
+    decision = ValueOfInformationScheduler().choose((stale,), graph)
+    assert decision.stopped
+    assert decision.inadmissible == {"stale": "stale-graph-version"}
