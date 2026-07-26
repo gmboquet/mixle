@@ -251,7 +251,9 @@ class AsyncSnapshotStallBudgetTest(unittest.TestCase):
 
             handle.wait(timeout=10)
             self.assertTrue(handle.done)
-            self.assertTrue(Path(d, "loader_state.json").exists())
+            self.assertTrue(Path(d, "CURRENT").exists())
+            self.assertTrue(Path(d, "_SUCCESS").exists())
+            self.assertFalse(Path(d, "loader_state.json").exists())
 
     def test_synchronous_save_blocks_for_the_full_slow_disk_latency(self):
         import torch.distributed.checkpoint as dcp

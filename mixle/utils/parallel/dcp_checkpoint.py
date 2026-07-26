@@ -17,16 +17,19 @@ distributed-state-dict APIs, but not verified without retained hardware receipts
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import random
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-_FORMAT_VERSION = 1
+_FORMAT_VERSION = 2
 
 
 def _rank_world() -> tuple[int, int]:
@@ -81,34 +84,249 @@ def _sidecar_payload(
     }
 
 
-def _write_sidecar(path: Path, rank: int, payload: dict[str, Any]) -> None:
+def _safe_encode(value: Any) -> Any:
+    """Encode metadata without pickle or executable object reconstruction."""
     import torch
 
-    temporary = path / ("rank-%05d.pt.tmp" % rank)
-    target = path / ("rank-%05d.pt" % rank)
-    torch.save(payload, temporary)
-    os.replace(temporary, target)
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if np.isfinite(value):
+            return value
+        return {"__type__": "float", "value": repr(value)}
+    if isinstance(value, np.generic):
+        return _safe_encode(value.item())
+    if isinstance(value, bytes):
+        return {"__type__": "bytes", "data": base64.b64encode(value).decode("ascii")}
+    if isinstance(value, np.ndarray):
+        array = np.ascontiguousarray(value)
+        return {
+            "__type__": "ndarray",
+            "dtype": array.dtype.str,
+            "shape": list(array.shape),
+            "data": base64.b64encode(array.tobytes()).decode("ascii"),
+        }
+    if torch.is_tensor(value):
+        tensor = value.detach().cpu().contiguous()
+        raw = tensor.view(torch.uint8).numpy().tobytes()
+        return {
+            "__type__": "tensor",
+            "dtype": str(tensor.dtype).removeprefix("torch."),
+            "shape": list(tensor.shape),
+            "data": base64.b64encode(raw).decode("ascii"),
+        }
+    if isinstance(value, tuple):
+        return {"__type__": "tuple", "items": [_safe_encode(item) for item in value]}
+    if isinstance(value, list):
+        return [_safe_encode(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            "__type__": "dict",
+            "items": [[_safe_encode(key), _safe_encode(item)] for key, item in value.items()],
+        }
+    raise TypeError(
+        "checkpoint metadata type %s.%s is not safely serializable"
+        % (type(value).__module__, type(value).__qualname__)
+    )
 
 
-def _finalize_checkpoint(path: Path, *, rank: int, world_size: int) -> None:
+def _safe_decode(value: Any) -> Any:
+    """Decode only the closed typed metadata schema emitted by ``_safe_encode``."""
+    import torch
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, list):
+        return [_safe_decode(item) for item in value]
+    if not isinstance(value, dict) or "__type__" not in value:
+        raise RuntimeError("checkpoint metadata contains an invalid typed value")
+    kind = value["__type__"]
+    if kind == "float":
+        values = {"inf": float("inf"), "-inf": float("-inf"), "nan": float("nan")}
+        if value.get("value") not in values:
+            raise RuntimeError("checkpoint metadata contains an invalid non-finite float")
+        return values[value["value"]]
+    if kind == "bytes":
+        return base64.b64decode(value["data"], validate=True)
+    if kind == "ndarray":
+        dtype = np.dtype(value["dtype"])
+        shape = tuple(int(size) for size in value["shape"])
+        raw = base64.b64decode(value["data"], validate=True)
+        expected = int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
+        if len(raw) != expected:
+            raise RuntimeError("checkpoint ndarray metadata has an invalid byte length")
+        return np.frombuffer(raw, dtype=dtype).copy().reshape(shape)
+    if kind == "tensor":
+        dtype_name = str(value["dtype"])
+        dtype = getattr(torch, dtype_name, None)
+        if not isinstance(dtype, torch.dtype):
+            raise RuntimeError("checkpoint tensor metadata has an unsupported dtype")
+        shape = tuple(int(size) for size in value["shape"])
+        raw = base64.b64decode(value["data"], validate=True)
+        itemsize = torch.empty((), dtype=dtype).element_size()
+        expected = int(np.prod(shape, dtype=np.int64)) * itemsize
+        if len(raw) != expected:
+            raise RuntimeError("checkpoint tensor metadata has an invalid byte length")
+        byte_tensor = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
+        return byte_tensor.view(dtype).clone().reshape(shape)
+    if kind == "tuple":
+        return tuple(_safe_decode(item) for item in value["items"])
+    if kind == "dict":
+        return {_safe_decode(key): _safe_decode(item) for key, item in value["items"]}
+    raise RuntimeError("checkpoint metadata contains unknown typed value %r" % kind)
+
+
+def _atomic_write(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+    temporary = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
+    try:
+        with temporary.open("w", encoding=encoding) as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _generation_path(destination: Path, rank: int) -> Path:
+    """Create one fresh generation name shared by every distributed rank."""
+    import torch.distributed as dist
+
+    token = uuid.uuid4().hex if rank == 0 else None
+    if dist.is_available() and dist.is_initialized():
+        box = [token]
+        dist.broadcast_object_list(box, src=0)
+        token = box[0]
+    generation = destination / ".generations" / ("generation-" + str(token))
+    if rank == 0:
+        generation.mkdir(parents=True, exist_ok=False)
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+    elif rank != 0:
+        raise RuntimeError("non-root checkpoint rank requires an initialized process group")
+    return generation
+
+
+def _write_sidecar(path: Path, rank: int, payload: dict[str, Any]) -> None:
+    target = path / ("rank-%05d.json" % rank)
+    _atomic_write(target, json.dumps(_safe_encode(payload), sort_keys=True, separators=(",", ":")))
+
+
+def _finalize_checkpoint(path: Path, *, rank: int, world_size: int) -> str:
     import torch.distributed as dist
 
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
     if rank == 0:
+        files = []
+        for candidate in sorted(path.rglob("*")):
+            if not candidate.is_file() or candidate.name in ("manifest.json", "_SUCCESS"):
+                continue
+            relative = candidate.relative_to(path).as_posix()
+            files.append({"path": relative, "size": candidate.stat().st_size, "sha256": _sha256(candidate)})
         manifest = {
             "format_version": _FORMAT_VERSION,
             "world_size": world_size,
-            "rank_sidecars": ["rank-%05d.pt" % index for index in range(world_size)],
+            "rank_sidecars": ["rank-%05d.json" % index for index in range(world_size)],
+            "files": files,
         }
-        temporary = path / "manifest.json.tmp"
-        temporary.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
-        os.replace(temporary, path / "manifest.json")
-        success_temporary = path / "_SUCCESS.tmp"
-        success_temporary.write_text("complete\n", encoding="ascii")
-        os.replace(success_temporary, path / "_SUCCESS")
+        manifest_text = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        _atomic_write(path / "manifest.json", manifest_text)
+        _atomic_write(path / "_SUCCESS", hashlib.sha256(manifest_text.encode("utf-8")).hexdigest() + "\n")
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
+    return path.name
+
+
+def _publish_generation(destination: Path, generation: Path, *, rank: int) -> None:
+    """Atomically publish a completed fresh generation through ``CURRENT``."""
+    import torch.distributed as dist
+
+    if rank == 0:
+        relative = generation.relative_to(destination).as_posix()
+        manifest_text = (generation / "manifest.json").read_text(encoding="utf-8")
+        pointer = json.dumps(
+            {
+                "format_version": _FORMAT_VERSION,
+                "generation": relative,
+                "manifest_sha256": hashlib.sha256(manifest_text.encode("utf-8")).hexdigest(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        # Root-level files are compatibility summaries only. CURRENT is the
+        # single atomic publication point used by the loader.
+        _atomic_write(destination / "manifest.json", manifest_text)
+        _atomic_write(destination / "_SUCCESS", pointer + "\n")
+        _atomic_write(destination / "CURRENT", pointer + "\n")
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
+
+def _resolve_and_validate_generation(destination: Path) -> tuple[Path, dict[str, Any]]:
+    current = destination / "CURRENT"
+    if not current.is_file():
+        raise RuntimeError("checkpoint is incomplete: %s has no CURRENT generation pointer." % destination)
+    try:
+        pointer = json.loads(current.read_text(encoding="utf-8"))
+        if int(pointer["format_version"]) != _FORMAT_VERSION:
+            raise RuntimeError("unsupported training checkpoint pointer version")
+        relative = Path(pointer["generation"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("checkpoint generation pointer escapes its destination")
+        generation = (destination / relative).resolve()
+        root = destination.resolve()
+        if generation.parent.parent != root or generation.parent.name != ".generations":
+            raise RuntimeError("checkpoint generation pointer has an invalid location")
+        manifest_path = generation / "manifest.json"
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+        digest = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()
+        if digest != pointer["manifest_sha256"]:
+            raise RuntimeError("checkpoint manifest does not match CURRENT")
+        if (generation / "_SUCCESS").read_text(encoding="ascii").strip() != digest:
+            raise RuntimeError("checkpoint generation completion marker is invalid")
+        manifest = json.loads(manifest_text)
+    except (KeyError, ValueError, OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("checkpoint generation metadata is invalid") from exc
+    if int(manifest.get("format_version", -1)) != _FORMAT_VERSION:
+        raise RuntimeError("unsupported training checkpoint format version")
+    listed: set[str] = set()
+    for record in manifest.get("files", ()):
+        relative_name = str(record.get("path", ""))
+        relative_path = Path(relative_name)
+        if not relative_name or relative_path.is_absolute() or ".." in relative_path.parts or relative_name in listed:
+            raise RuntimeError("checkpoint manifest contains an invalid file path")
+        listed.add(relative_name)
+        candidate = generation / relative_path
+        if not candidate.is_file():
+            raise RuntimeError("checkpoint file is missing: %s" % relative_name)
+        if candidate.stat().st_size != int(record["size"]) or _sha256(candidate) != record["sha256"]:
+            raise RuntimeError("checkpoint file failed integrity validation: %s" % relative_name)
+    expected_sidecars = set(manifest.get("rank_sidecars", ()))
+    if not expected_sidecars or not expected_sidecars.issubset(listed):
+        raise RuntimeError("checkpoint manifest does not cover every rank sidecar")
+    actual = {
+        candidate.relative_to(generation).as_posix()
+        for candidate in generation.rglob("*")
+        if candidate.is_file() and candidate.name not in ("manifest.json", "_SUCCESS")
+    }
+    if actual != listed:
+        raise RuntimeError("checkpoint generation contains files outside its integrity manifest")
+    return generation, manifest
 
 
 def _dcp_state(module: Any, optimizer: Any) -> dict[str, Any]:
@@ -116,6 +334,19 @@ def _dcp_state(module: Any, optimizer: Any) -> dict[str, Any]:
 
     model_state, optimizer_state = get_state_dict(module, optimizer)
     return {"model": model_state, "optimizer": optimizer_state}
+
+
+def _save_generation(state: dict[str, Any], destination: Path, payload: dict[str, Any]) -> None:
+    """Write, verify, and publish one complete immutable generation."""
+    import torch.distributed.checkpoint as dcp
+
+    rank, world_size = _rank_world()
+    destination.mkdir(parents=True, exist_ok=True)
+    generation = _generation_path(destination, rank)
+    dcp.save(state, checkpoint_id=str(generation))
+    _write_sidecar(generation, rank, payload)
+    _finalize_checkpoint(generation, rank=rank, world_size=world_size)
+    _publish_generation(destination, generation, rank=rank)
 
 
 def save_sharded(module: Any, optimizer: Any, path: str) -> None:
@@ -152,19 +383,7 @@ def save_training_state(
 ) -> None:
     """Synchronously save complete, reshardable training state."""
 
-    import torch.distributed.checkpoint as dcp
-
-    rank, world_size = _rank_world()
     destination = Path(path)
-    destination.mkdir(parents=True, exist_ok=True)
-    # Do NOT remove an existing _SUCCESS marker here. When this call is replacing an already-valid
-    # checkpoint at the same path, invalidating the marker before the new write has even started
-    # would leave a window -- if dcp.save/_write_sidecar below then fails (crash, disk full,
-    # exception) -- where neither the old checkpoint (marker gone) nor the new one (write
-    # incomplete) is loadable, even though the OLD checkpoint's data is still fully intact on disk.
-    # _finalize_checkpoint's final ``os.replace(success_temporary, path / "_SUCCESS")`` already
-    # atomically supersedes any old marker with the new one in a single step, once (and only once)
-    # the new write has fully succeeded, so an explicit early removal is both unnecessary and unsafe.
     payload = _sidecar_payload(
         step=step,
         scheduler=scheduler,
@@ -174,9 +393,65 @@ def save_training_state(
         typed_scheduler_state=typed_scheduler_state,
         extra=extra,
     )
-    dcp.save(_dcp_state(module, optimizer), checkpoint_id=str(destination))
-    _write_sidecar(destination, rank, payload)
-    _finalize_checkpoint(destination, rank=rank, world_size=world_size)
+    _save_generation(_dcp_state(module, optimizer), destination, payload)
+
+
+def save_frozen_training_state(
+    model_state: dict[str, Any],
+    optimizer_state: dict[str, Any],
+    path: str,
+    *,
+    step: int,
+    loader_state: Any = None,
+    parallel_plan: Any = None,
+    typed_scheduler_state: Any = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Transactionally save already-frozen model and optimizer state dictionaries."""
+    payload = _sidecar_payload(
+        step=step,
+        scheduler=None,
+        scaler=None,
+        loader_state=loader_state,
+        parallel_plan=parallel_plan,
+        typed_scheduler_state=typed_scheduler_state,
+        extra=extra,
+    )
+    _save_generation(
+        {"model": model_state, "optimizer": optimizer_state},
+        Path(path),
+        payload,
+    )
+
+
+def _load_metadata_from_generation(source: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Decode metadata from the already-validated generation selected by a caller."""
+    rank, world_size = _rank_world()
+    saved_world_size = int(manifest["world_size"])
+    sidecar_rank = rank if world_size == saved_world_size else rank % saved_world_size
+    sidecar_name = "rank-%05d.json" % sidecar_rank
+    if sidecar_name not in set(manifest["rank_sidecars"]):
+        raise RuntimeError("checkpoint has no metadata sidecar for rank %d" % sidecar_rank)
+    try:
+        encoded_payload = json.loads((source / sidecar_name).read_text(encoding="utf-8"))
+        payload = _safe_decode(encoded_payload)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("checkpoint rank metadata is invalid") from exc
+    if not isinstance(payload, dict) or int(payload.get("format_version", -1)) != _FORMAT_VERSION:
+        raise RuntimeError("checkpoint rank metadata has an unsupported schema")
+    for required in ("step", "rng", "extra"):
+        if required not in payload:
+            raise RuntimeError("checkpoint rank metadata is missing %s" % required)
+    payload = dict(payload)
+    payload["world_size_changed"] = world_size != saved_world_size
+    payload["saved_world_size"] = saved_world_size
+    return payload
+
+
+def load_training_metadata(path: str) -> dict[str, Any]:
+    """Validate one published generation and safely decode this rank's metadata."""
+    source, manifest = _resolve_and_validate_generation(Path(path))
+    return _load_metadata_from_generation(source, manifest)
 
 
 def load_training_state(
@@ -191,17 +466,12 @@ def load_training_state(
 ) -> dict[str, Any]:
     """Restore complete training state and return its non-tensor metadata."""
 
-    import torch
     import torch.distributed.checkpoint as dcp
     from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
 
-    source = Path(path)
-    if not (source / "_SUCCESS").is_file():
-        raise RuntimeError("checkpoint is incomplete: %s has no _SUCCESS marker." % source)
-    manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
-    if int(manifest.get("format_version", -1)) != _FORMAT_VERSION:
-        raise RuntimeError("unsupported training checkpoint format version.")
-    rank, world_size = _rank_world()
+    destination = Path(path)
+    source, manifest = _resolve_and_validate_generation(destination)
+    _, world_size = _rank_world()
     saved_world_size = int(manifest["world_size"])
     changed = world_size != saved_world_size
     if changed and not allow_world_size_change:
@@ -209,6 +479,10 @@ def load_training_state(
             "checkpoint world_size changed from %d to %d; pass allow_world_size_change=True to reshard "
             "model state and rebuild rank-local loader state." % (saved_world_size, world_size)
         )
+    payload = _load_metadata_from_generation(source, manifest)
+
+    # All files and typed metadata have been authenticated and decoded before
+    # any live model, optimizer, scheduler, scaler, or RNG state is mutated.
     model_state, optimizer_state = get_state_dict(module, optimizer)
     state = {"model": model_state, "optimizer": optimizer_state}
     dcp.load(state, checkpoint_id=str(source))
@@ -218,17 +492,12 @@ def load_training_state(
         model_state_dict=state["model"],
         optim_state_dict=state["optimizer"],
     )
-    sidecar_rank = rank if not changed else rank % saved_world_size
-    payload = torch.load(source / ("rank-%05d.pt" % sidecar_rank), weights_only=False)
     if scheduler is not None and payload.get("scheduler") is not None:
         scheduler.load_state_dict(payload["scheduler"])
     if scaler is not None and payload.get("scaler") is not None:
         scaler.load_state_dict(payload["scaler"])
     if restore_rng and not changed:
         _restore_rng_state(payload["rng"])
-    payload = dict(payload)
-    payload["world_size_changed"] = changed
-    payload["saved_world_size"] = saved_world_size
     return payload
 
 
@@ -238,6 +507,7 @@ class AsyncTrainingCheckpoint:
 
     future: Any
     path: Path
+    generation: Path
     rank: int
     world_size: int
     payload: dict[str, Any]
@@ -251,8 +521,9 @@ class AsyncTrainingCheckpoint:
             wait()
         else:
             self.future.result()
-        _write_sidecar(self.path, self.rank, self.payload)
-        _finalize_checkpoint(self.path, rank=self.rank, world_size=self.world_size)
+        _write_sidecar(self.generation, self.rank, self.payload)
+        _finalize_checkpoint(self.generation, rank=self.rank, world_size=self.world_size)
+        _publish_generation(self.path, self.generation, rank=self.rank)
         self._complete = True
 
     @property
@@ -282,9 +553,7 @@ def async_save_training_state(
     rank, world_size = _rank_world()
     destination = Path(path)
     destination.mkdir(parents=True, exist_ok=True)
-    # See the matching comment in save_training_state: an existing _SUCCESS marker must survive
-    # until _finalize_checkpoint's atomic os.replace supersedes it, not be removed up front -- a
-    # failed/never-awaited async save must never leave a replaced checkpoint with no valid marker.
+    generation = _generation_path(destination, rank)
     payload = _sidecar_payload(
         step=step,
         scheduler=scheduler,
@@ -294,15 +563,17 @@ def async_save_training_state(
         typed_scheduler_state=typed_scheduler_state,
         extra=extra,
     )
-    future = dcp.async_save(_dcp_state(module, optimizer), checkpoint_id=str(destination))
-    return AsyncTrainingCheckpoint(future, destination, rank, world_size, payload)
+    future = dcp.async_save(_dcp_state(module, optimizer), checkpoint_id=str(generation))
+    return AsyncTrainingCheckpoint(future, destination, generation, rank, world_size, payload)
 
 
 __all__ = [
     "AsyncTrainingCheckpoint",
     "async_save_training_state",
     "load_sharded",
+    "load_training_metadata",
     "load_training_state",
+    "save_frozen_training_state",
     "save_sharded",
     "save_training_state",
 ]

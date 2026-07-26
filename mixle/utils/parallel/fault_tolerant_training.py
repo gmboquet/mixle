@@ -8,13 +8,10 @@ re-partition, deterministic rendezvous-based chaos test); this module carries th
 where the parallelism is data-parallel gradient averaging rather than additive sufficient-statistic
 folding, so the mechanics differ even though the shape of the fault-tolerance story does not:
 
-* **Async DCP snapshots** (:func:`save_checkpoint_async`) -- wraps
-  :func:`mixle.utils.parallel.dcp_checkpoint.save_sharded`'s underlying ``torch.distributed.checkpoint``
-  call so a checkpoint does not block training: the (bounded, D2H-copy) cost of cloning the state dict to a
-  frozen CPU snapshot happens synchronously on the caller's thread, and the (unbounded, I/O-latency-bound)
-  cost of actually writing it to disk happens on a background thread. Loader state rides along in the same
-  checkpoint directory (a sibling ``loader_state.json``), so a resume restores model + optimizer + data
-  position together, atomically from the caller's point of view.
+* **Async DCP snapshots** (:func:`save_checkpoint_async`) -- freezes model, optimizer, loader, and caller
+  metadata at one instant, then writes them on a background thread through the same immutable-generation,
+  integrity-manifest, and atomic-publication protocol as synchronous training checkpoints. A resume
+  therefore restores model + optimizer + data position together without trusting a detached sidecar.
 * **Loader-state capture** (:class:`LoaderState`) -- mirrors the resumability contract
   :class:`mixle.data.streaming_corpus.StreamingCorpus` (F3, PR #139) already guarantees:
   ``epoch_batches(epoch)`` is a pure, deterministic function of ``(seed, epoch, rank, world_size)``, so the
@@ -47,12 +44,10 @@ that would run at 10k GPUs, exercised at small scale.
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -62,7 +57,11 @@ try:
 except ImportError:  # pragma: no cover - torch is optional
     torch = None
 
-from mixle.utils.parallel.dcp_checkpoint import load_sharded
+from mixle.utils.parallel.dcp_checkpoint import (
+    load_training_metadata,
+    load_training_state,
+    save_frozen_training_state,
+)
 from mixle.utils.parallel.training_health import TrainingHealthMonitor
 
 __all__ = [
@@ -210,17 +209,14 @@ def save_checkpoint_async(
 ) -> AsyncCheckpointHandle:
     """Snapshot ``(model, optimizer, loader_state)`` to ``path`` without blocking the training loop.
 
-    Refines :func:`mixle.utils.parallel.dcp_checkpoint.save_sharded` for the async case: that function
-    calls ``dcp.save`` directly on the live state dict, which blocks the caller for the full write -- fine
-    for a synchronous checkpoint, unsafe to background (the live tensors keep changing under the writer).
-    Here, the ONLY synchronous work is ``get_state_dict`` + a detached CPU clone (a bounded D2H-copy cost
-    that does not scale with disk/network write latency); the actual ``dcp.save`` call -- and the sibling
-    ``loader_state.json`` write -- happen on a background thread, so this function returns as soon as the
-    clone is done and the training loop's next step can start immediately.
+    The ONLY synchronous work is ``get_state_dict`` + a detached CPU clone (a bounded D2H-copy cost that
+    does not scale with disk/network write latency). The transactional generation write and publication
+    happen on a background thread, so this function returns as soon as the clone is done and the training
+    loop's next step can start immediately.
 
-    ``loader_state`` (plus any caller-supplied ``extra``, e.g. every rank's ``LoaderState`` in a
-    multi-rank job) is written alongside the DCP checkpoint directory as JSON -- resuming needs both the
-    model/optimizer AND the data position, and this keeps them physically bundled under one ``path``.
+    ``loader_state`` and caller ``extra`` use the same integrity-bound typed
+    sidecar and immutable-generation publication protocol as
+    :mod:`mixle.utils.parallel.dcp_checkpoint`.
     """
     from torch.distributed.checkpoint.state_dict import get_state_dict
 
@@ -230,17 +226,21 @@ def save_checkpoint_async(
     optim_sd = _clone_state_tree(optim_sd)
     prepare_time_s = time.perf_counter() - t0
 
-    payload = {"loader_state": loader_state.to_dict(), "extra": extra or {}}
+    loader_payload = loader_state.to_dict()
+    extra_payload = dict(extra or {})
 
     errors: list[BaseException] = []
 
     def _write() -> None:
         try:
-            import torch.distributed.checkpoint as dcp
-
-            Path(path).mkdir(parents=True, exist_ok=True)
-            dcp.save({"model": model_sd, "optimizer": optim_sd}, checkpoint_id=str(path))
-            Path(path, "loader_state.json").write_text(json.dumps(payload))
+            save_frozen_training_state(
+                model_sd,
+                optim_sd,
+                path,
+                step=int(loader_payload["batch_idx"]),
+                loader_state=loader_payload,
+                extra=extra_payload,
+            )
         except BaseException as error:  # noqa: BLE001 - surfaced by AsyncCheckpointHandle.wait
             errors.append(error)
 
@@ -250,17 +250,14 @@ def save_checkpoint_async(
 
 
 def load_checkpoint(module: Any, optimizer: Any, path: str) -> LoaderState:
-    """Load a checkpoint written by :func:`save_checkpoint_async` (or plain ``save_sharded``, if a sibling
-    ``loader_state.json`` was written by hand) into ``module``/``optimizer`` in place; returns the captured
-    :class:`LoaderState` so the caller's data loader can resume from the exact same position."""
-    load_sharded(module, optimizer, path)
-    payload = json.loads(Path(path, "loader_state.json").read_text())
+    """Load a verified transactional checkpoint and return its loader position."""
+    payload = load_training_state(module, optimizer, path)
     return LoaderState.from_dict(payload["loader_state"])
 
 
 def load_checkpoint_extra(path: str) -> dict[str, Any]:
-    """The ``extra`` payload written alongside a checkpoint (e.g. every rank's ``LoaderState``)."""
-    payload = json.loads(Path(path, "loader_state.json").read_text())
+    """Return verified typed ``extra`` metadata without mutating training state."""
+    payload = load_training_metadata(path)
     return dict(payload.get("extra") or {})
 
 
