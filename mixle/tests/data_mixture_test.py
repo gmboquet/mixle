@@ -7,6 +7,7 @@ alternative domains are pure noise. All training here is a real (tiny) transform
 """
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -15,6 +16,8 @@ torch = pytest.importorskip("torch")
 
 from mixle.task.data_mixture import (  # noqa: E402
     SyntheticDomain,
+    _normalize_weights,
+    _sample_interleaved_stream,
     estimate_near_duplicate_rate,
     optimize_mixture,
     proxy_run_score,
@@ -54,6 +57,63 @@ class SyntheticDomainTest(unittest.TestCase):
         b = d.sample(40, seed=7)  # noise_p=0 -> no randomness at all, any seed matches
         np.testing.assert_array_equal(a, b)
         np.testing.assert_array_equal(a[:4], a[4:8])  # repeats with the stated period
+
+
+class MixtureIntegrityTest(unittest.TestCase):
+    def test_training_stream_samples_domain_identity_per_token(self):
+        domains = [
+            SyntheticDomain(name="a", vocab=100, period=1, pattern_seed=0),
+            SyntheticDomain(name="b", vocab=100, period=1, pattern_seed=1),
+        ]
+        stream, assignment = _sample_interleaved_stream(
+            domains,
+            np.array([0.5, 0.5]),
+            128,
+            seed=7,
+        )
+        self.assertGreater(int(np.count_nonzero(assignment[1:] != assignment[:-1])), 20)
+        for index, domain in enumerate(domains):
+            np.testing.assert_array_equal(stream[assignment == index], domain.sample(int((assignment == index).sum())))
+
+    def test_nonfinite_weights_and_duplicate_names_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "finite"):
+            _normalize_weights([float("nan"), 1.0], 2)
+        domains = [
+            SyntheticDomain(name="same", vocab=10),
+            SyntheticDomain(name="same", vocab=10),
+        ]
+        with self.assertRaisesRegex(ValueError, "unique"):
+            optimize_mixture(domains, proxy_steps=1, budget=3)
+
+    def test_optimizer_reserves_an_independently_seeded_audit(self):
+        domains = [
+            SyntheticDomain(name="a", vocab=10, period=1, pattern_seed=0),
+            SyntheticDomain(name="b", vocab=10, period=1, pattern_seed=1),
+        ]
+        calls = []
+
+        def fake_score(weights, called_domains, proxy_steps, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("return_detail"):
+                return 0.25, {domain.name: 0.25 for domain in called_domains}
+            return float(np.asarray(weights)[1])
+
+        with patch("mixle.task.data_mixture.proxy_run_score", side_effect=fake_score):
+            weights, receipt = optimize_mixture(
+                domains,
+                proxy_steps=2,
+                budget=4,
+                proxy_kwargs={"eval_seed": 123},
+                seed=4,
+                return_receipt=True,
+            )
+
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(receipt.search_runs, 3)
+        self.assertEqual(receipt.selection_eval_seed, 123)
+        self.assertNotEqual(receipt.audit_eval_seed, receipt.selection_eval_seed)
+        self.assertEqual(calls[-1]["eval_seed"], receipt.audit_eval_seed)
+        np.testing.assert_allclose(weights, receipt.weights)
 
 
 class OptimizerSanityTest(unittest.TestCase):

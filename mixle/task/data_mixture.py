@@ -41,11 +41,33 @@ from typing import Any
 import numpy as np
 
 __all__ = [
+    "MixtureOptimizationReceipt",
     "SyntheticDomain",
     "estimate_near_duplicate_rate",
     "optimize_mixture",
     "proxy_run_score",
 ]
+
+
+def _exact_int(value: Any, name: str, *, minimum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be an integer.")
+    result = int(value)
+    if minimum is not None and result < minimum:
+        raise ValueError(f"{name} must be >= {minimum}.")
+    return result
+
+
+def _random_state_seed(value: Any, name: str = "seed") -> int:
+    result = _exact_int(value, name, minimum=0)
+    if result >= 2**32:
+        raise ValueError(f"{name} must be less than 2**32.")
+    return result
+
+
+def _derived_seed(seed: int, purpose: str) -> int:
+    payload = f"{seed}:{purpose}".encode()
+    return int.from_bytes(hashlib.sha256(payload).digest()[:4], "big")
 
 
 @dataclass(frozen=True)
@@ -69,24 +91,28 @@ class SyntheticDomain:
     _pattern: np.ndarray = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.vocab < 2:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("name must be a non-empty string.")
+        vocab = _exact_int(self.vocab, "vocab")
+        if vocab < 2:
             raise ValueError("vocab must be >= 2.")
-        if not 0.0 <= self.noise_p <= 1.0:
+        noise_p = float(self.noise_p)
+        if not np.isfinite(noise_p) or not 0.0 <= noise_p <= 1.0:
             raise ValueError("noise_p must lie in [0, 1].")
-        if self.period is not None and self.period < 1:
-            raise ValueError("period must be positive (or None for pure noise).")
+        pattern_seed = _random_state_seed(self.pattern_seed, "pattern_seed")
+        period = None if self.period is None else _exact_int(self.period, "period", minimum=1)
         if self.period is None:
             pattern = np.zeros(0, dtype=np.int64)
         else:
-            pattern = np.random.RandomState(self.pattern_seed).randint(0, self.vocab, size=int(self.period))
+            pattern = np.random.RandomState(pattern_seed).randint(0, vocab, size=period)
         object.__setattr__(self, "_pattern", pattern)
 
     def sample(self, n_tokens: int, *, seed: int = 0) -> np.ndarray:
         """Draw ``n_tokens`` ids (int64 array) from this domain's distribution."""
-        n_tokens = int(n_tokens)
-        if n_tokens <= 0:
+        n_tokens = _exact_int(n_tokens, "n_tokens", minimum=0)
+        if n_tokens == 0:
             return np.zeros(0, dtype=np.int64)
-        rng = np.random.RandomState(seed)
+        rng = np.random.RandomState(_random_state_seed(seed))
         if self.period is None:
             return rng.randint(0, self.vocab, size=n_tokens).astype(np.int64)
         idx = np.arange(n_tokens) % int(self.period)
@@ -99,15 +125,76 @@ class SyntheticDomain:
 
 
 def _normalize_weights(mixture_weights: Sequence[float], n_domains: int) -> np.ndarray:
-    w = np.asarray(list(mixture_weights), dtype=np.float64)
+    try:
+        w = np.asarray(list(mixture_weights), dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("mixture_weights must contain real numbers.") from exc
     if w.shape != (n_domains,):
         raise ValueError(f"mixture_weights must have {n_domains} entries, got shape {w.shape}.")
+    if not np.all(np.isfinite(w)):
+        raise ValueError("mixture_weights must be finite.")
     if np.any(w < 0.0):
         raise ValueError("mixture_weights must be non-negative.")
     total = float(w.sum())
     if total <= 0.0:
         raise ValueError("mixture_weights must sum to a positive total.")
     return w / total
+
+
+def _validate_domains(domains: Sequence[SyntheticDomain]) -> list[SyntheticDomain]:
+    result = list(domains)
+    if len(result) < 2:
+        raise ValueError("need at least two domains to mix.")
+    if any(not isinstance(domain, SyntheticDomain) for domain in result):
+        raise TypeError("domains must contain only SyntheticDomain instances.")
+    names = [domain.name for domain in result]
+    if len(set(names)) != len(names):
+        raise ValueError("domain names must be unique.")
+    if len({domain.vocab for domain in result}) != 1:
+        raise ValueError("all domains must share the same vocab.")
+    return result
+
+
+def _sample_interleaved_stream(
+    domains: Sequence[SyntheticDomain],
+    weights: np.ndarray,
+    n_tokens: int,
+    *,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample domain identity per token and return the stream plus those identities.
+
+    Tokens belonging to one domain retain that domain's sequential generator order,
+    but are scattered into positions drawn independently from the mixture.
+    """
+    n_tokens = _exact_int(n_tokens, "n_tokens", minimum=1)
+    seed = _random_state_seed(seed)
+    assignment = np.random.RandomState(_derived_seed(seed, "domain-assignment")).choice(
+        len(domains), size=n_tokens, p=weights
+    )
+    stream = np.empty(n_tokens, dtype=np.int64)
+    for index, domain in enumerate(domains):
+        positions = np.flatnonzero(assignment == index)
+        if positions.size:
+            stream[positions] = domain.sample(
+                int(positions.size),
+                seed=_derived_seed(seed, f"domain-{index}"),
+            )
+    return stream, assignment
+
+
+@dataclass(frozen=True)
+class MixtureOptimizationReceipt:
+    """Independent evaluation evidence for a selected mixture."""
+
+    method: str
+    weights: tuple[float, ...]
+    search_runs: int
+    selection_eval_seed: int
+    audit_training_seed: int
+    audit_eval_seed: int
+    audit_loss: float
+    audit_per_domain: tuple[tuple[str, float], ...]
 
 
 def proxy_run_score(
@@ -128,8 +215,8 @@ def proxy_run_score(
 ) -> float | tuple[float, dict[str, float]]:
     """Run one short proxy training and return the mean held-out NLL across ``domains`` (lower is better).
 
-    Builds a training token stream by drawing ``mixture_weights[i]``-proportional tokens from each domain
-    (concatenated; the number of tokens is chosen so training runs roughly ``proxy_steps`` gradient
+    Builds a training token stream by independently drawing each token's domain from
+    ``mixture_weights`` (the number of tokens is chosen so training runs roughly ``proxy_steps`` gradient
     steps at ``batch_size``), trains a real (tiny) :class:`mixle.models.language_model.LM` on it for one
     epoch, then scores held-out NLL on ``eval_tokens`` fresh tokens from EACH domain (independent of the
     mixture) and returns the unweighted mean across domains -- the DoReMi objective is generalizing to
@@ -146,37 +233,29 @@ def proxy_run_score(
 
     from mixle.models.language_model import LM
 
-    domains = list(domains)
-    if len(domains) < 2:
-        raise ValueError("need at least two domains to mix.")
-    vocabs = {d.vocab for d in domains}
-    if len(vocabs) != 1:
-        raise ValueError("all domains must share the same vocab.")
+    domains = _validate_domains(domains)
     vocab = domains[0].vocab
-    proxy_steps = max(1, int(proxy_steps))
+    proxy_steps = _exact_int(proxy_steps, "proxy_steps", minimum=1)
+    batch_size = _exact_int(batch_size, "batch_size", minimum=1)
+    block = _exact_int(block, "block", minimum=1)
+    eval_tokens = _exact_int(eval_tokens, "eval_tokens", minimum=1)
+    seed = _random_state_seed(seed)
+    eval_seed = _random_state_seed(eval_seed, "eval_seed")
     weights = _normalize_weights(mixture_weights, len(domains))
-    torch.manual_seed(int(seed))  # deterministic model init + fit-loop RNG (dropout/etc.) given `seed`
+    torch.manual_seed(seed)  # deterministic model init + fit-loop RNG (dropout/etc.) given `seed`
 
     total_train_tokens = proxy_steps * batch_size + block + 1
-    chunks = []
-    for i, (domain, w) in enumerate(zip(domains, weights)):
-        n_i = int(round(w * total_train_tokens))
-        n_i = max(n_i, 0)
-        if n_i:
-            chunks.append(domain.sample(n_i, seed=seed * 10_000 + i))
-    if not chunks:
-        raise ValueError("mixture assigns zero tokens to every domain.")
-    train_tokens = np.concatenate(chunks)
-    if len(train_tokens) <= block:
-        # a degenerate (near-empty) mixture request; pad with more of whatever domain had weight
-        train_tokens = np.tile(train_tokens, block // max(len(train_tokens), 1) + 2)
+    train_tokens, _ = _sample_interleaved_stream(domains, weights, total_train_tokens, seed=seed)
 
     lm = LM(vocab=vocab, d_model=d_model, n_layer=n_layer, n_head=n_head, block=block, device="cpu")
     lm.fit(train_tokens, epochs=1, batch_size=batch_size, lr=lr, shuffle=True)
 
     detail: dict[str, float] = {}
     for i, domain in enumerate(domains):
-        held_out = domain.sample(eval_tokens + block + 1, seed=eval_seed + i)
+        held_out = domain.sample(
+            eval_tokens + block + 1,
+            seed=_derived_seed(eval_seed, f"held-out-domain-{i}"),
+        )
         detail[domain.name] = lm.nll(held_out)
     aggregate = float(np.mean(list(detail.values())))
     if return_detail:
@@ -207,7 +286,13 @@ def _bandit_search(
     bandit = ThompsonGaussian(n_arms, seed=seed)
     for t in range(int(budget)):
         arm = bandit.select()
-        loss = proxy_run_score(arms[arm], domains, proxy_steps, seed=seed * 1000 + t, **proxy_kwargs)
+        loss = proxy_run_score(
+            arms[arm],
+            domains,
+            proxy_steps,
+            seed=_derived_seed(seed, f"bandit-search-{t}"),
+            **proxy_kwargs,
+        )
         bandit.update(arm, reward=-loss)  # higher reward = lower held-out loss
     best_arm = int(np.argmax(bandit.means))
     return arms[best_arm]
@@ -231,7 +316,13 @@ def _doe_search(
     for t in range(int(budget)):
         x = opt.ask()
         w = _softmax(np.asarray(x, dtype=np.float64))
-        loss = proxy_run_score(w, domains, proxy_steps, seed=seed * 1000 + t, **proxy_kwargs)
+        loss = proxy_run_score(
+            w,
+            domains,
+            proxy_steps,
+            seed=_derived_seed(seed, f"doe-search-{t}"),
+            **proxy_kwargs,
+        )
         opt.tell(x, loss)
     return _softmax(np.asarray(opt.best.best_x, dtype=np.float64))
 
@@ -244,32 +335,73 @@ def optimize_mixture(
     method: str = "bandit",
     proxy_kwargs: dict[str, Any] | None = None,
     seed: int = 0,
-) -> np.ndarray:
+    return_receipt: bool = False,
+) -> np.ndarray | tuple[np.ndarray, MixtureOptimizationReceipt]:
     """Learn domain mixture weights via repeated short proxy runs (DoReMi-style search).
 
-    ``budget`` proxy runs (each :func:`proxy_run_score` at ``proxy_steps`` gradient steps) are used to
-    search the mixture-weight simplex. ``method="bandit"`` (default) discretizes the simplex into a
+    ``budget - 1`` proxy runs (each :func:`proxy_run_score` at ``proxy_steps`` gradient steps) search
+    the mixture-weight simplex; the final reserved run audits the selected mixture with independent
+    training and evaluation seeds. ``method="bandit"`` (default) discretizes the simplex into a
     lattice of candidate mixtures (``mixle.doe.mixture.simplex_lattice``) and searches them with
     ``mixle.task.bandit.ThompsonGaussian`` (reward = negative held-out loss); ``method="doe"`` searches
     continuously via ``mixle.doe.optimizer.BayesianOptimizer`` over a softmax-reparameterized simplex.
-    Returns the learned weight vector (one entry per domain, summing to 1).
+    Returns the learned weight vector (one entry per domain, summing to 1). With
+    ``return_receipt=True``, also returns the immutable independent-audit receipt.
     """
-    domains = list(domains)
-    if len(domains) < 2:
-        raise ValueError("need at least two domains to mix.")
-    if budget < 2:
-        raise ValueError("budget must allow at least two proxy runs.")
+    domains = _validate_domains(domains)
+    proxy_steps = _exact_int(proxy_steps, "proxy_steps", minimum=1)
+    budget = _exact_int(budget, "budget", minimum=3)
+    seed = _random_state_seed(seed)
+    if not isinstance(method, str):
+        raise ValueError("method must be 'bandit' or 'doe'.")
+    if not isinstance(return_receipt, bool):
+        raise ValueError("return_receipt must be a boolean.")
     kwargs = dict(proxy_kwargs or {})
-    if kwargs.get("return_detail"):
+    if "seed" in kwargs:
+        raise ValueError("proxy_kwargs must not override optimize_mixture's training seed.")
+    if "return_detail" in kwargs:
         # the search loop needs a bare scalar loss (bandit.update(reward=-loss), opt.tell(x, loss));
         # return_detail=True makes proxy_run_score return a (loss, per_domain_dict) tuple instead,
         # which crashes the loop far from this call site with an opaque TypeError.
-        raise ValueError("proxy_kwargs['return_detail']=True is incompatible with optimize_mixture's search loop.")
+        raise ValueError("proxy_kwargs must not override optimize_mixture's return_detail setting.")
+    selection_eval_seed = _random_state_seed(kwargs.get("eval_seed", 999_000), "proxy_kwargs['eval_seed']")
+    kwargs["eval_seed"] = selection_eval_seed
+    search_runs = budget - 1
     if method == "bandit":
-        return _bandit_search(domains, proxy_steps, budget, kwargs, seed)
-    if method == "doe":
-        return _doe_search(domains, proxy_steps, budget, kwargs, seed)
-    raise ValueError(f"unknown method {method!r}; expected 'bandit' or 'doe'.")
+        weights = _bandit_search(domains, proxy_steps, search_runs, kwargs, seed)
+    elif method == "doe":
+        weights = _doe_search(domains, proxy_steps, search_runs, kwargs, seed)
+    else:
+        raise ValueError(f"unknown method {method!r}; expected 'bandit' or 'doe'.")
+
+    audit_training_seed = _derived_seed(seed, "independent-audit-training")
+    audit_eval_seed = _derived_seed(selection_eval_seed, "independent-audit-evaluation")
+    if audit_eval_seed == selection_eval_seed:
+        audit_eval_seed = (audit_eval_seed + 1) % (2**32)
+    audit_kwargs = dict(kwargs)
+    audit_kwargs.pop("eval_seed", None)
+    audit_loss, audit_detail = proxy_run_score(
+        weights,
+        domains,
+        proxy_steps,
+        seed=audit_training_seed,
+        eval_seed=audit_eval_seed,
+        return_detail=True,
+        **audit_kwargs,
+    )
+    receipt = MixtureOptimizationReceipt(
+        method=method,
+        weights=tuple(float(weight) for weight in weights),
+        search_runs=search_runs,
+        selection_eval_seed=selection_eval_seed,
+        audit_training_seed=audit_training_seed,
+        audit_eval_seed=audit_eval_seed,
+        audit_loss=audit_loss,
+        audit_per_domain=tuple(audit_detail.items()),
+    )
+    if return_receipt:
+        return weights, receipt
+    return weights
 
 
 # --- corpus dedup / quality receipt --------------------------------------------------------------------
