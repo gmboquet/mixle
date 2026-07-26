@@ -531,6 +531,7 @@ __all__ = [
     "SegmentalHiddenMarkovModelEstimator",
     "SegmentalHiddenMarkovModelDataEncoder",
     "BernoulliSetDistribution",
+    "BernoulliSetFitError",
     "BernoulliSetSampler",
     "BernoulliSetEstimator",
     "BernoulliSetDataEncoder",
@@ -1671,6 +1672,7 @@ from mixle.stats.sets.bernoulli_set import (
     BernoulliSetDistribution,
     BernoulliSetEnumerator,
     BernoulliSetEstimator,
+    BernoulliSetFitError,
     BernoulliSetSampler,
 )
 from mixle.stats.sets.integer_bernoulli_edit import (
