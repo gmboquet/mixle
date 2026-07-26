@@ -955,6 +955,9 @@ def encoded_data(
     root_only: bool = False,
     parallel_chunks: bool = False,
     chunk_workers: int | None = None,
+    batch_size: int | None = None,
+    shuffle: bool | None = None,
+    seed: int | None = None,
 ) -> EncodedDataHandle:
     """Create an encoded-data handle or explicitly reuse an unchanged handle.
 
@@ -984,6 +987,9 @@ def encoded_data(
                 ("root_only", root_only),
                 ("parallel_chunks", parallel_chunks),
                 ("chunk_workers", chunk_workers is not None),
+                ("batch_size", batch_size is not None),
+                ("shuffle", shuffle is not None),
+                ("seed", seed is not None),
             )
             if active
         ]
@@ -1018,6 +1024,9 @@ def encoded_data(
         root_only=root_only,
         parallel_chunks=parallel_chunks,
         chunk_workers=chunk_workers,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        seed=seed,
     )
 
 
@@ -1141,10 +1150,22 @@ def _torchrun_backend(data, *, estimator, model, encoder, sub_chunks, comm, root
     )
 
 
-def _lightning_backend(data, *, estimator, model, encoder, sub_chunks, **_):
+def _lightning_backend(
+    data, *, estimator, model, encoder, sub_chunks, batch_size, shuffle, seed, num_workers, **_
+):
     from mixle.utils.parallel.lightning_data import LightningEncodedData
 
-    return LightningEncodedData(data, estimator=estimator, model=model, encoder=encoder, sub_chunks=sub_chunks)
+    return LightningEncodedData(
+        data,
+        estimator=estimator,
+        model=model,
+        encoder=encoder,
+        batch_size=batch_size,
+        shuffle=True if shuffle is None else shuffle,
+        seed=0 if seed is None else seed,
+        num_workers=0 if num_workers is None else num_workers,
+        sub_chunks=sub_chunks,
+    )
 
 
 def _ray_backend(data, *, estimator, model, encoder, num_chunks, num_workers, client, **_):
