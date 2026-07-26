@@ -31,6 +31,12 @@ class DatetimeParsingTest(unittest.TestCase):
         phi = cyclic_phase(np.arange(0, 86400, 3600.0), "day")
         self.assertTrue(np.all((phi >= 0) & (phi < 2 * np.pi)))
 
+    def test_nat_and_none_remain_missing(self):
+        converted = to_unix_seconds(
+            [np.datetime64("NaT"), None]
+        )
+        self.assertTrue(np.all(np.isnan(converted)))
+
 
 class PeriodicTimeTest(unittest.TestCase):
     def setUp(self):
@@ -66,6 +72,37 @@ class PeriodicTimeTest(unittest.TestCase):
         rng = np.random.RandomState(2)
         pt = _fit_periodic(rng.uniform(0, 365 * 86400, 5000), "day")
         self.assertLess(pt.conc, 0.3)  # no time-of-day structure -> near-uniform
+
+    def test_period_must_be_finite_and_positive_everywhere(self):
+        for period in (0.0, -1.0, np.inf, np.nan):
+            with self.subTest(period=period), self.assertRaises(ValueError):
+                PeriodicTimeDistribution(period)
+            with self.subTest(
+                encoder_period=period
+            ), self.assertRaises(ValueError):
+                SeasonalTimeSeries(periods=[period])
+
+    def test_missing_timestamp_fails_closed(self):
+        pt = PeriodicTimeDistribution("day")
+        self.assertEqual(pt.log_density(np.datetime64("NaT")), -np.inf)
+        with self.assertRaises(ValueError):
+            pt.dist_to_encoder().seq_encode([np.datetime64("NaT")])
+        accumulator = pt.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            accumulator.update(None, 1.0, None)
+
+    def test_random_variable_is_cycle_quotient(self):
+        pt = PeriodicTimeDistribution("day", loc=1.0, conc=2.0)
+        self.assertAlmostEqual(
+            pt.log_density(1234.0),
+            pt.log_density(1234.0 + 86400.0),
+        )
+        draws = pt.sampler(seed=0).sample(100)
+        self.assertTrue(np.all((draws >= 0.0) & (draws < 86400.0)))
+
+    def test_nonzero_implicit_pseudo_count_is_rejected(self):
+        with self.assertRaises(NotImplementedError):
+            PeriodicTimeDistribution("day").estimator(pseudo_count=1.0)
 
 
 class SeasonalTimeSeriesTest(unittest.TestCase):
@@ -123,6 +160,43 @@ class SeasonalTimeSeriesTest(unittest.TestCase):
         y = 20 + daily + weekly + rng.randn(len(secs)) * 0.3
         m = SeasonalTimeSeries(periods=["day", "week"], harmonics=1).fit(secs, y)
         self.assertLess(np.sqrt(np.mean((m.mean(secs) - y) ** 2)), 0.4)
+
+    def test_configuration_and_fit_contracts(self):
+        with self.assertRaises(TypeError):
+            SeasonalTimeSeries(harmonics=1.9)
+        with self.assertRaises(ValueError):
+            SeasonalTimeSeries(periods=["day", "day"])
+        with self.assertRaises(ValueError):
+            SeasonalTimeSeries(periods=["day", 86400.0])
+        model = SeasonalTimeSeries(periods=[], harmonics=1, trend=False)
+        with self.assertRaises(ValueError):
+            model.fit([], [])
+        with self.assertRaises(ValueError):
+            model.fit([0.0, 1.0], [1.0])
+        with self.assertRaises(ValueError):
+            model.fit([0.0], [1.0])
+        with self.assertRaises(ValueError):
+            model.fit([0.0, 1.0, 2.0], [1.0, 1.0, 1.0])
+
+    def test_decomposition_reconstructs_mean(self):
+        model = SeasonalTimeSeries(
+            periods=["day", "week"],
+            harmonics=1,
+        ).fit(
+            np.arange(100, dtype=float) * 3600.0,
+            np.sin(np.arange(100, dtype=float)) + np.arange(100) * 0.01,
+        )
+        decomposition = model.decompose(
+            np.arange(20, dtype=float) * 3600.0
+        )
+        reconstructed = np.sum(
+            np.stack(list(decomposition.values())),
+            axis=0,
+        )
+        np.testing.assert_allclose(
+            reconstructed,
+            model.mean(np.arange(20, dtype=float) * 3600.0),
+        )
 
 
 if __name__ == "__main__":
