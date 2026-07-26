@@ -38,6 +38,12 @@ def fit_ab(min_dist: float, spread: float = 1.0) -> tuple[float, float]:
     ``exp(-(d - min_dist)/spread)`` (1 inside ``min_dist``) -- umap-learn's own calibration."""
     from scipy.optimize import curve_fit
 
+    if not np.isfinite(min_dist) or min_dist < 0.0:
+        raise ValueError("min_dist must be finite and non-negative.")
+    if not np.isfinite(spread) or spread <= 0.0:
+        raise ValueError("spread must be finite and positive.")
+    if min_dist > spread:
+        raise ValueError("min_dist must not exceed spread.")
     grid = np.linspace(0.0, 3.0 * spread, 300)
     target = np.where(grid < min_dist, 1.0, np.exp(-(grid - min_dist) / spread))
 
@@ -51,6 +57,13 @@ def fit_ab(min_dist: float, spread: float = 1.0) -> tuple[float, float]:
 def _smooth_knn_row(dists: np.ndarray, target: float, n_iter: int = 64) -> tuple[float, float]:
     """UMAP's per-row calibration: rho = nearest positive distance; binary-search sigma so
     ``sum_j exp(-max(0, d_j - rho)/sigma) = target``."""
+    dists = np.asarray(dists, dtype=np.float64)
+    if dists.ndim != 1 or dists.size == 0 or not np.all(np.isfinite(dists)) or np.any(dists < 0.0):
+        raise ValueError("each kNN distance row must be a finite non-empty non-negative vector.")
+    if not np.isfinite(target) or target <= 0.0 or target > dists.size:
+        raise ValueError("smooth-kNN target must be finite, positive, and feasible.")
+    if isinstance(n_iter, bool) or not isinstance(n_iter, (int, np.integer)) or n_iter <= 0:
+        raise ValueError("n_iter must be a positive integer.")
     positive = dists[dists > 0.0]
     rho = float(positive.min()) if len(positive) else 0.0
     lo, hi, sigma = 0.0, np.inf, 1.0
@@ -76,20 +89,43 @@ def fuzzy_simplicial_set(knn_idx: np.ndarray, knn_dist: np.ndarray) -> scipy.spa
     """
     knn_idx = np.asarray(knn_idx, dtype=np.int64)
     knn_dist = np.asarray(knn_dist, dtype=np.float64)
-    n, k = knn_idx.shape
-    target = np.log2(max(k, 2))
+    if knn_idx.ndim != 2 or knn_dist.ndim != 2 or knn_idx.shape != knn_dist.shape:
+        raise ValueError("knn_idx and knn_dist must be aligned two-dimensional arrays.")
+    n, _ = knn_idx.shape
+    if n < 2:
+        raise ValueError("a fuzzy graph requires at least two observations.")
+    if np.any(knn_idx < 0) or np.any(knn_idx >= n):
+        raise ValueError("kNN indices are outside the observation range.")
+    if not np.all(np.isfinite(knn_dist)) or np.any(knn_dist < 0.0):
+        raise ValueError("kNN distances must be finite and non-negative.")
 
-    rows = np.repeat(np.arange(n, dtype=np.int64), k)
-    cols = knn_idx.ravel()
-    vals = np.empty(n * k, dtype=np.float64)
+    rows_list: list[int] = []
+    cols_list: list[int] = []
+    vals_list: list[float] = []
     for i in range(n):
-        rho, sigma = _smooth_knn_row(knn_dist[i], target)
-        vals[i * k : (i + 1) * k] = np.exp(-np.maximum(knn_dist[i] - rho, 0.0) / sigma)
+        keep = knn_idx[i] != i
+        indices = knn_idx[i, keep]
+        distances = knn_dist[i, keep]
+        if indices.size == 0:
+            raise ValueError("each kNN row must contain at least one non-self neighbor.")
+        if np.unique(indices).size != indices.size:
+            raise ValueError("each kNN row must contain unique non-self neighbors.")
+        target = float(np.log2(max(indices.size, 2)))
+        rho, sigma = _smooth_knn_row(distances, target)
+        memberships = np.exp(-np.maximum(distances - rho, 0.0) / sigma)
+        rows_list.extend([i] * len(indices))
+        cols_list.extend(int(index) for index in indices)
+        vals_list.extend(float(value) for value in memberships)
 
-    w = scipy.sparse.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
+    w = scipy.sparse.coo_matrix((vals_list, (rows_list, cols_list)), shape=(n, n)).tocsr()
+    w.setdiag(0.0)
+    w.eliminate_zeros()
     w_t = w.T.tocsr()
     prod = w.multiply(w_t)
-    return (w + w_t - prod).tocoo()
+    graph = (w + w_t - prod).tocoo()
+    graph.setdiag(0.0)
+    graph.eliminate_zeros()
+    return graph
 
 
 def _spectral_init(graph: scipy.sparse.coo_matrix, emb_dim: int, rng: np.random.RandomState) -> np.ndarray:
@@ -138,11 +174,37 @@ def simplicial_set_layout(
     from mixle.utils.hvis.goals import apply_projections, total_goal_gradient
 
     graph = graph.tocoo()
+    if graph.shape[0] != graph.shape[1] or graph.shape[0] < 2:
+        raise ValueError("graph must be a square matrix with at least two observations.")
+    if graph.nnz == 0:
+        raise ValueError("graph must contain at least one non-self edge.")
+    if not np.all(np.isfinite(graph.data)) or np.any(graph.data < 0.0):
+        raise ValueError("graph memberships must be finite and non-negative.")
+    if np.any(graph.row == graph.col):
+        raise ValueError("graph must not contain self-edges.")
+    if isinstance(emb_dim, bool) or not isinstance(emb_dim, (int, np.integer)) or emb_dim <= 0:
+        raise ValueError("emb_dim must be a positive integer.")
+    if n_epochs is not None and (
+        isinstance(n_epochs, bool) or not isinstance(n_epochs, (int, np.integer)) or n_epochs <= 0
+    ):
+        raise ValueError("n_epochs must be a positive integer or None.")
+    if (
+        isinstance(negative_sample_rate, bool)
+        or not isinstance(negative_sample_rate, (int, np.integer))
+        or negative_sample_rate <= 0
+    ):
+        raise ValueError("negative_sample_rate must be a positive integer.")
+    if not np.isfinite(learning_rate) or learning_rate <= 0.0:
+        raise ValueError("learning_rate must be finite and positive.")
+    if not np.isfinite(a) or a <= 0.0 or not np.isfinite(b) or b <= 0.0:
+        raise ValueError("a and b must be finite and positive.")
     n = graph.shape[0]
-    keep = graph.data > graph.data.max() / max(float(n_epochs or 500), 1.0)
-    heads, tails, weights = graph.row[keep], graph.col[keep], graph.data[keep]
     if n_epochs is None:
         n_epochs = 500 if n < 10000 else 200
+    keep = graph.data > graph.data.max() / float(n_epochs)
+    heads, tails, weights = graph.row[keep], graph.col[keep], graph.data[keep]
+    if weights.size == 0:
+        raise ValueError("no graph edges survive the epoch-sampling threshold.")
     rng = np.random.RandomState(seed)
 
     if Y is None:
@@ -151,6 +213,8 @@ def simplicial_set_layout(
         y = np.array(Y, dtype=np.float64)
         if y.shape != (n, emb_dim):
             raise ValueError(f"initial Y must have shape ({n}, {emb_dim}).")
+        if not np.all(np.isfinite(y)):
+            raise ValueError("initial Y must contain only finite values.")
 
     epochs_per_sample = weights.max() / weights
     next_due = epochs_per_sample.copy()

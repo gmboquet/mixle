@@ -139,6 +139,35 @@ class AxisAlignTest(unittest.TestCase):
 
 
 class InternalUmapTest(unittest.TestCase):
+    def test_fuzzy_graph_removes_self_before_membership_calibration(self):
+        from mixle.utils.hvis.umap_np import fuzzy_simplicial_set
+
+        idx = np.array([[0, 1, 2], [1, 0, 2], [2, 1, 0]])
+        dist = np.array([[0.0, 1.0, 2.0], [0.0, 1.0, 3.0], [0.0, 2.0, 3.0]])
+        graph = fuzzy_simplicial_set(idx, dist).tocsr()
+        np.testing.assert_array_equal(graph.diagonal(), np.zeros(3))
+        self.assertGreater(graph.nnz, 0)
+
+    def test_fuzzy_graph_rejects_self_only_rows(self):
+        from mixle.utils.hvis.umap_np import fuzzy_simplicial_set
+
+        with self.assertRaises(ValueError):
+            fuzzy_simplicial_set(np.arange(3)[:, None], np.zeros((3, 1)))
+
+    def test_layout_rejects_empty_graph_and_invalid_sampling_controls(self):
+        import scipy.sparse
+
+        from mixle.utils.hvis.umap_np import simplicial_set_layout
+
+        empty = scipy.sparse.coo_matrix((3, 3), dtype=np.float64)
+        with self.assertRaises(ValueError):
+            simplicial_set_layout(empty)
+        graph = scipy.sparse.coo_matrix(([1.0, 1.0], ([0, 1], [1, 0])), shape=(3, 3))
+        with self.assertRaises(ValueError):
+            simplicial_set_layout(graph, n_epochs=0)
+        with self.assertRaises(ValueError):
+            simplicial_set_layout(graph, negative_sample_rate=0)
+
     def test_internal_engine_separates_clusters(self):
         data, labels = _data(seed=6)
         coords = humap(data, mix_model=_MODEL, engine="internal", seed=6, n_epochs=150, out=None)
