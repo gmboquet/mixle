@@ -465,6 +465,8 @@ __all__ = [
     "CategoricalLatentPosterior",
     "MarkovChainLatentPosterior",
     "MeanFieldLDAPosterior",
+    "ImpossiblePosteriorError",
+    "ImpossiblePosteriorResult",
     "MixtureSampler",
     "MixtureEstimator",
     "MixtureDataEncoder",
@@ -1084,6 +1086,8 @@ from mixle.stats.compute.pdist import (  # noqa: F401
 )
 from mixle.stats.compute.posterior import (
     CategoricalLatentPosterior,
+    ImpossiblePosteriorError,
+    ImpossiblePosteriorResult,
     LatentPosterior,
     MarkovChainLatentPosterior,
     MeanFieldLDAPosterior,

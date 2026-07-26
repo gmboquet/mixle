@@ -25,6 +25,7 @@ Mean-field realizations additionally provide ``expected_complete_ll(dist)`` / ``
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -36,6 +37,19 @@ from mixle.utils.optional_deps import HAS_PANDAS, pandas, require
 # Canonical guarded softmax (all-(-inf) slices -> uniform). For the finite 1-D inputs used here this
 # matches the previous local `_softmax`; the guard only changes the degenerate all-(-inf) case.
 from mixle.utils.special import softmax as _softmax
+
+
+def _float64_array(value: Any, label: str) -> np.ndarray:
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{label} must be a real numeric array.") from exc
+    if np.iscomplexobj(raw):
+        raise TypeError(f"{label} must be real-valued.")
+    try:
+        return np.asarray(raw, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{label} must be a real numeric array.") from exc
 
 
 def _as_rng(rng: Any) -> RandomState:
@@ -50,6 +64,18 @@ def _cat(rng: RandomState, p: np.ndarray) -> int:
 def _entropy(p: np.ndarray) -> float:
     with np.errstate(divide="ignore", invalid="ignore"):
         return float(-np.sum(np.where(p > 0.0, p * np.log(p), 0.0)))
+
+
+class ImpossiblePosteriorError(ValueError):
+    """Raised when an operation requires a posterior law but the evidence has zero probability."""
+
+
+@dataclass(frozen=True, slots=True)
+class ImpossiblePosteriorResult:
+    """Typed explanation that a model/evidence pair does not define a conditional probability law."""
+
+    reason: str
+    log_evidence: float = float("-inf")
 
 
 class Posterior(ABC):
@@ -120,10 +146,7 @@ class CategoricalLatentPosterior(LatentPosterior):
     """
 
     def __init__(self, responsibilities: np.ndarray, support: Any = None) -> None:
-        try:
-            probabilities = np.asarray(responsibilities, dtype=np.float64)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise TypeError("responsibilities must be a finite row-stochastic (N, K) matrix.") from exc
+        probabilities = _float64_array(responsibilities, "responsibilities")
         if probabilities.ndim != 2:
             raise ValueError("responsibilities must be a 2-D (N, K) matrix")
         self.n, self.k = probabilities.shape
@@ -188,14 +211,53 @@ class MarkovChainLatentPosterior(LatentPosterior):
     """
 
     def __init__(self, log_pi: np.ndarray, log_A: np.ndarray, log_b: np.ndarray) -> None:
-        self.log_pi = np.asarray(log_pi, dtype=np.float64)
-        self.log_A = np.asarray(log_A, dtype=np.float64)
-        self.log_b = np.asarray(log_b, dtype=np.float64)
+        log_pi = _float64_array(log_pi, "log_pi")
+        log_A = _float64_array(log_A, "log_A")
+        log_b = _float64_array(log_b, "log_b")
+        if log_pi.ndim != 1 or log_pi.size == 0:
+            raise ValueError("log_pi must be a non-empty (K,) vector.")
+        k = log_pi.size
+        if log_A.shape != (k, k):
+            raise ValueError(f"log_A must have shape ({k}, {k}).")
+        if log_b.ndim != 2 or log_b.shape[1] != k:
+            raise ValueError(f"log_b must have shape (T, {k}).")
+        for label, values in (("log_pi", log_pi), ("log_A", log_A), ("log_b", log_b)):
+            if np.isnan(values).any() or np.isposinf(values).any():
+                raise ValueError(f"{label} may contain finite values or -inf, but not NaN or +inf.")
+        pi_norm = float(logsumexp(log_pi))
+        transition_norms = logsumexp(log_A, axis=1)
+        if not np.isfinite(pi_norm) or not np.isclose(pi_norm, 0.0, rtol=0.0, atol=1.0e-10):
+            raise ValueError("log_pi must encode a normalized probability vector.")
+        if not np.isfinite(transition_norms).all() or not np.allclose(
+            transition_norms, 0.0, rtol=0.0, atol=1.0e-10
+        ):
+            raise ValueError("each log_A row must encode a normalized transition probability vector.")
+        self.log_pi = np.array(log_pi - pi_norm, copy=True)
+        self.log_A = np.array(log_A - transition_norms[:, None], copy=True)
+        self.log_b = np.array(log_b, copy=True)
+        self.log_pi.setflags(write=False)
+        self.log_A.setflags(write=False)
+        self.log_b.setflags(write=False)
         self.t, self.k = self.log_b.shape
         self._log_alpha = self._forward()  # alpha_t(k) = log p(z_t=k, x_{1:t}), the FFBS filter
+        impossible_at = (
+            None
+            if self.t == 0
+            else next((t for t in range(self.t) if np.isneginf(self._log_alpha[t]).all()), None)
+        )
+        self.impossibility = (
+            None
+            if impossible_at is None
+            else ImpossiblePosteriorResult(
+                f"the evidence has zero probability at sequence position {impossible_at}; "
+                "no conditional latent-state law exists."
+            )
+        )
 
     def _forward(self) -> np.ndarray:
         la = np.empty((self.t, self.k))
+        if self.t == 0:
+            return la
         la[0] = self.log_pi + self.log_b[0]
         for t in range(1, self.t):
             la[t] = self.log_b[t] + logsumexp(la[t - 1][:, None] + self.log_A, axis=0)
@@ -203,7 +265,18 @@ class MarkovChainLatentPosterior(LatentPosterior):
 
     def log_likelihood(self) -> float:
         """The sequence log-likelihood ``log p(x)`` (the forward normalizer)."""
+        if self.t == 0:
+            return 0.0
         return float(logsumexp(self._log_alpha[-1]))
+
+    @property
+    def is_impossible(self) -> bool:
+        """Whether the supplied evidence has zero probability under the chain model."""
+        return self.impossibility is not None
+
+    def _require_possible(self) -> None:
+        if self.impossibility is not None:
+            raise ImpossiblePosteriorError(self.impossibility.reason)
 
     def _backward(self) -> np.ndarray:
         lb = np.zeros((self.t, self.k))
@@ -213,12 +286,18 @@ class MarkovChainLatentPosterior(LatentPosterior):
 
     def marginals(self) -> np.ndarray:
         """The ``(T, K)`` smoothing probabilities ``q(z_t = k | x)``."""
+        self._require_possible()
+        if self.t == 0:
+            return np.empty((0, self.k))
         log_gamma = self._log_alpha + self._backward()
         log_gamma -= logsumexp(log_gamma, axis=1, keepdims=True)
         return np.exp(log_gamma)
 
     def sample(self, rng: Any = None) -> np.ndarray:
         """Draw a state path ``z ~ q(z | x)`` via FFBS; returns ``(T,)`` state indices."""
+        self._require_possible()
+        if self.t == 0:
+            return np.empty(0, dtype=int)
         rng = _as_rng(rng)
         z = np.empty(self.t, dtype=int)
         z[-1] = _cat(rng, _softmax(self._log_alpha[-1]))  # z_T ~ filter at the last step (= smoother)
@@ -229,6 +308,9 @@ class MarkovChainLatentPosterior(LatentPosterior):
 
     def mode(self) -> np.ndarray:
         """The Viterbi (max-product) MAP path ``(T,)``."""
+        self._require_possible()
+        if self.t == 0:
+            return np.empty(0, dtype=int)
         v = np.empty((self.t, self.k))
         bp = np.zeros((self.t, self.k), dtype=int)
         v[0] = self.log_pi + self.log_b[0]
@@ -244,14 +326,16 @@ class MarkovChainLatentPosterior(LatentPosterior):
 
     def entropy(self) -> float:
         """Exact scalar chain entropy via the FFBS factorization ``q = q(z_T) prod_t q(z_t|z_{t+1})``."""
+        self._require_possible()
+        if self.t == 0:
+            return 0.0
         gamma = self.marginals()
         h = _entropy(_softmax(self._log_alpha[-1]))
         for t in range(self.t - 1):
             logp = self._log_alpha[t][:, None] + self.log_A  # (j, k): unnormalized q(z_t=j, z_{t+1}=k)
-            cond = np.exp(logp - logsumexp(logp, axis=0, keepdims=True))  # q(z_t=j | z_{t+1}=k)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                h_k = -np.sum(np.where(cond > 0.0, cond * np.log(cond), 0.0), axis=0)  # (k,)
-            h += float(np.sum(gamma[t + 1] * h_k))
+            for k in np.flatnonzero(gamma[t + 1] > 0.0):
+                conditional = _softmax(logp[:, k])
+                h += float(gamma[t + 1, k]) * _entropy(conditional)
         return h
 
     def to_dataframe(self) -> Any:
@@ -291,10 +375,61 @@ class MeanFieldLDAPosterior(LatentPosterior):
     """
 
     def __init__(self, gamma: np.ndarray, phi: np.ndarray, counts: np.ndarray) -> None:
-        self.gamma = np.asarray(gamma, dtype=np.float64).ravel()
-        self.phi = np.asarray(phi, dtype=np.float64)
-        self.counts = np.asarray(counts)
-        self.k = self.gamma.shape[0]
+        gamma = _float64_array(gamma, "gamma")
+        phi = _float64_array(phi, "phi")
+        try:
+            raw_counts = np.asarray(counts)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("counts must be a real numeric array.") from exc
+        if np.iscomplexobj(raw_counts):
+            raise TypeError("counts must be real-valued.")
+        if gamma.ndim != 1 or gamma.size == 0 or not np.isfinite(gamma).all() or np.any(gamma <= 0.0):
+            raise ValueError("gamma must be a non-empty vector of finite positive Dirichlet parameters.")
+        with np.errstate(over="ignore"):
+            gamma_total = gamma.sum()
+        if not np.isfinite(gamma_total):
+            raise ValueError("gamma parameters must have a finite positive total.")
+        k = gamma.shape[0]
+        if phi.ndim != 2 or phi.shape[1] != k:
+            raise ValueError(f"phi must have shape (W, {k}).")
+        if not np.isfinite(phi).all() or np.any(phi < 0.0):
+            raise ValueError("phi must contain finite non-negative probabilities.")
+        row_sums = phi.sum(axis=1)
+        if not np.allclose(row_sums, 1.0, rtol=1.0e-10, atol=1.0e-12):
+            raise ValueError("each phi row must sum to one.")
+        if raw_counts.ndim != 1 or raw_counts.shape[0] != phi.shape[0]:
+            raise ValueError("counts must be a (W,) vector aligned with phi rows.")
+        if np.issubdtype(raw_counts.dtype, np.bool_) or any(
+            isinstance(value, (bool, np.bool_)) for value in raw_counts
+        ):
+            raise TypeError("counts must contain exact non-negative integers, not booleans.")
+        if np.issubdtype(raw_counts.dtype, np.integer):
+            if np.any(raw_counts < 0) or (
+                np.issubdtype(raw_counts.dtype, np.unsignedinteger)
+                and np.any(raw_counts > np.iinfo(np.int64).max)
+            ):
+                raise ValueError("counts must contain exact non-negative integers representable as int64.")
+            integer_counts = np.asarray(raw_counts, dtype=np.int64)
+        else:
+            try:
+                numeric_counts = np.asarray(raw_counts, dtype=np.float64)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise TypeError("counts must contain exact non-negative integers.") from exc
+            if (
+                not np.isfinite(numeric_counts).all()
+                or np.any(numeric_counts < 0.0)
+                or np.any(numeric_counts != np.floor(numeric_counts))
+                or np.any(numeric_counts >= float(2**63))
+            ):
+                raise ValueError("counts must contain exact non-negative integers representable as int64.")
+            integer_counts = np.asarray(numeric_counts, dtype=np.int64)
+        self.gamma = np.array(gamma, copy=True)
+        self.phi = np.array(phi / row_sums[:, None], copy=True)
+        self.counts = np.array(integer_counts, dtype=np.int64, copy=True)
+        self.gamma.setflags(write=False)
+        self.phi.setflags(write=False)
+        self.counts.setflags(write=False)
+        self.k = k
 
     def topic_proportions(self) -> np.ndarray:
         """The mean document-topic distribution ``E_q[theta] = gamma / sum(gamma)`` ``(K,)``."""
@@ -308,12 +443,9 @@ class MeanFieldLDAPosterior(LatentPosterior):
         """Draw the full latent ``(theta, z)``: ``theta ~ Dir(gamma)`` and per-*token* topics ``z`` from ``phi``."""
         rng = _as_rng(rng)
         theta = rng.dirichlet(self.gamma)
-        cdf = np.cumsum(self.phi, axis=1)
-        cdf[:, -1] = 1.0
         z = []
         for w, c in enumerate(self.counts):
-            u = rng.random_sample(int(c))[:, None]
-            z.extend((u < cdf[w]).argmax(axis=1).tolist())
+            z.extend(_cat(rng, self.phi[w]) for _ in range(int(c)))
         return theta, np.asarray(z, dtype=int)
 
     def mode(self) -> np.ndarray:
