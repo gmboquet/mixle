@@ -1,7 +1,9 @@
 """Edge distillation (mixle.task.edge): device budgets, structure x process search, design meta-model."""
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -70,16 +72,26 @@ def _fast_edge_space():
 
 
 class FootprintTest(unittest.TestCase):
-    def test_mlp_footprint_matches_closed_form(self):
+    def test_mlp_footprint_measures_the_complete_export_and_dtype(self):
         from mixle.task import distill_records_from_labels
 
         recs, labels = _make_records(60, 0)
         student = distill_records_from_labels(recs, labels, dim=64, hidden=[8], epochs=10, lr=1e-2, seed=0)
         fp = footprint(student)
-        # Linear(64->8) + Linear(8->2): params = 64*8+8 + 8*2+2; macs = 64*8 + 8*2
-        self.assertEqual(fp.bytes, 4 * (64 * 8 + 8 + 8 * 2 + 2))
+        raw_fp32_bytes = sum(parameter.numel() * parameter.element_size() for parameter in student.model.parameters())
+        self.assertGreater(fp.bytes, raw_fp32_bytes)  # manifest + adapter/config/meta are included
         self.assertEqual(fp.ops, 64 * 8 + 8 * 2)
         self.assertFalse(fp.torch_free)
+        self.assertEqual(len(fp.artifact_digest), 64)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(student.save(str(Path(directory) / "artifact")))
+            exported_bytes = sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+        self.assertEqual(fp.bytes, exported_bytes)
+
+        student.model.double()
+        fp64 = footprint(student)
+        self.assertGreater(fp64.bytes, fp.bytes)
 
     def test_structured_footprint_is_measured_and_torch_free(self):
         from mixle.task import distill_structured_from_labels
@@ -95,15 +107,16 @@ class FootprintTest(unittest.TestCase):
 
 class DeviceSpecTest(unittest.TestCase):
     def test_feasibility_and_violations(self):
-        dev = DeviceSpec(max_bytes=1000, max_ops=50)
-        ok = EdgeFootprint(bytes=800, ops=40, torch_free=False)
-        too_big = EdgeFootprint(bytes=2000, ops=40, torch_free=False)
+        dev = DeviceSpec(max_bytes=1000, max_ops=50, max_inference_seconds=0.1)
+        ok = EdgeFootprint(bytes=800, ops=40, torch_free=False, inference_seconds=0.05)
+        too_big = EdgeFootprint(bytes=2000, ops=40, torch_free=False, inference_seconds=0.05)
         self.assertTrue(dev.feasible(ok))
         self.assertFalse(dev.feasible(too_big))
         v = dev.violations(too_big)
-        self.assertEqual(len(v), 2)
+        self.assertEqual(len(v), 3)
         self.assertAlmostEqual(v[0], 1.0)  # (2000-1000)/1000
         self.assertLess(v[1], 0.0)
+        self.assertLess(v[2], 0.0)
 
     def test_torch_free_gate(self):
         dev = DeviceSpec(torch_free=True)
@@ -265,6 +278,7 @@ class LatencyProbeTest(unittest.TestCase):
     def test_for_latency_converts_budget_arithmetic(self):
         dev = DeviceSpec.for_latency(10.0, 2_000_000.0, max_bytes=5000, torch_free=True)
         self.assertEqual(dev.max_ops, 20_000)  # 2e6 ops/s * 0.01 s
+        self.assertEqual(dev.max_inference_seconds, 0.01)
         self.assertEqual(dev.max_bytes, 5000)
         self.assertTrue(dev.torch_free)
         with self.assertRaises(ValueError):
