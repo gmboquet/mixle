@@ -21,6 +21,8 @@ get bit-identical outputs. ``mixle.task.model.TaskModel`` builds the callable ta
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -31,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 SUPPORTED_SCHEMA_VERSIONS = (SCHEMA_VERSION,)  # every schema_version this code currently knows how to read
 ARTIFACT_TYPE = "mixle.task"
 KNOWN_PAYLOADS = ("torch", "json", "arrays")
@@ -39,6 +41,67 @@ MANIFEST_NAME = "manifest.json"
 WEIGHTS_NAME = "weights.safetensors"
 JSON_MODEL_NAME = "model.json"
 ARRAYS_NAME = "arrays.npz"
+_PAYLOAD_FILES = {
+    "torch": WEIGHTS_NAME,
+    "json": JSON_MODEL_NAME,
+    "arrays": ARRAYS_NAME,
+}
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _manifest_integrity(data: dict[str, Any]) -> str:
+    covered = dict(data)
+    covered.pop("integrity_sha256", None)
+    encoded = json.dumps(
+        covered,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _fsync_directory(path: str) -> None:
+    """Durably publish directory-entry changes where the platform supports it."""
+
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _recover_artifact(path: str) -> None:
+    """Restore an interrupted replacement when the canonical path is absent."""
+
+    target = os.path.abspath(path)
+    if os.path.lexists(target):
+        return
+    parent = os.path.dirname(target) or "."
+    prefix = f".{os.path.basename(target)}.prev-"
+    try:
+        candidates = [
+            os.path.join(parent, name)
+            for name in os.listdir(parent)
+            if name.startswith(prefix) and os.path.isdir(os.path.join(parent, name))
+        ]
+    except FileNotFoundError:
+        return
+    if not candidates:
+        return
+    # A normal replacement can create only one live backup. If an earlier process left more
+    # than one, recover the most recently published generation and retain the others for diagnosis.
+    selected = max(candidates, key=lambda candidate: os.stat(candidate).st_mtime_ns)
+    os.replace(selected, target)
+    _fsync_directory(parent)
 
 
 def _atomic_json_dump(dst: str, obj: Any, **dump_kwargs: Any) -> None:
@@ -87,25 +150,31 @@ def _atomic_artifact_write(path: str, write_fn: Callable[[str], None]) -> None:
     recoverable from its backup suffix; if the second rename itself fails, the backup is moved straight back
     so ``path`` is never left missing. The backup is removed only once the new generation is already live.
     """
-    parent = os.path.dirname(os.path.abspath(path)) or "."
+    target = os.path.abspath(path)
+    parent = os.path.dirname(target) or "."
     os.makedirs(parent, exist_ok=True)
+    _recover_artifact(target)
     staging = tempfile.mkdtemp(dir=parent, prefix=".tmp-artifact-")
     os.chmod(staging, 0o755)  # mkdtemp defaults to 0o700; match the world-readable dirs os.makedirs would make
     published = False
     try:
         write_fn(staging)  # if this raises, `path` has not been touched at all
-        if os.path.lexists(path):
-            backup = os.path.join(parent, f".{os.path.basename(path)}.prev-{uuid.uuid4().hex}")
-            os.replace(path, backup)  # atomic: `path` momentarily absent, old generation intact under `backup`
+        if os.path.lexists(target):
+            backup = os.path.join(parent, f".{os.path.basename(target)}.prev-{uuid.uuid4().hex}")
+            os.replace(target, backup)
+            _fsync_directory(parent)
             try:
-                os.replace(staging, path)  # atomic: `path` now IS the new generation
+                os.replace(staging, target)
+                _fsync_directory(parent)
             except BaseException:
-                os.replace(backup, path)  # restore -- `path` must never end up missing
+                os.replace(backup, target)
+                _fsync_directory(parent)
                 raise
             published = True
             shutil.rmtree(backup, ignore_errors=True)  # best-effort: new generation is already live either way
         else:
-            os.replace(staging, path)
+            os.replace(staging, target)
+            _fsync_directory(parent)
             published = True
     finally:
         if not published:
@@ -169,6 +238,8 @@ class TaskManifest:
     meta: dict[str, Any] = field(default_factory=dict)  # free-form provenance (teacher, data hash, eval, ...)
     schema_version: str = SCHEMA_VERSION
     created_at: str = ""
+    payload_sha256: str = ""
+    integrity_sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Return the strict-JSON manifest representation written to ``manifest.json``."""
@@ -180,6 +251,8 @@ class TaskManifest:
             "task": self.task,
             "io": self.io,
             "meta": self.meta,
+            "payload_sha256": self.payload_sha256,
+            "integrity_sha256": self.integrity_sha256,
         }
         if self.payload in ("torch", "arrays"):  # payloads reconstructed through a registered builder
             d["builder"] = self.builder
@@ -242,17 +315,44 @@ class TaskManifest:
             meta=meta,
             schema_version=schema_version,
             created_at=d.get("created_at", ""),
+            payload_sha256=d.get("payload_sha256", ""),
+            integrity_sha256=d.get("integrity_sha256", ""),
         )
 
 
 def read_manifest(path: str) -> TaskManifest:
     """Read only the manifest of an artifact directory without loading weights."""
+    _recover_artifact(path)
     with open(os.path.join(path, MANIFEST_NAME)) as f:
-        return TaskManifest.from_dict(json.load(f))
+        data = json.load(f)
+    manifest = TaskManifest.from_dict(data)
+    if not isinstance(manifest.payload_sha256, str) or len(manifest.payload_sha256) != 64:
+        raise ValueError("task-artifact manifest has no valid payload_sha256 integrity binding.")
+    if not isinstance(manifest.integrity_sha256, str) or len(manifest.integrity_sha256) != 64:
+        raise ValueError("task-artifact manifest has no valid integrity_sha256 binding.")
+    payload_path = os.path.join(path, _PAYLOAD_FILES[manifest.payload])
+    actual_payload = _sha256_file(payload_path)
+    if not hmac.compare_digest(actual_payload, manifest.payload_sha256):
+        raise ValueError("task-artifact payload digest does not match its manifest.")
+    actual_integrity = _manifest_integrity(data)
+    if not hmac.compare_digest(actual_integrity, manifest.integrity_sha256):
+        raise ValueError("task-artifact manifest integrity digest does not match its contents.")
+    return manifest
 
 
 def _write_manifest(path: str, manifest: TaskManifest) -> None:
-    _atomic_json_dump(os.path.join(path, MANIFEST_NAME), manifest.to_dict(), indent=2, sort_keys=True)
+    manifest.created_at = manifest.created_at or datetime.now(UTC).isoformat()
+    manifest.payload_sha256 = _sha256_file(os.path.join(path, _PAYLOAD_FILES[manifest.payload]))
+    data = manifest.to_dict()
+    data["integrity_sha256"] = _manifest_integrity(data)
+    manifest.integrity_sha256 = data["integrity_sha256"]
+    _atomic_json_dump(
+        os.path.join(path, MANIFEST_NAME),
+        data,
+        allow_nan=False,
+        indent=2,
+        sort_keys=True,
+    )
 
 
 # --- torch payload: builder + config + tied-safe weights ----------------------------------------------------
