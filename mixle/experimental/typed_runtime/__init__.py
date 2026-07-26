@@ -73,6 +73,8 @@ from mixle.experimental.typed_runtime.context_ir import (
     ContextNode,
     ContextNodeKind,
     EvidenceStatus,
+    EvidenceTransition,
+    FrozenMetadata,
     Provenance,
 )
 from mixle.experimental.typed_runtime.context_materializer import (
@@ -295,6 +297,7 @@ __all__ = [
     "EffectiveContextRun",
     "EffectiveContextRuntime",
     "ErrorFeedbackCompressor",
+    "EvidenceTransition",
     "EvidenceStatus",
     "FailureKind",
     "FailureLedger",
@@ -305,6 +308,7 @@ __all__ = [
     "FisherProvider",
     "FingerprintFn",
     "FrontierClaimAssessment",
+    "FrozenMetadata",
     "GainEvidence",
     "GainProvider",
     "GainPerCostScheduler",
