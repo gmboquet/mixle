@@ -21,6 +21,10 @@ from mixle.stats.compute.capability_decline import KernelCapabilityDeclinedError
 from mixle.utils.optional_deps import numba
 
 
+class GeneratedKernelCompilationError(RuntimeError):
+    """A declared generated kernel failed to trace or compile unexpectedly."""
+
+
 @dataclass(frozen=True)
 class ParameterSpec:
     """A fitted distribution parameter used by scoring.
@@ -297,17 +301,40 @@ def generated_log_density_diagnostics(x: Any, encoded_symbols: Sequence[str] | N
 
     if declaration.exponential_family is not None:
         try:
+            _ensure_diagnostic_exp_family_trace_supported(declaration)
             expr = _generated_exp_family_scalar_expression(enc, params, declaration.exponential_family, engine)
             strategy = "exp_family"
-        except Exception as exc:
+        except KernelCapabilityDeclinedError as exc:
             fn = getattr(dist_type, "backend_log_density_from_params", None)
             if not callable(fn):
                 raise
             fallback_reason = "%s: %s" % (type(exc).__name__, exc)
-            expr = _diagnostic_backend_log_density_expression(dist_type, params, encoded_values, engine)
+            _ensure_diagnostic_backend_trace_supported(declaration)
+            try:
+                expr = _diagnostic_backend_log_density_expression(dist_type, params, encoded_values, engine)
+            except KernelCapabilityDeclinedError:
+                raise
+            except Exception as backend_exc:
+                raise GeneratedKernelCompilationError(
+                    "%s backend diagnostic trace failed: %s"
+                    % (dist_type.__name__, backend_exc)
+                ) from backend_exc
             strategy = "backend_log_density_from_params"
+        except Exception as exc:
+            raise GeneratedKernelCompilationError(
+                "%s exponential-family diagnostic trace failed: %s"
+                % (dist_type.__name__, exc)
+            ) from exc
     else:
-        expr = _diagnostic_backend_log_density_expression(dist_type, params, encoded_values, engine)
+        _ensure_diagnostic_backend_trace_supported(declaration)
+        try:
+            expr = _diagnostic_backend_log_density_expression(dist_type, params, encoded_values, engine)
+        except KernelCapabilityDeclinedError:
+            raise
+        except Exception as exc:
+            raise GeneratedKernelCompilationError(
+                "%s backend diagnostic trace failed: %s" % (dist_type.__name__, exc)
+            ) from exc
         strategy = "backend_log_density_from_params"
 
     rv = engine.diagnostics(expr)
@@ -322,6 +349,36 @@ def generated_log_density_diagnostics(x: Any, encoded_symbols: Sequence[str] | N
     if fallback_reason is not None:
         rv["fallback_reason"] = fallback_reason
     return rv
+
+
+def _ensure_diagnostic_exp_family_trace_supported(declaration: DistributionDeclaration) -> None:
+    spec = declaration.exponential_family
+    if spec is None:
+        return
+    if spec.sufficient_statistics_from_params is not None:
+        raise KernelCapabilityDeclinedError(
+            "symbolic diagnostics cannot infer runtime-dependent sufficient-statistic geometry"
+        )
+    if declaration.support.endswith("_vector"):
+        raise KernelCapabilityDeclinedError(
+            "symbolic diagnostics do not infer vector observation geometry"
+        )
+
+
+def _ensure_diagnostic_backend_trace_supported(declaration: DistributionDeclaration) -> None:
+    if not _generated_backend_hook_supported(declaration.distribution_type, declaration):
+        raise KernelCapabilityDeclinedError(
+            "backend diagnostic hook is not declaration-conformant"
+        )
+    non_symbolic = {
+        "simplex_map",
+        "row_simplex_map",
+        "log_probability_tables",
+    }
+    if any(spec.constraint in non_symbolic for spec in declaration.parameters):
+        raise KernelCapabilityDeclinedError(
+            "symbolic backend diagnostics do not synthesize mapping-valued parameters"
+        )
 
 
 def _numeric_parameter_array(value: Any, name: str) -> np.ndarray:
@@ -832,7 +889,6 @@ def _build_generic_numba_kernel(
     if dist_type in _GENERIC_NUMBA_KERNEL_CACHE:
         return _GENERIC_NUMBA_KERNEL_CACHE[dist_type]
 
-    result: tuple[Any, int, tuple[str, ...]] | None = None
     try:
         from mixle.engines.symbolic_engine import SymbolicEngine
 
@@ -880,9 +936,12 @@ def _build_generic_numba_kernel(
         kernel = numba.njit(cache=False)(namespace["_generic_numba_kernel"])
         result = (kernel, n_data, ordered_params)
     except _UnsupportedNumbaLowering:
-        result = None
-    except Exception:  # noqa: BLE001
-        result = None
+        _GENERIC_NUMBA_KERNEL_CACHE[dist_type] = None
+        return None
+    except Exception as exc:
+        raise GeneratedKernelCompilationError(
+            "%s generated numba compilation failed: %s" % (dist_type.__name__, exc)
+        ) from exc
 
     _GENERIC_NUMBA_KERNEL_CACHE[dist_type] = result
     return result
@@ -1126,7 +1185,15 @@ def _diagnostic_encoded_values(
 def _diagnostic_param_symbols(declaration: DistributionDeclaration, engine: Any) -> dict[str, Any]:
     params = {}
     for spec in declaration.parameters:
-        if spec.constraint in ("real_vector", "positive_vector"):
+        if spec.constraint in (
+            "real_vector",
+            "positive_vector",
+            "simplex",
+            "simplex_vector",
+            "integer_vector",
+            "log_unit_interval_vector",
+            "optional_log_unit_interval_vector",
+        ):
             params[spec.name] = np.asarray(
                 [
                     engine.symbol("%s_0" % spec.name),
@@ -1134,7 +1201,12 @@ def _diagnostic_param_symbols(declaration: DistributionDeclaration, engine: Any)
                 ],
                 dtype=object,
             )
-        elif spec.constraint in ("positive_matrix",):
+        elif spec.constraint in (
+            "positive_matrix",
+            "row_simplex_matrix",
+            "column_simplex_matrix",
+            "integer_matrix",
+        ):
             params[spec.name] = np.asarray(
                 [
                     [engine.symbol("%s_00" % spec.name), engine.symbol("%s_01" % spec.name)],
