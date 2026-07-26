@@ -26,8 +26,11 @@ before/after fidelity numbers the tests assert on.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from numbers import Integral
 from typing import Any
 
 
@@ -72,6 +75,80 @@ class DistillResult:
 # --------------------------------------------------------------------------------------------------
 
 
+def _finite_float(value: Any, name: str, *, minimum: float | None = None, strict: bool = False) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be finite") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    if minimum is not None and (result <= minimum if strict else result < minimum):
+        relation = "greater than" if strict else "at least"
+        raise ValueError(f"{name} must be {relation} {minimum}")
+    return result
+
+
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return int(value)
+
+
+def _nonnegative_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return int(value)
+
+
+def _module_device(module: Any) -> Any:
+    torch = _torch()
+    if isinstance(module, torch.nn.Module):
+        parameter = next(module.parameters(), None)
+        if parameter is not None:
+            return parameter.device
+        buffer = next(module.buffers(), None)
+        if buffer is not None:
+            return buffer.device
+    return torch.device("cpu")
+
+
+@contextmanager
+def _evaluating(module: Any):
+    """Temporarily evaluate a borrowed module and restore its original mode."""
+    is_module = hasattr(module, "training") and hasattr(module, "train") and hasattr(module, "eval")
+    was_training = bool(module.training) if is_module else None
+    if is_module:
+        module.eval()
+    try:
+        yield
+    finally:
+        if is_module:
+            module.train(was_training)
+
+
+def _validate_logits(student_logits: Any, teacher_logits: Any) -> tuple[Any, Any]:
+    torch = _torch()
+    if not isinstance(student_logits, torch.Tensor) or not isinstance(teacher_logits, torch.Tensor):
+        raise ValueError("student and teacher logits must be torch tensors")
+    if student_logits.ndim != 2 or teacher_logits.ndim != 2 or student_logits.shape != teacher_logits.shape:
+        raise ValueError("student and teacher logits must have the same nonempty (rows, classes) shape")
+    if student_logits.shape[0] == 0 or student_logits.shape[1] == 0:
+        raise ValueError("student and teacher logits must have the same nonempty (rows, classes) shape")
+    if not bool(torch.isfinite(student_logits).all()) or not bool(torch.isfinite(teacher_logits).all()):
+        raise ValueError("student and teacher logits must be finite")
+    return student_logits, teacher_logits
+
+
+def _validate_labels(y: Any, *, rows: int, classes: int, device: Any) -> Any:
+    torch = _torch()
+    labels = _as_long(y).to(device)
+    if labels.ndim != 1 or labels.shape[0] != rows:
+        raise ValueError("hard labels must have shape (rows,)")
+    if bool((labels < 0).any()) or bool((labels >= classes).any()):
+        raise ValueError("hard labels must lie in [0, classes)")
+    return labels
+
+
 def _softmax_logits(logits: Any, temperature: float) -> Any:
     torch = _torch()
     return torch.nn.functional.log_softmax(logits / temperature, dim=-1)
@@ -81,7 +158,8 @@ def _kd_kl(student_logits: Any, teacher_logits: Any, temperature: float) -> Any:
     """Temperature-softened ``KL(teacher || student)`` (Hinton), scaled by ``T^2`` so its gradient magnitude
     is comparable to the hard-loss term."""
     torch = _torch()
-    t = float(temperature)
+    student_logits, teacher_logits = _validate_logits(student_logits, teacher_logits)
+    t = _finite_float(temperature, "temperature", minimum=0.0, strict=True)
     log_p_student = _softmax_logits(student_logits, t)
     p_teacher = torch.softmax(teacher_logits / t, dim=-1)
     # KL(teacher || student) = sum p_teacher (log p_teacher - log p_student); the constant-in-student entropy
@@ -92,6 +170,7 @@ def _kd_kl(student_logits: Any, teacher_logits: Any, temperature: float) -> Any:
 def _agreement(student_logits: Any, teacher_logits: Any) -> float:
     """Fraction of rows where the student and teacher argmax agree."""
     torch = _torch()
+    student_logits, teacher_logits = _validate_logits(student_logits, teacher_logits)
     with torch.no_grad():
         return float((student_logits.argmax(-1) == teacher_logits.argmax(-1)).float().mean().cpu().item())
 
@@ -104,6 +183,11 @@ def _soft_kl(student_logits: Any, teacher_logits: Any, temperature: float = 1.0)
 
 def _accuracy(logits: Any, y: Any) -> float:
     torch = _torch()
+    if not isinstance(logits, torch.Tensor) or logits.ndim != 2 or logits.shape[0] == 0 or logits.shape[1] == 0:
+        raise ValueError("logits must have nonempty shape (rows, classes)")
+    if not bool(torch.isfinite(logits).all()):
+        raise ValueError("logits must be finite")
+    y = _validate_labels(y, rows=logits.shape[0], classes=logits.shape[1], device=logits.device)
     with torch.no_grad():
         return float((logits.argmax(-1) == y).float().mean().cpu().item())
 
@@ -140,9 +224,20 @@ def kd_loss(
     it composes into any training loop.
     """
     torch = _torch()
+    temperature = _finite_float(temperature, "temperature", minimum=0.0, strict=True)
+    alpha = _finite_float(alpha, "alpha", minimum=0.0)
+    if alpha > 1.0:
+        raise ValueError("alpha must be in [0, 1]")
+    student_logits, teacher_logits = _validate_logits(student_logits, teacher_logits)
     soft = _kd_kl(student_logits, teacher_logits, temperature)
     if y is None or alpha >= 1.0:
         return alpha * soft
+    y = _validate_labels(
+        y,
+        rows=student_logits.shape[0],
+        classes=student_logits.shape[1],
+        device=student_logits.device,
+    )
     hard = torch.nn.functional.cross_entropy(student_logits, y)
     return alpha * soft + (1.0 - alpha) * hard
 
@@ -170,7 +265,20 @@ def response_distill(
     is compared -- the number the test asserts the KD student wins.
     """
     torch = _torch()
-    x, teacher_logits = _teacher_logits(teacher, x)
+    epochs = _positive_int(epochs, "epochs")
+    lr = _finite_float(lr, "lr", minimum=0.0, strict=True)
+    temperature = _finite_float(temperature, "temperature", minimum=0.0, strict=True)
+    alpha = _finite_float(alpha, "alpha", minimum=0.0)
+    if alpha > 1.0:
+        raise ValueError("alpha must be in [0, 1]")
+    x, teacher_logits = _teacher_logits(teacher, x, target=student)
+    if y is not None:
+        y = _validate_labels(
+            y,
+            rows=x.shape[0],
+            classes=teacher_logits.shape[1],
+            device=x.device,
+        )
 
     torch.manual_seed(seed)
     if reset_student:
@@ -203,6 +311,7 @@ def response_distill(
         extra["baseline_soft_kl"] = _soft_kl(_forward(base, x), teacher_logits, temperature)
     if y is not None:
         extra["student_accuracy"] = _accuracy(_forward(student, x), y)
+    student.eval()
     return DistillResult(student, "teacher_agreement", before, after, lower_is_better=False, extra=extra, history=hist)
 
 
@@ -226,11 +335,9 @@ def analytic_response_distill(
     """
 
     torch = _torch()
-    if temperature <= 0.0:
-        raise ValueError("temperature must be positive.")
-    if ridge < 0.0:
-        raise ValueError("ridge must be non-negative.")
-    x, teacher_logits = _teacher_logits(teacher, x)
+    temperature = _finite_float(temperature, "temperature", minimum=0.0, strict=True)
+    ridge = _finite_float(ridge, "ridge", minimum=0.0)
+    x, teacher_logits = _teacher_logits(teacher, x, target=student)
     torch.manual_seed(seed)
     if reset_student:
         student = _reset(student, seed)
@@ -248,6 +355,7 @@ def analytic_response_distill(
             "agreement_after": _agreement(after_logits, teacher_logits),
         }
     )
+    student.eval()
     return DistillResult(
         student,
         "soft_kl",
@@ -277,7 +385,21 @@ def planned_response_distill(
     """Run analytic head elimination, then optionally refine all student blocks on cached teacher logits."""
 
     torch = _torch()
-    x, teacher_logits = _teacher_logits(teacher, x)
+    temperature = _finite_float(temperature, "temperature", minimum=0.0, strict=True)
+    alpha = _finite_float(alpha, "alpha", minimum=0.0)
+    if alpha > 1.0:
+        raise ValueError("alpha must be in [0, 1]")
+    ridge = _finite_float(ridge, "ridge", minimum=0.0)
+    refinement_epochs = _nonnegative_int(refinement_epochs, "refinement_epochs")
+    lr = _finite_float(lr, "lr", minimum=0.0, strict=True)
+    x, teacher_logits = _teacher_logits(teacher, x, target=student)
+    if y is not None:
+        y = _validate_labels(
+            y,
+            rows=x.shape[0],
+            classes=teacher_logits.shape[1],
+            device=x.device,
+        )
     torch.manual_seed(seed)
     student = _reset(student, seed)
     initial_logits = _forward(student, x)
@@ -301,6 +423,7 @@ def planned_response_distill(
         )
     final_logits = _forward(student, x)
     after = _soft_kl(final_logits, teacher_logits, temperature)
+    student.eval()
     return DistillResult(
         student,
         "soft_kl",
@@ -344,15 +467,39 @@ def multi_teacher_distill(
     reports the mean single-teacher agreement the ensemble student should beat.
     """
     torch = _torch()
-    x = _as_tensor(x)
-    logits = [_teacher_logits(t, x)[1] for t in teachers]
+    teachers = list(teachers)
+    if not teachers:
+        raise ValueError("teachers must contain at least one teacher")
+    epochs = _positive_int(epochs, "epochs")
+    lr = _finite_float(lr, "lr", minimum=0.0, strict=True)
+    temperature = _finite_float(temperature, "temperature", minimum=0.0, strict=True)
+    alpha = _finite_float(alpha, "alpha", minimum=0.0)
+    if alpha > 1.0:
+        raise ValueError("alpha must be in [0, 1]")
     w = _norm_weights(weights, len(teachers))
-    ens_prob = sum(wi * torch.softmax(li, dim=-1) for wi, li in zip(w, logits))
+    x = _as_tensor(x).to(_module_device(student))
+    logits = [_teacher_logits(teacher, x, target=student)[1] for teacher in teachers]
+    first_shape = logits[0].shape
+    if any(logit.shape != first_shape for logit in logits):
+        raise ValueError("all teacher logits must have the same shape")
+    if y is not None:
+        y = _validate_labels(
+            y,
+            rows=x.shape[0],
+            classes=first_shape[1],
+            device=x.device,
+        )
+    ens_prob = sum(
+        weight * torch.softmax(logit, dim=-1)
+        for weight, logit in zip(w, logits, strict=True)
+    )
     ens_argmax = ens_prob.argmax(-1)
 
     torch.manual_seed(seed)
     student = _reset(student, seed)
-    before = _ensemble_agreement(_forward(student, x), ens_argmax)
+    student_logits = _forward(student, x)
+    _validate_logits(student_logits, logits[0])
+    before = _ensemble_agreement(student_logits, ens_argmax)
 
     hist, optimizer_receipt = _train(
         student,
@@ -380,11 +527,22 @@ def multi_teacher_distill(
         "single_teacher_agreements": single,
         "optimizer": optimizer_receipt,
     }
+    student.eval()
     return DistillResult(student, "ensemble_agreement", before, after, lower_is_better=False, extra=extra, history=hist)
 
 
 def _ensemble_kd_loss(student_logits: Any, ens_prob: Any, y: Any | None, temperature: float, alpha: float) -> Any:
     torch = _torch()
+    if (
+        not isinstance(student_logits, torch.Tensor)
+        or not isinstance(ens_prob, torch.Tensor)
+        or student_logits.shape != ens_prob.shape
+        or student_logits.ndim != 2
+        or student_logits.shape[0] == 0
+    ):
+        raise ValueError("student logits and ensemble probabilities must have the same nonempty 2-D shape")
+    if not bool(torch.isfinite(student_logits).all()) or not bool(torch.isfinite(ens_prob).all()):
+        raise ValueError("student logits and ensemble probabilities must be finite")
     t = float(temperature)
     # soften the *ensemble probabilities* to temperature T by re-normalizing p^(1/T)
     soft_target = ens_prob.clamp_min(1e-12).pow(1.0 / t)
@@ -412,14 +570,37 @@ class _Hook:
 
     def __init__(self, module: Any, name: str) -> None:
         self.value: Any = None
-        target = dict(module.named_modules())[name]
+        modules = dict(module.named_modules())
+        if name not in modules:
+            raise ValueError(f"unknown module layer {name!r}")
+        target = modules[name]
         self._h = target.register_forward_hook(self._grab)
+        self._removed = False
 
     def _grab(self, _mod: Any, _inp: Any, out: Any) -> None:
         self.value = out
 
     def remove(self) -> None:
-        self._h.remove()
+        if not self._removed:
+            self._h.remove()
+            self._removed = True
+
+
+def _capture_teacher_feature(teacher: Any, x: Any, layer: str, *, target_device: Any) -> Any:
+    torch = _torch()
+    teacher_x = x.to(_module_device(teacher))
+    hook = _Hook(teacher, layer)
+    try:
+        with _evaluating(teacher), torch.no_grad():
+            teacher(teacher_x)
+        feature = hook.value
+        if not isinstance(feature, torch.Tensor) or feature.shape[0] != x.shape[0]:
+            raise ValueError("teacher layer must emit a tensor with one row per input")
+        if not bool(torch.isfinite(feature).all()):
+            raise ValueError("teacher features must be finite")
+        return feature.detach().to(target_device)
+    finally:
+        hook.remove()
 
 
 def hint_distill(
@@ -441,45 +622,54 @@ def hint_distill(
     hooks. ``before``/``after`` are the normalized feature gap -- lower is better.
     """
     torch = _torch()
-    x = _as_tensor(x)
-    teacher.eval()
-
-    th = _Hook(teacher, teacher_layer)
-    with torch.no_grad():
-        teacher(x)
-    teach_feat = _flatten_feat(th.value).detach()
-    th.remove()
+    epochs = _positive_int(epochs, "epochs")
+    lr = _finite_float(lr, "lr", minimum=0.0, strict=True)
+    device = _module_device(student)
+    x = _as_tensor(x).to(device)
+    if x.ndim < 1 or x.shape[0] == 0:
+        raise ValueError("distillation inputs must contain at least one row")
+    teach_feat = _flatten_feat(
+        _capture_teacher_feature(teacher, x, teacher_layer, target_device=device)
+    )
 
     torch.manual_seed(seed)
     student = _reset(student, seed)
     sh = _Hook(student, student_layer)
+    try:
+        student(x)
+        student_feature = sh.value
+        if not isinstance(student_feature, torch.Tensor) or student_feature.shape[0] != x.shape[0]:
+            raise ValueError("student layer must emit a tensor with one row per input")
+        stud_dim = _flatten_feat(student_feature).shape[-1]
+        teach_dim = teach_feat.shape[-1]
+        regressor = (
+            torch.nn.Identity()
+            if stud_dim == teach_dim
+            else torch.nn.Linear(stud_dim, teach_dim).to(device)
+        )
 
-    student(x)
-    stud_dim = _flatten_feat(sh.value).shape[-1]
-    teach_dim = teach_feat.shape[-1]
-    regressor = torch.nn.Identity() if stud_dim == teach_dim else torch.nn.Linear(stud_dim, teach_dim)
+        def feat_gap() -> float:
+            with torch.no_grad():
+                student(x)
+                sf = regressor(_flatten_feat(sh.value))
+                return float(_norm_gap(sf, teach_feat).cpu().item())
 
-    def feat_gap() -> float:
-        with torch.no_grad():
+        before = feat_gap()
+        trainable = torch.nn.ModuleList([student, regressor])
+        opt, optimizer_receipt = _make_optimizer(trainable, optimizer, lr, sign_stable=False)
+        hist = []
+        for _ in range(epochs):
+            opt.zero_grad()
             student(x)
             sf = regressor(_flatten_feat(sh.value))
-            return float(_norm_gap(sf, teach_feat).cpu().item())
-
-    before = feat_gap()
-
-    trainable = torch.nn.ModuleList([student, regressor])
-    opt, optimizer_receipt = _make_optimizer(trainable, optimizer, lr, sign_stable=False)
-    hist = []
-    for _ in range(int(epochs)):
-        opt.zero_grad()
-        student(x)
-        sf = regressor(_flatten_feat(sh.value))
-        loss = torch.nn.functional.mse_loss(sf, teach_feat)
-        loss.backward()
-        opt.step()
-        hist.append(float(loss.detach().cpu().item()))
-    after = feat_gap()
-    sh.remove()
+            loss = torch.nn.functional.mse_loss(sf, teach_feat)
+            loss.backward()
+            opt.step()
+            hist.append(float(loss.detach().cpu().item()))
+        after = feat_gap()
+    finally:
+        sh.remove()
+    student.eval()
     return DistillResult(
         student,
         "feature_gap",
@@ -493,6 +683,11 @@ def hint_distill(
 
 def _flatten_feat(t: Any) -> Any:
     """Flatten a feature to ``(batch, features)`` -- handles both ``(N, D)`` and conv ``(N, C, H, W)`` shapes."""
+    torch = _torch()
+    if not isinstance(t, torch.Tensor) or t.ndim < 2 or t.shape[0] == 0:
+        raise ValueError("features must be a tensor with nonempty batch and feature dimensions")
+    if not bool(torch.isfinite(t).all()):
+        raise ValueError("features must be finite")
     return t.reshape(t.shape[0], -1)
 
 
@@ -511,6 +706,10 @@ def _norm_gap(a: Any, b: Any) -> Any:
 def _attention_map(feat: Any) -> Any:
     """Spatial attention map ``sum_c |F_c|^2`` flattened and L2-normalized per sample (the AT statistic)."""
     torch = _torch()
+    if not isinstance(feat, torch.Tensor) or feat.ndim not in {2, 4} or feat.shape[0] == 0:
+        raise ValueError("attention features must have nonempty shape (N, D) or (N, C, H, W)")
+    if not bool(torch.isfinite(feat).all()):
+        raise ValueError("attention features must be finite")
     # feat: (N, C, H, W) -> (N, H*W); if already (N, D) treat channels as the summed axis trivially
     if feat.dim() == 4:
         a = feat.pow(2).sum(1).reshape(feat.shape[0], -1)
@@ -538,36 +737,48 @@ def attention_transfer(
     attention-map gap -- lower is better.
     """
     torch = _torch()
-    x = _as_tensor(x)
-    teacher.eval()
-
-    th = _Hook(teacher, teacher_layer)
-    with torch.no_grad():
-        teacher(x)
-    teach_att = _attention_map(th.value).detach()
-    th.remove()
+    epochs = _positive_int(epochs, "epochs")
+    lr = _finite_float(lr, "lr", minimum=0.0, strict=True)
+    beta = _finite_float(beta, "beta", minimum=0.0, strict=True)
+    device = _module_device(student)
+    x = _as_tensor(x).to(device)
+    if x.ndim < 1 or x.shape[0] == 0:
+        raise ValueError("distillation inputs must contain at least one row")
+    teach_att = _attention_map(
+        _capture_teacher_feature(teacher, x, teacher_layer, target_device=device)
+    ).detach()
 
     torch.manual_seed(seed)
     student = _reset(student, seed)
     sh = _Hook(student, student_layer)
-
-    def att_gap() -> float:
-        with torch.no_grad():
+    try:
+        def student_attention() -> Any:
             student(x)
-            return float((_attention_map(sh.value) - teach_att).norm(dim=-1).mean().cpu().item())
+            value = sh.value
+            if not isinstance(value, torch.Tensor) or value.shape[0] != x.shape[0]:
+                raise ValueError("student layer must emit a tensor with one row per input")
+            attention = _attention_map(value)
+            if attention.shape != teach_att.shape:
+                raise ValueError("student and teacher attention maps must have the same shape")
+            return attention
 
-    before = att_gap()
-    opt, optimizer_receipt = _make_optimizer(student, optimizer, lr, sign_stable=False)
-    hist = []
-    for _ in range(int(epochs)):
-        opt.zero_grad()
-        student(x)
-        loss = beta * torch.nn.functional.mse_loss(_attention_map(sh.value), teach_att)
-        loss.backward()
-        opt.step()
-        hist.append(float(loss.detach().cpu().item()))
-    after = att_gap()
-    sh.remove()
+        def att_gap() -> float:
+            with torch.no_grad():
+                return float((student_attention() - teach_att).norm(dim=-1).mean().cpu().item())
+
+        before = att_gap()
+        opt, optimizer_receipt = _make_optimizer(student, optimizer, lr, sign_stable=False)
+        hist = []
+        for _ in range(epochs):
+            opt.zero_grad()
+            loss = beta * torch.nn.functional.mse_loss(student_attention(), teach_att)
+            loss.backward()
+            opt.step()
+            hist.append(float(loss.detach().cpu().item()))
+        after = att_gap()
+    finally:
+        sh.remove()
+    student.eval()
     return DistillResult(
         student,
         "attention_gap",
@@ -587,6 +798,10 @@ def attention_transfer(
 def _pairwise_distances(feat: Any) -> Any:
     """RKD-D distance potential: pairwise L2 distances normalized by their nonzero mean."""
     torch = _torch()
+    if not isinstance(feat, torch.Tensor) or feat.ndim != 2 or feat.shape[0] < 2:
+        raise ValueError("relational features must have shape (N, D) with N >= 2")
+    if not bool(torch.isfinite(feat).all()):
+        raise ValueError("relational features must be finite")
     d = torch.cdist(feat, feat, p=2)
     mask = d > 0
     mu = d[mask].mean() if mask.any() else torch.ones((), device=d.device, dtype=d.dtype)
@@ -596,6 +811,8 @@ def _pairwise_distances(feat: Any) -> Any:
 def _pairwise_angles(feat: Any) -> Any:
     """RKD-A angle potential: cosine of the angle at each vertex over triplets (i, j, k)."""
     torch = _torch()
+    if not isinstance(feat, torch.Tensor) or feat.ndim != 2 or feat.shape[0] < 2:
+        raise ValueError("relational features must have shape (N, D) with N >= 2")
     # e_ij = normalize(feat_i - feat_j); angle_ijk = <e_ij, e_kj>
     diff = feat.unsqueeze(0) - feat.unsqueeze(1)  # (N, N, D): diff[i, j] = feat_i - feat_j... use j as anchor
     e = torch.nn.functional.normalize(diff, p=2, dim=-1)  # (N, N, D)
@@ -625,42 +842,57 @@ def relational_distill(
     structure gap -- lower is better.
     """
     torch = _torch()
-    x = _as_tensor(x)
-    teacher.eval()
-
-    th = _Hook(teacher, teacher_layer)
-    with torch.no_grad():
-        teacher(x)
-    tf = _flatten_feat(th.value).detach()
-    th.remove()
+    epochs = _positive_int(epochs, "epochs")
+    lr = _finite_float(lr, "lr", minimum=0.0, strict=True)
+    dist_weight = _finite_float(dist_weight, "dist_weight", minimum=0.0)
+    angle_weight = _finite_float(angle_weight, "angle_weight", minimum=0.0)
+    if dist_weight == 0.0 and (not use_angle or angle_weight == 0.0):
+        raise ValueError("at least one relational loss weight must be positive")
+    device = _module_device(student)
+    x = _as_tensor(x).to(device)
+    if x.ndim < 1 or x.shape[0] < 2:
+        raise ValueError("relational distillation requires at least two input rows")
+    tf = _flatten_feat(
+        _capture_teacher_feature(teacher, x, teacher_layer, target_device=device)
+    )
     teach_dist = _pairwise_distances(tf).detach()
     teach_ang = _pairwise_angles(tf).detach() if use_angle else None
 
     torch.manual_seed(seed)
     student = _reset(student, seed)
     sh = _Hook(student, student_layer)
-
-    def dist_gap() -> float:
-        with torch.no_grad():
+    try:
+        def student_feature() -> Any:
             student(x)
-            return float((_pairwise_distances(_flatten_feat(sh.value)) - teach_dist).abs().mean().cpu().item())
+            value = sh.value
+            if not isinstance(value, torch.Tensor) or value.shape[0] != x.shape[0]:
+                raise ValueError("student layer must emit a tensor with one row per input")
+            flattened = _flatten_feat(value)
+            if not bool(torch.isfinite(flattened).all()):
+                raise ValueError("student features must be finite")
+            return flattened
 
-    before = dist_gap()
-    opt, optimizer_receipt = _make_optimizer(student, optimizer, lr, sign_stable=False)
-    hist = []
-    huber = torch.nn.functional.smooth_l1_loss
-    for _ in range(int(epochs)):
-        opt.zero_grad()
-        student(x)
-        sf = _flatten_feat(sh.value)
-        loss = dist_weight * huber(_pairwise_distances(sf), teach_dist)
-        if use_angle:
-            loss = loss + angle_weight * huber(_pairwise_angles(sf), teach_ang)
-        loss.backward()
-        opt.step()
-        hist.append(float(loss.detach().cpu().item()))
-    after = dist_gap()
-    sh.remove()
+        def dist_gap() -> float:
+            with torch.no_grad():
+                return float((_pairwise_distances(student_feature()) - teach_dist).abs().mean().cpu().item())
+
+        before = dist_gap()
+        opt, optimizer_receipt = _make_optimizer(student, optimizer, lr, sign_stable=False)
+        hist = []
+        huber = torch.nn.functional.smooth_l1_loss
+        for _ in range(epochs):
+            opt.zero_grad()
+            sf = student_feature()
+            loss = dist_weight * huber(_pairwise_distances(sf), teach_dist)
+            if use_angle:
+                loss = loss + angle_weight * huber(_pairwise_angles(sf), teach_ang)
+            loss.backward()
+            opt.step()
+            hist.append(float(loss.detach().cpu().item()))
+        after = dist_gap()
+    finally:
+        sh.remove()
+    student.eval()
     return DistillResult(
         student,
         "distance_gap",
@@ -698,18 +930,39 @@ def sequence_level_distill(
     ``before``/``after`` are the student's token match to the teacher's sequences -- higher is better.
     """
     torch = _torch()
+    gen_length = _positive_int(gen_length, "gen_length")
+    vocab_size = _positive_int(vocab_size, "vocab_size")
+    epochs = _positive_int(epochs, "epochs")
+    lr = _finite_float(lr, "lr", minimum=0.0, strict=True)
     prompts = _as_long(prompts)
+    if prompts.ndim != 2 or prompts.shape[0] == 0 or prompts.shape[1] == 0:
+        raise ValueError("prompts must have nonempty shape (batch, prompt_length)")
+    if bool((prompts < 0).any()) or bool((prompts >= vocab_size).any()):
+        raise ValueError("prompt token ids must lie in [0, vocab_size)")
 
     # 1. teacher generates hard target sequences (greedy) -- the Kim-Rush "sequence-level" target.
-    with torch.no_grad():
-        targets = _greedy_generate(teacher, prompts, gen_length)  # (N, gen_length)
+    with _evaluating(teacher), torch.no_grad():
+        targets = _greedy_generate(
+            teacher,
+            prompts,
+            gen_length,
+            vocab_size=vocab_size,
+        )  # (N, gen_length)
 
     torch.manual_seed(seed)
     student = _reset(student, seed)
+    student_device = _module_device(student)
+    prompts = prompts.to(student_device)
+    targets = targets.to(student_device)
 
     def match() -> float:
-        with torch.no_grad():
-            pred = _greedy_generate(_lm_step(student), prompts, gen_length)
+        with _evaluating(student), torch.no_grad():
+            pred = _greedy_generate(
+                _lm_step(student),
+                prompts,
+                gen_length,
+                vocab_size=vocab_size,
+            )
             return float((pred == targets).float().mean().cpu().item())
 
     before = match()
@@ -717,24 +970,54 @@ def sequence_level_distill(
     # 2. teacher-force the student on (prompt + target) -> next tokens.
     full = torch.cat([prompts, targets], dim=1)  # (N, L0 + gen_length)
     inp = full[:, :-1]
-    tgt = full[:, 1:]
+    prompt_length = prompts.shape[1]
     opt, optimizer_receipt = _make_optimizer(student, optimizer, lr, sign_stable=True)
     hist = []
-    for _ in range(int(epochs)):
+    student.train()
+    for _ in range(epochs):
         opt.zero_grad()
         logits = student(inp)  # (N, L, vocab)
-        loss = torch.nn.functional.cross_entropy(logits.reshape(-1, vocab_size), tgt.reshape(-1))
+        expected_shape = (prompts.shape[0], inp.shape[1], vocab_size)
+        if not isinstance(logits, torch.Tensor) or tuple(logits.shape) != expected_shape:
+            raise ValueError(f"student LM logits must have shape {expected_shape}")
+        if not bool(torch.isfinite(logits).all()):
+            raise ValueError("student LM logits must be finite")
+        continuation_logits = logits[:, prompt_length - 1 :, :]
+        if continuation_logits.shape[1] != gen_length:
+            raise ValueError("student continuation logits do not align with generated targets")
+        loss = torch.nn.functional.cross_entropy(
+            continuation_logits.reshape(-1, vocab_size),
+            targets.reshape(-1),
+        )
         loss.backward()
         opt.step()
         hist.append(float(loss.detach().cpu().item()))
     after = match()
 
-    extra: dict[str, Any] = {"optimizer": optimizer_receipt}
+    extra: dict[str, Any] = {
+        "optimizer": optimizer_receipt,
+        "prompt_tokens_masked": int(max(prompt_length - 1, 0) * prompts.shape[0]),
+        "continuation_tokens": int(gen_length * prompts.shape[0]),
+    }
     if baseline:
         base = _clone_untrained(student, seed + 1)
-        extra["baseline_match"] = float(
-            (_greedy_generate(_lm_step(base), prompts, gen_length) == targets).float().mean().cpu().item()
-        )
+        with _evaluating(base), torch.no_grad():
+            extra["baseline_match"] = float(
+                (
+                    _greedy_generate(
+                        _lm_step(base),
+                        prompts,
+                        gen_length,
+                        vocab_size=vocab_size,
+                    )
+                    == targets
+                )
+                .float()
+                .mean()
+                .cpu()
+                .item()
+            )
+    student.eval()
     return DistillResult(student, "sequence_match", before, after, lower_is_better=False, extra=extra, history=hist)
 
 
@@ -747,14 +1030,32 @@ def _lm_step(student: Any) -> Callable[[Any], Any]:
     return step
 
 
-def _greedy_generate(step: Callable[[Any], Any], prompts: Any, gen_length: int) -> Any:
+def _greedy_generate(
+    step: Callable[[Any], Any],
+    prompts: Any,
+    gen_length: int,
+    *,
+    vocab_size: int | None = None,
+) -> Any:
     """Autoregressively roll out ``gen_length`` greedy tokens from ``step(context) -> next logits``."""
     torch = _torch()
+    gen_length = _nonnegative_int(gen_length, "gen_length")
+    if not isinstance(prompts, torch.Tensor) or prompts.ndim != 2 or prompts.shape[0] == 0:
+        raise ValueError("prompts must be a nonempty 2-D tensor")
+    if gen_length == 0:
+        return torch.empty((prompts.shape[0], 0), dtype=torch.long, device=prompts.device)
     ctx = prompts
     out = []
-    for _ in range(int(gen_length)):
+    for _ in range(gen_length):
         logits = step(ctx)
+        if not isinstance(logits, torch.Tensor) or logits.ndim != 2 or logits.shape[0] != ctx.shape[0]:
+            raise ValueError("generation step must return logits with shape (batch, vocabulary)")
+        if logits.shape[1] == 0 or (vocab_size is not None and logits.shape[1] != vocab_size):
+            raise ValueError("generation logits have the wrong vocabulary size")
+        if not bool(torch.isfinite(logits).all()):
+            raise ValueError("generation logits must be finite")
         nxt = logits.argmax(-1, keepdim=True)
+        nxt = nxt.to(ctx.device)
         out.append(nxt)
         ctx = torch.cat([ctx, nxt], dim=1)
     return torch.cat(out, dim=1)
@@ -783,15 +1084,25 @@ def _forward(module: Any, x: Any) -> Any:
     return module(x)
 
 
-def _teacher_logits(teacher: Any, x: Any) -> tuple[Any, Any]:
+def _teacher_logits(teacher: Any, x: Any, *, target: Any | None = None) -> tuple[Any, Any]:
     """Evaluate a teacher (module or callable) on ``x`` under ``no_grad``; return ``(x_tensor, detached logits)``."""
     torch = _torch()
     x = _as_tensor(x)
-    if hasattr(teacher, "eval"):
-        teacher.eval()
-    with torch.no_grad():
-        logits = teacher(x)
-    return x, logits.detach()
+    if x.ndim < 1 or x.shape[0] == 0:
+        raise ValueError("distillation inputs must contain at least one row")
+    if torch.is_floating_point(x) and not bool(torch.isfinite(x).all()):
+        raise ValueError("distillation inputs must be finite")
+    target_device = _module_device(target) if target is not None else x.device
+    teacher_device = _module_device(teacher) if isinstance(teacher, torch.nn.Module) else target_device
+    with _evaluating(teacher), torch.no_grad():
+        logits = teacher(x.to(teacher_device))
+    if not isinstance(logits, torch.Tensor) or logits.ndim != 2:
+        raise ValueError("teacher must return a 2-D logits tensor")
+    if logits.shape[0] != x.shape[0] or logits.shape[1] == 0:
+        raise ValueError("teacher logits must have shape (input_rows, classes)")
+    if not bool(torch.isfinite(logits).all()):
+        raise ValueError("teacher logits must be finite")
+    return x.to(target_device), logits.detach().to(target_device)
 
 
 def _reset(student: Any, seed: int) -> Any:
@@ -810,8 +1121,7 @@ def _project_linear_head(
     """Solve the terminal linear head against teacher logits with the body held fixed."""
 
     torch = _torch()
-    if ridge < 0.0:
-        raise ValueError("ridge must be non-negative.")
+    ridge = _finite_float(ridge, "ridge", minimum=0.0)
     linear_layers = [(name, layer) for name, layer in student.named_modules() if isinstance(layer, torch.nn.Linear)]
     if not linear_layers:
         raise ValueError("analytic response distillation requires a student with a Linear output head.")
@@ -854,7 +1164,11 @@ def _project_linear_head(
         row_weights = torch.as_tensor(weights, dtype=torch.float64).reshape(-1).cpu()
         if row_weights.numel() != features.shape[0]:
             raise ValueError("weights must have one value per teacher-logit row.")
-        if bool((row_weights < 0.0).any()) or not bool(row_weights.sum() > 0.0):
+        if (
+            not bool(torch.isfinite(row_weights).all())
+            or bool((row_weights < 0.0).any())
+            or not bool(row_weights.sum() > 0.0)
+        ):
             raise ValueError("weights must be non-negative with positive total mass.")
     design = features
     if head.bias is not None:
@@ -889,11 +1203,18 @@ def _project_linear_head(
 
 
 def _norm_weights(weights: Sequence[float] | None, k: int) -> list[float]:
+    if k <= 0:
+        raise ValueError("at least one teacher is required")
     if weights is None:
         return [1.0 / k] * k
-    w = [float(x) for x in weights]
+    try:
+        w = [float(x) for x in weights]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("teacher weights must be finite and non-negative") from exc
     if len(w) != k:
         raise ValueError("weights must have one entry per teacher")
+    if any(not math.isfinite(value) or value < 0.0 for value in w):
+        raise ValueError("teacher weights must be finite and non-negative")
     s = sum(w)
     if s <= 0:
         raise ValueError("teacher weights must sum to a positive value")
@@ -920,11 +1241,26 @@ def _train_response(
     optimizer: Any,
 ) -> tuple[list[float], dict[str, Any]]:
     torch = _torch()
+    epochs = _positive_int(epochs, "epochs")
+    _finite_float(lr, "lr", minimum=0.0, strict=True)
     n = int(x.shape[0])
-    bs = n if batch_size is None else int(batch_size)
-    if bs <= 0:
+    if n <= 0 or teacher_logits.shape[0] != n:
+        raise ValueError("inputs and teacher logits must have the same positive row count")
+    if batch_size is not None and (
+        isinstance(batch_size, bool) or not isinstance(batch_size, Integral) or batch_size <= 0
+    ):
         raise ValueError("batch_size must be positive when supplied.")
-    labels = None if y is None else _as_long(y)
+    bs = n if batch_size is None else int(batch_size)
+    labels = (
+        None
+        if y is None
+        else _validate_labels(
+            y,
+            rows=n,
+            classes=teacher_logits.shape[1],
+            device=x.device,
+        )
+    )
     opt, receipt = _make_optimizer(student, optimizer, lr, sign_stable=False)
     student.train()
     history = []
@@ -945,7 +1281,7 @@ def _train_response(
             opt.step()
             losses.append(float(loss.detach().cpu().item()))
         history.append(sum(losses) / len(losses))
-    receipt.update({"batch_size": int(bs), "steps": int(epochs) * ((n + bs - 1) // bs)})
+    receipt.update({"batch_size": int(bs), "steps": epochs * ((n + bs - 1) // bs)})
     return history, receipt
 
 
@@ -955,6 +1291,8 @@ def _train(
     """Train ``student`` against a recomputed full-batch loss with automatically routed updates."""
 
     torch = _torch()
+    epochs = _positive_int(epochs, "epochs")
+    _finite_float(lr, "lr", minimum=0.0, strict=True)
     opt, receipt = _make_optimizer(student, optimizer, lr, sign_stable=False)
     student.train()
     hist = []
@@ -964,5 +1302,5 @@ def _train(
         loss.backward()
         opt.step()
         hist.append(float(loss.detach().cpu().item()))
-    receipt["steps"] = int(epochs)
+    receipt["steps"] = epochs
     return hist, receipt
