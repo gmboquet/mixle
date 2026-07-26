@@ -12,30 +12,16 @@ answer. For gradient-based training this is expensive to catch (you'd have to re
 gradient step, or use redundant hardware). mixle's additive-stat EM makes it cheap: recompute
 the SAME shard's accumulator TWICE, from the SAME raw shard bytes / same estimator / same
 model / same ``sub_chunks`` split, once on the shard's normal ("primary") rank and once on a
-DIFFERENT ("audit") rank. Determinism-given-seed + additive stats + fixed chunking means the
-two ``(count, value())`` payloads MUST be bitwise identical if nothing is corrupted -- so any
-byte-level difference is proof of a real hardware/software fault, not numerical noise (there
-is no tolerance band to tune, unlike a gradient re-check).
+DIFFERENT ("audit") rank.
 
-**Why zero false positives holds "by construction", not just empirically:**
-    1. Both the primary and audit recompute start from ``self._shard_raw[shard_id]`` -- the
-       IDENTICAL pickled raw observations the driver has held since construction. Neither rank
-       is given a different view of the data.
-    2. Both recomputes run the SAME code path: ``_worker_main``'s ``"update_shard"`` handler,
-       which pickles the shard with the SAME ``sub_chunks`` value (see ``_encode_shard``), so
-       floating-point summation order -- which is NOT associative -- is identical on both
-       ranks. This is exactly the "fixed chunking" half of the guarantee: without pinning
-       ``sub_chunks``, two honest ranks could legitimately disagree in the last bit.
-    3. ``seq_update`` (the E-step) and ``seq_initialize`` are pure, deterministic functions of
-       (encoded data, weights, model[, seed]) -- no per-rank RNG state, no nondeterministic
-       parallel reduction inside a single call. IEEE-754 arithmetic is deterministic given a
-       fixed sequence of operations, so replaying the identical operation sequence on
-       different physical hardware still produces the identical bit pattern.
-    4. Therefore an uncorrupted primary and an uncorrupted audit recompute of the same shard
-       are the same pure computation evaluated twice, and must agree bit-for-bit. A mismatch
-       can only arise if at least one of the two computations was NOT the pure computation --
-       i.e. something (memory fault, cosmic ray, buggy kernel) perturbed it. This is verified
-       empirically too, at scale, in ``mixle/tests/sdc_audit_test.py``.
+The verdict is deliberately not based on pickle-byte equality. Healthy heterogeneous workers
+can differ in serialization order or in the last numerical bits because of CPU/GPU kernels,
+BLAS implementations, fused operations, or library versions. Payloads are decoded into a
+closed typed statistic, compared under the explicitly configured ``audit_rtol``/``audit_atol``
+numeric envelope, and separately canonicalized for exact evidence digests. Every mismatch
+receipt records that envelope, maximum observed errors, the typed canonical digests, and the
+raw payload digests. Exact raw agreement remains useful evidence but is never assumed to be a
+portable proof of worker health.
 
 **NaN/Inf watchdog.** ``mixle.models._neural_serial.check_finite`` already guards individual
 density evaluations. K5 extends that same "fail loud, immediately, with the offending
@@ -54,8 +40,10 @@ from __future__ import annotations
 
 import hashlib
 import pickle
+import struct
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from numbers import Complex, Integral, Real
 from typing import Any
 
 import numpy as np
@@ -71,6 +59,174 @@ __all__ = [
 ]
 
 _PROTO = pickle.HIGHEST_PROTOCOL
+
+
+@dataclass(frozen=True)
+class _StatisticComparison:
+    equivalent: bool
+    reason: str
+    max_abs_error: float
+    max_rel_error: float
+    primary_canonical_sha256: str
+    audit_canonical_sha256: str
+
+
+def _canonical_statistic_bytes(value: Any) -> bytes:
+    """Canonical typed encoding used for evidence digests, never executable loading."""
+    if value is None:
+        return b"N"
+    if isinstance(value, bool):
+        return b"B1" if value else b"B0"
+    if isinstance(value, np.generic):
+        return _canonical_statistic_bytes(value.item())
+    if isinstance(value, Integral):
+        raw = str(int(value)).encode("ascii")
+        return b"I" + len(raw).to_bytes(8, "big") + raw
+    if isinstance(value, Real):
+        return b"F" + struct.pack(">d", float(value))
+    if isinstance(value, Complex):
+        return b"C" + struct.pack(">dd", float(value.real), float(value.imag))
+    if isinstance(value, str):
+        raw = value.encode("utf-8")
+        return b"S" + len(raw).to_bytes(8, "big") + raw
+    if isinstance(value, bytes):
+        return b"Y" + len(value).to_bytes(8, "big") + value
+    if isinstance(value, np.ndarray):
+        shape = b",".join(str(int(size)).encode("ascii") for size in value.shape)
+        header = value.dtype.str.encode("ascii") + b":" + shape
+        if value.dtype.kind == "O":
+            body = b"".join(_canonical_statistic_bytes(item) for item in value.flat)
+        else:
+            body = np.ascontiguousarray(value.astype(value.dtype.newbyteorder(">"), copy=False)).tobytes()
+        return b"A" + len(header).to_bytes(8, "big") + header + len(body).to_bytes(8, "big") + body
+    if isinstance(value, tuple):
+        return b"T" + len(value).to_bytes(8, "big") + b"".join(_canonical_statistic_bytes(item) for item in value)
+    if isinstance(value, list):
+        return b"L" + len(value).to_bytes(8, "big") + b"".join(_canonical_statistic_bytes(item) for item in value)
+    if isinstance(value, dict):
+        pairs = sorted(
+            (
+                _canonical_statistic_bytes(key),
+                _canonical_statistic_bytes(item),
+            )
+            for key, item in value.items()
+        )
+        return b"D" + len(pairs).to_bytes(8, "big") + b"".join(
+            len(key).to_bytes(8, "big") + key + len(item).to_bytes(8, "big") + item for key, item in pairs
+        )
+    raise TypeError(f"unsupported statistic type {type(value).__module__}.{type(value).__qualname__}")
+
+
+def _compare_statistic_payloads(primary: bytes, audit: bytes, *, rtol: float, atol: float) -> _StatisticComparison:
+    """Compare typed statistics numerically while retaining exact canonical evidence digests."""
+    try:
+        primary_value = pickle.loads(primary)
+        audit_value = pickle.loads(audit)
+        primary_canonical = _canonical_statistic_bytes(primary_value)
+        audit_canonical = _canonical_statistic_bytes(audit_value)
+    except Exception as error:  # noqa: BLE001 - corrupt bytes are themselves an audit mismatch
+        return _StatisticComparison(
+            False,
+            f"payload decode/schema failure: {type(error).__name__}: {error}",
+            float("inf"),
+            float("inf"),
+            hashlib.sha256(b"raw:" + primary).hexdigest(),
+            hashlib.sha256(b"raw:" + audit).hexdigest(),
+        )
+
+    max_abs_error = 0.0
+    max_rel_error = 0.0
+    mismatch = ""
+
+    def _compare(left: Any, right: Any, path: str) -> None:
+        nonlocal max_abs_error, max_rel_error, mismatch
+        if mismatch:
+            return
+        if isinstance(left, np.generic):
+            left = left.item()
+        if isinstance(right, np.generic):
+            right = right.item()
+        if isinstance(left, bool) or isinstance(right, bool):
+            if type(left) is not type(right) or left != right:
+                mismatch = f"{path}: boolean/schema mismatch"
+            return
+        if isinstance(left, Integral) and isinstance(right, Integral):
+            if int(left) != int(right):
+                mismatch = f"{path}: integer mismatch"
+            return
+        if isinstance(left, Complex) and isinstance(right, Complex):
+            left_complex = complex(left)
+            right_complex = complex(right)
+            if not (
+                np.isfinite(left_complex.real)
+                and np.isfinite(left_complex.imag)
+                and np.isfinite(right_complex.real)
+                and np.isfinite(right_complex.imag)
+            ):
+                mismatch = f"{path}: non-finite numeric value"
+                return
+            absolute = abs(left_complex - right_complex)
+            scale = max(abs(left_complex), abs(right_complex))
+            relative = absolute / scale if scale > 0.0 else 0.0
+            max_abs_error = max(max_abs_error, float(absolute))
+            max_rel_error = max(max_rel_error, float(relative))
+            if absolute > atol + rtol * scale:
+                mismatch = f"{path}: numeric error exceeds tolerance"
+            return
+        if isinstance(left, np.ndarray) and isinstance(right, np.ndarray):
+            if left.shape != right.shape or left.dtype.kind != right.dtype.kind:
+                mismatch = f"{path}: array shape/dtype-kind mismatch"
+                return
+            if left.dtype.kind in "biu":
+                if not np.array_equal(left, right):
+                    mismatch = f"{path}: exact array mismatch"
+                return
+            if left.dtype.kind in "fc":
+                if not np.all(np.isfinite(left)) or not np.all(np.isfinite(right)):
+                    mismatch = f"{path}: non-finite array value"
+                    return
+                absolute = np.abs(left.astype(np.complex128) - right.astype(np.complex128))
+                scale = np.maximum(np.abs(left), np.abs(right))
+                if absolute.size:
+                    max_abs_error = max(max_abs_error, float(np.max(absolute)))
+                    relative = np.divide(absolute, scale, out=np.zeros_like(absolute, dtype=float), where=scale > 0)
+                    max_rel_error = max(max_rel_error, float(np.max(relative)))
+                if np.any(absolute > atol + rtol * scale):
+                    mismatch = f"{path}: array error exceeds tolerance"
+                return
+            if left.dtype.kind == "O":
+                for index, (left_item, right_item) in enumerate(zip(left.flat, right.flat)):
+                    _compare(left_item, right_item, f"{path}[{index}]")
+                return
+            if not np.array_equal(left, right):
+                mismatch = f"{path}: array mismatch"
+            return
+        if isinstance(left, (list, tuple)) and isinstance(right, type(left)):
+            if len(left) != len(right):
+                mismatch = f"{path}: sequence length mismatch"
+                return
+            for index, (left_item, right_item) in enumerate(zip(left, right)):
+                _compare(left_item, right_item, f"{path}[{index}]")
+            return
+        if isinstance(left, dict) and isinstance(right, dict):
+            if left.keys() != right.keys():
+                mismatch = f"{path}: mapping key mismatch"
+                return
+            for key in left:
+                _compare(left[key], right[key], f"{path}[{key!r}]")
+            return
+        if type(left) is not type(right) or left != right:
+            mismatch = f"{path}: value/schema mismatch"
+
+    _compare(primary_value, audit_value, "statistic")
+    return _StatisticComparison(
+        not mismatch,
+        mismatch or "within declared numeric envelope",
+        max_abs_error,
+        max_rel_error,
+        hashlib.sha256(primary_canonical).hexdigest(),
+        hashlib.sha256(audit_canonical).hexdigest(),
+    )
 
 
 def inject_bit_flip(payload: bytes, bit_offset: int | None = None) -> bytes:
@@ -145,13 +301,22 @@ class SDCAuditReceipt:
     first_diff_byte_offset: int | None
     primary_sha256: str
     audit_sha256: str
+    comparison_mode: str = "typed_numeric_envelope/v1"
+    audit_rtol: float = 0.0
+    audit_atol: float = 0.0
+    max_abs_error: float = 0.0
+    max_rel_error: float = 0.0
+    mismatch_reason: str = ""
+    primary_canonical_sha256: str = ""
+    audit_canonical_sha256: str = ""
     primary_value_repr: str = field(default="", repr=False)
     audit_value_repr: str = field(default="", repr=False)
 
     def summary(self) -> str:
         return (
             "SDC audit mismatch: shard=%d primary_rank=%d audit_rank=%d "
-            "primary=%dB (sha256 %s) audit=%dB (sha256 %s) first_diff_byte=%s"
+            "primary=%dB (sha256 %s) audit=%dB (sha256 %s) first_diff_byte=%s "
+            "comparison=%s rtol=%g atol=%g reason=%s"
             % (
                 self.shard_id,
                 self.primary_worker,
@@ -161,12 +326,25 @@ class SDCAuditReceipt:
                 self.audit_nbytes,
                 self.audit_sha256[:12],
                 self.first_diff_byte_offset,
+                self.comparison_mode,
+                self.audit_rtol,
+                self.audit_atol,
+                self.mismatch_reason,
             )
         )
 
 
 def _receipt(
-    round_no: int, shard_id: int, primary_worker: int, audit_worker: int, primary: bytes, audit: bytes
+    round_no: int,
+    shard_id: int,
+    primary_worker: int,
+    audit_worker: int,
+    primary: bytes,
+    audit: bytes,
+    comparison: _StatisticComparison,
+    *,
+    rtol: float,
+    atol: float,
 ) -> SDCAuditReceipt:
     n = min(len(primary), len(audit))
     first_diff = next((i for i in range(n) if primary[i] != audit[i]), None)
@@ -189,6 +367,13 @@ def _receipt(
         first_diff_byte_offset=first_diff,
         primary_sha256=hashlib.sha256(primary).hexdigest(),
         audit_sha256=hashlib.sha256(audit).hexdigest(),
+        audit_rtol=rtol,
+        audit_atol=atol,
+        max_abs_error=comparison.max_abs_error,
+        max_rel_error=comparison.max_rel_error,
+        mismatch_reason=comparison.reason,
+        primary_canonical_sha256=comparison.primary_canonical_sha256,
+        audit_canonical_sha256=comparison.audit_canonical_sha256,
         primary_value_repr=_safe_repr(primary),
         audit_value_repr=_safe_repr(audit),
     )
@@ -201,7 +386,8 @@ class AuditedMPEncodedData(ResilientMPEncodedData):
     fraction of shards are ALSO recomputed on a second, different rank via the same ad hoc
     ``"update_shard"`` wire command K4 already uses for shard recovery (see
     ``ResilientMPEncodedData._recover_shard``) -- no new worker-side machinery. The primary and
-    audit ``(count, value())`` payloads are compared BYTE-FOR-BYTE. A mismatch:
+    audit ``(count, value())`` payloads are compared as typed statistics under an explicit
+    numerical envelope. A mismatch:
 
         1. is recorded as a structured :class:`SDCAuditReceipt` (``self.audit_receipts``,
            ``self.last_round_audit_mismatches``);
@@ -221,9 +407,9 @@ class AuditedMPEncodedData(ResilientMPEncodedData):
     Args:
         audit_rate (float): fraction of shards (``0..1``) redundantly recomputed each round.
         rng (np.random.RandomState | None): drives which shards are audited each round and
-            which live rank is picked as the second ("audit") rank. Not used for anything that
-            needs to be reproducible bit-for-bit across ranks -- only for *which* shards get
-            the (always bit-exact) double-check.
+            which live rank is picked as the second ("audit") rank.
+        audit_rtol / audit_atol (float): finite nonnegative tolerances used for floating and
+            complex statistic leaves. Integer and categorical leaves remain exact.
 
     Testing hook:
         :meth:`arm_corruption` registers a one-shot-per-round hook that can mutate a payload
@@ -242,7 +428,10 @@ class AuditedMPEncodedData(ResilientMPEncodedData):
         sub_chunks: int = 1,
         max_retries: int = 2,
         audit_rate: float = 0.1,
+        audit_rtol: float = 1.0e-12,
+        audit_atol: float = 1.0e-12,
         rng: np.random.RandomState | None = None,
+        worker_timeout_s: float = 30.0,
     ) -> None:
         super().__init__(
             data,
@@ -251,10 +440,27 @@ class AuditedMPEncodedData(ResilientMPEncodedData):
             num_workers=num_workers,
             sub_chunks=sub_chunks,
             max_retries=max_retries,
+            worker_timeout_s=worker_timeout_s,
         )
         if not (0.0 <= float(audit_rate) <= 1.0):
             raise ValueError("audit_rate must be within [0, 1].")
+        if (
+            isinstance(audit_rtol, bool)
+            or not isinstance(audit_rtol, Real)
+            or not np.isfinite(audit_rtol)
+            or audit_rtol < 0.0
+        ):
+            raise ValueError("audit_rtol must be finite and nonnegative")
+        if (
+            isinstance(audit_atol, bool)
+            or not isinstance(audit_atol, Real)
+            or not np.isfinite(audit_atol)
+            or audit_atol < 0.0
+        ):
+            raise ValueError("audit_atol must be finite and nonnegative")
         self.audit_rate = float(audit_rate)
+        self.audit_rtol = float(audit_rtol)
+        self.audit_atol = float(audit_atol)
         self._audit_rng = rng if rng is not None else np.random.RandomState()
         self._fold_fn = finite_guarded_fold
         self._corrupt_hook: Any = None
@@ -350,8 +556,24 @@ class AuditedMPEncodedData(ResilientMPEncodedData):
             eval_count += 2
             audited.add(shard_id)
 
-            if primary_payload != audit_payload:
-                receipt = _receipt(self._round, shard_id, owner, secondary, primary_payload, audit_payload)
+            comparison = _compare_statistic_payloads(
+                primary_payload,
+                audit_payload,
+                rtol=self.audit_rtol,
+                atol=self.audit_atol,
+            )
+            if not comparison.equivalent:
+                receipt = _receipt(
+                    self._round,
+                    shard_id,
+                    owner,
+                    secondary,
+                    primary_payload,
+                    audit_payload,
+                    comparison,
+                    rtol=self.audit_rtol,
+                    atol=self.audit_atol,
+                )
                 mismatches.append(receipt)
                 self.audit_receipts.append(receipt)
                 if quarantine_on_mismatch:
