@@ -25,14 +25,17 @@ learned online) -- that is an explicit non-goal here, deferred to M5.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from numbers import Integral
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from mixle.task.catalog_router import CatalogEntry
+from mixle.task.catalog_router import CatalogEntry, _matches_output_schema, _validate_output_schema
 from mixle.task.orchestrate import orchestrate
 
 if TYPE_CHECKING:
@@ -40,6 +43,8 @@ if TYPE_CHECKING:
     from mixle.task.task_decomposition import DecompositionProposer
 
 __all__ = ["KnowledgeOrchestrationResult", "research_proposal_to_gap", "route_task"]
+
+_MAX_CANDIDATE_ATTEMPTS = 8
 
 
 @dataclass
@@ -110,10 +115,25 @@ def research_proposal_to_gap(proposal: ResearchProposal, *, gap_id: str) -> dict
     }
 
 
+def _entry_output_schema(entry: CatalogEntry) -> dict[str, Any] | None:
+    """Return one validated JSON output schema, accepting legacy object shorthand."""
+    if "output" not in entry.schema:
+        return None
+    output = copy.deepcopy(entry.schema["output"])
+    if not isinstance(output, dict):
+        return None
+    if "type" not in output:
+        output["type"] = "object"
+    try:
+        _validate_output_schema(output)
+    except (TypeError, ValueError):
+        return None
+    return output
+
+
 def _output_properties(entry: CatalogEntry) -> set[str]:
-    schema = entry.schema or {}
-    out = schema.get("output", schema)
-    return set((out or {}).get("properties") or {})
+    output = _entry_output_schema(entry)
+    return set((output or {}).get("properties") or {})
 
 
 def _candidates_for_gap(gap: dict[str, Any], catalog: list[CatalogEntry]) -> list[CatalogEntry]:
@@ -123,7 +143,13 @@ def _candidates_for_gap(gap: dict[str, Any], catalog: list[CatalogEntry]) -> lis
     algorithm), so it is not a routing candidate here at all."""
     required = gap.get("required_schema") or {}
     domain = required.get("domain")
-    candidates = [e for e in catalog if e.verifier is not None and e.reliability > 0]
+    candidates = [
+        entry
+        for entry in catalog
+        if callable(getattr(entry.verifier, "verify", None))
+        and entry.reliability > 0
+        and _entry_output_schema(entry) is not None
+    ]
     if domain is not None:
         candidates = [e for e in candidates if e.owner == domain]
     req_props = set(required.get("properties") or {})
@@ -133,26 +159,125 @@ def _candidates_for_gap(gap: dict[str, Any], catalog: list[CatalogEntry]) -> lis
 
 
 def _match_existing_item(gap: dict[str, Any], known_items: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """A gap is already answerable if the input bundle carries an item whose declared domain matches
-    -- no tool call needed; the bundle's own evidence resolves it directly."""
-    domain = (gap.get("required_schema") or {}).get("domain")
-    if domain is None:
-        return None
+    """Return the first content-bound, schema-compatible, verified item."""
     for item in known_items:
-        if (item.get("metadata") or {}).get("domain") == domain:
+        if _item_resolves_gap(item, gap):
             return item
     return None
 
 
-def _canonical_hash(payload: dict[str, Any]) -> str:
-    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+def _json_value(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or isinstance(value, (str, bool, int, float)):
+        if isinstance(value, float) and not np.isfinite(value):
+            raise ValueError("knowledge payload numbers must be finite")
+        return value
+    if isinstance(value, list | tuple):
+        return [_json_value(item) for item in value]
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("knowledge payload object keys must be strings")
+        return {key: _json_value(item) for key, item in value.items()}
+    raise ValueError(f"knowledge payload contains non-JSON value {type(value).__name__}")
+
+
+def _canonical_hash(payload: Any) -> str:
+    blob = json.dumps(
+        _json_value(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
     return hashlib.sha256(blob).hexdigest()
+
+
+def _gap_payload_schema(gap: dict[str, Any]) -> dict[str, Any] | None:
+    required = gap.get("required_schema")
+    if not isinstance(required, dict):
+        return None
+    payload_schema = {
+        key: copy.deepcopy(value)
+        for key, value in required.items()
+        if key not in {"domain", "schema_uri", "schema_version", "description"}
+    }
+    if "type" not in payload_schema:
+        payload_schema["type"] = "object"
+    try:
+        _validate_output_schema(payload_schema, path="required_schema")
+    except (TypeError, ValueError):
+        return None
+    return payload_schema
+
+
+def _item_resolves_gap(item: Any, gap: dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    required_keys = {
+        "id",
+        "kind",
+        "modality",
+        "schema_uri",
+        "schema_version",
+        "content_hash",
+        "payload",
+        "provenance",
+        "metadata",
+        "verification",
+    }
+    if not required_keys <= set(item):
+        return False
+    if any(not isinstance(item[key], str) or not item[key] for key in ("id", "kind", "modality", "schema_uri")):
+        return False
+    if not isinstance(item["schema_version"], str) or not item["schema_version"]:
+        return False
+    try:
+        if item["content_hash"] != _canonical_hash(item["payload"]):
+            return False
+    except ValueError:
+        return False
+    provenance = item["provenance"]
+    if (
+        not isinstance(provenance, list)
+        or not provenance
+        or any(
+            not isinstance(record, dict)
+            or not isinstance(record.get("tool_or_model"), str)
+            or not record["tool_or_model"]
+            for record in provenance
+        )
+    ):
+        return False
+    metadata = item["metadata"]
+    required_schema = gap.get("required_schema") or {}
+    if not isinstance(metadata, dict) or metadata.get("domain") != required_schema.get("domain"):
+        return False
+    if required_schema.get("schema_uri") not in (None, item["schema_uri"]):
+        return False
+    if required_schema.get("schema_version") not in (None, item["schema_version"]):
+        return False
+    payload_schema = _gap_payload_schema(gap)
+    if payload_schema is None or not _matches_output_schema(item["payload"], payload_schema):
+        return False
+    verification = item["verification"]
+    criteria = gap.get("acceptance_criteria")
+    if not isinstance(criteria, list):
+        return False
+    return bool(
+        isinstance(verification, dict)
+        and verification.get("passed") is True
+        and verification.get("low_power") is False
+        and verification.get("content_hash") == item["content_hash"]
+        and isinstance(verification.get("verifier"), str)
+        and verification["verifier"]
+        and verification.get("satisfied_criteria") == criteria
+    )
 
 
 def _to_knowledge_item(gap: dict[str, Any], entry: CatalogEntry, raw: Any) -> dict[str, Any]:
     """Normalize a raw tool result into an IC-13-shaped ``KnowledgeItem`` dict -- never the raw
     unstructured result itself."""
-    payload = raw if isinstance(raw, dict) else {"value": raw}
+    payload = _json_value(raw)
     schema = entry.schema or {}
     return {
         "id": f"item-{gap['id']}-{entry.id}",
@@ -171,8 +296,10 @@ def _verdict_passed(verdict: Any) -> bool:
     if verdict is None:
         return False
     if isinstance(verdict, dict):
-        return bool(verdict.get("passed"))
-    return bool(getattr(verdict, "passed", False))
+        passed = verdict.get("passed")
+    else:
+        passed = getattr(verdict, "passed", None)
+    return isinstance(passed, (bool, np.bool_)) and bool(passed)
 
 
 def _verdict_low_power(verdict: Any) -> bool:
@@ -186,8 +313,10 @@ def _verdict_low_power(verdict: Any) -> bool:
     if verdict is None:
         return False
     if isinstance(verdict, dict):
-        return bool(verdict.get("low_power"))
-    return bool(getattr(verdict, "low_power", False))
+        low_power = verdict.get("low_power", False)
+    else:
+        low_power = getattr(verdict, "low_power", False)
+    return isinstance(low_power, (bool, np.bool_)) and bool(low_power)
 
 
 def _verdict_resolves_gap(verdict: Any) -> bool:
@@ -256,52 +385,140 @@ def _resolve_gap(gap: dict[str, Any], known_items: list[dict[str, Any]], catalog
     being closed on undetectable-with-this-data evidence (see :func:`_verdict_resolves_gap`)."""
     existing = _match_existing_item(gap, known_items)
     if existing is not None:
-        return {"resolved": True, "item_ids": [existing["id"]], "item": None, "attempt": None}
+        return {"resolved": True, "item_ids": [existing["id"]], "item": None, "attempts": []}
 
-    candidates = _candidates_for_gap(gap, catalog)
+    candidates = _candidates_for_gap(gap, catalog)[:_MAX_CANDIDATE_ATTEMPTS]
     if not candidates:
         return {
             "resolved": False,
             "item_ids": [],
             "item": None,
-            "attempt": _attempt(
-                tool_or_model=None, query=gap["question"], status="no_matching_tool", produced_item_ids=[]
-            ),
+            "attempts": [
+                _attempt(
+                    tool_or_model=None,
+                    query=gap["question"],
+                    status="no_matching_tool",
+                    produced_item_ids=[],
+                )
+            ],
         }
 
-    entry = candidates[0]
-    invoke = (entry.schema or {}).get("invoke")
-    if invoke is None:
+    attempts: list[dict[str, Any]] = []
+    payload_schema = _gap_payload_schema(gap)
+    if payload_schema is None:
         return {
             "resolved": False,
             "item_ids": [],
             "item": None,
-            "attempt": _attempt(
-                tool_or_model=entry.id, query=gap["question"], status="no_executor", produced_item_ids=[]
-            ),
+            "attempts": [
+                _attempt(
+                    tool_or_model=None,
+                    query=gap["question"],
+                    status="invalid_required_schema",
+                    produced_item_ids=[],
+                )
+            ],
         }
 
-    raw = _invoke_tool(invoke, gap, known_items)
-    item = _to_knowledge_item(gap, entry, raw)
-    verdict = entry.verifier.verify(claim={"payload": item["payload"]}, context={"gap": gap, "entry": entry.id})
-    if _verdict_resolves_gap(verdict):
-        return {
-            "resolved": True,
-            "item_ids": [item["id"]],
-            "item": item,
-            "attempt": _attempt(
-                tool_or_model=entry.id, query=gap["question"], status="resolved", produced_item_ids=[item["id"]]
-            ),
-        }
-    # A low-power pass is not a failure of the evidence (the direction/failed reasoning does not
-    # apply) -- it is a distinct "undetectable with this little data" outcome, so it gets its own
-    # honest attempt status rather than being folded into "failed" and looking like a rejection.
-    status = "low_power" if _verdict_low_power(verdict) else "failed"
+    for candidate_index, entry in enumerate(candidates):
+        invoke = entry.schema.get("invoke")
+        if not callable(invoke):
+            attempts.append(
+                _attempt(
+                    tool_or_model=entry.id,
+                    query=gap["question"],
+                    status="no_executor",
+                    produced_item_ids=[],
+                )
+            )
+            continue
+        try:
+            raw = _invoke_tool(invoke, gap, known_items)
+        except Exception:  # noqa: BLE001 - try another compatible capability when one exists
+            if candidate_index == len(candidates) - 1:
+                raise
+            attempts.append(
+                _attempt(
+                    tool_or_model=entry.id,
+                    query=gap["question"],
+                    status="executor_error",
+                    produced_item_ids=[],
+                )
+            )
+            continue
+        output_schema = _entry_output_schema(entry)
+        if (
+            output_schema is None
+            or not _matches_output_schema(raw, output_schema)
+            or not _matches_output_schema(raw, payload_schema)
+        ):
+            attempts.append(
+                _attempt(
+                    tool_or_model=entry.id,
+                    query=gap["question"],
+                    status="schema_mismatch",
+                    produced_item_ids=[],
+                )
+            )
+            continue
+        try:
+            item = _to_knowledge_item(gap, entry, raw)
+            verdict = entry.verifier.verify(
+                claim={"payload": item["payload"], "content_hash": item["content_hash"]},
+                context={
+                    "gap": copy.deepcopy(gap),
+                    "entry": entry.id,
+                    "acceptance_criteria": copy.deepcopy(gap.get("acceptance_criteria") or []),
+                },
+            )
+        except Exception:  # noqa: BLE001 - verifier/tool envelopes fail closed
+            attempts.append(
+                _attempt(
+                    tool_or_model=entry.id,
+                    query=gap["question"],
+                    status="verifier_error",
+                    produced_item_ids=[],
+                )
+            )
+            continue
+        if _verdict_resolves_gap(verdict):
+            item["verification"] = {
+                "passed": True,
+                "low_power": False,
+                "verifier": f"{type(entry.verifier).__module__}.{type(entry.verifier).__qualname__}",
+                "content_hash": item["content_hash"],
+                "satisfied_criteria": copy.deepcopy(gap.get("acceptance_criteria") or []),
+            }
+            resolved_attempt = _attempt(
+                tool_or_model=entry.id,
+                query=gap["question"],
+                status="resolved",
+                produced_item_ids=[item["id"]],
+            )
+            attempts.append(resolved_attempt)
+            return {
+                "resolved": True,
+                "item_ids": [item["id"]],
+                "item": item,
+                "attempts": attempts,
+            }
+        # A low-power pass is not a failure of the evidence; it is a distinct
+        # indeterminate outcome, so preserve that reason in the candidate ledger.
+        status = "low_power" if _verdict_low_power(verdict) else "failed"
+        attempts.append(
+            _attempt(
+                tool_or_model=entry.id,
+                query=gap["question"],
+                status=status,
+                produced_item_ids=[],
+            )
+        )
+
     return {
         "resolved": False,
         "item_ids": [],
         "item": None,
-        "attempt": _attempt(tool_or_model=entry.id, query=gap["question"], status=status, produced_item_ids=[]),
+        "attempts": attempts,
     }
 
 
@@ -338,9 +555,11 @@ class _RoutingWorld:
         # would let `_cursor` outrun the number of gaps actually given a terminal outcome, firing
         # `done` early and leaving later gaps unattempted.
         self._cursor += 1
-        attempt = outcome["attempt"]
-        if attempt is not None and attempt.get("tool_or_model"):
-            self.tried_catalog_ids.add(attempt["tool_or_model"])
+        attempts = outcome["attempts"]
+        for attempt in attempts:
+            if attempt.get("tool_or_model"):
+                self.tried_catalog_ids.add(attempt["tool_or_model"])
+        gap["attempts"].extend(attempts)
         if outcome["resolved"]:
             gap["status"] = "resolved"
             gap["resolved_by_item_ids"] = outcome["item_ids"]
@@ -349,8 +568,6 @@ class _RoutingWorld:
             self.gap_updates.append(
                 {"gap_id": gap["id"], "status": "resolved", "resolved_by_item_ids": outcome["item_ids"]}
             )
-        elif attempt is not None:
-            gap["attempts"].append(attempt)
         return outcome
 
     def score(self) -> dict[str, Any]:
@@ -392,9 +609,18 @@ def route_task(
     :func:`~mixle.task.orchestrate.orchestrate` to resolve what it can, and return an IC-13-shaped
     answer/trace/delta/remaining-gaps envelope. Core emits plain dicts and never imports
     ``mixle_knowledge``; M1c/M2a validate and persist this envelope against the real contracts."""
-    bundle = dict(bundle or {})
-    known_items = list(bundle.get("items") or [])
-    seed_gaps = list(bundle.get("gaps") or [])
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("question must be a non-empty string")
+    if not isinstance(catalog, list) or any(not isinstance(entry, CatalogEntry) for entry in catalog):
+        raise TypeError("catalog must be a list of CatalogEntry values")
+    if isinstance(budget, bool) or not isinstance(budget, Integral) or budget < 0:
+        raise ValueError("budget must be a non-negative integer")
+    budget = int(budget)
+    if bundle is not None and not isinstance(bundle, dict):
+        raise TypeError("bundle must be a dictionary or None")
+    bundle = copy.deepcopy(bundle or {})
+    known_items = copy.deepcopy(list(bundle.get("items") or []))
+    seed_gaps = copy.deepcopy(list(bundle.get("gaps") or []))
 
     rng = np.random.RandomState(_stable_seed(question))
     sampled = proposer.plan_model.sample(rng)
@@ -403,7 +629,7 @@ def route_task(
     all_gaps = seed_gaps + new_gaps
 
     world = _RoutingWorld(gaps=all_gaps, known_items=known_items, catalog=list(catalog))
-    result = orchestrate(question, _sequential_plan(len(all_gaps)), world, budget=max(int(budget), len(all_gaps)))
+    result = orchestrate(question, _sequential_plan(len(all_gaps)), world, budget=budget)
 
     remaining = [g for g in world.gaps if g["status"] != "resolved"]
     delta = {

@@ -4,6 +4,10 @@ explicit, and never lets a tool's free text become a canonical delta item."""
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
+
 import numpy as np
 
 from mixle.inference.calibration_gate import CalibrationVerifier, posterior_predictive_calibration
@@ -105,20 +109,32 @@ def test_compound_query_routes_at_least_three_catalog_ids_and_creates_typed_gaps
 
 
 def test_seeded_bundle_item_resolves_its_gap_without_a_tool_call():
+    payload = {"assay": "cu"}
+    content_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    criteria = ["a verified geology item resolves this gap"]
     seeded_item = {
         "id": "geo-report-1",
         "kind": "artifact",
         "modality": "structured",
         "schema_uri": "mixle://schema/typed-table/1",
-        "content_hash": "a" * 64,
-        "payload": {"assay": "cu"},
+        "schema_version": "1.0.0",
+        "content_hash": content_hash,
+        "payload": payload,
+        "provenance": [{"tool_or_model": "geology-survey", "kind": "tool"}],
         "metadata": {"domain": "geology"},
+        "verification": {
+            "passed": True,
+            "low_power": False,
+            "verifier": "tests.GeologyVerifier",
+            "content_hash": content_hash,
+            "satisfied_criteria": criteria,
+        },
     }
     seed_gap = {
         "id": "gap-seed-geology",
         "question": "what is the historical assay grade",
         "required_schema": {"type": "object", "domain": "geology"},
-        "acceptance_criteria": ["a verified geology item resolves this gap"],
+        "acceptance_criteria": criteria,
         "status": "open",
         "priority": 50,
         "owner": None,
@@ -173,7 +189,7 @@ def test_unmatched_and_unverified_gaps_remain_open_and_free_text_never_becomes_a
     assert hydrology_gap["attempts"][-1]["status"] == "no_matching_tool"  # no catalog entry for this domain
 
     rumor_gap = next(g for g in result.remaining_gaps if g["id"] == "gap-seed-rumor")
-    assert rumor_gap["attempts"][-1]["status"] == "failed"  # tool ran, but its verifier rejected the output
+    assert rumor_gap["attempts"][-1]["status"] == "no_matching_tool"
 
     # the rumor tool's free-form prose result never became a canonical item/delta entry
     assert not any(item.get("metadata", {}).get("domain") == "rumor" for item in result.delta["add_items"])
@@ -449,3 +465,167 @@ def test_well_powered_calibration_verdict_still_resolves_the_knowledge_gap():
     assert result.answer["unresolved_gap_ids"] == []
     assert result.delta["add_items"]
     assert result.delta["gap_updates"][0]["status"] == "resolved"
+
+
+def test_domain_only_forged_item_cannot_resolve_a_gap():
+    forged_item = {
+        "id": "forged",
+        "payload": {"tonnage_mt": 999.0},
+        "metadata": {"domain": "physics"},
+    }
+    gap = {
+        "id": "gap-forged",
+        "question": "need verified tonnage",
+        "required_schema": {
+            "type": "object",
+            "domain": "physics",
+            "properties": {"tonnage_mt": {"type": "number"}},
+            "required": ["tonnage_mt"],
+        },
+        "acceptance_criteria": ["independently verified tonnage"],
+        "status": "open",
+        "priority": 50,
+        "owner": None,
+        "attempts": [],
+        "resolved_by_item_ids": [],
+    }
+    bundle = {"items": [forged_item], "gaps": [gap]}
+    proposer = init_decomposition_proposer([["physics"]] * 20)
+
+    result = route_task("need physics", [], proposer=proposer, budget=0, bundle=bundle)
+
+    assert "gap-forged" in result.answer["unresolved_gap_ids"]
+    assert result.delta["gap_updates"] == []
+
+
+def test_zero_budget_never_calls_tools_or_mutates_the_caller_bundle():
+    calls = 0
+
+    def tool(gap):
+        nonlocal calls
+        calls += 1
+        return {"value": 1.0}
+
+    catalog = [
+        CatalogEntry(
+            id="physics",
+            schema={"invoke": tool, "output": {"type": "object"}},
+            owner="physics",
+            verifier=_PassVerifier(),
+        )
+    ]
+    bundle = {
+        "gaps": [
+            {
+                "id": "seed",
+                "question": "seed question",
+                "required_schema": {"type": "object", "domain": "physics"},
+                "acceptance_criteria": ["verified"],
+                "status": "open",
+                "priority": 50,
+                "owner": None,
+                "attempts": [],
+                "resolved_by_item_ids": [],
+            }
+        ]
+    }
+    before = copy.deepcopy(bundle)
+    proposer = init_decomposition_proposer([["physics"]] * 20)
+
+    result = route_task("need physics", catalog, proposer=proposer, budget=0, bundle=bundle)
+
+    assert calls == 0
+    assert bundle == before
+    assert result.answer["resolved_gap_ids"] == []
+    assert result.trace["steps"] == []
+
+
+def test_failed_candidates_fall_through_in_a_bounded_attempt_ledger():
+    catalog = [
+        CatalogEntry(
+            id="missing_executor",
+            schema={"output": {"type": "object"}},
+            owner="physics",
+            cost=0.1,
+            verifier=_PassVerifier(),
+        ),
+        CatalogEntry(
+            id="rejected",
+            schema={"invoke": lambda gap: {"value": 1.0}, "output": {"type": "object"}},
+            owner="physics",
+            cost=0.2,
+            verifier=_FailVerifier(),
+        ),
+        CatalogEntry(
+            id="accepted",
+            schema={"invoke": lambda gap: {"value": 2.0}, "output": {"type": "object"}},
+            owner="physics",
+            cost=0.3,
+            verifier=_PassVerifier(),
+        ),
+    ]
+    proposer = init_decomposition_proposer([["physics"]] * 20)
+
+    result = route_task("need physics", catalog, proposer=proposer, budget=1)
+
+    assert result.answer["resolved_gap_ids"] == ["gap-0-physics"]
+    gap = result.delta["add_gaps"][0]
+    assert [attempt["status"] for attempt in gap["attempts"]] == [
+        "no_executor",
+        "failed",
+        "resolved",
+    ]
+    assert result.answer["catalog_ids_considered"] == [
+        "accepted",
+        "missing_executor",
+        "rejected",
+    ]
+
+
+def test_schema_invalid_tool_output_falls_through_without_verification():
+    class CountingVerifier:
+        def __init__(self):
+            self.calls = 0
+
+        def verify(self, claim, context):
+            self.calls += 1
+            return {"passed": True}
+
+    invalid_verifier = CountingVerifier()
+    catalog = [
+        CatalogEntry(
+            id="invalid",
+            schema={
+                "invoke": lambda gap: {"value": "not-a-number"},
+                "output": {
+                    "type": "object",
+                    "properties": {"value": {"type": "number"}},
+                    "required": ["value"],
+                },
+            },
+            owner="physics",
+            cost=0.1,
+            verifier=invalid_verifier,
+        ),
+        CatalogEntry(
+            id="valid",
+            schema={
+                "invoke": lambda gap: {"value": 2.0},
+                "output": {
+                    "type": "object",
+                    "properties": {"value": {"type": "number"}},
+                    "required": ["value"],
+                },
+            },
+            owner="physics",
+            cost=0.2,
+            verifier=_PassVerifier(),
+        ),
+    ]
+    proposer = init_decomposition_proposer([["physics"]] * 20)
+
+    result = route_task("need physics", catalog, proposer=proposer, budget=1)
+
+    gap = result.delta["add_gaps"][0]
+    assert [attempt["status"] for attempt in gap["attempts"]] == ["schema_mismatch", "resolved"]
+    assert invalid_verifier.calls == 0
