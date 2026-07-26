@@ -30,9 +30,13 @@ Teachers are consulted once per dataset (labels are cached), never per candidate
 
 from __future__ import annotations
 
+import hashlib
 import json
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from numbers import Integral, Real
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -68,26 +72,71 @@ __all__ = [
 
 @dataclass(frozen=True)
 class EdgeFootprint:
-    """A student's measured deployment cost: serialized ``bytes``, per-inference ``ops`` (multiply-
-    accumulates for an MLP; factor evaluations for a structured classifier), and ``torch_free``."""
+    """Exact exported bytes plus execution-path evidence.
+
+    ``ops`` is an explicitly labeled structural estimate. ``inference_seconds``
+    is measured by running the serving object's real ``batch`` path.
+    """
 
     bytes: int
     ops: int
     torch_free: bool
+    inference_seconds: float | None = None
+    artifact_digest: str | None = None
+    ops_kind: str = "structural_estimate"
+
+    def __post_init__(self) -> None:
+        if isinstance(self.bytes, bool) or not isinstance(self.bytes, Integral) or self.bytes < 0:
+            raise ValueError("footprint bytes must be a non-negative integer")
+        if isinstance(self.ops, bool) or not isinstance(self.ops, Integral) or self.ops < 0:
+            raise ValueError("footprint ops must be a non-negative integer")
+        if not isinstance(self.torch_free, bool):
+            raise ValueError("footprint torch_free must be a boolean")
+        if self.inference_seconds is not None and (
+            isinstance(self.inference_seconds, bool)
+            or not isinstance(self.inference_seconds, Real)
+            or not np.isfinite(self.inference_seconds)
+            or self.inference_seconds <= 0.0
+        ):
+            raise ValueError("footprint inference_seconds must be finite and positive or None")
+        if self.artifact_digest is not None and (
+            not isinstance(self.artifact_digest, str)
+            or len(self.artifact_digest) != 64
+            or any(char not in "0123456789abcdef" for char in self.artifact_digest)
+        ):
+            raise ValueError("artifact_digest must be a lowercase SHA-256 hex digest or None")
 
 
 @dataclass(frozen=True)
 class DeviceSpec:
     """A hard deployment budget. ``None`` leaves an axis unconstrained.
 
-    ``max_bytes``: model size on flash/disk. ``max_ops``: per-inference op budget (a latency proxy --
-    calibrate ops/sec once per device to turn a latency target into this number). ``torch_free``:
-    the device cannot run torch, so only pure-mixle students qualify.
+    ``max_bytes`` gates the exact exported artifact. ``max_inference_seconds``
+    gates a benchmark of the actual serving path. ``max_ops`` is retained as a
+    structural compatibility constraint, but cannot be used without an actual
+    latency bound. ``torch_free`` excludes torch-backed artifacts.
     """
 
     max_bytes: int | None = None
     max_ops: int | None = None
+    max_inference_seconds: float | None = None
     torch_free: bool = False
+
+    def __post_init__(self) -> None:
+        for name, value in (("max_bytes", self.max_bytes), ("max_ops", self.max_ops)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, Integral) or value <= 0):
+                raise ValueError(f"{name} must be a positive integer or None")
+        if self.max_inference_seconds is not None and (
+            isinstance(self.max_inference_seconds, bool)
+            or not isinstance(self.max_inference_seconds, Real)
+            or not np.isfinite(self.max_inference_seconds)
+            or self.max_inference_seconds <= 0.0
+        ):
+            raise ValueError("max_inference_seconds must be finite and positive or None")
+        if self.max_ops is not None and self.max_inference_seconds is None:
+            raise ValueError("max_ops is only an estimate; pair it with max_inference_seconds")
+        if not isinstance(self.torch_free, bool):
+            raise ValueError("torch_free must be a boolean")
 
     @classmethod
     def for_latency(
@@ -107,7 +156,12 @@ class DeviceSpec:
         """
         if max_ms <= 0 or ops_per_second <= 0:
             raise ValueError("max_ms and ops_per_second must be positive")
-        return cls(max_bytes=max_bytes, max_ops=int(ops_per_second * max_ms / 1000.0), torch_free=torch_free)
+        return cls(
+            max_bytes=max_bytes,
+            max_ops=int(ops_per_second * max_ms / 1000.0),
+            max_inference_seconds=float(max_ms) / 1000.0,
+            torch_free=torch_free,
+        )
 
     def violations(self, fp: EdgeFootprint) -> list[float]:
         """Normalized constraint values, feasible when ``<= 0`` (the form constrained BO consumes)."""
@@ -116,6 +170,11 @@ class DeviceSpec:
             out.append((fp.bytes - self.max_bytes) / float(self.max_bytes))
         if self.max_ops is not None:
             out.append((fp.ops - self.max_ops) / float(self.max_ops))
+        if self.max_inference_seconds is not None:
+            if fp.inference_seconds is None:
+                out.append(float("inf"))
+            else:
+                out.append((fp.inference_seconds - self.max_inference_seconds) / self.max_inference_seconds)
         return out
 
     def feasible(self, fp: EdgeFootprint) -> bool:
@@ -137,28 +196,73 @@ def _torch_macs_and_params(module: Any) -> tuple[int, int]:
     return macs, params
 
 
-def footprint(student: TaskModel) -> EdgeFootprint:
-    """Measure a student's deployment cost. Bytes are real (fp32 weights, int8 arrays for a quantized
-    student, or serialized JSON for a structured one); ops are the closed-form per-inference count for
-    the student's kind."""
-    if student.payload == "torch":
-        macs, params = _torch_macs_and_params(student.model)
-        return EdgeFootprint(bytes=4 * params, ops=macs, torch_free=False)
-    if student.payload == "arrays":
-        # quantized numpy student: int8 weight bytes measured from the arrays; inference needs no torch
-        return EdgeFootprint(bytes=student.model.nbytes(), ops=student.model.macs(), torch_free=True)
-    # pure-mixle payload: measure the actual serialized size
-    from mixle.utils.serialization import ensure_pysp_serialization_registry, to_serializable
+def _exported_artifact_measurement(student: TaskModel) -> tuple[int, str]:
+    """Save the exact serving artifact and hash every path/content byte."""
+    with tempfile.TemporaryDirectory(prefix="mixle-edge-artifact-") as directory:
+        root = Path(student.save(str(Path(directory) / "artifact")))
+        files = sorted(path for path in root.rglob("*") if path.is_file())
+        if not files:
+            raise RuntimeError("TaskModel.save produced an empty deployment artifact")
+        digest = hashlib.sha256()
+        total = 0
+        for path in files:
+            relative = path.relative_to(root).as_posix().encode()
+            payload = path.read_bytes()
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+            total += len(payload)
+        return total, digest.hexdigest()
 
-    ensure_pysp_serialization_registry()
-    nbytes = len(json.dumps(to_serializable(student.model)).encode())
+
+def footprint(
+    student: TaskModel,
+    *,
+    probe_inputs: Sequence[Any] | None = None,
+    repeats: int = 3,
+) -> EdgeFootprint:
+    """Measure the exact exported artifact and optionally benchmark serving.
+
+    The artifact byte count comes from :meth:`TaskModel.save`, so weights use
+    their actual dtype and the manifest, adapter, labels, configuration, and
+    metadata are included. ``ops`` remains a structural estimate and is never
+    sufficient by itself for a hard latency gate.
+    """
+    if not isinstance(student, TaskModel):
+        raise TypeError("student must be a TaskModel")
+    nbytes, artifact_digest = _exported_artifact_measurement(student)
+    seconds = measure_inference_seconds(student, probe_inputs, repeats=repeats) if probe_inputs is not None else None
+    if student.payload == "torch":
+        macs, _params = _torch_macs_and_params(student.model)
+        return EdgeFootprint(
+            bytes=nbytes,
+            ops=macs,
+            torch_free=False,
+            inference_seconds=seconds,
+            artifact_digest=artifact_digest,
+        )
+    if student.payload == "arrays":
+        return EdgeFootprint(
+            bytes=nbytes,
+            ops=student.model.macs(),
+            torch_free=True,
+            inference_seconds=seconds,
+            artifact_digest=artifact_digest,
+        )
     adapter = student.adapter
     n_labels = len(getattr(adapter, "labels", [])) or 1
     n_fields = int(getattr(adapter, "label_index", 1))
     n_comp = int(student.meta.get("recipe", {}).get("n_components", 1) or 1)
     # classification scores every label: one factor evaluation per field (+ label), per component.
     ops = n_labels * n_comp * (n_fields + 1)
-    return EdgeFootprint(bytes=nbytes, ops=ops, torch_free=True)
+    return EdgeFootprint(
+        bytes=nbytes,
+        ops=ops,
+        torch_free=True,
+        inference_seconds=seconds,
+        artifact_digest=artifact_digest,
+    )
 
 
 def measure_inference_seconds(student: TaskModel, inputs: Sequence[Any], *, repeats: int = 5) -> float:
@@ -631,7 +735,11 @@ def distill_for_edge(
         run = _scaled(recipe, family, screen_fidelity) if fidelity == "screen" else recipe
         student = _train(family, run)
         agree = agreement(student, val_truth, val_data)
-        fp = footprint(student)
+        fp = footprint(
+            student,
+            probe_inputs=val_data[: min(16, len(val_data))],
+            repeats=1,
+        )
         viol = device.violations(fp)
         hard_ok = fp.torch_free or not device.torch_free
         trial = {
