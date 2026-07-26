@@ -8,6 +8,7 @@ import pytest
 from mixle.experimental.typed_runtime import (
     ArtifactKind,
     ConsistencyRequirement,
+    ContractEvidenceKind,
     ContractRegistry,
     CurvatureKind,
     EffectiveContextMeasurement,
@@ -199,6 +200,8 @@ class DeclarationAndValidationTest:
             exact=False,
             outer_objective_compatible=False,
             declared_by="test_registry",
+            evidence_kind=ContractEvidenceKind.EXPLICIT_DECLARATION,
+            evidence_id="test:registry-v1",
         )
         registry = ContractRegistry()
         registry.register(GaussianDistribution, contract)
@@ -225,6 +228,8 @@ class DeclarationAndValidationTest:
             outer_objective_compatible=False,
             exact=False,
             declared_by="test_explicit_neural_contract",
+            evidence_kind=ContractEvidenceKind.EXPLICIT_DECLARATION,
+            evidence_id="test:neural-contract-v1",
         )
         graph = compile_update_graph(leaf, leaf.estimator(), contract_overrides={"root": contract})
         issues = validate_update_graph(graph, strict=True)
@@ -238,6 +243,8 @@ class DeclarationAndValidationTest:
             merge_law=MergeLaw.REPLICATED,
             writes=frozenset(),
             declared_by="path_override",
+            evidence_kind=ContractEvidenceKind.EXPLICIT_DECLARATION,
+            evidence_id="test:path-override-v1",
         )
         graph = compile_update_graph(
             GaussianDistribution(0.0, 1.0),
@@ -399,6 +406,8 @@ class FailClosedContractEvidenceTest:
             merge_law=MergeLaw.ADDITIVE,
             convergence_certificate=ConvergenceCertificate.MONOTONE_CERTIFIED,
             declared_by="test_without_acceptance_proof",
+            evidence_kind=ContractEvidenceKind.EXPLICIT_DECLARATION,
+            evidence_id="test:missing-proof-v1",
         )
         with pytest.raises(ValueError, match="acceptance-proof"):
             registry.register(GaussianDistribution, unsupported)
@@ -409,6 +418,8 @@ class FailClosedContractEvidenceTest:
             merge_law=MergeLaw.ADDITIVE,
             convergence_certificate=ConvergenceCertificate.MONOTONE_CERTIFIED,
             declared_by="test_empty_acceptance_proof",
+            evidence_kind=ContractEvidenceKind.EXPLICIT_DECLARATION,
+            evidence_id="test:empty-proof-v1",
             notes=("acceptance-proof:   ",),
         )
         with pytest.raises(ValueError, match="acceptance-proof"):
@@ -420,6 +431,8 @@ class FailClosedContractEvidenceTest:
             merge_law=MergeLaw.ADDITIVE,
             outer_objective_compatible=False,
             declared_by="test_unknown_objective",
+            evidence_kind=ContractEvidenceKind.EXPLICIT_DECLARATION,
+            evidence_id="test:unknown-objective-v1",
         )
         with pytest.raises(ValueError, match="identify the objective"):
             registry.register(GaussianDistribution, exact_unknown_objective)
@@ -440,6 +453,8 @@ class FailClosedContractEvidenceTest:
                         merge_law=MergeLaw.REPLICATED,
                         writes=frozenset(),
                         declared_by="test_unused_path",
+                        evidence_kind=ContractEvidenceKind.EXPLICIT_DECLARATION,
+                        evidence_id="test:unused-path-v1",
                     )
                 },
             )

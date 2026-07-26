@@ -39,6 +39,21 @@ def _problem(seed=19, nobs=240):
 
 
 class TypedLocalExecutionTest:
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"delta": float("nan")}, "delta"),
+            ({"delta": float("inf")}, "delta"),
+            ({"accept_tolerance": float("nan")}, "accept_tolerance"),
+            ({"accept_tolerance": float("inf")}, "accept_tolerance"),
+            ({"stall_patience": 0}, "stall_patience"),
+        ],
+    )
+    def test_non_finite_or_invalid_controls_fail_before_execution(self, kwargs, message):
+        start, estimator, encoded = _problem(nobs=10)
+        with pytest.raises(ValueError, match=message):
+            run_typed_mixture_em(encoded, estimator, start, **kwargs)
+
     def test_real_partial_updates_are_monotone_receipted_and_cheaper_than_full_tree_work(self):
         start, estimator, encoded = _problem()
         rounds = 12

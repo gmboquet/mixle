@@ -1,7 +1,7 @@
 """Experimental statistically typed optimization and context-runtime foundation.
 
 The package implements the semantic compiler, measured scheduler, transactional
-proposal runtime, structured placement, local exact model-parallel adapter,
+proposal runtime, structured placement, reference-checked local model-parallel adapter,
 geometry-routed torch optimizer execution, and transactional context-action
 execution. Real multi-host transport (today's structured executor uses local
 worker threads), a general execution adapter for every compiled estimator, and
@@ -99,6 +99,7 @@ from mixle.experimental.typed_runtime.contracts import (
     ArtifactKind,
     ComputeBand,
     ConsistencyRequirement,
+    ContractEvidenceKind,
     ConvergenceCertificate,
     CostEstimate,
     CounterSemantics,
@@ -158,6 +159,11 @@ from mixle.experimental.typed_runtime.hierarchical import (
     CorrectionProvider,
     HierarchicalProposalCoordinator,
     HierarchicalRoundReceipt,
+)
+from mixle.experimental.typed_runtime.inventory import (
+    RuntimeCapability,
+    RuntimeCapabilityStatus,
+    runtime_capabilities,
 )
 from mixle.experimental.typed_runtime.local import (
     GainProvider,
@@ -308,6 +314,7 @@ __all__ = [
     "ContextScheduleDecision",
     "ContextSchedulerConfig",
     "ContextTokenizer",
+    "ContractEvidenceKind",
     "ContractRegistry",
     "CostEstimate",
     "CounterSemantics",
@@ -379,6 +386,8 @@ __all__ = [
     "ReplayStepReceipt",
     "RecoveryDrillReceipt",
     "RuntimeVersions",
+    "RuntimeCapability",
+    "RuntimeCapabilityStatus",
     "ScaleRunReceipt",
     "NodeScheduleState",
     "NodeTerminalReceipt",
@@ -445,5 +454,6 @@ __all__ = [
     "run_structured_estimation_step",
     "run_graph_memory_pilot",
     "route_optimizer_geometry",
+    "runtime_capabilities",
     "shrink_proposal",
 ]

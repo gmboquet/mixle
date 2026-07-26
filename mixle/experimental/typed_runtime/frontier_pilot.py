@@ -16,7 +16,13 @@ from mixle.experimental.typed_runtime.context_attention import (
     bounded_context_attention,
 )
 from mixle.experimental.typed_runtime.context_ir import ContextGraph, ContextNode, ContextNodeKind
-from mixle.experimental.typed_runtime.contracts import MergeLaw, ObjectiveKind, UpdateContract, UpdateKind
+from mixle.experimental.typed_runtime.contracts import (
+    ContractEvidenceKind,
+    MergeLaw,
+    ObjectiveKind,
+    UpdateContract,
+    UpdateKind,
+)
 from mixle.experimental.typed_runtime.geometry import (
     BatchSemanticsReceipt,
     GeometryRouterConfig,
@@ -271,6 +277,9 @@ def run_graph_memory_pilot(
         update_kind=UpdateKind.FIRST_ORDER,
         merge_law=MergeLaw.LOW_RANK,
         exact=False,
+        declared_by="graph_memory_pilot",
+        evidence_kind=ContractEvidenceKind.EXPLICIT_DECLARATION,
+        evidence_id="frontier-pilot:regime-moe-v1",
     )
 
     def tensors(context: np.ndarray, regime: np.ndarray, labels: np.ndarray) -> tuple[Any, Any, Any]:

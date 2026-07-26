@@ -106,6 +106,15 @@ class CounterSemantics(StrEnum):
     HIGH_WATER_MARK = "high_water_mark"
 
 
+class ContractEvidenceKind(StrEnum):
+    """Provenance class supporting a compiled update contract."""
+
+    AUDITED_CATALOG = "audited_catalog"
+    EXPLICIT_DECLARATION = "explicit_declaration"
+    CONSERVATIVE_FALLBACK = "conservative_fallback"
+    UNVERIFIED = "unverified"
+
+
 def weakest_band(bands: Iterable[ComputeBand]) -> ComputeBand:
     """FLOAT32_ELIGIBLE only when every node is eligible; FLOAT64 otherwise (or when empty)."""
     result: ComputeBand | None = None
@@ -266,6 +275,8 @@ class UpdateContract:
     convergence_certificate: ConvergenceCertificate = ConvergenceCertificate.UNKNOWN
     compute_band: ComputeBand = ComputeBand.FLOAT64
     declared_by: str = "compiler_default"
+    evidence_kind: ContractEvidenceKind = ContractEvidenceKind.UNVERIFIED
+    evidence_id: str | None = None
     notes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -277,6 +288,13 @@ class UpdateContract:
             raise ValueError("an unknown objective cannot claim outer-objective compatibility.")
         if StateSemantics.IMMUTABLE_RESULT in self.state_semantics and len(self.state_semantics) > 1:
             raise ValueError("immutable_result cannot be combined with mutable state semantics.")
+        if not isinstance(self.evidence_kind, ContractEvidenceKind):
+            raise TypeError("contract evidence_kind must be a ContractEvidenceKind value.")
+        if self.evidence_kind is ContractEvidenceKind.UNVERIFIED:
+            if self.evidence_id is not None:
+                raise ValueError("an unverified contract cannot claim an evidence_id.")
+        elif not isinstance(self.evidence_id, str) or not self.evidence_id.strip():
+            raise ValueError("verified or conservative contracts require a non-empty evidence_id.")
 
     @property
     def is_mutable(self) -> bool:
@@ -308,6 +326,8 @@ class UpdateContract:
             "convergence_certificate": self.convergence_certificate.value,
             "compute_band": self.compute_band.value,
             "declared_by": self.declared_by,
+            "evidence_kind": self.evidence_kind.value,
+            "evidence_id": self.evidence_id,
             "notes": list(self.notes),
         }
 
@@ -315,6 +335,7 @@ class UpdateContract:
 __all__ = [
     "ArtifactKind",
     "ComputeBand",
+    "ContractEvidenceKind",
     "ConvergenceCertificate",
     "ConsistencyRequirement",
     "CostEstimate",
