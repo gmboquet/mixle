@@ -118,6 +118,35 @@ class FusedKernelRuntimeContractTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.compiled.em_step(self.encoding, object(), weights=invalid)
 
+    def test_worker_pool_growth_closes_the_superseded_pool(self):
+        self.compiled.seq_component_log_density(self.encoding, n_threads=2)
+        old_pool = self.compiled._pool
+        self.compiled.seq_component_log_density(self.encoding, n_threads=3)
+        self.assertIsNot(self.compiled._pool, old_pool)
+        with self.assertRaises(RuntimeError):
+            old_pool.submit(lambda: None)
+
+    def test_close_and_context_manager_have_idempotent_lifecycle(self):
+        with CompiledMixture(self.model) as compiled:
+            encoding = compiled.encode([-1.0, 1.0])
+            compiled.seq_component_log_density(encoding, n_threads=2)
+            self.assertIsNotNone(compiled._pool)
+
+        self.assertIsNone(compiled._pool)
+        compiled.close()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            compiled.seq_component_log_density(encoding)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            compiled.encode([0.0])
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            compiled.__enter__()
+
+    def test_thread_count_must_be_a_positive_integer(self):
+        for invalid in (0, -1, 1.5, True):
+            with self.subTest(n_threads=invalid):
+                with self.assertRaises((TypeError, ValueError)):
+                    self.compiled.seq_component_log_density(self.encoding, n_threads=invalid)
+
 
 if __name__ == "__main__":
     unittest.main()

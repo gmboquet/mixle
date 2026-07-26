@@ -54,6 +54,7 @@ kernel path streams each observation exactly once.
 
 import math
 from collections.abc import Iterator, Sequence
+from threading import Lock
 from typing import Any
 
 import numpy as np
@@ -1433,11 +1434,15 @@ class CompiledMixture:
         self._score = _make_score_driver(self.builder.kernel)
         self._accumulate = _make_acc_driver(self.builder.acc_kernel)
         self._pool = None
+        self._pool_size = 0
+        self._pool_lock = Lock()
+        self._closed = False
 
     # -- data ------------------------------------------------------------
 
     def encode(self, data):
         """Encode raw observations into the compiled mixture's columnar buffers."""
+        self._ensure_open()
         bufs, add = self.builder.new_sink()
         n = 0
         for x in data:
@@ -1514,15 +1519,52 @@ class CompiledMixture:
 
     _MIN_ROWS_PER_THREAD = 50000
 
-    def _executor(self, n_threads):
-        if self._pool is None or self._pool._max_workers < n_threads:
-            from concurrent.futures import ThreadPoolExecutor
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("CompiledMixture is closed")
 
-            self._pool = ThreadPoolExecutor(max_workers=n_threads)
-        return self._pool
+    @staticmethod
+    def _validated_thread_count(n_threads: int) -> int:
+        if isinstance(n_threads, (bool, np.bool_)) or not isinstance(n_threads, (int, np.integer)):
+            raise TypeError("n_threads must be a positive integer")
+        if n_threads < 1:
+            raise ValueError("n_threads must be a positive integer")
+        return int(n_threads)
+
+    def _executor(self, n_threads):
+        n_threads = self._validated_thread_count(n_threads)
+        with self._pool_lock:
+            self._ensure_open()
+            if self._pool is None or self._pool_size < n_threads:
+                from concurrent.futures import ThreadPoolExecutor
+
+                if self._pool is not None:
+                    self._pool.shutdown(wait=True)
+                self._pool = ThreadPoolExecutor(max_workers=n_threads)
+                self._pool_size = n_threads
+            return self._pool
+
+    def close(self) -> None:
+        """Release worker threads; safe to call repeatedly."""
+        with self._pool_lock:
+            if self._closed:
+                return
+            self._closed = True
+            pool, self._pool = self._pool, None
+            self._pool_size = 0
+        if pool is not None:
+            pool.shutdown(wait=True)
+
+    def __enter__(self):
+        self._ensure_open()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
 
     def seq_component_log_density(self, enc, model=None, n_threads: int | None = None) -> np.ndarray:
         """Return per-component log-density matrix for encoded observations."""
+        self._ensure_open()
         model = self.model if model is None else model
         n, cols = self._validated_encoding(enc)
         _, params = self._validated_model(model)
@@ -1532,6 +1574,8 @@ class CompiledMixture:
             import os
 
             n_threads = max(1, min(8, os.cpu_count() or 1, n * self.K // self._MIN_ROWS_PER_THREAD))
+        else:
+            n_threads = self._validated_thread_count(n_threads)
 
         if n_threads <= 1:
             self._score(0, n, self.K, params, cols, out)
@@ -1575,6 +1619,7 @@ class CompiledMixture:
 
     def weighted_suff_stats(self, enc, gamma: np.ndarray, model=None, n_threads: int | None = None):
         """Legacy-format sufficient statistics from per-row component weights."""
+        self._ensure_open()
         model = self.model if model is None else model
         n, cols = self._validated_encoding(enc)
         _, params = self._validated_model(model)
@@ -1593,6 +1638,8 @@ class CompiledMixture:
             import os
 
             n_threads = max(1, min(8, os.cpu_count() or 1, n * self.K // self._MIN_ROWS_PER_THREAD))
+        else:
+            n_threads = self._validated_thread_count(n_threads)
 
         if n_threads <= 1:
             stats = self.builder.make_stats(self.K)
