@@ -926,7 +926,7 @@ class HierarchicalDPMTestCase(unittest.TestCase):
         self.assertEqual(model.group_weights.shape, (40, 8))
         self.assertTrue(np.allclose(model.group_weights.sum(axis=1), 1.0))
         gp = model.group_posteriors(groups)
-        cors = [np.corrcoef(model.group_weights[j], gp[j])[0, 1] for j in range(40)]
+        cors = [np.corrcoef(model.group_weight(groups[j]), gp[j])[0, 1] for j in range(40)]
         self.assertGreater(np.median(cors), 0.9)
 
     def test_new_group_scoring_is_finite(self):

@@ -31,6 +31,7 @@ __all__ = [
     "HierarchicalDirichletProcessMixtureDistribution",
     "HierarchicalDirichletProcessMixtureEstimator",
     "HierarchicalDirichletProcessMixtureSampler",
+    "HDPGroup",
     "PitmanYorProcessDistribution",
     "PitmanYorProcessSampler",
     "PitmanYorProcessEstimator",
@@ -869,6 +870,7 @@ from mixle.stats.bayes.dirichlet_process_mixture import (
     DirichletProcessMixtureSampler,
 )
 from mixle.stats.bayes.hierarchical_dirichlet_process_mixture import (
+    HDPGroup,
     HierarchicalDirichletProcessMixtureDistribution,
     HierarchicalDirichletProcessMixtureEstimator,
     HierarchicalDirichletProcessMixtureSampler,

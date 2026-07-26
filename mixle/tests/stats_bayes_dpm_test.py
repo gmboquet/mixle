@@ -29,7 +29,10 @@ from mixle.stats.bayes.dirichlet_process_mixture import (
     DirichletProcessMixtureDistribution,
     DirichletProcessMixtureEstimator,
 )
-from mixle.stats.bayes.hierarchical_dirichlet_process_mixture import HierarchicalDirichletProcessMixtureEstimator
+from mixle.stats.bayes.hierarchical_dirichlet_process_mixture import (
+    HDPGroup,
+    HierarchicalDirichletProcessMixtureEstimator,
+)
 from mixle.stats.bayes.normal_gamma import NormalGammaDistribution
 from mixle.stats.univariate.continuous.gamma import GammaDistribution
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution, GaussianEstimator
@@ -79,10 +82,17 @@ def _matched_hdpm():
     alpha, gamma = 2.0, 1.5
     gw = rng.dirichlet([1, 1, 1], size=12)
 
-    sd = SHD(s_c, beta, alpha, gamma, group_weights=gw)
-
     groups = [[float(rng.normal() * 0.7 + rng.choice(mus)) for _ in range(rng.randint(5, 15))] for _ in range(12)]
-    return sd, groups, k
+    keyed_groups = [HDPGroup("group-%d" % index, group) for index, group in enumerate(groups)]
+    sd = SHD(
+        s_c,
+        beta,
+        alpha,
+        gamma,
+        group_weights=gw,
+        group_ids=[group.group_id for group in keyed_groups],
+    )
+    return sd, keyed_groups, k
 
 
 # --------------------------------------------------------------------------- #
