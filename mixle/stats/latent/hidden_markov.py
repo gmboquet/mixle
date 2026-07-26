@@ -1388,7 +1388,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             num_units=self.n_states,
             reduction=ReductionOp.SUM,
             exact=True,
-            child_roles=("state",) * self.n_states,
+            child_roles=tuple(f"state_{i}" for i in range(self.n_states)),
             engine_axis=None,
             key_pooling=False,
         )

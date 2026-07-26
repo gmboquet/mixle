@@ -403,7 +403,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             num_units=self.count,
             reduction=ReductionOp.SUM,
             exact=True,
-            child_roles=("factor",) * self.count,
+            child_roles=tuple(f"factor_{i}" for i in range(self.count)),
         )
 
     def dist_to_encoder(self) -> CompositeDataEncoder:

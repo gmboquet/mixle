@@ -255,7 +255,7 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
             num_units=self.count,
             reduction=ReductionOp.SUM,
             exact=True,
-            child_roles=tuple(self.fields),
+            child_roles=tuple(str(field) for field in self.fields),
         )
 
     def dist_to_encoder(self) -> RecordDataEncoder:
