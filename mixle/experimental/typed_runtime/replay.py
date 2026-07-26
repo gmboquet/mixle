@@ -22,6 +22,14 @@ class ReplayMode(StrEnum):
     TOLERANCE = "tolerance"
 
 
+class ReplayStatus(StrEnum):
+    """Whole-log replay outcome; an empty log is explicitly not run."""
+
+    MATCHED = "matched"
+    MISMATCHED = "mismatched"
+    NOT_RUN = "not_run"
+
+
 @dataclass(frozen=True)
 class ReplayEntry:
     """One immutable batch, expected receipt, and optional resulting state."""
@@ -52,6 +60,8 @@ class ReplayLog:
     def record(self, batch: ProposalBatch, receipt: CommitReceipt, *, expected_state: Any = None) -> None:
         """Record detached replay inputs so later caller mutation cannot rewrite history."""
 
+        if not isinstance(batch, ProposalBatch) or not isinstance(receipt, CommitReceipt):
+            raise TypeError("replay records require a ProposalBatch and CommitReceipt.")
         if receipt.batch_id != batch.batch_id:
             raise ValueError("commit receipt does not belong to the proposal batch.")
         self.entries.append(ReplayEntry(copy.deepcopy(batch), receipt, copy.deepcopy(expected_state)))
@@ -93,11 +103,40 @@ class ReplayReport:
     relative_tolerance: float
     steps: tuple[ReplayStepReceipt, ...]
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.mode, ReplayMode):
+            raise TypeError("replay report mode must be ReplayMode.")
+        if (
+            not math.isfinite(self.absolute_tolerance)
+            or not math.isfinite(self.relative_tolerance)
+            or self.absolute_tolerance < 0.0
+            or self.relative_tolerance < 0.0
+        ):
+            raise ValueError("replay-report tolerances must be finite and non-negative.")
+        if not isinstance(self.steps, tuple) or any(not isinstance(step, ReplayStepReceipt) for step in self.steps):
+            raise TypeError("replay report steps must be a tuple of ReplayStepReceipt values.")
+
+    @property
+    def status(self) -> ReplayStatus:
+        """Distinguish successful evidence from mismatch and absent evidence."""
+
+        if not self.steps:
+            return ReplayStatus.NOT_RUN
+        if all(step.matched for step in self.steps):
+            return ReplayStatus.MATCHED
+        return ReplayStatus.MISMATCHED
+
+    @property
+    def ran(self) -> bool:
+        """Whether at least one replay step was attempted."""
+
+        return self.status is not ReplayStatus.NOT_RUN
+
     @property
     def matched(self) -> bool:
         """Whether every recorded transaction replayed under the selected guarantee."""
 
-        return all(step.matched for step in self.steps)
+        return self.status is ReplayStatus.MATCHED
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible replay report."""
@@ -106,12 +145,22 @@ class ReplayReport:
             "mode": self.mode.value,
             "absolute_tolerance": self.absolute_tolerance,
             "relative_tolerance": self.relative_tolerance,
+            "status": self.status.value,
+            "ran": self.ran,
             "matched": self.matched,
             "steps": [step.as_dict() for step in self.steps],
         }
 
 
 StateProbe = Callable[[], Any]
+
+
+def _valid_fingerprints(values: Any) -> bool:
+    return (
+        isinstance(values, dict)
+        and bool(values)
+        and all(isinstance(name, str) and name and isinstance(value, str) and value for name, value in values.items())
+    )
 
 
 def _numeric_close(left: Any, right: Any, *, atol: float, rtol: float) -> bool:
@@ -169,12 +218,25 @@ def replay_log(
 ) -> ReplayReport:
     """Replay every batch and compare semantic receipts plus resulting state."""
 
-    if absolute_tolerance < 0.0 or relative_tolerance < 0.0:
-        raise ValueError("replay tolerances must be non-negative.")
+    if not isinstance(log, ReplayLog) or not isinstance(coordinator, TransactionalCoordinator):
+        raise TypeError("replay_log requires a ReplayLog and TransactionalCoordinator.")
+    if not isinstance(mode, ReplayMode):
+        raise TypeError("replay mode must be ReplayMode.")
+    if (
+        not math.isfinite(absolute_tolerance)
+        or not math.isfinite(relative_tolerance)
+        or absolute_tolerance < 0.0
+        or relative_tolerance < 0.0
+    ):
+        raise ValueError("replay tolerances must be finite and non-negative.")
     if mode is ReplayMode.TOLERANCE and state_probe is None:
         raise ValueError("tolerance replay requires a state_probe.")
     steps: list[ReplayStepReceipt] = []
     for index, entry in enumerate(log.entries):
+        if not isinstance(entry, ReplayEntry):
+            raise TypeError("replay log entries must be ReplayEntry values.")
+        if entry.expected_receipt.batch_id != entry.batch.batch_id:
+            raise ValueError("replay entry receipt does not belong to its proposal batch.")
         expected = entry.expected_receipt
         input_mismatches = [
             "proposal-payload-mutated:%s" % proposal.proposal_id
@@ -207,10 +269,22 @@ def replay_log(
         )
 
         if mode is ReplayMode.BITWISE:
+            if not _valid_fingerprints(expected.participant_fingerprints_before) or not _valid_fingerprints(
+                expected.participant_fingerprints_after
+            ):
+                mismatches.append("missing-expected-participant-fingerprints")
+            if not _valid_fingerprints(actual.participant_fingerprints_before) or not _valid_fingerprints(
+                actual.participant_fingerprints_after
+            ):
+                mismatches.append("missing-actual-participant-fingerprints")
+            if expected.participant_fingerprints_before != actual.participant_fingerprints_before:
+                mismatches.append("participant-state-fingerprint-before")
             if expected.participant_fingerprints_after != actual.participant_fingerprints_after:
                 mismatches.append("participant-state-fingerprint")
-            if entry.expected_state is not None and state_probe is not None:
-                if payload_fingerprint(entry.expected_state) != payload_fingerprint(state_probe()):
+            if entry.expected_state is not None:
+                if state_probe is None:
+                    mismatches.append("missing-state-probe")
+                elif payload_fingerprint(entry.expected_state) != payload_fingerprint(state_probe()):
                     mismatches.append("probed-state-fingerprint")
         else:
             if entry.expected_state is None:
@@ -232,6 +306,7 @@ __all__ = [
     "ReplayLog",
     "ReplayMode",
     "ReplayReport",
+    "ReplayStatus",
     "ReplayStepReceipt",
     "StateProbe",
     "replay_log",

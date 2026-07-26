@@ -1,12 +1,14 @@
 """Integrated graph-context MoE pilot and recovery acceptance receipt."""
 
 import json
+from dataclasses import replace
 
 import pytest
 
 pytest.importorskip("torch")
 
 from mixle.experimental.typed_runtime import (  # noqa: E402
+    AcceptanceGateReceipt,
     ClaimKind,
     GateStatus,
     ScaleRunReceipt,
@@ -96,3 +98,39 @@ def test_claim_gate_requires_real_scale_evidence_and_accepts_complete_receipts()
     assert assessment.frontier_training_allowed
     assert assessment.effective_trillion_context_allowed
     assert all(gate.status is GateStatus.PASSED for gate in assessment.gates)
+
+    empty_controls = replace(receipt, failure_receipts=())
+    rejected = assess_frontier_claims(empty_controls, scale)
+    control_gate = next(gate for gate in rejected.gates if gate.gate == "local-negative-controls")
+    assert control_gate.status is GateStatus.FAILED
+    assert control_gate.required_evidence_count == 3
+    assert control_gate.observed_evidence_count == 0
+    assert not rejected.frontier_training_allowed
+    assert not rejected.effective_trillion_context_allowed
+
+    wrong_control = replace(
+        receipt,
+        failure_receipts=tuple(
+            replace(row, benchmark_id="unrelated-pilot")
+            if row.case_id == "local-window-negative-control"
+            else row
+            for row in receipt.failure_receipts
+        ),
+    )
+    wrong_assessment = assess_frontier_claims(wrong_control, scale)
+    assert next(
+        gate for gate in wrong_assessment.gates if gate.gate == "local-negative-controls"
+    ).status is GateStatus.FAILED
+
+
+def test_passed_gate_cannot_be_constructed_without_declared_evidence():
+    with pytest.raises(ValueError, match="requires its declared evidence"):
+        AcceptanceGateReceipt(
+            "vacuous",
+            GateStatus.PASSED,
+            (ClaimKind.FRONTIER_TRAINING,),
+            "passed=0/0",
+            required_evidence_count=1,
+            observed_evidence_count=0,
+            required_fields=("receipt",),
+        )

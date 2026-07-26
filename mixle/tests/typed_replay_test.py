@@ -1,6 +1,7 @@
 """Bitwise and explicit-tolerance proposal replay tests."""
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from mixle.experimental.typed_runtime import (
     ProposalPacket,
     ReplayLog,
     ReplayMode,
+    ReplayStatus,
     StateSemantics,
     TransactionalCoordinator,
     TransactionParticipant,
@@ -141,3 +143,32 @@ def test_mutated_logged_payload_is_detected_before_apply():
 def test_tolerance_replay_requires_state_probe():
     with pytest.raises(ValueError, match="state_probe"):
         replay_log(ReplayLog(), _coordinator()[1], mode=ReplayMode.TOLERANCE)
+
+
+def test_empty_bitwise_replay_is_not_run_and_does_not_match():
+    report = replay_log(ReplayLog(), _coordinator()[1])
+    assert report.status is ReplayStatus.NOT_RUN
+    assert not report.ran
+    assert not report.matched
+    assert report.as_dict()["status"] == "not_run"
+
+
+def test_bitwise_replay_requires_committed_state_fingerprints_and_requested_probe():
+    state, coordinator = _coordinator()
+    batch = ProposalBatch("batch", (_proposal("p1", 0, 0, [1.0, 2.0]),))
+    receipt = coordinator.commit(batch)
+
+    missing_fingerprints = ReplayLog()
+    missing_fingerprints.record(
+        batch,
+        replace(receipt, participant_fingerprints_before={}, participant_fingerprints_after={}),
+    )
+    fingerprint_report = replay_log(missing_fingerprints, _coordinator()[1])
+    assert not fingerprint_report.matched
+    assert "missing-expected-participant-fingerprints" in fingerprint_report.steps[0].mismatches
+
+    missing_probe = ReplayLog()
+    missing_probe.record(batch, receipt, expected_state=state)
+    probe_report = replay_log(missing_probe, _coordinator()[1])
+    assert not probe_report.matched
+    assert "missing-state-probe" in probe_report.steps[0].mismatches
