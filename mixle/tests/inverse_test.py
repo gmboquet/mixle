@@ -17,13 +17,15 @@ Also covers the two API guards the design note's "resolved" section pins: rounds
 import numpy as np
 import pytest
 
+import mixle.task.inverse as inverse_module
+
 # _split_separation is private (mixle.inference.structure, leading underscore) -- imported directly
 # here rather than made public, matching the precedent mixle/tests/torch_parity_test.py already sets
 # for a test reaching into another module's internals (see notes/designs/M3.md, "Resolved").
 from mixle.inference.structure import _split_separation
 from mixle.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
-from mixle.task.inverse import learn_inverse
+from mixle.task.inverse import InverseModel, InverseReceipts, learn_inverse
 
 torch = pytest.importorskip("torch")
 
@@ -154,46 +156,84 @@ def test_rounds_greater_than_one_without_y_obs_raises():
 # --------------------------------------------------------------------------------------------- #
 
 
-def test_sequential_refinement_sharpens_posterior_at_observed_y():
-    # A single seed's sharpness_by_round is not reliably monotonic: retraining a small conditional
-    # flow each round is a genuinely noisy fit, and a handful of seeds occasionally land on a round
-    # whose flow is transiently poorly conditioned (checked directly -- even at n_sims=800, several
-    # independent 12-seed panels showed individual per-seed round-3 sharpness spike as high as 62,
-    # swamping that one seed's own comparison). The MEDIAN across a panel of seeds is not: three
-    # independent 12-seed panels (seeds 0-11, 200-211, 300-311) all gave a clean, strictly decreasing
-    # median trajectory despite those same per-seed outliers, so that -- not any one hardcoded run --
-    # is what this test asserts.
-    mu0 = np.array([0.0, 0.0])
-    var0 = np.array([9.0, 9.0])
-    var_obs = 0.25
-    y_obs = np.array([2.0, -2.0])
+def test_sequential_rounds_retain_prior_rows_and_apply_proposal_correction(monkeypatch):
+    """The invariant that matters is the target measure, not forced narrowing.
 
-    panel = []
-    for seed in range(12):
-        prior = DiagonalGaussianDistribution(mu=mu0, covar=var0)
-        rng = np.random.RandomState(seed)
+    A valid posterior can remain broad or multimodal, so "sharpness decreases"
+    was an unsafe acceptance test. This spies on the actual fit objective:
+    round-one prior rows remain present and each proposal block receives the
+    declared-prior/proposal density ratio.
+    """
 
-        def simulator(theta, rng=rng):
-            return np.asarray(theta, dtype=float) + rng.normal(0.0, np.sqrt(var_obs), size=2)
+    class Prior:
+        def log_density(self, theta):
+            return -float(np.asarray(theta).reshape(-1)[0])
 
-        model = learn_inverse(
-            simulator,
-            prior,
-            family="flow",
-            n_sims=800,
-            m_steps=200,
-            rounds=3,
-            y_obs=y_obs,
-            seed=seed,
-            n_sbc_replications=20,
+    initial_theta = np.arange(4, dtype=float).reshape(-1, 1)
+    initial_y = initial_theta.copy()
+    proposal_theta = np.arange(1, 5, dtype=float).reshape(-1, 1)
+    fitted = []
+    module = object()
+
+    monkeypatch.setattr(
+        inverse_module,
+        "_generate_pairs",
+        lambda prior, simulator, n, seed: (initial_theta.copy(), initial_y.copy()),
+    )
+    monkeypatch.setattr(inverse_module, "_build_student", lambda *args, **kwargs: module)
+    monkeypatch.setattr(
+        inverse_module,
+        "_sample_given",
+        lambda current, y, n, seed=None: proposal_theta.copy(),
+    )
+    monkeypatch.setattr(
+        inverse_module,
+        "_log_density_given",
+        lambda current, y, theta: np.zeros(len(theta)),
+    )
+    monkeypatch.setattr(inverse_module, "_posterior_sharpness", lambda *args, **kwargs: 1.0)
+    monkeypatch.setattr(
+        inverse_module,
+        "_calibration_receipts",
+        lambda *args, **kwargs: (0.0, 1.0, 2, {0.5: 0.5, 0.9: 0.9}),
+    )
+
+    def capture_fit(current, ys, thetas, *, weights=None, **kwargs):
+        fitted.append(
+            (
+                np.asarray(thetas).copy(),
+                None if weights is None else np.asarray(weights).copy(),
+            )
         )
-        assert len(model.receipts.sharpness_by_round) == 3
-        assert model.receipts.rounds_trained == 3
-        panel.append(model.receipts.sharpness_by_round)
+        return current
 
-    median_sharpness = np.median(np.asarray(panel), axis=0)
-    assert median_sharpness[1] < median_sharpness[0]
-    assert median_sharpness[2] < median_sharpness[1]
+    monkeypatch.setattr(inverse_module, "_fit_round", capture_fit)
+    result = learn_inverse(
+        lambda theta: np.asarray(theta),
+        Prior(),
+        family="mdn",
+        n_sims=4,
+        rounds=3,
+        y_obs=np.array([0.0]),
+        n_sbc_replications=10,
+        seed=3,
+    )
+
+    assert fitted[0][1] is None
+    assert fitted[1][0].shape == (8, 1)
+    assert fitted[2][0].shape == (12, 1)
+    np.testing.assert_array_equal(fitted[2][0][:4], initial_theta)
+    expected, _ = inverse_module._normalized_importance_weights(
+        -proposal_theta[:, 0],
+        context="test",
+    )
+    np.testing.assert_allclose(fitted[1][1][4:], expected * 4)
+    assert [entry["target"] for entry in result.receipts.round_training] == [
+        "declared_prior_joint",
+        "declared_prior_joint",
+        "declared_prior_joint",
+    ]
+    assert "p(theta)/q_round" in result.receipts.round_training[1]["correction"]
 
 
 # --------------------------------------------------------------------------------------------- #
@@ -209,6 +249,57 @@ def test_reweight_requires_true_log_likelihood():
 
     with pytest.raises(ValueError, match="true_log_likelihood"):
         learn_inverse(simulator, prior, family="mdn", n_sims=50, reweight=True, y_obs=np.array([0.0]))
+
+
+def test_reweight_requires_an_observation():
+    prior = GaussianDistribution(mu=0.0, sigma2=1.0)
+    with pytest.raises(ValueError, match="requires y_obs"):
+        learn_inverse(
+            lambda theta: np.atleast_1d(theta),
+            prior,
+            family="mdn",
+            n_sims=10,
+            reweight=True,
+            true_log_likelihood=lambda theta, y: 0.0,
+        )
+
+
+def test_reweighted_model_returns_the_bound_empirical_posterior():
+    receipts = InverseReceipts(
+        sbc_statistic=0.0,
+        sbc_pvalue=1.0,
+        sbc_bins=2,
+        sbc_replications=10,
+        sbc_pass=True,
+        coverage={0.9: 0.9},
+        coverage_pass={0.9: True},
+        prior_predictive={},
+        rounds_trained=1,
+        ess=1.22,
+        ess_ratio=0.61,
+        warnings=["finite-particle target correction"],
+    )
+    model = InverseModel(
+        module=object(),
+        prior=object(),
+        simulator=lambda theta: theta,
+        family="mdn",
+        theta_dim=1,
+        y_dim=1,
+        receipts=receipts,
+        seed=0,
+        reweighted_y=np.array([2.0]),
+        reweighted_particles=np.array([[0.0], [10.0]]),
+        reweighted_weights=np.array([0.9, 0.1]),
+    )
+    posterior = model.posterior(np.array([2.0]))
+    assert posterior.receipt.method == "sir"
+    assert posterior.mean(0) == pytest.approx(1.0)
+    assert set(np.unique(posterior.sample(100, seed=1))) <= {0.0, 10.0}
+    with pytest.raises(NotImplementedError):
+        posterior.log_density([0.0])
+    with pytest.raises(ValueError, match="bound"):
+        model.posterior(np.array([3.0]))
 
 
 def test_reweight_reports_ess_receipt():
@@ -243,3 +334,6 @@ def test_reweight_reports_ess_receipt():
     assert 0.0 <= model.receipts.ess_ratio <= 1.0
     # a well-trained student's proposal is close to the true posterior here -> high ESS ratio.
     assert model.receipts.ess_ratio > 0.5
+    post = model.posterior(y_obs)
+    assert post.receipt.method == "sir"
+    assert post.receipt.n_particles == 500
