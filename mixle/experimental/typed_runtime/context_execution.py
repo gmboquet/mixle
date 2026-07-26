@@ -188,6 +188,8 @@ class ContextActionExecutor:
                 return receipt
             if action.expected_graph_version is None:
                 raise ValueError("non-stop context actions require expected_graph_version.")
+            if action.resource_limits is None:
+                raise ValueError("non-stop context actions require finite resource_limits.")
             if action.kind not in self.adapters:
                 raise KeyError("no context action adapter registered for %s" % action.kind.value)
 
@@ -206,13 +208,29 @@ class ContextActionExecutor:
                 staged.restore(snapshot)
                 self._apply_result(staged, action, result)
                 wall = time.perf_counter() - started
+                actual_latency = max(wall, result.external_latency_seconds)
+                limits = action.resource_limits
+                violations = []
+                if actual_latency > limits.latency_seconds:
+                    violations.append("latency")
+                if result.materialized_tokens > limits.materialized_tokens:
+                    violations.append("materialized_tokens")
+                if result.monetary_cost > limits.monetary_cost:
+                    violations.append("monetary_cost")
+                if result.tool_calls > limits.tool_calls:
+                    violations.append("tool_calls")
+                if violations:
+                    raise RuntimeError(
+                        "context action exceeded declared resource limits: %s."
+                        % ", ".join(violations)
+                    )
                 receipt = ContextActionReceipt(
                     action,
                     version_before,
                     staged.version,
                     tuple(node.node_id for node in result.nodes),
                     tuple(edge.edge_id for edge in result.edges),
-                    wall + result.external_latency_seconds,
+                    actual_latency,
                     result.materialized_tokens,
                     result.tool_calls,
                     result.monetary_cost,
@@ -234,7 +252,7 @@ class ContextActionExecutor:
                     self.graph.version,
                     (),
                     (),
-                    wall + external_latency,
+                    max(wall, external_latency),
                     materialized_tokens,
                     tool_calls,
                     monetary_cost,

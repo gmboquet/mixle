@@ -8,6 +8,7 @@ from mixle.experimental.typed_runtime import (
     ContextAction,
     ContextActionExecutor,
     ContextActionKind,
+    ContextActionLimits,
     ContextActionResult,
     ContextEdge,
     ContextEdgeKind,
@@ -96,7 +97,15 @@ def test_runtime_creates_then_verifies_context_before_explicit_voi_stop():
 
     def provider(current, receipts):
         if "source" not in current.nodes:
-            return (ContextAction("retrieve", ContextActionKind.RETRIEVE, expected_information_gain=1.0),)
+            return (
+                ContextAction(
+                    "retrieve",
+                    ContextActionKind.RETRIEVE,
+                    expected_information_gain=1.0,
+                    gain_sample_count=1,
+                    resource_limits=ContextActionLimits(1.0, 4, 0.0, 0),
+                ),
+            )
         if "hypothesis" not in current.nodes:
             return (
                 ContextAction(
@@ -104,7 +113,9 @@ def test_runtime_creates_then_verifies_context_before_explicit_voi_stop():
                     ContextActionKind.GENERATE_HYPOTHESIS,
                     input_nodes=("source",),
                     expected_information_gain=0.8,
+                    gain_sample_count=1,
                     generated_output=True,
+                    resource_limits=ContextActionLimits(1.0, 5, 0.0, 0),
                 ),
             )
         if current.nodes["hypothesis"].evidence_status is EvidenceStatus.UNVERIFIED:
@@ -114,6 +125,8 @@ def test_runtime_creates_then_verifies_context_before_explicit_voi_stop():
                     ContextActionKind.VERIFY,
                     input_nodes=("hypothesis",),
                     expected_information_gain=0.6,
+                    gain_sample_count=1,
+                    resource_limits=ContextActionLimits(1.0, 0, 0.0, 0),
                 ),
             )
         return (
@@ -122,7 +135,9 @@ def test_runtime_creates_then_verifies_context_before_explicit_voi_stop():
                 ContextActionKind.RETRIEVE,
                 input_nodes=("source",),
                 expected_information_gain=0.01,
+                gain_sample_count=1,
                 expected_latency_seconds=1.0,
+                resource_limits=ContextActionLimits(1.0, 0, 0.0, 0),
             ),
         )
 
@@ -167,12 +182,16 @@ def test_hard_maximum_iteration_guard_emits_stop_receipt():
                 "tool-%d" % index,
                 ContextActionKind.TOOL_CALL,
                 expected_information_gain=1.0,
+                gain_sample_count=1,
+                resource_limits=ContextActionLimits(1.0, 0, 0.0, 0),
             ),
         )
 
     run = EffectiveContextRuntime(graph, scheduler, executor, provider).run(maximum_iterations=2)
     assert run.stopping_reason == "maximum-iterations"
     assert len(run.completed_actions) == 2
+    assert len(run.decisions) == 3
+    assert run.decisions[-1].stopping_reason == "maximum-iterations"
     assert run.action_receipts[-1].action.kind is ContextActionKind.STOP
 
 

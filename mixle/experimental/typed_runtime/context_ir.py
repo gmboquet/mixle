@@ -459,6 +459,34 @@ class ContextActionKind(StrEnum):
 
 
 @dataclass(frozen=True)
+class ContextActionLimits:
+    """Finite worst-case resources an adapter is permitted to consume."""
+
+    latency_seconds: float
+    materialized_tokens: int
+    monetary_cost: float
+    tool_calls: int
+
+    def __post_init__(self) -> None:
+        numeric = (self.latency_seconds, self.monetary_cost)
+        if any(not math.isfinite(value) or value < 0.0 for value in numeric):
+            raise ValueError("context action latency and monetary limits must be finite and non-negative.")
+        counts = (self.materialized_tokens, self.tool_calls)
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
+            raise ValueError("context action token and tool-call limits must be non-negative integers.")
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return JSON-compatible action resource limits."""
+
+        return {
+            "latency_seconds": self.latency_seconds,
+            "materialized_tokens": self.materialized_tokens,
+            "monetary_cost": self.monetary_cost,
+            "tool_calls": self.tool_calls,
+        }
+
+
+@dataclass(frozen=True)
 class ContextAction:
     """Inspectable proposal for one context-construction operation."""
 
@@ -477,6 +505,7 @@ class ContextAction:
     expected_tool_calls: int = 0
     maximum_outputs: int = 1
     generated_output: bool = False
+    resource_limits: ContextActionLimits | None = None
 
     def __post_init__(self) -> None:
         if not self.action_id:
@@ -491,8 +520,12 @@ class ContextAction:
         )
         if any(not math.isfinite(value) for value in numeric):
             raise ValueError("context action gain and costs must be finite.")
-        if self.gain_standard_error < 0.0 or self.expected_latency_seconds < 0.0:
-            raise ValueError("context action uncertainty and latency must be non-negative.")
+        if (
+            self.gain_standard_error < 0.0
+            or self.expected_latency_seconds < 0.0
+            or self.expected_monetary_cost < 0.0
+        ):
+            raise ValueError("context action uncertainty and expected costs must be non-negative.")
         if (
             self.gain_sample_count < 0
             or self.expected_tokens < 0
@@ -527,6 +560,7 @@ class ContextAction:
             "expected_tool_calls": self.expected_tool_calls,
             "maximum_outputs": self.maximum_outputs,
             "generated_output": self.generated_output,
+            "resource_limits": self.resource_limits.as_dict() if self.resource_limits is not None else None,
         }
 
 
@@ -581,6 +615,7 @@ class ContextActionReceipt:
 __all__ = [
     "ContextAction",
     "ContextActionKind",
+    "ContextActionLimits",
     "ContextActionReceipt",
     "ContextEdge",
     "ContextEdgeKind",
