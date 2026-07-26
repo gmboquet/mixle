@@ -11,12 +11,14 @@ import unittest
 
 import numpy as np
 
+from mixle.engines import TorchEngine, torch
 from mixle.ppl import Bernoulli, Field, Normal, Poisson, free
 from mixle.stats.combinator.composite import CompositeDistribution
 from mixle.stats.combinator.sequence import SequenceDistribution
 from mixle.stats.compute.exp_family import (
     ConditionalExponentialFamilyForm,
     ExponentialFamilyForm,
+    _flatten_statistics,
     is_exponential_family,
     to_exponential_family,
 )
@@ -67,6 +69,20 @@ def _reference_log_density(dist, x):
 
 
 class LeafExponentialFamilyTest(unittest.TestCase):
+    @unittest.skipIf(torch is None, "torch is not installed")
+    def test_multiblock_statistics_preserve_torch_autograd(self):
+        engine = TorchEngine(device="cpu", dtype="float64")
+        left = torch.tensor([1.0, 2.0], dtype=torch.float64, requires_grad=True)
+        right = torch.tensor([[3.0], [4.0]], dtype=torch.float64, requires_grad=True)
+
+        result = _flatten_statistics((left, right), engine)
+
+        self.assertIsInstance(result, torch.Tensor)
+        self.assertEqual(result.dtype, torch.float64)
+        result.sum().backward()
+        torch.testing.assert_close(left.grad, torch.ones_like(left))
+        torch.testing.assert_close(right.grad, torch.ones_like(right))
+
     def test_reconstruction(self):
         for dist, x in _leaf_cases():
             with self.subTest(dist=type(dist).__name__):

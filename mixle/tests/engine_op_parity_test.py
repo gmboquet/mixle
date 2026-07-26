@@ -95,7 +95,7 @@ class EngineOpParityTestCase(unittest.TestCase):
     def test_required_ops_covered_by_parity_cases(self):
         # Guard against the canonical list and the parity matrix drifting apart: every required *math*
         # op must have a parity case.  Pure allocation/conversion ops are covered by engine_test.py.
-        allocation = {"asarray", "zeros", "empty", "arange", "to_numpy", "stack", "index_add"}
+        allocation = {"asarray", "zeros", "empty", "arange", "to_numpy", "stack", "concatenate", "index_add"}
         math_ops = set(ComputeEngine.REQUIRED_OPS) - allocation
         self.assertEqual(math_ops - set(_cases()), set(), "REQUIRED_OPS math op without a parity case")
 
@@ -135,6 +135,22 @@ class EngineOpParityTestCase(unittest.TestCase):
                 out_t, np.array([0, 1, 1, 2], dtype=np.int64), self.torch.asarray([1.0, 2.0, 3.0, 4.0])
             )
             np.testing.assert_allclose(self.torch.to_numpy(res_t), ref, rtol=1e-6, atol=1e-6)
+
+    def test_concatenate_parity(self):
+        """Concatenation preserves the selected engine and agrees numerically."""
+        engines = [self.numpy, self.symbolic] + ([self.torch] if self.torch is not None else [])
+        for engine in engines:
+            with self.subTest(engine=engine.name):
+                value = engine.concatenate(
+                    (engine.asarray([[1.0], [2.0]]), engine.asarray([[3.0], [4.0]])),
+                    axis=1,
+                )
+                if isinstance(engine, SymbolicEngine):
+                    value = engine.evaluate(value, {})
+                np.testing.assert_allclose(
+                    np.asarray(engine.to_numpy(value), dtype=np.float64),
+                    np.array([[1.0, 3.0], [2.0, 4.0]]),
+                )
 
 
 if __name__ == "__main__":

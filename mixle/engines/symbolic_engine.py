@@ -267,6 +267,10 @@ class SymbolicEngine(ComputeEngine):
         """Stack symbolic arrays with NumPy object-array semantics."""
         return np.stack(tuple(arrays), axis=axis)
 
+    def concatenate(self, arrays: Any, axis: int = 0) -> Any:
+        """Join symbolic arrays with NumPy object-array semantics."""
+        return np.concatenate(tuple(arrays), axis=axis)
+
     log = staticmethod(lambda x: _elementwise_call("log", x))
     exp = staticmethod(lambda x: _elementwise_call("exp", x))
     sqrt = staticmethod(lambda x: _elementwise_call("sqrt", x))

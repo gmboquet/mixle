@@ -191,6 +191,10 @@ class JaxEngine(ComputeEngine):
         """Stack arrays with ``jnp.stack``, placed on this engine's device."""
         return jax.device_put(jnp.stack(tuple(arrays), axis=axis), self.device)
 
+    def concatenate(self, arrays: Any, axis: int = 0) -> Any:
+        """Join arrays with ``jnp.concatenate`` on this engine's device."""
+        return jax.device_put(jnp.concatenate(tuple(arrays), axis=axis), self.device)
+
     def requires_grad(self, x: Any) -> bool:
         """Always False: JAX autograd is functional (``jax.grad``), not tensor-tagged."""
         return False

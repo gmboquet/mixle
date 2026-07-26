@@ -71,6 +71,7 @@ class ComputeEngine(ABC):
         "arange",
         "to_numpy",
         "stack",
+        "concatenate",
         # elementwise math
         "log",
         "exp",
@@ -192,6 +193,11 @@ class ComputeEngine(ABC):
     @abstractmethod
     def stack(self, arrays: Any, axis: int = 0) -> Any:
         """Stack a sequence of arrays along ``axis``."""
+        ...
+
+    @abstractmethod
+    def concatenate(self, arrays: Any, axis: int = 0) -> Any:
+        """Join a sequence of arrays along an existing ``axis``."""
         ...
 
     def requires_grad(self, x: Any) -> bool:
