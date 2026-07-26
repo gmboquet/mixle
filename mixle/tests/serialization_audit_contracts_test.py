@@ -47,6 +47,38 @@ class StrictDecodeTest(unittest.TestCase):
         with self.assertRaisesRegex(SerializationError, "duplicate"):
             from_serializable(payload)
 
+    def test_decode_limits_depth_nodes_and_container_size(self):
+        nested = None
+        for _ in range(serialization.MAX_DECODE_DEPTH + 1):
+            nested = [nested]
+        with self.assertRaisesRegex(SerializationError, "depth"):
+            from_serializable(nested)
+
+        with (
+            mock.patch.object(serialization, "MAX_DECODE_CONTAINER_ITEMS", 2),
+            self.assertRaisesRegex(SerializationError, "item"),
+        ):
+            from_serializable([1, 2, 3])
+
+        with (
+            mock.patch.object(serialization, "MAX_DECODE_NODES", 2),
+            self.assertRaisesRegex(SerializationError, "node"),
+        ):
+            from_serializable([1, 2])
+
+    def test_constructor_schema_rejects_injected_or_inconsistent_state(self):
+        payload = to_serializable(GaussianDistribution(0.0, 1.0))
+        payload["state"]["items"].append(["injected", True])
+        with self.assertRaisesRegex(SerializationError, "constructor-owned schema"):
+            from_serializable(payload)
+
+        payload = to_serializable(GaussianDistribution(0.0, 1.0))
+        for pair in payload["state"]["items"]:
+            if pair[0] == "log_const":
+                pair[1] = 123.0
+        with self.assertRaisesRegex(SerializationError, "constructor-owned schema"):
+            from_serializable(payload)
+
 
 class ArrayCodecTest(unittest.TestCase):
     def test_complex_datetime_and_structured_arrays_round_trip(self):

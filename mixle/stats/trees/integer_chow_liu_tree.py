@@ -194,6 +194,43 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
         self.num_features = len(dependency_list)
         self.name = name
 
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Return the constructor-owned state used by the safe JSON codec."""
+        return {
+            "dependency_list": [parent for _, parent in self.dependency_list],
+            "conditional_log_densities": self.conditional_log_densities,
+            "feature_order": self.feature_order,
+            "name": self.name,
+        }
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Validate and reconstruct current and legacy serialized tree state."""
+        required = {"dependency_list", "conditional_log_densities", "feature_order", "name"}
+        legacy_derived = {"conditional_densities", "num_features"}
+        fields = set(state)
+        if fields not in (required, required | legacy_derived):
+            raise ValueError(
+                "invalid IntegerChowLiuTreeDistribution state fields: expected %r, got %r"
+                % (sorted(required), sorted(fields))
+            )
+        dependencies = state["dependency_list"]
+        if dependencies and all(isinstance(entry, (list, tuple)) and len(entry) == 2 for entry in dependencies):
+            dependencies = [entry[1] for entry in dependencies]
+        self.__init__(
+            dependencies,
+            state["conditional_log_densities"],
+            feature_order=state["feature_order"],
+            name=state["name"],
+        )
+        if fields == required | legacy_derived:
+            if int(state["num_features"]) != self.num_features:
+                raise ValueError("serialized num_features is inconsistent with dependency_list")
+            expected = state["conditional_densities"]
+            if len(expected) != len(self.conditional_densities) or any(
+                not np.array_equal(actual, saved) for actual, saved in zip(self.conditional_densities, expected)
+            ):
+                raise ValueError("serialized conditional_densities are inconsistent with log densities")
+
     def __str__(self) -> str:
         """Return a constructor-style representation of the distribution."""
 
