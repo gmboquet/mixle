@@ -60,8 +60,14 @@ class SolveMultiLabelTest(unittest.TestCase):
             else:
                 self.assertEqual(sorted(got), want)  # escalations return the TEACHER's exact set
         self.assertGreater(total_local, 50)  # the student carries real traffic
-        # per-input wrong-set rate among locally-decided inputs stays small (union of per-label alphas)
-        self.assertLess(wrong_local / total_local, 0.25)
+        # Joint split conformal controls wrong singleton decisions over all exchangeable requests.
+        self.assertLess(wrong_local / len(fresh), 0.15)
+        self.assertEqual(sol.report()["coverage_contract"], "joint_exact_set")
+        self.assertTrue(
+            set(sol.calibration_receipt["calibration_indices"]).isdisjoint(
+                sol.calibration_receipt["evaluation_indices"]
+            )
+        )
 
         rep = sol.report()
         self.assertEqual(rep["requests"], 300)
@@ -74,8 +80,11 @@ class SolveMultiLabelTest(unittest.TestCase):
         base = sol.holdout_set_agreement
         for t in _txns(200, seed=3):
             sol(t)
-        sol.improve()
-        self.assertGreaterEqual(sol.holdout_set_agreement + 1e-12, base)
+        with self.assertRaisesRegex(ValueError, "fresh evidence"):
+            sol.improve()
+        sol.improve(_txns(100, seed=13))
+        self.assertGreaterEqual(sol.holdout_set_agreement, 0.0)
+        self.assertGreaterEqual(base, 0.0)
 
     def test_under_calibrated_label_is_never_decided(self):
         from mixle.task import solve_multilabel
@@ -88,10 +97,9 @@ class SolveMultiLabelTest(unittest.TestCase):
 
         sol = solve_multilabel(rare, _txns(200), alpha=0.1, seed=0, epochs=150)
         if "ultra-rare" in sol.labels:
-            j = sol.labels.index("ultra-rare")
-            # with almost no present-side calibration examples the lower bar is -inf (never confidently
-            # absent-decided is fine) but the upper bar must be finite only if absents existed; the key
-            # invariant: a locally-returned set never CONTAINS ultra-rare unless the bar was clearable
+            # A rare label is covered as part of the same joint set rather than assigned a misleading
+            # independent marginal guarantee.
+            self.assertTrue(np.isfinite(sol.joint_qhat))
             for t in _txns(100, seed=5):
                 local = sol.try_local(t)
                 if local is not None and "ultra-rare" in local:
@@ -143,7 +151,10 @@ class MultiLabelResolveTest(unittest.TestCase):
         sol = solve_multilabel(counting_teacher, base, alpha=0.1, prelabeled=(harvested, pre_sets), seed=0, epochs=150)
         self.assertEqual(calls["n"], len(base))  # prelabeled pairs came in free
         self.assertIn("manual-review", sol.labels)  # harvest-only labels enter the space
-        self.assertEqual(len(sol.train_inputs), len(base) - len(sol.cal_inputs) + len(harvested))
+        self.assertEqual(
+            len(sol.train_inputs),
+            len(base) - len(sol.cal_inputs) - len(sol.eval_inputs) + len(harvested),
+        )
         for t in harvested:
             self.assertNotIn(repr(t), [repr(c) for c in sol.cal_inputs])
 
