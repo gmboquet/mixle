@@ -158,6 +158,11 @@ def _arr(enc: Any, dtype: Any = np.float64) -> np.ndarray:
     return np.ascontiguousarray(enc, dtype=dtype)
 
 
+def _on_support(expression: str, condition: str) -> str:
+    """Guard an inlined log-density expression with its encoded support."""
+    return f"(({expression}) if {condition} else -np.inf)"
+
+
 # --- scalar leaves --------------------------------------------------------------------------------
 def _gaussian_params(comps: list[Any]) -> dict[str, np.ndarray]:
     mu = np.array([c.mu for c in comps], dtype=np.float64)
@@ -187,7 +192,10 @@ register_leaf_template(
         params=lambda comps: (lambda beta: {"rate": 1.0 / beta, "lograte": -np.log(beta)})(
             np.array([c.beta for c in comps], dtype=np.float64)
         ),
-        expr=lambda v, p: f"{p['lograte']}[k] - {p['rate']}[k] * {v[0]}",
+        expr=lambda v, p: _on_support(
+            f"{p['lograte']}[k] - {p['rate']}[k] * {v[0]}",
+            f"np.isfinite({v[0]}) and {v[0]} >= 0.0",
+        ),
         acc_names=("sx",),
         acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}",
         to_value=lambda s, count: (count, s[0]),  # (sum_w, sum_wx)
@@ -203,7 +211,13 @@ register_leaf_template(
         params=lambda comps: (lambda p: {"logp": np.log(p), "log1mp": np.log1p(-p)})(
             np.array([c.p for c in comps], dtype=np.float64)
         ),
-        expr=lambda v, p: f"{p['logp']}[k] + ({v[0]} - 1.0) * {p['log1mp']}[k]",
+        expr=lambda v, p: _on_support(
+            (
+                f"(0.0 if {p['log1mp']}[k] == -np.inf and {v[0]} == 1.0 "
+                f"else {p['logp']}[k] + ({v[0]} - 1.0) * {p['log1mp']}[k])"
+            ),
+            f"np.isfinite({v[0]}) and {v[0]} >= 1.0 and np.floor({v[0]}) == {v[0]}",
+        ),
         acc_names=("sx",),
         acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}",
         to_value=lambda s, count: (count, s[0]),  # (sum_w, sum_wx)
@@ -216,10 +230,13 @@ register_leaf_template(
         name="bernoulli",
         matches=lambda d: type(d).__name__ == "BernoulliDistribution",
         data=lambda enc: (_arr(enc),),  # log p(x) = x*logit + ln(1-p)
-        params=lambda comps: (lambda p: {"logit": np.log(p) - np.log1p(-p), "log1mp": np.log1p(-p)})(
+        params=lambda comps: (lambda p: {"logp": np.log(p), "log1mp": np.log1p(-p)})(
             np.array([c.p for c in comps], dtype=np.float64)
         ),
-        expr=lambda v, p: f"{p['log1mp']}[k] + {v[0]} * {p['logit']}[k]",
+        expr=lambda v, p: _on_support(
+            f"({p['logp']}[k] if {v[0]} == 1.0 else {p['log1mp']}[k])",
+            f"np.isfinite({v[0]}) and ({v[0]} == 0.0 or {v[0]} == 1.0)",
+        ),
         acc_names=("sx",),
         acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}",
         to_value=lambda s, count: (count, s[0]),  # (sum_w, sum_wx)
@@ -236,7 +253,10 @@ register_leaf_template(
             np.array([c.lam for c in comps], dtype=np.float64)
         ),
         arity=2,
-        expr=lambda v, p: f"{p['loglam']}[k] * {v[0]} - {p['lam']}[k] - {v[1]}",
+        expr=lambda v, p: _on_support(
+            f"{p['loglam']}[k] * {v[0]} - {p['lam']}[k] - {v[1]}",
+            f"np.isfinite({v[0]}) and {v[0]} >= 0.0 and np.floor({v[0]}) == {v[0]}",
+        ),
         acc_names=("sx",),
         acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}",
         to_value=lambda s, count: (count, s[0]),  # (sum_w, sum_wx)
@@ -259,7 +279,10 @@ register_leaf_template(
         data=lambda enc: (_arr(enc[0]), _arr(enc[1])),  # (x, log x); log p = (k-1)lnx - x/th - k ln th - lgamma(k)
         params=_gamma_params,
         arity=2,
-        expr=lambda v, p: f"{p['norm']}[k] + {p['km1']}[k] * {v[1]} - {p['inv_theta']}[k] * {v[0]}",
+        expr=lambda v, p: _on_support(
+            f"{p['norm']}[k] + {p['km1']}[k] * {v[1]} - {p['inv_theta']}[k] * {v[0]}",
+            f"np.isfinite({v[0]}) and {v[0]} > 0.0",
+        ),
         acc_names=("sx", "slogx"),
         acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}; {a['slogx']}[k] += {r} * {v[1]}",
         to_value=lambda s, count: (count, s[0], s[1]),  # (sum_w, sum_wx, sum_w_logx)
@@ -282,7 +305,10 @@ register_leaf_template(
         params=lambda comps: (lambda s2: {"a": 0.5 / s2, "lognorm": 0.5 * np.log(2.0 / np.pi) - 0.5 * np.log(s2)})(
             np.array([c.sigma**2 for c in comps], dtype=np.float64)
         ),
-        expr=lambda v, p: f"{p['lognorm']}[k] - {v[0]} * {v[0]} * {p['a']}[k]",
+        expr=lambda v, p: _on_support(
+            f"{p['lognorm']}[k] - {v[0]} * {v[0]} * {p['a']}[k]",
+            f"np.isfinite({v[0]}) and {v[0]} >= 0.0",
+        ),
         acc_names=("sx2",),
         acc_stmt=lambda v, a, r: f"{a['sx2']}[k] += {r} * {v[0]} * {v[0]}",
         to_value=lambda s, count: (count, s[0]),  # (n, sum_w x^2)
@@ -298,7 +324,10 @@ register_leaf_template(
         params=lambda comps: (lambda s2: {"a": 0.5 / s2, "lognorm": -np.log(s2)})(
             np.array([c.sigma**2 for c in comps], dtype=np.float64)
         ),
-        expr=lambda v, p: f"{p['lognorm']}[k] + np.log({v[0]}) - {v[0]} * {v[0]} * {p['a']}[k]",
+        expr=lambda v, p: _on_support(
+            f"{p['lognorm']}[k] + np.log({v[0]}) - {v[0]} * {v[0]} * {p['a']}[k]",
+            f"np.isfinite({v[0]}) and {v[0]} > 0.0",
+        ),
         acc_names=("sx2",),
         acc_stmt=lambda v, a, r: f"{a['sx2']}[k] += {r} * {v[0]} * {v[0]}",
         to_value=lambda s, count: (count, s[0]),  # (n, sum_w x^2)
@@ -322,7 +351,13 @@ register_leaf_template(
         matches=lambda d: type(d).__name__ == "InverseGaussianDistribution",
         data=_arr0,
         params=_inverse_gaussian_params,
-        expr=lambda v, p: f"{p['lognorm']}[k] - 1.5 * np.log({v[0]}) + {p['c1']}[k] * {v[0]} + {p['c2']}[k] / {v[0]}",
+        expr=lambda v, p: _on_support(
+            (
+                f"{p['lognorm']}[k] - 1.5 * np.log({v[0]}) "
+                f"+ {p['c1']}[k] * {v[0]} + {p['c2']}[k] / {v[0]}"
+            ),
+            f"np.isfinite({v[0]}) and {v[0]} > 0.0",
+        ),
         acc_names=("sx", "s1x"),
         acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}; {a['s1x']}[k] += {r} / {v[0]}",
         to_value=lambda s, count: (count, s[0], s[1]),  # (n, sum_w x, sum_w / x)
@@ -345,7 +380,10 @@ register_leaf_template(
         data=lambda enc: (_arr(enc[0]), _arr(enc[1]), _arr(enc[2]), _arr(enc[3])),  # (log x, log(1-x), x, x^2)
         params=_beta_params,
         arity=4,
-        expr=lambda v, p: f"{p['lognorm']}[k] + {p['am1']}[k] * {v[0]} + {p['bm1']}[k] * {v[1]}",
+        expr=lambda v, p: _on_support(
+            f"{p['lognorm']}[k] + {p['am1']}[k] * {v[0]} + {p['bm1']}[k] * {v[1]}",
+            f"np.isfinite({v[2]}) and {v[2]} > 0.0 and {v[2]} < 1.0",
+        ),
         acc_names=("slogx", "slog1mx", "sx", "sx2"),
         acc_stmt=lambda v, a, r: (
             f"{a['slogx']}[k] += {r} * {v[0]}; {a['slog1mx']}[k] += {r} * {v[1]}; "
@@ -371,7 +409,10 @@ register_leaf_template(
         data=lambda enc: (_arr(enc[0]), _arr(enc[1])),  # (log x, 1/x)
         params=_inverse_gamma_params,
         arity=2,
-        expr=lambda v, p: f"{p['lognorm']}[k] - {p['ap1']}[k] * {v[0]} - {p['beta']}[k] * {v[1]}",
+        expr=lambda v, p: _on_support(
+            f"{p['lognorm']}[k] - {p['ap1']}[k] * {v[0]} - {p['beta']}[k] * {v[1]}",
+            f"np.isfinite({v[0]}) and np.isfinite({v[1]}) and {v[1]} > 0.0",
+        ),
         acc_names=("s1x", "slogx"),
         acc_stmt=lambda v, a, r: f"{a['s1x']}[k] += {r} * {v[1]}; {a['slogx']}[k] += {r} * {v[0]}",
         to_value=lambda s, count: (count, s[0], -s[1]),  # (n, sum_w / x, sum_w log(1/x))  -- Gamma on 1/x
@@ -464,7 +505,10 @@ register_leaf_template(
         params=lambda comps: (lambda p: {"logp": np.log(p), "lognorm": -np.log(-np.log1p(-p))})(
             np.array([c.p for c in comps], dtype=np.float64)
         ),
-        expr=lambda v, p: f"{p['lognorm']}[k] + {v[0]} * {p['logp']}[k] - np.log({v[0]})",
+        expr=lambda v, p: _on_support(
+            f"{p['lognorm']}[k] + {v[0]} * {p['logp']}[k] - np.log({v[0]})",
+            f"np.isfinite({v[0]}) and {v[0]} >= 1.0 and np.floor({v[0]}) == {v[0]}",
+        ),
         acc_names=("sx",),
         acc_stmt=lambda v, a, r: f"{a['sx']}[k] += {r} * {v[0]}",
         to_value=lambda s, count: (count, s[0]),  # (n, sum_w x)
@@ -1477,7 +1521,9 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
             "                r = np.exp(llbuf[k] - m) / s * wi",
             "            comp_counts[k] += r",
         ]
-        lines += ["            " + st for st in f["acc"]]
+        if f["acc"]:
+            lines.append("            if r != 0.0:")
+            lines += ["                " + st for st in f["acc"]]
         if plan.needs_responsibilities:
             lines.append("            R[i, k] = r")
         lines += ["    " + ln for ln in f["post"]]
@@ -1565,7 +1611,9 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
             "                    r = np.exp(llbuf_c[k] - m) / s * wi",
             "                comp_counts[c, k] += r",
         ]
-        lines += ["                " + st for st in f["acc"]]
+        if f["acc"]:
+            lines.append("                if r != 0.0:")
+            lines += ["                    " + st for st in f["acc"]]
         if plan.needs_responsibilities:
             lines.append("                R[i, k] = r")
         lines += ["    " + ln for ln in f["post"]]
