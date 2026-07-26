@@ -87,7 +87,9 @@ class PlanGrammar:
             cont -= set("()|=;\n")  # the parser bans structural characters inside values
             out = set(cont)
             if s.val_len > 0:  # a non-empty value may terminate: ")" ends the step, "; " starts the next key
-                out.add(")")
+                required = set(self.specs[s.tool or ""].required_args)
+                if required.issubset(s.used):
+                    out.add(")")
                 if any(a not in s.used for a in self.specs[s.tool or ""].args):
                     out.add(";")
             return out
@@ -152,6 +154,7 @@ def constrained_plan_decode(
     grammar = PlanGrammar(specs, request)
     state = grammar.start()
     w = codec.encode(str(request) + _PROMPT_SEP)
+    was_training = bool(lm.module.training)
     lm.module.to(lm.device).eval()
     text: list[str] = []
     logps: list[float] = []
@@ -179,4 +182,4 @@ def constrained_plan_decode(
                 return "".join(text), float(np.mean(logps))
         return None  # budget exhausted before EOS
     finally:
-        lm.module.train()
+        lm.module.train(was_training)
