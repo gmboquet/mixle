@@ -100,6 +100,47 @@ class RebalanceWeightsTest(unittest.TestCase):
         self.assertLess(weights[0], weights[1])
         self.assertAlmostEqual(sum(weights.values()), 2.0, places=9)  # normalized to sum to rank count
 
+    def test_zero_duration_is_not_treated_as_a_throughput_measurement(self):
+        records = [
+            RankRecord(rank=0, round=0, e_step_seconds=0.0),
+            RankRecord(rank=1, round=0, e_step_seconds=1.0),
+        ]
+        with self.assertRaisesRegex(ValueError, "zero-duration"):
+            plan_rebalance_weights(records, round=0)
+
+
+class ReceiptValidationTest(unittest.TestCase):
+    def test_measurements_must_be_finite_nonnegative_and_typed(self):
+        invalid = (
+            {"rank": -1, "round": 0, "e_step_seconds": 1.0},
+            {"rank": 0, "round": -1, "e_step_seconds": 1.0},
+            {"rank": 0, "round": 0, "e_step_seconds": -1.0},
+            {"rank": 0, "round": 0, "e_step_seconds": float("nan")},
+            {"rank": 0, "round": 0, "e_step_seconds": float("inf")},
+            {"rank": 0, "round": 0, "e_step_seconds": 1.0, "bytes_processed": -1},
+            {"rank": 0, "round": 0, "e_step_seconds": 1.0, "n_obs": 0.5},
+        )
+        for values in invalid:
+            with self.subTest(values=values), self.assertRaises((TypeError, ValueError)):
+                RankRecord(**values)
+        with self.assertRaisesRegex(ValueError, "cannot override"):
+            RankRecord(rank=0, round=0, e_step_seconds=1.0, extra={"rank": 7})
+
+    def test_duplicate_round_rank_receipts_are_rejected_before_aggregation(self):
+        records = [
+            RankRecord(rank=0, round=0, e_step_seconds=1.0, bytes_processed=10, n_obs=1),
+            RankRecord(rank=0, round=0, e_step_seconds=2.0, bytes_processed=20, n_obs=2),
+        ]
+        aggregations = (
+            detect_stragglers,
+            imbalance_receipt,
+            plan_rebalance_weights,
+            fit_report,
+        )
+        for aggregate in aggregations:
+            with self.subTest(aggregate=aggregate.__name__), self.assertRaisesRegex(ValueError, "duplicate"):
+                aggregate(records)
+
 
 class FitReportTest(unittest.TestCase):
     def test_fit_report_smoke(self):

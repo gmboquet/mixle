@@ -23,9 +23,11 @@ Pieces:
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from numbers import Integral, Real
 from typing import Any
 
 from mixle.telemetry.core import Event, Telemetry
@@ -42,6 +44,35 @@ __all__ = [
     "record_rank_round",
     "records_from_events",
 ]
+
+_MEASUREMENT_FIELDS = {
+    "rank",
+    "round",
+    "e_step_seconds",
+    "m_step_seconds",
+    "total_seconds",
+    "bytes_processed",
+    "accumulator_bytes",
+    "n_obs",
+}
+
+
+def _nonnegative_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer, got {value!r}")
+    result = int(value)
+    if result < 0:
+        raise ValueError(f"{name} must be nonnegative, got {result}")
+    return result
+
+
+def _nonnegative_finite(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a real number, got {value!r}")
+    result = float(value)
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be finite and nonnegative, got {value!r}")
+    return result
 
 
 @dataclass(frozen=True)
@@ -65,6 +96,30 @@ class RankRecord:
     n_obs: int = 0
     extra: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        rank = _nonnegative_int(self.rank, "rank")
+        round_value = _nonnegative_int(self.round, "round")
+        e_seconds = _nonnegative_finite(self.e_step_seconds, "e_step_seconds")
+        m_seconds = _nonnegative_finite(self.m_step_seconds, "m_step_seconds")
+        if not math.isfinite(e_seconds + m_seconds):
+            raise ValueError("combined E-step and M-step duration must be finite")
+        bytes_processed = _nonnegative_int(self.bytes_processed, "bytes_processed")
+        accumulator_bytes = _nonnegative_int(self.accumulator_bytes, "accumulator_bytes")
+        n_obs = _nonnegative_int(self.n_obs, "n_obs")
+        if not isinstance(self.extra, dict):
+            raise TypeError("extra must be a dictionary")
+        collisions = _MEASUREMENT_FIELDS.intersection(self.extra)
+        if collisions:
+            raise ValueError(f"extra cannot override measurement fields: {sorted(collisions)}")
+        object.__setattr__(self, "rank", rank)
+        object.__setattr__(self, "round", round_value)
+        object.__setattr__(self, "e_step_seconds", e_seconds)
+        object.__setattr__(self, "m_step_seconds", m_seconds)
+        object.__setattr__(self, "bytes_processed", bytes_processed)
+        object.__setattr__(self, "accumulator_bytes", accumulator_bytes)
+        object.__setattr__(self, "n_obs", n_obs)
+        object.__setattr__(self, "extra", dict(self.extra))
+
     @property
     def total_seconds(self) -> float:
         return self.e_step_seconds + self.m_step_seconds
@@ -86,16 +141,15 @@ class RankRecord:
     @classmethod
     def from_features(cls, features: dict[str, Any]) -> RankRecord:
         """Inverse of :meth:`as_features` (round-trips through a :class:`~mixle.telemetry.core.Event`)."""
-        known = {"rank", "round", "e_step_seconds", "m_step_seconds", "bytes_processed", "accumulator_bytes", "n_obs"}
-        extra = {k: v for k, v in features.items() if k not in known and k != "total_seconds"}
+        extra = {key: value for key, value in features.items() if key not in _MEASUREMENT_FIELDS}
         return cls(
-            rank=int(features["rank"]),
-            round=int(features["round"]),
-            e_step_seconds=float(features.get("e_step_seconds", 0.0)),
-            m_step_seconds=float(features.get("m_step_seconds", 0.0)),
-            bytes_processed=int(features.get("bytes_processed", 0)),
-            accumulator_bytes=int(features.get("accumulator_bytes", 0)),
-            n_obs=int(features.get("n_obs", 0)),
+            rank=features["rank"],
+            round=features["round"],
+            e_step_seconds=features.get("e_step_seconds", 0.0),
+            m_step_seconds=features.get("m_step_seconds", 0.0),
+            bytes_processed=features.get("bytes_processed", 0),
+            accumulator_bytes=features.get("accumulator_bytes", 0),
+            n_obs=features.get("n_obs", 0),
             extra=extra,
         )
 
@@ -138,9 +192,27 @@ def records_from_events(events: Sequence[Event]) -> list[RankRecord]:
     return [RankRecord.from_features(ev.features) for ev in events if ev.kind == "em_round"]
 
 
+def _validated_records(records: Sequence[RankRecord]) -> list[RankRecord]:
+    """Require exactly one trustworthy receipt for each ``(round, rank)`` identity."""
+    result: list[RankRecord] = []
+    seen: set[tuple[int, int]] = set()
+    for record in records:
+        if not isinstance(record, RankRecord):
+            raise TypeError(f"records must contain RankRecord values, got {type(record).__name__}")
+        identity = (record.round, record.rank)
+        if identity in seen:
+            raise ValueError(f"duplicate EM rank receipt for round={record.round} rank={record.rank}")
+        seen.add(identity)
+        result.append(record)
+    return result
+
+
 def _records_for_round(records: Sequence[RankRecord], round: int | None) -> tuple[int, list[RankRecord]]:
+    records = _validated_records(records)
     if round is None:
         round = max((r.round for r in records), default=0)
+    else:
+        round = _nonnegative_int(round, "round")
     return round, [r for r in records if r.round == round]
 
 
@@ -179,6 +251,10 @@ def detect_stragglers(
     median -- the ratio catches the practically-significant case, the z-score guards against
     flagging normal jitter when every rank is close together.
     """
+    threshold_ratio = _nonnegative_finite(threshold_ratio, "threshold_ratio")
+    z_threshold = _nonnegative_finite(z_threshold, "z_threshold")
+    if threshold_ratio < 1.0:
+        raise ValueError("threshold_ratio must be at least 1.0")
     r, round_records = _records_for_round(records, round)
     if not round_records:
         return StragglerReport(
@@ -277,7 +353,10 @@ def plan_rebalance_weights(records: Sequence[RankRecord], *, round: int | None =
     weighted by a *predicted* per-unit FLOP cost (``best.unit_works``). This function produces the
     *observed* analogue: a per-rank weight inversely proportional to how long that rank actually
     took, normalized to sum to the rank count -- a rank that ran 2x slower than average gets ~0.5x
-    the weight, meaning "give this rank half as much data/model next round". The weights are in
+    the weight, meaning "give this rank half as much data/model next round". Every included rank
+    must have a strictly positive duration: a zero-duration record supplies no finite throughput
+    estimate and is rejected rather than being treated as either infinitely fast or incapable.
+    The weights are in
     exactly the shape ``_balance_units`` consumes (a sequence of relative per-unit works, here one
     "unit" per rank), so a re-planning loop can plug them in directly; wiring that end-to-end
     (re-running ``balance_plan`` with per-worker throughput overrides derived from these weights)
@@ -288,12 +367,13 @@ def plan_rebalance_weights(records: Sequence[RankRecord], *, round: int | None =
     times = {rec.rank: rec.total_seconds for rec in round_records}
     if not times:
         return {}
-    positive = {rank: t for rank, t in times.items() if t > 0}
-    if not positive:
-        # every rank reported zero time (e.g. a degenerate/empty round): weight uniformly.
-        n = len(times)
-        return dict.fromkeys(times, 1.0 / n if n else 0.0)
-    inv = {rank: (1.0 / t if t > 0 else 0.0) for rank, t in times.items()}
+    zero_duration = sorted(rank for rank, duration in times.items() if duration == 0.0)
+    if zero_duration:
+        raise ValueError(
+            "cannot derive throughput weights from zero-duration rank receipts: "
+            + ", ".join(str(rank) for rank in zero_duration)
+        )
+    inv = {rank: 1.0 / duration for rank, duration in times.items()}
     total_inv = sum(inv.values())
     n = len(times)
     return {rank: (w / total_inv) * n if total_inv > 0 else 0.0 for rank, w in inv.items()}
@@ -376,6 +456,7 @@ def fit_report(
     rounds collected so far -- an empty ``records`` sequence yields a zeroed report rather than
     raising.
     """
+    records = _validated_records(records)
     rounds = sorted({rec.round for rec in records})
     ranks = sorted({rec.rank for rec in records})
 
@@ -396,7 +477,7 @@ def fit_report(
     return FitReport(
         n_rounds=len(rounds),
         n_ranks=len(ranks),
-        total_seconds=sum(rec.total_seconds for rec in records),
+        total_seconds=math.fsum(rec.total_seconds for rec in records),
         total_bytes=sum(rec.bytes_processed for rec in records),
         total_obs=sum(rec.n_obs for rec in records),
         rounds=tuple(rounds),
