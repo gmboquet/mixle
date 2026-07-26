@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from numbers import Integral
+from typing import Any
 
 import numpy as np
 
@@ -44,8 +46,52 @@ class GridWorld:
     max_steps: int = 100
 
     def __post_init__(self) -> None:
+        if isinstance(self.size, bool) or not isinstance(self.size, Integral) or self.size <= 0:
+            raise ValueError("size must be a positive integer")
+        if isinstance(self.max_steps, bool) or not isinstance(self.max_steps, Integral) or self.max_steps <= 0:
+            raise ValueError("max_steps must be a positive integer")
+        self.size = int(self.size)
+        self.max_steps = int(self.max_steps)
+        self.goal = self._validate_state(self.goal, name="goal")
+        try:
+            raw_obstacles = frozenset(self.obstacles)
+        except TypeError as exc:
+            raise ValueError("obstacles must be an iterable of grid coordinates") from exc
+        self.obstacles = frozenset(
+            self._validate_state(obstacle, name="obstacle") for obstacle in raw_obstacles
+        )
+        if self.goal in self.obstacles:
+            raise ValueError("goal cannot be an obstacle")
+        if (0, 0) in self.obstacles:
+            raise ValueError("the default start (0, 0) cannot be an obstacle")
+        for name, value in (("step_cost", self.step_cost), ("goal_reward", self.goal_reward)):
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{name} must be finite") from exc
+            if not np.isfinite(numeric):
+                raise ValueError(f"{name} must be finite")
+            setattr(self, name, numeric)
         self._state: State = (0, 0)
         self._steps = 0
+        self._done = self._state == self.goal
+
+    def _validate_state(self, state: Any, *, name: str) -> State:
+        if not isinstance(state, tuple) or len(state) != 2:
+            raise ValueError(f"{name} must be a (row, column) tuple")
+        row, column = state
+        if any(isinstance(value, bool) or not isinstance(value, Integral) for value in state):
+            raise ValueError(f"{name} coordinates must be integers")
+        normalized = (int(row), int(column))
+        if not all(0 <= value < self.size for value in normalized):
+            raise ValueError(f"{name} must lie inside the grid")
+        return normalized
+
+    def _validate_occupiable_state(self, state: Any, *, name: str) -> State:
+        normalized = self._validate_state(state, name=name)
+        if normalized in self.obstacles:
+            raise ValueError(f"{name} cannot be an obstacle")
+        return normalized
 
     @property
     def n_states(self) -> int:
@@ -54,12 +100,15 @@ class GridWorld:
 
     def state_index(self, state: State) -> int:
         """Map a ``(row, column)`` state to its row-major integer index."""
+        state = self._validate_state(state, name="state")
         return state[0] * self.size + state[1]
 
     def index_state(self, index: int) -> State:
         """Map a row-major integer state index back to ``(row, column)``."""
+        if isinstance(index, bool) or not isinstance(index, Integral) or not 0 <= index < self.n_states:
+            raise ValueError("state index must be an integer in [0, n_states)")
         r, c = divmod(index, self.size)
-        return (r, c)
+        return (int(r), int(c))
 
     def states(self) -> list[State]:
         """Return every grid state in row-major order."""
@@ -67,6 +116,11 @@ class GridWorld:
 
     def transition(self, state: State, action: Action) -> State:
         """The deterministic next state for ``action`` at ``state`` (walls/obstacles are a no-op)."""
+        state = self._validate_state(state, name="state")
+        if action not in _DELTA:
+            raise ValueError(f"unknown action {action!r}")
+        if state == self.goal or state in self.obstacles:
+            return state
         dr, dc = _DELTA[action]
         r, c = state
         nr, nc = r + dr, c + dc
@@ -76,22 +130,30 @@ class GridWorld:
 
     def reset(self, start: State = (0, 0)) -> State:
         """Reset the environment to ``start`` and return the initial state."""
-        self._state = start
+        self._state = self._validate_occupiable_state(start, name="start")
         self._steps = 0
+        self._done = self._state == self.goal
         return self._state
 
     def step(self, action: Action) -> tuple[State, float, bool]:
-        """Apply one action and return ``(next_state, reward, done)``."""
+        """Apply one action and return ``(next_state, reward, done)``.
+
+        Terminal states are absorbing: calls after reaching the goal or step limit return the
+        same state, zero reward, and ``done=True``.
+        """
+        if self._done:
+            return self._state, 0.0, True
         self._state = self.transition(self._state, action)
         self._steps += 1
         at_goal = self._state == self.goal
         reward = self.goal_reward if at_goal else self.step_cost
-        done = at_goal or self._steps >= self.max_steps
-        return self._state, reward, done
+        self._done = at_goal or self._steps >= self.max_steps
+        return self._state, reward, self._done
 
     def optimal_path_length(self, start: State = (0, 0)) -> int:
         """BFS shortest obstacle-free path length from ``start`` to ``goal`` -- ground truth for
         tests, computed independently of any learning algorithm in this module."""
+        start = self._validate_occupiable_state(start, name="start")
         if start == self.goal:
             return 0
         visited = {start}
@@ -136,6 +198,31 @@ def tabular_q_learning(
 ) -> QLearningResult:
     """Epsilon-greedy tabular Q-learning: ``episodes`` full rollouts from ``env.reset()``, each step
     updating ``Q(s, a)`` toward the observed one-step Bellman target."""
+    if not isinstance(env, GridWorld):
+        raise ValueError("env must be a GridWorld")
+    if isinstance(episodes, bool) or not isinstance(episodes, Integral) or episodes <= 0:
+        raise ValueError("episodes must be a positive integer")
+    for name, value, lower, upper, lower_inclusive in (
+        ("alpha", alpha, 0.0, 1.0, False),
+        ("gamma", gamma, 0.0, 1.0, True),
+        ("epsilon", epsilon, 0.0, 1.0, True),
+    ):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be finite and in the supported range") from exc
+        lower_ok = numeric >= lower if lower_inclusive else numeric > lower
+        if not np.isfinite(numeric) or not lower_ok or numeric > upper:
+            bracket = "[" if lower_inclusive else "("
+            raise ValueError(f"{name} must be in {bracket}{lower}, {upper}]")
+    if seed is not None:
+        if isinstance(seed, bool) or not isinstance(seed, Integral) or not 0 <= seed < 2**32:
+            raise ValueError("seed must be None or an integer in [0, 2**32)")
+        seed = int(seed)
+    episodes = int(episodes)
+    alpha = float(alpha)
+    gamma = float(gamma)
+    epsilon = float(epsilon)
     rng = np.random.RandomState(seed)
     q = np.zeros((env.n_states, len(ACTIONS)))
     rewards_per_episode = []
