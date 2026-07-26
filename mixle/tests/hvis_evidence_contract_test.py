@@ -10,6 +10,7 @@ from mixle.utils.hvis import (
     AffinityCapabilityUnavailableError,
     _posteriors_and_loglikes,
     _resolve_affinity,
+    conditional_pmat,
     fisher_factors,
     local_factors,
     model_log_affinity,
@@ -156,6 +157,35 @@ class OptionalAndFisherGeometryContractTest(unittest.TestCase):
     def test_absent_fisher_capability_has_a_typed_result(self):
         with self.assertRaises(AffinityCapabilityUnavailableError):
             fisher_factors(object(), data=[0.0, 1.0])
+
+
+class ConditionalAffinityContractTest(unittest.TestCase):
+    def test_diagonal_is_unconditionally_excluded(self):
+        log_affinity = np.asarray([[1000.0, -1.0, -2.0], [-1.0, 1000.0, -3.0], [-2.0, -3.0, 1000.0]])
+        probability = conditional_pmat(log_affinity)
+        np.testing.assert_array_equal(np.diag(probability), 0.0)
+        np.testing.assert_allclose(probability.sum(axis=1), 1.0)
+
+    def test_matrix_requires_finite_off_diagonal_affinities(self):
+        invalid = (
+            np.asarray([[0.0, np.nan], [-1.0, 0.0]]),
+            np.asarray([[0.0, np.inf], [-1.0, 0.0]]),
+            np.asarray([[0.0, -np.inf], [-1.0, 0.0]]),
+            np.ones((2, 3)),
+        )
+        for matrix in invalid:
+            with self.subTest(matrix=matrix), self.assertRaises(ValueError):
+                conditional_pmat(matrix)
+
+    def test_perplexity_must_be_reachable_without_self_mass(self):
+        matrix = np.zeros((4, 4), dtype=np.float64)
+        for perplexity in (0.5, 3.1, float("nan"), float("inf")):
+            with self.subTest(perplexity=perplexity), self.assertRaises(ValueError):
+                conditional_pmat(matrix, perplexity=perplexity)
+
+        probability = conditional_pmat(matrix, perplexity=3.0)
+        np.testing.assert_array_equal(np.diag(probability), 0.0)
+        np.testing.assert_allclose(probability.sum(axis=1), 1.0)
 
 
 if __name__ == "__main__":
