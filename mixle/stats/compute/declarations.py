@@ -2015,12 +2015,35 @@ def _weighted_histogram(stat: Any, weights: Any, engine: Any) -> dict[int, float
     (torch/stacked) accumulate path produces the exact dict the numpy host
     accumulator returns for histogram-kind statistics.
     """
-    vals = np.asarray(engine.to_numpy(stat))
-    wts = np.asarray(engine.to_numpy(weights), dtype=np.float64)
+    raw_vals = np.asarray(engine.to_numpy(stat))
+    try:
+        vals = np.asarray(raw_vals, dtype=np.float64)
+        wts = np.asarray(engine.to_numpy(weights), dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("generated histogram values and weights must be numeric vectors.") from exc
+    if vals.ndim != 1 or wts.ndim != 1:
+        raise ValueError("generated histogram values and weights must be one-dimensional.")
+    if vals.shape != wts.shape:
+        raise ValueError(
+            "generated histogram values and weights must have matching lengths."
+        )
+    if np.any(~np.isfinite(vals)):
+        raise ValueError("generated histogram values must be finite.")
+    if np.any(vals != np.floor(vals)):
+        raise ValueError("generated histogram values must be exact integers.")
+    if np.any(vals < 0.0):
+        raise ValueError("generated histogram count values must be non-negative.")
+    if np.any(vals >= float(2**63)):
+        raise ValueError("generated histogram values exceed the int64 range.")
+    if np.any(~np.isfinite(wts)):
+        raise ValueError("generated histogram weights must be finite.")
+    if np.any(wts < 0.0):
+        raise ValueError("generated histogram weights must be non-negative.")
+
     hist: dict[int, float] = {}
     if vals.size == 0:
         return hist
-    ints = np.rint(vals.reshape(-1)).astype(np.int64)
+    ints = vals.astype(np.int64)
     uniq, inv = np.unique(ints, return_inverse=True)
     wsum = np.zeros(uniq.shape[0], dtype=np.float64)
     np.add.at(wsum, inv, wts.reshape(-1))
