@@ -183,6 +183,11 @@ def _worker_main(conn) -> None:
                 resident[shard_id] = _encode_shard(encoder, shard_b, sub_chunks)
                 conn.send(("ok", sum(sz for sz, _ in resident[shard_id])))
 
+            elif cmd == "remove_shard":
+                _, shard_id = msg
+                resident.pop(shard_id, None)
+                conn.send(("ok", shard_id))
+
             elif cmd == "update":
                 _, estimator_b, model_b = msg
                 conn.send(("started", os.getpid()))

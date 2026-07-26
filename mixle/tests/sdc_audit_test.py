@@ -134,6 +134,24 @@ class TypedStatisticComparisonTestCase(unittest.TestCase):
         self.assertIn("exceeds tolerance", far.reason)
 
 
+class QuarantinePlanningTestCase(unittest.TestCase):
+    def test_no_survivor_leaves_all_workers_and_shards_untouched(self):
+        encoded = AuditedMPEncodedData.__new__(AuditedMPEncodedData)
+        encoded._conns = {0: object(), 1: object()}
+        encoded._procs = {}
+        encoded._blacklist = set()
+        encoded._failures = {0: 0, 1: 0}
+        encoded._worker_shards = {0: {0}, 1: {1}}
+        encoded.max_retries = 2
+
+        status = encoded._quarantine({0, 1})
+        self.assertEqual(status, "deferred:no_safe_survivor")
+        self.assertEqual(encoded._blacklist, set())
+        self.assertEqual(encoded._worker_shards, {0: {0}, 1: {1}})
+        self.assertEqual(set(encoded._conns), {0, 1})
+        encoded._conns = {}
+
+
 class SDCAuditTestCase(unittest.TestCase):
     """Real end-to-end tests against a live multiprocessing worker pool. A single pool is
     reused across many independent audit rounds/trials within each test (spawning worker
@@ -150,8 +168,8 @@ class SDCAuditTestCase(unittest.TestCase):
 
     def test_end_to_end_quarantine_and_receipt_on_a_real_bit_flip(self):
         """A single injected bit-flip on one shard's primary rank, discovered during a real
-        pysp_seq_estimate round, produces a receipt and quarantines both suspect ranks via K4's
-        blacklist mechanism -- without derailing the round (K4 recovers the lost shards)."""
+        pysp_seq_estimate round, produces a receipt and uses a third witness to quarantine only
+        the worker that disagrees with the two matching computations."""
         with AuditedMPEncodedData(
             self.data, estimator=self.est, num_workers=6, audit_rate=1.0, rng=np.random.RandomState(42)
         ) as enc:
@@ -173,8 +191,11 @@ class SDCAuditTestCase(unittest.TestCase):
             self.assertEqual(receipt.shard_id, target_shard)
             self.assertIsNotNone(receipt.first_diff_byte_offset)
             self.assertNotEqual(receipt.primary_sha256, receipt.audit_sha256)
-            # both suspect ranks were quarantined via K4's existing blacklist mechanism
-            self.assertTrue({receipt.primary_worker, receipt.audit_worker}.issubset(enc._blacklist))
+            self.assertIsNotNone(receipt.witness_worker)
+            self.assertEqual(receipt.suspected_workers, (receipt.primary_worker,))
+            self.assertIn(receipt.primary_worker, enc._blacklist)
+            self.assertNotIn(receipt.audit_worker, enc._blacklist)
+            self.assertEqual(receipt.quarantine_status, "committed")
             self.assertEqual(enc.audit_receipts, [receipt])
 
     def test_catch_rate_matches_audit_rate_per_single_round(self):
