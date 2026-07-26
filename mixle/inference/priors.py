@@ -114,6 +114,69 @@ def as_prior_dict(prior: Any) -> Any:
 
 
 @dataclass(frozen=True)
+class PriorAlignmentReceipt:
+    """Durable acknowledgement that a structural prior is partial or broadcast."""
+
+    mode: str
+    rationale: str
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("partial", "broadcast"):
+            raise ValueError("prior alignment mode must be 'partial' or 'broadcast'.")
+        if not isinstance(self.rationale, str) or not self.rationale.strip():
+            raise ValueError("non-exact prior alignment requires a non-empty rationale.")
+
+    def as_dict(self) -> dict[str, str]:
+        """Return the serialized alignment acknowledgement."""
+        return {"mode": self.mode, "rationale": self.rationale.strip()}
+
+
+def _alignment_payload(receipt: PriorAlignmentReceipt | None) -> dict[str, Any]:
+    if receipt is None:
+        return {}
+    if not isinstance(receipt, PriorAlignmentReceipt):
+        raise TypeError("alignment_receipt must be a PriorAlignmentReceipt.")
+    return {"alignment_receipt": receipt.as_dict()}
+
+
+@dataclass(frozen=True)
+class AlignedPrior:
+    """Apply one prior through an explicitly acknowledged alignment mode."""
+
+    prior: Any
+    alignment_receipt: PriorAlignmentReceipt
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.alignment_receipt, PriorAlignmentReceipt):
+            raise TypeError("alignment_receipt must be a PriorAlignmentReceipt.")
+        if self.alignment_receipt.mode != "broadcast":
+            raise ValueError("AlignedPrior requires a broadcast alignment receipt.")
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the wrapped prior and its durable alignment receipt."""
+        return {
+            "family": "aligned",
+            "prior": as_prior_dict(self.prior),
+            **_alignment_payload(self.alignment_receipt),
+        }
+
+
+def partial_alignment(rationale: str) -> PriorAlignmentReceipt:
+    """Acknowledge that unspecified structural positions intentionally have no prior."""
+    return PriorAlignmentReceipt("partial", rationale)
+
+
+def broadcast_alignment(rationale: str) -> PriorAlignmentReceipt:
+    """Acknowledge that one prior intentionally applies to every structural position."""
+    return PriorAlignmentReceipt("broadcast", rationale)
+
+
+def broadcast(prior: Any, rationale: str) -> AlignedPrior:
+    """Wrap a prior for intentional broadcast across a model structure."""
+    return AlignedPrior(prior, broadcast_alignment(rationale))
+
+
+@dataclass(frozen=True)
 class NormalGammaPrior:
     """Normal-Gamma prior for Gaussian ``mu`` and precision ``tau``.
 
@@ -280,10 +343,18 @@ class CompositePrior:
     """Child priors for a ``CompositeDistribution``."""
 
     children: Sequence[Any]
+    alignment_receipt: PriorAlignmentReceipt | None = None
+
+    def __post_init__(self) -> None:
+        _alignment_payload(self.alignment_receipt)
 
     def as_dict(self) -> dict:
         """Return child priors as a plain composite-prior payload."""
-        return {"family": "composite", "children": tuple(as_prior_dict(p) for p in self.children)}
+        return {
+            "family": "composite",
+            "children": tuple(as_prior_dict(p) for p in self.children),
+            **_alignment_payload(self.alignment_receipt),
+        }
 
 
 @dataclass(frozen=True)
@@ -293,6 +364,10 @@ class ConditionalPrior:
     conditions: Mapping[Any, Any]
     default: Any | None = None
     given: Any | None = None
+    alignment_receipt: PriorAlignmentReceipt | None = None
+
+    def __post_init__(self) -> None:
+        _alignment_payload(self.alignment_receipt)
 
     def as_dict(self) -> dict:
         """Return keyed/default/given priors as a plain payload."""
@@ -301,6 +376,7 @@ class ConditionalPrior:
             "conditions": {key: as_prior_dict(value) for key, value in self.conditions.items()},
             "default": as_prior_dict(self.default),
             "given": as_prior_dict(self.given),
+            **_alignment_payload(self.alignment_receipt),
         }
 
 
@@ -310,6 +386,10 @@ class MixturePrior:
 
     components: Sequence[Any] = ()
     weights: Any | None = None
+    alignment_receipt: PriorAlignmentReceipt | None = None
+
+    def __post_init__(self) -> None:
+        _alignment_payload(self.alignment_receipt)
 
     def as_dict(self) -> dict:
         """Return component and weight priors as a plain payload."""
@@ -317,6 +397,7 @@ class MixturePrior:
             "family": "mixture",
             "components": tuple(as_prior_dict(p) for p in self.components),
             "weights": as_prior_dict(self.weights),
+            **_alignment_payload(self.alignment_receipt),
         }
 
 
@@ -327,6 +408,10 @@ class MarkovChainPrior:
     initial: Any | None = None
     transitions: Mapping[Any, Any] | None = None
     length: Any | None = None
+    alignment_receipt: PriorAlignmentReceipt | None = None
+
+    def __post_init__(self) -> None:
+        _alignment_payload(self.alignment_receipt)
 
     def as_dict(self) -> dict:
         """Return initial, transition, and length priors as a plain payload."""
@@ -337,6 +422,7 @@ class MarkovChainPrior:
             if self.transitions is None
             else {key: as_prior_dict(value) for key, value in self.transitions.items()},
             "length": as_prior_dict(self.length),
+            **_alignment_payload(self.alignment_receipt),
         }
 
 
@@ -361,12 +447,17 @@ class RecordPrior:
     """Field priors for a named ``RecordDistribution``."""
 
     fields: Mapping[Any, Any]
+    alignment_receipt: PriorAlignmentReceipt | None = None
+
+    def __post_init__(self) -> None:
+        _alignment_payload(self.alignment_receipt)
 
     def as_dict(self) -> dict:
         """Return field priors as a plain record-prior payload."""
         return {
             "family": "record",
             "fields": {key: as_prior_dict(value) for key, value in self.fields.items()},
+            **_alignment_payload(self.alignment_receipt),
         }
 
 
@@ -422,28 +513,50 @@ def gamma(
     )
 
 
-def composite(children: Sequence[Any]) -> CompositePrior:
+def composite(
+    children: Sequence[Any], alignment_receipt: PriorAlignmentReceipt | None = None
+) -> CompositePrior:
     """Create a Composite prior from child prior specifications."""
-    return CompositePrior(children=children)
+    return CompositePrior(children=children, alignment_receipt=alignment_receipt)
 
 
 def conditional(
-    conditions: Mapping[Any, Any], default: Any | None = None, given: Any | None = None
+    conditions: Mapping[Any, Any],
+    default: Any | None = None,
+    given: Any | None = None,
+    alignment_receipt: PriorAlignmentReceipt | None = None,
 ) -> ConditionalPrior:
     """Create a Conditional prior over keyed/default/given child priors."""
-    return ConditionalPrior(conditions=conditions, default=default, given=given)
+    return ConditionalPrior(
+        conditions=conditions,
+        default=default,
+        given=given,
+        alignment_receipt=alignment_receipt,
+    )
 
 
-def mixture(components: Sequence[Any] = (), weights: Any | None = None) -> MixturePrior:
+def mixture(
+    components: Sequence[Any] = (),
+    weights: Any | None = None,
+    alignment_receipt: PriorAlignmentReceipt | None = None,
+) -> MixturePrior:
     """Create a Mixture prior over component and weight priors."""
-    return MixturePrior(components=components, weights=weights)
+    return MixturePrior(components=components, weights=weights, alignment_receipt=alignment_receipt)
 
 
 def markov_chain(
-    initial: Any | None = None, transitions: Mapping[Any, Any] | None = None, length: Any | None = None
+    initial: Any | None = None,
+    transitions: Mapping[Any, Any] | None = None,
+    length: Any | None = None,
+    alignment_receipt: PriorAlignmentReceipt | None = None,
 ) -> MarkovChainPrior:
     """Create a Markov-chain prior over initial, transition, and length terms."""
-    return MarkovChainPrior(initial=initial, transitions=transitions, length=length)
+    return MarkovChainPrior(
+        initial=initial,
+        transitions=transitions,
+        length=length,
+        alignment_receipt=alignment_receipt,
+    )
 
 
 def optional(observed: Any | None = None, missing: Any | None = None) -> OptionalPrior:
@@ -451,12 +564,15 @@ def optional(observed: Any | None = None, missing: Any | None = None) -> Optiona
     return OptionalPrior(observed=observed, missing=missing)
 
 
-def record(fields: Mapping[Any, Any]) -> RecordPrior:
+def record(
+    fields: Mapping[Any, Any], alignment_receipt: PriorAlignmentReceipt | None = None
+) -> RecordPrior:
     """Create a Record prior from field-name prior specifications."""
-    return RecordPrior(fields=fields)
+    return RecordPrior(fields=fields, alignment_receipt=alignment_receipt)
 
 
 __all__ = [
+    "AlignedPrior",
     "BetaPrior",
     "ConditionalPrior",
     "CompositePrior",
@@ -467,9 +583,12 @@ __all__ = [
     "MixturePrior",
     "NormalGammaPrior",
     "OptionalPrior",
+    "PriorAlignmentReceipt",
     "RecordPrior",
     "as_prior_dict",
     "beta",
+    "broadcast",
+    "broadcast_alignment",
     "conditional",
     "composite",
     "dirichlet",
@@ -479,5 +598,6 @@ __all__ = [
     "mixture",
     "normal_gamma",
     "optional",
+    "partial_alignment",
     "record",
 ]
