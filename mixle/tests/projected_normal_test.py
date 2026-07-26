@@ -8,6 +8,7 @@ from scipy.integrate import quad
 import mixle
 from mixle.capability import HasCDF
 from mixle.stats import ProjectedNormalDistribution as PN
+from mixle.stats.directional.projected_normal import ProjectedNormalFitError
 
 
 class ProjectedNormalTest(unittest.TestCase):
@@ -36,6 +37,72 @@ class ProjectedNormalTest(unittest.TestCase):
         d = PN(0.0, 0.0)
         for t in (-2.0, 0.0, 1.0, 3.0):
             self.assertAlmostEqual(d.density(t), 1.0 / (2.0 * np.pi), places=9)
+
+    def test_large_finite_mean_has_finite_density_and_em_radius(self):
+        from mixle.engines import NUMPY_ENGINE
+
+        for mu_x, theta in ((40.0, 0.0), (40.0, np.pi)):
+            with self.subTest(mu_x=mu_x, theta=theta):
+                d = PN(mu_x, 0.0)
+                encoded = d.dist_to_encoder().seq_encode([theta])
+                scalar = d.log_density(theta)
+                sequence = d.seq_log_density(encoded)[0]
+                backend = d.backend_seq_log_density(encoded, NUMPY_ENGINE)[0]
+                self.assertTrue(np.isfinite(scalar))
+                self.assertAlmostEqual(sequence, scalar, places=10)
+                self.assertAlmostEqual(backend, scalar, places=10)
+                stats = d.backend_legacy_sufficient_statistics(
+                    encoded,
+                    {"mu_x": mu_x, "mu_y": 0.0},
+                    NUMPY_ENGINE,
+                )
+                self.assertTrue(all(np.all(np.isfinite(value)) for value in stats))
+
+    def test_parameters_and_angles_must_be_finite(self):
+        for parameters in ((np.nan, 0.0), (0.0, np.inf), (np.inf, 0.0)):
+            with self.subTest(parameters=parameters), self.assertRaises(ValueError):
+                PN(*parameters)
+        d = PN(1.0, 0.0)
+        with self.assertRaises(ValueError):
+            d.log_density(np.nan)
+        with self.assertRaises(ValueError):
+            d.dist_to_encoder().seq_encode([0.0, np.nan])
+
+    def test_forged_encoded_observations_are_rejected(self):
+        from mixle.engines import NUMPY_ENGINE
+
+        d = PN(1.0, 0.0)
+        for encoded in (
+            (np.asarray([1.0]), np.asarray([1.0])),
+            (np.asarray([1.0, 0.0]), np.asarray([0.0])),
+            (np.asarray([np.nan]), np.asarray([0.0])),
+        ):
+            with self.subTest(encoded=encoded), self.assertRaises(ValueError):
+                d.seq_log_density(encoded)
+            with self.assertRaises(ValueError):
+                d.backend_seq_log_density(encoded, NUMPY_ENGINE)
+
+    def test_accumulator_and_estimator_fail_closed(self):
+        d = PN(1.0, 0.0)
+        estimator = d.estimator()
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.update(0.0, 1.0, None)
+        before = accumulator.value()
+        for weight in (-1.0, np.nan, np.inf):
+            with self.subTest(weight=weight), self.assertRaises(ValueError):
+                accumulator.update(1.0, weight, None)
+            self.assertEqual(accumulator.value(), before)
+        with self.assertRaises(ProjectedNormalFitError):
+            estimator.estimate(None, (0.0, 0.0, 0.0))
+        for statistics in (
+            (np.nan, 0.0, 1.0),
+            (0.0, 0.0, -1.0),
+            (1.0, 0.0, 0.0),
+        ):
+            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+                estimator.estimate(None, statistics)
+        with self.assertRaises(ValueError):
+            d.estimator(pseudo_count=1.0)
 
     def test_em_recovers_mu(self):
         true = PN(2.0, -1.0)
