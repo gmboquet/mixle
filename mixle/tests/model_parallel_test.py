@@ -170,6 +170,29 @@ class CostAwareExecutorTest(unittest.TestCase):
         self.assertIn(id(heavy), ids)  # the 3-way D=15 mixture (heavy) is chosen...
         self.assertNotIn(id(wide), ids)  # ...over the 20-way scalar mixture (wider but cheap)
 
+    def test_discovers_and_executes_mixture_behind_atomic_optional_wrapper(self):
+        from mixle.utils.parallel.model_parallel import _parallel_ids
+
+        inner = stats.MixtureDistribution(
+            [stats.GaussianDistribution(float(i), 1.0) for i in range(4)],
+            [0.25] * 4,
+        )
+        model = stats.OptionalDistribution(inner, p=0.2)
+        inner_estimator = stats.MixtureEstimator([stats.GaussianEstimator() for _ in range(4)])
+        estimator = stats.OptionalEstimator(inner_estimator)
+        data = [None, -1.0, 0.0, 1.0, 2.0, None, 3.0]
+        self.assertIn(id(inner), _parallel_ids(model, 2))
+
+        encoded = model.dist_to_encoder().seq_encode(data)
+        weights = np.ones(len(data))
+        local = estimator.accumulator_factory().make()
+        local.seq_update(encoded, weights, model)
+        parallel = estimator.accumulator_factory().make()
+        from mixle.utils.parallel.model_parallel import model_parallel_fold
+
+        model_parallel_fold(parallel, model, encoded, weights, num_workers=2)
+        np.testing.assert_equal(local.value(), parallel.value())
+
     def test_cost_heterogeneous_model_is_bit_identical(self):
         # a composite of [3-way MVGaussian mixture, 20-way scalar mixture]: whichever axis the executor
         # threads, the in-process fold must stay exactly equal to the serial path.

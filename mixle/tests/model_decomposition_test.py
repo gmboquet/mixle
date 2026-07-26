@@ -42,6 +42,16 @@ class SizingTest(unittest.TestCase):
         self.assertEqual(sized.children[0].axis, DecompAxis.COMPONENT)  # the inner mixture
         self.assertEqual(sized.children[0].num_units, 3)
 
+    def test_tree_finds_nested_axis_behind_atomic_wrapper(self):
+        wrapped = stats.OptionalDistribution(_mixture(6), p=0.2)
+        sized = size_model_tree(wrapped)
+        self.assertEqual(sized.axis, DecompAxis.NONE)
+        self.assertEqual(len(sized.children), 1)
+        self.assertEqual(sized.children[0].axis, DecompAxis.COMPONENT)
+        dec = decompose_model(wrapped, _devices(3), n_data=10)
+        self.assertEqual(dec.axis, DecompAxis.COMPONENT)
+        self.assertEqual(dec.num_units, 6)
+
     def test_shard_children(self):
         self.assertEqual(len(shard_children(_mixture(4))), 4)
         self.assertEqual(len(shard_children(stats.GaussianDistribution(0.0, 1.0))), 0)
