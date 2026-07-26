@@ -26,6 +26,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
 
 @dataclass
 class CeilingReport:
@@ -39,7 +41,13 @@ class CeilingReport:
 
 def ceiling_report(held_out_score: float, target: float) -> CeilingReport:
     """Return whether held-out score reaches the requested target."""
-    return CeilingReport(held_out_score=held_out_score, target=target, met=held_out_score >= target)
+    if not np.isfinite(held_out_score) or not np.isfinite(target):
+        raise ValueError("ceiling scores and targets must be finite")
+    return CeilingReport(
+        held_out_score=float(held_out_score),
+        target=float(target),
+        met=bool(held_out_score >= target),
+    )
 
 
 @dataclass
@@ -52,6 +60,15 @@ class StructuralCandidate:
     name: str
     fit: Callable[[Sequence[Any]], Any]  # train data -> fitted model with .log_density / .score
     new_information: str = ""
+    capability_test: Callable[[Any], bool] | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("structural candidate name must be a nonempty string")
+        if not callable(self.fit):
+            raise TypeError("structural candidate fit must be callable")
+        if self.capability_test is not None and not callable(self.capability_test):
+            raise TypeError("capability_test must be callable")
 
 
 @dataclass
@@ -62,6 +79,10 @@ class ProposalVerdict:
     accepted: bool
     train_score: float
     held_out_score: float
+    baseline_score: float
+    improvement: float
+    capability_delta_verified: bool
+    verification_indices: tuple[int, ...]
     reason: str = ""
 
 
@@ -75,40 +96,77 @@ class ImagineResult:
 
 
 def _mean_log_density(model: Any, data: Sequence[Any]) -> float:
-    import numpy as np
-
-    return float(np.mean([model.log_density(x) for x in data]))
+    rows = list(data)
+    if not rows:
+        raise ValueError("scoring data must be nonempty")
+    values = np.asarray([model.log_density(x) for x in rows], dtype=np.float64)
+    if values.shape != (len(rows),) or not np.all(np.isfinite(values)):
+        raise ValueError("candidate and baseline log densities must be finite")
+    return float(np.mean(values))
 
 
 def propose_structure(
     candidates: Sequence[StructuralCandidate],
     train: Sequence[Any],
-    held_out: Sequence[Any],
+    verification: Sequence[Any],
     ceiling: CeilingReport,
+    *,
+    baseline_model: Any,
+    seed: int = 0,
 ) -> ImagineResult:
     """Fit and verify each candidate in order. A candidate is accepted only if it names a genuine
     new information source and improves held-out score over the ceiling's own held-out score
     (never train alone, since a richer family can always fit train better without a real capability
     gain). The first accepted candidate that also reaches ``ceiling.target`` breaks the ceiling."""
+    train = list(train)
+    verification = list(verification)
+    candidates = list(candidates)
+    if not train or not verification:
+        raise ValueError("training and independent verification data must be nonempty")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed must be an integer")
+    if len({candidate.name for candidate in candidates}) != len(candidates):
+        raise ValueError("structural candidate names must be unique")
+    if candidates and len(verification) < len(candidates):
+        raise ValueError("verification must provide at least one independent row per candidate")
+    panels = np.array_split(np.random.RandomState(seed).permutation(len(verification)), len(candidates)) if candidates else []
     result = ImagineResult(ceiling=ceiling)
-    for cand in candidates:
+    for cand, panel in zip(candidates, panels):
         model = cand.fit(train)
         train_score = _mean_log_density(model, train)
-        held_out_score = _mean_log_density(model, held_out)
-        if not cand.new_information:
+        rows = [verification[int(i)] for i in panel]
+        held_out_score = _mean_log_density(model, rows)
+        baseline_score = _mean_log_density(baseline_model, rows)
+        improvement = held_out_score - baseline_score
+        capability_delta = False
+        if cand.capability_test is not None:
+            try:
+                capability_delta = bool(not cand.capability_test(baseline_model) and cand.capability_test(model))
+            except Exception:  # noqa: BLE001 - an unverifiable capability fails closed
+                capability_delta = False
+        common = {
+            "name": cand.name,
+            "train_score": train_score,
+            "held_out_score": held_out_score,
+            "baseline_score": baseline_score,
+            "improvement": improvement,
+            "capability_delta_verified": capability_delta,
+            "verification_indices": tuple(int(i) for i in panel),
+        }
+        if not capability_delta:
             verdict = ProposalVerdict(
-                cand.name, False, train_score, held_out_score, reason="no named new information source"
+                accepted=False,
+                reason="no executable capability delta over the baseline",
+                **common,
             )
-        elif held_out_score <= ceiling.held_out_score:
+        elif improvement <= 0.0:
             verdict = ProposalVerdict(
-                cand.name,
-                False,
-                train_score,
-                held_out_score,
+                accepted=False,
                 reason="does not improve held-out over the current class (overfitting risk, not a real gain)",
+                **common,
             )
         else:
-            verdict = ProposalVerdict(cand.name, True, train_score, held_out_score)
+            verdict = ProposalVerdict(accepted=True, **common)
             if result.breaks_ceiling is None and held_out_score >= ceiling.target:
                 result.breaks_ceiling = cand.name
         result.verdicts.append(verdict)

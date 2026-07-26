@@ -202,18 +202,27 @@ def run_discrepancy_invention_loop(
     rng = np.random.RandomState(seed)
     journal = EpistemicJournal()
     design = design if design is not None else DesignModel(signature="discrepancy-invention-loop", n_constraints=0)
+    held_out = list(held_out)
+    if len(held_out) < 6:
+        raise ValueError("held_out needs at least six rows for disjoint ceiling, proposal, and gate evidence")
+    evidence_panels = np.array_split(rng.permutation(len(held_out)), 3)
+    ceiling_panel = [held_out[int(i)] for i in evidence_panels[0]]
+    proposal_panel = [held_out[int(i)] for i in evidence_panels[1]]
+    gate_panel = [held_out[int(i)] for i in evidence_panels[2]]
 
     champion_model = champion_fit(train)
-    champion_score = _mean_log_density(champion_model, held_out)
+    champion_score = _mean_log_density(champion_model, ceiling_panel)
 
     # 1. discrepancy receipt: does the champion's predictive diverge from the real held-out data?
-    discrepancy = discrepancy_report(champion_model, held_out, metric="auto")
+    discrepancy = discrepancy_report(champion_model, ceiling_panel, metric="auto")
     root_portfolio = HypothesisPortfolio([Hypothesis("champion", champion_model)], np.array([1.0]), w_open=0.0)
-    root_surprise = root_portfolio.surprise_score(held_out[0], lambda h, y: float(np.exp(h.payload.log_density(y))))
+    root_surprise = root_portfolio.surprise_score(
+        ceiling_panel[0], lambda h, y: float(np.exp(h.payload.log_density(y)))
+    )
     _record_stage(
         journal,
         root_portfolio,
-        observation=held_out[0],
+        observation=ceiling_panel[0],
         surprise=root_surprise,
         rationale=(
             f"discrepancy detected: metric={discrepancy.metric} value={discrepancy.value:.6g} "
@@ -224,7 +233,7 @@ def run_discrepancy_invention_loop(
     # 2. ceiling verdict: 'tune it' (capacity ladder still gaining) vs. 'ceiling-bound' (plateaued).
     ceiling = ceiling_report(champion_score, target)
     tuning_scores = {
-        f"tune_variant_{i}": _mean_log_density(variant_fit(train), held_out)
+        f"tune_variant_{i}": _mean_log_density(variant_fit(train), ceiling_panel)
         for i, variant_fit in enumerate(tuning_variants)
     }
     tune_helps, best_tuned_score = _capacity_ladder_verdict(
@@ -269,7 +278,14 @@ def run_discrepancy_invention_loop(
         return result
 
     # 3. propose_structure: search the composition grammar for a genuinely richer structure.
-    imagine = propose_structure(list(candidates), train, held_out, ceiling)
+    imagine = propose_structure(
+        list(candidates),
+        train,
+        proposal_panel,
+        ceiling,
+        baseline_model=champion_model,
+        seed=seed,
+    )
     result.imagine = imagine
     _record_stage(
         journal,
@@ -340,7 +356,7 @@ def run_discrepancy_invention_loop(
     )
 
     # 5. gate: does the winning proposal actually beat the champion (same anti-regression gate as L1/L4/L6)?
-    gate_verdict = challenger_beats_champion(champion_model, winning_model, held_out, objective=objective)
+    gate_verdict = challenger_beats_champion(champion_model, winning_model, gate_panel, objective=objective)
     result.gate_verdict = gate_verdict
     _record_stage(
         journal,
