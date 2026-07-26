@@ -17,6 +17,7 @@ pytest.importorskip("safetensors")
 from mixle.task.capacity import (  # noqa: E402
     DEFAULT_RUNGS,
     KNOWN_RUNGS,
+    WordEmbeddingFeaturizer,
     capacity_ladder,
     climb_to,
 )
@@ -86,6 +87,8 @@ class CapacityLadderTest(unittest.TestCase):
         self.assertIsNotNone(result.ceiling("hashed_ngram"))
         self.assertLess(result.ceiling("hashed_ngram"), 0.7)
         self.assertIsNone(result.winner)
+        self.assertEqual(result.outcome, "capacity_ceiling_measured")
+        self.assertTrue(result.fully_evaluated())
 
     def test_embedding_head_generalizes_with_synonym_vectors(self):
         train_texts, val_texts = _corpus()
@@ -137,6 +140,9 @@ class CapacityLadderTest(unittest.TestCase):
         self.assertIsNone(stub.score)
         self.assertIsNone(stub.model)
         self.assertTrue(stub.note)
+        self.assertEqual(stub.status, "not_evaluated")
+        self.assertEqual(result.outcome, "not_evaluated")
+        self.assertFalse(result.fully_evaluated())
 
     def test_unknown_rung_name_raises(self):
         train_texts, val_texts = _corpus()
@@ -186,6 +192,83 @@ class CapacityLadderTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             climb_to("not_a_rung")
         self.assertEqual(KNOWN_RUNGS[-1], "small_lm")
+
+
+class CapacityContractTest(unittest.TestCase):
+    def test_unavailable_only_ladder_is_not_a_measured_ceiling(self):
+        result = capacity_ladder(
+            ["a", "b"],
+            ["one", "two"],
+            target=0.9,
+            rungs=("strong_encoder",),
+            val_texts=["three"],
+            val_labels=["a"],
+        )
+        self.assertIsNone(result.winner)
+        self.assertEqual(result.outcome, "not_evaluated")
+        self.assertFalse(result.fully_evaluated())
+
+    def test_rejects_misaligned_or_missing_labels(self):
+        with self.assertRaises(ValueError):
+            capacity_ladder(["a"], ["one", "two"], target=0.8, rungs=("strong_encoder",))
+        with self.assertRaises(ValueError):
+            capacity_ladder(
+                ["a", "b"],
+                ["one", "two"],
+                target=0.8,
+                rungs=("strong_encoder",),
+                val_texts=["three"],
+            )
+        with self.assertRaises(ValueError):
+            capacity_ladder(
+                ["a", "b"],
+                ["one", "two"],
+                target=0.8,
+                rungs=("strong_encoder",),
+                val_texts=["three"],
+                val_labels=["a", "b"],
+            )
+        with self.assertRaises(ValueError):
+            capacity_ladder(
+                lambda _texts: ["a"],
+                ["one", "two"],
+                target=0.8,
+                rungs=("strong_encoder",),
+            )
+
+    def test_validates_target_split_rungs_and_embedding_family(self):
+        base = dict(
+            teacher_or_labels=["a", "b"],
+            texts=["one", "two"],
+            target=0.8,
+            rungs=("strong_encoder",),
+            val_texts=["three"],
+            val_labels=["a"],
+        )
+        for target in (np.nan, np.inf, -0.1, 1.1):
+            with self.assertRaises(ValueError):
+                capacity_ladder(**{**base, "target": target})
+        for calibration_frac in (np.nan, 0.0, 1.0):
+            with self.assertRaises(ValueError):
+                capacity_ladder(**base, calibration_frac=calibration_frac)
+        for rungs in ((), ("embedding_head", "hashed_ngram"), ("hashed_ngram", "hashed_ngram")):
+            with self.assertRaises(ValueError):
+                capacity_ladder(**{**base, "rungs": rungs})
+        for vectors in (
+            {"a": [1.0, 2.0], "b": [1.0]},
+            {"a": [1.0, np.nan]},
+            {"a": []},
+        ):
+            with self.assertRaises(ValueError):
+                capacity_ladder(**base, word_vectors=vectors)
+
+    def test_embedding_featurizer_copies_and_validates_vectors(self):
+        source = np.asarray([1.0, 0.0])
+        featurizer = WordEmbeddingFeaturizer({"word": source}, dim=2)
+        source[0] = 99.0
+        np.testing.assert_array_equal(featurizer.vectors["word"], [1.0, 0.0])
+        with self.assertRaises(ValueError):
+            WordEmbeddingFeaturizer({"a": [1.0], "b": [1.0, 2.0]}, dim=2)
 
 
 if __name__ == "__main__":
