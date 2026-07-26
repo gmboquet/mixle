@@ -7,6 +7,7 @@ The probability of an observed subset ``x`` is
     p(x) = prod_{k in x} p_k * prod_{k not in x} (1 - p_k).
 """
 
+import operator
 from collections.abc import Sequence
 from typing import Any
 
@@ -25,6 +26,197 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.utils.aliasing import MISSING, coalesce_alias
+
+_COUNT_ATOL = 1.0e-8
+
+
+class IntegerBernoulliSetFitError(RuntimeError):
+    """Raised when integer Bernoulli-set statistics do not identify a fit."""
+
+
+def _validated_num_vals(value: Any) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("num_vals must be a non-negative integer")
+    try:
+        result = operator.index(value)
+    except TypeError as exc:
+        raise TypeError("num_vals must be a non-negative integer") from exc
+    if result < 0:
+        raise ValueError("num_vals must be non-negative")
+    return result
+
+
+def _validated_min_prob(value: Any) -> float:
+    if isinstance(value, (bool, np.bool_)) or np.ndim(value) != 0:
+        raise TypeError("Integer Bernoulli-set min_prob must be a real scalar")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("Integer Bernoulli-set min_prob must be a real scalar") from exc
+    if not np.isfinite(result) or result < 0.0 or result > 0.5:
+        raise ValueError("Integer Bernoulli-set min_prob must lie in [0, 0.5]")
+    return result
+
+
+def _validated_weight(value: Any, *, label: str = "weight") -> float:
+    if isinstance(value, (bool, np.bool_)) or np.ndim(value) != 0:
+        raise TypeError(f"Integer Bernoulli-set {label} must be a real scalar")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"Integer Bernoulli-set {label} must be a real scalar"
+        ) from exc
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(
+            f"Integer Bernoulli-set {label} must be finite and non-negative"
+        )
+    return result
+
+
+def _validated_weights(value: Any, rows: int) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Integer Bernoulli-set weights must be numeric") from exc
+    if result.shape != (rows,):
+        raise ValueError(
+            "Integer Bernoulli-set weights must have exact shape (%d,)" % rows
+        )
+    if np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError(
+            "Integer Bernoulli-set weights must be finite and non-negative"
+        )
+    return result
+
+
+def _validated_log_probabilities(value: Any, *, label: str) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a numeric vector") from exc
+    if result.ndim != 1:
+        raise ValueError(f"{label} must be one-dimensional")
+    if np.any(np.isnan(result)) or np.any(np.isposinf(result)) or np.any(result > 0.0):
+        raise ValueError(f"{label} must contain finite or -inf log probabilities")
+    return result.copy()
+
+
+def _log_complement(log_p: np.ndarray) -> np.ndarray:
+    """Return ``log(1-exp(log_p))`` stably for validated log probabilities."""
+    result = np.empty_like(log_p)
+    cutoff = -np.log(2.0)
+    low = log_p < cutoff
+    with np.errstate(divide="ignore", invalid="ignore"):
+        result[low] = np.log1p(-np.exp(log_p[low]))
+        result[~low] = np.log(-np.expm1(log_p[~low]))
+    return result
+
+
+def _validated_observation(
+    value: Any,
+    *,
+    num_vals: int | None,
+) -> np.ndarray:
+    try:
+        labels = tuple(value)
+    except TypeError as exc:
+        raise TypeError("Integer Bernoulli-set observations must be iterable") from exc
+    checked = []
+    seen = set()
+    for raw in labels:
+        if isinstance(raw, (bool, np.bool_)):
+            raise TypeError(
+                "Integer Bernoulli-set observations require exact integers"
+            )
+        try:
+            label = operator.index(raw)
+        except TypeError as exc:
+            raise TypeError(
+                "Integer Bernoulli-set observations require exact integers"
+            ) from exc
+        if label < 0 or (num_vals is not None and label >= num_vals):
+            raise ValueError(
+                "Integer Bernoulli-set observation is outside configured support"
+            )
+        if label in seen:
+            raise ValueError(
+                "Integer Bernoulli-set observations cannot contain duplicates"
+            )
+        seen.add(label)
+        checked.append(label)
+    return np.asarray(checked, dtype=np.int64)
+
+
+def _validated_encoded_sets(
+    value: Any,
+    *,
+    num_vals: int | None,
+) -> tuple[int, np.ndarray, np.ndarray]:
+    if not isinstance(value, (tuple, list)) or len(value) != 3:
+        raise ValueError("Encoded integer Bernoulli sets must contain three items")
+    rows = _validated_num_vals(value[0])
+    row_index = np.asarray(value[1])
+    labels = np.asarray(value[2])
+    if (
+        row_index.ndim != 1
+        or labels.ndim != 1
+        or row_index.shape != labels.shape
+    ):
+        raise ValueError("Encoded integer Bernoulli-set arrays have invalid geometry")
+    if row_index.dtype.kind not in "iu" or labels.dtype.kind not in "iu":
+        raise TypeError("Encoded integer Bernoulli-set values must be integer arrays")
+    row_index = row_index.astype(np.int64, copy=False)
+    labels = labels.astype(np.int64, copy=False)
+    if np.any(row_index < 0) or np.any(row_index >= rows):
+        raise ValueError("Encoded integer Bernoulli-set row indices are out of range")
+    if np.any(labels < 0) or (
+        num_vals is not None and np.any(labels >= num_vals)
+    ):
+        raise ValueError("Encoded integer Bernoulli-set labels are out of range")
+    pairs = tuple(zip(row_index.tolist(), labels.tolist()))
+    if len(set(pairs)) != len(pairs):
+        raise ValueError(
+            "Encoded integer Bernoulli-set rows cannot contain duplicate labels"
+        )
+    return rows, row_index, labels
+
+
+def _validated_statistics(
+    value: Any,
+    *,
+    num_vals: int,
+) -> tuple[np.ndarray, float]:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise ValueError(
+            "Integer Bernoulli-set sufficient statistics must contain two items"
+        )
+    try:
+        counts = np.asarray(value[0], dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Integer Bernoulli-set inclusion counts must be numeric"
+        ) from exc
+    if counts.shape != (num_vals,):
+        raise ValueError(
+            "Integer Bernoulli-set inclusion counts must have exact shape (%d,)"
+            % num_vals
+        )
+    total = _validated_weight(value[1], label="total weight")
+    tolerance = _COUNT_ATOL * max(1.0, total)
+    if np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
+        raise ValueError(
+            "Integer Bernoulli-set inclusion counts must be finite and non-negative"
+        )
+    if np.any(counts > total + tolerance):
+        raise ValueError(
+            "Integer Bernoulli-set inclusion counts cannot exceed total weight"
+        )
+    return counts.copy(), total
+
+
+def _validated_sample_size(value: Any) -> int:
+    return _validated_num_vals(value)
 
 
 class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
@@ -85,22 +277,31 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
         """
 
-        num_vals = len(log_pvec)
+        checked_log_p = _validated_log_probabilities(
+            log_pvec,
+            label="log_pvec",
+        )
+        num_vals = len(checked_log_p)
+        derived_log_n = _log_complement(checked_log_p)
+        if log_nvec is not None:
+            checked_log_n = _validated_log_probabilities(
+                log_nvec,
+                label="log_nvec",
+            )
+            if checked_log_n.shape != checked_log_p.shape:
+                raise ValueError("log_pvec and log_nvec must have equal lengths")
+            pair_norm = np.logaddexp(checked_log_p, checked_log_n)
+            if not np.allclose(pair_norm, 0.0, rtol=0.0, atol=1.0e-12):
+                raise ValueError(
+                    "Each log_pvec/log_nvec pair must be complementary probabilities"
+                )
         self.name = name
         self.num_vals = num_vals
-        self.log_pvec = np.asarray(log_pvec, dtype=np.float64).copy()
+        self.log_pvec = checked_log_p
+        self.log_nvec = derived_log_n
         self.keys = keys
-
-        with np.errstate(divide="ignore"):
-            if log_nvec is None:
-                log_nvec = np.log1p(-np.exp(self.log_pvec))
-                self.log_nvec = None
-                self.log_dvec = self.log_pvec - log_nvec
-                self.log_nsum = np.sum(log_nvec[np.isfinite(log_nvec)])
-            else:
-                self.log_nvec = np.asarray(log_nvec, dtype=np.float64)
-                self.log_dvec = self.log_pvec - self.log_nvec
-                self.log_nsum = np.sum(self.log_nvec[np.isfinite(self.log_nvec)])
+        self.log_dvec = self.log_pvec - self.log_nvec
+        self.log_nsum = float(np.sum(self.log_nvec[np.isfinite(self.log_nvec)]))
 
         # An element with p_k = 1 is *required*: its log_dvec entry is +inf (log_nvec = -inf,
         # excluded from log_nsum). Treat it as forced membership (mirrors BernoulliSetDistribution):
@@ -110,12 +311,20 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         if self.num_required:
             self.log_dvec = self.log_dvec.copy()
             self.log_dvec[self.required] = 0.0
+        self.log_pvec.setflags(write=False)
+        self.log_nvec.setflags(write=False)
+        self.log_dvec.setflags(write=False)
+        self.required.setflags(write=False)
 
     def __str__(self) -> str:
         s1 = repr(list(self.log_pvec))
-        s2 = repr(None if self.log_nvec is None else list(self.log_nvec))
+        s2 = repr(list(self.log_nvec))
         s3 = repr(self.name)
-        return "IntegerBernoulliSetDistribution(%s, log_nvec=%s, name=%s)" % (s1, s2, s3)
+        s4 = repr(self.keys)
+        return (
+            "IntegerBernoulliSetDistribution(%s, log_nvec=%s, name=%s, keys=%s)"
+            % (s1, s2, s3, s4)
+        )
 
     def density(self, x: Sequence[int] | np.ndarray) -> float:
         """Return the probability density or mass at a single observation."""
@@ -123,14 +332,14 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: Sequence[int] | np.ndarray) -> float:
         """Return the log-density or log-mass at a single observation."""
-        xx = np.asarray(x, dtype=int)
+        xx = _validated_observation(x, num_vals=self.num_vals)
         if self.num_required and not np.all(np.isin(self.required, xx)):
             return -np.inf
         return np.sum(self.log_dvec[xx]) + self.log_nsum
 
     def seq_log_density(self, x: tuple[int, np.ndarray, np.ndarray]) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
-        sz, idx, xs = x
+        sz, idx, xs = _validated_encoded_sets(x, num_vals=self.num_vals)
         rv = np.zeros(sz, dtype=np.float64)
         rv += np.bincount(idx, weights=self.log_dvec[xs], minlength=sz)
         rv += self.log_nsum
@@ -142,10 +351,10 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
     def backend_seq_log_density(self, x: tuple[int, np.ndarray, np.ndarray], engine: Any) -> Any:
         """Engine-neutral log-density for encoded integer Bernoulli-set observations."""
-        sz, idx, xs = x
+        sz, idx, xs = _validated_encoded_sets(x, num_vals=self.num_vals)
         rv = engine.zeros(sz) + engine.asarray(self.log_nsum)
         if len(xs):
-            log_dvec = engine.asarray(self.log_dvec)
+            log_dvec = engine.asarray(np.array(self.log_dvec, copy=True))
             rv = rv + engine.bincount(engine.asarray(idx), weights=log_dvec[engine.asarray(xs)], minlength=sz)
         if self.num_required:
             req_cnt = engine.zeros(sz)
@@ -158,6 +367,10 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def backend_stacked_params(cls, dists: Sequence["IntegerBernoulliSetDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked integer Bernoulli-set parameters for shared support size."""
+        if not dists:
+            raise ValueError(
+                "Stacked IntegerBernoulliSetDistribution parameters require at least one component."
+            )
         num_vals = int(dists[0].num_vals)
         if any(int(dist.num_vals) != num_vals for dist in dists):
             raise ValueError("Stacked IntegerBernoulliSetDistribution components require shared support size.")
@@ -177,7 +390,10 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         cls, x: tuple[int, np.ndarray, np.ndarray], params: dict[str, Any], engine: Any
     ) -> Any:
         """Return an ``(n, k)`` matrix of integer Bernoulli-set log densities."""
-        sz, idx, xs = x
+        sz, idx, xs = _validated_encoded_sets(
+            x,
+            num_vals=int(params["num_vals"]),
+        )
         rv = engine.zeros((sz, int(params["num_components"]))) + params["log_nsum"][None, :]
         if len(xs):
             contrib = params["log_dvec"][engine.asarray(xs), :]
@@ -195,8 +411,25 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         cls, x: tuple[int, np.ndarray, np.ndarray], weights: Any, params: dict[str, Any], engine: Any
     ) -> tuple[Any, Any]:
         """Return component-stacked legacy ``(inclusion_counts, total_weight)`` statistics."""
-        sz, idx, xs = x
-        ww = engine.asarray(weights)
+        sz, idx, xs = _validated_encoded_sets(
+            x,
+            num_vals=int(params["num_vals"]),
+        )
+        weights_np = np.asarray(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            dtype=np.float64,
+        )
+        expected_shape = (sz, int(params["num_components"]))
+        if weights_np.shape != expected_shape:
+            raise ValueError(
+                "Stacked integer Bernoulli-set weights must have exact shape %r"
+                % (expected_shape,)
+            )
+        if np.any(~np.isfinite(weights_np)) or np.any(weights_np < 0.0):
+            raise ValueError(
+                "Stacked integer Bernoulli-set weights must be finite and non-negative"
+            )
+        ww = engine.asarray(weights_np)
         num_vals = int(params["num_vals"])
         if len(xs):
             row_weights = ww[engine.asarray(idx)]
@@ -217,11 +450,19 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "IntegerBernoulliSetEstimator":
         """Return an estimator for fitting this distribution from data."""
-        return IntegerBernoulliSetEstimator(self.num_vals, pseudo_count=pseudo_count, name=self.name)
+        return IntegerBernoulliSetEstimator(
+            self.num_vals,
+            pseudo_count=pseudo_count,
+            suff_stat=(
+                None if pseudo_count is None else np.exp(self.log_pvec)
+            ),
+            name=self.name,
+            keys=self.keys,
+        )
 
     def dist_to_encoder(self) -> "IntegerBernoulliSetDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
-        return IntegerBernoulliSetDataEncoder()
+        return IntegerBernoulliSetDataEncoder(self.num_vals)
 
     def enumerator(self) -> "IntegerBernoulliSetEnumerator":
         """Returns IntegerBernoulliSetEnumerator iterating subsets in descending probability order."""
@@ -292,8 +533,9 @@ class IntegerBernoulliSetSampler(DistributionSampler):
             log_u = np.log(self.rng.rand(self.dist.num_vals))
             return list(np.flatnonzero(log_u <= self.dist.log_pvec))
         else:
+            checked_size = _validated_sample_size(size)
             rv = []
-            for i in range(size):
+            for _ in range(checked_size):
                 log_u = np.log(self.rng.rand(self.dist.num_vals))
                 rv.append(list(np.flatnonzero(log_u <= self.dist.log_pvec)))
             return rv
@@ -316,18 +558,19 @@ class IntegerBernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
             tot_sum (float): Sum of weights for observations.
 
         """
-        self.pcnt = np.zeros(num_vals, dtype=np.float64)
+        self.num_vals = _validated_num_vals(num_vals)
+        self.pcnt = np.zeros(self.num_vals, dtype=np.float64)
         self.keys = keys
-        self.num_vals = num_vals
         self.tot_sum = 0.0
 
     def update(
         self, x: Sequence[int] | np.ndarray, weight: float, estimate: IntegerBernoulliSetDistribution | None
     ) -> None:
         """Update inclusion counts from one weighted subset."""
-        xx = np.asarray(x, dtype=int)
-        self.pcnt[xx] += weight
-        self.tot_sum += weight
+        xx = _validated_observation(x, num_vals=self.num_vals)
+        checked_weight = _validated_weight(weight)
+        self.pcnt[xx] += checked_weight
+        self.tot_sum += checked_weight
 
     def initialize(self, x: Sequence[int] | np.ndarray, weight: float, rng: RandomState | None) -> None:
         """Initialize inclusion counts from one weighted subset."""
@@ -340,11 +583,15 @@ class IntegerBernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
         estimate: IntegerBernoulliSetDistribution | None,
     ) -> None:
         """Update inclusion counts from encoded subsets and observation weights."""
-        sz, idx, xs = x
-        agg_cnt = np.bincount(xs, weights=weights[idx])
-        n = len(agg_cnt)
-        self.pcnt[:n] += agg_cnt
-        self.tot_sum += weights.sum()
+        sz, idx, xs = _validated_encoded_sets(x, num_vals=self.num_vals)
+        checked_weights = _validated_weights(weights, sz)
+        agg_cnt = np.bincount(
+            xs,
+            weights=checked_weights[idx],
+            minlength=self.num_vals,
+        )
+        self.pcnt += agg_cnt
+        self.tot_sum += float(checked_weights.sum())
 
     def seq_update_engine(
         self,
@@ -358,25 +605,26 @@ class IntegerBernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
         The weighted integer histogram is reduced on the active engine; the fixed-size count
         vector is host bookkeeping. Matches seq_update.
         """
-        sz, idx, xs = x
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        sz, idx, xs = _validated_encoded_sets(x, num_vals=self.num_vals)
+        weights_np = np.asarray(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            dtype=np.float64,
+        )
+        weights_np = _validated_weights(weights_np, sz)
         w_eng = engine.asarray(weights_np)
 
-        xsv = np.asarray(xs)
-        minlen = int(xsv.max()) + 1 if xsv.size > 0 else 0
-        if xsv.size > 0:
+        if xs.size > 0:
             agg_cnt = np.asarray(
                 engine.to_numpy(
                     engine.bincount(
-                        engine.asarray(xsv.astype(np.int64)),
+                        engine.asarray(xs),
                         weights=w_eng[np.asarray(idx, dtype=np.int64)],
-                        minlength=minlen,
+                        minlength=self.num_vals,
                     )
                 ),
                 dtype=np.float64,
             )
-            n = len(agg_cnt)
-            self.pcnt[:n] += agg_cnt
+            self.pcnt += agg_cnt
 
         self.tot_sum += float(engine.to_numpy(engine.sum(w_eng)))
 
@@ -388,29 +636,37 @@ class IntegerBernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[np.ndarray, float]) -> "IntegerBernoulliSetAccumulator":
         """Merge inclusion counts and total observation weight."""
-        self.pcnt += suff_stat[0]
-        self.tot_sum += suff_stat[1]
+        counts, total = _validated_statistics(suff_stat, num_vals=self.num_vals)
+        combined_counts, combined_total = _validated_statistics(
+            (self.pcnt + counts, self.tot_sum + total),
+            num_vals=self.num_vals,
+        )
+        self.pcnt = combined_counts
+        self.tot_sum = combined_total
         return self
 
     def value(self) -> tuple[np.ndarray, float]:
         """Return inclusion counts and total observation weight."""
-        return self.pcnt, self.tot_sum
+        return self.pcnt.copy(), self.tot_sum
 
     def from_value(self, x: tuple[np.ndarray, float]) -> "IntegerBernoulliSetAccumulator":
         """Restore inclusion counts and total observation weight."""
-        self.pcnt = x[0]
-        self.tot_sum = x[1]
+        self.pcnt, self.tot_sum = _validated_statistics(
+            x,
+            num_vals=self.num_vals,
+        )
         return self
 
     def scale(self, c: float) -> "IntegerBernoulliSetAccumulator":
         """Scale inclusion counts and total observation weight by a constant."""
-        self.pcnt *= c
-        self.tot_sum *= c
+        checked_scale = _validated_weight(c, label="scale")
+        self.pcnt *= checked_scale
+        self.tot_sum *= checked_scale
         return self
 
     def acc_to_encoder(self) -> "IntegerBernoulliSetDataEncoder":
         """Return the encoder compatible with Bernoulli-set sufficient statistics."""
-        return IntegerBernoulliSetDataEncoder()
+        return IntegerBernoulliSetDataEncoder(self.num_vals)
 
 
 class IntegerBernoulliSetAccumulatorFactory(StatisticAccumulatorFactory):
@@ -429,7 +685,7 @@ class IntegerBernoulliSetAccumulatorFactory(StatisticAccumulatorFactory):
 
         """
         self.keys = keys
-        self.num_vals = num_vals
+        self.num_vals = _validated_num_vals(num_vals)
 
     def make(self) -> "IntegerBernoulliSetAccumulator":
         """Create an empty integer Bernoulli-set accumulator."""
@@ -468,12 +724,56 @@ class IntegerBernoulliSetEstimator(ParameterEstimator):
             min_prob (float): Minimum probability for an integer in range of set dist.
 
         """
-        self.num_vals = coalesce_alias("num_vals", num_vals, "num_values", num_values, default=MISSING)
+        self.num_vals = _validated_num_vals(
+            coalesce_alias(
+                "num_vals",
+                num_vals,
+                "num_values",
+                num_values,
+                default=MISSING,
+            )
+        )
         self.keys = keys
-        self.pseudo_count = pseudo_count
-        self.suff_stat = suff_stat
+        if pseudo_count is None:
+            if suff_stat is not None:
+                raise ValueError(
+                    "Integer Bernoulli-set prior probabilities require a pseudo-count"
+                )
+            self.pseudo_count = None
+            self.suff_stat = None
+        else:
+            self.pseudo_count = _validated_weight(
+                pseudo_count,
+                label="pseudo-count",
+            )
+            if suff_stat is None:
+                self.suff_stat = None
+            else:
+                try:
+                    prior_probabilities = np.asarray(
+                        suff_stat,
+                        dtype=np.float64,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "Integer Bernoulli-set prior probabilities must be numeric"
+                    ) from exc
+                if prior_probabilities.shape != (self.num_vals,):
+                    raise ValueError(
+                        "Integer Bernoulli-set prior probabilities must have exact "
+                        "shape (%d,)" % self.num_vals
+                    )
+                if (
+                    np.any(~np.isfinite(prior_probabilities))
+                    or np.any(prior_probabilities < 0.0)
+                    or np.any(prior_probabilities > 1.0)
+                ):
+                    raise ValueError(
+                        "Integer Bernoulli-set prior probabilities must lie in [0, 1]"
+                    )
+                self.suff_stat = prior_probabilities.copy()
         self.name = name
-        self.min_prob = min_prob
+        self.min_prob = _validated_min_prob(min_prob)
 
     def accumulator_factory(self) -> "IntegerBernoulliSetAccumulatorFactory":
         """Return a factory for integer Bernoulli-set sufficient-statistic accumulators."""
@@ -481,55 +781,61 @@ class IntegerBernoulliSetEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: np.ndarray | None = None) -> "IntegerBernoulliSetDistribution":
         """Estimate an integer Bernoulli-set distribution from inclusion-count statistics."""
-        if self.pseudo_count is not None and self.suff_stat is not None:
-            p0 = np.multiply(self.suff_stat, self.pseudo_count)
-            p1 = np.multiply(np.subtract(1.0, self.suff_stat), self.pseudo_count)
-            tsum = np.log(suff_stat[1] + self.pseudo_count)
-            log_pvec = np.log(suff_stat[0] + p0) - tsum
-            log_nvec = np.log((suff_stat[1] - suff_stat[0]) + p1) - tsum
-
-        elif self.pseudo_count is not None and self.suff_stat is None:
-            p = self.pseudo_count
-            log_c = np.log(suff_stat[1] + p)
-            log_pvec = np.log(suff_stat[0] + (p / 2.0)) - log_c
-            log_nvec = np.log((suff_stat[1] - suff_stat[0]) + (p / 2.0)) - log_c
-
+        counts, total = _validated_statistics(
+            suff_stat,
+            num_vals=self.num_vals,
+        )
+        prior_weight = 0.0 if self.pseudo_count is None else self.pseudo_count
+        if total == 0.0 and prior_weight == 0.0:
+            raise IntegerBernoulliSetFitError(
+                "Integer Bernoulli-set fitting requires positive observation or prior weight"
+            )
+        if self.suff_stat is None:
+            prior_probabilities = np.full(self.num_vals, 0.5, dtype=np.float64)
         else:
-            if suff_stat[1] == 0:
-                # no observations: fall back to p = 0.5 per element (these are log-probabilities)
-                log_pvec = np.zeros(self.num_vals, dtype=np.float64) + np.log(0.5)
-                log_nvec = np.zeros(self.num_vals, dtype=np.float64) + np.log(0.5)
-
-            elif self.min_prob > 0:
-                log_pvec = np.log(np.maximum(suff_stat[0] / suff_stat[1], self.min_prob))
-                log_nvec = np.log(np.maximum((suff_stat[1] - suff_stat[0]) / suff_stat[1], self.min_prob))
-
-            else:
-                pvec = suff_stat[0] / suff_stat[1]
-                nvec = (suff_stat[1] - suff_stat[0]) / suff_stat[1]
-
-                is_zero = pvec == 0
-                is_one = nvec == 0
-
-                log_pvec = np.zeros(self.num_vals, dtype=np.float64)
-                log_nvec = np.zeros(self.num_vals, dtype=np.float64)
-
-                log_pvec[~is_zero] = np.log(pvec[~is_zero])
-                log_pvec[is_zero] = -np.inf
-                log_nvec[~is_one] = np.log(nvec[~is_one])
-                log_nvec[is_one] = -np.inf
-
-        return IntegerBernoulliSetDistribution(log_pvec, log_nvec, name=self.name, keys=self.keys)
+            prior_probabilities = self.suff_stat
+        denominator = total + prior_weight
+        probabilities = (
+            counts + prior_weight * prior_probabilities
+        ) / denominator
+        if self.min_prob > 0.0:
+            upper = 1.0 - self.min_prob
+            if upper == 1.0:
+                upper = float(np.nextafter(1.0, 0.0))
+            probabilities = np.clip(probabilities, self.min_prob, upper)
+        with np.errstate(divide="ignore"):
+            log_pvec = np.log(probabilities)
+        result = IntegerBernoulliSetDistribution(
+            log_pvec,
+            name=self.name,
+            keys=self.keys,
+        )
+        result.fit_metadata = {
+            "converged": True,
+            "solver": "weighted-inclusion-frequency",
+            "regularized": prior_weight > 0.0,
+            "support_size": self.num_vals,
+            "repairs": (),
+        }
+        return result
 
 
 class IntegerBernoulliSetDataEncoder(DataSequenceEncoder):
     """Data encoder for iid integer Bernoulli-set observations."""
 
+    def __init__(self, num_vals: int | None = None) -> None:
+        self.num_vals = (
+            None if num_vals is None else _validated_num_vals(num_vals)
+        )
+
     def __str__(self) -> str:
-        return "IntegerBernoulliSetDataEncoder"
+        return "IntegerBernoulliSetDataEncoder(num_vals=%r)" % self.num_vals
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, IntegerBernoulliSetDataEncoder)
+        return (
+            isinstance(other, IntegerBernoulliSetDataEncoder)
+            and self.num_vals == other.num_vals
+        )
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> tuple[int, np.ndarray, np.ndarray]:
         """Encode sequences of iid observations for vectorized calculations.
@@ -546,13 +852,29 @@ class IntegerBernoulliSetDataEncoder(DataSequenceEncoder):
             See above for details.
 
         """
-        idx = []
-        xs = []
-        for i, xx in enumerate(x):
-            idx.extend([i] * len(xx))
-            xs.extend(xx)
+        try:
+            rows = tuple(x)
+        except TypeError as exc:
+            raise TypeError(
+                "Integer Bernoulli-set batches must be iterable"
+            ) from exc
+        row_index = []
+        labels = []
+        for row, observation in enumerate(rows):
+            checked = _validated_observation(
+                observation,
+                num_vals=self.num_vals,
+            )
+            row_index.extend([row] * len(checked))
+            labels.extend(checked.tolist())
+        encoded = (
+            len(rows),
+            np.asarray(row_index, dtype=np.int64),
+            np.asarray(labels, dtype=np.int64),
+        )
+        return _validated_encoded_sets(encoded, num_vals=self.num_vals)
 
-        idx = np.asarray(idx, dtype=np.int32)
-        xs = np.asarray(xs, dtype=np.int32)
-
-        return len(x), idx, xs
+    def row_count(self, x: tuple[int, np.ndarray, np.ndarray]) -> int:
+        """Return the validated encoded batch row count."""
+        rows, _, _ = _validated_encoded_sets(x, num_vals=self.num_vals)
+        return rows
