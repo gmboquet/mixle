@@ -25,8 +25,8 @@ folding, so the mechanics differ even though the shape of the fault-tolerance st
   optimizer step commits, so a chaos test's kill lands at a known point, not a timing race) but adapted to
   data-parallel gradient averaging: a dead rank's gradient is simply excluded from the step's average (the
   job continues with fewer ranks, degrading gracefully) rather than failing the whole step, and a dead rank
-  can be elastically respawned and resume from the last checkpoint's loader state (not from scratch, not
-  re-running the whole job).
+  can be elastically respawned at its last checkpointed loader position while joining the current
+  canonical model generation (not from scratch and without rewinding surviving ranks).
 * **Resume-with-receipts** -- :meth:`ElasticTrainingJob.respawn_rank` marks the NEXT observed step as
   ``restart=True`` when it feeds :class:`mixle.utils.parallel.training_health.TrainingHealthMonitor`
   (F4, PR #147), so every restart automatically gets F4's per-restart continuity verdict for free -- this
@@ -358,10 +358,11 @@ def _average_grads(grad_lists: list[list[torch.Tensor]]) -> list[torch.Tensor]:
 class ElasticTrainingJob:
     """A data-parallel training loop, chaos-tolerant: a rank dying mid-step degrades gracefully -- the
     job continues averaging over fewer surviving ranks that step, rather than hard-failing -- and a dead
-    rank can be elastically respawned and resume from the last checkpoint's model/optimizer/loader state
-    instead of the whole job restarting from scratch.
+    rank can be elastically respawned at its last checkpointed loader position and rejoin the current
+    canonical model generation instead of restarting or rewinding the whole job.
 
-    Holds one canonical ``(model, optimizer)`` (what gets checkpointed and what a respawned rank loads);
+    Holds one canonical ``(model, optimizer)`` (what gets checkpointed and what every live replica receives
+    at the start of its next step);
     each :class:`SimulatedRank` computes its OWN local forward+backward against a fresh copy of the
     canonical weights (the data-parallel replica), and the driver applies the mean of surviving ranks'
     gradients to the canonical model once per step -- the plain-mean "all-reduce" this module's docstring
@@ -502,10 +503,13 @@ class ElasticTrainingJob:
         return handle
 
     def respawn_rank(self, rank_id: int, checkpoint_path: str | None = None) -> LoaderState:
-        """Elastic restart: bring ``rank_id`` back from the last checkpoint -- model, optimizer, and every
-        rank's loader state -- instead of restarting the whole job from scratch. Mirrors
-        ``resilient_em``'s ``_respawn_worker``: same rank id, resumed data position, job otherwise
-        untouched. Marks the next ``run_step`` as a restart so F4's continuity check evaluates it."""
+        """Bring ``rank_id`` back at its checkpointed data position without rolling back the live job.
+
+        The respawned replica receives the current canonical model at the start of its next step, exactly
+        like every other replica. Only its own loader position comes from the checkpoint; committed model
+        updates and surviving ranks' positions remain untouched. Marks the next ``run_step`` as a restart
+        so F4's continuity check evaluates it.
+        """
         self._check_single_driver("respawn_rank")
         path = checkpoint_path or self.checkpoint_dir
         # A checkpoint write in flight to this same path must finish before it's read back, or this can
@@ -514,12 +518,14 @@ class ElasticTrainingJob:
         # wait manually before respawning; this turns that into a guarantee instead of a convention.
         if self.last_checkpoint_handle is not None and self.last_checkpoint_handle.path == path:
             self.last_checkpoint_handle.wait()
-        load_checkpoint(self.canonical_model, self.canonical_optimizer, path)
         extra = load_checkpoint_extra(path)
         loader_states = extra.get("loader_states")
-        if loader_states:
-            for r, s in loader_states.items():
-                self.loader_states[int(r)] = LoaderState.from_dict(s)
+        if not isinstance(loader_states, dict):
+            raise RuntimeError("checkpoint does not contain rank-local loader states")
+        saved_state = loader_states.get(rank_id, loader_states.get(str(rank_id)))
+        if saved_state is None:
+            raise RuntimeError(f"checkpoint does not contain loader state for rank {rank_id}")
+        self.loader_states[rank_id] = LoaderState.from_dict(saved_state)
         self.dead_ranks.discard(rank_id)
         self._spawn_rank(rank_id)
         self.pending_restart = True
