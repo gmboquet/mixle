@@ -46,6 +46,7 @@ def _exact_proposal(proposal_id, payload, *, base=0, dependency=0, observations=
         ObjectiveKind.MLE,
         payload,
         observations=observations,
+        data_fingerprint="data:%s" % proposal_id,
     )
 
 
