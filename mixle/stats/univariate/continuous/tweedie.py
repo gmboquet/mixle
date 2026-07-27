@@ -36,6 +36,53 @@ from mixle.stats.compute.pdist import (
 from mixle.utils.vector import gammaln
 
 _MIN_TWEEDIE = 1.0e-12
+_DEFAULT_MAX_SERIES_TERMS = 100_000
+_DEFAULT_MAX_SERIES_WORK = 10_000_000
+_DEFAULT_SERIES_TOLERANCE = 50.0
+
+
+class TweedieSeriesResourceError(RuntimeError):
+    """A Tweedie density series exceeded its declared term or work budget."""
+
+    def __init__(self, *, required_terms: int, rows: int, max_terms: int, max_work: int) -> None:
+        self.required_terms = required_terms
+        self.rows = rows
+        self.max_terms = max_terms
+        self.max_work = max_work
+        super().__init__(
+            "Tweedie density series requires at least %d terms across %d rows; "
+            "budgets are max_series_terms=%d and max_series_work=%d." % (required_terms, rows, max_terms, max_work)
+        )
+
+
+def _series_budget(value: Any, label: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{label} must be a positive integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{label} must be a positive integer")
+    return result
+
+
+def _series_target(n_peak_max: float) -> int:
+    return int(
+        math.ceil(
+            max(
+                50.0,
+                2.0 * n_peak_max + 10.0 * math.sqrt(n_peak_max + 1.0) + 50.0,
+            )
+        )
+    )
+
+
+def _check_series_budget(*, terms: int, rows: int, max_terms: int, max_work: int) -> None:
+    if terms > max_terms or terms * rows > max_work:
+        raise TweedieSeriesResourceError(
+            required_terms=terms,
+            rows=rows,
+            max_terms=max_terms,
+            max_work=max_work,
+        )
 
 
 def _tweedie_params(mu: float, phi: float, p: float) -> tuple[float, float, float]:
@@ -46,49 +93,68 @@ def _tweedie_params(mu: float, phi: float, p: float) -> tuple[float, float, floa
     return lam, a, theta
 
 
-def _tweedie_positive_logpdf(y: np.ndarray, mu: float, phi: float, p: float) -> np.ndarray:
-    """Return ``log f(y)`` for strictly-positive ``y`` (the compound Poisson-Gamma series)."""
+def _tweedie_positive_logpdf(
+    y: np.ndarray,
+    mu: float,
+    phi: float,
+    p: float,
+    *,
+    max_terms: int,
+    max_work: int,
+    tolerance: float,
+) -> np.ndarray:
+    """Return ``log f(y)`` using bounded, streaming log-sum accumulation."""
     lam, a, theta = _tweedie_params(mu, phi, p)
     log_lam = math.log(lam)
     log_theta = math.log(theta)
     log_y = np.log(y)
-
-    # The series terms in n are unimodal. The summand's log is
-    #   A_n + (a*log y_i)*n, with A_n = n*log lam - lgamma(n+1) - lgamma(n*a) - n*a*log theta,
-    # whose Stirling-approximate stationary point grows like n* ~ y_i**(2-p) / (phi*(2-p)) (i.e. ~sqrt(y)
-    # in the dispersion-units that matter), NOT linearly in y. A fixed cap (the old n_max=20000) truncates
-    # the peak for large lambda (large mu / small phi); instead center a window on the actual peak and
-    # widen it until the boundary log-terms fall ``tol`` below the peak.
-    def _log_terms(n: np.ndarray) -> np.ndarray:
-        # log term[i, n] = c_i + A_n + (a*log y_i)*n
-        a_n = n * log_lam - gammaln(n + 1.0) - gammaln(n * a) - n * a * log_theta
-        c_i = -lam - log_y - y / theta
-        return c_i[:, None] + a_n[None, :] + (a * log_y)[:, None] * n[None, :]
-
-    # Peak location of the saddlepoint series (Dunn & Smyth): n*_i ~ y_i**(2-p) / (phi*(2-p)).
+    rows = len(y)
+    if rows == 0:
+        return np.empty(0, dtype=np.float64)
+    c_i = -lam - log_y - y / theta
     n_peak = np.power(np.maximum(y, _MIN_TWEEDIE), 2.0 - p) / (phi * (2.0 - p))
-    n_peak_max = float(np.max(n_peak)) if y.size else 1.0
-    # Initial window: [1, n_hi]. Widen geometrically until both the lower boundary (n=1) and the upper
-    # boundary (n=n_hi) are ``tol`` below the per-row peak across every observation.
-    tol = 50.0  # in log-units; exp(-50) ~ 2e-22 relative contribution, far below float64 round-off
-    n_hi = max(50.0, 2.0 * n_peak_max + 10.0 * math.sqrt(n_peak_max + 1.0) + 50.0)
-    for _ in range(64):
-        n = np.arange(1, int(math.ceil(n_hi)) + 1, dtype=np.float64)
-        terms = _log_terms(n)
-        m = np.max(terms, axis=1)
-        # Boundary log-terms relative to the per-row peak; if the upper edge is still within ``tol`` of
-        # the peak for any row the window is too narrow, so widen and retry.
-        upper_gap = m - terms[:, -1]
-        if not y.size or np.all(upper_gap >= tol):
-            break
-        n_hi = n_hi * 2.0
-    return m + np.log(np.sum(np.exp(terms - m[:, None]), axis=1))
+    target = _series_target(float(np.max(n_peak)))
+    _check_series_budget(terms=target, rows=rows, max_terms=max_terms, max_work=max_work)
+
+    log_sum = np.full(rows, -np.inf, dtype=np.float64)
+    peak = np.full(rows, -np.inf, dtype=np.float64)
+    completed = 0
+    while True:
+        for n_int in range(completed + 1, target + 1):
+            n = float(n_int)
+            a_n = n * log_lam - gammaln(n + 1.0) - gammaln(n * a) - n * a * log_theta
+            term = c_i + a_n + (a * log_y) * n
+            log_sum = np.logaddexp(log_sum, term)
+            peak = np.maximum(peak, term)
+        completed = target
+        if np.all(peak - term >= tolerance):
+            return log_sum
+        target = min(max_terms, target * 2)
+        if target == completed:
+            raise TweedieSeriesResourceError(
+                required_terms=completed + 1,
+                rows=rows,
+                max_terms=max_terms,
+                max_work=max_work,
+            )
+        _check_series_budget(terms=target, rows=rows, max_terms=max_terms, max_work=max_work)
 
 
 class TweedieDistribution(SequenceEncodableProbabilityDistribution):
     """Tweedie (compound Poisson-Gamma) distribution on ``[0, inf)`` with fixed power ``p in (1, 2)``."""
 
-    def __init__(self, mu: float, phi: float, p: float = 1.5, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        mu: float,
+        phi: float,
+        p: float = 1.5,
+        name: str | None = None,
+        keys: str | None = None,
+        *,
+        max_series_terms: int = _DEFAULT_MAX_SERIES_TERMS,
+        max_series_work: int = _DEFAULT_MAX_SERIES_WORK,
+        series_tolerance: float = _DEFAULT_SERIES_TOLERANCE,
+    ) -> None:
         """Create a Tweedie with mean ``mu``, dispersion ``phi``, and fixed power ``p``.
 
         Args:
@@ -104,21 +170,34 @@ class TweedieDistribution(SequenceEncodableProbabilityDistribution):
             raise ValueError("TweedieDistribution requires finite phi > 0.")
         if not (1.0 < p < 2.0):
             raise ValueError("TweedieDistribution requires power p strictly in (1, 2).")
+        checked_max_terms = _series_budget(max_series_terms, "max_series_terms")
+        checked_max_work = _series_budget(max_series_work, "max_series_work")
+        if not np.isfinite(series_tolerance) or series_tolerance <= 0.0:
+            raise ValueError("series_tolerance must be finite and positive")
         self.mu = float(mu)
         self.phi = float(phi)
         self.p = float(p)
         self.name = name
         self.keys = keys
+        self.max_series_terms = checked_max_terms
+        self.max_series_work = checked_max_work
+        self.series_tolerance = float(series_tolerance)
         self.lam, self.gamma_shape, self.gamma_scale = _tweedie_params(self.mu, self.phi, self.p)
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the Tweedie distribution."""
-        return "TweedieDistribution(%s, %s, %s, name=%s, keys=%s)" % (
+        return (
+            "TweedieDistribution(%s, %s, %s, name=%s, keys=%s, "
+            "max_series_terms=%s, max_series_work=%s, series_tolerance=%s)"
+        ) % (
             repr(self.mu),
             repr(self.phi),
             repr(self.p),
             repr(self.name),
             repr(self.keys),
+            repr(self.max_series_terms),
+            repr(self.max_series_work),
+            repr(self.series_tolerance),
         )
 
     def density(self, x: float) -> float:
@@ -135,7 +214,17 @@ class TweedieDistribution(SequenceEncodableProbabilityDistribution):
             return -np.inf
         if xx == 0.0:
             return -self.lam
-        return float(_tweedie_positive_logpdf(np.array([xx], dtype=np.float64), self.mu, self.phi, self.p)[0])
+        return float(
+            _tweedie_positive_logpdf(
+                np.array([xx], dtype=np.float64),
+                self.mu,
+                self.phi,
+                self.p,
+                max_terms=self.max_series_terms,
+                max_work=self.max_series_work,
+                tolerance=self.series_tolerance,
+            )[0]
+        )
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized Tweedie log-density at sequence-encoded non-negative observations ``x``."""
@@ -145,7 +234,15 @@ class TweedieDistribution(SequenceEncodableProbabilityDistribution):
         rv[zero] = -self.lam
         pos = xx > 0.0
         if np.any(pos):
-            rv[pos] = _tweedie_positive_logpdf(xx[pos], self.mu, self.phi, self.p)
+            rv[pos] = _tweedie_positive_logpdf(
+                xx[pos],
+                self.mu,
+                self.phi,
+                self.p,
+                max_terms=self.max_series_terms,
+                max_work=self.max_series_work,
+                tolerance=self.series_tolerance,
+            )
         return rv
 
     # --- compute-engine backend (numpy + torch/GPU), SCORING only: the moment accumulator stays
@@ -167,23 +264,56 @@ class TweedieDistribution(SequenceEncodableProbabilityDistribution):
         log_lam, log_theta = math.log(lam), math.log(theta)
 
         xx = engine.asarray(x)
+        rows = int(np.size(engine.to_numpy(xx)))
+        if rows == 0:
+            return engine.asarray(np.empty(0, dtype=np.float64))
         ys = engine.maximum(xx, engine.asarray(1.0e-300))  # keep the series finite on masked rows
         log_y = engine.log(ys)
         c_i = -lam - log_y - ys / theta
 
         y_max = float(engine.to_numpy(engine.max(xx))) if np.prod(np.shape(engine.to_numpy(xx))) else 1.0
         n_peak_max = max(y_max, _MIN_TWEEDIE) ** (2.0 - self.p) / (self.phi * (2.0 - self.p))
-        n_hi = max(50.0, 2.0 * n_peak_max + 10.0 * math.sqrt(n_peak_max + 1.0) + 50.0)
-        for _ in range(64):
-            n = engine.asarray(np.arange(1, int(math.ceil(n_hi)) + 1, dtype=np.float64))
-            a_n = n * log_lam - engine.gammaln(n + 1.0) - engine.gammaln(n * a) - n * a * log_theta
-            terms = c_i[:, None] + a_n[None, :] + (a * log_y)[:, None] * n[None, :]
-            m = engine.max(terms, axis=1)
-            gap = float(engine.to_numpy(engine.max(terms[:, -1] - m)))  # worst upper-boundary gap
-            if gap <= -50.0:
+        target = _series_target(n_peak_max)
+        _check_series_budget(
+            terms=target,
+            rows=rows,
+            max_terms=self.max_series_terms,
+            max_work=self.max_series_work,
+        )
+        log_sum = None
+        peak = None
+        completed = 0
+        while True:
+            term = None
+            for n_int in range(completed + 1, target + 1):
+                n = engine.asarray(float(n_int))
+                a_n = n * log_lam - engine.gammaln(n + 1.0) - engine.gammaln(n * a) - n * a * log_theta
+                term = c_i + a_n + (a * log_y) * n
+                if log_sum is None:
+                    log_sum = term
+                    peak = term
+                else:
+                    log_sum = engine.logsumexp(engine.stack((log_sum, term), axis=1), axis=1)
+                    peak = engine.maximum(peak, term)
+            completed = target
+            gap = float(engine.to_numpy(engine.max(term - peak)))
+            if gap <= -self.series_tolerance:
                 break
-            n_hi = n_hi * 2.0
-        pos_val = engine.logsumexp(terms, axis=1)
+            target = min(self.max_series_terms, target * 2)
+            if target == completed:
+                raise TweedieSeriesResourceError(
+                    required_terms=completed + 1,
+                    rows=rows,
+                    max_terms=self.max_series_terms,
+                    max_work=self.max_series_work,
+                )
+            _check_series_budget(
+                terms=target,
+                rows=rows,
+                max_terms=self.max_series_terms,
+                max_work=self.max_series_work,
+            )
+        pos_val = log_sum
 
         neg_inf = engine.asarray(-np.inf)
         return engine.where(xx == 0.0, engine.asarray(-lam), engine.where(xx > 0.0, pos_val, neg_inf))

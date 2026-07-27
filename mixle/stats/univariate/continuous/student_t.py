@@ -18,6 +18,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import finite_observations
 from mixle.utils.special import gammaln
 
 
@@ -58,8 +59,8 @@ class StudentTDistribution(SequenceEncodableProbabilityDistribution):
     def __init__(
         self, df: float, loc: float = 0.0, scale: float = 1.0, name: str | None = None, keys: str | None = None
     ) -> None:
-        if df <= 0.0 or scale <= 0.0 or not np.isfinite(df) or not np.isfinite(scale):
-            raise ValueError("StudentTDistribution requires df > 0 and scale > 0.")
+        if df <= 0.0 or scale <= 0.0 or not np.isfinite(df) or not np.isfinite(loc) or not np.isfinite(scale):
+            raise ValueError("StudentTDistribution requires df > 0, finite loc, and scale > 0.")
         self.df = float(df)
         self.loc = float(loc)
         self.scale = float(scale)
@@ -278,8 +279,8 @@ class StudentTEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        if df <= 0.0 or not np.isfinite(df):
-            raise ValueError("StudentTEstimator requires df > 0.")
+        if df <= 2.0 or not np.isfinite(df):
+            raise ValueError("StudentTEstimator's moment fit requires finite df > 2.")
         self.df = float(df)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
@@ -296,7 +297,7 @@ class StudentTEstimator(ParameterEstimator):
         sum_x, sum_x2, count = suff_stat
         if self.pseudo_count is not None and self.suff_stat is not None:
             loc0, scale0 = self.suff_stat
-            var0 = scale0 * scale0 * self.df / (self.df - 2.0) if self.df > 2.0 else scale0 * scale0
+            var0 = scale0 * scale0 * self.df / (self.df - 2.0)
             sum_x += self.pseudo_count * loc0
             sum_x2 += self.pseudo_count * (var0 + loc0 * loc0)
             count += self.pseudo_count
@@ -306,7 +307,7 @@ class StudentTEstimator(ParameterEstimator):
 
         loc = sum_x / count
         var = max(sum_x2 / count - loc * loc, self.min_scale * self.min_scale)
-        scale2 = var * (self.df - 2.0) / self.df if self.df > 2.0 else var
+        scale2 = var * (self.df - 2.0) / self.df
         scale = math.sqrt(max(scale2, self.min_scale * self.min_scale))
         return StudentTDistribution(self.df, loc=loc, scale=scale, name=self.name, keys=self.keys)
 
@@ -322,7 +323,4 @@ class StudentTDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
         """Encode observations as a floating-point array."""
-        rv = np.asarray(x, dtype=np.float64)
-        if rv.size and np.any(np.isnan(rv)):
-            raise ValueError("StudentTDistribution requires finite or infinite real-valued observations.")
-        return rv
+        return finite_observations(x, label="Student-t observations")

@@ -63,28 +63,15 @@ class GeneralizedExtremeValueTest(unittest.TestCase):
         self.assertAlmostEqual(fitted.scale, d.scale, places=6)
         self.assertAlmostEqual(fitted.shape, d.shape, places=6)
 
-    def test_non_finite_prior_suff_stat_is_ignored_not_propagated(self):
-        # A cloned estimator can inherit a prior suff_stat computed from an earlier, already-
-        # degenerate fit elsewhere in a structure-search recursion (e.g. a near-empty or zero-
-        # variance sub-cluster overflowing to inf/nan raw moments). Blending that into otherwise
-        # healthy real data must not poison the result -- the corrupt prior should be treated as
-        # no prior at all. Reproduces the exact real (mean0, second0, third0) shape observed from
-        # a live structure-learning failure: a finite mean paired with an inf second moment and a
-        # nan third moment.
-        est = GeneralizedExtremeValueEstimator(pseudo_count=1.0, suff_stat=(3.5, float("inf"), float("nan")))
-        real_data_suff_stat = (-97.09542338523842, 427.95961073482613, -1226.6157671106344, 72.0)
-        fitted = est.estimate(None, real_data_suff_stat)
-        self.assertTrue(np.isfinite(fitted.loc))
-        self.assertTrue(np.isfinite(fitted.scale))
-        self.assertGreater(fitted.scale, 0.0)
-        self.assertTrue(np.isfinite(fitted.shape))
-
-        # Must match fitting on the real data alone (no prior at all): the corrupt prior
-        # contributes nothing, rather than merely failing to crash.
-        plain = GeneralizedExtremeValueEstimator().estimate(None, real_data_suff_stat)
-        self.assertAlmostEqual(fitted.loc, plain.loc, places=9)
-        self.assertAlmostEqual(fitted.scale, plain.scale, places=9)
-        self.assertAlmostEqual(fitted.shape, plain.shape, places=9)
+    def test_non_finite_prior_suff_stat_is_rejected(self):
+        # A corrupt inherited prior must be made explicit at the ownership boundary. Silently
+        # dropping requested regularization makes the returned fit indistinguishable from a
+        # successful regularized result.
+        with self.assertRaises(ValueError):
+            GeneralizedExtremeValueEstimator(
+                pseudo_count=1.0,
+                suff_stat=(3.5, float("inf"), float("nan")),
+            )
 
 
 if __name__ == "__main__":

@@ -99,12 +99,13 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
                 StatisticSpec("sum"),
                 StatisticSpec("sum2"),
             ),
-            support="unit_interval_open",
+            support="unit_interval",
             exponential_family=ExponentialFamilySpec(
                 sufficient_statistics=cls.exp_family_sufficient_statistics,
                 natural_parameters=cls.exp_family_natural_parameters,
                 log_partition=cls.exp_family_log_partition,
                 legacy_sufficient_statistics=cls.exp_family_legacy_sufficient_statistics,
+                runtime_scoring=False,
             ),
         )
 
@@ -179,19 +180,34 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
             xx = float(x)
         except Exception:  # noqa: BLE001
             return -np.inf
-        if not np.isfinite(xx) or xx <= 0.0 or xx >= 1.0:
+        if not np.isfinite(xx) or xx < 0.0 or xx > 1.0:
             return -np.inf
+        if xx == 0.0:
+            if self.a < 1.0:
+                return np.inf
+            return -self.log_const if self.a == 1.0 else -np.inf
+        if xx == 1.0:
+            if self.b < 1.0:
+                return np.inf
+            return -self.log_const if self.b == 1.0 else -np.inf
         return (self.a - 1.0) * math.log(xx) + (self.b - 1.0) * math.log1p(-xx) - self.log_const
 
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
-        lx, l1mx, _, _ = x
-        return (self.a - 1.0) * lx + (self.b - 1.0) * l1mx - self.log_const
+        lx, l1mx, values, _ = x
+        left = np.inf if self.a < 1.0 else (-self.log_const if self.a == 1.0 else -np.inf)
+        right = np.inf if self.b < 1.0 else (-self.log_const if self.b == 1.0 else -np.inf)
+        with np.errstate(invalid="ignore"):
+            interior = (self.a - 1.0) * lx + (self.b - 1.0) * l1mx - self.log_const
+        return np.where(values == 0.0, left, np.where(values == 1.0, right, interior))
 
     @staticmethod
     def backend_log_density_from_params(log_x: Any, log1m_x: Any, a: Any, b: Any, engine: Any) -> Any:
         """Engine-neutral Beta log-density from encoded logs and parameters."""
-        return (a - 1.0) * log_x + (b - 1.0) * log1m_x - engine.betaln(a, b)
+        one = engine.asarray(1.0)
+        safe_log_x = engine.where(a == one, engine.asarray(0.0), log_x)
+        safe_log1m_x = engine.where(b == one, engine.asarray(0.0), log1m_x)
+        return (a - one) * safe_log_x + (b - one) * safe_log1m_x - engine.betaln(a, b)
 
     def backend_seq_log_density(self, x: tuple[Any, Any, Any, Any], engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
@@ -392,9 +408,18 @@ class BetaEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.pseudo_count = pseudo_count
-        self.suff_stat = np.asarray(suff_stat, dtype=np.float64) if suff_stat is not None else None
-        self.delta = delta
+        if pseudo_count is not None and (
+            isinstance(pseudo_count, (bool, np.bool_)) or not np.isfinite(pseudo_count) or pseudo_count < 0.0
+        ):
+            raise ValueError("BetaEstimator pseudo_count must be finite and non-negative.")
+        prior = np.asarray(suff_stat, dtype=np.float64) if suff_stat is not None else None
+        if prior is not None and (prior.shape != (2,) or np.any(~np.isfinite(prior))):
+            raise ValueError("BetaEstimator prior log statistics must be a finite length-two vector.")
+        if not np.isfinite(delta) or delta <= 0.0:
+            raise ValueError("BetaEstimator delta must be finite and positive.")
+        self.pseudo_count = None if pseudo_count == 0.0 else pseudo_count
+        self.suff_stat = prior
+        self.delta = float(delta)
         self.name = name
         self.keys = keys
 
@@ -418,6 +443,9 @@ class BetaEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float, float]) -> BetaDistribution:
         """Estimate Beta shape parameters from weighted sufficient statistics."""
         count, sum_log_x, sum_log1m, sum_x, sum_x2 = suff_stat
+        values = np.asarray(suff_stat, dtype=np.float64)
+        if values.shape != (5,) or np.any(~np.isfinite(values)) or count < 0.0:
+            raise ValueError("Beta sufficient statistics must be finite with a non-negative count.")
         if count <= 0.0 and self.pseudo_count is None:
             return BetaDistribution(1.0, 1.0, name=self.name, keys=self.keys)
 
@@ -430,6 +458,8 @@ class BetaEstimator(ParameterEstimator):
             logs = logs + self.pseudo_count * prior_logs
             denom = denom + self.pseudo_count
 
+        if not np.isfinite(denom) or denom <= 0.0:
+            raise ValueError("Beta estimation requires positive effective count.")
         mean_logs = logs / denom
         initial = self._moment_initial(count, sum_x, sum_x2)
         alpha, _ = dirichlet_param_solve(initial, mean_logs, self.delta)
@@ -449,6 +479,7 @@ class BetaDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Encode observations as log and moment arrays for vectorized updates."""
         rv = np.asarray(x, dtype=np.float64)
-        if rv.size and (np.any(rv <= 0.0) or np.any(rv >= 1.0) or np.any(np.isnan(rv))):
-            raise ValueError("BetaDistribution requires observations in (0, 1).")
-        return np.log(rv), np.log1p(-rv), rv, rv * rv
+        if rv.size and (np.any(rv < 0.0) or np.any(rv > 1.0) or np.any(~np.isfinite(rv))):
+            raise ValueError("BetaDistribution requires finite observations in [0, 1].")
+        with np.errstate(divide="ignore"):
+            return np.log(rv), np.log1p(-rv), rv, rv * rv

@@ -51,8 +51,8 @@ class LogisticDistribution(SequenceEncodableProbabilityDistribution):
         return xx, xx * xx, xx * 0.0 + engine.asarray(1.0)
 
     def __init__(self, loc: float = 0.0, scale: float = 1.0, name: str | None = None, keys: str | None = None) -> None:
-        if scale <= 0.0 or not np.isfinite(scale):
-            raise ValueError("LogisticDistribution requires scale > 0.")
+        if not np.isfinite(loc) or scale <= 0.0 or not np.isfinite(scale):
+            raise ValueError("LogisticDistribution requires finite loc and scale > 0.")
         self.loc = float(loc)
         self.scale = float(scale)
         self.log_scale = math.log(self.scale)

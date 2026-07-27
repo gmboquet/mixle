@@ -33,8 +33,30 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    finite_observation,
+    finite_observations,
+)
 
 _XI_TOL = 1.0e-8  # |xi| below this is treated as the exponential limit
+
+
+def _gpd_observations(
+    value: Any,
+    *,
+    loc: float,
+    scale: float | None = None,
+    shape: float | None = None,
+) -> np.ndarray:
+    upper = None
+    if shape is not None and scale is not None and shape < -_XI_TOL:
+        upper = loc - scale / shape
+    return finite_observations(
+        value,
+        label="generalized-Pareto observations",
+        minimum=loc,
+        maximum=upper,
+    )
 
 
 class GeneralizedParetoDistribution(SequenceEncodableProbabilityDistribution):
@@ -224,7 +246,11 @@ class GeneralizedParetoDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> "GeneralizedParetoDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
-        return GeneralizedParetoDataEncoder()
+        return GeneralizedParetoDataEncoder(
+            loc=self.loc,
+            scale=self.scale,
+            shape=self.shape,
+        )
 
 
 class GeneralizedParetoSampler(DistributionSampler):
@@ -248,7 +274,10 @@ class GeneralizedParetoSampler(DistributionSampler):
 class GeneralizedParetoAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted first and second moments for GPD estimation."""
 
-    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(self, loc: float = 0.0, name: str | None = None, keys: str | None = None) -> None:
+        if not np.isfinite(loc):
+            raise ValueError("generalized-Pareto accumulator threshold must be finite")
+        self.loc = float(loc)
         self.sum = 0.0
         self.sum2 = 0.0
         self.count = 0.0
@@ -257,8 +286,23 @@ class GeneralizedParetoAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: float, weight: float, estimate: GeneralizedParetoDistribution | None) -> None:
         """Accumulate weighted first and second moments for one observation."""
-        self.sum += x * weight
-        self.sum2 += x * x * weight
+        if estimate is None:
+            xx = finite_observation(
+                x,
+                label="generalized-Pareto observation",
+                minimum=self.loc,
+            )
+        else:
+            xx = float(
+                _gpd_observations(
+                    [x],
+                    loc=estimate.loc,
+                    scale=estimate.scale,
+                    shape=estimate.shape,
+                )[0]
+            )
+        self.sum += xx * weight
+        self.sum2 += xx * xx * weight
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
@@ -267,7 +311,15 @@ class GeneralizedParetoAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: GeneralizedParetoDistribution | None) -> None:
         """Accumulate weighted first and second moments from encoded data."""
-        xx = np.asarray(x, dtype=np.float64)
+        if estimate is None:
+            xx = _gpd_observations(x, loc=self.loc)
+        else:
+            xx = _gpd_observations(
+                x,
+                loc=estimate.loc,
+                scale=estimate.scale,
+                shape=estimate.shape,
+            )
         self.sum += np.dot(xx, weights)
         self.sum2 += np.dot(xx * xx, weights)
         self.count += np.sum(weights, dtype=np.float64)
@@ -294,19 +346,22 @@ class GeneralizedParetoAccumulator(SequenceEncodableStatisticAccumulator):
 
     def acc_to_encoder(self) -> "GeneralizedParetoDataEncoder":
         """Return the encoder used by this accumulator."""
-        return GeneralizedParetoDataEncoder()
+        return GeneralizedParetoDataEncoder(loc=self.loc)
 
 
 class GeneralizedParetoAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for GeneralizedParetoAccumulator."""
 
-    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(self, loc: float = 0.0, name: str | None = None, keys: str | None = None) -> None:
+        if not np.isfinite(loc):
+            raise ValueError("generalized-Pareto accumulator threshold must be finite")
+        self.loc = float(loc)
         self.name = name
         self.keys = keys
 
     def make(self) -> GeneralizedParetoAccumulator:
         """Create a fresh generalized-Pareto accumulator."""
-        return GeneralizedParetoAccumulator(name=self.name, keys=self.keys)
+        return GeneralizedParetoAccumulator(loc=self.loc, name=self.name, keys=self.keys)
 
 
 class GeneralizedParetoEstimator(ParameterEstimator):
@@ -334,7 +389,7 @@ class GeneralizedParetoEstimator(ParameterEstimator):
 
     def accumulator_factory(self) -> GeneralizedParetoAccumulatorFactory:
         """Return an accumulator factory for generalized-Pareto moments."""
-        return GeneralizedParetoAccumulatorFactory(name=self.name, keys=self.keys)
+        return GeneralizedParetoAccumulatorFactory(loc=self.loc, name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> GeneralizedParetoDistribution:
         """Estimate scale and shape from exceedance moments at the fixed location."""
@@ -362,12 +417,42 @@ class GeneralizedParetoEstimator(ParameterEstimator):
 class GeneralizedParetoDataEncoder(DataSequenceEncoder):
     """Encode GPD observations as a float array."""
 
+    def __init__(
+        self,
+        loc: float = 0.0,
+        scale: float | None = None,
+        shape: float | None = None,
+    ) -> None:
+        if not np.isfinite(loc):
+            raise ValueError("generalized-Pareto encoder threshold must be finite")
+        if (scale is None) != (shape is None):
+            raise ValueError("generalized-Pareto encoder scale and shape must be supplied together")
+        if scale is not None and (not np.isfinite(scale) or scale <= 0.0 or not np.isfinite(shape)):
+            raise ValueError("generalized-Pareto encoder requires finite shape and scale > 0")
+        self.loc = float(loc)
+        self.scale = None if scale is None else float(scale)
+        self.shape = None if shape is None else float(shape)
+
     def __str__(self) -> str:
-        return "GeneralizedParetoDataEncoder"
+        return "GeneralizedParetoDataEncoder(loc=%r, scale=%r, shape=%r)" % (
+            self.loc,
+            self.scale,
+            self.shape,
+        )
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, GeneralizedParetoDataEncoder)
+        return (
+            isinstance(other, GeneralizedParetoDataEncoder)
+            and other.loc == self.loc
+            and other.scale == self.scale
+            and other.shape == self.shape
+        )
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
         """Encode observations as a floating-point array."""
-        return np.asarray(x, dtype=np.float64)
+        return _gpd_observations(
+            x,
+            loc=self.loc,
+            scale=self.scale,
+            shape=self.shape,
+        )

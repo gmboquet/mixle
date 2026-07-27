@@ -81,8 +81,8 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
             keys (Optional[str]): Assign keys for merging sufficient statistics.
 
         """
-        if scale <= 0.0 or not np.isfinite(scale):
-            raise ValueError("GumbelDistribution requires scale > 0.")
+        if not np.isfinite(loc) or scale <= 0.0 or not np.isfinite(scale):
+            raise ValueError("GumbelDistribution requires finite loc and scale > 0.")
         self.loc = float(loc)
         self.scale = float(scale)
         self.log_scale = math.log(self.scale)

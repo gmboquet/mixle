@@ -744,6 +744,7 @@ __all__ = [
     "SkewNormalEstimator",
     "SkewNormalDataEncoder",
     "TweedieDistribution",
+    "TweedieSeriesResourceError",
     "TweedieSampler",
     "TweedieEstimator",
     "TweedieDataEncoder",
@@ -1993,6 +1994,7 @@ from mixle.stats.univariate.continuous.tweedie import (
     TweedieDistribution,
     TweedieEstimator,
     TweedieSampler,
+    TweedieSeriesResourceError,
 )
 from mixle.stats.univariate.continuous.uniform import (
     UniformDataEncoder,

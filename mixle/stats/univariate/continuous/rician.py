@@ -31,6 +31,10 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    finite_observation,
+    finite_observations,
+)
 
 
 class RicianDistribution(SequenceEncodableProbabilityDistribution):
@@ -251,7 +255,7 @@ class RicianAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: float, weight: float, estimate: RicianDistribution | None) -> None:
         """Accumulate weighted second and fourth power sums for one observation."""
-        x2 = float(x) ** 2
+        x2 = finite_observation(x, label="Rician observation", minimum=0.0) ** 2
         self.count += weight
         self.s2 += weight * x2
         self.s4 += weight * x2 * x2
@@ -262,7 +266,7 @@ class RicianAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
         """Accumulate weighted second and fourth power sums from encoded data."""
-        x2 = np.asarray(x, dtype=np.float64) ** 2
+        x2 = finite_observations(x, label="Rician observations", minimum=0.0) ** 2
         w = np.asarray(weights, dtype=np.float64)
         self.count += float(w.sum())
         self.s2 += float(np.dot(w, x2))
@@ -354,4 +358,4 @@ class RicianDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
         """Encode observations as a floating-point array."""
-        return np.asarray(x, dtype=np.float64)
+        return finite_observations(x, label="Rician observations", minimum=0.0)

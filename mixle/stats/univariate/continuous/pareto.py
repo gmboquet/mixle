@@ -245,6 +245,8 @@ class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
         """Accumulate weighted log and support-minimum statistics for one sample."""
         if x <= 0.0:
             raise ValueError("ParetoDistribution requires observations x > 0.")
+        if not np.isfinite(weight) or weight < 0.0:
+            raise ValueError("Pareto observation weight must be finite and non-negative.")
         if weight > 0.0:
             self.count += weight
             self.sum_of_logs += math.log(x) * weight
@@ -259,6 +261,9 @@ class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> None:
         """Accumulate weighted log and support-minimum statistics from encoded data."""
         xx, lx = x
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.shape != np.asarray(xx).shape or np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
+            raise ValueError("Pareto weights must be finite, non-negative, and aligned with observations.")
         mask = weights > 0.0
         if np.any(mask):
             self.count += np.sum(weights[mask], dtype=np.float64)
@@ -271,12 +276,14 @@ class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
         """Engine-resident accumulation of the count and log-sum statistics (numpy or torch)."""
         xx, lx = x
         weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        if weights_np.shape != np.asarray(xx).shape or np.any(~np.isfinite(weights_np)) or np.any(weights_np < 0.0):
+            raise ValueError("Pareto weights must be finite, non-negative, and aligned with observations.")
         w = engine.asarray(weights_np)
         lx_e = engine.asarray(np.asarray(lx, dtype=np.float64))
         zero = engine.asarray(0.0)
         pos = w > zero
         self.count += float(engine.to_numpy(engine.sum(engine.where(pos, w, zero))))
-        self.sum_of_logs += float(engine.to_numpy(engine.sum(lx_e * w)))
+        self.sum_of_logs += float(engine.to_numpy(engine.sum(engine.where(pos, lx_e * w, zero))))
         mask_np = weights_np > 0.0
         if np.any(mask_np):
             self.min_val = min(self.min_val, float(np.min(np.asarray(xx)[mask_np])))

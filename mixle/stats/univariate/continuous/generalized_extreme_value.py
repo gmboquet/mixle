@@ -33,6 +33,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import finite_observations
 
 _XI_TOL = 1.0e-8  # |xi| below this is treated as the Gumbel limit
 _EULER = 0.5772156649015329
@@ -249,8 +250,12 @@ class GeneralizedExtremeValueDistribution(SequenceEncodableProbabilityDistributi
 
     def estimator(self, pseudo_count: float | None = None) -> "GeneralizedExtremeValueEstimator":
         """Return a method-of-moments estimator for ``loc``, ``scale`` and ``shape``."""
-        if pseudo_count is None:
+        if pseudo_count is None or pseudo_count == 0.0:
             return GeneralizedExtremeValueEstimator(name=self.name, keys=self.keys)
+        if not np.isfinite(pseudo_count) or pseudo_count < 0.0:
+            raise ValueError("GEV pseudo_count must be finite and non-negative.")
+        if self.shape >= 1.0 / 3.0:
+            raise ValueError("GEV moment regularization requires a prior with a finite third moment (shape < 1/3).")
         # Convert this distribution's own (loc, scale, shape) into the raw first three moments, the
         # same space `estimate()` accumulates in, so pseudo_count can blend a prior pseudo-sample
         # toward them (mirrors GumbelEstimator / WeibullEstimator's suff_stat pattern).
@@ -371,11 +376,24 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.pseudo_count = pseudo_count
-        self.suff_stat = suff_stat
-        self.min_scale = min_scale
-        self.xi_max = xi_max
-        self.xi_min = xi_min
+        if pseudo_count is not None and (
+            isinstance(pseudo_count, (bool, np.bool_)) or not np.isfinite(pseudo_count) or pseudo_count < 0.0
+        ):
+            raise ValueError("GEV pseudo_count must be finite and non-negative.")
+        prior = None if suff_stat is None else tuple(float(value) for value in suff_stat)
+        if prior is not None and (len(prior) != 3 or not all(np.isfinite(value) for value in prior)):
+            raise ValueError("GEV prior moments must be a finite length-three tuple.")
+        if pseudo_count not in (None, 0.0) and prior is None:
+            raise ValueError("positive GEV pseudo_count requires prior moments.")
+        if not np.isfinite(min_scale) or min_scale <= 0.0:
+            raise ValueError("GEV min_scale must be finite and positive.")
+        if not np.isfinite(xi_min) or not np.isfinite(xi_max) or xi_min >= xi_max or xi_max >= 1.0 / 3.0:
+            raise ValueError("GEV shape bounds must be finite, ordered, and keep xi_max below 1/3.")
+        self.pseudo_count = None if pseudo_count == 0.0 else pseudo_count
+        self.suff_stat = prior
+        self.min_scale = float(min_scale)
+        self.xi_max = float(xi_max)
+        self.xi_min = float(xi_min)
         self.name = name
         self.keys = keys
 
@@ -388,17 +406,7 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
     ) -> GeneralizedExtremeValueDistribution:
         """Estimate location, scale, and shape from weighted moments."""
         sum_x, sum_x2, sum_x3, count = suff_stat
-        if (
-            self.pseudo_count is not None
-            and self.suff_stat is not None
-            and np.isfinite(self.pseudo_count)
-            and all(np.isfinite(v) for v in self.suff_stat)
-        ):
-            # A cloned estimator can inherit a prior suff_stat computed from an earlier, already
-            # -degenerate fit elsewhere in a structure-search recursion (e.g. a near-empty or
-            # zero-variance sub-cluster). Blending a non-finite prior into otherwise-healthy real
-            # moments would silently poison sum_x2/sum_x3/var for THIS fit too, so a corrupt prior
-            # is treated as no prior at all rather than propagated.
+        if self.pseudo_count is not None and self.suff_stat is not None:
             mean0, second0, third0 = self.suff_stat
             sum_x += self.pseudo_count * mean0
             sum_x2 += self.pseudo_count * second0
@@ -452,4 +460,4 @@ class GeneralizedExtremeValueDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
         """Encode observations as a floating-point array."""
-        return np.asarray(x, dtype=np.float64)
+        return finite_observations(x, label="GEV observations")

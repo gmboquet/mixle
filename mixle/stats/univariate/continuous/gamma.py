@@ -110,6 +110,7 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
                 log_partition=cls.exp_family_log_partition,
                 base_measure=cls.exp_family_base_measure,
                 legacy_sufficient_statistics=cls.exp_family_legacy_sufficient_statistics,
+                runtime_scoring=False,
             ),
         )
 
@@ -144,7 +145,7 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
     def exp_family_base_measure(x: tuple[Any, Any], engine: Any) -> Any:
         """Return Gamma support base measure for generated scoring."""
         vals = engine.asarray(x[0])
-        return engine.where(vals > 0.0, vals * 0.0, engine.asarray(-np.inf))
+        return engine.where(vals >= 0.0, vals * 0.0, engine.asarray(-np.inf))
 
     def __init__(self, k: float, theta: float, name: str | None = None, keys: str | None = None) -> None:
         """Create a Gamma distribution.
@@ -226,8 +227,12 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
             xx = float(x)
         except Exception:  # noqa: BLE001
             return 0.0
-        if not np.isfinite(xx) or xx <= 0.0:
+        if not np.isfinite(xx) or xx < 0.0:
             return 0.0
+        if xx == 0.0:
+            if self.k < 1.0:
+                return np.inf
+            return exp(self.log_const) if self.k == 1.0 else 0.0
         return exp(self.log_const + (self.k - one) * log(xx) - xx / self.theta)
 
     def log_density(self, x: float) -> float:
@@ -249,8 +254,12 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
             xx = float(x)
         except Exception:  # noqa: BLE001
             return -np.inf
-        if not np.isfinite(xx) or xx <= 0.0:
+        if not np.isfinite(xx) or xx < 0.0:
             return -np.inf
+        if xx == 0.0:
+            if self.k < 1.0:
+                return np.inf
+            return self.log_const if self.k == 1.0 else -np.inf
         return self.log_const + (self.k - one) * log(xx) - xx / self.theta
 
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
@@ -272,13 +281,15 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
             rv += x[1] * (self.k - 1.0)
         rv += self.log_const
 
-        return np.where(np.isfinite(x[0]) & (x[0] > 0.0), rv, -np.inf)
+        return np.where(np.isfinite(x[0]) & (x[0] >= 0.0), rv, -np.inf)
 
     @staticmethod
     def backend_log_density_from_params(vals: Any, log_vals: Any, k: Any, theta: Any, engine: Any) -> Any:
         """Engine-neutral gamma log-density from explicit parameters."""
-        rv = -engine.gammaln(k) - k * engine.log(theta) + (k - engine.asarray(1.0)) * log_vals - vals / theta
-        return engine.where(vals > 0.0, rv, engine.asarray(-np.inf))
+        one = engine.asarray(1.0)
+        safe_log_vals = engine.where(k == one, engine.asarray(0.0), log_vals)
+        rv = -engine.gammaln(k) - k * engine.log(theta) + (k - one) * safe_log_vals - vals / theta
+        return engine.where(vals >= 0.0, rv, engine.asarray(-np.inf))
 
     def backend_seq_log_density(self, x: tuple[Any, Any], engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
@@ -746,8 +757,9 @@ class GammaDataEncoder(DataSequenceEncoder):
         """
         rv1 = np.asarray(x, dtype=float)
 
-        if np.any(rv1 <= 0) or np.any(~np.isfinite(rv1)):
-            raise ValueError("GammaDistribution has support x > 0.")
+        if np.any(rv1 < 0) or np.any(~np.isfinite(rv1)):
+            raise ValueError("GammaDistribution has support x >= 0.")
         else:
-            rv2 = np.log(rv1)
+            with np.errstate(divide="ignore"):
+                rv2 = np.log(rv1)
             return rv1, rv2

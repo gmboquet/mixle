@@ -29,6 +29,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import finite_observations
 
 _B = math.sqrt(2.0 / math.pi)
 _HALF_LOG_2PI = 0.5 * math.log(2.0 * math.pi)
@@ -365,4 +366,4 @@ class SkewNormalDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
         """Encode observations as a floating-point array."""
-        return np.asarray(x, dtype=np.float64)
+        return finite_observations(x, label="skew-normal observations")
