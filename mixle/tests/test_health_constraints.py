@@ -182,6 +182,21 @@ def test_health_liability_rejects_invalid_discount_and_cost():
             health_liability(risk, cost_per_case=bad_cost)
 
 
+@pytest.mark.parametrize(
+    "samples",
+    [
+        np.array([-1.0, 1.0]),
+        np.array([]),
+        np.array(np.nan),
+        np.ones((2, 2, 2)),
+    ],
+)
+def test_health_liability_rejects_invalid_risk_samples(samples):
+    risk = type("Risk", (), {"samples": samples, "prior_dominated": False})()
+    with pytest.raises(ValueError, match="risk.samples"):
+        health_liability(risk, cost_per_case=10.0)
+
+
 def test_health_liability_valid_discount_still_prices_correctly():
     """Negative control for MXR-080-0098: legitimate discounts (including a large but valid one) keep
     producing a correctly-scaled, non-negative liability."""

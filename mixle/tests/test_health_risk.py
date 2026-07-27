@@ -136,6 +136,61 @@ def test_dose_response_output_gate_rejects_non_finite_dose():
         dr.probability(np.array([1.0, float("nan"), 3.0]), n=3, rng=np.random.default_rng(0))
 
 
+@pytest.mark.parametrize("model, params", [
+    ("loglinear", {"beta": 0.05}),
+    ("logit", {"a": 1.0}),
+    ("hill", {"ec50": 1.0}),
+    ("threshold_linear", {"slope": 0.1}),
+])
+def test_dose_response_rejects_negative_dose_for_every_model(model, params):
+    dr = DoseResponse(model=model, params=params)
+    with pytest.raises(ValueError, match="nonnegative"):
+        dr.probability(np.array([1.0, -1.0]), n=2, rng=np.random.default_rng(0))
+
+
+def test_dose_response_rejects_implicit_bare_receptor_axis():
+    dr = DoseResponse(model="logit", params={})
+    with pytest.raises(ValueError, match="one-dimensional"):
+        dr.probability(np.ones((2, 2)), n=2, rng=np.random.default_rng(0))
+
+
+@pytest.mark.parametrize("n", [0, -1, 1.5, True])
+def test_dose_response_rejects_invalid_draw_count_before_sampling(n):
+    dr = DoseResponse(model="logit", params={})
+    with pytest.raises(ValueError, match="n must"):
+        dr.probability(1.0, n=n, rng=np.random.default_rng(0))
+
+
+def test_dose_response_validates_posterior_draw_domain_and_axis():
+    class InvalidExposurePosterior:
+        @property
+        def mean(self):
+            return np.array([1.0])
+
+        @property
+        def cov(self):
+            return np.array([[1.0]])
+
+        def samples(self, n, rng):
+            return np.full(n, -1.0)
+
+        def credible_interval(self, level):
+            return np.array([-1.0]), np.array([-1.0])
+
+        def derived_quantity(self, fn, n, rng):
+            pushed = fn(self.samples(n, rng))
+            return type("Quantity", (), {"samples": pushed, "prior_dominated": False})()
+
+    posterior = InvalidExposurePosterior()
+    assert isinstance(posterior, Posterior)
+    with pytest.raises(ValueError, match="nonnegative"):
+        DoseResponse(model="logit", params={}).probability(
+            posterior,
+            n=4,
+            rng=np.random.default_rng(0),
+        )
+
+
 def test_cumulative_exposure_rejects_invalid_time_step_decay_and_series():
     """MXR-080-0098: dt must be finite and positive, decay finite and non-negative, series finite."""
     series = np.array([1.0, 2.0, 3.0, 4.0])
@@ -149,6 +204,10 @@ def test_cumulative_exposure_rejects_invalid_time_step_decay_and_series():
         cumulative_exposure(np.array([1.0, float("nan"), 3.0]), 1.0)
     with pytest.raises(ValueError):
         cumulative_exposure(np.array([1.0, float("inf"), 3.0]), 1.0)
+    with pytest.raises(ValueError, match="nonnegative"):
+        cumulative_exposure(np.array([-1.0, -2.0]), 1.0)
+    with pytest.raises(ValueError, match="one-dimensional"):
+        cumulative_exposure(np.ones((2, 2)), 1.0)
 
 
 def test_cumulative_exposure_valid_inputs_unchanged():

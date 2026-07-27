@@ -202,6 +202,32 @@ def test_safety_risk_surface_rejects_invalid_gradient_limit_slope_and_deformatio
         safety_risk_surface(posterior, gradient_limit=1.0, slope=np.full((3, 3), float("nan")))
 
 
+@pytest.mark.parametrize("failure", ["nan", "wrong_shape"])
+def test_safety_risk_surface_rejects_invalid_posterior_field_draws(failure):
+    class InvalidPosterior(_DeformationPosterior):
+        def samples(self, n, rng):
+            if failure == "nan":
+                return np.full((n, self._d), np.nan)
+            return np.zeros((n, self._d - 1))
+
+    with pytest.raises(ValueError, match="posterior deformation draws"):
+        safety_risk_surface(InvalidPosterior(np.zeros((3, 3))), gradient_limit=1.0)
+
+
+def test_safety_risk_surface_validates_returned_derived_quantity():
+    class InvalidResultPosterior(_DeformationPosterior):
+        def derived_quantity(self, fn, n, rng):
+            fn(self.samples(n, rng))
+            return type(
+                "Quantity",
+                (),
+                {"samples": np.full((n, self._d), np.nan), "prior_dominated": False},
+            )()
+
+    with pytest.raises(ValueError, match="safety-risk samples"):
+        safety_risk_surface(InvalidResultPosterior(np.zeros((3, 3))), gradient_limit=1.0)
+
+
 def test_safety_risk_surface_valid_gradient_limit_unchanged():
     """Negative control for MXR-080-0098: a legitimate (including exactly zero) gradient_limit still
     produces the expected deterministic exceedance surface."""

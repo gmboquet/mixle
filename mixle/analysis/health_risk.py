@@ -84,6 +84,7 @@ An alert firing (``ExceedanceReport.alerts.any()``) is the hook the mlops drift/
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -110,6 +111,48 @@ DOSE_RESPONSE_MODELS = ("loglinear", "logit", "hill", "threshold_linear")
 # reproduce the same surface.
 _MC_SAMPLES = 2000
 _MC_SEED = 0
+
+
+def _positive_draw_count(n: int, *, name: str = "n") -> int:
+    """Return an exact positive draw count without Boolean or fractional coercion."""
+    if isinstance(n, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-Boolean positive integer")
+    try:
+        count = operator.index(n)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be a non-Boolean positive integer") from exc
+    if count <= 0:
+        raise ValueError(f"{name} must be positive, got {count}")
+    return int(count)
+
+
+def _validated_dose_values(dose: Any, *, name: str = "dose") -> np.ndarray:
+    """Validate the universal physical dose domain before any model can clip or transform it."""
+    arr = np.asarray(dose, dtype=float)
+    if arr.size == 0:
+        raise ValueError(f"{name} must be nonempty")
+    if not np.isfinite(arr).all():
+        raise ValueError(f"{name} must be finite (no NaN/Inf)")
+    if np.any(arr < 0.0):
+        raise ValueError(f"{name} must be nonnegative")
+    return arr
+
+
+def _validated_probability_samples(samples: Any, *, n: int, name: str) -> np.ndarray:
+    """Validate a scalar or receptor-vector probability draw ensemble with an explicit sample axis."""
+    arr = np.asarray(samples, dtype=float)
+    if arr.ndim not in (1, 2) or arr.shape[0] != n or any(size == 0 for size in arr.shape):
+        raise ValueError(f"{name} must have shape (n,) or (n, n_receptors) with n={n}; got {arr.shape}")
+    if not np.isfinite(arr).all() or np.any(arr < 0.0) or np.any(arr > 1.0):
+        raise ValueError(f"{name} must contain only finite probabilities in [0, 1]")
+    return arr
+
+
+def _validated_prior_flag(quantity: Any, *, name: str) -> bool:
+    flag = getattr(quantity, "prior_dominated", None)
+    if not isinstance(flag, (bool, np.bool_)):
+        raise ValueError(f"{name}.prior_dominated must be Boolean")
+    return bool(flag)
 
 
 @dataclass
@@ -250,7 +293,8 @@ def _validated_response_fn(fn: Callable[[np.ndarray], np.ndarray], model: str) -
     """
 
     def _wrapped(d: np.ndarray) -> np.ndarray:
-        out = np.asarray(fn(d), dtype=float)
+        validated_dose = _validated_dose_values(d)
+        out = np.asarray(fn(validated_dose), dtype=float)
         if not np.isfinite(out).all():
             raise ValueError(
                 f"{model} dose-response pushforward produced non-finite output (NaN/Inf); refusing to "
@@ -274,7 +318,14 @@ def _as_dose_samples(dose: Any, n: int, rng: np.random.Generator) -> np.ndarray:
     array is treated as an already-drawn ensemble. Any other length is an "array-with-UQ" sample set
     of a different size, resampled with replacement to ``n`` draws.
     """
-    arr = np.atleast_1d(np.asarray(dose, dtype=float))
+    raw = np.asarray(dose, dtype=float)
+    if raw.ndim > 1:
+        raise ValueError(
+            f"bare dose must be a scalar or one-dimensional draw ensemble; got shape {raw.shape}. "
+            "Use population_risk for an explicit receptor axis."
+        )
+    arr = np.atleast_1d(raw)
+    _validated_dose_values(arr)
     if arr.size == 1:
         return np.full(n, float(arr[0]))
     if arr.shape[0] == n:
@@ -322,13 +373,35 @@ class DoseResponse:
         posterior's own ``derived_quantity``, so `prior_dominated` propagates from the exposure
         uncertainty), an array of dose draws/ensemble members ("array-with-UQ", resampled to ``n``
         if its length differs), or a bare scalar (a degenerate point mass -- the returned quantity
-        still carries a (trivial) credible interval).
+        still carries a (trivial) credible interval). Bare ensembles are one-dimensional. Posterior
+        draws explicitly use shape ``(n,)`` for scalar dose or ``(n, n_receptors)`` for a receptor
+        vector. Every dose must be finite and nonnegative, and ``n`` is an exact non-Boolean positive
+        integer.
         """
         from mixle.reason.posterior_protocol import Posterior
 
+        n = _positive_draw_count(n)
         fn = self.response_fn()
         if isinstance(dose, Posterior):
-            return dose.derived_quantity(fn, n, rng)
+            def _pushforward(draws: np.ndarray) -> np.ndarray:
+                dose_draws = _validated_dose_values(draws, name="posterior dose draws")
+                if dose_draws.ndim not in (1, 2) or dose_draws.shape[0] != n:
+                    raise ValueError(
+                        "posterior dose draws must have shape (n,) or (n, n_receptors) "
+                        f"with n={n}; got {dose_draws.shape}"
+                    )
+                return fn(dose_draws)
+
+            quantity = dose.derived_quantity(_pushforward, n, rng)
+            samples = _validated_probability_samples(
+                getattr(quantity, "samples", None),
+                n=n,
+                name="posterior dose-response samples",
+            )
+            return _SampleDerivedQuantity(
+                samples=np.array(samples, copy=True),
+                prior_dominated=_validated_prior_flag(quantity, name="posterior dose-response result"),
+            )
         draws = _as_dose_samples(dose, n, rng)
         return _SampleDerivedQuantity(samples=fn(draws), prior_dominated=False)
 
@@ -343,13 +416,17 @@ def cumulative_exposure(series: np.ndarray, dt: float, *, decay: float = 0.0) ->
     equally large spike near the end of the series. Feeds a chronic dose-response evaluation (e.g.
     via :meth:`DoseResponse.probability`).
 
-    ``series`` must be finite, ``dt`` finite and positive (MXR-080-0098: a zero or negative timestep
-    makes the integral either trivially zero or sign-flipped, silently), and ``decay`` finite and
-    non-negative (a negative "decay" would amplify, not discount, older readings without bound).
+    ``series`` must be a one-dimensional finite nonnegative time series; multidimensional
+    receptor/time data require an explicit aggregation before this scalar integration. ``dt`` must be
+    finite and positive (MXR-080-0098: a zero or negative timestep makes the integral either
+    trivially zero or sign-flipped, silently), and ``decay`` finite and non-negative (a negative
+    "decay" would amplify, not discount, older readings without bound).
     """
-    x = np.asarray(series, dtype=float).ravel()
-    if not np.isfinite(x).all():
-        raise ValueError("series must be finite (no NaN/Inf)")
+    x = np.asarray(series, dtype=float)
+    if x.ndim != 1:
+        raise ValueError(f"series must be a one-dimensional time series, got shape {x.shape}")
+    if not np.isfinite(x).all() or np.any(x < 0.0):
+        raise ValueError("series must be finite and nonnegative")
     dt = float(dt)
     if not np.isfinite(dt) or dt <= 0.0:
         raise ValueError(f"dt must be finite and positive, got {dt!r}")
@@ -380,12 +457,30 @@ def population_risk(
     """
     from mixle.reason.posterior_protocol import Posterior
 
+    n = _positive_draw_count(n)
     fn = dr.response_fn()
     if isinstance(exposure, Posterior):
-        return exposure.derived_quantity(lambda draws: fn(draws).sum(axis=-1), n, rng)
-    arr = np.atleast_1d(np.asarray(exposure, dtype=float))
+        def _aggregate(draws: np.ndarray) -> np.ndarray:
+            dose_draws = _validated_dose_values(draws, name="posterior exposure draws")
+            if dose_draws.ndim != 2 or dose_draws.shape[0] != n or dose_draws.shape[1] == 0:
+                raise ValueError(
+                    f"posterior exposure draws must have shape (n, n_receptors) with n={n}; got {dose_draws.shape}"
+                )
+            return fn(dose_draws).sum(axis=1)
+
+        quantity = exposure.derived_quantity(_aggregate, n, rng)
+        samples = np.asarray(getattr(quantity, "samples", None), dtype=float)
+        if samples.shape != (n,) or not np.isfinite(samples).all() or np.any(samples < 0.0):
+            raise ValueError(f"posterior population-risk samples must be finite nonnegative shape ({n},)")
+        return _SampleDerivedQuantity(
+            samples=np.array(samples, copy=True),
+            prior_dominated=_validated_prior_flag(quantity, name="posterior population-risk result"),
+        )
+    arr = np.asarray(exposure, dtype=float)
+    if arr.ndim != 1 or arr.size == 0:
+        raise ValueError(f"exposure must be a nonempty one-dimensional receptor vector, got shape {arr.shape}")
     expected_cases = float(np.sum(fn(arr)))
-    return _SampleDerivedQuantity(samples=np.full(int(n), expected_cases), prior_dominated=False)
+    return _SampleDerivedQuantity(samples=np.full(n, expected_cases), prior_dominated=False)
 
 
 def health_liability(risk: DerivedQuantity, *, cost_per_case: float, discount: float = 0.0) -> DerivedQuantity:
@@ -402,6 +497,8 @@ def health_liability(risk: DerivedQuantity, *, cost_per_case: float, discount: f
     honestly flagged as such downstream. Handed to J6's ``priced_liabilities``/``risk_adjusted_plan``
     (``analysis/valuation.py``) as the ``health_cost`` callable's output.
 
+    ``risk.samples`` must be a nonempty finite nonnegative ``(n,)`` case-count series or
+    ``(n, n_receptors)`` risk surface; negative harm is never interpreted as a benefit.
     ``cost_per_case`` must be finite and non-negative (a dollar price cannot be negative), and
     ``discount`` finite and strictly greater than ``-1.0`` (MXR-080-0098: the ``1 / (1 + discount)``
     present-value factor is only well-defined for a denominator that is positive; ``discount == -1``
@@ -417,9 +514,17 @@ def health_liability(risk: DerivedQuantity, *, cost_per_case: float, discount: f
             f"positive denominator), got {discount!r}"
         )
     samples = np.asarray(risk.samples, dtype=float)
+    if samples.ndim not in (1, 2) or any(size == 0 for size in samples.shape):
+        raise ValueError("risk.samples must have shape (n,) or (n, n_receptors) and be nonempty")
+    if not np.isfinite(samples).all() or np.any(samples < 0.0):
+        raise ValueError("risk.samples must be finite and nonnegative")
     factor = cost_per_case / (1.0 + discount)
-    prior_dominated = bool(getattr(risk, "prior_dominated", False))
-    return _SampleDerivedQuantity(samples=samples * factor, prior_dominated=prior_dominated)
+    with np.errstate(over="ignore", invalid="ignore"):
+        liability_samples = samples * factor
+    if not np.isfinite(liability_samples).all():
+        raise ValueError("health liability samples overflowed")
+    prior_dominated = _validated_prior_flag(risk, name="risk")
+    return _SampleDerivedQuantity(samples=liability_samples, prior_dominated=prior_dominated)
 
 
 def exposure_constraints(
@@ -518,15 +623,27 @@ def _grid_shape_for(posterior: Posterior, slope: np.ndarray | None) -> tuple[int
     IC-1, but structural typing does not forbid extra attributes), then falls back to a square grid if
     `d` is a perfect square, else treats the field as a 1-D transect.
     """
-    d = int(np.asarray(posterior.mean).shape[0])
+    mean = np.asarray(posterior.mean, dtype=float)
+    if mean.ndim != 1 or mean.size == 0:
+        raise ValueError(f"posterior.mean must be a nonempty flattened one-dimensional field, got shape {mean.shape}")
+    if not np.isfinite(mean).all():
+        raise ValueError("posterior.mean must be finite")
+    d = mean.size
     if slope is not None:
         shape = tuple(np.asarray(slope).shape)
+        if not shape or any(size == 0 for size in shape):
+            raise ValueError("slope must be a nonempty spatial field")
         if int(np.prod(shape)) != d:
             raise ValueError(f"slope shape {shape} does not match deformation dimension {d}")
         return shape
     grid_shape = getattr(posterior, "grid_shape", None)
     if grid_shape is not None:
-        shape = tuple(grid_shape)
+        try:
+            shape = tuple(_positive_draw_count(size, name="posterior.grid_shape entry") for size in grid_shape)
+        except TypeError as exc:
+            raise ValueError("posterior.grid_shape must be an iterable of positive integer dimensions") from exc
+        if not shape:
+            raise ValueError("posterior.grid_shape must contain at least one spatial dimension")
         if int(np.prod(shape)) != d:
             raise ValueError(f"posterior.grid_shape {shape} does not match deformation dimension {d}")
         return shape
@@ -543,7 +660,7 @@ def _gradient_magnitude(grid: np.ndarray) -> np.ndarray:
     norm of the per-axis finite-difference gradient (`np.gradient`), computed over the spatial axes
     only -- never across the leading Monte-Carlo/sample axis.
     """
-    spatial_axes = tuple(range(1, grid.ndim))
+    spatial_axes = tuple(axis for axis in range(1, grid.ndim) if grid.shape[axis] > 1)
     if not spatial_axes:
         return np.zeros_like(grid)
     grads = np.gradient(grid, axis=spatial_axes)
@@ -580,7 +697,9 @@ def safety_risk_surface(
     ``gradient_limit`` must be finite and non-negative (a tilt *magnitude* threshold cannot itself be
     negative), and ``slope``/an ``ndarray`` ``deformation`` must be finite (MXR-080-0098): a NaN either
     way would otherwise compare False against ``> gradient_limit`` and silently mark an unevaluable
-    cell as "not exceeding" instead of raising.
+    cell as "not exceeding" instead of raising. Posterior evidence additionally requires a finite
+    flattened mean and exactly ``(_MC_SAMPLES, n_cells)`` finite draws; the returned binary risk
+    samples are validated independently before publication.
     """
     from mixle.reason.posterior_protocol import Posterior
 
@@ -597,6 +716,8 @@ def safety_risk_surface(
 
     if isinstance(deformation, np.ndarray):
         grid = np.asarray(deformation, dtype=float)
+        if grid.ndim == 0 or grid.size == 0:
+            raise ValueError("deformation ndarray must be a nonempty spatial field")
         if not np.isfinite(grid).all():
             raise ValueError("deformation ndarray must be finite (no NaN/Inf)")
         grid_shape = grid.shape
@@ -612,19 +733,39 @@ def safety_risk_surface(
         raise TypeError("deformation must be an IC-1 Posterior or an np.ndarray field")
 
     grid_shape = _grid_shape_for(deformation, slope_arr_raw)
+    n_cells = int(np.prod(grid_shape))
     slope_arr = None if slope_arr_raw is None else slope_arr_raw.reshape(grid_shape)
 
     def _pushforward(draws: np.ndarray) -> np.ndarray:
-        n = draws.shape[0]
-        grid = draws.reshape((n, *grid_shape))
+        draw_array = np.asarray(draws, dtype=float)
+        expected_shape = (_MC_SAMPLES, n_cells)
+        if draw_array.shape != expected_shape:
+            raise ValueError(f"posterior deformation draws must have shape {expected_shape}, got {draw_array.shape}")
+        if not np.isfinite(draw_array).all():
+            raise ValueError("posterior deformation draws must be finite")
+        grid = draw_array.reshape((_MC_SAMPLES, *grid_shape))
         tilt = _gradient_magnitude(grid)
         if slope_arr is not None:
             tilt = tilt + slope_arr[np.newaxis, ...]
+        if not np.isfinite(tilt).all():
+            raise ValueError("posterior deformation tilt must remain finite")
         exceed = (tilt > gradient_limit).astype(float)
-        return exceed.reshape(n, -1)
+        return exceed.reshape(_MC_SAMPLES, -1)
 
     rng = np.random.default_rng(_MC_SEED)
-    return deformation.derived_quantity(_pushforward, _MC_SAMPLES, rng)
+    quantity = deformation.derived_quantity(_pushforward, _MC_SAMPLES, rng)
+    samples = np.asarray(getattr(quantity, "samples", None), dtype=float)
+    expected_result_shape = (_MC_SAMPLES, n_cells)
+    if samples.shape != expected_result_shape:
+        raise ValueError(
+            f"posterior safety-risk samples must have shape {expected_result_shape}, got {samples.shape}"
+        )
+    if not np.isfinite(samples).all() or not np.all((samples == 0.0) | (samples == 1.0)):
+        raise ValueError("posterior safety-risk samples must be finite binary exceedance indicators")
+    return _SampleDerivedQuantity(
+        samples=np.array(samples, copy=True),
+        prior_dominated=_validated_prior_flag(quantity, name="posterior safety-risk result"),
+    )
 
 
 def incident_probability(
