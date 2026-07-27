@@ -7,6 +7,7 @@ import numpy as np
 
 from mixle.inference.estimation import fit
 from mixle.stats import PlackettLuceDistribution
+from mixle.stats.rankings.plackett_luce import PlackettLuceAccumulator, PlackettLuceEstimator
 
 
 def _orderings(k):
@@ -111,6 +112,34 @@ class PlackettLuceTestCase(unittest.TestCase):
     def test_invalid_parameters_raise(self):
         with self.assertRaises(ValueError):
             PlackettLuceDistribution([1.0])
+
+    def test_full_distribution_rejects_partial_sample_spaces(self):
+        dist = PlackettLuceDistribution([0.0, 1.0, 2.0])
+        with self.assertRaisesRegex(ValueError, "full ranking"):
+            dist.log_density([0])
+        with self.assertRaises(ValueError):
+            dist.seq_log_density(np.asarray([[0]]))
+
+    def test_accumulator_and_estimator_contracts(self):
+        accumulator = PlackettLuceAccumulator(3)
+        with self.assertRaises(ValueError):
+            accumulator.update([0, 0, 1], 1.0, None)
+        with self.assertRaises(ValueError):
+            accumulator.seq_update(np.asarray([[0, 1, 2]]), np.asarray([-1.0]), None)
+        with self.assertRaises(ValueError):
+            accumulator.seq_update(np.asarray([[0, 1, 2]]), np.asarray([1.0, 2.0]), None)
+        extreme = PlackettLuceDistribution([-1.0e308, 0.0, 1.0e308])
+        accumulator.update([0, 1, 2], 1.0, extreme)
+        receipt = accumulator.value()
+        receipt[1][:] = 0.0
+        receipt[2][:] = 0.0
+        self.assertGreater(accumulator.value()[1].sum(), 0.0)
+        with self.assertRaises(ValueError):
+            PlackettLuceEstimator(3).estimate(None, (1.0, np.zeros(2), np.zeros(3)))
+        with self.assertRaises(ValueError):
+            PlackettLuceEstimator(3, pseudo_count=-1.0)
+        with self.assertRaises(ValueError):
+            extreme.sampler().sample(-1)
 
 
 if __name__ == "__main__":
