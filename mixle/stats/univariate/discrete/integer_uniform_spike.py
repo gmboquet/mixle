@@ -92,26 +92,42 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
-        if not 0.0 <= p <= 1.0:
+        spike = int(exact_integer_observations([k], label="Integer-uniform-spike location")[0])
+        support_min = int(
+            exact_integer_observations(
+                [0 if min_val is None else min_val],
+                label="Integer-uniform-spike support minimum",
+            )[0]
+        )
+        support_size = int(
+            exact_integer_observations(
+                [num_vals],
+                label="Integer-uniform-spike support size",
+                minimum=1,
+            )[0]
+        )
+        if not np.isfinite(p) or not 0.0 <= p <= 1.0:
             # An out-of-range "probability" silently propagates into density()/log_density() answers
             # (e.g. exp(log_density) > 1), so reject it at the constructor like the scalar families do.
             raise ValueError("IntegerUniformSpikeDistribution requires p in [0, 1], not %s." % repr(p))
 
-        self.p = p
-        self.min_val = min_val
-        self.max_val = min_val + num_vals - 1
+        if support_size == 1 and p != 1.0:
+            raise ValueError("A singleton integer-uniform-spike support requires p=1.")
+        self.p = float(p)
+        self.min_val = support_min
+        self.max_val = support_min + support_size - 1
 
-        if not self.min_val <= k <= self.max_val:
+        if not self.min_val <= spike <= self.max_val:
             raise ValueError("Spike value k must be between [%s, %s]." % (repr(self.min_val), repr(self.max_val)))
         else:
-            self.k = k
+            self.k = spike
 
-        self.log_p = np.log(p)
-        self.num_vals = num_vals
+        self.log_p = -np.inf if self.p == 0.0 else np.log(self.p)
+        self.num_vals = support_size
         # With a single value there is no non-spike category, so the off-spike log-mass is
         # -inf (the spike carries all probability); avoids log(num_vals - 1) = log(0) = -inf
         # feeding a +inf into log_1p.
-        if num_vals == 1:
+        if support_size == 1 or self.p == 1.0:
             self.log_1p = -np.inf
         else:
             self.log_1p = np.log1p(-self.p) - np.log(self.num_vals - 1)
@@ -162,10 +178,13 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
             Log-density at observation x.
 
         """
-        if self.max_val >= x >= self.min_val:
-            return self.log_p if x == self.k else self.log_1p
-        else:
+        try:
+            value = float(x)
+        except Exception:  # noqa: BLE001
             return -np.inf
+        if not np.isfinite(value) or np.floor(value) != value or not self.min_val <= value <= self.max_val:
+            return -np.inf
+        return self.log_p if value == self.k else self.log_1p
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized evaluation of log-density at sequence encoded input x.
@@ -178,11 +197,11 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
 
         """
 
-        rv = np.zeros(len(x), dtype=float)
-        rv.fill(-np.inf)
-
-        in_range = np.bitwise_and(x >= self.min_val, x <= self.max_val)
-        in_range_k = x[in_range] == self.k
+        values = np.asarray(x, dtype=np.float64)
+        rv = np.full(values.shape, -np.inf, dtype=float)
+        exact = np.isfinite(values) & (np.floor(values) == values)
+        in_range = exact & (values >= self.min_val) & (values <= self.max_val)
+        in_range_k = values[in_range] == self.k
 
         rv1 = rv[in_range]
         rv1[in_range_k] = self.log_p
@@ -194,7 +213,8 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
     def backend_seq_log_density(self, x: np.ndarray, engine: Any) -> Any:
         """Engine-neutral log-density for encoded integer spike observations."""
         xx = engine.asarray(x)
-        in_range = (xx >= self.min_val) & (xx <= self.max_val)
+        finite = ~(engine.isnan(xx) | engine.isinf(xx))
+        in_range = finite & (engine.floor(xx) == xx) & (xx >= self.min_val) & (xx <= self.max_val)
         is_spike = xx == self.k
         return engine.where(
             in_range,
@@ -224,7 +244,8 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
     def backend_stacked_log_density(cls, x: np.ndarray, params: dict[str, Any], engine: Any) -> Any:
         """Return an ``(n, k)`` matrix of integer-uniform-spike log densities."""
         xx = engine.asarray(x)
-        in_range = (xx >= params["min_val"]) & (xx <= params["max_val"])
+        finite = ~(engine.isnan(xx) | engine.isinf(xx))
+        in_range = finite & (engine.floor(xx) == xx) & (xx >= params["min_val"]) & (xx <= params["max_val"])
         is_spike = xx[:, None] == params["k"][None, :]
         rv = engine.where(is_spike, params["log_p"][None, :], params["log_1p"][None, :])
         return engine.where(in_range[:, None], rv, engine.asarray(-np.inf))
@@ -278,6 +299,7 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
                 min_val=self.min_val,
                 max_val=self.max_val,
                 pseudo_count=pseudo_count,
+                suff_stat=(self.k, self.p),
                 name=self.name,
                 keys=self.keys,
             )
@@ -582,7 +604,7 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
         if self.count_vec is None and suff_stat[1] is not None:
             self.min_val = suff_stat[0]
             self.max_val = suff_stat[0] + len(suff_stat[1]) - 1
-            self.count_vec = suff_stat[1]
+            self.count_vec = np.array(suff_stat[1], dtype=np.float64, copy=True)
 
         elif self.count_vec is not None and suff_stat[1] is not None:
             if self.min_val == suff_stat[0] and len(self.count_vec) == len(suff_stat[1]):
@@ -610,7 +632,7 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self) -> tuple[int, np.ndarray]:
         """Returns sufficient statistics as a tuple (min_val, count_vec)."""
-        return self.min_val, self.count_vec
+        return self.min_val, None if self.count_vec is None else self.count_vec.copy()
 
     def from_value(self, x: tuple[int, np.ndarray]) -> "IntegerUniformSpikeAccumulator":
         """Set sufficient statistics from a (min_val, count_vec) tuple.
@@ -624,7 +646,7 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.min_val = x[0]
         self.max_val = x[0] + len(x[1]) - 1
-        self.count_vec = x[1]
+        self.count_vec = np.array(x[1], dtype=np.float64, copy=True)
 
         return self
 
@@ -692,24 +714,53 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
 
         Args:
             min_val (Optional[int]): Smallest integer value in the range.
-            pseudo_count (Optional[float]): Regularize value k.
-            suff_stat (Optional[Tuple[int, Optional[float]]]): Tuple of k to regularize and optional value of p for k.
+            pseudo_count (Optional[float]): Total regularization weight.
+            suff_stat (Optional[Tuple[int, Optional[float]]]): Prior spike location and optional
+                non-negative relative weight applied at that location.
             name (Optional[str]): Optional name assigned to the estimated distribution.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
-            pseudo_count (Optional[float]): Regularize value k.
+            pseudo_count (Optional[float]): Total regularization weight.
             min_val (int): Smallest integer value in the range. Defaults to 0.
             max_val (int): Set to the min val plus number of values - 1.
-            suff_stat (Optional[Tuple[int, Optional[float]]]): Tuple of k to regularize and optional value of p for k.
+            suff_stat (Optional[Tuple[int, Optional[float]]]): Prior spike location and optional
+                non-negative relative weight applied at that location.
             name (Optional[str]): Optional name assigned to the estimated distribution.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
-        self.pseudo_count = pseudo_count
-        self.min_val = min_val
-        self.max_val = max_val
-        self.suff_stat = suff_stat if suff_stat is not None else (None, None)
+        if pseudo_count is not None and (
+            isinstance(pseudo_count, (bool, np.bool_)) or not np.isfinite(pseudo_count) or pseudo_count < 0.0
+        ):
+            raise ValueError("integer-uniform-spike pseudo_count must be finite and non-negative.")
+        fixed_min = (
+            None
+            if min_val is None
+            else int(exact_integer_observations([min_val], label="Integer-uniform-spike minimum")[0])
+        )
+        fixed_max = (
+            None
+            if max_val is None
+            else int(exact_integer_observations([max_val], label="Integer-uniform-spike maximum")[0])
+        )
+        if (fixed_min is None) != (fixed_max is None):
+            raise ValueError("integer-uniform-spike fixed support requires both min_val and max_val.")
+        if fixed_min is not None and fixed_min > fixed_max:
+            raise ValueError("integer-uniform-spike fixed support must be ordered.")
+        prior_spike, prior_probability = (None, None) if suff_stat is None else suff_stat
+        if prior_spike is not None:
+            prior_spike = int(
+                exact_integer_observations([prior_spike], label="Integer-uniform-spike prior location")[0]
+            )
+            if fixed_min is not None and not fixed_min <= prior_spike <= fixed_max:
+                raise ValueError("integer-uniform-spike prior location falls outside the fixed support.")
+        if prior_probability is not None and (not np.isfinite(prior_probability) or prior_probability < 0.0):
+            raise ValueError("integer-uniform-spike prior weight must be finite and non-negative.")
+        self.pseudo_count = None if pseudo_count == 0.0 else pseudo_count
+        self.min_val = fixed_min
+        self.max_val = fixed_max
+        self.suff_stat = (prior_spike, prior_probability)
         self.keys = keys
         self.name = name
 
@@ -733,94 +784,72 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
             IntegerUniformSpikeDistribution object.
 
         """
-        min_val, count_vec = suff_stat
+        if suff_stat is None or suff_stat[1] is None:
+            if self.min_val is None:
+                raise ValueError("integer-uniform-spike no-data fitting requires a fixed support.")
+            observed_min = self.min_val
+            counts = np.zeros(self.max_val - self.min_val + 1, dtype=np.float64)
+        else:
+            observed_min = int(
+                exact_integer_observations([suff_stat[0]], label="Integer-uniform-spike statistic minimum")[0]
+            )
+            counts = np.asarray(suff_stat[1], dtype=np.float64)
+            if counts.ndim != 1 or counts.size == 0 or np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
+                raise ValueError("integer-uniform-spike counts must be a non-empty finite non-negative vector.")
 
-        with np.errstate(divide="ignore", invalid="ignore"):
-            if self.pseudo_count is None:
-                count = np.sum(count_vec)
-                p_vec = count_vec / count
-                non_spike = count - count_vec
-                log1m_p = np.log1p(-p_vec) - np.log(len(count_vec) - 1)
-                log_p = np.log(p_vec)
-                ll = np.where(non_spike == 0.0, 0.0, non_spike * log1m_p)
-                ll += np.where(count_vec == 0.0, 0.0, count_vec * log_p)
-                k = np.argmax(ll)
-                p = p_vec[k]
+        observed_max = observed_min + len(counts) - 1
+        prior_spike, prior_probability = self.suff_stat
+        if self.min_val is not None:
+            if observed_min < self.min_val or observed_max > self.max_val:
+                raise ValueError("integer-uniform-spike evidence falls outside the fixed support.")
+            aligned = np.zeros(self.max_val - self.min_val + 1, dtype=np.float64)
+            offset = observed_min - self.min_val
+            aligned[offset : offset + len(counts)] = counts
+            support_min = self.min_val
+            counts = aligned
+        else:
+            support_min = observed_min
+            support_max = observed_max
+            if prior_spike is not None:
+                support_min = min(support_min, prior_spike)
+                support_max = max(support_max, prior_spike)
+            aligned = np.zeros(support_max - support_min + 1, dtype=np.float64)
+            offset = observed_min - support_min
+            aligned[offset : offset + len(counts)] = counts
+            counts = aligned
 
-                return IntegerUniformSpikeDistribution(
-                    k=k if min_val is None else k + min_val,
-                    min_val=min_val,
-                    num_vals=len(count_vec),
-                    p=p,
-                    name=self.name,
-                    keys=self.keys,
-                )
-            if self.pseudo_count is not None:
-                # Copy so the pseudo_count adjustments below do not mutate the caller's array.
-                count_vec = np.array(count_vec, dtype=np.float64)
-                if self.suff_stat[0] is not None and self.suff_stat[1] is None:
-                    k_pseudo = self.suff_stat[0] if min_val is None else self.suff_stat[0] - min_val
-                    count_vec[k_pseudo] += self.pseudo_count
-                    count = np.sum(count_vec)
-                    p_vec = count_vec / count
-                    non_spike = count - count_vec
-                    log1m_p = np.log1p(-p_vec) - np.log(len(count_vec) - 1)
-                    log_p = np.log(p_vec)
-                    ll = np.where(non_spike == 0.0, 0.0, non_spike * log1m_p)
-                    ll += np.where(count_vec == 0.0, 0.0, count_vec * log_p)
-                    k = np.argmax(ll)
-                    p = p_vec[k]
+        if self.pseudo_count is not None:
+            if prior_spike is None:
+                counts += self.pseudo_count / len(counts)
+            else:
+                spike_index = prior_spike - support_min
+                prior_weight = 1.0 if prior_probability is None else prior_probability
+                counts[spike_index] += self.pseudo_count * prior_weight
 
-                    return IntegerUniformSpikeDistribution(
-                        k=k if min_val is None else k + min_val,
-                        min_val=min_val,
-                        num_vals=len(count_vec),
-                        p=p,
-                        name=self.name,
-                        keys=self.keys,
-                    )
+        total = float(np.sum(counts))
+        if len(counts) == 1:
+            spike_index, probability = 0, 1.0
+        elif total == 0.0:
+            spike_index, probability = 0, 1.0 / len(counts)
+        else:
+            probabilities = counts / total
+            non_spike = total - counts
+            with np.errstate(divide="ignore", invalid="ignore"):
+                log_spike = np.log(probabilities)
+                log_other = np.log1p(-probabilities) - np.log(len(counts) - 1)
+                likelihood = np.where(counts == 0.0, 0.0, counts * log_spike)
+                likelihood += np.where(non_spike == 0.0, 0.0, non_spike * log_other)
+            spike_index = int(np.argmax(likelihood))
+            probability = float(probabilities[spike_index])
 
-                elif self.suff_stat[0] is not None and self.suff_stat[1] is not None:
-                    k_pseudo = self.suff_stat[0] if min_val is None else self.suff_stat[0] - min_val
-                    count_vec[k_pseudo] += self.pseudo_count * self.suff_stat[1]
-                    count = np.sum(count_vec)
-                    p_vec = count_vec / count
-                    non_spike = count - count_vec
-                    log1m_p = np.log1p(-p_vec) - np.log(len(count_vec) - 1)
-                    log_p = np.log(p_vec)
-                    ll = np.where(non_spike == 0.0, 0.0, non_spike * log1m_p)
-                    ll += np.where(count_vec == 0.0, 0.0, count_vec * log_p)
-                    k = np.argmax(ll)
-                    p = p_vec[k]
-
-                    return IntegerUniformSpikeDistribution(
-                        k=k if min_val is None else k + min_val,
-                        min_val=min_val,
-                        num_vals=len(count_vec),
-                        p=p,
-                        name=self.name,
-                        keys=self.keys,
-                    )
-                else:
-                    count_vec += self.pseudo_count
-                    count = np.sum(count_vec)
-                    p_vec = count_vec / count
-                    non_spike = count - count_vec
-                    log1m_p = np.log1p(-p_vec) - np.log(len(count_vec) - 1)
-                    log_p = np.log(p_vec)
-                    ll = np.where(non_spike == 0.0, 0.0, non_spike * log1m_p)
-                    ll += np.where(count_vec == 0.0, 0.0, count_vec * log_p)
-                    k = np.argmax(ll)
-                    p = p_vec[k]
-
-                    return IntegerUniformSpikeDistribution(
-                        k=k if min_val is None else k + min_val,
-                        min_val=min_val,
-                        num_vals=len(count_vec),
-                        p=p,
-                        name=self.name,
-                        keys=self.keys,
-                    )
+        return IntegerUniformSpikeDistribution(
+            k=support_min + spike_index,
+            min_val=support_min,
+            num_vals=len(counts),
+            p=probability,
+            name=self.name,
+            keys=self.keys,
+        )
 
 
 class IntegerUniformSpikeDataEncoder(DataSequenceEncoder):
@@ -844,4 +873,7 @@ class IntegerUniformSpikeDataEncoder(DataSequenceEncoder):
             Numpy array of ints.
 
         """
-        return np.asarray(x, dtype=int)
+        return exact_integer_observations(
+            x,
+            label="Integer-uniform-spike observations",
+        )

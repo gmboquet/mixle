@@ -15,8 +15,12 @@ from mixle.stats import (
     GammaDistribution,
     GeometricDistribution,
     IntegerCategoricalDistribution,
+    IntegerCategoricalEstimator,
+    IntegerUniformSpikeDistribution,
+    IntegerUniformSpikeEstimator,
     LogSeriesDistribution,
     NegativeBinomialDistribution,
+    PointMassDistribution,
     PoissonDistribution,
 )
 from mixle.stats.univariate.discrete.categorical import CategoricalAccumulator
@@ -183,6 +187,131 @@ class CategoricalEvidenceContractTest(unittest.TestCase):
                 accumulator.update(100, 0.0, None)
                 self.assertEqual((accumulator.min_val, accumulator.max_val), (2, 2))
                 np.testing.assert_array_equal(accumulator.count_vec, np.asarray([1.0]))
+
+
+class DiscreteProbabilityLawContractTest(unittest.TestCase):
+    def test_empty_categorical_fit_requires_explicit_support(self):
+        with self.assertRaises(ValueError):
+            CategoricalEstimator().estimate(None, {})
+        fitted = CategoricalEstimator(suff_stat={"known": 1.0}).estimate(None, {})
+        self.assertEqual(fitted.pmap, {"known": 1.0})
+
+    def test_unnormalized_categorical_scoring_is_explicit_and_not_sampleable(self):
+        for kwargs in (
+            {"pmap": {"a": 0.5}},
+            {"pmap": {"a": 0.5}, "default_value": 0.1},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                CategoricalDistribution(**kwargs)
+
+        scorer = CategoricalDistribution(
+            {"a": 0.5},
+            default_value=0.1,
+            scoring_only=True,
+        )
+        self.assertTrue(scorer.scoring_only)
+        self.assertFalse(scorer.is_normalized_probability)
+        with self.assertRaises(ValueError):
+            scorer.sampler()
+
+    def test_integer_categorical_requires_exact_origin_and_probability_simplex(self):
+        for origin, probabilities in (
+            (0.5, [0.5, 0.5]),
+            (0, []),
+            (0, [0.0, 0.0]),
+            (0, [0.8, 0.8]),
+        ):
+            with self.subTest(origin=origin, probabilities=probabilities), self.assertRaises(ValueError):
+                IntegerCategoricalDistribution(origin, probabilities)
+
+    def test_integer_categorical_scalar_and_batch_use_exact_integrality(self):
+        distribution = IntegerCategoricalDistribution(1, [0.5, 0.5])
+        fractional = 1.0 + 5.0e-10
+        self.assertEqual(distribution.density(fractional), 0.0)
+        self.assertEqual(distribution.log_density(fractional), -np.inf)
+        self.assertEqual(distribution.seq_log_density(np.asarray([fractional]))[0], -np.inf)
+        with self.assertRaises(ValueError):
+            distribution.dist_to_encoder().seq_encode([fractional])
+
+    def test_integer_categorical_empty_batches_and_zero_count_fits_are_defined(self):
+        accumulator = IntegerCategoricalEstimator(min_val=2, max_val=3).accumulator_factory().make()
+        accumulator.seq_update(np.asarray([], dtype=np.int64), np.asarray([], dtype=float), None)
+        fitted = IntegerCategoricalEstimator(min_val=2, max_val=3).estimate(
+            None,
+            accumulator.value(),
+        )
+        self.assertEqual(fitted.min_val, 2)
+        np.testing.assert_allclose(fitted.p_vec, [0.5, 0.5])
+        with self.assertRaises(ValueError):
+            IntegerCategoricalEstimator().estimate(None, None)
+
+    def test_integer_count_accumulator_arrays_are_owned(self):
+        for accumulator in (
+            IntegerCategoricalAccumulator(),
+            IntegerUniformSpikeAccumulator(None, None),
+        ):
+            with self.subTest(accumulator=accumulator):
+                donor = np.asarray([1.0, 2.0])
+                accumulator.combine((4, donor))
+                donor[0] = 99.0
+                self.assertEqual(accumulator.value()[1][0], 1.0)
+
+                exposed = accumulator.value()[1]
+                exposed[0] = 88.0
+                self.assertEqual(accumulator.value()[1][0], 1.0)
+
+                replacement = np.asarray([3.0, 4.0])
+                accumulator.from_value((7, replacement))
+                replacement[0] = 77.0
+                self.assertEqual(accumulator.value()[1][0], 3.0)
+
+    def test_integer_uniform_spike_requires_a_valid_integer_probability_law(self):
+        invalid = (
+            (0.5, 2, 0.5, 0),
+            (0, 1.5, 0.5, 0),
+            (0, 0, 0.5, 0),
+            (0, 1, 0.2, 0),
+        )
+        for k, size, probability, minimum in invalid:
+            with self.subTest(values=(k, size, probability, minimum)), self.assertRaises(ValueError):
+                IntegerUniformSpikeDistribution(k, size, probability, minimum)
+
+    def test_integer_uniform_spike_rejects_fractional_states_in_every_path(self):
+        distribution = IntegerUniformSpikeDistribution(1, 3, 0.5, min_val=0)
+        self.assertEqual(distribution.log_density(1.5), -np.inf)
+        self.assertEqual(distribution.seq_log_density(np.asarray([1.5]))[0], -np.inf)
+        with self.assertRaises(ValueError):
+            distribution.dist_to_encoder().seq_encode([1.5])
+
+    def test_integer_uniform_spike_empty_and_prior_support_contracts(self):
+        fitted = IntegerUniformSpikeEstimator(min_val=0, max_val=1).estimate(
+            None,
+            (0, np.zeros(2)),
+        )
+        self.assertEqual((fitted.k, fitted.p), (0, 0.5))
+        with self.assertRaises(ValueError):
+            IntegerUniformSpikeEstimator(
+                min_val=0,
+                max_val=1,
+                pseudo_count=1.0,
+                suff_stat=(2, None),
+            )
+        with self.assertRaises(ValueError):
+            IntegerUniformSpikeEstimator(min_val=0, max_val=1).estimate(
+                None,
+                (0, np.asarray([1.0, -1.0])),
+            )
+
+    def test_point_mass_owns_and_copies_mutable_atoms(self):
+        source = {"values": [1]}
+        distribution = PointMassDistribution(source)
+        source["values"].append(2)
+        self.assertEqual(distribution.value, {"values": [1]})
+
+        draws = distribution.sampler().sample(2)
+        draws[0]["values"].append(3)
+        self.assertEqual(draws[1], {"values": [1]})
+        self.assertEqual(distribution.value, {"values": [1]})
 
 
 if __name__ == "__main__":

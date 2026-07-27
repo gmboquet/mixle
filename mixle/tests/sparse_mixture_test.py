@@ -30,7 +30,11 @@ class LogDensitySupTest(unittest.TestCase):
         # default_value (0.99) exceeds every in-pmap probability (0.005 each): the true peak
         # log-density is achieved by a label OUTSIDE pmap, not by max(pmap.values()). The sup
         # must also apply CategoricalDistribution's -log1p(default_value) normalizer.
-        cat = st.CategoricalDistribution({"a": 0.005, "b": 0.005}, default_value=0.99)
+        cat = st.CategoricalDistribution(
+            {"a": 0.005, "b": 0.005},
+            default_value=0.99,
+            scoring_only=True,
+        )
         sup = log_density_sup(cat)
         outside_label_density = cat.log_density("not_in_pmap")
         self.assertAlmostEqual(sup, outside_label_density, places=10)
@@ -84,8 +88,12 @@ class SparseScoreTest(unittest.TestCase):
         # entirely by comp0's default_value branch, which the pre-fix bound understated -- upper
         # was < exact, breaking "lower <= log p(x) <= upper".
         comps = [
-            st.CategoricalDistribution({"a": 0.005, "b": 0.005}, default_value=0.99),
-            st.CategoricalDistribution({"a": 0.9, "b": 0.05}),
+            st.CategoricalDistribution(
+                {"a": 0.005, "b": 0.005},
+                default_value=0.99,
+                scoring_only=True,
+            ),
+            st.CategoricalDistribution({"a": 0.9, "b": 0.05}, scoring_only=True),
             st.CategoricalDistribution({"a": 0.5, "b": 0.5}),
         ]
         m = st.MixtureDistribution(comps, [0.2, 0.5, 0.3])

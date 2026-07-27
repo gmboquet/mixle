@@ -21,6 +21,23 @@ class BlackboxLaplaceTest(unittest.TestCase):
         back, _ = rebuild(u0)
         self.assertTrue(np.allclose([back.dists[0].mu, back.dists[0].sigma2, back.dists[1].lam], [1.5, 4.0, 3.0]))
 
+    def test_categorical_round_trip_preserves_scoring_contract_and_metadata(self):
+        scorer = S.CategoricalDistribution(
+            {"a": 0.4, "b": 0.6},
+            default_value=0.1,
+            name="labels",
+            keys="shared-labels",
+            scoring_only=True,
+        )
+        u0, rebuild = _flatten(scorer)
+        back, rest = rebuild(u0)
+        self.assertEqual(len(rest), 0)
+        self.assertEqual((back.name, back.keys), ("labels", "shared-labels"))
+        self.assertEqual(back.default_value, 0.1)
+        self.assertTrue(back.scoring_only)
+        with self.assertRaises(ValueError):
+            back.sampler()
+
     def test_calibrated_on_gaussian_mean(self):
         rng = np.random.RandomState(0)
         data = list(rng.normal(5.0, 2.0, 400))

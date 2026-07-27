@@ -128,9 +128,27 @@ def _flatten(model) -> tuple[np.ndarray, Callable[[np.ndarray], Any]]:
         keys = sorted(model.pmap.keys(), key=repr)
         u0 = np.asarray(_simplex_to_u([model.pmap[k] for k in keys]), dtype=float)
 
-        def rebuild(u, _keys=keys, _k=len(keys), _dv=model.default_value, _nm=model.name):
+        def rebuild(
+            u,
+            _keys=keys,
+            _k=len(keys),
+            _dv=model.default_value,
+            _nm=model.name,
+            _ky=model.keys,
+            _scoring=model.scoring_only,
+        ):
             p, rest = _simplex_from_u(u, _k)
-            return S.CategoricalDistribution(dict(zip(_keys, p)), default_value=_dv, name=_nm), rest
+            pmap = dict(zip(_keys, p))
+            return (
+                S.CategoricalDistribution(
+                    pmap,
+                    default_value=_dv,
+                    name=_nm,
+                    keys=_ky,
+                    scoring_only=_scoring,
+                ),
+                rest,
+            )
 
         return u0, rebuild
 
@@ -375,16 +393,15 @@ def laplace_posterior(
             ump = u0.copy()
             ump[i] -= h[i]
             ump[j] += h[j]
-            hess[i, j] = hess[j, i] = (
-                log_target(upp) + log_target(umm) - log_target(upm) - log_target(ump)
-            ) / (4 * h[i] * h[j])
+            hess[i, j] = hess[j, i] = (log_target(upp) + log_target(umm) - log_target(upm) - log_target(ump)) / (
+                4 * h[i] * h[j]
+            )
 
     gradient_norm = float(np.linalg.norm(gradient, ord=np.inf))
     gradient_limit = float(mode_tol * max(1.0, abs(f0)))
     if gradient_norm > gradient_limit:
         raise ValueError(
-            f"proposed Laplace mode is not stationary: gradient norm {gradient_norm:.6g} "
-            f"exceeds {gradient_limit:.6g}"
+            f"proposed Laplace mode is not stationary: gradient norm {gradient_norm:.6g} exceeds {gradient_limit:.6g}"
         )
     raw_precision = -0.5 * (hess + hess.T)
     eigenvalues = np.linalg.eigvalsh(raw_precision)
@@ -410,9 +427,7 @@ def laplace_posterior(
         "raw_min_precision_eigenvalue": float(np.min(eigenvalues)),
         "mode_gradient_norm": gradient_norm,
         "mode_gradient_limit": gradient_limit,
-        "approximation_status": (
-            "regularized_rank_deficient_local_mode" if rank < d else "validated_local_mode"
-        ),
+        "approximation_status": ("regularized_rank_deficient_local_mode" if rank < d else "validated_local_mode"),
     }
     return LaplacePosterior(model, u0, cov, rebuild, metadata)
 

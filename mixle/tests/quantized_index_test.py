@@ -359,8 +359,8 @@ class QuantizedEnumerationIndexTestCase(unittest.TestCase):
 
         dist = DirectComposite(
             (
-                DirectCategorical({"a": 0.5, "b": 0.25}),
-                DirectCategorical({"x": 0.5, "y": 0.25}),
+                DirectCategorical({"a": 0.5, "b": 0.25}, scoring_only=True),
+                DirectCategorical({"x": 0.5, "y": 0.25}, scoring_only=True),
             )
         )
 

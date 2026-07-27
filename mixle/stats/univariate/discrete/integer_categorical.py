@@ -114,8 +114,10 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         vals = np.asarray(engine.to_numpy(engine.asarray(x))).reshape(-1)
         min_val = int(params["min_val"])
         k = int(np.asarray(engine.to_numpy(engine.asarray(params["p_vec"]))).reshape(-1).shape[0])
-        idx = np.rint(vals - min_val).astype(np.int64)
-        in_support = (idx >= 0) & (idx < k)
+        finite_integer = np.isfinite(vals) & (np.floor(vals) == vals)
+        safe_vals = np.where(finite_integer, vals, min_val)
+        idx = (safe_vals - min_val).astype(np.int64)
+        in_support = finite_integer & (idx >= 0) & (idx < k)
         onehot = np.zeros((vals.shape[0], k), dtype=np.float64)
         rows = np.nonzero(in_support)[0]
         onehot[rows, idx[in_support]] = 1.0
@@ -138,7 +140,8 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         min_val = engine.asarray(params["min_val"])
         k = int(np.asarray(engine.to_numpy(engine.asarray(params["p_vec"]))).reshape(-1).shape[0])
         v = vals - min_val
-        good = (v >= 0) & (v < k)
+        finite = ~(engine.isnan(v) | engine.isinf(v))
+        good = finite & (engine.floor(v) == v) & (v >= 0) & (v < k)
         return engine.where(good, engine.asarray(0.0), engine.asarray(-np.inf))
 
     def __init__(
@@ -165,7 +168,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 ``None`` (default) is a plain point model.
 
         Attributes:
-            p_vec: Probability vector, stored as given (not renormalized by the constructor).
+            p_vec: Owned probability-simplex vector.
             min_val: Minimum supported integer value.
             max_val: Maximum supported integer value.
             log_p_vec: Elementwise log probabilities.
@@ -174,15 +177,25 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             keys: Optional key for merging sufficient statistics.
         """
         p_vec = coalesce_alias("p_vec", p_vec, "prob_vec", prob_vec, default=MISSING)
-        if any(not np.isfinite(v) or v < 0.0 for v in p_vec):
-            # A negative or non-finite "probability" silently propagates into density()/log_density()
-            # answers -- `nan < 0.0` is always False, so the old check let NaN straight through -- so
-            # reject both at the constructor like the scalar families do (CategoricalDistribution.pmap).
-            raise ValueError("IntegerCategoricalDistribution requires finite, non-negative probabilities.")
+        min_value = int(
+            exact_integer_observations(
+                [min_val],
+                label="Integer-categorical support origin",
+            )[0]
+        )
+        probabilities = np.asarray(p_vec, dtype=np.float64)
+        if (
+            probabilities.ndim != 1
+            or probabilities.size == 0
+            or np.any(~np.isfinite(probabilities))
+            or np.any(probabilities < 0.0)
+            or not np.isclose(float(np.sum(probabilities)), 1.0, rtol=1.0e-12, atol=1.0e-12)
+        ):
+            raise ValueError("IntegerCategoricalDistribution requires a non-empty probability simplex.")
         with np.errstate(divide="ignore"):
-            self.p_vec = np.asarray(p_vec, dtype=np.float64)
-            self.min_val = min_val
-            self.max_val = min_val + self.p_vec.shape[0] - 1
+            self.p_vec = probabilities.copy()
+            self.min_val = min_value
+            self.max_val = min_value + self.p_vec.shape[0] - 1
             self.log_p_vec = np.log(self.p_vec)
             self.num_vals = self.p_vec.shape[0]
             self.name = name
@@ -226,6 +239,8 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 cpp = np.ones(self.num_vals) * cpp
             else:
                 cpp = np.asarray(cpp, dtype=float)
+                if cpp.shape != (self.num_vals,):
+                    raise ValueError("Dirichlet prior dimension must match integer-categorical support.")
             self.conj_prior_params = cpp
             self.expected_nparams = digamma(cpp) - digamma(np.sum(cpp))
             self.has_conj_prior = True
@@ -277,7 +292,9 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             Density at x.
 
         """
-        return zero if x < self.min_val or x > self.max_val else self.p_vec[x - self.min_val]
+        if not valid_integer(x) or x < self.min_val or x > self.max_val:
+            return zero
+        return self.p_vec[int(x) - self.min_val]
 
     def log_density(self, x: int) -> float:
         """Evaluate the log-density of the integer categorical at observation x.
@@ -291,10 +308,10 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             Log-density at x.
 
         """
+        if not valid_integer(x):
+            return -inf
         xi = int(x)
-        # Accept integer-valued floats (e.g. a count total summed as float64); reject non-integers
-        # and out-of-support values. Indexing log_p_vec with a raw float raises, hence the cast.
-        if xi != x or xi < self.min_val or xi > self.max_val:
+        if xi < self.min_val or xi > self.max_val:
             return -inf
         return self.log_p_vec[xi - self.min_val]
 
@@ -308,18 +325,12 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of floats containing log_density() evaluated at each observation in x.
 
         """
-        x = np.asarray(x)
-        rv = np.full(x.shape[0], -np.inf)
-        if np.issubdtype(x.dtype, np.integer):
-            v = x - self.min_val
-            u = np.bitwise_and(v >= 0, v < self.num_vals)
-            rv[u] = self.log_p_vec[v[u]]
-            return rv
-        # Float input (e.g. count totals summed as float64): accept integer-valued entries by casting
-        # the index to int, and reject non-integer values (indexing log_p_vec with a float raises).
-        xi = np.rint(x).astype(np.int64)
-        v = xi - self.min_val
-        u = (v >= 0) & (v < self.num_vals) & (np.abs(x - xi) < 1.0e-9)
+        values = np.asarray(x, dtype=np.float64)
+        rv = np.full(values.shape, -np.inf)
+        exact = np.isfinite(values) & (np.floor(values) == values)
+        safe = np.where(exact, values, self.min_val).astype(np.int64)
+        v = safe - self.min_val
+        u = exact & (v >= 0) & (v < self.num_vals)
         rv[u] = self.log_p_vec[v[u]]
         return rv
 
@@ -327,7 +338,8 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
     def backend_log_density_from_params(x: Any, min_val: int, log_p_vec: Any, engine: Any) -> Any:
         """Engine-neutral integer-categorical log-density from explicit parameters."""
         v = x - engine.asarray(min_val)
-        good = (v >= 0) & (v < len(log_p_vec))
+        finite = ~(engine.isnan(v) | engine.isinf(v))
+        good = finite & (engine.floor(v) == v) & (v >= 0) & (v < len(log_p_vec))
         safe_v = engine.clip(v, 0, len(log_p_vec) - 1)
         return engine.where(good, log_p_vec[safe_v], engine.asarray(-np.inf))
 
@@ -355,7 +367,8 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         """Return an ``(n, k)`` matrix of integer-categorical log densities."""
         xx = engine.asarray(x)
         v = xx - engine.asarray(params["min_val"])
-        good = (v >= 0) & (v < params["num_vals"])
+        finite = ~(engine.isnan(v) | engine.isinf(v))
+        good = finite & (engine.floor(v) == v) & (v >= 0) & (v < params["num_vals"])
         safe_v = engine.clip(v, 0, params["num_vals"] - 1)
         rv = params["log_p"][safe_v, :]
         return engine.where(good[:, None], rv, engine.asarray(-np.inf))
@@ -408,7 +421,13 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 probability vector during estimation.
         """
         if pseudo_count is None:
-            return IntegerCategoricalEstimator(name=self.name, keys=self.keys, prior=self.prior)
+            return IntegerCategoricalEstimator(
+                min_val=self.min_val,
+                max_val=self.max_val,
+                name=self.name,
+                keys=self.keys,
+                prior=self.prior,
+            )
 
         else:
             return IntegerCategoricalEstimator(
@@ -704,7 +723,7 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         if self.count_vec is None and suff_stat[1] is not None:
             self.min_val = suff_stat[0]
             self.max_val = suff_stat[0] + len(suff_stat[1]) - 1
-            self.count_vec = suff_stat[1]
+            self.count_vec = np.array(suff_stat[1], dtype=np.float64, copy=True)
 
         elif self.count_vec is not None and suff_stat[1] is not None:
             if self.min_val == suff_stat[0] and len(self.count_vec) == len(suff_stat[1]):
@@ -732,13 +751,13 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self) -> tuple[int, np.ndarray]:
         """Return ``(min_val, count_vec)`` sufficient statistics."""
-        return self.min_val, self.count_vec
+        return self.min_val, None if self.count_vec is None else self.count_vec.copy()
 
     def from_value(self, x: tuple[int, np.ndarray]) -> "IntegerCategoricalAccumulator":
         """Replace accumulator state from a ``(min_val, count_vec)`` statistic."""
         self.min_val = x[0]
         self.max_val = x[0] + len(x[1]) - 1
-        self.count_vec = x[1]
+        self.count_vec = np.array(x[1], dtype=np.float64, copy=True)
 
         return self
 
@@ -815,10 +834,42 @@ class IntegerCategoricalEstimator(ParameterEstimator):
             name: Optional estimator name.
             keys: Optional merge key.
         """
-        self.pseudo_count = pseudo_count
-        self.min_val = min_val
-        self.max_val = max_val
-        self.suff_stat = suff_stat
+        if pseudo_count is not None and (
+            isinstance(pseudo_count, (bool, np.bool_)) or not np.isfinite(pseudo_count) or pseudo_count < 0.0
+        ):
+            raise ValueError("integer-categorical pseudo_count must be finite and non-negative.")
+        fixed_min = (
+            None
+            if min_val is None
+            else int(exact_integer_observations([min_val], label="Integer-categorical minimum")[0])
+        )
+        fixed_max = (
+            None
+            if max_val is None
+            else int(exact_integer_observations([max_val], label="Integer-categorical maximum")[0])
+        )
+        if (fixed_min is None) != (fixed_max is None):
+            raise ValueError("integer-categorical fixed support requires both min_val and max_val.")
+        if fixed_min is not None and fixed_min > fixed_max:
+            raise ValueError("integer-categorical fixed support must be ordered.")
+        prior_stat = None
+        if suff_stat is not None:
+            prior_min, prior_probs = suff_stat
+            prior_min = int(exact_integer_observations([prior_min], label="Integer-categorical prior minimum")[0])
+            prior_probs = np.asarray(prior_probs, dtype=np.float64)
+            if (
+                prior_probs.ndim != 1
+                or prior_probs.size == 0
+                or np.any(~np.isfinite(prior_probs))
+                or np.any(prior_probs < 0.0)
+                or not np.isclose(float(np.sum(prior_probs)), 1.0, rtol=1.0e-12, atol=1.0e-12)
+            ):
+                raise ValueError("integer-categorical prior statistic must contain a probability simplex.")
+            prior_stat = (prior_min, prior_probs.copy())
+        self.pseudo_count = None if pseudo_count == 0.0 else pseudo_count
+        self.min_val = fixed_min
+        self.max_val = fixed_max
+        self.suff_stat = prior_stat
         self.keys = keys
         self.name = name
         self.prior = prior
@@ -871,12 +922,16 @@ class IntegerCategoricalEstimator(ParameterEstimator):
         when degenerate) carrying the posterior Dirichlet forward as the new prior."""
         from mixle.stats.bayes.dirichlet import DirichletDistribution
 
-        min_val, count_vec = suff_stat
+        min_val, count_vec = self._validated_observed_statistic(suff_stat)
         alpha0 = self.prior.get_parameters()
         if np.ndim(alpha0) == 0:
             alpha0 = np.ones(len(count_vec)) * alpha0
         else:
             alpha0 = np.asarray(alpha0, dtype=float)
+            if alpha0.shape != count_vec.shape:
+                raise ValueError("Dirichlet prior dimension must match integer-categorical sufficient statistics.")
+        if np.any(~np.isfinite(alpha0)) or np.any(alpha0 <= 0.0):
+            raise ValueError("Dirichlet prior parameters must be finite and positive.")
 
         posterior_params = count_vec + alpha0
 
@@ -894,6 +949,32 @@ class IntegerCategoricalEstimator(ParameterEstimator):
 
         return IntegerCategoricalDistribution(min_val, prob_vec, name=self.name, keys=self.keys, prior=hyper_posterior)
 
+    def _validated_observed_statistic(
+        self,
+        suff_stat: tuple[int, np.ndarray] | None,
+    ) -> tuple[int, np.ndarray]:
+        """Return owned, aligned, finite non-negative counts."""
+        if suff_stat is None:
+            if self.min_val is not None:
+                return self.min_val, np.zeros(self.max_val - self.min_val + 1, dtype=np.float64)
+            if self.suff_stat is not None:
+                return self.suff_stat[0], np.zeros(len(self.suff_stat[1]), dtype=np.float64)
+            raise ValueError("integer-categorical no-data fitting requires a fixed or prior support.")
+
+        observed_min = int(exact_integer_observations([suff_stat[0]], label="Integer-categorical statistic minimum")[0])
+        counts = np.asarray(suff_stat[1], dtype=np.float64)
+        if counts.ndim != 1 or counts.size == 0 or np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
+            raise ValueError("integer-categorical counts must be a non-empty finite non-negative vector.")
+        observed_max = observed_min + len(counts) - 1
+        if self.min_val is not None:
+            if observed_min < self.min_val or observed_max > self.max_val:
+                raise ValueError("integer-categorical evidence falls outside the fixed support.")
+            aligned = np.zeros(self.max_val - self.min_val + 1, dtype=np.float64)
+            offset = observed_min - self.min_val
+            aligned[offset : offset + len(counts)] = counts
+            return self.min_val, aligned
+        return observed_min, counts.copy()
+
     def estimate(
         self, nobs: float | None, suff_stat: tuple[int, np.ndarray] | None
     ) -> "IntegerCategoricalDistribution":
@@ -907,56 +988,30 @@ class IntegerCategoricalEstimator(ParameterEstimator):
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
 
-        if self.pseudo_count is not None and self.suff_stat is None:
-            pseudo_count_per_level = self.pseudo_count / float(len(suff_stat[1]))
-            adjusted_nobs = suff_stat[1].sum() + self.pseudo_count
-
-            return IntegerCategoricalDistribution(
-                suff_stat[0], (suff_stat[1] + pseudo_count_per_level) / adjusted_nobs, name=self.name, keys=self.keys
+        min_val, counts = self._validated_observed_statistic(suff_stat)
+        if self.suff_stat is not None and self.pseudo_count is not None:
+            prior_min, prior_probs = self.suff_stat
+            prior_max = prior_min + len(prior_probs) - 1
+            observed_max = min_val + len(counts) - 1
+            combined_min = min(min_val, prior_min)
+            combined_max = max(observed_max, prior_max)
+            combined = np.zeros(combined_max - combined_min + 1, dtype=np.float64)
+            combined[min_val - combined_min : min_val - combined_min + len(counts)] += counts
+            combined[prior_min - combined_min : prior_min - combined_min + len(prior_probs)] += (
+                self.pseudo_count * prior_probs
             )
+            min_val, counts = combined_min, combined
+        elif self.pseudo_count is not None:
+            counts += self.pseudo_count / len(counts)
 
-        elif self.pseudo_count is not None and self.min_val is not None and self.max_val is not None:
-            min_val = min(self.min_val, suff_stat[0])
-            max_val = max(self.max_val, suff_stat[0] + len(suff_stat[1]) - 1)
-
-            count_vec = vec.zeros(max_val - min_val + 1)
-
-            i0 = suff_stat[0] - min_val
-            i1 = (suff_stat[0] + len(suff_stat[1]) - 1) - min_val + 1
-            count_vec[i0:i1] += suff_stat[1]
-
-            pseudo_count_per_level = self.pseudo_count / float(len(count_vec))
-            adjusted_nobs = suff_stat[1].sum() + self.pseudo_count
-
-            return IntegerCategoricalDistribution(
-                min_val, (count_vec + pseudo_count_per_level) / adjusted_nobs, name=self.name, keys=self.keys
-            )
-
-        elif self.pseudo_count is not None and self.suff_stat is not None:
-            s_max_val = self.suff_stat[0] + len(self.suff_stat[1]) - 1
-            s_min_val = self.suff_stat[0]
-
-            min_val = min(s_min_val, suff_stat[0])
-            max_val = max(s_max_val, suff_stat[0] + len(suff_stat[1]) - 1)
-
-            count_vec = vec.zeros(max_val - min_val + 1)
-
-            i0 = s_min_val - min_val
-            i1 = s_max_val - min_val + 1
-            count_vec[i0:i1] = self.suff_stat[1] * self.pseudo_count
-
-            i0 = suff_stat[0] - min_val
-            i1 = (suff_stat[0] + len(suff_stat[1]) - 1) - min_val + 1
-            count_vec[i0:i1] += suff_stat[1]
-
-            return IntegerCategoricalDistribution(
-                min_val, count_vec / (count_vec.sum()), name=self.name, keys=self.keys
-            )
-
-        else:
-            return IntegerCategoricalDistribution(
-                suff_stat[0], suff_stat[1] / (suff_stat[1].sum()), name=self.name, keys=self.keys
-            )
+        total = float(np.sum(counts))
+        probabilities = np.full(len(counts), 1.0 / len(counts)) if total == 0.0 else counts / total
+        return IntegerCategoricalDistribution(
+            min_val,
+            probabilities,
+            name=self.name,
+            keys=self.keys,
+        )
 
 
 class IntegerCategoricalDataEncoder(DataSequenceEncoder):

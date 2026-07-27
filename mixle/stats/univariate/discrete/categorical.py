@@ -180,38 +180,24 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         keys: str | None = None,
         prob_map: dict[Any, float] = MISSING,
         prior: Optional["SequenceEncodableProbabilityDistribution"] = None,
+        scoring_only: bool = False,
     ) -> None:
         """Create a categorical distribution over an explicit support map.
 
-        Labels in ``pmap`` receive their configured probabilities. Labels outside
-        the support receive ``default_value``; the default of ``0.0`` gives finite
-        support and ``-inf`` log-density for unknown labels.
+        By default this class represents a finite probability law: ``pmap`` must
+        be non-empty, its values must sum to one, and ``default_value`` must be
+        zero. Set ``scoring_only=True`` to construct an explicitly unnormalized
+        fallback scorer instead. Scoring-only objects can be evaluated but cannot
+        be sampled.
 
         Args:
-            pmap: Mapping from labels to probabilities. Values must be finite and non-negative.
-                ``density()``/``log_density()`` assume ``sum(pmap.values()) == 1`` for the
-                result to be a properly-normalized probability (labels with p = 0 may be
-                included or omitted interchangeably), but the constructor does not check or
-                enforce that sum: several existing call sites intentionally build a pmap with
-                an arbitrary, non-1-summing total -- e.g. as a cheap fixture for exercising
-                dispatch logic that never inspects the values, or to make ``default_value``
-                dominate every in-pmap probability by construction. Pass a normalized map when
-                you need ``density()`` to be meaningful.
+            pmap: Mapping from labels to finite, non-negative values. Unless
+                ``scoring_only`` is true, the mapping must be non-empty and sum
+                to one within floating-point tolerance.
             default_value: Probability assigned to labels outside ``pmap``. Must be finite and
-                within ``[0, 1]``. When ``default_value > 0`` and ``pmap`` does not cover the
-                full label space, ``density()``/``log_density()`` become a smoothed *scoring*
-                function rather than a normalized probability measure: every distinct label
-                outside ``pmap`` receives the same flat fallback mass, so querying several
-                distinct out-of-vocabulary labels can each score positive density, and those
-                densities can sum to more than 1 over the true (potentially unbounded) label
-                space. This is inherent to using a single fallback constant for "everything
-                else" -- the same tradeoff a Laplace/Kneser-Ney-smoothed language model makes --
-                since the true unknown-label cardinality is unknowable in general, so there is
-                no way to normalize it properly, and this class makes no attempt to.
-                :class:`CategoricalSampler` reflects the same boundary from the sampling side:
-                it can only draw labels registered in ``pmap``, never a synthesized
-                "default"/unknown label, since there is no way to generatively sample from an
-                unspecified label space.
+                within ``[0, 1]``. A positive fallback requires
+                ``scoring_only=True`` because an unspecified label space cannot
+                be normalized or sampled.
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
             prob_map: Alias for ``pmap``.
@@ -219,20 +205,23 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 :class:`~mixle.stats.bayes.dict_dirichlet.DictDirichletDistribution` enables the Bayesian /
                 variational machinery (``expected_log_density`` and the conjugate posterior update);
                 ``None`` (default) is a plain point model.
+            scoring_only: Permit an unnormalized map or positive fallback as an
+                evaluation-only scorer. Sampling is unavailable in this mode.
 
         Attributes:
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
-            pmap: Mapping from labels to probabilities, stored as given (not renormalized or
-                sum-checked by the constructor).
+            pmap: Owned copy of the configured label weights.
             default_value: Probability assigned to labels outside ``pmap``.
+            scoring_only: Whether this object is evaluation-only.
+            is_normalized_probability: Whether this object is a sampleable finite law.
             no_default: ``True`` when outside-support labels have nonzero mass.
             log_default_value: Log of ``default_value``.
             log1p_default_value: Log normalizer for ``1 + default_value``.
 
         Raises:
-            ValueError: If ``pmap`` contains a non-finite or negative value, or if
-                ``default_value`` is non-finite or outside ``[0, 1]``.
+            ValueError: If the values are invalid or an unnormalized scorer is
+                requested without ``scoring_only=True``.
 
         """
         pmap = coalesce_alias("pmap", pmap, "prob_map", prob_map, default=MISSING)
@@ -243,17 +232,6 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             # the sampler's RandomState.choice), so reject it at the constructor like the scalar
             # families do.
             #
-            # Deliberately NOT also enforced here: sum(pmap.values()) == 1. density()'s docstring
-            # assumes that sum, but several existing, intentional call sites construct a pmap that
-            # doesn't hold it -- e.g. mixle/tests/quantized_index_test.py and
-            # fused_em_mixtures_test.py build a partial pmap (such as ``{2: 0.5}``) purely as a
-            # cheap object to call .estimator()/.quantized_index() on, never inspecting the
-            # values; mixle/tests/sparse_mixture_test.py builds pmap={"a": 0.005, "b": 0.005} with
-            # default_value=0.99 specifically so default_value dominates every in-pmap
-            # probability, which a sum-to-1 rejection (or a silent renormalization, which would
-            # rescale "a"/"b" up and defeat that domination) would break. A finite/non-negative
-            # check has no such legitimate counterexample: no call site anywhere in the codebase
-            # relies on constructing a NaN or negative "probability".
             raise ValueError("CategoricalDistribution requires finite non-negative probabilities.")
         if not np.isfinite(default_value) or default_value < 0.0 or default_value > 1.0:
             # default_value used to be silently clamped into [0, 1] for self.default_value while
@@ -263,9 +241,20 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             # default_value made log_density() return nan for every in-pmap label. Reject it here
             # instead, like pmap above.
             raise ValueError("CategoricalDistribution requires default_value in [0, 1], not %s." % repr(default_value))
+        if not isinstance(scoring_only, (bool, np.bool_)):
+            raise TypeError("scoring_only must be a boolean.")
+        total = float(np.sum(probs))
+        normalized = len(probs) > 0 and default_value == 0.0 and np.isclose(total, 1.0, rtol=1.0e-12, atol=1.0e-12)
+        if not normalized and not scoring_only:
+            raise ValueError(
+                "CategoricalDistribution requires a non-empty normalized finite support; "
+                "set scoring_only=True explicitly for an unnormalized fallback scorer."
+            )
         self.name = name
         self.keys = keys
-        self.pmap = pmap
+        self.pmap = dict(pmap)
+        self.scoring_only = bool(scoring_only)
+        self.is_normalized_probability = normalized and not self.scoring_only
         self.no_default = default_value != 0.0
         self.default_value = default_value
         self.log_default_value = float(-np.inf if default_value == 0 else math.log(default_value))
@@ -301,6 +290,13 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         state = dict(state)
         pmap = state["pmap"]
         state["pmap"] = pmap if isinstance(pmap, dict) else dict(pmap)
+        normalized = (
+            bool(state["pmap"])
+            and state.get("default_value", 0.0) == 0.0
+            and np.isclose(sum(state["pmap"].values()), 1.0, rtol=1.0e-12, atol=1.0e-12)
+        )
+        state.setdefault("scoring_only", not normalized)
+        state.setdefault("is_normalized_probability", normalized and not state["scoring_only"])
         self.__dict__.update(state)
 
     def __str__(self) -> str:
@@ -312,7 +308,14 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         s3 = repr(self.name)
         s4 = repr(self.keys)
 
-        return "CategoricalDistribution({%s}, default_value=%s, name=%s, keys=%s)" % (s1, s2, s3, s4)
+        scoring = ", scoring_only=True" if self.scoring_only else ""
+        return "CategoricalDistribution({%s}, default_value=%s, name=%s, keys=%s%s)" % (
+            s1,
+            s2,
+            s3,
+            s4,
+            scoring,
+        )
 
     def get_prior(self) -> Optional["SequenceEncodableProbabilityDistribution"]:
         """Return the conjugate parameter prior over the category-probability simplex (or None)."""
@@ -610,38 +613,20 @@ class CategoricalSampler(DistributionSampler):
         Attributes:
             rng: Random state used for sampling.
             levels: Category labels.
-            probs: Category probabilities in ``levels`` order, normalized to sum to 1.
+            probs: Category probabilities in ``levels`` order.
             num_levels: Number of categories.
 
         Raises:
-            ValueError: If ``dist.pmap`` is empty or every one of its values is 0.0, since
-                there is then no relative proportion of registered labels to sample from.
+            ValueError: If ``dist`` is not a normalized finite-support law.
 
         """
         self.rng = RandomState(seed)
+        if not getattr(dist, "is_normalized_probability", False):
+            raise ValueError("CategoricalSampler requires a normalized finite-support probability distribution.")
         temp = list(dist.pmap.items())
         self.levels = [u[0] for u in temp]
         raw_probs = np.asarray([u[1] for u in temp], dtype=np.float64)
-        total = raw_probs.sum()
-        if total <= 0.0:
-            # dist.pmap values are already guaranteed finite and non-negative by
-            # CategoricalDistribution.__init__, so total <= 0.0 here only happens when pmap is
-            # empty or every entry is exactly 0.0 -- there is no relative proportion left to
-            # sample from, and np.random.RandomState.choice cannot sample from an all-zero-weight
-            # distribution either. Fail clearly here, at sampler construction, instead of letting
-            # a 0/0 division or an opaque numpy error surface later out of sample().
-            raise ValueError(
-                "CategoricalSampler requires pmap to contain at least one category with positive probability."
-            )
-        # CategoricalDistribution.pmap is deliberately allowed to not sum to 1 (see its
-        # __init__ docstring; density()/log_density() already tolerate this by dividing by
-        # (1 + default_value)), but np.random.RandomState.choice requires p to sum to exactly 1.
-        # Normalizing by pmap's own sum makes sampling work from the relative proportions of
-        # pmap's registered labels regardless, so a construction-time-legal, non-1-summing pmap
-        # no longer crashes here. This does not change what can be sampled -- draws are still
-        # only ever one of pmap's registered labels, never a synthesized "default"/unknown label
-        # (there is no way to generatively sample from an unspecified label space).
-        self.probs = (raw_probs / total).tolist()
+        self.probs = raw_probs.tolist()
         self.num_levels = len(self.levels)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any | list[Any]:
@@ -902,7 +887,9 @@ class CategoricalEstimator(ParameterEstimator):
         ):
             raise ValueError("categorical pseudo_count must be finite and non-negative.")
         if suff_stat is not None and (
-            not suff_stat or any(not np.isfinite(value) or value < 0.0 for value in suff_stat.values())
+            not suff_stat
+            or any(not np.isfinite(value) or value < 0.0 for value in suff_stat.values())
+            or sum(suff_stat.values()) <= 0.0
         ):
             raise ValueError("categorical prior statistics must be a non-empty map of finite non-negative values.")
         # A supplied prior count map without an explicit multiplier is one unit of prior
@@ -989,6 +976,18 @@ class CategoricalEstimator(ParameterEstimator):
                 (if it is not None).
 
         """
+        if not suff_stat:
+            if self.has_conj_prior:
+                prior_parameters = self.prior.get_parameters()
+                if isinstance(prior_parameters, dict) and prior_parameters:
+                    suff_stat = {key: 0.0 for key in prior_parameters}
+                else:
+                    raise ValueError("empty categorical fitting requires a prior with an explicit finite support.")
+            elif self.suff_stat is not None:
+                suff_stat = {key: 0.0 for key in self.suff_stat}
+            else:
+                raise ValueError("empty categorical fitting requires explicit prior support.")
+
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
 
@@ -1029,7 +1028,13 @@ class CategoricalEstimator(ParameterEstimator):
                 k: (suff_stat.get(k, 0) + self.suff_stat.get(k, 0) * self.pseudo_count) / adjusted_nobs for k in levels
             }
 
-        return CategoricalDistribution(pmap=p_map, default_value=default_value, name=self.name, keys=self.keys)
+        return CategoricalDistribution(
+            pmap=p_map,
+            default_value=default_value,
+            name=self.name,
+            keys=self.keys,
+            scoring_only=default_value != 0.0,
+        )
 
 
 class CategoricalDataEncoder(DataSequenceEncoder):
