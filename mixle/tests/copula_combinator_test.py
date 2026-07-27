@@ -10,7 +10,12 @@ from scipy.stats import norm, spearmanr
 
 import mixle.stats as st
 from mixle.inference import optimize
-from mixle.stats.combinator.copula import CopulaDistribution
+from mixle.stats.combinator.copula import (
+    CopulaDistribution,
+    CopulaEstimator,
+    CopulaIFMStatistics,
+    CopulaQuantileError,
+)
 from mixle.stats.multivariate.frank_copula import FrankCopulaDistribution
 from mixle.stats.multivariate.gaussian_copula import GaussianCopulaDistribution
 
@@ -42,8 +47,37 @@ class _BadCdfMarginal:
     def cdf(self, x):
         return self.bad_value
 
+    def quantile(self, q):
+        return 0.0
+
     def log_density(self, x):
         return 0.0
+
+
+class _MissingQuantileMarginal:
+    def cdf(self, x):
+        return norm.cdf(x)
+
+    def log_density(self, x):
+        return norm.logpdf(x)
+
+
+class _BrokenQuantileMarginal(_BadCdfMarginal):
+    def __init__(self):
+        super().__init__(0.5)
+
+
+class _RecordingEstimator:
+    def __init__(self, delegate):
+        self.delegate = delegate
+        self.counts = []
+
+    def accumulator_factory(self):
+        return self.delegate.accumulator_factory()
+
+    def estimate(self, nobs, suff_stat):
+        self.counts.append(nobs)
+        return self.delegate.estimate(nobs, suff_stat)
 
 
 class CopulaDistributionTest(unittest.TestCase):
@@ -156,6 +190,100 @@ class CopulaDistributionTest(unittest.TestCase):
         )
         self.assertEqual(cop.dim, 3)
         self.assertEqual(cop.copula.dim, 3)
+
+    def test_requires_deterministic_quantiles(self):
+        with self.assertRaises(TypeError):
+            CopulaDistribution(
+                [_MissingQuantileMarginal(), st.GaussianDistribution(0.0, 1.0)],
+                GaussianCopulaDistribution(np.eye(2)),
+            )
+
+    def test_sampling_rejects_a_broken_quantile_cdf_round_trip(self):
+        cop = CopulaDistribution(
+            [_BrokenQuantileMarginal(), st.GaussianDistribution(0.0, 1.0)],
+            GaussianCopulaDistribution(np.eye(2)),
+        )
+        with self.assertRaises(CopulaQuantileError):
+            cop.sampler(4).sample()
+
+    def test_scalar_and_batch_paths_require_exact_finite_geometry(self):
+        cop = _proto()
+        for row in ((1.0,), (1.0, 2.0, 3.0), (1.0, float("nan"))):
+            with self.subTest(row=row), self.assertRaises(ValueError):
+                cop.log_density(row)
+            with self.subTest(encoded_row=row), self.assertRaises(ValueError):
+                cop.dist_to_encoder().seq_encode([row])
+
+    def test_empty_batch_has_canonical_shape_and_empty_scores(self):
+        cop = _proto()
+        enc = cop.dist_to_encoder().seq_encode([])
+        self.assertEqual(enc[1].shape, (0, 2))
+        self.assertEqual(cop.seq_log_density(enc).shape, (0,))
+
+    def test_pseudo_count_is_forwarded_to_every_stage(self):
+        marginals = [st.GaussianDistribution(0.0, 1.0), st.GaussianDistribution(0.0, 1.0)]
+        core = GaussianCopulaDistribution(np.eye(2))
+        calls = []
+        for index, marginal in enumerate(marginals):
+            original = marginal.estimator
+            marginal.estimator = (
+                lambda pseudo_count=None, original=original, index=index: (
+                    calls.append(("marginal", index, pseudo_count)),
+                    original(pseudo_count=pseudo_count),
+                )[1]
+            )
+        original_core = core.estimator
+        core.estimator = lambda pseudo_count=None: (
+            calls.append(("copula", pseudo_count)),
+            original_core(pseudo_count=pseudo_count),
+        )[1]
+        CopulaDistribution(marginals, core).estimator(pseudo_count=3.5)
+        self.assertEqual(
+            calls,
+            [("marginal", 0, 3.5), ("marginal", 1, 3.5), ("copula", 3.5)],
+        )
+
+    def test_ifm_statistics_validate_geometry_weights_and_counts(self):
+        cop = _proto()
+        accumulator = cop.estimator().accumulator_factory().make()
+        encoded = cop.dist_to_encoder().seq_encode([(1.0, 2.0), (2.0, 3.0)])
+        accumulator.seq_update(encoded, np.array([0.25, 1.75]), cop)
+        valid = accumulator.value()
+        malformed = (
+            valid._replace(marginal_statistics=valid.marginal_statistics[:1]),
+            valid._replace(columns=np.zeros((2, 3))),
+            valid._replace(weights=np.ones(1)),
+            valid._replace(weights=np.array([1.0, -1.0])),
+            valid._replace(marginal_effective_count=99.0),
+            tuple(valid),
+        )
+        for value in malformed:
+            with self.subTest(value=type(value).__name__), self.assertRaises(ValueError):
+                accumulator.from_value(value)
+            with self.subTest(estimate=type(value).__name__), self.assertRaises(ValueError):
+                cop.estimator().estimate(None, value)
+
+    def test_ifm_forwards_the_buffered_effective_count_not_outer_nobs(self):
+        cop = _proto()
+        marginal_estimators = [_RecordingEstimator(m.estimator()) for m in cop.marginals]
+        core_estimator = _RecordingEstimator(cop.copula.estimator())
+        estimator = CopulaEstimator(
+            marginal_estimators,
+            core_estimator,
+            dim=2,
+            copula_prototype=cop.copula,
+        )
+        accumulator = estimator.accumulator_factory().make()
+        encoded = cop.dist_to_encoder().seq_encode([(1.0, 2.0), (2.0, 3.0), (4.0, 5.0)])
+        accumulator.seq_update(encoded, np.array([0.5, 1.0, 2.0]), cop)
+        estimator.estimate(1000.0, accumulator.value())
+        self.assertEqual([est.counts for est in marginal_estimators], [[3.5], [3.5]])
+        self.assertEqual(core_estimator.counts, [3.5])
+
+    def test_ifm_statistics_are_versioned(self):
+        stats = CopulaIFMStatistics(2, (None, None), np.zeros((0, 2)), np.zeros(0), 0.0, 0.0)
+        with self.assertRaises(ValueError):
+            _proto().estimator().estimate(None, stats)
 
     def test_scalar_pit_rejects_a_marginal_cdf_outside_the_unit_interval(self):
         # a broken marginal.cdf() (bug, or a value outside the marginal's support) used to be silently

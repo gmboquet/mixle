@@ -39,10 +39,11 @@ Copulas* (CRC, 2014).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
+from mixle.capability import HasCDF, supports
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -55,6 +56,90 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.multivariate._copula_common import reject_out_of_unit_cube
 
 _CLIP = 1.0e-12  # keep PIT scores strictly inside (0,1) so the copula's Phi^{-1} stays finite
+
+
+class CopulaIFMStatistics(NamedTuple):
+    """Versioned IFM state with explicit stage-specific effective counts."""
+
+    schema_version: int
+    marginal_statistics: tuple[Any, ...]
+    columns: np.ndarray
+    weights: np.ndarray
+    marginal_effective_count: float
+    copula_effective_count: float
+
+
+class CopulaQuantileError(RuntimeError):
+    """Raised when a marginal quantile violates its declared CDF inverse contract."""
+
+
+def _finite_weight(value: Any, *, name: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be a finite non-negative scalar." % name) from exc
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError("%s must be a finite non-negative scalar." % name)
+    return result
+
+
+def _validate_row(value: Any, dim: int, *, label: str = "copula observation") -> np.ndarray:
+    try:
+        row = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must contain exactly %d finite numeric coordinates." % (label, dim)) from exc
+    if row.shape != (dim,) or not np.all(np.isfinite(row)):
+        raise ValueError("%s must have shape (%d,) with finite numeric coordinates." % (label, dim))
+    return row
+
+
+def _validate_columns(value: Any, dim: int, *, label: str = "copula columns") -> np.ndarray:
+    try:
+        columns = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be a finite numeric matrix with %d columns." % (label, dim)) from exc
+    if columns.shape == (0,):
+        columns = np.zeros((0, dim), dtype=np.float64)
+    if columns.ndim != 2 or columns.shape[1] != dim or not np.all(np.isfinite(columns)):
+        raise ValueError("%s must have shape (n, %d) with finite numeric values." % (label, dim))
+    return columns
+
+
+def _validate_weights(value: Any, rows: int) -> np.ndarray:
+    try:
+        weights = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("copula weights must be a finite non-negative vector.") from exc
+    if (
+        weights.shape != (rows,)
+        or np.any(~np.isfinite(weights))
+        or np.any(weights < 0.0)
+    ):
+        raise ValueError("copula weights must be a finite non-negative vector aligned with the buffered rows.")
+    return weights
+
+
+def _validate_ifm_statistics(value: Any, dim: int) -> CopulaIFMStatistics:
+    if not isinstance(value, CopulaIFMStatistics) or value.schema_version != 1:
+        raise ValueError("copula IFM statistics must use schema version 1.")
+    if not isinstance(value.marginal_statistics, tuple) or len(value.marginal_statistics) != dim:
+        raise ValueError("copula IFM marginal-statistic arity must equal %d." % dim)
+    columns = _validate_columns(value.columns, dim)
+    weights = _validate_weights(value.weights, len(columns))
+    marginal_count = _finite_weight(value.marginal_effective_count, name="marginal_effective_count")
+    copula_count = _finite_weight(value.copula_effective_count, name="copula_effective_count")
+    actual = float(weights.sum())
+    tolerance = 1.0e-12 * max(1.0, actual)
+    if abs(marginal_count - actual) > tolerance or abs(copula_count - actual) > tolerance:
+        raise ValueError("copula IFM effective counts must equal the buffered weight sum.")
+    return CopulaIFMStatistics(
+        1,
+        value.marginal_statistics,
+        columns,
+        weights,
+        marginal_count,
+        copula_count,
+    )
 
 
 def _is_discrete_marginal(marginal: Any) -> bool:
@@ -83,7 +168,7 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
     """Joint over ``d`` scalar fields = ``d`` marginals coupled by a copula core (Sklar's theorem).
 
     ``marginals`` is a length-``d`` sequence of CONTINUOUS mixle leaves, each exposing ``log_density``,
-    ``cdf``, a ``sampler()`` with ``sample()``, and the estimator/encoder contract -- a marginal with
+    deterministic ``cdf``/``quantile`` methods, and the estimator/encoder contract -- a marginal with
     enumerable (discrete/atomic) support is rejected at construction (see module docstring: the continuous
     Sklar density formula this class implements is not a valid probability model for discrete marginals).
     ``copula`` is a distribution on ``(0,1)^d`` (e.g. :class:`GaussianCopulaDistribution`) whose ``dim``
@@ -98,7 +183,7 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.marginals = list(marginals)
+        self.marginals = tuple(marginals)
         self.dim = len(self.marginals)
         if self.dim < 2:
             raise ValueError("CopulaDistribution needs at least 2 marginals; got %d" % self.dim)
@@ -113,6 +198,12 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
                 "over/under-counts and the model no longer sums to 1. A correct discrete/mixed joint needs "
                 "copula-CDF rectangle differences, which none of this combinator's copula cores currently "
                 "expose; discrete/mixed marginals are not yet supported." % discrete
+            )
+        missing_cdf = [i for i, marginal in enumerate(self.marginals) if not supports(marginal, HasCDF)]
+        if missing_cdf:
+            raise TypeError(
+                "CopulaDistribution marginals must satisfy the deterministic HasCDF contract "
+                "(callable cdf and quantile); missing at indices %s." % missing_cdf
             )
         copula_dim = getattr(copula, "dim", None)
         if copula_dim is None:
@@ -133,13 +224,14 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
 
     def _pit_row(self, x: Sequence[float]) -> np.ndarray:
         """Probability-integral transform of one observation: ``u_i = clip(F_i(x_i))`` in ``(0,1)``."""
-        u = np.array([float(self.marginals[i].cdf(x[i])) for i in range(self.dim)], dtype=np.float64)
+        row = _validate_row(x, self.dim)
+        u = np.array([float(self.marginals[i].cdf(row[i])) for i in range(self.dim)], dtype=np.float64)
         reject_out_of_unit_cube(u)
         return np.clip(u, _CLIP, 1.0 - _CLIP)
 
     def _pit_columns(self, cols: np.ndarray) -> np.ndarray:
         """PIT an ``(n, d)`` array of raw observations to an ``(n, d)`` array of uniform scores."""
-        cols = np.asarray(cols, dtype=np.float64)
+        cols = _validate_columns(cols, self.dim)
         u = np.empty_like(cols)
         for i in range(self.dim):
             u[:, i] = [float(self.marginals[i].cdf(v)) for v in cols[:, i]]
@@ -152,18 +244,32 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: Sequence[float]) -> float:
         """Sklar's decomposition: sum of marginal log-densities + the copula log-density at the PIT scores."""
-        marg = sum(float(self.marginals[i].log_density(x[i])) for i in range(self.dim))
-        return marg + float(self.copula.log_density(self._pit_row(x)))
+        row = _validate_row(x, self.dim)
+        marg = sum(float(self.marginals[i].log_density(row[i])) for i in range(self.dim))
+        return marg + float(self.copula.log_density(self._pit_row(row)))
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
         """Vectorized: per-column marginal log-densities (summed) plus the copula log-density at the PIT scores."""
+        if not isinstance(enc, tuple) or len(enc) != 2:
+            raise ValueError("encoded copula data must be a (marginal_encodings, raw_columns) pair.")
         marg_encs, raw_cols = enc
-        rv = self.marginals[0].seq_log_density(marg_encs[0])
+        if not isinstance(marg_encs, tuple) or len(marg_encs) != self.dim:
+            raise ValueError("encoded copula marginal arity must equal %d." % self.dim)
+        raw_cols = _validate_columns(raw_cols, self.dim)
+        rv = np.asarray(self.marginals[0].seq_log_density(marg_encs[0]), dtype=np.float64)
+        if rv.shape != (len(raw_cols),):
+            raise ValueError("marginal 0 batch score must contain exactly one value per observation.")
         for i in range(1, self.dim):
-            rv = rv + self.marginals[i].seq_log_density(marg_encs[i])
+            marginal_scores = np.asarray(self.marginals[i].seq_log_density(marg_encs[i]), dtype=np.float64)
+            if marginal_scores.shape != (len(raw_cols),):
+                raise ValueError("marginal %d batch score must contain exactly one value per observation." % i)
+            rv = rv + marginal_scores
         u = self._pit_columns(raw_cols)
         cop_enc = self.copula.dist_to_encoder().seq_encode(u)
-        return rv + np.asarray(self.copula.seq_log_density(cop_enc), dtype=np.float64)
+        copula_scores = np.asarray(self.copula.seq_log_density(cop_enc), dtype=np.float64)
+        if copula_scores.shape != (len(raw_cols),):
+            raise ValueError("copula batch score must contain exactly one value per observation.")
+        return rv + copula_scores
 
     def sampler(self, seed: int | None = None) -> CopulaSampler:
         """Return a sampler that draws copula scores and inverts the marginals."""
@@ -172,9 +278,10 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
     def estimator(self, pseudo_count: float | None = None) -> CopulaEstimator:
         """Return an IFM estimator for marginals followed by the copula core."""
         return CopulaEstimator(
-            [m.estimator() for m in self.marginals],
-            self.copula.estimator(),
+            [m.estimator(pseudo_count=pseudo_count) for m in self.marginals],
+            self.copula.estimator(pseudo_count=pseudo_count),
             dim=self.dim,
+            copula_prototype=self.copula,
             name=self.name,
             keys=self.keys,
         )
@@ -185,42 +292,41 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class CopulaSampler(DistributionSampler):
-    """Sample by drawing uniform scores from the copula, then inverting each marginal by its quantile.
-
-    Requires each marginal's sampler to expose ``quantile`` OR the marginal itself to expose ``ppf``/``quantile``;
-    falls back to inverse-CDF root finding on ``cdf`` when neither is present, so any ``cdf``-bearing marginal
-    is sampleable.
-    """
+    """Sample by drawing uniform scores and applying each marginal's deterministic quantile."""
 
     def __init__(self, dist: CopulaDistribution, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
         self._cop_sampler = dist.copula.sampler(seed if seed is None else seed + 1)
+        self._quantiles = tuple(marginal.quantile for marginal in dist.marginals)
 
-    def _invert(self, marginal: Any, u: float) -> float:
-        for owner in (marginal, marginal.sampler()):
-            for attr in ("quantile", "ppf", "inverse_cdf"):
-                fn = getattr(owner, attr, None)
-                if callable(fn):
-                    return float(fn(u))
-        return self._bisect_cdf(marginal, u)
-
-    def _bisect_cdf(self, marginal: Any, u: float, lo: float = -1e6, hi: float = 1e6, iters: int = 100) -> float:
-        # monotone bisection on the CDF -- a last-resort inverse for a marginal exposing only cdf
-        for _ in range(iters):
-            mid = 0.5 * (lo + hi)
-            if float(marginal.cdf(mid)) < u:
-                lo = mid
-            else:
-                hi = mid
-        return 0.5 * (lo + hi)
+    def _invert(self, index: int, u: float) -> float:
+        target = float(np.clip(u, _CLIP, 1.0 - _CLIP))
+        value = float(self._quantiles[index](target))
+        if not np.isfinite(value):
+            raise CopulaQuantileError(
+                "marginal %d quantile returned a non-finite value for probability %.17g." % (index, target)
+            )
+        achieved = float(self.dist.marginals[index].cdf(value))
+        if not np.isfinite(achieved) or not 0.0 <= achieved <= 1.0:
+            raise CopulaQuantileError("marginal %d quantile/CDF contract returned an invalid probability." % index)
+        if abs(achieved - target) > 1.0e-7:
+            raise CopulaQuantileError(
+                "marginal %d quantile/CDF round trip did not converge: target %.17g, achieved %.17g."
+                % (index, target, achieved)
+            )
+        return value
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one joint observation or ``size`` iid observations."""
+        if isinstance(size, (bool, np.bool_)):
+            raise TypeError("size must be a non-negative integer or None.")
         n = 1 if size is None else int(size)
+        if size is not None and (n != size or n < 0):
+            raise ValueError("size must be a non-negative integer or None.")
         u = np.atleast_2d(self._cop_sampler.sample(n)).reshape(n, self.dist.dim)
         out = [
-            tuple(self._invert(self.dist.marginals[i], float(u[r, i])) for i in range(self.dist.dim)) for r in range(n)
+            tuple(self._invert(i, float(u[r, i])) for i in range(self.dist.dim)) for r in range(n)
         ]
         return out[0] if size is None else out
 
@@ -234,7 +340,7 @@ class CopulaDataEncoder(DataSequenceEncoder):
     """
 
     def __init__(self, marginal_encoders: Sequence[DataSequenceEncoder]) -> None:
-        self.marginal_encoders = list(marginal_encoders)
+        self.marginal_encoders = tuple(marginal_encoders)
         self.dim = len(self.marginal_encoders)
 
     def __str__(self) -> str:
@@ -245,7 +351,8 @@ class CopulaDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[Sequence[float]]) -> tuple[tuple[Any, ...], np.ndarray]:
         """Encode each marginal column while retaining raw columns for PIT recomputation."""
-        cols = np.asarray([[float(row[i]) for i in range(self.dim)] for row in x], dtype=np.float64)
+        rows = tuple(_validate_row(row, self.dim, label="copula observation at row %d" % i) for i, row in enumerate(x))
+        cols = np.asarray(rows, dtype=np.float64).reshape((len(rows), self.dim))
         marg_encs = tuple(self.marginal_encoders[i].seq_encode(cols[:, i].tolist()) for i in range(self.dim))
         return marg_encs, cols
 
@@ -261,67 +368,89 @@ class CopulaAccumulator(SequenceEncodableStatisticAccumulator):
     def __init__(self, marginal_accumulators: Sequence[Any], dim: int, keys: str | None = None) -> None:
         self.marginal_accumulators = list(marginal_accumulators)
         self.dim = dim
+        if len(self.marginal_accumulators) != self.dim:
+            raise ValueError("copula accumulator marginal arity must equal dim.")
         self.keys = keys
         self._cols: list[np.ndarray] = []
         self._w: list[np.ndarray] = []
 
     def update(self, x: Sequence[float], weight: float, estimate: CopulaDistribution | None) -> None:
         """Update marginal accumulators and buffer one raw observation for IFM copula fitting."""
+        row = _validate_row(x, self.dim)
+        checked_weight = _finite_weight(weight, name="weight")
+        if estimate is not None and estimate.dim != self.dim:
+            raise ValueError("copula estimate dimension does not match its accumulator.")
         marg_est = estimate.marginals if estimate is not None else [None] * self.dim
         for i in range(self.dim):
-            self.marginal_accumulators[i].update(x[i], weight, marg_est[i])
-        self._cols.append(np.asarray([float(x[i]) for i in range(self.dim)], dtype=np.float64).reshape(1, self.dim))
-        self._w.append(np.asarray([float(weight)], dtype=np.float64))
+            self.marginal_accumulators[i].update(row[i], checked_weight, marg_est[i])
+        self._cols.append(row.reshape(1, self.dim))
+        self._w.append(np.asarray([checked_weight], dtype=np.float64))
 
     def initialize(self, x: Sequence[float], weight: float, rng: np.random.RandomState | None) -> None:
         """Initialize marginal accumulators and buffer one raw observation."""
+        row = _validate_row(x, self.dim)
+        checked_weight = _finite_weight(weight, name="weight")
         for i in range(self.dim):
-            self.marginal_accumulators[i].initialize(x[i], weight, rng)
-        self._cols.append(np.asarray([float(x[i]) for i in range(self.dim)], dtype=np.float64).reshape(1, self.dim))
-        self._w.append(np.asarray([float(weight)], dtype=np.float64))
+            self.marginal_accumulators[i].initialize(row[i], checked_weight, rng)
+        self._cols.append(row.reshape(1, self.dim))
+        self._w.append(np.asarray([checked_weight], dtype=np.float64))
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: CopulaDistribution | None) -> None:
         """Update marginal accumulators and buffer encoded raw columns for IFM."""
+        if not isinstance(enc, tuple) or len(enc) != 2:
+            raise ValueError("encoded copula data must be a (marginal_encodings, raw_columns) pair.")
         marg_encs, raw_cols = enc
+        if not isinstance(marg_encs, tuple) or len(marg_encs) != self.dim:
+            raise ValueError("encoded copula marginal arity must equal dim.")
+        raw_cols = _validate_columns(raw_cols, self.dim)
+        weights = _validate_weights(weights, len(raw_cols))
+        if estimate is not None and estimate.dim != self.dim:
+            raise ValueError("copula estimate dimension does not match its accumulator.")
         marg_est = estimate.marginals if estimate is not None else [None] * self.dim
         for i in range(self.dim):
             self.marginal_accumulators[i].seq_update(marg_encs[i], weights, marg_est[i])
-        self._cols.append(np.asarray(raw_cols, dtype=np.float64).reshape(-1, self.dim))
-        self._w.append(np.asarray(weights, dtype=np.float64).ravel())
+        self._cols.append(raw_cols)
+        self._w.append(weights)
 
     def seq_initialize(self, enc: Any, weights: np.ndarray, rng: np.random.RandomState | None) -> None:
         """Initialize marginal accumulators and buffer encoded raw columns."""
+        if not isinstance(enc, tuple) or len(enc) != 2:
+            raise ValueError("encoded copula data must be a (marginal_encodings, raw_columns) pair.")
         marg_encs, raw_cols = enc
+        if not isinstance(marg_encs, tuple) or len(marg_encs) != self.dim:
+            raise ValueError("encoded copula marginal arity must equal dim.")
+        raw_cols = _validate_columns(raw_cols, self.dim)
+        weights = _validate_weights(weights, len(raw_cols))
         for i in range(self.dim):
             self.marginal_accumulators[i].seq_initialize(marg_encs[i], weights, rng)
-        self._cols.append(np.asarray(raw_cols, dtype=np.float64).reshape(-1, self.dim))
-        self._w.append(np.asarray(weights, dtype=np.float64).ravel())
+        self._cols.append(raw_cols)
+        self._w.append(weights)
 
-    def combine(self, suff_stat: tuple[tuple[Any, ...], np.ndarray, np.ndarray]) -> CopulaAccumulator:
+    def combine(self, suff_stat: CopulaIFMStatistics) -> CopulaAccumulator:
         """Merge marginal sufficient statistics and buffered raw columns."""
-        marg_stats, cols, w = suff_stat
+        checked = _validate_ifm_statistics(suff_stat, self.dim)
         for i in range(self.dim):
-            self.marginal_accumulators[i].combine(marg_stats[i])
-        if len(cols):
-            self._cols.append(np.asarray(cols, dtype=np.float64).reshape(-1, self.dim))
-            self._w.append(np.asarray(w, dtype=np.float64).ravel())
+            self.marginal_accumulators[i].combine(checked.marginal_statistics[i])
+        if len(checked.columns):
+            self._cols.append(checked.columns)
+            self._w.append(checked.weights)
         return self
 
-    def value(self) -> tuple[tuple[Any, ...], np.ndarray, np.ndarray]:
+    def value(self) -> CopulaIFMStatistics:
         """Return marginal stats, buffered raw columns, and buffered weights."""
         marg_vals = tuple(acc.value() for acc in self.marginal_accumulators)
         cols = np.concatenate(self._cols, axis=0) if self._cols else np.zeros((0, self.dim))
         w = np.concatenate(self._w) if self._w else np.zeros((0,))
-        return marg_vals, cols, w
+        effective_count = float(w.sum())
+        return CopulaIFMStatistics(1, marg_vals, cols, w, effective_count, effective_count)
 
-    def from_value(self, x: tuple[tuple[Any, ...], np.ndarray, np.ndarray]) -> CopulaAccumulator:
+    def from_value(self, x: CopulaIFMStatistics) -> CopulaAccumulator:
         """Restore marginal stats and raw-column buffers from ``value`` output."""
-        marg_vals, cols, w = x
+        checked = _validate_ifm_statistics(x, self.dim)
         for i in range(self.dim):
-            self.marginal_accumulators[i].from_value(marg_vals[i])
-        cols = np.asarray(cols, dtype=np.float64).reshape(-1, self.dim)
-        self._cols = [cols] if len(cols) else []
-        self._w = [np.asarray(w, dtype=np.float64).ravel()] if len(cols) else []
+            self.marginal_accumulators[i].from_value(checked.marginal_statistics[i])
+        self._cols = [checked.columns] if len(checked.columns) else []
+        self._w = [checked.weights] if len(checked.columns) else []
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -347,6 +476,8 @@ class CopulaAccumulatorFactory(StatisticAccumulatorFactory):
     def __init__(self, marginal_factories: Sequence[Any], dim: int, keys: str | None = None) -> None:
         self.marginal_factories = list(marginal_factories)
         self.dim = dim
+        if len(self.marginal_factories) != self.dim:
+            raise ValueError("copula accumulator factory marginal arity must equal dim.")
         self.keys = keys
 
     def make(self) -> CopulaAccumulator:
@@ -362,12 +493,18 @@ class CopulaEstimator(ParameterEstimator):
         marginal_estimators: Sequence[ParameterEstimator],
         copula_estimator: ParameterEstimator,
         dim: int,
+        copula_prototype: SequenceEncodableProbabilityDistribution,
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.marginal_estimators = list(marginal_estimators)
+        self.marginal_estimators = tuple(marginal_estimators)
         self.copula_estimator = copula_estimator
         self.dim = dim
+        if len(self.marginal_estimators) != self.dim:
+            raise ValueError("copula estimator marginal arity must equal dim.")
+        if int(getattr(copula_prototype, "dim", -1)) != self.dim:
+            raise ValueError("copula estimator prototype dimension must equal dim.")
+        self.copula_prototype = copula_prototype
         self.name = name
         self.keys = keys
 
@@ -378,26 +515,26 @@ class CopulaEstimator(ParameterEstimator):
         )
 
     def estimate(
-        self, nobs: float | None, suff_stat: tuple[tuple[Any, ...], np.ndarray, np.ndarray]
+        self, nobs: float | None, suff_stat: CopulaIFMStatistics
     ) -> CopulaDistribution:
         """Estimate marginals, transform buffered data by PIT, and estimate the copula core."""
-        marg_stats, cols, w = suff_stat
-        marginals = [self.marginal_estimators[i].estimate(nobs, marg_stats[i]) for i in range(self.dim)]
+        checked = _validate_ifm_statistics(suff_stat, self.dim)
+        marginals = [
+            self.marginal_estimators[i].estimate(
+                checked.marginal_effective_count,
+                checked.marginal_statistics[i],
+            )
+            for i in range(self.dim)
+        ]
 
         # IFM stage 2: PIT the buffered data through the freshly-fitted marginals, fit the copula on the scores.
-        fitted = CopulaDistribution(marginals, self.copula_estimator_prototype(), name=self.name, keys=self.keys)
-        if len(cols):
-            u = fitted._pit_columns(np.asarray(cols, dtype=np.float64))
+        fitted = CopulaDistribution(marginals, self.copula_prototype, name=self.name, keys=self.keys)
+        if len(checked.columns):
+            u = fitted._pit_columns(checked.columns)
             cop_enc = fitted.copula.dist_to_encoder().seq_encode(u)
             cop_acc = self.copula_estimator.accumulator_factory().make()
-            cop_acc.seq_update(cop_enc, np.asarray(w, dtype=np.float64).ravel(), None)
-            copula = self.copula_estimator.estimate(nobs, cop_acc.value())
+            cop_acc.seq_update(cop_enc, checked.weights, None)
+            copula = self.copula_estimator.estimate(checked.copula_effective_count, cop_acc.value())
         else:
             copula = fitted.copula
         return CopulaDistribution(marginals, copula, name=self.name, keys=self.keys)
-
-    def copula_estimator_prototype(self) -> SequenceEncodableProbabilityDistribution:
-        """A copula instance usable for PIT-encoding before the copula is refit -- the estimator's own default."""
-        # estimate() with an empty accumulator returns the copula's default (e.g. identity-correlation Gaussian).
-        empty = self.copula_estimator.accumulator_factory().make()
-        return self.copula_estimator.estimate(0.0, empty.value())

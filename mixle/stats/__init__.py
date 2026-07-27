@@ -687,6 +687,8 @@ __all__ = [
     "CopulaAccumulator",
     "CopulaAccumulatorFactory",
     "CopulaDataEncoder",
+    "CopulaIFMStatistics",
+    "CopulaQuantileError",
     "ExponentiallyModifiedGaussianDistribution",
     "ExponentiallyModifiedGaussianSampler",
     "ExponentiallyModifiedGaussianEstimator",
@@ -972,6 +974,8 @@ from mixle.stats.combinator.copula import (
     CopulaDataEncoder,
     CopulaDistribution,
     CopulaEstimator,
+    CopulaIFMStatistics,
+    CopulaQuantileError,
     CopulaSampler,
 )
 from mixle.stats.combinator.exponential_tilt import (
