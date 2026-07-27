@@ -27,6 +27,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations, nonnegative_weights
 
 
 class BetaBinomialDistribution(SequenceEncodableProbabilityDistribution):
@@ -142,7 +143,7 @@ class BetaBinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> "BetaBinomialDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
-        return BetaBinomialDataEncoder()
+        return BetaBinomialDataEncoder(self.n)
 
 
 class BetaBinomialEnumerator(DistributionEnumerator):
@@ -185,7 +186,8 @@ class BetaBinomialSampler(DistributionSampler):
 class BetaBinomialAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted first and second moments for beta-binomial estimation."""
 
-    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(self, n: int, name: str | None = None, keys: str | None = None) -> None:
+        self.n = n
         self.sum = 0.0
         self.sum2 = 0.0
         self.count = 0.0
@@ -194,8 +196,19 @@ class BetaBinomialAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: int, weight: float, estimate: BetaBinomialDistribution | None) -> None:
         """Accumulate weighted first and second moments for one count."""
-        self.sum += weight * x
-        self.sum2 += weight * x * x
+        weights = nonnegative_weights([weight], shape=(1,))
+        if weights[0] == 0.0:
+            return
+        value = int(
+            exact_integer_observations(
+                [x],
+                label="Beta-binomial observations",
+                minimum=0,
+                maximum=self.n,
+            )[0]
+        )
+        self.sum += weight * value
+        self.sum2 += weight * value * value
         self.count += weight
 
     def initialize(self, x: int, weight: float, rng: RandomState | None) -> None:
@@ -204,10 +217,16 @@ class BetaBinomialAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: BetaBinomialDistribution | None) -> None:
         """Accumulate weighted moments from encoded counts."""
-        xx = np.asarray(x, dtype=np.float64)
-        self.sum += float(np.dot(xx, weights))
-        self.sum2 += float(np.dot(xx * xx, weights))
-        self.count += float(np.sum(weights))
+        xx = exact_integer_observations(
+            x,
+            label="Beta-binomial observations",
+            minimum=0,
+            maximum=self.n,
+        ).astype(np.float64)
+        ww = nonnegative_weights(weights, shape=xx.shape)
+        self.sum += float(np.dot(xx, ww))
+        self.sum2 += float(np.dot(xx * xx, ww))
+        self.count += float(np.sum(ww))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize statistics from encoded counts."""
@@ -231,19 +250,20 @@ class BetaBinomialAccumulator(SequenceEncodableStatisticAccumulator):
 
     def acc_to_encoder(self) -> "BetaBinomialDataEncoder":
         """Return the encoder used by this accumulator."""
-        return BetaBinomialDataEncoder()
+        return BetaBinomialDataEncoder(self.n)
 
 
 class BetaBinomialAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for BetaBinomialAccumulator."""
 
-    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(self, n: int, name: str | None = None, keys: str | None = None) -> None:
+        self.n = n
         self.name = name
         self.keys = keys
 
     def make(self) -> BetaBinomialAccumulator:
         """Create a fresh beta-binomial accumulator."""
-        return BetaBinomialAccumulator(name=self.name, keys=self.keys)
+        return BetaBinomialAccumulator(self.n, name=self.name, keys=self.keys)
 
 
 class BetaBinomialEstimator(ParameterEstimator):
@@ -275,7 +295,7 @@ class BetaBinomialEstimator(ParameterEstimator):
 
     def accumulator_factory(self) -> BetaBinomialAccumulatorFactory:
         """Return an accumulator factory for beta-binomial moments."""
-        return BetaBinomialAccumulatorFactory(name=self.name, keys=self.keys)
+        return BetaBinomialAccumulatorFactory(self.n, name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> BetaBinomialDistribution:
         """Estimate beta-binomial shape parameters from weighted moments."""
@@ -305,12 +325,20 @@ class BetaBinomialEstimator(ParameterEstimator):
 class BetaBinomialDataEncoder(DataSequenceEncoder):
     """Encode beta-binomial counts as a float array."""
 
+    def __init__(self, n: int) -> None:
+        self.n = n
+
     def __str__(self) -> str:
-        return "BetaBinomialDataEncoder"
+        return f"BetaBinomialDataEncoder(n={self.n!r})"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, BetaBinomialDataEncoder)
+        return isinstance(other, BetaBinomialDataEncoder) and self.n == other.n
 
     def seq_encode(self, x: Sequence[int]) -> np.ndarray:
-        """Encode counts as a floating-point array."""
-        return np.asarray(x, dtype=np.float64)
+        """Encode exact counts in the fixed support ``{0, ..., n}``."""
+        return exact_integer_observations(
+            x,
+            label="Beta-binomial observations",
+            minimum=0,
+            maximum=self.n,
+        )
