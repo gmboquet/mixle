@@ -35,6 +35,32 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.multivariate._vector_contracts import (
+    batch as vector_batch,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    dimension as vector_dimension,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    event as vector_event,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    finite_scalar,
+    marginal_indices,
+    student_t_moments,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    matrix as matrix_parameter,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    vector as vector_parameter,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    weight as observation_weight,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    weights as observation_weights,
+)
 from mixle.utils.special import gammaln
 from mixle.utils.vector import cholesky_logdet
 
@@ -149,15 +175,15 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
             keys: Optional sufficient-statistic key.
 
         """
-        if dof <= 0.0 or not np.isfinite(dof):
-            raise ValueError("MultivariateStudentTDistribution requires dof > 0.")
-        mu = np.asarray(loc, dtype=float).copy()
-        shape = np.asarray(shape, dtype=float).copy()
+        checked_dof = finite_scalar(dof, label="multivariate Student-t dof", positive=True)
+        mu = vector_parameter(loc, label="multivariate Student-t location")
         dim = len(mu)
-        if shape.shape != (dim, dim):
-            raise ValueError("MultivariateStudentTDistribution shape must be a (p, p) matrix matching loc.")
-        if not np.allclose(shape, shape.T):
-            raise ValueError("MultivariateStudentTDistribution shape must be symmetric.")
+        shape = matrix_parameter(
+            shape,
+            label="multivariate Student-t scale",
+            dim=dim,
+            symmetric=True,
+        )
         # Positive-DEFINITE, not just semi-definite: unlike e.g. a Gaussian covariance, a singular
         # shape (a genuine zero eigenvalue, not merely a negative one) makes log|Sigma| = -inf and
         # Sigma^{-1} undefined, so the density is not well-defined. Checked directly on the raw shape
@@ -171,11 +197,13 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         if cholesky_logdet(shape) is None:
             raise ValueError("MultivariateStudentTDistribution requires a positive-definite scale matrix.")
 
-        self.dof = float(dof)
+        self.dof = checked_dof
         self.mu = mu
         self.shape = shape
         self.dim = dim
         self.inv_shape, self.log_det = _safe_inverse_and_logdet(shape)
+        for parameter in (self.mu, self.shape, self.inv_shape):
+            parameter.setflags(write=False)
         self.log_const = (
             gammaln((self.dof + dim) / 2.0)
             - gammaln(self.dof / 2.0)
@@ -218,7 +246,13 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         if unobs_idx.size == 0:
             raise ValueError("at least one dimension must be left unobserved")
         if obs_idx.size == 0:
-            return MultivariateStudentTDistribution(self.dof, mu.copy(), shape.copy())
+            return MultivariateStudentTDistribution(
+                self.dof,
+                mu.copy(),
+                shape.copy(),
+                name=self.name,
+                keys=self.keys,
+            )
         x_o = np.array([observed[i] for i in obs_idx], dtype=np.float64) - mu[obs_idx]
         s_oo = shape[np.ix_(obs_idx, obs_idx)]
         s_uo = shape[np.ix_(unobs_idx, obs_idx)]
@@ -229,7 +263,13 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         p_o = obs_idx.size
         scale_cond = ((self.dof + d_o) / (self.dof + p_o)) * (s_uu - s_uo @ solve[:, 1:])
         scale_cond = 0.5 * (scale_cond + scale_cond.T)
-        return MultivariateStudentTDistribution(self.dof + p_o, mu_cond, scale_cond)
+        return MultivariateStudentTDistribution(
+            self.dof + p_o,
+            mu_cond,
+            scale_cond,
+            name=self.name,
+            keys=self.keys,
+        )
 
     def marginal(self, keep: Sequence[int]) -> "MultivariateStudentTDistribution":
         """Return the marginal over the dimensions ``keep``: ``MVT(dof, mu[keep], shape[keep, keep])``.
@@ -237,14 +277,16 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         A multivariate Student-t marginal keeps the same degrees of freedom and simply restricts the
         location and shape to the kept coordinates (order preserved).
         """
-        idx = np.asarray(list(keep), dtype=int)
-        if idx.size == 0:
-            raise ValueError("keep at least one dimension")
-        if idx.min() < 0 or idx.max() >= self.dim:
-            raise ValueError("kept indices must be in [0, dim)")
+        idx = marginal_indices(keep, self.dim)
         mu = np.asarray(self.mu, dtype=np.float64)
         shape = np.asarray(self.shape, dtype=np.float64)
-        return MultivariateStudentTDistribution(self.dof, mu[idx], shape[np.ix_(idx, idx)])
+        return MultivariateStudentTDistribution(
+            self.dof,
+            mu[idx],
+            shape[np.ix_(idx, idx)],
+            name=self.name,
+            keys=self.keys,
+        )
 
     def density(self, x: Sequence[float] | np.ndarray) -> float:
         """Return the probability density at a single observation."""
@@ -252,13 +294,14 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
 
     def log_density(self, x: Sequence[float] | np.ndarray) -> float:
         """Return the log-density at a single observation."""
-        diff = np.asarray(x, dtype=float) - self.mu
+        diff = vector_event(x, self.dim, label="multivariate Student-t observation") - self.mu
         mahal = float(diff @ self.inv_shape @ diff)
         return self.log_const - 0.5 * (self.dof + self.dim) * np.log1p(mahal / self.dof)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
-        diff = x - self.mu
+        checked = vector_batch(x, self.dim, label="multivariate Student-t observations")
+        diff = checked - self.mu
         mahal = np.einsum("ij,jk,ik->i", diff, self.inv_shape, diff)
         return self.log_const - 0.5 * (self.dof + self.dim) * np.log1p(mahal / self.dof)
 
@@ -266,8 +309,8 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         """Engine-neutral vectorized log-density for encoded data."""
         return self.backend_log_density_from_params(
             engine.asarray(x),
-            engine.asarray(self.mu),
-            engine.asarray(self.inv_shape),
+            engine.asarray(self.mu.copy()),
+            engine.asarray(self.inv_shape.copy()),
             engine.asarray(self.log_const),
             engine.asarray(self.dof),
             self.dim,
@@ -318,7 +361,7 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
 
     def dist_to_encoder(self) -> "MultivariateStudentTDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
-        return MultivariateStudentTDataEncoder()
+        return MultivariateStudentTDataEncoder(self.dim)
 
 
 class MultivariateStudentTSampler(DistributionSampler):
@@ -347,8 +390,8 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
     """
 
     def __init__(self, dof: float, dim: int | None = None, keys: str | None = None) -> None:
-        self.dof = float(dof)
-        self.dim = dim
+        self.dof = finite_scalar(dof, label="multivariate Student-t dof", positive=True)
+        self.dim = vector_dimension(dim, label="multivariate Student-t dimension", allow_none=True)
         self.count = 0.0
         self.sum_u = 0.0
         self.sum_ux = np.zeros(dim) if dim is not None else None
@@ -356,6 +399,7 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def _ensure_dim(self, p: int) -> None:
+        p = vector_dimension(p, label="multivariate Student-t dimension")
         if self.dim is None:
             self.dim = p
         if self.sum_ux is None:
@@ -365,6 +409,12 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
     def _weight_for(self, diff: np.ndarray, estimate: MultivariateStudentTDistribution | None) -> float:
         if estimate is None:
             return 1.0
+        if (
+            not isinstance(estimate, MultivariateStudentTDistribution)
+            or estimate.dim != self.dim
+            or estimate.dof != self.dof
+        ):
+            raise ValueError("Student-t accumulator estimate must match its configured dimension and dof")
         mahal = float(diff @ estimate.inv_shape @ diff)
         return (estimate.dof + estimate.dim) / (estimate.dof + mahal)
 
@@ -372,11 +422,15 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
         self, x: Sequence[float] | np.ndarray, weight: float, estimate: MultivariateStudentTDistribution | None
     ) -> None:
         """Accumulate one EM reweighted vector observation."""
-        xx = np.asarray(x, dtype=float)
-        self._ensure_dim(len(xx))
+        if self.dim is None:
+            xx = vector_parameter(x, label="multivariate Student-t observation")
+            self._ensure_dim(len(xx))
+        else:
+            xx = vector_event(x, self.dim, label="multivariate Student-t observation")
+        checked_weight = observation_weight(weight, label="multivariate Student-t observation weight")
         u = self._weight_for(xx - estimate.mu, estimate) if estimate is not None else 1.0
-        wu = weight * u
-        self.count += weight
+        wu = checked_weight * u
+        self.count += checked_weight
         self.sum_u += wu
         self.sum_ux += wu * xx
         self.sum_uxx += wu * np.outer(xx, xx)
@@ -387,18 +441,34 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: MultivariateStudentTDistribution | None) -> None:
         """Accumulate EM reweighted statistics from encoded vectors."""
-        self._ensure_dim(x.shape[1])
+        if self.dim is None:
+            raw = np.asarray(x, dtype=np.float64)
+            if raw.ndim != 2 or raw.shape[1] == 0:
+                raise ValueError("multivariate Student-t observations must have exact shape (N, D) with D > 0")
+            self._ensure_dim(raw.shape[1])
+        checked = vector_batch(x, self.dim, label="multivariate Student-t observations")
+        checked_weights = observation_weights(
+            weights,
+            len(checked),
+            label="multivariate Student-t observation weights",
+        )
         if estimate is None:
-            u = np.ones(x.shape[0])
+            u = np.ones(checked.shape[0])
         else:
-            diff = x - estimate.mu
+            if (
+                not isinstance(estimate, MultivariateStudentTDistribution)
+                or estimate.dim != self.dim
+                or estimate.dof != self.dof
+            ):
+                raise ValueError("Student-t accumulator estimate must match its configured dimension and dof")
+            diff = checked - estimate.mu
             mahal = np.einsum("ij,jk,ik->i", diff, estimate.inv_shape, diff)
             u = (estimate.dof + estimate.dim) / (estimate.dof + mahal)
-        wu = weights * u
-        self.count += float(np.sum(weights, dtype=np.float64))
+        wu = checked_weights * u
+        self.count += float(np.sum(checked_weights, dtype=np.float64))
         self.sum_u += float(np.sum(wu, dtype=np.float64))
-        self.sum_ux += x.T @ wu
-        self.sum_uxx += (x * wu[:, None]).T @ x
+        self.sum_ux += checked.T @ wu
+        self.sum_uxx += (checked * wu[:, None]).T @ checked
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize statistics from encoded vectors."""
@@ -406,9 +476,9 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, float, np.ndarray, np.ndarray]) -> "MultivariateStudentTAccumulator":
         """Merge another multivariate Student-t sufficient-statistic tuple."""
-        count, sum_u, sum_ux, sum_uxx = suff_stat
+        count, sum_u, sum_ux, sum_uxx, inferred_dim = student_t_moments(suff_stat, self.dim)
         if sum_ux is not None:
-            self._ensure_dim(len(sum_ux))
+            self._ensure_dim(inferred_dim)
             self.sum_ux += sum_ux
             self.sum_uxx += sum_uxx
         self.count += count
@@ -417,27 +487,34 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self) -> tuple[float, float, np.ndarray | None, np.ndarray | None]:
         """Return count, latent-weight total, weighted sum, and weighted second moment."""
-        return self.count, self.sum_u, self.sum_ux, self.sum_uxx
+        return (
+            self.count,
+            self.sum_u,
+            None if self.sum_ux is None else self.sum_ux.copy(),
+            None if self.sum_uxx is None else self.sum_uxx.copy(),
+        )
 
     def from_value(
         self, x: tuple[float, float, np.ndarray | None, np.ndarray | None]
     ) -> "MultivariateStudentTAccumulator":
         """Replace accumulator contents from sufficient statistics."""
-        self.count, self.sum_u, self.sum_ux, self.sum_uxx = x
-        self.dim = None if x[2] is None else len(x[2])
+        self.count, self.sum_u, self.sum_ux, self.sum_uxx, self.dim = student_t_moments(
+            x,
+            self.dim,
+        )
         return self
 
     def acc_to_encoder(self) -> "MultivariateStudentTDataEncoder":
         """Return the encoder used by this accumulator."""
-        return MultivariateStudentTDataEncoder()
+        return MultivariateStudentTDataEncoder(self.dim)
 
 
 class MultivariateStudentTAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for MultivariateStudentTAccumulator."""
 
     def __init__(self, dof: float, dim: int | None = None, keys: str | None = None) -> None:
-        self.dof = dof
-        self.dim = dim
+        self.dof = finite_scalar(dof, label="multivariate Student-t dof", positive=True)
+        self.dim = vector_dimension(dim, label="multivariate Student-t dimension", allow_none=True)
         self.keys = keys
 
     def make(self) -> MultivariateStudentTAccumulator:
@@ -457,8 +534,7 @@ class MultivariateStudentTEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        if dof <= 0.0 or not np.isfinite(dof):
-            raise ValueError("MultivariateStudentTEstimator requires dof > 0.")
+        checked_dof = finite_scalar(dof, label="multivariate Student-t dof", positive=True)
         if pseudo_count is not None:
             # Unlike the raw-moment method-of-moments estimators (Gumbel, Weibull, ...), this is an
             # EM/IRLS estimator: the accumulated sufficient statistic (sum_u, sum_ux, sum_uxx) is
@@ -474,9 +550,9 @@ class MultivariateStudentTEstimator(ParameterEstimator):
                 "expectation under the model, so there is no small, safe way to blend a prior "
                 "pseudo-sample into it. Pass pseudo_count=None (the default)."
             )
-        self.dof = float(dof)
-        self.dim = dim
-        self.min_ridge = min_ridge
+        self.dof = checked_dof
+        self.dim = vector_dimension(dim, label="multivariate Student-t dimension", allow_none=True)
+        self.min_ridge = finite_scalar(min_ridge, label="multivariate Student-t min_ridge", positive=True)
         self.name = name
         self.keys = keys
 
@@ -488,16 +564,31 @@ class MultivariateStudentTEstimator(ParameterEstimator):
         self, nobs: float | None, suff_stat: tuple[float, float, np.ndarray | None, np.ndarray | None]
     ) -> MultivariateStudentTDistribution:
         """Estimate location and scale from EM reweighted statistics."""
-        count, sum_u, sum_ux, sum_uxx = suff_stat
+        count, sum_u, sum_ux, sum_uxx, inferred_dim = student_t_moments(suff_stat, self.dim)
         if sum_ux is None or count <= 0.0 or sum_u <= 0.0:
-            p = self.dim if self.dim is not None else 1
+            if self.dim is None:
+                raise ValueError("cannot infer Student-t dimension from an empty sufficient statistic")
+            p = self.dim
             return MultivariateStudentTDistribution(self.dof, np.zeros(p), np.eye(p), name=self.name, keys=self.keys)
+        if self.dim is not None and inferred_dim != self.dim:
+            raise ValueError("Student-t sufficient statistic dimension does not match estimator")
 
         mu = sum_ux / sum_u
         # Sigma = sum_i w_i u_i (x_i - mu)(x_i - mu)' / sum_i w_i
         scatter = sum_uxx - np.outer(mu, sum_ux) - np.outer(sum_ux, mu) + sum_u * np.outer(mu, mu)
         shape = scatter / count
         shape = 0.5 * (shape + shape.T)
+        scale = max(
+            float(np.linalg.norm(sum_uxx, ord=2)),
+            float(np.linalg.norm(np.outer(mu, sum_ux), ord=2)),
+            float(np.linalg.norm(sum_u * np.outer(mu, mu), ord=2)),
+            1.0,
+        ) / count
+        minimum_eigenvalue = float(np.linalg.eigvalsh(shape)[0])
+        if minimum_eigenvalue < -1.0e-6 * scale:
+            raise ValueError("Student-t sufficient statistics imply a non-positive-semidefinite scale")
+        if minimum_eigenvalue < 0.0:
+            shape = shape + np.eye(len(mu)) * -minimum_eigenvalue
         shape = shape + np.eye(len(mu)) * self.min_ridge
         return MultivariateStudentTDistribution(self.dof, mu, shape, name=self.name, keys=self.keys)
 
@@ -505,17 +596,20 @@ class MultivariateStudentTEstimator(ParameterEstimator):
 class MultivariateStudentTDataEncoder(DataSequenceEncoder):
     """Encode a sequence of length-p real vectors into an (n, p) float array."""
 
+    def __init__(self, dim: int | None = None) -> None:
+        self.dim = vector_dimension(dim, label="multivariate Student-t dimension", allow_none=True)
+
     def __str__(self) -> str:
-        return "MultivariateStudentTDataEncoder"
+        return "MultivariateStudentTDataEncoder(dim=%s)" % self.dim
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, MultivariateStudentTDataEncoder)
+        return isinstance(other, MultivariateStudentTDataEncoder) and other.dim == self.dim
 
     def seq_encode(self, x: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
         """Encode observations as an ``(n, p)`` floating-point matrix."""
-        rv = np.asarray(x, dtype=np.float64)
-        if rv.ndim != 2:
-            rv = rv.reshape((len(x), -1))
-        if rv.size and not np.all(np.isfinite(rv)):
-            raise ValueError("MultivariateStudentTDistribution requires finite real-vector observations.")
-        return rv
+        raw = np.asarray(x, dtype=np.float64)
+        if self.dim is None:
+            if raw.ndim != 2 or raw.shape[1] == 0:
+                raise ValueError("multivariate Student-t observations must have exact shape (N, D) with D > 0")
+            self.dim = raw.shape[1]
+        return vector_batch(raw, self.dim, label="multivariate Student-t observations").copy()

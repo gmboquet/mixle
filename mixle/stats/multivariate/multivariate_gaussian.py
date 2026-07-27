@@ -30,7 +30,37 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias
+from mixle.stats.multivariate._vector_contracts import (
+    batch as vector_batch,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    dimension as vector_dimension,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    event as vector_event,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    finite_scalar,
+    gaussian_moments,
+    gaussian_prior_statistics,
+    marginal_indices,
+    pooled_gaussian_covariance,
+    pseudo_counts,
+    require_pseudo_moments,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    matrix as matrix_parameter,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    vector as vector_parameter,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    weight as observation_weight,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    weights as observation_weights,
+)
+from mixle.utils.aliasing import MISSING, coalesce_alias
 
 _MAX_HEAL_EIGENVALUE_RATIO = 1e-4
 """Relative-tolerance bound on how negative ``_robust_cho_factor``'s worst eigenvalue may be before
@@ -253,10 +283,9 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         Args:
             mu: Mean vector.
             covar: Positive-definite covariance matrix. ``covariance`` is
-                accepted as an alias. A covariance that is asymmetric, or that is not positive-definite
-                only because of small float noise (e.g. float32/GPU EM accumulation error), is silently
-                symmetrized and/or jitter-healed -- see ``_robust_cho_factor``. Raises ``ValueError`` if
-                ``covar`` is substantively (not just numerically-noisy) non-positive-definite.
+                accepted as an alias. Public construction requires a finite,
+                symmetric, strictly positive-definite matrix; estimators
+                regularize their own numeric output before construction.
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate parameter prior over (mu, Lambda=covar^-1). A
@@ -267,9 +296,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         Attributes:
             dim: Dimension of the Gaussian.
             mu: Mean vector.
-            covar: Effective covariance matrix -- symmetrized, and self-healed if the input was only
-                PD after regularization (see ``_robust_cho_factor``). Always the exact matrix backing
-                ``chol``/``log_det``/``inv_covar``, so scoring and sampling agree.
+            covar: Validated covariance matrix backing scoring and sampling.
             chol: Cholesky factor when available.
             name: Optional diagnostic name.
             keys: Optional sufficient-statistic key.
@@ -278,27 +305,30 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
 
         """
         covar = coalesce_alias("covar", covar, "covariance", covariance, default=MISSING)
-        self.dim = len(mu)
-        self.mu = np.asarray(mu, dtype=float)
-        self.covar = np.asarray(covar, dtype=float)
-        self.covar = np.reshape(self.covar, (len(self.mu), len(self.mu)))
-        # self.covar is reassigned here to the EXACT (symmetrized, and self-healed if necessary)
-        # covariance _robust_cho_factor actually factorized -- not the possibly asymmetric/indefinite
-        # input -- so every downstream reader of self.covar (the sampler, __str__, condition/marginal,
-        # the Fisher view, ...) agrees with what chol/log_det/inv_covar drive scoring from. Previously
-        # self.covar kept the raw input, so an accepted-but-invalid covariance (asymmetric, or PD only
-        # after healing) made scoring and sampling silently disagree about the effective covariance.
-        self.chol, self.covar = _robust_cho_factor(self.covar)
+        self.mu = vector_parameter(mu, label="multivariate Gaussian mean")
+        self.dim = len(self.mu)
+        self.covar = matrix_parameter(
+            covar,
+            label="multivariate Gaussian covariance",
+            dim=self.dim,
+            symmetric=True,
+        )
+        try:
+            self.chol = scipy.linalg.cho_factor(self.covar)
+        except (scipy.linalg.LinAlgError, np.linalg.LinAlgError) as exc:
+            raise ValueError(
+                "multivariate Gaussian covariance must be strictly positive definite; "
+                "regularize estimator output explicitly before construction"
+            ) from exc
         self.name = name
         self.keys = keys
 
-        if self.chol is None:
-            raise RuntimeError("Cannot obtain Choleskey factorization for covariance matrix.")
-        else:
-            self.use_lstsq = False
-            self.log_det = float(2.0 * np.log(vec.diag(self.chol[0])).sum())
-            self.inv_covar = scipy.linalg.cho_solve(self.chol, np.eye(self.dim))
-            self.chol_const = -0.5 * (len(self.mu) * np.log(2.0 * pi) + self.log_det)
+        self.use_lstsq = False
+        self.log_det = float(2.0 * np.log(vec.diag(self.chol[0])).sum())
+        self.inv_covar = scipy.linalg.cho_solve(self.chol, np.eye(self.dim))
+        self.chol_const = -0.5 * (len(self.mu) * np.log(2.0 * pi) + self.log_det)
+        for parameter in (self.mu, self.covar, self.chol[0], self.inv_covar):
+            parameter.setflags(write=False)
 
         self.set_prior(prior)
 
@@ -315,6 +345,8 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
 
         if self.has_conj_prior:
             self.conj_prior_params = prior.get_parameters()
+            if self.conj_prior_params[0].shape != (self.dim,):
+                raise ValueError("multivariate Gaussian conjugate prior dimension must match the distribution")
             self.e_log_det = prior.expected_log_det()
         else:
             self.conj_prior_params = None
@@ -377,7 +409,8 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
             raise RuntimeError("Least-squares log-likelihood evaluation not supported.")
         else:
             try:
-                diff = self.mu - x
+                checked = vector_event(x, self.dim, label="multivariate Gaussian observation")
+                diff = self.mu - checked
                 soln = scipy.linalg.cho_solve(self.chol, diff.T).T
                 rv = self.chol_const - 0.5 * ((diff * soln).sum())
                 return rv
@@ -395,7 +428,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         """
         from scipy.stats import chi2
 
-        diff = self.mu - np.asarray(x, dtype=float)
+        diff = self.mu - vector_event(x, self.dim, label="multivariate Gaussian observation")
         soln = scipy.linalg.cho_solve(self.chol, diff.T).T
         maha2 = float((diff * soln).sum())
         return float(chi2.cdf(maha2, df=self.dim))
@@ -438,7 +471,8 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
             # on a transposed RHS copies in/out and rescans for finiteness on every EM iteration.
             # Memory-neutral by design: an extra precomputed factor here (one more d x d array per
             # component) tipped the placement planner's byte budget in memory-constrained plans.
-            diff = x - self.mu
+            checked = vector_batch(x, self.dim, label="multivariate Gaussian observations")
+            diff = checked - self.mu
             soln = np.dot(diff, self.inv_covar)
             rv = self.chol_const - 0.5 * (diff * soln).sum(axis=1)
             return rv
@@ -456,8 +490,8 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         """Engine-neutral vectorized log-density for encoded data."""
         return self.backend_log_density_from_params(
             engine.asarray(x),
-            engine.asarray(self.mu),
-            engine.asarray(self.inv_covar),
+            engine.asarray(self.mu.copy()),
+            engine.asarray(self.inv_covar.copy()),
             engine.asarray(self.log_det),
             engine,
         )
@@ -545,7 +579,13 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         if unobs_idx.size == 0:
             raise ValueError("at least one dimension must be left unobserved")
         if obs_idx.size == 0:
-            return MultivariateGaussianDistribution(self.mu.copy(), self.covar.copy())
+            return MultivariateGaussianDistribution(
+                self.mu.copy(),
+                self.covar.copy(),
+                name=self.name,
+                keys=self.keys,
+                prior=self.prior,
+            )
         x_o = np.array([observed[i] for i in obs_idx], dtype=np.float64)
         cov = np.asarray(self.covar, dtype=np.float64)
         s_oo = cov[np.ix_(obs_idx, obs_idx)]
@@ -555,7 +595,10 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         mu_cond = self.mu[unobs_idx] + s_uo @ solve[:, 0]
         cov_cond = s_uu - s_uo @ solve[:, 1:]
         cov_cond = 0.5 * (cov_cond + cov_cond.T)
-        return MultivariateGaussianDistribution(mu_cond, cov_cond)
+        # A Normal-Wishart law on the original precision is not closed under
+        # conditioning the represented observation. Preserve identity metadata,
+        # but clear that incompatible parameter prior on a dimension-changing result.
+        return MultivariateGaussianDistribution(mu_cond, cov_cond, name=self.name, keys=self.keys)
 
     def marginal(self, keep: Sequence[int]) -> "MultivariateGaussianDistribution":
         """Return the marginal Gaussian over dimensions ``keep``.
@@ -563,12 +606,15 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         ``N(mu, Sigma)`` marginalized to index set ``keep`` is ``N(mu[keep], Sigma[keep, keep])``. The
         order of ``keep`` is preserved, so the result's dimensions follow the given order.
         """
-        idx = np.asarray(list(keep), dtype=int)
-        if idx.size == 0:
-            raise ValueError("keep at least one dimension")
-        if idx.min() < 0 or idx.max() >= self.dim:
-            raise ValueError("kept indices must be in [0, dim)")
-        return MultivariateGaussianDistribution(self.mu[idx], np.asarray(self.covar)[np.ix_(idx, idx)])
+        idx = marginal_indices(keep, self.dim)
+        prior = self.prior if len(idx) == self.dim and np.array_equal(idx, np.arange(self.dim)) else None
+        return MultivariateGaussianDistribution(
+            self.mu[idx],
+            np.asarray(self.covar)[np.ix_(idx, idx)],
+            name=self.name,
+            keys=self.keys,
+            prior=prior,
+        )
 
     def estimator(self, pseudo_count: float | None = None):
         """Return an estimator initialized from this distribution's shape.
@@ -584,11 +630,15 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
 
         """
         if pseudo_count is None:
-            return MultivariateGaussianEstimator(name=self.name, prior=self.prior)
+            return MultivariateGaussianEstimator(name=self.name, keys=self.keys, prior=self.prior)
         else:
             pseudo_count = (pseudo_count, pseudo_count)
             return MultivariateGaussianEstimator(
-                pseudo_count=pseudo_count, suff_stat=(self.mu, self.covar), name=self.name, prior=self.prior
+                pseudo_count=pseudo_count,
+                suff_stat=(self.mu, self.covar),
+                name=self.name,
+                keys=self.keys,
+                prior=self.prior,
             )
 
     def dist_to_encoder(self) -> "MultivariateGaussianDataEncoder":
@@ -648,7 +698,7 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             name: Optional diagnostic name.
 
         """
-        self.dim = dim
+        self.dim = vector_dimension(dim, label="multivariate Gaussian dimension", allow_none=True)
         self.count = 0.0
         self.keys = keys
         self.name = name
@@ -673,16 +723,22 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        x = np.asarray(x, dtype=float)
         if self.dim is None:
-            self.dim = len(x)
+            checked = vector_parameter(x, label="multivariate Gaussian observation")
+            self.dim = len(checked)
             self.sum = vec.zeros(self.dim)
             self.sum2 = vec.zeros((self.dim, self.dim))
-
-        x_weight = x * weight
+        else:
+            checked = vector_event(x, self.dim, label="multivariate Gaussian observation")
+        if estimate is not None and (
+            not isinstance(estimate, MultivariateGaussianDistribution) or estimate.dim != self.dim
+        ):
+            raise ValueError("multivariate Gaussian accumulator estimate must have the configured dimension")
+        checked_weight = observation_weight(weight, label="multivariate Gaussian observation weight")
+        x_weight = checked * checked_weight
         self.sum += x_weight
-        self.sum2 += vec.outer(x, x_weight)
-        self.count += weight
+        self.sum2 += vec.outer(checked, x_weight)
+        self.count += checked_weight
 
     def initialize(self, x: np.ndarray, weight: float, rng: RandomState | None) -> None:
         """Initialize the accumulator with a weighted observation. Calls update().
@@ -711,17 +767,29 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         if self.dim is None:
-            self.dim = x.shape[1]
+            raw = np.asarray(x, dtype=np.float64)
+            if raw.ndim != 2 or raw.shape[1] == 0:
+                raise ValueError("multivariate Gaussian observations must have exact shape (N, D) with D > 0")
+            self.dim = raw.shape[1]
             self.sum = vec.zeros(self.dim)
             self.sum2 = vec.zeros((self.dim, self.dim))
-
-        x_weight = np.multiply(x.T, weights)
-        self.count += weights.sum()
+        checked = vector_batch(x, self.dim, label="multivariate Gaussian observations")
+        checked_weights = observation_weights(
+            weights,
+            len(checked),
+            label="multivariate Gaussian observation weights",
+        )
+        if estimate is not None and (
+            not isinstance(estimate, MultivariateGaussianDistribution) or estimate.dim != self.dim
+        ):
+            raise ValueError("multivariate Gaussian accumulator estimate must have the configured dimension")
+        x_weight = np.multiply(checked.T, checked_weights)
+        self.count += checked_weights.sum()
         self.sum += x_weight.sum(axis=1)
         # the weighted second moment sum_i w_i x_i x_i^T is (x.T * w) @ x -- a single BLAS gemm.
         # np.einsum runs the naive C loop here (no BLAS), which dominated MVN EM at ~76% of fit time
         # (20-36x slower than matmul on this contraction); the plain matmul is exact and multithreaded.
-        self.sum2 += x_weight @ x
+        self.sum2 += x_weight @ checked
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Vectorized initialization of the accumulator. Calls seq_update().
@@ -748,24 +816,33 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             This accumulator.
 
         """
-        if suff_stat[0] is not None and self.sum is not None:
-            self.sum += suff_stat[0]
-            self.sum2 += suff_stat[1]
-            self.count += suff_stat[2]
-
-        elif suff_stat[0] is not None and self.sum is None:
+        sum_x, sum_xx, count, inferred_dim = gaussian_moments(
+            suff_stat,
+            self.dim,
+            diagonal=False,
+        )
+        if sum_x is not None and self.sum is not None:
+            self.sum += sum_x
+            self.sum2 += sum_xx
+            self.count += count
+        elif sum_x is not None and self.sum is None:
             # copy on adopt: value() hands out the LIVE arrays, so adopting the caller's reference
             # makes every later in-place += here mutate the DONOR accumulator too (chunk combines
             # and keyed pooling both hit this -- caught by the keyed-protocol sweep)
-            self.sum = np.asarray(suff_stat[0], dtype=np.float64).copy()
-            self.sum2 = np.asarray(suff_stat[1], dtype=np.float64).copy()
-            self.count = suff_stat[2]
+            self.dim = inferred_dim
+            self.sum = sum_x.copy()
+            self.sum2 = sum_xx.copy()
+            self.count = count
 
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, float]:
         """Return ``(sum, sum_outer, count)`` sufficient statistics."""
-        return self.sum, self.sum2, self.count
+        return (
+            None if self.sum is None else self.sum.copy(),
+            None if self.sum2 is None else self.sum2.copy(),
+            self.count,
+        )
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray, float]) -> "MultivariateGaussianAccumulator":
         """Replace this accumulator's sufficient statistics.
@@ -778,9 +855,11 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             This accumulator.
 
         """
-        self.sum = None if x[0] is None else np.asarray(x[0], dtype=np.float64).copy()
-        self.sum2 = None if x[1] is None else np.asarray(x[1], dtype=np.float64).copy()
-        self.count = x[2]
+        self.sum, self.sum2, self.count, self.dim = gaussian_moments(
+            x,
+            self.dim,
+            diagonal=False,
+        )
         return self
 
     def acc_to_encoder(self) -> "MultivariateGaussianDataEncoder":
@@ -805,7 +884,7 @@ class MultivariateGaussianAccumulatorFactory(StatisticAccumulatorFactory):
             name: Optional diagnostic name.
 
         """
-        self.dim = dim
+        self.dim = vector_dimension(dim, label="multivariate Gaussian dimension", allow_none=True)
         self.keys = keys
         self.name = name
 
@@ -847,9 +926,9 @@ class MultivariateGaussianEstimator(ParameterEstimator):
                 ``None`` (default) uses a tiny ``1e-8``.
             ridge (Optional[float]): Relative ridge coefficient. ``None`` (default) uses ``1e-6``;
                 the covariance is regularized as ``cov + eps * I`` with
-                ``eps = max(min_covar, ridge * trace(cov) / d)`` so a singular / non-finite
-                covariance (a component holding < d points) cannot break the Cholesky factor.
-                Bias is negligible at the defaults.
+                ``eps = max(min_covar, ridge * trace(cov) / d)`` so a singular empirical
+                covariance (a component holding fewer than ``d`` points) remains factorizable.
+                Non-finite statistics are rejected. Bias is negligible at the defaults.
             track_conditioning (bool): Opt-in numerics-conditioning receipt. When ``True``,
                 ``estimate`` computes the eigenspectrum of the RAW (pre-ridge) empirical covariance
                 and attaches it to the returned distribution as ``.conditioning_receipt`` -- a
@@ -870,29 +949,50 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             keys: Optional sufficient-statistic key.
         """
 
-        dim_loc = (
-            dim
-            if dim is not None
-            else (
-                (None if suff_stat[1] is None else int(np.sqrt(np.size(suff_stat[1]))))
-                if suff_stat[0] is None
-                else len(suff_stat[0])
-            )
+        if suff_stat is None:
+            suff_stat = (None, None)
+        self.prior_mu, self.prior_covar, self.dim = gaussian_prior_statistics(
+            suff_stat,
+            dim,
+            diagonal=False,
         )
-
-        self.dim = dim_loc
-        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
-        self.pseudo_count = pseudo_count
-        self.prior_mu = None if suff_stat[0] is None else np.reshape(suff_stat[0], dim_loc)
-        self.prior_covar = None if suff_stat[1] is None else np.reshape(suff_stat[1], (dim_loc, dim_loc))
+        self.pseudo_count = pseudo_counts(
+            pseudo_count,
+            label="multivariate Gaussian pseudo-count",
+        )
+        require_pseudo_moments(self.pseudo_count, self.prior_mu, self.prior_covar)
         self.name = name
         self.keys = keys
         self.prior = prior
         self.has_conj_prior = isinstance(prior, NormalWishartDistribution)
-        self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
-        self.ridge = 1.0e-6 if ridge is None else float(ridge)
+        if self.has_conj_prior:
+            prior_dim = len(prior.get_parameters()[0])
+            if self.dim is None:
+                self.dim = prior_dim
+            elif self.dim != prior_dim:
+                raise ValueError(
+                    "multivariate Gaussian estimator prior dimension must match its configured dimension"
+                )
+        self.min_covar = finite_scalar(
+            1.0e-8 if min_covar is None else min_covar,
+            label="multivariate Gaussian min_covar",
+            positive=True,
+        )
+        self.ridge = finite_scalar(
+            1.0e-6 if ridge is None else ridge,
+            label="multivariate Gaussian ridge",
+            nonnegative=True,
+        )
+        if not isinstance(track_conditioning, bool):
+            raise TypeError("multivariate Gaussian track_conditioning must be a bool")
         self.track_conditioning = track_conditioning
-        self.degenerate_ratio = float(degenerate_ratio)
+        self.degenerate_ratio = finite_scalar(
+            degenerate_ratio,
+            label="multivariate Gaussian degenerate_ratio",
+            positive=True,
+        )
+        if self.degenerate_ratio > 1.0:
+            raise ValueError("multivariate Gaussian degenerate_ratio must not exceed one")
 
     def accumulator_factory(self) -> "MultivariateGaussianAccumulatorFactory":
         """Return an accumulator factory matching this estimator."""
@@ -940,7 +1040,13 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             covar = w_n_inv / nu_n
 
         posterior = NormalWishartDistribution(m_n, kappa_n, w_n, nu_n)
-        return MultivariateGaussianDistribution(m_n, covar, name=self.name, prior=posterior)
+        return MultivariateGaussianDistribution(
+            m_n,
+            covar,
+            name=self.name,
+            keys=self.keys,
+            prior=posterior,
+        )
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, float]
@@ -960,36 +1066,64 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             MultivariateGaussianDistribution
 
         """
+        sum_x, sum_xx, count, inferred_dim = gaussian_moments(
+            suff_stat,
+            self.dim,
+            diagonal=False,
+        )
+        if sum_x is None:
+            if self.dim is None:
+                raise ValueError("cannot infer multivariate Gaussian dimension from empty sufficient statistics")
+            sum_x = vec.zeros(self.dim)
+            sum_xx = vec.zeros((self.dim, self.dim))
+            inferred_dim = self.dim
+        checked_stat = (sum_x, sum_xx, count)
         if self.has_conj_prior:
-            return self._estimate_conjugate(suff_stat)
+            return self._estimate_conjugate(checked_stat)
 
-        nobs = suff_stat[2]
+        nobs = count
         pc1, pc2 = self.pseudo_count
 
         if nobs <= 0:
-            # zero-responsibility component: fall back to the prior mean (or zeros)
-            # rather than dividing by zero and emitting a NaN mean.
-            d = self.dim if self.dim is not None else len(suff_stat[0])
+            d = inferred_dim
             mu = np.asarray(self.prior_mu, dtype=float) if self.prior_mu is not None else vec.zeros(d)
             raw_covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.eye(d)
             covar = self._regularize_covar(raw_covar)
-            dist = MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.keys)
+            dist = MultivariateGaussianDistribution(
+                mu,
+                covar,
+                name=self.name,
+                keys=self.keys,
+                prior=self.prior,
+            )
             self._attach_conditioning_receipt(dist, raw_covar)
             return dist
 
-        if pc1 is not None and self.prior_mu is not None:
-            mu = (suff_stat[0] + pc1 * self.prior_mu) / (nobs + pc1)
+        if pc1 not in (None, 0.0):
+            mu = (sum_x + pc1 * self.prior_mu) / (nobs + pc1)
         else:
-            mu = suff_stat[0] / nobs
+            mu = sum_x / nobs
 
-        if pc2 is not None and self.prior_covar is not None:
-            raw_covar = (suff_stat[1] + (pc2 * self.prior_covar) - vec.outer(mu, mu * nobs)) / (nobs + pc2)
-        else:
-            raw_covar = (suff_stat[1] / nobs) - vec.outer(mu, mu)
+        raw_covar = pooled_gaussian_covariance(
+            sum_x,
+            sum_xx,
+            nobs,
+            mu,
+            pc2,
+            self.prior_mu,
+            self.prior_covar,
+            diagonal=False,
+        )
 
         covar = self._regularize_covar(raw_covar)
 
-        dist = MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.keys)
+        dist = MultivariateGaussianDistribution(
+            mu,
+            covar,
+            name=self.name,
+            keys=self.keys,
+            prior=self.prior,
+        )
         self._attach_conditioning_receipt(dist, raw_covar)
         return dist
 
@@ -1004,14 +1138,15 @@ class MultivariateGaussianEstimator(ParameterEstimator):
     def _regularize_covar(self, covar: np.ndarray) -> np.ndarray:
         """P1 covariance ridge: cov <- cov + eps*I with eps = max(min_covar, ridge*trace/d).
 
-        Clamps non-finite entries to zero first so a singular / NaN covariance from a
-        component holding fewer than d points cannot break the Cholesky factorization.
-        Symmetrizes to absorb accumulation round-off. Bias is negligible at the defaults.
+        The sufficient-statistic validator rejects non-finite input before this point.
+        Symmetrization absorbs accumulation round-off. Bias is negligible at the defaults.
         """
         covar = np.asarray(covar, dtype=float)
-        d = covar.shape[0]
+        if covar.shape != (self.dim or len(covar), self.dim or len(covar)):
+            raise ValueError("multivariate Gaussian covariance regularizer requires a square matrix")
         if not np.isfinite(covar).all():
-            covar = np.where(np.isfinite(covar), covar, 0.0)
+            raise ValueError("multivariate Gaussian covariance must contain only finite values")
+        d = covar.shape[0]
         covar = 0.5 * (covar + covar.T)
         trace = float(np.trace(covar))
         eps = max(self.min_covar, self.ridge * trace / d if trace > 0.0 else 0.0)
@@ -1028,7 +1163,7 @@ class MultivariateGaussianDataEncoder(DataSequenceEncoder):
             dim: Optional Gaussian dimension. Inferred from data when omitted.
 
         """
-        self.dim = dim
+        self.dim = vector_dimension(dim, label="multivariate Gaussian dimension", allow_none=True)
 
     def __str__(self) -> str:
         """Return a readable encoder summary."""
@@ -1057,11 +1192,9 @@ class MultivariateGaussianDataEncoder(DataSequenceEncoder):
             Encoded data matrix with shape (len(x), dim).
 
         """
-        self.dim = len(x[0]) if self.dim is None else self.dim
-        rv = np.reshape(np.asarray(x, dtype=float), (-1, self.dim))
-        if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
-            # the same encode-time gate the univariate Gaussian applies: scoring previously relied
-            # on cho_solve's check_finite to reject NaN loudly; the gemm path (no LAPACK scan) needs
-            # the contract enforced where every fit/score pass already runs exactly once
-            raise ValueError("MultivariateGaussianDistribution requires finite observations.")
-        return rv
+        raw = np.asarray(x, dtype=np.float64)
+        if self.dim is None:
+            if raw.ndim != 2 or raw.shape[1] == 0:
+                raise ValueError("multivariate Gaussian observations must have exact shape (N, D) with D > 0")
+            self.dim = raw.shape[1]
+        return vector_batch(raw, self.dim, label="multivariate Gaussian observations").copy()

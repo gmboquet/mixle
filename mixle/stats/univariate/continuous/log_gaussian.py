@@ -25,7 +25,11 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.utils.aliasing import broadcast_pseudo_count
+from mixle.stats.univariate.continuous._gaussian_contracts import (
+    pooled_scalar_variance,
+    scalar_estimator_configuration,
+    scalar_gaussian_moments,
+)
 from mixle.utils.special import digamma
 
 
@@ -653,10 +657,12 @@ class LogGaussianEstimator(ParameterEstimator):
             keys (Optional[str]): String keys of LogGaussianEstimator instance for combining sufficient statistics.
 
         """
-        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
-        self.pseudo_count = pseudo_count
-        self.suff_stat = suff_stat
-        self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
+        configured_floor = 1.0e-8 if min_covar is None else min_covar
+        self.pseudo_count, self.suff_stat, self.min_covar = scalar_estimator_configuration(
+            pseudo_count,
+            suff_stat,
+            configured_floor,
+        )
         self.keys = keys
         self.name = name
         self.prior = prior
@@ -677,7 +683,9 @@ class LogGaussianEstimator(ParameterEstimator):
 
     def _estimate_conjugate(self, suff_stat: tuple[float, float, float, float]) -> "LogGaussianDistribution":
         """Closed-form NormalGamma conjugate posterior update on log-scale statistics."""
-        sum_x, sum_xx, nobs_loc1, nobs_loc2 = suff_stat
+        sum_x, sum_xx, count = scalar_gaussian_moments(suff_stat)
+        nobs_loc1 = count
+        nobs_loc2 = count
         sum_xxx = sum_x
         old_mu, old_lam, old_a, old_b = self.prior.get_parameters()
 
@@ -709,32 +717,36 @@ class LogGaussianEstimator(ParameterEstimator):
         ``suff_stat`` is ``(sum_log_x, sum_log_x2, count, count2)``. ``nobs``
         is accepted for estimator API consistency but is not used.
         """
+        log_x, log_x2, count = scalar_gaussian_moments(suff_stat)
+        checked_stat = (log_x, log_x2, count, count)
         if self.has_conj_prior:
-            return self._estimate_conjugate(suff_stat)
+            return self._estimate_conjugate(checked_stat)
 
-        log_x, log_x2 = suff_stat[0], suff_stat[1]
-        nobs_loc1, nobs_loc2 = suff_stat[2], suff_stat[3]
-
-        if nobs_loc1 == 0.0:
+        pc1, pc2 = self.pseudo_count
+        prior_mean, prior_variance = self.suff_stat
+        if pc1 not in (None, 0.0):
+            mu = (log_x + pc1 * prior_mean) / (count + pc1)
+        elif count > 0.0:
+            mu = log_x / count
+        elif prior_mean is not None:
+            mu = prior_mean
+        else:
             mu = 0.0
-        elif self.pseudo_count[0] is not None and self.suff_stat[0] is not None:
-            mu = (log_x + self.pseudo_count[0] * self.suff_stat[0]) / (nobs_loc1 + self.pseudo_count[0])
-        else:
-            mu = suff_stat[0] / nobs_loc1
 
-        if nobs_loc2 == 0.0:
-            sigma2 = self.min_covar
-        elif self.pseudo_count[1] is not None and self.suff_stat[1] is not None:
-            sigma2 = (suff_stat[1] - mu * mu * nobs_loc2 + self.pseudo_count[1] * self.suff_stat[1]) / (
-                nobs_loc2 + self.pseudo_count[1]
-            )
-        else:
-            # E[y^2] - E[y]^2 on the log scale (matches GaussianEstimator; the previous form was only
-            # correct when the two observation counts were equal)
-            sigma2 = log_x2 / nobs_loc2 - mu * mu
+        sigma2 = pooled_scalar_variance(
+            log_x,
+            log_x2,
+            count,
+            mu,
+            pc2,
+            prior_mean,
+            prior_variance,
+        )
+        if count == 0.0 and pc2 in (None, 0.0) and prior_variance is not None:
+            sigma2 = prior_variance
 
-        sigma2 = max(sigma2, self.min_covar, 1.0e-6 * sigma2)
-        return LogGaussianDistribution(mu, sigma2, name=self.name, keys=self.keys)
+        sigma2 = max(sigma2, self.min_covar)
+        return LogGaussianDistribution(mu, sigma2, name=self.name, keys=self.keys, prior=self.prior)
 
 
 class LogGaussianDataEncoder(DataSequenceEncoder):
