@@ -427,7 +427,10 @@ class GrammarLearningHelpersTestCase(unittest.TestCase):
         estimator = CategoricalDistribution({"a": 0.5, "b": 0.5}).estimator(pseudo_count=1.0)
         incompatible = HeterogeneousPCFGDistribution(
             binary_rules={"S": [("A", "A", 0.5)]},
-            terminal_rules={"S": [(CategoricalDistribution({"a": 1.0}), 0.5)]},
+            terminal_rules={
+                "S": [(CategoricalDistribution({"a": 1.0}), 0.5)],
+                "A": [(CategoricalDistribution({"a": 1.0}), 1.0)],
+            },
             start="S",
         )
         with self.assertRaisesRegex(ValueError, "induced grammar skeleton"):
