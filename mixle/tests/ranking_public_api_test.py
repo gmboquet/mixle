@@ -22,6 +22,8 @@ EXPECTED_RANKING_API = (
     "SpearmanRankingAccumulatorFactory",
     "ThurstoneApproximationDiagnostics",
     "ThurstoneFitDiagnostics",
+    "ThurstoneMostellerFitDiagnostics",
+    "TieModelFitDiagnostics",
 )
 
 

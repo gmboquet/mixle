@@ -636,6 +636,8 @@ __all__ = [
     "ThurstoneMostellerDistribution",
     "ThurstoneMostellerSampler",
     "ThurstoneMostellerEstimator",
+    "ThurstoneMostellerFitDiagnostics",
+    "TieModelFitDiagnostics",
     "PairWinAccumulator",
     "PairWinAccumulatorFactory",
     "PairDataEncoder",
@@ -1746,7 +1748,9 @@ from mixle.stats.rankings.paired_comparison import (
     RaoKupperEstimator,
     ThurstoneMostellerDistribution,
     ThurstoneMostellerEstimator,
+    ThurstoneMostellerFitDiagnostics,
     ThurstoneMostellerSampler,
+    TieModelFitDiagnostics,
 )
 from mixle.stats.rankings.plackett_luce import (
     PlackettLuceAccumulator,
