@@ -57,11 +57,17 @@ class SchemaTest(unittest.TestCase):
         s = _schema()
         rec = {"user": "c", "count": 1, "score": -0.5}
         self.assertEqual(s.from_tuple(s.to_tuple(rec)), rec)
+        with self.assertRaises(ValueError):
+            s.from_tuple(("c", 1))
+        with self.assertRaises(ValueError):
+            s.from_tuple(("c", 1, -0.5, "extra"))
+        with self.assertRaises(TypeError):
+            s.from_tuple(("c", "one", -0.5))
 
     def test_marginal_sub_schema(self):
         s = _schema()
         m = s.marginal(["score", "user"])
-        self.assertEqual(m.names, ["score", "user"])
+        self.assertEqual(m.names, ("score", "user"))
         # scoring the marginal works on the reduced record
         self.assertTrue(math.isfinite(m.log_density({"score": 0.1, "user": "a"})))
 
@@ -72,6 +78,17 @@ class SchemaTest(unittest.TestCase):
             Schema.from_fields(
                 [("x", int, st.PoissonDistribution(1.0)), ("x", int, st.PoissonDistribution(2.0))]
             )  # duplicate name
+
+    def test_schema_metadata_is_immutable_and_aligned(self):
+        s = _schema()
+        self.assertIsInstance(s.fields, tuple)
+        self.assertIsInstance(s.names, tuple)
+        with self.assertRaises(AttributeError):
+            s.fields = ()
+        with self.assertRaises(AttributeError):
+            s.names = ()
+        self.assertEqual(tuple(field.name for field in s.fields), s.names)
+        self.assertEqual(len(s.composite.dists), len(s.fields))
 
 
 if __name__ == "__main__":
