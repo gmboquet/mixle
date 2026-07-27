@@ -54,7 +54,6 @@ from mixle.stats import (
     TransformDistribution,
     UniformDistribution,
     WeibullDistribution,
-    field,
 )
 from mixle.stats.compute.declarations import ParameterSpec
 
@@ -272,14 +271,14 @@ class GradientFitTestCase(unittest.TestCase):
         self.assertLess(abs(fitted.dist.sigma2 - np.var(values)), 0.25)
         self.assertLess(np.linalg.norm(fitted.len_dist.p_vec - empirical_lengths), 0.1)
 
-    def test_fit_mle_improves_record_with_reused_source_likelihood(self):
+    def test_fit_mle_improves_record_with_distinct_sources(self):
         rng = np.random.RandomState(5)
         values = rng.normal(1.5, np.sqrt(0.4), size=90)
-        data = [{"x": float(x)} for x in values]
+        data = [{"left": float(x), "right": float(x)} for x in values]
         start = RecordDistribution(
             {
-                field("left_view", source="x"): GaussianDistribution(-1.0, 2.0),
-                field("right_view", source="x"): GaussianDistribution(3.0, 2.0),
+                "left": GaussianDistribution(-1.0, 2.0),
+                "right": GaussianDistribution(3.0, 2.0),
             }
         )
         enc = start.dist_to_encoder().seq_encode(data)
@@ -288,7 +287,7 @@ class GradientFitTestCase(unittest.TestCase):
         fitted, ll = fit_mle(enc, start, max_its=120, lr=0.05, print_iter=1000)
 
         self.assertIsInstance(fitted, RecordDistribution)
-        self.assertEqual(fitted.sources, ("x", "x"))
+        self.assertEqual(fitted.sources, ("left", "right"))
         self.assertGreater(ll, ll0)
         for child in fitted.dists:
             self.assertLess(abs(child.mu - np.mean(values)), 0.2)

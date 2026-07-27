@@ -96,19 +96,14 @@ class DataFrameAdapterTestCase(unittest.TestCase):
             seq_log_density_sum(enc_df, model), seq_log_density_sum(enc_list, model), rtol=0, atol=0
         )
 
-    def test_record_distribution_can_reuse_dataframe_source_column(self):
-        df = pd.DataFrame({"x": [-1.0, 0.0, 1.0, 2.0]})
-        model = RecordDistribution(
-            {
-                field("x_left", source="x"): GaussianDistribution(0.0, 1.0),
-                field("x_right", source="x"): GaussianDistribution(1.0, 2.0),
-            }
-        )
-
-        enc = seq_encode_dataframe(df, model=model)[0][1]
-        records = dataframe_records(df, fields=["x"], as_dict=True)
-        expected = np.asarray([model.log_density(row) for row in records])
-        np.testing.assert_allclose(model.seq_log_density(enc), expected, rtol=1.0e-12, atol=1.0e-12)
+    def test_record_distribution_rejects_reused_dataframe_source_column(self):
+        with self.assertRaisesRegex(ValueError, "record sources must be unique"):
+            RecordDistribution(
+                {
+                    field("x_left", source="x"): GaussianDistribution(0.0, 1.0),
+                    field("x_right", source="x"): GaussianDistribution(1.0, 2.0),
+                }
+            )
 
     def test_record_estimator_accepts_dataframe_fields(self):
         df = pd.DataFrame({"x": [-1.0, 0.0, 1.0], "y": [0.5, 1.5, 2.5]})

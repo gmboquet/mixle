@@ -35,8 +35,9 @@ def field(name: Any, source: Any = None) -> tuple[Any, Any]:
     """Declare a named model field and the input key/column it reads.
 
     ``field('x')`` reads input key ``'x'`` and names the model field ``'x'``.
-    ``field('x_copy', source='x')`` names a second model variable that reads
-    the same input key, useful for dependence features and repeated views.
+    A record is a normalized product law, so every modeled field and every
+    source key must be unique; repeated views belong in an explicit factor
+    model rather than this generative record wrapper.
     """
     return name, name if source is None else source
 
@@ -55,7 +56,16 @@ def _field_source(spec: FieldSpec) -> Any:
 
 def _normalize_fields(fields: Sequence[FieldSpec]) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     specs = tuple(fields)
-    return tuple(_field_name(spec) for spec in specs), tuple(_field_source(spec) for spec in specs)
+    names = tuple(_field_name(spec) for spec in specs)
+    sources = tuple(_field_source(spec) for spec in specs)
+    for label, values in (("field names", names), ("record sources", sources)):
+        try:
+            unique = set(values)
+        except TypeError as exc:
+            raise TypeError("%s must be hashable mapping keys." % label) from exc
+        if len(unique) != len(values):
+            raise ValueError("%s must be unique." % label)
+    return names, sources
 
 
 def _split_fields(
@@ -75,10 +85,48 @@ def _split_fields(
     return keys, sources, vals
 
 
-def _record_get(row: Any, source: Any) -> Any:
-    if isinstance(row, Mapping):
-        return row.get(source, None)
-    return None
+def _record_matches(row: Any, sources: Sequence[Any]) -> bool:
+    return isinstance(row, Mapping) and set(row.keys()) == set(sources)
+
+
+def _require_record(row: Any, sources: Sequence[Any], *, index: int | None = None) -> Mapping[Any, Any]:
+    if not isinstance(row, Mapping):
+        where = "" if index is None else " at row %d" % index
+        raise TypeError("record observation%s must be a mapping." % where)
+    actual = set(row.keys())
+    expected = set(sources)
+    if actual != expected:
+        missing = [source for source in sources if source not in actual]
+        extra = [key for key in row if key not in expected]
+        where = "" if index is None else " at row %d" % index
+        raise ValueError(
+            "record observation%s must contain exactly the configured sources; missing=%r, extra=%r."
+            % (where, missing, extra)
+        )
+    return row
+
+
+def _record_get(row: Mapping[Any, Any], source: Any) -> Any:
+    return row[source]
+
+
+def _require_arity(value: Any, count: int, *, label: str) -> tuple[Any, ...]:
+    if not isinstance(value, (tuple, list)) or len(value) != count:
+        actual = len(value) if isinstance(value, (tuple, list)) else None
+        raise ValueError("%s must contain exactly %d field payloads; received %r." % (label, count, actual))
+    return tuple(value)
+
+
+def _require_encoded(value: Any, count: int) -> tuple[Any, ...]:
+    expected = 1 if count == 0 else count
+    encoded = _require_arity(value, expected, label="encoded record")
+    if count == 0 and (
+        isinstance(encoded[0], (bool, np.bool_))
+        or not isinstance(encoded[0], (int, np.integer))
+        or int(encoded[0]) < 0
+    ):
+        raise ValueError("an encoded empty record must contain one non-negative row count.")
+    return encoded
 
 
 class RecordDistribution(SequenceEncodableProbabilityDistribution):
@@ -122,7 +170,7 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: Mapping[Any, Any]) -> float:
         """Return summed child log densities for one mapping record."""
-        if not isinstance(x, Mapping):
+        if not _record_matches(x, self.sources):
             return -np.inf
         rv = 0.0
         for source, dist in zip(self.sources, self.dists):
@@ -131,10 +179,9 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
 
     def seq_log_density(self, x: tuple[Any, ...]) -> np.ndarray:
         """Return per-row log densities for encoded record fields."""
+        x = _require_encoded(x, self.count)
         if self.count == 0:
-            if isinstance(x, tuple) and len(x) == 1 and isinstance(x[0], (int, np.integer)):
-                return np.zeros(int(x[0]), dtype=float)
-            return np.zeros(0, dtype=float)
+            return np.zeros(int(x[0]), dtype=float)
         rv = self.dists[0].seq_log_density(x[0])
         for i in range(1, self.count):
             rv += self.dists[i].seq_log_density(x[i])
@@ -142,9 +189,9 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
 
     def backend_seq_log_density(self, x: tuple[Any, ...], engine: Any) -> Any:
         """Return per-row log densities using backend-aware child scorers."""
+        x = _require_encoded(x, self.count)
         if self.count == 0:
-            n = int(x[0]) if isinstance(x, tuple) and len(x) == 1 else 0
-            return engine.zeros(n)
+            return engine.zeros(int(x[0]))
         from mixle.stats.compute.backend import backend_seq_log_density
 
         rv = backend_seq_log_density(self.dists[0], x[0], engine)
@@ -180,9 +227,9 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
         from mixle.stats.compute.stacked import stacked_component_log_density
 
         children = params["children"]
+        x = _require_encoded(x, len(children))
         if not children:
-            n = int(x[0]) if isinstance(x, tuple) and len(x) == 1 else 0
-            return engine.zeros((n, int(params["num_components"])))
+            return engine.zeros((int(x[0]), int(params["num_components"])))
         rv = stacked_component_log_density(x[0], children[0], engine)
         for i in range(1, len(children)):
             rv = rv + stacked_component_log_density(x[i], children[i], engine)
@@ -199,6 +246,7 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
             unstack_component_stats,
         )
 
+        x = _require_encoded(x, len(params["children"]))
         ww = engine.asarray(weights)
         num_components = int(tuple(getattr(ww, "shape", (0, 0)))[1])
         outer_estimators = tuple(getattr(estimator, "estimators", ()))
@@ -297,8 +345,9 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
         Like :meth:`CompositeDistribution.structural_fine_bucket`, but fields are addressed by
         source name rather than tuple position.
         """
+        row = _require_record(value, self.sources)
         return sum(
-            self.dists[i].structural_fine_bucket(_record_get(value, self.sources[i]), quantizer)
+            self.dists[i].structural_fine_bucket(_record_get(row, self.sources[i]), quantizer)
             for i in range(self.count)
         )
 
@@ -433,12 +482,19 @@ class RecordAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = self.fields
         self.accumulators = list(accumulators)
         self.count = len(self.fields)
+        if len(self.accumulators) != self.count:
+            raise ValueError(
+                "record accumulator field/child length mismatch: %d fields, %d accumulators."
+                % (self.count, len(self.accumulators))
+            )
         self._init_rng = False
         self._acc_rng: list[np.random.RandomState] | None = None
 
     def update(self, x: Mapping[Any, Any], weight: float, estimate: RecordDistribution | None) -> None:
         """Accumulate one weighted mapping record."""
-        row = x if isinstance(x, Mapping) else {}
+        row = _require_record(x, self.sources)
+        if estimate is not None and estimate.count != self.count:
+            raise ValueError("record estimate arity does not match its accumulator.")
         for i, source in enumerate(self.sources):
             child_estimate = None if estimate is None else estimate.dists[i]
             self.accumulators[i].update(_record_get(row, source), weight, child_estimate)
@@ -450,20 +506,24 @@ class RecordAccumulator(SequenceEncodableStatisticAccumulator):
 
     def initialize(self, x: Mapping[Any, Any], weight: float, rng: np.random.RandomState) -> None:
         """Randomly initialize child accumulators from one mapping record."""
+        row = _require_record(x, self.sources)
         if not self._init_rng:
             self._rng_initialize(rng)
-        row = x if isinstance(x, Mapping) else {}
         for i, source in enumerate(self.sources):
             self.accumulators[i].initialize(_record_get(row, source), weight, self._acc_rng[i])
 
     def seq_update(self, x: tuple[Any, ...], weights: np.ndarray, estimate: RecordDistribution | None) -> None:
         """Accumulate encoded records with per-row weights."""
+        x = _require_encoded(x, self.count)
+        if estimate is not None and estimate.count != self.count:
+            raise ValueError("record estimate arity does not match its accumulator.")
         for i in range(self.count):
             child_estimate = None if estimate is None else estimate.dists[i]
             self.accumulators[i].seq_update(x[i], weights, child_estimate)
 
     def seq_initialize(self, x: tuple[Any, ...], weights: np.ndarray, rng: np.random.RandomState) -> None:
         """Randomly initialize child accumulators from encoded records."""
+        x = _require_encoded(x, self.count)
         if not self._init_rng:
             self._rng_initialize(rng)
         for i in range(self.count):
@@ -478,6 +538,7 @@ class RecordAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[Any, ...]) -> RecordAccumulator:
         """Merge field-wise sufficient statistics into this accumulator."""
+        suff_stat = _require_arity(suff_stat, self.count, label="record sufficient statistics")
         for i in range(self.count):
             self.accumulators[i].combine(suff_stat[i])
         return self
@@ -488,8 +549,9 @@ class RecordAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: tuple[Any, ...]) -> RecordAccumulator:
         """Restore child accumulators from a field-wise payload."""
-        self.accumulators = [self.accumulators[i].from_value(x[i]) for i in range(len(x))]
-        self.count = len(x)
+        x = _require_arity(x, self.count, label="record sufficient statistics")
+        for i in range(self.count):
+            self.accumulators[i].from_value(x[i])
         return self
 
     def scale(self, c: float) -> RecordAccumulator:
@@ -521,6 +583,11 @@ class RecordAccumulatorFactory(StatisticAccumulatorFactory):
     def __init__(self, fields: Sequence[Any], factories: Sequence[StatisticAccumulatorFactory]) -> None:
         self.fields, self.sources = _normalize_fields(fields)
         self.factories = tuple(factories)
+        if len(self.factories) != len(self.fields):
+            raise ValueError(
+                "record accumulator factory field/child length mismatch: %d fields, %d factories."
+                % (len(self.fields), len(self.factories))
+            )
 
     def make(self) -> RecordAccumulator:
         """Create a fresh record accumulator."""
@@ -543,9 +610,10 @@ class RecordEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple[Any, ...]) -> RecordDistribution:
         """Estimate each child field and return a fitted record distribution."""
+        suff_stat = _require_arity(suff_stat, self.count, label="record sufficient statistics")
         return RecordDistribution(
             tuple(zip(self.fields, self.sources)),
-            [est.estimate(nobs, ss) for est, ss in zip(self.estimators, suff_stat)],
+            [self.estimators[i].estimate(nobs, suff_stat[i]) for i in range(self.count)],
         )
 
 
@@ -556,21 +624,40 @@ class RecordDataEncoder(DataSequenceEncoder):
         self.fields, self.sources = _normalize_fields(fields)
         self.keys = self.fields
         self.encoders = tuple(encoders)
+        if len(self.encoders) != len(self.fields):
+            raise ValueError(
+                "record encoder field/child length mismatch: %d fields, %d encoders."
+                % (len(self.fields), len(self.encoders))
+            )
 
     def __str__(self) -> str:
-        parts = ["%s: %s" % (repr(k), str(e)) for k, e in zip(self.fields, self.encoders)]
+        parts = [
+            "%s<-source(%s): %s" % (repr(field), repr(source), str(encoder))
+            for field, source, encoder in zip(self.fields, self.sources, self.encoders)
+        ]
         return "RecordDataEncoder({%s})" % ", ".join(parts)
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, RecordDataEncoder) and self.fields == other.fields and self.encoders == other.encoders
+        return (
+            isinstance(other, RecordDataEncoder)
+            and self.fields == other.fields
+            and self.sources == other.sources
+            and self.encoders == other.encoders
+        )
+
+    @property
+    def __mixle_cache_key__(self) -> tuple[Any, ...]:
+        """Return complete field/source/child identity for generated-code caches."""
+        return "record_encoder", self.fields, self.sources, self.encoders
 
     def seq_encode(self, x: Sequence[Mapping[Any, Any]]) -> tuple[Any, ...]:
         """Encode a sequence of mapping records field-by-field."""
+        rows = tuple(_require_record(row, self.sources, index=i) for i, row in enumerate(x))
         if len(self.fields) == 0:
-            return (len(x),)
+            return (len(rows),)
         encoded = []
         for source, encoder in zip(self.sources, self.encoders):
-            encoded.append(encoder.seq_encode([_record_get(row, source) for row in x]))
+            encoded.append(encoder.seq_encode([_record_get(row, source) for row in rows]))
         return tuple(encoded)
 
 
