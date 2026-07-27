@@ -36,6 +36,20 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.rankings._contracts import (
+    finite_nonnegative,
+    matrix_statistics,
+    pair,
+    pair_batch,
+    positive_integer,
+    sample_size,
+    tie_batch,
+    tie_comparison,
+    tie_statistics,
+)
+from mixle.stats.rankings._contracts import (
+    weights as validate_weights,
+)
 
 _SQRT2 = math.sqrt(2.0)
 
@@ -61,7 +75,8 @@ class ThurstoneMostellerDistribution(SequenceEncodableProbabilityDistribution):
         m = np.asarray(mu, dtype=float)
         if m.ndim != 1 or m.size < 2 or not np.all(np.isfinite(m)):
             raise ValueError("mu must be a finite length-K vector with K >= 2.")
-        self.mu = m - m.mean()
+        self.mu = np.asarray(m - m.mean(), dtype=np.float64)
+        self.mu.setflags(write=False)
         self.dim = m.size
         self.log_pairs = math.log(self.dim * (self.dim - 1) / 2.0)
         self.name = name
@@ -80,11 +95,13 @@ class ThurstoneMostellerDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: tuple[int, int]) -> float:
         """Return the log probability of one winner-loser pair."""
-        return float(self.seq_log_density(np.asarray([x], dtype=np.int64))[0])
+        checked = pair(x, self.dim, label="Thurstone-Mosteller comparison")
+        return float(self.seq_log_density(np.asarray([checked], dtype=np.int64))[0])
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Score encoded winner-loser pairs."""
-        z = (self.mu[x[:, 0]] - self.mu[x[:, 1]]) / _SQRT2
+        checked = pair_batch(x, self.dim, label="Thurstone-Mosteller comparisons")
+        z = (self.mu[checked[:, 0]] - self.mu[checked[:, 1]]) / _SQRT2
         return np.log(np.clip(ndtr(z), 1e-300, 1.0)) - self.log_pairs
 
     def sampler(self, seed: int | None = None) -> ThurstoneMostellerSampler:
@@ -93,7 +110,12 @@ class ThurstoneMostellerDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> ThurstoneMostellerEstimator:
         """Return the least-squares probit paired-comparison estimator."""
-        return ThurstoneMostellerEstimator(dim=self.dim, name=self.name, keys=self.keys)
+        return ThurstoneMostellerEstimator(
+            dim=self.dim,
+            pseudo_count=pseudo_count,
+            name=self.name,
+            keys=self.keys,
+        )
 
     def dist_to_encoder(self) -> PairDataEncoder:
         """Return the encoder for winner-loser pair data."""
@@ -117,21 +139,23 @@ class ThurstoneMostellerSampler(DistributionSampler):
         """Draw one comparison or a list of comparisons."""
         if size is None:
             return self._sample_one()
-        return [self._sample_one() for _ in range(size)]
+        return [self._sample_one() for _ in range(sample_size(size))]
 
 
 class PairWinAccumulator(SequenceEncodableStatisticAccumulator):
     """Win-count matrix ``wins[i, j]`` for (winner, loser) pair data."""
 
     def __init__(self, dim: int, keys: str | None = None) -> None:
-        self.dim = dim
-        self.wins = np.zeros((dim, dim))
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.wins = np.zeros((self.dim, self.dim))
         self.count = 0.0
         self.keys = keys
 
     def update(self, x: tuple[int, int], weight: float, estimate: Any) -> None:
         """Accumulate one weighted winner-loser observation."""
-        self.wins[int(x[0]), int(x[1])] += weight
+        winner, loser = pair(x, self.dim, label="paired comparison")
+        weight = finite_nonnegative(weight, label="weight")
+        self.wins[winner, loser] += weight
         self.count += weight
 
     def initialize(self, x: tuple[int, int], weight: float, rng: RandomState | None) -> None:
@@ -140,8 +164,10 @@ class PairWinAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
         """Accumulate weighted winner-loser pairs from an encoded batch."""
-        np.add.at(self.wins, (x[:, 0], x[:, 1]), weights)
-        self.count += float(np.sum(weights, dtype=np.float64))
+        checked = pair_batch(x, self.dim, label="paired comparisons")
+        checked_weights = validate_weights(weights, len(checked))
+        np.add.at(self.wins, (checked[:, 0], checked[:, 1]), checked_weights)
+        self.count += float(np.sum(checked_weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize sufficient statistics from an encoded weighted batch."""
@@ -149,18 +175,18 @@ class PairWinAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat) -> PairWinAccumulator:
         """Merge serialized win-count sufficient statistics."""
-        self.count += suff_stat[0]
-        self.wins += suff_stat[1]
+        count, wins = matrix_statistics(suff_stat, self.dim, label="paired-win statistics")
+        self.count += count
+        self.wins += wins
         return self
 
     def value(self):
         """Return serialized win-count sufficient statistics."""
-        return self.count, self.wins
+        return self.count, self.wins.copy()
 
     def from_value(self, x) -> PairWinAccumulator:
         """Restore accumulator state from serialized win counts."""
-        self.count, self.wins = x[0], np.asarray(x[1])
-        self.dim = self.wins.shape[0]
+        self.count, self.wins = matrix_statistics(x, self.dim, label="paired-win statistics")
         return self
 
     def acc_to_encoder(self) -> PairDataEncoder:
@@ -172,7 +198,8 @@ class PairWinAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for paired win-count accumulators."""
 
     def __init__(self, dim: int, keys: str | None = None) -> None:
-        self.dim, self.keys = dim, keys
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.keys = keys
 
     def make(self) -> PairWinAccumulator:
         """Create a fresh paired-win accumulator."""
@@ -182,10 +209,16 @@ class PairWinAccumulatorFactory(StatisticAccumulatorFactory):
 class ThurstoneMostellerEstimator(ParameterEstimator):
     """``mu_i - mu_j = sqrt(2) Phi^{-1}(P(i beats j))`` from the win-count matrix (least squares)."""
 
-    def __init__(self, dim: int, name: str | None = None, keys: str | None = None) -> None:
-        if dim is None or dim < 2:
-            raise ValueError("ThurstoneMostellerEstimator requires dim >= 2.")
-        self.dim, self.name, self.keys = int(dim), name, keys
+    def __init__(
+        self,
+        dim: int,
+        pseudo_count: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.pseudo_count = None if pseudo_count is None else finite_nonnegative(pseudo_count, label="pseudo_count")
+        self.name, self.keys = name, keys
 
     def accumulator_factory(self) -> PairWinAccumulatorFactory:
         """Return the accumulator factory used by this estimator."""
@@ -193,7 +226,12 @@ class ThurstoneMostellerEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat) -> ThurstoneMostellerDistribution:
         """Estimate Thurstone-Mosteller utilities from win-count statistics."""
-        count, wins = suff_stat
+        if nobs is not None:
+            finite_nonnegative(nobs, label="nobs")
+        count, wins = matrix_statistics(suff_stat, self.dim, label="paired-win statistics")
+        if self.pseudo_count is not None and self.pseudo_count > 0.0:
+            wins += self.pseudo_count * (1.0 - np.eye(self.dim))
+            count += self.pseudo_count * self.dim * (self.dim - 1)
         n = self.dim
         if count <= 0.0:
             return ThurstoneMostellerDistribution(np.zeros(n), name=self.name, keys=self.keys)
@@ -209,22 +247,23 @@ class PairDataEncoder(DataSequenceEncoder):
     """Encode ``(winner, loser)`` pairs into an ``(N, 2)`` integer array."""
 
     def __init__(self, dim: int | None = None) -> None:
-        self.dim = dim
+        self.dim = None if dim is None else positive_integer(dim, label="dim", minimum=2)
 
     def __str__(self) -> str:
-        return "PairDataEncoder"
+        return "PairDataEncoder(dim=%s)" % self.dim
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, PairDataEncoder)
+        return isinstance(other, PairDataEncoder) and self.dim == other.dim
 
     def seq_encode(self, x: Sequence[tuple[int, int]]) -> np.ndarray:
         """Encode winner-loser pairs as an integer ``(N, 2)`` array."""
-        rv = np.asarray([list(p) for p in x], dtype=np.int64)
-        if rv.ndim != 2 or rv.shape[1] != 2 or rv.shape[0] == 0:
-            raise ValueError("requires a non-empty sequence of (winner, loser) pairs.")
-        if np.any(rv[:, 0] == rv[:, 1]):
-            raise ValueError("a comparison must have winner != loser.")
-        return rv
+        raw = np.asarray([list(value) for value in x])
+        if self.dim is None:
+            if raw.ndim != 2 or raw.shape[1:] != (2,) or raw.shape[0] == 0:
+                raise ValueError("requires a non-empty sequence of comparisons.")
+            inferred = max(2, int(np.max(raw)) + 1)
+            return pair_batch(raw, inferred, label="paired comparisons", allow_empty=False)
+        return pair_batch(raw, self.dim, label="paired comparisons", allow_empty=False)
 
 
 # =================================================================================================
@@ -234,42 +273,39 @@ class _TieEncoder(DataSequenceEncoder):
     """Encode ``(i, j, outcome)`` triples canonically as ``(lo, hi, o)`` with ``o`` in {0:lo,1:hi,2:tie}."""
 
     def __init__(self, dim: int | None = None) -> None:
-        self.dim = dim
+        self.dim = None if dim is None else positive_integer(dim, label="dim", minimum=2)
 
     def __str__(self) -> str:
-        return "TieEncoder"
+        return "TieEncoder(dim=%s)" % self.dim
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, _TieEncoder)
+        return isinstance(other, _TieEncoder) and self.dim == other.dim
 
     def seq_encode(self, x: Sequence[tuple[int, int, int]]) -> np.ndarray:
         """Encode and canonicalize tie-model comparison triples."""
-        rv = np.asarray([list(t) for t in x], dtype=np.int64)
-        if rv.ndim != 2 or rv.shape[1] != 3 or rv.shape[0] == 0:
-            raise ValueError("requires a non-empty sequence of (i, j, outcome) triples.")
-        if np.any(rv[:, 0] == rv[:, 1]) or np.any((rv[:, 2] < 0) | (rv[:, 2] > 2)):
-            raise ValueError("a tie comparison needs i != j and outcome in {0,1,2}.")
-        out = rv.copy()
-        swap = rv[:, 0] > rv[:, 1]  # canonicalize to lo < hi, remap win outcome 0<->1
-        out[swap, 0], out[swap, 1] = rv[swap, 1], rv[swap, 0]
-        flip = swap & (rv[:, 2] != 2)
-        out[flip, 2] = 1 - rv[flip, 2]
-        return out
+        raw = np.asarray([list(value) for value in x])
+        if self.dim is None:
+            if raw.ndim != 2 or raw.shape[1:] != (3,) or raw.shape[0] == 0:
+                raise ValueError("requires a non-empty sequence of tie comparisons.")
+            inferred = max(2, int(np.max(raw[:, :2])) + 1)
+            return tie_batch(raw, inferred, allow_empty=False)
+        return tie_batch(raw, self.dim, allow_empty=False)
 
 
 class _TieAccumulator(SequenceEncodableStatisticAccumulator):
     """``wins[i, j]`` (i beat j) + ``ties[i, j]`` (i<j) from canonical ``(lo, hi, o)`` triples."""
 
     def __init__(self, dim: int, keys: str | None = None) -> None:
-        self.dim = dim
-        self.wins = np.zeros((dim, dim))
-        self.ties = np.zeros((dim, dim))
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.wins = np.zeros((self.dim, self.dim))
+        self.ties = np.zeros((self.dim, self.dim))
         self.count = 0.0
         self.keys = keys
 
     def update(self, x, weight: float, estimate: Any) -> None:
         """Accumulate one weighted comparison triple."""
-        self.seq_update(np.asarray([x], dtype=np.int64), np.asarray([weight], dtype=float), estimate)
+        checked = tie_comparison(x, self.dim)
+        self.seq_update(np.asarray([checked], dtype=np.int64), np.asarray([weight], dtype=float), estimate)
 
     def initialize(self, x, weight: float, rng: RandomState | None) -> None:
         """Initialize sufficient statistics from one weighted comparison."""
@@ -277,12 +313,14 @@ class _TieAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
         """Accumulate weighted tie-model comparisons from an encoded batch."""
-        lo, hi, o = x[:, 0], x[:, 1], x[:, 2]
+        checked = tie_batch(x, self.dim)
+        checked_weights = validate_weights(weights, len(checked))
+        lo, hi, o = checked[:, 0], checked[:, 1], checked[:, 2]
         m0, m1, m2 = o == 0, o == 1, o == 2
-        np.add.at(self.wins, (lo[m0], hi[m0]), weights[m0])
-        np.add.at(self.wins, (hi[m1], lo[m1]), weights[m1])
-        np.add.at(self.ties, (lo[m2], hi[m2]), weights[m2])
-        self.count += float(np.sum(weights, dtype=np.float64))
+        np.add.at(self.wins, (lo[m0], hi[m0]), checked_weights[m0])
+        np.add.at(self.wins, (hi[m1], lo[m1]), checked_weights[m1])
+        np.add.at(self.ties, (lo[m2], hi[m2]), checked_weights[m2])
+        self.count += float(np.sum(checked_weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize sufficient statistics from an encoded weighted batch."""
@@ -290,19 +328,23 @@ class _TieAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat) -> _TieAccumulator:
         """Merge serialized win-and-tie sufficient statistics."""
-        self.count += suff_stat[0]
-        self.wins += suff_stat[1]
-        self.ties += suff_stat[2]
+        count, wins, ties = tie_statistics(suff_stat, self.dim, label="tie-comparison statistics")
+        self.count += count
+        self.wins += wins
+        self.ties += ties
         return self
 
     def value(self):
         """Return serialized win-and-tie sufficient statistics."""
-        return self.count, self.wins, self.ties
+        return self.count, self.wins.copy(), self.ties.copy()
 
     def from_value(self, x) -> _TieAccumulator:
         """Restore accumulator state from serialized win-and-tie statistics."""
-        self.count, self.wins, self.ties = x[0], np.asarray(x[1]), np.asarray(x[2])
-        self.dim = self.wins.shape[0]
+        self.count, self.wins, self.ties = tie_statistics(
+            x,
+            self.dim,
+            label="tie-comparison statistics",
+        )
         return self
 
     def acc_to_encoder(self) -> _TieEncoder:
@@ -312,7 +354,8 @@ class _TieAccumulator(SequenceEncodableStatisticAccumulator):
 
 class _TieAccumulatorFactory(StatisticAccumulatorFactory):
     def __init__(self, dim: int, keys: str | None = None) -> None:
-        self.dim, self.keys = dim, keys
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.keys = keys
 
     def make(self) -> _TieAccumulator:
         """Create a fresh tie-model accumulator."""
@@ -337,8 +380,9 @@ class _BaseTieDistribution(SequenceEncodableProbabilityDistribution):
         lw = np.asarray(log_w, dtype=float)
         if lw.ndim != 1 or lw.size < 2 or not np.all(np.isfinite(lw)):
             raise ValueError("log_w must be a finite length-K vector with K >= 2.")
-        self.log_w = lw - lw.mean()
-        self.nu = float(nu)
+        self.log_w = np.asarray(lw - lw.mean(), dtype=np.float64)
+        self.log_w.setflags(write=False)
+        self.nu = finite_nonnegative(nu, label="nu")
         self.dim = lw.size
         self.log_pairs = math.log(self.dim * (self.dim - 1) / 2.0)
         self.name = name
@@ -354,14 +398,13 @@ class _BaseTieDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x) -> float:
         """Return the log probability of one comparison triple."""
-        i, j, o = int(x[0]), int(x[1]), int(x[2])
-        if i > j:
-            i, j, o = j, i, (o if o == 2 else 1 - o)
+        i, j, o = tie_comparison(x, self.dim)
         return float(self._outcome_logp(np.array([i]), np.array([j]), np.array([o]))[0]) - self.log_pairs
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Score encoded canonicalized comparison triples."""
-        return self._outcome_logp(x[:, 0], x[:, 1], x[:, 2]) - self.log_pairs
+        checked = tie_batch(x, self.dim)
+        return self._outcome_logp(checked[:, 0], checked[:, 1], checked[:, 2]) - self.log_pairs
 
     def _sample_outcome(self, i: int, j: int, rng: RandomState) -> int:
         """Sample an outcome code for the canonical pair ``i < j``."""
@@ -390,16 +433,15 @@ class _TieSampler(DistributionSampler):
         """Draw one comparison triple or a list of triples."""
         if size is None:
             return self._sample_one()
-        return [self._sample_one() for _ in range(size)]
+        return [self._sample_one() for _ in range(sample_size(size))]
 
 
 class DavidsonDistribution(_BaseTieDistribution):
     """Bradley-Terry with ties (Davidson 1970); tie mass ``nu sqrt(w_i w_j)``."""
 
     def __init__(self, log_w, nu: float = 1.0, name: str | None = None, keys: str | None = None) -> None:
-        if nu < 0.0:
-            raise ValueError("Davidson nu must be >= 0.")
-        super().__init__(log_w, nu, name, keys)
+        checked_nu = finite_nonnegative(nu, label="nu")
+        super().__init__(log_w, checked_nu, name, keys)
 
     def __str__(self) -> str:
         return "DavidsonDistribution(%s, nu=%s, name=%s, keys=%s)" % (
@@ -426,16 +468,22 @@ class DavidsonDistribution(_BaseTieDistribution):
 
     def estimator(self, pseudo_count: float | None = None):
         """Return the maximum-likelihood Davidson estimator."""
-        return DavidsonEstimator(dim=self.dim, name=self.name, keys=self.keys)
+        return DavidsonEstimator(
+            dim=self.dim,
+            pseudo_count=pseudo_count,
+            name=self.name,
+            keys=self.keys,
+        )
 
 
 class RaoKupperDistribution(_BaseTieDistribution):
     """Bradley-Terry with ties via a threshold ``nu >= 1`` (Rao-Kupper 1967)."""
 
     def __init__(self, log_w, nu: float = 1.5, name: str | None = None, keys: str | None = None) -> None:
-        if nu < 1.0:
+        checked_nu = finite_nonnegative(nu, label="nu")
+        if checked_nu < 1.0:
             raise ValueError("Rao-Kupper nu must be >= 1.")
-        super().__init__(log_w, nu, name, keys)
+        super().__init__(log_w, checked_nu, name, keys)
 
     def __str__(self) -> str:
         return "RaoKupperDistribution(%s, nu=%s, name=%s, keys=%s)" % (
@@ -462,7 +510,12 @@ class RaoKupperDistribution(_BaseTieDistribution):
 
     def estimator(self, pseudo_count: float | None = None):
         """Return the maximum-likelihood Rao-Kupper estimator."""
-        return RaoKupperEstimator(dim=self.dim, name=self.name, keys=self.keys)
+        return RaoKupperEstimator(
+            dim=self.dim,
+            pseudo_count=pseudo_count,
+            name=self.name,
+            keys=self.keys,
+        )
 
 
 def _fit_tie_model(make_dist, dim, wins, ties, nu0, nu_bounds):
@@ -495,10 +548,16 @@ def _fit_tie_model(make_dist, dim, wins, ties, nu0, nu_bounds):
 class DavidsonEstimator(ParameterEstimator):
     """Maximum-likelihood Davidson worths and tie parameter (L-BFGS on the count matrices)."""
 
-    def __init__(self, dim: int, name: str | None = None, keys: str | None = None) -> None:
-        if dim is None or dim < 2:
-            raise ValueError("DavidsonEstimator requires dim >= 2.")
-        self.dim, self.name, self.keys = int(dim), name, keys
+    def __init__(
+        self,
+        dim: int,
+        pseudo_count: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.pseudo_count = None if pseudo_count is None else finite_nonnegative(pseudo_count, label="pseudo_count")
+        self.name, self.keys = name, keys
 
     def accumulator_factory(self) -> _TieAccumulatorFactory:
         """Return the accumulator factory used by this estimator."""
@@ -506,7 +565,13 @@ class DavidsonEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat) -> DavidsonDistribution:
         """Estimate Davidson worths and tie parameter from sufficient statistics."""
-        count, wins, ties = suff_stat
+        if nobs is not None:
+            finite_nonnegative(nobs, label="nobs")
+        count, wins, ties = tie_statistics(suff_stat, self.dim, label="Davidson statistics")
+        if self.pseudo_count is not None and self.pseudo_count > 0.0:
+            wins += self.pseudo_count * (1.0 - np.eye(self.dim))
+            ties[np.triu_indices(self.dim, 1)] += self.pseudo_count
+            count += 3.0 * self.pseudo_count * self.dim * (self.dim - 1) / 2.0
         if count <= 0.0:
             return DavidsonDistribution(np.zeros(self.dim), 1.0, name=self.name, keys=self.keys)
         log_w, nu = _fit_tie_model(
@@ -518,10 +583,16 @@ class DavidsonEstimator(ParameterEstimator):
 class RaoKupperEstimator(ParameterEstimator):
     """Maximum-likelihood Rao-Kupper worths and threshold (L-BFGS on the count matrices)."""
 
-    def __init__(self, dim: int, name: str | None = None, keys: str | None = None) -> None:
-        if dim is None or dim < 2:
-            raise ValueError("RaoKupperEstimator requires dim >= 2.")
-        self.dim, self.name, self.keys = int(dim), name, keys
+    def __init__(
+        self,
+        dim: int,
+        pseudo_count: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.pseudo_count = None if pseudo_count is None else finite_nonnegative(pseudo_count, label="pseudo_count")
+        self.name, self.keys = name, keys
 
     def accumulator_factory(self) -> _TieAccumulatorFactory:
         """Return the accumulator factory used by this estimator."""
@@ -529,7 +600,13 @@ class RaoKupperEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat) -> RaoKupperDistribution:
         """Estimate Rao-Kupper worths and threshold from sufficient statistics."""
-        count, wins, ties = suff_stat
+        if nobs is not None:
+            finite_nonnegative(nobs, label="nobs")
+        count, wins, ties = tie_statistics(suff_stat, self.dim, label="Rao-Kupper statistics")
+        if self.pseudo_count is not None and self.pseudo_count > 0.0:
+            wins += self.pseudo_count * (1.0 - np.eye(self.dim))
+            ties[np.triu_indices(self.dim, 1)] += self.pseudo_count
+            count += 3.0 * self.pseudo_count * self.dim * (self.dim - 1) / 2.0
         if count <= 0.0:
             return RaoKupperDistribution(np.zeros(self.dim), 1.5, name=self.name, keys=self.keys)
         log_w, nu = _fit_tie_model(
