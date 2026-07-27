@@ -949,6 +949,50 @@ class LatentChurningTemporalGraphGrammarTest(unittest.TestCase):
         self.assertGreater(cur.node_remove_rates[c], 2.5)  # churn: fast turnover
         self.assertEqual(len(cur.decode(data[0])), len(data[0]) - 1)
 
+    def test_churn_rate_vector_and_finite_population_law_are_exact(self):
+        fixed = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], edge_rate=0.0, node_rate=0.0)
+        rates = np.array([2.0])
+        dist = stats.LatentChurningTemporalGraphGrammarDistribution(
+            [fixed],
+            rates,
+            [1.0],
+            [[1.0]],
+        )
+        rates[:] = 0.0
+        self.assertEqual(dist.node_remove_rates[0], 2.0)
+        one = np.zeros((1, 1))
+        empty = np.zeros((0, 0))
+        keep = [(one, ["node"]), (one, ["node"])]
+        drop = [(one, ["node"]), (empty, [])]
+        self.assertAlmostEqual(np.exp(dist.log_density(keep)) + np.exp(dist.log_density(drop)), 1.0, places=12)
+
+        for bad_rates in ([], [1.0, 2.0], [-1.0], [np.nan]):
+            with self.subTest(rates=bad_rates):
+                with self.assertRaises(ValueError):
+                    stats.LatentChurningTemporalGraphGrammarDistribution([fixed], bad_rates)
+        with self.assertRaises(ValueError):
+            dist.log_density([(np.zeros((2, 2)), [1, 1])])
+
+    def test_impossible_latent_churn_is_recorded_and_not_discarded(self):
+        fixed = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], edge_rate=0.0, node_rate=0.0)
+        dist = stats.LatentChurningTemporalGraphGrammarDistribution(
+            [fixed],
+            [0.0],
+            [1.0],
+            [[1.0]],
+        )
+        impossible = [(np.zeros((1, 1)), [0]), (np.zeros((0, 0)), [])]
+        estimator = dist.estimator(pseudo_count=0.5)
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.update(impossible, 3.0, dist)
+        value = accumulator.value()
+        self.assertEqual(value.rejected_weight, 3.0)
+        self.assertEqual(value.accepted_weight, 0.0)
+        with self.assertRaises(ValueError):
+            estimator.estimate(1.0, value)
+        with self.assertRaises(ValueError):
+            accumulator.seq_update([impossible], np.ones(2), dist)
+
 
 class RegimeMomentInitTest(unittest.TestCase):
     def test_moment_init_seeds_recoverable_em(self):
