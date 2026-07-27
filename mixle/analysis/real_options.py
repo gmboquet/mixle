@@ -53,6 +53,8 @@ value only (previously a ``TYPE_CHECKING``-only forward reference, which left th
 
 from __future__ import annotations
 
+import copy
+import operator
 import warnings
 from collections.abc import Callable
 from typing import Any, NamedTuple
@@ -103,12 +105,29 @@ def _require_finite(value: Any, name: str, *, context: str = "real_option_value"
 
 
 def _require_finite_int(value: Any, name: str, *, context: str = "real_option_value") -> int:
-    """Reject NaN/+-inf AND non-integral values (e.g. ``5.5``) instead of silently truncating them via
-    ``int(...)`` (MXR-080-0110: fractional horizons/steps were truncated despite an integer contract)."""
-    fvalue = _require_finite(value, name, context=context)
-    if fvalue != int(fvalue):
-        raise ValueError(f"{context}: {name} must be an exact integer, got {value!r}")
-    return int(fvalue)
+    """Require an actual non-Boolean integral scalar without coercion or truncation."""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{context}: {name} must be an exact integer and non-Boolean, got {value!r}")
+    try:
+        integer = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"{context}: {name} must be an exact integer and non-Boolean, got {value!r}") from exc
+    return int(integer)
+
+
+def _require_sample_count(value: Any, name: str, *, minimum: int = 1) -> int:
+    count = _require_finite_int(value, name, context="voi_dollars")
+    if count < minimum:
+        qualifier = f">= {minimum}"
+        raise ValueError(f"voi_dollars: {name} must be {qualifier}, got {count}")
+    return count
+
+
+def _require_finite_array(value: Any, name: str, *, context: str = "real_option_value") -> np.ndarray:
+    array = np.asarray(value, dtype=np.float64)
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{context}: {name} is not representable as finite float64")
+    return array
 
 
 def _intrinsic(
@@ -134,6 +153,40 @@ def _intrinsic(
         expansion_gain = np.maximum(expand_fraction * np.maximum(v, 0.0) - expansion_cost, 0.0)
         return v + expansion_gain
     raise ValueError(f"real_option_value: kind must be one of {_KINDS}, got {kind!r}")
+
+
+def _exercise_is_economic(
+    v: np.ndarray,
+    kind: str,
+    expand_fraction: float,
+    expansion_cost: float,
+    salvage_value: float,
+) -> np.ndarray:
+    """Whether immediate exercise means taking the named option action, not merely running the base."""
+    if kind == "defer":
+        return v > 0.0
+    if kind == "abandon":
+        return v < salvage_value
+    if expand_fraction == 0.0:
+        return np.zeros(v.shape, dtype=bool)
+    return expand_fraction * np.maximum(v, 0.0) > expansion_cost
+
+
+def _terminal_boundary(
+    kind: str,
+    expand_fraction: float,
+    expansion_cost: float,
+    salvage_value: float,
+) -> float:
+    if kind == "defer":
+        return 0.0
+    if kind == "abandon":
+        return salvage_value
+    if expand_fraction == 0.0:
+        return float("nan")
+    with np.errstate(over="ignore", invalid="ignore"):
+        boundary = expansion_cost / expand_fraction
+    return _require_finite(boundary, "terminal expansion boundary")
 
 
 def real_option_value(
@@ -173,17 +226,17 @@ def real_option_value(
             for ``"defer"``, ``max(npv_dist.mean, salvage_value)`` for ``"abandon"``, ``npv_dist.mean +
             max(expand_fraction * max(npv_dist.mean, 0) - expansion_cost, 0)`` for ``"expand"``.
         horizon: number of periods over which the option may be exercised. ``0`` means "decide now". Must
-            be a finite, exact (non-fractional) integer ``>= 0``.
+            be a non-Boolean integral scalar ``>= 0``.
         kind: one of ``"defer"``, ``"expand"``, ``"abandon"``.
         rate: per-period discount rate applied to the continuation value. Must be finite.
         n_steps: lattice steps (defaults to ``max(horizon, 1)``, i.e. one step per period). Must be a
-            finite, exact (non-fractional) positive integer when given explicitly.
+            non-Boolean positive integral scalar when given explicitly.
         expand_fraction: for ``kind="expand"``, the fractional capacity bonus applied to a positive
-            underlying value when the expansion is exercised. Must be finite.
+            underlying value when the expansion is exercised. Must be finite and nonnegative.
         expansion_cost: for ``kind="expand"``, the investment cost of actually exercising the expansion,
             netted against ``expand_fraction``'s capacity bonus -- without it, a positive-NPV project
             always "expands" for free and there is no real exercise decision being priced (see
-            :func:`_intrinsic`). Ignored for other kinds. Must be finite; default ``0.0`` (no cost,
+            :func:`_intrinsic`). Ignored for other kinds. Must be finite and nonnegative; default ``0.0`` (no cost,
             matching this function's behavior before ``expansion_cost`` existed).
         salvage_value: for ``kind="abandon"``, the value recovered by abandoning the project instead of
             riding out its NPV, replacing the previous hardcoded assumption of a total write-off. Ignored
@@ -212,43 +265,72 @@ def real_option_value(
     expand_fraction = _require_finite(expand_fraction, "expand_fraction")
     expansion_cost = _require_finite(expansion_cost, "expansion_cost")
     salvage_value = _require_finite(salvage_value, "salvage_value")
+    if expand_fraction < 0.0:
+        raise ValueError("real_option_value: expand_fraction must be nonnegative")
+    if expansion_cost < 0.0:
+        raise ValueError("real_option_value: expansion_cost must be nonnegative")
 
     npv_mean = _require_finite(npv_dist.mean, "npv_dist.mean")
-    n = int(n_steps) if n_steps is not None else max(int(horizon), 1)
+    n = n_steps if n_steps is not None else max(horizon, 1)
     dt = float(horizon) / n if horizon > 0 else 0.0
     scale = abs(npv_mean) if npv_mean != 0.0 else 1.0
-    h = volatility * scale * float(np.sqrt(dt))
+    with np.errstate(over="ignore", invalid="ignore"):
+        h = volatility * scale * float(np.sqrt(dt))
+    h = _require_finite(h, "lattice step size")
 
     if h == 0.0:
         # No dispersion (or no time to disperse in): waiting has no upside, and discounting only makes
         # it worse, so the optimal policy is immediate exercise -- the SAME payoff _intrinsic gives
         # every node of the lattice below, not a hardcoded max(npv_mean, 0.0) (which happens to match
         # _intrinsic for "defer"/"abandon" but silently ignores "expand"'s expand_fraction bonus).
-        value = float(_intrinsic(np.array([npv_mean]), kind, expand_fraction, expansion_cost, salvage_value)[0])
+        intrinsic = _require_finite_array(
+            _intrinsic(np.array([npv_mean]), kind, expand_fraction, expansion_cost, salvage_value),
+            "immediate exercise value",
+        )
+        value = float(intrinsic[0])
         boundary = np.full(n + 1, np.nan)
-        return OptionValue(value=value, exercise_boundary=boundary, premium_over_npv=value - npv_mean)
+        boundary[n] = _terminal_boundary(kind, expand_fraction, expansion_cost, salvage_value)
+        premium = _require_finite(value - npv_mean, "premium_over_npv")
+        return OptionValue(value=value, exercise_boundary=boundary, premium_over_npv=premium)
 
-    disc = float(np.exp(-rate * dt))
+    with np.errstate(over="ignore", invalid="ignore"):
+        disc = float(np.exp(-rate * dt))
+    disc = _require_finite(disc, "discount factor")
     boundary = np.full(n + 1, np.nan)
 
     j = np.arange(n + 1)
-    v = npv_mean + (2 * j - n) * h  # j up-moves, (n - j) down-moves out of n steps
-    option = _intrinsic(v, kind, expand_fraction, expansion_cost, salvage_value)
-    boundary[n] = 0.0  # at maturity, exercise iff the underlying is non-negative (kind-independent here)
+    with np.errstate(over="ignore", invalid="ignore"):
+        v = npv_mean + (2 * j - n) * h  # j up-moves, (n - j) down-moves out of n steps
+    v = _require_finite_array(v, "terminal lattice values")
+    option = _require_finite_array(
+        _intrinsic(v, kind, expand_fraction, expansion_cost, salvage_value),
+        "terminal option values",
+    )
+    boundary[n] = _terminal_boundary(kind, expand_fraction, expansion_cost, salvage_value)
 
     for step in range(n - 1, -1, -1):
         j = np.arange(step + 1)
-        v = npv_mean + (2 * j - step) * h
-        continuation = disc * 0.5 * (option[1 : step + 2] + option[0 : step + 1])
-        intrinsic = _intrinsic(v, kind, expand_fraction, expansion_cost, salvage_value)
-        exercise = intrinsic > continuation
-        option = np.where(exercise, intrinsic, continuation)
+        with np.errstate(over="ignore", invalid="ignore"):
+            v = npv_mean + (2 * j - step) * h
+            continuation = disc * 0.5 * (option[1 : step + 2] + option[0 : step + 1])
+        v = _require_finite_array(v, f"lattice values at step {step}")
+        continuation = _require_finite_array(continuation, f"continuation values at step {step}")
+        intrinsic = _require_finite_array(
+            _intrinsic(v, kind, expand_fraction, expansion_cost, salvage_value),
+            f"intrinsic values at step {step}",
+        )
+        choose_intrinsic = intrinsic > continuation
+        exercise = choose_intrinsic & _exercise_is_economic(
+            v, kind, expand_fraction, expansion_cost, salvage_value
+        )
+        option = np.where(choose_intrinsic, intrinsic, continuation)
         if np.any(exercise):
             exercised_v = v[exercise]
             boundary[step] = float(np.min(exercised_v)) if kind != "abandon" else float(np.max(exercised_v))
 
     value = float(option[0])
-    return OptionValue(value=value, exercise_boundary=boundary, premium_over_npv=value - npv_mean)
+    premium = _require_finite(value - npv_mean, "premium_over_npv")
+    return OptionValue(value=value, exercise_boundary=boundary, premium_over_npv=premium)
 
 
 def _variance_reduction(posterior: Posterior, drill_info: dict) -> float:
@@ -276,23 +358,17 @@ def _variance_reduction(posterior: Posterior, drill_info: dict) -> float:
                     cell_volumes=drill_info.get("cell_volumes"),
                 )
             )
-            return _clamp_variance_reduction(reduction)
-    return _clamp_variance_reduction(float(drill_info.get("variance_reduction", 0.5)))
+            return _validate_variance_reduction(reduction)
+    return _validate_variance_reduction(float(drill_info.get("variance_reduction", 0.5)))
 
 
-def _clamp_variance_reduction(reduction: float) -> float:
-    """Clamp a fractional variance reduction to ``[0, 1)``.
-
-    NaN is rejected explicitly, and first: plain ``min``/``max`` do not reliably filter it out
-    (``max(float("nan"), 0.0)`` returns ``nan``, not ``0.0``, silently defeating the floor below) --
-    the same NaN-comparisons-are-False trap that :func:`real_option_value`'s own validation guards
-    against. Left unfiltered, a NaN reduction would also silently miss ``voi_estimate``'s
-    ``reduction == 0.0`` fast path (NaN compares unequal to everything, itself included) and instead
-    poison the general Monte Carlo path with NaN centers/scales.
-    """
+def _validate_variance_reduction(reduction: float) -> float:
+    """Validate a declared fractional variance reduction is in ``[0, 1)`` without rewriting it."""
     if not np.isfinite(reduction):
         raise ValueError(f"voi_dollars: variance_reduction must be finite, got {reduction!r}")
-    return min(max(reduction, 0.0), 1.0 - 1e-9)
+    if not 0.0 <= reduction < 1.0:
+        raise ValueError(f"voi_dollars: variance_reduction must be in [0, 1), got {reduction!r}")
+    return reduction
 
 
 class VoiEstimate(NamedTuple):
@@ -328,12 +404,12 @@ _VOI_CI95_Z = 1.959963984540054  # two-sided 95% normal-approximation multiplier
 
 def _voi_estimate_from_paired_diffs(diffs: np.ndarray, method: str) -> VoiEstimate:
     n = int(diffs.shape[0])
+    if n < 2 or not np.all(np.isfinite(diffs)):
+        raise ValueError("voi_dollars: paired decision differences must contain at least two finite replicates")
     value = float(np.mean(diffs))
-    se = float(np.std(diffs, ddof=1) / np.sqrt(n)) if n > 1 else float("nan")
-    if np.isfinite(se):
-        ci_low, ci_high = value - _VOI_CI95_Z * se, value + _VOI_CI95_Z * se
-    else:
-        ci_low, ci_high = float("nan"), float("nan")
+    se = float(np.std(diffs, ddof=1) / np.sqrt(n))
+    ci_low, ci_high = value - _VOI_CI95_Z * se, value + _VOI_CI95_Z * se
+    _require_finite_array([value, se, ci_low, ci_high], "VOI estimate", context="voi_dollars")
     return VoiEstimate(value=value, standard_error=se, ci_low=ci_low, ci_high=ci_high, method=method)
 
 
@@ -382,7 +458,8 @@ def _warn_if_not_gaussian_like(posterior: Posterior, rng: np.random.Generator, *
     shape, which is only true for a genuinely Gaussian belief. Thresholds are generous (roughly 7 standard
     errors at ``n_probe=512`` for true Gaussian data) to keep the false-positive rate low.
     """
-    probe = np.asarray(posterior.samples(n_probe, rng), dtype=np.float64)
+    diagnostic_rng = copy.deepcopy(rng)
+    probe = np.asarray(posterior.samples(n_probe, diagnostic_rng), dtype=np.float64)
     if probe.ndim == 1:
         probe = probe[:, None]
     sd = probe.std(axis=0, ddof=1)
@@ -417,22 +494,59 @@ def _require_dense_finite_matrix(value: Any, name: str) -> np.ndarray:
     return arr
 
 
+def _require_covariance(
+    value: Any,
+    name: str,
+    size: int,
+    *,
+    positive_definite: bool,
+) -> np.ndarray:
+    arr = _require_dense_finite_matrix(value, name)
+    if arr.shape != (size, size):
+        raise ValueError(f"voi_dollars: {name} must have shape ({size}, {size}), got {arr.shape}")
+    scale = max(float(np.max(np.abs(arr), initial=0.0)), 1.0)
+    tolerance = 1e-10 * scale
+    if not np.allclose(arr, arr.T, rtol=1e-10, atol=tolerance):
+        raise ValueError(f"voi_dollars: {name} must be symmetric")
+    symmetric = 0.5 * (arr + arr.T)
+    eigenvalues = np.linalg.eigvalsh(symmetric)
+    if positive_definite:
+        if float(eigenvalues.min(initial=np.inf)) <= tolerance:
+            raise ValueError(f"voi_dollars: {name} must be positive-definite")
+    elif float(eigenvalues.min(initial=np.inf)) < -tolerance:
+        raise ValueError(f"voi_dollars: {name} must be positive-semidefinite")
+    return symmetric
+
+
 def _safe_cholesky(mat: np.ndarray, *, name: str) -> np.ndarray:
     """Cholesky factor of a symmetric PSD matrix, with a small jitter retry for numerical near-singularity."""
-    sym = 0.5 * (mat + mat.T)
     try:
-        return np.linalg.cholesky(sym)
+        return np.linalg.cholesky(mat)
     except np.linalg.LinAlgError:
         pass
-    scale = float(np.trace(sym)) / max(sym.shape[0], 1)
+    scale = float(np.trace(mat)) / max(mat.shape[0], 1)
     jitter = 1e-10 * (scale if scale > 0.0 else 1.0)
     try:
-        return np.linalg.cholesky(sym + jitter * np.eye(sym.shape[0]))
+        return np.linalg.cholesky(mat + jitter * np.eye(mat.shape[0]))
     except np.linalg.LinAlgError as exc:
         raise ValueError(
             f"voi_dollars: {name} is not (numerically) symmetric positive-definite, even after a small "
             "jitter -- the Gaussian-conjugate observation_model path requires a genuine covariance."
         ) from exc
+
+
+def _require_decision_value(value: Any, *, replicate: int, side: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"voi_dollars: decision_fn returned a non-scalar value for replicate {replicate} ({side})"
+        ) from exc
+    if not np.isfinite(result):
+        raise ValueError(
+            f"voi_dollars: decision_fn returned a non-finite value for replicate {replicate} ({side})"
+        )
+    return result
 
 
 def _voi_estimate_gaussian_conjugate(
@@ -447,18 +561,23 @@ def _voi_estimate_gaussian_conjugate(
     """The genuine sample-then-condition EVSI path: see :class:`GaussianObservationModel`'s docstring."""
     method = "gaussian_conjugate_evsi"
     mean = np.asarray(posterior.mean, dtype=np.float64)
+    if mean.ndim != 1 or mean.size == 0 or not np.all(np.isfinite(mean)):
+        raise ValueError("voi_dollars: posterior.mean must be a finite non-empty one-dimensional array")
     d = mean.shape[0]
-    cov = _require_dense_finite_matrix(posterior.cov, "posterior.cov")
-    if cov.shape != (d, d):
-        raise ValueError(f"voi_dollars: posterior.cov must have shape ({d}, {d}), got {cov.shape}")
+    cov = _require_covariance(posterior.cov, "posterior.cov", d, positive_definite=False)
 
     obs_matrix = _require_dense_finite_matrix(observation_model.obs_matrix, "observation_model.obs_matrix")
     if obs_matrix.ndim != 2 or obs_matrix.shape[1] != d:
         raise ValueError(f"voi_dollars: observation_model.obs_matrix must have shape (k, {d}), got {obs_matrix.shape}")
     k = obs_matrix.shape[0]
-    obs_cov = _require_dense_finite_matrix(observation_model.obs_cov, "observation_model.obs_cov")
-    if obs_cov.shape != (k, k):
-        raise ValueError(f"voi_dollars: observation_model.obs_cov must have shape ({k}, {k}), got {obs_cov.shape}")
+    if k == 0:
+        raise ValueError("voi_dollars: observation_model.obs_matrix must contain at least one observation row")
+    obs_cov = _require_covariance(
+        observation_model.obs_cov,
+        "observation_model.obs_cov",
+        k,
+        positive_definite=True,
+    )
 
     _warn_if_not_gaussian_like(posterior, rng)
 
@@ -466,9 +585,19 @@ def _voi_estimate_gaussian_conjugate(
     # covariance -- all independent of the observed VALUE, a standard closed-form property of conjugate-
     # Gaussian updating that lets these be computed once rather than per simulated observation.
     mean_y = obs_matrix @ mean
-    cov_y = obs_matrix @ cov @ obs_matrix.T + obs_cov
+    cov_y = _require_covariance(
+        obs_matrix @ cov @ obs_matrix.T + obs_cov,
+        "the prior-predictive observation covariance",
+        k,
+        positive_definite=True,
+    )
     gain = np.linalg.solve(cov_y, obs_matrix @ cov).T  # (d, k); solved rather than inverting cov_y directly
-    post_cov = cov - gain @ obs_matrix @ cov
+    post_cov = _require_covariance(
+        cov - gain @ obs_matrix @ cov,
+        "the post-observation covariance",
+        d,
+        positive_definite=False,
+    )
 
     l_prior = _safe_cholesky(cov, name="posterior.cov")
     l_post = _safe_cholesky(post_cov, name="the post-observation covariance")
@@ -485,7 +614,9 @@ def _voi_estimate_gaussian_conjugate(
         no_info_samples = mean + z @ l_prior.T
         post_mean_i = mean + gain @ (y_draws[i] - mean_y)
         with_info_samples = post_mean_i + z @ l_post.T
-        diffs[i] = float(decision_fn(with_info_samples)) - float(decision_fn(no_info_samples))
+        with_info = _require_decision_value(decision_fn(with_info_samples), replicate=i, side="with information")
+        no_info = _require_decision_value(decision_fn(no_info_samples), replicate=i, side="without information")
+        diffs[i] = with_info - no_info
 
     return _voi_estimate_from_paired_diffs(diffs, method)
 
@@ -569,12 +700,8 @@ def voi_estimate(
     Returns:
         A :class:`VoiEstimate`: the (unfloored) point estimate plus its Monte Carlo uncertainty.
     """
-    n_outer = int(drill_info.get("n_outer_samples", n_outer))
-    n_inner = int(drill_info.get("n_inner_samples", n_inner))
-    if n_outer < 1:
-        raise ValueError(f"voi_dollars: n_outer_samples must be >= 1, got {n_outer}")
-    if n_inner < 1:
-        raise ValueError(f"voi_dollars: n_inner_samples must be >= 1, got {n_inner}")
+    n_outer = _require_sample_count(drill_info.get("n_outer_samples", n_outer), "n_outer_samples", minimum=2)
+    n_inner = _require_sample_count(drill_info.get("n_inner_samples", n_inner), "n_inner_samples")
 
     if observation_model is not None:
         return _voi_estimate_gaussian_conjugate(
@@ -608,9 +735,9 @@ def voi_estimate(
     diffs = np.empty(n_outer, dtype=np.float64)
     for i in range(n_outer):
         base = posterior.samples(n_inner, rng)  # shared by both sides of this replicate -- see docstring
-        no_info = float(decision_fn(base))
+        no_info = _require_decision_value(decision_fn(base), replicate=i, side="without information")
         refined = centers[i] + inner_scale * (base - mean)
-        with_info = float(decision_fn(refined))
+        with_info = _require_decision_value(decision_fn(refined), replicate=i, side="with information")
         diffs[i] = with_info - no_info
 
     return _voi_estimate_from_paired_diffs(diffs, method)

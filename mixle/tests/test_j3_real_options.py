@@ -200,13 +200,11 @@ def test_real_option_value_rejects_fractional_n_steps():
         real_option_value(npv_dist, volatility=0.3, horizon=5, kind="defer", rate=0.05, n_steps=5.5)
 
 
-def test_real_option_value_accepts_a_whole_number_float_horizon():
-    """Negative control: a whole-number float (e.g. 5.0) is not the silently-truncated fraction the fix
-    targets, so it must still be accepted and price identically to the equivalent int."""
+def test_real_option_value_rejects_a_whole_number_float_horizon():
+    """Count-like configuration requires an integral scalar, not a numerically integral float."""
     npv_dist = _npv_dist(mean=10.0)
-    as_int = real_option_value(npv_dist, volatility=0.3, horizon=5, kind="defer", rate=0.05)
-    as_float = real_option_value(npv_dist, volatility=0.3, horizon=5.0, kind="defer", rate=0.05)
-    assert as_int.value == as_float.value
+    with pytest.raises(ValueError, match="horizon must be an exact integer"):
+        real_option_value(npv_dist, volatility=0.3, horizon=5.0, kind="defer", rate=0.05)
 
 
 def test_expansion_cost_prevents_the_capacity_bonus_when_it_exceeds_the_gain():
