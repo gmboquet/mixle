@@ -1,0 +1,139 @@
+{
+  "artifact": "mixle.public_claims/v1",
+  "evidence_grades": [
+    "E0",
+    "E1",
+    "E2",
+    "E3",
+    "E4",
+    "E5",
+    "none"
+  ],
+  "public_surfaces": {
+    "files": [
+      "README.md",
+      "CHANGELOG.md"
+    ],
+    "globs": [
+      "docs/**/*.rst",
+      "docs/**/*.md",
+      "examples/**/*.py",
+      "benchmarks/results/**/*.json"
+    ],
+    "exclude_globs": [
+      "docs/audits/**",
+      "docs/_build/**"
+    ],
+    "python_scope": "module_docstring"
+  },
+  "claims": [
+    {
+      "id": "CLM-080-001",
+      "statement": "~90 distribution families with a common estimator/sampler/encoder contract",
+      "grade": "E1",
+      "evidence": [
+        "mixle/tests/family_catalog_test.py",
+        "mixle/tests/distribution_invariant_catalog_test.py"
+      ]
+    },
+    {
+      "id": "CLM-080-002",
+      "statement": "Seven stable scalar families satisfy normalization, score, fit, and serialization invariants",
+      "grade": "E2",
+      "evidence": [
+        ".github/workflows/tests.yml#clean-wheel",
+        "mixle/tests/invariant_catalog_test.py"
+      ]
+    },
+    {
+      "id": "CLM-080-003",
+      "statement": "\"5000+ tests\"",
+      "grade": "E1",
+      "evidence": [
+        ".github/workflows/tests.yml#test",
+        "release-checklists/0.8.0.md"
+      ]
+    },
+    {
+      "id": "CLM-080-004",
+      "statement": "One ``optimize(...)`` call fits a heterogeneous composed base model",
+      "grade": "E2",
+      "evidence": [
+        ".github/workflows/tests.yml#clean-wheel",
+        "mixle/tests/smoke_test.py"
+      ]
+    },
+    {
+      "id": "CLM-080-005",
+      "statement": "A PyTorch module fits in one line with parity to a hand-written loop",
+      "grade": "E1",
+      "evidence": [
+        "mixle/tests/torch_parity_test.py",
+        "mixle/tests/grad_control_test.py"
+      ]
+    },
+    {
+      "id": "CLM-080-006",
+      "statement": "Distillation into a small local model with calibrated deferral and a cost/quality receipt",
+      "grade": "E1",
+      "evidence": [
+        "mixle/tests/task_calibration_test.py",
+        "mixle/tests/task_cascade_test.py"
+      ]
+    },
+    {
+      "id": "CLM-080-007",
+      "statement": "HMM / GMM performance and crossover behavior",
+      "grade": "none",
+      "evidence": [
+        "benchmarks/README.md",
+        "docs/performance-crossover.rst"
+      ]
+    },
+    {
+      "id": "CLM-080-008",
+      "statement": "Distributed estimation over Spark / Dask / Ray / MPI by switching one argument",
+      "grade": "E1",
+      "evidence": [
+        "mixle/tests/dask_encoded_data_test.py",
+        "mixle/tests/mpi_encoded_data_test.py",
+        "mixle/tests/ray_encoded_data_test.py",
+        "mixle/tests/spark_encoded_data_test.py"
+      ]
+    },
+    {
+      "id": "CLM-080-009",
+      "statement": "Distributed transformer and MoE training",
+      "grade": "E1",
+      "evidence": [
+        "mixle/tests/torchrun_encoded_data_test.py",
+        "docs/backend-support.rst"
+      ]
+    },
+    {
+      "id": "CLM-080-010",
+      "statement": "Serialization round-trips and provenance / replay",
+      "grade": "E1",
+      "evidence": [
+        "mixle/tests/serialization_compatibility_test.py",
+        "mixle/tests/provenance_test.py"
+      ]
+    },
+    {
+      "id": "CLM-080-011",
+      "statement": "Calibrated abstention (conformal / cascade / escalation)",
+      "grade": "E1",
+      "evidence": [
+        "mixle/tests/conformal_coverage_test.py",
+        "mixle/tests/task_calibration_test.py"
+      ]
+    }
+  ],
+  "approved_occurrences": [
+    {
+      "claim_id": "CLM-080-003",
+      "path": "docs/claim-evidence-ledger.rst",
+      "text": "* - \"5000+ tests\""
+    }
+  ]
+}

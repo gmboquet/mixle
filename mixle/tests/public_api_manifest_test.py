@@ -30,6 +30,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -94,6 +95,19 @@ class PublicApiManifestTest(unittest.TestCase):
             "manifests/api_manifest.json missing -- run scripts/gen_api_manifest.py",
         )
         self.assertTrue(_GEN_PATH.exists(), "scripts/gen_api_manifest.py missing")
+
+    def test_generator_rejects_duplicate_static_exports_before_normalizing(self):
+        generator = _load_generator()
+        with tempfile.TemporaryDirectory() as directory:
+            init = Path(directory) / "__init__.py"
+            init.write_text('__all__ = ["one", "one"]\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate __all__ exports.*one"):
+                generator._extract_all(init)
+
+    def test_live_inference_exports_are_unique(self):
+        import mixle.inference
+
+        self.assertEqual(len(mixle.inference.__all__), len(set(mixle.inference.__all__)))
 
     def test_standalone_generator_checks_its_own_checkout(self):
         env = dict(os.environ)

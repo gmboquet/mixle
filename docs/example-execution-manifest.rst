@@ -101,7 +101,7 @@ dist/mixle-0.8.0.dev0-py3-none-any.whl``, no extras, no editable install, no
     iterations regardless of convergence, by design -- a fixed amount of work
     that was already close to the budget before this pass.
   * ``hierarchical_mixture_example.py`` did **not** complete even with the
-    15-minute allowance (10x the declared budget), while confirmed still
+    15-minute allowance (well beyond the declared budget), while confirmed still
     actively computing throughout, not deadlocked (steadily increasing CPU
     time, never crashed or errored). This is a bigger gap than host load alone
     plausibly explains. Its fit path
@@ -214,14 +214,10 @@ reproduces the identical held-out mean log-likelihood (-2.0762). This pass also:
   download permission" to ``torch`` (same chokepoint as the four examples
   above) -- the dataset load itself is not the blocker in a base install.
 * Confirmed ``geoscience_inversion_report.py`` -- also absent from the
-  2026-07-17 evidence despite exercising ``mixle.task.inverse`` -- passes
-  (3.4s, deterministic across repeated runs). Separately worth a follow-up
-  look: the M3 inversion posterior this run produced was badly miscalibrated
-  (SBC p-value 1.4e-07; 50%/90% nominal coverage measured at 32%/95%; posterior
-  standard deviation about 39x tighter than the actual error), which the
-  script's own calibration layer correctly detected, abstaining rather than
-  serving an overconfident claim -- the script passes, but the underlying fit
-  quality is a separate, open question from execution status.
+  2026-07-17 evidence despite exercising ``mixle.task.inverse`` -- passes its
+  execution contract. The script's calibration layer detected a poorly
+  calibrated candidate and abstained. Exact measurements belong in the
+  content-addressed receipt, not in this mutable narrative.
 
 **2026-07-23 addition.** ``quickstart_example.py`` was added to close a
 coverage gap: neither ``mixle.describe()`` (the package docstring's own
@@ -260,17 +256,15 @@ independent hand or brute-force calculation, not just "exited zero":
   Separately found and since fixed (see below): ``nucleus_size()`` was wrong
   for this class.
 * ``model_comparison_example.py`` -- ``mixle.ppl``'s ``waic``/``loo``/``compare()``,
-  ranking a deliberately-wrong unimodal fit against a correct 2-component
-  mixture and a second wrong (Student-t) fit on genuinely bimodal data. Base
-  install, 3.1s. The mixture wins by a ~20x-standard-error margin -- an
-  unambiguous result, not a coin flip.
+  ranking a deliberately-wrong unimodal fit against a 2-component mixture and
+  a second wrong (Student-t) fit on genuinely bimodal data. The script reports
+  the measured ranking and diagnostics; this narrative does not preserve a
+  result from an unbound historical run.
 * ``copula_vine_example.py`` -- direct ``CopulaDistribution`` /
-  ``RVineCopulaDistribution`` fitting on Clayton-generated (genuine
-  lower-tail-dependent) heterogeneous-marginal data, contrasted against a
-  Gaussian-copula core fit to the same data. Base install, 10.3s. The vine
-  recovers 100% of the true joint lower-tail rate (77x the independence
-  baseline); the elliptical Gaussian copula recovers only 58% of it despite
-  fitting the same procedure on the same data.
+  ``RVineCopulaDistribution`` fitting on Clayton-generated
+  lower-tail-dependent heterogeneous-marginal data, contrasted against a
+  Gaussian-copula core fit to the same data. The script checks its measured
+  tail diagnostics; exact results belong in the candidate-bound receipt.
 
 Two real, non-blocking issues were found incidentally while building these
 (not introduced by them), both since fixed -- see the 2026-07-23 follow-ups

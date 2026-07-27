@@ -349,13 +349,13 @@ numerics, and Torch DTensor sharding.
   `lstsq`/`pinv` at all three IRLS solve sites, bit-unchanged at full rank.
 - `mixle.stats` HMM: the HMM distribution defaulted `use_numba=False` while the estimator defaulted
   it to `HAS_NUMBA`; since `optimize(prev_estimate=init)` encodes data through the distribution's
-  encoder, the common "pass an init" HMM fit silently never used numba (~90x slower than expected).
+  encoder, the common "pass an init" HMM fit silently never used numba.
   Distribution default now matches the estimator.
 
 ### Changed
 
-- `mixle.stats` MVN covariance accumulation switched from `np.einsum` to a BLAS `matmul` -- 2.7x
-  faster end-to-end MVN mixture fits, byte-exact.
+- `mixle.stats` MVN covariance accumulation switched from `np.einsum` to a BLAS `matmul`, with
+  byte-exact parity. Historical timing is not a 0.8.0 claim.
 - `mixle.stats` HMM distribution's `use_numba` default changed from `False` to `HAS_NUMBA`;
   behavior-preserving (bit-identical) but changes default performance characteristics, and an
   explicit `use_numba=False` is still respected.
@@ -384,8 +384,8 @@ FSDP2/Spark/MPI transports).
   (`HashedRecord`, active labeling, `recommend_model`).
 - Enumeration engines for exact/approximate ranking: `LatticeEnvelopeIndex`, `RescoredIndex`
   speculative enumeration, certified `branch_cap` pruning, `HMMPathIndex` quantized count-DP,
-  `AREnvelopeIndex` for LLM deep enumeration, a persistent `SeekIndex`, a numpy/batched fast path
-  (~24x on gpt2), and quantized-inference certificates (`logit_error_bucket_slack`).
+  `AREnvelopeIndex` for LLM deep enumeration, a persistent `SeekIndex`, a numpy/batched path,
+  and quantized-inference certificates (`logit_error_bucket_slack`).
 - Neural-density adapters wired into the PPL as first-class constructors (`NeuralDensity`,
   `NeuralConditionalDensity` wrapping VAE/MAF/MDN/autoregressive/flow torch models), `EnergyModel`
   (NCE + Langevin), `fisher_merge` closed-form Fisher-weighted parameter merge, closed-form
@@ -402,11 +402,10 @@ FSDP2/Spark/MPI transports).
   `LLMUncertainty` semantic-entropy plus conformal abstain, claim-level UQ, `BeliefState`
   epistemic-aleatoric decomposition, `DiscreteAnswer.decide`, and the `mixle.reason` front door.
 - Compute engines: LNS (logarithmic number system) integer arithmetic with an integer log-sum-exp
-  kernel (14x on LM cross-entropy), packed binary/ternary/sub-byte precision kernels, an MPFR
+  kernel, packed binary/ternary/sub-byte precision kernels, an MPFR
   arbitrary-precision tail, a precision-spectrum planner with data-aware `optimize(precision=)`,
   torch/GPU scoring rolled out across roughly twenty distribution families, distributed EM transports
-  (MPI, Spark, FSDP2/CUDA bf16 with DCP sharded checkpoints), and JAX/XLA jitted EM verified ~21x on
-  Apple M4.
+  (MPI, Spark, FSDP2/CUDA bf16 with DCP sharded checkpoints), and a JAX/XLA jitted EM path.
 - `mixle.evolve` Phase 1: typed search space, bandit-population meta-search, and structure operators;
   declarative `LM`/streaming-transformer/DPO leaves with SFT loss-masking and CPT+EWC.
 

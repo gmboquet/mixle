@@ -11,10 +11,10 @@ would actually reach for (scikit-learn specialists, raw torch). Three claims, th
      errors are all silent, the mixle system's local errors are conformally bounded and everything
      else escalates to the teacher.
   3. NEURAL INTEGRATION — a torch normalizing flow is a first-class mixle distribution: it EM-fits
-     INSIDE a mixture next to a classical Gaussian with the same ``optimize`` verb. The hybrid beats
-     both the all-classical and the all-neural fit on held-out likelihood.
+     INSIDE a mixture next to a classical Gaussian with the same ``optimize`` verb. The script prints
+     all held-out likelihoods without embedding a winner in the source.
 
-Honest boundaries are printed at the end. Runtime ~2 minutes on a laptop, no GPU needed.
+Boundaries and current-run measurements are printed at the end; no fixed runtime is claimed.
 """
 
 from __future__ import annotations

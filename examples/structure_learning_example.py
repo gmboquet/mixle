@@ -3,9 +3,9 @@
 mixle's tagline is "automatic inference for composable models of heterogeneous data." A CompositeDistribution
 composes heterogeneous fields, but models them as *independent* -- and when the fields actually depend on one
 another, that is badly wrong. This shows the gap and closes it: on a heterogeneous record where a category
-shifts a real's mean and that real drives a count, ``learn_structure`` discovers the dependency graph across
-mixed families and fits a joint model that beats the independent composite by hundreds of nats on held-out data
--- while still scoring, sampling, and composing like any mixle distribution.
+shifts a real's mean and that real drives a count, ``learn_structure`` discovers a dependency graph across
+mixed families. The script prints both held-out scores so the current run can be evaluated without embedding
+a fixed superiority claim in the source.
 
 Run: ``python structure_learning_example.py``
 """

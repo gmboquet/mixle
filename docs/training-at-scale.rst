@@ -159,9 +159,8 @@ warmup window. Injecting a loss spike into an otherwise stable run --
 
    anomalies = monitor.observe_step(6, 50.0)   # a deliberate spike
 
--- flags it the same step it happens: this exact run produced ``detected_step=6`` for
-``injected_step=6`` (latency 0) with ``kind="loss_spike"`` and ``z_score=1584.885`` against the
-stable baseline. The rolling baseline is causal -- each step is scored against the window as it
+-- reports the injected step as a ``loss_spike`` in the current run. The rolling baseline is causal
+-- each step is scored against the window as it
 stood *before* that step, so a checkpoint restart that silently drops optimizer/RNG state and
 produces a real loss jump is caught as ``restart_discontinuity`` on the very next step (see
 ``RestartContinuityTest`` in the receipts table below), while a well-behaved resume that continues
