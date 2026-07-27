@@ -466,6 +466,7 @@ def _stats_public_distribution_catalog():
             np.stack([np.array([[3.0, 0.7], [0.7, 3.0]]) * w for w in (0.6, 0.4)]),
             [0.5, 0.5],
             node_rate=0.5,
+            motif=stats.CommonNeighbourMotif((0, 1)),
         ),
         "ChurningTemporalGraphGrammarDistribution": stats.ChurningTemporalGraphGrammarDistribution(
             stats.TemporalGraphGrammarDistribution([0.25] * 4, edge_rate=2.0, node_rate=1.0),
