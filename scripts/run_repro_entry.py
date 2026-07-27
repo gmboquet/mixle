@@ -171,7 +171,7 @@ def run_entry(bundle: dict[str, Any], entry_id: str) -> dict[str, Any]:
     duration = time.monotonic() - started
     _validate_output(entry, result.stdout)
     return {
-        "artifact": "mixle.reproduction_entry_receipt/v1",
+        "artifact": "mixle.reproduction_entry_receipt/v2",
         "entry": entry_id,
         "argv": entry["argv"],
         "tier": entry["tier"],
@@ -182,6 +182,8 @@ def run_entry(bundle: dict[str, Any], entry_id: str) -> dict[str, Any]:
         ).hexdigest(),
         "stdout_sha256": hashlib.sha256(result.stdout.encode("utf-8")).hexdigest(),
         "validated_output": entry["expected"],
+        "execution_status": "passed",
+        "claim_status": "verified",
         "passed": True,
     }
 

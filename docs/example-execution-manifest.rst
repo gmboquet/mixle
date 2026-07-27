@@ -330,10 +330,12 @@ Execution status should be recorded as evidence, not inferred from import
 success or from an earlier notebook run. If an example writes an artifact, the
 artifact path and any cleanup policy should be captured with the status.
 
-Every example must be recorded as one of:
+Execution state and claim state are separate. Every attempted example receives
+one execution state:
 
 ``passed``
-    The script completed from a clean install with the documented command.
+    The script completed from a clean install with the documented command. This
+    proves runnability only; it does not verify any advertised result.
 
 ``failed``
     The script exited non-zero. Record the first meaningful exception.
@@ -353,6 +355,16 @@ Do not merge ``blocked`` and ``skipped``. A blocked example needs an external
 prerequisite; a skipped example was deliberately left out of the release gate.
 That distinction matters when deciding whether documentation can claim the
 workflow is healthy.
+
+An evidence-class example additionally receives claim state ``verified`` only
+when a machine-readable acceptance contract checks the advertised behavior and
+the process fails if that contract is absent or false. Publication's
+``mixle.example_execution_manifest/v2`` therefore records
+``execution_status``, ``claim_status``, and ``acceptance_contract`` separately.
+The exact-output and JSON assertions in
+``release-checklists/0.8.0-repro-bundle.json`` are the release claim oracles.
+Inventory entries below that merely say “Execute” are runnability targets, not
+claim evidence.
 
 Minimum Release Run
 -------------------
@@ -559,6 +571,7 @@ For each executed example, record:
 * optional extras installed;
 * timeout;
 * status;
+* claim status and its machine acceptance contract, if used as evidence;
 * first error or output artifact path; and
 * whether network or external data was used.
 

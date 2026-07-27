@@ -11,6 +11,8 @@ Everything measured in-process; a few seconds, no GPU, no network.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from mixle.inference import certify, learn_bayesian_network
@@ -55,8 +57,26 @@ def main() -> None:
         pred.append(_clg_mean(pf, record))
     r = float(np.corrcoef(truth, pred)[0, 1])
     rmse = float(np.sqrt(np.mean((np.asarray(truth) - np.asarray(pred)) ** 2)))
+    recovered_edges = set(pf.parents) == {1, 2}
+    accepted = recovered_edges and r >= 0.95 and rmse <= 6.0
     print(f"\nheld-out price prediction: corr={r:.3f}, rmse={rmse:.2f}")
-    print("the cross-modal edges were recovered from data; the readout is the closed-form CLG mean.")
+    print(
+        "ACCEPTANCE "
+        + json.dumps(
+            {
+                "artifact": "mixle.cross_modal_fit_acceptance/v1",
+                "accepted": accepted,
+                "held_out_correlation": r,
+                "held_out_rmse": rmse,
+                "price_parents": sorted(pf.parents),
+                "required_price_parents": [1, 2],
+            },
+            sort_keys=True,
+        )
+    )
+    if not accepted:
+        raise RuntimeError("cross-modal acceptance failed: required edges or held-out thresholds were not met")
+    print("the required cross-modal edges were recovered; the readout is the closed-form CLG mean.")
 
 
 def _clg_mean(factor, record: tuple) -> float:

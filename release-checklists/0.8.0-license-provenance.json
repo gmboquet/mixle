@@ -1,0 +1,10 @@
+{
+  "artifact": "mixle.license_provenance/v1",
+  "evidence": null,
+  "original_notice": "Copyright (c) 2023 Lawrence Livermore National Security, LLC",
+  "release": "0.8.0",
+  "review_date": null,
+  "reviewer": null,
+  "scope": "Authority to publish the complete 0.8.0 source and binary artifacts while preserving all required notices",
+  "status": "pending"
+}

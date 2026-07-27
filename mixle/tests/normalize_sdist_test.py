@@ -18,6 +18,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.normalize_sdist import normalize
 
@@ -97,6 +98,15 @@ class NormalizeSdistTest(unittest.TestCase):
         normalize(self.a, epoch)
         normalize(self.b, epoch)
         self.assertEqual(self.a.read_bytes(), self.b.read_bytes())
+
+    def test_failed_atomic_replace_preserves_the_original(self):
+        _make_sdist(self.a, mtime_base=1_700_000_050)
+        original = self.a.read_bytes()
+        with mock.patch("scripts.normalize_sdist.os.replace", side_effect=OSError("injected replace failure")):
+            with self.assertRaisesRegex(OSError, "injected replace failure"):
+                normalize(self.a, 1_700_000_000)
+        self.assertEqual(self.a.read_bytes(), original)
+        self.assertEqual(list(self.a.parent.glob(f".{self.a.name}.*.tmp")), [])
 
 
 if __name__ == "__main__":

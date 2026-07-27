@@ -12,8 +12,8 @@ sys.path.insert(0, str(ROOT))
 import mixle.stats  # noqa: F401,E402
 
 project = "mixle"
-author = "Grant Boquet"
-copyright = "2014-2026, Grant Boquet and contributors"
+author = "Mixle contributors"
+copyright = "2023 Lawrence Livermore National Security, LLC; 2026 Grant Boquet and contributors"
 
 pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
 release = pyproject["project"]["version"]

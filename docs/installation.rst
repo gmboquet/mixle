@@ -70,6 +70,9 @@ Install only the optional integrations you need:
    * - ``grammar``
      - NetworkX-backed grammar models
      - graph grammar workflows
+   * - ``examples``
+     - PEFT, scikit-learn, pomegranate, and hmmlearn comparison dependencies
+     - shipped examples that compare against external implementations
 
 Common installs:
 
@@ -81,10 +84,10 @@ Common installs:
    pip install "mixle[spark]"
    pip install "mixle[all]"
 
-The ``all`` extra is a broad convenience bundle for common local acceleration,
-distributed, data, Torch, and graph helpers. It is not every declared extra;
-install narrower extras such as ``scientist``, ``jax``, ``sympy``, ``sage``,
-``gmpy2``, or ``docs`` explicitly when those surfaces are needed.
+The ``all`` extra is the machine-checked union of runtime feature extras,
+including data, numerical, distributed, scientist, symbolic, kernel-build, and
+external-comparison support. Development-only ``docs``, ``test``, and ``lint``
+remain separate.
 
 The ``scientist`` extra installs Python packages only. The assembled
 ``mixle.scientist`` workflow loads open-weight models from the local Hugging

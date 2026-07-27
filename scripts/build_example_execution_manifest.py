@@ -70,8 +70,10 @@ def build_manifest(
     examples = []
     for entry_id, entry in sorted(expected_entries.items()):
         receipt = receipts[entry_id]
-        if receipt.get("artifact") != "mixle.reproduction_entry_receipt/v1" or receipt.get("passed") is not True:
+        if receipt.get("artifact") != "mixle.reproduction_entry_receipt/v2" or receipt.get("passed") is not True:
             raise ValueError(f"{entry_id}: receipt is not a passing reproduction receipt")
+        if receipt.get("execution_status") != "passed" or receipt.get("claim_status") != "verified":
+            raise ValueError(f"{entry_id}: receipt did not separately verify execution and claimed behavior")
         if receipt.get("entry_contract_sha256") != _contract_digest(entry):
             raise ValueError(f"{entry_id}: receipt is for a different entry contract")
         if receipt.get("argv") != entry["argv"] or receipt.get("tier") != entry["tier"]:
@@ -92,8 +94,9 @@ def build_manifest(
                 "command": entry["argv"],
                 "dependency_tier": entry["tier"],
                 "duration_seconds": duration,
-                "status": "passed",
-                "validated_output": entry["expected"],
+                "execution_status": "passed",
+                "claim_status": "verified",
+                "acceptance_contract": entry["expected"],
                 "stdout_sha256": receipt["stdout_sha256"],
                 "receipt_sha256": hashlib.sha256(
                     json.dumps(receipt, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
@@ -103,7 +106,7 @@ def build_manifest(
 
     environment_path = ROOT / bundle["environment"]
     return {
-        "artifact": "mixle.example_execution_manifest/v1",
+        "artifact": "mixle.example_execution_manifest/v2",
         "complete": True,
         "candidate": {
             "commit": commit,

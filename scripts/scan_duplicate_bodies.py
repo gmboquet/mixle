@@ -59,11 +59,12 @@ def _normalized_body(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
 def scan(root: Path | None = None) -> list[dict]:
     """Return duplicate-body groups as a sorted, JSON-serializable list.
 
-    Each group: ``{"locations": ["relpath::func", ...], "stmts": <int>}`` where
-    ``locations`` is the sorted set of distinct functions sharing one body.
+    Each group records path, qualified lexical scope, and source line for every
+    function sharing one body. Qualified scopes keep sibling-class and nested
+    functions distinct.
     """
     root = root or _repo_root()
-    by_signature: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    by_signature: dict[str, set[tuple[str, str, int]]] = defaultdict(set)
     stmts_of: dict[str, int] = {}
 
     for target in TARGET_DIRS:
@@ -73,13 +74,31 @@ def scan(root: Path | None = None) -> list[dict]:
             except (SyntaxError, UnicodeDecodeError):
                 continue
             rel = path.relative_to(root).as_posix()
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+
+            class FunctionVisitor(ast.NodeVisitor):
+                def __init__(self, relative_path: str) -> None:
+                    self.scope: list[str] = []
+                    self.relative_path = relative_path
+
+                def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                    self.scope.append(node.name)
+                    self.generic_visit(node)
+                    self.scope.pop()
+
+                def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
                     sig = _normalized_body(node)
-                    if sig is None:
-                        continue
-                    by_signature[sig].add((rel, node.name))
-                    stmts_of[sig] = len(node.body)
+                    qualified = ".".join([*self.scope, node.name])
+                    if sig is not None:
+                        by_signature[sig].add((self.relative_path, qualified, node.lineno))
+                        stmts_of[sig] = len(node.body)
+                    self.scope.append(node.name)
+                    self.generic_visit(node)
+                    self.scope.pop()
+
+                visit_FunctionDef = _visit_function
+                visit_AsyncFunctionDef = _visit_function
+
+            FunctionVisitor(rel).visit(tree)
 
     groups = []
     for sig, locs in by_signature.items():
@@ -87,7 +106,7 @@ def scan(root: Path | None = None) -> list[dict]:
             continue
         groups.append(
             {
-                "locations": sorted(f"{rel}::{name}" for rel, name in locs),
+                "locations": sorted(f"{rel}::{qualified}@L{line}" for rel, qualified, line in locs),
                 "stmts": stmts_of[sig],
             }
         )
@@ -97,8 +116,8 @@ def scan(root: Path | None = None) -> list[dict]:
 
 
 def group_signatures(groups: list[dict]) -> set[tuple[str, ...]]:
-    """A hashable identity per group -- its set of locations -- for set comparison."""
-    return {tuple(g["locations"]) for g in groups}
+    """A stable identity per group; line numbers remain diagnostic, not identity."""
+    return {tuple(location.rsplit("@L", 1)[0] for location in g["locations"]) for g in groups}
 
 
 def load_manifest() -> list[dict]:

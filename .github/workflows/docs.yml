@@ -31,8 +31,6 @@ on:
 # needs none of this; it only reads the checkout, so it runs fine under the same block.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One Pages deployment at a time; let an in-progress deploy finish rather than cancelling it. This
 # only ever applies to push/workflow_dispatch runs (build/deploy below skip pull_request), so PRs
@@ -104,6 +102,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || github.event_name == 'release'
     environment:
       name: github-pages

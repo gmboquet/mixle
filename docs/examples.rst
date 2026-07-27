@@ -156,9 +156,9 @@ scripts.
    pip install -e .
    pip install -e ".[torch]"
    pip install -e ".[scientist]"
-   pip install datasets
+   pip install -e ".[examples]"
 
-Use ``mixle[all]`` only when you deliberately want the full optional surface.
+Use ``mixle[all]`` only when you deliberately want the full runtime-feature surface.
 For most examples, a smaller extra is easier to debug.
 
 Execution Standard

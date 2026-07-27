@@ -56,7 +56,7 @@ class ExampleExecutionManifestTest(unittest.TestCase):
             receipt.write_text(
                 json.dumps(
                     {
-                        "artifact": "mixle.reproduction_entry_receipt/v1",
+                        "artifact": "mixle.reproduction_entry_receipt/v2",
                         "entry": entry["id"],
                         "argv": entry["argv"],
                         "tier": entry["tier"],
@@ -65,6 +65,8 @@ class ExampleExecutionManifestTest(unittest.TestCase):
                         "entry_contract_sha256": self.builder._contract_digest(entry),
                         "stdout_sha256": "c" * 64,
                         "validated_output": entry["expected"],
+                        "execution_status": "passed",
+                        "claim_status": "verified",
                         "passed": True,
                     }
                 ),
@@ -92,7 +94,16 @@ class ExampleExecutionManifestTest(unittest.TestCase):
             {example["id"] for example in manifest["examples"]},
             {entry["id"] for entry in self.bundle["entries"]},
         )
-        self.assertTrue(all(example["status"] == "passed" for example in manifest["examples"]))
+        self.assertEqual(manifest["artifact"], "mixle.example_execution_manifest/v2")
+        self.assertTrue(all(example["execution_status"] == "passed" for example in manifest["examples"]))
+        self.assertTrue(all(example["claim_status"] == "verified" for example in manifest["examples"]))
+
+    def test_exit_success_without_claim_verification_fails_closed(self):
+        receipt = json.loads(self.receipts[0].read_text(encoding="utf-8"))
+        receipt["claim_status"] = "not_checked"
+        self.receipts[0].write_text(json.dumps(receipt), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "separately verify"):
+            self.build()
 
     def test_missing_or_wrong_candidate_evidence_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "incomplete"):
@@ -106,8 +117,8 @@ class ExampleExecutionManifestTest(unittest.TestCase):
     def test_publish_workflow_builds_and_uploads_manifest(self):
         workflow = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
         self.assertIn("build_example_execution_manifest.py", workflow)
-        self.assertIn("--out metadata/example-execution-manifest.json", workflow)
-        self.assertIn("metadata/*.json", workflow)
+        self.assertIn("--out candidate/metadata/example-execution-manifest.json", workflow)
+        self.assertIn("candidate/metadata/*.json", workflow)
 
 
 if __name__ == "__main__":

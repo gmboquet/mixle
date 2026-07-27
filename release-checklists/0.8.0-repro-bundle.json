@@ -17,7 +17,7 @@
     {
       "path": "pyproject.toml",
       "role": "bundle-closure",
-      "sha256": "8bb6a3bd2ebc2983c72652c1eb5ac5343fba1824973ff842c133411760bd5256"
+      "sha256": "6144c5a42b0d14fd96036df805991c4ef09f2d92ab405c97d5c7c94d0c31e9eb"
     },
     {
       "path": "release-checklists/0.8.0-repro-environment.json",
@@ -42,7 +42,7 @@
     {
       "path": "scripts/run_repro_entry.py",
       "role": "bundle-closure",
-      "sha256": "c7613e28053ca271295f82ab36a84b41b6465cda40fbc466e06234db09e05d0c"
+      "sha256": "67566760a98ac67240dec5853f63b9d11596b0b66a5b768b987201574062b1d5"
     }
   ],
   "code_license": {
@@ -117,7 +117,7 @@
         {
           "path": "examples/real_receipt_banking77.py",
           "role": "executable",
-          "sha256": "a0a3921d4ef877d13d8b60754392d6391babff28496289ad9d657adb01f61e9e"
+          "sha256": "9243e9844ab909f4429da01185c78604512747b2d32491a5ce31db1c1398ca69"
         },
         {
           "path": "release-checklists/0.8.0-banking77-dataset.json",
