@@ -56,7 +56,7 @@ Sparse-path churn and directed scalable sampling are the remaining extensions.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
@@ -1480,6 +1480,8 @@ __all__ = [
     "LatentChurningTemporalGraphGrammarAccumulator",
     "LatentChurningTemporalGraphGrammarAccumulatorFactory",
     "LatentChurningTemporalGraphGrammarStatistics",
+    "RegimeMomentInitializationReceipt",
+    "RegimeMomentInitializationResult",
     "regime_moment_init",
 ]
 
@@ -4214,7 +4216,11 @@ class LatentChurningTemporalGraphGrammarEstimator(ParameterEstimator):
 
 
 # --- moment-based regime initialisation (identifiability-grounded EM seeding) -----------------------
-def _regime_signatures(proto: Any, obs: Any) -> np.ndarray:
+def _regime_signatures(
+    proto: Any,
+    obs: Any,
+    feature_maps: dict[str, Callable[[Any], float]] | None = None,
+) -> np.ndarray:
     """Per-transition signature (T, F): the OBSERVED edit derivation summary that identifies a regime.
 
     Because the motif partition is mutually exclusive the derivation is observed, so each transition exposes
@@ -4226,10 +4232,17 @@ def _regime_signatures(proto: Any, obs: Any) -> np.ndarray:
     attributed = hasattr(proto, "node_dists") and proto.node_dists is not None
     edge_attr = hasattr(proto, "edge_dists") and proto.edge_dists is not None
     churning = hasattr(proto, "node_remove_rates")
-    snaps = obs[0] if (attributed or edge_attr) else obs
+    if attributed or edge_attr:
+        validated = proto.dist_to_encoder().seq_encode([obs])[0]
+        snaps = validated[0]
+    elif churning:
+        validated = proto.dist_to_encoder().seq_encode([obs])[0]
+        snaps = validated
+    else:
+        snaps = proto.dist_to_encoder().seq_encode([obs])[0]
     m = regimes[0].motif.num_motifs
-    nf = obs[1] if attributed else None
-    ef = obs[2] if edge_attr else None
+    nf = validated[1] if attributed else None
+    ef = validated[2] if edge_attr else None
     out = []
     for t in range(len(snaps) - 1):
         if churning:
@@ -4238,7 +4251,11 @@ def _regime_signatures(proto: Any, obs: Any) -> np.ndarray:
             # surviving subgraphs, not the raw tuples. num_removed is itself a regime-discriminating
             # signal here (the whole point of this variant), so it's folded into the signature too.
             prev_surv, cur_reord, num_removed = _align_by_ids(
-                snaps[t][0], snaps[t][1], snaps[t + 1][0], snaps[t + 1][1]
+                snaps[t][0],
+                snaps[t][1],
+                snaps[t + 1][0],
+                snaps[t + 1][1],
+                regimes[0].directed,
             )
         else:
             prev_surv, cur_reord = snaps[t], snaps[t + 1]
@@ -4249,30 +4266,59 @@ def _regime_signatures(proto: Any, obs: Any) -> np.ndarray:
         if churning:
             feat.append(float(num_removed))
         if attributed:
-            feat.append(_records_mean(nf[t]) if nf and t < len(nf) else 0.0)
+            feat.append(
+                _records_mean(
+                    nf[t],
+                    None if feature_maps is None else feature_maps.get("node"),
+                    label="node",
+                )
+            )
         if edge_attr:
-            feat.append(_records_mean(ef[t]) if ef and t < len(ef) else 0.0)
+            feat.append(
+                _records_mean(
+                    ef[t],
+                    None if feature_maps is None else feature_maps.get("edge"),
+                    label="edge",
+                )
+            )
         out.append(feat)
     dim = 2 * m + 1 + int(churning) + int(attributed) + int(edge_attr)
     return np.asarray(out, dtype=np.float64) if out else np.zeros((0, dim))
 
 
-def _records_mean(records: Sequence[Any]) -> float:
-    vals = []
-    for r in records:
-        try:
-            vals.append(float(r))
-        except (TypeError, ValueError):
+def _records_mean(
+    records: Sequence[Any],
+    feature_map: Callable[[Any], float] | None = None,
+    *,
+    label: str = "attribute",
+) -> float:
+    """Mean of a declared scalar feature; structured records are never silently projected."""
+    values = []
+    for record in records:
+        if feature_map is None:
+            if isinstance(record, (bool, np.bool_)) or not isinstance(record, (int, float, np.number)):
+                raise ValueError(
+                    f"structured {label} records require an explicit {label} feature map."
+                )
+            value = float(record)
+        else:
             try:
-                vals.append(float(r[0]))
-            except (TypeError, ValueError, IndexError):
-                pass
-    return float(np.mean(vals)) if vals else 0.0
+                value = float(feature_map(record))
+            except (TypeError, ValueError, IndexError, KeyError) as exc:
+                raise ValueError(f"{label} feature map must return one finite numeric scalar.") from exc
+        if not np.isfinite(value):
+            raise ValueError(f"{label} regime features must be finite.")
+        values.append(value)
+    return float(np.mean(values)) if values else 0.0
 
 
 def _kmeans_labels(x: np.ndarray, k: int, rng: RandomState, iters: int = 25) -> np.ndarray:
-    if x.shape[0] <= k:
-        return np.arange(x.shape[0]) % k
+    if x.ndim != 2 or x.shape[0] < k or k < 1:
+        raise ValueError("k-means regime initialization requires at least k finite transition signatures.")
+    if np.any(~np.isfinite(x)):
+        raise ValueError("regime signatures must be finite.")
+    if x.shape[0] == k:
+        return np.arange(k)
     centers = x[rng.choice(x.shape[0], size=k, replace=False)]
     labels = np.zeros(x.shape[0], dtype=np.int64)
     for _ in range(iters):
@@ -4285,39 +4331,135 @@ def _kmeans_labels(x: np.ndarray, k: int, rng: RandomState, iters: int = 25) -> 
             members = x[labels == c]
             if members.shape[0]:
                 centers[c] = members.mean(axis=0)
+    missing = [cluster for cluster in range(k) if not np.any(labels == cluster)]
+    for cluster in missing:
+        counts = np.bincount(labels, minlength=k)
+        donor = int(np.argmax(counts))
+        donor_indices = np.where(labels == donor)[0]
+        if donor_indices.size <= 1:
+            raise ValueError("regime signatures cannot provide one seed transition per regime.")
+        donor_distances = ((x[donor_indices] - centers[donor]) ** 2).sum(axis=1)
+        labels[donor_indices[int(np.argmax(donor_distances))]] = cluster
     return labels
 
 
-def regime_moment_init(estimator: Any, proto: Any, data: Sequence[Any], k: int, seed: int | None = None) -> Any:
+@dataclass(frozen=True)
+class RegimeMomentInitializationReceipt:
+    num_sequences: int
+    num_transitions: int
+    num_regimes: int
+    feature_dimension: int
+    cluster_counts: tuple[int, ...]
+    structured_feature_maps: tuple[str, ...]
+    seed: int | None
+
+
+class RegimeMomentInitializationResult(NamedTuple):
+    model: Any
+    receipt: RegimeMomentInitializationReceipt
+
+
+def regime_moment_init(
+    estimator: Any,
+    proto: Any,
+    data: Sequence[Any],
+    k: int,
+    seed: int | None = None,
+    *,
+    feature_maps: dict[str, Callable[[Any], float]] | None = None,
+    return_receipt: bool = False,
+) -> Any:
     """Seed a regime-switching grammar EM by clustering observed per-transition edit signatures.
 
     Returns an initial distribution whose regimes are the k-means clusters of the (identifiable) transition
     signatures. Because the derivation is observed, these signatures are sufficient statistics that separate
     the regimes, so this avoids the local optima of random-restart EM. ``proto`` is any distribution of the
     target class (used only for its motif/attribute structure); ``estimator`` produces the fitted result."""
+    supported = (
+        (LatentAttributedTemporalGraphGrammarDistribution, LatentAttributedTemporalGraphGrammarEstimator),
+        (LatentChurningTemporalGraphGrammarDistribution, LatentChurningTemporalGraphGrammarEstimator),
+        (LatentTemporalGraphGrammarDistribution, LatentTemporalGraphGrammarEstimator),
+    )
+    expected_estimator = next(
+        (estimator_type for proto_type, estimator_type in supported if isinstance(proto, proto_type)),
+        None,
+    )
+    if expected_estimator is None or not isinstance(estimator, expected_estimator):
+        raise ValueError("estimator and prototype must be a matching supported latent temporal grammar pair.")
+    k = _exact_positive_int(k, name="k")
+    if estimator.k != k or proto.k != k:
+        raise ValueError("k must agree with both the estimator and prototype regime counts.")
+    if feature_maps is not None:
+        if not isinstance(feature_maps, dict) or any(
+            key not in {"node", "edge"} or not callable(value)
+            for key, value in feature_maps.items()
+        ):
+            raise ValueError("feature_maps must map 'node' and/or 'edge' to scalar callables.")
+    observations = tuple(data)
+    if not observations:
+        raise ValueError("moment initialization requires at least one observation.")
     rng = RandomState(seed)
     churning = hasattr(proto, "node_remove_rates")
     sigs, spans = [], []
-    for obs in data:
-        s = _regime_signatures(proto, obs)
+    for obs in observations:
+        s = _regime_signatures(proto, obs, feature_maps)
+        if s.shape[0] == 0:
+            raise ValueError("every moment-initialization observation must contain at least one transition.")
         sigs.append(s)
         spans.append(s.shape[0])
-    x = np.vstack([s for s in sigs if s.shape[0]]) if any(spans) else np.zeros((0, 1))
-    xs = (x - x.mean(axis=0)) / (x.std(axis=0) + 1.0e-9) if x.shape[0] else x
+    x = np.vstack(sigs)
+    if x.shape[0] < k:
+        raise ValueError("moment initialization requires at least one transition per regime.")
+    scale = x.std(axis=0)
+    xs = (x - x.mean(axis=0)) / np.where(scale > 0.0, scale, 1.0)
     labels = _kmeans_labels(xs, k, rng)
+    cluster_counts = np.bincount(labels, minlength=k)
+    if np.any(cluster_counts == 0):
+        raise ValueError("moment initialization failed to seed every regime.")
     acc = estimator.accumulator_factory().make()
     off = 0
-    for obs, span in zip(data, spans):
-        if span == 0:
-            continue
+    for obs, span in zip(observations, spans):
         lab = labels[off : off + span]
         off += span
         gamma = np.eye(k)[lab]  # hard one-hot responsibilities from the clustering
         xi = np.zeros((max(span - 1, 0), k, k))
         for t in range(span - 1):
             xi[t] = np.outer(gamma[t], gamma[t + 1])
-        # Latent/Attributed _accumulate take the observation directly; Churning's takes the
-        # already-identity-aligned (prev_surv, cur_reord, num_removed, n_prev) tuples instead
-        # (see LatentChurningTemporalGraphGrammarAccumulator._accumulate).
-        acc._accumulate(proto._aligned(obs) if churning else obs, 1.0, gamma, xi, None)
-    return estimator.estimate(len(data), acc.value())
+        if isinstance(proto, LatentAttributedTemporalGraphGrammarDistribution):
+            validated = proto.dist_to_encoder().seq_encode([obs])[0]
+            acc._accumulate(
+                validated,
+                1.0,
+                gamma,
+                xi,
+                None,
+                initialize=True,
+                rng=rng,
+            )
+        elif churning:
+            acc._accumulate(
+                proto._aligned(obs),
+                1.0,
+                gamma,
+                xi,
+                None,
+                initialize=True,
+                rng=rng,
+            )
+        else:
+            validated = list(proto.dist_to_encoder().seq_encode([obs])[0])
+            acc._accumulate(validated, 1.0, gamma, xi, None)
+    model = estimator.estimate(len(observations), acc.value())
+    receipt = RegimeMomentInitializationReceipt(
+        len(observations),
+        int(x.shape[0]),
+        k,
+        int(x.shape[1]),
+        tuple(int(count) for count in cluster_counts),
+        tuple(sorted(feature_maps)) if feature_maps is not None else (),
+        seed,
+    )
+    if return_receipt:
+        return RegimeMomentInitializationResult(model, receipt)
+    model.moment_initialization_receipt = receipt
+    return model

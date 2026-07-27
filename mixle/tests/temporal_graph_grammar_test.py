@@ -949,6 +949,43 @@ class LatentChurningTemporalGraphGrammarTest(unittest.TestCase):
         self.assertGreater(cur.node_remove_rates[c], 2.5)  # churn: fast turnover
         self.assertEqual(len(cur.decode(data[0])), len(data[0]) - 1)
 
+    def test_moment_init_validates_scope_preserves_structure_and_reports_coverage(self):
+        from mixle.stats.graphs.temporal_graph_grammar import regime_moment_init
+
+        state = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], edge_rate=1.0, node_rate=1.0)
+        proto = stats.LatentAttributedTemporalGraphGrammarDistribution(
+            [state],
+            [stats.PoissonDistribution(2.0)],
+            [stats.PoissonDistribution(3.0)],
+            [1.0],
+            [[1.0]],
+        )
+        previous = np.zeros((1, 1))
+        current = np.array([[0.0, 1.0], [1.0, 0.0]])
+        observation = ([previous, current], [[2]], [[3]])
+        result = regime_moment_init(
+            proto.estimator(pseudo_count=0.5),
+            proto,
+            [observation],
+            1,
+            seed=7,
+            return_receipt=True,
+        )
+        self.assertIsInstance(result.model, stats.LatentAttributedTemporalGraphGrammarDistribution)
+        self.assertEqual(result.receipt.num_transitions, 1)
+        self.assertEqual(result.receipt.cluster_counts, (1,))
+
+        structured = ([previous, current], [[{"value": 2.0}]], [[3]])
+        with self.assertRaises(ValueError):
+            regime_moment_init(proto.estimator(0.5), proto, [structured], 1)
+        with self.assertRaises(ValueError):
+            regime_moment_init(proto.estimator(0.5), proto, [], 1)
+        with self.assertRaises(ValueError):
+            regime_moment_init(proto.estimator(0.5), proto, [observation], 2)
+        base_proto = stats.LatentTemporalGraphGrammarDistribution([state])
+        with self.assertRaises(ValueError):
+            regime_moment_init(proto.estimator(0.5), base_proto, [[previous, current]], 1)
+
     def test_churn_rate_vector_and_finite_population_law_are_exact(self):
         fixed = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], edge_rate=0.0, node_rate=0.0)
         rates = np.array([2.0])
