@@ -31,7 +31,12 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.multivariate._copula_common import (
     BufferedUScoreAccumulatorFactory,
     UScoreEncoder,
-    reject_out_of_unit_cube,
+    reject_unsupported_pseudo_count,
+    u_score_batch,
+    validated_buffered_statistic,
+    validated_dimension,
+    validated_finite_scalar,
+    validated_sample_size,
 )
 from mixle.utils.vector import cholesky_logdet
 
@@ -46,22 +51,32 @@ class StudentTCopulaDistribution(SequenceEncodableProbabilityDistribution):
         r = np.asarray(corr, dtype=np.float64)
         if r.ndim != 2 or r.shape[0] != r.shape[1] or r.shape[0] < 2:
             raise ValueError("corr must be a square correlation matrix of size >= 2")
+        if np.any(~np.isfinite(r)):
+            raise ValueError("corr must contain only finite values")
         if not np.allclose(r, r.T):
             raise ValueError("corr must be symmetric")
         if not np.allclose(np.diag(r), 1.0):
             raise ValueError("corr must have a unit diagonal (it is a correlation, not a covariance, matrix)")
-        if not df > 0:
+        checked_df = validated_finite_scalar(df, label="Student-t copula df")
+        if not checked_df > 0:
             raise ValueError("df must be > 0 (got df=%s)" % (df,))
         logdet = cholesky_logdet(r)
         if logdet is None:
             raise ValueError("corr must be positive definite")
-        self.corr = r
+        r = r.copy()
+        r.setflags(write=False)
+        self._corr = r
         self.dim = r.shape[0]
-        self.df = float(df)
+        self.df = checked_df
         self.name = name
         self.keys = keys
         self._logdet = logdet
         self._inv = np.linalg.inv(r)
+
+    @property
+    def corr(self) -> np.ndarray:
+        """Return an owned copy so cached scoring state cannot be desynchronized."""
+        return self._corr.copy()
 
     def __str__(self) -> str:
         return "StudentTCopulaDistribution(dim=%d, df=%.4g)" % (self.dim, self.df)
@@ -70,9 +85,7 @@ class StudentTCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.seq_log_density(np.atleast_2d(np.asarray(u, dtype=np.float64)))[0])
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
-        u = np.asarray(u, dtype=np.float64)
-        reject_out_of_unit_cube(u)
-        u = np.clip(u, _CLIP, 1.0 - _CLIP)
+        u = u_score_batch(u, self.dim)
         nu, d = self.df, self.dim
         z = _t.ppf(u, nu)  # t-scores (n, d)
         quad = np.einsum("ni,ij,nj->n", z, self._inv, z)  # z^T R^{-1} z
@@ -86,10 +99,11 @@ class StudentTCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return StudentTCopulaSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> StudentTCopulaEstimator:
+        reject_unsupported_pseudo_count(pseudo_count, family="Student-t copula")
         return StudentTCopulaEstimator(self.dim, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> UScoreEncoder:
-        return UScoreEncoder()
+        return UScoreEncoder(self.dim)
 
 
 class StudentTCopulaSampler(DistributionSampler):
@@ -100,9 +114,9 @@ class StudentTCopulaSampler(DistributionSampler):
         self.rng = RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
-        n = 1 if size is None else int(size)
+        n = 1 if size is None else validated_sample_size(size)
         nu, d = self.dist.df, self.dist.dim
-        g = self.rng.multivariate_normal(np.zeros(d), self.dist.corr, size=n)
+        g = self.rng.multivariate_normal(np.zeros(d), self.dist._corr, size=n)
         chi = self.rng.chisquare(nu, size=(n, 1))
         z = g / np.sqrt(chi / nu)  # multivariate-t with dispersion R
         u = np.clip(_t.cdf(z, nu), _CLIP, 1.0 - _CLIP)
@@ -113,8 +127,10 @@ class StudentTCopulaEstimator(ParameterEstimator):
     """Inversion for ``R`` (correlation of the ``t``-scores) + profile likelihood over ``nu`` on a grid."""
 
     def __init__(self, dim: int, min_eig: float = 1.0e-8, name: str | None = None, keys: str | None = None) -> None:
-        self.dim = dim
-        self.min_eig = min_eig
+        self.dim = validated_dimension(dim, label="Student-t copula dimension")
+        self.min_eig = validated_finite_scalar(min_eig, label="Student-t copula min_eig")
+        if not 0.0 < self.min_eig < 1.0:
+            raise ValueError("Student-t copula min_eig must lie strictly between zero and one")
         self.name = name
         self.keys = keys
 
@@ -139,18 +155,16 @@ class StudentTCopulaEstimator(ParameterEstimator):
         return corr
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray]) -> StudentTCopulaDistribution:
-        u, w = suff_stat
-        if len(u) < 2:
-            return StudentTCopulaDistribution(np.eye(self.dim), _NU_GRID[2], name=self.name, keys=self.keys)
-        u = np.asarray(u, dtype=np.float64)
-        reject_out_of_unit_cube(u)
-        u = np.clip(u, _CLIP, 1.0 - _CLIP)
-        w = np.asarray(w, dtype=np.float64)
+        u, w = validated_buffered_statistic(
+            suff_stat, self.dim, minimum_rows=2, require_positive_weight=True
+        )
         best = None
         for nu in _NU_GRID:  # profile nu: refit R at each nu (t-scores depend on nu), keep the best likelihood
             corr = self._corr_from_scores(_t.ppf(u, nu), w)
             cand = StudentTCopulaDistribution(corr, nu, name=self.name, keys=self.keys)
             ll = float(np.dot(w, cand.seq_log_density(u)))
-            if best is None or ll > best[0]:
+            if np.isfinite(ll) and (best is None or ll > best[0]):
                 best = (ll, cand)
+        if best is None:
+            raise FloatingPointError("Student-t copula profile fit produced no finite candidate likelihood")
         return best[1]

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.random import RandomState
+from scipy.special import logsumexp
 
 from mixle.stats.compute.pdist import (
     DistributionSampler,
@@ -28,7 +29,12 @@ from mixle.stats.multivariate._copula_common import (
     BufferedUScoreAccumulatorFactory,
     UScoreEncoder,
     maximize_1d,
-    reject_out_of_unit_cube,
+    reject_unsupported_pseudo_count,
+    u_score_batch,
+    validated_buffered_statistic,
+    validated_dimension,
+    validated_finite_scalar,
+    validated_sample_size,
 )
 
 _CLIP = 1.0e-12
@@ -39,10 +45,11 @@ class FrankCopulaDistribution(SequenceEncodableProbabilityDistribution):
     """Frank copula on ``(0,1)^2`` with dependence parameter ``theta`` (any sign; 0 = independence)."""
 
     def __init__(self, dim: int, theta: float, name: str | None = None, keys: str | None = None) -> None:
-        if int(dim) != 2:
-            raise ValueError("FrankCopulaDistribution is bivariate (dim == 2); got dim=%d" % dim)
+        checked_dim = validated_dimension(dim, label="Frank copula dimension")
+        if checked_dim != 2:
+            raise ValueError("FrankCopulaDistribution is bivariate (dim == 2); got dim=%d" % checked_dim)
         self.dim = 2
-        self.theta = float(theta)
+        self.theta = validated_finite_scalar(theta, label="Frank theta")
         self.name = name
         self.keys = keys
 
@@ -53,25 +60,45 @@ class FrankCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.seq_log_density(np.atleast_2d(np.asarray(u, dtype=np.float64)))[0])
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
-        u = np.asarray(u, dtype=np.float64)
-        reject_out_of_unit_cube(u)
-        u = np.clip(u, _CLIP, 1.0 - _CLIP)
+        u = u_score_batch(u, self.dim)
         th = self.theta
         if abs(th) < _MIN_ABS_THETA:
             return np.zeros(u.shape[0])  # independence copula: c(u, v) = 1
-        a, b = u[:, 0], u[:, 1]
-        h1 = 1.0 - np.exp(-th)
-        denom = h1 - (1.0 - np.exp(-th * a)) * (1.0 - np.exp(-th * b))
-        return np.log(abs(th)) + np.log(abs(h1)) - th * (a + b) - 2.0 * np.log(np.abs(denom))
+        q = abs(th)
+        a = u[:, 0]
+        b = 1.0 - u[:, 1] if th < 0.0 else u[:, 1]
+        lo = np.minimum(a, b)
+        hi = np.maximum(a, b)
+        terms = np.column_stack(
+            [
+                np.zeros(len(u)),
+                -q * (hi - lo),
+                -q * hi,
+                -q * (1.0 - lo),
+            ]
+        )
+        log_bracket, sign = logsumexp(
+            terms,
+            b=np.asarray([1.0, 1.0, -1.0, -1.0]),
+            axis=1,
+            return_sign=True,
+        )
+        if np.any(sign <= 0.0):
+            raise FloatingPointError("Frank log-density denominator was numerically indeterminate")
+        result = np.log(q) + np.log(-np.expm1(-q)) - q * (hi - lo) - 2.0 * log_bracket
+        if np.any(np.isnan(result)):
+            raise FloatingPointError("Frank log-density was numerically indeterminate")
+        return result
 
     def sampler(self, seed: int | None = None) -> FrankCopulaSampler:
         return FrankCopulaSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> FrankCopulaEstimator:
+        reject_unsupported_pseudo_count(pseudo_count, family="Frank copula")
         return FrankCopulaEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> UScoreEncoder:
-        return UScoreEncoder()
+        return UScoreEncoder(self.dim)
 
 
 class FrankCopulaSampler(DistributionSampler):
@@ -82,16 +109,24 @@ class FrankCopulaSampler(DistributionSampler):
         self.rng = RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
-        n = 1 if size is None else int(size)
+        n = 1 if size is None else validated_sample_size(size)
         th = self.dist.theta
         u1 = self.rng.uniform(_CLIP, 1.0 - _CLIP, size=n)
         w = self.rng.uniform(_CLIP, 1.0 - _CLIP, size=n)
         if abs(th) < _MIN_ABS_THETA:
             u2 = w  # independence
         else:
-            eu = np.exp(-th * u1)
-            v = -np.log(1.0 + w * (1.0 - np.exp(-th)) / (w * (eu - 1.0) - eu)) / th
-            u2 = np.clip(v, _CLIP, 1.0 - _CLIP)
+            q = abs(th)
+            log_w = np.log(w)
+            log_eu = -q * u1
+            log_numerator = np.logaddexp(log_eu + np.log1p(-w), -q + log_w)
+            log_denominator = np.logaddexp(
+                log_w + np.log1p(-np.exp(log_eu)),
+                log_eu,
+            )
+            u2 = np.clip((log_denominator - log_numerator) / q, _CLIP, 1.0 - _CLIP)
+            if th < 0.0:
+                u2 = 1.0 - u2
         out = np.column_stack([u1, u2])
         return out[0] if size is None else out
 
@@ -107,10 +142,7 @@ class FrankCopulaEstimator(ParameterEstimator):
         return BufferedUScoreAccumulatorFactory(2, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray]) -> FrankCopulaDistribution:
-        u, w = suff_stat
-        if len(u) < 2:
-            return FrankCopulaDistribution(2, 0.0, name=self.name, keys=self.keys)
-        w = np.asarray(w, dtype=np.float64)
+        u, w = validated_buffered_statistic(suff_stat, 2, minimum_rows=2, require_positive_weight=True)
 
         def loglik(theta: float) -> float:
             return float(np.dot(w, FrankCopulaDistribution(2, theta).seq_log_density(u)))

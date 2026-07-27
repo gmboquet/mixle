@@ -38,6 +38,8 @@ from mixle.stats.multivariate._copula_common import (
     BufferedUScoreAccumulatorFactory,
     UScoreEncoder,
     reject_out_of_unit_cube,
+    reject_unsupported_pseudo_count,
+    u_score_batch,
     weighted_kendall_tau,
 )
 from mixle.stats.multivariate.vine_copula import (
@@ -207,19 +209,20 @@ class RVineCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.seq_log_density(np.atleast_2d(np.asarray(u, dtype=np.float64)))[0])
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
-        reject_out_of_unit_cube(u)
+        u = u_score_batch(u, self.dim)
         if not self.trees or not self.trees[0]:  # unfitted / independence
-            return np.zeros(np.atleast_2d(u).shape[0])
+            return np.zeros(len(u))
         return _forward_vals(self.trees, u)[0]
 
     def sampler(self, seed: int | None = None) -> RVineCopulaSampler:
         return RVineCopulaSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> RVineCopulaEstimator:
+        reject_unsupported_pseudo_count(pseudo_count, family="R-vine copula")
         return RVineCopulaEstimator(self.dim, candidates=self.candidates, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> UScoreEncoder:
-        return UScoreEncoder()
+        return UScoreEncoder(self.dim)
 
 
 class RVineCopulaSampler(DistributionSampler):

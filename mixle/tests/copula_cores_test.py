@@ -54,11 +54,15 @@ class ClaytonCopulaTest(unittest.TestCase):
 
     def test_rejects_out_of_range_pseudo_observations(self):
         c = ClaytonCopulaDistribution(2, 2.0)
-        for bad in (np.array([[-0.3, 0.4]]), np.array([[0.5, 1.7]]), np.array([[np.nan, 0.4]])):
+        for bad in (
+            np.array([[-0.3, 0.4]]),
+            np.array([[-5.0e-10, 0.4]]),
+            np.array([[0.5, 1.7]]),
+            np.array([[np.nan, 0.4]]),
+            np.array([[0.0, 1.0]]),
+        ):
             with self.assertRaises(ValueError):
                 c.seq_log_density(bad)
-        # the legitimate open-interval boundary (u exactly 0 or 1) must still score finite, not raise
-        self.assertTrue(np.all(np.isfinite(c.seq_log_density(np.array([[0.0, 1.0], [1.0, 0.0]])))))
 
 
 class FrankCopulaTest(unittest.TestCase):
@@ -85,10 +89,15 @@ class FrankCopulaTest(unittest.TestCase):
 
     def test_rejects_out_of_range_pseudo_observations(self):
         c = FrankCopulaDistribution(2, 5.0)
-        for bad in (np.array([[-0.3, 0.4]]), np.array([[0.5, 1.7]]), np.array([[np.nan, 0.4]])):
+        for bad in (
+            np.array([[-0.3, 0.4]]),
+            np.array([[-5.0e-10, 0.4]]),
+            np.array([[0.5, 1.7]]),
+            np.array([[np.nan, 0.4]]),
+            np.array([[0.0, 1.0]]),
+        ):
             with self.assertRaises(ValueError):
                 c.seq_log_density(bad)
-        self.assertTrue(np.all(np.isfinite(c.seq_log_density(np.array([[0.0, 1.0], [1.0, 0.0]])))))
 
 
 class StudentTCopulaTest(unittest.TestCase):
@@ -139,10 +148,15 @@ class StudentTCopulaTest(unittest.TestCase):
 
     def test_rejects_out_of_range_pseudo_observations(self):
         c = StudentTCopulaDistribution(np.array([[1.0, 0.6], [0.6, 1.0]]), 4.0)
-        for bad in (np.array([[-0.3, 0.4]]), np.array([[0.5, 1.7]]), np.array([[np.nan, 0.4]])):
+        for bad in (
+            np.array([[-0.3, 0.4]]),
+            np.array([[-5.0e-10, 0.4]]),
+            np.array([[0.5, 1.7]]),
+            np.array([[np.nan, 0.4]]),
+            np.array([[0.0, 1.0]]),
+        ):
             with self.assertRaises(ValueError):
                 c.seq_log_density(bad)
-        self.assertTrue(np.all(np.isfinite(c.seq_log_density(np.array([[0.0, 1.0], [1.0, 0.0]])))))
 
     def test_rejects_out_of_range_pseudo_observations_when_fitting(self):
         # a broken marginal CDF (or a caller passing raw data instead of PIT scores) must fail the fit

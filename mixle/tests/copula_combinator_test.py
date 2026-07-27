@@ -220,7 +220,7 @@ class CopulaDistributionTest(unittest.TestCase):
         self.assertEqual(enc[1].shape, (0, 2))
         self.assertEqual(cop.seq_log_density(enc).shape, (0,))
 
-    def test_pseudo_count_is_forwarded_to_every_stage(self):
+    def test_unsupported_copula_pseudo_count_fails_after_explicit_forwarding(self):
         marginals = [st.GaussianDistribution(0.0, 1.0), st.GaussianDistribution(0.0, 1.0)]
         core = GaussianCopulaDistribution(np.eye(2))
         calls = []
@@ -237,7 +237,8 @@ class CopulaDistributionTest(unittest.TestCase):
             calls.append(("copula", pseudo_count)),
             original_core(pseudo_count=pseudo_count),
         )[1]
-        CopulaDistribution(marginals, core).estimator(pseudo_count=3.5)
+        with self.assertRaises(ValueError):
+            CopulaDistribution(marginals, core).estimator(pseudo_count=3.5)
         self.assertEqual(
             calls,
             [("marginal", 0, 3.5), ("marginal", 1, 3.5), ("copula", 3.5)],

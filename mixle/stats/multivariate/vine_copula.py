@@ -41,6 +41,8 @@ from mixle.stats.multivariate._copula_common import (
     UScoreEncoder,
     maximize_1d,
     reject_out_of_unit_cube,
+    reject_unsupported_pseudo_count,
+    u_score_batch,
     weighted_kendall_tau,
 )
 
@@ -353,8 +355,7 @@ class CVineCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.seq_log_density(np.atleast_2d(np.asarray(u, dtype=np.float64)))[0])
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
-        reject_out_of_unit_cube(u)
-        u = _clip01(u)
+        u = u_score_batch(u, self.dim)
         n, d = u.shape
         loglik = np.zeros(n)
         v = {1: [u[:, k] for k in range(d)]}  # tree-1 pseudo-obs = the raw uniform columns
@@ -371,10 +372,11 @@ class CVineCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return CVineCopulaSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> CVineCopulaEstimator:
+        reject_unsupported_pseudo_count(pseudo_count, family="C-vine copula")
         return CVineCopulaEstimator(self.dim, candidates=self.candidates, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> UScoreEncoder:
-        return UScoreEncoder()
+        return UScoreEncoder(self.dim)
 
 
 class CVineCopulaSampler(DistributionSampler):
@@ -534,17 +536,18 @@ class DVineCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.seq_log_density(np.atleast_2d(np.asarray(u, dtype=np.float64)))[0])
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
-        reject_out_of_unit_cube(u)
-        return _dvine_walk(_clip01(u), None, self.pairs, self.candidates)[0]
+        u = u_score_batch(u, self.dim)
+        return _dvine_walk(u, None, self.pairs, self.candidates)[0]
 
     def sampler(self, seed: int | None = None) -> DVineCopulaSampler:
         return DVineCopulaSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> DVineCopulaEstimator:
+        reject_unsupported_pseudo_count(pseudo_count, family="D-vine copula")
         return DVineCopulaEstimator(self.dim, candidates=self.candidates, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> UScoreEncoder:
-        return UScoreEncoder()
+        return UScoreEncoder(self.dim)
 
 
 class DVineCopulaSampler(DistributionSampler):

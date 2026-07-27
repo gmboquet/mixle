@@ -44,8 +44,9 @@ class GumbelCopulaTest(unittest.TestCase):
         c = GumbelCopulaDistribution(2, 1.0)
         np.testing.assert_allclose(c.seq_log_density(np.array([[0.3, 0.7], [0.1, 0.9]])), 0.0, atol=1e-9)
 
-    def test_theta_below_one_is_clamped(self):
-        self.assertEqual(GumbelCopulaDistribution(2, 0.5).theta, 1.0)  # theta < 1 is not a valid Gumbel
+    def test_theta_below_one_is_rejected(self):
+        with self.assertRaises(ValueError):
+            GumbelCopulaDistribution(2, 0.5)
 
     def test_is_bivariate_only(self):
         with self.assertRaises(ValueError):
@@ -53,11 +54,15 @@ class GumbelCopulaTest(unittest.TestCase):
 
     def test_rejects_out_of_range_pseudo_observations(self):
         c = GumbelCopulaDistribution(2, 2.0)
-        for bad in (np.array([[-0.3, 0.4]]), np.array([[0.5, 1.7]]), np.array([[np.nan, 0.4]])):
+        for bad in (
+            np.array([[-0.3, 0.4]]),
+            np.array([[-5.0e-10, 0.4]]),
+            np.array([[0.5, 1.7]]),
+            np.array([[np.nan, 0.4]]),
+            np.array([[0.0, 1.0]]),
+        ):
             with self.assertRaises(ValueError):
                 c.seq_log_density(bad)
-        # the legitimate open-interval boundary (u exactly 0 or 1) must still score finite, not raise
-        self.assertTrue(np.all(np.isfinite(c.seq_log_density(np.array([[0.0, 1.0], [1.0, 0.0]])))))
 
     def test_plugs_into_copula_distribution_and_beats_clayton_on_upper_tail_data(self):
         # Gumbel-generated (upper-tail) data with heterogeneous marginals

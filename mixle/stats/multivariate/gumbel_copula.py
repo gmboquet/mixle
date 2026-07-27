@@ -30,7 +30,12 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.multivariate._copula_common import (
     BufferedUScoreAccumulatorFactory,
     UScoreEncoder,
-    reject_out_of_unit_cube,
+    reject_unsupported_pseudo_count,
+    u_score_batch,
+    validated_buffered_statistic,
+    validated_dimension,
+    validated_finite_scalar,
+    validated_sample_size,
     weighted_kendall_tau,
 )
 
@@ -41,10 +46,13 @@ class GumbelCopulaDistribution(SequenceEncodableProbabilityDistribution):
     """Gumbel copula on ``(0,1)^2`` with upper-tail dependence parameter ``theta >= 1``."""
 
     def __init__(self, dim: int, theta: float, name: str | None = None, keys: str | None = None) -> None:
-        if int(dim) != 2:
-            raise ValueError("GumbelCopulaDistribution is bivariate (dim == 2); got dim=%d" % dim)
+        checked_dim = validated_dimension(dim, label="Gumbel copula dimension")
+        if checked_dim != 2:
+            raise ValueError("GumbelCopulaDistribution is bivariate (dim == 2); got dim=%d" % checked_dim)
         self.dim = 2
-        self.theta = max(float(theta), 1.0)  # theta = 1 is independence; theta < 1 is not a valid Gumbel
+        self.theta = validated_finite_scalar(theta, label="Gumbel theta")
+        if self.theta < 1.0:
+            raise ValueError("Gumbel theta must be at least one")
         self.name = name
         self.keys = keys
 
@@ -55,35 +63,39 @@ class GumbelCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.seq_log_density(np.atleast_2d(np.asarray(u, dtype=np.float64)))[0])
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
-        u = np.asarray(u, dtype=np.float64)
-        reject_out_of_unit_cube(u)
-        u = np.clip(u, _CLIP, 1.0 - _CLIP)
+        u = u_score_batch(u, self.dim)
         th = self.theta
-        if th <= 1.0 + 1.0e-12:
+        if th == 1.0:
             return np.zeros(u.shape[0])  # independence copula
         x = -np.log(u[:, 0])
         y = -np.log(u[:, 1])
-        sx = x**th + y**th
-        a = sx ** (1.0 / th)  # A = (x^th + y^th)^{1/th}
-        # log c = -A + (th-1)(log x + log y) + (1/th - 2) log(x^th+y^th) + log(A + th - 1) - log(u v)
+        log_x = np.log(x)
+        log_y = np.log(y)
+        delta = np.abs(log_x - log_y)
+        soft_max_correction = np.log1p(np.exp(-th * delta))
+        log_a = np.maximum(log_x, log_y) + soft_max_correction / th
+        a = np.exp(log_a)
+        power_terms = -th * delta - 2.0 * soft_max_correction + log_a - log_x - log_y
         log_c = (
             -a
-            + (th - 1.0) * (np.log(x) + np.log(y))
-            + (1.0 / th - 2.0) * np.log(sx)
+            + power_terms
             + np.log(a + th - 1.0)
             - np.log(u[:, 0])
             - np.log(u[:, 1])
         )
+        if np.any(np.isnan(log_c)):
+            raise FloatingPointError("Gumbel log-density was numerically indeterminate")
         return log_c
 
     def sampler(self, seed: int | None = None) -> GumbelCopulaSampler:
         return GumbelCopulaSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> GumbelCopulaEstimator:
+        reject_unsupported_pseudo_count(pseudo_count, family="Gumbel copula")
         return GumbelCopulaEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> UScoreEncoder:
-        return UScoreEncoder()
+        return UScoreEncoder(self.dim)
 
 
 class GumbelCopulaSampler(DistributionSampler):
@@ -104,7 +116,7 @@ class GumbelCopulaSampler(DistributionSampler):
         return a * b
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
-        n = 1 if size is None else int(size)
+        n = 1 if size is None else validated_sample_size(size)
         th = self.dist.theta
         m = self._positive_stable(1.0 / th, n).reshape(n, 1)
         e = self.rng.exponential(1.0, size=(n, 2))
@@ -124,9 +136,9 @@ class GumbelCopulaEstimator(ParameterEstimator):
         return BufferedUScoreAccumulatorFactory(2, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray]) -> GumbelCopulaDistribution:
-        u, w = suff_stat
-        if len(u) < 2:
-            return GumbelCopulaDistribution(2, 1.0, name=self.name, keys=self.keys)
-        tau = float(np.clip(weighted_kendall_tau(u[:, 0], u[:, 1], w), 0.0, 0.999))
+        u, w = validated_buffered_statistic(suff_stat, 2, minimum_rows=2, require_positive_weight=True)
+        tau = max(weighted_kendall_tau(u[:, 0], u[:, 1], w), 0.0)
+        if tau >= 1.0 - 1.0e-12:
+            raise ValueError("Gumbel fit is on the comonotonic boundary and has no finite theta estimate")
         theta = 1.0 / (1.0 - tau)  # tau <= 0 -> theta = 1 (independence); tau -> 1 -> huge theta
         return GumbelCopulaDistribution(2, theta, name=self.name, keys=self.keys)
