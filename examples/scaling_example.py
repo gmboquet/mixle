@@ -46,11 +46,12 @@ if __name__ == "__main__":
     data = truth.sampler(1).sample(50000)
     print("true              : mu=2.00  P(a)=0.60  lam=4.00")
 
-    mu, pa, lam = _fit(data, "local")
-    print("backend='local'   : mu=%.2f  P(a)=%.2f  lam=%.2f" % (mu, pa, lam))
+    local = _fit(data, "local")
+    print("backend='local'   : mu=%.2f  P(a)=%.2f  lam=%.2f" % local)
 
-    mu, pa, lam = _fit(data, "mp", num_workers=4)
-    print("backend='mp' (x4) : mu=%.2f  P(a)=%.2f  lam=%.2f" % (mu, pa, lam))
+    multiprocessing = _fit(data, "mp", num_workers=4)
+    print("backend='mp' (x4) : mu=%.2f  P(a)=%.2f  lam=%.2f" % multiprocessing)
+    assert multiprocessing == local, (local, multiprocessing)
 
     # --- cluster backends (same optimize() call, external launcher) ---------------------------------
     # MPI -- run on N ranks; the model is the same on every rank, optimize() runs in lockstep:

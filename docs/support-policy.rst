@@ -39,13 +39,25 @@ Effective Matrix
 The effective matrix is the intersection of package metadata, dependency
 support, and the surfaces being claimed:
 
-* base ``mixle`` should import without optional heavy dependencies;
+* base ``mixle`` stable-core behavior is validated on Ubuntu and macOS arm64
+  under Python 3.11 and 3.12;
+* the exhaustive non-optional suite and clean wheel/sdist artifact lanes use
+  Ubuntu/Python 3.12 as the representative full cell; platform cells add
+  stable-core and platform-specific contracts rather than duplicating every
+  platform-independent stochastic test;
 * optional Torch, JAX, Spark, Dask, MPI, symbolic, data, and GPU paths should
-  be claimed only when their dependency stacks are installed and tested;
+  be claimed only when their dependency stacks are installed and tested. For
+  0.8.0 the extras resolver and optional behavior baseline is Linux
+  x86_64/Python 3.12 unless a backend row records broader evidence;
 * CPU fallback status should be stated for GPU-oriented workflows;
 * Windows should not be listed as supported unless it is actually tested; and
 * the final manifest should record exact Python, OS, Node, Xcode, SDK, and
-  package-manager versions used during release validation.
+package-manager versions used during release validation.
+
+An optional extra resolving on another platform or Python version is allowed
+by metadata, not a validated support claim. This distinction preserves the
+base Python/macOS support statement without pretending every accelerator,
+cluster, and native stack was exercised in every cell.
 
 Dependency Bound Policy
 -----------------------

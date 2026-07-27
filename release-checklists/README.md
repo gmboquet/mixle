@@ -31,7 +31,7 @@ scope; no out-of-repository record can silently broaden a Core checklist.
 | `TODO` | Required, no evidence yet. |
 | `PARTIAL` | Some evidence exists but doesn't cover the exact release commit, or is otherwise incomplete. |
 | `DONE` | Verified against the exact commit that will be (or was) released, with evidence recorded inline. |
-| `COMPLETE` | Implementation/local preparation is complete; exact-tip hosted or external evidence may still be separate. |
+| `IMPLEMENTED` | Implementation/local preparation is complete; exact-tip hosted or external evidence may still be separate. |
 | `HOSTED` | Must pass in hosted CI on the exact candidate. |
 | `EXTERNAL` | Requires a named human, external system, registry, or designated hardware. |
 | `EXCLUDED` | Explicitly out of scope for this release, with a one-line reason. Silence is not the same as excluded. |
@@ -62,8 +62,10 @@ The gate categories run pre-flight → verify → publish → post-publish:
   `PYTHONPATH`), an import smoke, and a full public-module import sweep.
 - **Dependency correctness** — declared deps match imports both ways, bounds are real and tested,
   optional deps stay optional.
-- **Test rigor** — the *full* suite (not the fast default), across the supported Python/OS matrix,
-  run against the clean install, with no known flakes.
+- **Test rigor** — stable-core behavior across every supported Python/OS cell, the full
+  platform-independent suite on the declared representative cell, platform-specific adverse
+  contracts where applicable, and artifact behavior against clean wheel/sdist installs. Optional
+  stacks are supported only on the cells their receipts actually cover.
 - **Hygiene** — secrets, debug leftovers, and clean commit/author history.
 - **Documentation and examples** — docs build strict, process references resolve *within the repo*,
   every shipped example/notebook actually executes.

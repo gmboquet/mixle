@@ -122,7 +122,7 @@ class HostedWorkflowContractTest(unittest.TestCase):
         self.assertIn("verify_vulnerability_waivers.py", security)
         self.assertIn("accepted-waivers", security)
         self.assertNotIn("continue-on-error: true", security)
-        self.assertEqual(tests.count("scripts/run_required_pytest.py"), 2)
+        self.assertEqual(tests.count("scripts/run_required_pytest.py"), 4)
         optional_job = tests.split("\n  optional:\n", 1)[1].split("\n  numerical:\n", 1)[0]
         self.assertNotIn("if:", optional_job)
         self.assertIn("--tier optional", optional_job)
