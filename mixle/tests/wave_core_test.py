@@ -4,15 +4,21 @@ DataSequenceEncoder.__str__ recursion fix.
 """
 
 import unittest
+from copy import deepcopy
 
 import numpy as np
 
 from mixle.enumeration.algorithms import freeze
 from mixle.stats import DiagonalGaussianSampler, DistributionSampler
-from mixle.stats.combinator.weighted import WeightedDistribution, WeightedSampler
+from mixle.stats.combinator.weighted import (
+    WeightedDistribution,
+    WeightedObservation,
+    WeightedSampler,
+)
 from mixle.stats.compute.pdist import DataSequenceEncoder, EnumerationError
 from mixle.stats.latent.dirac_length import DiracLengthMixtureDistribution
-from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+from mixle.stats.univariate.continuous.gaussian import GaussianDistribution, GaussianEstimator
+from mixle.stats.univariate.discrete.bernoulli import BernoulliDistribution
 from mixle.stats.univariate.discrete.integer_categorical import IntegerCategoricalDistribution
 from mixle.stats.univariate.discrete.integer_uniform_spike import IntegerUniformSpikeDistribution
 from mixle.stats.univariate.discrete.poisson import PoissonDistribution
@@ -52,8 +58,12 @@ class WeightedCombineTestCase(unittest.TestCase):
         acc1.combine(acc2.value())
 
         np.testing.assert_allclose(
-            np.asarray(acc1.value(), dtype=float), np.asarray(acc_all.value(), dtype=float), rtol=0, atol=1e-12
+            np.asarray(acc1.value().child, dtype=float),
+            np.asarray(acc_all.value().child, dtype=float),
+            rtol=0,
+            atol=1e-12,
         )
+        self.assertEqual(acc1.value().effective_weight, acc_all.value().effective_weight)
 
 
 class WeightedSamplerTestCase(unittest.TestCase):
@@ -91,11 +101,81 @@ class WeightedSamplerTestCase(unittest.TestCase):
         acc2 = est.accumulator_factory().make()
         for xw in samples[:10]:
             acc2.initialize(xw, 1.0, np.random.RandomState(3))
-        self.assertAlmostEqual(acc2.value()[2], 10.0, places=10)
+        self.assertAlmostEqual(acc2.value().child[2], 10.0, places=10)
+        self.assertAlmostEqual(acc2.value().effective_weight, 10.0, places=10)
 
-        # Log-density of a sampled value matches the base distribution.
-        v0 = samples[0][0]
-        self.assertAlmostEqual(dist.log_density(v0), dist.dist.log_density(v0), places=12)
+        # Log-density of a sampled weighted observation matches its child value.
+        sample0 = samples[0]
+        self.assertAlmostEqual(dist.log_density(sample0), dist.dist.log_density(sample0.value), places=12)
+
+    def test_sampling_scoring_encoding_and_enumeration_share_one_observation_type(self):
+        dist = WeightedDistribution(BernoulliDistribution(0.8))
+        sampled = dist.sampler(seed=13).sample()
+        self.assertIsInstance(sampled, WeightedObservation)
+        encoded = dist.dist_to_encoder().seq_encode([sampled])
+        self.assertAlmostEqual(dist.log_density(sampled), dist.seq_log_density(encoded)[0], places=12)
+        enumerated = list(dist.enumerator())
+        self.assertEqual(dist.support_size(), 2)
+        self.assertTrue(all(isinstance(value, WeightedObservation) for value, _ in enumerated))
+        for value, log_probability in enumerated:
+            self.assertAlmostEqual(log_probability, dist.log_density(value), places=12)
+        with self.assertRaises(TypeError):
+            dist.log_density(sampled.value)
+
+    def test_invalid_attached_weights_fail_before_accumulation(self):
+        dist = WeightedDistribution(GaussianDistribution(0.0, 1.0))
+        accumulator = dist.estimator().accumulator_factory().make()
+        before = accumulator.value()
+        for bad_weight in (-1.0, np.nan, np.inf):
+            with self.assertRaises(ValueError):
+                dist.log_density((0.0, bad_weight))
+            with self.assertRaises(ValueError):
+                dist.dist_to_encoder().seq_encode([(0.0, bad_weight)])
+            with self.assertRaises(ValueError):
+                accumulator.update((0.0, bad_weight), 1.0, dist)
+        self.assertEqual(accumulator.value(), before)
+
+    def test_child_estimator_receives_effective_weight(self):
+        class RecordingGaussianEstimator(GaussianEstimator):
+            def estimate(inner_self, nobs, suff_stat):
+                inner_self.received_nobs = nobs
+                return super().estimate(nobs, suff_stat)
+
+        child = RecordingGaussianEstimator()
+        estimator = WeightedDistribution(GaussianDistribution(0.0, 1.0)).estimator()
+        estimator.estimator = child
+        accumulator = estimator.accumulator_factory().make()
+        observations = [(1.0, 0.5), (3.0, 4.0)]
+        accumulator.seq_update(
+            accumulator.acc_to_encoder().seq_encode(observations),
+            np.asarray([2.0, 3.0]),
+            WeightedDistribution(GaussianDistribution(0.0, 1.0)),
+        )
+        fitted = estimator.estimate(999.0, accumulator.value())
+        self.assertEqual(child.received_nobs, 13.0)
+        self.assertEqual(accumulator.value().effective_weight, 13.0)
+        self.assertIsInstance(fitted, WeightedDistribution)
+
+    def test_key_pooling_keeps_effective_weight_with_child_statistics(self):
+        distribution = WeightedDistribution(
+            GaussianDistribution(0.0, 1.0),
+            keys="shared",
+        )
+        factory = distribution.estimator().accumulator_factory()
+        first, second, expected = factory.make(), factory.make(), factory.make()
+        first.update((0.0, 2.0), 1.0, distribution)
+        second.update((4.0, 3.0), 1.0, distribution)
+        expected.combine(deepcopy(first.value()))
+        expected.combine(deepcopy(second.value()))
+        pooled = {}
+        first.key_merge(pooled)
+        second.key_merge(pooled)
+        first.key_replace(pooled)
+        second.key_replace(pooled)
+        np.testing.assert_allclose(first.value().child, expected.value().child)
+        np.testing.assert_allclose(second.value().child, expected.value().child)
+        self.assertEqual(first.value().effective_weight, 5.0)
+        self.assertEqual(second.value().effective_weight, 5.0)
 
 
 class IntegerUniformSpikeEnumeratorTestCase(unittest.TestCase):
