@@ -54,7 +54,11 @@ class MaturityDocSyncTest(unittest.TestCase):
 
 class MaturityResolutionTest(unittest.TestCase):
     def test_longest_prefix_inheritance(self):
-        self.assertEqual(maturity_of("mixle.stats.latent.hidden_markov"), Maturity.STABLE)
+        self.assertEqual(maturity_of("mixle.stats.latent.hidden_markov"), Maturity.PROVISIONAL)
+        self.assertEqual(
+            maturity_of("mixle.stats.univariate.continuous.gaussian"),
+            Maturity.STABLE,
+        )
         self.assertEqual(maturity_of("mixle.inference.optimize"), Maturity.STABLE)
 
     def test_more_specific_prefix_overrides(self):
@@ -111,11 +115,18 @@ class MaturityPolicyConsistencyTest(unittest.TestCase):
         self.assertEqual(
             stable,
             {
-                "mixle.stats",
                 "mixle.semantics",
                 "mixle.inference.optimize",
                 "mixle.inference.estimation",
                 "mixle.inference.em",
+                "mixle.stats.parameter_packing",
+                "mixle.stats.univariate.continuous.exponential",
+                "mixle.stats.univariate.continuous.gamma",
+                "mixle.stats.univariate.continuous.gaussian",
+                "mixle.stats.univariate.continuous.log_gaussian",
+                "mixle.stats.univariate.discrete.categorical",
+                "mixle.stats.univariate.discrete.geometric",
+                "mixle.stats.univariate.discrete.poisson",
             },
         )
 

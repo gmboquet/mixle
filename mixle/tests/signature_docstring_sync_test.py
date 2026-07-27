@@ -1,10 +1,11 @@
-"""Documented parameters stay synchronized with runtime signatures (worklist Y4.2).
+"""Selected parameter-rich docstrings stay synchronized with runtime signatures.
 
 A docstring that documents a parameter the function no longer takes -- or renames -- is a stale doc that
-silently misleads. This gate parses the ``Args:`` section of the stable entry points and asserts every
+silently misleads. This focused readability gate parses the ``Args:`` section and asserts every
 documented parameter actually exists in the runtime signature, so a renamed/removed argument left in the
-docstring fails here. It checks the direction that is unambiguous (documented ⊆ actual); undocumented
-parameters are a separate, softer concern and are not failed by this test.
+docstring fails here. The complete stable compatibility boundary, including undocumented parameters,
+constructors, methods, order, kinds, defaults, and annotations, is enforced by
+``stable_signature_manifest_test.py``.
 """
 
 import importlib
@@ -12,13 +13,11 @@ import inspect
 import re
 import unittest
 
-# (module, attribute) for the stable entry points whose parameter docs must not drift.
-_STABLE_ENTRY_POINTS = [
+# Parameter-rich entry points whose prose parameter sections must not drift.
+_DOCUMENTED_ENTRY_POINTS = [
     ("mixle.inference.estimation", "optimize"),
     ("mixle.inference.estimation", "fit"),
     ("mixle.inference.estimation", "best_of"),
-    ("mixle.lifecycle", "propose"),
-    ("mixle.utils.automatic", "get_estimator"),
 ]
 
 _SECTION = re.compile(r"^\s*(Args|Arguments|Parameters)\s*:\s*$")
@@ -48,7 +47,7 @@ def _documented_params(fn):
 class SignatureDocstringSyncTest(unittest.TestCase):
     def test_documented_params_exist_in_signature(self):
         offenders = []
-        for module_name, attr in _STABLE_ENTRY_POINTS:
+        for module_name, attr in _DOCUMENTED_ENTRY_POINTS:
             fn = getattr(importlib.import_module(module_name), attr)
             actual = set(inspect.signature(fn).parameters)
             stale = _documented_params(fn) - actual

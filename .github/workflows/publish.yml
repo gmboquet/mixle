@@ -149,6 +149,9 @@ jobs:
       contents: write
       id-token: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify-candidate.outputs.candidate-sha }}
       - uses: actions/download-artifact@v4
         with:
           name: release-candidate-${{ needs.verify-candidate.outputs.candidate-sha }}
@@ -170,6 +173,16 @@ jobs:
             --name banking77-reproduction-receipt \
             --dir metadata/network \
             --repo "$REPOSITORY"
+          python ../scripts/build_example_execution_manifest.py \
+            --bundle ../release-checklists/0.8.0-repro-bundle.json \
+            --candidate metadata/release-candidate.json \
+            --wheel-metadata metadata/mixle-0.8.0-py3-none-any.whl.json \
+            --receipt metadata/reproduction-gallery-univariate.json \
+            --receipt metadata/reproduction-gallery-structured.json \
+            --receipt metadata/reproduction-production-provenance.json \
+            --receipt metadata/reproduction-scaling-backend.json \
+            --receipt metadata/network/banking77-reproduction-receipt.json \
+            --out metadata/example-execution-manifest.json
           gh release upload "$CANDIDATE_TAG" \
             metadata/SHA256SUMS metadata/*.json metadata/network/*.json \
             --repo "$REPOSITORY"

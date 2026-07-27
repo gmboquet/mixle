@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -144,6 +145,15 @@ def run_entry(bundle: dict[str, Any], entry_id: str) -> dict[str, Any]:
     entry = matches[0]
     environment = dict(os.environ)
     environment["PYTHONHASHSEED"] = "0"
+    for variable in (
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        environment[variable] = "1"
+    started = time.monotonic()
     try:
         result = subprocess.run(
             [sys.executable, *entry["argv"]],
@@ -158,14 +168,20 @@ def run_entry(bundle: dict[str, Any], entry_id: str) -> dict[str, Any]:
         raise ValueError(f"{entry_id}: exceeded {entry['timeout_seconds']}-second budget") from exc
     if result.returncode != 0:
         raise ValueError(f"{entry_id}: exited {result.returncode}: {result.stderr[-2000:]}")
+    duration = time.monotonic() - started
     _validate_output(entry, result.stdout)
     return {
         "artifact": "mixle.reproduction_entry_receipt/v1",
         "entry": entry_id,
+        "argv": entry["argv"],
+        "tier": entry["tier"],
+        "duration_seconds": duration,
+        "timeout_seconds": entry["timeout_seconds"],
         "entry_contract_sha256": hashlib.sha256(
             json.dumps(entry, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
         ).hexdigest(),
         "stdout_sha256": hashlib.sha256(result.stdout.encode("utf-8")).hexdigest(),
+        "validated_output": entry["expected"],
         "passed": True,
     }
 

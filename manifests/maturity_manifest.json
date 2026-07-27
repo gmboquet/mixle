@@ -1,5 +1,19 @@
 {
-  "artifact": "mixle.maturity_manifest/v1",
+  "artifact": "mixle.maturity_manifest/v2",
+  "stable_allowlist": [
+    "mixle.inference.em",
+    "mixle.inference.estimation",
+    "mixle.inference.optimize",
+    "mixle.semantics",
+    "mixle.stats.parameter_packing",
+    "mixle.stats.univariate.continuous.exponential",
+    "mixle.stats.univariate.continuous.gamma",
+    "mixle.stats.univariate.continuous.gaussian",
+    "mixle.stats.univariate.continuous.log_gaussian",
+    "mixle.stats.univariate.discrete.categorical",
+    "mixle.stats.univariate.discrete.geometric",
+    "mixle.stats.univariate.discrete.poisson"
+  ],
   "surfaces": {
     "mixle.analysis": {
       "maturity": "provisional",
@@ -129,6 +143,10 @@
       "maturity": "provisional",
       "status": "Unclassified (provisional by default)"
     },
+    "mixle.reproduction": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
     "mixle.scientist": {
       "maturity": "provisional",
       "status": "Optional assembled workflow"
@@ -146,8 +164,8 @@
       "status": "Unclassified (provisional by default)"
     },
     "mixle.stats": {
-      "maturity": "stable",
-      "status": "Stable core"
+      "maturity": "provisional",
+      "status": "Broad statistical catalog; stability is module-specific"
     },
     "mixle.stochastic_opt": {
       "maturity": "provisional",

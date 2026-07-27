@@ -22,7 +22,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO_ROOT)
 
 import mixle
-from mixle.maturity import maturity_of, status_of
+from mixle.maturity import MATURITY_REGISTRY, Maturity, maturity_of, status_of
 
 MANIFEST_PATH = os.path.join(_REPO_ROOT, "manifests", "maturity_manifest.json")
 
@@ -36,7 +36,10 @@ def _public_surfaces() -> list[str]:
 def build_manifest() -> dict:
     """Return the maturity manifest as a plain dict (public surface -> tier + human status)."""
     return {
-        "artifact": "mixle.maturity_manifest/v1",
+        "artifact": "mixle.maturity_manifest/v2",
+        "stable_allowlist": sorted(
+            name for name, (tier, _) in MATURITY_REGISTRY.items() if tier is Maturity.STABLE
+        ),
         "surfaces": {
             name: {"maturity": maturity_of(name).value, "status": status_of(name)} for name in _public_surfaces()
         },

@@ -25,10 +25,20 @@ sync, so this table and the registry cannot drift apart.
    * - Surface
      - Current status
      - Best use
-   * - ``mixle.stats``
+   * - ``mixle.stats.univariate.continuous.gaussian``,
+       ``mixle.stats.univariate.continuous.gamma``,
+       ``mixle.stats.univariate.continuous.exponential``,
+       ``mixle.stats.univariate.continuous.log_gaussian``,
+       ``mixle.stats.univariate.discrete.poisson``,
+       ``mixle.stats.univariate.discrete.geometric``,
+       ``mixle.stats.univariate.discrete.categorical``, and
+       ``mixle.stats.parameter_packing``
      - Stable core
-     - Distribution families, estimators, samplers, encoders, combinators,
-       mixtures, HMMs, and common Bayesian families.
+     - The seven invariant-catalogued scalar families and the reviewed parameter-packing contract.
+   * - Other ``mixle.stats`` modules
+     - Broad statistical catalog; stability is module-specific
+     - Useful, tested distribution, combinator, latent, graph, process, and Bayesian families that
+       remain provisional until their own invariant and compatibility evidence is complete.
    * - ``mixle.inference.optimize`` and direct estimation helpers
      - Stable core
      - MLE/EM/conjugate fitting for ordinary distribution and latent-model
@@ -93,7 +103,8 @@ What Is Safe to Build on First
 
 For ordinary work, start with:
 
-* ``mixle.stats`` for model families and estimators;
+* the seven stable ``mixle.stats`` scalar families for compatibility-sensitive work, and the broader
+  provisional catalog when the application can pin and validate its chosen families;
 * ``mixle.inference.optimize`` for fitting;
 * ``mixle.semantics`` for cross-package values, priors, observations, and results;
 * ``mixle.describe`` to inspect what the fitted object supports;

@@ -22,7 +22,7 @@
     {
       "path": "release-checklists/0.8.0-repro-environment.json",
       "role": "bundle-closure",
-      "sha256": "c321b9b5016ca58ad934f68c9503e56c04e5a0c282b5d7857d97f0dae794d600"
+      "sha256": "0b9a246f93019b2a23c94281b4d43c4a63775495d97ef061ad4952ace807e184"
     },
     {
       "path": "release-checklists/0.8.0-repro-requirements.txt",
@@ -42,7 +42,7 @@
     {
       "path": "scripts/run_repro_entry.py",
       "role": "bundle-closure",
-      "sha256": "cd4ab382be1a190ea21a414902d61c1e00ddfa1d3076678c278903b0e29534f2"
+      "sha256": "c7613e28053ca271295f82ab36a84b41b6465cda40fbc466e06234db09e05d0c"
     }
   ],
   "code_license": {
