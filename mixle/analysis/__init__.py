@@ -27,6 +27,7 @@ from mixle.analysis.carcinogenic_risk import (
 )
 from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator, LedoitWolfInsufficientData
 from mixle.analysis.coverage import (
+    CoverageInsufficientDataError,
     ace,
     chao1,
     chao2,
@@ -140,6 +141,7 @@ __all__ = [
     "silverman_bandwidth",
     "scott_bandwidth",
     # species / coverage estimation
+    "CoverageInsufficientDataError",
     "turing_coverage",
     "good_turing",
     "chao1",
