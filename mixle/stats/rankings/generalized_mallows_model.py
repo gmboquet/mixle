@@ -20,7 +20,10 @@ Data type: ``List[int]`` -- a full ordering, a permutation of ``0..n-1`` with ``
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
+from dataclasses import dataclass
+from itertools import permutations
 from typing import Any
 
 import numpy as np
@@ -35,12 +38,33 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.rankings._contracts import (
+    count_matrix_statistics,
+    finite_nonnegative,
     log_truncated_geometric_normalizer,
+    permutation,
+    permutation_batch,
+    positive_integer,
+    sample_size,
     truncated_geometric_mean,
+)
+from mixle.stats.rankings._contracts import (
+    weights as validate_weights,
 )
 from mixle.stats.rankings._permutation_kernels import seq_rim_code
 
 _MAX_THETA = 700.0
+
+
+@dataclass(frozen=True)
+class GeneralizedMallowsModelFitDiagnostics:
+    """Center-search and regularization evidence attached to a fitted stage-wise model."""
+
+    center_algorithm: str
+    center_exact: bool
+    centers_evaluated: int
+    objective: float
+    regularized: bool
+    pseudo_count: float
 
 
 def _log_psi(theta: float, m: int) -> float:
@@ -91,20 +115,27 @@ class GeneralizedMallowsModelDistribution(SequenceEncodableProbabilityDistributi
         theta: Sequence[float] | np.ndarray | None = None,
         name: str | None = None,
         keys: str | None = None,
+        fit_diagnostics: GeneralizedMallowsModelFitDiagnostics | None = None,
     ) -> None:
-        s0 = np.asarray(sigma0, dtype=np.int64)
-        n = len(s0)
-        if n < 2 or not np.array_equal(np.sort(s0), np.arange(n)):
-            raise ValueError("sigma0 must be a permutation of 0,...,n-1 with n >= 2.")
+        raw_center = np.asarray(sigma0)
+        if raw_center.ndim != 1 or len(raw_center) < 2:
+            raise ValueError("sigma0 must be a permutation with at least two items.")
+        n = len(raw_center)
+        s0 = permutation(raw_center, n, label="sigma0").copy()
         th = np.ones(n - 1) if theta is None else np.asarray(theta, dtype=float)
         if th.shape != (n - 1,) or np.any(th < 0.0) or not np.all(np.isfinite(th)):
             raise ValueError("theta must be a length-(n-1) vector of non-negative dispersions.")
         self.sigma0 = s0
-        self.theta = th
+        self.sigma0.setflags(write=False)
+        self.theta = th.copy()
+        self.theta.setflags(write=False)
         self.dim = n
-        self.log_z = float(sum(_log_psi(float(th[i - 1]), i) for i in range(1, n)))
+        self.log_z = float(sum(_log_psi(float(self.theta[i - 1]), i) for i in range(1, n)))
         self.name = name
         self.keys = keys
+        if fit_diagnostics is not None and not isinstance(fit_diagnostics, GeneralizedMallowsModelFitDiagnostics):
+            raise TypeError("fit_diagnostics must be a GeneralizedMallowsModelFitDiagnostics record.")
+        self.fit_diagnostics = fit_diagnostics
 
     def __str__(self) -> str:
         return "GeneralizedMallowsModelDistribution(%s, theta=%s, name=%s, keys=%s)" % (
@@ -120,10 +151,8 @@ class GeneralizedMallowsModelDistribution(SequenceEncodableProbabilityDistributi
 
     def log_density(self, x: Sequence[int]) -> float:
         """Return the log-probability of one ordering."""
-        # Forward as float, not int64: seq_log_density's own validation below must see any
-        # fractional entries as-is (an int64 cast here would silently truncate 0.5 -> 0 before
-        # that check ever ran, the same premature-truncation bug fixed in seq_log_density).
-        return float(self.seq_log_density(np.asarray(x, dtype=float)[None, :])[0])
+        checked = permutation(x, self.dim, label="stage-wise Mallows ordering")
+        return float(self.seq_log_density(checked[None, :])[0])
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-probabilities for encoded orderings.
@@ -140,19 +169,8 @@ class GeneralizedMallowsModelDistribution(SequenceEncodableProbabilityDistributi
                 to 0 by the int cast before this check ever saw it).
 
         """
-        xa = np.asarray(x, dtype=float)
-        expected = np.arange(self.dim)
-        if (
-            xa.ndim != 2
-            or xa.shape[1] != self.dim
-            or not np.array_equal(xa, np.round(xa))
-            or not all(np.array_equal(np.sort(row), expected) for row in xa)
-        ):
-            raise ValueError(
-                "GeneralizedMallowsModelDistribution requires each row of x to be a permutation of 0,...,n-1."
-            )
-        xa = xa.astype(np.int64)
-        j = seq_rim_code(xa, self.sigma0)  # (N, n-1)
+        checked = permutation_batch(x, self.dim, label="stage-wise Mallows orderings")
+        j = seq_rim_code(checked, self.sigma0)  # (N, n-1)
         return -(j @ self.theta) - self.log_z
 
     def sampler(self, seed: int | None = None) -> GeneralizedMallowsModelSampler:
@@ -161,7 +179,13 @@ class GeneralizedMallowsModelDistribution(SequenceEncodableProbabilityDistributi
 
     def estimator(self, pseudo_count: float | None = None) -> GeneralizedMallowsModelEstimator:
         """Return a stage-wise Mallows estimator with this item count."""
-        return GeneralizedMallowsModelEstimator(dim=self.dim, name=self.name, keys=self.keys)
+        return GeneralizedMallowsModelEstimator(
+            dim=self.dim,
+            pseudo_count=pseudo_count,
+            prior_center=self.sigma0,
+            name=self.name,
+            keys=self.keys,
+        )
 
     def dist_to_encoder(self) -> GeneralizedMallowsModelDataEncoder:
         """Return the full-ranking encoder used by vectorized methods."""
@@ -195,24 +219,68 @@ class GeneralizedMallowsModelSampler(DistributionSampler):
         """Draw one ordering or ``size`` iid orderings."""
         if size is None:
             return self._sample_one()
-        return [self._sample_one() for _ in range(size)]
+        return [self._sample_one() for _ in range(sample_size(size))]
+
+
+def _stage_statistics(value, dim: int) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
+    """Validate exact weighted empirical support and its derived precedence matrix."""
+    if isinstance(value, (str, bytes)):
+        raise TypeError("stage-wise Mallows statistics must be a four-item tuple.")
+    try:
+        if len(value) != 4:
+            raise TypeError("stage-wise Mallows statistics must be a four-item tuple.")
+    except TypeError as exc:
+        raise TypeError("stage-wise Mallows statistics must be a four-item tuple.") from exc
+    count, precede = count_matrix_statistics(
+        (value[0], value[1]),
+        dim,
+        label="stage-wise Mallows precedence statistics",
+        entries_per_observation=dim * (dim - 1) / 2.0,
+    )
+    raw_rows, raw_weights = value[2], value[3]
+    if count == 0.0:
+        if len(raw_rows) != 0 or len(raw_weights) != 0:
+            raise ValueError("zero-weight stage-wise Mallows statistics must have empty empirical support.")
+        return count, precede, np.empty((0, dim), dtype=np.int64), np.empty(0, dtype=np.float64)
+    rows = permutation_batch(raw_rows, dim, label="stage-wise Mallows empirical support", allow_empty=False)
+    row_weights = validate_weights(raw_weights, len(rows))
+    if not np.isclose(row_weights.sum(), count, rtol=1.0e-10, atol=1.0e-10 * max(1.0, count)):
+        raise ValueError("stage-wise Mallows support weights must sum to total observation weight.")
+    expected = np.zeros((dim, dim), dtype=np.float64)
+    earlier, later = np.triu_indices(dim, 1)
+    for row, weight in zip(rows, row_weights):
+        np.add.at(expected, (row[earlier], row[later]), weight)
+    if not np.allclose(expected, precede, rtol=1.0e-10, atol=1.0e-10 * max(1.0, count)):
+        raise ValueError("stage-wise Mallows precedence counts disagree with empirical support.")
+    return count, precede, rows, row_weights
 
 
 class GeneralizedMallowsModelAccumulator(SequenceEncodableStatisticAccumulator):
-    """Precede matrix (Copeland consensus) + count + a bounded reservoir for the per-stage means."""
+    """Accumulate precedence counts and an exact bounded weighted empirical support."""
 
     def __init__(self, dim: int, reservoir: int = 10000, keys: str | None = None) -> None:
-        self.dim = dim
-        self.precede = np.zeros((dim, dim))
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.precede = np.zeros((self.dim, self.dim))
         self.count = 0.0
-        self.reservoir = reservoir
-        self._res_x: list[np.ndarray] = []
-        self._res_w: list[float] = []
+        self.reservoir = positive_integer(reservoir, label="reservoir")
+        self._empirical: dict[tuple[int, ...], float] = {}
         self.keys = keys
+
+    def _push(self, row: np.ndarray, weight: float) -> None:
+        if weight == 0.0:
+            return
+        key = tuple(int(value) for value in row)
+        if key not in self._empirical and len(self._empirical) >= self.reservoir:
+            raise MemoryError(
+                "stage-wise Mallows exact empirical support exceeded the configured reservoir limit; "
+                "increase reservoir rather than silently dropping evidence."
+            )
+        self._empirical[key] = self._empirical.get(key, 0.0) + weight
 
     def update(self, x: Sequence[int], weight: float, estimate: Any) -> None:
         """Update consensus and reservoir statistics from one weighted ordering."""
-        self.seq_update(np.asarray([x], dtype=np.int64), np.asarray([weight], dtype=float), estimate)
+        checked = permutation(x, self.dim, label="stage-wise Mallows ordering")
+        self.seq_update(checked[None, :], np.asarray([weight], dtype=float), estimate)
 
     def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
         """Initialize consensus and reservoir statistics from one ordering."""
@@ -220,14 +288,22 @@ class GeneralizedMallowsModelAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
         """Update consensus and reservoir statistics from encoded orderings."""
-        n = self.dim
-        r_idx, rp_idx = np.triu_indices(n, 1)
-        for row, w in zip(x, weights):
-            np.add.at(self.precede, (row[r_idx], row[rp_idx]), w)
-            if len(self._res_x) < self.reservoir:
-                self._res_x.append(np.asarray(row, dtype=np.int64))
-                self._res_w.append(float(w))
-        self.count += float(np.sum(weights, dtype=np.float64))
+        checked = permutation_batch(x, self.dim, label="stage-wise Mallows orderings")
+        checked_weights = validate_weights(weights, len(checked))
+        prospective = set(self._empirical)
+        prospective.update(
+            tuple(int(value) for value in row) for row, weight in zip(checked, checked_weights) if weight > 0.0
+        )
+        if len(prospective) > self.reservoir:
+            raise MemoryError(
+                "stage-wise Mallows exact empirical support exceeded the configured reservoir limit; "
+                "increase reservoir rather than silently dropping evidence."
+            )
+        earlier, later = np.triu_indices(self.dim, 1)
+        for row, weight in zip(checked, checked_weights):
+            np.add.at(self.precede, (row[earlier], row[later]), weight)
+            self._push(row, float(weight))
+        self.count += float(np.sum(checked_weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize statistics from encoded orderings."""
@@ -235,25 +311,36 @@ class GeneralizedMallowsModelAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat) -> GeneralizedMallowsModelAccumulator:
         """Merge observation weight, precedence counts, and reservoir samples."""
-        count, precede, res_x, res_w = suff_stat
+        count, precede, rows, row_weights = _stage_statistics(suff_stat, self.dim)
+        prospective = set(self._empirical)
+        prospective.update(tuple(int(value) for value in row) for row in rows)
+        if len(prospective) > self.reservoir:
+            raise MemoryError(
+                "merged stage-wise Mallows support exceeds the configured reservoir limit; "
+                "increase reservoir rather than making the merge order-dependent."
+            )
         self.count += count
         self.precede += precede
-        for row, w in zip(res_x, res_w):
-            if len(self._res_x) < self.reservoir:
-                self._res_x.append(np.asarray(row, dtype=np.int64))
-                self._res_w.append(float(w))
+        for row, weight in zip(rows, row_weights):
+            self._push(row, float(weight))
         return self
 
     def value(self):
         """Return count, precedence matrix, and bounded reservoir contents."""
-        return self.count, self.precede, [np.asarray(r) for r in self._res_x], list(self._res_w)
+        keys = sorted(self._empirical)
+        return (
+            self.count,
+            self.precede.copy(),
+            [np.asarray(key, dtype=np.int64) for key in keys],
+            [self._empirical[key] for key in keys],
+        )
 
     def from_value(self, x) -> GeneralizedMallowsModelAccumulator:
         """Restore accumulator state from ``value`` output."""
-        self.count, self.precede, res_x, res_w = x
-        self.dim = self.precede.shape[0]
-        self._res_x = [np.asarray(r, dtype=np.int64) for r in res_x]
-        self._res_w = [float(w) for w in res_w]
+        self.count, self.precede, rows, row_weights = _stage_statistics(x, self.dim)
+        if len(rows) > self.reservoir:
+            raise MemoryError("restored stage-wise Mallows support exceeds the configured reservoir limit.")
+        self._empirical = {tuple(int(value) for value in row): float(weight) for row, weight in zip(rows, row_weights)}
         return self
 
     def acc_to_encoder(self) -> GeneralizedMallowsModelDataEncoder:
@@ -265,8 +352,8 @@ class GeneralizedMallowsModelAccumulatorFactory(StatisticAccumulatorFactory):
     """Create accumulators for stage-wise Generalized Mallows statistics."""
 
     def __init__(self, dim: int, reservoir: int = 10000, keys: str | None = None) -> None:
-        self.dim = dim
-        self.reservoir = reservoir
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.reservoir = positive_integer(reservoir, label="reservoir")
         self.keys = keys
 
     def make(self) -> GeneralizedMallowsModelAccumulator:
@@ -274,14 +361,47 @@ class GeneralizedMallowsModelAccumulatorFactory(StatisticAccumulatorFactory):
         return GeneralizedMallowsModelAccumulator(dim=self.dim, reservoir=self.reservoir, keys=self.keys)
 
 
-class GeneralizedMallowsModelEstimator(ParameterEstimator):
-    """Copeland consensus for ``sigma0`` and a per-stage moment match for each ``theta_i``."""
+def _fit_stage_center(
+    rows: np.ndarray,
+    row_weights: np.ndarray,
+    center: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Fit stage dispersions for one center and return them with exact negative log likelihood."""
+    count = float(row_weights.sum())
+    code = seq_rim_code(rows, center)
+    mean_code = (code * row_weights[:, None]).sum(axis=0) / count
+    theta = np.asarray([_solve_stage_theta(float(mean_code[index - 1]), index) for index in range(1, len(center))])
+    log_z = float(sum(_log_psi(float(theta[index - 1]), index) for index in range(1, len(center))))
+    negative_log_likelihood = float(np.sum(row_weights * (code @ theta)) + count * log_z)
+    return theta, negative_log_likelihood
 
-    def __init__(self, dim: int, reservoir: int = 10000, name: str | None = None, keys: str | None = None) -> None:
-        if dim is None or dim < 2:
-            raise ValueError("GeneralizedMallowsModelEstimator requires dim >= 2.")
-        self.dim = int(dim)
-        self.reservoir = reservoir
+
+class GeneralizedMallowsModelEstimator(ParameterEstimator):
+    """Fit a center and per-stage dispersions from exact weighted empirical support."""
+
+    def __init__(
+        self,
+        dim: int,
+        reservoir: int = 10000,
+        pseudo_count: float | None = None,
+        prior_center: Sequence[int] | np.ndarray | None = None,
+        center_exact_cap: int = 7,
+        allow_approximate_center: bool = False,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.reservoir = positive_integer(reservoir, label="reservoir")
+        self.pseudo_count = None if pseudo_count is None else finite_nonnegative(pseudo_count, label="pseudo_count")
+        self.prior_center = (
+            np.arange(self.dim, dtype=np.int64)
+            if prior_center is None
+            else permutation(prior_center, self.dim, label="prior_center").copy()
+        )
+        self.center_exact_cap = positive_integer(center_exact_cap, label="center_exact_cap", minimum=2)
+        if not isinstance(allow_approximate_center, (bool, np.bool_)):
+            raise TypeError("allow_approximate_center must be a Boolean.")
+        self.allow_approximate_center = bool(allow_approximate_center)
         self.name = name
         self.keys = keys
 
@@ -291,41 +411,89 @@ class GeneralizedMallowsModelEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat) -> GeneralizedMallowsModelDistribution:
         """Estimate central ordering and per-stage dispersions from accumulated rankings."""
-        count, precede, res_x, res_w = suff_stat
+        if nobs is not None:
+            finite_nonnegative(nobs, label="nobs")
+        count, precede, rows, row_weights = _stage_statistics(suff_stat, self.dim)
         n = self.dim
+        pseudo_count = 0.0 if self.pseudo_count is None else self.pseudo_count
+        if pseudo_count > 0.0:
+            rows = np.vstack((rows, self.prior_center))
+            row_weights = np.concatenate((row_weights, np.asarray([pseudo_count])))
+            count += pseudo_count
+            earlier, later = np.triu_indices(n, 1)
+            np.add.at(precede, (self.prior_center[earlier], self.prior_center[later]), pseudo_count)
         if count <= 0.0:
-            return GeneralizedMallowsModelDistribution(np.arange(n), name=self.name, keys=self.keys)
-        scores = precede.sum(axis=1) - precede.sum(axis=0)  # Copeland
-        sigma0 = np.argsort(-scores, kind="stable").astype(np.int64)
-        j = seq_rim_code(np.asarray(res_x, dtype=np.int64), sigma0)  # (R, n-1)
-        w = np.asarray(res_w, dtype=float)
-        mean_j = (j * w[:, None]).sum(axis=0) / w.sum()
-        theta = np.array([_solve_stage_theta(float(mean_j[i - 1]), i) for i in range(1, n)])
-        return GeneralizedMallowsModelDistribution(sigma0, theta, name=self.name, keys=self.keys)
+            return GeneralizedMallowsModelDistribution(
+                np.arange(n),
+                np.zeros(n - 1),
+                name=self.name,
+                keys=self.keys,
+            )
+
+        exact = n <= self.center_exact_cap
+        if not exact and not self.allow_approximate_center:
+            raise ValueError(
+                f"exact stage-wise Mallows center search is capped at {self.center_exact_cap} items; "
+                "set allow_approximate_center=True to request a labeled Copeland approximation."
+            )
+        if exact:
+            best_center: np.ndarray | None = None
+            best_theta: np.ndarray | None = None
+            best_objective = math.inf
+            centers_evaluated = 0
+            for candidate_tuple in permutations(range(n)):
+                candidate = np.asarray(candidate_tuple, dtype=np.int64)
+                theta, objective = _fit_stage_center(rows, row_weights, candidate)
+                centers_evaluated += 1
+                if objective < best_objective:
+                    best_center, best_theta, best_objective = candidate, theta, objective
+            if best_center is None or best_theta is None:
+                raise RuntimeError("stage-wise Mallows exact center search produced no candidates.")
+            center, theta = best_center, best_theta
+            center_algorithm = "exact_enumeration"
+        else:
+            scores = precede.sum(axis=1) - precede.sum(axis=0)
+            center = np.argsort(-scores, kind="stable").astype(np.int64)
+            theta, best_objective = _fit_stage_center(rows, row_weights, center)
+            centers_evaluated = 1
+            center_algorithm = "copeland_approximation"
+        diagnostics = GeneralizedMallowsModelFitDiagnostics(
+            center_algorithm=center_algorithm,
+            center_exact=exact,
+            centers_evaluated=centers_evaluated,
+            objective=best_objective,
+            regularized=pseudo_count > 0.0,
+            pseudo_count=pseudo_count,
+        )
+        return GeneralizedMallowsModelDistribution(
+            center,
+            theta,
+            name=self.name,
+            keys=self.keys,
+            fit_diagnostics=diagnostics,
+        )
 
 
 class GeneralizedMallowsModelDataEncoder(DataSequenceEncoder):
     """Encode a sequence of orderings (permutations of 0,...,n-1) into an (N, n) integer array."""
 
     def __init__(self, dim: int | None = None) -> None:
-        self.dim = dim
+        self.dim = None if dim is None else positive_integer(dim, label="dim", minimum=2)
 
     def __str__(self) -> str:
-        return "GeneralizedMallowsModelDataEncoder"
+        return "GeneralizedMallowsModelDataEncoder(dim=%s)" % self.dim
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, GeneralizedMallowsModelDataEncoder)
+        return isinstance(other, GeneralizedMallowsModelDataEncoder) and self.dim == other.dim
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray:
         """Validate and encode full orderings as a dense integer matrix."""
-        rv = np.asarray([list(row) for row in x], dtype=float)
-        if rv.ndim != 2 or rv.shape[0] == 0:
-            raise ValueError("GeneralizedMallowsModelDistribution requires a non-empty sequence of orderings.")
-        expected = np.arange(rv.shape[1])
-        for row in rv:
-            if not np.array_equal(row, np.round(row)) or not np.array_equal(np.sort(row), expected):
-                raise ValueError("orderings must be permutations of 0,...,n-1.")
-        return rv.astype(np.int64)
+        raw = np.asarray([list(row) for row in x])
+        if self.dim is None:
+            if raw.ndim != 2 or raw.shape[0] == 0:
+                raise ValueError("GeneralizedMallowsModelDistribution requires a non-empty sequence of orderings.")
+            return permutation_batch(raw, raw.shape[1], label="stage-wise Mallows orderings", allow_empty=False)
+        return permutation_batch(raw, self.dim, label="stage-wise Mallows orderings", allow_empty=False)
 
 
 __all__ = [
@@ -335,4 +503,5 @@ __all__ = [
     "GeneralizedMallowsModelAccumulatorFactory",
     "GeneralizedMallowsModelEstimator",
     "GeneralizedMallowsModelDataEncoder",
+    "GeneralizedMallowsModelFitDiagnostics",
 ]
