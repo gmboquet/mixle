@@ -26,6 +26,7 @@ def _run(name, run_id, *, sha=_SHA, status="completed", conclusion="success"):
         "head_sha": sha,
         "status": status,
         "conclusion": conclusion,
+        "details_url": f"https://github.com/gmboquet/mixle/actions/runs/{run_id}/job/{run_id}",
     }
 
 
@@ -40,7 +41,16 @@ def test_required_check_evidence_is_exact_sha_latest_success():
             _run("docs", 99, sha="b" * 40),
         ]
     }
-    assert module.verify_required_checks(payload, required, _SHA) == {"fast": 2, "docs": 3}
+    assert module.verify_required_checks(payload, required, _SHA) == {
+        "fast": {
+            "check_run_id": 2,
+            "details_url": "https://github.com/gmboquet/mixle/actions/runs/2/job/2",
+        },
+        "docs": {
+            "check_run_id": 3,
+            "details_url": "https://github.com/gmboquet/mixle/actions/runs/3/job/3",
+        },
+    }
 
     for bad in (
         {"check_runs": [_run("fast", 1)]},

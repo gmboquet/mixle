@@ -38,53 +38,109 @@ def minor_of(version: str) -> str:
     return ".".join(version.split(".")[:2])
 
 
+def _full_sha(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    sha = value.strip().lower()
+    if len(sha) != 40 or any(character not in "0123456789abcdef" for character in sha):
+        return None
+    return sha
+
+
+def _artifact_digest(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    digest = value.strip().lower()
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        return None
+    return digest
+
+
 def _git_commit() -> str:
     for env_var in ("MIXLE_BENCH_COMMIT", "GITHUB_SHA"):
-        sha = os.environ.get(env_var)
-        if sha:
-            return sha[:12]
+        if sha := _full_sha(os.environ.get(env_var)):
+            return sha
     try:
         out = subprocess.run(
-            ["git", "-C", str(ROOT), "rev-parse", "--short=12", "HEAD"],
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             timeout=5,
         )
-        if out.returncode == 0 and out.stdout.strip():
-            return out.stdout.strip()
+        if out.returncode == 0 and (sha := _full_sha(out.stdout)):
+            return sha
     except (OSError, subprocess.SubprocessError):
         pass
     return "unknown"
 
 
-def stamp_result(result: dict[str, Any]) -> dict[str, Any]:
-    """Return ``result`` with mixle version/minor/commit provenance attached."""
+def stamp_result(
+    result: dict[str, Any],
+    *,
+    commit: str | None = None,
+    artifact_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Attach exact candidate provenance; unverified local runs remain visibly ineligible."""
     version = _package_version()
+    resolved_commit = _full_sha(commit) or _full_sha(_git_commit())
+    resolved_artifact = _artifact_digest(artifact_sha256) or _artifact_digest(
+        os.environ.get("MIXLE_BENCH_ARTIFACT_SHA256")
+    )
     return {
         **result,
         "mixle_version": version,
         "mixle_minor": minor_of(version),
-        "mixle_commit": _git_commit(),
+        "mixle_commit": resolved_commit or "unknown",
+        "mixle_artifact_sha256": resolved_artifact or "unverified",
     }
 
 
-def is_current(result: dict[str, Any], *, current_version: str | None = None) -> bool:
-    """Whether ``result`` was produced by the current release line (major.minor match)."""
-    current = minor_of(current_version or _package_version())
-    stamped = result.get("mixle_minor")
-    if stamped is None:
-        version = result.get("mixle_version")
-        stamped = minor_of(version) if version else None
-    return stamped == current
+def is_current(
+    result: dict[str, Any],
+    *,
+    current_version: str | None = None,
+    current_commit: str | None = None,
+    artifact_sha256: str | None = None,
+) -> bool:
+    """Whether a result is bound to the exact approved version, commit, and artifact."""
+    expected_commit = _full_sha(current_commit) or _full_sha(_git_commit())
+    expected_artifact = _artifact_digest(artifact_sha256) or _artifact_digest(
+        os.environ.get("MIXLE_BENCH_ARTIFACT_SHA256")
+    )
+    if expected_commit is None or expected_artifact is None:
+        return False
+    return (
+        result.get("mixle_version") == (current_version or _package_version())
+        and _full_sha(result.get("mixle_commit")) == expected_commit
+        and _artifact_digest(result.get("mixle_artifact_sha256")) == expected_artifact
+    )
 
 
-def stale_results(results: list[dict[str, Any]], *, current_version: str | None = None) -> list[dict[str, Any]]:
-    """Results that are unstamped or stamped with a different release line."""
-    return [r for r in results if not is_current(r, current_version=current_version)]
+def stale_results(
+    results: list[dict[str, Any]],
+    *,
+    current_version: str | None = None,
+    current_commit: str | None = None,
+    artifact_sha256: str | None = None,
+) -> list[dict[str, Any]]:
+    """Results not bound to the exact approved release candidate."""
+    return [
+        result
+        for result in results
+        if not is_current(
+            result,
+            current_version=current_version,
+            current_commit=current_commit,
+            artifact_sha256=artifact_sha256,
+        )
+    ]
 
 
 if __name__ == "__main__":
     import json
 
-    demo = stamp_result({"benchmark": "gmm_fit", "n": 100000, "seconds": 0.098})
+    demo = stamp_result(
+        {"benchmark": "gmm_fit", "n": 100000, "seconds": 0.098},
+        artifact_sha256="0" * 64,
+    )
     print(json.dumps(demo, indent=2))

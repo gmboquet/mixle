@@ -1,57 +1,255 @@
 {
-  "_comment": "Worklist E14.5 reproducibility bundle. Each entry re-derives a shipped report. Run the command from a clean clone; the sha256 pins the exact script. Regenerate with `python scripts/build_repro_bundle.py --write`.",
-  "code_license": "MIT (see LICENSE, NOTICE)",
-  "acceptance": "E14/E4 external reproduction succeeds from this bundle.",
+  "acceptance": "Every local entry passes exact output validation; the hosted-network entry passes on the same candidate; and retained candidate/check/wheel records bind the bundle to publication.",
+  "artifact": "mixle.reproduction_bundle/v2",
+  "candidate_binding": {
+    "policy": "exact-publish-workflow-candidate",
+    "required_records": [
+      "metadata/release-candidate.json",
+      "metadata/release-check-evidence.json",
+      "metadata/SHA256SUMS",
+      "metadata/mixle-0.8.0-py3-none-any.whl.json",
+      "metadata/reproduction-*.json",
+      "metadata/network/banking77-reproduction-receipt.json"
+    ],
+    "rule": "The final bundle is incomplete unless these retained records bind its source commit, approved checks, wheel SHA-256, and local/hosted entry receipts to the signed v0.8.0 tag."
+  },
+  "closure": [
+    {
+      "path": "pyproject.toml",
+      "role": "bundle-closure",
+      "sha256": "d0ec03a77b561d61ea79bb42ee1449d2d703d73186dddef17b6cda8905f45f24"
+    },
+    {
+      "path": "release-checklists/0.8.0-repro-environment.json",
+      "role": "bundle-closure",
+      "sha256": "c321b9b5016ca58ad934f68c9503e56c04e5a0c282b5d7857d97f0dae794d600"
+    },
+    {
+      "path": "release-checklists/0.8.0-repro-requirements.txt",
+      "role": "bundle-closure",
+      "sha256": "c9b250ab0bec6e59c7eba9a96fe68410833a608167ddbc5648509702caf94fd0"
+    },
+    {
+      "path": "release-checklists/0.8.0-banking77-dataset.json",
+      "role": "bundle-closure",
+      "sha256": "9b059c2da7b8cf152a03e073418b9abd8485eaee960b98720f4ad2709ea116c7"
+    },
+    {
+      "path": "scripts/build_repro_bundle.py",
+      "role": "bundle-closure",
+      "sha256": "1c1750b06131a39ef18ae3040d834056690d39b60817af81bac745ed0bfb6277"
+    },
+    {
+      "path": "scripts/run_repro_entry.py",
+      "role": "bundle-closure",
+      "sha256": "cd4ab382be1a190ea21a414902d61c1e00ddfa1d3076678c278903b0e29534f2"
+    }
+  ],
+  "code_license": {
+    "files": [
+      "LICENSE",
+      "NOTICE"
+    ],
+    "spdx": "MIT"
+  },
   "entries": [
     {
+      "argv": [
+        "examples/real_receipt_banking77.py",
+        "--smoke",
+        "--json"
+      ],
+      "configuration": {
+        "n_round": 40,
+        "n_rounds": 1,
+        "n_seed": 1155,
+        "n_test": 60,
+        "seed": 0,
+        "student": "generative"
+      },
+      "dataset_record": "release-checklists/0.8.0-banking77-dataset.json",
+      "expected": {
+        "assertions": [
+          {
+            "equals": "mixle.banking77_reproduction/v1",
+            "path": "artifact"
+          },
+          {
+            "equals": "banking77 intents (77 classes)",
+            "path": "metrics.task"
+          },
+          {
+            "equals": 60,
+            "path": "metrics.n_test"
+          },
+          {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "path": "metrics.end_to_end_accuracy"
+          },
+          {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "path": "metrics.local_agreement"
+          },
+          {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "path": "metrics.escalation_rate"
+          },
+          {
+            "equals": "9d081458ff52e53cf7e848f414e6e9344e4e6696",
+            "path": "dataset.source_commit"
+          },
+          {
+            "equals": 10003,
+            "path": "dataset.splits.train.rows"
+          },
+          {
+            "equals": 3080,
+            "path": "dataset.splits.test.rows"
+          }
+        ],
+        "format": "json"
+      },
       "id": "flagship-banking77-cascade",
+      "inputs": [
+        {
+          "path": "examples/real_receipt_banking77.py",
+          "role": "executable",
+          "sha256": "a0a3921d4ef877d13d8b60754392d6391babff28496289ad9d657adb01f61e9e"
+        },
+        {
+          "path": "release-checklists/0.8.0-banking77-dataset.json",
+          "role": "dataset-license-and-integrity",
+          "sha256": "9b059c2da7b8cf152a03e073418b9abd8485eaee960b98720f4ad2709ea116c7"
+        }
+      ],
       "kind": "flagship",
-      "command": "python examples/real_receipt_banking77.py",
       "script": "examples/real_receipt_banking77.py",
-      "needs_network": true,
-      "dataset": "Banking77 (PolyAI)",
-      "data_license": "CONFIRM-AT-PUBLISH: verify Banking77 redistribution terms before bundling data",
-      "sha256": "21246d3f7945279752124557b247c856cb2ad5737fc41d24947b87228e86cef0"
+      "tier": "hosted-network",
+      "timeout_seconds": 30
     },
     {
+      "argv": [
+        "examples/gallery_univariate_example.py"
+      ],
+      "configuration": {
+        "dataset": "synthetic",
+        "seed": "declared in script"
+      },
+      "expected": {
+        "contains": [
+          "fit : GaussianDistribution(1.5485975768849254, 4.0204098815165565",
+          "fit : PoissonDistribution(4.027",
+          "fit : BernoulliDistribution(0.7004"
+        ],
+        "format": "text",
+        "stdout_sha256": "9e7667d4fc942dcbf00f52eea48a0da2b65f1964d216dab35828aec331ca5e7f"
+      },
       "id": "gallery-univariate",
+      "inputs": [
+        {
+          "path": "examples/gallery_univariate_example.py",
+          "role": "executable",
+          "sha256": "91720d75a50dc8166c7a1c84a5451ead45d2acae2dfe2d8f08cff198993da320"
+        }
+      ],
       "kind": "self-contained",
-      "command": "python examples/gallery_univariate_example.py",
       "script": "examples/gallery_univariate_example.py",
-      "needs_network": false,
-      "dataset": "none (samples from a known model)",
-      "data_license": "n/a (synthetic)",
-      "sha256": "91720d75a50dc8166c7a1c84a5451ead45d2acae2dfe2d8f08cff198993da320"
+      "tier": "local",
+      "timeout_seconds": 30
     },
     {
+      "argv": [
+        "examples/gallery_structured_example.py"
+      ],
+      "configuration": {
+        "dataset": "synthetic",
+        "seed": "declared in script"
+      },
+      "expected": {
+        "contains": [
+          "learned parents: [None, 0, 0]",
+          "held-out mean log-density: -17.965",
+          "held-out mean log-density: -19.841"
+        ],
+        "format": "text",
+        "stdout_sha256": "80b8fc6822e95f2d363555037da288e70e552395f86b9e60fd8267c364b5b75f"
+      },
       "id": "gallery-structured",
+      "inputs": [
+        {
+          "path": "examples/gallery_structured_example.py",
+          "role": "executable",
+          "sha256": "e45d3c177dcb3feae6d7055f1f4b9ff0be78fd935fbb492c7eb0fa55bb323d98"
+        }
+      ],
       "kind": "self-contained",
-      "command": "python examples/gallery_structured_example.py",
       "script": "examples/gallery_structured_example.py",
-      "needs_network": false,
-      "dataset": "none (samples from a known model)",
-      "data_license": "n/a (synthetic)",
-      "sha256": "e45d3c177dcb3feae6d7055f1f4b9ff0be78fd935fbb492c7eb0fa55bb323d98"
+      "tier": "local",
+      "timeout_seconds": 30
     },
     {
+      "argv": [
+        "examples/production_example.py"
+      ],
+      "configuration": {
+        "dataset": "synthetic",
+        "seed": "declared in script"
+      },
+      "expected": {
+        "contains": [
+          "# lineage verified: True",
+          "drift on shifted batch: True",
+          "chain intact: True"
+        ],
+        "format": "text",
+        "stdout_sha256": "c9e3874f3f4dac45ee6f88127c56033821658965a9d4db2ab6055d4d2539b669"
+      },
       "id": "production-provenance",
+      "inputs": [
+        {
+          "path": "examples/production_example.py",
+          "role": "executable",
+          "sha256": "476b549b6d0554678a412fab542dab6ac6c34e3df325a756f1c80e435200fd08"
+        }
+      ],
       "kind": "workflow",
-      "command": "python examples/production_example.py",
       "script": "examples/production_example.py",
-      "needs_network": false,
-      "dataset": "none (synthetic)",
-      "data_license": "n/a (synthetic)",
-      "sha256": "476b549b6d0554678a412fab542dab6ac6c34e3df325a756f1c80e435200fd08"
+      "tier": "local",
+      "timeout_seconds": 30
     },
     {
+      "argv": [
+        "examples/scaling_example.py"
+      ],
+      "configuration": {
+        "dataset": "synthetic",
+        "workers": 4
+      },
+      "expected": {
+        "contains": [
+          "backend='local'   : mu=2.00  P(a)=0.60  lam=4.01",
+          "backend='mp' (x4) : mu=2.00  P(a)=0.60  lam=4.01"
+        ],
+        "format": "text",
+        "stdout_sha256": "5fd8dd73c1c9062439a5a47b0c4266433c1992718b0c6c0a961330319645fe1a"
+      },
       "id": "scaling-backend",
+      "inputs": [
+        {
+          "path": "examples/scaling_example.py",
+          "role": "executable",
+          "sha256": "188e3017391c98e57e921a598764c2cba5cb850618b990d71dcc585a38b0081e"
+        }
+      ],
       "kind": "backend",
-      "command": "python examples/scaling_example.py",
       "script": "examples/scaling_example.py",
-      "needs_network": false,
-      "dataset": "none (synthetic)",
-      "data_license": "n/a (synthetic)",
-      "sha256": "188e3017391c98e57e921a598764c2cba5cb850618b990d71dcc585a38b0081e"
+      "tier": "local",
+      "timeout_seconds": 30
     }
-  ]
+  ],
+  "environment": "release-checklists/0.8.0-repro-environment.json",
+  "release": "0.8.0"
 }
