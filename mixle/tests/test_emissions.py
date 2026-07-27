@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from mixle.analysis.emissions import EmissionFactors, Footprint, emissions_footprint
+from mixle.analysis.emissions import EmissionFactors, Footprint, climate_terms, emissions_footprint
 
 ACTIVITY = {
     "diesel_L": 5_000.0,
@@ -74,6 +74,18 @@ def test_ci_present_when_sigma_and_n_given():
 def test_no_ci_without_sigma():
     factors_no_sigma = EmissionFactors(scope1=FACTORS.scope1, scope2=FACTORS.scope2, scope3=FACTORS.scope3)
     fp = emissions_footprint(ACTIVITY, factors_no_sigma, n=1_000, rng=np.random.default_rng(0))
+    assert fp.ci is None
+
+
+@pytest.mark.parametrize("n", [-1, 1.5, True, np.bool_(False)])
+def test_draw_count_must_be_an_exact_nonnegative_integer(n):
+    with pytest.raises(ValueError, match="n must"):
+        emissions_footprint(ACTIVITY, FACTORS, n=n)
+
+
+def test_zero_draws_explicitly_selects_point_estimate():
+    fp = emissions_footprint(ACTIVITY, FACTORS, n=0)
+    assert fp.total == pytest.approx(REF_TOTAL)
     assert fp.ci is None
 
 
@@ -172,8 +184,6 @@ def test_climate_terms_type_hints_are_resolvable():
 
 
 def test_climate_terms_still_duck_types_an_unrelated_water_object():
-    from mixle.analysis.emissions import climate_terms
-
     class ThirdPartyWaterBudget:
         shortfall_m3 = 0.0
         storage = [1.0, 2.0, 0.0]
@@ -182,3 +192,16 @@ def test_climate_terms_still_duck_types_an_unrelated_water_object():
     result = climate_terms(fp, ThirdPartyWaterBudget(), carbon_price=10.0)
     assert result["water_feasible"] is True
     assert result["shortfall_time_fraction"] == pytest.approx(1.0 / 3.0)
+
+
+@pytest.mark.parametrize("price", [-1.0, float("nan"), float("inf"), True, np.array([1.0])])
+def test_climate_terms_rejects_invalid_carbon_price(price):
+    with pytest.raises(ValueError, match="carbon_price"):
+        climate_terms(emissions_footprint(ACTIVITY, FACTORS), None, carbon_price=price)
+
+
+def test_climate_terms_rejects_invalid_or_overflowing_cost():
+    with pytest.raises(ValueError, match="footprint.total"):
+        climate_terms(Footprint(0.0, 0.0, 0.0, float("nan")), None, carbon_price=1.0)
+    with pytest.raises(ValueError, match="overflow"):
+        climate_terms(Footprint(1e308, 0.0, 0.0, 1e308), None, carbon_price=1e308)

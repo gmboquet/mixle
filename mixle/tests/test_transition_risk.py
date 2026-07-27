@@ -133,6 +133,26 @@ def test_non_finite_footprint_total_raises():
             transition_risk(_footprint(bad_total), _price_paths(), npv_samples=np.array([1.0, 2.0, 3.0]))
 
 
+def test_finite_inputs_that_overflow_carbon_cost_raise():
+    with pytest.raises(ValueError, match="carbon cost"):
+        transition_risk(_footprint(1e308), np.array([1e308]), npv_samples=np.array([1.0]))
+
+
+def test_finite_inputs_that_overflow_discounted_price_raise():
+    with pytest.raises(ValueError, match="discounted carbon price"):
+        transition_risk(
+            _footprint(1.0),
+            np.array([[1e308, 1e308]]),
+            discount=np.array([1e308, 1.0]),
+            npv_samples=np.array([1.0]),
+        )
+
+
+def test_finite_inputs_that_overflow_adjusted_value_raise():
+    with pytest.raises(ValueError, match="adjusted NPV"):
+        transition_risk(_footprint(1e308), np.array([1.0]), npv_samples=np.array([-1e308]))
+
+
 def test_multi_dimensional_npv_samples_raises_instead_of_flattening():
     # Regression: `npv_samples` used to be coerced with `.reshape(-1)`, so a meaningfully-shaped
     # (n_scenarios, n_draws) matrix was silently flattened into one long, structure-free set of
@@ -190,3 +210,17 @@ def test_transition_risk_result_accepts_valid_samples():
     result = TransitionRiskResult(**_result_kwargs())
     lo, hi = result.credible_interval(0.9)
     assert np.all(lo <= hi)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"samples": np.array([1.0, 2.0])},
+        {"scenario_mean": np.array([np.inf, 3.0])},
+        {"carbon_cost": np.array([0.5])},
+        {"ranking": [0, 0]},
+    ],
+)
+def test_transition_risk_result_rejects_inconsistent_published_state(override):
+    with pytest.raises(ValueError):
+        TransitionRiskResult(**_result_kwargs(**override))
