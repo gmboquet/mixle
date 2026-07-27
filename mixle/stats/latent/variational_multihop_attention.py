@@ -37,6 +37,21 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent._attention_contracts import (
+    AttentionOptimizerState,
+    exact_ids,
+    finite_matrix,
+    merge_optimizer_state,
+    observation_weights,
+    positive_finite,
+    positive_integer,
+    row_simplex,
+    safe_log_probabilities,
+    weighted_log_probability_sum,
+)
+from mixle.utils.vector import ImpossibleEvidenceError
+
+_OPTIMIZER_FAMILY = "variational_multihop_attention"
 
 
 def _softmax(s: np.ndarray, axis: int) -> np.ndarray:
@@ -45,8 +60,10 @@ def _softmax(s: np.ndarray, axis: int) -> np.ndarray:
     return w / w.sum(axis=axis, keepdims=True)
 
 
-def _two_hop(embed, keys, vals, q, t, emission, sigma2):
+def _two_hop(embed, keys, vals, q, t, emission, sigma2, weights=None):
     """Forward + per-symbol gradient + emission-aware final responsibilities for the 2-hop chain."""
+    if weights is None:
+        weights = np.ones(keys.shape[0], dtype=np.float64)
     eq = embed[q]  # (n, D)
     ek = embed[keys]  # (n, N, D)
     d1 = eq[:, None, :] - ek
@@ -56,35 +73,76 @@ def _two_hop(embed, keys, vals, q, t, emission, sigma2):
     a2 = _softmax(-np.sum(d2 * d2, axis=3) / (2 * sigma2), axis=2)  # (n, i, j)
     bj = emission[vals, t[:, None]]  # (n, N)  emission of each final value at the target
     h = np.einsum("nij,nj->ni", a2, bj)  # (n, N)
-    p = np.clip(np.einsum("ni,ni->n", a1, h), 1e-12, None)
-    gs1 = a1 * (h - p[:, None]) / p[:, None]  # (n, N)
-    gs2 = a1[:, :, None] * a2 * (bj[:, None, :] - h[:, :, None]) / p[:, None, None]  # (n, i, j)
+    p = np.einsum("ni,ni->n", a1, h)
+    possible = p > 0.0
+    gs1 = np.zeros_like(a1)
+    gs2 = np.zeros_like(a2)
+    gs1[possible] = weights[possible, None] * a1[possible] * (h[possible] - p[possible, None]) / p[possible, None]
+    gs2[possible] = (
+        weights[possible, None, None]
+        * a1[possible, :, None]
+        * a2[possible]
+        * (bj[possible, None, :] - h[possible, :, None])
+        / p[possible, None, None]
+    )
     grad = np.zeros_like(embed)
     np.add.at(grad, q, -np.einsum("ni,nij->nj", gs1, d1) / sigma2)
     np.add.at(grad, keys.reshape(-1), (gs1[:, :, None] * d1 / sigma2).reshape(-1, embed.shape[1]))
     np.add.at(grad, vals.reshape(-1), (-np.einsum("nij,nijd->nid", gs2, d2) / sigma2).reshape(-1, embed.shape[1]))
     np.add.at(grad, keys.reshape(-1), (np.einsum("nij,nijd->njd", gs2, d2) / sigma2).reshape(-1, embed.shape[1]))
-    rj = (a1[:, :, None] * a2 * bj[:, None, :]).sum(axis=1) / p[:, None]  # (n, N) final-position posterior
+    rj = np.zeros_like(a1)
+    rj[possible] = (a1[possible, :, None] * a2[possible] * bj[possible, None, :]).sum(axis=1) / p[possible, None]
     return p, grad, rj
 
 
 class VariationalMultiHopAttentionDistribution(SequenceEncodableProbabilityDistribution):
     """A 2-hop chain over tied latent embeddings (mean-field posterior)."""
 
-    def __init__(self, mean, log_var, emission, sigma2: float = 0.3, name: str | None = None) -> None:
+    def __init__(
+        self,
+        mean,
+        log_var,
+        emission,
+        sigma2: float = 0.3,
+        name: str | None = None,
+        optimizer_state: AttentionOptimizerState | dict[str, Any] | None = None,
+    ) -> None:
         """Args:
         mean / log_var: ``(S, D)`` posterior mean / log-variance of the tied embeddings.
         emission: ``(S, T)`` per-(value-symbol) categorical over targets.
         sigma2: gate variance (attention temperature).
         name: optional name.
         """
-        self.mean = np.asarray(mean, dtype=float)
-        self.log_var = np.asarray(log_var, dtype=float)
-        self.emission = np.asarray(emission, dtype=float)
+        self.mean = finite_matrix(mean, "mean")
+        self.log_var = finite_matrix(log_var, "log_var")
+        if self.log_var.shape != self.mean.shape:
+            raise ValueError("mean and log_var must have the same shape")
+        with np.errstate(over="ignore", invalid="ignore"):
+            variance = np.exp(self.log_var)
+        if np.any(~np.isfinite(variance)) or np.any(variance <= 0.0):
+            raise ValueError("log_var must encode positive finite variances")
+        self.emission = row_simplex(emission, "emission")
         self.num_symbols, self.embed_dim = self.mean.shape
+        if self.emission.shape[0] != self.num_symbols:
+            raise ValueError("emission must have one row per symbol")
         self.num_targets = self.emission.shape[1]
-        self.sigma2 = float(sigma2)
+        self.sigma2 = positive_finite(sigma2, "sigma2")
         self.name = name
+        if optimizer_state is None:
+            state = AttentionOptimizerState.fresh(_OPTIMIZER_FAMILY, self.mean, self.log_var, 0)
+        else:
+            state = (
+                AttentionOptimizerState.from_dict(optimizer_state)
+                if isinstance(optimizer_state, dict)
+                else optimizer_state
+            )
+            if state.family != _OPTIMIZER_FAMILY:
+                raise ValueError("optimizer_state belongs to a different attention family")
+            if state.mean.shape != self.mean.shape:
+                raise ValueError("optimizer_state geometry does not match the distribution")
+            if not np.array_equal(state.mean, self.mean) or not np.array_equal(state.log_var, self.log_var):
+                raise ValueError("optimizer_state posterior does not match mean and log_var")
+        self.optimizer_state = state
 
     def __str__(self) -> str:
         return "VariationalMultiHopAttentionDistribution(S=%d, D=%d, T=%d, name=%s)" % (
@@ -107,7 +165,7 @@ class VariationalMultiHopAttentionDistribution(SequenceEncodableProbabilityDistr
         """Return vectorized log-probabilities for encoded two-hop attention observations."""
         keys, vals, q, t = x
         p, _, _ = _two_hop(self.mean, keys, vals, q, t, self.emission, self.sigma2)
-        return np.log(p)
+        return safe_log_probabilities(p)
 
     def predict_proba(self, context_keys, context_values, query) -> np.ndarray:
         """Predictive target distribution (posterior-mean embeddings); ``(T,)`` or ``(n, T)``."""
@@ -128,8 +186,12 @@ class VariationalMultiHopAttentionDistribution(SequenceEncodableProbabilityDistr
         return self.mean
 
     def sampler(self, seed: int | None = None) -> VariationalMultiHopAttentionSampler:
-        """Return a sampler for synthetic two-hop attention observations."""
-        return VariationalMultiHopAttentionSampler(self, seed)
+        """Sample iid observations from the posterior-mean plug-in law used by scoring."""
+        return VariationalMultiHopAttentionSampler(self, seed, posterior_predictive=False)
+
+    def posterior_predictive_sampler(self, seed: int | None = None) -> VariationalMultiHopAttentionSampler:
+        """Sample iid observations, independently drawing an embedding table for every event."""
+        return VariationalMultiHopAttentionSampler(self, seed, posterior_predictive=True)
 
     def estimator(self, pseudo_count: float | None = None) -> VariationalMultiHopAttentionEstimator:
         """Return a variational EM estimator initialized with this model's dimensions."""
@@ -138,29 +200,33 @@ class VariationalMultiHopAttentionDistribution(SequenceEncodableProbabilityDistr
             embed_dim=self.embed_dim,
             num_targets=self.num_targets,
             sigma2=self.sigma2,
+            seed=self.optimizer_state.seed,
             name=self.name,
         )
 
     def dist_to_encoder(self) -> VariationalMultiHopAttentionDataEncoder:
         """Return the encoder for context keys, values, query symbols, and targets."""
-        return VariationalMultiHopAttentionDataEncoder()
+        return VariationalMultiHopAttentionDataEncoder(self.num_symbols, self.num_targets)
 
 
 class VariationalMultiHopAttentionSampler(DistributionSampler):
-    """Sample two-hop attention observations from posterior-mean embeddings plus embedding noise."""
+    """Sampler for either the plug-in or explicitly requested posterior-predictive law."""
 
-    def __init__(self, dist, seed: int | None = None) -> None:
+    def __init__(self, dist, seed: int | None = None, *, posterior_predictive: bool = False) -> None:
         self.dist = dist
         self.rng = RandomState(seed)
+        self.posterior_predictive = bool(posterior_predictive)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one observation or ``size`` iid synthetic observations."""
         n = 1 if size is None else size
         d = self.dist
         N = 6
-        embed = d.mean + np.exp(0.5 * d.log_var) * self.rng.randn(*d.mean.shape)
         out = []
         for _ in range(n):
+            embed = d.mean
+            if self.posterior_predictive:
+                embed = d.mean + np.exp(0.5 * d.log_var) * self.rng.randn(*d.mean.shape)
             keys = self.rng.randint(0, d.num_symbols, N)
             vals = self.rng.randint(0, d.num_symbols, N)
             q = int(self.rng.randint(0, d.num_symbols))
@@ -181,28 +247,45 @@ class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumula
         self.embed_dim = embed_dim
         self.num_targets = num_targets
         self.mc = mc
-        self._rng = RandomState(seed)
+        self.seed = int(seed)
         self.grad_m = np.zeros((num_symbols, embed_dim))
         self.grad_logv = np.zeros((num_symbols, embed_dim))
         self.emission_count = np.zeros((num_symbols, num_targets))
         self.ll = 0.0
         self.n = 0.0
+        self.optimizer_state: AttentionOptimizerState | None = None
         self.keys = keys
         self.name = name
 
     def seq_update(self, x, weights, estimate) -> None:
         """Update ELBO gradients and emission counts from encoded observations."""
         keys, vals, q, t = x
-        w = np.asarray(weights, dtype=float)
+        w = observation_weights(weights, keys.shape[0])
         m, log_v, sig = estimate.mean, estimate.log_var, estimate.sigma2
+        supported = np.any(estimate.emission[vals, t[:, None]] > 0.0, axis=1)
+        impossible = np.flatnonzero(~supported & (w > 0.0))
+        if impossible.size:
+            raise ImpossibleEvidenceError(
+                f"variational multi-hop attention encountered impossible evidence at rows {impossible.tolist()}"
+            )
+        self.optimizer_state = merge_optimizer_state(
+            self.optimizer_state, estimate.optimizer_state, family=_OPTIMIZER_FAMILY
+        )
+        rng = RandomState(
+            (
+                estimate.optimizer_state.seed * 1_000_003
+                + estimate.optimizer_state.iteration
+            )
+            % (2**31)
+        )
         s = np.exp(0.5 * log_v)
         for _ in range(self.mc):
-            eps = self._rng.randn(*m.shape)
+            eps = rng.randn(*m.shape)
             embed = m + s * eps
-            p, gE, rj = _two_hop(embed, keys, vals, q, t, estimate.emission, sig)
+            p, gE, rj = _two_hop(embed, keys, vals, q, t, estimate.emission, sig, w)
             self.grad_m += gE / self.mc
             self.grad_logv += (gE * eps * s * 0.5) / self.mc
-            self.ll += float(np.dot(w, np.log(p))) / self.mc
+            self.ll += weighted_log_probability_sum(p, w) / self.mc
             np.add.at(
                 self.emission_count,
                 (vals.reshape(-1), np.repeat(t, keys.shape[1])),
@@ -214,7 +297,7 @@ class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumula
         """Initialize emission counts with random final-hop responsibilities."""
         keys, vals, q, t = x
         n, N = keys.shape
-        w = np.asarray(weights, dtype=float)
+        w = observation_weights(weights, n)
         rj = rng.dirichlet(np.ones(N), size=n) * w[:, None]
         np.add.at(self.emission_count, (vals.reshape(-1), np.repeat(t, N)), rj.reshape(-1))
         self.n += float(w.sum())
@@ -231,28 +314,37 @@ class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumula
 
     def combine(self, suff_stat):
         """Merge variational gradients, emission counts, log-likelihood, and weight totals."""
-        gm, glv, ec, ll, n = suff_stat
+        gm, glv, ec, ll, n, state = suff_stat
         self.grad_m += gm
         self.grad_logv += glv
         self.emission_count += ec
         self.ll += ll
         self.n += n
+        self.optimizer_state = merge_optimizer_state(self.optimizer_state, state, family=_OPTIMIZER_FAMILY)
         return self
 
     def value(self):
         """Return accumulated gradients, emission counts, log-likelihood, and total weight."""
-        return (self.grad_m.copy(), self.grad_logv.copy(), self.emission_count.copy(), self.ll, self.n)
+        return (
+            self.grad_m.copy(),
+            self.grad_logv.copy(),
+            self.emission_count.copy(),
+            self.ll,
+            self.n,
+            None if self.optimizer_state is None else self.optimizer_state.to_dict(),
+        )
 
     def from_value(self, x):
         """Restore accumulator state from ``value`` output."""
         self.grad_m, self.grad_logv, self.emission_count = (np.asarray(v, dtype=float) for v in x[:3])
         self.ll = float(x[3])
         self.n = float(x[4])
+        self.optimizer_state = merge_optimizer_state(None, x[5], family=_OPTIMIZER_FAMILY)
         return self
 
     def acc_to_encoder(self):
         """Return the encoder compatible with this attention accumulator."""
-        return VariationalMultiHopAttentionDataEncoder()
+        return VariationalMultiHopAttentionDataEncoder(self.num_symbols, self.num_targets)
 
 
 class VariationalMultiHopAttentionAccumulatorFactory(StatisticAccumulatorFactory):
@@ -266,14 +358,19 @@ class VariationalMultiHopAttentionAccumulatorFactory(StatisticAccumulatorFactory
     def make(self):
         """Create an accumulator with a deterministic per-iteration Monte-Carlo seed."""
         e = self.est
-        seed = (e.seed * 1_000_003 + e._t) % (2**31)
         return VariationalMultiHopAttentionAccumulator(
-            e.num_symbols, e.embed_dim, e.num_targets, e.mc, seed, keys=self.keys, name=self.name
+            e.num_symbols,
+            e.embed_dim,
+            e.num_targets,
+            e.mc,
+            e.seed,
+            keys=self.keys,
+            name=self.name,
         )
 
 
 class VariationalMultiHopAttentionEstimator(ParameterEstimator):
-    """Variational-EM estimator with prior annealing (KL weight ramped over EM iterations)."""
+    """Stateless variational-EM estimator with model-carried Adam state and prior annealing."""
 
     def __init__(
         self,
@@ -301,75 +398,140 @@ class VariationalMultiHopAttentionEstimator(ParameterEstimator):
             iterations (prevents the unused embeddings collapsing before the data spreads them).
         emission_smoothing / seed / name / keys: standard controls.
         """
-        self.num_symbols = num_symbols
-        self.embed_dim = embed_dim
-        self.num_targets = num_targets
-        self.sigma2 = float(sigma2)
-        self.lr = float(lr)
-        self.mc = int(mc)
+        self.num_symbols = positive_integer(num_symbols, "num_symbols")
+        self.embed_dim = positive_integer(embed_dim, "embed_dim")
+        self.num_targets = positive_integer(num_targets, "num_targets")
+        self.sigma2 = positive_finite(sigma2, "sigma2")
+        self.lr = positive_finite(lr, "lr")
+        self.mc = positive_integer(mc, "mc")
         self.prior_strength = float(prior_strength)
-        self.anneal_iters = int(anneal_iters)
+        self.anneal_iters = positive_integer(anneal_iters, "anneal_iters")
         self.emission_smoothing = float(emission_smoothing)
+        if not np.isfinite(self.prior_strength) or self.prior_strength < 0.0:
+            raise ValueError("prior_strength must be finite and non-negative")
+        if not np.isfinite(self.emission_smoothing) or self.emission_smoothing < 0.0:
+            raise ValueError("emission_smoothing must be finite and non-negative")
         self.seed = int(seed)
         self.name = name
         self.keys = keys
-        self.mean = self.log_var = None
-        self._am = self._av = self._bm = self._bv = None
-        self._t = 0
 
     def accumulator_factory(self):
         """Return a factory for variational multi-hop attention accumulators."""
         return VariationalMultiHopAttentionAccumulatorFactory(self, keys=self.keys, name=self.name)
 
-    def _adam(self, param, grad, m1, m2):
+    def _adam(self, param, grad, m1, m2, iteration):
         b1, b2, eps = 0.9, 0.999, 1e-8
         m1 = b1 * m1 + (1 - b1) * grad
         m2 = b2 * m2 + (1 - b2) * grad * grad
-        return param + self.lr * (m1 / (1 - b1**self._t)) / (np.sqrt(m2 / (1 - b2**self._t)) + eps), m1, m2
+        return (
+            param + self.lr * (m1 / (1 - b1**iteration)) / (np.sqrt(m2 / (1 - b2**iteration)) + eps),
+            m1,
+            m2,
+        )
+
+    def _init_state(self) -> AttentionOptimizerState:
+        rng = RandomState(self.seed)
+        mean = rng.randn(self.num_symbols, self.embed_dim)
+        log_var = np.full((self.num_symbols, self.embed_dim), np.log(0.3))
+        return AttentionOptimizerState.fresh(_OPTIMIZER_FAMILY, mean, log_var, self.seed)
 
     def estimate(self, nobs, suff_stat):
         """Apply one variational EM update and return the updated attention distribution."""
-        grad_m, grad_logv, emission_count, _ll, _n = suff_stat
-        if self.mean is None:
-            rng = RandomState(self.seed)
-            self.mean = rng.randn(self.num_symbols, self.embed_dim)
-            self.log_var = np.full((self.num_symbols, self.embed_dim), np.log(0.3))
-            self._am = np.zeros_like(self.mean)
-            self._av = np.zeros_like(self.mean)
-            self._bm = np.zeros_like(self.log_var)
-            self._bv = np.zeros_like(self.log_var)
-        else:
-            self._t += 1
-            ps = self.prior_strength * min(1.0, self._t / max(1, self.anneal_iters))  # annealed KL weight
-            v = np.exp(self.log_var)
-            g_m = grad_m - ps * self.mean
-            g_logv = grad_logv - ps * 0.5 * (v - 1.0)
-            self.mean, self._am, self._av = self._adam(self.mean, g_m, self._am, self._av)
-            self.log_var, self._bm, self._bv = self._adam(self.log_var, g_logv, self._bm, self._bv)
-            self.log_var = np.clip(self.log_var, -8.0, 2.0)
+        grad_m, grad_logv, emission_count, _ll, _n = suff_stat[:5]
+        state_data = suff_stat[5] if len(suff_stat) > 5 else None
+        state = (
+            self._init_state()
+            if state_data is None
+            else merge_optimizer_state(None, state_data, family=_OPTIMIZER_FAMILY)
+        )
+        if state_data is not None:
+            iteration = state.iteration + 1
+            ps = self.prior_strength * min(1.0, iteration / self.anneal_iters)
+            variance = np.exp(state.log_var)
+            g_m = grad_m - ps * state.mean
+            g_logv = grad_logv - ps * 0.5 * (variance - 1.0)
+            mean, am, av = self._adam(
+                state.mean,
+                g_m,
+                state.mean_first_moment,
+                state.mean_second_moment,
+                iteration,
+            )
+            log_var, bm, bv = self._adam(
+                state.log_var,
+                g_logv,
+                state.log_var_first_moment,
+                state.log_var_second_moment,
+                iteration,
+            )
+            log_var = np.clip(log_var, -8.0, 2.0)
+            state = AttentionOptimizerState(_OPTIMIZER_FAMILY, mean, log_var, am, av, bm, bv, iteration, state.seed)
         em = emission_count + self.emission_smoothing
-        emission = em / em.sum(axis=1, keepdims=True)
+        row_totals = em.sum(axis=1, keepdims=True)
+        emission = np.divide(
+            em,
+            row_totals,
+            out=np.full_like(em, 1.0 / self.num_targets),
+            where=row_totals > 0.0,
+        )
         return VariationalMultiHopAttentionDistribution(
-            self.mean.copy(), self.log_var.copy(), emission, sigma2=self.sigma2, name=self.name
+            state.mean,
+            state.log_var,
+            emission,
+            sigma2=self.sigma2,
+            name=self.name,
+            optimizer_state=state,
         )
 
 
 class VariationalMultiHopAttentionDataEncoder(DataSequenceEncoder):
     """Encode context keys, context values, query symbols, and targets as integer arrays."""
 
+    def __init__(self, num_symbols=None, num_targets=None) -> None:
+        self.num_symbols = num_symbols
+        self.num_targets = num_targets
+
     def __str__(self) -> str:
         return "VariationalMultiHopAttentionDataEncoder"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, VariationalMultiHopAttentionDataEncoder)
+        return isinstance(other, VariationalMultiHopAttentionDataEncoder) and (
+            self.num_symbols,
+            self.num_targets,
+        ) == (other.num_symbols, other.num_targets)
 
     def seq_encode(self, x: Sequence[tuple[Any, Any, int, int]]):
         """Encode ``(context_keys, context_values, query, target)`` observations."""
-        keys = np.asarray([np.asarray(xi[0], dtype=int) for xi in x], dtype=int)
-        vals = np.asarray([np.asarray(xi[1], dtype=int) for xi in x], dtype=int)
-        q = np.asarray([int(xi[2]) for xi in x], dtype=int)
-        t = np.asarray([int(xi[3]) for xi in x], dtype=int)
+        keys = exact_ids(
+            [xi[0] for xi in x],
+            "variational multi-hop keys",
+            upper=self.num_symbols,
+            ndim=2,
+        )
+        vals = exact_ids(
+            [xi[1] for xi in x],
+            "variational multi-hop values",
+            upper=self.num_symbols,
+            ndim=2,
+        )
+        if keys.shape != vals.shape or keys.shape[1] == 0:
+            raise ValueError("variational multi-hop contexts must share one positive width")
+        q = exact_ids(
+            [xi[2] for xi in x],
+            "variational multi-hop query IDs",
+            upper=self.num_symbols,
+            ndim=1,
+        )
+        t = exact_ids(
+            [xi[3] for xi in x],
+            "variational multi-hop target IDs",
+            upper=self.num_targets,
+            ndim=1,
+        )
         return keys, vals, q, t
+
+    def row_count(self, x) -> int:
+        return int(np.asarray(x[0]).shape[0])
 
 
 __all__ = [
