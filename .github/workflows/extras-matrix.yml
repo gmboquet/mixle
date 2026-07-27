@@ -9,6 +9,9 @@ name: Extras resolver matrix
 # release owner's environment and recorded in the release checklist; this job pins the Linux x86_64 baseline.
 on:
   workflow_dispatch:
+  push:
+    branches: [release/0.8.0]
+  pull_request:
   schedule:
     - cron: "23 9 * * 1"
 
@@ -16,6 +19,7 @@ jobs:
   extra:
     name: "install .[${{ matrix.extra }}]"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -60,3 +64,48 @@ jobs:
         run: python -m pip check
       - name: mixle still imports
         run: python -c "import mixle; print('mixle', mixle.__version__, 'imports with [${{ matrix.extra }}]')"
+      - name: Record exact candidate and resolved graph
+        env:
+          PROFILE: ${{ matrix.extra }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          python scripts/environment_receipt.py record \
+            --profile "$PROFILE" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --out "extra-receipt-$PROFILE.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: extra-receipt-${{ matrix.extra }}
+          path: extra-receipt-${{ matrix.extra }}.json
+          if-no-files-found: error
+          retention-days: 90
+
+  release-evidence:
+    name: extras matrix / exact candidate
+    if: always()
+    needs: extra
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: extra-receipt-*
+          path: extra-receipts
+          merge-multiple: true
+      - name: Require every profile on this exact commit
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          test "${{ needs.extra.result }}" = "success"
+          python scripts/environment_receipt.py verify \
+            --directory extra-receipts \
+            --policy release-checklists/0.8.0-extra-profiles.json \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --out extra-profile-set-receipt.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: extra-profile-set-${{ github.sha }}
+          path: extra-profile-set-receipt.json
+          if-no-files-found: error
+          retention-days: 90

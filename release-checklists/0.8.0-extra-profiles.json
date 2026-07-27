@@ -1,0 +1,26 @@
+{
+  "artifact": "mixle.extra_profiles/v1",
+  "profiles": [
+    "all",
+    "arrays",
+    "arrow",
+    "dask",
+    "grammar",
+    "hadoop",
+    "highprec",
+    "jax",
+    "lightning",
+    "mongo",
+    "mpi",
+    "numba",
+    "pandas",
+    "ray",
+    "sage",
+    "scientist",
+    "spark",
+    "sql",
+    "sympy",
+    "torch",
+    "umap"
+  ]
+}
