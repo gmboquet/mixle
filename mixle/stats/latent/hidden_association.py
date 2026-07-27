@@ -17,6 +17,7 @@ sampler's ordered iid emissions.
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import numpy as np
@@ -48,6 +49,11 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_observation_weight,
+    validated_statistic_tuple,
+)
 from mixle.stats.latent.mixture import MixtureDistribution
 from mixle.stats.multivariate._multinomial_contracts import (
     canonical_bag,
@@ -62,6 +68,37 @@ T = TypeVar("T")  ### value data type
 SS1 = TypeVar("SS1")  ### Data type for suff stats of conditional
 SS2 = TypeVar("SS2")  ### Data type for suff stats of given
 SS3 = TypeVar("SS3")  ### Data type for suff stats of length
+
+
+@dataclass(frozen=True)
+class HiddenAssociationStatistics(Sequence[Any]):
+    """Mass-aware statistics with backward three-child iteration."""
+
+    conditional: Any
+    given: Any
+    size: Any
+    conditional_mass: float
+    observation_mass: float
+    schema_version: int = 1
+
+    def __len__(self) -> int:
+        return 3
+
+    def __getitem__(self, index):
+        return (self.conditional, self.given, self.size)[index]
+
+
+def _unpack_hidden_association_statistics(values):
+    if isinstance(values, HiddenAssociationStatistics):
+        return (
+            values.conditional,
+            values.given,
+            values.size,
+            validated_observation_weight(values.conditional_mass, "hidden-association conditional mass"),
+            validated_observation_weight(values.observation_mass, "hidden-association observation mass"),
+        )
+    conditional, given, size = validated_statistic_tuple(values, 3, "legacy hidden-association statistics")
+    return conditional, given, size, None, None
 
 
 def _canonical_observation(value: Any) -> tuple[list[tuple[Any, int]], list[tuple[Any, int]], int, int]:
@@ -518,6 +555,8 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         # pays nothing.
         self._track_ll = False
         self._seq_ll = 0.0
+        self.conditional_mass = 0.0
+        self.observation_mass = 0.0
 
     def update(
         self,
@@ -580,6 +619,8 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
                     posterior[i] * c1 * checked_weight,
                     estimate.cond_dist,
                 )
+        self.conditional_mass += checked_weight * emitted_total
+        self.observation_mass += checked_weight
 
         if track:
             obs_ll += estimate.given_dist.log_density(given)
@@ -617,6 +658,8 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
                         w[j, i] * c1 * checked_weight,
                         rng,
                     )
+        self.conditional_mass += checked_weight * emitted_total
+        self.observation_mass += checked_weight
 
         if self.given_accumulator is not None:
             self.given_accumulator.initialize(given, checked_weight, rng)
@@ -700,17 +743,29 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
             This HiddenAssociationAccumulator.
 
         """
-        cond_acc, given_acc, size_acc = suff_stat
+        cond_acc, given_acc, size_acc, conditional_mass, observation_mass = _unpack_hidden_association_statistics(
+            suff_stat
+        )
 
         self.cond_accumulator.combine(cond_acc)
         self.given_accumulator.combine(given_acc)
         self.size_accumulator.combine(size_acc)
+        if conditional_mass is not None:
+            self.conditional_mass += conditional_mass
+        if observation_mass is not None:
+            self.observation_mass += observation_mass
 
         return self
 
-    def value(self) -> tuple[Any, Any | None, Any | None]:
-        """Returns the sufficient statistics: (conditional, given, size) accumulator values."""
-        return self.cond_accumulator.value(), self.given_accumulator.value(), self.size_accumulator.value()
+    def value(self) -> HiddenAssociationStatistics:
+        """Return child statistics plus conditional-token and observation mass."""
+        return HiddenAssociationStatistics(
+            self.cond_accumulator.value(),
+            self.given_accumulator.value(),
+            self.size_accumulator.value(),
+            self.conditional_mass,
+            self.observation_mass,
+        )
 
     def from_value(self, x: tuple[SS1, SS2 | None, SS3 | None]) -> "HiddenAssociationAccumulator":
         """Set the sufficient statistics of this accumulator from x.
@@ -722,19 +777,24 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
             This HiddenAssociationAccumulator.
 
         """
-        cond_acc, given_acc, size_acc = x
+        cond_acc, given_acc, size_acc, conditional_mass, observation_mass = _unpack_hidden_association_statistics(x)
 
         self.cond_accumulator.from_value(cond_acc)
         self.given_accumulator.from_value(given_acc)
         self.size_accumulator.from_value(size_acc)
+        self.conditional_mass = 0.0 if conditional_mass is None else conditional_mass
+        self.observation_mass = 0.0 if observation_mass is None else observation_mass
 
         return self
 
     def scale(self, c: float) -> "HiddenAssociationAccumulator":
         """Scale sufficient statistics by delegating to child accumulators."""
+        c = validated_observation_weight(c, "hidden-association scale factor")
         self.cond_accumulator.scale(c)
         self.given_accumulator.scale(c)
         self.size_accumulator.scale(c)
+        self.conditional_mass *= c
+        self.observation_mass *= c
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -869,11 +929,21 @@ class HiddenAssociationEstimator(ParameterEstimator):
             HiddenAssociationDistribution object.
 
         """
-        cond_stats, given_stats, size_stats = suff_stat
+        cond_stats, given_stats, size_stats, conditional_mass, observation_mass = _unpack_hidden_association_statistics(
+            suff_stat
+        )
+        if observation_mass is not None:
+            validate_effective_sample_mass(
+                nobs,
+                observation_mass,
+                label="hidden-association effective sample",
+            )
+        else:
+            observation_mass = nobs
 
-        cond_dist = self.cond_estimator.estimate(None, cond_stats)
-        given_dist = self.given_estimator.estimate(nobs, given_stats)
-        len_dist = self.len_estimator.estimate(nobs, size_stats)
+        cond_dist = self.cond_estimator.estimate(conditional_mass, cond_stats)
+        given_dist = self.given_estimator.estimate(observation_mass, given_stats)
+        len_dist = self.len_estimator.estimate(observation_mass, size_stats)
 
         return HiddenAssociationDistribution(
             cond_dist=cond_dist, given_dist=given_dist, len_dist=len_dist, name=self.name

@@ -11,6 +11,12 @@ from mixle.stats.latent.effective_sample import (
     validated_observation_weights,
     validated_weighted_responsibilities,
 )
+from mixle.stats.latent.gated_mixture import (
+    GateBufferReceipt,
+    GatedMixtureEstimator,
+    GatedMixtureStatistics,
+    SoftmaxGate,
+)
 from mixle.stats.latent.semi_supervised_hidden_markov_model import SemiSupervisedHiddenMarkovEstimator
 from mixle.stats.latent.semi_supervised_mixture import SemiSupervisedMixtureEstimatorAccumulator
 from mixle.stats.latent.tree_hidden_markov_model import TreeHiddenMarkovEstimator
@@ -116,6 +122,24 @@ class LatentEffectiveSampleContractTest(unittest.TestCase):
         self.assertEqual(length.nobs, [3.0])
         self.assertEqual(topics[0].nobs, [2.0])
         self.assertEqual(topics[1].nobs, [1.0])
+
+    def test_gated_experts_receive_full_posterior_mass_not_buffer_mass(self):
+        first = _RecordingEstimator(CategoricalDistribution({"x": 1.0}))
+        second = _RecordingEstimator(CategoricalDistribution({"y": 1.0}))
+        estimator = GatedMixtureEstimator(
+            [first, second],
+            SoftmaxGate.zeros(2, 1),
+        )
+        statistics = GatedMixtureStatistics(
+            ("first", "second"),
+            np.zeros((0, 1)),
+            np.zeros((0, 2)),
+            GateBufferReceipt(10, 0, 10, 10),
+            np.array([2.0, 1.0]),
+        )
+        estimator.estimate(3.0, statistics)
+        self.assertEqual(first.nobs, [2.0])
+        self.assertEqual(second.nobs, [1.0])
 
 
 if __name__ == "__main__":

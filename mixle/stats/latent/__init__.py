@@ -54,6 +54,7 @@ _MODULE_EXPORTS: dict[str, tuple[str, ...]] = {
     "mixle.stats.latent.gated_mixture": (
         "GateOptimizationReceipt",
         "GateBufferReceipt",
+        "GatedMixtureStatistics",
         "SoftmaxGate",
         "GatedMixtureDistribution",
         "GatedMixtureSampler",
@@ -92,6 +93,7 @@ _MODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "HeterogeneousPCFGFisherView",
     ),
     "mixle.stats.latent.hidden_association": (
+        "HiddenAssociationStatistics",
         "HiddenAssociationDistribution",
         "HiddenAssociationEnumerator",
         "HiddenAssociationSampler",
@@ -151,6 +153,7 @@ _MODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "IndianBuffetProcessDataEncoder",
     ),
     "mixle.stats.latent.integer_hidden_association": (
+        "IntegerHiddenAssociationStatistics",
         "IntegerHiddenAssociationDistribution",
         "IntegerHiddenAssociationEnumerator",
         "IntegerHiddenAssociationSampler",

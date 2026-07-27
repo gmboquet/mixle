@@ -26,6 +26,12 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_statistic_tuple,
+    validated_weighted_responsibilities,
+)
 from mixle.stats.multivariate._multinomial_contracts import (
     exact_integer,
     finite_weight,
@@ -612,7 +618,12 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         good = ~impossible
         if np.any(good):
             posterior[good, :] = np.exp(scores[good, :] - row_ll[good, None])
-        weighted = posterior * checked_weights[:, None]
+        weighted = validated_weighted_responsibilities(
+            posterior * checked_weights[:, None],
+            checked_weights,
+            2,
+            label="Dirac-length responsibilities",
+        )
 
         if self._track_ll:
             positive = checked_weights > 0.0
@@ -651,7 +662,12 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         good = ~impossible
         if np.any(good):
             posterior[good, :] = np.exp(scores[good, :] - row_ll[good, None])
-        weighted = posterior * checked_weights[:, None]
+        weighted = validated_weighted_responsibilities(
+            posterior * checked_weights[:, None],
+            checked_weights,
+            2,
+            label="Dirac-length engine responsibilities",
+        )
         self.comp_counts += weighted.sum(axis=0)
         self.accumulator.seq_update(enc_x, weighted[:, 0], estimate.len_dist)
 
@@ -750,14 +766,15 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             This DiracLengthMixtureAccumulator.
 
         """
-        self.comp_counts += suff_stat[0]
-        self.accumulator.combine(suff_stat[1])
+        counts, component_statistics = validated_statistic_tuple(suff_stat, 2, "Dirac-length sufficient statistics")
+        self.comp_counts += validated_count_array(counts, (2,), "Dirac-length component counts")
+        self.accumulator.combine(component_statistics)
 
         return self
 
     def value(self) -> tuple[np.ndarray, Any]:
         """Returns sufficient statistics as a tuple (component counts, length-distribution statistics)."""
-        return self.comp_counts, self.accumulator.value()
+        return self.comp_counts.copy(), self.accumulator.value()
 
     def from_value(self, x: tuple[np.ndarray, SS0]) -> "DiracLengthMixtureAccumulator":
         """Set sufficient statistics from a (component counts, length-distribution statistics) tuple.
@@ -769,8 +786,9 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             This DiracLengthMixtureAccumulator.
 
         """
-        self.comp_counts = x[0]
-        self.accumulator.from_value(x[1])
+        counts, component_statistics = validated_statistic_tuple(x, 2, "Dirac-length sufficient statistics")
+        self.comp_counts = validated_count_array(counts, (2,), "Dirac-length component counts")
+        self.accumulator.from_value(component_statistics)
 
         return self
 
@@ -924,10 +942,9 @@ class DiracLengthMixtureEstimator(ParameterEstimator):
             DiracLengthMixtureDistribution object.
 
         """
-        counts, comp_suff_stats = suff_stat
-        counts = np.asarray(counts, dtype=np.float64)
-        if counts.shape != (2,) or np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
-            raise ValueError("Dirac-length component counts must be finite and non-negative with shape (2,)")
+        counts, comp_suff_stats = validated_statistic_tuple(suff_stat, 2, "Dirac-length sufficient statistics")
+        counts = validated_count_array(counts, (2,), "Dirac-length component counts")
+        validate_effective_sample_mass(nobs, counts.sum(), label="Dirac-length effective sample")
 
         len_dist = self.estimator.estimate(counts[0], comp_suff_stats)
 

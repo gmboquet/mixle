@@ -29,6 +29,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.effective_sample import validate_effective_sample_mass, validated_observation_weights
 
 __all__ = [
     "HierarchicalNormalDistribution",
@@ -277,7 +278,11 @@ def _canonical_bucket_statistics(suff_stat: Any) -> tuple[np.ndarray, ...]:
         if np.any(weights < 0.0) or np.any(sum_y2 < 0.0) or np.any(sum_sse < 0.0):
             raise ValueError("hierarchical-normal weights, squared sums, and SSE must be non-negative.")
         zero_weight = weights == 0.0
-        if np.any(sum_y[zero_weight] != 0.0) or np.any(sum_y2[zero_weight] != 0.0) or np.any(sum_sse[zero_weight] != 0.0):
+        if (
+            np.any(sum_y[zero_weight] != 0.0)
+            or np.any(sum_y2[zero_weight] != 0.0)
+            or np.any(sum_sse[zero_weight] != 0.0)
+        ):
             raise ValueError("zero-weight hierarchical-normal buckets must have zero weighted moments.")
         positive = weights > 0.0
         tolerance = 1.0e-10 * np.maximum(1.0, weights[positive] * sum_y2[positive])
@@ -348,11 +353,7 @@ class HierarchicalNormalEstimator(ParameterEstimator):
         centered2 = sum_y2 - 2.0 * mu * sum_y + group_weights * mu**2
         value = np.sum(
             group_weights
-            * (
-                sizes * np.log(2.0 * np.pi)
-                + (sizes - 1.0) * np.log(sigma2)
-                + np.log(sigma2 + sizes * tau2)
-            )
+            * (sizes * np.log(2.0 * np.pi) + (sizes - 1.0) * np.log(sigma2) + np.log(sigma2 + sizes * tau2))
             + sum_sse / sigma2
             + sizes * centered2 / (sigma2 + sizes * tau2)
         )
@@ -361,6 +362,11 @@ class HierarchicalNormalEstimator(ParameterEstimator):
     def estimate(self, nobs, suff_stat) -> HierarchicalNormalDistribution:
         """Fit ``mu``, ``tau``, and ``sigma`` with a weighted EM receipt."""
         sizes, group_weights, sum_y, sum_y2, sum_sse = _canonical_bucket_statistics(suff_stat)
+        validate_effective_sample_mass(
+            nobs,
+            group_weights.sum(),
+            label="hierarchical-normal effective sample",
+        )
         positive = group_weights > 0.0
         sizes = sizes[positive]
         group_weights = group_weights[positive]
@@ -405,9 +411,7 @@ class HierarchicalNormalEstimator(ParameterEstimator):
             sigma2 = max(0.5 * between, _MIN_VARIANCE)
             tau2 = max(0.5 * between, _MIN_VARIANCE)
         identifiable = total_group_weight > 1.0 and total_within_df > 0.0
-        objective_trace = [
-            self._objective(sizes, group_weights, sum_y, sum_y2, sum_sse, mu, tau2, sigma2)
-        ]
+        objective_trace = [self._objective(sizes, group_weights, sum_y, sum_y2, sum_sse, mu, tau2, sigma2)]
         converged = False
         termination_reason = "max_iterations"
         final_delta = None
@@ -418,24 +422,15 @@ class HierarchicalNormalEstimator(ParameterEstimator):
             slope = (sizes / sigma2) * post_var
             intercept = (mu / tau2) * post_var
             sum_post_mean = slope * sum_y + intercept * group_weights
-            sum_post_mean2 = (
-                slope**2 * sum_y2
-                + 2.0 * slope * intercept * sum_y
-                + intercept**2 * group_weights
-            )
+            sum_post_mean2 = slope**2 * sum_y2 + 2.0 * slope * intercept * sum_y + intercept**2 * group_weights
             mu_new = float(sum_post_mean.sum() / total_group_weight)
             tau_numerator = np.sum(
-                sum_post_mean2
-                - 2.0 * mu_new * sum_post_mean
-                + group_weights * mu_new**2
-                + group_weights * post_var
+                sum_post_mean2 - 2.0 * mu_new * sum_post_mean + group_weights * mu_new**2 + group_weights * post_var
             )
             tau2_new = max(float(tau_numerator / total_group_weight), _MIN_VARIANCE)
             residual_slope = 1.0 - slope
             residual2 = (
-                residual_slope**2 * sum_y2
-                - 2.0 * residual_slope * intercept * sum_y
-                + intercept**2 * group_weights
+                residual_slope**2 * sum_y2 - 2.0 * residual_slope * intercept * sum_y + intercept**2 * group_weights
             )
             sigma_numerator = np.sum(sum_sse + sizes * residual2 + sizes * group_weights * post_var)
             sigma2_new = max(float(sigma_numerator / total_observation_weight), _MIN_VARIANCE)
@@ -497,9 +492,7 @@ class HierarchicalNormalAccumulator(SequenceEncodableStatisticAccumulator):
         if weight == 0.0:
             return
         if size not in self.buckets and len(self.buckets) >= self.max_group_sizes:
-            raise ValueError(
-                f"hierarchical-normal distinct group-size limit {self.max_group_sizes} would be exceeded."
-            )
+            raise ValueError(f"hierarchical-normal distinct group-size limit {self.max_group_sizes} would be exceeded.")
         if size not in self.buckets:
             self.buckets[size] = np.zeros(4, dtype=np.float64)
         self.buckets[size] += weight * np.array([1.0, ybar, ybar**2, sse], dtype=np.float64)
@@ -517,19 +510,10 @@ class HierarchicalNormalAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_update(self, x, weights, estimate):
         """Accumulate an encoded weighted batch of groups."""
         sizes, ybar, sse = _validated_encoded_groups(x)
-        try:
-            weights = np.asarray(weights, dtype=np.float64)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise TypeError("hierarchical-normal group weights must be numeric.") from exc
-        if weights.shape != sizes.shape:
-            raise ValueError(f"hierarchical-normal group weights must have shape {sizes.shape}.")
-        if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
-            raise ValueError("hierarchical-normal group weights must be finite and non-negative.")
+        weights = validated_observation_weights(weights, len(sizes), "hierarchical-normal group weights")
         new_sizes = {int(size) for size, weight in zip(sizes, weights) if weight > 0.0} - set(self.buckets)
         if len(self.buckets) + len(new_sizes) > self.max_group_sizes:
-            raise ValueError(
-                f"hierarchical-normal distinct group-size limit {self.max_group_sizes} would be exceeded."
-            )
+            raise ValueError(f"hierarchical-normal distinct group-size limit {self.max_group_sizes} would be exceeded.")
         for size, mean, within_sse, weight in zip(sizes, ybar, sse, weights):
             self._add(int(size), float(mean), float(within_sse), float(weight))
 
@@ -542,9 +526,7 @@ class HierarchicalNormalAccumulator(SequenceEncodableStatisticAccumulator):
         sizes, weights, sum_y, sum_y2, sum_sse = _canonical_bucket_statistics(suff_stat)
         new_sizes = {int(size) for size, weight in zip(sizes, weights) if weight > 0.0} - set(self.buckets)
         if len(self.buckets) + len(new_sizes) > self.max_group_sizes:
-            raise ValueError(
-                f"hierarchical-normal distinct group-size limit {self.max_group_sizes} would be exceeded."
-            )
+            raise ValueError(f"hierarchical-normal distinct group-size limit {self.max_group_sizes} would be exceeded.")
         for size, weight, weighted_y, weighted_y2, weighted_sse in zip(
             sizes,
             weights,

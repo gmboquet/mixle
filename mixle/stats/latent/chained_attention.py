@@ -50,6 +50,12 @@ from mixle.stats.latent._attention_contracts import (
     safe_log_probabilities,
     weighted_log_probability_sum,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_statistic_tuple,
+)
 from mixle.utils.vector import ImpossibleEvidenceError
 
 
@@ -57,6 +63,43 @@ def _softmax(s: np.ndarray, axis: int) -> np.ndarray:
     s = s - s.max(axis=axis, keepdims=True)
     w = np.exp(s)
     return w / w.sum(axis=axis, keepdims=True)
+
+
+def _validated_chained_statistics(values, n_hops, num_symbols, num_targets):
+    """Validate one complete chained-attention statistic payload."""
+    key_num, key_mass, emission_count, ll, n = validated_statistic_tuple(
+        values, 5, "chained-attention sufficient statistics"
+    )
+    key_num = validated_count_array(
+        key_num,
+        (n_hops, num_symbols, num_symbols),
+        "chained-attention key numerators",
+    )
+    key_mass = validated_count_array(
+        key_mass,
+        (n_hops, num_symbols),
+        "chained-attention key mass",
+    )
+    emission_count = validated_count_array(
+        emission_count,
+        (num_symbols, num_targets),
+        "chained-attention emission counts",
+    )
+    if not np.allclose(key_num.sum(axis=2), key_mass, rtol=1.0e-9, atol=1.0e-9):
+        raise ValueError("chained-attention key numerators must conserve key mass")
+    n = validated_observation_weight(n, "chained-attention total weight")
+    for hop_mass in key_mass.sum(axis=1):
+        validate_effective_sample_mass(n, hop_mass, label="chained-attention hop mass")
+    validate_effective_sample_mass(n, emission_count.sum(), label="chained-attention emission mass")
+    if isinstance(ll, (bool, np.bool_)):
+        raise TypeError("chained-attention log-likelihood must be a real scalar")
+    try:
+        ll = float(ll)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("chained-attention log-likelihood must be a real scalar") from exc
+    if not np.isfinite(ll):
+        raise ValueError("chained-attention log-likelihood must be finite")
+    return key_num, key_mass, emission_count, ll, n
 
 
 def _gate(query_oh: np.ndarray, key_table: np.ndarray, keys: np.ndarray, sigma2: float) -> np.ndarray:
@@ -276,7 +319,12 @@ class ChainedAttentionAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat) -> ChainedAttentionAccumulator:
         """Merge key-table, emission, likelihood, and weight statistics."""
-        kn, km, ec, ll, n = suff_stat
+        kn, km, ec, ll, n = _validated_chained_statistics(
+            suff_stat,
+            self.n_hops,
+            self.num_symbols,
+            self.num_targets,
+        )
         self.key_num += kn
         self.key_mass += km
         self.emission_count += ec
@@ -290,9 +338,12 @@ class ChainedAttentionAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x) -> ChainedAttentionAccumulator:
         """Restore accumulator state from ``value`` output."""
-        self.key_num, self.key_mass, self.emission_count = (np.asarray(v, dtype=float) for v in x[:3])
-        self.ll = float(x[3])
-        self.n = float(x[4])
+        self.key_num, self.key_mass, self.emission_count, self.ll, self.n = _validated_chained_statistics(
+            x,
+            self.n_hops,
+            self.num_symbols,
+            self.num_targets,
+        )
         return self
 
     def acc_to_encoder(self) -> ChainedAttentionDataEncoder:
@@ -355,7 +406,13 @@ class ChainedAttentionEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat) -> ChainedAttentionDistribution:
         """Estimate key tables and emissions from accumulated forward-backward statistics."""
-        key_num, key_mass, emission_count, _ll, _n = suff_stat
+        key_num, key_mass, emission_count, _ll, observed_mass = _validated_chained_statistics(
+            suff_stat,
+            self.n_hops,
+            self.num_symbols,
+            self.num_targets,
+        )
+        validate_effective_sample_mass(nobs, observed_mass, label="chained-attention effective sample")
         key_tables = key_num / np.clip(key_mass, 1e-9, None)[:, :, None]
         em = emission_count + self.emission_smoothing
         emission = em / em.sum(axis=1, keepdims=True)

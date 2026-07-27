@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.stats.latent.effective_sample import validated_observation_weights
+
 
 @dataclass(frozen=True)
 class AttentionOptimizerState:
@@ -229,16 +231,7 @@ def exact_ids(value: Any, name: str, *, upper: int | None = None, ndim: int | No
 
 
 def observation_weights(value: Any, n: int) -> np.ndarray:
-    raw = np.asarray(value)
-    if raw.dtype.kind == "b":
-        raise TypeError("attention observation weights must be real-valued, not boolean")
-    try:
-        result = np.asarray(value, dtype=np.float64)
-    except (TypeError, ValueError) as exc:
-        raise TypeError("attention observation weights must be real-valued") from exc
-    if result.shape != (n,) or np.any(~np.isfinite(result)) or np.any(result < 0.0):
-        raise ValueError(f"attention observation weights must be a finite non-negative vector of length {n}")
-    return result
+    return validated_observation_weights(value, n, "attention observation weights")
 
 
 def safe_log_probabilities(probabilities: np.ndarray) -> np.ndarray:

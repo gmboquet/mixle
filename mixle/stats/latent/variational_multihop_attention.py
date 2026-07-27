@@ -49,9 +49,44 @@ from mixle.stats.latent._attention_contracts import (
     safe_log_probabilities,
     weighted_log_probability_sum,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_statistic_tuple,
+)
 from mixle.utils.vector import ImpossibleEvidenceError
 
 _OPTIMIZER_FAMILY = "variational_multihop_attention"
+
+
+def _validated_multihop_statistics(values, num_symbols, embed_dim, num_targets):
+    """Validate variational multi-hop statistics and conserved mass."""
+    grad_m, grad_logv, emission_count, ll, n, state = validated_statistic_tuple(
+        values, 6, "variational multi-hop attention sufficient statistics"
+    )
+    grad_m = finite_matrix(grad_m, "variational multi-hop mean gradients")
+    grad_logv = finite_matrix(grad_logv, "variational multi-hop log-variance gradients")
+    expected_gradient = (num_symbols, embed_dim)
+    if grad_m.shape != expected_gradient or grad_logv.shape != expected_gradient:
+        raise ValueError("variational multi-hop attention gradients have incorrect geometry")
+    emission_count = validated_count_array(
+        emission_count,
+        (num_symbols, num_targets),
+        "variational multi-hop emission counts",
+    )
+    n = validated_observation_weight(n, "variational multi-hop total weight")
+    validate_effective_sample_mass(n, emission_count.sum(), label="variational multi-hop emission mass")
+    if isinstance(ll, (bool, np.bool_)):
+        raise TypeError("variational multi-hop likelihood must be a real scalar")
+    try:
+        ll = float(ll)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("variational multi-hop likelihood must be a real scalar") from exc
+    if not np.isfinite(ll):
+        raise ValueError("variational multi-hop likelihood must be finite")
+    state = merge_optimizer_state(None, state, family=_OPTIMIZER_FAMILY)
+    return grad_m, grad_logv, emission_count, ll, n, state
 
 
 def _softmax(s: np.ndarray, axis: int) -> np.ndarray:
@@ -271,13 +306,7 @@ class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumula
         self.optimizer_state = merge_optimizer_state(
             self.optimizer_state, estimate.optimizer_state, family=_OPTIMIZER_FAMILY
         )
-        rng = RandomState(
-            (
-                estimate.optimizer_state.seed * 1_000_003
-                + estimate.optimizer_state.iteration
-            )
-            % (2**31)
-        )
+        rng = RandomState((estimate.optimizer_state.seed * 1_000_003 + estimate.optimizer_state.iteration) % (2**31))
         s = np.exp(0.5 * log_v)
         for _ in range(self.mc):
             eps = rng.randn(*m.shape)
@@ -314,7 +343,12 @@ class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumula
 
     def combine(self, suff_stat):
         """Merge variational gradients, emission counts, log-likelihood, and weight totals."""
-        gm, glv, ec, ll, n, state = suff_stat
+        gm, glv, ec, ll, n, state = _validated_multihop_statistics(
+            suff_stat,
+            self.num_symbols,
+            self.embed_dim,
+            self.num_targets,
+        )
         self.grad_m += gm
         self.grad_logv += glv
         self.emission_count += ec
@@ -336,10 +370,19 @@ class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumula
 
     def from_value(self, x):
         """Restore accumulator state from ``value`` output."""
-        self.grad_m, self.grad_logv, self.emission_count = (np.asarray(v, dtype=float) for v in x[:3])
-        self.ll = float(x[3])
-        self.n = float(x[4])
-        self.optimizer_state = merge_optimizer_state(None, x[5], family=_OPTIMIZER_FAMILY)
+        (
+            self.grad_m,
+            self.grad_logv,
+            self.emission_count,
+            self.ll,
+            self.n,
+            self.optimizer_state,
+        ) = _validated_multihop_statistics(
+            x,
+            self.num_symbols,
+            self.embed_dim,
+            self.num_targets,
+        )
         return self
 
     def acc_to_encoder(self):
@@ -437,13 +480,18 @@ class VariationalMultiHopAttentionEstimator(ParameterEstimator):
 
     def estimate(self, nobs, suff_stat):
         """Apply one variational EM update and return the updated attention distribution."""
-        grad_m, grad_logv, emission_count, _ll, _n = suff_stat[:5]
-        state_data = suff_stat[5] if len(suff_stat) > 5 else None
-        state = (
-            self._init_state()
-            if state_data is None
-            else merge_optimizer_state(None, state_data, family=_OPTIMIZER_FAMILY)
+        grad_m, grad_logv, emission_count, _ll, observed_mass, state_data = _validated_multihop_statistics(
+            suff_stat,
+            self.num_symbols,
+            self.embed_dim,
+            self.num_targets,
         )
+        validate_effective_sample_mass(
+            nobs,
+            observed_mass,
+            label="variational multi-hop attention effective sample",
+        )
+        state = self._init_state() if state_data is None else state_data
         if state_data is not None:
             iteration = state.iteration + 1
             ps = self.prior_strength * min(1.0, iteration / self.anneal_iters)
