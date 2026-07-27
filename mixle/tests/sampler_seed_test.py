@@ -316,7 +316,7 @@ def _stats_public_distribution_catalog():
         "GumbelCopulaDistribution": stats.GumbelCopulaDistribution(dim=2, theta=2.5),
         "CVineCopulaDistribution": stats.CVineCopulaDistribution(dim=3, pairs={}),
         "DVineCopulaDistribution": stats.DVineCopulaDistribution(dim=3, pairs={}),
-        "RVineCopulaDistribution": stats.RVineCopulaDistribution(dim=3, trees=[]),
+        "RVineCopulaDistribution": stats.RVineCopulaDistribution.independence(dim=3),
         "MatrixNormalDistribution": stats.MatrixNormalDistribution(
             [[0.0, 0.0], [1.0, -1.0], [2.0, 0.5]],
             [[2.0, 0.3, 0.1], [0.3, 1.0, 0.2], [0.1, 0.2, 1.5]],

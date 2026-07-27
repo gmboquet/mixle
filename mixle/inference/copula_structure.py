@@ -65,7 +65,7 @@ def copula_candidates(
     # to model, the more-flexible vine cannot help and would just cost time. Its per-edge tail-dependence
     # structure then earns its keep only if BIC prefers it over the elliptical Gaussian core.
     if g_bic < comp_bic:
-        vproto = CopulaDistribution(marginals, RVineCopulaDistribution(d, []))
+        vproto = CopulaDistribution(marginals, RVineCopulaDistribution.independence(d))
         vine = optimize(rows, vproto.estimator(), prev_estimate=vproto, max_its=max_its, rng=rng, out=None)
         v_ll = float(np.sum(vine.seq_log_density(vine.dist_to_encoder().seq_encode(rows))))
         v_bic = -2.0 * v_ll + (comp_params + _vine_param_count(vine.copula)) * n_log
