@@ -1,25 +1,12 @@
-"""Foundation capabilities on laptop resources -> compressed to edge devices, with honest receipts.
+"""Explore foundation encoders and edge students with measurements from the current run.
 
 Answers two questions the workplan raised, each measured on real data. Needs network on the FIRST run: it
 downloads the CIFAR-10 / banking77 datasets and the CLIP / MiniLM open weights from Hugging Face (cached
 thereafter, so later runs are offline):
 
-  1. Can a laptop RUN a foundation capability?  YES. A frozen open-weight encoder (605 MB CLIP, or 90 MB
-     MiniLM) + a ~10 KB certified mixle head classifies at 90%+ on CPU in seconds. The heavy part is the
-     encoder, and it fits on a laptop; the learned part is kilobytes and closed-form.
-
-  2. Can that capability be DISTILLED to an edge device (no torch, no foundation model)?  IT DEPENDS, and
-     the receipt says exactly when:
-       * TEXT (banking77 intent classification): YES. A MiniLM+head teacher (95%) distills into a ~48 KB
-         TORCH-FREE student that keeps ~97% of the accuracy -- because text n-grams carry the signal.
-       * VISION (CIFAR-10) onto raw pooled pixels: NO -- the capability lives in CLIP's learned features,
-         which a kilobyte pixel-student cannot reconstruct. BUT it is not lost: one GPU pass of FEATURE
-         distillation (see vision_edge_distillation/) yields a 5 MB student at 93% of CLIP's zero-shot,
-         then verified on this laptop's CPU. Vision reaches the edge via the laptop+pool topology.
-
-The point is not a single triumphant number -- it is that the system MEASURES what survives compression
-and tells you the boundary (and, for vision, what it takes to cross it), instead of asserting a
-capability it does not have.
+The script prints raw accuracy, size, and runtime measurements. Those values are environment-dependent
+example output, not 0.8.0 performance claims. Treat them as evidence only when the exact model,
+dataset, dependencies, hardware, command, and output are retained together.
 """
 
 from __future__ import annotations
@@ -51,7 +38,7 @@ def main() -> None:
     from mixle.scientist import distill_to_edge, encode_images, encode_texts, study
 
     # 1. FOUNDATION ON LAPTOP -----------------------------------------------------------------------
-    line("1. FOUNDATION CAPABILITY ON A LAPTOP: frozen encoder (605 MB) + a ~10 KB certified head")
+    line("1. FOUNDATION ENCODER + CERTIFIED HEAD")
     tr = load_dataset("cifar10", split="train[:2000]")
     te = load_dataset("cifar10", split="test[:800]")
     t0 = time.time()
@@ -64,10 +51,10 @@ def main() -> None:
         f"  CLIP + certified head: acc {acc:.3f} on CIFAR-10 | cert {head.certificate.guarantee.name} | "
         f"{time.time() - t0:.0f}s on CPU"
     )
-    print("  -> foundation-level perception, laptop resources, certified + calibrated. This is here.")
+    print("  -> current-run measurement; retain provenance before drawing a deployment conclusion.")
 
     # 2a. EDGE DISTILLATION THAT WORKS (text) --------------------------------------------------------
-    line("2a. DISTILL TO EDGE (text): MiniLM+head -> a torch-free KB student")
+    line("2a. TEXT STUDENT: MiniLM+head -> a torch-free artifact")
     ds = load_dataset("banking77", split="train")
     tb = load_dataset("banking77", split="test")
     xtr = [r["text"] for r in ds if r["label"] < 20][:1600]
@@ -77,13 +64,10 @@ def main() -> None:
     thead = study(encode_texts(xtr), ytr, alpha=0.1)
     art = distill_to_edge(_teacher_from_head(encode_texts, thead), xtr, xte, yte_t, max_bytes=500_000, seed=0)
     print(f"  {art.render()}")
-    print(
-        f"  -> a {art.bytes / 1000:.0f} KB torch-free artifact (from a ~90 MB encoder): "
-        f"~{90_000_000 // max(art.bytes, 1):,}x smaller, {art.retention:.0%} of the accuracy kept."
-    )
+    print(f"  -> artifact bytes {art.bytes}; measured accuracy retention {art.retention:.4f}.")
 
     # 2b. THE HONEST BOUNDARY (vision onto raw pixels) -----------------------------------------------
-    line("2b. THE HONEST BOUNDARY (vision): distilling onto raw pooled pixels loses the capability")
+    line("2b. VISION STUDENT ON RAW POOLED PIXELS")
     ftr = [image_features(np.array(r["img"]), dim=48) for r in tr]
     fte = [image_features(np.array(r["img"]), dim=48) for r in te]
     teach_tr = [int(v) for v in head.predict(ztr)]
@@ -106,13 +90,11 @@ def main() -> None:
         f"  torch-free pixel student: agreement w/ CLIP teacher {float((pred == teach_te).mean()):.3f} "
         f"(vs CLIP's {acc:.3f}) -- the signal is in CLIP's features, not the pixels."
     )
-    print("  -> onto raw pixels, the capability does not transfer. BUT it is not lost: feature")
-    print("     distillation at scale closes it -- see vision_edge_distillation/ (a 5 MB student,")
-    print("     93% of CLIP's zero-shot, GPU-trained for $0.04, then verified on this laptop's CPU).")
+    print("  -> compare this measured agreement with the deployment requirement.")
+    print("     vision_edge_distillation/ demonstrates a separately verifiable feature-distillation path.")
 
     print(
-        "\nfoundation-on-laptop: yes. edge distillation: text on the laptop, vision via one GPU pass "
-        "(the laptop+pool topology), both then running on bare metal."
+        "\nRun complete. Preserve exact inputs, environment, command, and output before citing a result."
     )
 
 

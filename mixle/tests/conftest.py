@@ -608,11 +608,11 @@ def _add_markers(item: pytest.Item, names: Iterable[str], assigned: set[str]) ->
 def pytest_collection_modifyitems(items) -> None:
     """Apply subsystem and tier markers during collection.
 
-    Any test that is not slow, optional, or benchmark-oriented is marked
-    ``fast``.  That keeps the fast CI command stable as new tests are added:
-    either the file/test is explicitly marked as heavier, or it joins the fast
-    gate automatically.
+    The domain registry remains the single triage authority. It also derives
+    the named execution tiers so every collected test has one reviewable
+    routing policy rather than accumulating hand-applied tier decorators.
     """
+    backend_markers = {"dask", "jax", "mpi", "numba", "ray", "spark", "torch", "torchrun"}
     for item in items:
         assigned: set[str] = set()
         filename = Path(str(item.fspath)).name
@@ -633,8 +633,36 @@ def pytest_collection_modifyitems(items) -> None:
         # marks and `-m fast` still selects it, which is exactly how 20 heavy roadmap files kept a
         # regressed 36-minute fast gate pinned in place).
         existing = {mark.name for mark in item.iter_markers()}
-        if not {"slow", "optional", "benchmark"} & (assigned | existing):
+        routed = assigned | existing
+
+        # A backend-specific test is optional by construction even if the older registry entry only
+        # names the backend. This makes `-m optional` the complete optional-dependency lane.
+        if backend_markers & routed and "optional" not in routed:
+            _add_markers(item, ("optional",), assigned)
+            routed.add("optional")
+
+        # Full means all base-install correctness, including slow/integration cases. Benchmark and
+        # optional-backend tests have their own lanes and cannot leak into it.
+        if not {"optional", "benchmark"} & routed:
+            _add_markers(item, ("full",), assigned)
+            routed.add("full")
+
+        # Numerical and hardware are orthogonal purpose tiers.
+        if "stochastic" in routed:
+            _add_markers(item, ("numerical",), assigned)
+            routed.add("numerical")
+        if {"mpi", "torchrun"} & routed:
+            _add_markers(item, ("hardware",), assigned)
+            routed.add("hardware")
+
+        if not {"slow", "optional", "benchmark"} & routed:
             _add_markers(item, ("fast",), assigned)
+            routed.add("fast")
+
+        # Core is the quick dependency-light stable/base lane. Experimental, stochastic, and
+        # backend-specific cases remain available through full/numerical/optional/hardware.
+        if "fast" in routed and not ({"experimental", "stochastic"} | backend_markers) & routed:
+            _add_markers(item, ("core",), assigned)
 
 
 @pytest.fixture(autouse=True)

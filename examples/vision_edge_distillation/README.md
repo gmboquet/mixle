@@ -1,37 +1,23 @@
-# Vision edge distillation: closing the gap with a rented GPU, verified on a laptop
+# Vision edge distillation: GPU training with CPU verification
 
-`foundation_to_edge.py` reports an honest negative: a **vision** foundation capability (CLIP) does **not**
-distil onto raw pooled pixels — a kilobyte pixel-student recovers ~14%, and even a from-scratch CNN
-trained on a laptop (3k images, MPS) reaches only ~40%. The capability lives in CLIP's web-scale
-pretrained features, which a small student on little data cannot reconstruct.
+This example explores whether a compact student can learn an embedding produced by a larger
+vision model and later run without that model. Results depend on the artifact, dataset snapshot,
+hardware, and dependency versions. This tracked page intentionally publishes no 0.8.0 performance
+number; a run is evidence only when its artifact digests and environment are retained with its
+receipt.
 
-This directory closes that gap the honest way — the **laptop + pool** topology the workplan describes: a
-one-time GPU training pass distils CLIP's *feature space* (not just its labels) into a compact student
-that then runs on the laptop with no CLIP and no GPU.
+The directory demonstrates a **laptop + pool** topology: a GPU training pass distils the teacher's
+feature space into a compact student, and a separate CPU process verifies the resulting files.
 
 ## The technique — feature distillation
 
-`distill_clip_features.py` (run on a CUDA GPU): a compact CNN (1.28M params) learns to **mimic CLIP's
-512-d image embedding** on all 50k CIFAR-10 images via a cosine loss, then classifies **zero-shot**
+`distill_clip_features.py` (run on a CUDA GPU): a compact CNN learns to mimic CLIP's image embedding
+on CIFAR-10 via a cosine loss, then classifies zero-shot
 through CLIP's *frozen* text head. The student carries CLIP's geometry; it never sees CLIP at inference.
 
-`verify_on_laptop.py` (run on the laptop, CPU): loads the retrieved 5 MB student and reproduces its
-accuracy locally — the round-trip receipt.
-
-## The receipt (measured, not asserted)
-
-Distilled on a rented RTX 3060 (vast.ai), then verified on a MacBook CPU:
-
-| student | accuracy | notes |
-|---|---|---|
-| pooled-pixel (KB, torch-free) | 0.14 | the honest negative from `foundation_to_edge.py` |
-| from-scratch CNN, 3k imgs, laptop MPS | 0.40 | label distillation, too little data |
-| **feature-distilled, 50k imgs, GPU** | **0.82** | 1.28M params, **5.1 MB**, 93% of CLIP's zero-shot |
-
-- CLIP zero-shot teacher: **0.888** on full CIFAR-10 test.
-- Student: **0.8165** (GPU) / **0.822** (laptop CPU re-verify) — **93% retention**, **118× smaller** than
-  CLIP (5 MB vs 605 MB), classifies 2000 images in 1.8 s on CPU.
-- Training: 40 epochs, ~5 min on the RTX 3060. **Total rented-compute cost: $0.04.**
+`verify_on_laptop.py` (run on a CPU): authenticates the retrieved files, restricts deserialization to
+tensor weights, and reports the measurements from that run. Its output is not a release claim unless
+the release evidence bundle records the exact inputs and environment.
 
 ## Reproduce
 
@@ -40,15 +26,17 @@ Distilled on a rented RTX 3060 (vast.ai), then verified on a MacBook CPU:
 pip install torch transformers datasets pillow
 python distill_clip_features.py           # writes student.pt, student_head.pt, metrics.json
 
-# copy those three files next to verify_on_laptop.py, then on the laptop (CPU):
-python verify_on_laptop.py
+# copy those three files next to verify_on_laptop.py. Obtain their SHA-256 digests
+# from the artifact producer over the same trusted channel as the release evidence,
+# then verify on the CPU:
+python verify_on_laptop.py \
+  --student-sha256 <student.pt-sha256> \
+  --head-sha256 <student_head.pt-sha256> \
+  --metrics-sha256 <metrics.json-sha256>
 ```
 
 ## What this establishes
 
-Foundation-capability-on-laptop and edge distillation are **here**, with the boundary mapped:
-
-- **Text**: distils to a torch-free KB student directly on the laptop (see `foundation_to_edge.py`).
-- **Vision**: needs one GPU pass to feature-distil (pennies on rented compute), then runs on the
-  laptop/edge in a few MB at 93% retention. The "keeps the encoder" fallback is no longer the only
-  option — a distilled student is.
+The example establishes a reproducible *procedure* and trust boundary, not a fixed performance
+conclusion. Use the generated measurements to decide whether a particular student satisfies a
+particular deployment target.

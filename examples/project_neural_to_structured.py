@@ -12,11 +12,9 @@ Pipeline (all mixle):
   3. ``reduce_mixture`` the student further with the closed-form Runnalls step;
   4. measure size (params), evaluation cost (log-density latency), and quality retained (held-out NLL).
 
-The honest nuance the numbers make concrete: the structured student wins big *when the data has the
-structure it can represent*. On this multimodal-blob target a Gaussian mixture is well-specified, so the
-projection loses no likelihood while shedding ~35x the parameters and ~7x the eval cost. On data the
-mixture genuinely cannot represent, the same projection would trade more quality for the compute -- the
-point is that the tradeoff is explicit and measured, not hidden.
+The script prints raw size, evaluation-time, and held-out-likelihood measurements. It intentionally
+states no fixed ratio or superiority conclusion: results are environment-dependent and are not a
+0.8.0 performance claim without an exact-candidate retained receipt.
 
 Run:  python examples/project_neural_to_structured.py
 """
@@ -105,23 +103,14 @@ def main() -> dict:
     print(f"{'GMM(8) student':<22}{params(student):>8}{gmm_nll:>10.3f}{lat_gmm * 1e3:>12.1f}ms")
     print(f"{'GMM(4) reduced':<22}{params(reduced):>8}{reduced_nll:>10.3f}")
 
-    # narrate from the measured numbers, not a hardcoded claim
-    gap = gmm_nll - flow_nll  # nats of NLL the student is worse (negative => the student is tighter)
-    verdict = "no likelihood lost" if gap <= 0.05 else f"costs {gap:.3f} nats of NLL"
-    print(
-        f"\n-> {flow_params / params(student):.0f}x fewer params, {lat_flow / lat_gmm:.1f}x faster eval; "
-        f"the structured student {verdict} vs the neural teacher ({gmm_nll:.3f} vs {flow_nll:.3f}). "
-        f"The win holds because this target is well-specified for a mixture; on data a mixture cannot "
-        f"represent, the same projection would trade more NLL for the compute."
-    )
+    gap = gmm_nll - flow_nll
+    print("\nRaw current-run measurements only; retain full provenance before making a comparative claim.")
     return {
         "flow_params": flow_params,
         "flow_nll": flow_nll,
         "gmm_params": params(student),
         "gmm_nll": gmm_nll,
         "reduced_nll": reduced_nll,
-        "param_ratio": flow_params / params(student),
-        "speedup": lat_flow / lat_gmm,
         "nll_gap": gap,
     }
 

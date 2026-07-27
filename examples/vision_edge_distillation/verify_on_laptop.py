@@ -6,9 +6,12 @@ weights, classifies CIFAR-10 test zero-shot through the frozen text head, and re
 latency next to the GPU-reported number.
 """
 
+import argparse
+import hashlib
 import json
 import os
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -44,12 +47,46 @@ class Student(nn.Module):
         return F.normalize(self.proj(self.body(x)), dim=-1)
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _authenticate(path: Path, expected: str) -> None:
+    normalized = expected.lower()
+    if len(normalized) != 64 or any(char not in "0123456789abcdef" for char in normalized):
+        raise ValueError(f"expected SHA-256 for {path.name} must be 64 hexadecimal characters")
+    actual = _sha256(path)
+    if actual != normalized:
+        raise ValueError(f"SHA-256 mismatch for {path.name}: expected {normalized}, received {actual}")
+
+
+def _arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--student-sha256", required=True)
+    parser.add_argument("--head-sha256", required=True)
+    parser.add_argument("--metrics-sha256", required=True)
+    return parser.parse_args()
+
+
 def main():
-    metrics = json.load(open(os.path.join(HERE, "metrics.json")))
+    args = _arguments()
+    student_path = Path(HERE, "student.pt")
+    head_path = Path(HERE, "student_head.pt")
+    metrics_path = Path(HERE, "metrics.json")
+    _authenticate(student_path, args.student_sha256)
+    _authenticate(head_path, args.head_sha256)
+    _authenticate(metrics_path, args.metrics_sha256)
+
+    with metrics_path.open(encoding="utf-8") as handle:
+        metrics = json.load(handle)
     student = Student()
-    student.load_state_dict(torch.load(os.path.join(HERE, "student.pt"), map_location="cpu"))
+    student.load_state_dict(torch.load(student_path, map_location="cpu", weights_only=True))
     student.eval()
-    head = torch.load(os.path.join(HERE, "student_head.pt"), map_location="cpu")
+    head = torch.load(head_path, map_location="cpu", weights_only=True)
     mean, std, tfeat = head["mean"], head["std"], head["tfeat"]
 
     from datasets import load_dataset
@@ -74,11 +111,8 @@ def main():
     print(f"  GPU-reported CLIP zero-shot teacher : {metrics['clip_zero_shot_acc']:.4f}")
     print(f"  GPU-reported student accuracy       : {metrics['student_acc']:.4f}")
     print(f"  LAPTOP-verified student accuracy    : {acc:.4f}  ({len(y)} test imgs, {dt:.1f}s CPU)")
-    print(
-        f"  retention: {acc / metrics['clip_zero_shot_acc']:.0%} of CLIP's zero-shot, at "
-        f"{605 / max(npar * 4 / 1e6, 0.1):.0f}x smaller than CLIP"
-    )
-    print("  (pooled-pixel student was 0.14; from-scratch 3k-image CNN was 0.40)")
+    print(f"  student/teacher accuracy ratio        : {acc / metrics['clip_zero_shot_acc']:.4f}")
+    print("  Local measurements above are not a 0.8.0 performance claim without a retained run receipt.")
 
 
 if __name__ == "__main__":

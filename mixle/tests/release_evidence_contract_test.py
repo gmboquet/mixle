@@ -112,7 +112,9 @@ class HostedWorkflowContractTest(unittest.TestCase):
         self.assertIn('--path "$SITE"', security)
         self.assertNotIn("continue-on-error: true", security)
         self.assertEqual(tests.count("scripts/run_required_pytest.py"), 2)
-        self.assertNotIn("if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'", tests)
+        optional_job = tests.split("\n  optional:\n", 1)[1].split("\n  numerical:\n", 1)[0]
+        self.assertNotIn("if:", optional_job)
+        self.assertIn("--tier optional", optional_job)
         self.assertIn("extras matrix / exact candidate", extras)
         self.assertIn("verify_published_artifacts.py", post)
         self.assertIn("public-artifacts/*.whl", post)

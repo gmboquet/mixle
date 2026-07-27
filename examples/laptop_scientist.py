@@ -2,20 +2,16 @@
 
 Run it: ``python examples/laptop_scientist.py``. CPU only, a couple of minutes. Needs network on the FIRST
 run: it downloads the CIFAR-10 dataset and the CLIP / local-LLM open weights from Hugging Face (cached
-thereafter, so later runs are offline). Three acts, each a RECEIPT -- a measured claim, next to the named
-alternative it beats:
+thereafter, so later runs are offline). Three acts print illustrative measurements:
 
   ACT 1  PERCEIVE + LEARN   real CLIP image features -> a closed-form certified head on CIFAR-10, vs a
-                            torch CNN given the SAME wall-clock budget. mixle wins on accuracy AND ships
-                            a certificate, calibration, and abstention the CNN cannot.
+                            torch CNN given the same wall-clock budget, with certificate, calibration,
+                            and abstention fields reported separately.
   ACT 2  REASON + VERIFY    grounded scientific QA through the local LLM, vs the same LLM raw: the
-                            scientist answers what it can cite and ABSTAINS otherwise; raw, the LLM
-                            confidently hallucinates.
-  ACT 3  INVERT + QUANTIFY  a physics parameter recovered with calibrated coverage -- the UQ a frontier
-                            LLM cannot give you at all.
+                            scientist reports whether it can cite an answer and abstains otherwise.
+  ACT 3  INVERT + QUANTIFY  a physics parameter and an empirical interval-coverage measurement.
 
-The thesis: not open-ended generative parity with giant models, but TRUSTWORTHY answers where the answer
-can be checked -- perception, certified inference, and honest uncertainty, on a laptop.
+Outputs are environment-dependent example results, not retained 0.8.0 performance claims.
 """
 
 from __future__ import annotations

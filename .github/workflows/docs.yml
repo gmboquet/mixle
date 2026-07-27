@@ -50,6 +50,7 @@ jobs:
   build:
     name: Build versioned HTML
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # The full multi-version build + Pages upload is for push/workflow_dispatch only; PRs get the
     # faster single-revision revision-check job instead.
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
@@ -82,6 +83,7 @@ jobs:
     name: Deploy to Pages
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     environment:
       name: github-pages
@@ -93,6 +95,7 @@ jobs:
   revision-check:
     name: Revision check (single-revision, warnings as errors)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/release/0.8.0'
     # Independent group so PR checks never queue behind a Pages deploy or behind each other; only
     # the latest push on a given PR ref needs to run.
