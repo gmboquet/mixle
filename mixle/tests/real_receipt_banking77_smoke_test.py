@@ -23,17 +23,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples"))
 @unittest.skipUnless(_HAS_DATASETS, "datasets (mixle[scientist]) not installed")
 class Banking77FlagshipSmokeTest(unittest.TestCase):
     def test_bounded_run_produces_a_wellformed_receipt(self):
-        # Fetching the dataset is the only network step; skip (don't fail) when it is unavailable.
+        from real_receipt_banking77 import Banking77UnavailableError, load_banking77, run
+
         try:
-            from datasets import load_dataset
-
-            load_dataset("banking77")
-        except Exception as exc:  # noqa: BLE001 -- offline / dataset-host down is a skip, not a failure
-            self.skipTest(f"Banking77 unavailable (offline?): {type(exc).__name__}: {exc}")
-
-        from real_receipt_banking77 import run
-
-        result = run(n_seed=1155, n_round=40, n_rounds=1, n_test=60, student="generative", verbose=False)
+            dataset = load_banking77()
+        except Banking77UnavailableError as exc:
+            self.skipTest(str(exc))
+        result = run(
+            n_seed=1155,
+            n_round=40,
+            n_rounds=1,
+            n_test=60,
+            student="generative",
+            verbose=False,
+            dataset=dataset,
+        )
         metrics = result["metrics"]
         self.assertEqual(metrics["task"], "banking77 intents (77 classes)")
         self.assertEqual(metrics["n_test"], 60)
@@ -42,6 +46,7 @@ class Banking77FlagshipSmokeTest(unittest.TestCase):
         self.assertGreater(metrics["escalation_rate"], 0.0)  # a small student on 77 classes must escalate
         self.assertEqual(len(result["rounds"]), 1)
         self.assertTrue(0.0 <= result["rounds"][0]["accuracy"] <= 1.0)
+        self.assertEqual(result["dataset"]["source_commit"], "9d081458ff52e53cf7e848f414e6e9344e4e6696")
 
 
 if __name__ == "__main__":

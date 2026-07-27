@@ -104,6 +104,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           python -m pip install --upgrade pip build twine
+          python -m pip install -r release-checklists/0.8.0-repro-requirements.txt
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD)"
           export MIXLE_SOURCE_COMMIT="$CANDIDATE_SHA"
           export MIXLE_SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')"
@@ -125,6 +126,9 @@ jobs:
           done
           (cd dist && sha256sum * > ../metadata/SHA256SUMS)
           python -c 'import json, os, pathlib; pathlib.Path("metadata/release-candidate.json").write_text(json.dumps({"artifact": "mixle.release_candidate/v1", "commit": os.environ["CANDIDATE_SHA"], "tag": os.environ["CANDIDATE_TAG"], "version": os.environ["CANDIDATE_VERSION"], "workflow_run": os.environ["GITHUB_RUN_ID"]}, indent=2, sort_keys=True) + "\n", encoding="utf-8")'
+          for entry in gallery-univariate gallery-structured production-provenance scaling-backend; do
+            python scripts/run_repro_entry.py --entry "$entry" > "metadata/reproduction-$entry.json"
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: release-candidate-${{ needs.verify-candidate.outputs.candidate-sha }}
@@ -141,6 +145,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      actions: read
       contents: write
       id-token: write
     steps:
@@ -159,7 +164,15 @@ jobs:
           set -euo pipefail
           test "$(python -c 'import json; print(json.load(open("metadata/release-candidate.json"))["commit"])')" = "$CANDIDATE_SHA"
           (cd dist && sha256sum -c ../metadata/SHA256SUMS)
-          gh release upload "$CANDIDATE_TAG" metadata/* --repo "$REPOSITORY"
+          OPTIONAL_RUN="$(python -c 'import json, re; u=json.load(open("metadata/release-check-evidence.json"))["checks"]["optional extras / py3.12"]["details_url"]; print(re.search(r"/actions/runs/([0-9]+)/", u).group(1))')"
+          mkdir -p metadata/network
+          gh run download "$OPTIONAL_RUN" \
+            --name banking77-reproduction-receipt \
+            --dir metadata/network \
+            --repo "$REPOSITORY"
+          gh release upload "$CANDIDATE_TAG" \
+            metadata/SHA256SUMS metadata/*.json metadata/network/*.json \
+            --repo "$REPOSITORY"
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: candidate/dist/

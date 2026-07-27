@@ -23,8 +23,8 @@ def required_check_names(path: Path) -> tuple[str, ...]:
     return names
 
 
-def verify_required_checks(payload: object, required: tuple[str, ...], sha: str) -> dict[str, int]:
-    """Return selected successful run IDs, or raise for missing/stale/failed evidence."""
+def verify_required_checks(payload: object, required: tuple[str, ...], sha: str) -> dict[str, dict[str, object]]:
+    """Return selected successful check identities, or raise for missing/stale/failed evidence."""
     if not isinstance(sha, str) or len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha.lower()):
         raise ValueError("candidate SHA must be a full 40-character hexadecimal commit ID")
     if not isinstance(payload, dict) or not isinstance(payload.get("check_runs"), list):
@@ -41,7 +41,7 @@ def verify_required_checks(payload: object, required: tuple[str, ...], sha: str)
             raise ValueError(f"check {run.get('name')!r} has an invalid run ID")
         by_name[run["name"]].append(run)
 
-    selected: dict[str, int] = {}
+    selected: dict[str, dict[str, object]] = {}
     failures: list[str] = []
     for name, runs in by_name.items():
         if not runs:
@@ -54,7 +54,11 @@ def verify_required_checks(payload: object, required: tuple[str, ...], sha: str)
                 f"{latest.get('status')}/{latest.get('conclusion')}"
             )
             continue
-        selected[name] = latest["id"]
+        details_url = latest.get("details_url")
+        if not isinstance(details_url, str) or "/actions/runs/" not in details_url:
+            failures.append(f"{name}: latest run {latest['id']} lacks an Actions run URL")
+            continue
+        selected[name] = {"check_run_id": latest["id"], "details_url": details_url}
     if failures:
         raise ValueError("release-candidate checks are not approved:\n- " + "\n- ".join(failures))
     return selected

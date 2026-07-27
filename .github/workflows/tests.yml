@@ -228,8 +228,16 @@ jobs:
           python -m pip install "dask>=2023.5.0" "distributed>=2023.5.0"
           python -m pytest mixle/tests/dask_encoded_data_test.py -q -m ""
       - name: Install the Banking77 flagship dataset dependency
-        run: python -m pip install datasets
+        run: |
+          python -m pip install datasets
+          python -m pip install -r release-checklists/0.8.0-repro-requirements.txt
       - name: Run the Banking77 real-data flagship smoke
-        # The one flagship on real public data (F10.4): bounded run of the teacher/student cascade. It
-        # skips itself if the dataset can't be fetched (offline), so a network blip is a skip, not a fail.
-        run: python -m pytest mixle/tests/real_receipt_banking77_smoke_test.py -q -m ""
+        # The one flagship on real public data (F10.4): the bundle runner verifies the immutable source
+        # bytes, bounded configuration, strict JSON receipt, and expected result contract.
+        run: python scripts/run_repro_entry.py --entry flagship-banking77-cascade > banking77-reproduction-receipt.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: banking77-reproduction-receipt
+          path: banking77-reproduction-receipt.json
+          if-no-files-found: error
+          retention-days: 90
