@@ -441,7 +441,10 @@ def seq_rim_code(orderings: np.ndarray, sigma0: np.ndarray) -> np.ndarray:
     if len(center) == 0:
         raise ValueError("RIM permutations must contain at least one item.")
     rows = _validate_orderings(orderings, label="orderings", expected_dim=len(center))
-    return _seq_rim_code(rows, center)
+    return _seq_rim_code(
+        np.array(rows, dtype=np.int64, order="C", copy=True),
+        np.array(center, dtype=np.int64, order="C", copy=True),
+    )
 
 
 def permutation_distance(a: np.ndarray, b: np.ndarray, metric: str = "kendall") -> int:
