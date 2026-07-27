@@ -1756,7 +1756,6 @@ class BackendScoringTestCase(unittest.TestCase):
             "uniform",
             "weibull",
             "composite_with_optional",
-            "transform_gaussian",
             "von_mises_fisher",
         }
         generated_resident_cases = {
@@ -1781,7 +1780,6 @@ class BackendScoringTestCase(unittest.TestCase):
             "record_gaussian_poisson",
             "select_gaussian_by_sign",
             "sequence_gaussian",
-            "transform_gaussian",
             "weighted_gaussian",
         }
         for name, dist, data in self.stacked_mixture_cases():

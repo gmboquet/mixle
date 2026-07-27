@@ -25,6 +25,7 @@ from mixle.stats import (
     LaplaceEstimator,
     LogisticDistribution,
     LogisticEstimator,
+    LogTransform,
     MixtureDistribution,
     MixtureEstimator,
     NegativeBinomialDistribution,
@@ -37,6 +38,8 @@ from mixle.stats import (
     RayleighEstimator,
     StudentTDistribution,
     StudentTEstimator,
+    TransformCompatibilityError,
+    TransformContract,
     TransformDistribution,
     TransformEstimator,
     UniformDistribution,
@@ -141,11 +144,16 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
         self.assertEqual(tcat.log_density(11.0), -np.inf)
 
         class LabelTransform:
+            contract = TransformContract("finite", "finite", measure="discrete")
+
             def forward(self, x):
                 return "v%s" % x
 
             def inverse(self, y):
                 return int(y[1:])
+
+            def log_abs_det_inverse_jacobian(self, y):
+                return 0.0
 
             def invalid_inverse_value(self):
                 return 0
@@ -291,6 +299,71 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
         self.assertIsInstance(fitted, TransformDistribution)
         self.assertAlmostEqual(fitted.dist.mu, base.mean())
         self.assertAlmostEqual(fitted.dist.sigma2, np.mean((base - base.mean()) ** 2))
+
+    def test_transform_contract_rejects_incompatible_or_ambiguous_mappings(self):
+        with self.assertRaises(TransformCompatibilityError):
+            TransformDistribution(GaussianDistribution(0.0, 1.0), transform=LogTransform())
+        with self.assertRaises(ValueError):
+            AffineTransform(loc=np.inf, scale=1.0)
+
+        class DuckTransform:
+            def forward(self, value):
+                return value
+
+            def inverse(self, value):
+                return value
+
+            def log_abs_det_inverse_jacobian(self, value):
+                return 0.0
+
+            def invalid_inverse_value(self):
+                return 0
+
+        with self.assertRaises(TransformCompatibilityError):
+            TransformDistribution(CategoricalDistribution({0: 0.5, 1: 0.5}), DuckTransform())
+
+        class CollapsingTransform(DuckTransform):
+            contract = TransformContract("finite", "finite", measure="discrete")
+
+            def forward(self, value):
+                return 0
+
+            def inverse(self, value):
+                return 0
+
+        with self.assertRaises(TransformCompatibilityError):
+            TransformDistribution(CategoricalDistribution({0: 0.5, 1: 0.5}), CollapsingTransform())
+        with self.assertRaises(TransformCompatibilityError):
+            TransformDistribution(
+                CategoricalDistribution({0: 0.5, 1: 0.5}),
+                AffineTransform(),
+                density_correction=True,
+            )
+
+    def test_transform_scoring_propagates_child_failures(self):
+        child = GaussianDistribution(0.0, 1.0)
+
+        def broken_log_density(value):
+            raise RuntimeError("internal child defect")
+
+        child.log_density = broken_log_density
+        dist = TransformDistribution(child, AffineTransform())
+        with self.assertRaisesRegex(RuntimeError, "internal child defect"):
+            dist.log_density(1.0)
+
+    def test_transform_fit_reports_rejected_weight_and_uses_effective_count(self):
+        dist = TransformDistribution(GaussianDistribution(0.0, 1.0), ExpTransform())
+        data = [-1.0, np.exp(-1.0), 1.0, np.exp(1.0)]
+        enc = dist.dist_to_encoder().seq_encode(data)
+        estimator = dist.estimator()
+        acc = estimator.accumulator_factory().make()
+        acc.seq_update(enc, np.ones(len(data)), dist)
+        fitted = estimator.estimate(len(data), acc.value())
+
+        self.assertAlmostEqual(fitted.dist.mu, 0.0)
+        self.assertEqual(fitted.fit_receipt.accepted_weight, 3.0)
+        self.assertEqual(fitted.fit_receipt.rejected_weight, 1.0)
+        self.assertEqual(fitted.fit_receipt.rejected_fraction, 0.25)
 
     def test_beta_estimator_is_finite_and_improves_likelihood(self):
         dist = BetaDistribution(2.0, 5.0)
