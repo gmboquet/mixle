@@ -18,6 +18,8 @@ from mixle.stats.compute.mixture_evidence import (
 )
 from mixle.stats.compute.posterior import ImpossiblePosteriorError
 from mixle.stats.compute.stacked import StackedMixtureKernel
+from mixle.stats.latent.mixture import MixtureAccumulator
+from mixle.stats.univariate.continuous.gaussian import GaussianAccumulator
 
 
 class MixtureEvidenceContractTest(unittest.TestCase):
@@ -70,6 +72,63 @@ class MixtureEvidenceContractTest(unittest.TestCase):
         self.assertAlmostEqual(float(accumulator.comp_counts.sum()), 1.0)
         with self.assertRaises(ImpossiblePosteriorError):
             model.latent_posterior(["outside"])
+
+    def test_constructor_owns_weights_and_component_container(self):
+        components = [stats.GaussianDistribution(0.0, 1.0), stats.GaussianDistribution(2.0, 1.0)]
+        weights = np.asarray([0.25, 0.75])
+        model = stats.MixtureDistribution(components, weights)
+        original_score = model.log_density(0.0)
+
+        weights[:] = [0.9, 0.1]
+        components.clear()
+
+        np.testing.assert_array_equal(model.w, [0.25, 0.75])
+        self.assertEqual(len(model.components), 2)
+        self.assertEqual(model.log_density(0.0), original_score)
+
+    def test_scoring_only_categorical_cannot_become_a_generative_mixture_component(self):
+        scorer = stats.CategoricalDistribution({"a": 0.5}, scoring_only=True)
+        with self.assertRaisesRegex(TypeError, "generative probability laws"):
+            stats.MixtureDistribution([scorer], [1.0])
+
+    def test_mixture_accumulator_owns_count_snapshots(self):
+        accumulator = (
+            stats.MixtureDistribution(
+                [stats.GaussianDistribution(0.0, 1.0), stats.GaussianDistribution(1.0, 1.0)],
+                [0.5, 0.5],
+            )
+            .estimator()
+            .accumulator_factory()
+            .make()
+        )
+        accumulator.comp_counts[:] = [1.0, 2.0]
+
+        snapshot = accumulator.value()
+        snapshot[0][0] = 99.0
+        self.assertEqual(accumulator.comp_counts[0], 1.0)
+
+        donor_counts = np.asarray([3.0, 4.0])
+        accumulator.from_value((donor_counts, snapshot[1]))
+        donor_counts[0] = 88.0
+        self.assertEqual(accumulator.comp_counts[0], 3.0)
+
+    def test_keyed_component_pooling_restores_independent_accumulators(self):
+        first = MixtureAccumulator([GaussianAccumulator()], keys=(None, "shared-components"))
+        second = MixtureAccumulator([GaussianAccumulator()], keys=(None, "shared-components"))
+        first.accumulators[0].update(1.0, 1.0, None)
+        second.accumulators[0].update(3.0, 1.0, None)
+
+        pooled = {}
+        first.key_merge(pooled)
+        second.key_merge(pooled)
+        first.key_replace(pooled)
+        second.key_replace(pooled)
+
+        self.assertIsNot(first.accumulators, second.accumulators)
+        self.assertIsNot(first.accumulators[0], second.accumulators[0])
+        self.assertEqual(first.accumulators[0].value(), second.accumulators[0].value())
+        first.accumulators[0].update(100.0, 1.0, None)
+        self.assertNotEqual(first.accumulators[0].value(), second.accumulators[0].value())
 
     def test_object_and_compiled_fast_paths_share_the_policy(self):
         weighted = np.array(

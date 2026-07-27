@@ -9,6 +9,7 @@ from mixle.stats import DiagonalGaussianDistribution as DG
 from mixle.stats import MixtureDistribution
 from mixle.stats import MultivariateGaussianDistribution as MVN
 from mixle.stats import MultivariateStudentTDistribution as MVT
+from mixle.stats.compute.posterior import ImpossiblePosteriorError
 
 
 def _rcov(rng, d):
@@ -94,6 +95,12 @@ class MixtureConditionalTest(unittest.TestCase):
         self.assertEqual(s.shape, (40000, 2))  # the two unobserved dims
         analytic = cond.w[0] * cond.components[0].mu + cond.w[1] * cond.components[1].mu
         np.testing.assert_allclose(s.mean(0), analytic, atol=0.05)
+
+    def test_impossible_conditioning_raises_before_constructing_nan_weights(self):
+        comps = [MVN(np.zeros(2), np.eye(2)), MVN(np.ones(2), np.eye(2))]
+        mix = MixtureDistribution(comps, [0.4, 0.6])
+        with np.errstate(over="ignore", invalid="ignore"), self.assertRaises(ImpossiblePosteriorError):
+            mix.conditional({0: 1.0e308})
 
 
 if __name__ == "__main__":
