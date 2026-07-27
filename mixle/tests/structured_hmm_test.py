@@ -184,11 +184,11 @@ class ForgettingParallelTest(unittest.TestCase):
         self.assertLess(err20, 1e-9)  # forgetting absorbs it -> ~exact
 
     def test_chunked_em_recovers_chain_and_parallel_matches_serial(self):
-        rng = np.random.RandomState(0)
         hmm = self._ergodic_hmm()
         seqs = [hmm.sampler(seed=s).sample(200) for s in range(10)]
 
         def init():
+            rng = np.random.RandomState(0)
             return StructuredHMM(
                 [S.GaussianDistribution(m + rng.uniform(-1, 1), 1) for m in (-4, 0, 4)],
                 np.ones(3) / 3,
@@ -197,7 +197,7 @@ class ForgettingParallelTest(unittest.TestCase):
 
         h_serial = init()
         fit_chunked(h_serial, seqs, chunk=80, overlap=25, max_its=20, workers=0)
-        h_par = init()  # same init stream consumed identically
+        h_par = init()
         fit_chunked(h_par, seqs, chunk=80, overlap=25, max_its=20, workers=4)
         means = sorted(e.mu for e in h_serial.emissions)
         self.assertLess(max(abs(m - t) for m, t in zip(means, [-4, 0, 4])), 0.5)

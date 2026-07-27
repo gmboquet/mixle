@@ -23,6 +23,8 @@ forward-backward be split into chunks and run in parallel; see ``parallel`` in t
 
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -37,7 +39,7 @@ from mixle.stats.latent.markov_stopping import (
     validated_state_ids,
     validated_terminal_states,
 )
-from mixle.utils.vector import require_possible_log_evidence
+from mixle.utils.vector import ImpossibleEvidenceError, require_possible_log_evidence
 
 
 class TransitionOperator:
@@ -116,6 +118,208 @@ def _exact_positive_integer(value: Any, label: str) -> int:
     if result <= 0:
         raise ValueError(f"{label} must be positive.")
     return result
+
+
+def _exact_nonnegative_integer(value: Any, label: str) -> int:
+    """Return an exact non-negative integer."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{label} must be an integer.")
+    result = int(value)
+    if result < 0:
+        raise ValueError(f"{label} must be non-negative.")
+    return result
+
+
+def _finite_nonnegative_real(value: Any, label: str) -> float:
+    """Return a finite non-negative real without accepting strings or booleans."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise TypeError(f"{label} must be a real number.")
+    result = float(value)
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{label} must be finite and non-negative.")
+    return result
+
+
+def _validated_fit_controls(max_its: Any, tol: Any) -> tuple[int, float]:
+    """Validate common EM iteration and convergence controls."""
+    return (
+        _exact_positive_integer(max_its, "max_its"),
+        _finite_nonnegative_real(tol, "tol"),
+    )
+
+
+def _validated_sequences(values: Any, label: str) -> list[list[Any]]:
+    """Materialize a non-empty batch of non-empty observation sequences."""
+    try:
+        sequences = [list(sequence) for sequence in values]
+    except TypeError as exc:
+        raise TypeError(f"{label} must be an iterable of observation sequences.") from exc
+    if not sequences:
+        raise ValueError(f"{label} must contain at least one sequence.")
+    empty = [index for index, sequence in enumerate(sequences) if not sequence]
+    if empty:
+        raise ValueError(f"{label} contains empty sequence rows {empty}.")
+    return sequences
+
+
+def _validated_weights(
+    values: Any,
+    size: int,
+    label: str = "weights",
+    *,
+    require_positive_total: bool = True,
+) -> np.ndarray:
+    """Return an owned finite non-negative weight vector with positive total mass."""
+    if values is None:
+        weights = np.ones(size, dtype=np.float64)
+    else:
+        try:
+            weights = np.asarray(values, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError(f"{label} must be a numeric vector.") from exc
+        if weights.shape != (size,):
+            raise ValueError(f"{label} must have shape ({size},).")
+        if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
+            raise ValueError(f"{label} must contain finite non-negative values.")
+        weights = weights.copy()
+    if require_positive_total and float(weights.sum()) <= 0.0:
+        raise ValueError(f"{label} must contain positive total mass.")
+    return weights
+
+
+def _validated_input_symbols(values: Any, n_inputs: int, label: str) -> list[int]:
+    """Return exact in-range discrete IOHMM input symbols."""
+    try:
+        raw_symbols = list(values)
+    except TypeError as exc:
+        raise TypeError(f"{label} must be an iterable of input symbols.") from exc
+    symbols: list[int] = []
+    for index, symbol in enumerate(raw_symbols):
+        if isinstance(symbol, (bool, np.bool_)) or not isinstance(symbol, (int, np.integer)):
+            raise TypeError(f"{label}[{index}] must be an integer.")
+        normalized = int(symbol)
+        if normalized < 0 or normalized >= n_inputs:
+            raise ValueError(f"{label}[{index}]={normalized} is outside [0, {n_inputs}).")
+        symbols.append(normalized)
+    return symbols
+
+
+def _validated_io_record(values: Any, n_inputs: int, label: str) -> tuple[list[Any], list[int]]:
+    """Split and validate a non-empty IOHMM record of observation/input pairs."""
+    try:
+        record = list(values)
+    except TypeError as exc:
+        raise TypeError(f"{label} must be an iterable of observation/input pairs.") from exc
+    if not record:
+        raise ValueError(f"{label} must not be empty.")
+    observations: list[Any] = []
+    raw_inputs: list[Any] = []
+    for index, pair in enumerate(record):
+        try:
+            observation, symbol = pair
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"{label}[{index}] must contain exactly one observation and input symbol.") from exc
+        observations.append(observation)
+        raw_inputs.append(symbol)
+    return observations, _validated_input_symbols(raw_inputs, n_inputs, f"{label} inputs")
+
+
+@dataclass(frozen=True)
+class HMMFitDiagnostics:
+    """Machine-readable receipt for a structured-family EM fit."""
+
+    algorithm: str
+    converged: bool
+    iterations: int
+    termination_reason: str
+    log_likelihood_trace: tuple[float, ...]
+    initial_log_likelihood: float
+    final_log_likelihood: float
+    final_absolute_delta: float | None
+    final_relative_delta: float | None
+    monotone: bool
+    n_sequences: int
+    total_weight: float
+    approximate: bool
+
+
+class HMMFitResult(tuple):
+    """Backward-compatible ``(model, trace)`` result with a fit diagnostics receipt."""
+
+    diagnostics: HMMFitDiagnostics
+
+    def __new__(cls, model: Any, trace: list[float], diagnostics: HMMFitDiagnostics):
+        result = super().__new__(cls, (model, trace))
+        result.diagnostics = diagnostics
+        return result
+
+    @property
+    def model(self):
+        """Return the fitted model."""
+        return self[0]
+
+    @property
+    def log_likelihood_trace(self):
+        """Return the accepted model log-likelihood trajectory."""
+        return self[1]
+
+
+def _fit_delta(previous: float, current: float) -> tuple[float, float]:
+    """Return absolute and scale-relative likelihood changes."""
+    absolute = current - previous
+    return absolute, absolute / max(1.0, abs(previous))
+
+
+def _weighted_fit_log_likelihood(scores: Any, weights: np.ndarray, context: str) -> float:
+    """Validate per-record evidence and return its finite weighted sum."""
+    likelihoods = require_possible_log_evidence(scores, context=context)
+    if likelihoods.shape != weights.shape:
+        raise RuntimeError(f"{context} returned {likelihoods.size} scores for {weights.size} weights.")
+    total = float(np.dot(weights, likelihoods))
+    if not np.isfinite(total):
+        raise RuntimeError(f"{context} produced a non-finite weighted log likelihood.")
+    return total
+
+
+def _fit_receipt(
+    *,
+    algorithm: str,
+    trace: list[float],
+    converged: bool,
+    iterations: int,
+    termination_reason: str,
+    n_sequences: int,
+    total_weight: float,
+    approximate: bool,
+) -> HMMFitDiagnostics:
+    """Build a validated diagnostics receipt from an accepted likelihood trajectory."""
+    likelihoods = np.asarray(trace, dtype=np.float64)
+    if likelihoods.ndim != 1 or likelihoods.size == 0 or np.any(~np.isfinite(likelihoods)):
+        raise RuntimeError(f"{algorithm} did not produce a finite likelihood trajectory.")
+    differences = np.diff(likelihoods)
+    monotonicity_allowance = 1.0e-8 * np.maximum(1.0, np.abs(likelihoods[:-1]))
+    monotone = bool(np.all(differences >= -monotonicity_allowance))
+    if not monotone and not approximate:
+        raise RuntimeError(f"{algorithm} accepted a non-monotone likelihood trajectory.")
+    if len(trace) > 1:
+        absolute, relative = _fit_delta(trace[-2], trace[-1])
+    else:
+        absolute = relative = None
+    return HMMFitDiagnostics(
+        algorithm=algorithm,
+        converged=converged,
+        iterations=iterations,
+        termination_reason=termination_reason,
+        log_likelihood_trace=tuple(float(value) for value in trace),
+        initial_log_likelihood=float(trace[0]),
+        final_log_likelihood=float(trace[-1]),
+        final_absolute_delta=None if absolute is None else float(absolute),
+        final_relative_delta=None if relative is None else float(relative),
+        monotone=monotone,
+        n_sequences=n_sequences,
+        total_weight=total_weight,
+        approximate=approximate,
+    )
 
 
 def _numeric_matrix(values: Any, label: str) -> np.ndarray:
@@ -858,52 +1062,127 @@ class StructuredHMM:
             and type(self.transition) is DenseTransition
         )
 
-    def fit(self, seqs, *, max_its: int = 50, tol: float = 1e-6, fast: bool = True):
-        """EM (Baum-Welch) through the transition operator. Returns ``(fitted_hmm, loglik_trace)``.
+    def fit(self, seqs, *, max_its: int = 50, tol: float = 1e-6, fast: bool = True, weights=None):
+        """Fit by Baum-Welch through the transition operator.
 
-        ``fast=True`` uses the numba-jitted dense forward-backward (~30x over the numpy Python loop) when
-        the transition is a plain ``DenseTransition`` with no terminal states; structured operators
-        (low-rank / sparse / combinator) use the operator's per-step accumulate as before."""
-        seqs = [list(s) for s in seqs]
-        use_fast = fast and self._can_fast_fb()
+        ``fast=True`` uses the numba-jitted dense forward-backward when possible. The returned
+        :class:`HMMFitResult` remains unpackable as ``(fitted_hmm, loglik_trace)`` and also exposes a
+        validated ``diagnostics`` receipt.
+        """
+        max_its, tol = _validated_fit_controls(max_its, tol)
+        if not isinstance(fast, (bool, np.bool_)):
+            raise TypeError("fast must be a boolean.")
+        seqs = _validated_sequences(seqs, "StructuredHMM fit data")
+        weights = _validated_weights(weights, len(seqs))
+        active_indices = np.flatnonzero(weights > 0.0)
+        use_fast = bool(fast) and self._can_fast_fb()
         fb = _dense_fb_numba() if use_fast else None
-        ll_trace = []
-        for _ in range(int(max_its)):
-            active = [seq for seq in seqs if seq]
-            require_possible_log_evidence(
-                self.seq_log_density(active),
-                context="StructuredHMM.fit",
-            )
+        ll_trace: list[float] = []
+        iterations = 0
+        converged = False
+        termination_reason = "max_iterations"
+        rollback = None
+
+        for _ in range(max_its):
+            active = [seqs[index] for index in active_indices]
+            try:
+                total_ll = _weighted_fit_log_likelihood(
+                    self.seq_log_density(active),
+                    weights[active_indices],
+                    "StructuredHMM.fit",
+                )
+            except (ImpossibleEvidenceError, ValueError, RuntimeError, FloatingPointError):
+                if rollback is None:
+                    raise
+                self.pi, self.transition, self.emissions = rollback
+                iterations -= 1
+                termination_reason = "invalid_update_rejected"
+                break
+            if ll_trace:
+                absolute, _ = _fit_delta(ll_trace[-1], total_ll)
+                allowance = 1.0e-8 * max(1.0, abs(ll_trace[-1]))
+                if absolute < -allowance:
+                    if rollback is not None:
+                        self.pi, self.transition, self.emissions = rollback
+                        iterations -= 1
+                    termination_reason = "non_monotone_update_rejected"
+                    break
+                ll_trace.append(total_ll)
+                if abs(absolute) <= tol * max(1.0, abs(ll_trace[-2])):
+                    converged = True
+                    termination_reason = "converged"
+                    break
+            else:
+                ll_trace.append(total_ll)
+
             trans_acc = self.transition.new_accumulator()
             pi_acc = np.zeros(self.K)
             emit_accs = [est.accumulator_factory().make() for est in self._emit_est]
             nk = np.zeros(self.K)
-            total_ll = 0.0
             a_mat = self.transition.as_matrix() if use_fast else None
-            for seq in seqs:
-                if not seq:
-                    continue
+            for index in active_indices:
+                seq = seqs[index]
+                weight = weights[index]
                 log_b = self._log_b(seq)
                 if use_fast:
-                    ll, gamma, xi = fb(log_b, self.pi, a_mat)
-                    trans_acc += xi  # expected K x K transition counts, computed in numba
+                    _, gamma, xi = fb(log_b, self.pi, a_mat)
+                    trans_acc += weight * xi
                 else:
-                    alpha, beta, c, b, gamma, ll = self._forward_backward(log_b)
+                    alpha, beta, c, b, gamma, _ = self._forward_backward(log_b)
                     for t in range(len(seq) - 1):
-                        self.transition.accumulate(trans_acc, alpha[t], b[t + 1] * beta[t + 1], c[t + 1])
-                total_ll += ll
-                pi_acc += gamma[0]
+                        self.transition.accumulate(
+                            trans_acc,
+                            alpha[t],
+                            weight * b[t + 1] * beta[t + 1],
+                            c[t + 1],
+                        )
+                pi_acc += weight * gamma[0]
                 for k in range(self.K):
                     enc = self.emissions[k].dist_to_encoder().seq_encode(seq)
-                    emit_accs[k].seq_update(enc, gamma[:, k], self.emissions[k])
-                    nk[k] += gamma[:, k].sum()
+                    state_weights = weight * gamma[:, k]
+                    emit_accs[k].seq_update(enc, state_weights, self.emissions[k])
+                    nk[k] += state_weights.sum()
+            rollback = (self.pi.copy(), self.transition, list(self.emissions))
             self.transition = self.transition.estimate(trans_acc)
-            self.pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else self.pi
+            self.pi = pi_acc / pi_acc.sum()
             self.emissions = [self._emit_est[k].estimate(float(nk[k]), emit_accs[k].value()) for k in range(self.K)]
-            ll_trace.append(total_ll)
-            if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
-                break
-        return self, ll_trace
+            iterations += 1
+
+        if iterations and termination_reason == "max_iterations":
+            try:
+                final_ll = _weighted_fit_log_likelihood(
+                    self.seq_log_density([seqs[index] for index in active_indices]),
+                    weights[active_indices],
+                    "StructuredHMM.fit final model",
+                )
+            except (ImpossibleEvidenceError, ValueError, RuntimeError, FloatingPointError):
+                self.pi, self.transition, self.emissions = rollback
+                iterations -= 1
+                termination_reason = "invalid_update_rejected"
+            else:
+                absolute, _ = _fit_delta(ll_trace[-1], final_ll)
+                allowance = 1.0e-8 * max(1.0, abs(ll_trace[-1]))
+                if absolute < -allowance:
+                    self.pi, self.transition, self.emissions = rollback
+                    iterations -= 1
+                    termination_reason = "non_monotone_update_rejected"
+                else:
+                    ll_trace.append(final_ll)
+                    if abs(absolute) <= tol * max(1.0, abs(ll_trace[-2])):
+                        converged = True
+                        termination_reason = "converged"
+
+        diagnostics = _fit_receipt(
+            algorithm="structured-baum-welch",
+            trace=ll_trace,
+            converged=converged,
+            iterations=iterations,
+            termination_reason=termination_reason,
+            n_sequences=len(active_indices),
+            total_weight=float(weights.sum()),
+            approximate=False,
+        )
+        return HMMFitResult(self, ll_trace, diagnostics)
 
 
 class _StructuredHMMSampler:
@@ -1081,12 +1360,14 @@ def chunked_state_posteriors(hmm: StructuredHMM, seq, *, chunk: int, overlap: in
     (embarrassingly parallel). The first chunk uses the model's pi; interior chunks start from the uniform
     belief and the ``overlap`` context lets the chain *forget* that wrong boundary -- so the kept interior
     matches the exact forward-backward up to an error that decays at the mixing rate in ``overlap``."""
-    require_possible_log_evidence(
-        hmm.seq_log_density([seq]),
-        context="chunked_state_posteriors",
-    )
-    log_b_full = hmm._log_b(seq)
-    t_len = len(seq)
+    chunk = _exact_positive_integer(chunk, "chunk")
+    overlap = _exact_nonnegative_integer(overlap, "overlap")
+    if overlap >= chunk:
+        raise ValueError("overlap must be smaller than chunk.")
+    sequence = _validated_sequences([seq], "chunked posterior data")[0]
+    require_possible_log_evidence(hmm.seq_log_density([sequence]), context="chunked_state_posteriors")
+    log_b_full = hmm._log_b(sequence)
+    t_len = len(sequence)
     out = np.zeros((t_len, hmm.K))
     uniform = np.ones(hmm.K) / hmm.K
     for ctx_lo, ctx_hi, keep_lo, keep_hi in _chunk_spans(t_len, chunk, overlap):
@@ -1097,23 +1378,45 @@ def chunked_state_posteriors(hmm: StructuredHMM, seq, *, chunk: int, overlap: in
 
 
 def fit_chunked(
-    hmm: StructuredHMM, seqs, *, chunk: int, overlap: int, max_its: int = 50, workers: int = 0, tol: float = 1e-6
+    hmm: StructuredHMM,
+    seqs,
+    *,
+    chunk: int,
+    overlap: int,
+    max_its: int = 50,
+    workers: int = 0,
+    tol: float = 1e-6,
+    weights=None,
 ):
     """Baum-Welch where each long sequence's forward-backward is split into overlapping chunks run in
     PARALLEL (the forgetting property bounds the boundary error). ``workers>0`` runs the per-chunk E-steps
     on a thread pool (NumPy releases the GIL in its array kernels); ``workers=0`` runs them serially. The
     interior suff-statistics are accumulated exactly as in :meth:`StructuredHMM.fit`; this only changes
     *how* the E-step is computed, trading a small, overlap-controlled approximation for intra-sequence
-    parallelism. Returns ``(fitted_hmm, loglik_trace)`` (LL is the chunk-summed approximation)."""
+    parallelism. The returned :class:`HMMFitResult` remains unpackable as ``(fitted_hmm,
+    loglik_trace)`` and marks the receipt's objective as approximate."""
     from concurrent.futures import ThreadPoolExecutor
 
-    seqs = [list(s) for s in seqs]
+    if not isinstance(hmm, StructuredHMM):
+        raise TypeError("fit_chunked requires a StructuredHMM.")
+    chunk = _exact_positive_integer(chunk, "chunk")
+    overlap = _exact_nonnegative_integer(overlap, "overlap")
+    if overlap >= chunk:
+        raise ValueError("overlap must be smaller than chunk.")
+    workers = _exact_nonnegative_integer(workers, "workers")
+    max_its, tol = _validated_fit_controls(max_its, tol)
+    seqs = _validated_sequences(seqs, "chunked StructuredHMM fit data")
+    weights = _validated_weights(weights, len(seqs))
+    active_indices = np.flatnonzero(weights > 0.0)
     uniform = np.ones(hmm.K) / hmm.K
-    ll_trace = []
-    scaled_trace = []
+    ll_trace: list[float] = []
+    iterations = 0
+    converged = False
+    termination_reason = "max_iterations"
+    rollback = None
 
     def chunk_estep(args):
-        seq, ctx_lo, ctx_hi, keep_lo, keep_hi = args
+        seq_index, seq, weight, ctx_lo, ctx_hi, keep_lo, keep_hi = args
         log_b = hmm._log_b(seq)[ctx_lo:ctx_hi]
         pi = hmm.pi if ctx_lo == 0 else uniform
         alpha, beta, c, b, gamma, ll = hmm._forward_backward(log_b, pi=pi)
@@ -1127,56 +1430,116 @@ def fit_chunked(
         with np.errstate(divide="ignore"):
             contrib_scaled = float(np.sum(np.log(c[win])))
             contrib_ll = contrib_scaled + float(np.sum(log_b[win].max(axis=1)))
-        return seq, ctx_lo, keep_lo, keep_hi, alpha, beta, c, b, gamma, (contrib_ll, contrib_scaled)
-
-    for _ in range(int(max_its)):
-        active = [seq for seq in seqs if seq]
-        require_possible_log_evidence(
-            hmm.seq_log_density(active),
-            context="fit_chunked",
+        return (
+            seq_index,
+            seq,
+            weight,
+            ctx_lo,
+            keep_lo,
+            keep_hi,
+            alpha,
+            beta,
+            c,
+            b,
+            gamma,
+            contrib_ll,
         )
-        tasks = [
-            (seq, lo, hi, klo, khi)
-            for seq in seqs
-            if seq
-            for (lo, hi, klo, khi) in _chunk_spans(len(seq), chunk, overlap)
-        ]
-        if workers and workers > 1:
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                results = list(ex.map(chunk_estep, tasks))  # independent chunks -> parallel
-        else:
-            results = [chunk_estep(t) for t in tasks]
 
+    def run_estep():
+        tasks = [
+            (index, seqs[index], weights[index], lo, hi, keep_lo, keep_hi)
+            for index in active_indices
+            for (lo, hi, keep_lo, keep_hi) in _chunk_spans(len(seqs[index]), chunk, overlap)
+        ]
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                return list(ex.map(chunk_estep, tasks))
+        return [chunk_estep(task) for task in tasks]
+
+    for _ in range(max_its):
+        try:
+            results = run_estep()
+        except (ImpossibleEvidenceError, ValueError, RuntimeError, FloatingPointError):
+            if rollback is None:
+                raise
+            hmm.pi, hmm.transition, hmm.emissions = rollback
+            iterations -= 1
+            termination_reason = "invalid_update_rejected"
+            break
+        total_ll = float(sum(result[2] * result[-1] for result in results))
+        if not np.isfinite(total_ll):
+            if rollback is None:
+                raise RuntimeError("fit_chunked produced a non-finite weighted approximate log likelihood.")
+            hmm.pi, hmm.transition, hmm.emissions = rollback
+            iterations -= 1
+            termination_reason = "invalid_update_rejected"
+            break
+        if ll_trace:
+            absolute, _ = _fit_delta(ll_trace[-1], total_ll)
+            allowance = 1.0e-8 * max(1.0, abs(ll_trace[-1]))
+            ll_trace.append(total_ll)
+            if absolute >= -allowance and abs(absolute) <= tol * max(1.0, abs(ll_trace[-2])):
+                converged = True
+                termination_reason = "converged"
+                break
+        else:
+            ll_trace.append(total_ll)
         trans_acc = hmm.transition.new_accumulator()
         pi_acc = np.zeros(hmm.K)
         emit_accs = [est.accumulator_factory().make() for est in hmm._emit_est]
         nk = np.zeros(hmm.K)
-        total_ll = 0.0
-        total_scaled = 0.0
-        for seq, ctx_lo, keep_lo, keep_hi, alpha, beta, c, b, gamma, (contrib_ll, contrib_scaled) in results:
-            total_ll += contrib_ll
-            total_scaled += contrib_scaled
+        for _, seq, weight, ctx_lo, keep_lo, keep_hi, alpha, beta, c, b, gamma, _ in results:
             if ctx_lo == 0:
-                pi_acc += gamma[0]
+                pi_acc += weight * gamma[0]
             for t in range(keep_lo, keep_hi):  # kept interior transitions
                 if t + 1 < len(c):
-                    hmm.transition.accumulate(trans_acc, alpha[t], b[t + 1] * beta[t + 1], c[t + 1])
+                    hmm.transition.accumulate(
+                        trans_acc,
+                        alpha[t],
+                        weight * b[t + 1] * beta[t + 1],
+                        c[t + 1],
+                    )
             seg = seq[ctx_lo + keep_lo : ctx_lo + keep_hi]
             for k in range(hmm.K):
                 enc = hmm.emissions[k].dist_to_encoder().seq_encode(seg)
-                w = gamma[keep_lo:keep_hi, k]
-                emit_accs[k].seq_update(enc, w, hmm.emissions[k])
-                nk[k] += w.sum()
+                state_weights = weight * gamma[keep_lo:keep_hi, k]
+                emit_accs[k].seq_update(enc, state_weights, hmm.emissions[k])
+                nk[k] += state_weights.sum()
+        rollback = (hmm.pi.copy(), hmm.transition, list(hmm.emissions))
         hmm.transition = hmm.transition.estimate(trans_acc)
-        hmm.pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else hmm.pi
+        hmm.pi = pi_acc / pi_acc.sum()
         hmm.emissions = [hmm._emit_est[k].estimate(float(nk[k]), emit_accs[k].value()) for k in range(hmm.K)]
-        ll_trace.append(total_ll)
-        scaled_trace.append(total_scaled)
-        # break on the scaled-frame quantity (historical behavior): the reported ll includes the
-        # parameter-dependent emission-max offset, which would rescale the relative tolerance
-        if len(scaled_trace) > 1 and abs(scaled_trace[-1] - scaled_trace[-2]) < tol * max(1.0, abs(scaled_trace[-2])):
-            break
-    return hmm, ll_trace
+        iterations += 1
+
+    if iterations and termination_reason == "max_iterations":
+        try:
+            final_results = run_estep()
+            final_ll = float(sum(result[2] * result[-1] for result in final_results))
+            if not np.isfinite(final_ll):
+                raise RuntimeError("fit_chunked final model produced a non-finite objective.")
+        except (ImpossibleEvidenceError, ValueError, RuntimeError, FloatingPointError):
+            hmm.pi, hmm.transition, hmm.emissions = rollback
+            iterations -= 1
+            termination_reason = "invalid_update_rejected"
+        else:
+            absolute, _ = _fit_delta(ll_trace[-1], final_ll)
+            allowance = 1.0e-8 * max(1.0, abs(ll_trace[-1]))
+            ll_trace.append(final_ll)
+            if absolute >= -allowance and abs(absolute) <= tol * max(1.0, abs(ll_trace[-2])):
+                converged = True
+                termination_reason = "converged"
+
+    diagnostics = _fit_receipt(
+        algorithm="chunked-structured-baum-welch",
+        trace=ll_trace,
+        converged=converged,
+        iterations=iterations,
+        termination_reason=termination_reason,
+        n_sequences=len(active_indices),
+        total_weight=float(weights.sum()),
+        approximate=True,
+    )
+    return HMMFitResult(hmm, ll_trace, diagnostics)
 
 
 # ===================================================================================================
@@ -1200,6 +1563,11 @@ def _add_nested(a, b):
 
 def _scale_nested(a, f):
     return a * f if isinstance(a, np.ndarray) else [_scale_nested(x, f) for x in a]
+
+
+def _copy_nested(value):
+    """Copy an arbitrarily nested transition sufficient statistic."""
+    return deepcopy(value)
 
 
 class StructuredHMMDataEncoder(DataSequenceEncoder):
@@ -1242,14 +1610,26 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x, weights, estimate):
         """Run forward-backward and accumulate weighted sufficient statistics for a batch."""
-        active = [seq for seq in x if seq]
+        sequences = list(x)
+        weights = _validated_weights(
+            weights,
+            len(sequences),
+            "StructuredHMM accumulator weights",
+            require_positive_total=False,
+        )
+        active_indices = np.flatnonzero(weights > 0.0)
+        active = [sequences[index] for index in active_indices]
+        if any(not sequence for sequence in active):
+            raise ValueError("StructuredHMM accumulator data contains an empty positive-weight sequence.")
+        if not active:
+            return
         require_possible_log_evidence(
             estimate.seq_log_density(active),
             context="StructuredHMMAccumulator.seq_update",
         )
-        for seq, w in zip(x, np.asarray(weights, dtype=float)):
-            if not seq:
-                continue
+        for index in active_indices:
+            seq = sequences[index]
+            w = weights[index]
             log_b = estimate._log_b(seq)
             alpha, beta, c, b, gamma, _ = estimate._forward_backward(log_b)
             self.pi_acc += w * gamma[0]
@@ -1263,11 +1643,23 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_initialize(self, x, weights, rng):
         """Initialize sufficient statistics with random soft state responsibilities."""
+        sequences = list(x)
+        weights = _validated_weights(
+            weights,
+            len(sequences),
+            "StructuredHMM initializer weights",
+            require_positive_total=False,
+        )
+        active_indices = np.flatnonzero(weights > 0.0)
+        if any(not sequences[index] for index in active_indices):
+            raise ValueError("StructuredHMM initializer data contains an empty positive-weight sequence.")
+        if not len(active_indices):
+            return
         # no model yet: seed with random soft responsibilities + a random transition accumulator
         self.trans_acc = _add_nested(self.trans_acc, self.transition_proto.random_accumulator(rng))
-        for seq, w in zip(x, np.asarray(weights, dtype=float)):
-            if not seq:
-                continue
+        for index in active_indices:
+            seq = sequences[index]
+            w = weights[index]
             g = rng.dirichlet(np.ones(self.K), len(seq))
             self.pi_acc += w * g[0]
             for k in range(self.K):
@@ -1288,11 +1680,21 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self):
         """Return serialized HMM sufficient statistics."""
-        return (self.pi_acc.copy(), self.trans_acc, [e.value() for e in self.emit], self.nk.copy())
+        return (
+            self.pi_acc.copy(),
+            _copy_nested(self.trans_acc),
+            [e.value() for e in self.emit],
+            self.nk.copy(),
+        )
 
     def from_value(self, x):
         """Restore accumulator state from serialized sufficient statistics."""
-        self.pi_acc, self.trans_acc, emit_vals, self.nk = x[0].copy(), x[1], x[2], x[3].copy()
+        self.pi_acc, self.trans_acc, emit_vals, self.nk = (
+            x[0].copy(),
+            _copy_nested(x[1]),
+            x[2],
+            x[3].copy(),
+        )
         for k in range(self.K):
             self.emit[k].from_value(emit_vals[k])
         return self
@@ -1329,7 +1731,9 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
                 store[self.init_key] = self.pi_acc.copy()
         if self.trans_key is not None:
             store[self.trans_key] = (
-                _add_nested(store[self.trans_key], self.trans_acc) if self.trans_key in store else self.trans_acc
+                _add_nested(store[self.trans_key], self.trans_acc)
+                if self.trans_key in store
+                else _copy_nested(self.trans_acc)
             )
         for e in self.emit:
             if hasattr(e, "key_merge"):
@@ -1344,7 +1748,7 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
             # corrupt every other tied accumulator's counts.
             self.pi_acc = np.asarray(store[self.init_key]).copy()
         if self.trans_key is not None and self.trans_key in store:
-            self.trans_acc = store[self.trans_key]
+            self.trans_acc = _copy_nested(store[self.trans_key])
         for e in self.emit:
             if hasattr(e, "key_replace"):
                 e.key_replace(store)
@@ -1537,20 +1941,41 @@ class InputOutputHMM:
         - ``seq_log_density(obs_seqs, input_seqs)`` -- the explicit two-list API; or
         - ``seq_log_density(records)`` -- one list of ``(obs, input)``-pair sequences (the 5-part contract)."""
         if input_seqs is None:
-            out = []
-            for seq in x:
-                obs = [p[0] for p in seq]
-                inputs = [int(p[1]) for p in seq]
-                out.append(self._forward_backward(self._log_b(obs), inputs)[5])
-            return np.array(out)
-        return np.array([self._forward_backward(self._log_b(o), list(u))[5] for o, u in zip(x, input_seqs)])
+            records = list(x)
+            split = [
+                _validated_io_record(record, self.M, f"InputOutputHMM record {index}")
+                for index, record in enumerate(records)
+            ]
+        else:
+            observations = _validated_sequences(x, "InputOutputHMM observation data")
+            try:
+                raw_inputs = list(input_seqs)
+            except TypeError as exc:
+                raise TypeError("InputOutputHMM input data must be an iterable of input sequences.") from exc
+            if len(raw_inputs) != len(observations):
+                raise ValueError(
+                    "InputOutputHMM observation and input batches must contain the same number of sequences."
+                )
+            split = []
+            for index, (obs, values) in enumerate(zip(observations, raw_inputs)):
+                inputs = _validated_input_symbols(values, self.M, f"InputOutputHMM inputs row {index}")
+                if len(inputs) != len(obs):
+                    raise ValueError(
+                        f"InputOutputHMM inputs row {index} must contain exactly {len(obs)} symbols."
+                    )
+                split.append((obs, inputs))
+        return np.array([self._forward_backward(self._log_b(obs), inputs)[5] for obs, inputs in split])
 
     def _obs_inputs(self, seq, inputs):
         """Split one record into (observations, inputs), accepting both call forms the scoring API uses:
         ``(record)`` -- one sequence of ``(observation, input)`` pairs -- or ``(obs_seq, input_seq)``."""
         if inputs is None:
-            return [p[0] for p in seq], [int(p[1]) for p in seq]
-        return list(seq), [int(u) for u in inputs]
+            return _validated_io_record(seq, self.M, "InputOutputHMM record")
+        observations = _validated_sequences([seq], "InputOutputHMM observation data")[0]
+        symbols = _validated_input_symbols(inputs, self.M, "InputOutputHMM inputs")
+        if len(symbols) != len(observations):
+            raise ValueError(f"InputOutputHMM inputs must contain exactly {len(observations)} symbols.")
+        return observations, symbols
 
     def viterbi(self, seq, inputs=None):
         """Most-likely state path (Viterbi / max-product), conditioned on the input/control sequence:
@@ -1601,49 +2026,138 @@ class InputOutputHMM:
         """Return a sampler for ``(observation, input)``-pair records along a given control sequence."""
         return _IOHMMSampler(self, seed)
 
-    def fit(self, obs_seqs, input_seqs, *, max_its: int = 50, tol: float = 1e-6):
-        """Fit the IOHMM with Baum-Welch using the supplied observation and input sequences."""
-        obs_seqs = [list(o) for o in obs_seqs]
-        input_seqs = [list(u) for u in input_seqs]
-        ll_trace = []
-        for _ in range(int(max_its)):
-            active = [(o, u) for o, u in zip(obs_seqs, input_seqs) if o]
-            require_possible_log_evidence(
-                self.seq_log_density([o for o, _ in active], [u for _, u in active]),
-                context="InputOutputHMM.fit",
-            )
+    def fit(self, obs_seqs, input_seqs, *, max_its: int = 50, tol: float = 1e-6, weights=None):
+        """Fit the IOHMM by weighted Baum-Welch and return a diagnostics-bearing result."""
+        max_its, tol = _validated_fit_controls(max_its, tol)
+        obs_seqs = _validated_sequences(obs_seqs, "InputOutputHMM fit observations")
+        try:
+            raw_inputs = list(input_seqs)
+        except TypeError as exc:
+            raise TypeError("InputOutputHMM fit inputs must be an iterable of input sequences.") from exc
+        if len(raw_inputs) != len(obs_seqs):
+            raise ValueError("InputOutputHMM fit observations and inputs must contain the same number of sequences.")
+        input_seqs = []
+        for index, (observations, values) in enumerate(zip(obs_seqs, raw_inputs)):
+            symbols = _validated_input_symbols(values, self.M, f"InputOutputHMM fit inputs row {index}")
+            if len(symbols) != len(observations):
+                raise ValueError(
+                    f"InputOutputHMM fit inputs row {index} must contain exactly {len(observations)} symbols."
+                )
+            input_seqs.append(symbols)
+        weights = _validated_weights(weights, len(obs_seqs))
+        active_indices = np.flatnonzero(weights > 0.0)
+        ll_trace: list[float] = []
+        iterations = 0
+        converged = False
+        termination_reason = "max_iterations"
+        rollback = None
+
+        for _ in range(max_its):
+            active_obs = [obs_seqs[index] for index in active_indices]
+            active_inputs = [input_seqs[index] for index in active_indices]
+            try:
+                total_ll = _weighted_fit_log_likelihood(
+                    self.seq_log_density(active_obs, active_inputs),
+                    weights[active_indices],
+                    "InputOutputHMM.fit",
+                )
+            except (ImpossibleEvidenceError, ValueError, RuntimeError, FloatingPointError):
+                if rollback is None:
+                    raise
+                self.pi, self.transitions, self.emissions = rollback
+                iterations -= 1
+                termination_reason = "invalid_update_rejected"
+                break
+            if ll_trace:
+                absolute, _ = _fit_delta(ll_trace[-1], total_ll)
+                allowance = 1.0e-8 * max(1.0, abs(ll_trace[-1]))
+                if absolute < -allowance:
+                    if rollback is not None:
+                        self.pi, self.transitions, self.emissions = rollback
+                        iterations -= 1
+                    termination_reason = "non_monotone_update_rejected"
+                    break
+                ll_trace.append(total_ll)
+                if abs(absolute) <= tol * max(1.0, abs(ll_trace[-2])):
+                    converged = True
+                    termination_reason = "converged"
+                    break
+            else:
+                ll_trace.append(total_ll)
+
             trans_accs = [t.new_accumulator() for t in self.transitions]
             pi_acc = np.zeros(self.K)
             emit_accs = [est.accumulator_factory().make() for est in self._emit_est]
             nk = np.zeros(self.K)
-            total_ll = 0.0
-            for o, u in zip(obs_seqs, input_seqs):
-                if not o:
-                    continue
+            for index in active_indices:
+                o = obs_seqs[index]
+                u = input_seqs[index]
+                weight = weights[index]
                 log_b = self._log_b(o)
-                alpha, beta, c, b, gamma, ll = self._forward_backward(log_b, u)
-                total_ll += ll
-                pi_acc += gamma[0]
+                alpha, beta, c, b, gamma, _ = self._forward_backward(log_b, u)
+                pi_acc += weight * gamma[0]
                 for t in range(len(o) - 1):
                     m = u[t]
-                    self.transitions[m].accumulate(trans_accs[m], alpha[t], b[t + 1] * beta[t + 1], c[t + 1])
+                    self.transitions[m].accumulate(
+                        trans_accs[m],
+                        alpha[t],
+                        weight * b[t + 1] * beta[t + 1],
+                        c[t + 1],
+                    )
                 for k in range(self.K):
                     enc = self.emissions[k].dist_to_encoder().seq_encode(o)
-                    emit_accs[k].seq_update(enc, gamma[:, k], self.emissions[k])
-                    nk[k] += gamma[:, k].sum()
+                    state_weights = weight * gamma[:, k]
+                    emit_accs[k].seq_update(enc, state_weights, self.emissions[k])
+                    nk[k] += state_weights.sum()
+            rollback = (self.pi.copy(), list(self.transitions), list(self.emissions))
             self.transitions = [self.transitions[m].estimate(trans_accs[m]) for m in range(self.M)]
-            self.pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else self.pi
+            self.pi = pi_acc / pi_acc.sum()
             self.emissions = [self._emit_est[k].estimate(float(nk[k]), emit_accs[k].value()) for k in range(self.K)]
-            ll_trace.append(total_ll)
-            if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
-                break
-        return self, ll_trace
+            iterations += 1
+
+        if iterations and termination_reason == "max_iterations":
+            try:
+                final_ll = _weighted_fit_log_likelihood(
+                    self.seq_log_density(
+                        [obs_seqs[index] for index in active_indices],
+                        [input_seqs[index] for index in active_indices],
+                    ),
+                    weights[active_indices],
+                    "InputOutputHMM.fit final model",
+                )
+            except (ImpossibleEvidenceError, ValueError, RuntimeError, FloatingPointError):
+                self.pi, self.transitions, self.emissions = rollback
+                iterations -= 1
+                termination_reason = "invalid_update_rejected"
+            else:
+                absolute, _ = _fit_delta(ll_trace[-1], final_ll)
+                allowance = 1.0e-8 * max(1.0, abs(ll_trace[-1]))
+                if absolute < -allowance:
+                    self.pi, self.transitions, self.emissions = rollback
+                    iterations -= 1
+                    termination_reason = "non_monotone_update_rejected"
+                else:
+                    ll_trace.append(final_ll)
+                    if abs(absolute) <= tol * max(1.0, abs(ll_trace[-2])):
+                        converged = True
+                        termination_reason = "converged"
+
+        diagnostics = _fit_receipt(
+            algorithm="input-output-baum-welch",
+            trace=ll_trace,
+            converged=converged,
+            iterations=iterations,
+            termination_reason=termination_reason,
+            n_sequences=len(active_indices),
+            total_weight=float(weights.sum()),
+            approximate=False,
+        )
+        return HMMFitResult(self, ll_trace, diagnostics)
 
     # --- 5-part contract: a record is one (obs, input) sequence = a list of (observation, input) pairs ---
     def log_density(self, seq):
         """Return the log likelihood of one ``(observation, input)`` sequence."""
-        obs = [p[0] for p in seq]
-        inputs = [int(p[1]) for p in seq]
+        obs, inputs = _validated_io_record(seq, self.M, "InputOutputHMM record")
         return self._forward_backward(self._log_b(obs), inputs)[5]
 
     def dist_to_encoder(self):
@@ -1672,7 +2186,9 @@ class _IOHMMSampler:
 
     def sample(self, inputs):
         h = self.hmm
-        u = [int(v) for v in inputs]
+        u = _validated_input_symbols(inputs, h.M, "InputOutputHMM sampler inputs")
+        if not u:
+            raise ValueError("InputOutputHMM sampler inputs must not be empty.")
         mats = [t.as_matrix() for t in h.transitions]
         s = self.rng.choice(h.K, p=h.pi)
         out = []
@@ -1734,16 +2250,25 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x, weights, estimate):
         """Accumulate weighted sufficient statistics from a batch of IOHMM records."""
-        active = [seq for seq in x if seq]
+        records = list(x)
+        weights = _validated_weights(
+            weights,
+            len(records),
+            "IOHMM accumulator weights",
+            require_positive_total=False,
+        )
+        active_indices = np.flatnonzero(weights > 0.0)
+        active = [records[index] for index in active_indices]
+        if not active:
+            return
         require_possible_log_evidence(
             estimate.seq_log_density(active),
             context="IOHMMAccumulator.seq_update",
         )
-        for seq, w in zip(x, np.asarray(weights, dtype=float)):
-            if not seq:
-                continue
-            obs = [p[0] for p in seq]
-            inputs = [int(p[1]) for p in seq]
+        for index in active_indices:
+            seq = records[index]
+            w = weights[index]
+            obs, inputs = _validated_io_record(seq, self.M, f"IOHMM accumulator record {index}")
             log_b = estimate._log_b(obs)
             alpha, beta, c, b, gamma, _ = estimate._forward_backward(log_b, inputs)
             self.pi_acc += w * gamma[0]
@@ -1758,12 +2283,22 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_initialize(self, x, weights, rng):
         """Initialize IOHMM sufficient statistics with random soft responsibilities."""
+        records = list(x)
+        weights = _validated_weights(
+            weights,
+            len(records),
+            "IOHMM initializer weights",
+            require_positive_total=False,
+        )
+        active_indices = np.flatnonzero(weights > 0.0)
+        if not len(active_indices):
+            return
         for m in range(self.M):
             self.trans_accs[m] = _add_nested(self.trans_accs[m], self.transition_protos[m].random_accumulator(rng))
-        for seq, w in zip(x, np.asarray(weights, dtype=float)):
-            if not seq:
-                continue
-            obs = [p[0] for p in seq]
+        for index in active_indices:
+            seq = records[index]
+            w = weights[index]
+            obs, _ = _validated_io_record(seq, self.M, f"IOHMM initializer record {index}")
             g = rng.dirichlet(np.ones(self.K), len(seq))
             self.pi_acc += w * g[0]
             for k in range(self.K):
@@ -1784,11 +2319,21 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self):
         """Return serialized IOHMM sufficient statistics."""
-        return (self.pi_acc.copy(), self.trans_accs, [e.value() for e in self.emit], self.nk.copy())
+        return (
+            self.pi_acc.copy(),
+            _copy_nested(self.trans_accs),
+            [e.value() for e in self.emit],
+            self.nk.copy(),
+        )
 
     def from_value(self, x):
         """Restore accumulator state from serialized IOHMM statistics."""
-        self.pi_acc, self.trans_accs, emit_vals, self.nk = x[0].copy(), x[1], x[2], x[3].copy()
+        self.pi_acc, self.trans_accs, emit_vals, self.nk = (
+            x[0].copy(),
+            _copy_nested(x[1]),
+            x[2],
+            x[3].copy(),
+        )
         for k in range(self.K):
             self.emit[k].from_value(emit_vals[k])
         return self
@@ -1944,44 +2489,110 @@ class ExplicitDurationHMM:
                     trans_contrib[i] += np.exp(log_alpha[t, i] + log_a[i, :] + log_bstar[t + 1, :] - z)
         return float(z), pi_contrib, trans_contrib, dur_contrib, occ
 
-    def fit(self, seqs, *, max_its: int = 50, tol: float = 1e-6):
-        """Baum-Welch (EM) for the explicit-duration HMM: re-estimates emissions, the per-state duration
-        distributions, the (zero-diagonal) transition, and pi. Returns (fitted_hmm, loglik_trace)."""
-        seqs = [list(s) for s in seqs]
-        ll_trace = []
-        for _ in range(int(max_its)):
-            active = [seq for seq in seqs if seq]
-            require_possible_log_evidence(
-                self.seq_log_density(active),
-                context="ExplicitDurationHMM.fit",
-            )
+    def fit(self, seqs, *, max_its: int = 50, tol: float = 1e-6, weights=None):
+        """Fit the explicit-duration HMM by weighted Baum-Welch with a diagnostics receipt."""
+        max_its, tol = _validated_fit_controls(max_its, tol)
+        seqs = _validated_sequences(seqs, "ExplicitDurationHMM fit data")
+        weights = _validated_weights(weights, len(seqs))
+        active_indices = np.flatnonzero(weights > 0.0)
+        ll_trace: list[float] = []
+        iterations = 0
+        converged = False
+        termination_reason = "max_iterations"
+        rollback = None
+
+        for _ in range(max_its):
+            active = [seqs[index] for index in active_indices]
+            try:
+                total_ll = _weighted_fit_log_likelihood(
+                    self.seq_log_density(active),
+                    weights[active_indices],
+                    "ExplicitDurationHMM.fit",
+                )
+            except (ImpossibleEvidenceError, ValueError, RuntimeError, FloatingPointError):
+                if rollback is None:
+                    raise
+                self.pi, self.a, self.dur, self.emissions = rollback
+                iterations -= 1
+                termination_reason = "invalid_update_rejected"
+                break
+            if ll_trace:
+                absolute, _ = _fit_delta(ll_trace[-1], total_ll)
+                allowance = 1.0e-8 * max(1.0, abs(ll_trace[-1]))
+                if absolute < -allowance:
+                    if rollback is not None:
+                        self.pi, self.a, self.dur, self.emissions = rollback
+                        iterations -= 1
+                    termination_reason = "non_monotone_update_rejected"
+                    break
+                ll_trace.append(total_ll)
+                if abs(absolute) <= tol * max(1.0, abs(ll_trace[-2])):
+                    converged = True
+                    termination_reason = "converged"
+                    break
+            else:
+                ll_trace.append(total_ll)
+
             dur_acc = np.zeros((self.K, self.D))
             trans_acc = np.zeros((self.K, self.K))
             pi_acc = np.zeros(self.K)
             emit_accs = [est.accumulator_factory().make() for est in self._emit_est]
             nk = np.zeros(self.K)
-            total_ll = 0.0
-            for seq in seqs:
-                if not seq:
-                    continue
-                ll, pic, trc, drc, occ = self._estep(seq)
-                total_ll += ll
-                pi_acc += pic
-                trans_acc += trc
-                dur_acc += drc
+            for index in active_indices:
+                seq = seqs[index]
+                weight = weights[index]
+                _, pic, trc, drc, occ = self._estep(seq)
+                pi_acc += weight * pic
+                trans_acc += weight * trc
+                dur_acc += weight * drc
                 for k in range(self.K):
                     enc = self.emissions[k].dist_to_encoder().seq_encode(seq)
-                    emit_accs[k].seq_update(enc, occ[:, k], self.emissions[k])
-                    nk[k] += occ[:, k].sum()
-            self.pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else self.pi
+                    state_weights = weight * occ[:, k]
+                    emit_accs[k].seq_update(enc, state_weights, self.emissions[k])
+                    nk[k] += state_weights.sum()
+            rollback = (self.pi.copy(), self.a.copy(), self.dur.copy(), list(self.emissions))
+            self.pi = pi_acc / pi_acc.sum()
             np.fill_diagonal(trans_acc, 0.0)
-            self.a = _row_normalize(trans_acc) if trans_acc.sum() > 0 else self.a
-            self.dur = _row_normalize(dur_acc)
+            self.a = _row_normalize(trans_acc, self.a)
+            self.dur = _row_normalize(dur_acc, self.dur)
             self.emissions = [self._emit_est[k].estimate(float(nk[k]), emit_accs[k].value()) for k in range(self.K)]
-            ll_trace.append(total_ll)
-            if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
-                break
-        return self, ll_trace
+            iterations += 1
+
+        if iterations and termination_reason == "max_iterations":
+            try:
+                final_ll = _weighted_fit_log_likelihood(
+                    self.seq_log_density([seqs[index] for index in active_indices]),
+                    weights[active_indices],
+                    "ExplicitDurationHMM.fit final model",
+                )
+            except (ImpossibleEvidenceError, ValueError, RuntimeError, FloatingPointError):
+                self.pi, self.a, self.dur, self.emissions = rollback
+                iterations -= 1
+                termination_reason = "invalid_update_rejected"
+            else:
+                absolute, _ = _fit_delta(ll_trace[-1], final_ll)
+                allowance = 1.0e-8 * max(1.0, abs(ll_trace[-1]))
+                if absolute < -allowance:
+                    self.pi, self.a, self.dur, self.emissions = rollback
+                    iterations -= 1
+                    termination_reason = "non_monotone_update_rejected"
+                else:
+                    ll_trace.append(final_ll)
+                    if abs(absolute) <= tol * max(1.0, abs(ll_trace[-2])):
+                        converged = True
+                        termination_reason = "converged"
+
+        diagnostics = _fit_receipt(
+            algorithm="explicit-duration-baum-welch",
+            trace=ll_trace,
+            converged=converged,
+            iterations=iterations,
+            termination_reason=termination_reason,
+            n_sequences=len(active_indices),
+            total_weight=float(weights.sum()),
+            approximate=False,
+        )
+        return HMMFitResult(self, ll_trace, diagnostics)
 
     # --- 5-part contract: a record is one observation sequence ---
     def log_density(self, seq):
@@ -2169,14 +2780,26 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x, weights, estimate):
         """Accumulate weighted explicit-duration HMM statistics from a batch."""
-        active = [seq for seq in x if seq]
+        sequences = list(x)
+        weights = _validated_weights(
+            weights,
+            len(sequences),
+            "ExplicitDurationHMM accumulator weights",
+            require_positive_total=False,
+        )
+        active_indices = np.flatnonzero(weights > 0.0)
+        active = [sequences[index] for index in active_indices]
+        if any(not sequence for sequence in active):
+            raise ValueError("ExplicitDurationHMM accumulator data contains an empty positive-weight sequence.")
+        if not active:
+            return
         require_possible_log_evidence(
             estimate.seq_log_density(active),
             context="EDHMMAccumulator.seq_update",
         )
-        for seq, w in zip(x, np.asarray(weights, dtype=float)):
-            if not seq:
-                continue
+        for index in active_indices:
+            seq = sequences[index]
+            w = weights[index]
             _, pic, trc, drc, occ = estimate._estep(list(seq))
             self.pi_acc += w * pic
             self.trans_acc += w * trc
@@ -2189,12 +2812,24 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_initialize(self, x, weights, rng):
         """Initialize explicit-duration HMM statistics with random soft responsibilities."""
+        sequences = list(x)
+        weights = _validated_weights(
+            weights,
+            len(sequences),
+            "ExplicitDurationHMM initializer weights",
+            require_positive_total=False,
+        )
+        active_indices = np.flatnonzero(weights > 0.0)
+        if any(not sequences[index] for index in active_indices):
+            raise ValueError("ExplicitDurationHMM initializer data contains an empty positive-weight sequence.")
+        if not len(active_indices):
+            return
         self.trans_acc += rng.random((self.K, self.K))
         np.fill_diagonal(self.trans_acc, 0.0)
         self.dur_acc += rng.random((self.K, self.D))
-        for seq, w in zip(x, np.asarray(weights, dtype=float)):
-            if not seq:
-                continue
+        for index in active_indices:
+            seq = sequences[index]
+            w = weights[index]
             g = rng.dirichlet(np.ones(self.K), len(seq))
             self.pi_acc += w * g[0]
             for k in range(self.K):
