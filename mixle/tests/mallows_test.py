@@ -7,6 +7,7 @@ import numpy as np
 
 from mixle.inference.estimation import fit
 from mixle.stats import MallowsDistribution
+from mixle.stats.rankings.mallows import MallowsDataEncoder
 
 
 def _orderings(n):
@@ -128,6 +129,50 @@ class MallowsTestCase(unittest.TestCase):
             MallowsDistribution([0, 1, 2], theta=-1.0)
         with self.assertRaises(ValueError):
             MallowsDistribution([0, 0, 1])
+
+    def test_vector_scoring_and_encoder_dimension_contracts(self):
+        dist = MallowsDistribution([0, 1, 2])
+        for value in ([0, 0, 1], [0, 1], [0, 1, 4], [0.5, 1.0, 2.0]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                dist.seq_log_density(np.asarray([value]))
+        self.assertEqual(MallowsDataEncoder(3), MallowsDataEncoder(3))
+        self.assertNotEqual(MallowsDataEncoder(3), MallowsDataEncoder(4))
+        self.assertIn("dim=3", str(MallowsDataEncoder(3)))
+
+    def test_distribution_owns_immutable_center(self):
+        center = np.asarray([2, 0, 1])
+        dist = MallowsDistribution(center)
+        center[:] = [0, 1, 2]
+        np.testing.assert_array_equal(dist.sigma0, [2, 0, 1])
+        with self.assertRaises(ValueError):
+            dist.sigma0[0] = 0
+
+    def test_accumulator_validates_evidence_and_owns_state(self):
+        acc = MallowsDistribution([0, 1, 2]).estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.update([0, 0, 1], 1.0, None)
+        with self.assertRaises(ValueError):
+            acc.seq_update(np.asarray([[0, 1, 2]]), np.asarray([-1.0]), None)
+        with self.assertRaises(ValueError):
+            acc.seq_update(np.asarray([[0, 1, 2]]), np.asarray([1.0, 2.0]), None)
+        acc.update([0, 1, 2], 1.0, None)
+        _, precede = acc.value()
+        precede[:] = 0.0
+        self.assertGreater(acc.value()[1].sum(), 0.0)
+        with self.assertRaises(ValueError):
+            acc.from_value((1.0, np.zeros((3, 3))))
+
+    def test_pseudo_count_and_controls_are_enforced(self):
+        dist = MallowsDistribution([2, 0, 1], theta=1.0)
+        estimate = dist.estimator(pseudo_count=2.0).estimate(None, (0.0, np.zeros((3, 3))))
+        np.testing.assert_array_equal(estimate.sigma0, dist.sigma0)
+        self.assertGreater(estimate.theta, 0.0)
+        with self.assertRaises(ValueError):
+            dist.estimator(pseudo_count=-1.0)
+        with self.assertRaises(ValueError):
+            dist.sampler().sample(-1)
+        with self.assertRaises(ValueError):
+            dist.sampler().sample(1.5)
 
 
 if __name__ == "__main__":
