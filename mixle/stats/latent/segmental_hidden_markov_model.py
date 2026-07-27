@@ -13,6 +13,7 @@ can all score the same raw segment observations.
 
 import math
 from collections.abc import Sequence
+from numbers import Real
 from typing import Any
 
 import numpy as np
@@ -28,6 +29,7 @@ from mixle.stats.combinator.null_dist import (
     NullDistribution,
     NullEstimator,
 )
+from mixle.stats.compute.mixture_evidence import validated_probability_vector
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -46,6 +48,99 @@ from mixle.stats.latent.markov_stopping import (
 )
 from mixle.stats.sequences.markov_chain import MarkovChainDistribution
 from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias, require
+from mixle.utils.vector import require_possible_log_evidence
+
+
+def _owned_segmental_sequence(values: Any, label: str, *, size: int | None = None) -> list[Any]:
+    """Return an owned non-empty sequence with optional exact arity."""
+    try:
+        owned = list(values)
+    except TypeError as exc:
+        raise TypeError(f"{label} must be an iterable.") from exc
+    if not owned:
+        raise ValueError(f"{label} must not be empty.")
+    if size is not None and len(owned) != size:
+        raise ValueError(f"{label} must contain exactly {size} entries.")
+    return owned
+
+
+def _validated_segmental_transitions(values: Any, n_states: int) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Return an owned stochastic transition matrix and explicit zero rows."""
+    try:
+        transitions = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("segmental HMM transitions must be a numeric matrix.") from exc
+    expected = (n_states, n_states)
+    if transitions.shape != expected:
+        raise ValueError(f"segmental HMM transitions must have shape {expected}, got {transitions.shape}.")
+    if np.any(~np.isfinite(transitions)) or np.any(transitions < 0.0):
+        raise ValueError("segmental HMM transitions must contain finite non-negative probabilities.")
+    row_sums = transitions.sum(axis=1)
+    zero_rows = np.flatnonzero(row_sums == 0.0)
+    nonzero = row_sums != 0.0
+    if not np.allclose(row_sums[nonzero], 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError("segmental HMM transition rows must sum to one.")
+    return transitions.copy(), tuple(int(index) for index in zero_rows)
+
+
+def _reachable_segmental_states(initial: np.ndarray, transitions: np.ndarray) -> np.ndarray:
+    """Return states graph-reachable from positive initial mass."""
+    reachable = initial > 0.0
+    frontier = list(np.flatnonzero(reachable))
+    while frontier:
+        state = frontier.pop()
+        for child in np.flatnonzero(transitions[state] > 0.0):
+            if not reachable[child]:
+                reachable[child] = True
+                frontier.append(int(child))
+    return reachable
+
+
+def _validated_segmental_pseudo_count(value: Any) -> tuple[float | None, float | None]:
+    """Return finite non-negative initial/transition pseudo-counts."""
+    value = broadcast_pseudo_count(value, 2)
+    if value is None:
+        return (None, None)
+    try:
+        controls = tuple(value)
+    except TypeError as exc:
+        raise TypeError("SegmentalHiddenMarkovEstimator pseudo_count must be a scalar or pair.") from exc
+    if len(controls) != 2:
+        raise ValueError("SegmentalHiddenMarkovEstimator pseudo_count must contain exactly two entries.")
+    result: list[float | None] = []
+    for index, control in enumerate(controls):
+        if control is None:
+            result.append(None)
+        elif isinstance(control, bool) or not isinstance(control, Real):
+            raise TypeError(f"SegmentalHiddenMarkovEstimator pseudo_count[{index}] must be real or None.")
+        elif not np.isfinite(float(control)) or float(control) < 0.0:
+            raise ValueError(f"SegmentalHiddenMarkovEstimator pseudo_count[{index}] must be finite and non-negative.")
+        else:
+            result.append(float(control))
+    return result[0], result[1]
+
+
+def _validated_segmental_count_array(values: Any, label: str, shape: tuple[int, ...]) -> np.ndarray:
+    """Return an owned finite non-negative sufficient-statistic array."""
+    try:
+        counts = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{label} must be a numeric array.") from exc
+    if counts.shape != shape:
+        raise ValueError(f"{label} must have shape {shape}, got {counts.shape}.")
+    if np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
+        raise ValueError(f"{label} must contain finite non-negative values.")
+    return counts.copy()
+
+
+def _validated_segment_count(value: Any) -> int:
+    """Return an exact non-negative sampled segment count."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError("segmental HMM sampled length must be an integer.")
+    result = int(value)
+    if result < 0:
+        raise ValueError("segmental HMM sampled length must be non-negative.")
+    return result
 
 
 def _forward_log(log_w: np.ndarray, log_a: np.ndarray, log_emit: np.ndarray) -> float:
@@ -81,9 +176,6 @@ def _forward_backward(
 
     ll = float(logsumexp(alpha[-1]))
     if not np.isfinite(ll):
-        gamma.fill(1.0 / float(k))
-        if n > 1:
-            xi_sum.fill(float(n - 1) / float(k * k))
         return ll, gamma, xi_sum
 
     for t in range(n - 2, -1, -1):
@@ -164,30 +256,35 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
     ) -> None:
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
         transitions = require("transitions", transitions, default=MISSING)
-        self.emissions = list(emissions)
+        context = "SegmentalHiddenMarkovModelDistribution"
+        self.emissions = _owned_segmental_sequence(emissions, f"{context} emissions")
         self.n_states = len(self.emissions)
-        self.w = np.asarray(w, dtype=np.float64)
-        if self.w.shape[0] != self.n_states:
-            raise ValueError("initial probability vector length must match number of emissions.")
-        self.w = self.w / self.w.sum()
-        self.transitions = np.asarray(transitions, dtype=np.float64).reshape((self.n_states, self.n_states))
-        row_sum = self.transitions.sum(axis=1, keepdims=True)
-        bad = row_sum.flatten() <= 0.0
-        if np.any(bad):
-            self.transitions[bad, :] = 1.0 / float(self.n_states)
-            row_sum = self.transitions.sum(axis=1, keepdims=True)
-        self.transitions = self.transitions / row_sum
+        self.w = validated_probability_vector(w, f"{context} initial probabilities", size=self.n_states)
+        self.terminal_states = validated_terminal_states(
+            terminal_states,
+            self.n_states,
+            context=context,
+        )
+        self.transitions, zero_transition_rows = _validated_segmental_transitions(transitions, self.n_states)
+        reachable = _reachable_segmental_states(self.w, self.transitions)
+        reachable_zero_rows = tuple(
+            index
+            for index in zero_transition_rows
+            if reachable[index] and (self.terminal_states is None or index not in self.terminal_states)
+        )
+        if reachable_zero_rows:
+            raise ValueError(
+                f"{context} reachable non-terminal states cannot have zero transition rows: {reachable_zero_rows}."
+            )
+        self.unreachable_transition_rows = zero_transition_rows
+        for index in zero_transition_rows:
+            self.transitions[index, index] = 1.0
         with np.errstate(divide="ignore"):
             self.log_w = np.log(self.w)
             self.log_transitions = np.log(self.transitions)
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
         self.null_len_dist = supports(self.len_dist, Neutral)
         self.name = name
-        self.terminal_states = validated_terminal_states(
-            terminal_states,
-            self.n_states,
-            context="SegmentalHiddenMarkovModelDistribution",
-        )
         if self.terminal_states is not None:
             self._terminal_mask = np.zeros(self.n_states, dtype=bool)
             self._terminal_mask[list(self.terminal_states)] = True
@@ -195,7 +292,7 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
                 self.w,
                 self.transitions,
                 self.terminal_states,
-                context="SegmentalHiddenMarkovModelDistribution",
+                context=context,
             )
 
     def __str__(self) -> str:
@@ -371,7 +468,7 @@ class SegmentalHiddenMarkovSampler(DistributionSampler):
                 last_state=z,
             )
             return [self.obs_samplers[s].sample() for s in states]
-        n = self.len_sampler.sample()
+        n = _validated_segment_count(self.len_sampler.sample())
         states = self.state_sampler.sample_seq(n)
         return [self.obs_samplers[s].sample() for s in states]
 
@@ -386,13 +483,19 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         name: str | None = None,
     ) -> None:
-        self.accumulators = list(accumulators)
+        self.accumulators = _owned_segmental_sequence(
+            accumulators,
+            "SegmentalHiddenMarkovAccumulator state accumulators",
+        )
         self.num_states = len(self.accumulators)
         self.init_counts = np.zeros(self.num_states, dtype=np.float64)
         self.state_counts = np.zeros(self.num_states, dtype=np.float64)
         self.trans_counts = np.zeros((self.num_states, self.num_states), dtype=np.float64)
         self.len_accumulator = len_accumulator if len_accumulator is not None else NullAccumulator()
-        self.init_key, self.trans_key, self.state_key = keys if keys is not None else (None, None, None)
+        keys = (None, None, None) if keys is None else tuple(keys)
+        if len(keys) != 3:
+            raise ValueError("SegmentalHiddenMarkovAccumulator keys must contain exactly three entries.")
+        self.init_key, self.trans_key, self.state_key = keys
         self.name = name
 
         # When _track_ll is enabled, seq_update accumulates the per-sequence data
@@ -460,6 +563,10 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         estimate: SegmentalHiddenMarkovModelDistribution,
     ) -> None:
         """Update encoded-sequence statistics with Baum-Welch posteriors."""
+        require_possible_log_evidence(
+            estimate.seq_log_density(x),
+            context="SegmentalHiddenMarkovAccumulator.seq_update",
+        )
         idx, sz, enc_by_state, len_enc = x
         total = len(idx)
         log_emit = np.empty((total, self.num_states), dtype=np.float64)
@@ -517,6 +624,10 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         """
         from mixle.stats.latent.hidden_markov import hmm_engine_forward_backward, hmm_pad_log_emissions
 
+        require_possible_log_evidence(
+            estimate.seq_log_density(x),
+            context="SegmentalHiddenMarkovAccumulator.seq_update_engine",
+        )
         idx, sz, enc_by_state, len_enc = x
         sz = np.asarray(sz)
         total = len(idx)
@@ -649,9 +760,14 @@ class SegmentalHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         name: str | None = None,
     ) -> None:
-        self.factories = list(factories)
+        self.factories = _owned_segmental_sequence(
+            factories,
+            "SegmentalHiddenMarkovAccumulatorFactory state factories",
+        )
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
-        self.keys = keys
+        self.keys = (None, None, None) if keys is None else tuple(keys)
+        if len(self.keys) != 3:
+            raise ValueError("SegmentalHiddenMarkovAccumulatorFactory keys must contain exactly three entries.")
         self.name = name
 
     def make(self) -> SegmentalHiddenMarkovAccumulator:
@@ -673,14 +789,22 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         terminal_states: set[int] | Sequence[int] | None = None,
     ) -> None:
-        self.estimators = list(estimators)
+        self.estimators = _owned_segmental_sequence(
+            estimators,
+            "SegmentalHiddenMarkovEstimator estimators",
+        )
         self.num_states = len(self.estimators)
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
-        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
-        self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None)
-        self.keys = keys
+        self.pseudo_count = _validated_segmental_pseudo_count(pseudo_count)
+        self.keys = (None, None, None) if keys is None else tuple(keys)
+        if len(self.keys) != 3:
+            raise ValueError("SegmentalHiddenMarkovEstimator keys must contain exactly three entries.")
         self.name = name
-        self.terminal_states = terminal_states
+        self.terminal_states = validated_terminal_states(
+            terminal_states,
+            self.num_states,
+            context="SegmentalHiddenMarkovEstimator",
+        )
 
     def accumulator_factory(self) -> SegmentalHiddenMarkovAccumulatorFactory:
         """Return an accumulator factory for Baum-Welch sufficient statistics."""
@@ -697,7 +821,40 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
         suff_stat: tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Any], Any | None],
     ) -> SegmentalHiddenMarkovModelDistribution:
         """Estimate initial, transition, emission, and length distributions."""
-        num_states, init_counts, state_counts, trans_counts, emission_ss, len_ss = suff_stat
+        try:
+            values = tuple(suff_stat)
+        except TypeError as exc:
+            raise TypeError("segmental HMM sufficient statistics must contain six entries.") from exc
+        if len(values) != 6:
+            raise ValueError("segmental HMM sufficient statistics must contain exactly six entries.")
+        num_states, init_counts, state_counts, trans_counts, emission_ss, len_ss = values
+        if isinstance(num_states, bool) or not isinstance(num_states, (int, np.integer)):
+            raise TypeError("segmental HMM sufficient-statistic state count must be an integer.")
+        if int(num_states) != self.num_states:
+            raise ValueError(
+                f"segmental HMM sufficient-statistic state count {num_states} does not match {self.num_states}."
+            )
+        num_states = self.num_states
+        init_counts = _validated_segmental_count_array(
+            init_counts,
+            "segmental HMM initial counts",
+            (num_states,),
+        )
+        state_counts = _validated_segmental_count_array(
+            state_counts,
+            "segmental HMM state counts",
+            (num_states,),
+        )
+        trans_counts = _validated_segmental_count_array(
+            trans_counts,
+            "segmental HMM transition counts",
+            (num_states, num_states),
+        )
+        emission_ss = _owned_segmental_sequence(
+            emission_ss,
+            "segmental HMM emission sufficient statistics",
+            size=num_states,
+        )
         emissions = [self.estimators[k].estimate(state_counts[k], emission_ss[k]) for k in range(num_states)]
         len_dist = self.len_estimator.estimate(nobs, len_ss)
 
@@ -712,11 +869,15 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
         else:
             transitions = trans_counts.copy()
         row_sum = transitions.sum(axis=1, keepdims=True)
-        bad = row_sum.flatten() <= 0.0
-        if np.any(bad):
-            transitions[bad, :] = 1.0
-            row_sum = transitions.sum(axis=1, keepdims=True)
-        transitions = transitions / row_sum
+        empty_rows = row_sum[:, 0] == 0.0
+        transitions = np.divide(
+            transitions,
+            row_sum,
+            out=np.zeros_like(transitions),
+            where=row_sum > 0.0,
+        )
+        empty_indices = np.flatnonzero(empty_rows)
+        transitions[empty_indices, empty_indices] = 1.0
 
         return SegmentalHiddenMarkovModelDistribution(
             emissions, w, transitions, len_dist=len_dist, name=self.name, terminal_states=self.terminal_states
@@ -731,7 +892,10 @@ class SegmentalHiddenMarkovDataEncoder(DataSequenceEncoder):
         emission_encoders: Sequence[DataSequenceEncoder],
         len_encoder: DataSequenceEncoder | None = NullDataEncoder(),
     ) -> None:
-        self.emission_encoders = list(emission_encoders)
+        self.emission_encoders = _owned_segmental_sequence(
+            emission_encoders,
+            "SegmentalHiddenMarkovDataEncoder emission encoders",
+        )
         self.len_encoder = len_encoder if len_encoder is not None else NullDataEncoder()
 
     def __str__(self) -> str:
@@ -757,6 +921,27 @@ class SegmentalHiddenMarkovDataEncoder(DataSequenceEncoder):
         enc_by_state = tuple(enc.seq_encode(flat) for enc in self.emission_encoders)
         len_enc = None if supports(self.len_encoder, Neutral) else self.len_encoder.seq_encode(lengths)
         return idx, lengths, enc_by_state, len_enc
+
+    def row_count(self, x: Any) -> int:
+        """Return and validate the number of encoded segment sequences."""
+        if not isinstance(x, tuple) or len(x) != 4:
+            raise ValueError("segmental HMM encoding must be a four-slot payload.")
+        idx, lengths, enc_by_state, len_enc = x
+        lengths = np.asarray(lengths)
+        if lengths.ndim != 1 or np.any(lengths < 0):
+            raise ValueError("segmental HMM encoded lengths must be one-dimensional and non-negative.")
+        total = int(lengths.sum())
+        if np.asarray(idx).shape != (total,):
+            raise ValueError("segmental HMM node-to-sequence indices do not match encoded lengths.")
+        if len(enc_by_state) != len(self.emission_encoders):
+            raise ValueError("segmental HMM encoded emission-state arity does not match the encoder.")
+        for encoder, encoded in zip(self.emission_encoders, enc_by_state):
+            if encoder.row_count(encoded) != total:
+                raise ValueError("segmental HMM encoded emission rows do not match the flattened segment count.")
+        count = int(lengths.size)
+        if len_enc is not None and self.len_encoder.row_count(len_enc) != count:
+            raise ValueError("segmental HMM encoded length rows do not match the sequence count.")
+        return count
 
 
 SegmentalHiddenMarkovDistribution = SegmentalHiddenMarkovModelDistribution
