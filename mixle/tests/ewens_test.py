@@ -98,6 +98,12 @@ class EwensTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             dist.sampler().sample(1.5)
 
+    def test_extreme_finite_theta_has_a_stable_normalizer(self):
+        dist = EwensDistribution(3, theta=1.0e308)
+        self.assertTrue(math.isfinite(dist.log_z))
+        self.assertLessEqual(dist.log_density([0, 1, 2]), 0.0)
+        self.assertTrue(math.isfinite(dist.log_density([1, 0, 2])))
+
 
 if __name__ == "__main__":
     unittest.main()

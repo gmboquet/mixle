@@ -1,6 +1,7 @@
 """Tests for the Mallows permutation distribution (normalization, distance, sampling, estimation)."""
 
 import itertools
+import math
 import unittest
 
 import numpy as np
@@ -173,6 +174,11 @@ class MallowsTestCase(unittest.TestCase):
             dist.sampler().sample(-1)
         with self.assertRaises(ValueError):
             dist.sampler().sample(1.5)
+
+    def test_near_zero_theta_is_the_continuous_uniform_limit(self):
+        dist = MallowsDistribution([0, 1, 2, 3], theta=1.0e-309)
+        self.assertAlmostEqual(dist.log_z, math.log(24.0), places=12)
+        self.assertAlmostEqual(dist.density([3, 2, 1, 0]), 1.0 / 24.0, places=12)
 
 
 if __name__ == "__main__":

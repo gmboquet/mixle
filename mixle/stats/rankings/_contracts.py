@@ -75,6 +75,38 @@ def sample_size(size: Any | None) -> int | None:
     return None if size is None else nonnegative_integer(size, label="sample size")
 
 
+def log_truncated_geometric_normalizer(theta: float, maximum: int) -> float:
+    """Return ``log(sum(exp(-theta*k), k=0..maximum))`` without near-zero cancellation."""
+    if maximum <= 0:
+        return 0.0
+    if theta < 0.0 or not math.isfinite(theta):
+        raise ValueError("theta must be finite and nonnegative.")
+    if theta == 0.0:
+        return math.log(maximum + 1)
+    return math.log(-math.expm1(-(maximum + 1) * theta)) - math.log(-math.expm1(-theta))
+
+
+def truncated_geometric_mean(theta: float, maximum: int) -> float:
+    """Return the mean of the truncated-geometric law on ``0..maximum`` stably."""
+    if maximum <= 0:
+        return 0.0
+    if theta < 0.0 or not math.isfinite(theta):
+        raise ValueError("theta must be finite and nonnegative.")
+    if theta == 0.0:
+        return maximum / 2.0
+    if theta < 1.0e-5:
+        # The quadratic term vanishes by symmetry; the remainder is O(theta**3).
+        return maximum / 2.0 - theta * maximum * (maximum + 2.0) / 12.0
+
+    def inverse_expm1(value: float) -> float:
+        if value > 50.0:
+            exp_negative = math.exp(-value)
+            return exp_negative / (1.0 - exp_negative)
+        return 1.0 / math.expm1(value)
+
+    return inverse_expm1(theta) - (maximum + 1) * inverse_expm1((maximum + 1) * theta)
+
+
 def permutation(value: Any, dim: int, *, label: str = "ordering") -> np.ndarray:
     """Return one exact permutation of the declared model support."""
     return _validate_permutation(value, label=label, expected_dim=dim)
