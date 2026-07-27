@@ -70,6 +70,38 @@ def validated_row_probability_matrix(values: Any, label: str, *, shape: tuple[in
     return probabilities.copy()
 
 
+def validated_column_probability_matrix(values: Any, label: str, *, shape: tuple[int, int]) -> np.ndarray:
+    """Return an owned finite non-negative matrix whose columns are probability simplexes."""
+    try:
+        probabilities = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{label} must be a numeric column-probability matrix.") from exc
+    if probabilities.shape != shape:
+        raise ValueError(f"{label} must have shape {shape}, got {probabilities.shape}.")
+    if np.any(~np.isfinite(probabilities)) or np.any(probabilities < 0.0):
+        raise ValueError(f"{label} must contain finite non-negative probabilities.")
+    column_sums = probabilities.sum(axis=0)
+    if not np.allclose(column_sums, 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError(f"{label} columns must each sum to one.")
+    return probabilities.copy()
+
+
+def validated_joint_probability_matrix(values: Any, label: str, *, shape: tuple[int, int]) -> np.ndarray:
+    """Return an owned non-empty probability simplex arranged as a fixed-shape matrix."""
+    try:
+        probabilities = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{label} must be a numeric joint-probability matrix.") from exc
+    if probabilities.shape != shape:
+        raise ValueError(f"{label} must have shape {shape}, got {probabilities.shape}.")
+    if np.any(~np.isfinite(probabilities)) or np.any(probabilities < 0.0):
+        raise ValueError(f"{label} must contain finite non-negative probabilities.")
+    total = float(probabilities.sum())
+    if not np.isclose(total, 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError(f"{label} must sum to one, got {total!r}.")
+    return probabilities.copy()
+
+
 def normalize_mixture_log_scores(weighted_log_scores: Any) -> MixtureEvidence:
     """Normalize a NumPy ``(rows, components)`` weighted log-score matrix.
 

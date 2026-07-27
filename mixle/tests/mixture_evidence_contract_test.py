@@ -196,6 +196,92 @@ class MixtureEvidenceContractTest(unittest.TestCase):
                 snapshot[0][...] = 99.0
                 np.testing.assert_array_equal(accumulator.comp_counts, np.full_like(accumulator.comp_counts, 2.0))
 
+    def test_joint_mixture_stores_one_owned_coherent_joint_law(self):
+        components1 = [
+            stats.CategoricalDistribution({"a": 1.0}),
+            stats.CategoricalDistribution({"b": 1.0}),
+        ]
+        components2 = [
+            stats.CategoricalDistribution({0: 1.0}),
+            stats.CategoricalDistribution({1: 1.0}),
+        ]
+        joint = np.asarray([[0.3, 0.1], [0.2, 0.4]])
+        model = stats.JointMixtureDistribution(components1, components2, joint_weights=joint)
+
+        joint[:] = [[1.0, 0.0], [0.0, 0.0]]
+        components1.clear()
+        components2.clear()
+
+        expected = np.asarray([[0.3, 0.1], [0.2, 0.4]])
+        np.testing.assert_array_equal(model.joint_weights, expected)
+        np.testing.assert_allclose(model.w1[:, None] * model.taus12, expected)
+        np.testing.assert_allclose(model.taus21 * model.w2[None, :], expected)
+        self.assertEqual(len(model.components1), 2)
+        self.assertEqual(len(model.components2), 2)
+
+    def test_joint_mixture_reconciles_legacy_contradictory_reverse_law(self):
+        components = [
+            stats.CategoricalDistribution({"a": 1.0}),
+            stats.CategoricalDistribution({"b": 1.0}),
+        ]
+        with self.assertWarnsRegex(DeprecationWarning, "different joint law"):
+            model = stats.JointMixtureDistribution(
+                components,
+                components,
+                w1=[0.6, 0.4],
+                w2=[0.5, 0.5],
+                taus12=[[0.7, 0.3], [0.2, 0.8]],
+                taus21=[[0.7, 0.2], [0.3, 0.8]],
+            )
+        expected = np.asarray([[0.42, 0.18], [0.08, 0.32]])
+        np.testing.assert_allclose(model.joint_weights, expected)
+        np.testing.assert_allclose(model.w1[:, None] * model.taus12, expected)
+        np.testing.assert_allclose(model.taus21 * model.w2[None, :], expected)
+
+    def test_joint_mixture_rejects_invalid_joint_geometry(self):
+        component = stats.CategoricalDistribution({"a": 1.0})
+        for joint in ([[0.5]], [[np.nan]], [[-0.5]], [[0.4, 0.6]]):
+            with self.subTest(joint=joint):
+                with self.assertRaises(ValueError):
+                    stats.JointMixtureDistribution([component], [component], joint_weights=joint)
+        with self.assertRaises(TypeError):
+            stats.JointMixtureDistribution(
+                [component],
+                [component],
+                w1=[1.0],
+                w2=[1.0],
+                taus12=[[1.0]],
+                taus21=[[1.0]],
+                joint_weights=[[1.0]],
+            )
+
+    def test_joint_mixture_impossible_rows_do_not_create_statistics(self):
+        model = stats.JointMixtureDistribution(
+            [stats.CategoricalDistribution({"a": 1.0})],
+            [stats.CategoricalDistribution({0: 1.0})],
+            joint_weights=[[1.0]],
+        )
+        enc = model.dist_to_encoder().seq_encode([("outside", 1)])
+        self.assertEqual(model.log_density(("outside", 1)), -np.inf)
+        np.testing.assert_array_equal(model.seq_log_density(enc), [-np.inf])
+
+        accumulator = model.estimator().accumulator_factory().make()
+        accumulator.seq_update(enc, np.ones(1), model)
+        np.testing.assert_array_equal(accumulator.comp_counts1, [0.0])
+        np.testing.assert_array_equal(accumulator.comp_counts2, [0.0])
+        np.testing.assert_array_equal(accumulator.joint_counts, [[0.0]])
+
+        accumulator.comp_counts1[:] = 1.0
+        accumulator.comp_counts2[:] = 2.0
+        accumulator.joint_counts[:] = 3.0
+        snapshot = accumulator.value()
+        snapshot[0][:] = 11.0
+        snapshot[1][:] = 12.0
+        snapshot[2][:] = 13.0
+        np.testing.assert_array_equal(accumulator.comp_counts1, [1.0])
+        np.testing.assert_array_equal(accumulator.comp_counts2, [2.0])
+        np.testing.assert_array_equal(accumulator.joint_counts, [[3.0]])
+
     def test_semi_supervised_prior_requires_exact_finite_entries(self):
         model = stats.SemiSupervisedMixtureDistribution(
             [stats.CategoricalDistribution({"a": 1.0}), stats.CategoricalDistribution({"b": 1.0})],

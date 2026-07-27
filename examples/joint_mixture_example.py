@@ -19,12 +19,12 @@ if __name__ == '__main__':
     d22 = SequenceDistribution(CompositeDistribution([GaussianDistribution(mu= 0.0, sigma2=1.0), GammaDistribution(3.0, 3.0)]), PoissonDistribution(3.0), len_normalized=True)
     d23 = SequenceDistribution(CompositeDistribution([GaussianDistribution(mu= 6.0, sigma2=1.0), GammaDistribution(1.0, 3.0)]), PoissonDistribution(3.0), len_normalized=True)
 
-    taus12 = [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]]
-    taus21 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-    w1     = [0.6, 0.3, 0.1]
-    w2     = [0.7, 0.2, 0.1]
-
-    dist     = JointMixtureDistribution([d11, d12, d13], [d21, d22, d23], w1, w2, taus12, taus21)
+    joint_weights = [[0.48, 0.06, 0.06], [0.03, 0.24, 0.03], [0.01, 0.01, 0.08]]
+    dist = JointMixtureDistribution(
+        [d11, d12, d13],
+        [d21, d22, d23],
+        joint_weights=joint_weights,
+    )
 
 
     sampler  = dist.sampler(seed=1)
