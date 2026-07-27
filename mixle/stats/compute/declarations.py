@@ -114,6 +114,18 @@ class DistributionDeclaration:
             if getattr(suff_stat, "schema_version", None) != 1:
                 raise ValueError("%s expected sequence-statistics schema version 1." % self.name)
             suff_stat = (suff_stat.elements, suff_stat.lengths)
+        if (
+            hasattr(suff_stat, "branches")
+            and hasattr(suff_stat, "default_nobs")
+            and hasattr(suff_stat, "given_nobs")
+        ):
+            if getattr(suff_stat, "schema_version", None) != 1:
+                raise ValueError("%s expected conditional-statistics schema version 1." % self.name)
+            suff_stat = (
+                {branch.key: branch.statistic for branch in suff_stat.branches},
+                suff_stat.default,
+                suff_stat.given,
+            )
         if len(self.statistics) == 1:
             spec = self.statistics[0]
             if spec.kind == "choice_child_stats" and hasattr(suff_stat, "branches"):

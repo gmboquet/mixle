@@ -188,13 +188,11 @@ class ConditionalEnumeratorTestCase(unittest.TestCase):
         self.assertEqual(set(as_dict), {("a", "x"), ("b", "y"), ("c", "q")})
         self.assertAlmostEqual(as_dict[("c", "q")], np.log(0.2), places=10)
 
-    def test_missing_key_without_default_contributes_nothing(self) -> None:
+    def test_missing_key_without_default_is_rejected(self) -> None:
         given = CategoricalDistribution({"a": 0.5, "c": 0.5})
         dmap = {"a": CategoricalDistribution({"x": 0.9, "y": 0.1})}
-        dist = ConditionalDistribution(dmap, given_dist=given)
-
-        items = dist.enumerator().top_k(10)
-        self.assertEqual({v for v, _ in items}, {("a", "x"), ("a", "y")})
+        with self.assertRaisesRegex(ValueError, "no conditional branch or default"):
+            ConditionalDistribution(dmap, given_dist=given)
 
     def test_null_given_fails_fast(self) -> None:
         dist = ConditionalDistribution({"a": CategoricalDistribution({"x": 1.0})})

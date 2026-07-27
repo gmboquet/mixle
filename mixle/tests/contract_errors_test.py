@@ -47,7 +47,7 @@ def _mixture_encoder():
 
 
 def _conditional_encoder():
-    return stats.ConditionalDistribution({"a": _GAUSS}, given_dist=_CAT_AB).dist_to_encoder()
+    return stats.ConditionalDistribution({"a": _GAUSS, "b": _GAUSS}, given_dist=_CAT_AB).dist_to_encoder()
 
 
 def _optional_encoder():
@@ -67,7 +67,22 @@ def _mixture_estimator():
 
 
 def _conditional_estimator():
-    return stats.ConditionalDistribution({"a": _GAUSS}, given_dist=_CAT_AB).estimator()
+    return stats.ConditionalDistribution({"a": _GAUSS, "b": _GAUSS}, given_dist=_CAT_AB).estimator()
+
+
+def _conditional_unknown_statistics():
+    zero = _GAUSS.estimator().accumulator_factory().make().value()
+    return stats.ConditionalStatistics(
+        1,
+        (
+            stats.ConditionalBranchStatistics("a", 0.0, zero),
+            stats.ConditionalBranchStatistics("unknown-key", 0.0, zero),
+        ),
+        0.0,
+        None,
+        0.0,
+        _CAT_AB.estimator().accumulator_factory().make().value(),
+    )
 
 
 def _optional_estimator():
@@ -178,13 +193,13 @@ CATALOG: list[tuple[str, str, Callable[[], Any], str]] = [
         "conditional",
         "mismatched_estimator_data_shape",
         lambda: _conditional_estimator().estimate(1.0, "not-a-tuple"),
-        "ConditionalDistributionEstimator.estimate(suff_stat)",
+        "ConditionalDistributionEstimator.estimate",
     ),
     (
         "conditional",
         "unknown_conditioning_key",
-        lambda: _conditional_estimator().estimate(1.0, ({"unknown-key": (1.0, 2.0)}, None, {"a": 1.0})),
-        "ConditionalDistributionEstimator.estimator_map['unknown-key']",
+        lambda: _conditional_estimator().estimate(1.0, _conditional_unknown_statistics()),
+        "ConditionalDistributionEstimator.estimate.branches",
     ),
     # --- optional ------------------------------------------------------------------------------
     (
