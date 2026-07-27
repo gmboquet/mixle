@@ -1,10 +1,12 @@
 """Bradley-Terry paired-comparison model: normalization, MM fit, and worth recovery."""
 
 import unittest
+import warnings
 
 import numpy as np
 
 from mixle.stats import BradleyTerryDistribution
+from mixle.stats.rankings.bradley_terry import BradleyTerryDataEncoder, BradleyTerryEstimator
 
 
 class BradleyTerryTest(unittest.TestCase):
@@ -66,6 +68,64 @@ class BradleyTerryTest(unittest.TestCase):
             BradleyTerryDistribution([1.0])  # K must be >= 2
         with self.assertRaises(ValueError):
             BradleyTerryDistribution([0.0, 0.0]).dist_to_encoder().seq_encode([(1, 1)])  # winner == loser
+
+    def test_every_scoring_boundary_rejects_invalid_comparisons(self):
+        dist = BradleyTerryDistribution(np.zeros(3))
+        invalid = ((0, 0), (-1, 0), (0, 3), (0.5, 1), (0, 1, 2))
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises((TypeError, ValueError)):
+                    dist.log_density(value)
+                with self.assertRaises((TypeError, ValueError)):
+                    dist.seq_log_density(np.asarray([value]))
+                with self.assertRaises((TypeError, ValueError)):
+                    dist.dist_to_encoder().seq_encode([value])
+
+    def test_encoder_identity_includes_support_dimension(self):
+        self.assertEqual(BradleyTerryDataEncoder(3), BradleyTerryDataEncoder(3))
+        self.assertNotEqual(BradleyTerryDataEncoder(3), BradleyTerryDataEncoder(4))
+        self.assertIn("dim=3", str(BradleyTerryDataEncoder(3)))
+
+    def test_extreme_finite_worths_sample_without_overflow(self):
+        dist = BradleyTerryDistribution([-1.0e308, 0.0, 1.0e308])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            draws = dist.sampler(seed=1).sample(100)
+        self.assertTrue(all(0 <= winner < 3 and 0 <= loser < 3 and winner != loser for winner, loser in draws))
+
+    def test_accumulator_rejects_corrupt_evidence_and_copies_state(self):
+        dist = BradleyTerryDistribution(np.zeros(3))
+        accumulator = dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            accumulator.seq_update(np.asarray([[0, 1], [1, 2]]), np.ones(1), None)
+        with self.assertRaises(ValueError):
+            accumulator.update((0, 1), -1.0, None)
+
+        accumulator.update((0, 1), 2.0, None)
+        value = accumulator.value()
+        value[1][0, 1] += 100.0
+        self.assertEqual(accumulator.wins[0, 1], 2.0)
+        restored = dist.estimator().accumulator_factory().make().from_value(accumulator.value())
+        restored.wins[0, 1] += 100.0
+        self.assertEqual(accumulator.wins[0, 1], 2.0)
+
+    def test_estimator_controls_and_statistics_are_validated(self):
+        for kwargs in (
+            {"dim": 1},
+            {"dim": 3.5},
+            {"dim": 3, "pseudo_count": -1.0},
+            {"dim": 3, "max_iter": 0},
+            {"dim": 3, "max_iter": 2.5},
+            {"dim": 3, "tol": 0.0},
+        ):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises((TypeError, ValueError)):
+                    BradleyTerryEstimator(**kwargs)
+        estimator = BradleyTerryEstimator(3)
+        with self.assertRaises(ValueError):
+            estimator.estimate(None, (1.0, np.zeros((2, 2))))
+        with self.assertRaises(ValueError):
+            estimator.estimate(None, (1.0, np.zeros((3, 3))))
 
 
 if __name__ == "__main__":
