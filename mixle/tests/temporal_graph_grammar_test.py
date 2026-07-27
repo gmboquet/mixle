@@ -8,6 +8,7 @@ import scipy.sparse as sp
 import mixle.stats as stats
 from mixle.stats.graphs.temporal_graph_grammar import (
     ApproximateTemporalGraphSample,
+    ChurningTemporalGraphGrammarStatistics,
     HomophilyTemporalGraphGrammarStatistics,
     LabeledTemporalGraphGrammarDistribution,
     TemporalGraphGrammarStatistics,
@@ -591,6 +592,51 @@ class ChurningTemporalGraphGrammarTest(unittest.TestCase):
         gt = stats.ChurningTemporalGraphGrammarDistribution(edit, node_remove_rate=2.0)
         obs = [gt.sampler(seed=s).sample_one(num_steps=6, seed_graph=_seed_graph(rng, n=25, p=0.3)) for s in range(40)]
         self.assertTrue(np.all(np.isfinite(gt.seq_log_density(obs))))
+
+    def test_identity_contract_and_finite_population_removal_law(self):
+        edit = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], edge_rate=0.0, node_rate=0.0)
+        dist = stats.ChurningTemporalGraphGrammarDistribution(edit, node_remove_rate=2.0)
+        one = np.zeros((1, 1))
+        empty = np.zeros((0, 0))
+        keep = [(one, ["node"]), (one, ["node"])]
+        drop = [(one, ["node"]), (empty, [])]
+        self.assertAlmostEqual(np.exp(dist.log_density(keep)) + np.exp(dist.log_density(drop)), 1.0, places=12)
+        self.assertAlmostEqual(np.exp(dist.log_density(drop)), 1.0 - np.exp(-2.0), places=12)
+
+        invalid = [
+            [(np.zeros((2, 2)), ["duplicate", "duplicate"])],
+            [(np.zeros((2, 2)), ["only-one"])],
+            [(one, ["node"]), (empty, []), (one, ["node"])],
+            [(np.array([[1.0]]), ["node"])],
+        ]
+        for sequence in invalid:
+            with self.subTest(sequence=sequence):
+                with self.assertRaises(ValueError):
+                    dist.log_density(sequence)
+
+    def test_churning_statistics_are_versioned_validated_and_atomic(self):
+        edit = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], edge_rate=0.0, node_rate=0.0)
+        dist = stats.ChurningTemporalGraphGrammarDistribution(edit, node_remove_rate=1.0)
+        observation = [(np.zeros((1, 1)), [0]), (np.zeros((0, 0)), [])]
+        estimator = dist.estimator()
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.update(observation, 1.0, dist)
+        before = accumulator.value()
+        with self.assertRaises(ValueError):
+            accumulator.seq_update([observation], np.ones(2), dist)
+        self.assertEqual(accumulator.value().removed, before.removed)
+
+        corrupt = ChurningTemporalGraphGrammarStatistics(
+            1,
+            False,
+            before.edit,
+            -1.0,
+            1.0,
+        )
+        with self.assertRaises(ValueError):
+            estimator.estimate(1.0, corrupt)
+        with self.assertRaises(ValueError):
+            estimator.estimate(0.0, estimator.accumulator_factory().make().value())
 
 
 class LatentRegimeTemporalGraphGrammarTest(unittest.TestCase):

@@ -1453,6 +1453,8 @@ __all__ = [
     "ChurningTemporalGraphGrammarEstimator",
     "ChurningTemporalGraphGrammarAccumulator",
     "ChurningTemporalGraphGrammarAccumulatorFactory",
+    "ChurningTemporalGraphGrammarDataEncoder",
+    "ChurningTemporalGraphGrammarStatistics",
     "LatentTemporalGraphGrammarDistribution",
     "LatentTemporalGraphGrammarSampler",
     "LatentTemporalGraphGrammarEstimator",
@@ -1940,21 +1942,65 @@ class HomophilyTemporalGraphGrammarDataEncoder(DataSequenceEncoder):
 
 # --- node churn: removal + addition with identity tracking -----------------------------------------
 def _node_removal_logp(rate: float, n_prev: int, k_removed: int) -> float:
-    """log p(remove k of n_prev nodes) = Poisson(k; rate) x uniform over which k-subset."""
-    if k_removed > n_prev:
-        return float("-inf")
-    lp = k_removed * math.log(rate + _EPS) - rate - math.lgamma(k_removed + 1)
-    return lp - math.lgamma(n_prev + 1) + math.lgamma(k_removed + 1) + math.lgamma(n_prev - k_removed + 1)
+    """Exact law for a uniformly selected subset of ``min(Poisson(rate), n_prev)`` nodes."""
+    return _capped_poisson_subset_log_prob(k_removed, n_prev, rate)
 
 
-def _align_by_ids(prev_adj: Any, prev_ids: Sequence[int], cur_adj: Any, cur_ids: Sequence[int]) -> tuple:
+def _validate_identity_snapshot(snapshot: Any, directed: bool) -> tuple[Any, tuple[Any, ...]]:
+    if not isinstance(snapshot, (tuple, list)) or len(snapshot) != 2:
+        raise ValueError("identity-tracked snapshots must be (adjacency, node_ids).")
+    adjacency, raw_ids = snapshot
+    canonical = _binarize(adjacency, directed=directed)
+    try:
+        node_ids = tuple(raw_ids)
+        unique_ids = set(node_ids)
+    except TypeError as exc:
+        raise ValueError("node_ids must be a sequence of hashable stable identities.") from exc
+    if len(node_ids) != canonical.shape[0]:
+        raise ValueError("node_ids must contain exactly one identity per adjacency row.")
+    if len(unique_ids) != len(node_ids):
+        raise ValueError("node_ids must be unique within every snapshot.")
+    return canonical, node_ids
+
+
+def _validate_churning_sequence(
+    x: Any,
+    directed: bool,
+) -> tuple[tuple[Any, tuple[Any, ...]], ...]:
+    try:
+        snapshots = tuple(_validate_identity_snapshot(snapshot, directed) for snapshot in x)
+    except TypeError as exc:
+        raise ValueError("churning temporal observations must be a sequence of snapshots.") from exc
+    if not snapshots:
+        raise ValueError("churning temporal observations must contain at least one snapshot.")
+    seen = set(snapshots[0][1])
+    active = seen.copy()
+    for _, node_ids in snapshots[1:]:
+        current = set(node_ids)
+        arriving = current - active
+        if arriving & seen:
+            raise ValueError("a departed node identity cannot be reused as a newly arriving node.")
+        seen.update(arriving)
+        active = current
+    return snapshots
+
+
+def _align_by_ids(
+    prev_adj: Any,
+    prev_ids: Sequence[Any],
+    cur_adj: Any,
+    cur_ids: Sequence[Any],
+    directed: bool = False,
+) -> tuple:
     """Align two snapshots by stable node id. Returns (prev_surviving_subgraph, cur_reordered, num_removed).
 
     Removed nodes = ids in prev but not cur; their incident edges vanish with them (not counted as edge
     removals). ``cur`` is reordered so the surviving nodes (in prev order) come first and the genuinely-new
     nodes are appended -- exactly the ``prev' -> cur`` layout the edit grammar expects (shared nodes keep
     their index, new nodes at the end)."""
-    pid, cid = list(prev_ids), list(cur_ids)
+    prev_adj, checked_prev_ids = _validate_identity_snapshot((prev_adj, prev_ids), directed)
+    cur_adj, checked_cur_ids = _validate_identity_snapshot((cur_adj, cur_ids), directed)
+    pid, cid = list(checked_prev_ids), list(checked_cur_ids)
     cpos = {nid: k for k, nid in enumerate(cid)}
     pset = set(pid)
     surv = [k for k, nid in enumerate(pid) if nid in cpos]  # prev positions of survivors, in prev order
@@ -1992,8 +2038,12 @@ class ChurningTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistr
         node_remove_rate: float = 0.0,
         name: str | None = None,
     ) -> None:
+        if not isinstance(edit_grammar, TemporalGraphGrammarDistribution):
+            raise ValueError("edit_grammar must be a TemporalGraphGrammarDistribution.")
         self.edit_grammar = edit_grammar
-        self.node_remove_rate = float(node_remove_rate)
+        self.node_remove_rate = _finite_nonnegative(node_remove_rate, name="node_remove_rate")
+        if name is not None and not isinstance(name, str):
+            raise ValueError("name must be a string or None.")
         self.name = name
 
     def __str__(self) -> str:
@@ -2007,14 +2057,20 @@ class ChurningTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistr
 
     def log_density(self, x: Sequence[tuple]) -> float:
         """Score one identity-tracked churning graph sequence."""
-        snaps = list(x)
+        snaps = _validate_churning_sequence(x, self.edit_grammar.directed)
         if len(snaps) < 2:
             return 0.0
         lp = 0.0
         for t in range(1, len(snaps)):
             pa, pid = snaps[t - 1]
             ca, cid = snaps[t]
-            prev_surv, cur_reord, num_removed = _align_by_ids(pa, pid, ca, cid)
+            prev_surv, cur_reord, num_removed = _align_by_ids(
+                pa,
+                pid,
+                ca,
+                cid,
+                self.edit_grammar.directed,
+            )
             lp += self._node_removal_log_density(len(pid), num_removed)
             if lp == float("-inf"):
                 return lp
@@ -2022,8 +2078,8 @@ class ChurningTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistr
         return lp
 
     def seq_encode(self, x: Sequence[Any]) -> Sequence[Any]:
-        """Return churning graph observations unchanged for scoring."""
-        return x
+        """Validate and encode identity-tracked graph observations."""
+        return self.dist_to_encoder().seq_encode(x)
 
     def seq_log_density(self, x: Sequence[Any]) -> np.ndarray:
         """Score a batch of churning graph observations."""
@@ -2036,12 +2092,14 @@ class ChurningTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistr
     def estimator(self, pseudo_count: float | None = None) -> ChurningTemporalGraphGrammarEstimator:
         """Return the estimator for the wrapped edit grammar and node churn rate."""
         return ChurningTemporalGraphGrammarEstimator(
-            self.edit_grammar.estimator(pseudo_count=pseudo_count), name=self.name
+            self.edit_grammar.estimator(pseudo_count=pseudo_count),
+            edit_grammar=self.edit_grammar,
+            name=self.name,
         )
 
-    def dist_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
-        """Return the pass-through graph encoder."""
-        return TemporalGraphGrammarDataEncoder()
+    def dist_to_encoder(self) -> ChurningTemporalGraphGrammarDataEncoder:
+        """Return the validated identity-tracked graph encoder."""
+        return ChurningTemporalGraphGrammarDataEncoder(self.edit_grammar.directed)
 
 
 class ChurningTemporalGraphGrammarSampler(DistributionSampler):
@@ -2055,7 +2113,13 @@ class ChurningTemporalGraphGrammarSampler(DistributionSampler):
     def sample_one(self, num_steps: int = 10, seed_graph: np.ndarray | None = None, n_init: int = 8) -> list:
         """Draw one churning graph sequence."""
         d = self.dist
-        adj = np.zeros((n_init, n_init)) if seed_graph is None else np.asarray(seed_graph, dtype=np.float64).copy()
+        num_steps = _exact_nonnegative_int(num_steps, name="num_steps")
+        n_init = _exact_nonnegative_int(n_init, name="n_init")
+        if seed_graph is None:
+            adj = np.zeros((n_init, n_init))
+        else:
+            canonical = _binarize(seed_graph, directed=d.edit_grammar.directed)
+            adj = canonical.toarray() if sp.issparse(canonical) else canonical
         ids = list(range(adj.shape[0]))
         next_id = adj.shape[0]
         snaps = [(adj.copy(), list(ids))]
@@ -2087,33 +2151,73 @@ class ChurningTemporalGraphGrammarSampler(DistributionSampler):
         """Draw one sequence or a list of sequences."""
         if size is None:
             return self.sample_one(**kw)
-        return [self.sample_one(**kw) for _ in range(size)]
+        sample_size = _exact_nonnegative_int(size, name="size")
+        return [self.sample_one(**kw) for _ in range(sample_size)]
+
+
+class ChurningTemporalGraphGrammarStatistics(NamedTuple):
+    schema_version: int
+    directed: bool
+    edit: Any
+    removed: float
+    steps: float
+
+
+def _validate_churning_statistics(
+    value: Any,
+    directed: bool,
+) -> ChurningTemporalGraphGrammarStatistics:
+    if not isinstance(value, ChurningTemporalGraphGrammarStatistics) or value.schema_version != 1:
+        raise ValueError("churning temporal graph statistics must use schema version 1.")
+    if value.directed != directed:
+        raise ValueError("churning temporal graph statistics use incompatible directedness.")
+    removed = float(value.removed)
+    steps = float(value.steps)
+    if not np.isfinite(removed) or removed < 0.0 or not np.isfinite(steps) or steps < 0.0:
+        raise ValueError("churning temporal graph statistics must be finite and non-negative.")
+    return ChurningTemporalGraphGrammarStatistics(1, directed, value.edit, removed, steps)
 
 
 class ChurningTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulator for churning graph grammar and node-removal sufficient statistics."""
 
-    def __init__(self, edit_acc: Any) -> None:
+    def __init__(self, edit_acc: Any, directed: bool, factory: ChurningTemporalGraphGrammarAccumulatorFactory) -> None:
         self.edit_acc = edit_acc
+        self.directed = directed
+        self.factory = factory
         self.removed = 0.0
         self.steps = 0.0
 
     def update(self, x: Sequence[tuple], weight: float, estimate: Any | None) -> None:
         """Accumulate sufficient statistics from one churning graph sequence."""
-        snaps = list(x)
+        snaps = _validate_churning_sequence(x, self.directed)
+        checked_weight = _finite_nonnegative(weight, name="weight")
         edit_est = None if estimate is None else estimate.edit_grammar
+        pending = self.factory.make()
         for t in range(1, len(snaps)):
             pa, pid = snaps[t - 1]
             ca, cid = snaps[t]
-            prev_surv, cur_reord, num_removed = _align_by_ids(pa, pid, ca, cid)
-            self.removed += weight * num_removed
-            self.steps += weight
-            self.edit_acc.update([prev_surv, cur_reord], weight, edit_est)  # one transition's edge/node stats
+            prev_surv, cur_reord, num_removed = _align_by_ids(pa, pid, ca, cid, self.directed)
+            pending.removed += checked_weight * num_removed
+            pending.steps += checked_weight
+            pending.edit_acc.update(
+                [prev_surv, cur_reord],
+                checked_weight,
+                edit_est,
+            )
+        self.combine(pending.value())
 
     def seq_update(self, x: Sequence[Any], weights: np.ndarray, estimate: Any | None) -> None:
         """Accumulate weighted sufficient statistics from a batch."""
-        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
-            self.update(obs, float(w), estimate)
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if checked_weights.ndim != 1 or len(checked_weights) != len(x):
+            raise ValueError("weights must be a one-dimensional array aligned with the churning batch.")
+        if np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
+            raise ValueError("weights must be finite and non-negative.")
+        pending = self.factory.make()
+        for observation, weight in zip(x, checked_weights):
+            pending.update(observation, float(weight), estimate)
+        self.combine(pending.value())
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
         """Initialize sufficient statistics from one weighted sequence."""
@@ -2123,22 +2227,31 @@ class ChurningTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumula
         """Initialize sufficient statistics from a weighted batch."""
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: tuple) -> ChurningTemporalGraphGrammarAccumulator:
+    def combine(self, suff_stat: ChurningTemporalGraphGrammarStatistics) -> ChurningTemporalGraphGrammarAccumulator:
         """Merge serialized churning sufficient statistics."""
-        e, r, s = suff_stat
-        self.edit_acc.combine(e)
-        self.removed += r
-        self.steps += s
+        checked = _validate_churning_statistics(suff_stat, self.directed)
+        self.edit_acc.combine(checked.edit)
+        self.removed += checked.removed
+        self.steps += checked.steps
         return self
 
-    def value(self) -> tuple:
+    def value(self) -> ChurningTemporalGraphGrammarStatistics:
         """Return serialized churning sufficient statistics."""
-        return self.edit_acc.value(), self.removed, self.steps
+        return ChurningTemporalGraphGrammarStatistics(
+            1,
+            self.directed,
+            self.edit_acc.value(),
+            self.removed,
+            self.steps,
+        )
 
-    def from_value(self, x: tuple) -> ChurningTemporalGraphGrammarAccumulator:
+    def from_value(self, x: ChurningTemporalGraphGrammarStatistics) -> ChurningTemporalGraphGrammarAccumulator:
         """Restore accumulator state from serialized sufficient statistics."""
-        self.edit_acc.from_value(x[0])
-        self.removed, self.steps = float(x[1]), float(x[2])
+        fresh = self.factory.make()
+        fresh.combine(x)
+        self.edit_acc = fresh.edit_acc
+        self.removed = fresh.removed
+        self.steps = fresh.steps
         return self
 
     def key_merge(self, stats_dict: dict) -> None:
@@ -2149,42 +2262,85 @@ class ChurningTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumula
         """Replace keyed sufficient statistics; unused for this accumulator."""
         pass
 
-    def acc_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+    def acc_to_encoder(self) -> ChurningTemporalGraphGrammarDataEncoder:
         """Return the encoder associated with this accumulator."""
-        return TemporalGraphGrammarDataEncoder()
+        return ChurningTemporalGraphGrammarDataEncoder(self.directed)
 
 
 class ChurningTemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for churning temporal graph grammar accumulators."""
 
-    def __init__(self, edit_factory: Any) -> None:
+    def __init__(self, edit_factory: Any, directed: bool) -> None:
         self.edit_factory = edit_factory
+        self.directed = directed
 
     def make(self) -> ChurningTemporalGraphGrammarAccumulator:
         """Create a fresh churning accumulator."""
-        return ChurningTemporalGraphGrammarAccumulator(self.edit_factory.make())
+        return ChurningTemporalGraphGrammarAccumulator(self.edit_factory.make(), self.directed, self)
 
 
 class ChurningTemporalGraphGrammarEstimator(ParameterEstimator):
     """Estimator for identity-tracked churning temporal graph grammars."""
 
-    def __init__(self, edit_estimator: Any, name: str | None = None) -> None:
+    def __init__(
+        self,
+        edit_estimator: Any,
+        edit_grammar: TemporalGraphGrammarDistribution | None = None,
+        name: str | None = None,
+    ) -> None:
         self.edit_estimator = edit_estimator
+        if edit_grammar is not None and not isinstance(edit_grammar, TemporalGraphGrammarDistribution):
+            raise ValueError("edit_grammar must be a TemporalGraphGrammarDistribution or None.")
+        if edit_grammar is not None:
+            self.directed = edit_grammar.directed
+        elif hasattr(edit_estimator, "motif") and isinstance(edit_estimator.motif, CommonNeighbourMotif):
+            self.directed = edit_estimator.motif.directed
+        else:
+            raise ValueError("edit_estimator must declare the edit grammar's motif directedness.")
+        if name is not None and not isinstance(name, str):
+            raise ValueError("name must be a string or None.")
         self.name = name
         self.keys = None
 
     def accumulator_factory(self) -> ChurningTemporalGraphGrammarAccumulatorFactory:
         """Return the accumulator factory used by this estimator."""
-        return ChurningTemporalGraphGrammarAccumulatorFactory(self.edit_estimator.accumulator_factory())
+        return ChurningTemporalGraphGrammarAccumulatorFactory(
+            self.edit_estimator.accumulator_factory(),
+            self.directed,
+        )
 
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> ChurningTemporalGraphGrammarDistribution:
+    def estimate(
+        self,
+        nobs: float | None,
+        suff_stat: ChurningTemporalGraphGrammarStatistics,
+    ) -> ChurningTemporalGraphGrammarDistribution:
         """Estimate the wrapped edit grammar and node-removal rate."""
-        edit_val, removed, steps = suff_stat
+        checked = _validate_churning_statistics(suff_stat, self.directed)
+        if checked.steps <= 0.0:
+            raise ValueError("cannot estimate a churning temporal grammar without transition evidence.")
         return ChurningTemporalGraphGrammarDistribution(
-            self.edit_estimator.estimate(nobs, edit_val),
-            node_remove_rate=removed / steps if steps > 0 else 0.0,
+            self.edit_estimator.estimate(nobs, checked.edit),
+            node_remove_rate=checked.removed / checked.steps,
             name=self.name,
         )
+
+
+class ChurningTemporalGraphGrammarDataEncoder(DataSequenceEncoder):
+    """Validate and encode identity-tracked temporal graph sequences."""
+
+    def __init__(self, directed: bool) -> None:
+        self.directed = bool(directed)
+
+    def seq_encode(self, x: Sequence[Any]) -> tuple[tuple, ...]:
+        return tuple(_validate_churning_sequence(observation, self.directed) for observation in x)
+
+    def row_count(self, x: Any) -> int:
+        if not isinstance(x, tuple):
+            raise ValueError("encoded churning temporal graph payload must be a tuple.")
+        return len(x)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, ChurningTemporalGraphGrammarDataEncoder) and other.directed == self.directed
 
 
 # --- latent-regime dynamics: an HMM over graph-edit grammars ---------------------------------------
