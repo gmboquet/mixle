@@ -5,10 +5,10 @@ observation can carry soft evidence (a prior) over the hidden state at *each* po
 only the initial state. An observation is a pair ``(emission_seq, state_prior)``:
 
     - ``emission_seq``: a length-T sequence of emissions (data type of the emission distributions).
-    - ``state_prior``: an optional ``T``-by-``S`` array of non-negative weights. Row t is a prior / soft label
-      over the S hidden states at position t; it multiplies the hidden-state distribution there. ``None`` (or an
-      all-ones row) imposes no constraint. There is no separate learned initial distribution -- the prior at
-      position 0 plays that role (uniform when absent).
+    - ``state_prior``: an optional ``T``-by-``S`` array of finite non-negative likelihood potentials. Row t is
+      soft evidence over the S hidden states at position t. Rows are normalized to unit maximum, so their
+      absolute scale is irrelevant and an all-ones row imposes no constraint. The HMM's initial state law is
+      uniform and is not replaced by the evidence at position 0.
 
 The prior folds into the forward-backward as an extra multiplicative factor on the emission likelihood at every
 position, so it shapes both scoring (``log_density``) and the EM E-step. Only the transitions and emissions (and
@@ -46,10 +46,13 @@ _LOG_ZERO = -np.inf
 
 
 def _as_prior(prior, length: int, num_states: int) -> np.ndarray | None:
-    """Validate/normalize an observation's state prior to a (length, num_states) float array, or None."""
+    """Return owned, unit-maximum state likelihood potentials, or ``None``."""
     if prior is None:
         return None
-    p = np.asarray(prior, dtype=float)
+    try:
+        p = np.asarray(prior, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("state_prior must be a numeric likelihood-potential array.") from exc
     if p.ndim == 1:
         p = p.reshape(1, -1)
     if p.shape == (length, num_states):
@@ -58,9 +61,13 @@ def _as_prior(prior, length: int, num_states: int) -> np.ndarray | None:
         p = np.repeat(p, length, axis=0)  # a single shared prior row broadcast over the sequence
     else:
         raise ValueError("state_prior must be shape (T=%d, S=%d) or (1, S); got %s" % (length, num_states, p.shape))
-    if np.any(p < 0.0):
-        raise ValueError("state_prior must be non-negative.")
-    return p
+    if np.any(~np.isfinite(p)) or np.any(p < 0.0):
+        raise ValueError("state_prior likelihood potentials must be finite and non-negative.")
+    row_max = p.max(axis=1, keepdims=True)
+    if np.any(row_max <= 0.0):
+        bad_rows = np.flatnonzero(row_max[:, 0] <= 0.0).tolist()
+        raise ValueError(f"state_prior likelihood-potential rows must contain positive evidence; bad rows {bad_rows}.")
+    return (p / row_max).copy()
 
 
 class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
@@ -131,7 +138,10 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         if len(emissions) == 0:
             return _LOG_ZERO
         return terminal_forward_loglik(
-            np.zeros(self.nStates), self.logTransitions, self._terminal_log_b(emissions, prior), self._terminal_mask
+            np.full(self.nStates, -np.log(self.nStates)),
+            self.logTransitions,
+            self._terminal_log_b(emissions, prior),
+            self._terminal_mask,
         )
 
     def __str__(self) -> str:
@@ -174,7 +184,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         if n == 0:
             return 0.0
         phi, offset = self._emission_potential(emissions, prior)
-        a = phi[0]
+        a = phi[0] / self.nStates
         c = a.sum()
         if c <= 0.0:
             return _LOG_ZERO
@@ -318,7 +328,7 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
         A = dist.transitions
         alpha = np.empty((n, s))
         scale = np.empty(n)
-        a = phi[0].copy()
+        a = phi[0] / s
         c = a.sum()
         c = c if c > 0 else 1.0
         alpha[0] = a / c
@@ -354,7 +364,10 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
 
         log_b = dist._terminal_log_b(emissions, prior)
         _, gamma, xi = terminal_forward_backward(
-            np.zeros(dist.nStates), dist.logTransitions, log_b, dist._terminal_mask
+            np.full(dist.nStates, -np.log(dist.nStates)),
+            dist.logTransitions,
+            log_b,
+            dist._terminal_mask,
         )
         return (None, None) if gamma is None else (gamma, xi.sum(axis=0))
 
