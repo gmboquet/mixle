@@ -11,6 +11,8 @@ ordinary mixture.
 observations, so initialization is not vectorized.
 """
 
+import copy
+import operator
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
@@ -20,6 +22,11 @@ from numpy.random import RandomState
 import mixle.utils.vector as vec
 from mixle.engines.arithmetic import *
 from mixle.engines.arithmetic import maxrandint
+from mixle.stats.compute.mixture_evidence import (
+    normalize_engine_mixture_log_scores,
+    normalize_mixture_log_scores,
+    validated_probability_vector,
+)
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -30,6 +37,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.mixture import _owned_generative_components
 from mixle.utils.aliasing import MISSING, coalesce_alias
 
 T0 = TypeVar("T0")  # Data type
@@ -47,11 +55,21 @@ def _sum_prior_weights(prior: Sequence[tuple[int, T1]], num_components: int) -> 
     prior_weights = np.zeros(num_components, dtype=np.float64)
 
     for idx, val in prior:
-        if not (0 <= idx < num_components):
-            raise ValueError("Prior component index %d is out of range [0, %d)." % (idx, num_components))
-        if val < 0:
-            raise ValueError("Prior value %s for component %d is negative." % (str(val), idx))
-        prior_weights[idx] += val
+        if isinstance(idx, (bool, np.bool_)):
+            raise TypeError("Prior component indices must be exact integers, not booleans.")
+        try:
+            index = operator.index(idx)
+        except TypeError as exc:
+            raise TypeError("Prior component indices must be exact integers.") from exc
+        if not (0 <= index < num_components):
+            raise ValueError("Prior component index %d is out of range [0, %d)." % (index, num_components))
+        try:
+            value = float(val)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("Prior values must be finite numeric weights.") from exc
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError("Prior value %s for component %d must be finite and non-negative." % (str(val), index))
+        prior_weights[index] += value
 
     if not prior_weights.sum() > 0:
         raise ValueError("Prior has non-positive total mass.")
@@ -120,11 +138,15 @@ class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution
 
         """
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
-        self.components = components
-        self.num_components = len(components)
-        self.w = np.asarray(w)
+        self.components = _owned_generative_components(components, "SemiSupervisedMixtureDistribution")
+        self.num_components = len(self.components)
+        self.w = validated_probability_vector(
+            w,
+            "SemiSupervisedMixtureDistribution weights",
+            size=self.num_components,
+        )
         self.zw = self.w == 0.0
-        self.log_w = np.log(w + self.zw)
+        self.log_w = np.log(self.w + self.zw)
         self.log_w[self.zw] = -np.inf
         self.name = name
 
@@ -195,21 +217,13 @@ class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution
         """
         datum, prior = x
 
-        if prior is None:
-            rv = vec.posterior(np.asarray([u.log_density(datum) for u in self.components]) + self.log_w)
-        else:
+        scores = np.asarray([u.log_density(datum) for u in self.components], dtype=np.float64) + self.log_w
+        if prior is not None:
             w_loc = _sum_prior_weights(prior, self.num_components)
             h_loc = w_loc > 0.0
-
-            w_loc[h_loc] = np.log(w_loc[h_loc])
-            w_loc[h_loc] += self.log_w[h_loc]
-            for i in np.flatnonzero(h_loc):
-                w_loc[i] += self.components[i].log_density(datum)
-
-            w_loc[h_loc] = vec.posterior(w_loc[h_loc])
-            rv = w_loc
-
-        return rv
+            scores[~h_loc] = -np.inf
+            scores[h_loc] += np.log(w_loc[h_loc])
+        return normalize_mixture_log_scores(scores[None, :]).responsibilities[0]
 
     def seq_log_density(self, x: E) -> np.ndarray:
         """Vectorized evaluation of the log-density on sequence encoded data x.
@@ -324,20 +338,7 @@ class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution
                 ll_mat[:, i] += self.components[i].seq_log_density(enc_data)
                 ll_mat[enc_prior_flag, i] -= norm_const
 
-        ll_max = ll_mat.max(axis=1, keepdims=True)
-
-        bad_rows = np.isinf(ll_max.flatten())
-
-        ll_mat[bad_rows, :] = self.log_w
-        ll_max[bad_rows] = np.max(self.log_w)
-
-        ll_mat -= ll_max
-
-        np.exp(ll_mat, out=ll_mat)
-        ll_sum = np.sum(ll_mat, axis=1, keepdims=True)
-        ll_mat /= ll_sum
-
-        return ll_mat
+        return normalize_mixture_log_scores(ll_mat).responsibilities
 
     def density_semantics(self):
         """Return exact-or-approximate density semantics joined from component models."""
@@ -625,29 +626,10 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
             ll_mat[:, i] += estimate.components[i].seq_log_density(enc_data)
             ll_mat[enc_prior_flag, i] -= norm_const
 
-        ll_max = ll_mat.max(axis=1, keepdims=True)
-
-        bad_rows = np.isinf(ll_max.flatten())
-
-        ll_mat[bad_rows, :] = estimate.log_w
-        ll_max[bad_rows] = np.max(estimate.log_w)
-
-        ll_mat -= ll_max
-        np.exp(ll_mat, out=ll_mat)
-        ll_sum = np.sum(ll_mat, axis=1, keepdims=True)
-
-        # Capture per-row data log-likelihood (== seq_log_density) by reusing the posterior
-        # normalizer already computed here: row_ll = rowmax + log(rowsum), with -inf for invalid
-        # rows seq_log_density would also return -inf for. Free except an O(n) log/dot, and only
-        # when the fused-EM fast path requests it (_track_ll).
+        normalized = normalize_mixture_log_scores(ll_mat)
         if self._track_ll:
-            with np.errstate(divide="ignore"):
-                row_ll = ll_max[:, 0] + np.log(ll_sum[:, 0])
-            if np.any(bad_rows):
-                row_ll[bad_rows] = -np.inf
-            self._seq_ll += float(np.dot(weights, row_ll))
-
-        ll_mat /= ll_sum
+            self._seq_ll += float(np.dot(weights, normalized.log_evidence))
+        ll_mat = normalized.responsibilities
 
         for i in range(self.num_components):
             w_loc = ll_mat[:, i] * weights
@@ -679,13 +661,8 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
         )  # (sz, C)
         ll = engine.asarray(base) + emit - engine.asarray(nc)
 
-        ll_max = engine.max(ll, axis=1, keepdims=True)
-        bad = ll_max <= engine.asarray(-1.0e308)
-        ll = engine.where(bad, engine.asarray(estimate.log_w)[None, :], ll)
-        ll_max = engine.where(bad, engine.asarray(float(np.max(estimate.log_w))), ll_max)
-        e = engine.exp(ll - ll_max)
-        resp = e / engine.sum(e, axis=1, keepdims=True)
-        resp = resp * engine.asarray(weights_np)[:, None]
+        normalized = normalize_engine_mixture_log_scores(ll, engine)
+        resp = normalized.responsibilities * engine.asarray(weights_np)[:, None]
 
         resp_np = np.asarray(engine.to_numpy(resp))
         self.comp_counts += resp_np.sum(axis=0)
@@ -703,15 +680,15 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
             SemiSupervisedMixtureEstimatorAccumulator with combined sufficient statistics.
 
         """
-        self.comp_counts += suff_stat[0]
+        self.comp_counts += np.asarray(suff_stat[0], dtype=np.float64)
         for i in range(self.num_components):
-            self.accumulators[i].combine(suff_stat[1][i])
+            self.accumulators[i].combine(copy.deepcopy(suff_stat[1][i]))
 
         return self
 
     def value(self) -> tuple[np.ndarray, tuple[Any, ...]]:
         """Returns the sufficient statistics: (component counts, component values)."""
-        return self.comp_counts, tuple([u.value() for u in self.accumulators])
+        return self.comp_counts.copy(), tuple(copy.deepcopy(u.value()) for u in self.accumulators)
 
     def from_value(self, x: tuple[np.ndarray, tuple[SS0, ...]]) -> "SemiSupervisedMixtureEstimatorAccumulator":
         """Set the accumulator's sufficient statistics to x.
@@ -724,9 +701,9 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
             SemiSupervisedMixtureEstimatorAccumulator object.
 
         """
-        self.comp_counts = x[0]
+        self.comp_counts = np.asarray(x[0], dtype=np.float64).copy()
         for i in range(self.num_components):
-            self.accumulators[i].from_value(x[1][i])
+            self.accumulators[i].from_value(copy.deepcopy(x[1][i]))
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -753,9 +730,9 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
             if self.comp_key in stats_dict:
                 acc = stats_dict[self.comp_key]
                 for i in range(len(acc)):
-                    acc[i] = acc[i].combine(self.accumulators[i].value())
+                    acc[i].combine(copy.deepcopy(self.accumulators[i].value()))
             else:
-                stats_dict[self.comp_key] = self.accumulators
+                stats_dict[self.comp_key] = copy.deepcopy(self.accumulators)
 
         for u in self.accumulators:
             u.key_merge(stats_dict)
@@ -781,7 +758,10 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
         if self.comp_key is not None:
             if self.comp_key in stats_dict:
                 acc = stats_dict[self.comp_key]
-                self.accumulators = acc
+                if len(acc) != self.num_components:
+                    raise ValueError("keyed semi-supervised mixture component statistics have incompatible arity.")
+                for local, pooled in zip(self.accumulators, acc):
+                    local.from_value(copy.deepcopy(pooled.value()))
 
         for u in self.accumulators:
             u.key_replace(stats_dict)
@@ -1006,24 +986,13 @@ class SemiSupervisedMixtureDataEncoder(DataSequenceEncoder):
             datum, prior = xi
             data.append(datum)
             if prior is not None:
-                prior_total = 0.0
-                for prior_entry in prior:
-                    if num_components is not None and not (0 <= prior_entry[0] < num_components):
-                        raise ValueError(
-                            "Prior component index %d for observation %d is out of range [0, %d)."
-                            % (prior_entry[0], i, num_components)
-                        )
-                    if prior_entry[1] < 0:
-                        raise ValueError(
-                            "Prior value %s for component %d of observation %d is negative."
-                            % (str(prior_entry[1]), prior_entry[0], i)
-                        )
-                    prior_total += prior_entry[1]
+                if num_components is None:
+                    raise ValueError("Semi-supervised prior encoding requires a known component count.")
+                validated = _sum_prior_weights(prior, num_components)
+                for component in np.flatnonzero(validated):
                     prior_idx.append(i)
-                    prior_comp.append(prior_entry[0])
-                    prior_val.append(prior_entry[1])
-                if not prior_total > 0:
-                    raise ValueError("Prior for observation %d has non-positive total mass." % i)
+                    prior_comp.append(int(component))
+                    prior_val.append(float(validated[component]))
 
         prior_comp = np.asarray(prior_comp, dtype=int)
         prior_idx = np.asarray(prior_idx, dtype=int)

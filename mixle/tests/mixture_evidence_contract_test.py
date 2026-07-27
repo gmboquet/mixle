@@ -86,10 +86,128 @@ class MixtureEvidenceContractTest(unittest.TestCase):
         self.assertEqual(len(model.components), 2)
         self.assertEqual(model.log_density(0.0), original_score)
 
+    def test_specialized_mixture_constructors_enforce_owned_probability_geometry(self):
+        components = [
+            stats.CategoricalDistribution({"a": 1.0}),
+            stats.CategoricalDistribution({"b": 1.0}),
+        ]
+        weights = np.asarray([0.25, 0.75])
+        heterogeneous = stats.HeterogeneousMixtureDistribution(components, weights)
+        semi_supervised = stats.SemiSupervisedMixtureDistribution(components, weights)
+        topics = list(components)
+        outer = np.asarray([0.4, 0.6])
+        inner = np.asarray([[0.8, 0.2], [0.1, 0.9]])
+        hierarchical = stats.HierarchicalMixtureDistribution(topics, outer, inner)
+
+        weights[:] = [0.9, 0.1]
+        components.clear()
+        outer[:] = [0.7, 0.3]
+        inner[:] = [[1.0, 0.0], [1.0, 0.0]]
+        topics.clear()
+
+        np.testing.assert_array_equal(heterogeneous.w, [0.25, 0.75])
+        np.testing.assert_array_equal(semi_supervised.w, [0.25, 0.75])
+        np.testing.assert_array_equal(hierarchical.w, [0.4, 0.6])
+        np.testing.assert_array_equal(hierarchical.taus, [[0.8, 0.2], [0.1, 0.9]])
+        self.assertEqual(len(heterogeneous.components), 2)
+        self.assertEqual(len(semi_supervised.components), 2)
+        self.assertEqual(len(hierarchical.topics), 2)
+
+        for mixture_type in (
+            stats.HeterogeneousMixtureDistribution,
+            stats.SemiSupervisedMixtureDistribution,
+        ):
+            with self.subTest(mixture_type=mixture_type.__name__):
+                with self.assertRaises(ValueError):
+                    mixture_type([stats.CategoricalDistribution({"a": 1.0})], [0.5, 0.5])
+                with self.assertRaises(ValueError):
+                    mixture_type([stats.CategoricalDistribution({"a": 1.0})], [np.nan])
+
+        with self.assertRaises(ValueError):
+            stats.HierarchicalMixtureDistribution(
+                [stats.CategoricalDistribution({"a": 1.0})],
+                [0.5, 0.5],
+                [[1.0], [0.5]],
+            )
+
     def test_scoring_only_categorical_cannot_become_a_generative_mixture_component(self):
         scorer = stats.CategoricalDistribution({"a": 0.5}, scoring_only=True)
-        with self.assertRaisesRegex(TypeError, "generative probability laws"):
-            stats.MixtureDistribution([scorer], [1.0])
+        for constructor in (
+            lambda: stats.MixtureDistribution([scorer], [1.0]),
+            lambda: stats.HeterogeneousMixtureDistribution([scorer], [1.0]),
+            lambda: stats.SemiSupervisedMixtureDistribution([scorer], [1.0]),
+            lambda: stats.HierarchicalMixtureDistribution([scorer], [1.0], [[1.0]]),
+        ):
+            with self.subTest(constructor=constructor):
+                with self.assertRaisesRegex(TypeError, "generative probability laws"):
+                    constructor()
+
+    def test_specialized_mixtures_give_impossible_evidence_zero_responsibility(self):
+        components = [
+            stats.CategoricalDistribution({"a": 1.0}),
+            stats.CategoricalDistribution({"b": 1.0}),
+        ]
+        heterogeneous = stats.HeterogeneousMixtureDistribution(components, [0.5, 0.5])
+        h_enc = heterogeneous.dist_to_encoder().seq_encode(["outside"])
+        np.testing.assert_array_equal(heterogeneous.posterior("outside"), [0.0, 0.0])
+        np.testing.assert_array_equal(heterogeneous.seq_posterior(h_enc), [[0.0, 0.0]])
+        h_acc = heterogeneous.estimator().accumulator_factory().make()
+        h_acc.seq_update(h_enc, np.ones(1), heterogeneous)
+        np.testing.assert_array_equal(h_acc.comp_counts, [0.0, 0.0])
+
+        semi_supervised = stats.SemiSupervisedMixtureDistribution(components, [0.5, 0.5])
+        observation = ("outside", [(0, 1.0)])
+        s_enc = semi_supervised.dist_to_encoder().seq_encode([observation])
+        np.testing.assert_array_equal(semi_supervised.posterior(observation), [0.0, 0.0])
+        np.testing.assert_array_equal(semi_supervised.seq_posterior(s_enc), [[0.0, 0.0]])
+        s_acc = semi_supervised.estimator().accumulator_factory().make()
+        s_acc.seq_update(s_enc, np.ones(1), semi_supervised)
+        np.testing.assert_array_equal(s_acc.comp_counts, [0.0, 0.0])
+
+        hierarchical = stats.HierarchicalMixtureDistribution(
+            components,
+            [0.4, 0.6],
+            [[1.0, 0.0], [0.0, 1.0]],
+        )
+        impossible = hierarchical.dist_to_encoder().seq_encode([["outside"]])
+        empty = hierarchical.dist_to_encoder().seq_encode([[]])
+        np.testing.assert_array_equal(hierarchical.seq_posterior(impossible), [[0.0, 0.0]])
+        np.testing.assert_allclose(hierarchical.seq_posterior(empty), [[0.4, 0.6]])
+        hierarchical_acc = hierarchical.estimator().accumulator_factory().make()
+        hierarchical_acc.seq_update(impossible, np.ones(1), hierarchical)
+        np.testing.assert_array_equal(hierarchical_acc.w_counts, [0.0, 0.0])
+        np.testing.assert_array_equal(hierarchical_acc.comp_counts, np.zeros((2, 2)))
+
+    def test_specialized_accumulator_snapshots_own_their_counts(self):
+        components = [
+            stats.CategoricalDistribution({"a": 1.0}),
+            stats.CategoricalDistribution({"b": 1.0}),
+        ]
+        models = [
+            stats.HeterogeneousMixtureDistribution(components, [0.5, 0.5]),
+            stats.SemiSupervisedMixtureDistribution(components, [0.5, 0.5]),
+            stats.HierarchicalMixtureDistribution(components, [0.5, 0.5], [[1.0, 0.0], [0.0, 1.0]]),
+        ]
+        for model in models:
+            with self.subTest(model=type(model).__name__):
+                accumulator = model.estimator().accumulator_factory().make()
+                accumulator.comp_counts[...] = 2.0
+                snapshot = accumulator.value()
+                snapshot[0][...] = 99.0
+                np.testing.assert_array_equal(accumulator.comp_counts, np.full_like(accumulator.comp_counts, 2.0))
+
+    def test_semi_supervised_prior_requires_exact_finite_entries(self):
+        model = stats.SemiSupervisedMixtureDistribution(
+            [stats.CategoricalDistribution({"a": 1.0}), stats.CategoricalDistribution({"b": 1.0})],
+            [0.5, 0.5],
+        )
+        invalid_priors = [[(0.5, 1.0)], [(True, 1.0)], [(0, np.nan)], [(0, np.inf)]]
+        for prior in invalid_priors:
+            with self.subTest(prior=prior):
+                with self.assertRaises((TypeError, ValueError)):
+                    model.posterior(("a", prior))
+                with self.assertRaises((TypeError, ValueError)):
+                    model.dist_to_encoder().seq_encode([("a", prior)])
 
     def test_mixture_accumulator_owns_count_snapshots(self):
         accumulator = (

@@ -36,6 +36,40 @@ class MixtureEvidence:
     impossible: Any
 
 
+def validated_probability_vector(values: Any, label: str, *, size: int | None = None) -> np.ndarray:
+    """Return an owned non-empty probability simplex with optional fixed size."""
+    try:
+        probabilities = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{label} must be a one-dimensional numeric probability vector.") from exc
+    if probabilities.ndim != 1 or probabilities.size == 0:
+        raise ValueError(f"{label} must be a non-empty one-dimensional probability vector.")
+    if size is not None and probabilities.size != size:
+        raise ValueError(f"{label} must contain exactly {size} entries.")
+    if np.any(~np.isfinite(probabilities)) or np.any(probabilities < 0.0):
+        raise ValueError(f"{label} must contain finite non-negative probabilities.")
+    total = float(probabilities.sum())
+    if not np.isclose(total, 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError(f"{label} must sum to one, got {total!r}.")
+    return probabilities.copy()
+
+
+def validated_row_probability_matrix(values: Any, label: str, *, shape: tuple[int, int]) -> np.ndarray:
+    """Return an owned finite non-negative matrix whose rows are probability simplexes."""
+    try:
+        probabilities = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{label} must be a numeric row-probability matrix.") from exc
+    if probabilities.shape != shape:
+        raise ValueError(f"{label} must have shape {shape}, got {probabilities.shape}.")
+    if np.any(~np.isfinite(probabilities)) or np.any(probabilities < 0.0):
+        raise ValueError(f"{label} must contain finite non-negative probabilities.")
+    row_sums = probabilities.sum(axis=1)
+    if not np.allclose(row_sums, 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError(f"{label} rows must each sum to one.")
+    return probabilities.copy()
+
+
 def normalize_mixture_log_scores(weighted_log_scores: Any) -> MixtureEvidence:
     """Normalize a NumPy ``(rows, components)`` weighted log-score matrix.
 
