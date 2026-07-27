@@ -8,10 +8,11 @@ emission model marginalized over that empirical mixture.
 For grouped counts ``x`` and emissions ``y``, the model scores:
 
     log p(x, y) = log p_given(x) + log p_len(|y|)
+        + log(|y|!) - sum_y log(count_y!)
         + sum_y count_y log sum_x empirical_x cond(y | x)
 
-This representation keeps repeated values compact while preserving the same
-distributional contract as iid samples expanded by count.
+This is the normalized grouped count-vector law induced by collapsing the
+sampler's ordered iid emissions.
 """
 
 import math
@@ -48,12 +49,35 @@ from mixle.stats.compute.pdist import (
     child_enumerator,
 )
 from mixle.stats.latent.mixture import MixtureDistribution
+from mixle.stats.multivariate._multinomial_contracts import (
+    canonical_bag,
+    exact_integer,
+    finite_weight,
+    log_coefficient,
+    observation_weights,
+)
 from mixle.utils.optsutil import count_by_value
 
 T = TypeVar("T")  ### value data type
 SS1 = TypeVar("SS1")  ### Data type for suff stats of conditional
 SS2 = TypeVar("SS2")  ### Data type for suff stats of given
 SS3 = TypeVar("SS3")  ### Data type for suff stats of length
+
+
+def _canonical_observation(value: Any) -> tuple[list[tuple[Any, int]], list[tuple[Any, int]], int, int]:
+    if isinstance(value, (str, bytes)):
+        raise TypeError("hidden-association observation must be a (given_bag, emitted_bag) pair")
+    try:
+        parts = list(value)
+    except TypeError as exc:
+        raise TypeError("hidden-association observation must be a (given_bag, emitted_bag) pair") from exc
+    if len(parts) != 2:
+        raise ValueError("hidden-association observation must be a (given_bag, emitted_bag) pair")
+    given, given_total = canonical_bag(parts[0])
+    emitted, emitted_total = canonical_bag(parts[1])
+    if emitted_total > 0 and given_total == 0:
+        raise ValueError("nonempty hidden-association emissions require a positive-mass given bag")
+    return given, emitted, given_total, emitted_total
 
 
 class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
@@ -154,15 +178,12 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
             Log-density at observation x.
 
         """
-        rv = 0
-        nn = 0
-        for x1, c1 in x[1]:
-            cc = 0  ## count for counts in given
-            nn += c1
+        given, emitted, given_total, emitted_total = _canonical_observation(x)
+        rv = log_coefficient([count for _, count in emitted])
+        for x1, c1 in emitted:
             ll = -np.inf
-            for x0, c0 in x[0]:
+            for x0, c0 in given:
                 tt = self.cond_dist.log_density((x0, x1)) + math.log(c0)
-                cc += c0
 
                 if tt == -np.inf:
                     continue
@@ -172,19 +193,16 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
                 else:
                     ll = math.log1p(math.exp(ll - tt)) + tt
 
-            if ll == -np.inf or cc <= 0:
-                # Empty/all-zero given-set: no association mass for this emitted
-                # value. Matches backend_seq_log_density's -inf handling and
-                # avoids -inf - (-inf) = NaN from the log(cc) normalizer.
-                rv += -np.inf * c1
+            if ll == -np.inf:
+                return float("-inf")
             else:
-                ll -= math.log(cc)
+                ll -= math.log(given_total)
                 rv += ll * c1
 
-        rv += self.given_dist.log_density(x[0])
-        rv += self.len_dist.log_density(nn)
+        rv += self.given_dist.log_density(given)
+        rv += self.len_dist.log_density(emitted_total)
 
-        return rv
+        return float(rv)
 
     def seq_log_density(self, x: list[tuple[list[tuple[T, float]], list[tuple[T, float]]]]) -> np.ndarray:
         """Evaluation of log-density at sequence encoded input x (loops over log_density).
@@ -208,15 +226,13 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
         assoc_scores = []
         emit_lengths = []
 
-        for given_obs, emitted_obs in x:
+        canonical = [_canonical_observation(value) for value in x]
+        for given_obs, emitted_obs, _, emitted_total in canonical:
             emit_counts = [c1 for _, c1 in emitted_obs]
-            emit_lengths.append(sum(emit_counts))
+            emit_lengths.append(emitted_total)
 
             if not emitted_obs:
                 assoc_scores.append(engine.asarray(0.0))
-                continue
-            if not given_obs:
-                assoc_scores.append(engine.asarray(float("-inf")))
                 continue
 
             pairs = []
@@ -235,11 +251,13 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
 
             weighted_scores = pair_scores + engine.log(given_count_array).reshape((1, -1))
             per_emitted = engine.logsumexp(weighted_scores, axis=1) - engine.log(engine.sum(given_count_array))
-            assoc_scores.append(engine.sum(per_emitted * emit_count_array))
+            assoc_scores.append(
+                engine.sum(per_emitted * emit_count_array) + engine.asarray(log_coefficient(emit_counts))
+            )
 
         rv = engine.stack(assoc_scores) if assoc_scores else engine.zeros(0)
 
-        given_enc = self.given_dist.dist_to_encoder().seq_encode([xx[0] for xx in x])
+        given_enc = self.given_dist.dist_to_encoder().seq_encode([value[0] for value in canonical])
         rv = rv + backend_seq_log_density(self.given_dist, given_enc, engine)
 
         len_enc = self.len_dist.dist_to_encoder().seq_encode(emit_lengths)
@@ -280,7 +298,13 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
             raise EnumerationError(self, reason="enumeration requires a non-null given_dist over the S1 bags")
         if not isinstance(self.cond_dist, ConditionalDistribution):
             raise EnumerationError(self, reason="enumeration requires cond_dist to be a ConditionalDistribution")
-        return HiddenAssociationEnumerator(self)
+        raise EnumerationError(
+            self,
+            reason=(
+                "normalized grouped-output enumeration requires a finite support manifest for each "
+                "conditional emission mixture"
+            ),
+        )
 
     def sampler(self, seed: int | None = None) -> "HiddenAssociationSampler":
         """Return a sampler for iid grouped-count pairs.
@@ -402,12 +426,17 @@ class HiddenAssociationSampler(DistributionSampler):
 
         """
         if size is None:
-            prev_obs = self.given_sampler.sample()
-            cnt = self.len_sampler.sample()
+            prev_obs, _, given_total, _ = _canonical_observation((self.given_sampler.sample(), []))
+            cnt = exact_integer(
+                self.len_sampler.sample(),
+                label="hidden-association sampled emission length",
+                nonnegative=True,
+            )
+            if cnt > 0 and given_total == 0:
+                raise ValueError("cannot sample nonempty emissions from an empty given bag")
             rng = np.random.RandomState(self.idx_sampler.randint(0, maxrandint))
             rv = []
-            pp = np.asarray([u[1] for u in prev_obs], dtype=float)
-            pp /= pp.sum()
+            pp = np.asarray([u[1] for u in prev_obs], dtype=float) / given_total
 
             for i in rng.choice(len(prev_obs), p=pp, size=cnt):
                 rv.append(self.cond_sampler.sample_given(prev_obs[i][0]))
@@ -429,14 +458,20 @@ class HiddenAssociationSampler(DistributionSampler):
             List of (emitted value, count) pairs.
 
         """
-        cnt = self.len_sampler.sample()
+        given, _, given_total, _ = _canonical_observation((x, []))
+        cnt = exact_integer(
+            self.len_sampler.sample(),
+            label="hidden-association sampled emission length",
+            nonnegative=True,
+        )
+        if cnt > 0 and given_total == 0:
+            raise ValueError("cannot sample nonempty emissions from an empty given bag")
         rng = np.random.RandomState(self.idx_sampler.randint(0, maxrandint))
         rv = []
-        pp = np.asarray([u[1] for u in x], dtype=float)
-        pp /= pp.sum()
+        pp = np.asarray([u[1] for u in given], dtype=float) / given_total if given_total else np.zeros(0)
 
-        for i in rng.choice(len(x), p=pp, size=cnt):
-            rv.append(self.cond_sampler.sample_given(x[i][0]))
+        for i in rng.choice(len(given), p=pp, size=cnt):
+            rv.append(self.cond_sampler.sample_given(given[i][0]))
 
         rv = list(count_by_value(rv).items())
 
@@ -499,22 +534,25 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
             estimate (HiddenAssociationDistribution): Previous estimate used to compute posteriors.
 
         """
-        nn = 0
-        pv = np.zeros(len(x[0]))
+        if not isinstance(estimate, HiddenAssociationDistribution):
+            raise TypeError("hidden-association accumulator estimate has the wrong model type")
+        checked_weight = finite_weight(weight, label="hidden-association observation weight")
+        given, emitted, given_total, emitted_total = _canonical_observation(x)
+        if checked_weight == 0.0:
+            return
+        assignments: list[tuple[Any, int, np.ndarray]] = []
+        pv = np.zeros(len(given))
         # Data log-density of this observation (== HiddenAssociationDistribution.log_density(x)),
         # reusing the per-emitted logsumexp normalizer ``ll`` the E-step already computes. Only
         # materialized when the fused-EM fast path requests it (_track_ll).
         track = self._track_ll
-        obs_ll = 0.0
+        obs_ll = log_coefficient([count for _, count in emitted])
 
-        for x1, c1 in x[1]:
-            cc = 0
-            nn += c1
+        for x1, c1 in emitted:
             ll = -np.inf
 
-            for i, (x0, c0) in enumerate(x[0]):
+            for i, (x0, c0) in enumerate(given):
                 tt = estimate.cond_dist.log_density((x0, x1)) + math.log(c0)
-                cc += c0
                 pv[i] = tt
 
                 if tt == -np.inf:
@@ -525,36 +563,34 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
                 else:
                     ll = math.log1p(math.exp(ll - tt)) + tt
 
-            if ll == -np.inf or cc <= 0:
-                # Empty/all-zero given-set: no association mass. Avoid the
-                # -inf - (-inf) = NaN normalizer that would corrupt sufficient
-                # statistics, and contribute -inf to the tracked log-density to
-                # match HiddenAssociationDistribution.log_density.
-                if track:
-                    obs_ll += -np.inf * c1
-                continue
+            if ll == -np.inf:
+                raise ValueError("hidden-association observation is impossible under the estimate")
 
             if track:
-                obs_ll += (ll - math.log(cc)) * c1
+                obs_ll += (ll - math.log(given_total)) * c1
 
             pv -= ll
             np.exp(pv, out=pv)
+            assignments.append((x1, c1, pv.copy()))
 
-            for i, (x0, c0) in enumerate(x[0]):
-                self.cond_accumulator.update((x0, x1), pv[i] * c1 * weight, estimate.cond_dist)
+        for x1, c1, posterior in assignments:
+            for i, (x0, _) in enumerate(given):
+                self.cond_accumulator.update(
+                    (x0, x1),
+                    posterior[i] * c1 * checked_weight,
+                    estimate.cond_dist,
+                )
 
         if track:
-            obs_ll += estimate.given_dist.log_density(x[0])
-            obs_ll += estimate.len_dist.log_density(nn)
-            self._seq_ll += weight * obs_ll
+            obs_ll += estimate.given_dist.log_density(given)
+            obs_ll += estimate.len_dist.log_density(emitted_total)
+            self._seq_ll += checked_weight * obs_ll
 
         if self.given_accumulator is not None:
-            given_dist = None if estimate is None else estimate.given_dist
-            self.given_accumulator.update(x[0], weight, given_dist)
+            self.given_accumulator.update(given, checked_weight, estimate.given_dist)
 
         if self.size_accumulator is not None:
-            len_dist = None if estimate is None else estimate.len_dist
-            self.size_accumulator.update(nn, weight, len_dist)
+            self.size_accumulator.update(emitted_total, checked_weight, estimate.len_dist)
 
     def initialize(
         self, x: tuple[list[tuple[T, float]], list[tuple[T, float]]], weight: float, rng: np.random.RandomState
@@ -568,18 +604,25 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
             rng (np.random.RandomState): Random number generator for the random assignments.
 
         """
-        w = rng.dirichlet(np.ones(len(x[0])), size=len(x[1]))
-        nn = 0
-        for j, (x1, c1) in enumerate(x[1]):
-            nn += c1
-            for i, (x0, c0) in enumerate(x[0]):
-                self.cond_accumulator.initialize((x0, x1), w[j, i] * c1 * weight, rng)
+        checked_weight = finite_weight(weight, label="hidden-association observation weight")
+        given, emitted, _, emitted_total = _canonical_observation(x)
+        if checked_weight == 0.0:
+            return
+        if emitted:
+            w = rng.dirichlet(np.ones(len(given)), size=len(emitted))
+            for j, (x1, c1) in enumerate(emitted):
+                for i, (x0, _) in enumerate(given):
+                    self.cond_accumulator.initialize(
+                        (x0, x1),
+                        w[j, i] * c1 * checked_weight,
+                        rng,
+                    )
 
         if self.given_accumulator is not None:
-            self.given_accumulator.initialize(x[0], weight, rng)
+            self.given_accumulator.initialize(given, checked_weight, rng)
 
         if self.size_accumulator is not None:
-            self.size_accumulator.initialize(nn, weight, rng)
+            self.size_accumulator.initialize(emitted_total, checked_weight, rng)
 
     def seq_initialize(
         self,
@@ -595,8 +638,13 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
             rng (np.random.RandomState): Random number generator for the random assignments.
 
         """
+        checked_weights = observation_weights(
+            weights,
+            len(x),
+            label="hidden-association observation weights",
+        )
         for i, xx in enumerate(x):
-            self.initialize(xx, weights[i], rng)
+            self.initialize(xx, checked_weights[i], rng)
 
     def seq_update(
         self,
@@ -612,7 +660,12 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
             estimate (HiddenAssociationDistribution): Previous estimate used to compute posteriors.
 
         """
-        for xx, ww in zip(x, weights):
+        checked_weights = observation_weights(
+            weights,
+            len(x),
+            label="hidden-association observation weights",
+        )
+        for xx, ww in zip(x, checked_weights):
             self.update(xx, ww, estimate)
 
     def seq_update_engine(
@@ -630,56 +683,12 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         the active engine. The engine-computed posterior weights are fed to the conditional
         accumulator; the given/size accumulators are updated per observation. Mirrors ``update``.
         """
-        from mixle.stats.compute.backend import backend_seq_log_density
-
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
-
-        pairs = []
-        log_c0 = []
-        c1_list = []
-        w_list = []
-        group_id = []
-        emit_lengths = []
-        num_groups = 0
-        for o, (given_obs, emitted_obs) in enumerate(x):
-            emit_lengths.append(sum(c1 for _, c1 in emitted_obs))
-            if not emitted_obs or not given_obs:
-                continue
-            wo = float(weights_np[o])
-            log_gc = np.log(np.asarray([c0 for _, c0 in given_obs], dtype=np.float64))
-            for x1, c1 in emitted_obs:
-                for k, (x0, _) in enumerate(given_obs):
-                    pairs.append((x0, x1))
-                    log_c0.append(log_gc[k])
-                    c1_list.append(c1)
-                    w_list.append(wo)
-                    group_id.append(num_groups)
-                num_groups += 1
-
-        if pairs:
-            cond_enc = estimate.cond_dist.dist_to_encoder().seq_encode(pairs)
-            pair_scores = backend_seq_log_density(estimate.cond_dist, cond_enc, engine)
-            scored = pair_scores + engine.asarray(np.asarray(log_c0, dtype=np.float64))
-            gid = engine.asarray(np.asarray(group_id, dtype=np.int64))
-            shift = engine.max(scored, axis=0)
-            e = engine.exp(scored - shift)
-            denom = engine.index_add(engine.zeros(num_groups), gid, e)
-            pv = e / denom[gid]
-            pair_w = (
-                pv
-                * engine.asarray(np.asarray(c1_list, dtype=np.float64))
-                * engine.asarray(np.asarray(w_list, dtype=np.float64))
-            )
-            pair_w_np = np.asarray(engine.to_numpy(pair_w), dtype=np.float64)
-            self.cond_accumulator.seq_update(cond_enc, pair_w_np, estimate.cond_dist)
-
-        if not supports(self.given_accumulator, Neutral):
-            given_enc = self.given_accumulator.acc_to_encoder().seq_encode([xx[0] for xx in x])
-            self.given_accumulator.seq_update(given_enc, weights_np, estimate.given_dist)
-
-        if not supports(self.size_accumulator, Neutral):
-            size_enc = self.size_accumulator.acc_to_encoder().seq_encode(emit_lengths)
-            self.size_accumulator.seq_update(size_enc, weights_np, estimate.len_dist)
+        weights_np = observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            len(x),
+            label="hidden-association observation weights",
+        )
+        self.seq_update(x, weights_np, estimate)
 
     def combine(self, suff_stat: tuple[SS1, SS2 | None, SS3 | None]) -> "HiddenAssociationAccumulator":
         """Merge sufficient statistics of suff_stat into this accumulator.
@@ -895,7 +904,11 @@ class HiddenAssociationDataEncoder(DataSequenceEncoder):
             The observations unchanged (seq_log_density and seq_update loop over them).
 
         """
-        return x
+        encoded = []
+        for value in x:
+            given, emitted, _, _ = _canonical_observation(value)
+            encoded.append((given, emitted))
+        return encoded
 
     def row_count(self, x: Any) -> int:
         """Return the number of identity-encoded grouped-count observations."""

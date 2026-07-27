@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from mixle.stats.latent.integer_hidden_association import IntegerHiddenAssociationDistribution
+from mixle.stats.multivariate._multinomial_contracts import log_coefficient
 
 COND_WEIGHTS = np.asarray(
     [
@@ -54,7 +55,7 @@ def target_probabilities(alpha, datum):
 
 def expected_log_density(alpha, datum):
     cy = np.asarray([c for _, c in datum[1]], dtype=float)
-    return float(np.dot(np.log(target_probabilities(alpha, datum)), cy))
+    return float(np.dot(np.log(target_probabilities(alpha, datum)), cy) + log_coefficient(cy))
 
 
 def expected_structured_total(alpha, datum, weight):

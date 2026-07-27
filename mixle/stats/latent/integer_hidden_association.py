@@ -10,8 +10,9 @@ For previous words ``S1`` and emitted words ``S2``, ``cond_weights`` models
 ``p(word_in_S2 | state)``. The ``alpha`` parameter mixes this learned
 association with a uniform background over emitted values.
 
-The grouped-count representation keeps repeated integer words compact while
-preserving the same density as an expanded iid sequence with counts.
+The grouped-count representation keeps repeated integer words compact and uses
+the normalized multinomial count-vector law induced by collapsing the sampler's
+ordered iid emissions.
 """
 
 import math
@@ -42,6 +43,13 @@ from mixle.stats.compute.pdist import (
     child_enumerator,
 )
 from mixle.stats.latent.integer_probabilistic_latent_semantic_indexing import multinomial_bag_stream
+from mixle.stats.multivariate._multinomial_contracts import (
+    canonical_integer_bag,
+    exact_integer,
+    finite_weight,
+    log_coefficient,
+    observation_weights,
+)
 from mixle.utils.optional_deps import HAS_NUMBA, numba
 from mixle.utils.optsutil import count_by_value
 
@@ -55,6 +63,56 @@ E = E3 | E4
 
 SS1 = TypeVar("SS1")  # suff stat prev
 SS2 = TypeVar("SS2")  # suff stat len
+
+
+def _positive_dimension(value: Any, label: str) -> int:
+    result = exact_integer(value, label=label)
+    if result <= 0:
+        raise ValueError("%s must be positive" % label)
+    return result
+
+
+def _row_simplex_matrix(value: Any, label: str) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("%s must be a finite nonempty row-simplex matrix" % label) from exc
+    if result.ndim != 2 or 0 in result.shape or np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError("%s must be a finite nonempty row-simplex matrix" % label)
+    totals = result.sum(axis=1, keepdims=True)
+    if not np.allclose(totals, 1.0, rtol=1.0e-12, atol=1.0e-12):
+        raise ValueError("%s rows must each sum to one" % label)
+    return (result / totals).copy()
+
+
+def _canonical_integer_observation(
+    value: Any,
+    num_vals1: int,
+    num_vals2: int,
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]], int, int]:
+    if isinstance(value, (str, bytes)):
+        raise TypeError("integer hidden-association observation must be a (given_bag, emitted_bag) pair")
+    try:
+        parts = list(value)
+    except TypeError as exc:
+        raise TypeError("integer hidden-association observation must be a (given_bag, emitted_bag) pair") from exc
+    if len(parts) != 2:
+        raise ValueError("integer hidden-association observation must be a (given_bag, emitted_bag) pair")
+    given, given_total, _ = canonical_integer_bag(
+        parts[0],
+        min_val=0,
+        max_val=num_vals1 - 1,
+        reject_outside=True,
+    )
+    emitted, emitted_total, _ = canonical_integer_bag(
+        parts[1],
+        min_val=0,
+        max_val=num_vals2 - 1,
+        reject_outside=True,
+    )
+    if emitted_total > 0 and given_total == 0:
+        raise ValueError("nonempty integer hidden-association emissions require a positive-mass given bag")
+    return given, emitted, given_total, emitted_total
 
 
 class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
@@ -100,19 +158,25 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
             use_numba: Whether Numba encoding/kernels are enabled.
 
         """
-        self.cond_weights = np.asarray(cond_weights, dtype=np.float64)
-        self.state_prob_mat = np.asarray(state_prob_mat, dtype=np.float64)
+        self.cond_weights = _row_simplex_matrix(cond_weights, "cond_weights")
+        self.state_prob_mat = _row_simplex_matrix(state_prob_mat, "state_prob_mat")
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
         self.prev_dist = prev_dist if prev_dist is not None else NullDistribution()
         self.has_prev_dist = not supports(self.prev_dist, Neutral)
         self.num_vals2 = self.state_prob_mat.shape[1]
         self.num_vals1 = self.cond_weights.shape[0]
         self.num_states = self.state_prob_mat.shape[0]
-        self.alpha = alpha
+        if self.cond_weights.shape[1] != self.num_states:
+            raise ValueError("cond_weights columns must equal the number of state_prob_mat rows")
+        self.alpha = float(alpha)
+        if not np.isfinite(self.alpha) or self.alpha < 0.0 or self.alpha > 1.0:
+            raise ValueError("alpha must be finite and lie in [0, 1]")
         self.name = name
         self.keys = keys
         self.init_prob_vec = np.empty(0, dtype=np.float64)
-        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
+        if use_numba is not None and not isinstance(use_numba, (bool, np.bool_)):
+            raise TypeError("use_numba must be a bool or None")
+        self.use_numba = HAS_NUMBA if use_numba is None else bool(use_numba)
 
     def compute_capabilities(self):
         """Return backend capability metadata for this concrete integer association model."""
@@ -198,25 +262,29 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         a = self.alpha / nw
         b = 1 - self.alpha
 
-        cx = np.asarray([u[1] for u in x[0]], dtype=float)
-        vx = np.asarray([u[0] for u in x[0]], dtype=int)
-        cy = np.asarray([u[1] for u in x[1]], dtype=float)
-        vy = np.asarray([u[0] for u in x[1]], dtype=int)
+        given, emitted, given_total, emitted_total = _canonical_integer_observation(
+            x,
+            self.num_vals1,
+            self.num_vals2,
+        )
+        cx = np.asarray([u[1] for u in given], dtype=np.float64)
+        vx = np.asarray([u[0] for u in given], dtype=np.int64)
+        cy = np.asarray([u[1] for u in emitted], dtype=np.float64)
+        vy = np.asarray([u[0] for u in emitted], dtype=np.int64)
 
-        n1 = np.sum(cx)
-        n2 = np.sum(cy)
-
-        ll = self.cond_weights[vx, :].T * (cx / np.sum(cx))
-        ll = np.dot(ll.T, self.state_prob_mat[:, vy])
-        with np.errstate(divide="ignore"):
-            log_sum_x = np.log(b * np.sum(ll, axis=0) + a)
-        rv = float(np.dot(log_sum_x, cy))
+        rv = log_coefficient(cy)
+        if len(emitted):
+            ll = self.cond_weights[vx, :].T * (cx / given_total)
+            ll = np.dot(ll.T, self.state_prob_mat[:, vy])
+            with np.errstate(divide="ignore"):
+                log_sum_x = np.log(b * np.sum(ll, axis=0) + a)
+            rv += float(np.dot(log_sum_x, cy))
         # rv += np.dot(np.log(self.init_prob_vec[vx]), cx)
 
-        rv += self.prev_dist.log_density(x[0])
-        rv += self.len_dist.log_density(n2)
+        rv += self.prev_dist.log_density(given)
+        rv += self.len_dist.log_density(emitted_total)
 
-        return rv
+        return float(rv)
 
     def seq_log_density(self, x: E) -> np.ndarray:
         """Vectorized evaluation of log-density at sequence encoded input x.
@@ -243,7 +311,7 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
                 x_mat = self.cond_weights[vx, :].T * (cx / np.sum(cx))
                 x_mat = np.dot(x_mat.T, self.state_prob_mat[:, vy])
                 with np.errstate(divide="ignore"):
-                    rv[i] = np.dot(np.log(b * np.sum(x_mat, axis=0) + a), cy)
+                    rv[i] = np.dot(np.log(b * np.sum(x_mat, axis=0) + a), cy) + log_coefficient(cy)
                 # rv[i] += np.dot(np.log(self.init_prob_vec[vx]), cx)
 
             rv += self.prev_dist.seq_log_density(xx[1])
@@ -255,7 +323,7 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
             rv = np.zeros(len(s0), dtype=np.float64)
             t0 = np.concatenate([[0], s0]).cumsum().astype(np.int32)
             t1 = np.concatenate([[0], s1]).cumsum().astype(np.int32)
-            max_len = s0.max()
+            max_len = int(s0.max()) if len(s0) else 0
             numba_seq_log_density(
                 self.num_states,
                 max_len,
@@ -273,6 +341,8 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
                 b,
                 rv,
             )
+            for i in range(len(s1)):
+                rv[i] += log_coefficient(c1[t1[i] : t1[i + 1]])
 
             rv += self.prev_dist.seq_log_density(xv)
             rv += self.len_dist.seq_log_density(nn)
@@ -310,7 +380,9 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
                 given_state = cond_weights[given_ids, :] * given_weights[:, None]
                 emitted_given = engine.matmul(given_state, state_probs[:, emitted_ids])
                 emitted_probs = b * engine.sum(emitted_given, axis=0) + a
-                scores.append(engine.sum(engine.log(emitted_probs) * emitted_counts))
+                scores.append(
+                    engine.sum(engine.log(emitted_probs) * emitted_counts) + engine.asarray(log_coefficient(cy))
+                )
 
             rv = engine.stack(scores)
 
@@ -325,16 +397,18 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         -- the smoothed mixture the model uses to score each emitted word. Returns None for an empty S1
         (``n1 = 0``), whose conditional is degenerate (the model's own density is undefined there).
         """
-        if not s1:
+        given, _, given_total, _ = _canonical_integer_observation(
+            (s1, []),
+            self.num_vals1,
+            self.num_vals2,
+        )
+        if given_total == 0:
             return None
-        vx = np.asarray([u[0] for u in s1], dtype=int)
-        cx = np.asarray([u[1] for u in s1], dtype=float)
-        n1 = float(cx.sum())
-        if n1 <= 0.0:
-            return None
+        vx = np.asarray([u[0] for u in given], dtype=np.int64)
+        cx = np.asarray([u[1] for u in given], dtype=np.float64)
         a = self.alpha / self.num_vals2
         b = 1.0 - self.alpha
-        state_weight = (self.cond_weights[vx, :] * (cx / n1)[:, None]).sum(axis=0)  # (num_states,)
+        state_weight = (self.cond_weights[vx, :] * (cx / given_total)[:, None]).sum(axis=0)  # (num_states,)
         q = b * (state_weight @ self.state_prob_mat) + a  # (num_vals2,)
         with np.errstate(divide="ignore"):
             return np.log(q)
@@ -400,7 +474,13 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         """Return an encoder for integer hidden-association observations."""
         prev_encoder = self.prev_dist.dist_to_encoder()
         len_encoder = self.len_dist.dist_to_encoder()
-        return IntegerHiddenAssociationDataEncoder(prev_encoder, len_encoder, self.use_numba)
+        return IntegerHiddenAssociationDataEncoder(
+            self.num_vals1,
+            self.num_vals2,
+            prev_encoder,
+            len_encoder,
+            self.use_numba,
+        )
 
 
 class IntegerHiddenAssociationEnumerator(DistributionEnumerator):
@@ -473,17 +553,24 @@ class IntegerHiddenAssociationSampler(DistributionSampler):
             List of (emitted word, count) pairs.
 
         """
-        slen = self.size_sampler.sample()
+        given, _, given_total, _ = _canonical_integer_observation(
+            (x, []),
+            self.dist.num_vals1,
+            self.dist.num_vals2,
+        )
+        slen = exact_integer(
+            self.size_sampler.sample(),
+            label="integer hidden-association sampled emission length",
+            nonnegative=True,
+        )
+        if slen > 0 and given_total == 0:
+            raise ValueError("cannot sample nonempty emissions from an empty given bag")
         rng = np.random.RandomState(self.rng.randint(0, maxrandint))
 
-        x0 = np.asarray([xx[0] for xx in x])
-        x1 = np.asarray([xx[1] for xx in x], dtype=float)
-        s1 = np.sum(x1)
-
-        if s1 > 0:
-            x1 /= s1
-        else:
+        if slen == 0:
             return []
+        x0 = np.asarray([xx[0] for xx in given], dtype=np.int64)
+        x1 = np.asarray([xx[1] for xx in given], dtype=np.float64) / given_total
 
         v2 = []
         z1 = rng.choice(len(x0), p=x1, replace=True, size=slen)
@@ -559,15 +646,17 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             state_key (Optional[str]): Key for merging state counts.
 
         """
-        self.init_count = np.zeros(num_vals1, dtype=np.float64)
-        self.weight_count = np.zeros((num_vals1, num_states), dtype=np.float64)
-        self.state_count = np.zeros((num_states, num_vals2), dtype=np.float64)
+        self.num_vals1 = _positive_dimension(num_vals1, "num_vals1")
+        self.num_vals2 = _positive_dimension(num_vals2, "num_vals2")
+        self.num_states = _positive_dimension(num_states, "num_states")
+        self.init_count = np.zeros(self.num_vals1, dtype=np.float64)
+        self.weight_count = np.zeros((self.num_vals1, self.num_states), dtype=np.float64)
+        self.state_count = np.zeros((self.num_states, self.num_vals2), dtype=np.float64)
         self.size_accumulator = size_acc if size_acc is not None else NullAccumulator()
         self.prev_accumulator = prev_acc if prev_acc is not None else NullAccumulator()
-        self.num_vals1 = num_vals1
-        self.num_vals2 = num_vals2
-        self.num_states = num_states
-        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
+        if use_numba is not None and not isinstance(use_numba, (bool, np.bool_)):
+            raise TypeError("use_numba must be a bool or None")
+        self.use_numba = HAS_NUMBA if use_numba is None else bool(use_numba)
         self.weight_key, self.state_key = keys if keys is not None else (None, None)
 
         # Data log-likelihood accumulated as a byproduct of the E-step (the per-observation log_density),
@@ -599,16 +688,38 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             estimate (IntegerHiddenAssociationDistribution): Previous estimate used to compute posteriors.
 
         """
-        vx = np.asarray([u[0] for u in x[0]], dtype=int)
-        cx = np.asarray([u[1] for u in x[0]], dtype=float)
-        vy = np.asarray([u[0] for u in x[1]], dtype=int)
-        cy = np.asarray([u[1] for u in x[1]], dtype=float)
-        nx = np.sum(cx)
+        if not isinstance(estimate, IntegerHiddenAssociationDistribution):
+            raise TypeError("integer hidden-association accumulator estimate has the wrong model type")
+        if (
+            estimate.num_vals1 != self.num_vals1
+            or estimate.num_vals2 != self.num_vals2
+            or estimate.num_states != self.num_states
+        ):
+            raise ValueError("integer hidden-association accumulator estimate dimensions do not match")
+        checked_weight = finite_weight(weight, label="integer hidden-association observation weight")
+        given, emitted, given_total, emitted_total = _canonical_integer_observation(
+            x,
+            self.num_vals1,
+            self.num_vals2,
+        )
+        if checked_weight == 0.0:
+            return
+        vx = np.asarray([u[0] for u in given], dtype=np.int64)
+        cx = np.asarray([u[1] for u in given], dtype=np.float64)
+        vy = np.asarray([u[0] for u in emitted], dtype=np.int64)
+        cy = np.asarray([u[1] for u in emitted], dtype=np.float64)
 
         a = estimate.alpha / estimate.num_vals2
         b = 1 - estimate.alpha
 
-        x_mat = (estimate.cond_weights[vx, :].T * (cx / nx)).T
+        x_mat = (
+            (estimate.cond_weights[vx, :].T * (cx / given_total)).T
+            if len(emitted)
+            else np.zeros(
+                (len(vx), self.num_states),
+                dtype=np.float64,
+            )
+        )
         y_mat = estimate.state_prob_mat[:, vy]
         z_mat = x_mat[:, :, None] * y_mat[None, :, :]
 
@@ -616,16 +727,18 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
         ss = np.sum(np.sum(z_mat, axis=0, keepdims=True), axis=1, keepdims=True)
         denom = ss * b + a
+        if np.any(denom <= 0.0):
+            raise ValueError("integer hidden-association observation is impossible under the estimate")
         scale = np.zeros_like(denom)
         np.divide(b, denom, out=scale, where=denom > 0.0)
         z_mat *= scale
 
-        self.weight_count[vx, :] += np.dot(z_mat, cy) * weight
-        self.state_count[:, vy] += np.sum(z_mat, axis=0) * cy * weight
-        self.init_count[vx] += cx * weight
+        np.add.at(self.weight_count, vx, np.dot(z_mat, cy) * checked_weight)
+        np.add.at(self.state_count.T, vy, (np.sum(z_mat, axis=0) * cy * checked_weight).T)
+        np.add.at(self.init_count, vx, cx * checked_weight)
 
-        self.prev_accumulator.update(x[0], weight, None if estimate is None else estimate.prev_dist)
-        self.size_accumulator.update(cy.sum(), weight, None if estimate is None else estimate.len_dist)
+        self.prev_accumulator.update(given, checked_weight, estimate.prev_dist)
+        self.size_accumulator.update(emitted_total, checked_weight, estimate.len_dist)
 
     def _rng_initialize(self, rng: np.random.RandomState) -> None:
         if not self._init_rng:
@@ -648,20 +761,35 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             rng (np.random.RandomState): Random number generator for the random assignments.
 
         """
+        checked_weight = finite_weight(weight, label="integer hidden-association observation weight")
+        given, emitted, _, emitted_total = _canonical_integer_observation(
+            x,
+            self.num_vals1,
+            self.num_vals2,
+        )
+        if checked_weight == 0.0:
+            return
         if not self._init_rng:
             self._rng_initialize(rng)
+        vx = np.asarray([u[0] for u in given], dtype=np.int64)
+        cx = np.asarray([u[1] for u in given], dtype=np.float64)
+        vy = np.asarray([u[0] for u in emitted], dtype=np.int64)
+        cy = np.asarray([u[1] for u in emitted], dtype=np.float64)
 
-        vx = np.asarray([u[0] for u in x[0]], dtype=int)
-        cx = np.asarray([u[1] for u in x[0]], dtype=float)
-        vy = np.asarray([u[0] for u in x[1]], dtype=int)
-        cy = np.asarray([u[1] for u in x[1]], dtype=float)
+        np.add.at(
+            self.weight_count,
+            vx,
+            self._rng_weight.dirichlet(np.ones(self.num_states), size=len(vx)) * checked_weight,
+        )
+        np.add.at(
+            self.state_count.T,
+            vy,
+            (self._rng_state.dirichlet(np.ones(self.num_states), size=len(vy)).T * cy * checked_weight).T,
+        )
+        np.add.at(self.init_count, vx, cx * checked_weight)
 
-        self.weight_count[vx, :] += self._rng_weight.dirichlet(np.ones(self.num_states), size=len(vx)) * weight
-        self.state_count[:, vy] += self._rng_state.dirichlet(np.ones(self.num_states), size=len(vy)).T * cy * weight
-        self.init_count[vx] += cx * weight
-
-        self.prev_accumulator.initialize(x[0], weight, self._rng_prev)
-        self.size_accumulator.initialize(cy.sum(), weight, self._rng_size)
+        self.prev_accumulator.initialize(given, checked_weight, self._rng_prev)
+        self.size_accumulator.initialize(emitted_total, checked_weight, self._rng_size)
 
     def seq_initialize(self, x: E, weights: np.ndarray, rng: np.random.RandomState) -> None:
         """Vectorized initialization of sufficient statistics from sequence encoded observations.
@@ -672,6 +800,12 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             rng (np.random.RandomState): Random number generator for the random assignments.
 
         """
+        rows = len(x[0][0]) if x[1] is None else len(x[1][0][0])
+        weights = observation_weights(
+            weights,
+            rows,
+            label="integer hidden-association observation weights",
+        )
         if not self._init_rng:
             self._rng_initialize(rng)
 
@@ -730,6 +864,14 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             estimate (IntegerHiddenAssociationDistribution): Previous estimate used to compute posteriors.
 
         """
+        if not isinstance(estimate, IntegerHiddenAssociationDistribution):
+            raise TypeError("integer hidden-association accumulator estimate has the wrong model type")
+        rows = len(x[0][0]) if x[1] is None else len(x[1][0][0])
+        weights = observation_weights(
+            weights,
+            rows,
+            label="integer hidden-association observation weights",
+        )
         if x[1] is None:
             xx = x[0]
             a = estimate.alpha / estimate.num_vals2
@@ -737,10 +879,27 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             track = self._track_ll
             obs_ll = np.zeros(len(xx[0]), dtype=np.float64) if track else None
 
+            for entry, weight in zip(xx[0], weights):
+                if weight == 0.0:
+                    continue
+                vx, cx, vy, cy = entry
+                if len(vy):
+                    state_weights = np.sum(
+                        estimate.cond_weights[vx, :] * (cx / np.sum(cx))[:, None],
+                        axis=0,
+                    )
+                    probs = b * (state_weights @ estimate.state_prob_mat[:, vy]) + a
+                    if np.any(probs <= 0.0):
+                        raise ValueError("integer hidden-association observation is impossible under the estimate")
+
             for i, (entry, weight) in enumerate(zip(xx[0], weights)):
                 vx, cx, vy, cy = entry
                 nx = np.sum(cx)
-                x_mat = (estimate.cond_weights[vx, :].T * (cx / nx)).T
+                x_mat = (
+                    (estimate.cond_weights[vx, :].T * (cx / nx)).T
+                    if len(vy)
+                    else np.zeros((len(vx), self.num_states), dtype=np.float64)
+                )
                 y_mat = estimate.state_prob_mat[:, vy]
                 z_mat = x_mat[:, :, None] * y_mat[None, :, :]
 
@@ -753,7 +912,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
                     # reusing ``denom`` (the per-emitted-word mixture mass) before it is consumed by the
                     # responsibility normalization below.
                     with np.errstate(divide="ignore"):
-                        obs_ll[i] = float(np.dot(np.log(denom.reshape(-1)), cy))
+                        obs_ll[i] = float(np.dot(np.log(denom.reshape(-1)), cy) + log_coefficient(cy))
                 scale = np.zeros_like(denom)
                 np.divide(b, denom, out=scale, where=denom > 0.0)
                 z_mat *= scale
@@ -780,10 +939,24 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
             t0 = np.concatenate([[0], s0]).cumsum().astype(np.int32)
             t1 = np.concatenate([[0], s1]).cumsum().astype(np.int32)
-            max_len = s0.max()
+            max_len = int(s0.max()) if len(s0) else 0
 
             a = estimate.alpha / estimate.num_vals2
             b = 1 - estimate.alpha
+
+            for i, weight in enumerate(weights):
+                if weight == 0.0 or s1[i] == 0:
+                    continue
+                vx = x0[t0[i] : t0[i + 1]]
+                cx = c0[t0[i] : t0[i + 1]]
+                vy = x1[t1[i] : t1[i + 1]]
+                state_weights = np.sum(
+                    estimate.cond_weights[vx, :] * (cx / np.sum(cx))[:, None],
+                    axis=0,
+                )
+                probs = b * (state_weights @ estimate.state_prob_mat[:, vy]) + a
+                if np.any(probs <= 0.0):
+                    raise ValueError("integer hidden-association observation is impossible under the estimate")
 
             numba_seq_update(
                 self.num_states,
@@ -985,7 +1158,13 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         """Return an encoder compatible with integer hidden-association observations."""
         prev_encoder = self.prev_accumulator.acc_to_encoder()
         len_encoder = self.size_accumulator.acc_to_encoder()
-        return IntegerHiddenAssociationDataEncoder(prev_encoder, len_encoder, self.use_numba)
+        return IntegerHiddenAssociationDataEncoder(
+            self.num_vals1,
+            self.num_vals2,
+            prev_encoder,
+            len_encoder,
+            self.use_numba,
+        )
 
 
 class IntegerHiddenAssociationAccumulatorFactory(StatisticAccumulatorFactory):
@@ -1026,9 +1205,9 @@ class IntegerHiddenAssociationAccumulatorFactory(StatisticAccumulatorFactory):
         self.prev_factory = prev_factory if prev_factory is not None else NullAccumulatorFactory()
         self.keys = keys
         self.use_numba = HAS_NUMBA if use_numba is None else use_numba
-        self.num_vals1 = num_vals1
-        self.num_vals2 = num_vals2
-        self.num_states = num_states
+        self.num_vals1 = _positive_dimension(num_vals1, "num_vals1")
+        self.num_vals2 = _positive_dimension(num_vals2, "num_vals2")
+        self.num_states = _positive_dimension(num_states, "num_states")
 
     def make(self) -> "IntegerHiddenAssociationAccumulator":
         """Return a fresh integer hidden-association accumulator."""
@@ -1096,22 +1275,30 @@ class IntegerHiddenAssociationEstimator(ParameterEstimator):
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.num_vals = num_vals
-        self.num_states = num_states
-        self.alpha = alpha
-        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
+        self.num_states = _positive_dimension(num_states, "num_states")
+        self.alpha = float(alpha)
+        if not np.isfinite(self.alpha) or self.alpha < 0.0 or self.alpha > 1.0:
+            raise ValueError("alpha must be finite and lie in [0, 1]")
+        if pseudo_count is not None and (not np.isfinite(float(pseudo_count)) or float(pseudo_count) < 0.0):
+            raise ValueError("pseudo_count must be finite and non-negative")
+        if use_numba is not None and not isinstance(use_numba, (bool, np.bool_)):
+            raise TypeError("use_numba must be a bool or None")
+        self.use_numba = HAS_NUMBA if use_numba is None else bool(use_numba)
         self.name = name
         self.keys = keys if keys is not None else (None, None)
 
         if isinstance(num_vals, (tuple, list)):
-            if len(num_vals) >= 2:
-                self.num_vals1 = num_vals[0]
-                self.num_vals2 = num_vals[1]
+            if len(num_vals) == 2:
+                self.num_vals1 = _positive_dimension(num_vals[0], "num_vals1")
+                self.num_vals2 = _positive_dimension(num_vals[1], "num_vals2")
             elif len(num_vals) == 1:
-                self.num_vals1 = num_vals[0]
-                self.num_vals2 = num_vals[0]
+                self.num_vals1 = _positive_dimension(num_vals[0], "num_vals")
+                self.num_vals2 = self.num_vals1
+            else:
+                raise ValueError("num_vals must be one positive dimension or a pair of dimensions")
         else:
-            self.num_vals1 = num_vals
-            self.num_vals2 = num_vals
+            self.num_vals1 = _positive_dimension(num_vals, "num_vals")
+            self.num_vals2 = self.num_vals1
 
     def accumulator_factory(self) -> "IntegerHiddenAssociationAccumulatorFactory":
         """Return an accumulator factory matching this estimator."""
@@ -1137,6 +1324,17 @@ class IntegerHiddenAssociationEstimator(ParameterEstimator):
 
         """
         init_count, weight_count, state_count, prev_stats, size_stats = suff_stat
+        init_count = np.asarray(init_count, dtype=np.float64).copy()
+        weight_count = np.asarray(weight_count, dtype=np.float64).copy()
+        state_count = np.asarray(state_count, dtype=np.float64).copy()
+        if init_count.shape != (self.num_vals1,):
+            raise ValueError("integer hidden-association initial statistics have the wrong shape")
+        if weight_count.shape != (self.num_vals1, self.num_states):
+            raise ValueError("integer hidden-association weight statistics have the wrong shape")
+        if state_count.shape != (self.num_states, self.num_vals2):
+            raise ValueError("integer hidden-association state statistics have the wrong shape")
+        if any(np.any(~np.isfinite(value)) or np.any(value < 0.0) for value in (init_count, weight_count, state_count)):
+            raise ValueError("integer hidden-association statistics must be finite and non-negative")
 
         len_dist = self.len_estimator.estimate(nobs, size_stats)
         prev_dist = self.prev_estimator.estimate(nobs, prev_stats)
@@ -1150,11 +1348,12 @@ class IntegerHiddenAssociationEstimator(ParameterEstimator):
 
         wsum = np.sum(weight_count, axis=1, keepdims=True)
         ssum = np.sum(state_count, axis=1, keepdims=True)
-        ssum[ssum == 0] = 1.0
-        wsum[wsum == 0] = 1.0
-
-        weight_prob = weight_count / wsum
-        state_prob = state_count / ssum
+        zero_weights = wsum[:, 0] == 0.0
+        zero_states = ssum[:, 0] == 0.0
+        weight_prob = weight_count / np.where(wsum == 0.0, 1.0, wsum)
+        state_prob = state_count / np.where(ssum == 0.0, 1.0, ssum)
+        weight_prob[zero_weights, :] = 1.0 / self.num_states
+        state_prob[zero_states, :] = 1.0 / self.num_vals2
 
         # return IntegerHiddenAssociationDistribution(init_prob, state_prob, weight_prob, self.alpha, len_dist)
         return IntegerHiddenAssociationDistribution(
@@ -1172,7 +1371,14 @@ class IntegerHiddenAssociationEstimator(ParameterEstimator):
 class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
     """Encode grouped-count integer hidden-association observations."""
 
-    def __init__(self, prev_encoder: DataSequenceEncoder, len_encoder: DataSequenceEncoder, use_numba: bool) -> None:
+    def __init__(
+        self,
+        num_vals1: int,
+        num_vals2: int,
+        prev_encoder: DataSequenceEncoder,
+        len_encoder: DataSequenceEncoder,
+        use_numba: bool,
+    ) -> None:
         """Create an encoder for grouped-count word-set pairs.
 
         Args:
@@ -1186,13 +1392,22 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
             use_numba: Whether Numba encoding is enabled.
 
         """
+        self.num_vals1 = _positive_dimension(num_vals1, "num_vals1")
+        self.num_vals2 = _positive_dimension(num_vals2, "num_vals2")
         self.prev_encoder = prev_encoder
         self.len_encoder = len_encoder
-        self.use_numba = use_numba
+        if not isinstance(use_numba, (bool, np.bool_)):
+            raise TypeError("use_numba must be a bool")
+        self.use_numba = bool(use_numba)
 
     def __str__(self) -> str:
         """Return a readable encoder summary."""
-        s = "IntegerHiddenAssociationDataEncoder(prev_encoder=" + str(self.prev_encoder) + ",len_encoder="
+        s = (
+            "IntegerHiddenAssociationDataEncoder("
+            + f"num_vals1={self.num_vals1},num_vals2={self.num_vals2},prev_encoder="
+            + str(self.prev_encoder)
+            + ",len_encoder="
+        )
         s += str(self.len_encoder) + ",use_numba=" + str(self.use_numba) + ")"
         return s
 
@@ -1202,7 +1417,9 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
             cond0 = self.prev_encoder == other.prev_encoder
             cond1 = self.len_encoder == other.len_encoder
             cond2 = self.use_numba == other.use_numba
-            return cond0 and cond1 and cond2
+            cond3 = self.num_vals1 == other.num_vals1
+            cond4 = self.num_vals2 == other.num_vals2
+            return cond0 and cond1 and cond2 and cond3 and cond4
         else:
             return False
 
@@ -1272,8 +1489,17 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
 
         """
 
+        canonical = []
+        for value in x:
+            given, emitted, _, _ = _canonical_integer_observation(
+                value,
+                self.num_vals1,
+                self.num_vals2,
+            )
+            canonical.append((given, emitted))
+
         if not self.use_numba:
-            enc_rv = self._seq_encode(x)
+            enc_rv = self._seq_encode(canonical)
         else:
             x1 = []
             x0 = []
@@ -1284,7 +1510,7 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
             w0 = []
             nn = []
 
-            for i, xx in enumerate(x):
+            for i, xx in enumerate(canonical):
                 xx0 = [v for v, c in xx[0]]
                 cc0 = [c for v, c in xx[0]]
                 xx1 = [v for v, c in xx[1]]
@@ -1300,7 +1526,7 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
                 nn.append(sum(cc1))
 
             nn = self.len_encoder.seq_encode(nn)
-            xv = self.prev_encoder.seq_encode([x[0] for x in x])
+            xv = self.prev_encoder.seq_encode([value[0] for value in canonical])
 
             x0 = np.asarray(x0, dtype=np.int32)
             x1 = np.asarray(x1, dtype=np.int32)
@@ -1313,6 +1539,18 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
             enc_rv = tuple([None, ((s0, s1, x0, x1, c0, c1, w0), xv, nn)])
 
         return enc_rv
+
+    def row_count(self, x: Any) -> int:
+        """Return the number of validated association rows in an encoded payload."""
+        if not isinstance(x, (tuple, list)) or len(x) != 2:
+            raise ValueError("integer hidden-association encoded data has the wrong structure")
+        if x[1] is None:
+            if not isinstance(x[0], (tuple, list)) or len(x[0]) != 3:
+                raise ValueError("integer hidden-association encoded data has the wrong structure")
+            return len(x[0][0])
+        if not isinstance(x[1], (tuple, list)) or len(x[1]) != 3:
+            raise ValueError("integer hidden-association encoded data has the wrong structure")
+        return len(x[1][0][0])
 
 
 @numba.njit(
@@ -1385,6 +1623,8 @@ def numba_seq_update(
 
     for i in range(len(t0) - 1):
         weight = weights[i]
+        if weight == 0.0:
+            continue
         vx = x0[t0[i] : t0[i + 1]]
         cx = c0[t0[i] : t0[i + 1]]
         vy = x1[t1[i] : t1[i + 1]]
