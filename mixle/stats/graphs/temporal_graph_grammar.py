@@ -1472,6 +1472,8 @@ __all__ = [
     "LatentAttributedTemporalGraphGrammarEstimator",
     "LatentAttributedTemporalGraphGrammarAccumulator",
     "LatentAttributedTemporalGraphGrammarAccumulatorFactory",
+    "LatentAttributedTemporalGraphGrammarDataEncoder",
+    "LatentAttributedTemporalGraphGrammarStatistics",
     "LatentChurningTemporalGraphGrammarDistribution",
     "LatentChurningTemporalGraphGrammarSampler",
     "LatentChurningTemporalGraphGrammarEstimator",
@@ -2893,6 +2895,59 @@ class LatentTemporalGraphGrammarEstimator(ParameterEstimator):
 
 
 # --- regime-switching ATTRIBUTES: a latent regime over structure AND node/edge attributes -----------
+def _validate_latent_attributed_observation(
+    x: Any,
+    structure: TemporalGraphGrammarDistribution,
+    *,
+    has_node_dists: bool,
+    has_edge_dists: bool,
+) -> tuple[tuple[Any, ...], tuple[tuple[Any, ...], ...], tuple[tuple[Any, ...], ...]]:
+    if not isinstance(x, (tuple, list)) or len(x) != 3:
+        raise ValueError(
+            "latent attributed observations must be (snapshots, node_features, edge_features)."
+        )
+    raw_snaps, raw_nodes, raw_edges = x
+    if isinstance(raw_snaps, ApproximateTemporalGraphSample):
+        raise ValueError("approximate scalable samples must be explicitly unwrapped before attribution.")
+    try:
+        snaps = tuple(_binarize(snapshot, directed=structure.directed) for snapshot in raw_snaps)
+    except TypeError as exc:
+        raise ValueError("latent attributed snapshots must be a sequence.") from exc
+    if not snaps:
+        raise ValueError("latent attributed observations must contain at least one snapshot.")
+    structure.log_density(snaps)
+    transition_count = len(snaps) - 1
+
+    def _groups(raw: Any, *, label: str, enabled: bool) -> tuple[tuple[Any, ...], ...]:
+        try:
+            groups = tuple(tuple(group) for group in raw)
+        except TypeError as exc:
+            raise ValueError(f"{label} must be a sequence of per-transition record sequences.") from exc
+        if enabled:
+            if len(groups) != transition_count:
+                raise ValueError(f"{label} must contain exactly one record group per transition.")
+        elif groups:
+            raise ValueError(f"{label} must be empty when its regime distributions are not configured.")
+        return groups
+
+    node_features = _groups(raw_nodes, label="node_features", enabled=has_node_dists)
+    edge_features = _groups(raw_edges, label="edge_features", enabled=has_edge_dists)
+    for transition, (previous, current) in enumerate(zip(snaps, snaps[1:])):
+        new_nodes = current.shape[0] - previous.shape[0]
+        if new_nodes < 0:
+            raise ValueError("latent attributed temporal graphs do not support node removal.")
+        if has_node_dists and len(node_features[transition]) != new_nodes:
+            raise ValueError(
+                "node feature group %d must contain exactly one record per added node." % transition
+            )
+        num_added = len(_edge_diff(previous, current, structure.directed)[0])
+        if has_edge_dists and len(edge_features[transition]) != num_added:
+            raise ValueError(
+                "edge feature group %d must contain exactly one record per added edge." % transition
+            )
+    return snaps, node_features, edge_features
+
+
 class LatentAttributedTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution):
     """A regime-switching dynamic graph where the hidden regime drives the STRUCTURE *and* the ATTRIBUTES.
 
@@ -2917,19 +2972,32 @@ class LatentAttributedTemporalGraphGrammarDistribution(SequenceEncodableProbabil
         transition_matrix: Sequence[Sequence[float]] | None = None,
         name: str | None = None,
     ) -> None:
-        self.structures = list(structures)
-        self.k = len(self.structures)
-        self.node_dists = None if node_dists is None else list(node_dists)
-        self.edge_dists = None if edge_dists is None else list(edge_dists)
-        ip = np.ones(self.k) / self.k if initial_probs is None else np.asarray(initial_probs, dtype=np.float64)
-        self.initial_probs = ip / ip.sum()
-        if transition_matrix is None:
-            self.transition_matrix = np.ones((self.k, self.k)) / self.k
-        else:
-            tm = np.asarray(transition_matrix, dtype=np.float64)
-            self.transition_matrix = tm / tm.sum(axis=1, keepdims=True)
-        self.log_init = np.log(np.clip(self.initial_probs, _EPS, None))
-        self.log_trans = np.log(np.clip(self.transition_matrix, _EPS, None))
+        core = LatentTemporalGraphGrammarDistribution(
+            structures,
+            initial_probs,
+            transition_matrix,
+            name=name,
+        )
+        self.structures = core.states
+        self.k = core.k
+
+        def _children(value: Sequence[Any] | None, label: str) -> tuple[Any, ...] | None:
+            if value is None:
+                return None
+            result = tuple(value)
+            if len(result) != self.k or any(
+                not isinstance(distribution, SequenceEncodableProbabilityDistribution)
+                for distribution in result
+            ):
+                raise ValueError(f"{label} must contain exactly one sequence-encodable distribution per regime.")
+            return result
+
+        self.node_dists = _children(node_dists, "node_dists")
+        self.edge_dists = _children(edge_dists, "edge_dists")
+        self.initial_probs = core.initial_probs
+        self.transition_matrix = core.transition_matrix
+        self.log_init = core.log_init
+        self.log_trans = core.log_trans
         self.name = name
 
     def __str__(self) -> str:
@@ -2944,7 +3012,12 @@ class LatentAttributedTemporalGraphGrammarDistribution(SequenceEncodableProbabil
         return all((s.motif.bins == m0.bins and s.motif.directed == m0.directed) for s in self.structures)
 
     def _emission_logb(self, x: tuple) -> np.ndarray:
-        snaps, node_features, edge_features = x
+        snaps, node_features, edge_features = _validate_latent_attributed_observation(
+            x,
+            self.structures[0],
+            has_node_dists=self.node_dists is not None,
+            has_edge_dists=self.edge_dists is not None,
+        )
         t_steps = len(snaps) - 1
         log_b = np.empty((t_steps, self.k))
         shared = self._shared_motif()
@@ -2964,14 +3037,26 @@ class LatentAttributedTemporalGraphGrammarDistribution(SequenceEncodableProbabil
 
     def log_density(self, x: tuple) -> float:
         """Score one attributed graph sequence with regimes marginalized out."""
-        snaps = x[0]
+        validated = _validate_latent_attributed_observation(
+            x,
+            self.structures[0],
+            has_node_dists=self.node_dists is not None,
+            has_edge_dists=self.edge_dists is not None,
+        )
+        snaps = validated[0]
         if len(snaps) < 2:
             return 0.0
-        return _grammar_forward_backward(self._emission_logb(x), self.log_init, self.log_trans)[0]
+        return _grammar_forward_backward(self._emission_logb(validated), self.log_init, self.log_trans)[0]
 
     def decode(self, x: tuple) -> list:
         """Viterbi: the most likely regime governing each transition (jointly explaining structure+attrs)."""
-        log_b = self._emission_logb(x)
+        validated = _validate_latent_attributed_observation(
+            x,
+            self.structures[0],
+            has_node_dists=self.node_dists is not None,
+            has_edge_dists=self.edge_dists is not None,
+        )
+        log_b = self._emission_logb(validated)
         t_steps = log_b.shape[0]
         if t_steps == 0:
             return []
@@ -2982,14 +3067,16 @@ class LatentAttributedTemporalGraphGrammarDistribution(SequenceEncodableProbabil
             scores = v[t - 1][:, None] + self.log_trans
             ptr[t] = scores.argmax(axis=0)
             v[t] = log_b[t] + scores.max(axis=0)
+        if not np.any(np.isfinite(v[-1])):
+            raise ValueError("cannot decode a zero-probability latent attributed sequence.")
         path = [int(v[-1].argmax())]
         for t in range(t_steps - 1, 0, -1):
             path.append(int(ptr[t][path[-1]]))
         return path[::-1]
 
     def seq_encode(self, x: Sequence[Any]) -> Sequence[Any]:
-        """Return attributed latent-regime observations unchanged for scoring."""
-        return x
+        """Validate and encode attributed latent-regime observations."""
+        return self.dist_to_encoder().seq_encode(x)
 
     def seq_log_density(self, x: Sequence[Any]) -> np.ndarray:
         """Score a batch of attributed latent-regime observations."""
@@ -3005,13 +3092,20 @@ class LatentAttributedTemporalGraphGrammarDistribution(SequenceEncodableProbabil
             [st.estimator(pseudo_count=pseudo_count) for st in self.structures],
             None if self.node_dists is None else [d.estimator() for d in self.node_dists],
             None if self.edge_dists is None else [d.estimator() for d in self.edge_dists],
+            structures=self.structures,
+            node_encoders=None if self.node_dists is None else [d.dist_to_encoder() for d in self.node_dists],
+            edge_encoders=None if self.edge_dists is None else [d.dist_to_encoder() for d in self.edge_dists],
             pseudo_count=pseudo_count,
             name=self.name,
         )
 
-    def dist_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
-        """Return the pass-through graph encoder."""
-        return TemporalGraphGrammarDataEncoder()
+    def dist_to_encoder(self) -> LatentAttributedTemporalGraphGrammarDataEncoder:
+        """Return the event-aligned latent attributed encoder."""
+        return LatentAttributedTemporalGraphGrammarDataEncoder(
+            self.structures[0],
+            self.node_dists is not None,
+            self.edge_dists is not None,
+        )
 
 
 class LatentAttributedTemporalGraphGrammarSampler(DistributionSampler):
@@ -3025,7 +3119,13 @@ class LatentAttributedTemporalGraphGrammarSampler(DistributionSampler):
     def sample_one(self, num_steps: int = 10, seed_graph: np.ndarray | None = None, n_init: int = 5) -> tuple:
         """Draw one attributed latent-regime graph observation."""
         d = self.dist
-        adj = np.zeros((n_init, n_init)) if seed_graph is None else np.asarray(seed_graph, dtype=np.float64).copy()
+        num_steps = _exact_nonnegative_int(num_steps, name="num_steps")
+        n_init = _exact_nonnegative_int(n_init, name="n_init")
+        if seed_graph is None:
+            adj = np.zeros((n_init, n_init))
+        else:
+            canonical = _binarize(seed_graph, directed=d.structures[0].directed)
+            adj = canonical.toarray() if sp.issparse(canonical) else canonical
         snaps = [adj.copy()]
         node_features: list = []
         edge_features: list = []
@@ -3061,194 +3161,528 @@ class LatentAttributedTemporalGraphGrammarSampler(DistributionSampler):
         """Draw one observation or a list of observations."""
         if size is None:
             return self.sample_one(**kw)
-        return [self.sample_one(**kw) for _ in range(size)]
+        sample_size = _exact_nonnegative_int(size, name="size")
+        return [self.sample_one(**kw) for _ in range(sample_size)]
+
+
+class LatentAttributedTemporalGraphGrammarStatistics(NamedTuple):
+    schema_version: int
+    bins: tuple[int, ...]
+    directed: bool
+    num_states: int
+    init_counts: np.ndarray
+    trans_counts: np.ndarray
+    structure_values: tuple[Any, ...]
+    node_values: tuple[Any, ...] | None
+    edge_values: tuple[Any, ...] | None
+    node_weights: np.ndarray
+    edge_weights: np.ndarray
+    accepted_weight: float
+    rejected_weight: float
+    transition_weight: float
+
+
+def _validate_latent_attributed_statistics(
+    value: Any,
+    *,
+    bins: tuple[int, ...],
+    directed: bool,
+    num_states: int,
+    has_node_models: bool,
+    has_edge_models: bool,
+) -> LatentAttributedTemporalGraphGrammarStatistics:
+    if not isinstance(value, LatentAttributedTemporalGraphGrammarStatistics) or value.schema_version != 1:
+        raise ValueError("latent attributed temporal statistics must use schema version 1.")
+    if value.bins != bins or value.directed != directed or value.num_states != num_states:
+        raise ValueError("latent attributed temporal statistics use an incompatible model schema.")
+    init_counts = np.array(value.init_counts, dtype=np.float64, copy=True)
+    trans_counts = np.array(value.trans_counts, dtype=np.float64, copy=True)
+    node_weights = np.array(value.node_weights, dtype=np.float64, copy=True)
+    edge_weights = np.array(value.edge_weights, dtype=np.float64, copy=True)
+    structure_values = tuple(value.structure_values)
+    node_values = None if value.node_values is None else tuple(value.node_values)
+    edge_values = None if value.edge_values is None else tuple(value.edge_values)
+    if (
+        init_counts.shape != (num_states,)
+        or trans_counts.shape != (num_states, num_states)
+        or node_weights.shape != (num_states,)
+        or edge_weights.shape != (num_states,)
+        or len(structure_values) != num_states
+        or (has_node_models and (node_values is None or len(node_values) != num_states))
+        or (not has_node_models and node_values is not None)
+        or (has_edge_models and (edge_values is None or len(edge_values) != num_states))
+        or (not has_edge_models and edge_values is not None)
+    ):
+        raise ValueError("latent attributed temporal statistics have incompatible state dimensions.")
+    accepted_weight = float(value.accepted_weight)
+    rejected_weight = float(value.rejected_weight)
+    transition_weight = float(value.transition_weight)
+    arrays = (init_counts, trans_counts, node_weights, edge_weights)
+    if any(np.any(~np.isfinite(array)) or np.any(array < 0.0) for array in arrays) or any(
+        not np.isfinite(component) or component < 0.0
+        for component in (accepted_weight, rejected_weight, transition_weight)
+    ):
+        raise ValueError("latent attributed temporal statistics must be finite and non-negative.")
+    if not np.isclose(init_counts.sum(), accepted_weight, rtol=1.0e-10, atol=1.0e-10):
+        raise ValueError("latent attributed initial counts must sum to accepted_weight.")
+    if not np.isclose(
+        trans_counts.sum(),
+        max(0.0, transition_weight - accepted_weight),
+        rtol=1.0e-10,
+        atol=1.0e-10,
+    ):
+        raise ValueError("latent attributed transition counts are incoherent with transition_weight.")
+    if not has_node_models and np.any(node_weights != 0.0):
+        raise ValueError("node weights require configured node models.")
+    if not has_edge_models and np.any(edge_weights != 0.0):
+        raise ValueError("edge weights require configured edge models.")
+    return LatentAttributedTemporalGraphGrammarStatistics(
+        1,
+        bins,
+        directed,
+        num_states,
+        init_counts,
+        trans_counts,
+        structure_values,
+        node_values,
+        edge_values,
+        node_weights,
+        edge_weights,
+        accepted_weight,
+        rejected_weight,
+        transition_weight,
+    )
 
 
 class LatentAttributedTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulator for attributed latent-regime graph grammar EM statistics."""
+    """Fail-closed EM accumulator with event-aligned attribute statistics."""
 
-    def __init__(self, k: int, struct_accs: Sequence[Any], node_accs: Any, edge_accs: Any) -> None:
-        self.k = k
+    def __init__(
+        self,
+        struct_accs: Sequence[Any],
+        node_accs: Sequence[Any] | None,
+        edge_accs: Sequence[Any] | None,
+        factory: LatentAttributedTemporalGraphGrammarAccumulatorFactory,
+    ) -> None:
+        self.factory = factory
+        self.k = factory.k
         self.struct_accs = list(struct_accs)
-        self.node_accs = node_accs
-        self.edge_accs = edge_accs
-        self.init_counts = np.zeros(k, dtype=np.float64)
-        self.trans_counts = np.zeros((k, k), dtype=np.float64)
+        self.node_accs = None if node_accs is None else list(node_accs)
+        self.edge_accs = None if edge_accs is None else list(edge_accs)
+        self.init_counts = np.zeros(self.k)
+        self.trans_counts = np.zeros((self.k, self.k))
+        self.node_weights = np.zeros(self.k)
+        self.edge_weights = np.zeros(self.k)
+        self.accepted_weight = 0.0
+        self.rejected_weight = 0.0
+        self.transition_weight = 0.0
 
-    def _accumulate(self, x: tuple, weight: float, gamma: np.ndarray, xi: np.ndarray, estimate: Any) -> None:
+    def _accumulate(
+        self,
+        x: tuple,
+        weight: float,
+        gamma: np.ndarray,
+        xi: np.ndarray,
+        estimate: Any,
+        *,
+        initialize: bool,
+        rng: RandomState | None,
+    ) -> None:
         snaps, node_features, edge_features = x
         self.init_counts += weight * gamma[0]
+        self.accepted_weight += weight
+        self.transition_weight += weight * (len(snaps) - 1)
         if xi.shape[0]:
             self.trans_counts += weight * xi.sum(axis=0)
-        for kk in range(self.k):
-            s_est = None if estimate is None else estimate.structures[kk]
-            for t in range(len(snaps) - 1):
-                w = weight * gamma[t, kk]
-                if w <= 0:
+        for state_index in range(self.k):
+            structure_estimate = None if estimate is None else estimate.structures[state_index]
+            for transition in range(len(snaps) - 1):
+                posterior_weight = weight * gamma[transition, state_index]
+                if posterior_weight <= 0.0:
                     continue
-                self.struct_accs[kk].update([snaps[t], snaps[t + 1]], w, s_est)
-                if self.node_accs is not None and node_features and node_features[t]:
-                    nd = None if estimate is None else estimate.node_dists[kk]
-                    for r in node_features[t]:  # per-record update (raw values; works with or without an estimate)
-                        self.node_accs[kk].update(r, w, nd)
-                if self.edge_accs is not None and edge_features and edge_features[t]:
-                    ed = None if estimate is None else estimate.edge_dists[kk]
-                    for r in edge_features[t]:
-                        self.edge_accs[kk].update(r, w, ed)
+                structure_obs = [snaps[transition], snaps[transition + 1]]
+                if initialize:
+                    self.struct_accs[state_index].initialize(structure_obs, posterior_weight, rng)
+                else:
+                    self.struct_accs[state_index].update(
+                        structure_obs,
+                        posterior_weight,
+                        structure_estimate,
+                    )
+                if self.node_accs is not None and node_features[transition]:
+                    records = node_features[transition]
+                    encoder = (
+                        self.factory.node_encoders[state_index]
+                        if estimate is None
+                        else estimate.node_dists[state_index].dist_to_encoder()
+                    )
+                    encoded = encoder.seq_encode(records)
+                    weights = np.full(len(records), posterior_weight)
+                    if initialize:
+                        self.node_accs[state_index].seq_initialize(encoded, weights, rng)
+                    else:
+                        self.node_accs[state_index].seq_update(
+                            encoded,
+                            weights,
+                            estimate.node_dists[state_index],
+                        )
+                    self.node_weights[state_index] += posterior_weight * len(records)
+                if self.edge_accs is not None and edge_features[transition]:
+                    records = edge_features[transition]
+                    encoder = (
+                        self.factory.edge_encoders[state_index]
+                        if estimate is None
+                        else estimate.edge_dists[state_index].dist_to_encoder()
+                    )
+                    encoded = encoder.seq_encode(records)
+                    weights = np.full(len(records), posterior_weight)
+                    if initialize:
+                        self.edge_accs[state_index].seq_initialize(encoded, weights, rng)
+                    else:
+                        self.edge_accs[state_index].seq_update(
+                            encoded,
+                            weights,
+                            estimate.edge_dists[state_index],
+                        )
+                    self.edge_weights[state_index] += posterior_weight * len(records)
 
     def update(self, x: tuple, weight: float, estimate: Any | None) -> None:
-        """Accumulate posterior-weighted statistics for one attributed sequence."""
-        if len(x[0]) < 2:
-            return
-        _, gamma, xi = _grammar_forward_backward(estimate._emission_logb(x), estimate.log_init, estimate.log_trans)
+        if not isinstance(estimate, LatentAttributedTemporalGraphGrammarDistribution) or estimate.k != self.k:
+            raise ValueError("latent attributed updates require a compatible current distribution.")
+        validated = _validate_latent_attributed_observation(
+            x,
+            self.factory.structures[0],
+            has_node_dists=self.node_accs is not None,
+            has_edge_dists=self.edge_accs is not None,
+        )
+        if len(validated[0]) < 2:
+            raise ValueError("latent attributed estimation requires at least one graph transition.")
+        checked_weight = _finite_nonnegative(weight, name="weight")
+        _, gamma, xi = _grammar_forward_backward(
+            estimate._emission_logb(validated),
+            estimate.log_init,
+            estimate.log_trans,
+        )
+        pending = self.factory.make()
         if gamma is None:
-            return
-        self._accumulate(x, weight, gamma, xi, estimate)
+            pending.rejected_weight = checked_weight
+        else:
+            pending._accumulate(
+                validated,
+                checked_weight,
+                gamma,
+                xi,
+                estimate,
+                initialize=False,
+                rng=None,
+            )
+        self.combine(pending.value())
 
     def initialize(self, x: tuple, weight: float, rng: RandomState | None) -> None:
-        """Initialize attributed latent-regime statistics with random soft assignments."""
-        if len(x[0]) < 2:
-            return
-        rng = rng if rng is not None else RandomState()
-        t_steps = len(x[0]) - 1
-        gamma = rng.dirichlet(np.ones(self.k), size=t_steps)
-        xi = np.zeros((max(t_steps - 1, 0), self.k, self.k))
-        for t in range(t_steps - 1):
-            xi[t] = np.outer(gamma[t], gamma[t + 1])
-        self._accumulate(x, weight, gamma, xi, None)
+        validated = _validate_latent_attributed_observation(
+            x,
+            self.factory.structures[0],
+            has_node_dists=self.node_accs is not None,
+            has_edge_dists=self.edge_accs is not None,
+        )
+        if len(validated[0]) < 2:
+            raise ValueError("latent attributed initialization requires at least one graph transition.")
+        checked_weight = _finite_nonnegative(weight, name="weight")
+        rng = rng if rng is not None else RandomState(0)
+        transition_count = len(validated[0]) - 1
+        gamma = rng.dirichlet(np.ones(self.k), size=transition_count)
+        xi = np.zeros((max(transition_count - 1, 0), self.k, self.k))
+        for transition in range(transition_count - 1):
+            xi[transition] = np.outer(gamma[transition], gamma[transition + 1])
+        pending = self.factory.make()
+        pending._accumulate(
+            validated,
+            checked_weight,
+            gamma,
+            xi,
+            None,
+            initialize=True,
+            rng=rng,
+        )
+        self.combine(pending.value())
 
     def seq_update(self, x: Sequence[Any], weights: np.ndarray, estimate: Any | None) -> None:
-        """Accumulate posterior-weighted statistics from a batch."""
-        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
-            self.update(obs, float(w), estimate)
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if checked_weights.ndim != 1 or len(checked_weights) != len(x):
+            raise ValueError("weights must be one-dimensional and aligned with the attributed latent batch.")
+        if np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
+            raise ValueError("weights must be finite and non-negative.")
+        pending = self.factory.make()
+        for observation, weight in zip(x, checked_weights):
+            pending.update(observation, float(weight), estimate)
+        self.combine(pending.value())
 
     def seq_initialize(self, x: Sequence[Any], weights: np.ndarray, rng: RandomState | None) -> None:
-        """Initialize sufficient statistics from a weighted batch."""
-        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
-            self.initialize(obs, float(w), rng)
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if checked_weights.ndim != 1 or len(checked_weights) != len(x):
+            raise ValueError("weights must be one-dimensional and aligned with the attributed latent batch.")
+        if np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
+            raise ValueError("weights must be finite and non-negative.")
+        pending = self.factory.make()
+        for observation, weight in zip(x, checked_weights):
+            pending.initialize(observation, float(weight), rng)
+        self.combine(pending.value())
 
-    def combine(self, suff_stat: tuple) -> LatentAttributedTemporalGraphGrammarAccumulator:
-        """Merge serialized attributed latent-regime sufficient statistics."""
-        ic, tc, sv, nv, ev = suff_stat
-        self.init_counts += ic
-        self.trans_counts += tc
-        for acc, v in zip(self.struct_accs, sv):
-            acc.combine(v)
+    def combine(
+        self,
+        suff_stat: LatentAttributedTemporalGraphGrammarStatistics,
+    ) -> LatentAttributedTemporalGraphGrammarAccumulator:
+        checked = _validate_latent_attributed_statistics(
+            suff_stat,
+            bins=self.factory.bins,
+            directed=self.factory.directed,
+            num_states=self.k,
+            has_node_models=self.node_accs is not None,
+            has_edge_models=self.edge_accs is not None,
+        )
+        self.init_counts += checked.init_counts
+        self.trans_counts += checked.trans_counts
+        for accumulator, state_value in zip(self.struct_accs, checked.structure_values):
+            accumulator.combine(state_value)
         if self.node_accs is not None:
-            for acc, v in zip(self.node_accs, nv):
-                acc.combine(v)
+            for accumulator, state_value in zip(self.node_accs, checked.node_values):
+                accumulator.combine(state_value)
         if self.edge_accs is not None:
-            for acc, v in zip(self.edge_accs, ev):
-                acc.combine(v)
+            for accumulator, state_value in zip(self.edge_accs, checked.edge_values):
+                accumulator.combine(state_value)
+        self.node_weights += checked.node_weights
+        self.edge_weights += checked.edge_weights
+        self.accepted_weight += checked.accepted_weight
+        self.rejected_weight += checked.rejected_weight
+        self.transition_weight += checked.transition_weight
         return self
 
-    def value(self) -> tuple:
-        """Return serialized attributed latent-regime sufficient statistics."""
-        return (
+    def value(self) -> LatentAttributedTemporalGraphGrammarStatistics:
+        return LatentAttributedTemporalGraphGrammarStatistics(
+            1,
+            self.factory.bins,
+            self.factory.directed,
+            self.k,
             self.init_counts.copy(),
             self.trans_counts.copy(),
-            [acc.value() for acc in self.struct_accs],
-            None if self.node_accs is None else [acc.value() for acc in self.node_accs],
-            None if self.edge_accs is None else [acc.value() for acc in self.edge_accs],
+            tuple(accumulator.value() for accumulator in self.struct_accs),
+            None
+            if self.node_accs is None
+            else tuple(accumulator.value() for accumulator in self.node_accs),
+            None
+            if self.edge_accs is None
+            else tuple(accumulator.value() for accumulator in self.edge_accs),
+            self.node_weights.copy(),
+            self.edge_weights.copy(),
+            self.accepted_weight,
+            self.rejected_weight,
+            self.transition_weight,
         )
 
-    def from_value(self, x: tuple) -> LatentAttributedTemporalGraphGrammarAccumulator:
-        """Restore accumulator state from serialized sufficient statistics."""
-        self.init_counts = np.asarray(x[0], dtype=np.float64).copy()
-        self.trans_counts = np.asarray(x[1], dtype=np.float64).copy()
-        for acc, v in zip(self.struct_accs, x[2]):
-            acc.from_value(v)
-        if self.node_accs is not None:
-            for acc, v in zip(self.node_accs, x[3]):
-                acc.from_value(v)
-        if self.edge_accs is not None:
-            for acc, v in zip(self.edge_accs, x[4]):
-                acc.from_value(v)
+    def from_value(
+        self,
+        x: LatentAttributedTemporalGraphGrammarStatistics,
+    ) -> LatentAttributedTemporalGraphGrammarAccumulator:
+        fresh = self.factory.make()
+        fresh.combine(x)
+        self.__dict__.update(fresh.__dict__)
         return self
 
     def key_merge(self, stats_dict: dict) -> None:
-        """Merge keyed sufficient statistics; unused for this accumulator."""
         pass
 
     def key_replace(self, stats_dict: dict) -> None:
-        """Replace keyed sufficient statistics; unused for this accumulator."""
         pass
 
-    def acc_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
-        """Return the encoder associated with this accumulator."""
-        return TemporalGraphGrammarDataEncoder()
+    def acc_to_encoder(self) -> LatentAttributedTemporalGraphGrammarDataEncoder:
+        return self.factory.encoder
 
 
 class LatentAttributedTemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory):
-    """Factory for attributed latent-regime graph grammar accumulators."""
-
-    def __init__(self, k: int, struct_factories: Sequence[Any], node_factories: Any, edge_factories: Any) -> None:
-        self.k = k
-        self.struct_factories = list(struct_factories)
-        self.node_factories = node_factories
-        self.edge_factories = edge_factories
+    def __init__(
+        self,
+        structures: Sequence[TemporalGraphGrammarDistribution],
+        struct_factories: Sequence[Any],
+        node_factories: Sequence[Any] | None,
+        edge_factories: Sequence[Any] | None,
+        node_encoders: Sequence[Any] | None,
+        edge_encoders: Sequence[Any] | None,
+    ) -> None:
+        self.structures = tuple(structures)
+        self.k = len(self.structures)
+        self.bins = self.structures[0].motif.bins
+        self.directed = self.structures[0].directed
+        self.struct_factories = tuple(struct_factories)
+        self.node_factories = None if node_factories is None else tuple(node_factories)
+        self.edge_factories = None if edge_factories is None else tuple(edge_factories)
+        self.node_encoders = None if node_encoders is None else tuple(node_encoders)
+        self.edge_encoders = None if edge_encoders is None else tuple(edge_encoders)
+        self.encoder = LatentAttributedTemporalGraphGrammarDataEncoder(
+            self.structures[0],
+            self.node_factories is not None,
+            self.edge_factories is not None,
+        )
 
     def make(self) -> LatentAttributedTemporalGraphGrammarAccumulator:
-        """Create a fresh attributed latent-regime accumulator."""
         return LatentAttributedTemporalGraphGrammarAccumulator(
-            self.k,
-            [f.make() for f in self.struct_factories],
-            None if self.node_factories is None else [f.make() for f in self.node_factories],
-            None if self.edge_factories is None else [f.make() for f in self.edge_factories],
+            [factory.make() for factory in self.struct_factories],
+            None if self.node_factories is None else [factory.make() for factory in self.node_factories],
+            None if self.edge_factories is None else [factory.make() for factory in self.edge_factories],
+            self,
         )
 
 
 class LatentAttributedTemporalGraphGrammarEstimator(ParameterEstimator):
-    """EM for the regime-switching attributed grammar: forward-backward E-step, per-regime weighted M-step
-    over structure + node attrs + edge attrs together."""
-
     def __init__(
         self,
         structure_estimators: Sequence[Any],
-        node_estimators: Any = None,
-        edge_estimators: Any = None,
+        node_estimators: Sequence[Any] | None = None,
+        edge_estimators: Sequence[Any] | None = None,
+        *,
+        structures: Sequence[TemporalGraphGrammarDistribution],
+        node_encoders: Sequence[Any] | None = None,
+        edge_encoders: Sequence[Any] | None = None,
         pseudo_count: float | None = None,
         name: str | None = None,
     ) -> None:
-        self.structure_estimators = list(structure_estimators)
-        self.k = len(self.structure_estimators)
-        self.node_estimators = node_estimators
-        self.edge_estimators = edge_estimators
-        self.pseudo_count = pseudo_count
+        self.structures = tuple(structures)
+        core = LatentTemporalGraphGrammarEstimator(structure_estimators, pseudo_count, name)
+        self.structure_estimators = core.state_estimators
+        self.k = core.k
+        if len(self.structures) != self.k:
+            raise ValueError("structures must contain exactly one prototype per structure estimator.")
+
+        def _children(value: Sequence[Any] | None, label: str) -> tuple[Any, ...] | None:
+            if value is None:
+                return None
+            result = tuple(value)
+            if len(result) != self.k:
+                raise ValueError(f"{label} must contain exactly one estimator per regime.")
+            return result
+
+        self.node_estimators = _children(node_estimators, "node_estimators")
+        self.edge_estimators = _children(edge_estimators, "edge_estimators")
+        self.node_encoders = _children(node_encoders, "node_encoders")
+        self.edge_encoders = _children(edge_encoders, "edge_encoders")
+        if (self.node_estimators is None) != (self.node_encoders is None):
+            raise ValueError("node estimators and encoders must be configured together.")
+        if (self.edge_estimators is None) != (self.edge_encoders is None):
+            raise ValueError("edge estimators and encoders must be configured together.")
+        self.bins = core.bins
+        self.directed = core.directed
+        self.pseudo_count = core.pseudo_count
         self.name = name
         self.keys = None
 
     def accumulator_factory(self) -> LatentAttributedTemporalGraphGrammarAccumulatorFactory:
-        """Return the accumulator factory used by this estimator."""
         return LatentAttributedTemporalGraphGrammarAccumulatorFactory(
-            self.k,
-            [est.accumulator_factory() for est in self.structure_estimators],
-            None if self.node_estimators is None else [est.accumulator_factory() for est in self.node_estimators],
-            None if self.edge_estimators is None else [est.accumulator_factory() for est in self.edge_estimators],
-        )
-
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> LatentAttributedTemporalGraphGrammarDistribution:
-        """Estimate regime priors, transitions, structures, and attribute models."""
-        init_counts, trans_counts, sv, nv, ev = suff_stat
-        pc = 0.0 if self.pseudo_count is None else float(self.pseudo_count)
-        ip = init_counts + pc
-        ip = ip / ip.sum() if ip.sum() > 0 else np.ones(self.k) / self.k
-        tm = trans_counts + pc
-        row = tm.sum(axis=1, keepdims=True)
-        tm = np.where(row > 0, tm / np.where(row > 0, row, 1.0), 1.0 / self.k)
-        structures = [est.estimate(nobs, v) for est, v in zip(self.structure_estimators, sv)]
-        node_dists = (
+            self.structures,
+            [estimator.accumulator_factory() for estimator in self.structure_estimators],
             None
             if self.node_estimators is None
-            else [est.estimate(nobs, v) for est, v in zip(self.node_estimators, nv)]
-        )
-        edge_dists = (
+            else [estimator.accumulator_factory() for estimator in self.node_estimators],
             None
             if self.edge_estimators is None
-            else [est.estimate(nobs, v) for est, v in zip(self.edge_estimators, ev)]
+            else [estimator.accumulator_factory() for estimator in self.edge_estimators],
+            self.node_encoders,
+            self.edge_encoders,
         )
+
+    def estimate(
+        self,
+        nobs: float | None,
+        suff_stat: LatentAttributedTemporalGraphGrammarStatistics,
+    ) -> LatentAttributedTemporalGraphGrammarDistribution:
+        checked = _validate_latent_attributed_statistics(
+            suff_stat,
+            bins=self.bins,
+            directed=self.directed,
+            num_states=self.k,
+            has_node_models=self.node_estimators is not None,
+            has_edge_models=self.edge_estimators is not None,
+        )
+        if checked.rejected_weight > 0.0:
+            raise ValueError(
+                "cannot estimate a latent attributed grammar after rejecting zero-probability evidence."
+            )
+        if checked.accepted_weight <= 0.0:
+            raise ValueError("cannot estimate a latent attributed grammar without accepted transition evidence.")
+        pc = 0.0 if self.pseudo_count is None else float(self.pseudo_count)
+        ip = checked.init_counts + pc
+        tm = checked.trans_counts + pc
+        if np.any(tm.sum(axis=1) <= 0.0):
+            raise ValueError("every latent transition row requires evidence or a positive pseudo_count.")
+        structure_weights = checked.init_counts + checked.trans_counts.sum(axis=0)
+        structures = [
+            estimator.estimate(float(structure_weights[index]), value)
+            for index, (estimator, value) in enumerate(
+                zip(self.structure_estimators, checked.structure_values)
+            )
+        ]
+        node_dists = None
+        if self.node_estimators is not None:
+            if np.any(checked.node_weights <= 0.0):
+                raise ValueError("every latent node model requires aligned effective record weight.")
+            node_dists = [
+                estimator.estimate(float(checked.node_weights[index]), value)
+                for index, (estimator, value) in enumerate(
+                    zip(self.node_estimators, checked.node_values)
+                )
+            ]
+        edge_dists = None
+        if self.edge_estimators is not None:
+            if np.any(checked.edge_weights <= 0.0):
+                raise ValueError("every latent edge model requires aligned effective record weight.")
+            edge_dists = [
+                estimator.estimate(float(checked.edge_weights[index]), value)
+                for index, (estimator, value) in enumerate(
+                    zip(self.edge_estimators, checked.edge_values)
+                )
+            ]
         return LatentAttributedTemporalGraphGrammarDistribution(
-            structures, node_dists, edge_dists, ip, tm, name=self.name
+            structures,
+            node_dists,
+            edge_dists,
+            ip,
+            tm,
+            name=self.name,
+        )
+
+
+class LatentAttributedTemporalGraphGrammarDataEncoder(DataSequenceEncoder):
+    def __init__(
+        self,
+        structure: TemporalGraphGrammarDistribution,
+        has_node_dists: bool,
+        has_edge_dists: bool,
+    ) -> None:
+        self.structure = structure
+        self.has_node_dists = has_node_dists
+        self.has_edge_dists = has_edge_dists
+
+    def seq_encode(self, x: Sequence[Any]) -> tuple[tuple, ...]:
+        return tuple(
+            _validate_latent_attributed_observation(
+                observation,
+                self.structure,
+                has_node_dists=self.has_node_dists,
+                has_edge_dists=self.has_edge_dists,
+            )
+            for observation in x
+        )
+
+    def row_count(self, x: Any) -> int:
+        if not isinstance(x, tuple):
+            raise ValueError("encoded latent attributed temporal payload must be a tuple.")
+        return len(x)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, LatentAttributedTemporalGraphGrammarDataEncoder)
+            and other.structure.motif.bins == self.structure.motif.bins
+            and other.structure.directed == self.structure.directed
+            and other.has_node_dists == self.has_node_dists
+            and other.has_edge_dists == self.has_edge_dists
         )
 
 
