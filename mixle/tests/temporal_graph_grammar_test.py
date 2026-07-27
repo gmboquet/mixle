@@ -10,6 +10,7 @@ from mixle.stats.graphs.temporal_graph_grammar import (
     ApproximateTemporalGraphSample,
     LabeledTemporalGraphGrammarDistribution,
     TemporalGraphGrammarStatistics,
+    _edge_diff,
 )
 
 
@@ -302,6 +303,59 @@ class LabeledTemporalGraphGrammarTest(unittest.TestCase):
         self.assertAlmostEqual(fit.node_dist.dists[0].mu, 40.0, delta=0.7)  # node age
         self.assertAlmostEqual(fit.node_dist.dists[1].pmap["NYC"], 0.5, delta=0.05)  # node location
         self.assertAlmostEqual(fit.edge_dist.lam, 6.0, delta=0.3)  # edge communication count
+
+    def test_features_are_bound_to_nodes_and_per_transition_edge_events(self):
+        empty = np.zeros((2, 2))
+        edge = np.array([[0.0, 1.0], [1.0, 0.0]])
+        structure = stats.TemporalGraphGrammarDistribution([1, 0, 0, 0], edge_rate=1.0)
+        dist = LabeledTemporalGraphGrammarDistribution(
+            structure,
+            stats.GaussianDistribution(0.0, 1.0),
+            stats.PoissonDistribution(3.0),
+        )
+        observation = ([empty, edge], [0.0, 1.0], [[3]])
+        self.assertTrue(np.isfinite(dist.log_density(observation)))
+        self.assertEqual(dist.dist_to_encoder().row_count(dist.seq_encode([observation])), 1)
+
+        invalid = [
+            ([empty, edge], [0.0], [[3]]),
+            ([empty, edge], [0.0, 1.0, 2.0], [[3]]),
+            ([empty, edge], [0.0, 1.0], []),
+            ([empty, edge], [0.0, 1.0], [[]]),
+            ([empty, edge], [0.0, 1.0], [3]),
+        ]
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    dist.log_density(value)
+
+        estimator = dist.estimator()
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.update(observation, 1.5, dist)
+        value = accumulator.value()
+        self.assertEqual(value.node_weight, 3.0)
+        self.assertEqual(value.edge_weight, 1.5)
+        before = accumulator.value()
+        with self.assertRaises(ValueError):
+            accumulator.seq_update([observation], np.ones(2), dist)
+        self.assertEqual(accumulator.value().node_weight, before.node_weight)
+
+    def test_sampler_emits_event_aligned_records_and_cold_initialization_uses_child_contracts(self):
+        structure = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], edge_rate=2.0, node_rate=1.0)
+        dist = LabeledTemporalGraphGrammarDistribution(
+            structure,
+            stats.GaussianDistribution(0.0, 1.0),
+            stats.PoissonDistribution(2.0),
+        )
+        observation = dist.sampler(seed=4).sample_one(num_steps=3, n_init=4)
+        snapshots, node_features, edge_groups = observation
+        self.assertEqual(len(node_features), snapshots[-1].shape[0])
+        self.assertEqual(len(edge_groups), len(snapshots) - 1)
+        for previous, current, group in zip(snapshots, snapshots[1:], edge_groups):
+            self.assertEqual(len(group), len(_edge_diff(previous, current)[0]))
+        accumulator = dist.estimator().accumulator_factory().make()
+        accumulator.initialize(observation, 1.0, np.random.RandomState(5))
+        self.assertEqual(accumulator.value().node_weight, float(len(node_features)))
 
 
 class HomophilyTemporalGraphGrammarTest(unittest.TestCase):

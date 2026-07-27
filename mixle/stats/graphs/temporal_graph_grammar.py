@@ -944,6 +944,57 @@ def _emission_ll(dist: Any, records: Sequence[Any]) -> float:
     return float(np.sum(dist.seq_log_density(enc)))
 
 
+def _validate_labeled_observation(
+    x: Any,
+    structure: TemporalGraphGrammarDistribution,
+    *,
+    has_node_dist: bool,
+    has_edge_dist: bool,
+) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[tuple[Any, ...], ...]]:
+    """Canonicalize an attributed observation and bind every record to a structural event."""
+    if not isinstance(x, (tuple, list)) or len(x) != 3:
+        raise ValueError("attributed temporal observations must be (snapshots, node_features, edge_features).")
+    raw_snaps, raw_nodes, raw_edges = x
+    if isinstance(raw_snaps, ApproximateTemporalGraphSample):
+        raise ValueError("approximate scalable samples must be explicitly unwrapped before attribution.")
+    try:
+        snaps = tuple(_binarize(snapshot, directed=structure.directed) for snapshot in raw_snaps)
+        node_features = tuple(raw_nodes)
+    except TypeError as exc:
+        raise ValueError("attributed temporal observation fields must be sequences.") from exc
+    if not snaps:
+        raise ValueError("attributed temporal observations must contain at least one snapshot.")
+    structure.log_density(snaps)
+    if has_node_dist:
+        if len(node_features) != snaps[-1].shape[0]:
+            raise ValueError("node_features must contain exactly one record per final node index.")
+    elif node_features:
+        raise ValueError("node_features must be empty when no node distribution is configured.")
+
+    if has_edge_dist:
+        try:
+            edge_features = tuple(tuple(group) for group in raw_edges)
+        except TypeError as exc:
+            raise ValueError("edge_features must be a sequence of per-transition record sequences.") from exc
+        if len(edge_features) != len(snaps) - 1:
+            raise ValueError("edge_features must contain exactly one record group per transition.")
+        for transition, (prev, cur, group) in enumerate(zip(snaps, snaps[1:], edge_features)):
+            num_added = len(_edge_diff(prev, cur, structure.directed)[0])
+            if len(group) != num_added:
+                raise ValueError(
+                    "edge feature group %d must contain exactly one record per added edge." % transition
+                )
+    else:
+        try:
+            edge_features = tuple(raw_edges)
+        except TypeError as exc:
+            raise ValueError("edge_features must be a sequence.") from exc
+        if edge_features:
+            raise ValueError("edge_features must be empty when no edge distribution is configured.")
+        edge_features = ()
+    return snaps, node_features, edge_features
+
+
 class LabeledTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution):
     """A dynamic graph whose nodes and edges carry attributes.
 
@@ -951,7 +1002,8 @@ class LabeledTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistri
     ordinary mixle distributions: ``node_dist`` over per-node attribute records (location, name, age, ... --
     typically a ``CompositeDistribution`` of leaves or a mixture) and ``edge_dist`` over per-edge attribute
     records (communication counts, channel, weight, ...). An observation is ``(snapshots, node_features,
-    edge_features)``: the adjacency chain, one attribute record per node, and one per added edge. The
+    edge_features)``: the adjacency chain, one attribute record per final node index, and one edge-record
+    group per transition containing one record per added edge in canonical ``_edge_diff`` order. The
     likelihood factorises -- structure x node attributes x edge attributes -- so the attribute models are
     fit (and scored) with the full mixle distribution machinery (mixtures, fusion, all leaf families).
     """
@@ -963,6 +1015,13 @@ class LabeledTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistri
         edge_dist: SequenceEncodableProbabilityDistribution | None = None,
         name: str | None = None,
     ) -> None:
+        if not isinstance(structure, TemporalGraphGrammarDistribution):
+            raise ValueError("structure must be a TemporalGraphGrammarDistribution.")
+        for label, distribution in (("node_dist", node_dist), ("edge_dist", edge_dist)):
+            if distribution is not None and not isinstance(distribution, SequenceEncodableProbabilityDistribution):
+                raise ValueError(f"{label} must be a sequence-encodable probability distribution or None.")
+        if name is not None and not isinstance(name, str):
+            raise ValueError("name must be a string or None.")
         self.structure = structure
         self.node_dist = node_dist
         self.edge_dist = edge_dist
@@ -977,16 +1036,22 @@ class LabeledTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistri
 
     def log_density(self, x: tuple) -> float:
         """Score one attributed dynamic graph observation."""
-        snaps, node_features, edge_features = x
+        snaps, node_features, edge_features = _validate_labeled_observation(
+            x,
+            self.structure,
+            has_node_dist=self.node_dist is not None,
+            has_edge_dist=self.edge_dist is not None,
+        )
+        flat_edges = tuple(record for group in edge_features for record in group)
         return (
             self.structure.log_density(snaps)
             + _emission_ll(self.node_dist, node_features)
-            + _emission_ll(self.edge_dist, edge_features)
+            + _emission_ll(self.edge_dist, flat_edges)
         )
 
     def seq_encode(self, x: Sequence[tuple]) -> Sequence[tuple]:
-        """Return attributed dynamic graph observations unchanged."""
-        return x
+        """Validate and encode a batch of event-aligned attributed observations."""
+        return self.dist_to_encoder().seq_encode(x)
 
     def seq_log_density(self, x: Sequence[tuple]) -> np.ndarray:
         """Score a batch of attributed dynamic graph observations."""
@@ -1002,12 +1067,19 @@ class LabeledTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistri
             self.structure.estimator(**kw),
             None if self.node_dist is None else self.node_dist.estimator(),
             None if self.edge_dist is None else self.edge_dist.estimator(),
+            structure=self.structure,
+            node_encoder=None if self.node_dist is None else self.node_dist.dist_to_encoder(),
+            edge_encoder=None if self.edge_dist is None else self.edge_dist.dist_to_encoder(),
             name=self.name,
         )
 
-    def dist_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
-        """Return the pass-through graph encoder."""
-        return TemporalGraphGrammarDataEncoder()
+    def dist_to_encoder(self) -> LabeledTemporalGraphGrammarDataEncoder:
+        """Return the event-aligned attributed graph encoder."""
+        return LabeledTemporalGraphGrammarDataEncoder(
+            self.structure,
+            self.node_dist is not None,
+            self.edge_dist is not None,
+        )
 
 
 class LabeledTemporalGraphGrammarSampler(DistributionSampler):
@@ -1023,85 +1095,187 @@ class LabeledTemporalGraphGrammarSampler(DistributionSampler):
         snaps = self.struct.sample_one(**kw)
         n_final = snaps[-1].shape[0]
         directed = getattr(self.dist.structure, "directed", False)
-        num_added = sum(len(_edge_diff(snaps[t - 1], snaps[t], directed)[0]) for t in range(1, len(snaps)))
         node_features = (
             list(self.dist.node_dist.sampler(self.rng.randint(2**31)).sample(size=n_final))
             if self.dist.node_dist is not None
             else []
         )
-        edge_features = (
-            list(self.dist.edge_dist.sampler(self.rng.randint(2**31)).sample(size=num_added))
-            if self.dist.edge_dist is not None and num_added
-            else []
-        )
+        edge_features = []
+        if self.dist.edge_dist is not None:
+            edge_sampler = self.dist.edge_dist.sampler(self.rng.randint(2**31))
+            for prev, cur in zip(snaps, snaps[1:]):
+                num_added = len(_edge_diff(prev, cur, directed)[0])
+                edge_features.append(list(edge_sampler.sample(size=num_added)) if num_added else [])
         return snaps, node_features, edge_features
 
     def sample(self, size: int | None = None, **kw: Any) -> Any:
         """Draw one observation or a list of observations."""
         if size is None:
             return self.sample_one(**kw)
-        return [self.sample_one(**kw) for _ in range(size)]
+        sample_size = _exact_nonnegative_int(size, name="size")
+        return [self.sample_one(**kw) for _ in range(sample_size)]
+
+
+class LabeledTemporalGraphGrammarStatistics(NamedTuple):
+    schema_version: int
+    structure: Any
+    node: Any
+    edge: Any
+    node_weight: float
+    edge_weight: float
 
 
 class LabeledTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulator for structure, node-attribute, and edge-attribute sufficient statistics."""
 
-    def __init__(self, structure_acc: Any, node_acc: Any, edge_acc: Any) -> None:
+    def __init__(
+        self,
+        structure_acc: Any,
+        node_acc: Any,
+        edge_acc: Any,
+        node_encoder: Any,
+        edge_encoder: Any,
+        factory: LabeledTemporalGraphGrammarAccumulatorFactory,
+    ) -> None:
         self.structure_acc = structure_acc
         self.node_acc = node_acc
         self.edge_acc = edge_acc
+        self.node_encoder = node_encoder
+        self.edge_encoder = edge_encoder
+        self.factory = factory
+        self.node_weight = 0.0
+        self.edge_weight = 0.0
+
+    def _validated_and_encoded(
+        self,
+        x: Any,
+        estimate: Any | None,
+    ) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...], Any, Any]:
+        structure = estimate.structure if estimate is not None else self.factory.structure
+        snaps, nodes, edge_groups = _validate_labeled_observation(
+            x,
+            structure,
+            has_node_dist=self.node_acc is not None,
+            has_edge_dist=self.edge_acc is not None,
+        )
+        edges = tuple(record for group in edge_groups for record in group)
+        node_encoder = (
+            estimate.node_dist.dist_to_encoder()
+            if estimate is not None and estimate.node_dist is not None
+            else self.node_encoder
+        )
+        edge_encoder = (
+            estimate.edge_dist.dist_to_encoder()
+            if estimate is not None and estimate.edge_dist is not None
+            else self.edge_encoder
+        )
+        node_encoded = node_encoder.seq_encode(nodes) if self.node_acc is not None else None
+        edge_encoded = edge_encoder.seq_encode(edges) if self.edge_acc is not None else None
+        return snaps, nodes, edges, node_encoded, edge_encoded
 
     def update(self, x: tuple, weight: float, estimate: Any | None) -> None:
         """Accumulate sufficient statistics from one attributed graph observation."""
-        snaps, node_features, edge_features = x
-        self.structure_acc.update(snaps, weight, None if estimate is None else estimate.structure)
-        if self.node_acc is not None and node_features:
-            nd = None if estimate is None else estimate.node_dist
-            enc = nd.dist_to_encoder().seq_encode(list(node_features)) if nd is not None else node_features
-            self.node_acc.seq_update(enc, np.full(len(node_features), weight), nd)
-        if self.edge_acc is not None and edge_features:
-            ed = None if estimate is None else estimate.edge_dist
-            enc = ed.dist_to_encoder().seq_encode(list(edge_features)) if ed is not None else edge_features
-            self.edge_acc.seq_update(enc, np.full(len(edge_features), weight), ed)
+        checked_weight = _finite_nonnegative(weight, name="weight")
+        snaps, nodes, edges, node_encoded, edge_encoded = self._validated_and_encoded(x, estimate)
+        pending = self.factory.make()
+        pending.structure_acc.update(snaps, checked_weight, None if estimate is None else estimate.structure)
+        if pending.node_acc is not None and nodes:
+            pending.node_acc.seq_update(
+                node_encoded,
+                np.full(len(nodes), checked_weight),
+                None if estimate is None else estimate.node_dist,
+            )
+            pending.node_weight = checked_weight * len(nodes)
+        if pending.edge_acc is not None and edges:
+            pending.edge_acc.seq_update(
+                edge_encoded,
+                np.full(len(edges), checked_weight),
+                None if estimate is None else estimate.edge_dist,
+            )
+            pending.edge_weight = checked_weight * len(edges)
+        self.combine(pending.value())
 
     def seq_update(self, x: Sequence[tuple], weights: np.ndarray, estimate: Any | None) -> None:
         """Accumulate weighted sufficient statistics from a batch."""
-        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
-            self.update(obs, float(w), estimate)
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if checked_weights.ndim != 1 or len(checked_weights) != len(x):
+            raise ValueError("weights must be a one-dimensional array aligned with the attributed batch.")
+        if np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
+            raise ValueError("weights must be finite and non-negative.")
+        pending = self.factory.make()
+        for obs, weight in zip(x, checked_weights):
+            pending.update(obs, float(weight), estimate)
+        self.combine(pending.value())
 
     def initialize(self, x: tuple, weight: float, rng: RandomState | None) -> None:
         """Initialize sufficient statistics from one weighted observation."""
-        self.update(x, weight, None)
+        checked_weight = _finite_nonnegative(weight, name="weight")
+        snaps, nodes, edges, node_encoded, edge_encoded = self._validated_and_encoded(x, None)
+        pending = self.factory.make()
+        pending.structure_acc.initialize(snaps, checked_weight, rng)
+        if pending.node_acc is not None and nodes:
+            pending.node_acc.seq_initialize(node_encoded, np.full(len(nodes), checked_weight), rng)
+            pending.node_weight = checked_weight * len(nodes)
+        if pending.edge_acc is not None and edges:
+            pending.edge_acc.seq_initialize(edge_encoded, np.full(len(edges), checked_weight), rng)
+            pending.edge_weight = checked_weight * len(edges)
+        self.combine(pending.value())
 
     def seq_initialize(self, x: Any, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize sufficient statistics from a weighted batch."""
-        self.seq_update(x, weights, None)
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if checked_weights.ndim != 1 or len(checked_weights) != len(x):
+            raise ValueError("weights must be a one-dimensional array aligned with the attributed batch.")
+        if np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
+            raise ValueError("weights must be finite and non-negative.")
+        pending = self.factory.make()
+        for obs, weight in zip(x, checked_weights):
+            pending.initialize(obs, float(weight), rng)
+        self.combine(pending.value())
 
-    def combine(self, suff_stat: tuple) -> LabeledTemporalGraphGrammarAccumulator:
+    def combine(self, suff_stat: LabeledTemporalGraphGrammarStatistics) -> LabeledTemporalGraphGrammarAccumulator:
         """Merge serialized attributed-graph sufficient statistics."""
-        s, n, e = suff_stat
-        self.structure_acc.combine(s)
+        if not isinstance(suff_stat, LabeledTemporalGraphGrammarStatistics) or suff_stat.schema_version != 1:
+            raise ValueError("labeled temporal graph statistics must use schema version 1.")
+        node_weight = _finite_nonnegative(suff_stat.node_weight, name="node_weight")
+        edge_weight = _finite_nonnegative(suff_stat.edge_weight, name="edge_weight")
+        self.structure_acc.combine(suff_stat.structure)
         if self.node_acc is not None:
-            self.node_acc.combine(n)
+            if suff_stat.node is None:
+                raise ValueError("node statistics are required by the configured node model.")
+            self.node_acc.combine(suff_stat.node)
+        elif suff_stat.node is not None or node_weight != 0.0:
+            raise ValueError("node statistics are incompatible with a model that has no node distribution.")
         if self.edge_acc is not None:
-            self.edge_acc.combine(e)
+            if suff_stat.edge is None:
+                raise ValueError("edge statistics are required by the configured edge model.")
+            self.edge_acc.combine(suff_stat.edge)
+        elif suff_stat.edge is not None or edge_weight != 0.0:
+            raise ValueError("edge statistics are incompatible with a model that has no edge distribution.")
+        self.node_weight += node_weight
+        self.edge_weight += edge_weight
         return self
 
-    def value(self) -> tuple:
+    def value(self) -> LabeledTemporalGraphGrammarStatistics:
         """Return serialized attributed-graph sufficient statistics."""
-        return (
+        return LabeledTemporalGraphGrammarStatistics(
+            1,
             self.structure_acc.value(),
             None if self.node_acc is None else self.node_acc.value(),
             None if self.edge_acc is None else self.edge_acc.value(),
+            self.node_weight,
+            self.edge_weight,
         )
 
-    def from_value(self, x: tuple) -> LabeledTemporalGraphGrammarAccumulator:
+    def from_value(self, x: LabeledTemporalGraphGrammarStatistics) -> LabeledTemporalGraphGrammarAccumulator:
         """Restore accumulator state from serialized sufficient statistics."""
-        self.structure_acc.from_value(x[0])
-        if self.node_acc is not None:
-            self.node_acc.from_value(x[1])
-        if self.edge_acc is not None:
-            self.edge_acc.from_value(x[2])
+        fresh = self.factory.make()
+        fresh.combine(x)
+        self.structure_acc = fresh.structure_acc
+        self.node_acc = fresh.node_acc
+        self.edge_acc = fresh.edge_acc
+        self.node_weight = fresh.node_weight
+        self.edge_weight = fresh.edge_weight
         return self
 
     def key_merge(self, stats_dict: dict) -> None:
@@ -1112,18 +1286,34 @@ class LabeledTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulat
         """Replace keyed sufficient statistics; unused for this accumulator."""
         pass
 
-    def acc_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+    def acc_to_encoder(self) -> LabeledTemporalGraphGrammarDataEncoder:
         """Return the encoder associated with this accumulator."""
-        return TemporalGraphGrammarDataEncoder()
+        return self.factory.encoder
 
 
 class LabeledTemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for attributed temporal graph grammar accumulators."""
 
-    def __init__(self, structure_factory: Any, node_factory: Any, edge_factory: Any) -> None:
+    def __init__(
+        self,
+        structure: TemporalGraphGrammarDistribution,
+        structure_factory: Any,
+        node_factory: Any,
+        edge_factory: Any,
+        node_encoder: Any,
+        edge_encoder: Any,
+    ) -> None:
+        self.structure = structure
         self.structure_factory = structure_factory
         self.node_factory = node_factory
         self.edge_factory = edge_factory
+        self.node_encoder = node_encoder
+        self.edge_encoder = edge_encoder
+        self.encoder = LabeledTemporalGraphGrammarDataEncoder(
+            structure,
+            node_factory is not None,
+            edge_factory is not None,
+        )
 
     def make(self) -> LabeledTemporalGraphGrammarAccumulator:
         """Create a fresh attributed temporal graph grammar accumulator."""
@@ -1131,6 +1321,9 @@ class LabeledTemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory)
             self.structure_factory.make(),
             None if self.node_factory is None else self.node_factory.make(),
             None if self.edge_factory is None else self.edge_factory.make(),
+            self.node_encoder,
+            self.edge_encoder,
+            self,
         )
 
 
@@ -1138,30 +1331,98 @@ class LabeledTemporalGraphGrammarEstimator(ParameterEstimator):
     """Estimator for attributed temporal graph grammars."""
 
     def __init__(
-        self, structure_estimator: Any, node_estimator: Any = None, edge_estimator: Any = None, name: str | None = None
+        self,
+        structure_estimator: Any,
+        node_estimator: Any = None,
+        edge_estimator: Any = None,
+        *,
+        structure: TemporalGraphGrammarDistribution,
+        node_encoder: Any = None,
+        edge_encoder: Any = None,
+        name: str | None = None,
     ) -> None:
         self.structure_estimator = structure_estimator
         self.node_estimator = node_estimator
         self.edge_estimator = edge_estimator
+        self.structure = structure
+        self.node_encoder = node_encoder
+        self.edge_encoder = edge_encoder
         self.name = name
         self.keys = None
 
     def accumulator_factory(self) -> LabeledTemporalGraphGrammarAccumulatorFactory:
         """Return the accumulator factory used by this estimator."""
         return LabeledTemporalGraphGrammarAccumulatorFactory(
+            self.structure,
             self.structure_estimator.accumulator_factory(),
             None if self.node_estimator is None else self.node_estimator.accumulator_factory(),
             None if self.edge_estimator is None else self.edge_estimator.accumulator_factory(),
+            self.node_encoder,
+            self.edge_encoder,
         )
 
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> LabeledTemporalGraphGrammarDistribution:
+    def estimate(
+        self,
+        nobs: float | None,
+        suff_stat: LabeledTemporalGraphGrammarStatistics,
+    ) -> LabeledTemporalGraphGrammarDistribution:
         """Estimate structure and attribute distributions from sufficient statistics."""
-        s_val, n_val, e_val = suff_stat
+        if not isinstance(suff_stat, LabeledTemporalGraphGrammarStatistics) or suff_stat.schema_version != 1:
+            raise ValueError("labeled temporal graph statistics must use schema version 1.")
+        node_weight = _finite_nonnegative(suff_stat.node_weight, name="node_weight")
+        edge_weight = _finite_nonnegative(suff_stat.edge_weight, name="edge_weight")
+        if self.node_estimator is not None and node_weight <= 0.0:
+            raise ValueError("cannot estimate node attributes without aligned node records.")
+        if self.edge_estimator is not None and edge_weight <= 0.0:
+            raise ValueError("cannot estimate edge attributes without aligned edge records.")
         return LabeledTemporalGraphGrammarDistribution(
-            self.structure_estimator.estimate(nobs, s_val),
-            None if self.node_estimator is None else self.node_estimator.estimate(nobs, n_val),
-            None if self.edge_estimator is None else self.edge_estimator.estimate(nobs, e_val),
+            self.structure_estimator.estimate(nobs, suff_stat.structure),
+            None
+            if self.node_estimator is None
+            else self.node_estimator.estimate(node_weight, suff_stat.node),
+            None
+            if self.edge_estimator is None
+            else self.edge_estimator.estimate(edge_weight, suff_stat.edge),
             name=self.name,
+        )
+
+
+class LabeledTemporalGraphGrammarDataEncoder(DataSequenceEncoder):
+    """Validate event alignment while retaining the attributed observation structure."""
+
+    def __init__(
+        self,
+        structure: TemporalGraphGrammarDistribution,
+        has_node_dist: bool,
+        has_edge_dist: bool,
+    ) -> None:
+        self.structure = structure
+        self.has_node_dist = has_node_dist
+        self.has_edge_dist = has_edge_dist
+
+    def seq_encode(self, x: Sequence[tuple]) -> tuple[tuple, ...]:
+        return tuple(
+            _validate_labeled_observation(
+                observation,
+                self.structure,
+                has_node_dist=self.has_node_dist,
+                has_edge_dist=self.has_edge_dist,
+            )
+            for observation in x
+        )
+
+    def row_count(self, x: Any) -> int:
+        if not isinstance(x, tuple):
+            raise ValueError("encoded labeled temporal graph payload must be a tuple.")
+        return len(x)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, LabeledTemporalGraphGrammarDataEncoder)
+            and other.structure.motif.bins == self.structure.motif.bins
+            and other.structure.directed == self.structure.directed
+            and other.has_node_dist == self.has_node_dist
+            and other.has_edge_dist == self.has_edge_dist
         )
 
 
@@ -1178,6 +1439,8 @@ __all__ = [
     "LabeledTemporalGraphGrammarEstimator",
     "LabeledTemporalGraphGrammarAccumulator",
     "LabeledTemporalGraphGrammarAccumulatorFactory",
+    "LabeledTemporalGraphGrammarDataEncoder",
+    "LabeledTemporalGraphGrammarStatistics",
     "HomophilyTemporalGraphGrammarDistribution",
     "HomophilyTemporalGraphGrammarSampler",
     "HomophilyTemporalGraphGrammarEstimator",
