@@ -2388,20 +2388,33 @@ class ExplicitDurationHMM:
     plain HMM cannot.
 
     ``durations`` is one length-``max_duration`` probability vector per state (over d = 1..max_duration).
-    The forward variable alpha_t(j) = P(obs_1:t, a segment ends at t in state j); the likelihood is
-    sum_j alpha_T(j). Forward/EM are O(T * K * max_duration). Verified against brute-force segmentation.
+    A sequence has an exogenous fixed observation horizon. Its final latent duration is right-censored when
+    it extends beyond that horizon, exactly matching ``sample(length)``. Forward/EM are O(T * K *
+    max_duration).
     """
 
     def __init__(self, emissions, pi, transition_matrix, durations, max_duration, name=None) -> None:
-        self.emissions = list(emissions)
+        try:
+            self.emissions = list(emissions)
+        except TypeError as exc:
+            raise TypeError("ExplicitDurationHMM emissions must be an iterable.") from exc
+        if len(self.emissions) < 2:
+            raise ValueError("ExplicitDurationHMM requires at least two states because segments must switch state.")
         self.K = len(self.emissions)
-        self.pi = np.asarray(pi, dtype=float)
-        self.pi = self.pi / self.pi.sum()
-        a = np.asarray(transition_matrix, dtype=float).copy()
-        np.fill_diagonal(a, 0.0)  # EDHMM: must switch state after a segment
-        self.a = _row_normalize(a)
-        self.D = int(max_duration)
-        self.dur = _row_normalize(np.asarray(durations, dtype=float))  # (K, D), over d=1..D
+        self.pi = validated_probability_vector(pi, "ExplicitDurationHMM initial probabilities", size=self.K)
+        self.a = validated_row_probability_matrix(
+            transition_matrix,
+            "ExplicitDurationHMM transition matrix",
+            shape=(self.K, self.K),
+        )
+        if np.any(np.diag(self.a) != 0.0):
+            raise ValueError("ExplicitDurationHMM transition diagonal must be exactly zero.")
+        self.D = _exact_positive_integer(max_duration, "ExplicitDurationHMM max_duration")
+        self.dur = validated_row_probability_matrix(
+            durations,
+            "ExplicitDurationHMM duration probabilities",
+            shape=(self.K, self.D),
+        )
         self.name = name
         self._emit_est = [e.estimator() for e in self.emissions]
 
@@ -2411,17 +2424,25 @@ class ExplicitDurationHMM:
     def _seg_loglik(self, log_b):
         """seg[t, d, j] = log P(obs_{t-d+1 .. t} | state j) for a length-(d+1) segment ENDING at t."""
         t_len = log_b.shape[0]
-        csum = np.vstack([np.zeros(self.K), np.cumsum(log_b, axis=0)])  # (T+1, K)
         seg = np.full((t_len, self.D, self.K), -np.inf)
-        for d in range(self.D):  # duration index d -> actual duration d+1
-            for t in range(d, t_len):
-                seg[t, d] = csum[t + 1] - csum[t - d]
+        if t_len:
+            seg[:, 0, :] = log_b
+        for duration_index in range(1, self.D):
+            for end in range(duration_index, t_len):
+                seg[end, duration_index] = seg[end - 1, duration_index - 1] + log_b[end]
         return seg
+
+    def _log_duration_survival(self):
+        """Return log P(duration >= d) for duration indices d=0..D-1."""
+        survival = np.flip(np.cumsum(np.flip(self.dur, axis=1), axis=1), axis=1)
+        return _log_probabilities(survival)
 
     def _forward(self, log_b):
         t_len = log_b.shape[0]
         seg = self._seg_loglik(log_b)
-        log_dur, log_a, log_pi = np.log(self.dur + 1e-300), np.log(self.a + 1e-300), np.log(self.pi + 1e-300)
+        log_dur = _log_probabilities(self.dur)
+        log_a = _log_probabilities(self.a)
+        log_pi = _log_probabilities(self.pi)
         log_alpha = np.full((t_len, self.K), -np.inf)  # segment ends at t in j
         log_e = np.full((t_len + 1, self.K), -np.inf)  # entry into j at time tau (segment starts at tau)
         log_e[0] = log_pi
@@ -2439,21 +2460,33 @@ class ExplicitDurationHMM:
         return log_alpha, log_e, seg
 
     def forward_loglik(self, seq):
-        """Total log-likelihood log sum_j alpha_T(j) via the scaled explicit-duration forward."""
-        log_alpha, _, _ = self._forward(self._log_b(seq))
-        return float(_logsumexp(log_alpha[-1]))
+        """Fixed-horizon log likelihood, marginalizing a possibly right-censored final duration."""
+        sequence = _validated_sequences([seq], "ExplicitDurationHMM scoring data")[0]
+        _, log_e, seg = self._forward(self._log_b(sequence))
+        t_len = len(sequence)
+        log_survival = self._log_duration_survival()
+        final_terms = []
+        for observed_index in range(min(t_len, self.D)):
+            start = t_len - observed_index - 1
+            final_terms.extend(log_e[start] + log_survival[:, observed_index] + seg[-1, observed_index])
+        return float(_logsumexp(final_terms))
 
     def _backward(self, log_b, seg):
         t_len = log_b.shape[0]
-        log_dur, log_a = np.log(self.dur + 1e-300), np.log(self.a + 1e-300)
+        log_dur = _log_probabilities(self.dur)
+        log_survival = self._log_duration_survival()
+        log_a = _log_probabilities(self.a)
         log_beta = np.full((t_len, self.K), -np.inf)  # P(obs_{t+1:} | segment ends at t in j)
-        log_bstar = np.full((t_len + 1, self.K), -np.inf)  # P(obs_{tau:} | segment starts at tau in j)
-        log_beta[t_len - 1] = 0.0
+        log_bstar = np.full((t_len, self.K), -np.inf)  # P(obs_{tau:} | segment starts at tau in j)
         for tau in range(t_len - 1, -1, -1):
+            remaining = t_len - tau
             for j in range(self.K):
-                terms = [
-                    log_dur[j, d] + seg[tau + d, d, j] + log_beta[tau + d, j] for d in range(min(self.D, t_len - tau))
-                ]
+                terms = []
+                if remaining <= self.D:
+                    terms.append(log_survival[j, remaining - 1] + seg[t_len - 1, remaining - 1, j])
+                for duration in range(1, min(self.D, remaining - 1) + 1):
+                    end = tau + duration - 1
+                    terms.append(log_dur[j, duration - 1] + seg[end, duration - 1, j] + log_beta[end, j])
                 log_bstar[tau, j] = _logsumexp(terms) if terms else -np.inf
             if tau > 0:
                 for j in range(self.K):
@@ -2462,21 +2495,24 @@ class ExplicitDurationHMM:
 
     def _estep(self, seq):
         """Per-sequence E-step. Returns (loglik, pi_contrib (K,), trans_contrib (K,K), dur_contrib (K,D),
-        occ (T,K)) -- the segment-posterior statistics that drive the duration/transition/emission M-step."""
+        occ (T,K)). The last segment's latent duration is marginalized over every duration at least as
+        long as its observed right-censored portion."""
         log_b = self._log_b(seq)
         t_len = len(seq)
-        log_dur = np.log(self.dur + 1e-300)
-        log_a = np.log(self.a + 1e-300)
-        log_pi = np.log(self.pi + 1e-300)
+        log_dur = _log_probabilities(self.dur)
+        log_a = _log_probabilities(self.a)
+        log_pi = _log_probabilities(self.pi)
         log_alpha, log_e, seg = self._forward(log_b)
         log_beta, log_bstar = self._backward(log_b, seg)
-        z = _logsumexp(log_alpha[-1])
+        z = _logsumexp(log_pi + log_bstar[0])
         require_possible_log_evidence(z, context="ExplicitDurationHMM._estep")
         pi_contrib = np.exp(log_pi + log_bstar[0] - z)
         dur_contrib = np.zeros((self.K, self.D))
         trans_contrib = np.zeros((self.K, self.K))
         occ = np.zeros((t_len, self.K))
-        for t in range(t_len):
+
+        # Completed, non-final segments have an exact latent duration and transition onward.
+        for t in range(t_len - 1):
             for j in range(self.K):
                 for d in range(min(t + 1, self.D)):
                     lp = log_e[t - d, j] + log_dur[j, d] + seg[t, d, j] + log_beta[t, j] - z
@@ -2484,9 +2520,20 @@ class ExplicitDurationHMM:
                         p = np.exp(lp)
                         dur_contrib[j, d] += p
                         occ[t - d : t + 1, j] += p
-            if t < t_len - 1:
-                for i in range(self.K):
-                    trans_contrib[i] += np.exp(log_alpha[t, i] + log_a[i, :] + log_bstar[t + 1, :] - z)
+            for i in range(self.K):
+                trans_contrib[i] += np.exp(log_alpha[t, i] + log_a[i, :] + log_bstar[t + 1, :] - z)
+
+        # The final segment is observed for r positions but its actual duration may be any q >= r.
+        for observed_index in range(min(t_len, self.D)):
+            start = t_len - observed_index - 1
+            for j in range(self.K):
+                emission_loglik = seg[t_len - 1, observed_index, j]
+                for duration_index in range(observed_index, self.D):
+                    lp = log_e[start, j] + log_dur[j, duration_index] + emission_loglik - z
+                    if np.isfinite(lp):
+                        probability = np.exp(lp)
+                        dur_contrib[j, duration_index] += probability
+                        occ[start:t_len, j] += probability
         return float(z), pi_contrib, trans_contrib, dur_contrib, occ
 
     def fit(self, seqs, *, max_its: int = 50, tol: float = 1e-6, weights=None):
@@ -2615,10 +2662,9 @@ class ExplicitDurationHMM:
         """The HSMM as an EQUIVALENT StructuredHMM via the remaining-duration expansion: K*D sub-states
         (k, r) = "state k with r steps left in the segment". The expanded chain emits from state k at every
         sub-state, decrements deterministically (k,r)->(k,r-1), and at (k,1) switches segment with
-        A[k,k']*dur[k'](d'). ``final_states`` = the (k,1) sub-states require the last segment to COMPLETE, so
-        the expanded forward log-likelihood EQUALS this EDHMM's exactly. This hands the HSMM the full
-        StructuredHMM read-out API -- Viterbi (recover state+remaining-duration), posterior decoding, the
-        standard forward -- and, with ``len_dist``, enumeration. O(K*D) states."""
+        A[k,k']*dur[k'](d'). Reading the first T expanded-chain emissions exactly represents the
+        right-censored fixed horizon, so no final-state constraint is applied. This hands the HSMM the full
+        StructuredHMM read-out API and, with ``len_dist``, enumeration. O(K*D) states."""
 
         def idx(k, r):  # r in 1..D
             return k * self.D + (r - 1)
@@ -2638,34 +2684,19 @@ class ExplicitDurationHMM:
                     continue
                 for dp in range(1, self.D + 1):
                     a[idx(k, 1), idx(kp, dp)] = self.a[k, kp] * self.dur[kp, dp - 1]  # switch segment
-        final = {idx(k, 1) for k in range(self.K)}
-        return StructuredHMM(emissions, pi, DenseTransition(a), len_dist=len_dist, final_states=final)
+        return StructuredHMM(emissions, pi, DenseTransition(a), len_dist=len_dist)
 
     def enumerator(self, len_dist):
-        """Enumerate observation sequences in descending marginal probability under this HSMM (complete
-        final segment), given a ``len_dist`` over total sequence length. Built on the exact HMM expansion +
-        the final-state best-first enumerator; ``.top_k(k)`` -> [(sequence, log_prob), ...]. Needs discrete
-        (Categorical) emissions and a Categorical-like ``len_dist``."""
+        """Enumerate fixed-horizon observation sequences in descending marginal probability, given a
+        ``len_dist`` over total sequence length. Built on the exact right-censored HMM expansion;
+        ``.top_k(k)`` -> [(sequence, log_prob), ...]."""
         return self.to_structured_hmm(len_dist=len_dist).enumerator()
 
     def state_posteriors(self, seq):
         """Per-position smoothing posteriors gamma[t, j] = P(z_t = j | obs), marginalizing the durations
         (sum the posterior of every segment that covers position t). Rows sum to 1."""
-        log_b = self._log_b(seq)
-        t_len = len(seq)
-        log_alpha, log_e, seg = self._forward(log_b)
-        log_beta, _ = self._backward(log_b, seg)
-        z = _logsumexp(log_alpha[-1])
-        require_possible_log_evidence(z, context="ExplicitDurationHMM.state_posteriors")
-        log_dur = np.log(self.dur + 1e-300)
-        occ = np.zeros((t_len, self.K))
-        for t in range(t_len):
-            for j in range(self.K):
-                for d in range(min(t + 1, self.D)):
-                    lp = log_e[t - d, j] + log_dur[j, d] + seg[t, d, j] + log_beta[t, j] - z
-                    if np.isfinite(lp):
-                        occ[t - d : t + 1, j] += np.exp(lp)
-        return occ
+        sequence = _validated_sequences([seq], "ExplicitDurationHMM posterior data")[0]
+        return self._estep(sequence)[4]
 
     def posterior_decode(self, seq):
         """Per-position MAP state argmax_j P(z_t = j | obs)."""
@@ -2673,11 +2704,16 @@ class ExplicitDurationHMM:
 
     def viterbi_segments(self, seq):
         """Most-likely segmentation (max-product over the segment lattice): a list of (state, start,
-        duration) segments covering the sequence, O(T K D). The HSMM analog of Viterbi decoding."""
-        log_b = self._log_b(seq)
-        t_len = len(seq)
+        observed_duration) segments covering the sequence, O(T K D). The last tuple describes the
+        observed portion of a right-censored latent duration."""
+        sequence = _validated_sequences([seq], "ExplicitDurationHMM Viterbi data")[0]
+        require_possible_log_evidence(self.forward_loglik(sequence), context="ExplicitDurationHMM.viterbi_segments")
+        log_b = self._log_b(sequence)
+        t_len = len(sequence)
         seg = self._seg_loglik(log_b)
-        log_dur, log_a, log_pi = np.log(self.dur + 1e-300), np.log(self.a + 1e-300), np.log(self.pi + 1e-300)
+        log_dur = _log_probabilities(self.dur)
+        log_a = _log_probabilities(self.a)
+        log_pi = _log_probabilities(self.pi)
         delta = np.full((t_len, self.K), -np.inf)  # best score of a segment ending at t in j
         bp_d = np.zeros((t_len, self.K), dtype=int)  # chosen duration index
         entry = np.full((t_len, self.K), -np.inf)  # best score to START a segment at t in j
@@ -2697,16 +2733,33 @@ class ExplicitDurationHMM:
                 for j in range(self.K):
                     vals = delta[t] + log_a[:, j]
                     entry[t + 1, j], bp_prev[t + 1, j] = float(vals.max()), int(vals.argmax())
-        j = int(delta[t_len - 1].argmax())
-        segments, t = [], t_len - 1
-        while t >= 0:
-            d = int(bp_d[t, j])
-            start = t - d
-            segments.append((int(j), int(start), d + 1))  # (state, start, duration)
-            if start == 0:
-                break
-            j = int(bp_prev[start, j])
-            t = start - 1
+
+        best_score = -np.inf
+        final_state = 0
+        final_start = 0
+        final_observed_duration = 1
+        for observed_index in range(min(t_len, self.D)):
+            start = t_len - observed_index - 1
+            observed_duration = observed_index + 1
+            for state in range(self.K):
+                emission_loglik = seg[-1, observed_index, state]
+                for duration_index in range(observed_index, self.D):
+                    score = entry[start, state] + log_dur[state, duration_index] + emission_loglik
+                    if score > best_score:
+                        best_score = score
+                        final_state = state
+                        final_start = start
+                        final_observed_duration = observed_duration
+
+        segments = [(int(final_state), int(final_start), int(final_observed_duration))]
+        start = final_start
+        state = final_state
+        while start > 0:
+            state = int(bp_prev[start, state])
+            end = start - 1
+            duration_index = int(bp_d[end, state])
+            start = end - duration_index
+            segments.append((state, int(start), duration_index + 1))
         segments.reverse()
         return segments
 
@@ -2717,6 +2770,8 @@ class ExplicitDurationHMM:
 
 def _logsumexp(v):
     v = np.asarray(v, dtype=float)
+    if v.size == 0:
+        return -np.inf
     m = v.max()
     if not np.isfinite(m):
         return -np.inf
@@ -2730,14 +2785,17 @@ class _EDHMMSampler:
 
     def sample(self, length):
         h = self.hmm
+        horizon = _exact_positive_integer(length, "ExplicitDurationHMM sample length")
         out = []
         s = self.rng.choice(h.K, p=h.pi)
-        while len(out) < length:
+        while len(out) < horizon:
             d = self.rng.choice(h.D, p=h.dur[s]) + 1
             for _ in range(d):
-                if len(out) >= length:
+                if len(out) >= horizon:
                     break
                 out.append(h.emissions[s].sampler(seed=int(self.rng.randint(1, 2**31))).sample())
+            if len(out) >= horizon:
+                break
             s = self.rng.choice(h.K, p=h.a[s])
         return out
 
@@ -2768,7 +2826,12 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def __init__(self, emission_accumulators, k, d):
         self.emit = list(emission_accumulators)
-        self.K, self.D = int(k), int(d)
+        self.K = _exact_positive_integer(k, "EDHMMAccumulator state count")
+        if self.K < 2:
+            raise ValueError("EDHMMAccumulator requires at least two states.")
+        self.D = _exact_positive_integer(d, "EDHMMAccumulator maximum duration")
+        if len(self.emit) != self.K:
+            raise ValueError(f"EDHMMAccumulator requires exactly {self.K} emission accumulators.")
         self.pi_acc = np.zeros(self.K)
         self.trans_acc = np.zeros((self.K, self.K))
         self.dur_acc = np.zeros((self.K, self.D))
@@ -2896,7 +2959,12 @@ class EDHMMEstimator(ParameterEstimator):
 
     def __init__(self, emission_estimators, k, d, name=None):
         self.emission_estimators = list(emission_estimators)
-        self.k, self.d = int(k), int(d)
+        self.k = _exact_positive_integer(k, "EDHMMEstimator state count")
+        if self.k < 2:
+            raise ValueError("EDHMMEstimator requires at least two states.")
+        self.d = _exact_positive_integer(d, "EDHMMEstimator maximum duration")
+        if len(self.emission_estimators) != self.k:
+            raise ValueError(f"EDHMMEstimator requires exactly {self.k} emission estimators.")
         self.name = name
 
     def accumulator_factory(self):
@@ -2909,8 +2977,10 @@ class EDHMMEstimator(ParameterEstimator):
         pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else np.ones(self.k) / self.k
         a = trans_acc.copy()
         np.fill_diagonal(a, 0.0)
-        a = _row_normalize(a) if a.sum() > 0 else np.full((self.k, self.k), 1.0 / max(self.k - 1, 1))
-        dur = _row_normalize(dur_acc)
+        transition_fallback = np.full((self.k, self.k), 1.0 / (self.k - 1))
+        np.fill_diagonal(transition_fallback, 0.0)
+        a = _row_normalize(a, transition_fallback)
+        dur = _row_normalize(dur_acc, np.full((self.k, self.d), 1.0 / self.d))
         emissions = [self.emission_estimators[i].estimate(float(nk[i]), emit_vals[i]) for i in range(self.k)]
         return ExplicitDurationHMM(emissions, pi, a, dur, self.d, name=self.name)
 

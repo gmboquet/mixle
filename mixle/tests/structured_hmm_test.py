@@ -330,7 +330,7 @@ class InputOutputHMMTest(unittest.TestCase):
 
 
 class ExplicitDurationHMMTest(unittest.TestCase):
-    def test_forward_matches_brute_force_segmentation(self):
+    def test_forward_matches_brute_force_right_censored_segmentation(self):
 
         from mixle.stats.latent.structured_hmm import ExplicitDurationHMM, _logsumexp
 
@@ -351,16 +351,18 @@ class ExplicitDurationHMMTest(unittest.TestCase):
             total = []
 
             def rec(t, prev, lp):
-                if t == t_len:
-                    total.append(lp)
-                    return
                 for j in range(K):
                     if prev is not None and m.a[prev, j] == 0:
                         continue
                     trans = logpi[j] if prev is None else loga[prev, j]
-                    for d in range(1, min(D, t_len - t) + 1):
-                        seg = sum(log_b[t + s, j] for s in range(d))
-                        rec(t + d, j, lp + trans + logd[j, d - 1] + seg)
+                    for d in range(1, D + 1):
+                        observed = min(d, t_len - t)
+                        seg = sum(log_b[t + s, j] for s in range(observed))
+                        score = lp + trans + logd[j, d - 1] + seg
+                        if t + d >= t_len:
+                            total.append(score)
+                        else:
+                            rec(t + d, j, score)
 
             rec(0, None, 0.0)
             return _logsumexp(total)
