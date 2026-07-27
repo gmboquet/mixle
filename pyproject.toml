@@ -131,6 +131,9 @@ all = ["numba>=0.59", "tbb>=2021.6; platform_machine == 'x86_64'", "pyspark>=3.4
 Homepage = "https://github.com/gmboquet/mixle"
 Repository = "https://github.com/gmboquet/mixle"
 
+[project.scripts]
+mixle-reproduce = "mixle.reproduction:main"
+
 [tool.setuptools]
 # Release artifacts do not ship the 400k-line test tree. Runtime data is declared explicitly below;
 # MANIFEST.in retains the changelog and generated compatibility manifests in the sdist.

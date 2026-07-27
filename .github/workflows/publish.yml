@@ -1,72 +1,165 @@
 name: Publish
 
-# Build the sdist + wheel and publish to PyPI via Trusted Publishing (OIDC) -- no API tokens are
-# stored as secrets. Publishing to PyPI runs only when a GitHub Release is published; a manual
-# workflow_dispatch can build-and-check without touching PyPI.
-#
-# The PyPI distribution name is "mixle" (the import package is still `mixle`); the GitHub repo
-# is gmboquet/mixle.
-# One-time setup (PyPI side, done by the maintainer):
-#   1. Confirm the project name "mixle" is available or owned by you (https://pypi.org/project/mixle/).
-#   2. On PyPI, add a Trusted Publisher for the "mixle" project (a "pending" publisher if it
-#      does not exist yet):
-#        Owner: gmboquet   Repository: mixle
-#        Workflow: publish.yml   Environment: pypi
-# To release: bump `version` in pyproject.toml, tag the commit (e.g. v0.2.0), and publish a GitHub
-# Release for that tag -- this workflow then builds and uploads it.
+# Trusted Publishing is deliberately downstream of release-candidate verification. A published
+# GitHub Release is only a request to publish: its signed annotated tag, version, ancestry, exact
+# commit checks, build output, and retained digests must all agree before PyPI credentials are
+# requested. Manual dispatch builds the current commit but can never publish it.
 
 on:
   release:
     types: [published]
   workflow_dispatch: {}
 
-# Cancel superseded runs on the same ref.
+permissions:
+  contents: read
+  checks: read
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.release.tag_name || github.sha }}
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build sdist + wheel
+  verify-candidate:
+    name: Verify immutable release candidate
     runs-on: ubuntu-latest
+    outputs:
+      candidate-sha: ${{ steps.candidate.outputs.sha }}
+      candidate-tag: ${{ steps.candidate.outputs.tag }}
+      candidate-version: ${{ steps.candidate.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      # Reproducible build: setuptools/wheel honor SOURCE_DATE_EPOCH for archive-member timestamps,
-      # so pin it to the commit being built rather than the wall-clock build time -- otherwise two
-      # builds of the identical source tree produce byte-different artifacts (different digests),
-      # which breaks any downstream fingerprint/provenance check that expects a build to be
-      # deterministic in the source it was built from. The wheel is reproducible from this alone; the
-      # sdist needs an extra repack step (scripts/normalize_sdist.py) -- SOURCE_DATE_EPOCH alone does
-      # not reach every tar-member mtime setuptools' sdist command writes, and this fixes that.
-      - name: Build
+      - id: candidate
+        name: Bind tag, version, ancestry, signature, and hosted evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
         run: |
-          python -m pip install --upgrade pip build twine
-          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD)"
-          python -m build
-          python scripts/normalize_sdist.py dist/*.tar.gz "$SOURCE_DATE_EPOCH"
-      # Validate metadata renders on PyPI before any upload.
-      - name: Twine check
-        run: twine check dist/*
+          set -euo pipefail
+          VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [ "$EVENT_NAME" != "release" ]; then
+            python -c 'import json, os, pathlib; pathlib.Path(os.environ["RUNNER_TEMP"], "release-check-evidence.json").write_text(json.dumps({"artifact": "mixle.release_check_evidence/v1", "commit": os.environ["EVENT_SHA"], "checks": {}, "publication_authorized": False}, sort_keys=True) + "\n", encoding="utf-8")'
+            printf 'sha=%s\n' "$EVENT_SHA" >> "$GITHUB_OUTPUT"
+            printf 'tag=\n' >> "$GITHUB_OUTPUT"
+            printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TAG="$RELEASE_TAG"
+          test "$TAG" = "v$VERSION"
+          test "$(git cat-file -t "refs/tags/$TAG")" = "tag"
+
+          TAG_OBJECT_SHA="$(gh api "repos/$REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)"
+          test "$(gh api "repos/$REPOSITORY/git/tags/$TAG_OBJECT_SHA" --jq .verification.verified)" = "true"
+          SHA="$(gh api "repos/$REPOSITORY/git/tags/$TAG_OBJECT_SHA" --jq .object.sha)"
+          test "$SHA" = "$(git rev-list -n 1 "refs/tags/$TAG")"
+
+          git fetch origin release/0.8.0:refs/remotes/origin/release/0.8.0
+          git merge-base --is-ancestor origin/release/0.8.0 "$SHA"
+          test "$SHA" = "$(git rev-parse origin/release/0.8.0)"
+
+          gh api "repos/$REPOSITORY/commits/$SHA/check-runs?per_page=100" > "$RUNNER_TEMP/check-runs.json"
+          python scripts/verify_required_checks.py \
+            --required .github/release-required-checks.txt \
+            --input "$RUNNER_TEMP/check-runs.json" \
+            --sha "$SHA" > "$RUNNER_TEMP/release-check-evidence.json"
+
+          printf 'sha=%s\n' "$SHA" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
-          name: dist
-          path: dist/
+          name: candidate-approval-${{ steps.candidate.outputs.sha }}
+          path: ${{ runner.temp }}/release-check-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+
+  build:
+    name: Build and fingerprint exact candidate
+    needs: verify-candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify-candidate.outputs.candidate-sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-approval-${{ needs.verify-candidate.outputs.candidate-sha }}
+          path: metadata
+      - name: Build exact candidate
+        env:
+          CANDIDATE_SHA: ${{ needs.verify-candidate.outputs.candidate-sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          python -m pip install --upgrade pip build twine
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD)"
+          export MIXLE_SOURCE_COMMIT="$CANDIDATE_SHA"
+          export MIXLE_SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')"
+          export MIXLE_SOURCE_DIRTY=false
+          python -m build
+          python scripts/normalize_sdist.py dist/*.tar.gz "$SOURCE_DATE_EPOCH"
+          twine check dist/*
+      - name: Record candidate and artifact digests
+        env:
+          CANDIDATE_SHA: ${{ needs.verify-candidate.outputs.candidate-sha }}
+          CANDIDATE_TAG: ${{ needs.verify-candidate.outputs.candidate-tag }}
+          CANDIDATE_VERSION: ${{ needs.verify-candidate.outputs.candidate-version }}
+        run: |
+          set -euo pipefail
+          mkdir -p metadata
+          for artifact in dist/*; do
+            python scripts/release_metadata.py "$artifact" \
+              --out "metadata/$(basename "$artifact").json"
+          done
+          (cd dist && sha256sum * > ../metadata/SHA256SUMS)
+          python -c 'import json, os, pathlib; pathlib.Path("metadata/release-candidate.json").write_text(json.dumps({"artifact": "mixle.release_candidate/v1", "commit": os.environ["CANDIDATE_SHA"], "tag": os.environ["CANDIDATE_TAG"], "version": os.environ["CANDIDATE_VERSION"], "workflow_run": os.environ["GITHUB_RUN_ID"]}, indent=2, sort_keys=True) + "\n", encoding="utf-8")'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-candidate-${{ needs.verify-candidate.outputs.candidate-sha }}
+          path: |
+            dist/
+            metadata/
+          if-no-files-found: error
+          retention-days: 90
 
   publish-pypi:
-    name: Publish to PyPI
-    # Real publish only on a published GitHub Release.
+    name: Retain evidence and publish exact candidate to PyPI
     if: github.event_name == 'release'
-    needs: build
+    needs: [verify-candidate, build]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write # required for trusted publishing (OIDC)
+      contents: write
+      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist/
+          name: release-candidate-${{ needs.verify-candidate.outputs.candidate-sha }}
+          path: candidate
+      - name: Re-verify and retain immutable release evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.verify-candidate.outputs.candidate-sha }}
+          CANDIDATE_TAG: ${{ needs.verify-candidate.outputs.candidate-tag }}
+          REPOSITORY: ${{ github.repository }}
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          test "$(python -c 'import json; print(json.load(open("metadata/release-candidate.json"))["commit"])')" = "$CANDIDATE_SHA"
+          (cd dist && sha256sum -c ../metadata/SHA256SUMS)
+          gh release upload "$CANDIDATE_TAG" metadata/* --repo "$REPOSITORY"
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: candidate/dist/
