@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 # PyPI distribution name; the import package is `mixle` (cf. scikit-learn -> sklearn).
 name = "mixle"
 version = "0.8.0"
-description = "A package for estimating heterogeneous probability density functions."
+description = "Composable statistical inference, automatic modeling, and evidence-aware scientific workflows."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = "MIT"
@@ -16,6 +16,8 @@ keywords = [
     "machine learning",
     "density estimation",
     "statistics",
+    "probabilistic inference",
+    "scientific computing",
     "heterogeneous data",
 ]
 classifiers = [
@@ -226,13 +228,14 @@ testpaths = ["mixle/tests"]
 python_files = ["*_test.py", "test_*.py"]
 python_classes = ["*Test", "*TestCase"]
 python_functions = ["test_*"]
-# Fast + parallel by default: plain `pytest` runs the `fast` gate under `-n auto` in a few minutes on a
+# Fast + parallel by default: plain `pytest` retains the legacy `fast` alias under `-n auto` for local
 # laptop (re-measured 2026-07-11: ~3 min for ~4.8k tests; it had silently regressed to 36+ min before
 # the conftest registry retriage). Heavy integration / training / stochastic-recovery tests are tagged
 # `slow` in conftest and excluded here; they still run in CI's full gate. Files must NOT self-mark
 # `fast` -- the conftest registry is the single triage authority (see pytest_collection_modifyitems).
 # A later `-m` on the command line overrides this default, so the CI gates keep working:
-#   full correctness run : pytest -m "not optional and not benchmark"   (everything incl. slow)
+#   core correctness run : pytest -m core
+#   full correctness run : pytest -m full
 #   single file, serial  : pytest path/to/file_test.py -n0 -m ""        (-m "" clears the fast filter)
 # --dist loadgroup honors the xdist_group marks conftest puts on minute-scale setUpClass classes
 # (the setup runs once per suite instead of once per worker); ungrouped tests keep plain load-balancing.
@@ -300,8 +303,8 @@ markers = [
     "smoke: import, public-API, and critical-fit-path checks; budget <=30 s local / <=60 s CI.",
     "core: stable base-install correctness; budget <=4 min per Python CI job.",
     "full: all non-optional correctness incl. slow tests; budget <=20 min.",
-    "numerical: repeated-seed and numerical-stress tests; nightly, not a per-commit gate.",
-    "hardware: real MPI/GPU/multi-process receipts; scheduled or manually gated.",
+    "numerical: repeated-seed and numerical-stress tests; budget <=30 min, scheduled/manual.",
+    "hardware: real MPI/torchrun multi-process receipts; budget <=20 min, scheduled/manual.",
 ]
 
 [tool.coverage.run]

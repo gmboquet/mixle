@@ -1,19 +1,19 @@
 """Worklist T3.1 -- the test-tier taxonomy is declared, documented, and consistent.
 
 T3.1 redesigns the suite around named tiers with time budgets instead of one broad
-``fast`` marker. This test pins the taxonomy so the three sources agree:
+``fast`` marker. This test pins the taxonomy so the sources agree:
 
   * the tier markers are declared in ``pyproject.toml`` (``--strict-markers`` then makes
     them usable and typo-proof);
   * every tier is documented in ``docs/test-tiers.rst`` with a budget;
-  * a real ``smoke`` tier exists and is small.
-
-It does not re-mark the whole suite (that migration is incremental); it guarantees the
-vocabulary and the smoke tier are real and stay in sync.
+  * a real ``smoke`` tier exists and is small;
+  * central collection routing populates every named correctness tier;
+  * hosted tier execution goes through the hard-budget receipt runner.
 """
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -23,6 +23,8 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
 TIERS_DOC = ROOT / "docs" / "test-tiers.rst"
 SMOKE = Path(__file__).resolve().parent / "smoke_test.py"
+CONFTEST = Path(__file__).resolve().parent / "conftest.py"
+RUNNER = ROOT / "scripts" / "run_test_tier.py"
 
 # The tier vocabulary T3.1 introduces (plus the pre-existing optional/benchmark).
 TIER_MARKERS = ("smoke", "core", "full", "optional", "numerical", "benchmark", "hardware")
@@ -77,3 +79,29 @@ def test_smoke_tier_exists_and_is_small() -> None:
     # Smoke must stay dependency-light: no torch / backend imports at module scope.
     for heavy in ("import torch", "pyspark", "mpi4py"):
         assert heavy not in src, f"smoke tier must stay dependency-light; found {heavy!r}"
+
+
+def test_named_tiers_are_centrally_populated() -> None:
+    source = CONFTEST.read_text(encoding="utf-8")
+    for tier in ("core", "full", "optional", "numerical", "hardware"):
+        assert f'("{tier}",)' in source, f"central collection routing does not populate {tier!r}"
+    assert "backend_markers" in source
+
+
+def test_tier_runner_has_hard_reviewed_budgets() -> None:
+    source = RUNNER.read_text(encoding="utf-8")
+    for tier in ("core", "full", "optional", "numerical", "hardware"):
+        assert f'"{tier}":' in source
+    assert "subprocess.TimeoutExpired" in source
+    assert "mixle.test_tier_receipt/v1" in source
+
+
+def test_every_executable_workflow_job_has_a_deadline() -> None:
+    workflows = ROOT / ".github" / "workflows"
+    for path in workflows.glob("*.yml"):
+        jobs = path.read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
+        blocks = re.split(r"(?m)^  (?=[a-zA-Z0-9_-]+:\s*$)", jobs)
+        for block in blocks:
+            if "\n    runs-on:" in block:
+                name = block.split(":", 1)[0].strip()
+                assert "\n    timeout-minutes:" in block, f"{path.name}:{name} has no job deadline"

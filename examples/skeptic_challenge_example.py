@@ -208,9 +208,8 @@ def act2() -> None:
         f"({escalated / len(fresh):.1%} of traffic said 'not sure' and escalated to the teacher;"
     )
     print("                              the answered slice carries conformal risk alpha=0.08 by construction)")
-    print("  real-data receipts (not this synthetic demo): Banking77 e2e 0.983 vs teacher at 84KB;")
-    print("  escalation decays 0.679->0.428 over 6 harvest rounds (examples/real_receipt_banking77.py);")
-    print("  CLIP VLM -> 10k-param head, 14760x smaller at matched accuracy (mixle-mlops examples).")
+    print("  See examples/real_receipt_banking77.py for a candidate-bound real-data reproduction path.")
+    print("  This synthetic demo publishes no 0.8.0 headline performance result.")
 
 
 # ---------------------------------------------------------------------------------------------

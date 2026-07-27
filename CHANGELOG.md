@@ -199,11 +199,12 @@ with a regression test that fails on the unfixed code):
 
 ### Changed
 
-- Performance (exactness-preserving, parity-tested): multivariate-Gaussian scoring precomputes the
-  inverse Cholesky factor for single-gemm scoring (1.3-2.3x kernel, 1.59x end-to-end on the benchmark
-  GMM config, identical likelihoods); the torch objective fitters evaluate one forward per Adam
-  iteration instead of two, with NaN-aware best-state tracking; `seq_encode` chunking uses stride
-  slices (~76x on ndarray inputs) (E-1, E-2/G-3, E-3, I-2; #436).
+- Exactness-preserving, parity-tested implementation changes: multivariate-Gaussian scoring
+  precomputes the inverse Cholesky factor for single-gemm scoring; the torch objective fitters
+  evaluate one forward per Adam iteration instead of two, with NaN-aware best-state tracking; and
+  `seq_encode` chunking uses stride slices. These are implementation notes, not 0.8.0 performance
+  claims; candidate-specific timing requires a retained benchmark receipt under the release policy
+  (E-1, E-2/G-3, E-3, I-2; #436).
 - The MPI backend (`MPIEncodedData`, `optimize(..., backend="mpi")`'s underlying handle) now folds
   per-rank sufficient statistics with an `O(log W)` `comm.reduce` binary tree instead of a
   gather-to-root loop, so no single rank folds more than `O(log W)` payloads — matching the technique
@@ -458,7 +459,9 @@ FSDP2/Spark/MPI transports).
 - Lower-bound version pins across the always-installed core and every optional-dependency extra, so
   users on too-old dependencies get a clear resolver error instead of obscure runtime breakage.
 
-[Unreleased]: https://github.com/gmboquet/mixle/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/gmboquet/mixle/compare/v0.7.0...HEAD
+[0.8.0]: https://github.com/gmboquet/mixle/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/gmboquet/mixle/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/gmboquet/mixle/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/gmboquet/mixle/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/gmboquet/mixle/releases/tag/v0.6.0

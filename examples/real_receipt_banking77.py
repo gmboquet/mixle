@@ -1,26 +1,11 @@
 """The first REAL-data receipt: Banking77 (77 intents, real customer queries) through the solve loop.
 
-Everything else in examples/ uses synthetic teachers; this one runs the loop against a real public
-dataset. The "frontier" is an oracle stand-in (the dataset's gold labels, priced per call like an API)
-— so the accuracy ceiling is honest and the costs are modeled, not yet billed. What it measures:
-
-  * the scorecard on the official test split — measured in one run on a laptop:
-        end-to-end accuracy 0.983 · local agreement 0.948 · escalation 0.66
-        artifact 84 KB · $19.95 vs $30.00 per 1k
-  * the ESCALATION-DECAY CURVE — six rounds of live traffic, each followed by ``improve()``
-    (harvest the teacher's answers on escalated queries, re-distill, promote only if better):
-        MLP student        : 0.679 -> 0.584 -> 0.576 -> 0.488 -> 0.499 -> 0.428
-        generative student : 0.588 -> 0.476 -> 0.438 -> 0.380 -> 0.300 -> 0.297
-    "Gets cheaper the longer it runs", measured — and the generative student (torch-free,
-    ``student="generative"``) compounds faster, ending 13 points lower. End-to-end accuracy eases
-    0.98 -> 0.95 as more traffic answers locally: that is the alpha = 0.1 design exposing its bounded
-    local risk, not a regression (escalated queries are still answered exactly by the teacher).
-
-Honest readings this run forces: (1) a 77-class real task makes a hashed-feature student humble — the
-conformal gate correctly refuses ~2/3 of traffic at first; the SYSTEM is still 98% accurate because
-refusals go to the teacher. (2) The student saturates around ~43% escalation — the ceiling of this
-student family, which is the argument for stronger students (structured/generative), not for loosening
-the gate. Run: ``python examples/real_receipt_banking77.py`` (~4 min; downloads Banking77 once).
+Everything else in examples/ uses synthetic teachers; this one runs the loop against a pinned public
+dataset. The "frontier" is an oracle stand-in (the dataset's gold labels, priced per call like an API),
+so costs are modeled rather than billed. It prints a scorecard and an escalation-decay curve as fresh
+measurements. The tracked source intentionally embeds no prior headline result. Run receipts become
+release evidence only when they bind the exact candidate, dataset digests, dependencies, command,
+duration, and output.
 """
 
 from __future__ import annotations

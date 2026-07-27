@@ -88,7 +88,6 @@ myst_enable_extensions = [
 myst_heading_anchors = 0
 myst_all_links_external = False
 suppress_warnings = [
-    "docutils",
     "myst.header",
     "myst.xref_missing",
 ]
@@ -108,12 +107,6 @@ napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 napoleon_use_param = True
 napoleon_use_rtype = True
-
-# Several legacy library docstrings contain plain-text math and argument
-# sketches that are not valid reStructuredText. Keep the Sphinx source pages
-# strict while preventing inherited autodoc formatting debt from blocking
-# public manual builds.
-suppress_warnings = ["docutils"]
 
 # Doctest is not enabled as a documentation release gate. The generated API
 # reference includes wrapped NumPy/SciPy callables whose upstream examples are

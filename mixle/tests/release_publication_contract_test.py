@@ -69,6 +69,7 @@ def test_publish_workflow_has_fail_closed_candidate_binding():
         ".verification.verified",
         'git merge-base --is-ancestor origin/release/0.8.0 "$SHA"',
         'test "$SHA" = "$(git rev-parse origin/release/0.8.0)"',
+        'test "$EVENT_SHA" = "$SHA"',
         "verify_required_checks.py",
         "release_metadata.py",
         "sha256sum -c",
@@ -78,6 +79,23 @@ def test_publish_workflow_has_fail_closed_candidate_binding():
         assert required_fragment in workflow
     assert workflow.index("verify-candidate:") < workflow.index("build:")
     assert workflow.index("sha256sum -c") < workflow.index("gh-action-pypi-publish")
+
+
+def test_publication_is_recoverable_two_phase_and_public_transition_is_last():
+    workflow = (_ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+    assert "release:\n" not in workflow
+    assert "options: [prepare, promote]" in workflow
+    assert "prepare_run_id:" in workflow
+    assert "if: inputs.phase == 'prepare'" in workflow
+    assert "if: inputs.phase == 'promote'" in workflow
+    assert "gh release create" in workflow and "--draft" in workflow
+    assert 'test "$(gh release view "$CANDIDATE_TAG" --json isDraft --jq .isDraft)" = "true"' in workflow
+    assert "run-id: ${{ inputs.prepare_run_id }}" in workflow
+    assert "skip-existing: true" in workflow
+    assert workflow.index("gh-action-pypi-publish") < workflow.index("verify_published_artifacts.py")
+    assert workflow.index("verify_published_artifacts.py") < workflow.index(
+        'gh release edit "$CANDIDATE_TAG" --draft=false'
+    )
 
 
 def test_release_check_policy_is_nonempty_and_unique():

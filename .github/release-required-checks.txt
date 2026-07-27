@@ -2,14 +2,16 @@
 smoke / collection-light
 release decisions / accepted review
 lint (ruff enforced, mypy advisory)
-fast / py3.11
-fast / py3.12
-fast / macOS arm64 / py3.11
-fast / macOS arm64 / py3.12
-min-versions (oldest declared floors)
+core / py3.11
+core / py3.12
+core / macOS arm64 / py3.11
+core / macOS arm64 / py3.12
+core / minimum versions
 full / py3.12
 clean-wheel install + import sweep
 optional extras / py3.12
+numerical / repeated-seed stress
+hardware / MPI and torchrun
 extras matrix / exact candidate
 Revision check (single-revision, warnings as errors)
 pip-audit (base install)

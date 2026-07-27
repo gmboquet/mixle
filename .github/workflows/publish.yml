@@ -1,27 +1,46 @@
 name: Publish
 
-# Trusted Publishing is deliberately downstream of release-candidate verification. A published
-# GitHub Release is only a request to publish: its signed annotated tag, version, ancestry, exact
-# commit checks, build output, and retained digests must all agree before PyPI credentials are
-# requested. Manual dispatch builds the current commit but can never publish it.
+# Publication is deliberately two phase and manually dispatched from the signed candidate tag:
+#
+#   prepare  - verify the exact release-branch tip and required checks, build/attest immutable
+#              artifacts, retain the workflow artifact, and create a non-public draft release.
+#   promote  - download that exact prepare-run artifact, re-verify every digest, publish the
+#              already-validated files to PyPI, and only then make the GitHub Release public.
+#
+# A failed build can therefore never follow a public GitHub Release. A failure after the idempotent
+# PyPI upload leaves a recoverable draft; rerunning promote verifies the same bytes and completes
+# the final public transition.
 
 on:
-  release:
-    types: [published]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: "prepare immutable artifacts, or promote a prepared draft"
+        required: true
+        type: choice
+        options: [prepare, promote]
+      tag:
+        description: "Signed annotated candidate tag (for example v0.8.0)"
+        required: true
+        type: string
+      prepare_run_id:
+        description: "Successful prepare workflow run ID (required for promote)"
+        required: false
+        type: string
 
 permissions:
   contents: read
   checks: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.release.tag_name || github.sha }}
+  group: publish-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
   verify-candidate:
     name: Verify immutable release candidate
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       candidate-sha: ${{ steps.candidate.outputs.sha }}
       candidate-tag: ${{ steps.candidate.outputs.tag }}
@@ -29,6 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.tag }}
           fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
@@ -37,21 +57,14 @@ jobs:
         name: Bind tag, version, ancestry, signature, and hosted evidence
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ inputs.tag }}
           REPOSITORY: ${{ github.repository }}
-          EVENT_NAME: ${{ github.event_name }}
           EVENT_SHA: ${{ github.sha }}
+          PHASE: ${{ inputs.phase }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
         run: |
           set -euo pipefail
           VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-          if [ "$EVENT_NAME" != "release" ]; then
-            python -c 'import json, os, pathlib; pathlib.Path(os.environ["RUNNER_TEMP"], "release-check-evidence.json").write_text(json.dumps({"artifact": "mixle.release_check_evidence/v1", "commit": os.environ["EVENT_SHA"], "checks": {}, "publication_authorized": False}, sort_keys=True) + "\n", encoding="utf-8")'
-            printf 'sha=%s\n' "$EVENT_SHA" >> "$GITHUB_OUTPUT"
-            printf 'tag=\n' >> "$GITHUB_OUTPUT"
-            printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           TAG="$RELEASE_TAG"
           test "$TAG" = "v$VERSION"
           test "$(git cat-file -t "refs/tags/$TAG")" = "tag"
@@ -60,10 +73,18 @@ jobs:
           test "$(gh api "repos/$REPOSITORY/git/tags/$TAG_OBJECT_SHA" --jq .verification.verified)" = "true"
           SHA="$(gh api "repos/$REPOSITORY/git/tags/$TAG_OBJECT_SHA" --jq .object.sha)"
           test "$SHA" = "$(git rev-list -n 1 "refs/tags/$TAG")"
+          test "$EVENT_SHA" = "$SHA"
 
           git fetch origin release/0.8.0:refs/remotes/origin/release/0.8.0
           git merge-base --is-ancestor origin/release/0.8.0 "$SHA"
           test "$SHA" = "$(git rev-parse origin/release/0.8.0)"
+
+          if [ "$PHASE" = "promote" ]; then
+            test -n "$PREPARE_RUN_ID"
+            case "$PREPARE_RUN_ID" in *[!0-9]*) exit 1;; esac
+          else
+            test -z "$PREPARE_RUN_ID"
+          fi
 
           gh api "repos/$REPOSITORY/commits/$SHA/check-runs?per_page=100" > "$RUNNER_TEMP/check-runs.json"
           python scripts/verify_required_checks.py \
@@ -76,15 +97,19 @@ jobs:
           printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
-          name: candidate-approval-${{ steps.candidate.outputs.sha }}
+          name: candidate-approval-${{ steps.candidate.outputs.sha }}-${{ inputs.phase }}
           path: ${{ runner.temp }}/release-check-evidence.json
           if-no-files-found: error
           retention-days: 90
 
   build:
-    name: Build and fingerprint exact candidate
+    name: Prepare exact candidate and draft release
+    if: inputs.phase == 'prepare'
     needs: verify-candidate
     runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -95,7 +120,7 @@ jobs:
           python-version: "3.12"
       - uses: actions/download-artifact@v4
         with:
-          name: candidate-approval-${{ needs.verify-candidate.outputs.candidate-sha }}
+          name: candidate-approval-${{ needs.verify-candidate.outputs.candidate-sha }}-prepare
           path: metadata
       - name: Build exact candidate
         env:
@@ -119,7 +144,6 @@ jobs:
           CANDIDATE_VERSION: ${{ needs.verify-candidate.outputs.candidate-version }}
         run: |
           set -euo pipefail
-          mkdir -p metadata
           for artifact in dist/*; do
             python scripts/release_metadata.py "$artifact" \
               --out "metadata/$(basename "$artifact").json"
@@ -130,7 +154,8 @@ jobs:
           SITE=$("$RUNNER_TEMP/sbom-artifact-env/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
           python -m venv "$RUNNER_TEMP/sbom-tool-env"
           "$RUNNER_TEMP/sbom-tool-env/bin/python" -m pip install pip-audit
-          "$RUNNER_TEMP/sbom-tool-env/bin/pip-audit" --path "$SITE" --format cyclonedx-json -o metadata/raw-sbom.json
+          "$RUNNER_TEMP/sbom-tool-env/bin/pip-audit" \
+            --path "$SITE" --format cyclonedx-json -o metadata/raw-sbom.json
           python scripts/bind_sbom.py \
             --cyclonedx metadata/raw-sbom.json \
             --wheel-metadata metadata/mixle-0.8.0-py3-none-any.whl.json \
@@ -149,12 +174,27 @@ jobs:
             metadata/
           if-no-files-found: error
           retention-days: 90
+      - name: Create or update a non-public draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ needs.verify-candidate.outputs.candidate-tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$CANDIDATE_TAG" --json isDraft >/dev/null 2>&1; then
+            test "$(gh release view "$CANDIDATE_TAG" --json isDraft --jq .isDraft)" = "true"
+          else
+            gh release create "$CANDIDATE_TAG" --verify-tag --draft \
+              --title "mixle ${{ needs.verify-candidate.outputs.candidate-version }}" \
+              --generate-notes
+          fi
+          gh release upload "$CANDIDATE_TAG" dist/* metadata/* --clobber
 
-  publish-pypi:
-    name: Retain evidence and publish exact candidate to PyPI
-    if: github.event_name == 'release'
-    needs: [verify-candidate, build]
+  promote:
+    name: Promote prepared artifacts and publish release
+    if: inputs.phase == 'promote'
+    needs: verify-candidate
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment: pypi
     permissions:
       actions: read
@@ -168,36 +208,72 @@ jobs:
         with:
           name: release-candidate-${{ needs.verify-candidate.outputs.candidate-sha }}
           path: candidate
-      - name: Re-verify and retain immutable release evidence
+          run-id: ${{ inputs.prepare_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-approval-${{ needs.verify-candidate.outputs.candidate-sha }}-promote
+          path: promotion
+      - name: Re-verify immutable prepared evidence
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ needs.verify-candidate.outputs.candidate-sha }}
           CANDIDATE_TAG: ${{ needs.verify-candidate.outputs.candidate-tag }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
           REPOSITORY: ${{ github.repository }}
-        working-directory: candidate
         run: |
           set -euo pipefail
-          test "$(python -c 'import json; print(json.load(open("metadata/release-candidate.json"))["commit"])')" = "$CANDIDATE_SHA"
-          (cd dist && sha256sum -c ../metadata/SHA256SUMS)
-          OPTIONAL_RUN="$(python -c 'import json, re; u=json.load(open("metadata/release-check-evidence.json"))["checks"]["optional extras / py3.12"]["details_url"]; print(re.search(r"/actions/runs/([0-9]+)/", u).group(1))')"
-          mkdir -p metadata/network
+          test "$(gh release view "$CANDIDATE_TAG" --json isDraft --jq .isDraft)" = "true"
+          test "$(python -c 'import json; print(json.load(open("candidate/metadata/release-candidate.json"))["commit"])')" = "$CANDIDATE_SHA"
+          test "$(python -c 'import json; print(json.load(open("candidate/metadata/release-candidate.json"))["workflow_run"])')" = "$PREPARE_RUN_ID"
+          cp promotion/release-check-evidence.json candidate/metadata/promotion-check-evidence.json
+          (cd candidate/dist && sha256sum -c ../metadata/SHA256SUMS)
+          OPTIONAL_RUN="$(python -c 'import json, re; u=json.load(open("promotion/release-check-evidence.json"))["checks"]["optional extras / py3.12"]["details_url"]; print(re.search(r"/actions/runs/([0-9]+)/", u).group(1))')"
+          mkdir -p candidate/metadata/network
           gh run download "$OPTIONAL_RUN" \
             --name banking77-reproduction-receipt \
-            --dir metadata/network \
+            --dir candidate/metadata/network \
             --repo "$REPOSITORY"
-          python ../scripts/build_example_execution_manifest.py \
-            --bundle ../release-checklists/0.8.0-repro-bundle.json \
-            --candidate metadata/release-candidate.json \
-            --wheel-metadata metadata/mixle-0.8.0-py3-none-any.whl.json \
-            --receipt metadata/reproduction-gallery-univariate.json \
-            --receipt metadata/reproduction-gallery-structured.json \
-            --receipt metadata/reproduction-production-provenance.json \
-            --receipt metadata/reproduction-scaling-backend.json \
-            --receipt metadata/network/banking77-reproduction-receipt.json \
-            --out metadata/example-execution-manifest.json
+          python scripts/build_example_execution_manifest.py \
+            --bundle release-checklists/0.8.0-repro-bundle.json \
+            --candidate candidate/metadata/release-candidate.json \
+            --wheel-metadata candidate/metadata/mixle-0.8.0-py3-none-any.whl.json \
+            --receipt candidate/metadata/reproduction-gallery-univariate.json \
+            --receipt candidate/metadata/reproduction-gallery-structured.json \
+            --receipt candidate/metadata/reproduction-production-provenance.json \
+            --receipt candidate/metadata/reproduction-scaling-backend.json \
+            --receipt candidate/metadata/network/banking77-reproduction-receipt.json \
+            --out candidate/metadata/example-execution-manifest.json
           gh release upload "$CANDIDATE_TAG" \
-            metadata/SHA256SUMS metadata/*.json metadata/network/*.json \
-            --repo "$REPOSITORY"
-      - uses: pypa/gh-action-pypi-publish@release/v1
+            candidate/metadata/SHA256SUMS candidate/metadata/*.json candidate/metadata/network/*.json \
+            --clobber
+      - name: Publish the already-verified files to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: candidate/dist/
+          skip-existing: true
+      - name: Require public-index bytes to equal the prepared artifacts
+        env:
+          VERSION: ${{ needs.verify-candidate.outputs.candidate-version }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            rm -rf public-artifacts
+            mkdir public-artifacts
+            if python -m pip download --no-deps --only-binary=:all: \
+                 --dest public-artifacts "mixle==$VERSION" &&
+               python -m pip download --no-deps --no-binary=:all: \
+                 --dest public-artifacts "mixle==$VERSION"; then
+              break
+            fi
+            test "$attempt" -lt 6
+            sleep 10
+          done
+          python scripts/verify_published_artifacts.py \
+            --directory public-artifacts \
+            --sums candidate/metadata/SHA256SUMS
+      - name: Make the validated GitHub Release public
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ needs.verify-candidate.outputs.candidate-tag }}
+        run: gh release edit "$CANDIDATE_TAG" --draft=false --latest

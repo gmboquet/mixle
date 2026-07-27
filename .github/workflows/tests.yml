@@ -53,6 +53,7 @@ jobs:
   lint:
     name: lint (ruff enforced, mypy advisory)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -89,8 +90,9 @@ jobs:
         run: mypy
 
   fast:
-    name: fast / py${{ matrix.python-version }}
+    name: core / py${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     strategy:
       fail-fast: false
       matrix:
@@ -109,14 +111,27 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[test,highprec]"
-      - name: Run fast tests
-        run: python -m pytest -m fast -n auto
+      - name: Run the hard-budget core tier
+        run: |
+          python scripts/run_test_tier.py \
+            --tier core \
+            --candidate-sha "$GITHUB_SHA" \
+            --budget-seconds 240 \
+            --receipt "core-py${{ matrix.python-version }}.json" \
+            -- -n auto
+      - uses: actions/upload-artifact@v7
+        with:
+          name: core-tier-py${{ matrix.python-version }}
+          path: core-py${{ matrix.python-version }}.json
+          if-no-files-found: error
+          retention-days: 90
 
   fast-macos:
-    name: fast / macOS arm64 / py${{ matrix.python-version }}
+    name: core / macOS arm64 / py${{ matrix.python-version }}
     # macOS arm64 is the day-to-day dev platform; this gates it in CI so the "Operating System :: MacOS"
     # classifier and the README's macOS claim are backed by a run, not just ad-hoc local use.
     runs-on: macos-14
+    timeout-minutes: 8
     strategy:
       fail-fast: false
       matrix:
@@ -132,15 +147,28 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[test,highprec]"
-      - name: Run fast tests
-        run: python -m pytest -m fast -n auto
+      - name: Run the hard-budget core tier
+        run: |
+          python scripts/run_test_tier.py \
+            --tier core \
+            --candidate-sha "$GITHUB_SHA" \
+            --budget-seconds 240 \
+            --receipt "core-macos-py${{ matrix.python-version }}.json" \
+            -- -n auto
+      - uses: actions/upload-artifact@v7
+        with:
+          name: core-macos-tier-py${{ matrix.python-version }}
+          path: core-macos-py${{ matrix.python-version }}.json
+          if-no-files-found: error
+          retention-days: 90
 
   min-versions:
-    name: min-versions (oldest declared floors)
+    name: core / minimum versions
     # Install at the OLDEST declared dependency floors (constraints-min.txt) on the oldest supported
     # Python and run the fast suite, so a floor that is missing an API, unbuildable, or numerically
     # incompatible fails here instead of silently passing on whatever newer version pip resolves.
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -153,13 +181,26 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -c constraints-min.txt -e ".[test,highprec]"
           python -c "import numpy, scipy, mpmath; print('numpy', numpy.__version__, 'scipy', scipy.__version__, 'mpmath', mpmath.__version__)"
-      - name: Run fast tests at the minimum floors
-        run: python -m pytest -m fast -n auto
+      - name: Run the hard-budget core tier at the minimum floors
+        run: |
+          python scripts/run_test_tier.py \
+            --tier core \
+            --candidate-sha "$GITHUB_SHA" \
+            --budget-seconds 240 \
+            --receipt core-minimum-versions.json \
+            -- -n auto
+      - uses: actions/upload-artifact@v7
+        with:
+          name: core-minimum-versions
+          path: core-minimum-versions.json
+          if-no-files-found: error
+          retention-days: 90
 
   full:
     name: full / py3.12
     # Runs in parallel with `fast` (no `needs:`) to cut wall-clock; -n auto parallelizes within.
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -179,12 +220,21 @@ jobs:
         # PRs. 45% trips only when a whole subsystem's tests vanish -- e.g. a bad merge dropping a test
         # directory -- which is exactly the regression a gate must catch. Raise it once the optional-extras
         # job also reports coverage and the two are combined into a representative number.
-        run: python -m pytest -m "not optional and not benchmark" -n auto --cov --cov-report=xml --cov-report=term --cov-fail-under=45
+        run: |
+          python scripts/run_test_tier.py \
+            --tier full \
+            --candidate-sha "$GITHUB_SHA" \
+            --budget-seconds 1200 \
+            --receipt full-py3.12.json \
+            -- -n auto --cov --cov-report=xml --cov-report=term --cov-fail-under=45
       - name: Upload coverage report
         uses: actions/upload-artifact@v7
         with:
           name: coverage-xml
-          path: coverage.xml
+          path: |
+            coverage.xml
+            full-py3.12.json
+          if-no-files-found: error
           retention-days: 30
 
   clean-wheel:
@@ -193,6 +243,7 @@ jobs:
     # public module. An optional dependency imported at a module's top level breaks `import mixle...` for
     # every base-install user -- a regression that shipped in the wheel before (numba, mpi4py).
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -218,7 +269,7 @@ jobs:
   optional:
     name: optional extras / py3.12
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -231,7 +282,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test,numba,torch,umap,jax]"
       - name: Run optional tests
-        run: python -m pytest -m "optional or torch or numba or jax" -n auto
+        run: |
+          python scripts/run_test_tier.py \
+            --tier optional \
+            --candidate-sha "$GITHUB_SHA" \
+            --budget-seconds 1800 \
+            --receipt optional-py3.12.json \
+            -- -n auto
       - name: Run gated two-rank torchrun smoke
         # -m "" overrides the default `-m fast` addopts; the torchrun tests aren't `fast`, so without this
         # the selection is empty and pytest exits 5 ("no tests collected"), failing the job.
@@ -277,8 +334,73 @@ jobs:
         with:
           name: banking77-reproduction-receipt
           path: |
+            optional-py3.12.json
             banking77-reproduction-receipt.json
             sunspots-required-receipt.json
             adult-required-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+  numerical:
+    name: numerical / repeated-seed stress
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install numerical test harness
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test,highprec]"
+      - name: Run the hard-budget numerical tier
+        run: |
+          python scripts/run_test_tier.py \
+            --tier numerical \
+            --candidate-sha "$GITHUB_SHA" \
+            --budget-seconds 1800 \
+            --receipt numerical.json \
+            -- -n auto
+      - uses: actions/upload-artifact@v7
+        with:
+          name: numerical-tier-${{ github.sha }}
+          path: numerical.json
+          if-no-files-found: error
+          retention-days: 90
+
+  hardware:
+    name: hardware / MPI and torchrun
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install MPI, torchrun, and the test harness
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenmpi-dev openmpi-bin
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test,mpi,torch]"
+      - name: Run the hard-budget hardware tier
+        env:
+          MIXLE_RUN_TORCHRUN_SMOKE: "1"
+        run: |
+          python scripts/run_test_tier.py \
+            --tier hardware \
+            --candidate-sha "$GITHUB_SHA" \
+            --budget-seconds 1200 \
+            --receipt hardware.json \
+            -- -n 0
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hardware-tier-${{ github.sha }}
+          path: hardware.json
           if-no-files-found: error
           retention-days: 90
