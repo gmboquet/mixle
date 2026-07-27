@@ -28,6 +28,7 @@ from typing import Any
 
 import numpy as np
 from scipy.optimize import minimize
+from scipy.sparse.linalg import LinearOperator
 from scipy.stats import norm
 
 from mixle.analysis.kriging import calibrate_variance
@@ -41,6 +42,7 @@ _HOLDOUT_STRIDE = 5
 _MIN_HOLDOUT_CELLS = 3
 _MIN_TRAIN_CELLS = 8
 _RATE_CLIP = 700.0  # exp() overflow guard on the log-intensity + offset
+_MAX_DENSE_COV_CELLS = 2_048
 
 
 def _safe_exp(x: np.ndarray) -> np.ndarray:
@@ -262,10 +264,51 @@ class HabitatModel:
         return _safe_exp(self.design @ self.beta)
 
     @property
-    def cov(self) -> np.ndarray:
-        """Dense ``(K, K)`` delta-method covariance of the intensity field, recalibrated."""
-        jac = self.mean[:, None] * self.design  # d(lambda_c)/d(beta) = lambda_c * X_c
-        return self._var_scale * (jac @ self.beta_cov @ jac.T)
+    def cov(self) -> np.ndarray | LinearOperator:
+        """Delta-method covariance of the intensity field, recalibrated.
+
+        Domains with at most 2,048 cells return a dense ``(K, K)`` array. Larger domains return a
+        symmetric :class:`~scipy.sparse.linalg.LinearOperator` backed by the ``(K, p)`` intensity
+        Jacobian and ``(p, p)`` coefficient covariance, avoiding quadratic field storage.
+
+        Raises:
+            ValueError: the Jacobian or requested covariance operation is not finite. In particular,
+                finite model inputs can still imply a covariance outside float64's representable range;
+                such a matrix is not published as posterior evidence.
+        """
+        with np.errstate(over="ignore", invalid="ignore"):
+            jac = self.mean[:, None] * self.design  # d(lambda_c)/d(beta) = lambda_c * X_c
+        if not np.all(np.isfinite(jac)):
+            raise ValueError("habitat intensity covariance Jacobian is not representable as finite float64.")
+
+        num_cells = self.design.shape[0]
+        if num_cells <= _MAX_DENSE_COV_CELLS:
+            with np.errstate(over="ignore", invalid="ignore"):
+                covariance = self._var_scale * (jac @ self.beta_cov @ jac.T)
+            if not np.all(np.isfinite(covariance)):
+                raise ValueError("dense habitat intensity covariance is not representable as finite float64.")
+            return covariance
+
+        jac = _readonly_owned_view(jac)
+
+        def apply_covariance(value: np.ndarray) -> np.ndarray:
+            operand = np.asarray(value, dtype=np.float64)
+            if not np.all(np.isfinite(operand)):
+                raise ValueError("habitat covariance operands must be finite.")
+            with np.errstate(over="ignore", invalid="ignore"):
+                result = self._var_scale * (jac @ (self.beta_cov @ (jac.T @ operand)))
+            if not np.all(np.isfinite(result)):
+                raise ValueError("habitat covariance product is not representable as finite float64.")
+            return result
+
+        return LinearOperator(
+            shape=(num_cells, num_cells),
+            matvec=apply_covariance,
+            rmatvec=apply_covariance,
+            matmat=apply_covariance,
+            rmatmat=apply_covariance,
+            dtype=np.float64,
+        )
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         """Per-cell central credible interval of the suitability field (lognormal delta-method).

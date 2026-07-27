@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.sparse.linalg import LinearOperator
 
 from mixle.analysis.sdm import (
     _RATE_CLIP,
@@ -698,6 +699,35 @@ def test_habitat_model_mean_and_credible_interval_stay_finite_under_extreme_beta
     assert np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))
     draws = model.samples(10, np.random.default_rng(0))
     assert np.all(np.isfinite(draws))
+
+
+def test_habitat_model_rejects_unrepresentable_dense_covariance():
+    model = HabitatModel(
+        beta=np.array([700.0]),
+        beta_cov=np.array([[1.0]]),
+        design=np.array([[1.0]]),
+        cell_area=np.array([1.0]),
+    )
+    assert np.isfinite(model.mean).all()
+    with pytest.raises(ValueError, match="dense habitat intensity covariance"):
+        _ = model.cov
+
+
+def test_habitat_model_uses_matrix_free_covariance_for_large_domains():
+    num_cells = 2_049
+    model = HabitatModel(
+        beta=np.array([0.0]),
+        beta_cov=np.array([[2.0]]),
+        design=np.ones((num_cells, 1)),
+        cell_area=np.ones(num_cells),
+        var_scale=3.0,
+    )
+    covariance = model.cov
+    assert isinstance(covariance, LinearOperator)
+    assert covariance.shape == (num_cells, num_cells)
+    np.testing.assert_allclose(covariance @ np.ones(num_cells), np.full(num_cells, 6.0 * num_cells))
+    with pytest.raises(ValueError, match="operands must be finite"):
+        covariance @ np.full(num_cells, np.nan)
 
 
 def test_habitat_model_samples_rejects_invalid_draw_count():
