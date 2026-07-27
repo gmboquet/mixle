@@ -50,5 +50,6 @@ Submodules
    mixle.relations
    mixle.scientist
    mixle.scorecard
+   mixle.semantics
    mixle.spend
    mixle.system

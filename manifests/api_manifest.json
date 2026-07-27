@@ -1462,7 +1462,7 @@
       ]
     },
     "mixle.stats": {
-      "maturity": "stable",
+      "maturity": "provisional",
       "names": [
         "AffineTransform",
         "AitchisonNormalDistribution",
@@ -2140,7 +2140,7 @@
       ]
     },
     "mixle.stats.latent": {
-      "maturity": "stable",
+      "maturity": "provisional",
       "names": [
         "BlockDiagonalTransition",
         "ByLength",
@@ -2450,7 +2450,7 @@
       ]
     },
     "mixle.stats.multivariate": {
-      "maturity": "stable",
+      "maturity": "provisional",
       "names": [
         "AitchisonNormalAccumulator",
         "AitchisonNormalDataEncoder",
@@ -2547,7 +2547,7 @@
       ]
     },
     "mixle.stats.rankings": {
-      "maturity": "stable",
+      "maturity": "provisional",
       "names": [
         "BradleyTerryAccumulator",
         "BradleyTerryAccumulatorFactory",

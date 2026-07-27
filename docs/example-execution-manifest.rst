@@ -6,6 +6,25 @@ This page is the release-facing execution manifest for scripts shipped under
 manifest records what must be executed, skipped, or marked blocked before a
 public release.
 
+Authoritative Release Evidence
+------------------------------
+
+The dated narrative below is historical engineering context, **not** 0.8.0
+release evidence. The authoritative record is the generated
+``example-execution-manifest.json`` attached to the GitHub release. Publication
+builds it only after all entries in
+``release-checklists/0.8.0-repro-bundle.json`` have passing receipts. It binds
+every required example's exact command, dependency tier, duration, output
+validation contract, and output/receipt digests to the final 40-character
+candidate commit and exact wheel SHA-256. Missing, failed, duplicated, stale,
+over-budget, or wrong-contract receipts abort publication. The manifest also
+binds the versioned dependency-profile digest.
+
+The local required set covers univariate, structured, production/provenance,
+and scaling workflows. The hosted required entry covers immutable-source
+Banking77 data. Other examples remain instructional or optional and are not
+silently counted as release evidence.
+
 Current Inventory
 -----------------
 

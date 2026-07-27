@@ -12,6 +12,13 @@
   },
   "dependency_lock": "release-checklists/0.8.0-repro-requirements.txt",
   "hash_seed": 0,
+  "numeric_threads": {
+    "OPENBLAS_NUM_THREADS": 1,
+    "OMP_NUM_THREADS": 1,
+    "MKL_NUM_THREADS": 1,
+    "VECLIB_MAXIMUM_THREADS": 1,
+    "NUMEXPR_NUM_THREADS": 1
+  },
   "network_policy": {
     "local": "disabled",
     "hosted-network": "only immutable URLs named by a checked dataset record"

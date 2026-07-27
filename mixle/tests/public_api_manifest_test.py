@@ -161,7 +161,7 @@ class PublicApiManifestTest(unittest.TestCase):
             self.assertIn(entry.get("maturity"), _VALID_MATURITIES, f"{key} has no valid maturity tag: {entry!r}")
         if "mixle.experimental.typed_runtime" in current:
             self.assertEqual(current["mixle.experimental.typed_runtime"]["maturity"], "experimental")
-        self.assertEqual(current.get("mixle.stats", {}).get("maturity"), "stable")
+        self.assertEqual(current.get("mixle.stats", {}).get("maturity"), "provisional")
 
     def test_dynamic_package_names_actually_resolve(self):
         """A name in a lazy ``__getattr__``-built ``__all__`` (``mixle``, ``mixle.stats``,

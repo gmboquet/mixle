@@ -17,17 +17,12 @@ behavior regresses. Each row below names that evidence.
 
    * - Stable surface
      - Evidence (fails on regression)
-   * - Core distribution contracts (density, sampler, estimator, encoder; scalar/vectorized agreement)
-     - the invariant catalog (``invariant_catalog_test``), the distribution interface suites, and
-       ``scipy_golden_test`` for densities against SciPy
-   * - Common scalar and multivariate distributions
-     - the invariant catalog + per-family suites; parameter-recovery and weighted-estimation contracts
-   * - Composite / record / optional / sequence combinators
-     - the combinator suites; heterogeneous-record automatic modeling round-trips
-   * - Mixtures and the principal HMM path
-     - mixture stability + fused-EM suites; the HMM numerical stress panel (long-sequence underflow,
-       impossible-observation ``-inf``); parity against ``hmmlearn`` (sunspots flagship) and against
-       scikit-learn's ``GaussianMixture`` (fitted-parameter parity)
+   * - Gaussian, Gamma, Exponential, LogGaussian, Poisson, Geometric, and Categorical distribution
+       modules
+     - the complete invariant catalog for this allowlist, their per-family interface and recovery
+       suites, and ``scipy_golden_test`` density parity
+   * - ``mixle.stats.parameter_packing``
+     - exact pack/unpack shape, ordering, and round-trip contracts
    * - Direct MLE / EM / conjugate fitting through ``optimize``
      - the weighted-estimation contract (weights == replicated sufficient statistics), the fit-seed
        determinism suite, and EM monotonicity/quiet-by-default behavior
@@ -45,7 +40,8 @@ Not stable
 Everything else is explicitly **not** covered by the stable compatibility promise, even where it is useful
 and tested:
 
-* **provisional** (usable, may change within a minor release) -- ``mixle.ppl``, ``mixle.process``,
+* **provisional** (usable, may change within a minor release) -- all other ``mixle.stats`` families
+  (including combinators, mixtures, HMMs, graphs, processes, and Bayesian catalogs), ``mixle.ppl``, ``mixle.process``,
   ``mixle.models`` (neural leaves, GPs, grammars, ...), ``mixle.task`` / ``mixle.reason``,
   ``mixle.enumeration`` / ``mixle.ops`` beyond the capability-gated core, ``mixle.doe`` / ``mixle.evolve``,
   the runtime layers (``mixle.substrate`` / ``mixle.pool`` / ``mixle.telemetry`` / ``mixle.scientist``), and

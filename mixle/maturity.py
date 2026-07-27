@@ -9,10 +9,9 @@ the maturity tier of any dotted module name. The three tiers match the deprecati
 * ``PROVISIONAL`` -- usable and tested, but signatures/defaults may still change within a minor release.
 * ``EXPERIMENTAL`` -- no compatibility guarantee (only ``mixle.experimental``).
 
-:func:`maturity_of` resolves a dotted name by longest matching prefix, so ``mixle.stats.latent.hidden_markov``
-inherits ``mixle.stats``'s tier while ``mixle.inference.estimation`` overrides the ``mixle.inference`` tier
-(provisional) to stable, and ``mixle.inference.production`` overrides it to stay at the provisional default
-under its own, more specific label.
+:func:`maturity_of` resolves a dotted name by longest matching prefix. ``mixle.stats`` is provisional by
+default; only individually reviewed statistical modules are stable. ``mixle.inference.estimation`` overrides
+the provisional ``mixle.inference`` tier, while ``mixle.inference.production`` remains provisional.
 Surfaces not listed default to :data:`DEFAULT_MATURITY` (``PROVISIONAL``) -- the conservative choice: a
 surface makes no stability promise until it is explicitly recorded as stable.
 """
@@ -34,7 +33,27 @@ class Maturity(StrEnum):
 
 # module prefix -> (tier, human status label mirrored from docs/maturity.rst). More specific prefixes win.
 MATURITY_REGISTRY: dict[str, tuple[Maturity, str]] = {
-    "mixle.stats": (Maturity.STABLE, "Stable core"),
+    "mixle.stats": (Maturity.PROVISIONAL, "Broad statistical catalog; stability is module-specific"),
+    "mixle.stats.parameter_packing": (Maturity.STABLE, "Stable reviewed parameter-packing contract"),
+    "mixle.stats.univariate.continuous.exponential": (
+        Maturity.STABLE,
+        "Stable reviewed scalar family",
+    ),
+    "mixle.stats.univariate.continuous.gamma": (Maturity.STABLE, "Stable reviewed scalar family"),
+    "mixle.stats.univariate.continuous.gaussian": (Maturity.STABLE, "Stable reviewed scalar family"),
+    "mixle.stats.univariate.continuous.log_gaussian": (
+        Maturity.STABLE,
+        "Stable reviewed scalar family",
+    ),
+    "mixle.stats.univariate.discrete.categorical": (
+        Maturity.STABLE,
+        "Stable reviewed scalar family",
+    ),
+    "mixle.stats.univariate.discrete.geometric": (
+        Maturity.STABLE,
+        "Stable reviewed scalar family",
+    ),
+    "mixle.stats.univariate.discrete.poisson": (Maturity.STABLE, "Stable reviewed scalar family"),
     # mixle.inference as a whole is NOT documented stable in docs/maturity.rst -- only the single narrow
     # row "mixle.inference.optimize and direct estimation helpers" (MLE/EM/conjugate fitting) is. The rest
     # of the package (causal inference, scoring rules, resampling, uncertainty decomposition, forecasting,

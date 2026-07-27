@@ -33,3 +33,4 @@ Submodules
    :maxdepth: 4
 
    mixle.stats.missing
+   mixle.stats.parameter_packing

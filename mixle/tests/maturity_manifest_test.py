@@ -55,8 +55,24 @@ class MaturityManifestTest(unittest.TestCase):
         for name, entry in manifest["surfaces"].items():
             self.assertEqual(entry["maturity"], maturity_of(name).value, f"{name} tier drifted from the registry")
         # anchors, consistent with A1.2 / A1.5
-        self.assertEqual(manifest["surfaces"]["mixle.stats"]["maturity"], "stable")
+        self.assertEqual(manifest["surfaces"]["mixle.stats"]["maturity"], "provisional")
+        self.assertIn("mixle.stats.univariate.continuous.gaussian", manifest["stable_allowlist"])
         self.assertEqual(manifest["surfaces"]["mixle.experimental"]["maturity"], "experimental")
+
+    def test_every_stable_module_has_a_linked_api_page(self):
+        manifest = json.loads(MANIFEST.read_text())
+        api_root = REPO_ROOT / "docs" / "api"
+        missing = [
+            module
+            for module in manifest["stable_allowlist"]
+            if module != "mixle.inference.optimize" and not (api_root / f"{module}.rst").is_file()
+        ]
+        self.assertEqual(missing, [], f"stable modules missing generated API pages: {missing}")
+        self.assertIn("mixle.semantics", (api_root / "mixle.rst").read_text(encoding="utf-8"))
+        self.assertIn(
+            "mixle.stats.parameter_packing",
+            (api_root / "mixle.stats.rst").read_text(encoding="utf-8"),
+        )
 
 
 if __name__ == "__main__":
