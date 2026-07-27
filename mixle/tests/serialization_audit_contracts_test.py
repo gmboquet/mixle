@@ -26,6 +26,24 @@ TAG = "__pysp_type__"
 
 
 class StrictDecodeTest(unittest.TestCase):
+    def test_objects_carry_and_enforce_a_schema_version(self):
+        payload = to_serializable(GaussianDistribution(0.0, 1.0))
+        self.assertEqual(payload["schema_version"], serialization.OBJECT_SCHEMA_VERSION)
+        payload["schema_version"] += 1
+        with self.assertRaisesRegex(SerializationError, "unsupported schema_version"):
+            from_serializable(payload)
+
+    def test_unversioned_provisional_state_fails_with_migration_guidance(self):
+        class Provisional:
+            def __init__(self, value):
+                self.value = value
+
+        register_serializable_class(Provisional, "test.serialization.Provisional")
+        payload = to_serializable(Provisional(1))
+        del payload["schema_version"]
+        with self.assertRaisesRegex(SerializationError, "originating Mixle version"):
+            from_serializable(payload)
+
     def test_nonstandard_raw_nonfinite_json_is_rejected(self):
         for text in ("NaN", "Infinity", "-Infinity", "[NaN]"):
             with self.subTest(text=text), self.assertRaises(SerializationError):

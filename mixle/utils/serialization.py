@@ -29,6 +29,7 @@ except Exception:  # pragma: no cover - scipy is a package dependency in normal 
 
 
 TAG = "__pysp_type__"
+OBJECT_SCHEMA_VERSION = 1
 MAX_DECODE_DEPTH = 128
 MAX_DECODE_NODES = 1_000_000
 MAX_DECODE_CONTAINER_ITEMS = 1_000_000
@@ -42,6 +43,109 @@ _CALLABLE_IDS: dict[Callable[..., Any], str] = {}
 _REGISTRY_READY = False
 _REGISTRY_LOCK = threading.RLock()
 _OPTIONAL_IMPORT_NAMES = {"torch", "umap", "pyspark"}
+_OPTIONAL_SERIALIZATION_MODULES = (
+    "mixle.models.dpo_leaf",
+    "mixle.models.energy",
+    "mixle.models.feature_map",
+    "mixle.models.grad_leaf",
+    "mixle.models.mixture_density",
+    "mixle.models.neural_density",
+    "mixle.models.neural_families",
+    "mixle.models.neural_leaf",
+    "mixle.models.pinn",
+    "mixle.models.softmax_leaf",
+    "mixle.models.streaming_transformer_leaf",
+)
+
+# Persistence compatibility is narrower than runtime serializability. These schemas have historical
+# fixtures and an explicit v0 -> v1 migration. Every other registered type remains usable for
+# same-version round trips but is honestly recorded as provisional in the schema manifest.
+_STABLE_STATE_FIELDS: dict[str, frozenset[str]] = {
+    "mixle.stats.univariate.continuous.exponential.ExponentialDistribution": frozenset(
+        {
+            "beta",
+            "conj_prior_params",
+            "expected_nparams",
+            "has_conj_prior",
+            "keys",
+            "log_beta",
+            "name",
+            "prior",
+        }
+    ),
+    "mixle.stats.univariate.continuous.gaussian.GaussianDistribution": frozenset(
+        {
+            "const",
+            "expected_nparams",
+            "has_conj_prior",
+            "keys",
+            "log_const",
+            "mu",
+            "name",
+            "prior",
+            "sigma2",
+        }
+    ),
+    "mixle.stats.univariate.discrete.categorical.CategoricalDistribution": frozenset(
+        {
+            "conj_prior_params",
+            "default_value",
+            "expected_nparams",
+            "has_conj_prior",
+            "is_normalized_probability",
+            "keys",
+            "log1p_default_value",
+            "log_default_value",
+            "name",
+            "no_default",
+            "pmap",
+            "prior",
+            "scoring_only",
+        }
+    ),
+    "mixle.stats.univariate.discrete.poisson.PoissonDistribution": frozenset(
+        {
+            "conj_prior_params",
+            "has_conj_prior",
+            "keys",
+            "lam",
+            "log_lambda",
+            "name",
+            "prior",
+        }
+    ),
+    "mixle.stats.latent.mixture.MixtureDistribution": frozenset(
+        {
+            "components",
+            "conj_prior_params",
+            "expected_nparams",
+            "has_conj_prior",
+            "log_w",
+            "name",
+            "num_components",
+            "prior",
+            "w",
+            "zw",
+        }
+    ),
+}
+
+
+def _migrate_stable_v0_state(tid: str, state: dict[str, Any]) -> dict[str, Any]:
+    """Apply the five reviewed legacy-schema migrations without mutating the decoded artifact."""
+    migrated = dict(state)
+    if tid in {
+        "mixle.stats.univariate.continuous.exponential.ExponentialDistribution",
+        "mixle.stats.univariate.continuous.gaussian.GaussianDistribution",
+        "mixle.stats.univariate.discrete.poisson.PoissonDistribution",
+    }:
+        migrated["keys"] = None
+    elif tid == "mixle.stats.univariate.discrete.categorical.CategoricalDistribution":
+        migrated.update(keys=None, is_normalized_probability=True, scoring_only=False)
+    elif tid != "mixle.stats.latent.mixture.MixtureDistribution":
+        raise SerializationError("no v0 -> v1 migration is registered for %r" % tid)
+    return migrated
+
 
 # Trust gate for code-executing deserialization (currently: an embedded torch module, persisted as a
 # full-object pickle -- see mixle.models._neural_serial). The type-tagged registry walk above this gate
@@ -177,6 +281,36 @@ def serializable_class_ids() -> set[str]:
     return set(_CLASS_REGISTRY.keys())
 
 
+def serializable_schema_records(profile: str = "full") -> dict[str, dict[str, Any]]:
+    """Return the declared per-type schema records for one generation profile.
+
+    ``base`` excludes torch-backed ``mixle.models`` types. ``full`` includes every type available
+    after the optional serialization-module discovery. A generator must separately attest that the
+    profile's dependency inventory is installed before treating this record as complete.
+    """
+    if profile not in {"base", "full"}:
+        raise ValueError("serialization profile must be 'base' or 'full'")
+    ensure_pysp_serialization_registry()
+    ids = sorted(tid for tid in _CLASS_REGISTRY if profile == "full" or not tid.startswith("mixle.models."))
+    records: dict[str, dict[str, Any]] = {}
+    for tid in ids:
+        cls = _CLASS_REGISTRY[tid]
+        stable_fields = _STABLE_STATE_FIELDS.get(tid)
+        records[tid] = {
+            "state_version": OBJECT_SCHEMA_VERSION,
+            "stability": "stable" if stable_fields is not None else "provisional",
+            "codec": (
+                "class-owned"
+                if callable(getattr(cls, "__pysp_getstate__", None))
+                and callable(getattr(cls, "__pysp_setstate__", None))
+                else "constructor-validated"
+            ),
+            "state_fields": sorted(stable_fields) if stable_fields is not None else None,
+            "migrations": ["0->1"] if stable_fields is not None else [],
+        }
+    return records
+
+
 def _iter_distribution_modules(package_name: str) -> Iterable[Any]:
     package = importlib.import_module(package_name)
     yield package
@@ -244,6 +378,31 @@ def ensure_pysp_serialization_registry() -> None:
         for _, cls in inspect.getmembers(bn, inspect.isclass):
             if cls.__module__ == bn.__name__ and getattr(cls, "__pysp_serializable__", False):
                 _register_class(registry, class_ids, cls)
+
+        # Neural serialization types are optional and are deliberately discovered from an explicit
+        # module inventory rather than from import side effects. Missing optional dependencies leave
+        # the base profile complete; full-profile generation refuses to run unless its inventory is
+        # present.
+        for module_name in _OPTIONAL_SERIALIZATION_MODULES:
+            try:
+                module = importlib.import_module(module_name)
+            except ModuleNotFoundError as err:
+                if err.name in _OPTIONAL_IMPORT_NAMES:
+                    continue
+                raise
+            for _, cls in inspect.getmembers(module, inspect.isclass):
+                if (
+                    cls.__module__ == module.__name__
+                    and not cls.__name__.startswith("_")
+                    and getattr(cls, "__pysp_serializable__", False)
+                ):
+                    _register_class(registry, class_ids, cls)
+
+        # Decorator registrations that occurred while discovery imported modules belong to this same
+        # atomic snapshot. Merge them explicitly instead of losing them when the local snapshot is
+        # published (TypeDispatch is the current non-subclass example).
+        for tid, cls in _CLASS_REGISTRY.items():
+            _register_class(registry, class_ids, cls, tid)
 
         # Publish one complete snapshot. A failed discovery leaves the previous
         # registry intact and _REGISTRY_READY false, so a later call can retry.
@@ -348,9 +507,7 @@ def _encode_ndarray(value: np.ndarray, active: set[int], memo: dict[int, str]) -
         _cycle_leave(obj_id, active)
 
 
-def _decode_ndarray(
-    payload: dict[str, Any], references: dict[str, Any], depth: int, budget: list[int]
-) -> np.ndarray:
+def _decode_ndarray(payload: dict[str, Any], references: dict[str, Any], depth: int, budget: list[int]) -> np.ndarray:
     _require_fields(payload, {TAG, "dtype", "shape", "data"}, {"id"})
     dtype_payload = payload["dtype"]
     if isinstance(dtype_payload, str):  # legacy v0.7/v0.8 payload
@@ -435,9 +592,7 @@ def _encode_dict(value: dict[Any, Any], active: set[int], memo: dict[int, str]) 
         _cycle_leave(obj_id, active)
 
 
-def _decode_dict(
-    payload: dict[str, Any], references: dict[str, Any], depth: int, budget: list[int]
-) -> dict[Any, Any]:
+def _decode_dict(payload: dict[str, Any], references: dict[str, Any], depth: int, budget: list[int]) -> dict[Any, Any]:
     _require_fields(payload, {TAG, "items"}, {"id"})
     if not isinstance(payload["items"], list):
         raise SerializationError("dict items must be a list")
@@ -484,10 +639,17 @@ def _encode_object(value: Any, active: set[int], memo: dict[int, str]) -> dict[s
     obj_id = _cycle_enter(value, active)
     try:
         state = state_getter() if callable(state_getter) else dict(value.__dict__)
+        stable_fields = _STABLE_STATE_FIELDS.get(tid)
+        if stable_fields is not None and set(state) != stable_fields:
+            raise SerializationError(
+                "state for stable constructor-owned schema %r does not match its declared fields "
+                "(missing=%r, extra=%r)" % (tid, sorted(stable_fields - set(state)), sorted(set(state) - stable_fields))
+            )
         return {
             TAG: "object",
             "id": reference_id,
             "type": tid,
+            "schema_version": OBJECT_SCHEMA_VERSION,
             "state": _encode(state, active, memo),
         }
     finally:
@@ -499,7 +661,9 @@ def _constructor_decode(cls: type[Any], state: dict[str, Any], tid: str) -> Any:
     try:
         signature = inspect.signature(cls)
     except (TypeError, ValueError) as exc:
-        raise SerializationError("registered class %r has no safe decode hook or inspectable constructor" % tid) from exc
+        raise SerializationError(
+            "registered class %r has no safe decode hook or inspectable constructor" % tid
+        ) from exc
 
     kwargs: dict[str, Any] = {}
     missing: list[str] = []
@@ -548,7 +712,7 @@ def _constructor_decode(cls: type[Any], state: dict[str, Any], tid: str) -> Any:
 
 
 def _decode_object(payload: dict[str, Any], references: dict[str, Any], depth: int, budget: list[int]) -> Any:
-    _require_fields(payload, {TAG, "type", "state"}, {"id"})
+    _require_fields(payload, {TAG, "type", "state"}, {"id", "schema_version"})
     ensure_pysp_serialization_registry()
     tid = payload["type"]
     if not isinstance(tid, str):
@@ -556,6 +720,21 @@ def _decode_object(payload: dict[str, Any], references: dict[str, Any], depth: i
     cls = _CLASS_REGISTRY.get(tid)
     if cls is None:
         raise SerializationError("type id %r is not registered for mixle JSON deserialization" % tid)
+    schema_version = payload.get("schema_version", 0)
+    schema_version = _exact_int(schema_version, name="object schema_version", minimum=0)
+    legacy_schema = schema_version == 0
+    if legacy_schema:
+        if tid not in _STABLE_STATE_FIELDS:
+            raise SerializationError(
+                "legacy unversioned state for provisional type %r is unsupported; "
+                "load it with the originating Mixle version and re-save it" % tid
+            )
+        schema_version = OBJECT_SCHEMA_VERSION
+    if schema_version != OBJECT_SCHEMA_VERSION:
+        raise SerializationError(
+            "unsupported schema_version %d for %r; supported version is %d"
+            % (schema_version, tid, OBJECT_SCHEMA_VERSION)
+        )
     reference_id = payload.get("id")
     if reference_id is not None:
         if not isinstance(reference_id, str) or not reference_id:
@@ -565,6 +744,20 @@ def _decode_object(payload: dict[str, Any], references: dict[str, Any], depth: i
     state = _decode(payload["state"], references, depth + 1, budget)
     if not isinstance(state, dict):
         raise SerializationError("serialized object state for %r is not a dict" % tid)
+    if legacy_schema:
+        state = _migrate_stable_v0_state(tid, state)
+    stable_fields = _STABLE_STATE_FIELDS.get(tid)
+    if stable_fields is not None and set(state) != stable_fields:
+        raise SerializationError(
+            "serialized state for stable constructor-owned schema %r does not match version %d fields "
+            "(missing=%r, extra=%r)"
+            % (
+                tid,
+                schema_version,
+                sorted(stable_fields - set(state)),
+                sorted(set(state) - stable_fields),
+            )
+        )
     if callable(getattr(cls, "__pysp_setstate__", None)):
         obj = cls.__new__(cls)
         obj.__pysp_setstate__(state)

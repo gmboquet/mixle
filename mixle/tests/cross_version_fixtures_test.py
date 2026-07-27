@@ -10,6 +10,7 @@ Regenerate the fixtures only when deliberately changing the compatibility baseli
 released version in a clean env and re-run its ``to_json`` (see the header in ``manifest.json``).
 """
 
+import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -17,6 +18,7 @@ from pathlib import Path
 from mixle.utils.serialization import ensure_pysp_serialization_registry, from_json
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "v0_7_0"
+_SCHEMA_MANIFEST = Path(__file__).resolve().parents[2] / "manifests" / "serialization_schema_manifest.json"
 
 
 class CrossVersionFixturesTest(unittest.TestCase):
@@ -24,12 +26,28 @@ class CrossVersionFixturesTest(unittest.TestCase):
         ensure_pysp_serialization_registry()
         self.manifest = json.loads((_FIXTURES / "manifest.json").read_text(encoding="utf-8"))
 
+    def test_fixture_policy_covers_every_stable_schema_and_family(self):
+        schemas = json.loads(_SCHEMA_MANIFEST.read_text(encoding="utf-8"))["profiles"]["full"]["schemas"]
+        stable = {type_id for type_id, schema in schemas.items() if schema["stability"] == "stable"}
+        cases = self.manifest["cases"]
+        covered = {case["schema_id"] for case in cases}
+        self.assertEqual(covered, stable)
+        required_families = set(self.manifest["coverage_policy"]["required_families"])
+        self.assertEqual({case["family"] for case in cases}, required_families)
+        nested = [case for case in cases if case["nested_schema_ids"]]
+        self.assertTrue(nested, "compatibility policy requires a representative nested composition")
+        for case in nested:
+            self.assertTrue(set(case["nested_schema_ids"]) <= stable)
+
     def test_v0_7_0_artifacts_load_and_score_unchanged(self):
         cases = self.manifest["cases"]
         self.assertTrue(cases, "no cross-version fixtures found")
         for case in cases:
             with self.subTest(case=case["name"]):
-                payload = (_FIXTURES / case["file"]).read_text(encoding="utf-8")
+                fixture_path = _FIXTURES / case["file"]
+                fixture_bytes = fixture_path.read_bytes()
+                self.assertEqual(hashlib.sha256(fixture_bytes).hexdigest(), case["sha256"])
+                payload = fixture_bytes.decode("utf-8")
                 try:
                     dist = from_json(payload)
                 except Exception as exc:  # noqa: BLE001
