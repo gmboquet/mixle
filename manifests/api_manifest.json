@@ -1594,6 +1594,8 @@
         "FrankPairCopula",
         "GammaDistribution",
         "GammaEstimator",
+        "GateBufferReceipt",
+        "GateOptimizationReceipt",
         "GatedMixtureDistribution",
         "GatedMixtureEstimator",
         "GaussianCopulaDistribution",
