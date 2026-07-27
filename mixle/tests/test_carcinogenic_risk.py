@@ -276,14 +276,25 @@ def test_slope_factor_rejects_nan_sigma_log():
         SlopeFactor(oral_csf=1.5, sigma_log=float("nan"))
 
 
-def test_slope_factor_sigma_log_mutation_after_construction_caught_at_call_entry():
-    """Defense-in-depth: ``SlopeFactor`` is not frozen, so ``sigma_log`` can be mutated to an invalid
-    value after construction, bypassing ``__post_init__``. ``excess_lifetime_cancer_risk``
-    re-validates ``sf.sigma_log`` at call entry, so this is still caught."""
+def test_slope_factor_is_immutable_after_validation():
     sf = SlopeFactor(oral_csf=1.5, sigma_log=0.1)
-    sf.sigma_log = -0.3
-    with pytest.raises(ValueError):
-        excess_lifetime_cancer_risk(1e-4, sf, route="oral")
+    with pytest.raises((AttributeError, TypeError)):
+        sf.sigma_log = -0.3
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"oral_csf": np.array([1.0, 2.0])},
+        {"inhalation_iur": np.array([1.0, 2.0])},
+        {"sigma_log": np.array([0.1, 0.2])},
+        {"oral_csf": True},
+        {"sigma_log": False},
+    ],
+)
+def test_slope_factor_fields_require_real_scalars(kwargs):
+    with pytest.raises((TypeError, ValueError)):
+        SlopeFactor(**kwargs)
 
 
 def test_excess_lifetime_cancer_risk_rejects_non_positive_n():
@@ -329,6 +340,21 @@ def test_risk_quantity_rejects_out_of_range_samples():
         RiskQuantity(samples=np.array([0.1, -0.5, 0.2]))
     with pytest.raises(ValueError):
         RiskQuantity(samples=np.array([0.1, 1.5, 0.2]))
+
+
+def test_risk_quantity_requires_one_immutable_owned_sample_axis():
+    source = np.array([0.1, 0.2, 0.3])
+    quantity = RiskQuantity(samples=source)
+    source[0] = 0.9
+    assert quantity.samples[0] == pytest.approx(0.1)
+    with pytest.raises(ValueError):
+        quantity.samples[0] = 0.9
+    with pytest.raises((AttributeError, TypeError)):
+        quantity.samples = np.array([0.2])
+    with pytest.raises(ValueError, match="one-dimensional"):
+        RiskQuantity(samples=np.ones((2, 2)))
+    with pytest.raises(TypeError, match="Boolean"):
+        RiskQuantity(samples=np.array([0.1]), prior_dominated="no")
 
 
 def test_risk_quantity_accepts_valid_samples():

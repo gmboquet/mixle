@@ -27,6 +27,7 @@ class, so modules stay independent siblings -- see ``analysis/health_risk.py``'s
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Real
 
 import numpy as np
 
@@ -35,7 +36,7 @@ from mixle.reason.posterior_protocol import DerivedQuantity, Posterior
 __all__ = ["SlopeFactor", "RiskQuantity", "excess_lifetime_cancer_risk", "radon_wlm_risk"]
 
 
-@dataclass
+@dataclass(frozen=True)
 class SlopeFactor:
     """A chemical's cancer potency, EPA-IRIS style.
 
@@ -59,10 +60,20 @@ class SlopeFactor:
     source: str = "EPA-IRIS"
 
     def __post_init__(self) -> None:
-        _require_finite_nonnegative(self.sigma_log, "SlopeFactor.sigma_log")
+        for name in ("oral_csf", "inhalation_iur"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _require_finite_nonnegative_scalar(value, f"SlopeFactor.{name}"))
+        object.__setattr__(
+            self,
+            "sigma_log",
+            _require_finite_nonnegative_scalar(self.sigma_log, "SlopeFactor.sigma_log"),
+        )
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ValueError("SlopeFactor.source must be a non-empty provenance string.")
 
 
-@dataclass
+@dataclass(frozen=True)
 class RiskQuantity:
     """A pushforward risk distribution: draws + credible interval + the ``prior_dominated`` flag.
 
@@ -82,11 +93,17 @@ class RiskQuantity:
 
     def __post_init__(self) -> None:
         arr = np.asarray(self.samples, dtype=float)
-        if arr.size == 0:
-            raise ValueError("RiskQuantity.samples must be non-empty.")
-        _require_finite_nonnegative(self.samples, "RiskQuantity.samples")
+        if arr.ndim != 1 or arr.size == 0:
+            raise ValueError("RiskQuantity.samples must be a non-empty one-dimensional vector.")
+        _require_finite_nonnegative(arr, "RiskQuantity.samples")
         if np.any(arr > 1.0):
             raise ValueError(f"RiskQuantity.samples must be <= 1 (a valid probability-like risk), got {self.samples!r}")
+        if not isinstance(self.prior_dominated, (bool, np.bool_)):
+            raise TypeError("RiskQuantity.prior_dominated must be Boolean.")
+        arr = arr.copy()
+        arr.setflags(write=False)
+        object.__setattr__(self, "samples", arr)
+        object.__setattr__(self, "prior_dominated", bool(self.prior_dominated))
 
     @property
     def mean(self) -> float:
@@ -95,7 +112,9 @@ class RiskQuantity:
 
     def credible_interval(self, level: float = 0.9) -> tuple[float, float]:
         """Central ``level`` credible interval of the risk samples (e.g. ``level=0.9`` -> 5%/95%)."""
-        if not 0.0 < level < 1.0:
+        if isinstance(level, (bool, np.bool_)) or not isinstance(level, Real):
+            raise TypeError("level must be a real scalar probability.")
+        if not np.isfinite(level) or not 0.0 < level < 1.0:
             raise ValueError("level must be in (0, 1).")
         alpha = (1.0 - level) / 2.0
         lo = float(np.quantile(self.samples, alpha))
@@ -128,6 +147,16 @@ def _require_finite_nonnegative(value: np.ndarray | float, name: str) -> None:
         raise ValueError(f"{name} must be finite, got {value!r}")
     if np.any(arr < 0):
         raise ValueError(f"{name} must be non-negative, got {value!r}")
+
+
+def _require_finite_nonnegative_scalar(value: float, name: str) -> float:
+    """Validate a scalar physical coefficient without inventing a batch axis."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a real scalar, got {value!r}")
+    scalar = float(value)
+    if not np.isfinite(scalar) or scalar < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative, got {value!r}")
+    return scalar
 
 
 def _require_positive_int(value: int, name: str) -> None:
@@ -177,6 +206,8 @@ def excess_lifetime_cancer_risk(
     Returns:
         A :class:`DerivedQuantity` of excess lifetime cancer risk (samples + CI + ``prior_dominated``).
     """
+    if not isinstance(sf, SlopeFactor):
+        raise TypeError(f"sf must be a validated SlopeFactor, got {type(sf).__name__}")
     if route not in ("oral", "inhalation"):
         raise ValueError(f"route must be 'oral' or 'inhalation', got {route!r}.")
     csf = sf.oral_csf if route == "oral" else sf.inhalation_iur
@@ -226,6 +257,8 @@ def excess_lifetime_cancer_risk(
     if isinstance(exposure, Posterior):
         dq = exposure.derived_quantity(_apply, n, rng)
         samples = np.atleast_1d(np.asarray(dq.samples, dtype=float))
+        if not isinstance(dq.prior_dominated, (bool, np.bool_)):
+            raise TypeError("posterior-derived cancer risk must carry a Boolean prior_dominated flag")
         prior_dominated = bool(dq.prior_dominated)
     elif isinstance(exposure, np.ndarray):
         samples = _apply(exposure)
@@ -269,7 +302,8 @@ def radon_wlm_risk(
     # n / rng are accepted for signature symmetry with excess_lifetime_cancer_risk and to leave room
     # for a future posterior-valued wlm; the deterministic BEIR-VI formula needs neither.
     _require_finite_nonnegative(wlm, "wlm")
-    _require_finite_nonnegative(risk_per_wlm, "risk_per_wlm")
+    risk_per_wlm = _require_finite_nonnegative_scalar(risk_per_wlm, "risk_per_wlm")
+    _require_positive_int(n, "n")
     if isinstance(wlm, np.ndarray):
         samples = _lnt_risk(np.atleast_1d(np.asarray(wlm, dtype=float)), risk_per_wlm)
     else:
