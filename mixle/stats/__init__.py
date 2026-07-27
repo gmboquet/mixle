@@ -2270,6 +2270,26 @@ _LAZY_NAMES: dict[str, str] = {
     "LDASampler": "mixle.stats.latent.lda",
 }
 
+# Keep the focused latent namespace and this consolidated namespace in lockstep.
+# Latent integration roles remain directly importable here but the established
+# suffix policy keeps sampler/encoder/accumulator plumbing out of the curated
+# star-import surface.
+from mixle.stats import latent as _latent_api  # noqa: E402
+
+LatentAPIEntry = _latent_api.LatentAPIEntry
+latent_api_manifest = _latent_api.latent_api_manifest
+for _latent_entry in _latent_api.latent_api_manifest():
+    if _latent_entry.source == _latent_api.__name__:
+        if _latent_entry.name not in __all__:
+            __all__.append(_latent_entry.name)
+        continue
+    _LAZY_NAMES.setdefault(_latent_entry.name, _latent_entry.source)
+    if not _latent_entry.name.endswith(_INTERNAL_SUFFIXES) and _latent_entry.name not in __all__:
+        __all__.append(_latent_entry.name)
+
+del _latent_api
+del _latent_entry
+
 # Distribution classes (by attribute name) whose legacy_numpy capabilities must be
 # registered when their lazy module is first loaded -- previously registered eagerly
 # in _register_builtin_compute_metadata.
