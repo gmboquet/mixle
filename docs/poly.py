@@ -1,16 +1,8 @@
-"""sphinx-polyversion configuration: builds versioned docs (tags + main) into one site.
+"""Legacy development-only sphinx-polyversion preview.
 
-Run with ``sphinx-polyversion docs/poly.py``. Each matched git ref is checked out into its own
-temporary venv, ``mixle[docs]`` is installed there, and its ``docs/`` tree is built with
-``sphinx-build`` into ``OUTPUT_DIR/<ref-name>/``. ``versions.json`` (the list of built refs) lands
-at ``OUTPUT_DIR/versions.json``; ``docs/_templates/sidebar/version-switcher.html`` reads it
-client-side to render the version dropdown (Furo has no host-agnostic switcher of its own -- its
-built-in one is Read the Docs-specific), so it works uniformly across every built version, including
-tags whose own ``conf.py`` predates this setup. ``docs/_root_templates/index.html`` is rendered once
-at the site root and redirects ``/`` to ``/main/`` (the latest merged, released state).
-
-Iterate locally with ``sphinx-polyversion -l docs/poly.py`` (builds only the working tree, no other
-refs) before running the real multi-version build, which is slower (one venv + full doc build per ref).
+Released documentation is never rebuilt by this file. Publication archives the exact candidate's
+strict Sphinx output, and the Pages workflow authenticates and assembles those immutable archives.
+This compatibility helper builds only ``main``/the local working tree for development preview.
 """
 
 from datetime import UTC, datetime
@@ -22,11 +14,11 @@ from sphinx_polyversion.git import Git, GitRef, GitRefType, file_predicate
 from sphinx_polyversion.pyvenv import Pip, VenvWrapper
 from sphinx_polyversion.sphinx import SphinxBuilder
 
-#: Branches to build docs for: the mainline (always the latest merged/released state).
+#: Branches to build docs for: the moving development line only.
 BRANCH_REGEX = r"^main$"
 
-#: Tags to build docs for: released versions, back to the first one with a docs/ tree.
-TAG_REGEX = r"^v\d+\.\d+\.\d+$"
+#: Released tags are immutable archives and must never be rebuilt here.
+TAG_REGEX = r"(?!)"
 
 #: Output dir relative to the repo root.
 OUTPUT_DIR = "docs/_build/html"

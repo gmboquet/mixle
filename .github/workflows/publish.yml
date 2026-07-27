@@ -125,6 +125,7 @@ jobs:
       - name: Build exact candidate
         env:
           CANDIDATE_SHA: ${{ needs.verify-candidate.outputs.candidate-sha }}
+          CANDIDATE_VERSION: ${{ needs.verify-candidate.outputs.candidate-version }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
@@ -137,6 +138,14 @@ jobs:
           python -m build
           python scripts/normalize_sdist.py dist/*.tar.gz "$SOURCE_DATE_EPOCH"
           twine check dist/*
+          python -m pip install -e ".[docs]"
+          python -m sphinx -b html -W --keep-going docs "$RUNNER_TEMP/docs-html"
+          python scripts/package_docs_archive.py \
+            --source "$RUNNER_TEMP/docs-html" \
+            --output "docs-dist/mixle-docs-v$CANDIDATE_VERSION.tar.gz" \
+            --version "$CANDIDATE_VERSION" \
+            --commit "$CANDIDATE_SHA" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH"
       - name: Record candidate and artifact digests
         env:
           CANDIDATE_SHA: ${{ needs.verify-candidate.outputs.candidate-sha }}
@@ -171,6 +180,7 @@ jobs:
           name: release-candidate-${{ needs.verify-candidate.outputs.candidate-sha }}
           path: |
             dist/
+            docs-dist/
             metadata/
           if-no-files-found: error
           retention-days: 90
@@ -187,7 +197,7 @@ jobs:
               --title "mixle ${{ needs.verify-candidate.outputs.candidate-version }}" \
               --generate-notes
           fi
-          gh release upload "$CANDIDATE_TAG" dist/* metadata/* --clobber
+          gh release upload "$CANDIDATE_TAG" dist/* docs-dist/* metadata/* --clobber
 
   promote:
     name: Promote prepared artifacts and publish release
@@ -245,6 +255,7 @@ jobs:
             --receipt candidate/metadata/network/banking77-reproduction-receipt.json \
             --out candidate/metadata/example-execution-manifest.json
           gh release upload "$CANDIDATE_TAG" \
+            candidate/docs-dist/* \
             candidate/metadata/SHA256SUMS candidate/metadata/*.json candidate/metadata/network/*.json \
             --clobber
       - name: Publish the already-verified files to PyPI

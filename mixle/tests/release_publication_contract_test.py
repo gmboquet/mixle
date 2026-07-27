@@ -72,6 +72,7 @@ def test_publish_workflow_has_fail_closed_candidate_binding():
         'test "$EVENT_SHA" = "$SHA"',
         "verify_required_checks.py",
         "release_metadata.py",
+        "package_docs_archive.py",
         "sha256sum -c",
         "gh release upload",
         "environment: pypi",
@@ -79,6 +80,7 @@ def test_publish_workflow_has_fail_closed_candidate_binding():
         assert required_fragment in workflow
     assert workflow.index("verify-candidate:") < workflow.index("build:")
     assert workflow.index("sha256sum -c") < workflow.index("gh-action-pypi-publish")
+    assert "candidate/docs-dist/" in workflow
 
 
 def test_publication_is_recoverable_two_phase_and_public_transition_is_last():

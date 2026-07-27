@@ -171,11 +171,10 @@ html_context = {
 }
 
 # Furo ships no host-agnostic version switcher (its built-in one only activates under Read the Docs
-# hosting) -- this repo's own _templates/sidebar/version-switcher.html reads the version list from
-# switcher.json, rendered once at the site root by sphinx-polyversion (see docs/poly.py). Only takes
-# effect on builds run through `sphinx-polyversion`; a plain `sphinx-build` (single-version, e.g. local
-# `make html`) still renders the partial, but its fetch of `../switcher.json` 404s harmlessly -- the
-# button just shows an empty menu.
+# hosting). This repo's partial reads switcher.json, generated at the site root when authenticated
+# immutable release archives are assembled with moving development docs. A plain local Sphinx build
+# has no root switcher file, so the fetch fails harmlessly and the button keeps its current-version
+# label with an empty menu.
 html_sidebars = {
     "**": [
         "sidebar/brand.html",
