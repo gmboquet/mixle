@@ -41,6 +41,16 @@ _MODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "DiracLengthMixtureEstimator",
         "DiracLengthMixtureDataEncoder",
     ),
+    "mixle.stats.latent.effective_sample": (
+        "EffectiveSampleReceipt",
+        "validated_positive_integer",
+        "validated_observation_weight",
+        "validated_observation_weights",
+        "validated_count_array",
+        "validated_statistic_tuple",
+        "validate_effective_sample_mass",
+        "validated_weighted_responsibilities",
+    ),
     "mixle.stats.latent.gated_mixture": (
         "GateOptimizationReceipt",
         "GateBufferReceipt",

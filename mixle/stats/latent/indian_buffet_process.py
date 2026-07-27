@@ -32,6 +32,13 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_observation_weights,
+    validated_statistic_tuple,
+)
 
 SS = tuple[np.ndarray, float, float | None]
 
@@ -448,6 +455,7 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Any, weight: float, estimate: IndianBuffetProcessDistribution | None) -> None:
         """Update weighted feature-use counts from one row."""
+        weight = validated_observation_weight(weight)
         if estimate is not None:
             self.alpha = estimate.alpha
         xx = _to_binary_vector(x, self.num_features, self.data_format)
@@ -463,7 +471,11 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         if estimate is not None:
             self.alpha = estimate.alpha
         xx = np.asarray(x, dtype=np.float64)
-        ww = np.asarray(weights, dtype=np.float64)
+        if xx.ndim != 2 or xx.shape[1] != self.num_features:
+            raise ValueError(f"encoded IBP observations must have shape (rows, {self.num_features})")
+        if np.any(~np.isfinite(xx)) or np.any((xx != 0.0) & (xx != 1.0)):
+            raise ValueError("encoded IBP observations must contain only finite binary values")
+        ww = validated_observation_weights(weights, xx.shape[0])
         self.feature_counts += np.dot(ww, xx)
         self.total_count += float(np.sum(ww))
         if self._track_ll:
@@ -486,9 +498,17 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         """
         if estimate is not None:
             self.alpha = estimate.alpha
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        xx_np = np.asarray(x, dtype=np.float64)
+        if xx_np.ndim != 2 or xx_np.shape[1] != self.num_features:
+            raise ValueError(f"encoded IBP observations must have shape (rows, {self.num_features})")
+        if np.any(~np.isfinite(xx_np)) or np.any((xx_np != 0.0) & (xx_np != 1.0)):
+            raise ValueError("encoded IBP observations must contain only finite binary values")
+        weights_np = validated_observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            xx_np.shape[0],
+        )
         w = engine.asarray(weights_np)
-        xx = engine.asarray(np.asarray(x, dtype=np.float64))
+        xx = engine.asarray(xx_np)
         self.feature_counts += np.asarray(engine.to_numpy(engine.matmul(w, xx)), dtype=np.float64)
         self.total_count += float(engine.to_numpy(engine.sum(w)))
 
@@ -498,10 +518,15 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: SS) -> "IndianBuffetProcessAccumulator":
         """Merge feature-use counts, total count, and alpha metadata."""
-        self.feature_counts += suff_stat[0]
-        self.total_count += suff_stat[1]
-        if suff_stat[2] is not None:
-            self.alpha = suff_stat[2]
+        feature_counts, total_count, alpha = validated_statistic_tuple(suff_stat, 3, "IBP sufficient statistics")
+        feature_counts = validated_count_array(feature_counts, (self.num_features,), "IBP feature counts")
+        total_count = validated_observation_weight(total_count, "IBP total count")
+        if np.any(feature_counts > total_count + 1.0e-9 * max(1.0, total_count)):
+            raise ValueError("IBP feature counts cannot exceed total count")
+        self.feature_counts += feature_counts
+        self.total_count += total_count
+        if alpha is not None:
+            self.alpha = _validate_alpha(alpha)
         return self
 
     def value(self) -> SS:
@@ -510,14 +535,18 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: SS) -> "IndianBuffetProcessAccumulator":
         """Restore feature-use counts, total count, and alpha metadata."""
-        self.feature_counts = np.asarray(x[0], dtype=np.float64).copy()
-        self.total_count = float(x[1])
-        if x[2] is not None:
-            self.alpha = float(x[2])
+        feature_counts, total_count, alpha = validated_statistic_tuple(x, 3, "IBP sufficient statistics")
+        self.feature_counts = validated_count_array(feature_counts, (self.num_features,), "IBP feature counts")
+        self.total_count = validated_observation_weight(total_count, "IBP total count")
+        if np.any(self.feature_counts > self.total_count + 1.0e-9 * max(1.0, self.total_count)):
+            raise ValueError("IBP feature counts cannot exceed total count")
+        if alpha is not None:
+            self.alpha = _validate_alpha(alpha)
         return self
 
     def scale(self, c: float) -> "IndianBuffetProcessAccumulator":
         """Scale additive counts while preserving the IBP concentration metadata."""
+        c = validated_observation_weight(c, "IBP scale factor")
         self.feature_counts *= c
         self.total_count *= c
         return self
@@ -584,12 +613,13 @@ class IndianBuffetProcessEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: SS) -> IndianBuffetProcessDistribution:
         """Update the variational Beta posterior and optional concentration parameter."""
-        feature_counts, total_count, prev_alpha = suff_stat
+        feature_counts, total_count, prev_alpha = validated_statistic_tuple(suff_stat, 3, "IBP sufficient statistics")
         alpha = self.alpha if prev_alpha is None else _validate_alpha(prev_alpha)
-        feature_counts = np.asarray(feature_counts, dtype=np.float64)
-
-        if feature_counts.shape != (self.num_features,):
-            raise ValueError("IBP sufficient statistics have the wrong feature dimension")
+        feature_counts = validated_count_array(feature_counts, (self.num_features,), "IBP feature counts")
+        total_count = validated_observation_weight(total_count, "IBP total count")
+        if np.any(feature_counts > total_count + 1.0e-9 * max(1.0, total_count)):
+            raise ValueError("IBP feature counts cannot exceed total count")
+        validate_effective_sample_mass(nobs, total_count, label="IBP effective sample")
 
         active_pseudo = np.zeros(self.num_features, dtype=np.float64)
         inactive_pseudo = np.zeros(self.num_features, dtype=np.float64)
@@ -606,7 +636,7 @@ class IndianBuffetProcessEstimator(ParameterEstimator):
 
         prior_a = alpha / float(self.num_features)
         post_a = prior_a + feature_counts + active_pseudo
-        post_b = 1.0 + (float(total_count) - feature_counts) + inactive_pseudo
+        post_b = 1.0 + (total_count - feature_counts) + inactive_pseudo
         post_a = np.maximum(post_a, np.finfo(np.float64).tiny)
         post_b = np.maximum(post_b, np.finfo(np.float64).tiny)
 

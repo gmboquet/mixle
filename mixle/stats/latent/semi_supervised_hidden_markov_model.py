@@ -33,6 +33,13 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_observation_weights,
+    validated_statistic_tuple,
+)
 from mixle.stats.latent.markov_stopping import (
     DEFAULT_TERMINAL_STEP_CAP,
     require_terminal_reached,
@@ -302,18 +309,13 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
     """Baum-Welch sufficient statistics for the semi-supervised HMM (transition + emission counts, length)."""
 
     def __init__(self, accumulators, len_accumulator=None, keys=(None, None)):
-        # INTENTIONAL DIVERGENCE from the base HiddenMarkovAccumulator. This model has no learned initial
-        # state distribution (the per-position state prior at t=0 plays that role -- see the module docstring),
-        # so the merge key is a 2-tuple (trans_key, state_key) -- no init_key -- and value()/combine() carry a
-        # 3-tuple (trans_counts, emission_values, len_value) rather than the base 6-tuple (num_states,
-        # init_counts, state_counts, trans_counts, emission_values, len_value). There are no init/state counts
-        # to track, and SemiSupervisedHiddenMarkovEstimator.estimate consumes exactly this 3-tuple. These
-        # accumulators never interoperate with HiddenMarkovAccumulator (the factory makes this type and key
-        # tying is within-class), so the shapes are self-consistent; aligning to the base tuples would require
-        # fabricating statistics the estimator ignores. Keep this shape.
+        # This model has no learned initial-state distribution, so it intentionally
+        # retains a two-key merge contract. State-occupancy counts are nevertheless
+        # required to tell each emission estimator its assigned posterior mass.
         self.accumulators = list(accumulators)
         self.num_states = len(self.accumulators)
         self.trans_counts = np.zeros((self.num_states, self.num_states))
+        self.state_counts = np.zeros(self.num_states)
         self.len_accumulator = len_accumulator if len_accumulator is not None else NullAccumulator()
         self.trans_key = keys[0]
         self.state_key = keys[1]
@@ -381,6 +383,7 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
             else:
                 gamma, xi = self._posteriors(dist, emissions, prior)
             self.trans_counts += weight * xi
+            self.state_counts += weight * gamma.sum(axis=0)
             # accumulate emissions vectorized over T: one weighted seq_update per state instead of T*S calls
             enc = self.accumulators[0].acc_to_encoder().seq_encode(list(emissions))
             for s in range(self.num_states):
@@ -390,6 +393,7 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
 
     def update(self, x, weight, estimate):
         """Update Baum-Welch sufficient statistics from one weighted observation."""
+        weight = validated_observation_weight(weight)
         emissions, prior = x
         require_possible_log_evidence(
             estimate.log_density(x),
@@ -399,6 +403,7 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
 
     def initialize(self, x, weight, rng):
         """Initialize emission and transition statistics with random soft state assignments."""
+        weight = validated_observation_weight(weight)
         emissions, prior = x
         n = len(emissions)
         # random soft responsibilities (respecting the prior's zeros) to break symmetry
@@ -408,6 +413,7 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
             if p is not None:
                 gamma = gamma * (p > 0)
                 gamma = gamma / np.clip(gamma.sum(axis=1, keepdims=True), 1e-12, None)
+            self.state_counts += weight * gamma.sum(axis=0)
             for t in range(n):
                 for s in range(self.num_states):
                     self.accumulators[s].initialize(emissions[t], weight * gamma[t, s], rng)
@@ -423,19 +429,34 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
             context="SemiSupervisedHiddenMarkovEstimatorAccumulator.seq_update",
         )
         emissions_list, priors, _, _ = x
+        weights = validated_observation_weights(weights, len(emissions_list))
         for i, emissions in enumerate(emissions_list):
-            self._accumulate(estimate, emissions, priors[i], float(weights[i]))
+            self._accumulate(estimate, emissions, priors[i], weights[i])
 
     def seq_initialize(self, x, weights, rng):
         """Initialize sufficient statistics from encoded observations and weights."""
         emissions_list, priors, _, _ = x
+        weights = validated_observation_weights(weights, len(emissions_list))
         for i, emissions in enumerate(emissions_list):
-            self.initialize((emissions, priors[i]), float(weights[i]), rng)
+            self.initialize((emissions, priors[i]), weights[i], rng)
 
     def combine(self, suff_stat):
         """Merge transition, emission, and length sufficient statistics."""
-        trans, emissions, length = suff_stat
+        trans, state_counts, emissions, length = validated_statistic_tuple(
+            suff_stat, 4, "semi-supervised HMM sufficient statistics"
+        )
+        trans = validated_count_array(trans, (self.num_states, self.num_states), "transition counts")
+        state_counts = validated_count_array(state_counts, (self.num_states,), "state counts")
+        if len(emissions) != self.num_states:
+            raise ValueError("emission statistics must have one item per hidden state")
+        validate_effective_sample_mass(
+            state_counts.sum(),
+            trans.sum(),
+            label="semi-supervised HMM transition mass",
+            allow_unassigned=True,
+        )
         self.trans_counts += trans
+        self.state_counts += state_counts
         for s in range(self.num_states):
             self.accumulators[s].combine(emissions[s])
         self.len_accumulator.combine(length)
@@ -445,14 +466,26 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
         """Return transition counts, per-state emission stats, and length stats."""
         return (
             self.trans_counts,
+            self.state_counts,
             tuple(acc.value() for acc in self.accumulators),
             self.len_accumulator.value(),
         )
 
     def from_value(self, x):
         """Restore transition counts, per-state emission stats, and length stats."""
-        trans, emissions, length = x
-        self.trans_counts = trans
+        trans, state_counts, emissions, length = validated_statistic_tuple(
+            x, 4, "semi-supervised HMM sufficient statistics"
+        )
+        self.trans_counts = validated_count_array(trans, (self.num_states, self.num_states), "transition counts")
+        self.state_counts = validated_count_array(state_counts, (self.num_states,), "state counts")
+        if len(emissions) != self.num_states:
+            raise ValueError("emission statistics must have one item per hidden state")
+        validate_effective_sample_mass(
+            self.state_counts.sum(),
+            self.trans_counts.sum(),
+            label="semi-supervised HMM transition mass",
+            allow_unassigned=True,
+        )
         for s in range(self.num_states):
             self.accumulators[s].from_value(emissions[s])
         self.len_accumulator.from_value(length)
@@ -472,11 +505,12 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
                 stats_dict[self.trans_key] = self.trans_counts.copy()
         if self.state_key is not None:
             if self.state_key in stats_dict:
-                acc = stats_dict[self.state_key]
+                counts, acc = stats_dict[self.state_key]
+                stats_dict[self.state_key] = (counts + self.state_counts, acc)
                 for i in range(self.num_states):
                     acc[i] = acc[i].combine(self.accumulators[i].value())
             else:
-                stats_dict[self.state_key] = self.accumulators
+                stats_dict[self.state_key] = (self.state_counts.copy(), self.accumulators)
         for acc in self.accumulators:
             acc.key_merge(stats_dict)
         self.len_accumulator.key_merge(stats_dict)
@@ -489,7 +523,10 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
             # silently corrupt every other tied accumulator's counts.
             self.trans_counts = np.asarray(stats_dict[self.trans_key]).copy()
         if self.state_key is not None and self.state_key in stats_dict:
-            self.accumulators = stats_dict[self.state_key]
+            counts, accumulators = stats_dict[self.state_key]
+            self.state_counts = np.asarray(counts).copy()
+            for index, accumulator in enumerate(self.accumulators):
+                accumulator.from_value(accumulators[index].value())
         for acc in self.accumulators:
             acc.key_replace(stats_dict)
         self.len_accumulator.key_replace(stats_dict)
@@ -544,15 +581,38 @@ class SemiSupervisedHiddenMarkovEstimator(ParameterEstimator):
 
     def estimate(self, nobs, suff_stat):
         """Estimate the HMM transition matrix and child distributions from accumulated statistics."""
-        trans_counts, emission_stats, length_stat = suff_stat
+        trans_counts, state_counts, emission_stats, length_stat = validated_statistic_tuple(
+            suff_stat, 4, "semi-supervised HMM sufficient statistics"
+        )
+        trans_counts = validated_count_array(trans_counts, (self.num_states, self.num_states), "transition counts")
+        state_counts = validated_count_array(state_counts, (self.num_states,), "state counts")
+        if len(emission_stats) != self.num_states:
+            raise ValueError("emission statistics must have one item per hidden state")
+        transition_mass = trans_counts.sum()
+        state_mass = state_counts.sum()
+        validate_effective_sample_mass(
+            state_mass,
+            transition_mass,
+            label="semi-supervised HMM transition mass",
+            allow_unassigned=True,
+        )
+        if nobs is not None:
+            nobs = validated_observation_weight(nobs, "semi-supervised HMM observation mass")
+            nonempty_sequence_mass = state_mass - transition_mass
+            validate_effective_sample_mass(
+                nobs,
+                nonempty_sequence_mass,
+                label="semi-supervised HMM nonempty-sequence mass",
+                allow_unassigned=True,
+            )
         pc = 0.0 if self.pseudo_count is None else float(self.pseudo_count)
         row = trans_counts + pc / self.num_states
         denom = row.sum(axis=1, keepdims=True)
         denom[denom == 0] = 1.0
         transitions = row / denom
-        topics = [self.estimators[s].estimate(None, emission_stats[s]) for s in range(self.num_states)]
+        topics = [self.estimators[s].estimate(state_counts[s], emission_stats[s]) for s in range(self.num_states)]
         len_dist = (
-            None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.estimate(None, length_stat)
+            None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.estimate(nobs, length_stat)
         )
         return SemiSupervisedHiddenMarkovModelDistribution(
             topics, transitions, len_dist=len_dist, name=self.name, keys=self.keys, terminal_states=self.terminal_states

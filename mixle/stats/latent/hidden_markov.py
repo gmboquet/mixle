@@ -65,6 +65,14 @@ from mixle.stats.latent._hidden_markov_numba_kernels import (
     numba_baum_welch_alphas,
     numba_seq_log_density,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_observation_weights,
+    validated_positive_integer,
+    validated_statistic_tuple,
+)
 from mixle.stats.latent.heterogeneous_mixture import HeterogeneousMixtureDataEncoder
 from mixle.stats.latent.markov_stopping import (
     DEFAULT_TERMINAL_STEP_CAP,
@@ -2678,6 +2686,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        weight = validated_observation_weight(weight, "hidden-Markov observation weight")
         enc_x = estimate.dist_to_encoder().seq_encode([x])
         self.seq_update(enc_x, np.asarray([weight]), estimate)
 
@@ -2709,6 +2718,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        weight = validated_observation_weight(weight, "hidden-Markov initialization weight")
         if not self._init_rng:
             self._rng_initialize(rng)
 
@@ -2776,6 +2786,8 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        rows = self.acc_to_encoder().row_count(x)
+        weights = validated_observation_weights(weights, rows, "hidden-Markov initialization weights")
         x0, x1 = x
 
         if x1 is None:
@@ -2975,6 +2987,10 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        rows = self.acc_to_encoder().row_count(x)
+        weights = validated_observation_weights(weights, rows, "hidden-Markov observation weights")
+        if estimate.n_states != self.num_states:
+            raise ValueError("hidden-Markov estimate and accumulator state counts must match")
         vec.require_possible_log_evidence(
             estimate.seq_log_density(x),
             context="HiddenMarkovAccumulator.seq_update",
@@ -3226,13 +3242,20 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         gamma weights. Falls back to the host :meth:`seq_update` for the blocked (non-numba)
         encoding.
         """
+        rows = self.acc_to_encoder().row_count(x)
+        weights_np = validated_observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            rows,
+            "hidden-Markov observation weights",
+        )
+        if estimate.n_states != self.num_states:
+            raise ValueError("hidden-Markov estimate and accumulator state counts must match")
         vec.require_possible_log_evidence(
             estimate.seq_log_density(x),
             context="HiddenMarkovAccumulator.seq_update_engine",
         )
         x0, x1 = x
         num_states = estimate.n_states
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         with np.errstate(divide="ignore"):
             log_w = np.log(estimate.w)
             log_a = np.log(estimate.transitions)
@@ -3336,7 +3359,30 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             HiddenMarkovAccumulator object.
 
         """
-        num_states, init_counts, state_counts, trans_counts, acc_values, len_acc_value = suff_stat
+        num_states, init_counts, state_counts, trans_counts, acc_values, len_acc_value = validated_statistic_tuple(
+            suff_stat,
+            6,
+            "hidden-Markov sufficient statistics",
+        )
+        num_states = validated_positive_integer(num_states, "hidden-Markov statistic state count")
+        if num_states != self.num_states:
+            raise ValueError("hidden-Markov statistic state count must match the accumulator")
+        init_counts = validated_count_array(init_counts, (num_states,), "hidden-Markov initial counts")
+        state_counts = validated_count_array(state_counts, (num_states,), "hidden-Markov state counts")
+        trans_counts = validated_count_array(
+            trans_counts,
+            (num_states, num_states),
+            "hidden-Markov transition counts",
+        )
+        if not np.isclose(
+            float(state_counts.sum()),
+            float(init_counts.sum() + trans_counts.sum()),
+            rtol=1.0e-9,
+            atol=1.0e-9,
+        ):
+            raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
+        if not isinstance(acc_values, (tuple, list)) or len(acc_values) != num_states:
+            raise ValueError("hidden-Markov emission statistics must match the state count")
 
         self.init_counts += init_counts
         self.state_counts += state_counts
@@ -3402,11 +3448,30 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             HiddenMarkovAccumulator: This accumulator after restoration.
 
         """
-        num_states, init_counts, state_counts, trans_counts, accumulators, len_acc = x
-        self.num_states = num_states
-        self.init_counts = init_counts
-        self.state_counts = state_counts
-        self.trans_counts = trans_counts
+        num_states, init_counts, state_counts, trans_counts, accumulators, len_acc = validated_statistic_tuple(
+            x,
+            6,
+            "hidden-Markov sufficient statistics",
+        )
+        num_states = validated_positive_integer(num_states, "hidden-Markov statistic state count")
+        if num_states != self.num_states:
+            raise ValueError("hidden-Markov statistic state count must match the accumulator")
+        self.init_counts = validated_count_array(init_counts, (num_states,), "hidden-Markov initial counts")
+        self.state_counts = validated_count_array(state_counts, (num_states,), "hidden-Markov state counts")
+        self.trans_counts = validated_count_array(
+            trans_counts,
+            (num_states, num_states),
+            "hidden-Markov transition counts",
+        )
+        if not np.isclose(
+            float(self.state_counts.sum()),
+            float(self.init_counts.sum() + self.trans_counts.sum()),
+            rtol=1.0e-9,
+            atol=1.0e-9,
+        ):
+            raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
+        if not isinstance(accumulators, (tuple, list)) or len(accumulators) != num_states:
+            raise ValueError("hidden-Markov emission statistics must match the state count")
 
         for i, v in enumerate(accumulators):
             self.accumulators[i].from_value(v)
@@ -3418,6 +3483,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
     def scale(self, c: float) -> HiddenMarkovAccumulator:
         """Scale linear HMM sufficient statistics while preserving metadata."""
+        c = validated_observation_weight(c, "hidden-Markov statistic scale")
         self.init_counts *= c
         self.state_counts *= c
         self.trans_counts *= c
@@ -3701,7 +3767,36 @@ class HiddenMarkovEstimator(ParameterEstimator):
         """
         from mixle.stats.bayes.dirichlet import DirichletDistribution
 
-        num_states, init_counts, state_counts, trans_counts, topic_ss, len_ss = suff_stat
+        num_states, init_counts, state_counts, trans_counts, topic_ss, len_ss = validated_statistic_tuple(
+            suff_stat,
+            6,
+            "hidden-Markov sufficient statistics",
+        )
+        num_states = validated_positive_integer(num_states, "hidden-Markov statistic state count")
+        if num_states != self.num_states:
+            raise ValueError("hidden-Markov statistic state count must match the estimator")
+        init_counts = validated_count_array(init_counts, (num_states,), "hidden-Markov initial counts")
+        state_counts = validated_count_array(state_counts, (num_states,), "hidden-Markov state counts")
+        trans_counts = validated_count_array(
+            trans_counts,
+            (num_states, num_states),
+            "hidden-Markov transition counts",
+        )
+        if not isinstance(topic_ss, (tuple, list)) or len(topic_ss) != num_states:
+            raise ValueError("hidden-Markov emission statistics must match the state count")
+        if not np.isclose(
+            float(state_counts.sum()),
+            float(init_counts.sum() + trans_counts.sum()),
+            rtol=1.0e-9,
+            atol=1.0e-9,
+        ):
+            raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
+        validate_effective_sample_mass(
+            nobs,
+            float(init_counts.sum()),
+            label="hidden-Markov effective sample",
+            allow_unassigned=True,
+        )
 
         len_dist = self.len_estimator.estimate(nobs, len_ss)
         topics = [self.estimators[i].estimate(state_counts[i], topic_ss[i]) for i in range(num_states)]

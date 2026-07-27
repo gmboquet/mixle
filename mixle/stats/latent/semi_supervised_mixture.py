@@ -37,6 +37,14 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_observation_weights,
+    validated_statistic_tuple,
+    validated_weighted_responsibilities,
+)
 from mixle.stats.latent.mixture import _owned_generative_components
 from mixle.utils.aliasing import MISSING, coalesce_alias
 
@@ -521,13 +529,20 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
             None.
 
         """
+        weight = validated_observation_weight(weight)
         likelihood = estimate.posterior(x)
         datum, prior = x
-
-        self.comp_counts += likelihood * weight
+        assigned = validated_weighted_responsibilities(
+            np.asarray(likelihood)[None, :] * weight,
+            np.asarray([weight]),
+            self.num_components,
+            label="semi-supervised mixture responsibilities",
+            allow_unassigned=True,
+        )[0]
+        self.comp_counts += assigned
 
         for i in range(self.num_components):
-            self.accumulators[i].update(datum, likelihood[i] * weight, estimate.components[i])
+            self.accumulators[i].update(datum, assigned[i], estimate.components[i])
 
     def _rng_initialize(self, rng: RandomState) -> None:
         """Seed the member RandomStates for consistent initialize/seq_initialize calls."""
@@ -555,6 +570,7 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
             None.
 
         """
+        weight = validated_observation_weight(weight)
         datum, prior = x
 
         if not self._init_rng:
@@ -567,15 +583,17 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
             wc2 = 1.0 - wc0
 
             for i in range(self.num_components):
-                w = weight * wc2 if i == idx else wc1
+                w = weight * (wc2 if i == idx else wc1)
                 self.accumulators[i].initialize(datum, w, self._acc_rng[i])
                 self.comp_counts[i] += w
 
         else:
-            for i, w in prior:
-                ww = weight * w
-                self.accumulators[i].initialize(datum, ww, self._acc_rng[i])
-                self.comp_counts[i] += ww
+            prior_weights = _sum_prior_weights(prior, self.num_components)
+            assigned = weight * prior_weights / prior_weights.sum()
+            for i, ww in enumerate(assigned):
+                if ww > 0.0:
+                    self.accumulators[i].initialize(datum, ww, self._acc_rng[i])
+                    self.comp_counts[i] += ww
 
     def seq_initialize(self, x: E, weights: np.ndarray, rng: RandomState) -> None:
         """Initialize the accumulator from sequence encoded data x.
@@ -593,6 +611,9 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
 
         """
         sz, enc_data, (enc_prior, enc_prior_sum, enc_prior_flag), xx = x
+        weights = validated_observation_weights(weights, sz)
+        if len(xx) != sz:
+            raise ValueError("semi-supervised mixture raw rows must match encoded row count")
         for i in range(len(xx)):
             self.initialize(xx[i], weights[i], rng=rng)
 
@@ -613,6 +634,7 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
 
         """
         sz, enc_data, (enc_prior, enc_prior_sum, enc_prior_flag), _ = x
+        weights = validated_observation_weights(weights, sz)
         ll_mat = np.zeros((sz, estimate.num_components))
         ll_mat.fill(-np.inf)
 
@@ -629,10 +651,16 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
         normalized = normalize_mixture_log_scores(ll_mat)
         if self._track_ll:
             self._seq_ll += float(np.dot(weights, normalized.log_evidence))
-        ll_mat = normalized.responsibilities
+        ll_mat = validated_weighted_responsibilities(
+            normalized.responsibilities * weights[:, None],
+            weights,
+            self.num_components,
+            label="semi-supervised mixture responsibilities",
+            allow_unassigned=True,
+        )
 
         for i in range(self.num_components):
-            w_loc = ll_mat[:, i] * weights
+            w_loc = ll_mat[:, i]
             self.comp_counts[i] += w_loc.sum()
             self.accumulators[i].seq_update(enc_data, w_loc, estimate.components[i])
 
@@ -645,7 +673,10 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
 
         sz, enc_data, (enc_prior, enc_prior_sum, enc_prior_flag), _ = x
         num_components = estimate.num_components
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        weights_np = validated_observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            sz,
+        )
 
         # prior-adjusted base log-matrix (host-side index ops; low-overhead)
         base = np.full((sz, num_components), -np.inf, dtype=np.float64)
@@ -664,7 +695,13 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
         normalized = normalize_engine_mixture_log_scores(ll, engine)
         resp = normalized.responsibilities * engine.asarray(weights_np)[:, None]
 
-        resp_np = np.asarray(engine.to_numpy(resp))
+        resp_np = validated_weighted_responsibilities(
+            engine.to_numpy(resp),
+            weights_np,
+            num_components,
+            label="semi-supervised mixture engine responsibilities",
+            allow_unassigned=True,
+        )
         self.comp_counts += resp_np.sum(axis=0)
         for i in range(num_components):
             self.accumulators[i].seq_update(enc_data, resp_np[:, i], estimate.components[i])
@@ -680,9 +717,15 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
             SemiSupervisedMixtureEstimatorAccumulator with combined sufficient statistics.
 
         """
-        self.comp_counts += np.asarray(suff_stat[0], dtype=np.float64)
+        counts, component_stats = validated_statistic_tuple(
+            suff_stat, 2, "semi-supervised mixture sufficient statistics"
+        )
+        counts = validated_count_array(counts, (self.num_components,), "component counts")
+        if len(component_stats) != self.num_components:
+            raise ValueError("component statistics must have one item per component")
+        self.comp_counts += counts
         for i in range(self.num_components):
-            self.accumulators[i].combine(copy.deepcopy(suff_stat[1][i]))
+            self.accumulators[i].combine(copy.deepcopy(component_stats[i]))
 
         return self
 
@@ -701,9 +744,12 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
             SemiSupervisedMixtureEstimatorAccumulator object.
 
         """
-        self.comp_counts = np.asarray(x[0], dtype=np.float64).copy()
+        counts, component_stats = validated_statistic_tuple(x, 2, "semi-supervised mixture sufficient statistics")
+        self.comp_counts = validated_count_array(counts, (self.num_components,), "component counts")
+        if len(component_stats) != self.num_components:
+            raise ValueError("component statistics must have one item per component")
         for i in range(self.num_components):
-            self.accumulators[i].from_value(copy.deepcopy(x[1][i]))
+            self.accumulators[i].from_value(copy.deepcopy(component_stats[i]))
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -893,7 +939,18 @@ class SemiSupervisedMixtureEstimator(ParameterEstimator):
 
         """
         num_components = self.num_components
-        counts, comp_suff_stats = suff_stat
+        counts, comp_suff_stats = validated_statistic_tuple(
+            suff_stat, 2, "semi-supervised mixture sufficient statistics"
+        )
+        counts = validated_count_array(counts, (num_components,), "component counts")
+        if len(comp_suff_stats) != num_components:
+            raise ValueError("component statistics must have one item per component")
+        validate_effective_sample_mass(
+            nobs,
+            counts.sum(),
+            label="semi-supervised mixture effective sample",
+            allow_unassigned=True,
+        )
 
         components = [self.estimators[i].estimate(counts[i], comp_suff_stats[i]) for i in range(num_components)]
 

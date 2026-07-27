@@ -44,6 +44,14 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_observation_weights,
+    validated_positive_integer,
+    validated_statistic_tuple,
+)
 from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias, require
 from mixle.utils.optional_deps import HAS_NUMBA, numba
 
@@ -117,9 +125,7 @@ def _canonical_tree_observation(
             topology, emission = entry
             node_id, parent_id = topology
         except (TypeError, ValueError) as exc:
-            raise TypeError(
-                f"tree {tree_index} entry {position} must be ((node_id, parent_id), emission)."
-            ) from exc
+            raise TypeError(f"tree {tree_index} entry {position} must be ((node_id, parent_id), emission).") from exc
         if isinstance(node_id, bool) or not isinstance(node_id, (int, np.integer)):
             raise TypeError(f"tree {tree_index} node ID at entry {position} must be an integer.")
         if isinstance(parent_id, bool) or not isinstance(parent_id, (int, np.integer)):
@@ -145,8 +151,7 @@ def _canonical_tree_observation(
     roots = np.flatnonzero(parents == -1)
     if roots.tolist() != [0]:
         raise ValueError(
-            f"tree {tree_index} must have exactly one root, node 0 with parent -1; "
-            f"root IDs are {roots.tolist()}."
+            f"tree {tree_index} must have exactly one root, node 0 with parent -1; root IDs are {roots.tolist()}."
         )
     for node in range(1, len(canonical)):
         parent = int(parents[node])
@@ -158,6 +163,50 @@ def _canonical_tree_observation(
                 "the topology must be rooted, acyclic, and in canonical ID order."
             )
     return canonical, parents
+
+
+def _tree_encoded_row_count(x: Any) -> int:
+    """Return the exact number of outer tree observations in either encoding."""
+    try:
+        numba_encoding, numpy_encoding = x
+    except (TypeError, ValueError) as exc:
+        raise ValueError("tree-HMM encoded data must contain numba and NumPy layout slots") from exc
+    if (numba_encoding is None) == (numpy_encoding is None):
+        raise ValueError("tree-HMM encoded data must contain exactly one active layout")
+    offsets = np.asarray(numba_encoding[0] if numba_encoding is not None else numpy_encoding[1])
+    if offsets.ndim != 1 or offsets.size == 0:
+        raise ValueError("tree-HMM encoded offsets must be a non-empty one-dimensional array")
+    return int(offsets.size - 1)
+
+
+def _validated_tree_sufficient_statistics(
+    values: Any,
+    *,
+    num_states: int,
+    label: str,
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, tuple[Any, ...], Any]:
+    """Validate the public tree-HMM statistic schema and its mass law."""
+    observed_states, init_counts, state_counts, trans_counts, topic_stats, len_stats = validated_statistic_tuple(
+        values, 6, label
+    )
+    observed_states = validated_positive_integer(observed_states, f"{label} state count")
+    if observed_states != num_states:
+        raise ValueError(f"{label} state count must equal {num_states}")
+    init_counts = validated_count_array(init_counts, (num_states,), f"{label} initial counts")
+    state_counts = validated_count_array(state_counts, (num_states,), f"{label} state counts")
+    trans_counts = validated_count_array(
+        trans_counts,
+        (num_states, num_states),
+        f"{label} transition counts",
+    )
+    if not isinstance(topic_stats, (tuple, list)) or len(topic_stats) != num_states:
+        raise ValueError(f"{label} topic statistics must have one item per hidden state")
+    validate_effective_sample_mass(
+        state_counts.sum(),
+        init_counts.sum() + trans_counts.sum(),
+        label=f"{label} hidden-state mass",
+    )
+    return observed_states, init_counts, state_counts, trans_counts, tuple(topic_stats), len_stats
 
 
 class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
@@ -1069,6 +1118,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             estimate (TreeHiddenMarkovModelDistribution): Previous estimate used for the E-step.
 
         """
+        weight = validated_observation_weight(weight)
         enc_x = estimate.dist_to_encoder().seq_encode([x])
         self.seq_update(enc_x, np.asarray([weight]), estimate)
 
@@ -1095,6 +1145,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             rng (RandomState): Random number generator used to draw random state assignments.
 
         """
+        weight = validated_observation_weight(weight)
         if not self._init_rng:
             self._rng_initialize(rng)
 
@@ -1114,6 +1165,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
 
+        weights = validated_observation_weights(weights, _tree_encoded_row_count(x))
         if not self._init_rng:
             self._rng_initialize(rng)
 
@@ -1202,6 +1254,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             estimate (TreeHiddenMarkovModelDistribution): Previous estimate used for the E-step.
 
         """
+        weights = validated_observation_weights(weights, _tree_encoded_row_count(x))
         vec.require_possible_log_evidence(
             estimate.seq_log_density(x),
             context="TreeHiddenMarkovAccumulator.seq_update",
@@ -1462,6 +1515,10 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         """
         from mixle.stats.compute.backend import backend_seq_log_density
 
+        weights_np = validated_observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            _tree_encoded_row_count(x),
+        )
         vec.require_possible_log_evidence(
             estimate.seq_log_density(x),
             context="TreeHiddenMarkovAccumulator.seq_update_engine",
@@ -1473,7 +1530,6 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
         num_states = estimate.num_states
         max_level = len(level_idx)
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         w_eng = engine.asarray(weights_np)
 
         a_mat = engine.asarray(estimate.transitions)
@@ -1588,7 +1644,11 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             Self, with aggregated sufficient statistics.
 
         """
-        num_states, init_counts, state_counts, trans_counts, acc_values, len_acc_value = suff_stat
+        _, init_counts, state_counts, trans_counts, acc_values, len_acc_value = _validated_tree_sufficient_statistics(
+            suff_stat,
+            num_states=self.num_states,
+            label="tree-HMM sufficient statistics",
+        )
 
         self.init_counts += init_counts
         self.state_counts += state_counts
@@ -1629,11 +1689,13 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             Self, with sufficient statistics set to x.
 
         """
-        num_states, init_counts, state_counts, trans_counts, accumulators, len_acc = x
-        self.num_states = num_states
-        self.init_counts = init_counts
-        self.state_counts = state_counts
-        self.trans_counts = trans_counts
+        _, self.init_counts, self.state_counts, self.trans_counts, accumulators, len_acc = (
+            _validated_tree_sufficient_statistics(
+                x,
+                num_states=self.num_states,
+                label="tree-HMM sufficient statistics",
+            )
+        )
 
         for i, v in enumerate(accumulators):
             self.accumulators[i].from_value(v)
@@ -1645,6 +1707,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
     def scale(self, c: float) -> "TreeHiddenMarkovAccumulator":
         """Scale all accumulated tree-HMM sufficient statistics in place."""
+        c = validated_observation_weight(c, "tree-HMM scale factor")
         self.init_counts *= c
         self.state_counts *= c
         self.trans_counts *= c
@@ -1841,9 +1904,18 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
             TreeHiddenMarkovModelDistribution: Estimated distribution.
 
         """
-        num_states, init_counts, state_counts, trans_counts, topic_ss, len_ss = suff_stat
+        num_states, init_counts, state_counts, trans_counts, topic_ss, len_ss = _validated_tree_sufficient_statistics(
+            suff_stat,
+            num_states=self.num_states,
+            label="tree-HMM sufficient statistics",
+        )
+        validate_effective_sample_mass(
+            nobs,
+            init_counts.sum(),
+            label="tree-HMM effective sample",
+        )
 
-        len_dist = self.len_estimator.estimate(nobs, len_ss)
+        len_dist = self.len_estimator.estimate(state_counts.sum(), len_ss)
         topics = [self.estimators[i].estimate(state_counts[i], topic_ss[i]) for i in range(num_states)]
 
         if self.pseudo_count[0] is not None:

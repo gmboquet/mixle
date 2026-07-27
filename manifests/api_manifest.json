@@ -1570,6 +1570,7 @@
         "DistributionDeclaration",
         "DistributionEnumerator",
         "EDHMMEstimator",
+        "EffectiveSampleReceipt",
         "EncodedData",
         "EngineNotSupportedError",
         "EnumerationError",
@@ -2117,13 +2118,20 @@
         "tie_component_shard_values",
         "update_alpha_coupled",
         "validate_declaration",
+        "validate_effective_sample_mass",
         "validate_estimator_keys",
         "validate_statistic_layout",
         "validate_terminal_reachability",
+        "validated_count_array",
+        "validated_observation_weight",
+        "validated_observation_weights",
+        "validated_positive_integer",
         "validated_state_ids",
+        "validated_statistic_tuple",
         "validated_terminal_states",
         "validated_terminal_step_cap",
-        "validated_terminal_values"
+        "validated_terminal_values",
+        "validated_weighted_responsibilities"
       ]
     },
     "mixle.stats.latent": {
@@ -2155,6 +2163,7 @@
         "EDHMMAccumulatorFactory",
         "EDHMMDataEncoder",
         "EDHMMEstimator",
+        "EffectiveSampleReceipt",
         "ExplicitDurationHMM",
         "FinalStateEnumeration",
         "GateBufferReceipt",
@@ -2416,11 +2425,18 @@
         "terminal_forward_backward",
         "terminal_forward_loglik",
         "update_alpha_coupled",
+        "validate_effective_sample_mass",
         "validate_terminal_reachability",
+        "validated_count_array",
+        "validated_observation_weight",
+        "validated_observation_weights",
+        "validated_positive_integer",
         "validated_state_ids",
+        "validated_statistic_tuple",
         "validated_terminal_states",
         "validated_terminal_step_cap",
-        "validated_terminal_values"
+        "validated_terminal_values",
+        "validated_weighted_responsibilities"
       ]
     },
     "mixle.stats.multivariate": {

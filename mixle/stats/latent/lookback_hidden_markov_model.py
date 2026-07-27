@@ -62,6 +62,11 @@ from mixle.stats.latent._hidden_markov_numba_kernels import (
     numba_baum_welch_alphas,
     numba_seq_log_density,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_observation_weight,
+    validated_observation_weights,
+)
 from mixle.stats.latent.markov_stopping import (
     DEFAULT_TERMINAL_STEP_CAP,
     require_terminal_reached,
@@ -229,6 +234,11 @@ def _validated_lookback_sufficient_statistics(
     init_counts = _validated_lookback_count_array(values[2], f"{context} initial-state counts", (num_states,))
     state_counts = _validated_lookback_count_array(values[3], f"{context} state counts", (num_states,))
     trans_counts = _validated_lookback_count_array(values[4], f"{context} transition counts", (num_states, num_states))
+    validate_effective_sample_mass(
+        state_counts.sum(),
+        init_counts.sum() + trans_counts.sum(),
+        label=f"{context} hidden-state mass",
+    )
     topic_ss = _owned_sequence(values[5], f"{context} topic sufficient statistics", size=num_states)
     init_ss = _owned_sequence(values[6], f"{context} initial sufficient statistics", size=num_states)
     return lag, num_states, init_counts, state_counts, trans_counts, topic_ss, init_ss, values[7]
@@ -990,6 +1000,7 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             estimate (LookbackHiddenMarkovModelDistribution): Current estimate used for the E-step.
 
         """
+        weight = validated_observation_weight(weight)
         if estimate.terminal_states is not None:
             self._terminal_update(x, weight, estimate)
             return
@@ -1004,6 +1015,7 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             rng (np.random.RandomState): Random number generator for the random state assignment.
 
         """
+        weight = validated_observation_weight(weight)
         lag = self.lag
         n = len(x) - lag + 1 if lag > 0 else len(x)
 
@@ -1043,11 +1055,13 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
 
         """
         if self.terminal_states is not None:
-            for s, wt in zip(x, np.asarray(weights, dtype=np.float64)):
-                self.initialize(s, float(wt), rng)
+            weights = validated_observation_weights(weights, len(x))
+            for s, wt in zip(x, weights):
+                self.initialize(s, wt, rng)
             return
 
         (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
+        weights = validated_observation_weights(weights, len(sz))
 
         num_states = self.num_states
         tot_cnt = len(ids) + len(idi)
@@ -1114,11 +1128,13 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
 
         """
         if estimate.terminal_states is not None:
-            for s, wt in zip(x, np.asarray(weights, dtype=np.float64)):
-                self._terminal_update(s, float(wt), estimate)
+            weights = validated_observation_weights(weights, len(x))
+            for s, wt in zip(x, weights):
+                self._terminal_update(s, wt, estimate)
             return
 
         (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
+        weights = validated_observation_weights(weights, len(sz))
 
         tot_cnt = len(ids) + len(idi)
         seq_cnt = len(sz)
@@ -1189,7 +1205,10 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
         (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
         num_states = estimate.num_states
         tot_cnt = len(ids) + len(idi)
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        weights_np = validated_observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            len(sz),
+        )
 
         log_pr = np.zeros((tot_cnt, num_states), dtype=np.float64)
         for i in range(num_states):
@@ -1681,6 +1700,12 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
             lag=self.lag,
             num_states=self.num_states,
             context="LookbackHiddenMarkovModelEstimator.estimate",
+        )
+        validate_effective_sample_mass(
+            nobs,
+            init_counts.sum(),
+            label="lookback HMM effective sample",
+            allow_unassigned=True,
         )
 
         len_dist = self.len_estimator.estimate(nobs, len_ss)
