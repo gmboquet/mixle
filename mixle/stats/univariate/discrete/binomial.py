@@ -26,6 +26,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.univariate.continuous.beta import BetaDistribution
+from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations, nonnegative_weights
 from mixle.utils.special import digamma
 from mixle.utils.vector import gammaln
 
@@ -358,9 +359,7 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         n = dists[0].n
         min_val = dists[0].min_val
         if any(d.n != n or d.min_val != min_val for d in dists):
-            raise KernelCapabilityDeclinedError(
-                "Stacked BinomialDistribution components require shared n and min_val."
-            )
+            raise KernelCapabilityDeclinedError("Stacked BinomialDistribution components require shared n and min_val.")
         return {
             "p": engine.asarray([d.p for d in dists]),
             "n": engine.asarray(float(n)),
@@ -469,25 +468,26 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         Returns:
             BinomialEstimator object.
         """
+        min_val = self.min_val if self.min_val is not None else 0
+        max_val = min_val + self.n
         if self.prior is not None:
-            min_val = self.min_val if self.min_val is not None else 0
             return BinomialEstimator(
-                max_val=self.n + min_val,
+                max_val=max_val,
                 min_val=min_val,
                 name=self.name,
                 keys=self.keys,
                 prior=self.prior,
             )
         if pseudo_count is None:
-            return BinomialEstimator(name=self.name, keys=self.keys)
-        else:
-            return BinomialEstimator(
-                max_val=self.n,
-                min_val=self.min_val,
-                pseudo_count=pseudo_count,
-                suff_stat=self.p * self.n * pseudo_count,
-                name=self.name,
-            )
+            return BinomialEstimator(max_val=max_val, min_val=min_val, name=self.name, keys=self.keys)
+        return BinomialEstimator(
+            max_val=max_val,
+            min_val=min_val,
+            pseudo_count=pseudo_count,
+            suff_stat=self.p * self.n * pseudo_count,
+            name=self.name,
+            keys=self.keys,
+        )
 
     def dist_to_encoder(self) -> "BinomialDataEncoder":
         """Create the encoder for sequence-encoded binomial observations.
@@ -495,7 +495,8 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         Returns:
             BinomialDataEncoder object.
         """
-        return BinomialDataEncoder()
+        min_val = self.min_val if self.min_val is not None else 0
+        return BinomialDataEncoder(min_val=min_val, max_val=min_val + self.n)
 
     def enumerator(self) -> "BinomialEnumerator":
         """Returns BinomialEnumerator iterating the support in descending probability order."""
@@ -700,18 +701,29 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
             None (updates BinomialAccumulator sufficient statistics.)
 
         """
-        self.sum += x * weight
+        weights = nonnegative_weights([weight], shape=(1,))
+        if weights[0] == 0.0:
+            return
+        value = int(
+            exact_integer_observations(
+                [x],
+                label="Binomial observations",
+                minimum=self.min_val,
+                maximum=self.max_val,
+            )[0]
+        )
+        self.sum += value * weight
         self.count += weight
 
         if self.min_val is None:
-            self.min_val = x
+            self.min_val = value
         else:
-            self.min_val = min(self.min_val, x)
+            self.min_val = min(self.min_val, value)
 
         if self.max_val is None:
-            self.max_val = x
+            self.max_val = value
         else:
-            self.max_val = max(self.max_val, x)
+            self.max_val = max(self.max_val, value)
 
     def initialize(self, x: int, weight: float, rng: RandomState | None) -> None:
         """Initialize BinomialAccumulator sufficient statistics for one weighted observation.
@@ -740,10 +752,26 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        _, _, xx, min_val, max_val = x
+        _, _, xx, _, _ = x
+        values = exact_integer_observations(
+            xx,
+            label="Binomial observations",
+        )
+        ww = nonnegative_weights(weights, shape=values.shape)
+        used = ww > 0.0
+        if not np.any(used):
+            return
+        used_values = exact_integer_observations(
+            values[used],
+            label="Binomial observations with positive weight",
+            minimum=self.min_val,
+            maximum=self.max_val,
+        )
+        min_val = int(np.min(used_values))
+        max_val = int(np.max(used_values))
 
-        self.sum += np.sum(xx * weights)
-        self.count += np.sum(weights)
+        self.sum += float(np.dot(values.astype(np.float64), ww))
+        self.count += float(np.sum(ww))
 
         if self.min_val is not None:
             self.min_val = min(self.min_val, min_val)
@@ -761,10 +789,26 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         The weighted sum and count reductions run on the active engine; the scalar min/max
         support bounds remain host bookkeeping. Matches seq_update.
         """
-        _, _, xx, min_val, max_val = x
+        _, _, xx, _, _ = x
         weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        values = exact_integer_observations(
+            xx,
+            label="Binomial observations",
+        )
+        weights_np = nonnegative_weights(weights_np, shape=values.shape)
+        used = weights_np > 0.0
+        if not np.any(used):
+            return
+        used_values = exact_integer_observations(
+            values[used],
+            label="Binomial observations with positive weight",
+            minimum=self.min_val,
+            maximum=self.max_val,
+        )
+        min_val = int(np.min(used_values))
+        max_val = int(np.max(used_values))
         w = engine.asarray(weights_np)
-        xv = engine.asarray(np.asarray(xx, dtype=np.float64))
+        xv = engine.asarray(values.astype(np.float64))
 
         self.sum += float(engine.to_numpy(engine.sum(xv * w)))
         self.count += float(engine.to_numpy(engine.sum(w)))
@@ -866,7 +910,7 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
             BinomialDataEncoder()
 
         """
-        return BinomialDataEncoder()
+        return BinomialDataEncoder(min_val=self.min_val, max_val=self.max_val)
 
 
 class BinomialAccumulatorFactory(StatisticAccumulatorFactory):
@@ -1001,25 +1045,18 @@ class BinomialEstimator(ParameterEstimator):
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
 
-        count, sum, min_val, max_val = suff_stat
-
-        if min_val is not None:
-            if self.min_val is not None:
-                min_val = min(min_val, self.min_val)
+        count, sum, observed_min, observed_max = suff_stat
+        min_val = self.min_val if self.min_val is not None else (observed_min if observed_min is not None else 0)
+        if self.max_val is not None:
+            max_val = self.max_val
+            if observed_min is not None and observed_min < min_val:
+                raise ValueError("observed binomial support falls below the estimator's fixed minimum.")
+            if observed_max is not None and observed_max > max_val:
+                raise ValueError("observed binomial support exceeds the estimator's fixed maximum.")
         else:
-            if self.min_val is not None:
-                min_val = self.min_val
-            else:
-                min_val = 0
-
-        if max_val is not None:
-            if self.max_val is not None:
-                max_val = max(max_val, self.max_val)
-        else:
-            if self.max_val is not None:
-                max_val = self.max_val
-            else:
-                max_val = 0
+            max_val = observed_max if observed_max is not None else min_val
+            if observed_min is not None:
+                min_val = min(min_val, observed_min)
 
         # Number of trials inferred from the observed support span. CAVEAT: this is data-driven --
         # if the true maximum (n successes) is never observed, ``max_val`` underestimates it and the
@@ -1051,6 +1088,10 @@ class BinomialEstimator(ParameterEstimator):
 class BinomialDataEncoder(DataSequenceEncoder):
     """Data encoder for iid integer binomial observations."""
 
+    def __init__(self, min_val: int | None = None, max_val: int | None = None) -> None:
+        self.min_val = min_val
+        self.max_val = max_val
+
     def __str__(self) -> str:
         """Creates string name of BinomialDataEncoder.
 
@@ -1058,7 +1099,7 @@ class BinomialDataEncoder(DataSequenceEncoder):
             String name BinomialDataEncoder
 
         """
-        return "BinomialDataEncoder"
+        return f"BinomialDataEncoder(min_val={self.min_val!r}, max_val={self.max_val!r})"
 
     def __eq__(self, other: object) -> bool:
         """Define equality for BinomialDataEncoder objects.
@@ -1070,7 +1111,13 @@ class BinomialDataEncoder(DataSequenceEncoder):
             True is other is BinomialDataEncoder, else False.
 
         """
-        return isinstance(other, BinomialDataEncoder)
+        return (
+            isinstance(other, BinomialDataEncoder) and self.min_val == other.min_val and self.max_val == other.max_val
+        )
+
+    def row_count(self, x: E) -> int:
+        """Return the number of observations represented by the indexed payload."""
+        return int(np.asarray(x[2]).shape[0])
 
     def seq_encode(self, x: Sequence[int]) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
         """Encode List[int] for vectorized seq calls in Accumulator and Distribution.
@@ -1083,12 +1130,12 @@ class BinomialDataEncoder(DataSequenceEncoder):
                 reconstruct x, numpy array of x, min value of x, and max value of x.
 
         """
-        xx0 = np.asarray(x, dtype=np.float64)
-
-        if np.any(xx0 < 0) or np.any(np.isnan(xx0)) or np.any(np.floor(xx0) != xx0):
-            raise ValueError("BinomialDistribution requires non-negative integer values for x.")
-
-        xx = np.asarray(xx0, dtype=np.int32)
+        xx = exact_integer_observations(
+            x,
+            label="Binomial observations",
+            minimum=self.min_val,
+            maximum=self.max_val,
+        )
         if xx.size == 0:
             return xx, np.asarray([], dtype=np.int64), xx, 0, 0
         ux, ix = np.unique(xx, return_inverse=True)
