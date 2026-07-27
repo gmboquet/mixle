@@ -40,24 +40,24 @@ Every function here reads only duck-typed attributes off ``habitat`` (``.mean``,
 ``.cell_area``) or takes plain arrays, so anything satisfying the IC-1 ``Posterior`` surface over a
 suitability field -- in particular N1's ``HabitatModel`` -- works; the ``HabitatModel`` type hint is a
 forward reference (evaluated only under ``TYPE_CHECKING``), so this module has no hard runtime dependency
-on ``mixle.analysis.sdm``. :func:`effective_conductance` / :func:`habitat_connectivity` solve their linear
-system with plain ``numpy`` and never touch ``mixle.relations``. :func:`least_cost_corridor`,
-:func:`max_flow_connectivity`, and :func:`fragmentation_impact`'s minimum-cut computation do still call the
-frozen ``ShortestPath``/``max_flow``/``min_cut`` surface -- imported lazily inside each function (rather
-than at module scope) because ``mixle.relations`` transitively imports ``mixle.stats``, and this module is
-loaded from ``mixle.analysis.__init__`` while ``mixle.stats``/``mixle.inference``/``mixle.analysis``/
-``mixle.reason`` are, in some import orders, still themselves mid-initialization (a pre-existing,
-order-sensitive circular-import chain across those four packages); deferring the import to call time
-avoids perturbing that chain's timing instead of trying to fix it here.
+on ``mixle.analysis.sdm``. :func:`effective_conductance` / :func:`habitat_connectivity` use SciPy's sparse
+linear solver; :func:`max_flow_connectivity` and :func:`fragmentation_impact` use this module's sparse
+float-capacity push-relabel implementation. Only :func:`least_cost_corridor` calls the frozen
+``ShortestPath`` surface, imported lazily because ``mixle.relations`` transitively imports ``mixle.stats``
+and this module can be loaded while the statistics/analysis import graph is still initializing.
 """
 
 from __future__ import annotations
 
 from collections import deque
 from collections.abc import Sequence
+from dataclasses import dataclass
+from numbers import Integral
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
 
 if TYPE_CHECKING:
     from mixle.analysis.sdm import HabitatModel
@@ -98,7 +98,7 @@ def _neighbor_flat_indices(flat_idx: int, shape: tuple[int, ...], offsets: list[
 
 def _edge_cost(flat_resistance: np.ndarray, i: int, j: int) -> float:
     """Movement cost of the edge between adjacent cells ``i``/``j``: the mean of their per-cell resistance."""
-    return float(0.5 * (flat_resistance[i] + flat_resistance[j]))
+    return float(0.5 * flat_resistance[i] + 0.5 * flat_resistance[j])
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +160,16 @@ def _require_valid_terminals(sources: Sequence[int], sinks: Sequence[int], n: in
     Returns the de-duplicated, sorted node-index lists (a node repeated within one side is harmless --
     it is the same physical cell -- but must not appear on both sides).
     """
-    src = sorted({int(s) for s in sources})
-    snk = sorted({int(s) for s in sinks})
+    def exact(values: Sequence[int], label: str) -> list[int]:
+        indices: set[int] = set()
+        for value in values:
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+                raise TypeError(f"{label} entries must be exact integer node indices, got {value!r}")
+            indices.add(int(value))
+        return sorted(indices)
+
+    src = exact(sources, "sources")
+    snk = exact(sinks, "sinks")
     if not src:
         raise ValueError("sources must not be empty")
     if not snk:
@@ -174,6 +182,18 @@ def _require_valid_terminals(sources: Sequence[int], sinks: Sequence[int], n: in
     if overlap:
         raise ValueError(f"sources and sinks must be disjoint; overlapping node(s): {sorted(overlap)}")
     return src, snk
+
+
+def _require_binary_mask(value: Any, shape: tuple[int, ...], name: str) -> np.ndarray:
+    """Return an owned Boolean mask, accepting only bool or exact integer 0/1 entries."""
+    raw = np.asarray(value)
+    if raw.shape != shape:
+        raise ValueError(f"{name} shape {raw.shape} does not match required shape {shape}")
+    if raw.dtype.kind == "b":
+        return raw.astype(bool, copy=True)
+    if raw.dtype.kind not in "iu" or np.any((raw != 0) & (raw != 1)):
+        raise TypeError(f"{name} must contain only Boolean or exact integer 0/1 entries")
+    return raw.astype(bool)
 
 
 def resistance_raster(habitat: HabitatModel, *, floor: float = 1e-3) -> np.ndarray:
@@ -223,7 +243,8 @@ def least_cost_corridor(resistance: np.ndarray, patch_a: int, patch_b: int) -> t
     """
     from mixle.relations import ShortestPath
 
-    r = np.asarray(resistance, dtype=np.float64)
+    r = _require_valid_resistance(resistance)
+    src, snk = _require_valid_terminals([patch_a], [patch_b], r.size)
     shape = r.shape
     flat = r.reshape(-1)
     offsets = _rook_offsets(r.ndim)
@@ -240,8 +261,8 @@ def least_cost_corridor(resistance: np.ndarray, patch_a: int, patch_b: int) -> t
                 out.append((nb, cost))
         return out
 
-    target = int(patch_b)
-    relation = ShortestPath(int(patch_a), successors, is_goal=lambda c: c == target, sense="min")
+    target = snk[0]
+    relation = ShortestPath(src[0], successors, is_goal=lambda c: c == target, sense="min")
     solution = relation.solve()
     if solution is None:
         return float("inf"), []
@@ -267,19 +288,35 @@ def _conductance_edges(resistance: np.ndarray) -> tuple[int, list[tuple[int, int
                 continue  # each undirected pair visited once, from its lower-indexed endpoint
             cost = _edge_cost(flat, node, nb)
             if np.isfinite(cost) and cost > 0.0:
-                edges.append((node, nb, 1.0 / cost))
+                if cost < 1.0 / np.finfo(np.float64).max:
+                    raise ValueError(
+                        f"resistance between cells {node} and {nb} implies unrepresentable conductance"
+                    )
+                conductance = 1.0 / cost
+                if not np.isfinite(conductance):
+                    raise ValueError(
+                        f"resistance between cells {node} and {nb} implies unrepresentable conductance"
+                    )
+                edges.append((node, nb, conductance))
     return n, edges
 
 
-def _graph_laplacian(n: int, edges: list[tuple[int, int, float]]) -> np.ndarray:
-    """Dense ``(n, n)`` weighted graph Laplacian: ``L[i,i] = sum(incident conductances)``, ``L[i,j] = -c_ij``."""
-    laplacian = np.zeros((n, n), dtype=np.float64)
+def _graph_laplacian(n: int, edges: list[tuple[int, int, float]]) -> sparse.csr_matrix:
+    """Sparse weighted graph Laplacian with memory proportional to nodes plus edges."""
+    diagonal = np.zeros(n, dtype=np.float64)
+    rows: list[int] = []
+    cols: list[int] = []
+    values: list[float] = []
     for i, j, c in edges:
-        laplacian[i, i] += c
-        laplacian[j, j] += c
-        laplacian[i, j] -= c
-        laplacian[j, i] -= c
-    return laplacian
+        diagonal[i] += c
+        diagonal[j] += c
+        rows.extend((i, j))
+        cols.extend((j, i))
+        values.extend((-c, -c))
+    rows.extend(range(n))
+    cols.extend(range(n))
+    values.extend(diagonal.tolist())
+    return sparse.coo_matrix((values, (rows, cols)), shape=(n, n), dtype=np.float64).tocsr()
 
 
 def _reachable(n: int, edges: list[tuple[int, int, float]], start: set[int]) -> set[int]:
@@ -336,11 +373,17 @@ def effective_conductance(resistance: np.ndarray, sources: Sequence[int], sinks:
     src, snk = _require_valid_terminals(sources, sinks, n)
 
     _, edges = _conductance_edges(r)
+    if not edges:
+        return 0.0
+    scale = max(c for _i, _j, c in edges)
+    scaled_edges = [(i, j, c / scale) for i, j, c in edges]
+    if any(c == 0.0 or not np.isfinite(c) for _i, _j, c in scaled_edges):
+        raise ValueError("conductance dynamic range cannot be represented after stable rescaling")
     boundary = set(src) | set(snk)
-    reached = _reachable(n, edges, boundary)
+    reached = _reachable(n, scaled_edges, boundary)
     free = [i for i in range(n) if i not in boundary and i in reached]
 
-    laplacian = _graph_laplacian(n, edges)
+    laplacian = _graph_laplacian(n, scaled_edges)
     v = np.zeros(n, dtype=np.float64)
     v[src] = 1.0
     v[snk] = 0.0
@@ -348,13 +391,18 @@ def effective_conductance(resistance: np.ndarray, sources: Sequence[int], sinks:
     if free:
         free_idx = np.array(free)
         boundary_idx = np.array(sorted(boundary))
-        L_ff = laplacian[np.ix_(free_idx, free_idx)]
-        L_fd = laplacian[np.ix_(free_idx, boundary_idx)]
+        L_ff = laplacian[free_idx][:, free_idx]
+        L_fd = laplacian[free_idx][:, boundary_idx]
         rhs = -(L_fd @ v[boundary_idx])
-        v[free_idx] = np.linalg.solve(L_ff, rhs)
+        v[free_idx] = spsolve(L_ff, rhs)
 
-    current_out = float(np.sum(laplacian[src, :] @ v))
-    return current_out
+    current_scaled = float(np.sum(laplacian[src, :] @ v))
+    if not np.isfinite(current_scaled) or current_scaled < -1e-12:
+        raise ValueError("effective conductance is not a finite non-negative value")
+    result = max(0.0, current_scaled) * scale
+    if not np.isfinite(result):
+        raise ValueError("effective conductance exceeds the representable finite range")
+    return result
 
 
 def habitat_connectivity(resistance: np.ndarray, sources: Sequence[int], sinks: Sequence[int]) -> float:
@@ -370,47 +418,113 @@ def habitat_connectivity(resistance: np.ndarray, sources: Sequence[int], sinks: 
     return effective_conductance(resistance, sources, sinks)
 
 
-def _conductance_network(
+@dataclass(slots=True)
+class _FlowArc:
+    """Mutable residual-network arc."""
+
+    target: int
+    reverse: int
+    capacity: float
+
+
+def _sparse_max_flow(
     resistance: np.ndarray, sources: Sequence[int], sinks: Sequence[int]
-) -> tuple[np.ndarray, int, int]:
-    """Build the ``(n + 2, n + 2)`` super-source/-sink conductance capacity matrix for max-flow/min-cut.
-
-    Node ``i < n`` is grid cell ``i`` (row-major flat index); node ``n`` is a super-source wired to every
-    cell in ``sources`` and node ``n + 1`` a super-sink wired from every cell in ``sinks``, each at a
-    capacity derived from the network itself (see below). Rook-adjacent cells get a *symmetric* capacity
-    (current can flow either way) equal to the conductance ``1 / edge_cost`` of the movement cost between
-    them (the circuit-theory analogue of :func:`least_cost_corridor`'s edge cost); a non-finite edge cost
-    (a mined-out cell) yields zero conductance, i.e. no arc.
-
-    The super-arc capacity used to be a fixed constant (``1e6``), claimed to exceed every real cell-to-cell
-    conductance; that claim is false for any raster with sufficiently low resistance (MXR-080-0072: two
-    cells of resistance ``1e-9`` have conductance ``1e9``), which silently capped the reported connectivity
-    at the constant instead of the network's real value. The capacity used here is instead strictly more
-    than the sum of every real edge's conductance in the graph -- an upper bound on any flow the internal
-    network could possibly carry regardless of how extreme the input resistances are -- so the super-arcs
-    can never themselves be the bottleneck.
-    """
+) -> tuple[float, list[tuple[int, int]]]:
+    """Float-capacity FIFO push-relabel flow using O(nodes + edges) storage."""
     r = _require_valid_resistance(resistance)
     n = r.size
     src, snk = _require_valid_terminals(sources, sinks, n)
-
     _, edges = _conductance_edges(r)
-    cap = np.zeros((n + 2, n + 2), dtype=np.float64)
+    if not edges:
+        return 0.0, []
+    scale = max(c for _i, _j, c in edges)
+    scaled_edges = [(i, j, c / scale) for i, j, c in edges]
+    if any(c == 0.0 or not np.isfinite(c) for _i, _j, c in scaled_edges):
+        raise ValueError("conductance dynamic range cannot be represented after stable rescaling")
     source_node, sink_node = n, n + 1
-    total_conductance = 0.0
-    for i, j, c in edges:
-        cap[i, j] = c
-        cap[j, i] = c
-        total_conductance += c
-    # Strictly exceeds the total conductance of every edge in the graph -- and therefore the max possible
-    # flow through the internal network -- so the terminal arcs never themselves bottleneck the flow;
-    # `+ 1.0` keeps it strictly positive even for a totally edge-less (e.g. single-cell) raster.
-    terminal_capacity = total_conductance + 1.0
+    node_count = n + 2
+    graph: list[list[_FlowArc]] = [[] for _ in range(node_count)]
+    original: list[tuple[int, int]] = []
+
+    def add_arc(i: int, j: int, capacity: float, *, internal: bool = False) -> None:
+        forward = _FlowArc(j, len(graph[j]), capacity)
+        reverse = _FlowArc(i, len(graph[i]), 0.0)
+        graph[i].append(forward)
+        graph[j].append(reverse)
+        if internal:
+            original.append((i, j))
+
+    for i, j, c in scaled_edges:
+        add_arc(i, j, c, internal=True)
+        add_arc(j, i, c, internal=True)
+    terminal_capacity = sum(c for _i, _j, c in scaled_edges) + 1.0
     for s in src:
-        cap[source_node, s] = terminal_capacity
+        add_arc(source_node, s, terminal_capacity)
     for t in snk:
-        cap[t, sink_node] = terminal_capacity
-    return cap, source_node, sink_node
+        add_arc(t, sink_node, terminal_capacity)
+
+    tolerance = 0.0
+    height = np.zeros(node_count, dtype=np.int64)
+    excess = np.zeros(node_count, dtype=np.float64)
+    current = np.zeros(node_count, dtype=np.int64)
+    queued = np.zeros(node_count, dtype=bool)
+    active: deque[int] = deque()
+    height[source_node] = node_count
+
+    def enqueue(node: int) -> None:
+        if node not in (source_node, sink_node) and excess[node] > tolerance and not queued[node]:
+            queued[node] = True
+            active.append(node)
+
+    for arc in graph[source_node]:
+        amount = arc.capacity
+        if amount <= tolerance:
+            continue
+        arc.capacity = 0.0
+        graph[arc.target][arc.reverse].capacity += amount
+        excess[source_node] -= amount
+        excess[arc.target] += amount
+        enqueue(arc.target)
+
+    while active:
+        node = active.popleft()
+        queued[node] = False
+        while excess[node] > tolerance:
+            arc_index = int(current[node])
+            if arc_index >= len(graph[node]):
+                residual_heights = [
+                    int(height[arc.target]) for arc in graph[node] if arc.capacity > tolerance
+                ]
+                if not residual_heights:
+                    break
+                height[node] = min(residual_heights) + 1
+                current[node] = 0
+                continue
+            arc = graph[node][arc_index]
+            if arc.capacity > tolerance and height[node] == height[arc.target] + 1:
+                amount = min(excess[node], arc.capacity)
+                arc.capacity = max(0.0, arc.capacity - amount)
+                graph[arc.target][arc.reverse].capacity += amount
+                excess[node] -= amount
+                excess[arc.target] += amount
+                enqueue(arc.target)
+            else:
+                current[node] += 1
+        enqueue(node)
+
+    reached = {source_node}
+    queue = deque([source_node])
+    while queue:
+        u = queue.popleft()
+        for arc in graph[u]:
+            if arc.capacity > tolerance and arc.target not in reached:
+                reached.add(arc.target)
+                queue.append(arc.target)
+    cut = [(i, j) for i, j in original if i in reached and j not in reached]
+    result = float(excess[sink_node]) * scale
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError("maximum-flow connectivity is not a finite non-negative value")
+    return result, cut
 
 
 def max_flow_connectivity(resistance: np.ndarray, sources: Sequence[int], sinks: Sequence[int]) -> float:
@@ -427,11 +541,8 @@ def max_flow_connectivity(resistance: np.ndarray, sources: Sequence[int], sinks:
     edge to reach the sink (MXR-080-0071). This function exists as a distinctly-named, independently
     useful bottleneck-throughput metric in its own right -- never use it as a stand-in for the other.
     """
-    from mixle.relations import max_flow
-
-    cap, source_node, sink_node = _conductance_network(resistance, sources, sinks)
-    value, _flow = max_flow(cap, source_node, sink_node)
-    return float(value)
+    value, _cut = _sparse_max_flow(resistance, sources, sinks)
+    return value
 
 
 def fragmentation_impact(
@@ -459,29 +570,20 @@ def fragmentation_impact(
         minimum-cut arcs (:func:`mixle.relations.min_cut`), i.e. the single weakest link a footprint would
         need to sever to maximally damage connectivity.
     """
-    from mixle.relations import min_cut
-
-    resistance = np.asarray(resistance, dtype=np.float64)
-    mask = np.asarray(footprint_mask, dtype=bool)
-    if mask.shape != resistance.shape:
-        raise ValueError(f"footprint_mask shape {mask.shape} does not match resistance shape {resistance.shape}")
+    resistance = _require_valid_resistance(resistance)
+    src, snk = _require_valid_terminals(sources, sinks, resistance.size)
+    mask = _require_binary_mask(footprint_mask, resistance.shape, "footprint_mask")
     mined = resistance.copy()
     mined[mask] = np.inf
 
-    sources = list(sources)
-    sinks = list(sinks)
-    patch_a, patch_b = int(sources[0]), int(sinks[0])
+    patch_a, patch_b = src[0], snk[0]
 
     corridor_baseline, _ = least_cost_corridor(resistance, patch_a, patch_b)
     corridor_mined, _ = least_cost_corridor(mined, patch_a, patch_b)
 
-    connectivity_baseline = habitat_connectivity(resistance, sources, sinks)
-    connectivity_mined = habitat_connectivity(mined, sources, sinks)
-
-    cap, source_node, sink_node = _conductance_network(resistance, sources, sinks)
-    n = resistance.size
-    _cut_value, _side, cut_edges = min_cut(cap, source_node, sink_node)
-    mincut_edges = [(u, v) for u, v in cut_edges if u < n and v < n]
+    connectivity_baseline = habitat_connectivity(resistance, src, snk)
+    connectivity_mined = habitat_connectivity(mined, src, snk)
+    _cut_value, mincut_edges = _sparse_max_flow(resistance, src, snk)
 
     return {
         "corridor_resistance_baseline": corridor_baseline,
@@ -505,12 +607,8 @@ def _lost_equivalents(plan_footprint: Any, habitat: HabitatModel) -> tuple[np.nd
             negative habitat field used to propagate silently into the no-net-loss accounting below
             (MXR-080-0073); it is now rejected here, at the one place both public functions read it from.
     """
-    footprint = np.asarray(plan_footprint, dtype=bool)
     suitability = _require_finite_nonnegative(np.asarray(habitat.mean, dtype=np.float64), "habitat.mean")
-    if footprint.shape != suitability.shape:
-        raise ValueError(
-            f"plan_footprint shape {footprint.shape} does not match habitat.mean shape {suitability.shape}"
-        )
+    footprint = _require_binary_mask(plan_footprint, suitability.shape, "plan_footprint")
     area = _require_finite_positive(
         np.asarray(getattr(habitat, "cell_area", np.ones_like(suitability)), dtype=np.float64), "habitat.cell_area"
     )
