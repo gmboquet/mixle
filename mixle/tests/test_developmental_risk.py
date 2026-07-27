@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from mixle.analysis.developmental_risk import benchmark_dose, rfd_exceedance
+from mixle.analysis.developmental_risk import BMDResult, benchmark_dose, rfd_exceedance
 
 
 def test_bmdl_matches_reference():
@@ -292,14 +292,14 @@ def _valid_bmd_result():
     return benchmark_dose(doses, n_affected, n_total, bmr=0.10)
 
 
-@pytest.mark.parametrize("uf", [0.0, -5.0, float("nan"), float("inf")])
+@pytest.mark.parametrize("uf", [True, 0.0, -5.0, float("nan"), float("inf"), np.array([100.0])])
 def test_rejects_bad_uncertainty_factor(uf):
     result = _valid_bmd_result()
-    with pytest.raises(ValueError, match="uf"):
+    with pytest.raises((TypeError, ValueError), match="uf"):
         rfd_exceedance(np.array([1.0, 2.0, 3.0]), result, uf=uf, n=3, rng=np.random.default_rng(0))
 
 
-@pytest.mark.parametrize("n", [0, -3, 2.5, float("nan")])
+@pytest.mark.parametrize("n", [True, 0, -3, 2.5, 3.0, float("nan")])
 def test_rejects_bad_sample_count(n):
     result = _valid_bmd_result()
     with pytest.raises(ValueError, match="n must be"):
@@ -331,8 +331,52 @@ def test_rejects_non_finite_bmdl():
     n_affected = np.array([10.0, 11.0, 9.0, 10.0])  # flat curve -> unidentifiable
     flat_result = benchmark_dose(doses, n_affected, n_total, bmr=0.10)
     assert flat_result.status == "unidentifiable"
-    with pytest.raises(ValueError, match="not finite"):
+    with pytest.raises(ValueError, match="not 'ok'"):
         rfd_exceedance(np.array([1.0, 2.0, 3.0]), flat_result, uf=100.0, n=3, rng=np.random.default_rng(0))
+
+
+def test_bmd_result_enforces_a_closed_immutable_state_machine():
+    valid = BMDResult(
+        bmd=2.0,
+        bmdl=1.0,
+        bmr=0.1,
+        model="loglogistic",
+        dof=3,
+        status="ok",
+        bmd_se=0.2,
+    )
+    assert valid.converged is True
+    with pytest.raises((AttributeError, TypeError)):
+        valid.status = "unidentifiable"
+    with pytest.raises(ValueError):
+        valid._coef[0] = 10.0
+
+    invalid_states = [
+        dict(bmd=2.0, bmdl=1.0, bmr=0.1, model="bogus", dof=3, status="ok", bmd_se=0.2),
+        dict(bmd=2.0, bmdl=-1.0, bmr=0.1, model="loglogistic", dof=3, status="ok", bmd_se=0.2),
+        dict(bmd=1.0, bmdl=2.0, bmr=0.1, model="loglogistic", dof=3, status="ok", bmd_se=0.2),
+        dict(bmd=2.0, bmdl=1.0, bmr=1.1, model="loglogistic", dof=3, status="ok", bmd_se=0.2),
+        dict(bmd=2.0, bmdl=1.0, bmr=0.1, model="loglogistic", dof=3, status="bogus", bmd_se=0.2),
+        dict(
+            bmd=2.0,
+            bmdl=float("nan"),
+            bmr=0.1,
+            model="loglogistic",
+            dof=3,
+            status="unidentifiable",
+        ),
+        dict(
+            bmd=2.0,
+            bmdl=1.0,
+            bmr=0.1,
+            model="loglogistic",
+            dof=3,
+            status="bmdl_unavailable",
+        ),
+    ]
+    for kwargs in invalid_states:
+        with pytest.raises((TypeError, ValueError)):
+            BMDResult(**kwargs)
 
 
 def test_valid_rfd_exceedance_call_still_works():
@@ -345,6 +389,12 @@ def test_valid_rfd_exceedance_call_still_works():
 
     dq_scalar = rfd_exceedance(5.0, result, uf=100.0, n=10, rng=rng)
     assert dq_scalar.samples.shape == (10,)
+
+
+def test_rfd_exceedance_rejects_ambiguous_plain_exposure_axes():
+    result = _valid_bmd_result()
+    with pytest.raises(ValueError, match="one-dimensional"):
+        rfd_exceedance(np.ones((3, 2)), result, n=3, rng=np.random.default_rng(0))
 
 
 # Follow-up sweep (companion to MXR-080-0074/0075's fix in carcinogenic_risk.py): the same two
@@ -404,6 +454,8 @@ def test_sample_derived_quantity_rejects_empty_or_non_finite_samples():
         _SampleDerivedQuantity(samples=np.array([0.0, np.nan, 1.0]))
     with pytest.raises(ValueError):
         _SampleDerivedQuantity(samples=np.array([0.0, np.inf, 1.0]))
+    with pytest.raises(ValueError):
+        _SampleDerivedQuantity(samples=np.ones((2, 2)))
 
 
 def test_sample_derived_quantity_accepts_valid_samples():
@@ -437,5 +489,12 @@ def test_rfd_exceedance_posterior_with_legitimate_draws_still_works():
     result = _valid_bmd_result()
     draws = np.array([[0.001], [0.01], [100.0]])
     dq = rfd_exceedance(_RawDrawPosterior(draws), result, uf=100.0, n=3, rng=np.random.default_rng(0))
-    assert np.asarray(dq.samples).shape[0] == 3
+    assert np.asarray(dq.samples).shape == (3,)
     assert set(np.unique(dq.samples)).issubset({0.0, 1.0})
+
+
+@pytest.mark.parametrize("draws", [np.ones((3, 2)), np.ones((2, 1)), np.ones((3, 1, 1))])
+def test_rfd_exceedance_rejects_posterior_draws_with_ambiguous_or_wrong_axes(draws):
+    result = _valid_bmd_result()
+    with pytest.raises(ValueError, match="exactly one scalar"):
+        rfd_exceedance(_RawDrawPosterior(draws), result, uf=100.0, n=3, rng=np.random.default_rng(0))
