@@ -29,6 +29,10 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    finite_observation,
+    finite_observations,
+)
 
 
 class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
@@ -59,18 +63,22 @@ class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
         return math.exp(self.log_density(x))
 
     def log_density(self, x: float) -> float:
-        """Return the log-density at ``x`` (-inf for x <= 0)."""
+        """Return the log-density at ``x``, including the exact limit at zero."""
         xv = float(x)
-        if xv <= 0.0:
+        if xv < 0.0:
             return -math.inf
+        if xv == 0.0:
+            return self._log_const if self.m == 0.5 else -math.inf
         return self._log_const + (2.0 * self.m - 1.0) * math.log(xv) - self._m_over_omega * xv * xv
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density for a sequence-encoded array of observations."""
         xv = np.asarray(x, dtype=np.float64)
+        exponent = 2.0 * self.m - 1.0
         with np.errstate(divide="ignore", invalid="ignore"):
-            out = self._log_const + (2.0 * self.m - 1.0) * np.log(xv) - self._m_over_omega * xv * xv
-        return np.where(xv > 0.0, out, -np.inf)
+            log_x = np.where(exponent == 0.0, 0.0, np.log(xv))
+            out = self._log_const + exponent * log_x - self._m_over_omega * xv * xv
+        return np.where(xv >= 0.0, out, -np.inf)
 
     # --- compute-engine backend (numpy + torch/GPU): scoring + sufficient statistics in engine ops ---
     @classmethod
@@ -90,7 +98,7 @@ class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
             distribution_type=cls,
             parameters=(ParameterSpec("m", constraint="positive"), ParameterSpec("omega", constraint="positive")),
             statistics=(StatisticSpec("count"), StatisticSpec("sum_x2"), StatisticSpec("sum_x4")),
-            support="positive",
+            support="nonnegative_real",
             legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
         )
 
@@ -103,10 +111,15 @@ class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def backend_log_density_from_params(x: Any, m: Any, omega: Any, engine: Any) -> Any:
-        """Engine-neutral Nakagami log-density from explicit parameters (``-inf`` for ``x <= 0``)."""
+        """Engine-neutral Nakagami log-density with the exact limit at zero."""
         log_const = engine.log(engine.asarray(2.0)) + m * engine.log(m) - engine.gammaln(m) - m * engine.log(omega)
-        out = log_const + (2.0 * m - 1.0) * engine.log(x) - (m / omega) * x * x
-        return engine.where(x > 0.0, out, engine.asarray(float("-inf")))
+        exponent = 2.0 * m - 1.0
+        safe_x = engine.where(x > 0.0, x, engine.asarray(1.0))
+        safe_log_x = engine.log(safe_x)
+        out = log_const + exponent * safe_log_x - (m / omega) * x * x
+        neg_inf = engine.asarray(float("-inf"))
+        at_zero = engine.where(exponent == 0.0, log_const, neg_inf)
+        return engine.where(x > 0.0, out, engine.where(x == 0.0, at_zero, neg_inf))
 
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
@@ -220,7 +233,7 @@ class NakagamiAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: float, weight: float, estimate: NakagamiDistribution | None) -> None:
         """Accumulate weighted second and fourth power sums for one observation."""
-        x2 = float(x) ** 2
+        x2 = finite_observation(x, label="Nakagami observation", minimum=0.0) ** 2
         self.count += weight
         self.s2 += weight * x2
         self.s4 += weight * x2 * x2
@@ -231,7 +244,7 @@ class NakagamiAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
         """Accumulate weighted second and fourth power sums from encoded data."""
-        x2 = np.asarray(x, dtype=np.float64) ** 2
+        x2 = finite_observations(x, label="Nakagami observations", minimum=0.0) ** 2
         w = np.asarray(weights, dtype=np.float64)
         self.count += float(w.sum())
         self.s2 += float(np.dot(w, x2))
@@ -323,4 +336,4 @@ class NakagamiDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
         """Encode observations as a floating-point array."""
-        return np.asarray(x, dtype=np.float64)
+        return finite_observations(x, label="Nakagami observations", minimum=0.0)

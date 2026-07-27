@@ -1936,6 +1936,7 @@
         "TruncatedStatistics",
         "TweedieDistribution",
         "TweedieEstimator",
+        "TweedieSeriesResourceError",
         "TypeDispatch",
         "UniformDistribution",
         "UniformEstimator",

@@ -55,8 +55,8 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def __init__(self, mu: float, b: float, name: str | None = None, keys: str | None = None) -> None:
-        if b <= 0.0 or not np.isfinite(b):
-            raise ValueError("LaplaceDistribution requires b > 0.")
+        if not np.isfinite(mu) or b <= 0.0 or not np.isfinite(b):
+            raise ValueError("LaplaceDistribution requires finite mu and b > 0.")
         self.mu = float(mu)
         self.b = float(b)
         self.log_const = -math.log(2.0 * self.b)

@@ -33,6 +33,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import finite_observations
 
 
 def _excess_kurtosis(beta: float) -> float:
@@ -44,6 +45,8 @@ class GeneralizedGaussianDistribution(SequenceEncodableProbabilityDistribution):
     """Generalized Gaussian (exponential power) with location ``mu``, scale ``alpha`` and shape ``beta``."""
 
     def __init__(self, mu: float, alpha: float, beta: float, name: str | None = None, keys: str | None = None) -> None:
+        if not np.isfinite(mu):
+            raise ValueError("GeneralizedGaussianDistribution requires finite mu.")
         if alpha <= 0.0 or not np.isfinite(alpha):
             raise ValueError("GeneralizedGaussianDistribution requires finite alpha > 0.")
         if beta <= 0.0 or not np.isfinite(beta):
@@ -327,4 +330,4 @@ class GeneralizedGaussianDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
         """Encode observations as a floating-point array."""
-        return np.asarray(x, dtype=np.float64)
+        return finite_observations(x, label="generalized-Gaussian observations")
