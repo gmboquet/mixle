@@ -1,9 +1,8 @@
 """Exponential-family canonical-map test for IntegerMultinomial (WS-J).
 
 IntegerMultinomial (with no separate length/trials distribution) is an exponential family with the
-per-category count vector ``T(x)``, natural parameter ``eta = log(p_vec)``, ``A = 0`` and base
-``h(x) = 0`` on the support ``[min_val, min_val+K)``. This density omits the multinomial coefficient,
-so ``log p(x) = sum_k count_k * log p_k``. Because ``eta`` has ``-inf`` entries when a category has
+per-category count vector ``T(x)``, natural parameter ``eta = log(p_vec)``, ``A = 0`` and a base
+measure equal to the multinomial coefficient on ``[min_val, min_val+K)``. Because ``eta`` has ``-inf`` entries when a category has
 ``p = 0``, the generic ``<eta, T>`` dot form is NaN-prone (``0 * -inf``) for zero-count categories —
 so the spec sets ``runtime_scoring=False``: scoring keeps its safe indexing backend path while
 ``to_exponential_family`` still exposes the canonical map. Standalone to avoid the shared

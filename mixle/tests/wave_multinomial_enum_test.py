@@ -5,11 +5,8 @@ IntegerMultinomialDistribution (mixle/stats/int_multinomial.py) against brute fo
 tiny base (3 categories, trial counts <= 3): non-increasing order, exact multiset
 de-duplication, log_prob == log_density, and top-k agreement with the brute-force top-k.
 
-Note the density forms actually implemented: neither distribution includes the
-multinomial coefficient in log_density. IntegerMultinomialDistribution's support is
-countably infinite on the category term alone (sum_k n_k * log p_k); with the default
-Null len_dist that term IS the full log_density, but a real len_dist adds its own
-log-density of the total trial count, exactly like the sibling MultinomialDistribution.
+Both distributions include the multinomial base-measure coefficient. A real trial-count
+distribution is required for exact joint enumeration over lengths.
 """
 
 import itertools
@@ -52,91 +49,26 @@ def tiers(pairs):
 
 
 class MultinomialEnumeratorTestCase(unittest.TestCase):
-    """MultinomialDistribution (categorical base) enumeration against brute force."""
+    """Generic categorical support fails closed until a finite support manifest exists."""
 
     def setUp(self):
         self.base = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
         self.len_dist = IntegerCategoricalDistribution(0, [0.15, 0.25, 0.35, 0.25])
         self.dist = MultinomialDistribution(self.base, len_dist=self.len_dist)
-        with np.errstate(divide="ignore"):
-            brute = [(v, self.dist.log_density(v)) for v in multisets("abc", 3)]
-        brute = [(v, lp) for v, lp in brute if lp > -np.inf]
-        brute.sort(key=lambda u: -u[1])
-        self.brute = brute
 
-    def test_order_non_increasing(self):
-        items = list(self.dist.enumerator())
-        lps = [lp for _, lp in items]
-        for i in range(len(lps) - 1):
-            self.assertGreaterEqual(lps[i], lps[i + 1] - TOL, "order violated at %d" % i)
-
-    def test_log_prob_matches_log_density(self):
-        for v, lp in self.dist.enumerator():
-            self.assertAlmostEqual(lp, self.dist.log_density(v), delta=TOL, msg="lp mismatch at %r" % (v,))
-
-    def test_values_deduped_as_multisets(self):
-        items = list(self.dist.enumerator())
-        keys = [canon(v) for v, _ in items]
-        self.assertEqual(len(keys), len(set(keys)), "duplicate multisets yielded")
-
-    def test_complete_and_matches_brute_force(self):
-        # 1 + 3 + 6 + 10 multisets of sizes 0..3 over three categories.
-        items = list(self.dist.enumerator())
-        self.assertEqual(len(items), 20)
-        self.assertEqual(len(self.brute), 20)
-        np.testing.assert_allclose(
-            [lp for _, lp in items], [lp for _, lp in self.brute], atol=TOL, err_msg="score sequence mismatch"
-        )
-        self.assertEqual(tiers(items), tiers(self.brute), "tier values mismatch")
-
-    def test_top_k_matches_brute_force_top_k(self):
-        for k in (1, 3, 7, 12):
-            top = self.dist.enumerator().top_k(k)
-            self.assertEqual(len(top), k)
-            np.testing.assert_allclose([lp for _, lp in top], [lp for _, lp in self.brute[:k]], atol=TOL)
-            # Tie-safe value comparison: drop the (possibly split) trailing tier of each side.
-            full_tiers = tiers(self.brute)
-            for tier, values in tiers(top).items():
-                if tier > round(top[-1][1], 8):
-                    self.assertEqual(values, full_tiers[tier], "tier %r mismatch at k=%d" % (tier, k))
-                else:
-                    self.assertTrue(values <= full_tiers[tier], "tier %r not a subset at k=%d" % (tier, k))
-
-    def test_infinite_length_distribution(self):
-        dist = MultinomialDistribution(self.base, len_dist=GeometricDistribution(0.5))
-        items = dist.enumerator().top_k(25)
-        self.assertEqual(len(items), 25)
-        lps = [lp for _, lp in items]
-        for i in range(len(lps) - 1):
-            self.assertGreaterEqual(lps[i], lps[i + 1] - TOL)
-        for v, lp in items:
-            self.assertAlmostEqual(lp, dist.log_density(v), delta=TOL)
-        keys = [canon(v) for v, _ in items]
-        self.assertEqual(len(keys), len(set(keys)))
-        # Mass dominance: anything strictly more probable than the cutoff must be present.
-        # The empty multiset is skipped: the geometric support starts at 1, but its
-        # log_density applies the pmf formula outside the support too (density 1 at n=0).
-        cutoff = lps[-1]
-        seen = set(keys)
-        for v in multisets("abc", 8):
-            if len(v) > 0 and dist.log_density(v) > cutoff + TOL:
-                self.assertIn(canon(v), seen, "missing %r" % (v,))
-
-    def test_null_len_dist_raises(self):
-        with self.assertRaises(EnumerationError):
-            MultinomialDistribution(self.base).enumerator()
-
-    def test_len_normalized_raises(self):
-        with self.assertRaises(EnumerationError):
-            MultinomialDistribution(self.base, len_dist=self.len_dist, len_normalized=True).enumerator()
-
-    def test_non_enumerable_base_names_child(self):
+    def test_generic_support_is_not_misrepresented_as_exact(self):
         with self.assertRaises(EnumerationError) as cm:
-            MultinomialDistribution(GaussianDistribution(0.0, 1.0), len_dist=self.len_dist).enumerator()
-        self.assertIn("MultinomialDistribution.dist", str(cm.exception))
-        with self.assertRaises(EnumerationError) as cm:
-            MultinomialDistribution(self.base, len_dist=GaussianDistribution(0.0, 1.0)).enumerator()
-        self.assertIn("MultinomialDistribution.len_dist", str(cm.exception))
+            self.dist.enumerator()
+        self.assertIn("support manifest", str(cm.exception))
+
+    def test_all_length_and_normalization_modes_fail_closed(self):
+        for dist in (
+            MultinomialDistribution(self.base),
+            MultinomialDistribution(self.base, len_dist=GeometricDistribution(0.5)),
+            MultinomialDistribution(self.base, len_dist=self.len_dist, len_normalized=True),
+        ):
+            with self.subTest(dist=dist), self.assertRaises(EnumerationError):
+                dist.enumerator()
 
 
 class IntegerMultinomialEnumeratorTestCase(unittest.TestCase):
@@ -146,7 +78,15 @@ class IntegerMultinomialEnumeratorTestCase(unittest.TestCase):
     TOP_K = 30
 
     def setUp(self):
-        self.dist = IntegerMultinomialDistribution(1, [0.5, 0.3, 0.2])
+        self.lengths = IntegerCategoricalDistribution(
+            0,
+            np.ones(self.BRUTE_MAX_N + 1) / (self.BRUTE_MAX_N + 1),
+        )
+        self.dist = IntegerMultinomialDistribution(
+            1,
+            [0.5, 0.3, 0.2],
+            len_dist=self.lengths,
+        )
         brute = [(v, self.dist.log_density(v)) for v in multisets((1, 2, 3), self.BRUTE_MAX_N)]
         brute.sort(key=lambda u: -u[1])
         self.brute = brute
@@ -166,12 +106,7 @@ class IntegerMultinomialEnumeratorTestCase(unittest.TestCase):
         self.assertEqual(len(keys), len(set(keys)), "duplicate multisets yielded")
 
     def test_top_k_matches_brute_force_top_k(self):
-        # Any count vector outside the brute-force bound scores below (BRUTE_MAX_N+1)*log(p_max),
-        # so once the cutoff sits above that the brute force covers everything enumerated.
         cutoff = self.items[-1][1]
-        self.assertGreater(
-            cutoff, (self.BRUTE_MAX_N + 1) * np.log(0.5) + TOL, "brute-force bound too small to certify the top-k"
-        )
         np.testing.assert_allclose(
             [lp for _, lp in self.items],
             [lp for _, lp in self.brute[: self.TOP_K]],
@@ -198,7 +133,9 @@ class IntegerMultinomialEnumeratorTestCase(unittest.TestCase):
         # scores now genuinely differ from the Null-len_dist baseline (self.items) rather than matching
         # it, since a real len_dist changes which count vectors are most probable.
         with_len = IntegerMultinomialDistribution(
-            1, [0.5, 0.3, 0.2], len_dist=IntegerCategoricalDistribution(0, [0.25, 0.25, 0.25, 0.25])
+            1,
+            [0.5, 0.3, 0.2],
+            len_dist=IntegerCategoricalDistribution(0, [0.1, 0.2, 0.3, 0.4]),
         )
         items = with_len.enumerator().top_k(10)
         lps = [lp for _, lp in items]
@@ -206,23 +143,23 @@ class IntegerMultinomialEnumeratorTestCase(unittest.TestCase):
             self.assertGreaterEqual(lps[i], lps[i + 1] - TOL, "order violated at %d" % i)
         for v, lp in items:
             self.assertAlmostEqual(lp, with_len.log_density(v), delta=TOL)
-        # a real len_dist must change the scores -- this is NOT expected to match the Null baseline.
+        # a different len_dist must change the scores.
         self.assertGreater(np.max(np.abs(np.asarray(lps) - np.asarray([lp for _, lp in self.items[:10]]))), TOL)
 
     def test_zero_probability_category_skipped(self):
-        dist = IntegerMultinomialDistribution(0, [0.6, 0.0, 0.4])
+        dist = IntegerMultinomialDistribution(0, [0.6, 0.0, 0.4], len_dist=self.lengths)
         for v, lp in dist.enumerator().top_k(15):
             self.assertTrue(all(cat in (0, 2) for cat, _ in v), "zero-probability category emitted in %r" % (v,))
             self.assertAlmostEqual(lp, dist.log_density(v), delta=TOL)
 
-    def test_degenerate_category_raises(self):
+    def test_missing_length_distribution_raises(self):
         with self.assertRaises(EnumerationError) as cm:
             IntegerMultinomialDistribution(0, [1.0, 0.0]).enumerator()
-        self.assertIn("probability one", str(cm.exception))
+        self.assertIn("trial-count distribution", str(cm.exception))
 
-    def test_no_positive_categories_yields_only_empty(self):
-        items = list(IntegerMultinomialDistribution(0, []).enumerator())
-        self.assertEqual(items, [([], 0.0)])
+    def test_empty_probability_vector_is_rejected(self):
+        with self.assertRaises(ValueError):
+            IntegerMultinomialDistribution(0, [])
 
 
 if __name__ == "__main__":

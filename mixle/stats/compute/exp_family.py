@@ -609,10 +609,11 @@ class MultinomialExponentialFamilyForm:
     """Canonical exponential-family view of a multinomial over an exp-family element.
 
     A multinomial observation is a bag ``{(v_j, c_j)}`` of values with counts, and the (non
-    length-normalized, no separate trial distribution) log-density is the count-weighted sum of the
-    element log-densities, ``sum_j c_j log p_0(v_j)``.  So the natural parameters are the element's
+    length-normalized, no separate trial distribution) log-density is the multinomial coefficient
+    plus the count-weighted sum of the element log-densities. So the natural parameters are the element's
     (``eta = eta_0``), the sufficient statistic is the count-weighted sum ``T(x) = sum_j c_j T_0(v_j)``,
-    ``log h(x) = sum_j c_j log h_0(v_j)``, and ``A`` is the element's per-trial partition (the joint
+    ``log h(x) = log(n! / prod_j c_j!) + sum_j c_j log h_0(v_j)``, and ``A`` is the element's
+    per-trial partition (the joint
     scales by the total count ``n = sum_j c_j``).  Built by
     :meth:`~mixle.stats.multivariate.categorical_multinomial.MultinomialDistribution.to_exponential_family`.
     """
@@ -632,7 +633,9 @@ class MultinomialExponentialFamilyForm:
 
     @staticmethod
     def _values_counts(obs: Any) -> tuple[list, np.ndarray]:
-        pairs = list(obs)
+        from mixle.stats.multivariate._multinomial_contracts import canonical_bag
+
+        pairs, _ = canonical_bag(obs)
         values = [vc[0] for vc in pairs]
         counts = np.asarray([float(vc[1]) for vc in pairs], dtype=np.float64)
         return values, counts
@@ -656,7 +659,9 @@ class MultinomialExponentialFamilyForm:
         return self.element.log_partition()
 
     def log_base_measure(self, x: Any) -> np.ndarray:
-        """Return ``log h(x) = sum_j c_j log h_0(v_j)`` per observation."""
+        """Return the multinomial coefficient plus child base measures."""
+        from mixle.stats.multivariate._multinomial_contracts import log_coefficient
+
         out = []
         for obs in x:
             values, counts = self._values_counts(obs)
@@ -664,11 +669,13 @@ class MultinomialExponentialFamilyForm:
                 out.append(0.0)
                 continue
             h = np.asarray(self.engine.to_numpy(self.element.log_base_measure(values)), dtype=np.float64)
-            out.append(float(np.dot(counts, h)))
+            out.append(log_coefficient(counts) + float(np.dot(counts, h)))
         return np.asarray(out, dtype=np.float64)
 
     def log_density(self, x: Any) -> np.ndarray:
-        """Return the reconstructed log-density ``sum_j c_j log p_0(v_j)`` per observation."""
+        """Return the normalized multinomial count-vector log mass per observation."""
+        from mixle.stats.multivariate._multinomial_contracts import log_coefficient
+
         out = []
         for obs in x:
             values, counts = self._values_counts(obs)
@@ -676,7 +683,7 @@ class MultinomialExponentialFamilyForm:
                 out.append(0.0)
                 continue
             lp = np.asarray(self.engine.to_numpy(self.element.log_density(values)), dtype=np.float64)
-            out.append(float(np.dot(counts, lp)))
+            out.append(log_coefficient(counts) + float(np.dot(counts, lp)))
         return np.asarray(out, dtype=np.float64)
 
     def mean_parameters(self, **kwargs: Any) -> np.ndarray:

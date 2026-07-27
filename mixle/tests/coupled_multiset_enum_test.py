@@ -109,7 +109,11 @@ class IntegerHiddenAssociationEnumerationTestCase(unittest.TestCase):
 
         state_prob = np.array([[0.5, 0.3, 0.2], [0.1, 0.4, 0.5]])  # (states, S2 words)
         cond_w = np.array([[0.7, 0.3], [0.2, 0.8]])  # (S1 words, states)
-        prev = IntegerMultinomialDistribution(0, [0.6, 0.4])  # S1 bag distribution
+        prev = IntegerMultinomialDistribution(
+            0,
+            [0.6, 0.4],
+            len_dist=IntegerCategoricalDistribution(1, np.ones(6) / 6.0),
+        )
         len_dist = IntegerCategoricalDistribution(0, [0.3, 0.5, 0.2])  # S2 sizes 0..2
         return IntegerHiddenAssociationDistribution(state_prob, cond_w, alpha=0.1, prev_dist=prev, len_dist=len_dist)
 
@@ -159,7 +163,11 @@ class HiddenAssociationEnumerationTestCase(unittest.TestCase):
                 1: CategoricalDistribution({"a": 0.1, "b": 0.4, "c": 0.5}),
             }
         )
-        given = IntegerMultinomialDistribution(0, [0.7, 0.3])
+        given = IntegerMultinomialDistribution(
+            0,
+            [0.7, 0.3],
+            len_dist=IntegerCategoricalDistribution(1, np.ones(8) / 8.0),
+        )
         return HiddenAssociationDistribution(
             cond, given_dist=given, len_dist=IntegerCategoricalDistribution(0, [0.3, 0.5, 0.2])
         )
