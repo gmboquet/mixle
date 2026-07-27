@@ -17,6 +17,12 @@ from mixle.stats.latent.gated_mixture import (
     GatedMixtureStatistics,
     SoftmaxGate,
 )
+from mixle.stats.latent.probabilistic_circuit import (
+    ProbabilisticCircuitDistribution,
+    ProbabilisticCircuitStatistics,
+    leaf,
+    summ,
+)
 from mixle.stats.latent.semi_supervised_hidden_markov_model import SemiSupervisedHiddenMarkovEstimator
 from mixle.stats.latent.semi_supervised_mixture import SemiSupervisedMixtureEstimatorAccumulator
 from mixle.stats.latent.tree_hidden_markov_model import TreeHiddenMarkovEstimator
@@ -140,6 +146,35 @@ class LatentEffectiveSampleContractTest(unittest.TestCase):
         estimator.estimate(3.0, statistics)
         self.assertEqual(first.nobs, [2.0])
         self.assertEqual(second.nobs, [1.0])
+
+    def test_circuit_leaves_receive_their_flow_mass(self):
+        model = ProbabilisticCircuitDistribution(
+            summ(
+                [
+                    leaf(0, CategoricalDistribution({"x": 1.0})),
+                    leaf(0, CategoricalDistribution({"y": 1.0})),
+                ],
+                [0.5, 0.5],
+            ),
+            num_vars=1,
+        )
+        estimator = model.estimator()
+        leaf_ids = tuple(estimator.leaf_estimators)
+        recorders = {
+            leaf_ids[0]: _RecordingEstimator(CategoricalDistribution({"x": 1.0})),
+            leaf_ids[1]: _RecordingEstimator(CategoricalDistribution({"y": 1.0})),
+        }
+        estimator.leaf_estimators = recorders
+        root_id = len(model.nodes) - 1
+        statistics = ProbabilisticCircuitStatistics(
+            {root_id: np.array([2.0, 1.0])},
+            {leaf_ids[0]: "first", leaf_ids[1]: "second"},
+            {leaf_ids[0]: 2.0, leaf_ids[1]: 1.0},
+            3.0,
+        )
+        estimator.estimate(3.0, statistics)
+        self.assertEqual(recorders[leaf_ids[0]].nobs, [2.0])
+        self.assertEqual(recorders[leaf_ids[1]].nobs, [1.0])
 
 
 if __name__ == "__main__":

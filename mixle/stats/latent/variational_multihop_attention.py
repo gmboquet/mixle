@@ -333,11 +333,13 @@ class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumula
 
     def update(self, x, weight, estimate) -> None:
         """Update from one weighted two-hop attention observation."""
+        weight = validated_observation_weight(weight)
         enc = VariationalMultiHopAttentionDataEncoder().seq_encode([x])
         self.seq_update(enc, np.array([weight], dtype=float), estimate)
 
     def initialize(self, x, weight, rng) -> None:
         """Initialize from one weighted two-hop attention observation."""
+        weight = validated_observation_weight(weight)
         enc = VariationalMultiHopAttentionDataEncoder().seq_encode([x])
         self.seq_initialize(enc, np.array([weight], dtype=float), rng)
 

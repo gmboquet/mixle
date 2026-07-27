@@ -351,6 +351,7 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
 
     def update(self, x, weight: float, estimate) -> None:
         """Update from one weighted latent-embedding attention observation."""
+        weight = validated_observation_weight(weight)
         enc = VariationalEmbeddingAttentionDataEncoder().seq_encode([x])
         self.seq_update(enc, np.array([weight], dtype=float), estimate)
 
@@ -368,6 +369,7 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
 
     def initialize(self, x, weight: float, rng: RandomState) -> None:
         """Initialize from one weighted latent-embedding attention observation."""
+        weight = validated_observation_weight(weight)
         enc = VariationalEmbeddingAttentionDataEncoder().seq_encode([x])
         self.seq_initialize(enc, np.array([weight], dtype=float), rng)
 

@@ -309,11 +309,13 @@ class ChainedAttentionAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x, weight: float, estimate) -> None:
         """Update from one weighted chained-attention observation."""
+        weight = validated_observation_weight(weight)
         enc = ChainedAttentionDataEncoder(self.num_symbols, self.num_targets).seq_encode([x])
         self.seq_update(enc, np.array([weight], dtype=float), estimate)
 
     def initialize(self, x, weight: float, rng: RandomState) -> None:
         """Initialize from one weighted chained-attention observation."""
+        weight = validated_observation_weight(weight)
         enc = ChainedAttentionDataEncoder(self.num_symbols, self.num_targets).seq_encode([x])
         self.seq_initialize(enc, np.array([weight], dtype=float), rng)
 

@@ -33,6 +33,12 @@ from mixle.stats.compute.mixture_evidence import (
     validated_probability_vector,
     validated_row_probability_matrix,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_statistic_tuple,
+)
 from mixle.stats.latent.markov_stopping import (
     require_terminal_reached,
     validate_terminal_reachability,
@@ -584,7 +590,9 @@ class SparseTransition(TransitionOperator):
         rs = np.asarray(a.sum(axis=1)).ravel()
         empty_rows = np.flatnonzero(rs == 0.0)
         if len(empty_rows):
-            raise ValueError(f"SparseTransition every state needs positive outgoing mass; empty rows {empty_rows.tolist()}.")
+            raise ValueError(
+                f"SparseTransition every state needs positive outgoing mass; empty rows {empty_rows.tolist()}."
+            )
         from scipy.sparse import diags
 
         self.a = diags(1.0 / rs) @ a  # row-normalized csr
@@ -900,11 +908,7 @@ class StructuredHMM:
         beta = np.zeros((T, self.K))
         beta[T - 1] = 1.0
         for t in range(T - 2, -1, -1):
-            beta[t] = (
-                op.backward(b[t + 1] * beta[t + 1]) / c[t + 1]
-                if c[t + 1] > 0
-                else np.zeros(self.K)
-            )
+            beta[t] = op.backward(b[t + 1] * beta[t + 1]) / c[t + 1] if c[t + 1] > 0 else np.zeros(self.K)
         gamma = alpha * beta
         gsum = gamma.sum(axis=1, keepdims=True)
         gamma = np.divide(gamma, gsum, out=np.zeros_like(gamma), where=gsum > 0)
@@ -1570,6 +1574,37 @@ def _copy_nested(value):
     return deepcopy(value)
 
 
+def _validated_structured_hmm_statistics(values, states, *, label, transition_count=None):
+    """Validate common structured/IO HMM statistic geometry."""
+    pi_acc, trans_acc, emit_vals, nk = validated_statistic_tuple(values, 4, label)
+    pi_acc = validated_count_array(pi_acc, (states,), f"{label} initial counts")
+    nk = validated_count_array(nk, (states,), f"{label} emission counts")
+    if not isinstance(emit_vals, (tuple, list)) or len(emit_vals) != states:
+        raise ValueError(f"{label} emission statistics must have one item per state")
+    if transition_count is not None and (
+        not isinstance(trans_acc, (tuple, list)) or len(trans_acc) != transition_count
+    ):
+        raise ValueError(f"{label} transition statistics must have {transition_count} entries")
+    return pi_acc, _copy_nested(trans_acc), tuple(emit_vals), nk
+
+
+def _validated_edhmm_statistics(values, states, durations, *, label):
+    """Validate explicit-duration HMM statistics and segment-mass laws."""
+    pi_acc, trans_acc, dur_acc, emit_vals, nk = validated_statistic_tuple(values, 5, label)
+    pi_acc = validated_count_array(pi_acc, (states,), f"{label} initial counts")
+    trans_acc = validated_count_array(trans_acc, (states, states), f"{label} transition counts")
+    dur_acc = validated_count_array(dur_acc, (states, durations), f"{label} duration counts")
+    nk = validated_count_array(nk, (states,), f"{label} emission counts")
+    if not isinstance(emit_vals, (tuple, list)) or len(emit_vals) != states:
+        raise ValueError(f"{label} emission statistics must have one item per state")
+    validate_effective_sample_mass(
+        dur_acc.sum(),
+        pi_acc.sum() + trans_acc.sum(),
+        label=f"{label} segment mass",
+    )
+    return pi_acc, trans_acc, dur_acc, tuple(emit_vals), nk
+
+
 class StructuredHMMDataEncoder(DataSequenceEncoder):
     """Sequences pass through as lists -- the structured forward-backward scores raw observations through
     the per-state emission ``log_density`` (no flattened columnar encoding; composability over raw speed)."""
@@ -1606,6 +1641,7 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x, weight, estimate):
         """Accumulate sufficient statistics from one weighted sequence."""
+        weight = validated_observation_weight(weight, "structured-HMM observation weight")
         self.seq_update([x], np.array([weight], dtype=float), estimate)
 
     def seq_update(self, x, weights, estimate):
@@ -1670,7 +1706,11 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat):
         """Merge serialized HMM sufficient statistics."""
-        pi_acc, trans_acc, emit_vals, nk = suff_stat
+        pi_acc, trans_acc, emit_vals, nk = _validated_structured_hmm_statistics(
+            suff_stat,
+            self.K,
+            label="structured-HMM sufficient statistics",
+        )
         self.pi_acc += pi_acc
         self.trans_acc = _add_nested(self.trans_acc, trans_acc)
         self.nk += nk
@@ -1689,11 +1729,10 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x):
         """Restore accumulator state from serialized sufficient statistics."""
-        self.pi_acc, self.trans_acc, emit_vals, self.nk = (
-            x[0].copy(),
-            _copy_nested(x[1]),
-            x[2],
-            x[3].copy(),
+        self.pi_acc, self.trans_acc, emit_vals, self.nk = _validated_structured_hmm_statistics(
+            x,
+            self.K,
+            label="structured-HMM sufficient statistics",
         )
         for k in range(self.K):
             self.emit[k].from_value(emit_vals[k])
@@ -1702,7 +1741,7 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
     def scale(self, factor):
         """Multiply the running statistics by ``factor`` -- the decay primitive online/streaming
         Baum-Welch (StreamingEstimator) uses to fold a new batch into a forgetting running estimate."""
-        f = float(factor)
+        f = validated_observation_weight(factor, "structured-HMM scale factor")
         self.pi_acc *= f
         self.trans_acc = _scale_nested(self.trans_acc, f)
         self.nk *= f
@@ -1789,7 +1828,12 @@ class StructuredHMMEstimator(ParameterEstimator):
 
     def estimate(self, nobs, suff_stat):
         """Estimate an HMM from Baum-Welch sufficient statistics."""
-        pi_acc, trans_acc, emit_vals, nk = suff_stat
+        pi_acc, trans_acc, emit_vals, nk = _validated_structured_hmm_statistics(
+            suff_stat,
+            len(self.emission_estimators),
+            label="structured-HMM sufficient statistics",
+        )
+        validate_effective_sample_mass(nobs, pi_acc.sum(), label="structured-HMM effective sample")
         pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else np.ones(len(pi_acc)) / len(pi_acc)
         transition = self.transition_proto.estimate(trans_acc)
         emissions = [self.emission_estimators[k].estimate(float(nk[k]), emit_vals[k]) for k in range(len(emit_vals))]
@@ -1960,9 +2004,7 @@ class InputOutputHMM:
             for index, (obs, values) in enumerate(zip(observations, raw_inputs)):
                 inputs = _validated_input_symbols(values, self.M, f"InputOutputHMM inputs row {index}")
                 if len(inputs) != len(obs):
-                    raise ValueError(
-                        f"InputOutputHMM inputs row {index} must contain exactly {len(obs)} symbols."
-                    )
+                    raise ValueError(f"InputOutputHMM inputs row {index} must contain exactly {len(obs)} symbols.")
                 split.append((obs, inputs))
         return np.array([self._forward_backward(self._log_b(obs), inputs)[5] for obs, inputs in split])
 
@@ -2246,6 +2288,7 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x, weight, estimate):
         """Accumulate sufficient statistics from one weighted IOHMM record."""
+        weight = validated_observation_weight(weight, "IOHMM observation weight")
         self.seq_update([x], np.array([weight], dtype=float), estimate)
 
     def seq_update(self, x, weights, estimate):
@@ -2309,7 +2352,12 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat):
         """Merge serialized IOHMM sufficient statistics."""
-        pi_acc, trans_accs, emit_vals, nk = suff_stat
+        pi_acc, trans_accs, emit_vals, nk = _validated_structured_hmm_statistics(
+            suff_stat,
+            self.K,
+            label="IOHMM sufficient statistics",
+            transition_count=self.M,
+        )
         self.pi_acc += pi_acc
         self.trans_accs = [_add_nested(a, b) for a, b in zip(self.trans_accs, trans_accs)]
         self.nk += nk
@@ -2328,14 +2376,24 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x):
         """Restore accumulator state from serialized IOHMM statistics."""
-        self.pi_acc, self.trans_accs, emit_vals, self.nk = (
-            x[0].copy(),
-            _copy_nested(x[1]),
-            x[2],
-            x[3].copy(),
+        self.pi_acc, self.trans_accs, emit_vals, self.nk = _validated_structured_hmm_statistics(
+            x,
+            self.K,
+            label="IOHMM sufficient statistics",
+            transition_count=self.M,
         )
         for k in range(self.K):
             self.emit[k].from_value(emit_vals[k])
+        return self
+
+    def scale(self, factor):
+        """Scale IOHMM transition, emission, and initial-state statistics."""
+        factor = validated_observation_weight(factor, "IOHMM scale factor")
+        self.pi_acc *= factor
+        self.trans_accs = _scale_nested(self.trans_accs, factor)
+        self.nk *= factor
+        for accumulator in self.emit:
+            accumulator.scale(factor)
         return self
 
     def acc_to_encoder(self):
@@ -2371,7 +2429,13 @@ class IOHMMEstimator(ParameterEstimator):
 
     def estimate(self, nobs, suff_stat):
         """Estimate an IOHMM from Baum-Welch sufficient statistics."""
-        pi_acc, trans_accs, emit_vals, nk = suff_stat
+        pi_acc, trans_accs, emit_vals, nk = _validated_structured_hmm_statistics(
+            suff_stat,
+            len(self.emission_estimators),
+            label="IOHMM sufficient statistics",
+            transition_count=len(self.transition_protos),
+        )
+        validate_effective_sample_mass(nobs, pi_acc.sum(), label="IOHMM effective sample")
         pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else np.ones(len(pi_acc)) / len(pi_acc)
         transitions = [self.transition_protos[m].estimate(trans_accs[m]) for m in range(len(trans_accs))]
         emissions = [self.emission_estimators[k].estimate(float(nk[k]), emit_vals[k]) for k in range(len(emit_vals))]
@@ -2839,6 +2903,7 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x, weight, estimate):
         """Accumulate sufficient statistics from one weighted sequence."""
+        weight = validated_observation_weight(weight, "explicit-duration HMM observation weight")
         self.seq_update([x], np.array([weight], dtype=float), estimate)
 
     def seq_update(self, x, weights, estimate):
@@ -2887,23 +2952,26 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
             raise ValueError("ExplicitDurationHMM initializer data contains an empty positive-weight sequence.")
         if not len(active_indices):
             return
-        self.trans_acc += rng.random((self.K, self.K))
-        np.fill_diagonal(self.trans_acc, 0.0)
-        self.dur_acc += rng.random((self.K, self.D))
         for index in active_indices:
             seq = sequences[index]
             w = weights[index]
-            g = rng.dirichlet(np.ones(self.K), len(seq))
-            self.pi_acc += w * g[0]
+            state_mass = rng.dirichlet(np.ones(self.K))
+            self.pi_acc += w * state_mass
+            self.dur_acc[:, min(len(seq), self.D) - 1] += w * state_mass
             for k in range(self.K):
                 enc = self.emit[k].acc_to_encoder().seq_encode(seq)
-                wk = g[:, k] * w
+                wk = np.full(len(seq), state_mass[k] * w)
                 self.emit[k].seq_initialize(enc, wk, rng)
                 self.nk[k] += float(wk.sum())
 
     def combine(self, suff_stat):
         """Merge serialized explicit-duration HMM sufficient statistics."""
-        pi_acc, trans_acc, dur_acc, emit_vals, nk = suff_stat
+        pi_acc, trans_acc, dur_acc, emit_vals, nk = _validated_edhmm_statistics(
+            suff_stat,
+            self.K,
+            self.D,
+            label="explicit-duration HMM sufficient statistics",
+        )
         self.pi_acc += pi_acc
         self.trans_acc += trans_acc
         self.dur_acc += dur_acc
@@ -2924,15 +2992,25 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x):
         """Restore accumulator state from serialized EDHMM statistics."""
-        self.pi_acc, self.trans_acc, self.dur_acc, emit_vals, self.nk = (
-            x[0].copy(),
-            x[1].copy(),
-            x[2].copy(),
-            x[3],
-            x[4].copy(),
+        self.pi_acc, self.trans_acc, self.dur_acc, emit_vals, self.nk = _validated_edhmm_statistics(
+            x,
+            self.K,
+            self.D,
+            label="explicit-duration HMM sufficient statistics",
         )
         for k in range(self.K):
             self.emit[k].from_value(emit_vals[k])
+        return self
+
+    def scale(self, factor):
+        """Scale explicit-duration HMM statistics."""
+        factor = validated_observation_weight(factor, "explicit-duration HMM scale factor")
+        self.pi_acc *= factor
+        self.trans_acc *= factor
+        self.dur_acc *= factor
+        self.nk *= factor
+        for accumulator in self.emit:
+            accumulator.scale(factor)
         return self
 
     def acc_to_encoder(self):
@@ -2973,7 +3051,17 @@ class EDHMMEstimator(ParameterEstimator):
 
     def estimate(self, nobs, suff_stat):
         """Estimate an explicit-duration HMM from segment posterior statistics."""
-        pi_acc, trans_acc, dur_acc, emit_vals, nk = suff_stat
+        pi_acc, trans_acc, dur_acc, emit_vals, nk = _validated_edhmm_statistics(
+            suff_stat,
+            self.k,
+            self.d,
+            label="explicit-duration HMM sufficient statistics",
+        )
+        validate_effective_sample_mass(
+            nobs,
+            pi_acc.sum(),
+            label="explicit-duration HMM effective sample",
+        )
         pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else np.ones(self.k) / self.k
         a = trans_acc.copy()
         np.fill_diagonal(a, 0.0)
