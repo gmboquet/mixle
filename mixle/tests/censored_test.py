@@ -1,6 +1,7 @@
 """Tests for the CensoredDistribution combinator and the public TruncatedDistribution export."""
 
 import math
+from copy import deepcopy
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from mixle.stats import (
     TruncatedDistribution,
     UniformDistribution,
 )
+from mixle.stats.combinator.transform import IdentityTransform, TransformDistribution
 
 
 def _base():
@@ -216,3 +218,56 @@ def test_likelihood_estimator_retains_interval_evidence_for_declared_optimizer()
     assert np.array_equal(observed["weights"], [2.0, 3.0])
     assert result.fit_receipt.likelihood_aware
     assert result.fit_receipt.censored_weight == 3.0
+
+
+def _numeric_leaves(value):
+    if isinstance(value, (tuple, list)):
+        return np.concatenate([_numeric_leaves(item) for item in value])
+    if isinstance(value, np.ndarray):
+        return np.asarray(value, dtype=float).reshape(-1)
+    if isinstance(value, (int, float, np.number)):
+        return np.asarray([float(value)])
+    return np.zeros(0)
+
+
+@pytest.mark.parametrize(
+    ("distribution", "first_data", "second_data"),
+    [
+        (
+            CensoredDistribution(GaussianDistribution(0.0, 1.0), keys="shared"),
+            [ExactObservation(-1.0), ExactObservation(0.0), ExactObservation(1.0)],
+            [ExactObservation(2.0), ExactObservation(3.0)],
+        ),
+        (
+            TruncatedDistribution(BernoulliDistribution(0.4), allowed=[False, True], keys="shared"),
+            [False, True, False],
+            [True, True],
+        ),
+        (
+            TransformDistribution(
+                GaussianDistribution(0.0, 1.0),
+                IdentityTransform(),
+                keys="shared",
+            ),
+            [-1.0, 0.0, 1.0],
+            [2.0, 3.0],
+        ),
+    ],
+)
+def test_single_child_wrapper_own_keys_pool_complete_statistics(distribution, first_data, second_data):
+    factory = distribution.estimator().accumulator_factory()
+    first = factory.make()
+    second = factory.make()
+    first.seq_update(distribution.dist_to_encoder().seq_encode(first_data), np.ones(3), distribution)
+    second.seq_update(distribution.dist_to_encoder().seq_encode(second_data), np.ones(2), distribution)
+    expected = factory.make()
+    expected.combine(deepcopy(first.value()))
+    expected.combine(deepcopy(second.value()))
+
+    pooled = {}
+    first.key_merge(pooled)
+    second.key_merge(pooled)
+    first.key_replace(pooled)
+    second.key_replace(pooled)
+    np.testing.assert_allclose(_numeric_leaves(first.value()), _numeric_leaves(expected.value()))
+    np.testing.assert_allclose(_numeric_leaves(second.value()), _numeric_leaves(expected.value()))

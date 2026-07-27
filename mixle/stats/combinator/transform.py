@@ -415,11 +415,13 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
         transform: Any,
         density_correction: bool | None = None,
         name: str | None = None,
+        keys: str | None = None,
     ) -> None:
         self.accumulator = accumulator
         self.transform = transform
         self.density_correction = density_correction
         self.name = name
+        self.keys = keys
 
     def update(self, x: Any, weight: float, estimate: TransformDistribution | None) -> None:
         """Accumulate one inverse-transformed observation when it is valid."""
@@ -489,12 +491,20 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Delegate keyed statistic merging to the child accumulator."""
-        self.accumulator.key_merge(stats_dict)
+        """Pool the wrapper's full child statistics under its own key, or delegate when unkeyed."""
+        if self.keys is None:
+            self.accumulator.key_merge(stats_dict)
+            return
+        if self.keys in stats_dict:
+            self.combine(stats_dict[self.keys])
+        stats_dict[self.keys] = self.value()
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Delegate keyed statistic replacement to the child accumulator."""
-        self.accumulator.key_replace(stats_dict)
+        """Replace from the wrapper pool, or delegate when this wrapper is unkeyed."""
+        if self.keys is None:
+            self.accumulator.key_replace(stats_dict)
+        elif self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys])
 
     def acc_to_encoder(self) -> "TransformDataEncoder":
         """Return the encoder associated with this accumulator."""
@@ -512,16 +522,22 @@ class TransformAccumulatorFactory(StatisticAccumulatorFactory):
         transform: Any,
         density_correction: bool | None = None,
         name: str | None = None,
+        keys: str | None = None,
     ) -> None:
         self.factory = factory
         self.transform = transform
         self.density_correction = density_correction
         self.name = name
+        self.keys = keys
 
     def make(self) -> TransformAccumulator:
         """Create a fresh transform accumulator."""
         return TransformAccumulator(
-            self.factory.make(), self.transform, density_correction=self.density_correction, name=self.name
+            self.factory.make(),
+            self.transform,
+            density_correction=self.density_correction,
+            name=self.name,
+            keys=self.keys,
         )
 
 
@@ -549,6 +565,7 @@ class TransformEstimator(ParameterEstimator):
             self.transform,
             density_correction=self.density_correction,
             name=self.name,
+            keys=self.keys,
         )
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> TransformDistribution:
