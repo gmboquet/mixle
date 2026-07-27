@@ -28,6 +28,8 @@ def _flatten(value):
             stack.extend(val for _, val in sorted(v.items(), key=lambda kv: str(kv[0])))
         elif v is None:
             continue
+        elif isinstance(v, (str, bytes)):
+            continue
         else:
             out.append(np.asarray(v, dtype=np.float64).ravel())
     return np.concatenate(out) if out else np.zeros(0)

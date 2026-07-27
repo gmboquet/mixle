@@ -1018,6 +1018,8 @@ class BackendScoringTestCase(unittest.TestCase):
                 np.testing.assert_allclose(actual, expected, rtol=1.0e-10, atol=1.0e-10)
         elif expected is None:
             self.assertIsNone(actual)
+        elif isinstance(expected, (str, bytes)):
+            self.assertEqual(actual, expected)
         else:
             np.testing.assert_allclose(actual, expected, rtol=1.0e-10, atol=1.0e-10)
 

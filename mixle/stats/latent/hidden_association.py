@@ -380,7 +380,7 @@ class HiddenAssociationSampler(DistributionSampler):
         self.rng = np.random.RandomState(seed)
         self.dist = dist
 
-        self.cond_sampler = dist.cond_dist.sampler(seed=self.rng.randint(0, maxrandint))
+        self.cond_sampler = dist.cond_dist.conditional_sampler(seed=self.rng.randint(0, maxrandint))
         self.idx_sampler = np.random.RandomState(seed=self.rng.randint(0, maxrandint))
         self.len_sampler = self.dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
         self.given_sampler = self.dist.given_dist.sampler(seed=self.rng.randint(0, maxrandint))
@@ -896,6 +896,12 @@ class HiddenAssociationDataEncoder(DataSequenceEncoder):
 
         """
         return x
+
+    def row_count(self, x: Any) -> int:
+        """Return the number of identity-encoded grouped-count observations."""
+        if not isinstance(x, Sequence) or isinstance(x, (str, bytes)):
+            raise ValueError("hidden-association encoding must be an observation sequence.")
+        return len(x)
 
 
 def _register_hidden_association_engine_kernel():

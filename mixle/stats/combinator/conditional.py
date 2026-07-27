@@ -11,7 +11,7 @@ import heapq
 import itertools
 import math
 from collections.abc import Iterator, Sequence
-from typing import Any, Optional, TypeVar
+from typing import Any, NamedTuple, Optional, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
@@ -31,6 +31,7 @@ from mixle.stats.compute.pdist import (
     ConditionalSampler,
     ContractError,
     DataSequenceEncoder,
+    DensitySemantics,
     DistributionEnumerator,
     DistributionSampler,
     EnumerationError,
@@ -51,6 +52,176 @@ E = tuple[int, tuple[T0, ...], tuple[np.ndarray, ...], tuple[E0, ...], E1 | None
 SS0 = TypeVar("SS0")
 SS1 = TypeVar("SS1")
 SS2 = TypeVar("SS2")
+
+
+class NonGenerativeConditionalError(TypeError):
+    """Raised when a conditional factor without a given law is asked to generate pairs."""
+
+
+class ConditionalBranchStatistics(NamedTuple):
+    """One branch's effective count and child sufficient statistic."""
+
+    key: Any
+    nobs: float
+    statistic: Any
+
+
+class ConditionalStatistics(NamedTuple):
+    """Versioned sufficient statistics for a fixed conditional branch layout."""
+
+    schema_version: int
+    branches: tuple[ConditionalBranchStatistics, ...]
+    default_nobs: float
+    default: Any | None
+    given_nobs: float
+    given: Any | None
+
+
+def _finite_nonnegative(value: Any, *, label: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("%s must be a finite non-negative scalar." % label)
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be a finite non-negative scalar." % label) from exc
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError("%s must be a finite non-negative scalar." % label)
+    return result
+
+
+def _checked_pair(value: Any, *, path: str) -> tuple[Any, Any]:
+    """Require the exact pair schema shared by scalar and batch surfaces."""
+    length = None
+    if isinstance(value, (tuple, list, np.ndarray)):
+        try:
+            length = len(value)
+        except TypeError:
+            length = None
+    if length != 2:
+        raise ContractError(
+            path,
+            "a 2-tuple (given_value, observed_value)",
+            "%s%s"
+            % (
+                type(value).__name__,
+                " of length %d" % length if length is not None else "",
+            ),
+            "pass exactly one given value and one observed value.",
+        )
+    return value[0], value[1]
+
+
+def _validate_given_coverage(
+    dmap: dict[Any, SequenceEncodableProbabilityDistribution],
+    given_dist: SequenceEncodableProbabilityDistribution,
+) -> None:
+    """Prove that every positive-mass given value selects a configured branch."""
+    size = given_dist.support_size()
+    if size is None:
+        raise ValueError(
+            "ConditionalDistribution without a default requires a finite given support covered by dmap."
+        )
+    seen = []
+    for value, _ in itertools.islice(
+        child_enumerator(given_dist, "ConditionalDistribution.given_dist"),
+        size + 1,
+    ):
+        if value not in dmap:
+            raise ValueError(
+                "given_dist can generate %r, which has no conditional branch or default." % (value,)
+            )
+        seen.append(value)
+    if len(seen) > size or len(set(seen)) != len(seen):
+        raise ValueError("given_dist enumeration must expose a unique finite support.")
+
+
+def _validate_conditional_statistics(
+    value: Any,
+    expected_keys: tuple[Any, ...],
+    *,
+    path: str,
+    has_default: bool | None = None,
+    has_given: bool | None = None,
+) -> ConditionalStatistics:
+    """Validate exact branch coverage and every effective count before mutation or fitting."""
+    if not isinstance(value, ConditionalStatistics) or value.schema_version != 1:
+        raise ContractError(
+            path,
+            "ConditionalStatistics schema version 1",
+            type(value).__name__,
+            "pass the value produced by ConditionalDistributionAccumulator.value().",
+        )
+    if not isinstance(value.branches, tuple):
+        raise ContractError(path, "an immutable tuple of branch statistics", type(value.branches).__name__)
+    branch_map = {}
+    normalized = []
+    for index, branch in enumerate(value.branches):
+        if not isinstance(branch, ConditionalBranchStatistics):
+            raise ContractError(
+                "%s.branches[%d]" % (path, index),
+                "ConditionalBranchStatistics",
+                type(branch).__name__,
+            )
+        try:
+            duplicate = branch.key in branch_map
+        except TypeError as exc:
+            raise ContractError(
+                "%s.branches[%d].key" % (path, index),
+                "a hashable configured branch key",
+                type(branch.key).__name__,
+            ) from exc
+        if duplicate:
+            raise ValueError("%s contains duplicate branch key %r." % (path, branch.key))
+        branch_map[branch.key] = branch
+        normalized.append(
+            ConditionalBranchStatistics(
+                branch.key,
+                _finite_nonnegative(branch.nobs, label="conditional branch %r nobs" % (branch.key,)),
+                branch.statistic,
+            )
+        )
+    if set(branch_map) != set(expected_keys) or len(branch_map) != len(expected_keys):
+        raise ContractError(
+            "%s.branches" % path,
+            "exactly the configured keys %r" % (expected_keys,),
+            "keys %r" % (tuple(branch_map),),
+            "use statistics produced by the matching fixed-layout conditional accumulator.",
+        )
+    normalized_map = {branch.key: branch for branch in normalized}
+    checked = ConditionalStatistics(
+        1,
+        tuple(normalized_map[key] for key in expected_keys),
+        _finite_nonnegative(value.default_nobs, label="conditional default_nobs"),
+        value.default,
+        _finite_nonnegative(value.given_nobs, label="conditional given_nobs"),
+        value.given,
+    )
+    if has_default is False and (checked.default_nobs != 0.0 or checked.default is not None):
+        raise ContractError(
+            "%s.default" % path,
+            "no default statistics for a layout without a default branch",
+            "nobs=%r and payload type %s" % (checked.default_nobs, type(checked.default).__name__),
+        )
+    if has_given is False and (checked.given_nobs != 0.0 or checked.given is not None):
+        raise ContractError(
+            "%s.given" % path,
+            "no given statistics for a conditional-factor layout",
+            "nobs=%r and payload type %s" % (checked.given_nobs, type(checked.given).__name__),
+        )
+    return checked
+
+
+def _checked_weights(weights: Any, size: int, *, path: str) -> np.ndarray:
+    """Return one finite, non-negative scalar weight per encoded row."""
+    result = np.asarray(weights)
+    if result.shape != (size,):
+        raise ContractError(path, "a one-dimensional weight array of length %d" % size, "shape %r" % (result.shape,))
+    if not np.issubdtype(result.dtype, np.number):
+        raise TypeError("%s must contain numeric weights." % path)
+    result = result.astype(float, copy=False)
+    if np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError("%s must contain finite non-negative weights." % path)
+    return result
 
 
 def _conditional_zero_stats(component_estimators: Sequence[Any], num_components: int) -> tuple[Any, ...]:
@@ -127,13 +298,17 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         """
         if isinstance(dmap, list):
             dmap = dict(zip(range(len(dmap)), dmap))
+        if not isinstance(dmap, dict):
+            raise TypeError("dmap must be a dict or list of conditional distributions.")
 
-        self.dmap = dmap
+        self.dmap = dict(dmap)
         self.default_dist = default_dist if default_dist is not None else NullDistribution()
         self.given_dist = given_dist if given_dist is not None else NullDistribution()
 
         self.has_default = not supports(self.default_dist, Neutral)
         self.has_given = not supports(self.given_dist, Neutral)
+        if self.has_given and not self.has_default:
+            _validate_given_coverage(self.dmap, self.given_dist)
         self.name = name
         self.keys = keys
         self.set_prior(prior)
@@ -168,15 +343,19 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
 
         Mirrors ``log_density``: unmatched conditioning values with no default score ``-inf``.
         """
+        given, observed = _checked_pair(
+            x,
+            path="ConditionalDistribution.expected_log_density",
+        )
         if self.has_default:
-            rv = self.dmap.get(x[0], self.default_dist).expected_log_density(x[1])
+            rv = self.dmap.get(given, self.default_dist).expected_log_density(observed)
         else:
-            if x[0] in self.dmap:
-                rv = self.dmap[x[0]].expected_log_density(x[1])
+            if given in self.dmap:
+                rv = self.dmap[given].expected_log_density(observed)
             else:
                 return -np.inf
 
-        rv += self.given_dist.expected_log_density(x[0])
+        rv += self.given_dist.expected_log_density(given)
         return rv
 
     def seq_expected_log_density(self, x: E0) -> np.ndarray:
@@ -208,6 +387,18 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         if self.has_given:
             children.append(self.given_dist)
         return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(children)), kernel_status="generic")
+
+    def density_semantics(self):
+        """Classify a conditional kernel without a given law as a likelihood factor."""
+        from mixle.stats.compute.pdist import join_density_semantics
+
+        if not self.has_given:
+            return DensitySemantics.LIKELIHOOD_FACTOR
+        children = list(self.dmap.values())
+        if self.has_default:
+            children.append(self.default_dist)
+        children.append(self.given_dist)
+        return join_density_semantics(child.density_semantics() for child in children)
 
     def compute_declaration(self):
         """Return the generated-compute declaration for the conditional distribution."""
@@ -287,15 +478,16 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
             Log-density of ConditionalDistribution at Tuple x.
 
         """
+        given, observed = _checked_pair(x, path="ConditionalDistribution.log_density")
         if self.has_default:
-            rv = self.dmap.get(x[0], self.default_dist).log_density(x[1])
+            rv = self.dmap.get(given, self.default_dist).log_density(observed)
         else:
-            if x[0] in self.dmap:
-                rv = self.dmap[x[0]].log_density(x[1])
+            if given in self.dmap:
+                rv = self.dmap[given].log_density(observed)
             else:
                 return -np.inf
 
-        rv += self.given_dist.log_density(x[0])
+        rv += self.given_dist.log_density(given)
 
         return rv
 
@@ -435,8 +627,8 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def backend_stacked_sufficient_statistics_with_estimator(
         cls, x: E0, weights: Any, params: dict[str, Any], engine: Any, estimator: Any
-    ) -> tuple[dict[Any, Any], Any, Any]:
-        """Return per-component legacy conditional sufficient statistics."""
+    ) -> tuple[ConditionalStatistics, ...]:
+        """Return versioned per-component conditional sufficient statistics."""
         from mixle.stats.compute.stacked import (
             StackedEstimatorView,
             stacked_component_sufficient_statistics,
@@ -450,6 +642,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         group_pos = {key: pos for pos, key in enumerate(cond_vals)}
 
         per_key_stats: dict[Any, tuple[Any, ...]] = {}
+        per_key_counts: dict[Any, Any] = {}
         for key, route in params["routes"].items():
             component_estimators = tuple(
                 getattr(component_est, "estimator_map", {}).get(key) for component_est in outer_estimators
@@ -457,6 +650,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
             pos = group_pos.get(key)
             if pos is None:
                 per_key_stats[key] = _conditional_zero_stats(component_estimators, num_components)
+                per_key_counts[key] = [0.0] * num_components
                 continue
             child_estimator = (
                 StackedEstimatorView(component_estimators) if len(component_estimators) == num_components else None
@@ -466,8 +660,10 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
                 eobs_vals[pos], child_weights, route, engine, child_estimator
             )
             per_key_stats[key] = unstack_component_stats(child_stats, num_components)
+            per_key_counts[key] = engine.sum(child_weights, axis=0)
 
         default_stats = None
+        default_counts = [0.0] * num_components
         if params["default_route"] is not None:
             default_estimators = tuple(
                 getattr(component_est, "default_estimator", None) for component_est in outer_estimators
@@ -483,6 +679,11 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
                     eobs_vals[pos], child_weights, params["default_route"], engine, child_estimator
                 )
                 default_stats = _conditional_add_stats(default_stats, child_stats, engine)
+                child_counts = engine.sum(child_weights, axis=0)
+                default_counts = [
+                    default_counts[component] + child_counts[component]
+                    for component in range(num_components)
+                ]
             if default_stats is None:
                 default_by_component = _conditional_zero_stats(default_estimators, num_components)
             else:
@@ -501,13 +702,25 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
                 given_enc, ww, params["given_route"], engine, given_estimator
             )
             given_by_component = unstack_component_stats(given_stats, num_components)
+            given_counts = engine.sum(ww, axis=0)
         else:
             given_by_component = tuple(None for _ in range(num_components))
+            given_counts = [0.0] * num_components
 
         return tuple(
-            (
-                {key: per_key_stats[key][component] for key in params["keys"]},
+            ConditionalStatistics(
+                1,
+                tuple(
+                    ConditionalBranchStatistics(
+                        key,
+                        per_key_counts[key][component],
+                        per_key_stats[key][component],
+                    )
+                    for key in params["keys"]
+                ),
+                default_counts[component],
                 default_by_component[component],
+                given_counts[component],
                 given_by_component[component],
             )
             for component in range(num_components)
@@ -532,6 +745,16 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
             ConditionalDistributionSampler configured from this distribution.
 
         """
+        if not self.has_given or self.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR:
+            raise NonGenerativeConditionalError(
+                "ConditionalDistribution is a likelihood factor rather than a normalized joint law; "
+                "use conditional_sampler(seed).sample_given(value) when its branches are generative, "
+                "or configure generative branch and given distributions."
+            )
+        return ConditionalDistributionSampler(self, seed=seed)
+
+    def conditional_sampler(self, seed: int | None = None) -> "ConditionalDistributionSampler":
+        """Return a sampler that can draw values for caller-supplied given values."""
         return ConditionalDistributionSampler(self, seed=seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "ConditionalDistributionEstimator":
@@ -755,10 +978,16 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
 
         """
 
+        if not isinstance(batched, (bool, np.bool_)):
+            raise TypeError("batched must be bool.")
         if size is None:
             return self.single_sample()
-        else:
-            return [self.single_sample() for i in range(size)]
+        if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)):
+            raise TypeError("size must be a non-negative integer or None.")
+        size = int(size)
+        if size < 0:
+            raise ValueError("size must be a non-negative integer or None.")
+        return [self.single_sample() for _ in range(size)]
 
     def sample_given(self, x: T0) -> Any:
         """Sample from the conditional distribution for a supplied given value.
@@ -831,20 +1060,33 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
             _given_rng (Optional[RandomState]): Used to seed RandomState calls for given accumulator initialization.
 
         """
-        self.accumulator_map = accumulator_map
+        self.accumulator_map = dict(accumulator_map)
         self.default_accumulator = default_accumulator if default_accumulator is not None else NullAccumulator()
         self.given_accumulator = given_accumulator if given_accumulator is not None else NullAccumulator()
 
-        self.has_default = not supports(default_accumulator, Neutral)
-        self.has_given = not supports(given_accumulator, Neutral)
+        self.has_default = not supports(self.default_accumulator, Neutral)
+        self.has_given = not supports(self.given_accumulator, Neutral)
 
         self.keys = keys
+        self.branch_nobs = {key: 0.0 for key in self.accumulator_map}
+        self.default_nobs = 0.0
+        self.given_nobs = 0.0
 
         # Seeds for initializers.
         self._init_rng = False
         self._acc_rng: dict[T0, RandomState] | None = None
         self._default_rng: RandomState | None = None
         self._given_rng: RandomState | None = None
+
+    def _validate_estimate(self, estimate: Optional["ConditionalDistribution"]) -> None:
+        if estimate is None:
+            return
+        if (
+            tuple(estimate.dmap.keys()) != tuple(self.accumulator_map.keys())
+            or estimate.has_default != self.has_default
+            or estimate.has_given != self.has_given
+        ):
+            raise ValueError("conditional estimate layout does not match its accumulator.")
 
     def update(self, x: tuple[T0, T1], weight: float, estimate: Optional["ConditionalDistribution"]) -> None:
         """Updates sufficient statistics of ConditionalDistributionAccumulator for one weighted observation x.
@@ -862,23 +1104,33 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
 
-        if x[0] in self.accumulator_map:
-            if estimate is None:
-                self.accumulator_map[x[0]].update(x[1], weight, None)
-            else:
-                self.accumulator_map[x[0]].update(x[1], weight, estimate.dmap[x[0]])
+        given, observed = _checked_pair(x, path="ConditionalDistributionAccumulator.update")
+        checked_weight = _finite_nonnegative(weight, label="conditional weight")
+        self._validate_estimate(estimate)
+
+        if given in self.accumulator_map:
+            self.accumulator_map[given].update(
+                observed,
+                checked_weight,
+                None if estimate is None else estimate.dmap[given],
+            )
+            self.branch_nobs[given] += checked_weight
         else:
             if self.has_default:
-                if estimate is None:
-                    self.default_accumulator.update(x[1], weight, None)
-                else:
-                    self.default_accumulator.update(x[1], weight, estimate.default_dist)
+                self.default_accumulator.update(
+                    observed,
+                    checked_weight,
+                    None if estimate is None else estimate.default_dist,
+                )
+                self.default_nobs += checked_weight
 
         if self.has_given:
-            if estimate is None:
-                self.given_accumulator.update(x[0], weight, None)
-            else:
-                self.given_accumulator.update(x[0], weight, estimate.given_dist)
+            self.given_accumulator.update(
+                given,
+                checked_weight,
+                None if estimate is None else estimate.given_dist,
+            )
+            self.given_nobs += checked_weight
 
     def _rng_initialize(self, rng: RandomState) -> None:
         """Initializes protected rng members for first call to initialize or seq_initialize."""
@@ -888,6 +1140,7 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
         self._default_rng = RandomState(seed=rng.randint(2**31))
         self._given_rng = RandomState(seed=rng.randint(2**31))
+        self._init_rng = True
 
     def initialize(self, x: tuple[T0, T1], weight: float, rng: RandomState) -> None:
         """Initialize ConditionalDistributionAccumulator with single weighted observation.
@@ -904,17 +1157,25 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
+        given, observed = _checked_pair(
+            x,
+            path="ConditionalDistributionAccumulator.initialize",
+        )
+        checked_weight = _finite_nonnegative(weight, label="conditional weight")
         if not self._init_rng:
             self._rng_initialize(rng)
 
-        if x[0] in self.accumulator_map:
-            self.accumulator_map[x[0]].initialize(x[1], weight, self._acc_rng[x[0]])
+        if given in self.accumulator_map:
+            self.accumulator_map[given].initialize(observed, checked_weight, self._acc_rng[given])
+            self.branch_nobs[given] += checked_weight
         else:
             if self.has_default:
-                self.default_accumulator.initialize(x[1], weight, self._default_rng)
+                self.default_accumulator.initialize(observed, checked_weight, self._default_rng)
+                self.default_nobs += checked_weight
 
         if self.has_given:
-            self.given_accumulator.initialize(x[0], weight, self._given_rng)
+            self.given_accumulator.initialize(given, checked_weight, self._given_rng)
+            self.given_nobs += checked_weight
 
     def seq_initialize(self, x: E0, weights: np.ndarray, rng: RandomState) -> None:
         """Vectorized initialize ConditionalDistributionAccumulator for a sequence encoded x.
@@ -949,21 +1210,27 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         sz, cond_vals, eobs_vals, idx_vals, given_enc = x
+        weights = _checked_weights(weights, sz, path="ConditionalDistributionAccumulator.seq_initialize(weights)")
 
         if not self._init_rng:
             self._rng_initialize(rng)
 
         for i in range(len(cond_vals)):
+            child_weights = weights[idx_vals[i]]
+            child_nobs = float(np.sum(child_weights))
             if cond_vals[i] in self.accumulator_map:
                 self.accumulator_map[cond_vals[i]].seq_initialize(
-                    eobs_vals[i], weights[idx_vals[i]], self._acc_rng[cond_vals[i]]
+                    eobs_vals[i], child_weights, self._acc_rng[cond_vals[i]]
                 )
+                self.branch_nobs[cond_vals[i]] += child_nobs
             else:
                 if self.has_default:
-                    self.default_accumulator.seq_initialize(eobs_vals[i], weights[idx_vals[i]], self._default_rng)
+                    self.default_accumulator.seq_initialize(eobs_vals[i], child_weights, self._default_rng)
+                    self.default_nobs += child_nobs
 
         if self.has_given:
             self.given_accumulator.seq_initialize(given_enc, weights, self._given_rng)
+            self.given_nobs += float(np.sum(weights))
 
     def seq_update(self, x: E0, weights: np.ndarray, estimate: "ConditionalDistribution") -> None:
         """Vectorized update of sufficient statistics of ConditionalDistributionAccumulator for a sequence encoded
@@ -997,24 +1264,35 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         sz, cond_vals, eobs_vals, idx_vals, given_enc = x
+        weights = _checked_weights(weights, sz, path="ConditionalDistributionAccumulator.seq_update(weights)")
+        self._validate_estimate(estimate)
 
         for i in range(len(cond_vals)):
+            child_weights = weights[idx_vals[i]]
+            child_nobs = float(np.sum(child_weights))
             if cond_vals[i] in self.accumulator_map:
                 self.accumulator_map[cond_vals[i]].seq_update(
-                    eobs_vals[i], weights[idx_vals[i]], estimate.dmap[cond_vals[i]]
+                    eobs_vals[i],
+                    child_weights,
+                    None if estimate is None else estimate.dmap[cond_vals[i]],
                 )
+                self.branch_nobs[cond_vals[i]] += child_nobs
             else:
                 if self.has_default:
-                    if estimate is None:
-                        self.default_accumulator.seq_update(eobs_vals[i], weights[idx_vals[i]], None)
-                    else:
-                        self.default_accumulator.seq_update(eobs_vals[i], weights[idx_vals[i]], estimate.default_dist)
+                    self.default_accumulator.seq_update(
+                        eobs_vals[i],
+                        child_weights,
+                        None if estimate is None else estimate.default_dist,
+                    )
+                    self.default_nobs += child_nobs
 
         if self.has_given:
-            if estimate is None:
-                self.given_accumulator.seq_update(given_enc, weights, None)
-            else:
-                self.given_accumulator.seq_update(given_enc, weights, estimate.given_dist)
+            self.given_accumulator.seq_update(
+                given_enc,
+                weights,
+                None if estimate is None else estimate.given_dist,
+            )
+            self.given_nobs += float(np.sum(weights))
 
     def seq_update_engine(self, x: E0, weights: Any, estimate: "ConditionalDistribution", engine: Any) -> None:
         """Engine-resident E-step: per-conditional-value subgroup weights are gathered on the active
@@ -1024,10 +1302,17 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
         from mixle.stats.compute.backend import child_seq_update
 
         sz, cond_vals, eobs_vals, idx_vals, given_enc = x
+        self._validate_estimate(estimate)
         w_eng = engine.asarray(weights)
+        host_weights = _checked_weights(
+            engine.to_numpy(w_eng),
+            sz,
+            path="ConditionalDistributionAccumulator.seq_update_engine(weights)",
+        )
 
         for i in range(len(cond_vals)):
             wi = w_eng[np.asarray(idx_vals[i], dtype=np.int64)]
+            child_nobs = float(np.sum(host_weights[idx_vals[i]]))
             if cond_vals[i] in self.accumulator_map:
                 child_seq_update(
                     self.accumulator_map[cond_vals[i]],
@@ -1036,6 +1321,7 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
                     estimate.dmap[cond_vals[i]] if estimate is not None else None,
                     engine,
                 )
+                self.branch_nobs[cond_vals[i]] += child_nobs
             elif self.has_default:
                 child_seq_update(
                     self.default_accumulator,
@@ -1044,13 +1330,15 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
                     None if estimate is None else estimate.default_dist,
                     engine,
                 )
+                self.default_nobs += child_nobs
 
         if self.has_given:
             child_seq_update(
                 self.given_accumulator, given_enc, w_eng, None if estimate is None else estimate.given_dist, engine
             )
+            self.given_nobs += float(np.sum(host_weights))
 
-    def combine(self, suff_stat: tuple[dict[T0, SS0], SS1 | None, SS2 | None]) -> "ConditionalDistributionAccumulator":
+    def combine(self, suff_stat: ConditionalStatistics) -> "ConditionalDistributionAccumulator":
         """Aggregate sufficient statistics (suff_stat) with sufficient statistics of ConditionalDistributionAccumulator
             instance.
 
@@ -1062,29 +1350,44 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
             ConditionalDistributionAccumulator with aggregated sufficient statistics.
 
         """
-        for k, v in suff_stat[0].items():
-            if k in self.accumulator_map:
-                self.accumulator_map[k].combine(v)
-            else:
-                self.accumulator_map[k].from_value(v)
+        checked = _validate_conditional_statistics(
+            suff_stat,
+            tuple(self.accumulator_map),
+            path="ConditionalDistributionAccumulator.combine",
+            has_default=self.has_default,
+            has_given=self.has_given,
+        )
+        for branch in checked.branches:
+            self.accumulator_map[branch.key].combine(branch.statistic)
+            self.branch_nobs[branch.key] += branch.nobs
 
-        if self.has_default and suff_stat[1] is not None:
-            self.default_accumulator.combine(suff_stat[1])
+        if self.has_default:
+            if checked.default is not None:
+                self.default_accumulator.combine(checked.default)
+            self.default_nobs += checked.default_nobs
 
-        if self.has_given and suff_stat[2] is not None:
-            self.given_accumulator.combine(suff_stat[2])
+        if self.has_given:
+            if checked.given is not None:
+                self.given_accumulator.combine(checked.given)
+            self.given_nobs += checked.given_nobs
 
         return self
 
-    def value(self) -> tuple[dict[Any, Any], Any | None, Any | None]:
+    def value(self) -> ConditionalStatistics:
         """Get sufficient statistics of CompositeDistributionAccumulator."""
-        rv3 = self.given_accumulator.value()
-        rv2 = self.default_accumulator.value()
-        rv1 = {k: v.value() for k, v in self.accumulator_map.items()}
+        return ConditionalStatistics(
+            1,
+            tuple(
+                ConditionalBranchStatistics(key, self.branch_nobs[key], accumulator.value())
+                for key, accumulator in self.accumulator_map.items()
+            ),
+            self.default_nobs,
+            self.default_accumulator.value(),
+            self.given_nobs,
+            self.given_accumulator.value(),
+        )
 
-        return rv1, rv2, rv3
-
-    def from_value(self, x: tuple[dict[T0, SS0], SS1 | None, SS1 | None]) -> "ConditionalDistributionAccumulator":
+    def from_value(self, x: ConditionalStatistics) -> "ConditionalDistributionAccumulator":
         """Set ConditionalDistributionAccumulator member instances to x.
 
         Input x must be sufficient statistic tuple compatible with ConditionalDistributionAccumulator.
@@ -1096,25 +1399,39 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
             ConditionalDistributionAccumulator object.
 
         """
-        for k, v in x[0].items():
-            self.accumulator_map[k].from_value(v)
+        checked = _validate_conditional_statistics(
+            x,
+            tuple(self.accumulator_map),
+            path="ConditionalDistributionAccumulator.from_value",
+            has_default=self.has_default,
+            has_given=self.has_given,
+        )
+        for branch in checked.branches:
+            self.accumulator_map[branch.key].from_value(branch.statistic)
+            self.branch_nobs[branch.key] = branch.nobs
 
-        if self.has_default and x[1] is not None:
-            self.default_accumulator.from_value(x[1])
+        if self.has_default and checked.default is not None:
+            self.default_accumulator.from_value(checked.default)
+        self.default_nobs = checked.default_nobs
 
-        if self.has_given and x[2] is not None:
-            self.given_accumulator.from_value(x[2])
+        if self.has_given and checked.given is not None:
+            self.given_accumulator.from_value(checked.given)
+        self.given_nobs = checked.given_nobs
 
         return self
 
     def scale(self, c: float) -> "ConditionalDistributionAccumulator":
         """Scale every branch, default, and given accumulator statistic in place."""
-        for accumulator in self.accumulator_map.values():
-            accumulator.scale(c)
+        checked = _finite_nonnegative(c, label="conditional statistic scale")
+        for key, accumulator in self.accumulator_map.items():
+            accumulator.scale(checked)
+            self.branch_nobs[key] *= checked
         if self.has_default:
-            self.default_accumulator.scale(c)
+            self.default_accumulator.scale(checked)
+            self.default_nobs *= checked
         if self.has_given:
-            self.given_accumulator.scale(c)
+            self.given_accumulator.scale(checked)
+            self.given_nobs *= checked
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -1129,7 +1446,12 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        for k, v in self.accumulator_map.items():
+        if self.keys is not None:
+            if self.keys in stats_dict:
+                stats_dict[self.keys].combine(self.value())
+            else:
+                stats_dict[self.keys] = self
+        for v in self.accumulator_map.values():
             v.key_merge(stats_dict)
 
         if self.has_default:
@@ -1150,7 +1472,9 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        for k, v in self.accumulator_map.items():
+        if self.keys is not None and self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys].value())
+        for v in self.accumulator_map.values():
             v.key_replace(stats_dict)
 
         if self.has_default:
@@ -1203,7 +1527,7 @@ class ConditionalDistributionAccumulatorFactory(StatisticAccumulatorFactory):
             keys (Optional[str]): All ConditionalAccumulator objects with same keys value will merge suff stats.
 
         """
-        self.factory_map = factory_map
+        self.factory_map = dict(factory_map)
         self.default_factory = default_factory
         self.given_factory = given_factory
         self.keys = keys
@@ -1260,10 +1584,12 @@ class ConditionalDistributionEstimator(ParameterEstimator):
             keys (Optional[str]): ConditionalDistributionEstimator with matching 'keys' will be aggregated.
 
         """
-        self.estimator_map = estimator_map
+        self.estimator_map = dict(estimator_map)
         self.default_estimator = default_estimator if default_estimator is not None else NullEstimator()
         self.keys = keys
         self.given_estimator = given_estimator if given_estimator is not None else NullEstimator()
+        self.has_default = not isinstance(self.default_estimator, NullEstimator)
+        self.has_given = not isinstance(self.given_estimator, NullEstimator)
         self.name = name
         self.set_prior(prior)
 
@@ -1305,9 +1631,7 @@ class ConditionalDistributionEstimator(ParameterEstimator):
 
         return ConditionalDistributionAccumulatorFactory(emap_items, def_factory, given_factory, self.keys)
 
-    def estimate(
-        self, nobs: float | None, suff_stat: tuple[dict[T0, SS0], SS1 | None, SS2 | None]
-    ) -> "ConditionalDistribution":
+    def estimate(self, nobs: float | None, suff_stat: ConditionalStatistics) -> "ConditionalDistribution":
         """Estimate a ConditionalDistribution from aggregated data.
 
         Calls the estimate() member function of each ParameterEstimator instance for estimator_map, default_estimator,
@@ -1327,50 +1651,32 @@ class ConditionalDistributionEstimator(ParameterEstimator):
             ConditionalDistribution object.
 
         """
-        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 3:
-            raise ContractError(
-                "ConditionalDistributionEstimator.estimate(suff_stat)",
-                "a 3-tuple (dist_map_suff_stats, default_suff_stat, given_suff_stat)",
-                "%s%s"
-                % (
-                    type(suff_stat).__name__,
-                    " of length %d" % len(suff_stat) if isinstance(suff_stat, (tuple, list)) else "",
-                ),
-                "pass the 3-tuple produced by ConditionalDistributionAccumulator.value(), not a bare "
-                "component sufficient statistic.",
-            )
-        if not isinstance(suff_stat[0], dict):
-            raise ContractError(
-                "ConditionalDistributionEstimator.estimate(suff_stat[0])",
-                "a dict mapping each conditioning value to its sufficient statistic",
-                "%s" % type(suff_stat[0]).__name__,
-                "suff_stat[0] must be the dict-of-sufficient-statistics produced by "
-                "ConditionalDistributionAccumulator.value(), keyed by conditioning value.",
-            )
+        checked = _validate_conditional_statistics(
+            suff_stat,
+            tuple(self.estimator_map),
+            path="ConditionalDistributionEstimator.estimate",
+            has_default=self.has_default,
+            has_given=self.has_given,
+        )
 
         try:
-            default_dist = self.default_estimator.estimate(None, suff_stat[1])
+            default_dist = self.default_estimator.estimate(checked.default_nobs, checked.default)
         except ContractError as e:
             raise prefix_contract_error("ConditionalDistribution.default_dist", e) from None
         try:
-            given_dist = self.given_estimator.estimate(None, suff_stat[2])
+            given_dist = self.given_estimator.estimate(checked.given_nobs, checked.given)
         except ContractError as e:
             raise prefix_contract_error("ConditionalDistribution.given_dist", e) from None
 
         dist_map = {}
-        for k, v in suff_stat[0].items():
-            if k not in self.estimator_map:
-                raise ContractError(
-                    "ConditionalDistributionEstimator.estimator_map[%r]" % (k,),
-                    "a conditioning value present in estimator_map",
-                    "conditioning value %r, not in estimator_map" % (k,),
-                    "suff_stat[0] carries a key not covered by this estimator's estimator_map -- "
-                    "check the accumulator/estimator pairing, or add %r to estimator_map." % (k,),
-                )
+        for branch in checked.branches:
             try:
-                dist_map[k] = self.estimator_map[k].estimate(None, v)
+                dist_map[branch.key] = self.estimator_map[branch.key].estimate(branch.nobs, branch.statistic)
             except ContractError as e:
-                raise prefix_contract_error("ConditionalDistribution.estimator_map[%r]" % (k,), e) from None
+                raise prefix_contract_error(
+                    "ConditionalDistribution.estimator_map[%r]" % (branch.key,),
+                    e,
+                ) from None
 
         return ConditionalDistribution(
             dist_map, default_dist=default_dist, given_dist=given_dist, name=self.name, keys=self.keys
@@ -1408,7 +1714,7 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
             null_given_encoder (bool): True if default_encoder is instance of NullDataEncoder, else false.
 
         """
-        self.encoder_map = encoder_map
+        self.encoder_map = dict(encoder_map)
         self.default_encoder = default_encoder
         self.given_encoder = given_encoder
 
@@ -1417,23 +1723,13 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the conditional encoder."""
-        encoder_items = list(self.encoder_map.items())
-        encoder_str = "ConditionalDataEncoder("
-        for k, v in encoder_items[:-1]:
-            encoder_str += str(k) + ":" + str(v) + ","
-        encoder_str += str(encoder_items[-1][0]) + ":" + str(encoder_items[-1][1])
-
-        if not self.null_default_encoder:
-            encoder_str += ",default=" + str(self.default_encoder)
-        else:
-            encoder_str += ",default=None"
-
-        if not self.null_given_encoder:
-            encoder_str += ",given=" + str(self.given_encoder)
-        else:
-            encoder_str += ",given=None)"
-
-        return encoder_str
+        entries = ",".join(
+            "%r:%s" % (key, encoder)
+            for key, encoder in sorted(self.encoder_map.items(), key=lambda item: repr(item[0]))
+        )
+        default = "None" if self.null_default_encoder else str(self.default_encoder)
+        given = "None" if self.null_given_encoder else str(self.given_encoder)
+        return "ConditionalDataEncoder({%s},default=%s,given=%s)" % (entries, default, given)
 
     def __eq__(self, other) -> bool:
         """Return whether another encoder is equivalent to this encoder.
@@ -1503,24 +1799,16 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
         given_vals = []
 
         for i in range(len(x)):
-            xx = x[i]
-            if not isinstance(xx, (tuple, list, np.ndarray)) or len(xx) != 2:
-                raise ContractError(
-                    "ConditionalDistribution.seq_encode (row %d)" % i,
-                    "a 2-tuple (given_value, observed_value)",
-                    "%s%s"
-                    % (
-                        type(xx).__name__,
-                        " of length %d" % len(xx) if isinstance(xx, (tuple, list, np.ndarray)) else "",
-                    ),
-                    "each row must be a (given, value) pair -- check row %d for a missing/extra field." % i,
-                )
-            given_vals.append(xx[0])
-            if xx[0] not in cond_enc:
-                cond_enc[xx[0]] = [[xx[1]], [i]]
+            given, observed = _checked_pair(
+                x[i],
+                path="ConditionalDistribution.seq_encode (row %d)" % i,
+            )
+            given_vals.append(given)
+            if given not in cond_enc:
+                cond_enc[given] = [[observed], [i]]
             else:
-                cond_enc_loc = cond_enc[xx[0]]
-                cond_enc_loc[0].append(xx[1])
+                cond_enc_loc = cond_enc[given]
+                cond_enc_loc[0].append(observed)
                 cond_enc_loc[1].append(i)
 
         cond_enc_items = list(cond_enc.items())
@@ -1569,6 +1857,65 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
             ) from e
 
         return len(x), cond_vals, tuple(eobs_vals), tuple(idx_vals), given_enc
+
+    def row_count(self, x: Any) -> int:
+        """Validate grouped conditional geometry and return its original row count."""
+        if not isinstance(x, tuple) or len(x) != 5:
+            raise ValueError("conditional encoding must be a 5-tuple.")
+        size, cond_vals, eobs_vals, idx_vals, given_enc = x
+        if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)) or int(size) < 0:
+            raise ValueError("conditional encoding size must be a non-negative integer.")
+        size = int(size)
+        if not isinstance(cond_vals, tuple) or not isinstance(eobs_vals, tuple) or not isinstance(idx_vals, tuple):
+            raise ValueError("conditional grouped values, payloads, and indices must be tuples.")
+        if len(cond_vals) != len(eobs_vals) or len(cond_vals) != len(idx_vals):
+            raise ValueError("conditional grouped values, payloads, and indices must stay aligned.")
+
+        seen_keys = set()
+        covered = np.zeros(size, dtype=np.int64)
+        for position, key in enumerate(cond_vals):
+            try:
+                duplicate = key in seen_keys
+                seen_keys.add(key)
+            except TypeError as exc:
+                raise ValueError("conditional group keys must be hashable.") from exc
+            if duplicate:
+                raise ValueError("conditional group keys must be unique.")
+            indices = np.asarray(idx_vals[position])
+            if (
+                indices.ndim != 1
+                or not np.issubdtype(indices.dtype, np.integer)
+                or np.any(indices < 0)
+                or np.any(indices >= size)
+            ):
+                raise ValueError("conditional group indices must reference valid rows.")
+            indices = indices.astype(np.int64, copy=False)
+            if len(indices) == 0:
+                raise ValueError("conditional groups cannot be empty.")
+            covered[indices] += 1
+            encoder = self.encoder_map.get(key)
+            if encoder is None:
+                if self.null_default_encoder:
+                    if eobs_vals[position] is not None:
+                        raise ValueError("unmatched conditional groups without a default must use a None payload.")
+                    continue
+                encoder = self.default_encoder
+            if encoder.row_count(eobs_vals[position]) != len(indices):
+                raise ValueError("conditional child encoding does not preserve its group rows.")
+        if np.any(covered != 1):
+            raise ValueError("conditional group indices must partition every encoded row exactly once.")
+        if self.null_given_encoder:
+            if (
+                isinstance(given_enc, (bool, np.bool_))
+                or not isinstance(given_enc, (int, np.integer))
+                or int(given_enc) != size
+            ):
+                raise ValueError(
+                    "conditional encoding without a given model must retain the exact row count."
+                )
+        elif self.given_encoder.row_count(given_enc) != size:
+            raise ValueError("conditional given encoding does not preserve the outer rows.")
+        return size
 
 
 # --- Backward-compatible API naming aliases ---

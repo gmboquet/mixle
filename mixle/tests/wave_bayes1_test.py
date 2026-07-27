@@ -248,20 +248,22 @@ class ConditionalTestCase(unittest.TestCase):
         # stats EM contract: seq_update threads the current estimate to the children
         ref.seq_update(enc, np.ones(len(data)), cd)
         v1, v2 = acc.value(), ref.value()
-        for k in v2[0]:
-            self.assertTrue(np.allclose(v1[0][k], v2[0][k]))
+        self.assertEqual(tuple(branch.nobs for branch in v1.branches), tuple(branch.nobs for branch in v2.branches))
+        for left, right in zip(v1.branches, v2.branches):
+            self.assertEqual(left.key, right.key)
+            self.assertTrue(np.allclose(left.statistic, right.statistic))
 
     def test_sampler(self):
         # regression: sampler()/sample() used to be empty stubs returning None
         cd = self.make_dist()
-        s = cd.sampler(seed=7)
+        s = cd.conditional_sampler(seed=7)
         self.assertTrue(np.isfinite(s.sample_given("a")))
         self.assertEqual(len([s.sample_given("b") for _ in range(4)]), 4)
 
     def test_sampler_unmatched_without_default(self):
         cd = ConditionalDistribution({"a": GaussianDistribution(0.0, 1.0)}, default_dist=None)
         with self.assertRaisesRegex(Exception, "default distribution"):
-            cd.sampler(seed=1).sample_given("z")
+            cd.conditional_sampler(seed=1).sample_given("z")
 
     def test_estimator_round_trip(self):
         # regression: estimator() used to be an empty stub returning None, and

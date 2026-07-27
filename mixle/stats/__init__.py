@@ -180,6 +180,9 @@ __all__ = [
     "ConditionalDistributionEstimator",
     "ConditionalDistributionDataEncoder",
     "ConditionalDistributionEnumerator",
+    "ConditionalStatistics",
+    "ConditionalBranchStatistics",
+    "NonGenerativeConditionalError",
     "ConditionalEstimator",
     "ConditionalAccumulator",
     "ConditionalAccumulatorFactory",
@@ -965,6 +968,7 @@ from mixle.stats.combinator.composite import (
 from mixle.stats.combinator.conditional import (
     ConditionalAccumulator,
     ConditionalAccumulatorFactory,
+    ConditionalBranchStatistics,
     ConditionalDataEncoder,
     ConditionalDistribution,
     ConditionalDistributionDataEncoder,
@@ -973,6 +977,8 @@ from mixle.stats.combinator.conditional import (
     ConditionalDistributionSampler,
     ConditionalEnumerator,
     ConditionalEstimator,
+    ConditionalStatistics,
+    NonGenerativeConditionalError,
 )
 from mixle.stats.combinator.copula import (
     CopulaAccumulator,
