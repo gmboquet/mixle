@@ -211,7 +211,7 @@ class DistributionSerializationTestCase(unittest.TestCase):
         grammar = VertexReplacementGrammar(name="json")
         grammar.add_rule(VertexReplacementRule(2, graph, frequency=3.0))
 
-        dist = VertexReplacementGrammarDistribution(grammar, 0.01, orig_n=4)
+        dist = VertexReplacementGrammarDistribution(grammar, 0.0, orig_n=4)
         loaded = VertexReplacementGrammarDistribution.from_json(dist.to_json())
 
         self.assertIsInstance(loaded.grammar, VertexReplacementGrammar)
