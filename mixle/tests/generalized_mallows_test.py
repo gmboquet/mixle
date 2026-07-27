@@ -8,7 +8,12 @@ import numpy as np
 
 from mixle.stats import GeneralizedMallowsDistribution
 from mixle.stats.rankings._permutation_kernels import METRICS, permutation_distance
-from mixle.stats.rankings.generalized_mallows import expected_distance, metric_log_normalizer
+from mixle.stats.rankings.generalized_mallows import (
+    GeneralizedMallowsDataEncoder,
+    GeneralizedMallowsEstimator,
+    expected_distance,
+    metric_log_normalizer,
+)
 
 _CLOSED = ("kendall", "cayley", "hamming")
 
@@ -75,6 +80,7 @@ class RecoveryTest(unittest.TestCase):
             fit = true.estimator().estimate(len(samp), acc.value())
             self.assertEqual(list(fit.sigma0), center, msg=metric)  # exact consensus recovery
             self.assertAlmostEqual(fit.theta, 1.0, delta=0.35, msg=metric)  # theta within sampling error
+            self.assertTrue(fit.fit_diagnostics.center_exact)
 
     def test_combine_equals_single_shard(self):
         true = GeneralizedMallowsDistribution([0, 2, 1, 3], 1.2, "hamming")
@@ -132,6 +138,66 @@ class ValidationTest(unittest.TestCase):
             # A fractional entry must not be silently truncated to an in-range integer by the
             # encoder's int cast before the permutation check ever sees it.
             dist.dist_to_encoder().seq_encode([[0.5, 1.0, 2.0]])
+
+    def test_uncontrolled_normalizer_fallbacks_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "Monte Carlo normalization"):
+            GeneralizedMallowsDistribution(list(range(6)), 100.0, "ulam", n_mc=1, max_enum=5)
+        with self.assertRaisesRegex(ValueError, "Monte Carlo normalization"):
+            GeneralizedMallowsDistribution(list(range(5)), 100.0, "footrule", n_mc=1, max_exact=4)
+
+    def test_parameters_are_owned_and_encoder_identity_includes_dimension(self):
+        center = np.asarray([2, 0, 1])
+        dist = GeneralizedMallowsDistribution(center, 1.0, "cayley")
+        center[:] = [0, 1, 2]
+        np.testing.assert_array_equal(dist.sigma0, [2, 0, 1])
+        with self.assertRaises(ValueError):
+            dist.sigma0[0] = 0
+        self.assertEqual(GeneralizedMallowsDataEncoder(3), GeneralizedMallowsDataEncoder(3))
+        self.assertNotEqual(GeneralizedMallowsDataEncoder(3), GeneralizedMallowsDataEncoder(4))
+        self.assertIn("dim=3", str(GeneralizedMallowsDataEncoder(3)))
+
+    def test_all_metric_samplers_return_exact_support_values(self):
+        for metric in METRICS:
+            dist = GeneralizedMallowsDistribution([0, 1, 2], 1.0, metric)
+            draws = dist.sampler(seed=2).sample(20)
+            with self.subTest(metric=metric):
+                self.assertTrue(all(sorted(draw) == [0, 1, 2] for draw in draws))
+
+    def test_accumulator_never_silently_drops_or_aliases_evidence(self):
+        estimator = GeneralizedMallowsEstimator(3, reservoir=1)
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.update([0, 1, 2], 1.0, None)
+        before = accumulator.value()
+        with self.assertRaises(MemoryError):
+            accumulator.update([2, 1, 0], 1.0, None)
+        self.assertEqual(accumulator.value()[0], before[0])
+        before[1][:] = 0.0
+        before[2][:] = 0.0
+        before[3][0][:] = 0
+        self.assertGreater(accumulator.value()[1].sum(), 0.0)
+        with self.assertRaises(ValueError):
+            accumulator.seq_update(np.asarray([[0, 1, 2]]), np.asarray([-1.0]), None)
+
+    def test_pseudo_count_and_controls_are_explicit(self):
+        base = GeneralizedMallowsDistribution([2, 0, 1], 1.0, "kendall")
+        fitted = base.estimator(pseudo_count=2.0).estimate(None, (0.0, np.zeros((3, 3)), np.zeros((3, 3)), [], []))
+        self.assertTrue(fitted.fit_diagnostics.regularized)
+        np.testing.assert_array_equal(fitted.sigma0, base.sigma0)
+        invalid = (
+            {"dim": 1},
+            {"dim": 3, "reservoir": 0},
+            {"dim": 3, "n_mc": 0},
+            {"dim": 3, "max_exact": 23},
+            {"dim": 3, "pseudo_count": -1.0},
+            {"dim": 3, "allow_approximate_center": "false"},
+        )
+        for kwargs in invalid:
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                GeneralizedMallowsEstimator(**kwargs)
+        with self.assertRaises(ValueError):
+            base.sampler().sample(-1)
+        with self.assertRaises(ValueError):
+            base.sampler().sample(1.5)
 
 
 if __name__ == "__main__":
