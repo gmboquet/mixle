@@ -59,6 +59,34 @@ def _require_graph_size(adjacency: np.ndarray, num_nodes: int | None) -> None:
         )
 
 
+def _finite_nonnegative(value: Any, *, name: str) -> float:
+    result = float(value)
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative.")
+    return result
+
+
+def _validate_statistics(suff_stat: Any) -> tuple[float, float]:
+    if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 2:
+        raise ValueError("Erdos-Renyi statistics must be (edge_opportunities, edge_count).")
+    total = _finite_nonnegative(suff_stat[0], name="edge_opportunities")
+    successes = _finite_nonnegative(suff_stat[1], name="edge_count")
+    if successes > total:
+        raise ValueError("edge_count cannot exceed edge_opportunities.")
+    return total, successes
+
+
+def _require_matching_configuration(
+    left: ErdosRenyiGraphAccumulator, right: ErdosRenyiGraphAccumulator
+) -> None:
+    if (
+        left.directed != right.directed
+        or left.self_loops != right.self_loops
+        or left.num_nodes != right.num_nodes
+    ):
+        raise ValueError("cannot share Erdos-Renyi statistics across incompatible graph configurations.")
+
+
 class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
     """Independent Bernoulli distribution over binary graph edges."""
 
@@ -102,8 +130,8 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         from mixle.data.sources.graph_source import _clip_prob
 
         self.p = _clip_prob(p)
-        self.log_p = math.log(self.p)
-        self.log_1p = math.log1p(-self.p)
+        self.log_p = -math.inf if self.p == 0.0 else math.log(self.p)
+        self.log_1p = -math.inf if self.p == 1.0 else math.log1p(-self.p)
         self.directed = bool(directed)
         self.self_loops = bool(self_loops)
         self.num_nodes = _optional_num_nodes(num_nodes)
@@ -171,9 +199,12 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
             _validate_graph_constraints(adj, self.directed, self.self_loops)
             _require_graph_size(adj, self.num_nodes)
             counts.append(_edge_counts(adj, self.directed, self.self_loops))
-        counts = np.asarray(counts, dtype=np.float64).reshape(-1, 2)
-        total, successes = counts[:, 0], counts[:, 1]
-        return successes * self.log_p + (total - successes) * self.log_1p
+        from mixle.data.sources.graph_source import _bernoulli_log_likelihood
+
+        return np.asarray(
+            [_bernoulli_log_likelihood(successes, total, self.p) for total, successes in counts],
+            dtype=np.float64,
+        )
 
     def backend_seq_log_density(self, x: Sequence[GraphObservation], engine: Any) -> Any:
         """Engine-routed Bernoulli edge log-likelihood.
@@ -183,23 +214,24 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         math is engine-native (and differentiable in ``p`` on torch).
         """
         from mixle.data.sources.graph_source import (
-            _clip_prob,
+            _bernoulli_log_likelihood,
             _edge_counts,
             _extract_observation,
             _validate_graph_constraints,
         )
 
-        p = _clip_prob(self.p)
         counts = []
         for o in x:
             adj = _extract_observation(o, directed=self.directed).adjacency
             _validate_graph_constraints(adj, self.directed, self.self_loops)
             _require_graph_size(adj, self.num_nodes)
             counts.append(_edge_counts(adj, self.directed, self.self_loops))
-        counts = np.asarray(counts, dtype=np.float64).reshape(-1, 2)
-        total = engine.asarray(counts[:, 0])
-        successes = engine.asarray(counts[:, 1])
-        return successes * engine.asarray(math.log(p)) + (total - successes) * engine.asarray(math.log1p(-p))
+        return engine.asarray(
+            np.asarray(
+                [_bernoulli_log_likelihood(successes, total, self.p) for total, successes in counts],
+                dtype=np.float64,
+            )
+        )
 
     def edge_probability(self, i: int | None = None, j: int | None = None, context: Any | None = None) -> float:
         """Return the common edge probability ``p``."""
@@ -282,11 +314,16 @@ class ErdosRenyiGraphEnumerator(DistributionEnumerator):
         # Each free edge is an independent Bernoulli(p): present (1) at log_p, absent (0) at log_1p,
         # ordered by descending probability so the per-edge stream is sorted.
         present, absent = (1, 0)
-        edge_pair = (
-            [(present, dist.log_p), (absent, dist.log_1p)]
-            if dist.log_p >= dist.log_1p
-            else [(absent, dist.log_1p), (present, dist.log_p)]
-        )
+        if dist.p == 0.0:
+            edge_pair = [(absent, 0.0)]
+        elif dist.p == 1.0:
+            edge_pair = [(present, 0.0)]
+        else:
+            edge_pair = (
+                [(present, dist.log_p), (absent, dist.log_1p)]
+                if dist.log_p >= dist.log_1p
+                else [(absent, dist.log_1p), (present, dist.log_p)]
+            )
 
         def combine(edge_values: tuple[int, ...]) -> np.ndarray:
             adj = np.zeros((n, n), dtype=np.int8)
@@ -337,7 +374,8 @@ class ErdosRenyiGraphSampler(DistributionSampler):
         """Draw one graph or a list of graphs."""
         if size is None:
             return self.sample_graph(num_nodes=num_nodes)
-        return [self.sample_graph(num_nodes=num_nodes) for _ in range(int(size))]
+        sample_size = _optional_num_nodes(size, name="size")
+        return [self.sample_graph(num_nodes=num_nodes) for _ in range(sample_size)]
 
 
 class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
@@ -368,8 +406,9 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
         expected_nodes = self.num_nodes if estimate is None else estimate.num_nodes
         _require_graph_size(obs.adjacency, expected_nodes)
         total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
-        self.edge_opportunities += float(weight) * total
-        self.edge_count += float(weight) * successes
+        checked_weight = _finite_nonnegative(weight, name="weight")
+        self.edge_opportunities += checked_weight * total
+        self.edge_count += checked_weight * successes
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
         """Initialize sufficient statistics from one weighted graph."""
@@ -381,13 +420,21 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
         """Accumulate weighted edge counts from a batch of graphs."""
         from mixle.data.sources.graph_source import _edge_counts, _validate_graph_constraints
 
-        for obs, weight in zip(x, weights):
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if checked_weights.ndim != 1 or len(checked_weights) != len(x):
+            raise ValueError("weights must be a one-dimensional array aligned with the graph batch.")
+        if np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
+            raise ValueError("weights must be finite and non-negative.")
+        pending: list[tuple[float, float]] = []
+        for obs, weight in zip(x, checked_weights):
             _validate_graph_constraints(obs.adjacency, self.directed, self.self_loops)
             expected_nodes = self.num_nodes if estimate is None else estimate.num_nodes
             _require_graph_size(obs.adjacency, expected_nodes)
             total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
-            self.edge_opportunities += float(weight) * total
-            self.edge_count += float(weight) * successes
+            pending.append((float(weight) * total, float(weight) * successes))
+        for total, successes in pending:
+            self.edge_opportunities += total
+            self.edge_count += successes
 
     def seq_initialize(self, x: Sequence[GraphObservation], weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize sufficient statistics from a weighted graph batch."""
@@ -395,8 +442,9 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, float]) -> ErdosRenyiGraphAccumulator:
         """Merge serialized edge-count sufficient statistics."""
-        self.edge_opportunities += suff_stat[0]
-        self.edge_count += suff_stat[1]
+        total, successes = _validate_statistics(suff_stat)
+        combined = _validate_statistics((self.edge_opportunities + total, self.edge_count + successes))
+        self.edge_opportunities, self.edge_count = combined
         return self
 
     def value(self) -> tuple[float, float]:
@@ -405,9 +453,30 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: tuple[float, float]) -> ErdosRenyiGraphAccumulator:
         """Restore accumulator state from serialized edge counts."""
-        self.edge_opportunities = float(x[0])
-        self.edge_count = float(x[1])
+        self.edge_opportunities, self.edge_count = _validate_statistics(x)
         return self
+
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator under its configured sharing key."""
+        if self.keys is None:
+            return
+        if self.keys in stats_dict:
+            other = stats_dict[self.keys]
+            if not isinstance(other, ErdosRenyiGraphAccumulator):
+                raise ValueError("shared Erdos-Renyi key is bound to incompatible statistics.")
+            _require_matching_configuration(self, other)
+            other.combine(self.value())
+        else:
+            stats_dict[self.keys] = self
+
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from its configured sharing key."""
+        if self.keys is not None and self.keys in stats_dict:
+            other = stats_dict[self.keys]
+            if not isinstance(other, ErdosRenyiGraphAccumulator):
+                raise ValueError("shared Erdos-Renyi key is bound to incompatible statistics.")
+            _require_matching_configuration(self, other)
+            self.from_value(other.value())
 
     def acc_to_encoder(self) -> GraphDataEncoder:
         """Return the encoder associated with this accumulator."""
@@ -459,8 +528,10 @@ class ErdosRenyiGraphEstimator(ParameterEstimator):
     ) -> None:
         self.directed = bool(directed)
         self.self_loops = bool(self_loops)
-        self.pseudo_count = pseudo_count
-        self.prior_p = float(prior_p)
+        self.pseudo_count = None if pseudo_count is None else _finite_nonnegative(pseudo_count, name="pseudo_count")
+        from mixle.data.sources.graph_source import _clip_prob
+
+        self.prior_p = _clip_prob(prior_p)
         self.num_nodes = _optional_num_nodes(num_nodes)
         self.name = name
         self.keys = keys
@@ -477,11 +548,13 @@ class ErdosRenyiGraphEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> ErdosRenyiGraphDistribution:
         """Estimate the Bernoulli edge probability from edge-count statistics."""
-        total, successes = suff_stat
+        total, successes = _validate_statistics(suff_stat)
         if self.pseudo_count is not None:
-            successes += float(self.pseudo_count) * float(self.prior_p)
-            total += float(self.pseudo_count)
-        p = 0.5 if total <= 0.0 else successes / total
+            successes += self.pseudo_count * self.prior_p
+            total += self.pseudo_count
+        if total <= 0.0:
+            raise ValueError("cannot estimate an Erdos-Renyi distribution without data or positive pseudo-count.")
+        p = successes / total
         return ErdosRenyiGraphDistribution(
             p,
             directed=self.directed,

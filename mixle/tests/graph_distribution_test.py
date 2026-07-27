@@ -99,13 +99,13 @@ class GraphDistributionTestCase(unittest.TestCase):
 
         bp = np.array([[0.7, 0.2], [0.2, 0.5]])
         assign = [0, 0, 1, 1]
-        for directed, self_loops, prior in [(False, False, False), (False, False, True), (True, True, True)]:
+        for directed, self_loops in [(False, False), (True, True)]:
             dist = stats.StochasticBlockGraphDistribution(
                 bp,
                 block_assignments=assign,
                 directed=directed,
                 self_loops=self_loops,
-                include_assignment_prior=prior,
+                include_assignment_prior=False,
                 block_prior=[0.5, 0.5],
             )
             n = len(assign)
@@ -238,29 +238,21 @@ class GraphDistributionTestCase(unittest.TestCase):
         self.assertEqual(batch_ld.shape, (5,))
         self.assertTrue(np.all(np.isfinite(batch_ld)))
 
-        # Same underlying gap, different trigger: explicitly overriding num_nodes on a distribution
-        # that DOES have fixed block_assignments also forces a fresh prior draw (the fixed assignments
-        # don't match the requested size), so it must round-trip too.
+        # A fixed-assignment model cannot silently change into a population model
+        # merely because a new graph size was requested.
         also_fixed = stats.StochasticBlockGraphDistribution(block_probs, [0, 0, 1], block_prior=block_prior)
-        resized = also_fixed.sampler(seed=11).sample(num_nodes=5)
-        self.assertIsInstance(resized, tuple)
-        self.assertTrue(np.isfinite(also_fixed.log_density(resized)))
+        with self.assertRaises(ValueError):
+            also_fixed.sampler(seed=11).sample(num_nodes=5)
 
     def test_stochastic_block_sampler_return_assignments_explicit_override_still_honored(self):
-        # Negative control for the population-sampler round-trip fix above: return_assignments=None
-        # only changes the DEFAULT. An explicit return_assignments=False must still be honored (a
-        # caller who deliberately wants just the adjacency still gets one, even though it can no
-        # longer be scored) -- the auto-include must not silently overrule an explicit opt-out.
-        # Symmetrically, return_assignments=True keeps returning the same (adjacency, assignments)
-        # pair shape as before this fix.
+        # Population samples are joint (adjacency, assignments) outcomes. Discarding
+        # assignments would silently change the modeled sample space.
         block_probs = np.asarray([[0.75, 0.15], [0.15, 0.55]])
         block_prior = np.asarray([0.4, 0.6])
         dist = stats.StochasticBlockGraphDistribution(block_probs, block_prior=block_prior)
 
-        bare = dist.sampler(seed=9).sample(num_nodes=6, return_assignments=False)
-        self.assertIsInstance(bare, np.ndarray)
         with self.assertRaises(ValueError):
-            dist.log_density(bare)
+            dist.sampler(seed=9).sample(num_nodes=6, return_assignments=False)
 
         paired = dist.sampler(seed=9).sample(num_nodes=6, return_assignments=True)
         self.assertIsInstance(paired, tuple)

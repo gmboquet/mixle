@@ -861,6 +861,7 @@ __all__ = [
     "StochasticBlockGraphAccumulator",
     "StochasticBlockGraphAccumulatorFactory",
     "StochasticBlockGraphEstimator",
+    "StochasticBlockGraphStatistics",
 ]
 
 # --- public surface curation -------------------------------------------------------------------------
@@ -1225,6 +1226,7 @@ from mixle.stats.graphs.stochastic_block_graph import (
     StochasticBlockGraphDistribution,
     StochasticBlockGraphEstimator,
     StochasticBlockGraphSampler,
+    StochasticBlockGraphStatistics,
 )
 from mixle.stats.graphs.temporal_graph_grammar import (
     ChurningTemporalGraphGrammarAccumulator,
