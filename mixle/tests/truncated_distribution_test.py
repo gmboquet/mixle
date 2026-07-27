@@ -5,9 +5,13 @@ import unittest
 
 import numpy as np
 
-from mixle.stats.combinator.truncated import TruncatedDistribution
+from mixle.stats.combinator.truncated import (
+    TruncatedDistribution,
+    TruncatedProjectionEstimator,
+    TruncatedStatistics,
+)
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
-from mixle.stats.univariate.discrete.bernoulli import BernoulliDistribution
+from mixle.stats.univariate.discrete.bernoulli import BernoulliDistribution, BernoulliEstimator
 from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
 from mixle.stats.univariate.discrete.poisson import PoissonDistribution
 
@@ -109,6 +113,56 @@ class TruncatedDistributionTestCase(unittest.TestCase):
         t = TruncatedDistribution(base, forbidden=[1, 1])
         self.assertAlmostEqual(math.exp(t.log_density(0)), 1.0, delta=TOL)
         self.assertEqual(t.log_density(1), -np.inf)
+
+    def test_scalar_and_batch_accumulation_share_the_support_contract(self):
+        distribution = TruncatedDistribution(BernoulliDistribution(0.25), allowed=[0])
+        scalar = distribution.estimator().accumulator_factory().make()
+        scalar.update(1, 2.0, distribution)
+        scalar.update(0, 3.0, distribution)
+        batch = distribution.estimator().accumulator_factory().make()
+        encoded = distribution.dist_to_encoder().seq_encode([1, 0])
+        batch.seq_update(encoded, np.asarray([2.0, 3.0]), distribution)
+        self.assertEqual(scalar.value(), batch.value())
+        self.assertEqual(
+            scalar.value(),
+            TruncatedStatistics(1, (3.0, 0.0), 3.0, 2.0),
+        )
+
+    def test_cold_accumulator_encoder_retains_the_support_rule(self):
+        distribution = TruncatedDistribution(BernoulliDistribution(0.25), allowed=[0])
+        accumulator = distribution.estimator().accumulator_factory().make()
+        encoder = accumulator.acc_to_encoder()
+        self.assertEqual(encoder, distribution.dist_to_encoder())
+        accumulator.seq_initialize(
+            encoder.seq_encode([0, 1]),
+            np.asarray([4.0, 5.0]),
+            np.random.RandomState(0),
+        )
+        self.assertEqual(accumulator.value(), TruncatedStatistics(1, (4.0, 0.0), 4.0, 5.0))
+
+    def test_projection_estimator_is_explicit_and_reports_excluded_evidence(self):
+        class RecordingBernoulliEstimator(BernoulliEstimator):
+            def estimate(inner_self, nobs, suff_stat):
+                inner_self.received_nobs = nobs
+                return super().estimate(nobs, suff_stat)
+
+        estimator = TruncatedProjectionEstimator(
+            RecordingBernoulliEstimator(),
+            allowed=[0, 1],
+        )
+        fitted = estimator.estimate(
+            999.0,
+            TruncatedStatistics(1, (3.0, 1.0), 3.0, 2.0),
+        )
+        self.assertEqual(estimator.base_estimator.received_nobs, 3.0)
+        self.assertEqual(fitted.fit_receipt.accepted_weight, 3.0)
+        self.assertEqual(fitted.fit_receipt.rejected_weight, 2.0)
+        self.assertFalse(fitted.fit_receipt.likelihood_aware)
+
+    def test_support_size_intersects_allowed_values_with_base_support(self):
+        distribution = TruncatedDistribution(BernoulliDistribution(0.25), allowed=[0, 2])
+        self.assertEqual(distribution.support_size(), 1)
+        self.assertEqual([value for value, _ in distribution.enumerator()], [0])
 
 
 if __name__ == "__main__":

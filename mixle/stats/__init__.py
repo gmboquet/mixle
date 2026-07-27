@@ -659,6 +659,9 @@ __all__ = [
     "TruncatedDistribution",
     "TruncatedSampler",
     "TruncatedEstimator",
+    "TruncatedProjectionEstimator",
+    "TruncatedProjectionFitReceipt",
+    "TruncatedStatistics",
     "TruncatedDataEncoder",
     "TruncatedEnumerator",
     "CensoredDistribution",
@@ -1043,7 +1046,10 @@ from mixle.stats.combinator.truncated import (
     TruncatedDistribution,
     TruncatedEnumerator,
     TruncatedEstimator,
+    TruncatedProjectionEstimator,
+    TruncatedProjectionFitReceipt,
     TruncatedSampler,
+    TruncatedStatistics,
 )
 from mixle.stats.combinator.weighted import WeightedDataEncoder, WeightedDistribution, WeightedEstimator
 from mixle.stats.combinator.zero_inflated import (
