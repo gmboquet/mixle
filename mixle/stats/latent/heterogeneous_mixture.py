@@ -14,6 +14,7 @@ where
     P_0(x;beta) is an exponential density and P_1(x; k, theta) is a Gamma density.
 """
 
+import copy
 from collections.abc import Sequence
 from math import exp
 from typing import Any, TypeVar
@@ -26,6 +27,11 @@ import mixle.utils.vector as vec
 from mixle.engines.arithmetic import maxrandint
 from mixle.enumeration.algorithms import BufferedStream, best_first_union
 from mixle.stats.compute._sampling import scatter_component_draws
+from mixle.stats.compute.mixture_evidence import (
+    normalize_engine_mixture_log_scores,
+    normalize_mixture_log_scores,
+    validated_probability_vector,
+)
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -36,6 +42,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.stats.latent.mixture import _owned_generative_components
 from mixle.utils.aliasing import MISSING, coalesce_alias
 
 T = TypeVar("T")
@@ -104,13 +111,17 @@ class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution)
 
         """
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
-        self.w = np.asarray(w, dtype=float)
+        self.components = _owned_generative_components(components, "HeterogeneousMixtureDistribution")
+        self.num_components = len(self.components)
+        self.w = validated_probability_vector(
+            w,
+            "HeterogeneousMixtureDistribution weights",
+            size=self.num_components,
+        )
         self.zw = self.w == 0.0
         self.log_w = np.log(self.w + self.zw)
         self.log_w[self.zw] = -np.inf
 
-        self.components = components
-        self.num_components = len(components)
         self.name = name
 
     def __str__(self) -> str:
@@ -203,20 +214,8 @@ class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution)
             Numpy array of floats containing posterior distribution at observation x.
 
         """
-        comp_log_density = np.asarray([m.log_density(x) for m in self.components])
-        comp_log_density += self.log_w
-        comp_log_density[self.w == 0] = -np.inf
-
-        max_val = np.max(comp_log_density)
-
-        if max_val == -np.inf:
-            return self.w.copy()
-        else:
-            comp_log_density -= max_val
-            np.exp(comp_log_density, out=comp_log_density)
-            comp_log_density /= comp_log_density.sum()
-
-            return comp_log_density
+        scores = np.asarray([m.log_density(x) for m in self.components], dtype=np.float64) + self.log_w
+        return normalize_mixture_log_scores(scores[None, :]).responsibilities[0]
 
     def seq_log_density(self, x: tuple[list[np.ndarray], list[Any]]) -> np.ndarray:
         """Vectorized evaluation of component-wise log-density for encoded sequence x.
@@ -401,18 +400,7 @@ class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution)
                     ll_mat[:, i] = temp
                     ll_mat[:, i] += self.log_w[i]
 
-        ll_max = ll_mat.max(axis=1, keepdims=True)
-        bad_rows = np.isinf(ll_max.flatten())
-
-        ll_mat[bad_rows, :] = self.log_w.copy()
-        ll_max[bad_rows] = np.max(self.log_w)
-
-        ll_mat -= ll_max
-        np.exp(ll_mat, out=ll_mat)
-        np.sum(ll_mat, axis=1, keepdims=True, out=ll_max)
-        ll_mat /= ll_max
-
-        return ll_mat
+        return normalize_mixture_log_scores(ll_mat).responsibilities
 
     def sampler(self, seed: int | None = None) -> "HeterogeneousMixtureSampler":
         """Return a sampler for this heterogeneous mixture.
@@ -765,32 +753,10 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
                     ll_mat[:, i] = temp
                     ll_mat[:, i] += estimate.log_w[i]
 
-        ll_max = ll_mat.max(axis=1, keepdims=True)
-
-        bad_rows = np.isinf(ll_max.flatten())
-        ll_mat[bad_rows, :] = estimate.log_w.copy()
-        ll_max[bad_rows] = np.max(estimate.log_w)
-
-        # Capture per-row data log-likelihood (== seq_log_density) by reusing the rowmax and rowsum
-        # already computed for normalization: row_ll = rowmax + log(rowsum), with -inf for invalid
-        # rows seq_log_density also reports as -inf. Free except an O(n) log/dot, and only when the
-        # fused-EM fast path requests it (_track_ll).
-        track = self._track_ll and ll_mat_init
-        rowmax = ll_max[:, 0].copy() if track else None
-
-        ll_mat -= ll_max
-        np.exp(ll_mat, out=ll_mat)
-        np.sum(ll_mat, axis=1, keepdims=True, out=ll_max)
-
-        if track:
-            with np.errstate(divide="ignore"):
-                row_ll = rowmax + np.log(ll_max[:, 0])
-            if np.any(bad_rows):
-                row_ll[bad_rows] = -np.inf
-            self._seq_ll += float(np.dot(weights, row_ll))
-
-        np.divide(weights[:, None], ll_max, out=ll_max)
-        ll_mat *= ll_max
+        normalized = normalize_mixture_log_scores(ll_mat)
+        if self._track_ll and ll_mat_init:
+            self._seq_ll += float(np.dot(weights, normalized.log_evidence))
+        ll_mat = normalized.responsibilities * np.asarray(weights, dtype=np.float64)[:, None]
 
         for tag, tag_idxs in enumerate(tag_list):
             for i in tag_idxs:
@@ -830,14 +796,8 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         col_list = [cols[i] if cols[i] is not None else (engine.zeros(n) + neg) for i in range(num_comp)]
         ll_mat = engine.stack(col_list, axis=1)
 
-        log_w_e = engine.asarray(np.asarray(estimate.log_w, dtype=np.float64))
-        ll_max = engine.max(ll_mat, axis=1)
-        bad = engine.isinf(ll_max)
-        ll_mat = engine.where(bad[:, None], log_w_e[None, :], ll_mat)
-        ll_max = engine.where(bad, engine.asarray(float(np.max(estimate.log_w))), ll_max)
-        ll_mat = engine.exp(ll_mat - ll_max[:, None])
-        denom = engine.sum(ll_mat, axis=1)
-        ll_mat = ll_mat * (engine.asarray(weights_np) / denom)[:, None]
+        normalized = normalize_engine_mixture_log_scores(ll_mat, engine)
+        ll_mat = normalized.responsibilities * engine.asarray(weights_np)[:, None]
 
         ll_np = np.asarray(engine.to_numpy(ll_mat))
         for tag, tag_idxs in enumerate(tag_list):
@@ -862,9 +822,9 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             HeterogeneousMixtureAccumulator object.
 
         """
-        self.comp_counts += suff_stat[0]
+        self.comp_counts += np.asarray(suff_stat[0], dtype=np.float64)
         for i in range(self.num_components):
-            self.accumulators[i].combine(suff_stat[1][i])
+            self.accumulators[i].combine(copy.deepcopy(suff_stat[1][i]))
 
         return self
 
@@ -881,7 +841,7 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             Tuple[np.ndarray[float], Tuple[T1,...,Tk]] as described above.
 
         """
-        return self.comp_counts, tuple([u.value() for u in self.accumulators])
+        return self.comp_counts.copy(), tuple(copy.deepcopy(u.value()) for u in self.accumulators)
 
     def from_value(self, x: tuple[np.ndarray, tuple[Any, ...]]) -> "HeterogeneousMixtureAccumulator":
         """Set sufficient statistics of HeterogeneousMixtureAccumulator instance to x.
@@ -899,9 +859,9 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             HeterogeneousMixtureAccumulator object.
 
         """
-        self.comp_counts = x[0]
+        self.comp_counts = np.asarray(x[0], dtype=np.float64).copy()
         for i in range(self.num_components):
-            self.accumulators[i].from_value(x[1][i])
+            self.accumulators[i].from_value(copy.deepcopy(x[1][i]))
 
         return self
 
@@ -928,9 +888,9 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             if self.comp_key in stats_dict:
                 acc = stats_dict[self.comp_key]
                 for i in range(len(acc)):
-                    acc[i] = acc[i].combine(self.accumulators[i].value())
+                    acc[i].combine(copy.deepcopy(self.accumulators[i].value()))
             else:
-                stats_dict[self.comp_key] = self.accumulators
+                stats_dict[self.comp_key] = copy.deepcopy(self.accumulators)
 
         for u in self.accumulators:
             u.key_merge(stats_dict)
@@ -955,7 +915,10 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         if self.comp_key is not None:
             if self.comp_key in stats_dict:
                 acc = stats_dict[self.comp_key]
-                self.accumulators = acc
+                if len(acc) != self.num_components:
+                    raise ValueError("keyed heterogeneous-mixture component statistics have incompatible arity.")
+                for local, pooled in zip(self.accumulators, acc):
+                    local.from_value(copy.deepcopy(pooled.value()))
 
         for u in self.accumulators:
             u.key_replace(stats_dict)

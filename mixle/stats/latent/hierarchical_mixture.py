@@ -20,6 +20,7 @@ Further,
 
 """
 
+import copy
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
@@ -32,6 +33,12 @@ from mixle.engines.arithmetic import maxrandint
 from mixle.enumeration.algorithms import BufferedStream, best_first_union
 from mixle.stats.combinator.null_dist import NullAccumulator, NullAccumulatorFactory, NullDistribution, NullEstimator
 from mixle.stats.combinator.sequence import SequenceDistribution
+from mixle.stats.compute.mixture_evidence import (
+    normalize_engine_mixture_log_scores,
+    normalize_mixture_log_scores,
+    validated_probability_vector,
+    validated_row_probability_matrix,
+)
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -42,7 +49,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from mixle.stats.latent.mixture import MixtureDistribution
+from mixle.stats.latent.mixture import MixtureDistribution, _owned_generative_components
 
 T = TypeVar("T")  ## Data type for topics
 E1 = TypeVar("E1")  ## Encoded sequence from topic encoder.
@@ -137,13 +144,23 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
             keys (Tuple[Optional[str], Optional[str]]): Optional keys for outer weights and topic statistics.
 
         """
+        owned_topics = _owned_generative_components(topics, "HierarchicalMixtureDistribution topics")
+        outer_weights = validated_probability_vector(
+            mixture_weights,
+            "HierarchicalMixtureDistribution outer weights",
+        )
+        topic_matrix = validated_row_probability_matrix(
+            topic_weights,
+            "HierarchicalMixtureDistribution topic weights",
+            shape=(len(outer_weights), len(owned_topics)),
+        )
         with np.errstate(divide="ignore"):
-            self.topics = topics
-            self.num_topics = len(topics)
-            self.num_mixtures = len(mixture_weights)
-            self.w = np.asarray(mixture_weights, dtype=np.float64)
+            self.topics = owned_topics
+            self.num_topics = len(owned_topics)
+            self.num_mixtures = len(outer_weights)
+            self.w = outer_weights
             self.log_w = np.log(self.w)
-            self.taus = np.asarray(topic_weights, dtype=np.float64)
+            self.taus = topic_matrix
             self.log_taus = np.log(self.taus)
             self.len_dist = len_dist
             self.name = name
@@ -394,16 +411,7 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
         rv += self.log_w
 
         # Compute ln p_mat(bag of data)
-        ll_max2 = np.max(rv, axis=1, keepdims=True)
-        bad_rows = ~np.isfinite(ll_max2.flatten())
-        if np.any(bad_rows):
-            rv[bad_rows, :] = self.log_w
-            ll_max2[bad_rows, :] = np.max(self.log_w)
-        rv -= ll_max2
-        np.exp(rv, out=rv)
-        rv /= np.sum(rv, axis=1, keepdims=True)
-
-        return rv
+        return normalize_mixture_log_scores(rv).responsibilities
 
     def to_fisher(self, **kwargs):
         """Reuse the equivalent flat mixture's Fisher view."""
@@ -756,30 +764,13 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         rv += estimate.log_w
         rv += ll_max_sum[:, None]
-        ll_max2 = np.max(rv, axis=1, keepdims=True)
-        bad_seq = ~np.isfinite(ll_max2.flatten())
-        if np.any(bad_seq):
-            rv[bad_seq, :] = estimate.log_w
-            ll_max2[bad_seq, :] = np.max(estimate.log_w)
-        rv -= ll_max2
-
-        np.exp(rv, out=rv)
-        ll_sum = rv.sum(axis=1, keepdims=True)
-
-        # Capture per-row data log-likelihood (== seq_log_density) by reusing the posterior
-        # normalizer already computed here: row_ll = rowmax + log(rowsum), with -inf for invalid
-        # sequences seq_log_density would also return -inf for, plus the length-distribution term.
-        # Only when the fused-EM fast path requests it (_track_ll); standard path is unaffected.
+        normalized = normalize_mixture_log_scores(rv)
+        rv = normalized.responsibilities
         if self._track_ll:
-            with np.errstate(divide="ignore"):
-                row_ll = ll_max2[:, 0] + np.log(ll_sum[:, 0])
-            if np.any(bad_seq):
-                row_ll[bad_seq] = -np.inf
+            row_ll = normalized.log_evidence.copy()
             if estimate is not None and estimate.len_dist is not None:
                 row_ll = row_ll + estimate.len_dist.seq_log_density(enc_len)
             self._seq_ll += float(np.dot(weights, row_ll))
-
-        rv /= ll_sum
         # Outer weights: accumulate the DOCUMENT-level outer posteriors (one row per document,
         # weighted by the document weight) -- the EM maximizer for `w`. The token-level expansion
         # below (rv[idx, :]) feeds only the taus/topic statistics.
@@ -841,8 +832,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         cols = [engine.index_add(engine.zeros(sz), idx_e, ll_mat_t2[:, i]) for i in range(self.num_mixtures)]
         rv = engine.stack(cols, axis=1)
         rv = rv + engine.asarray(estimate.log_w) + ll_max_sum[:, None]
-        rv = rv - engine.logsumexp(rv, axis=1, keepdims=True)
-        rv = engine.exp(rv)  # outer posteriors (sz, M)
+        rv = normalize_engine_mixture_log_scores(rv, engine).responsibilities
 
         # Outer weights: document-level outer-posterior sums (matches the host seq_update).
         self.w_counts += np.dot(weights_np, np.asarray(engine.to_numpy(rv)))
@@ -889,22 +879,22 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             HierarchicalMixtureEstimatorAccumulator object.
 
         """
-        self.comp_counts += suff_stat[0]
-        self.w_counts += suff_stat[1]
+        self.comp_counts += np.asarray(suff_stat[0], dtype=np.float64)
+        self.w_counts += np.asarray(suff_stat[1], dtype=np.float64)
         for i in range(self.num_topics):
-            self.accumulators[i].combine(suff_stat[2][i])
+            self.accumulators[i].combine(copy.deepcopy(suff_stat[2][i]))
 
-        self.len_accumulator.combine(suff_stat[3])
+        self.len_accumulator.combine(copy.deepcopy(suff_stat[3]))
 
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, tuple[Any, ...], Any | None]:
         """Returns sufficient statistics of type Tuple[np.ndarray, np.ndarray, Tuple[SS1,...], Optional[SS2]]."""
         return (
-            self.comp_counts,
-            self.w_counts,
-            tuple([u.value() for u in self.accumulators]),
-            self.len_accumulator.value(),
+            self.comp_counts.copy(),
+            self.w_counts.copy(),
+            tuple(copy.deepcopy(u.value()) for u in self.accumulators),
+            copy.deepcopy(self.len_accumulator.value()),
         )
 
     def from_value(
@@ -925,12 +915,12 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             HierarchicalMixtureEstimatorAccumulator object.
 
         """
-        self.comp_counts = x[0]
-        self.w_counts = x[1]
+        self.comp_counts = np.asarray(x[0], dtype=np.float64).copy()
+        self.w_counts = np.asarray(x[1], dtype=np.float64).copy()
         for i in range(self.num_topics):
-            self.accumulators[i].from_value(x[2][i])
+            self.accumulators[i].from_value(copy.deepcopy(x[2][i]))
 
-        self.len_accumulator.from_value(x[3])
+        self.len_accumulator.from_value(copy.deepcopy(x[3]))
 
         return self
 
@@ -973,9 +963,9 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             if self.comp_key in stats_dict:
                 acc = stats_dict[self.comp_key]
                 for i in range(len(acc)):
-                    acc[i] = acc[i].combine(self.accumulators[i].value())
+                    acc[i].combine(copy.deepcopy(self.accumulators[i].value()))
             else:
-                stats_dict[self.comp_key] = self.accumulators
+                stats_dict[self.comp_key] = copy.deepcopy(self.accumulators)
 
         for u in self.accumulators:
             u.key_merge(stats_dict)
@@ -1009,7 +999,10 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         if self.comp_key is not None:
             if self.comp_key in stats_dict:
                 acc = stats_dict[self.comp_key]
-                self.accumulators = acc
+                if len(acc) != self.num_topics:
+                    raise ValueError("keyed hierarchical-mixture topic statistics have incompatible arity.")
+                for local, pooled in zip(self.accumulators, acc):
+                    local.from_value(copy.deepcopy(pooled.value()))
 
         for u in self.accumulators:
             u.key_replace(stats_dict)

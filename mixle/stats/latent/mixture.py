@@ -38,6 +38,7 @@ from mixle.inference.fisher import Path
 from mixle.stats.compute.mixture_evidence import (
     normalize_engine_mixture_log_scores,
     normalize_mixture_log_scores,
+    validated_probability_vector,
 )
 from mixle.stats.compute.pdist import (
     ContractError,
@@ -82,6 +83,35 @@ key_type = tuple[str, str] | tuple[None, None]
 
 
 from mixle.inference.fisher import FixedFisherView, SufficientStatisticVectorizer, to_fisher
+
+
+def _owned_generative_components(
+    components: Sequence[SequenceEncodableProbabilityDistribution],
+    label: str,
+    *,
+    minimum: int = 1,
+) -> list[SequenceEncodableProbabilityDistribution]:
+    """Return an owned component list containing only generative laws."""
+    try:
+        owned = list(components)
+    except TypeError as exc:
+        raise TypeError(f"{label} must be an iterable of probability distributions.") from exc
+    if len(owned) < minimum:
+        raise ValueError(f"{label} requires at least {minimum} component(s).")
+    neutral = [index for index, component in enumerate(owned) if supports(component, Neutral)]
+    from mixle.stats.compute.pdist import DensitySemantics
+
+    likelihood_factors = [
+        index
+        for index, component in enumerate(owned)
+        if component.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR
+    ]
+    if neutral or likelihood_factors:
+        invalid = sorted(set(neutral).union(likelihood_factors))
+        raise TypeError(
+            f"{label} components must be generative probability laws; likelihood factors found at indices {invalid}."
+        )
+    return owned
 
 
 def mixture_prior(
@@ -206,10 +236,6 @@ def _dirichlet_expectations(prior: Any, num_components: int) -> tuple[np.ndarray
 # measured landing ~6e-8 from 1.0 -- comfortably inside this tolerance but outside a naive
 # 1e-10/1e-12 bound, which would reject a legitimately fitted float32 mixture as off-simplex.
 # Plain float64 EM MLE fits (counts / counts.sum()) measured at ~2e-16, also well inside.
-_SIMPLEX_SUM_RTOL = 1.0e-5
-_SIMPLEX_SUM_ATOL = 1.0e-8
-
-
 class MixtureDistribution(SequenceEncodableProbabilityDistribution):
     """Finite mixture over homogeneous component distributions.
 
@@ -253,60 +279,8 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
-        try:
-            self.w = np.asarray(w, dtype=float)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise TypeError("MixtureDistribution weights must be a one-dimensional numeric sequence.") from exc
-        if self.w.ndim != 1 or self.w.size == 0:
-            raise ValueError("MixtureDistribution requires a non-empty one-dimensional weight vector.")
-        self.w = self.w.copy()
-        try:
-            components = list(components)
-        except TypeError as exc:
-            raise TypeError("MixtureDistribution components must be an iterable.") from exc
-
-        if len(components) != len(self.w):
-            # A mismatched pair constructs a model whose densities are silently wrong (and whose
-            # sampler dies later, far from the mistake), so fail at the constructor like the
-            # scalar families do.
-            raise ValueError("MixtureDistribution requires len(components) == len(w).")
-        neutral = [index for index, component in enumerate(components) if supports(component, Neutral)]
-        from mixle.stats.compute.pdist import DensitySemantics
-
-        likelihood_factors = [
-            index
-            for index, component in enumerate(components)
-            if component.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR
-        ]
-        if neutral or likelihood_factors:
-            invalid = sorted(set(neutral).union(likelihood_factors))
-            raise TypeError(
-                "MixtureDistribution components must be generative probability laws; "
-                "likelihood factors found at indices %s. Use PointMassDistribution(None) "
-                "for a proper null-valued component or place marginalization factors inside a "
-                "structured likelihood." % invalid
-            )
-        if not np.isfinite(self.w).all() or np.any(self.w < 0.0):
-            # A negative or non-finite weight silently propagates into log_density() as nan (only a
-            # RuntimeWarning) -- `nan < 0.0` is always False, so the old check let a NaN weight straight
-            # through, and it later surfaces again, far from the mistake, as an opaque error out of the
-            # sampler's RandomState.choice ("probabilities contain NaN"). Reject both at the constructor
-            # like the scalar families do (CategoricalDistribution.pmap / IntegerCategoricalDistribution.
-            # p_vec).
-            raise ValueError("MixtureDistribution requires finite, non-negative weights.")
-        if not np.isclose(float(self.w.sum()), 1.0, rtol=_SIMPLEX_SUM_RTOL, atol=_SIMPLEX_SUM_ATOL):
-            # Unlike CategoricalDistribution.pmap / IntegerCategoricalDistribution.p_vec (both
-            # deliberately "stored as given": several existing call sites construct a partial or
-            # intentionally-unnormalized vector on purpose, so those two classes only reject
-            # non-finite/negative entries), this class's own docstring commits to `w` being simplex
-            # weights that "should sum to one". A mixture whose weights don't sum to ~1 doesn't
-            # integrate to 1 and silently produces an invalid probability model with no error --
-            # log_density()/density() and sampling all still "work", just wrongly. A codebase-wide
-            # scan found no existing call site relying on a non-normalized `w`, so there is no
-            # legitimate case to preserve here.
-            raise ValueError(
-                "MixtureDistribution requires w to sum to 1.0 (simplex weights), got sum=%r." % float(self.w.sum())
-            )
+        components = _owned_generative_components(components, "MixtureDistribution")
+        self.w = validated_probability_vector(w, "MixtureDistribution weights", size=len(components))
 
         self.zw = self.w == 0.0
         self.log_w = np.log(self.w + self.zw)
