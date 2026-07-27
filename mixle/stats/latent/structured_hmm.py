@@ -27,6 +27,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.vector import require_possible_log_evidence
+
 
 class TransitionOperator:
     """A row-stochastic state-transition operator behind the HMM forward-backward.
@@ -521,17 +523,19 @@ class StructuredHMM:
         c = np.zeros(T)
         alpha[0] = (self.pi if pi is None else pi) * b[0]
         c[0] = alpha[0].sum()
-        alpha[0] /= c[0]
+        alpha[0] = alpha[0] / c[0] if c[0] > 0 else alpha[0]
         for t in range(1, T):
             alpha[t] = op.forward(alpha[t - 1]) * b[t]
             c[t] = alpha[t].sum()
             alpha[t] = alpha[t] / c[t] if c[t] > 0 else alpha[t]
         final_mass = float(alpha[T - 1][self.final_mask].sum())
-        loglik = float(np.sum(np.log(c)) + np.sum(mx) + np.log(final_mass + 1e-300))
+        with np.errstate(divide="ignore"):
+            loglik = float(np.sum(np.log(c)) + np.sum(mx) + np.log(final_mass))
         beta = np.zeros((T, self.K))
         beta[T - 1] = np.where(self.final_mask, 1.0, 0.0)
         for t in range(T - 2, -1, -1):
-            beta[t] = op.backward(b[t + 1] * beta[t + 1]) / c[t + 1]
+            backward = op.backward(b[t + 1] * beta[t + 1])
+            beta[t] = backward / c[t + 1] if c[t + 1] > 0 else np.zeros_like(backward)
         gamma = alpha * beta
         gs = gamma.sum(axis=1, keepdims=True)
         gamma = np.divide(gamma, gs, out=np.zeros_like(gamma), where=gs > 0)
@@ -552,17 +556,19 @@ class StructuredHMM:
         c = np.zeros(T)
         alpha[0] = (self.pi if pi is None else pi) * b[0]
         c[0] = alpha[0].sum()
-        alpha[0] /= c[0]
+        alpha[0] = alpha[0] / c[0] if c[0] > 0 else alpha[0]
         for t in range(1, T):
             alpha[t] = op.forward(np.where(nonterm, alpha[t - 1], 0.0)) * b[t]  # only leave non-terminal states
             c[t] = alpha[t].sum()
             alpha[t] = alpha[t] / c[t] if c[t] > 0 else alpha[t]
         term_mass = float(alpha[T - 1][self.term_mask].sum())  # must end in a terminal state
-        loglik = float(np.sum(np.log(c)) + np.sum(mx) + np.log(term_mass + 1e-300))
+        with np.errstate(divide="ignore"):
+            loglik = float(np.sum(np.log(c)) + np.sum(mx) + np.log(term_mass))
         beta = np.zeros((T, self.K))
         beta[T - 1] = np.where(self.term_mask, 1.0, 0.0)  # only terminal states close a sequence
         for t in range(T - 2, -1, -1):
-            beta[t] = np.where(nonterm, op.backward(b[t + 1] * beta[t + 1]), 0.0) / c[t + 1]
+            backward = np.where(nonterm, op.backward(b[t + 1] * beta[t + 1]), 0.0)
+            beta[t] = backward / c[t + 1] if c[t + 1] > 0 else np.zeros_like(backward)
         gamma = alpha * beta
         gs = gamma.sum(axis=1, keepdims=True)
         gamma = np.divide(gamma, gs, out=np.zeros_like(gamma), where=gs > 0)
@@ -591,7 +597,7 @@ class StructuredHMM:
 
     def posterior_decode(self, seq):
         """Per-position MAP state argmax_k P(z_t = k | x) from the forward-backward posteriors gamma."""
-        return np.argmax(self._forward_backward(self._log_b(seq))[4], axis=1)
+        return np.argmax(self.state_posteriors(seq), axis=1)
 
     def enumerator(self):
         """Enumerate observation sequences in descending marginal probability (top_k / rank / seek /
@@ -622,7 +628,9 @@ class StructuredHMM:
 
     def state_posteriors(self, seq):
         """The full smoothing posteriors gamma[t,k] = P(z_t = k | x)."""
-        return self._forward_backward(self._log_b(seq))[4]
+        result = self._forward_backward(self._log_b(seq))
+        require_possible_log_evidence(result[5], context="StructuredHMM.state_posteriors")
+        return result[4]
 
     def seq_log_density(self, seqs) -> np.ndarray:
         """Score a batch of observation sequences."""
@@ -654,6 +662,11 @@ class StructuredHMM:
         fb = _dense_fb_numba() if use_fast else None
         ll_trace = []
         for _ in range(int(max_its)):
+            active = [seq for seq in seqs if seq]
+            require_possible_log_evidence(
+                self.seq_log_density(active),
+                context="StructuredHMM.fit",
+            )
             trans_acc = self.transition.new_accumulator()
             pi_acc = np.zeros(self.K)
             emit_accs = [est.accumulator_factory().make() for est in self._emit_est]
@@ -825,6 +838,10 @@ def chunked_state_posteriors(hmm: StructuredHMM, seq, *, chunk: int, overlap: in
     (embarrassingly parallel). The first chunk uses the model's pi; interior chunks start from the uniform
     belief and the ``overlap`` context lets the chain *forget* that wrong boundary -- so the kept interior
     matches the exact forward-backward up to an error that decays at the mixing rate in ``overlap``."""
+    require_possible_log_evidence(
+        hmm.seq_log_density([seq]),
+        context="chunked_state_posteriors",
+    )
     log_b_full = hmm._log_b(seq)
     t_len = len(seq)
     out = np.zeros((t_len, hmm.K))
@@ -857,6 +874,7 @@ def fit_chunked(
         log_b = hmm._log_b(seq)[ctx_lo:ctx_hi]
         pi = hmm.pi if ctx_lo == 0 else uniform
         alpha, beta, c, b, gamma, ll = hmm._forward_backward(log_b, pi=pi)
+        require_possible_log_evidence(ll, context="fit_chunked")
         # transition mass over kept interior transitions only; c is in the mx-scaled frame of
         # _forward_backward, so the kept window's per-position emission maxima must be added back
         # for the REPORTED trace (the full-fit loglik does the same) -- without them the returned
@@ -869,6 +887,11 @@ def fit_chunked(
         return seq, ctx_lo, keep_lo, keep_hi, alpha, beta, c, b, gamma, (contrib_ll, contrib_scaled)
 
     for _ in range(int(max_its)):
+        active = [seq for seq in seqs if seq]
+        require_possible_log_evidence(
+            hmm.seq_log_density(active),
+            context="fit_chunked",
+        )
         tasks = [
             (seq, lo, hi, klo, khi)
             for seq in seqs
@@ -970,6 +993,11 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x, weights, estimate):
         """Run forward-backward and accumulate weighted sufficient statistics for a batch."""
+        active = [seq for seq in x if seq]
+        require_possible_log_evidence(
+            estimate.seq_log_density(active),
+            context="StructuredHMMAccumulator.seq_update",
+        )
         for seq, w in zip(x, np.asarray(weights, dtype=float)):
             if not seq:
                 continue
@@ -1213,7 +1241,8 @@ class InputOutputHMM:
                 loglik = float(np.sum(np.log(c)) + np.sum(mx))
         else:
             tm = float(alpha[t_len - 1][term].sum())
-            loglik = float(np.sum(np.log(c)) + np.sum(mx) + np.log(tm + 1e-300))
+            with np.errstate(divide="ignore"):
+                loglik = float(np.sum(np.log(c)) + np.sum(mx) + np.log(tm))
         beta = np.zeros((t_len, self.K))
         beta[t_len - 1] = 1.0 if term is None else np.where(term, 1.0, 0.0)
         for t in range(t_len - 2, -1, -1):
@@ -1273,13 +1302,14 @@ class InputOutputHMM:
 
     def posterior_decode(self, seq, inputs=None):
         """Per-position MAP state argmax_k P(z_t = k | x, u) from the forward-backward posteriors gamma."""
-        obs, u = self._obs_inputs(seq, inputs)
-        return np.argmax(self._forward_backward(self._log_b(obs), u)[4], axis=1)
+        return np.argmax(self.state_posteriors(seq, inputs), axis=1)
 
     def state_posteriors(self, seq, inputs=None):
         """The full smoothing posteriors gamma[t,k] = P(z_t = k | x, u), conditioned on the inputs."""
         obs, u = self._obs_inputs(seq, inputs)
-        return self._forward_backward(self._log_b(obs), u)[4]
+        result = self._forward_backward(self._log_b(obs), u)
+        require_possible_log_evidence(result[5], context="InputOutputHMM.state_posteriors")
+        return result[4]
 
     def sampler(self, seed=None):
         """Return a sampler for ``(observation, input)``-pair records along a given control sequence."""
@@ -1291,6 +1321,11 @@ class InputOutputHMM:
         input_seqs = [list(u) for u in input_seqs]
         ll_trace = []
         for _ in range(int(max_its)):
+            active = [(o, u) for o, u in zip(obs_seqs, input_seqs) if o]
+            require_possible_log_evidence(
+                self.seq_log_density([o for o, _ in active], [u for _, u in active]),
+                context="InputOutputHMM.fit",
+            )
             trans_accs = [t.new_accumulator() for t in self.transitions]
             pi_acc = np.zeros(self.K)
             emit_accs = [est.accumulator_factory().make() for est in self._emit_est]
@@ -1398,6 +1433,11 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x, weights, estimate):
         """Accumulate weighted sufficient statistics from a batch of IOHMM records."""
+        active = [seq for seq in x if seq]
+        require_possible_log_evidence(
+            estimate.seq_log_density(active),
+            context="IOHMMAccumulator.seq_update",
+        )
         for seq, w in zip(x, np.asarray(weights, dtype=float)):
             if not seq:
                 continue
@@ -1585,6 +1625,7 @@ class ExplicitDurationHMM:
         log_alpha, log_e, seg = self._forward(log_b)
         log_beta, log_bstar = self._backward(log_b, seg)
         z = _logsumexp(log_alpha[-1])
+        require_possible_log_evidence(z, context="ExplicitDurationHMM._estep")
         pi_contrib = np.exp(log_pi + log_bstar[0] - z)
         dur_contrib = np.zeros((self.K, self.D))
         trans_contrib = np.zeros((self.K, self.K))
@@ -1608,6 +1649,11 @@ class ExplicitDurationHMM:
         seqs = [list(s) for s in seqs]
         ll_trace = []
         for _ in range(int(max_its)):
+            active = [seq for seq in seqs if seq]
+            require_possible_log_evidence(
+                self.seq_log_density(active),
+                context="ExplicitDurationHMM.fit",
+            )
             dur_acc = np.zeros((self.K, self.D))
             trans_acc = np.zeros((self.K, self.K))
             pi_acc = np.zeros(self.K)
@@ -1698,6 +1744,7 @@ class ExplicitDurationHMM:
         log_alpha, log_e, seg = self._forward(log_b)
         log_beta, _ = self._backward(log_b, seg)
         z = _logsumexp(log_alpha[-1])
+        require_possible_log_evidence(z, context="ExplicitDurationHMM.state_posteriors")
         log_dur = np.log(self.dur + 1e-300)
         occ = np.zeros((t_len, self.K))
         for t in range(t_len):
@@ -1815,6 +1862,11 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x, weights, estimate):
         """Accumulate weighted explicit-duration HMM statistics from a batch."""
+        active = [seq for seq in x if seq]
+        require_possible_log_evidence(
+            estimate.seq_log_density(active),
+            context="EDHMMAccumulator.seq_update",
+        )
         for seq, w in zip(x, np.asarray(weights, dtype=float)):
             if not seq:
                 continue

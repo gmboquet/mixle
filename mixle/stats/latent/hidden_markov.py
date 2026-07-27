@@ -1180,6 +1180,10 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         if not self.use_numba:
             return None
 
+        vec.require_possible_log_evidence(
+            self.seq_log_density(x),
+            context="HiddenMarkovModelDistribution.seq_posterior",
+        )
         x0, x1 = x
 
         (idx, sz, enc_data), len_enc = x1
@@ -2923,6 +2927,11 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        vec.require_possible_log_evidence(
+            estimate.seq_log_density(x),
+            context="HiddenMarkovAccumulator.seq_update",
+        )
+
         if estimate.terminal_states is not None:
             self._terminal_seq_update(x, weights, estimate)
             return
@@ -3169,6 +3178,10 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         gamma weights. Falls back to the host :meth:`seq_update` for the blocked (non-numba)
         encoding.
         """
+        vec.require_possible_log_evidence(
+            estimate.seq_log_density(x),
+            context="HiddenMarkovAccumulator.seq_update_engine",
+        )
         x0, x1 = x
         num_states = estimate.n_states
         weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
