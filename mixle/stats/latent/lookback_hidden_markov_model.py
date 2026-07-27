@@ -30,6 +30,7 @@ LookbackHiddenMarkovModelDataEncoder constructor signatures also differ (here: e
 """
 
 from collections.abc import Sequence
+from numbers import Real
 from typing import Any, TypeVar
 
 import numpy as np
@@ -45,6 +46,7 @@ from mixle.stats.combinator.null_dist import (
     NullDistribution,
     NullEstimator,
 )
+from mixle.stats.compute.mixture_evidence import validated_probability_vector
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -73,6 +75,163 @@ from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias
 T = TypeVar("T")
 E0 = TypeVar("E0")
 E1 = TypeVar("E1")
+
+
+def _validated_lookback_lag(value: Any, *, context: str) -> int:
+    """Return an exact non-negative integer lookback lag."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{context} lag must be an integer.")
+    lag = int(value)
+    if lag < 0:
+        raise ValueError(f"{context} lag must be non-negative.")
+    return lag
+
+
+def _owned_sequence(
+    values: Any,
+    label: str,
+    *,
+    size: int | None = None,
+    minimum: int = 0,
+) -> list[Any]:
+    """Return an owned list with explicit arity requirements."""
+    try:
+        owned = list(values)
+    except TypeError as exc:
+        raise TypeError(f"{label} must be an iterable.") from exc
+    if len(owned) < minimum:
+        raise ValueError(f"{label} must contain at least {minimum} item(s).")
+    if size is not None and len(owned) != size:
+        raise ValueError(f"{label} must contain exactly {size} item(s), got {len(owned)}.")
+    return owned
+
+
+def _validated_lookback_transition_matrix(values: Any, num_states: int) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Return an owned stochastic transition matrix plus its zero-row indices."""
+    try:
+        transitions = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("LookbackHiddenMarkovModelDistribution transitions must be a numeric matrix.") from exc
+    expected = (num_states, num_states)
+    if transitions.shape != expected:
+        raise ValueError(
+            f"LookbackHiddenMarkovModelDistribution transitions must have shape {expected}, got {transitions.shape}."
+        )
+    if np.any(~np.isfinite(transitions)) or np.any(transitions < 0.0):
+        raise ValueError(
+            "LookbackHiddenMarkovModelDistribution transitions must contain finite non-negative probabilities."
+        )
+    row_sums = transitions.sum(axis=1)
+    zero_rows = np.flatnonzero(row_sums == 0.0)
+    nonzero_rows = row_sums != 0.0
+    if not np.allclose(row_sums[nonzero_rows], 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError("LookbackHiddenMarkovModelDistribution transition rows must sum to one.")
+    return transitions.copy(), tuple(int(index) for index in zero_rows)
+
+
+def _reachable_lookback_states(initial: np.ndarray, transitions: np.ndarray) -> np.ndarray:
+    """Return the states graph-reachable from positive initial mass."""
+    reachable = initial > 0.0
+    frontier = list(np.flatnonzero(reachable))
+    while frontier:
+        state = frontier.pop()
+        for child in np.flatnonzero(transitions[state] > 0.0):
+            if not reachable[child]:
+                reachable[child] = True
+                frontier.append(int(child))
+    return reachable
+
+
+def _validated_lookback_keys(values: Any, *, context: str) -> tuple[str | None, str | None, str | None]:
+    """Return the three optional accumulator-sharing keys."""
+    if values is None:
+        return (None, None, None)
+    keys = tuple(values)
+    if len(keys) != 3:
+        raise ValueError(f"{context} keys must contain exactly three entries.")
+    if any(value is not None and not isinstance(value, str) for value in keys):
+        raise TypeError(f"{context} keys must be strings or None.")
+    return keys
+
+
+def _validated_lookback_pseudo_count(value: Any) -> tuple[float | None, float | None]:
+    """Return finite non-negative initial/transition pseudo-count controls."""
+    value = broadcast_pseudo_count(value, 2)
+    if value is None:
+        return (None, None)
+    try:
+        controls = tuple(value)
+    except TypeError as exc:
+        raise TypeError("LookbackHiddenMarkovModelEstimator pseudo_count must be a scalar or a pair.") from exc
+    if len(controls) != 2:
+        raise ValueError("LookbackHiddenMarkovModelEstimator pseudo_count must contain exactly two entries.")
+    result: list[float | None] = []
+    for index, control in enumerate(controls):
+        if control is None:
+            result.append(None)
+            continue
+        if isinstance(control, bool) or not isinstance(control, Real):
+            raise TypeError(f"LookbackHiddenMarkovModelEstimator pseudo_count[{index}] must be a real number or None.")
+        numeric = float(control)
+        if not np.isfinite(numeric) or numeric < 0.0:
+            raise ValueError(
+                f"LookbackHiddenMarkovModelEstimator pseudo_count[{index}] must be finite and non-negative."
+            )
+        result.append(numeric)
+    return result[0], result[1]
+
+
+def _validated_lookback_count_array(values: Any, label: str, shape: tuple[int, ...]) -> np.ndarray:
+    """Return an owned finite non-negative sufficient-statistic count array."""
+    try:
+        counts = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{label} must be a numeric array.") from exc
+    if counts.shape != shape:
+        raise ValueError(f"{label} must have shape {shape}, got {counts.shape}.")
+    if np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
+        raise ValueError(f"{label} must contain finite non-negative values.")
+    return counts.copy()
+
+
+def _validate_lookback_dirichlet_geometry(prior: Any, label: str, num_states: int) -> None:
+    """Require a conjugate chain prior to cover exactly the hidden-state simplex."""
+    try:
+        parameters = np.asarray(prior.get_parameters(), dtype=np.float64)
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{label} must expose a numeric concentration vector.") from exc
+    if parameters.shape != (num_states,):
+        raise ValueError(f"{label} must contain exactly {num_states} concentrations.")
+
+
+def _validated_lookback_sufficient_statistics(
+    suff_stat: Any,
+    *,
+    lag: int,
+    num_states: int,
+    context: str,
+) -> tuple[int, int, np.ndarray, np.ndarray, np.ndarray, list[Any], list[Any], Any]:
+    """Validate the complete sufficient-statistic schema before mutation or estimation."""
+    try:
+        values = tuple(suff_stat)
+    except TypeError as exc:
+        raise TypeError(f"{context} sufficient statistics must be an eight-item tuple.") from exc
+    if len(values) != 8:
+        raise ValueError(f"{context} sufficient statistics must contain exactly eight items.")
+    observed_lag = _validated_lookback_lag(values[0], context=f"{context} sufficient-statistic")
+    if observed_lag != lag:
+        raise ValueError(f"{context} sufficient-statistic lag {observed_lag} does not match estimator lag {lag}.")
+    observed_states = values[1]
+    if isinstance(observed_states, bool) or not isinstance(observed_states, (int, np.integer)):
+        raise TypeError(f"{context} sufficient-statistic state count must be an integer.")
+    if int(observed_states) != num_states:
+        raise ValueError(f"{context} sufficient-statistic state count {observed_states} does not match {num_states}.")
+    init_counts = _validated_lookback_count_array(values[2], f"{context} initial-state counts", (num_states,))
+    state_counts = _validated_lookback_count_array(values[3], f"{context} state counts", (num_states,))
+    trans_counts = _validated_lookback_count_array(values[4], f"{context} transition counts", (num_states, num_states))
+    topic_ss = _owned_sequence(values[5], f"{context} topic sufficient statistics", size=num_states)
+    init_ss = _owned_sequence(values[6], f"{context} initial sufficient statistics", size=num_states)
+    return lag, num_states, init_counts, state_counts, trans_counts, topic_ss, init_ss, values[7]
 
 
 class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
@@ -125,31 +284,61 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
         """
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
         transitions = require("transitions", transitions, default=MISSING)
-        with np.errstate(divide="ignore"):
-            self.topics = topics
-            self.init_dist = init_dist if init_dist is not None else [NullDistribution()] * len(w)
-            self.lag = lag
-            self.num_topics = len(topics)
-            self.num_states = len(w)
-            self.w = vec.make(w)
-            self.log_w = log(self.w)
-            self.transitions = np.reshape(transitions, (self.num_states, self.num_states))
-            self.len_dist = len_dist if len_dist is not None else NullDistribution()
-            self.name = name
-            self.log_transitions = log(self.transitions)
-            self.terminal_states = validated_terminal_states(
-                terminal_states,
-                self.num_states,
-                context="LookbackHiddenMarkovModelDistribution",
+        context = "LookbackHiddenMarkovModelDistribution"
+        self.lag = _validated_lookback_lag(lag, context=context)
+        self.topics = _owned_sequence(topics, f"{context} topics", minimum=1)
+        self.w = validated_probability_vector(w, f"{context} initial weights")
+        self.num_states = len(self.w)
+        self.num_topics = len(self.topics)
+        if self.num_topics != self.num_states:
+            raise ValueError(
+                f"{context} requires one topic per state: got {self.num_topics} topics and {self.num_states} states."
             )
-            if self.terminal_states is not None:
-                self._terminal_mask = np.zeros(self.num_states, dtype=bool)
-                self._terminal_mask[list(self.terminal_states)] = True
+        if init_dist is None:
+            if self.lag > 0:
+                raise ValueError(f"{context} requires one initial distribution per state when lag is positive.")
+            self.init_dist = [NullDistribution() for _ in range(self.num_states)]
+        else:
+            self.init_dist = _owned_sequence(
+                init_dist,
+                f"{context} initial distributions",
+                size=self.num_states,
+            )
+        self.terminal_states = validated_terminal_states(
+            terminal_states,
+            self.num_states,
+            context=context,
+        )
+        self.transitions, zero_transition_rows = _validated_lookback_transition_matrix(
+            transitions,
+            self.num_states,
+        )
+        reachable = _reachable_lookback_states(self.w, self.transitions)
+        reachable_zero_rows = tuple(
+            index
+            for index in zero_transition_rows
+            if reachable[index] and (self.terminal_states is None or index not in self.terminal_states)
+        )
+        if reachable_zero_rows:
+            raise ValueError(
+                f"{context} reachable non-terminal states cannot have zero transition rows: {reachable_zero_rows}."
+            )
+        self.unreachable_transition_rows = zero_transition_rows
+        for index in zero_transition_rows:
+            self.transitions[index, index] = 1.0
+        with np.errstate(divide="ignore"):
+            self.log_w = np.log(self.w)
+            self.log_transitions = np.log(self.transitions)
+        self.len_dist = len_dist if len_dist is not None else NullDistribution()
+        self.name = name
+        if self.terminal_states is not None:
+            self._terminal_mask = np.zeros(self.num_states, dtype=bool)
+            self._terminal_mask[list(self.terminal_states)] = True
         validate_terminal_reachability(
             self.w,
             self.transitions,
             self.terminal_states,
-            context="LookbackHiddenMarkovModelDistribution",
+            context=context,
         )
         self.set_prior(prior)
 
@@ -183,13 +372,39 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
             self.has_conj_prior = False
             return
 
-        init_prior, row_priors = _unpack_hmm_chain_prior(prior)
+        try:
+            prior_values = tuple(prior)
+        except TypeError as exc:
+            raise TypeError(
+                "LookbackHiddenMarkovModelDistribution prior must be an initial prior and row-prior sequence."
+            ) from exc
+        if len(prior_values) != 2:
+            raise ValueError("LookbackHiddenMarkovModelDistribution prior must contain exactly two entries.")
+        init_prior, row_priors = _unpack_hmm_chain_prior(prior_values)
+        row_priors = _owned_sequence(
+            row_priors,
+            "LookbackHiddenMarkovModelDistribution transition-row priors",
+            size=self.num_states,
+        )
         self.prior = prior
         self.init_prior = init_prior
         self.row_priors = row_priors
         self.has_conj_prior = isinstance(init_prior, DirichletDistribution) and all(
             isinstance(u, DirichletDistribution) for u in row_priors
         )
+        if self.has_conj_prior:
+            _validate_lookback_dirichlet_geometry(
+                init_prior,
+                "LookbackHiddenMarkovModelDistribution initial prior",
+                self.num_states,
+            )
+            for index, row_prior in enumerate(row_priors):
+                _validate_lookback_dirichlet_geometry(
+                    row_prior,
+                    f"LookbackHiddenMarkovModelDistribution row prior {index}",
+                    self.num_states,
+                )
+        self.prior = (init_prior, tuple(row_priors))
 
     def _windowed_log_b(self, x: Sequence[Any]) -> np.ndarray:
         """Per-position, per-state emission log-densities ``(obs_cnt, num_states)`` for the lookback windows."""
@@ -610,9 +825,10 @@ class LookbackHiddenMarkovModelSampler(DistributionSampler):
         self.dist = dist
         self.rng = RandomState(seed)
 
-        self.init_samplers = [
-            dist.init_dist[i].sampler(seed=self.rng.randint(0, maxrandint)) for i in range(dist.num_states)
-        ]
+        init_seeds = [self.rng.randint(0, maxrandint) for _ in range(dist.num_states)]
+        self.init_samplers = (
+            [dist.init_dist[i].sampler(seed=init_seeds[i]) for i in range(dist.num_states)] if dist.lag > 0 else []
+        )
         self.obs_samplers = [
             getattr(dist.topics[i], "transition_sampler", dist.topics[i].sampler)(seed=self.rng.randint(0, maxrandint))
             for i in range(dist.num_states)
@@ -705,19 +921,31 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
                 transition counts, and state accumulators.
 
         """
-        self.seq_accumulators = seq_accumulators
-        self.init_accumulators = init_accumulators
-        self.num_states = len(seq_accumulators)
+        context = "LookbackHiddenMarkovModelEstimatorAccumulator"
+        self.lag = _validated_lookback_lag(lag, context=context)
+        self.seq_accumulators = _owned_sequence(
+            seq_accumulators,
+            f"{context} sequence accumulators",
+            minimum=1,
+        )
+        self.num_states = len(self.seq_accumulators)
+        if init_accumulators is None:
+            if self.lag > 0:
+                raise ValueError(f"{context} requires one initial accumulator per state when lag is positive.")
+            self.init_accumulators = [NullAccumulatorFactory().make() for _ in range(self.num_states)]
+        else:
+            self.init_accumulators = _owned_sequence(
+                init_accumulators,
+                f"{context} initial accumulators",
+                size=self.num_states,
+            )
         self.init_counts = vec.zeros(self.num_states)
         self.trans_counts = vec.zeros((self.num_states, self.num_states))
         self.state_counts = vec.zeros(self.num_states)
         self.len_accumulator = len_accumulator
-        self.lag = lag
-        self.terminal_states = terminal_states
+        self.terminal_states = validated_terminal_states(terminal_states, self.num_states, context=context)
 
-        self.init_key = keys[0]
-        self.trans_key = keys[1]
-        self.state_key = keys[2]
+        self.init_key, self.trans_key, self.state_key = _validated_lookback_keys(keys, context=context)
 
         # When _track_ll is enabled, seq_update accumulates the per-sequence data
         # log-likelihood into _seq_ll. Used by the fused-EM fast path in
@@ -1008,8 +1236,20 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             LookbackHiddenMarkovModelEstimatorAccumulator: This accumulator after aggregation.
 
         """
-        lag, num_states, init_counts, state_counts, trans_counts, seq_accumulators, init_accumulators, len_acc = (
-            suff_stat
+        (
+            _,
+            _,
+            init_counts,
+            state_counts,
+            trans_counts,
+            seq_accumulators,
+            init_accumulators,
+            len_acc,
+        ) = _validated_lookback_sufficient_statistics(
+            suff_stat,
+            lag=self.lag,
+            num_states=self.num_states,
+            context="LookbackHiddenMarkovModelEstimatorAccumulator.combine",
         )
 
         self.init_counts += init_counts
@@ -1059,13 +1299,21 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             LookbackHiddenMarkovModelEstimatorAccumulator: This accumulator after assignment.
 
         """
-        lag, num_states, init_counts, state_counts, trans_counts, seq_accumulators, init_accumulators, len_acc = x
-
-        self.lag = lag
-        self.num_states = num_states
-        self.init_counts = init_counts
-        self.state_counts = state_counts
-        self.trans_counts = trans_counts
+        (
+            _,
+            _,
+            self.init_counts,
+            self.state_counts,
+            self.trans_counts,
+            seq_accumulators,
+            init_accumulators,
+            len_acc,
+        ) = _validated_lookback_sufficient_statistics(
+            x,
+            lag=self.lag,
+            num_states=self.num_states,
+            context="LookbackHiddenMarkovModelEstimatorAccumulator.from_value",
+        )
 
         for i, v in enumerate(init_accumulators):
             self.init_accumulators[i].from_value(v)
@@ -1189,16 +1437,27 @@ class LookbackHiddenMarkovModelEstimatorAccumulatorFactory(StatisticAccumulatorF
                 initial-state counts, transition counts, and state accumulators.
 
         """
-        self.seq_factories = seq_factories
-        self.keys = keys if keys is not None else (None, None, None)
+        context = "LookbackHiddenMarkovModelEstimatorAccumulatorFactory"
+        self.lag = _validated_lookback_lag(lag, context=context)
+        self.seq_factories = _owned_sequence(
+            seq_factories,
+            f"{context} sequence factories",
+            minimum=1,
+        )
+        self.keys = _validated_lookback_keys(keys, context=context)
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
-        self.lag = lag
-        self.terminal_states = terminal_states
+        self.terminal_states = validated_terminal_states(terminal_states, len(self.seq_factories), context=context)
 
         if init_factories is None:
-            self.init_factories = [NullAccumulatorFactory() for j in range(len(seq_factories))]
+            if self.lag > 0:
+                raise ValueError(f"{context} requires one initial factory per state when lag is positive.")
+            self.init_factories = [NullAccumulatorFactory() for _ in range(len(self.seq_factories))]
         else:
-            self.init_factories = init_factories
+            self.init_factories = _owned_sequence(
+                init_factories,
+                f"{context} initial factories",
+                size=len(self.seq_factories),
+            )
 
     def make(self) -> "LookbackHiddenMarkovModelEstimatorAccumulator":
         """Create a new LookbackHiddenMarkovModelEstimatorAccumulator from the member factories.
@@ -1260,21 +1519,31 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
                 :func:`mixle.inference.estimation.optimize` auto-detect the ``'map'`` objective.
 
         """
-        self.num_states = len(estimators)
-        self.estimators = estimators
-        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
-        self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None)
+        context = "LookbackHiddenMarkovModelEstimator"
+        self.lag = _validated_lookback_lag(lag, context=context)
+        self.estimators = _owned_sequence(
+            estimators,
+            f"{context} topic estimators",
+            minimum=1,
+        )
+        self.num_states = len(self.estimators)
+        self.pseudo_count = _validated_lookback_pseudo_count(pseudo_count)
         self.suff_stat = suff_stat
-        self.keys = keys if keys is not None else (None, None, None)
+        self.keys = _validated_lookback_keys(keys, context=context)
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.name = name
-        self.lag = lag
-        self.terminal_states = terminal_states
+        self.terminal_states = validated_terminal_states(terminal_states, self.num_states, context=context)
 
         if init_estimators is None:
-            self.init_estimators = [NullEstimator() for xx in range(self.num_states)]
+            if self.lag > 0:
+                raise ValueError(f"{context} requires one initial estimator per state when lag is positive.")
+            self.init_estimators = [NullEstimator() for _ in range(self.num_states)]
         else:
-            self.init_estimators = init_estimators
+            self.init_estimators = _owned_sequence(
+                init_estimators,
+                f"{context} initial estimators",
+                size=self.num_states,
+            )
         self.set_prior(prior)
 
     def get_prior(self):
@@ -1304,13 +1573,39 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
             self.has_conj_prior = False
             return
 
-        init_prior, row_priors = prior[0], list(prior[1])
+        try:
+            prior_values = tuple(prior)
+        except TypeError as exc:
+            raise TypeError(
+                "LookbackHiddenMarkovModelEstimator prior must be an initial prior and row-prior sequence."
+            ) from exc
+        if len(prior_values) != 2:
+            raise ValueError("LookbackHiddenMarkovModelEstimator prior must contain exactly two entries.")
+        init_prior = prior_values[0]
+        row_priors = _owned_sequence(
+            prior_values[1],
+            "LookbackHiddenMarkovModelEstimator transition-row priors",
+            size=self.num_states,
+        )
         self.prior = prior
         self.init_prior = init_prior
         self.row_priors = row_priors
         self.has_conj_prior = isinstance(init_prior, DirichletDistribution) and all(
             isinstance(u, DirichletDistribution) for u in row_priors
         )
+        if self.has_conj_prior:
+            _validate_lookback_dirichlet_geometry(
+                init_prior,
+                "LookbackHiddenMarkovModelEstimator initial prior",
+                self.num_states,
+            )
+            for index, row_prior in enumerate(row_priors):
+                _validate_lookback_dirichlet_geometry(
+                    row_prior,
+                    f"LookbackHiddenMarkovModelEstimator row prior {index}",
+                    self.num_states,
+                )
+        self.prior = (init_prior, tuple(row_priors))
 
     def model_log_density(self, model: "LookbackHiddenMarkovModelDistribution") -> float:
         """Log-density of the model parameters under the priors (ELBO global term).
@@ -1372,7 +1667,21 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
             LookbackHiddenMarkovModelDistribution: M-step estimate of the distribution.
 
         """
-        lag, num_states, init_counts, state_counts, trans_counts, topic_ss, init_ss, len_ss = suff_stat
+        (
+            lag,
+            num_states,
+            init_counts,
+            state_counts,
+            trans_counts,
+            topic_ss,
+            init_ss,
+            len_ss,
+        ) = _validated_lookback_sufficient_statistics(
+            suff_stat,
+            lag=self.lag,
+            num_states=self.num_states,
+            context="LookbackHiddenMarkovModelEstimator.estimate",
+        )
 
         len_dist = self.len_estimator.estimate(nobs, len_ss)
 
@@ -1429,6 +1738,8 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
                 good_rows = ~bad_rows
                 transitions = np.zeros_like(trans_counts, dtype=np.float64)
                 transitions[good_rows, :] += trans_counts[good_rows, :] / row_sum[good_rows]
+                bad_indices = np.flatnonzero(bad_rows)
+                transitions[bad_indices, bad_indices] = 1.0
             else:
                 transitions = trans_counts / row_sum
 
@@ -1466,7 +1777,7 @@ class LookbackHiddenMarkovModelDataEncoder(DataSequenceEncoder):
 
         """
         self.encoder = encoder
-        self.lag = lag
+        self.lag = _validated_lookback_lag(lag, context="LookbackHiddenMarkovModelDataEncoder")
         self.len_encoder = len_encoder if len_encoder is not None else NullDataEncoder()
         self.init_encoder = init_encoder if init_encoder is not None else NullDataEncoder()
 
