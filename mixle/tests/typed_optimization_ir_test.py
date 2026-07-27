@@ -40,7 +40,7 @@ from mixle.stats import (
 from mixle.stats.bayes.normal_gamma import NormalGammaDistribution
 from mixle.stats.compute.pdist import ParameterEstimator, ProbabilityDistribution
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 class _NoTouchGaussian(GaussianDistribution):

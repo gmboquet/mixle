@@ -26,7 +26,10 @@ for _v in (
     os.environ.setdefault(_v, _THREADS)
 
 import time  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
 from math import lgamma, log  # noqa: E402
+from typing import Any  # noqa: E402
 
 import numpy as np  # noqa: E402
 
@@ -40,25 +43,60 @@ def pin_torch():
     torch.set_default_dtype(torch.float64)  # match numpy float64 for LL parity
 
 
-def timed(make_and_fit, reps=5):
-    """Median wall-clock of ``make_and_fit()`` over ``reps`` runs after one warm-up.
+@dataclass(frozen=True)
+class BenchmarkWorkload:
+    """Three-phase benchmark: setup and evaluation are explicitly outside timed fit."""
 
-    ``make_and_fit`` must build a fresh (unfitted) model from the shared init and fit
-    it, returning ``(mean_log_likelihood, iters)``. Rebuilding each rep keeps every run
-    identical (fitting mutates the model in place). A package that raises (e.g. a
-    non-PD covariance it cannot recover from) is recorded as a failure, not fabricated
-    and not allowed to abort the sweep.
-    """
+    prepare: Callable[[], Any]
+    fit: Callable[[Any], Any]
+    evaluate: Callable[[Any], tuple[float, int]]
+
+
+def timed(workload, reps=5):
+    """Median fit-only wall time, validating every warm-up and measured repetition."""
+    if isinstance(reps, bool) or not isinstance(reps, int) or reps <= 0:
+        raise ValueError("benchmark reps must be a positive exact integer")
+    if not isinstance(workload, BenchmarkWorkload):
+        raise TypeError("timed() requires a BenchmarkWorkload with prepare/fit/evaluate phases")
+
+    def execute():
+        prepared = workload.prepare()
+        t0 = time.perf_counter()
+        fitted = workload.fit(prepared)
+        elapsed = time.perf_counter() - t0
+        ll, iters = workload.evaluate(fitted)
+        ll = float(ll)
+        if not np.isfinite(ll):
+            raise ValueError("benchmark evaluation returned a non-finite mean log-likelihood")
+        if isinstance(iters, bool) or not isinstance(iters, (int, np.integer)) or int(iters) < 0:
+            raise ValueError("benchmark evaluation returned an invalid iteration count")
+        return elapsed, ll, int(iters)
+
     try:
-        ll, iters = make_and_fit()  # warm-up (discarded)
+        _, warm_ll, warm_iters = execute()
     except Exception as e:  # noqa: BLE001 - a crash is an honest, reportable outcome
         return {"sec": None, "mean_ll": None, "iters": None, "failed": type(e).__name__}
     ts = []
+    evaluations = []
     for _ in range(reps):
-        t0 = time.perf_counter()
-        make_and_fit()
-        ts.append(time.perf_counter() - t0)
-    return {"sec": float(np.median(ts)), "sec_min": float(np.min(ts)), "mean_ll": float(ll), "iters": int(iters)}
+        try:
+            elapsed, ll, iters = execute()
+        except Exception as e:  # noqa: BLE001 - every repetition must validate
+            return {"sec": None, "mean_ll": None, "iters": None, "failed": type(e).__name__}
+        ts.append(elapsed)
+        evaluations.append({"mean_ll": ll, "iters": iters})
+    all_ll = np.asarray([warm_ll, *(item["mean_ll"] for item in evaluations)], dtype=np.float64)
+    if not np.allclose(all_ll, warm_ll, rtol=1e-10, atol=1e-10):
+        return {"sec": None, "mean_ll": None, "iters": None, "failed": "NonReproducibleEvaluation"}
+    if any(item["iters"] != warm_iters for item in evaluations):
+        return {"sec": None, "mean_ll": None, "iters": None, "failed": "NonReproducibleIterationCount"}
+    return {
+        "sec": float(np.median(ts)),
+        "sec_min": float(np.min(ts)),
+        "mean_ll": warm_ll,
+        "iters": warm_iters,
+        "repetitions": evaluations,
+    }
 
 
 # --------------------------------------------------------------------------------------
@@ -148,13 +186,10 @@ def gmm_sklearn(X, init, max_its):
     k, dim = means0.shape
     prec0 = np.stack([np.linalg.inv(cov0)] * k)
 
-    def run():
-        # imported here, inside the timed thunk's failure contract: a missing package is
-        # recorded by `timed` as an honest per-package failure instead of aborting the sweep
-        # (the first call is the discarded warm-up, so import cost never lands in a timing)
+    def prepare():
         from sklearn.mixture import GaussianMixture
 
-        gm = GaussianMixture(
+        return GaussianMixture(
             n_components=k,
             covariance_type="full",
             max_iter=max_its,
@@ -165,19 +200,21 @@ def gmm_sklearn(X, init, max_its):
             precisions_init=prec0,
             random_state=0,
         )
-        gm.fit(X)
+
+    def fit(gm):
+        return gm.fit(X)
+
+    def evaluate(gm):
         return gm.score(X), gm.n_iter_
 
-    return run
+    return BenchmarkWorkload(prepare, fit, evaluate)
 
 
 def gmm_pomegranate(X, init, max_its):
     means0, cov0, w0 = init
     k = means0.shape[0]
 
-    def run():
-        # inside the timed thunk's failure contract (see gmm_sklearn); the tensor conversion
-        # repeats per rep, but it is microseconds against multi-second fits
+    def prepare():
         import torch
         from pomegranate.distributions import Normal
         from pomegranate.gmm import GeneralMixtureModel
@@ -187,11 +224,19 @@ def gmm_pomegranate(X, init, max_its):
             Normal(means=torch.tensor(means0[j]), covs=torch.tensor(cov0), covariance_type="full") for j in range(k)
         ]
         model = GeneralMixtureModel(dists, priors=torch.tensor(w0), max_iter=max_its, tol=1e-12, verbose=False)
+        return model, Xt
+
+    def fit(state):
+        model, Xt = state
         model.fit(Xt)
+        return model, Xt
+
+    def evaluate(state):
+        model, Xt = state
         n = Xt.shape[0]
         return float(model.log_probability(Xt).sum()) / n, max_its
 
-    return run
+    return BenchmarkWorkload(prepare, fit, evaluate)
 
 
 def gmm_mixle(X, init, max_its):
@@ -202,15 +247,23 @@ def gmm_mixle(X, init, max_its):
     k, dim = means0.shape
     data = list(X)
 
-    def run():
+    def prepare():
         comps = [st.MultivariateGaussianDistribution(means0[j].copy(), cov0.copy()) for j in range(k)]
         m0 = st.MixtureDistribution(comps, list(w0))
         est = st.MixtureEstimator([st.MultivariateGaussianEstimator(dim=dim) for _ in range(k)])
-        m = optimize(data, est, prev_estimate=m0, max_its=max_its, delta=None, out=None)
-        enc = m.dist_to_encoder().seq_encode(data)
+        enc = m0.dist_to_encoder().seq_encode(data)
+        return m0, est, [(len(data), enc)], enc
+
+    def fit(state):
+        m0, est, chunks, enc = state
+        model = optimize(None, est, prev_estimate=m0, max_its=max_its, delta=None, enc_data=chunks, out=None)
+        return model, enc
+
+    def evaluate(state):
+        m, enc = state
         return float(np.sum(np.asarray(m.seq_log_density(enc)))) / len(data), max_its
 
-    return run
+    return BenchmarkWorkload(prepare, fit, evaluate)
 
 
 # --------------------------------------------------------------------------------------
@@ -223,18 +276,22 @@ def hmm_hmmlearn(seqs, xcat, lengths, init, max_its):
     states = start0.shape[0]
     n_seq = len(seqs)
 
-    def run():
-        # inside the timed thunk's failure contract (see gmm_sklearn)
+    def prepare():
         from hmmlearn.hmm import GaussianHMM
 
         hm = GaussianHMM(
             n_components=states, covariance_type="diag", n_iter=max_its, tol=-1e9, init_params="", params="stmc"
         )
         hm.startprob_, hm.transmat_, hm.means_, hm.covars_ = start0.copy(), trans0.copy(), means0.copy(), covar0.copy()
-        hm.fit(xcat, lengths)
+        return hm
+
+    def fit(hm):
+        return hm.fit(xcat, lengths)
+
+    def evaluate(hm):
         return hm.score(xcat, lengths) / n_seq, hm.monitor_.iter
 
-    return run
+    return BenchmarkWorkload(prepare, fit, evaluate)
 
 
 def hmm_mixle(seqs, init, length, max_its):
@@ -249,7 +306,7 @@ def hmm_mixle(seqs, init, length, max_its):
     lam = float(length)
     len_term = -lam + length * log(lam) - lgamma(length + 1)
 
-    def run():
+    def prepare():
         comps = [st.GaussianDistribution(float(means0[j, 0]), 1.0) for j in range(states)]
         m0 = st.HiddenMarkovModelDistribution(
             comps, list(start0), trans0.tolist(), len_dist=st.PoissonDistribution(lam)
@@ -257,9 +314,17 @@ def hmm_mixle(seqs, init, length, max_its):
         est = st.HiddenMarkovEstimator(
             [st.GaussianEstimator() for _ in range(states)], len_estimator=st.PoissonEstimator()
         )
-        m = optimize(data, est, prev_estimate=m0, max_its=max_its, delta=None, out=None)
-        enc = m.dist_to_encoder().seq_encode(data)
+        enc = m0.dist_to_encoder().seq_encode(data)
+        return m0, est, [(len(data), enc)], enc
+
+    def fit(state):
+        m0, est, chunks, enc = state
+        model = optimize(None, est, prev_estimate=m0, max_its=max_its, delta=None, enc_data=chunks, out=None)
+        return model, enc
+
+    def evaluate(state):
+        m, enc = state
         full = float(np.sum(np.asarray(m.seq_log_density(enc)))) / len(data)
         return full - len_term, max_its
 
-    return run
+    return BenchmarkWorkload(prepare, fit, evaluate)

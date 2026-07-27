@@ -1,0 +1,2 @@
+# Explicit collection-light smoke surface. One path per line; no globs or broad directories.
+mixle/tests/smoke_test.py

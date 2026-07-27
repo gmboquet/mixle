@@ -58,6 +58,7 @@ import numpy as np
 
 try:
     import torch
+    import torch.nn as nn
     import torch.nn.functional as F
 
     _HAS_TORCH = True
@@ -65,8 +66,6 @@ except ImportError:  # pragma: no cover - torch is optional
     _HAS_TORCH = False
 
 if _HAS_TORCH:
-    import torch.nn as nn
-
     from mixle.experimental.context_spine import _apply_rope, _rope_angles
     from mixle.experimental.sketch_state_attention import _transformer_block
 

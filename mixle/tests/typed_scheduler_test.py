@@ -21,7 +21,7 @@ from mixle.experimental.typed_runtime import (
     UpdateNode,
 )
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 def _contract(

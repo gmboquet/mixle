@@ -15,6 +15,10 @@ import os
 import platform
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -24,6 +28,10 @@ import _bench as B  # noqa: E402
 from benchmark_provenance import stamp_result  # noqa: E402
 
 LL_TOL = 1e-3  # absolute tolerance on mean log-likelihood agreement across packages
+
+
+class BenchmarkValidationError(RuntimeError):
+    """A point cannot produce timing evidence because scientific parity is unverified."""
 
 
 def _versions():
@@ -44,17 +52,45 @@ def _versions():
 
 
 def _check_parity(label, results):
-    lls = [r["mean_ll"] for r in results.values() if r and r.get("mean_ll") is not None]
     failed = [p for p, r in results.items() if r and r.get("failed")]
     if failed:
         print(f"      note: {', '.join(failed)} failed ({', '.join(results[p]['failed'] for p in failed)})")
-    if len(lls) < 2:
-        return 0.0, True
-    dmax = float(max(lls) - min(lls))
-    ok = dmax < LL_TOL
-    flag = "" if ok else "  << LL MISMATCH"
-    print(f"      parity: max|Δ mean_ll| = {dmax:.2e}{flag}")
-    return dmax, ok
+    subject = results.get("mixle")
+    if not subject or subject.get("failed") or subject.get("mean_ll") is None:
+        raise BenchmarkValidationError(f"{label}: mixle did not produce a valid likelihood")
+    subject_ll = float(subject["mean_ll"])
+    if not np.isfinite(subject_ll):
+        raise BenchmarkValidationError(f"{label}: mixle produced a non-finite likelihood")
+    references = {
+        name: float(result["mean_ll"])
+        for name, result in results.items()
+        if name != "mixle"
+        and result
+        and not result.get("failed")
+        and result.get("mean_ll") is not None
+        and np.isfinite(float(result["mean_ll"]))
+    }
+    if not references:
+        raise BenchmarkValidationError(f"{label}: no independent reference implementation succeeded")
+    deltas = {name: abs(subject_ll - value) for name, value in references.items()}
+    dmax = max(deltas.values())
+    print(f"      parity: max|mixle-reference Δ mean_ll| = {dmax:.2e}")
+    if dmax >= LL_TOL:
+        raise BenchmarkValidationError(
+            f"{label}: likelihood parity failed ({deltas}); no timing evidence may be published"
+        )
+    return dmax, True
+
+
+def _prepare_output_directory(value):
+    path = Path(value).resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.NamedTemporaryFile(dir=path, prefix=".write-probe-", delete=True):
+            pass
+    except OSError as exc:
+        raise ValueError(f"benchmark output directory is not writable: {path}") from exc
+    return path
 
 
 def _ms(r):
@@ -203,7 +239,9 @@ def main():
     ap.add_argument("--quick", action="store_true", help="smaller sizes for a fast smoke run")
     ap.add_argument("--reps", type=int, default=4)
     ap.add_argument("--only", default="gmm_n,gmm_dim,hmm_n,hmm_states")
+    ap.add_argument("--output-dir", default=os.path.join(HERE, "results"))
     args = ap.parse_args()
+    output_dir = _prepare_output_directory(args.output_dir)
     B.pin_torch()
 
     meta = _versions()
@@ -226,8 +264,8 @@ def main():
     # --quick is a smoke run: keep it away from results.json, the tracked full-sweep reference
     # artifact that the write-up and B7.3's version-stamp gate consume.
     fname = "results_quick.json" if args.quick else "results.json"
-    path = os.path.join(HERE, "results", fname)
-    with open(path, "w") as f:
+    path = output_dir / fname
+    with path.open("w", encoding="utf-8") as f:
         json.dump(out, f, indent=2)
     print(f"\nwrote {path}")
 

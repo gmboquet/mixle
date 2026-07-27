@@ -1,4 +1,5 @@
 # Exact check-run names required on the release/0.8.0 tip before publication.
+smoke / collection-light
 lint (ruff enforced, mypy advisory)
 fast / py3.11
 fast / py3.12

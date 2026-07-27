@@ -1,94 +1,166 @@
-"""Base-install import safety (worklist P2.2).
-
-Every ``mixle`` package module must import cleanly with only the base dependencies installed -- an
-optional dependency (torch, numba, mpi4py, ...) may only be imported lazily (inside a function), behind
-a ``try/except ImportError``, or through the ``mixle.utils.optional_deps`` shim. A bare top-level
-``import torch`` in a package module breaks ``import mixle...`` for every base-install user and silently
-regressed the wheel twice before (numba and mpi4py, fixed in the 0.7.0 pass).
-
-This gate catches that statically -- by AST, without importing anything -- so it runs in any
-environment and pins the property regardless of which extras happen to be installed in CI. Test files
-are excluded: they may import optional deps at top level and are gated by pytest markers/skips, not by
-base-install import safety.
-"""
+"""Every optional import is mapped from project extras and guarded at executable module scope."""
 
 import ast
+import json
+import re
+import tomllib
 import unittest
 from pathlib import Path
 
-_PKG_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
+_PKG_ROOT = _ROOT / "mixle"
+_IMPORT_MAP = _ROOT / "manifests" / "optional_dependency_imports.json"
 
-# Third-party packages that are optional extras, not base dependencies. Keep in sync with the
-# ``[project.optional-dependencies]`` table in pyproject.toml. A top-level import of any of these in a
-# non-test package module is a base-install breakage.
-_OPTIONAL_TOP_LEVEL = frozenset(
-    {
-        "numba",
-        "pyspark",
-        "gmpy2",
-        "mpmath",
-        "zarr",
-        "h5py",
-        "pandas",
-        "mpi4py",
-        "torch",
-        "jax",
-        "jaxlib",
-        "flax",
-        "optax",
-        "ray",
-        "dask",
-        "distributed",
-        "umap",
-        "transformers",
-        "peft",
-        "lightning",
-        "pytorch_lightning",
-        "cupy",
-        "sklearn",
-        "hmmlearn",
-        "mamba_ssm",
-        "triton",
-        "safetensors",
-        "datasets",
-        "accelerate",
-        "sentencepiece",
-        "tokenizers",
+
+def _distribution(requirement: str) -> str:
+    match = re.match(r"[A-Za-z0-9_.-]+", requirement)
+    if match is None:
+        raise ValueError(f"invalid optional requirement: {requirement!r}")
+    return match.group(0)
+
+
+def _optional_import_names() -> frozenset[str]:
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    distributions = {
+        _distribution(requirement)
+        for requirements in project["optional-dependencies"].values()
+        for requirement in requirements
     }
-)
+    mapping = json.loads(_IMPORT_MAP.read_text(encoding="utf-8"))
+    if mapping.get("artifact") != "mixle.optional_dependency_imports/v1":
+        raise ValueError("unsupported optional-dependency import-map schema")
+    distribution_to_imports = mapping.get("distribution_to_imports")
+    if not isinstance(distribution_to_imports, dict):
+        raise ValueError("optional-dependency import map must contain a distribution mapping")
+    missing = sorted(distributions - set(distribution_to_imports))
+    extra = sorted(set(distribution_to_imports) - distributions)
+    if missing or extra:
+        raise ValueError(f"optional-dependency import map drift: missing={missing}, extra={extra}")
+    return frozenset(
+        import_name for distribution in distributions for import_name in distribution_to_imports[distribution]
+    )
 
 
-def _unguarded_optional_imports(path: Path) -> list[tuple[int, str]]:
-    """Top-level (module-scope) imports of an optional dependency. Imports nested inside a function,
-    ``try``, ``if``, ``with``, or class body are not module-scope and so are not flagged."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+def _catches_import_error(node: ast.Try) -> bool:
+    for handler in node.handlers:
+        error = handler.type
+        names = []
+        if isinstance(error, ast.Name):
+            names = [error.id]
+        elif isinstance(error, ast.Tuple):
+            names = [element.id for element in error.elts if isinstance(element, ast.Name)]
+        if {"ImportError", "ModuleNotFoundError"} & set(names):
+            return True
+    return False
+
+
+def _type_checking_guard(test: ast.expr) -> bool:
+    return (
+        isinstance(test, ast.Name)
+        and test.id == "TYPE_CHECKING"
+        or isinstance(test, ast.Attribute)
+        and isinstance(test.value, ast.Name)
+        and test.value.id == "typing"
+        and test.attr == "TYPE_CHECKING"
+    )
+
+
+def _scan_statements(
+    statements: list[ast.stmt],
+    optional_names: frozenset[str],
+    *,
+    guarded: bool = False,
+) -> list[tuple[int, str]]:
     hits: list[tuple[int, str]] = []
-    for node in tree.body:  # direct children of the module == true top level
-        tops: list[str] = []
+    for node in statements:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
         if isinstance(node, ast.Import):
-            tops = [alias.name.split(".", 1)[0] for alias in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            tops = [node.module.split(".", 1)[0]]
-        for top in tops:
-            if top in _OPTIONAL_TOP_LEVEL:
+            for alias in node.names:
+                top = alias.name.split(".", 1)[0]
+                if top in optional_names and not guarded:
+                    hits.append((node.lineno, top))
+            continue
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            top = node.module.split(".", 1)[0]
+            if top in optional_names and not guarded:
                 hits.append((node.lineno, top))
+            continue
+        if isinstance(node, ast.Try):
+            hits.extend(
+                _scan_statements(
+                    node.body,
+                    optional_names,
+                    guarded=guarded or _catches_import_error(node),
+                )
+            )
+            hits.extend(_scan_statements(node.orelse, optional_names, guarded=guarded))
+            hits.extend(_scan_statements(node.finalbody, optional_names, guarded=guarded))
+            for handler in node.handlers:
+                hits.extend(_scan_statements(handler.body, optional_names, guarded=guarded))
+            continue
+        if isinstance(node, ast.If):
+            if not _type_checking_guard(node.test):
+                hits.extend(_scan_statements(node.body, optional_names, guarded=guarded))
+            hits.extend(_scan_statements(node.orelse, optional_names, guarded=guarded))
+            continue
+        child_blocks = []
+        for field in ("body", "orelse", "finalbody"):
+            value = getattr(node, field, None)
+            if isinstance(value, list):
+                child_blocks.append(value)
+        if isinstance(node, ast.Match):
+            child_blocks.extend(case.body for case in node.cases)
+        for block in child_blocks:
+            hits.extend(_scan_statements(block, optional_names, guarded=guarded))
     return hits
 
 
+def _unguarded_optional_imports(path: Path) -> list[tuple[int, str]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return _scan_statements(tree.body, _optional_import_names())
+
+
 class OptionalImportGuardTest(unittest.TestCase):
-    def test_no_unguarded_top_level_optional_imports(self):
-        offenders: list[str] = []
+    def test_extras_and_import_map_are_complete(self):
+        names = _optional_import_names()
+        for required in (
+            "pyarrow",
+            "sqlalchemy",
+            "pymongo",
+            "fsspec",
+            "networkx",
+            "numpyro",
+            "sympy",
+            "sage",
+            "sentence_transformers",
+        ):
+            self.assertIn(required, names)
+
+    def test_no_unguarded_executable_module_scope_optional_imports(self):
+        offenders = []
         for path in sorted(_PKG_ROOT.rglob("*.py")):
             if "tests" in path.relative_to(_PKG_ROOT).parts:
                 continue
-            for lineno, dep in _unguarded_optional_imports(path):
-                offenders.append(f"  {path.relative_to(_PKG_ROOT.parent)}:{lineno}: top-level import of {dep!r}")
-        self.assertFalse(
+            for lineno, dependency in _unguarded_optional_imports(path):
+                offenders.append(f"{path.relative_to(_ROOT)}:{lineno}: {dependency}")
+        self.assertEqual(
             offenders,
-            "optional dependencies imported at module top level break the base install; import them "
-            "lazily (inside a function), behind try/except ImportError, or via mixle.utils.optional_deps:\n"
+            [],
+            "optional dependencies execute at module scope without an ImportError/TYPE_CHECKING guard:\n"
             + "\n".join(offenders),
         )
+
+    def test_nested_unconditional_import_is_detected(self):
+        tree = ast.parse("if True:\n    import pyarrow\n")
+        self.assertEqual(_scan_statements(tree.body, _optional_import_names()), [(2, "pyarrow")])
+
+    def test_real_import_guards_are_recognized(self):
+        guarded = ast.parse(
+            "try:\n    import pyarrow\nexcept ImportError:\n    pyarrow = None\n"
+            "if TYPE_CHECKING:\n    import sqlalchemy\n"
+        )
+        self.assertEqual(_scan_statements(guarded.body, _optional_import_names()), [])
 
 
 if __name__ == "__main__":

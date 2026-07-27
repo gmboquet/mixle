@@ -16,7 +16,7 @@ from mixle.stats import (
     seq_encode,
 )
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 def _problem(seed=19, nobs=240):
