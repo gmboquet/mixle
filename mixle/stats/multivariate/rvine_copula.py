@@ -37,16 +37,18 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.multivariate._copula_common import (
     BufferedUScoreAccumulatorFactory,
     UScoreEncoder,
-    reject_out_of_unit_cube,
     reject_unsupported_pseudo_count,
     u_score_batch,
+    validated_buffered_statistic,
+    validated_dimension,
+    validated_sample_size,
     weighted_kendall_tau,
 )
 from mixle.stats.multivariate.vine_copula import (
     _CLIP,
     _DEFAULT_CANDIDATES,
-    _clip01,
     _fit_best_pair,
+    _validated_candidates,
 )
 
 
@@ -76,22 +78,36 @@ def _max_spanning_tree(
 ) -> list[tuple[int, int]]:
     """Prim's algorithm for a MAXIMUM spanning tree over nodes ``0..n-1`` using only ``allowed`` edges.
 
-    Assumes the allowed graph is connected (true for a vine tree by the proximity condition). Returns the
-    chosen ``(i, j)`` edges (``i < j``).
+    Raises if the allowed graph is disconnected rather than returning a forest.
     """
+    n = validated_dimension(n, minimum=1, label="spanning-tree node count")
+    canonical_allowed: set[tuple[int, int]] = set()
+    for edge in allowed:
+        if not isinstance(edge, tuple) or len(edge) != 2:
+            raise ValueError("allowed spanning-tree edges must be (i, j) pairs")
+        i, j = edge
+        if not isinstance(i, int) or isinstance(i, bool) or not isinstance(j, int) or isinstance(j, bool):
+            raise TypeError("spanning-tree node IDs must be integers")
+        if not 0 <= i < n or not 0 <= j < n or i == j:
+            raise ValueError("allowed spanning-tree edges must join distinct nodes in range(0, n)")
+        canonical_allowed.add((min(i, j), max(i, j)))
+    missing_weights = canonical_allowed - set(weight)
+    if missing_weights:
+        raise ValueError("spanning-tree weights are missing allowed edge(s): %s" % sorted(missing_weights))
     in_tree = {0}
     chosen: list[tuple[int, int]] = []
     while len(in_tree) < n:
         best, best_w = None, -np.inf
-        for i, j in allowed:
+        for i, j in canonical_allowed:
             a, b = (i, j) if i < j else (j, i)
             if (a in in_tree) != (b in in_tree):  # exactly one endpoint inside -> a growing edge
                 if weight[(a, b)] > best_w:
                     best, best_w = (a, b), weight[(a, b)]
-        if best is None:  # disconnected under `allowed` -- add any missing node arbitrarily (defensive)
-            missing = next(k for k in range(n) if k not in in_tree)
-            in_tree.add(missing)
-            continue
+        if best is None:
+            missing = sorted(set(range(n)) - in_tree)
+            raise ValueError(
+                "allowed spanning-tree graph is disconnected; cannot reach node(s) %s from node 0" % missing
+            )
         chosen.append(best)
         in_tree.add(best[0] if best[1] in in_tree else best[1])
     return chosen
@@ -99,7 +115,6 @@ def _max_spanning_tree(
 
 def _forward_vals(trees: list[list[_Edge]], u: np.ndarray) -> tuple[np.ndarray, list[list[dict[int, np.ndarray]]]]:
     """Forward pass: accumulate the log-density and the per-edge conditional CDFs ``val[edge][var]``."""
-    u = _clip01(u)
     loglik = np.zeros(u.shape[0])
     all_vals: list[list[dict[int, np.ndarray]]] = []
     for t, tree in enumerate(trees):
@@ -120,7 +135,7 @@ def _forward_vals(trees: list[list[_Edge]], u: np.ndarray) -> tuple[np.ndarray, 
 
 def _select_and_fit(u: np.ndarray, w: np.ndarray, candidates: tuple[str, ...]) -> list[list[_Edge]]:
     """Dißmann's greedy selection + sequential fit: build tree by tree, max-spanning-tree on conditional |tau|."""
-    u = _clip01(u)
+    candidates = _validated_candidates(candidates)
     d = u.shape[1]
     trees: list[list[_Edge]] = []
     prev_vals: list[dict[int, np.ndarray]] = []
@@ -135,7 +150,13 @@ def _select_and_fit(u: np.ndarray, w: np.ndarray, candidates: tuple[str, ...]) -
     tree1: list[_Edge] = []
     vals1: list[dict[int, np.ndarray]] = []
     for i, j in _max_spanning_tree(d, weight, allowed):
-        pc = _fit_best_pair(u[:, i], u[:, j], w, candidates)
+        pc = _fit_best_pair(
+            u[:, i],
+            u[:, j],
+            w,
+            candidates,
+            edge_context="R-vine tree 1 variables (%d, %d)" % (i, j),
+        )
         tree1.append(_Edge(i, j, frozenset(), pc, None))
         vals1.append({i: pc.h(u[:, i], u[:, j]), j: pc.h(u[:, j], u[:, i])})
     trees.append(tree1)
@@ -169,12 +190,220 @@ def _select_and_fit(u: np.ndarray, w: np.ndarray, candidates: tuple[str, ...]) -
         vals_t: list[dict[int, np.ndarray]] = []
         for x, y in _max_spanning_tree(m, cand_weight, cand_allowed):
             a, b, shared, ia, ib, (px, py) = cand_info[(x, y)]
-            pc = _fit_best_pair(ia, ib, w, candidates)
+            pc = _fit_best_pair(
+                ia,
+                ib,
+                w,
+                candidates,
+                edge_context="R-vine tree %d variables (%d, %d) conditioned on %s"
+                % (t + 1, a, b, sorted(shared)),
+            )
             tree_t.append(_Edge(a, b, shared, pc, {a: (px, a), b: (py, b)}))
             vals_t.append({a: pc.h(ia, ib), b: pc.h(ib, ia)})
         trees.append(tree_t)
         prev_vals = vals_t
     return trees
+
+
+def _independence_trees(dim: int) -> list[list[_Edge]]:
+    """Construct a complete, valid C-vine-shaped independence tree sequence."""
+    trees: list[list[_Edge]] = []
+    for tree_index in range(dim - 1):
+        cond = frozenset(range(tree_index))
+        tree: list[_Edge] = []
+        for variable in range(tree_index + 1, dim):
+            parents = None
+            if tree_index:
+                parents = {
+                    tree_index: (0, tree_index),
+                    variable: (variable - tree_index, variable),
+                }
+            tree.append(
+                _Edge(
+                    tree_index,
+                    variable,
+                    cond,
+                    _independence_pair(),
+                    parents,
+                )
+            )
+        trees.append(tree)
+    return trees
+
+
+def _independence_pair() -> Any:
+    """Delay the pair-class import cycle through the already imported family table."""
+    from mixle.stats.multivariate.vine_copula import IndependencePairCopula
+
+    return IndependencePairCopula()
+
+
+def _tree_is_connected(node_count: int, edges: list[tuple[int, int]]) -> bool:
+    if node_count == 1:
+        return not edges
+    adjacency = {node: set() for node in range(node_count)}
+    for left, right in edges:
+        adjacency[left].add(right)
+        adjacency[right].add(left)
+    reached = {0}
+    frontier = [0]
+    while frontier:
+        node = frontier.pop()
+        for neighbor in adjacency[node] - reached:
+            reached.add(neighbor)
+            frontier.append(neighbor)
+    return len(reached) == node_count
+
+
+def _conditional_lookup(
+    trees: list[list[_Edge]],
+) -> dict[tuple[int, frozenset[int]], tuple[_Edge, int]]:
+    lookup: dict[tuple[int, frozenset[int]], tuple[_Edge, int]] = {}
+    for tree in trees:
+        for edge in tree:
+            for variable, other in ((edge.a, edge.b), (edge.b, edge.a)):
+                key = (variable, edge.cond | {other})
+                if key in lookup:
+                    raise ValueError(
+                        "R-vine contains duplicate conditional representation for variable %d given %s"
+                        % (variable, sorted(key[1]))
+                    )
+                lookup[key] = (edge, other)
+    return lookup
+
+
+def _find_sampling_order(
+    dim: int,
+    lookup: dict[tuple[int, frozenset[int]], tuple[_Edge, int]],
+) -> tuple[int, ...]:
+    """Find a Rosenblatt order whose required conditional scores exist in the vine."""
+
+    def search(prefix: tuple[int, ...]) -> tuple[int, ...] | None:
+        if len(prefix) == dim:
+            return prefix
+        conditioning = frozenset(prefix)
+        for variable in range(dim):
+            if variable in conditioning:
+                continue
+            if conditioning and (variable, conditioning) not in lookup:
+                continue
+            answer = search(prefix + (variable,))
+            if answer is not None:
+                return answer
+        return None
+
+    result = search(())
+    if result is None:
+        raise ValueError("R-vine tree sequence has no complete Rosenblatt sampling order")
+    return result
+
+
+def _validated_trees(dim: int, trees: Any) -> tuple[list[list[_Edge]], tuple[int, ...]]:
+    """Validate cardinality, IDs, topology, proximity, parents, and sampling completeness."""
+    if not isinstance(trees, (list, tuple)):
+        raise TypeError("R-vine trees must be a sequence of tree edge sequences")
+    if len(trees) != dim - 1:
+        raise ValueError("R-vine must contain exactly %d trees" % (dim - 1))
+
+    checked: list[list[_Edge]] = []
+    signatures: set[tuple[frozenset[int], frozenset[int]]] = set()
+    for tree_index, raw_tree in enumerate(trees):
+        if not isinstance(raw_tree, (list, tuple)):
+            raise TypeError("R-vine tree %d must be an edge sequence" % (tree_index + 1))
+        expected_edges = dim - tree_index - 1
+        if len(raw_tree) != expected_edges:
+            raise ValueError(
+                "R-vine tree %d must contain exactly %d edges" % (tree_index + 1, expected_edges)
+            )
+        tree: list[_Edge] = []
+        topology_edges: list[tuple[int, int]] = []
+        for edge_index, raw_edge in enumerate(raw_tree):
+            if not isinstance(raw_edge, _Edge):
+                raise TypeError("R-vine tree %d edge %d must be an R-vine edge" % (tree_index + 1, edge_index))
+            if (
+                not isinstance(raw_edge.a, int)
+                or isinstance(raw_edge.a, bool)
+                or not isinstance(raw_edge.b, int)
+                or isinstance(raw_edge.b, bool)
+                or raw_edge.a == raw_edge.b
+                or not 0 <= raw_edge.a < dim
+                or not 0 <= raw_edge.b < dim
+            ):
+                raise ValueError("R-vine conditioned variable IDs must be distinct integers in range(0, dim)")
+            try:
+                cond = frozenset(raw_edge.cond)
+            except TypeError as exc:
+                raise TypeError("R-vine edge conditioning set must be iterable") from exc
+            if (
+                len(cond) != tree_index
+                or raw_edge.a in cond
+                or raw_edge.b in cond
+                or any(
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or not 0 <= value < dim
+                    for value in cond
+                )
+            ):
+                raise ValueError(
+                    "R-vine tree %d edge conditioning set must contain exactly %d other valid variables"
+                    % (tree_index + 1, tree_index)
+                )
+            copula = raw_edge.copula
+            if (
+                not isinstance(getattr(copula, "family", None), str)
+                or not callable(getattr(copula, "logpdf", None))
+                or not callable(getattr(copula, "h", None))
+                or not callable(getattr(copula, "h_inv", None))
+            ):
+                raise TypeError("R-vine edge copula is not pair-copula compatible")
+            signature = (frozenset((raw_edge.a, raw_edge.b)), cond)
+            if signature in signatures:
+                raise ValueError("R-vine contains a duplicate conditioned edge")
+            signatures.add(signature)
+
+            parents = raw_edge.parents
+            if tree_index == 0:
+                if parents is not None:
+                    raise ValueError("R-vine tree 1 edges must not have parent references")
+                topology_edges.append((raw_edge.a, raw_edge.b))
+            else:
+                if not isinstance(parents, dict) or set(parents) != {raw_edge.a, raw_edge.b}:
+                    raise ValueError("R-vine deeper-tree parents must map both conditioned variables")
+                parent_nodes: list[int] = []
+                normalized_parents: dict[int, tuple[int, int]] = {}
+                previous = checked[tree_index - 1]
+                for variable in (raw_edge.a, raw_edge.b):
+                    reference = parents[variable]
+                    if (
+                        not isinstance(reference, tuple)
+                        or len(reference) != 2
+                        or not isinstance(reference[0], int)
+                        or isinstance(reference[0], bool)
+                        or reference[1] != variable
+                        or not 0 <= reference[0] < len(previous)
+                    ):
+                        raise ValueError("R-vine parent references must be valid (edge_index, variable) pairs")
+                    parent = previous[reference[0]]
+                    if parent.constraint() != cond | {variable} or variable not in (parent.a, parent.b):
+                        raise ValueError(
+                            "R-vine parent reference violates the proximity/conditioning contract"
+                        )
+                    parent_nodes.append(reference[0])
+                    normalized_parents[variable] = reference
+                if parent_nodes[0] == parent_nodes[1]:
+                    raise ValueError("R-vine edge must join two distinct previous-tree nodes")
+                topology_edges.append((parent_nodes[0], parent_nodes[1]))
+                parents = normalized_parents
+            tree.append(_Edge(raw_edge.a, raw_edge.b, cond, copula, parents))
+
+        node_count = dim if tree_index == 0 else len(checked[tree_index - 1])
+        if not _tree_is_connected(node_count, topology_edges):
+            raise ValueError("R-vine tree %d is cyclic or disconnected" % (tree_index + 1))
+        checked.append(tree)
+
+    lookup = _conditional_lookup(checked)
+    return checked, _find_sampling_order(dim, lookup)
 
 
 class RVineCopulaDistribution(SequenceEncodableProbabilityDistribution):
@@ -193,13 +422,29 @@ class RVineCopulaDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        if int(dim) < 2:
-            raise ValueError("RVineCopulaDistribution needs dim >= 2; got %d" % dim)
-        self.dim = int(dim)
-        self.trees = trees
-        self.candidates = tuple(candidates)
+        self.dim = validated_dimension(dim, label="R-vine copula dimension")
+        self.trees, self._sampling_order = _validated_trees(self.dim, trees)
+        self.candidates = _validated_candidates(candidates)
         self.name = name
         self.keys = keys
+
+    @classmethod
+    def independence(
+        cls,
+        dim: int,
+        candidates: tuple[str, ...] = _DEFAULT_CANDIDATES,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> RVineCopulaDistribution:
+        """Construct an explicit, structurally complete independence R-vine."""
+        checked_dim = validated_dimension(dim, label="R-vine copula dimension")
+        return cls(
+            checked_dim,
+            _independence_trees(checked_dim),
+            candidates=candidates,
+            name=name,
+            keys=keys,
+        )
 
     def __str__(self) -> str:
         fams = ",".join(e.copula.family for tree in self.trees for e in tree)
@@ -210,8 +455,6 @@ class RVineCopulaDistribution(SequenceEncodableProbabilityDistribution):
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
         u = u_score_batch(u, self.dim)
-        if not self.trees or not self.trees[0]:  # unfitted / independence
-            return np.zeros(len(u))
         return _forward_vals(self.trees, u)[0]
 
     def sampler(self, seed: int | None = None) -> RVineCopulaSampler:
@@ -226,53 +469,55 @@ class RVineCopulaDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class RVineCopulaSampler(DistributionSampler):
-    """Sample by inverse Rosenblatt over the fitted structure (generic numerical conditional inversion)."""
+    """Sample exactly by the inverse Rosenblatt transform encoded by the validated vine."""
 
     def __init__(self, dist: RVineCopulaDistribution, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
+        self._lookup = _conditional_lookup(dist.trees)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
-        # Generic (family-agnostic) inverse Rosenblatt: sample variables one at a time, inverting each new
-        # variable's conditional CDF (built from the vine) against a uniform via bisection. O(d^2) h-evals
-        # per accepted variable; correct for any pair-copula families.
-        n = 1 if size is None else int(size)
+        n = 1 if size is None else validated_sample_size(size)
         d = self.dist.dim
-        w = self.rng.uniform(_CLIP, 1.0 - _CLIP, size=(n, d))
-        x = np.empty((n, d))
-        x[:, 0] = w[:, 0]
-        for k in range(1, d):
-            lo = np.full(n, _CLIP)
-            hi = np.full(n, 1.0 - _CLIP)
-            for _ in range(50):  # bisection on the conditional CDF F(x_k | x_0..x_{k-1})
-                mid = 0.5 * (lo + hi)
-                cand = x.copy()
-                cand[:, k] = mid
-                cdf = self._conditional_cdf(cand, k)
-                under = cdf < w[:, k]
-                lo = np.where(under, mid, lo)
-                hi = np.where(under, hi, mid)
-            x[:, k] = 0.5 * (lo + hi)
-        out = _clip01(x)
+        innovations = self.rng.uniform(_CLIP, 1.0 - _CLIP, size=(n, d))
+        out = np.full((n, d), np.nan, dtype=np.float64)
+        forward_cache: dict[tuple[int, frozenset[int]], np.ndarray] = {}
+
+        def forward_score(variable: int, conditioning: frozenset[int]) -> np.ndarray:
+            key = (variable, conditioning)
+            if key in forward_cache:
+                return forward_cache[key]
+            if not conditioning:
+                result = out[:, variable]
+                if np.any(~np.isfinite(result)):
+                    raise RuntimeError("R-vine sampling requested an ungenerated conditioning variable")
+            else:
+                edge, other = self._lookup[key]
+                own_input = forward_score(variable, edge.cond)
+                other_input = forward_score(other, edge.cond)
+                result = edge.copula.h(own_input, other_input)
+            forward_cache[key] = result
+            return result
+
+        def invert_score(
+            variable: int,
+            conditioning: frozenset[int],
+            target: np.ndarray,
+        ) -> np.ndarray:
+            if not conditioning:
+                return target
+            edge, other = self._lookup[(variable, conditioning)]
+            other_input = forward_score(other, edge.cond)
+            lower_target = edge.copula.h_inv(target, other_input)
+            return invert_score(variable, edge.cond, lower_target)
+
+        generated: list[int] = []
+        for variable in self.dist._sampling_order:
+            conditioning = frozenset(generated)
+            out[:, variable] = invert_score(variable, conditioning, innovations[:, variable])
+            forward_cache[(variable, frozenset())] = out[:, variable]
+            generated.append(variable)
         return out[0] if size is None else out
-
-    def _conditional_cdf(self, u: np.ndarray, k: int) -> np.ndarray:
-        """``F(u_k | u_0,...,u_{k-1})`` from the vine's h-functions -- the Rosenblatt transform's k-th coord.
-
-        Recomputes the vine forward pass and reads off the conditional CDF of variable ``k`` given the
-        earlier variables by chaining the h-functions of the edges that touch ``k`` in successive trees.
-        """
-        # forward pass to get every edge's conditional CDFs at u
-        _, all_vals = _forward_vals(self.dist.trees, _clip01(u))
-        # F(u_k | earlier) is the tree-t conditional CDF of k where its conditioning set is exactly {0..k-1}
-        # restricted to the vine; walk down trees taking the deepest edge whose conditioning ⊆ {0..k-1}.
-        earlier = set(range(k))
-        best = _clip01(u)[:, k]  # tree-0 fallback: F(u_k) = u_k (marginal is uniform)
-        for t, tree in enumerate(self.dist.trees):
-            for idx, e in enumerate(tree):
-                if k in (e.a, e.b) and e.cond <= earlier and (e.constraint() - {k}) <= earlier:
-                    best = all_vals[t][idx][k]
-        return best
 
 
 class RVineCopulaEstimator(ParameterEstimator):
@@ -285,8 +530,8 @@ class RVineCopulaEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.dim = dim
-        self.candidates = tuple(candidates)
+        self.dim = validated_dimension(dim, label="R-vine copula dimension")
+        self.candidates = _validated_candidates(candidates)
         self.name = name
         self.keys = keys
 
@@ -294,9 +539,8 @@ class RVineCopulaEstimator(ParameterEstimator):
         return BufferedUScoreAccumulatorFactory(self.dim, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray]) -> RVineCopulaDistribution:
-        u, w = suff_stat
-        if len(u) < 2:
-            return RVineCopulaDistribution(self.dim, [], candidates=self.candidates, name=self.name, keys=self.keys)
-        reject_out_of_unit_cube(u)
-        trees = _select_and_fit(_clip01(u), np.asarray(w, dtype=np.float64), self.candidates)
+        u, w = validated_buffered_statistic(
+            suff_stat, self.dim, minimum_rows=2, require_positive_weight=True
+        )
+        trees = _select_and_fit(u, w, self.candidates)
         return RVineCopulaDistribution(self.dim, trees, candidates=self.candidates, name=self.name, keys=self.keys)

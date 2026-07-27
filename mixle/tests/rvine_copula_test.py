@@ -49,7 +49,9 @@ class RVineCopulaTest(unittest.TestCase):
         gc = GaussianCopulaDistribution(R)
         u = gc.sampler(0).sample(6000)
         rvine = (
-            RVineCopulaDistribution(5, [], candidates=("gaussian",)).estimator().estimate(None, (u, np.ones(len(u))))
+            RVineCopulaDistribution.independence(5, candidates=("gaussian",))
+            .estimator()
+            .estimate(None, (u, np.ones(len(u))))
         )
         gc_fit = _fit_gaussian_copula(gc, u)
         test = gc.sampler(1).sample(500)
@@ -63,7 +65,9 @@ class RVineCopulaTest(unittest.TestCase):
         # chain dependence 0-1-2-...-5: the best vine is a path; a fixed-root C-vine is a poor fit.
         u = GaussianCopulaDistribution(_chain_corr(6)).sampler(0).sample(4000)
         cand = ("gaussian", "independence")
-        rvine = RVineCopulaDistribution(6, [], candidates=cand).estimator().estimate(None, (u, np.ones(len(u))))
+        rvine = RVineCopulaDistribution.independence(6, candidates=cand).estimator().estimate(
+            None, (u, np.ones(len(u)))
+        )
         cvine = CVineCopulaDistribution(6, {}, candidates=cand).estimator().estimate(None, (u, np.ones(len(u))))
         ll_r = float(np.sum(rvine.seq_log_density(u)))
         ll_c = float(np.sum(cvine.seq_log_density(u)))
@@ -74,7 +78,9 @@ class RVineCopulaTest(unittest.TestCase):
         gc = GaussianCopulaDistribution(R)
         u = gc.sampler(0).sample(6000)
         rvine = (
-            RVineCopulaDistribution(4, [], candidates=("gaussian",)).estimator().estimate(None, (u, np.ones(len(u))))
+            RVineCopulaDistribution.independence(4, candidates=("gaussian",))
+            .estimator()
+            .estimate(None, (u, np.ones(len(u))))
         )
         s = rvine.sampler(1).sample(8000)
         Rhat = _fit_gaussian_copula(gc, s).corr
@@ -83,7 +89,9 @@ class RVineCopulaTest(unittest.TestCase):
     def test_sampling_recovers_a_nongaussian_joint_with_tail_dependence(self):
         u = ClaytonCopulaDistribution(4, theta=2.5).sampler(0).sample(5000)
         cand = ("clayton", "gaussian", "frank", "independence")
-        rvine = RVineCopulaDistribution(4, [], candidates=cand).estimator().estimate(None, (u, np.ones(len(u))))
+        rvine = RVineCopulaDistribution.independence(4, candidates=cand).estimator().estimate(
+            None, (u, np.ones(len(u)))
+        )
         s = rvine.sampler(1).sample(6000)
         worst = max(
             abs(kendalltau(u[:, i], u[:, j])[0] - kendalltau(s[:, i], s[:, j])[0])
@@ -95,20 +103,20 @@ class RVineCopulaTest(unittest.TestCase):
 
     def test_selects_per_edge_families(self):
         u = ClaytonCopulaDistribution(4, theta=3.0).sampler(0).sample(4000)
-        rvine = RVineCopulaDistribution(4, []).estimator().estimate(None, (u, np.ones(len(u))))
+        rvine = RVineCopulaDistribution.independence(4).estimator().estimate(None, (u, np.ones(len(u))))
         fams = [e.copula.family for tree in rvine.trees for e in tree]
         self.assertIn("clayton", fams)  # the lower-tail structure is recovered as Clayton edges
 
     def test_empty_rvine_is_independence(self):
-        rvine = RVineCopulaDistribution(4, [])
+        rvine = RVineCopulaDistribution.independence(4)
         np.testing.assert_allclose(rvine.seq_log_density(np.array([[0.2, 0.4, 0.6, 0.8]])), 0.0, atol=1e-12)
 
     def test_rejects_dim_below_two(self):
         with self.assertRaises(ValueError):
-            RVineCopulaDistribution(1, [])
+            RVineCopulaDistribution.independence(1)
 
     def test_rejects_out_of_range_pseudo_observations(self):
-        v = RVineCopulaDistribution(2, [])
+        v = RVineCopulaDistribution.independence(2)
         for bad in (
             np.array([[-0.3, 0.4]]),
             np.array([[-5.0e-10, 0.4]]),
@@ -122,7 +130,7 @@ class RVineCopulaTest(unittest.TestCase):
     def test_rejects_out_of_range_pseudo_observations_when_fitting(self):
         bad = np.array([[0.3, 0.4], [1.7, 0.2], [0.5, 0.5]])
         with self.assertRaises(ValueError):
-            RVineCopulaDistribution(2, []).estimator().estimate(None, (bad, np.ones(len(bad))))
+            RVineCopulaDistribution.independence(2).estimator().estimate(None, (bad, np.ones(len(bad))))
 
     def test_plugs_into_copula_distribution(self):
         u = ClaytonCopulaDistribution(3, theta=2.5).sampler(0).sample(1500)
@@ -132,7 +140,7 @@ class RVineCopulaTest(unittest.TestCase):
         data = list(zip(x0.tolist(), x1.tolist(), x2.tolist()))
         proto = CopulaDistribution(
             [st.GammaDistribution(1.0, 1.0), st.GaussianDistribution(0.0, 1.0), st.GammaDistribution(1.0, 1.0)],
-            RVineCopulaDistribution(3, []),
+            RVineCopulaDistribution.independence(3),
         )
         fit = optimize(data, proto.estimator(), prev_estimate=proto, max_its=3, out=None)
         self.assertAlmostEqual(float(fit.marginals[1].mu), 5.0, delta=0.4)

@@ -16,12 +16,25 @@ from mixle.stats.multivariate.gaussian_copula import (
     GaussianCopulaEstimator,
 )
 from mixle.stats.multivariate.gumbel_copula import GumbelCopulaDistribution
-from mixle.stats.multivariate.rvine_copula import RVineCopulaDistribution
+from mixle.stats.multivariate.rvine_copula import (
+    RVineCopulaDistribution,
+    _Edge,
+    _max_spanning_tree,
+)
 from mixle.stats.multivariate.student_t_copula import (
     StudentTCopulaDistribution,
     StudentTCopulaEstimator,
 )
-from mixle.stats.multivariate.vine_copula import CVineCopulaDistribution, DVineCopulaDistribution
+from mixle.stats.multivariate.vine_copula import (
+    ClaytonPairCopula,
+    CVineCopulaDistribution,
+    DVineCopulaDistribution,
+    FrankPairCopula,
+    GaussianPairCopula,
+    GumbelPairCopula,
+    IndependencePairCopula,
+    StudentTPairCopula,
+)
 
 
 class CopulaShapeAndParameterContractTest(unittest.TestCase):
@@ -44,7 +57,7 @@ class CopulaShapeAndParameterContractTest(unittest.TestCase):
             GumbelCopulaDistribution(2, 2.0),
             CVineCopulaDistribution(2, {}),
             DVineCopulaDistribution(2, {}),
-            RVineCopulaDistribution(2, []),
+            RVineCopulaDistribution.independence(2),
         ):
             with self.subTest(distribution=type(distribution).__name__):
                 wrong = np.full((1, distribution.dim + 1), 0.5)
@@ -163,6 +176,102 @@ class CopulaFitContractTest(unittest.TestCase):
             student.estimate(None, (np.array([[0.2, 0.3]]), np.ones(1)))
         with self.assertRaises(ValueError):
             student.estimate(None, (np.array([[0.2, 0.3], [0.4, 0.5]]), np.zeros(2)))
+
+
+class VineSelectionContractTest(unittest.TestCase):
+    def test_exported_pair_copulas_enforce_open_unit_support(self):
+        pairs = (
+            IndependencePairCopula(),
+            GaussianPairCopula(0.2),
+            ClaytonPairCopula(1.0),
+            FrankPairCopula(2.0),
+            GumbelPairCopula(2.0),
+            StudentTPairCopula(0.2, 4.0),
+        )
+        for pair in pairs:
+            for method, first, second in (
+                (pair.logpdf, -5.0e-10, 0.4),
+                (pair.logpdf, 0.4, 1.0),
+                (pair.h, np.nan, 0.4),
+                (pair.h_inv, 0.4, 1.2),
+            ):
+                with self.subTest(family=pair.family, method=method.__name__):
+                    with self.assertRaises(ValueError):
+                        method(first, second)
+
+    def test_pair_copula_parameters_fail_instead_of_clamping(self):
+        invalid = (
+            lambda: GaussianPairCopula(1.0),
+            lambda: GaussianPairCopula(np.nan),
+            lambda: ClaytonPairCopula(-1.0),
+            lambda: FrankPairCopula(np.inf),
+            lambda: GumbelPairCopula(0.5),
+            lambda: StudentTPairCopula(-1.0, 4.0),
+            lambda: StudentTPairCopula(0.2, np.nan),
+        )
+        for constructor in invalid:
+            with self.subTest(constructor=constructor), self.assertRaises((TypeError, ValueError)):
+                constructor()
+
+    def test_candidate_sets_are_nonempty_known_and_unique(self):
+        for candidates in ((), ("unknown",), ("gaussian", "gaussian")):
+            for constructor in (
+                lambda c=candidates: CVineCopulaDistribution(2, {}, candidates=c),
+                lambda c=candidates: DVineCopulaDistribution(2, {}, candidates=c),
+                lambda c=candidates: RVineCopulaDistribution.independence(2, candidates=c),
+            ):
+                with self.subTest(candidates=candidates, constructor=constructor):
+                    with self.assertRaises(ValueError):
+                        constructor()
+
+    def test_pair_family_selection_exposes_aic_evidence(self):
+        rng = np.random.RandomState(18)
+        u = rng.uniform(0.05, 0.95, size=(200, 2))
+        fitted = DVineCopulaDistribution(2, {}).estimator().estimate(None, (u, np.ones(len(u))))
+        pair = fitted.pairs[(1, 1)]
+        receipt = pair.selection_receipt
+        self.assertEqual(receipt.schema_version, 1)
+        self.assertEqual(receipt.criterion, "aic")
+        self.assertEqual(receipt.selected_family, pair.family)
+        self.assertEqual(receipt.edge_context, "D-vine tree 1 position 1")
+        self.assertEqual({item.family for item in receipt.evidence}, set(fitted.candidates))
+        selected = next(item for item in receipt.evidence if item.family == pair.family)
+        self.assertIsNone(selected.fit_error)
+        self.assertTrue(np.isfinite(selected.weighted_log_likelihood))
+        self.assertTrue(np.isfinite(selected.aic))
+
+    def test_disconnected_spanning_graph_is_rejected(self):
+        with self.assertRaises(ValueError):
+            _max_spanning_tree(3, {(0, 1): 1.0}, {(0, 1)})
+
+    def test_rvine_requires_a_complete_proximal_tree_sequence(self):
+        with self.assertRaises(ValueError):
+            RVineCopulaDistribution(3, [])
+        valid = RVineCopulaDistribution.independence(3)
+        with self.assertRaises(ValueError):
+            RVineCopulaDistribution(3, valid.trees[:1])
+        malformed_second_tree = [
+            valid.trees[0],
+            [
+                _Edge(
+                    1,
+                    2,
+                    frozenset({0}),
+                    IndependencePairCopula(),
+                    {1: (1, 1), 2: (0, 2)},
+                )
+            ],
+        ]
+        with self.assertRaises(ValueError):
+            RVineCopulaDistribution(3, malformed_second_tree)
+
+    def test_explicit_independence_rvine_is_complete_and_samples_its_law(self):
+        model = RVineCopulaDistribution.independence(4)
+        self.assertEqual([len(tree) for tree in model.trees], [3, 2, 1])
+        draws = model.sampler(91).sample(3000)
+        self.assertEqual(draws.shape, (3000, 4))
+        np.testing.assert_allclose(draws.mean(axis=0), 0.5, atol=0.025)
+        np.testing.assert_allclose(np.corrcoef(draws.T), np.eye(4), atol=0.06)
 
 
 if __name__ == "__main__":

@@ -74,8 +74,8 @@ def main() -> None:
     print(f"  e.g. row 0: {tuple(round(v, 2) for v in train[0])}\n")
 
     # --- fit the R-vine-cored copula directly: the explicit, test-proven path ---------------------------
-    print("fitting CopulaDistribution([Gamma, Gaussian, Gamma], RVineCopulaDistribution(3, [])) ...")
-    vine_proto = prototype(RVineCopulaDistribution(DIM, []))
+    print("fitting CopulaDistribution([Gamma, Gaussian, Gamma], RVineCopulaDistribution.independence(3)) ...")
+    vine_proto = prototype(RVineCopulaDistribution.independence(DIM))
     vine_fit = optimize(train, vine_proto.estimator(), prev_estimate=vine_proto, max_its=3, out=None)
     edges = [(e.a, e.b, e.copula.family) for tree in vine_fit.copula.trees for e in tree]
     print(
