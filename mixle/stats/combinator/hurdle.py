@@ -18,12 +18,25 @@ Poisson, a NegativeBinomial base the hurdle NB, and so on.
 
 import math
 from collections.abc import Sequence
+from copy import deepcopy
 from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
 
 from mixle.stats.combinator._base import MaskedBaseEncoder
+from mixle.stats.combinator._count_mixture import (
+    boundary_preserving_rate,
+    count_value_kind,
+    require_component_counts,
+    require_count_base,
+    require_count_value,
+    require_nonnegative,
+    require_positive,
+    require_positive_integer,
+    require_probability,
+    require_weights,
+)
 from mixle.stats.combinator.truncated import TruncatedDistribution
 from mixle.stats.compute.pdist import (
     DistributionSampler,
@@ -32,6 +45,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.special import log1mexp
 
 
 class HurdleDistribution(SequenceEncodableProbabilityDistribution):
@@ -50,19 +64,24 @@ class HurdleDistribution(SequenceEncodableProbabilityDistribution):
             base: The base count distribution for the positive part. Its support may include 0 (the
                 zero is truncated and the mass renormalized); a base with no mass at 0 leaves the
                 positive part unchanged (the renormalizer is 1).
-            pi: Zero (hurdle) probability, ``0 <= pi < 1``.
+            pi: Zero (hurdle) probability, ``0 <= pi <= 1``.
             name, keys: Optional instance name / parameter key (for the hurdle probability).
         """
-        if not (0.0 <= pi < 1.0):
-            raise ValueError("hurdle probability pi must be in [0, 1).")
+        checked_pi = require_probability(pi, name="hurdle probability pi")
+        log_p0 = require_count_base(
+            base,
+            model="HurdleDistribution",
+            require_zero_atom=False,
+            require_positive_mass=True,
+        )
         self.base = base
-        self.pi = float(pi)
+        self.pi = checked_pi
         self.name = name
         self.keys = keys
         self._log_pi = math.log(self.pi) if self.pi > 0.0 else -np.inf
-        self._log1mpi = math.log1p(-self.pi)
-        p0 = float(np.exp(base.log_density(0)))  # base mass at 0 that the truncation removes
-        self._log_renorm = math.log1p(-p0) if p0 > 0.0 else 0.0  # log(1 - P_base(0))
+        self._log1mpi = math.log1p(-self.pi) if self.pi < 1.0 else -np.inf
+        self._base_log_p0 = log_p0
+        self._log_renorm = log1mexp(log_p0)
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the hurdle distribution."""
@@ -79,15 +98,22 @@ class HurdleDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: Any) -> float:
         """Return ``log pi`` at ``x == 0``, else ``log[(1-pi) p_base(x) / (1 - p_base(0))]``."""
-        if x == 0:
+        kind = count_value_kind(x)
+        if kind < 0:
+            return -np.inf
+        if kind == 0:
             return self._log_pi
+        if self.pi == 1.0:
+            return -np.inf
         return self._log1mpi + float(self.base.log_density(x)) - self._log_renorm
 
     def seq_log_density(self, x: tuple[Any, np.ndarray]) -> np.ndarray:
         """Vectorized hurdle log-density for an encoded batch."""
         base_enc, zero_mask = x
         lb = np.asarray(self.base.seq_log_density(base_enc), dtype=np.float64)
-        rv = self._log1mpi + lb - self._log_renorm
+        rv = np.full(lb.shape, -np.inf, dtype=np.float64)
+        if self.pi < 1.0:
+            rv = self._log1mpi + lb - self._log_renorm
         if np.any(zero_mask):
             rv[zero_mask] = self._log_pi
         return rv
@@ -144,16 +170,17 @@ class HurdleAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Any, weight: float, estimate: HurdleDistribution | None) -> None:
         """Accumulate one observation, sending only nonzeros to the base."""
-        if x == 0:
-            self.zero_count += weight
+        checked_weight = require_nonnegative(weight, name="observation weight")
+        if require_count_value(x, path="HurdleAccumulator observation") == 0:
+            self.zero_count += checked_weight
         else:
-            self.base_accumulator.update(x, weight, None if estimate is None else estimate.base)
-        self.total += weight
+            self.base_accumulator.update(x, checked_weight, None if estimate is None else estimate.base)
+        self.total += checked_weight
 
     def seq_update(self, x: tuple[Any, np.ndarray], weights: np.ndarray, estimate: HurdleDistribution) -> None:
         """Accumulate encoded observations, masking zeros out of the base update."""
         base_enc, zero_mask = x
-        w = np.asarray(weights, dtype=np.float64)
+        w = require_weights(weights, len(zero_mask), path="HurdleAccumulator weights")
         base_w = w.copy()
         base_w[zero_mask] = 0.0  # zeros never inform the (zero-truncated) base
         self.base_accumulator.seq_update(base_enc, base_w, estimate.base)
@@ -162,16 +189,17 @@ class HurdleAccumulator(SequenceEncodableStatisticAccumulator):
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
         """Initialize the accumulator with one weighted observation."""
-        if x == 0:
-            self.zero_count += weight
+        checked_weight = require_nonnegative(weight, name="observation weight")
+        if require_count_value(x, path="HurdleAccumulator observation") == 0:
+            self.zero_count += checked_weight
         else:
-            self.base_accumulator.initialize(x, weight, rng)
-        self.total += weight
+            self.base_accumulator.initialize(x, checked_weight, rng)
+        self.total += checked_weight
 
     def seq_initialize(self, x: tuple[Any, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize encoded observations, excluding zeros from the base."""
         base_enc, zero_mask = x
-        w = np.asarray(weights, dtype=np.float64)
+        w = require_weights(weights, len(zero_mask), path="HurdleAccumulator weights")
         base_w = w.copy()
         base_w[zero_mask] = 0.0
         self.base_accumulator.seq_initialize(base_enc, base_w, rng)
@@ -181,6 +209,7 @@ class HurdleAccumulator(SequenceEncodableStatisticAccumulator):
     def combine(self, suff_stat: tuple[Any, float, float]) -> "HurdleAccumulator":
         """Merge serialized base statistics and zero counts into this accumulator."""
         base_ss, zc, t = suff_stat
+        zc, t = require_component_counts(zc, t, name="zero count")
         self.base_accumulator.combine(base_ss)
         self.zero_count += zc
         self.total += t
@@ -193,16 +222,18 @@ class HurdleAccumulator(SequenceEncodableStatisticAccumulator):
     def from_value(self, x: tuple[Any, float, float]) -> "HurdleAccumulator":
         """Restore the accumulator from serialized hurdle statistics."""
         base_ss, zc, t = x
+        zc, t = require_component_counts(zc, t, name="zero count")
         self.base_accumulator.from_value(base_ss)
-        self.zero_count = float(zc)
-        self.total = float(t)
+        self.zero_count = zc
+        self.total = t
         return self
 
     def scale(self, c: float) -> "HurdleAccumulator":
         """Scale base statistics and hurdle counts by a constant."""
-        self.base_accumulator.scale(c)
-        self.zero_count *= c
-        self.total *= c
+        checked_scale = require_nonnegative(c, name="statistic scale")
+        self.base_accumulator.scale(checked_scale)
+        self.zero_count *= checked_scale
+        self.total *= checked_scale
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -211,6 +242,7 @@ class HurdleAccumulator(SequenceEncodableStatisticAccumulator):
         if self.keys is not None:
             if self.keys in stats_dict:
                 zc, t = stats_dict[self.keys]
+                zc, t = require_component_counts(zc, t, name="zero count")
                 self.zero_count += zc
                 self.total += t
                 # write the POOL back: without this, the dict keeps the FIRST site's stats and
@@ -225,7 +257,9 @@ class HurdleAccumulator(SequenceEncodableStatisticAccumulator):
         """Replace base and hurdle statistics from a keyed statistics dictionary."""
         self.base_accumulator.key_replace(stats_dict)
         if self.keys is not None and self.keys in stats_dict:
-            self.zero_count, self.total = stats_dict[self.keys]
+            self.zero_count, self.total = require_component_counts(
+                *stats_dict[self.keys], name="zero count"
+            )
 
     def acc_to_encoder(self) -> "HurdleDataEncoder":
         """Return an encoder that augments the base encoding with a zero mask."""
@@ -266,11 +300,13 @@ class HurdleEstimator(ParameterEstimator):
         trunc_threshold: float = 1.0e-10,
     ) -> None:
         self.base_estimator = base_estimator
-        self.pseudo_count = pseudo_count
+        self.pseudo_count = (
+            None if pseudo_count is None else require_nonnegative(pseudo_count, name="pseudo_count")
+        )
         self.name = name
         self.keys = keys
-        self.trunc_max_iter = int(trunc_max_iter)
-        self.trunc_threshold = float(trunc_threshold)
+        self.trunc_max_iter = require_positive_integer(trunc_max_iter, name="trunc_max_iter")
+        self.trunc_threshold = require_positive(trunc_threshold, name="trunc_threshold")
 
     def accumulator_factory(self) -> HurdleAccumulatorFactory:
         """Return a factory for hurdle sufficient-statistic accumulators."""
@@ -279,30 +315,43 @@ class HurdleEstimator(ParameterEstimator):
     def _truncated_mle(self, n_pos: float, base_ss: Any) -> SequenceEncodableProbabilityDistribution:
         # EM for the zero-truncated MLE: re-impute the hypothetical missing zeros each iteration.
         base = self.base_estimator.estimate(n_pos, base_ss)
+        log_p0 = require_count_base(
+            base,
+            model="HurdleEstimator",
+            require_zero_atom=False,
+            require_positive_mass=True,
+        )
         if n_pos <= 0:
             return base
         prev_p0 = -1.0
         for _ in range(self.trunc_max_iter):
-            p0 = float(np.exp(base.log_density(0)))
-            if not (0.0 < p0 < 1.0) or abs(p0 - prev_p0) < self.trunc_threshold:
-                break  # no zero mass (no truncation) or converged
+            p0 = float(np.exp(log_p0))
+            if p0 == 0.0 or abs(p0 - prev_p0) < self.trunc_threshold:
+                break
             prev_p0 = p0
             n_missing = n_pos * p0 / (1.0 - p0)
+            if not math.isfinite(n_missing):
+                raise ValueError("HurdleEstimator produced a non-finite truncated missing count.")
             acc = self.base_estimator.accumulator_factory().make()
-            acc.from_value(base_ss)  # the positives' sufficient statistics ...
+            acc.from_value(deepcopy(base_ss))  # the positives' sufficient statistics ...
             acc.update(0, n_missing, base)  # ... plus the imputed hypothetical zeros at 0
             base = self.base_estimator.estimate(n_pos + n_missing, acc.value())
+            log_p0 = require_count_base(
+                base,
+                model="HurdleEstimator",
+                require_zero_atom=False,
+                require_positive_mass=True,
+            )
         return base
 
     def estimate(self, nobs: float | None, suff_stat: tuple[Any, float, float]) -> HurdleDistribution:
         """Estimate the hurdle probability and zero-truncated base distribution."""
+        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 3:
+            raise TypeError("HurdleEstimator sufficient statistics must be (base, zero_count, total).")
         base_ss, zero_count, total = suff_stat
+        zero_count, total = require_component_counts(zero_count, total, name="zero count")
         base = self._truncated_mle(total - zero_count, base_ss)
-        if self.pseudo_count is not None:
-            pi = zero_count / (total + self.pseudo_count) if total + self.pseudo_count > 0 else 0.0
-        else:
-            pi = zero_count / total if total > 0 else 0.0
-        pi = min(max(pi, 0.0), 1.0 - 1.0e-12)
+        pi = boundary_preserving_rate(zero_count, total, self.pseudo_count)
         return HurdleDistribution(base, pi, name=self.name, keys=self.keys)
 
 
@@ -310,4 +359,5 @@ class HurdleDataEncoder(MaskedBaseEncoder):
     """Encode observations via the base encoder, plus a boolean ``x == 0`` mask."""
 
     def _extra_columns(self, x: Sequence[Any]) -> tuple[np.ndarray]:
-        return (np.asarray([v == 0 for v in x], dtype=bool),)
+        kinds = [count_value_kind(v) for v in x]
+        return (np.asarray([kind == 0 for kind in kinds], dtype=bool),)

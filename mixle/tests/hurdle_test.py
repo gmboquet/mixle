@@ -6,9 +6,13 @@ import numpy as np
 
 from mixle.inference import estimate
 from mixle.stats import (
+    GaussianDistribution,
     GeometricDistribution,
     HurdleDistribution,
+    HurdleEstimator,
+    PointMassDistribution,
     PoissonDistribution,
+    PoissonEstimator,
 )
 
 
@@ -47,6 +51,54 @@ class HurdleDistributionTest(unittest.TestCase):
         self.assertAlmostEqual(d._log_renorm, 0.0)
         mass = np.array([d.density(int(k)) for k in range(1, 300)])
         self.assertAlmostEqual(mass.sum(), 1.0, places=9)
+
+    def test_requires_declared_atomic_nonnegative_count_support(self):
+        with self.assertRaises(TypeError):
+            HurdleDistribution(GaussianDistribution(0.0, 1.0), 0.5)
+        with self.assertRaises(TypeError):
+            HurdleDistribution(PointMassDistribution(-1), 0.5)
+        with self.assertRaises(ValueError):
+            HurdleDistribution(PointMassDistribution(0), 0.5)
+
+    def test_probability_boundaries_are_exact(self):
+        all_zero = HurdleDistribution(PoissonDistribution(2.0), 1.0)
+        self.assertEqual(all_zero.log_density(0), 0.0)
+        self.assertEqual(all_zero.log_density(1), -np.inf)
+        self.assertEqual(all_zero.sampler(seed=3).sample(20), [0] * 20)
+        with self.assertRaises(ValueError):
+            HurdleDistribution(PoissonDistribution(2.0), np.nan)
+
+    def test_estimator_validates_controls_and_statistics(self):
+        with self.assertRaises(ValueError):
+            HurdleEstimator(PoissonEstimator(), trunc_max_iter=0)
+        with self.assertRaises(ValueError):
+            HurdleEstimator(PoissonEstimator(), trunc_threshold=0.0)
+        with self.assertRaises(ValueError):
+            HurdleEstimator(PoissonEstimator(), pseudo_count=-1.0)
+        estimator = HurdleEstimator(PoissonEstimator())
+        for stats in [
+            ((0.0, 0.0), -1.0, 1.0),
+            ((0.0, 0.0), 2.0, 1.0),
+            ((0.0, 0.0), np.nan, 1.0),
+        ]:
+            with self.assertRaises(ValueError):
+                estimator.estimate(None, stats)
+
+    def test_estimator_preserves_deterministic_empirical_boundaries(self):
+        estimator = HurdleEstimator(PoissonEstimator(), pseudo_count=10.0)
+        all_zero = estimator.estimate(None, ((0.0, 0.0), 4.0, 4.0))
+        no_zero = estimator.estimate(None, ((4.0, 8.0), 0.0, 4.0))
+        self.assertEqual(all_zero.pi, 1.0)
+        self.assertEqual(no_zero.pi, 0.0)
+
+    def test_accumulator_rejects_invalid_evidence_before_mutation(self):
+        acc = self.d.estimator().accumulator_factory().make()
+        before = acc.value()
+        with self.assertRaises(ValueError):
+            acc.update(-1, 1.0, self.d)
+        with self.assertRaises(ValueError):
+            acc.update(1, np.inf, self.d)
+        self.assertEqual(acc.value(), before)
 
 
 if __name__ == "__main__":
