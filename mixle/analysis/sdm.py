@@ -21,6 +21,7 @@ targets *relative* intensity rather than raw, effort-confounded detection counts
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -74,10 +75,24 @@ def _validate_draw_count(n: int) -> int:
     ``rng.multivariate_normal(..., size=int(n))`` previously truncated any non-integral ``n`` silently
     (e.g. ``2.7`` became ``2`` with no warning); a non-positive ``n`` is not a meaningful draw count.
     """
-    n_int = int(n)
-    if n != n_int or n_int <= 0:
+    if isinstance(n, (bool, np.bool_)):
         raise ValueError(f"n must be a positive exact integer, got {n!r}.")
-    return n_int
+    try:
+        n_int = operator.index(n)
+    except TypeError as exc:
+        raise ValueError(f"n must be a positive exact integer, got {n!r}.") from exc
+    if n_int <= 0:
+        raise ValueError(f"n must be a positive exact integer, got {n!r}.")
+    return int(n_int)
+
+
+def _readonly_owned_view(value: np.ndarray) -> np.ndarray:
+    """Copy an array into owned immutable storage and expose a non-writeable view of it."""
+    owner = np.array(value, copy=True)
+    owner.setflags(write=False)
+    view = owner.view()
+    view.setflags(write=False)
+    return view
 
 
 def _validate_covariance(cov: np.ndarray, p: int, *, name: str) -> np.ndarray:
@@ -126,9 +141,18 @@ class SpeciesObservation:
 class _PushforwardQuantity:
     """A minimal IC-1 ``DerivedQuantity``: pushforward draws + interval + the prior-dominated flag."""
 
-    def __init__(self, samples: np.ndarray, prior_dominated: bool) -> None:
-        self.samples = samples
-        self.prior_dominated = prior_dominated
+    def __init__(self, samples: np.ndarray, prior_dominated: bool, *, n_samples: int) -> None:
+        arr = np.asarray(samples, dtype=float)
+        if arr.ndim == 0 or arr.shape[0] != n_samples or arr.size == 0:
+            raise ValueError(
+                f"derived quantity samples must preserve leading sample axis ({n_samples}, ...), got {arr.shape}."
+            )
+        if not np.all(np.isfinite(arr)):
+            raise ValueError("derived quantity samples must be finite.")
+        if not isinstance(prior_dominated, (bool, np.bool_)):
+            raise ValueError("prior_dominated must be Boolean.")
+        self.samples = _readonly_owned_view(arr)
+        self.prior_dominated = bool(prior_dominated)
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         """Central ``level`` interval of the pushed-forward samples (empirical quantiles).
@@ -175,8 +199,8 @@ class HabitatModel:
                 shape-compatible, genuinely positive-semidefinite state rather than accept -- or silently
                 clip -- an invalid one).
         """
-        beta_arr = np.asarray(beta, dtype=np.float64).reshape(-1)
-        if beta_arr.size == 0:
+        beta_arr = np.asarray(beta, dtype=np.float64)
+        if beta_arr.ndim != 1 or beta_arr.size == 0:
             raise ValueError("beta must be a non-empty 1-D array.")
         if not np.all(np.isfinite(beta_arr)):
             raise ValueError("beta must be finite.")
@@ -189,7 +213,7 @@ class HabitatModel:
             raise ValueError("design must be finite.")
         num_cells = design_arr.shape[0]
 
-        cell_area_arr = np.asarray(cell_area, dtype=np.float64).reshape(-1)
+        cell_area_arr = np.asarray(cell_area, dtype=np.float64)
         if cell_area_arr.shape != (num_cells,):
             raise ValueError(f"cell_area must have shape ({num_cells},) matching design, got {cell_area_arr.shape}.")
         if not np.all(np.isfinite(cell_area_arr)) or not np.all(cell_area_arr > 0.0):
@@ -201,10 +225,10 @@ class HabitatModel:
         if not (np.isfinite(var_scale_f) and var_scale_f > 0.0):
             raise ValueError(f"var_scale must be finite and strictly positive, got {var_scale!r}.")
 
-        self.beta = beta_arr
-        self.beta_cov = beta_cov_arr
-        self.design = design_arr
-        self.cell_area = cell_area_arr
+        self.beta = _readonly_owned_view(beta_arr)
+        self.beta_cov = _readonly_owned_view(beta_cov_arr)
+        self.design = _readonly_owned_view(design_arr)
+        self.cell_area = _readonly_owned_view(cell_area_arr)
         self._var_scale = var_scale_f
         self._prior_dominated = bool(prior_dominated)
 
@@ -259,15 +283,25 @@ class HabitatModel:
         self, fn: Callable[[np.ndarray], np.ndarray], n: int, rng: np.random.Generator
     ) -> _PushforwardQuantity:
         """Pushforward ``fn`` over ``n`` intensity-field draws into a ``DerivedQuantity`` (IC-1)."""
-        draws = self.samples(n, rng)
-        return _PushforwardQuantity(np.asarray(fn(draws)), self._prior_dominated)
+        n_valid = _validate_draw_count(n)
+        draws = self.samples(n_valid, rng)
+        pushed = np.asarray(fn(draws))
+        return _PushforwardQuantity(pushed, self._prior_dominated, n_samples=n_valid)
 
     def critical_habitat_mask(self, threshold: float) -> np.ndarray:
         """Boolean mask, True where fitted suitability ``lambda_c >= threshold``.
 
         The hard no-mine constraint N2 hands to H (same shape/role as a G9 seepage polygon).
         """
-        return self.mean >= float(threshold)
+        if isinstance(threshold, (bool, np.bool_)):
+            raise ValueError("threshold must be a non-Boolean finite nonnegative scalar.")
+        threshold_array = np.asarray(threshold)
+        if threshold_array.ndim != 0 or threshold_array.dtype.kind not in "iuf":
+            raise ValueError("threshold must be a finite nonnegative scalar.")
+        threshold_value = float(threshold_array)
+        if not np.isfinite(threshold_value) or threshold_value < 0.0:
+            raise ValueError(f"threshold must be finite and nonnegative, got {threshold!r}.")
+        return self.mean >= threshold_value
 
 
 def _validate_locations(raw: Sequence[float] | np.ndarray, num_cells: int, *, kind: str) -> np.ndarray:

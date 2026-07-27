@@ -12,11 +12,38 @@ this class adds -- everything about *what* each component emits is delegated to 
 
 from __future__ import annotations
 
+import operator
 from typing import Any
 
 import numpy as np
 
 __all__ = ["SpatialMixture"]
+
+_MAX_GRID_CELLS = 1_000_000
+
+
+def _positive_integer(value: Any, *, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-Boolean positive integer")
+    try:
+        integer = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be a non-Boolean positive integer") from exc
+    if integer <= 0:
+        raise ValueError(f"{name} must be positive, got {integer}")
+    return int(integer)
+
+
+def _validated_responsibilities(q: np.ndarray, *, n: int, k: int) -> np.ndarray:
+    arr = np.asarray(q, dtype=float)
+    if arr.shape != (n, k):
+        raise ValueError(f"responsibilities must have shape ({n}, {k}), got {arr.shape}")
+    if not np.all(np.isfinite(arr)) or np.any(arr < 0.0) or np.any(arr > 1.0):
+        raise ValueError("responsibilities must be finite probabilities in [0, 1]")
+    row_sums = arr.sum(axis=1)
+    if not np.all(np.isfinite(row_sums)) or not np.allclose(row_sums, 1.0, rtol=1e-10, atol=1e-12):
+        raise ValueError("every responsibility row must sum to one")
+    return arr
 
 
 def _grid_neighbors(shape: tuple[int, ...]) -> list[np.ndarray]:
@@ -47,18 +74,29 @@ class SpatialMixture:
         beta: Potts coupling (``>= 0``); larger smooths the labels more. ``0`` is an ordinary mixture.
 
     Raises:
-        ValueError: if any ``shape`` dimension is not positive, if ``n_components`` is not in
+        ValueError: if any ``shape`` dimension is not an exact positive integer, if the in-memory
+            grid exceeds :data:`_MAX_GRID_CELLS`, if ``n_components`` is not in
             ``[1, prod(shape)]`` (MXR-080-0115: more components than grid cells guarantees at least
             one permanently empty component by pigeonhole -- rejected here rather than left to fail
             unpredictably during fitting), or if ``beta`` is not finite and non-negative.
     """
 
     def __init__(self, shape, n_components: int, emission, beta: float = 1.0):
-        shape = tuple(int(s) for s in np.atleast_1d(shape))
-        if len(shape) == 0 or any(s <= 0 for s in shape):
-            raise ValueError(f"shape must be one or more positive grid dimensions, got {shape}")
-        n = int(np.prod(shape))
-        k = int(n_components)
+        raw_shape = np.asarray(shape, dtype=object)
+        if raw_shape.ndim == 0:
+            raw_shape = raw_shape.reshape(1)
+        if raw_shape.ndim != 1 or raw_shape.size == 0:
+            raise ValueError(f"shape must be one or more exact positive grid dimensions, got shape {raw_shape.shape}")
+        shape = tuple(_positive_integer(value, name="shape dimension") for value in raw_shape)
+        n = 1
+        for dimension in shape:
+            if n > _MAX_GRID_CELLS // dimension:
+                raise ValueError(
+                    f"grid has more than the supported {_MAX_GRID_CELLS} in-memory cells; "
+                    "use a sparse/chunked spatial model"
+                )
+            n *= dimension
+        k = _positive_integer(n_components, name="n_components")
         if not (1 <= k <= n):
             reason = (
                 "n_components > n_cells guarantees at least one permanently empty component by pigeonhole"
@@ -102,8 +140,13 @@ class SpatialMixture:
                     "value per cell for the shared spatial responsibilities/neighbor bookkeeping to "
                     "stay valid"
                 )
+            if np.any(np.isnan(col)) or np.any(np.isposinf(col)):
+                raise ValueError(f"component {j} produced NaN or positive-infinite log density")
             cols.append(col)
-        return np.column_stack(cols)
+        loglik = np.column_stack(cols)
+        if np.any(~np.isfinite(loglik).any(axis=1)):
+            raise ValueError("every cell must have at least one finite component log density")
+        return loglik
 
     def _reestimate(self, acc_enc, q: np.ndarray, current: list | None = None) -> list:
         """Responsibility-weighted M-step: drive each component's accumulator and re-estimate (mixle contract).
@@ -163,12 +206,8 @@ class SpatialMixture:
                 describe different numbers of cells, surfacing later as an unrelated shape-mismatch
                 crash deep inside the M-step instead of a clear error here).
         """
-        max_iter = int(max_iter)
-        if max_iter < 1:
-            raise ValueError(f"max_iter must be a positive integer, got {max_iter!r}")
-        mf_iter = int(mf_iter)
-        if mf_iter < 1:
-            raise ValueError(f"mf_iter must be a positive integer, got {mf_iter!r}")
+        max_iter = _positive_integer(max_iter, name="max_iter")
+        mf_iter = _positive_integer(mf_iter, name="mf_iter")
 
         data = list(observations)
         if len(data) != self.n:
@@ -189,6 +228,7 @@ class SpatialMixture:
             self.components = self._reestimate(acc_enc, np.eye(self.k)[lab], current=self.components)
 
         q = np.eye(self.k)[lab]
+        _validated_responsibilities(q, n=self.n, k=self.k)
         for t in range(max_iter):
             beta_t = self.beta * min(1.0, (t + 1) / max(1.0, 0.3 * max_iter))  # anneal the coupling in
             emis = self._emission_loglik(data)
@@ -198,21 +238,28 @@ class SpatialMixture:
                 logq -= logq.max(axis=1, keepdims=True)
                 q = np.exp(logq)
                 q /= q.sum(axis=1, keepdims=True)
+                _validated_responsibilities(q, n=self.n, k=self.k)
             self.components = self._reestimate(acc_enc, q, current=self.components)
-        self._q = q
+        owned_q = np.array(_validated_responsibilities(q, n=self.n, k=self.k), copy=True)
+        owned_q.setflags(write=False)
+        self._q = owned_q
         return self
 
     def responsibilities(self) -> np.ndarray:
         """The posterior label probabilities, ``(prod(shape), n_components)`` -- a simplex per cell."""
-        return self._q
+        q = _validated_responsibilities(self._q, n=self.n, k=self.k)
+        view = q.view()
+        view.setflags(write=False)
+        return view
 
     def labels(self) -> np.ndarray:
         """The MAP label field, reshaped to ``shape``."""
-        return self._q.argmax(axis=1).reshape(self.shape)
+        q = _validated_responsibilities(self._q, n=self.n, k=self.k)
+        return q.argmax(axis=1).reshape(self.shape)
 
     def entropy(self) -> np.ndarray:
         """Per-cell posterior entropy (label uncertainty), reshaped to ``shape``."""
-        q = np.clip(self._q, 1e-12, 1.0)
+        q = np.clip(_validated_responsibilities(self._q, n=self.n, k=self.k), 1e-12, 1.0)
         return (-(q * np.log(q)).sum(axis=1)).reshape(self.shape)
 
     def component(self, j: int) -> Any:

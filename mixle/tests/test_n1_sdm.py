@@ -593,6 +593,31 @@ def test_habitat_model_rejects_non_finite_beta():
         HabitatModel(**kwargs)
 
 
+def test_habitat_model_owns_and_freezes_validated_parameter_arrays():
+    beta = np.array([0.1, 0.2])
+    beta_cov = np.eye(2)
+    design = np.array([[1.0, 2.0], [1.0, 3.0]])
+    cell_area = np.array([1.0, 2.0])
+    model = HabitatModel(beta, beta_cov, design, cell_area)
+    mean_before = model.mean.copy()
+    beta[:] = 100.0
+    beta_cov[:] = np.nan
+    design[:] = -100.0
+    cell_area[:] = -1.0
+    np.testing.assert_array_equal(model.mean, mean_before)
+    for parameter in (model.beta, model.beta_cov, model.design, model.cell_area):
+        assert not parameter.flags.writeable
+        with pytest.raises(ValueError):
+            parameter.flat[0] = 0.0
+
+
+@pytest.mark.parametrize("threshold", [-1.0, np.nan, np.inf, True, np.array([1.0])])
+def test_critical_habitat_mask_rejects_invalid_threshold(threshold):
+    model = HabitatModel(**_valid_habitat_model_kwargs())
+    with pytest.raises(ValueError, match="threshold"):
+        model.critical_habitat_mask(threshold)
+
+
 def test_habitat_model_rejects_mismatched_design_shape():
     kwargs = _valid_habitat_model_kwargs(p=2)
     kwargs["design"] = np.ones((1, 3))  # p=3 columns, but beta implies p=2
@@ -684,6 +709,8 @@ def test_habitat_model_samples_rejects_invalid_draw_count():
         model.samples(0, rng)
     with pytest.raises(ValueError, match=r"positive exact integer"):
         model.samples(-3, rng)
+    with pytest.raises(ValueError, match=r"positive exact integer"):
+        model.samples(True, rng)
 
 
 def test_habitat_model_credible_interval_rejects_invalid_level():
@@ -701,6 +728,28 @@ def test_pushforward_quantity_credible_interval_rejects_invalid_level():
     dq = model.derived_quantity(lambda d: d.sum(axis=1), 32, np.random.default_rng(0))
     with pytest.raises(ValueError, match=r"\(0, 1\)"):
         dq.credible_interval(0.0)
+
+
+@pytest.mark.parametrize(
+    "callback",
+    [
+        lambda _draws: np.array(np.nan),
+        lambda _draws: np.full(4, np.nan),
+        lambda _draws: np.ones(2),
+    ],
+)
+def test_habitat_derived_quantity_rejects_invalid_callback_output(callback):
+    model = HabitatModel(**_valid_habitat_model_kwargs())
+    with pytest.raises(ValueError, match="derived quantity samples"):
+        model.derived_quantity(callback, 4, np.random.default_rng(0))
+
+
+def test_habitat_derived_quantity_owns_valid_sample_axis():
+    model = HabitatModel(**_valid_habitat_model_kwargs(num_cells=2))
+    quantity = model.derived_quantity(lambda draws: draws.sum(axis=1), 4, np.random.default_rng(0))
+    assert quantity.samples.shape == (4,)
+    assert np.isfinite(quantity.samples).all()
+    assert not quantity.samples.flags.writeable
 
 
 def test_fit_sdm_negative_control_normal_fit_is_valid_finite_and_psd():

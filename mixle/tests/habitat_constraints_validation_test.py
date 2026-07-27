@@ -41,7 +41,7 @@ def test_exclusion_rejects_invalid_buffer_radius(buffer_cells):
         )
 
 
-@pytest.mark.parametrize("suitability_cut", [np.nan, np.inf, True, np.array([1.0])])
+@pytest.mark.parametrize("suitability_cut", [-1.0, np.nan, np.inf, True, np.array([1.0])])
 def test_exclusion_rejects_invalid_suitability_cut(suitability_cut):
     with pytest.raises(ValueError, match="suitability_cut"):
         critical_habitat_exclusion(_habitat(np.array([0.1, 2.0])), _listed(), suitability_cut=suitability_cut)
