@@ -1,0 +1,12 @@
+# Exact check-run names required on the release/0.8.0 tip before publication.
+lint (ruff enforced, mypy advisory)
+fast / py3.11
+fast / py3.12
+fast / macOS arm64 / py3.11
+fast / macOS arm64 / py3.12
+min-versions (oldest declared floors)
+full / py3.12
+clean-wheel install + import sweep
+optional extras / py3.12
+Revision check (single-revision, warnings as errors)
+pip-audit (base install)

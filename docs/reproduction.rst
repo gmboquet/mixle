@@ -10,28 +10,33 @@ Why a receipt
 
 A reproduction is only meaningful if two people can compare *the same thing*. mixle's claims are backed by
 seeded, deterministic computations, so an independent run on the same version must produce identical numbers.
-``scripts/reproduce.py`` captures the environment and those numbers as a JSON **receipt**; a difference in the
-``checks`` block is a real, environment-dependent discrepancy worth investigating, not noise.
+The installed ``mixle-reproduce`` command captures the artifact, environment, expectations, measurements,
+and per-check verdicts as a JSON **receipt**. It exits nonzero unless the wheel identity, installed-content
+hashes, and every required check pass.
 
 The protocol
 ------------
 
-1. **Clean install.** In a fresh virtual environment, install the exact version under review::
+1. **Download and clean-install the exact artifact.** Keeping the wheel is necessary because an installed
+   Python distribution does not retain the byte digest of the wheel archive from which it came::
 
      python -m venv repro-env
-     repro-env/bin/pip install "mixle==<version>"        # or: pip install -e . from a clean clone
+     repro-env/bin/pip download --no-deps --only-binary=:all: "mixle==<version>" --dest artifacts
+     repro-env/bin/pip install artifacts/mixle-<version>-*.whl
 
-2. **Emit a receipt.** Run the reproduction script and save its output::
+2. **Emit a receipt.** Run the command shipped in that wheel and give it the retained artifact::
 
-     repro-env/bin/python scripts/reproduce.py --out receipt.json
+     repro-env/bin/mixle-reproduce --wheel artifacts/mixle-<version>-*.whl --out receipt.json
 
-   The receipt records the environment (Python, platform, machine, mixle / numpy / scipy versions, git
-   commit) and the deterministic claim checks -- a Gaussian fit recovering its parameters, scalar vs
-   vectorized score agreement, a serialization round-trip, automatic family recovery, and a seeded sample.
+   The command verifies the wheel's SHA-256, name and version, its embedded source commit/tree, the hashes
+   of installed files named by ``RECORD``, and the deterministic claim checks. A development checkout may
+   instead use ``python scripts/reproduce.py --source-tree``; that explicitly binds the receipt to the
+   repository containing the script and never consults the caller's ambient Git repository.
 
-3. **Compare.** The ``checks`` block must match a receipt produced from the same mixle version on any
-   platform. The ``environment`` block documents *where* the receipt was produced, so a platform-specific
-   difference (a BLAS build, a numpy version) is attributable rather than mysterious.
+3. **Require success, then compare.** The process exit status and receipt-level ``passed`` must both indicate
+   success. Each check records its observed value, required value, tolerance, and verdict. Compare the wheel
+   SHA-256 with the digest attached to the GitHub Release; the environment block makes dependency/platform
+   differences attributable.
 
 4. **Full suite (optional, stronger).** For a complete reproduction, run the correctness gate against the
    clean install::
@@ -44,9 +49,8 @@ The protocol
 What a mismatch means
 ---------------------
 
-* A **``checks`` difference on the same version** is a genuine reproducibility defect -- a nondeterminism, a
-  platform-dependent numeric path, or an unpinned dependency drift. Treat it as a bug and file it with both
-  receipts (the ``environment`` blocks localize the difference).
+* A failed check or nonzero exit is a failed reproduction, not an ordinary receipt. Treat it as a bug and
+  retain both receipts; their artifact and environment blocks localize the discrepancy.
 * A **``checks`` difference across versions** is expected when a release intentionally changes behavior; it
   must correspond to a changelog entry and a `release decision log <../release-checklists/0.8.0-decisions.md>`_
   entry.
