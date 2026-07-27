@@ -142,6 +142,23 @@ class DistributionDeclaration:
                 },
                 suff_stat.length,
             )
+        if (
+            hasattr(suff_stat, "num_values")
+            and hasattr(suff_stat, "lag")
+            and hasattr(suff_stat, "transition_counts")
+            and hasattr(suff_stat, "initial_nobs")
+            and hasattr(suff_stat, "length_nobs")
+        ):
+            if getattr(suff_stat, "schema_version", None) != 1:
+                raise ValueError("%s expected integer-Markov statistics schema version 1." % self.name)
+            suff_stat = (
+                {
+                    (prefix, target): count
+                    for prefix, target, count in suff_stat.transition_counts
+                },
+                suff_stat.initial,
+                suff_stat.length,
+            )
         if len(self.statistics) == 1:
             spec = self.statistics[0]
             if spec.kind == "choice_child_stats" and hasattr(suff_stat, "branches"):

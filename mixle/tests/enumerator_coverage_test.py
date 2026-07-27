@@ -143,12 +143,11 @@ class FiniteEnumeratorCoverageTestCase(unittest.TestCase):
         init_dist = SequenceDistribution(
             IntegerCategoricalDistribution(0, [0.55, 0.45]), len_dist=IntegerCategoricalDistribution(1, [1.0])
         )
-        len_dist = IntegerCategoricalDistribution(0, [0.1, 0.2, 0.4, 0.3])
+        len_dist = IntegerCategoricalDistribution(1, [2 / 9, 4 / 9, 3 / 9])
         dist = IntegerMarkovChainDistribution(
             num_values=2, cond_dist=[[0.8, 0.2], [0.3, 0.7]], lag=1, init_dist=init_dist, len_dist=len_dist
         )
-        support = [[]]
-        support.extend([list(v) for n in (1, 2, 3) for v in itertools.product(range(2), repeat=n)])
+        support = [list(v) for n in (1, 2, 3) for v in itertools.product(range(2), repeat=n)]
         assert_matches_brute(self, dist, support, "integer_markov_chain")
         total = np.logaddexp.reduce([lp for _, lp in dist.enumerator()])
         self.assertAlmostEqual(total, 0.0, delta=1e-8)

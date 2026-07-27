@@ -15,7 +15,7 @@ from mixle.stats.sequences.integer_markov_chain import IntegerMarkovChainAccumul
 
 def _make_imc_acc_factory():
     init_f = IntegerCategoricalEstimator(keys="initk").accumulator_factory()
-    return IntegerMarkovChainAccumulatorFactory(lag=1, init_factory=init_f)
+    return IntegerMarkovChainAccumulatorFactory(num_values=6, lag=1, init_factory=init_f)
 
 
 def test_init_accumulator_key_sharing_pools_and_replaces():

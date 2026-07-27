@@ -398,6 +398,8 @@ __all__ = [
     "IntegerMarkovChainEstimator",
     "IntegerMarkovChainDataEncoder",
     "IntegerMarkovChainEnumerator",
+    "IntegerMarkovChainStatistics",
+    "NonGenerativeIntegerMarkovChainError",
     "IntegerProbabilisticLatentSemanticIndexingDistribution",
     "IntegerProbabilisticLatentSemanticIndexingSampler",
     "IntegerProbabilisticLatentSemanticIndexingEstimator",
@@ -1735,6 +1737,8 @@ from mixle.stats.sequences.integer_markov_chain import (
     IntegerMarkovChainEnumerator,
     IntegerMarkovChainEstimator,
     IntegerMarkovChainSampler,
+    IntegerMarkovChainStatistics,
+    NonGenerativeIntegerMarkovChainError,
 )
 from mixle.stats.sequences.markov_chain import (
     MarkovChainDataEncoder,

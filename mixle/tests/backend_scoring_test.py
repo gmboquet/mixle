@@ -332,9 +332,9 @@ class BackendScoringTestCase(unittest.TestCase):
                         IntegerCategoricalDistribution(0, [0.25, 0.45, 0.30]),
                         len_dist=IntegerCategoricalDistribution(1, [1.0]),
                     ),
-                    len_dist=IntegerCategoricalDistribution(0, [0.10, 0.20, 0.30, 0.40]),
+                    len_dist=IntegerCategoricalDistribution(1, [2 / 9, 1 / 3, 4 / 9]),
                 ),
-                [[], [0], [0, 1, 2], [2, 2, 1]],
+                [[0], [1], [0, 1, 2], [2, 2, 1]],
             ),
             (
                 IntegerMultinomialDistribution(
@@ -683,7 +683,7 @@ class BackendScoringTestCase(unittest.TestCase):
                                 IntegerCategoricalDistribution(0, [0.25, 0.45, 0.30]),
                                 len_dist=IntegerCategoricalDistribution(1, [1.0]),
                             ),
-                            len_dist=IntegerCategoricalDistribution(0, [0.10, 0.20, 0.30, 0.40]),
+                            len_dist=IntegerCategoricalDistribution(1, [2 / 9, 1 / 3, 4 / 9]),
                         ),
                         IntegerMarkovChainDistribution(
                             3,
@@ -693,12 +693,12 @@ class BackendScoringTestCase(unittest.TestCase):
                                 IntegerCategoricalDistribution(0, [0.50, 0.20, 0.30]),
                                 len_dist=IntegerCategoricalDistribution(1, [1.0]),
                             ),
-                            len_dist=IntegerCategoricalDistribution(0, [0.25, 0.25, 0.30, 0.20]),
+                            len_dist=IntegerCategoricalDistribution(1, [1 / 3, 0.4, 4 / 15]),
                         ),
                     ],
                     [0.45, 0.55],
                 ),
-                [[], [0], [0, 1, 2], [2, 2, 1], [1, 0]],
+                [[0], [1], [0, 1, 2], [2, 2, 1], [1, 0]],
             ),
             (
                 "categorical",
