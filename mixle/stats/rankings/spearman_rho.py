@@ -1,20 +1,26 @@
-"""Spearman ranking distributions over full permutations.
+"""Spearman-rho distribution over full item orderings.
 
-Data type: List[int] (Component-wise rank of K dimensional observation vector)
+Observations use the ranking convention shared by the other ranking families:
+``x[rank] = item``. The location parameter is a (possibly fractional) mean
+rank vector, ``sigma[item] = expected rank``. Use :class:`ItemOrdering` and
+:class:`RankVector` when a boundary needs to make that distinction explicit.
 
-The Spearman ranking distribution with dimension K, has probability function
+For an ordering ``x``, let ``r`` be its inverse rank vector. Then
 
-    p_mat(x_k;rho, sigma) = exp(-rho * ||x_k-sigma||^2 ) / sum_{k=0}^{K-1} exp(-rho * ||x_k-sigma||^2 ), for k = 0,1,..,K-1
+``p(x) = exp(-rho * sum_item (r[item] - sigma[item])**2) / Z``.
 
-where x_k list of integers containing a permutation of the integers 0,1,2,...K-1. Note sigma is a list of floats with
-dimension equal to K representing the mean of the rank variables, and rho is a correlation coefficient.
-
+The normalizer is the permanent of the rank-by-item log-weight matrix. It is
+computed by exact subset dynamic programming under an explicit dimension
+budget; no factorial permutation array is materialized or globally cached.
+Sampling uses exact conditional permanents and enumeration uses lazy k-best
+assignment search.
 """
 
-import itertools
+from __future__ import annotations
+
 import math
 from collections.abc import Sequence
-from functools import cache
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -30,85 +36,182 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.rankings._contracts import (
+    finite_nonnegative,
+    finite_positive,
+    permutation,
+    permutation_batch,
+    positive_integer,
+    sample_size,
+)
+from mixle.stats.rankings._contracts import weights as validate_weights
+from mixle.stats.rankings._permutation_kernels import log_matrix_permanent
+from mixle.stats.rankings.representations import ItemOrdering, RankVector
 
-_DEFAULT_MAX_DIM = 10  # dim! permutations materialized densely: dim=10 is ~290MB/~1s (cached after first
-# use); dim=11 is already ~3.5GB/~14s, dim=12 ~46GB -- well past what a default should silently allow.
-
-
-@cache
-def _permutation_array(dim: int) -> np.ndarray:
-    return np.asarray(list(itertools.permutations(range(dim))), dtype=np.float64)
-
-
-def _squared_distances_to_sigma(sigma: np.ndarray) -> np.ndarray:
-    perms = _permutation_array(len(sigma))
-    diff = perms - sigma
-    return np.sum(diff * diff, axis=1)
-
-
-def _log_partition(sigma: np.ndarray, rho: float) -> float:
-    d2 = _squared_distances_to_sigma(sigma)
-    z = -float(rho) * d2
-    m = float(np.max(z))
-    return m + np.log(np.exp(z - m).sum())
+_DEFAULT_MAX_DIM = 10
+_HARD_EXACT_DIM = 22
 
 
-def _expected_distance(distances: np.ndarray, rho: float) -> float:
-    z = -float(rho) * distances
-    m = float(np.max(z))
-    weights = np.exp(z - m)
-    return float(np.dot(weights, distances) / weights.sum())
+@dataclass(frozen=True)
+class SpearmanRankingFitDiagnostics:
+    """Concentration-fit and regularization evidence attached to an estimate."""
+
+    concentration_algorithm: str
+    converged: bool
+    iterations: int
+    boundary_solution: bool
+    regularized: bool
+    pseudo_count: float
+
+
+def _validate_location(value: Any) -> np.ndarray:
+    raw = np.asarray(value, dtype=np.float64)
+    if raw.ndim != 1 or raw.size < 2 or not np.all(np.isfinite(raw)):
+        raise ValueError("sigma must be a finite one-dimensional vector with at least two entries.")
+    dim = len(raw)
+    # A common shift changes every assignment score by the same constant. Canonicalizing the
+    # location sum removes that non-identifiability before checking the permutahedron constraints.
+    sigma = np.array(raw - raw.mean() + (dim - 1) / 2.0, dtype=np.float64, copy=True)
+    ordered = np.sort(sigma)
+    tolerance = 1.0e-10 * max(1.0, float(np.max(np.abs(sigma))))
+    for count in range(1, dim):
+        minimum = count * (count - 1) / 2.0
+        if float(np.sum(ordered[:count])) < minimum - tolerance:
+            raise ValueError("sigma must be a compatible mean rank vector in the permutation permutahedron.")
+    sigma.setflags(write=False)
+    return sigma
+
+
+def _rank_vectors(orderings: np.ndarray) -> np.ndarray:
+    """Invert each ``x[rank] = item`` row to ``rank[item] = rank``."""
+    return np.argsort(orderings, axis=1).astype(np.int64, copy=False)
+
+
+def _log_weights(sigma: np.ndarray, rho: float) -> np.ndarray:
+    ranks = np.arange(len(sigma), dtype=np.float64)
+    return -rho * (ranks[:, None] - sigma[None, :]) ** 2
+
+
+def _log_partition_and_expected_distance(sigma: np.ndarray, rho: float) -> tuple[float, float]:
+    """Return exact log partition and expected squared rank distance in O(n 2**n)."""
+    costs = (np.arange(len(sigma), dtype=np.float64)[:, None] - sigma[None, :]) ** 2
+    log_weight = -rho * costs
+    dim = len(sigma)
+    states = 1 << dim
+    log_partition = np.full(states, -np.inf, dtype=np.float64)
+    expected = np.zeros(states, dtype=np.float64)
+    log_partition[0] = 0.0
+    for mask in range(1, states):
+        rank = mask.bit_count() - 1
+        combined_log = -np.inf
+        combined_expected = 0.0
+        for item in range(dim):
+            bit = 1 << item
+            if not mask & bit:
+                continue
+            previous = mask ^ bit
+            candidate_log = log_partition[previous] + log_weight[rank, item]
+            candidate_expected = expected[previous] + costs[rank, item]
+            if combined_log == -np.inf:
+                combined_log = candidate_log
+                combined_expected = candidate_expected
+            elif candidate_log > combined_log:
+                old_weight = math.exp(combined_log - candidate_log)
+                combined_expected = (candidate_expected + old_weight * combined_expected) / (1.0 + old_weight)
+                combined_log = candidate_log + math.log1p(old_weight)
+            else:
+                new_weight = math.exp(candidate_log - combined_log)
+                combined_expected = (combined_expected + new_weight * candidate_expected) / (1.0 + new_weight)
+                combined_log += math.log1p(new_weight)
+        log_partition[mask] = combined_log
+        expected[mask] = combined_expected
+    return float(log_partition[-1]), float(expected[-1])
 
 
 def _estimate_rho_from_mean_distance(
-    distances: np.ndarray, mean_distance: float, max_rho: float = 1.0e6, tol: float = 1.0e-12, max_iter: int = 100
-) -> float:
-    """Return the nonnegative MLE rho satisfying E_rho[D] = mean_distance."""
-    if mean_distance <= tol:
-        return float(max_rho)
-
-    uniform_mean = float(np.mean(distances))
-    if mean_distance >= uniform_mean - tol:
-        return 0.0
-
+    sigma: np.ndarray,
+    mean_distance: float,
+    max_rho: float,
+    tolerance: float = 1.0e-10,
+    max_iter: int = 100,
+) -> tuple[float, int, bool]:
+    """Solve ``E_rho[D] = mean_distance`` by monotone bisection."""
+    _, uniform_mean = _log_partition_and_expected_distance(sigma, 0.0)
+    if mean_distance >= uniform_mean - tolerance:
+        return 0.0, 0, True
+    if mean_distance <= tolerance:
+        return max_rho, 0, True
     lo = 0.0
     hi = 1.0
-    while hi < max_rho and _expected_distance(distances, hi) > mean_distance:
-        lo = hi
-        hi *= 2.0
-
-    if hi >= max_rho and _expected_distance(distances, max_rho) > mean_distance:
-        return float(max_rho)
-
-    hi = min(hi, max_rho)
-    for _ in range(max_iter):
-        mid = 0.5 * (lo + hi)
-        if hi - lo <= tol * max(1.0, hi):
+    while hi < max_rho:
+        _, expected = _log_partition_and_expected_distance(sigma, hi)
+        if expected <= mean_distance:
             break
-        if _expected_distance(distances, mid) > mean_distance:
+        lo = hi
+        hi = min(max_rho, 2.0 * hi)
+    _, at_cap = _log_partition_and_expected_distance(sigma, hi)
+    if hi == max_rho and at_cap > mean_distance:
+        return max_rho, 0, True
+    iterations = 0
+    for iterations in range(1, max_iter + 1):
+        mid = 0.5 * (lo + hi)
+        _, expected = _log_partition_and_expected_distance(sigma, mid)
+        if expected > mean_distance:
             lo = mid
         else:
             hi = mid
+        if hi - lo <= tolerance * max(1.0, hi):
+            break
+    return 0.5 * (lo + hi), iterations, False
 
-    return float(0.5 * (lo + hi))
+
+def _spearman_statistics(value: Any, dim: int) -> tuple[float, np.ndarray]:
+    if isinstance(value, (str, bytes)):
+        raise TypeError("Spearman statistics must be a two-item tuple.")
+    try:
+        if len(value) != 2:
+            raise TypeError("Spearman statistics must be a two-item tuple.")
+    except TypeError as exc:
+        raise TypeError("Spearman statistics must be a two-item tuple.") from exc
+    count = finite_nonnegative(value[0], label="Spearman statistic observation weight")
+    rank_sum = np.asarray(value[1], dtype=np.float64)
+    if rank_sum.shape != (dim,) or not np.all(np.isfinite(rank_sum)) or np.any(rank_sum < 0.0):
+        raise ValueError(f"Spearman rank sum must be a finite nonnegative vector of length {dim}.")
+    tolerance = 1.0e-10 * max(1.0, count)
+    if np.any(rank_sum > count * (dim - 1) + tolerance):
+        raise ValueError("Spearman rank-sum components exceed the support bound.")
+    expected_total = count * dim * (dim - 1) / 2.0
+    if not math.isclose(float(rank_sum.sum()), expected_total, rel_tol=1.0e-10, abs_tol=tolerance):
+        raise ValueError("Spearman rank-sum total is incompatible with the observation weight.")
+    ordered = np.sort(rank_sum)
+    for prefix in range(1, dim):
+        minimum = count * prefix * (prefix - 1) / 2.0
+        if float(np.sum(ordered[:prefix])) < minimum - tolerance:
+            raise ValueError("Spearman rank sum lies outside the scaled permutation permutahedron.")
+    return count, rank_sum.copy()
+
+
+def _backend_rank_vectors(x: Any, dim: int, engine: Any) -> Any:
+    xx = engine.asarray(x)
+    items = engine.arange(dim)
+    ranks = engine.arange(dim)
+    matches = xx[..., :, None] == items
+    return engine.sum(matches * ranks[None, :, None], axis=-2)
 
 
 class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
-    """Spearman ranking distribution over permutations of 0,...,K-1 with location sigma and decay rate rho.
-
-    Data type: List[int] (a permutation of the integers 0,1,...,K-1).
-    """
+    """Exact finite Spearman law over item orderings under a dimension budget."""
 
     @classmethod
     def compute_capabilities(cls):
-        """Declare backend support for Spearman-ranking generated kernels."""
+        """Declare generated NumPy and Torch scoring support."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
 
     @classmethod
     def compute_declaration(cls):
-        """Return the generated-compute declaration for the Spearman ranking distribution."""
+        """Return the generated-compute declaration."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -119,10 +222,7 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
                 ParameterSpec("rho"),
                 ParameterSpec("log_const", constraint="real", differentiable=False),
             ),
-            statistics=(
-                StatisticSpec("count"),
-                StatisticSpec("sum", kind="vector_moment"),
-            ),
+            statistics=(StatisticSpec("count"), StatisticSpec("sum", kind="vector_moment")),
             support="permutation",
             differentiable=False,
             legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
@@ -130,15 +230,19 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def backend_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
-        """Return row-wise legacy sufficient statistics for resident reductions."""
+        """Return row-wise count and item-indexed rank-vector statistics."""
         xx = engine.asarray(x)
-        one = engine.sum(xx * 0.0, axis=1) + engine.asarray(1.0)
-        return one, xx
+        ranks = _backend_rank_vectors(xx, int(params["sigma"].shape[-1]), engine)
+        one = engine.sum(ranks * 0.0, axis=1) + engine.asarray(1.0)
+        return one, ranks
 
     @staticmethod
     def backend_log_density_from_params(x: Any, sigma: Any, rho: Any, log_const: Any, engine: Any) -> Any:
-        """Engine-neutral Spearman ranking log-density from fitted parameters."""
-        diff = engine.asarray(x) - sigma
+        """Score item orderings after explicit conversion to rank vectors."""
+        ranks = _backend_rank_vectors(x, int(sigma.shape[-1]), engine)
+        if len(sigma.shape) > 1:
+            ranks = ranks[:, None, :]
+        diff = ranks - sigma
         return -rho * engine.sum(diff * diff, axis=-1) - log_const
 
     def __init__(
@@ -148,114 +252,75 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
         max_dim: int = _DEFAULT_MAX_DIM,
+        fit_diagnostics: SpearmanRankingFitDiagnostics | None = None,
     ) -> None:
-        """Create a Spearman ranking distribution.
-
-        Args:
-            sigma (Union[Sequence[float], np.ndarray]): Numpy array of means for the rank variables.
-            rho (float): Decay rate on variance of ranks.
-            name (Optional[str]): Optional distribution name.
-            keys (Optional[str]): Optional key for merging sufficient statistics.
-            max_dim (int): Guard on dim for the factorial-size normalizer (raises above this).
-
-        Attributes:
-            sigma (np.ndarray]): Numpy array of means for the rank variables.
-            rho (float): Decay rate on variance of ranks.
-            name (Optional[str]): Optional distribution name.
-            dim (int): Dimension of the rank variable.
-            keys (Optional[str]): Optional key for merging sufficient statistics.
-            max_dim (int): Guard on dim for the factorial-size normalizer.
-
-        """
-        self.sigma = np.asarray(sigma, dtype=np.float64)
-        self.rho = float(rho)
-        self.name = name
-        self.dim = len(sigma)
-        self.keys = keys
-        self.max_dim = max_dim
-        if self.dim > max_dim:
+        self._sigma = _validate_location(sigma)
+        self.dim = len(self._sigma)
+        self.rho = finite_nonnegative(rho, label="rho")
+        self.max_dim = positive_integer(max_dim, label="max_dim", minimum=2)
+        if self.dim > self.max_dim:
             raise ValueError(
-                "SpearmanRankingDistribution dim=%d exceeds max_dim=%d (normalizer materializes dim! "
-                "permutations)." % (self.dim, max_dim)
+                f"SpearmanRankingDistribution dim={self.dim} exceeds max_dim={self.max_dim} "
+                "(exact subset permanent budget)."
             )
+        if self.dim > _HARD_EXACT_DIM:
+            raise ValueError(f"exact Spearman permanent evaluation is limited to dimension {_HARD_EXACT_DIM}.")
+        self.log_weights = _log_weights(self._sigma, self.rho)
+        self.log_weights.setflags(write=False)
+        self.log_const, _ = _log_partition_and_expected_distance(self._sigma, self.rho)
+        if fit_diagnostics is not None and not isinstance(fit_diagnostics, SpearmanRankingFitDiagnostics):
+            raise TypeError("fit_diagnostics must be a SpearmanRankingFitDiagnostics record.")
+        self.fit_diagnostics = fit_diagnostics
+        self.name = name
+        self.keys = keys
 
-        self.log_const = _log_partition(self.sigma, self.rho)
+    @property
+    def sigma(self) -> np.ndarray:
+        """Return an ownership-safe copy of the canonical mean rank vector."""
+        return self._sigma.copy()
 
     def __str__(self) -> str:
-        """Return a constructor-style representation of the Spearman ranking distribution."""
         return "SpearmanRankingDistribution(sigma=%s, rho=%s, name=%s, keys=%s, max_dim=%s)" % (
-            repr(self.sigma),
+            repr([float(value) for value in self.sigma]),
             repr(self.rho),
             repr(self.name),
             repr(self.keys),
             repr(self.max_dim),
         )
 
-    def density(self, x: list[int]) -> float:
-        """Density of Spearman ranking distribution at observation x.
+    def density(self, x: Sequence[int] | ItemOrdering) -> float:
+        """Return the probability of an item ordering."""
+        return float(math.exp(self.log_density(x)))
 
-        See log_density() for details.
-
-        Args:
-            x (List[int]): Permutation of the integers 0,1,...,K-1.
-
-        Returns:
-            Density at observation x.
-
-        """
-        return np.exp(self.log_density(x))
-
-    def log_density(self, x: list[int]) -> float:
-        """Log-density of Spearman ranking distribution at observation x.
-
-        The log-density is given by
-
-            log(p(x; rho, sigma)) = -rho * ||x - sigma||^2 - log_const,
-
-        where log_const normalizes over all K! permutations.
-
-        Args:
-            x (List[int]): Permutation of the integers 0,1,...,K-1.
-
-        Returns:
-            Log-density at observation x.
-
-        """
-        temp = np.subtract(x, self.sigma)
-        return -self.rho * np.dot(temp, temp) - self.log_const
+    def log_density(self, x: Sequence[int] | ItemOrdering) -> float:
+        """Return the log-probability of one ``x[rank] = item`` ordering."""
+        ordering = permutation(x, self.dim, label="Spearman item ordering")
+        ranks = np.argsort(ordering)
+        difference = ranks - self._sigma
+        return -self.rho * float(np.dot(difference, difference)) - self.log_const
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
-        """Vectorized evaluation of log-density at sequence encoded input x.
-
-        Args:
-            x (np.ndarray): 2-d numpy array of N permutations with K columns.
-
-        Returns:
-            Numpy array of log-density (float) of length N.
-
-        """
-        temp = x - self.sigma
-        temp *= temp
-        rv = np.sum(temp, axis=1) * -self.rho
-        rv -= self.log_const
-        return rv
+        """Return vectorized log-probabilities for item orderings."""
+        checked = permutation_batch(x, self.dim, label="Spearman item orderings")
+        difference = _rank_vectors(checked) - self._sigma
+        return -self.rho * np.sum(difference * difference, axis=1) - self.log_const
 
     def backend_seq_log_density(self, x: np.ndarray, engine: Any) -> Any:
-        """Engine-neutral vectorized log-density for encoded permutations."""
+        """Engine-neutral vectorized scoring for encoded item orderings."""
         return self.backend_log_density_from_params(
             engine.asarray(x),
-            engine.asarray(self.sigma),
+            engine.asarray(self._sigma.copy()),
             engine.asarray(self.rho),
             engine.asarray(self.log_const),
             engine,
         )
 
     @classmethod
-    def backend_stacked_params(cls, dists: Sequence["SpearmanRankingDistribution"], engine: Any) -> dict[str, Any]:
-        """Return stacked parameters for equal-dimensional Spearman ranking mixtures."""
+    def backend_stacked_params(cls, dists: Sequence[SpearmanRankingDistribution], engine: Any) -> dict[str, Any]:
+        """Stack equal-dimensional Spearman parameters."""
         dim = int(dists[0].dim)
         if any(int(dist.dim) != dim for dist in dists):
-            raise ValueError("Stacked SpearmanRankingDistribution components require equal dimension.")
+            raise ValueError("stacked Spearman components require equal dimensions.")
         return {
             "__pysp_component_axis__": {"sigma": 0, "rho": 0, "log_const": 0},
             "sigma": engine.asarray([dist.sigma for dist in dists]),
@@ -265,41 +330,27 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def backend_stacked_log_density(cls, x: np.ndarray, params: dict[str, Any], engine: Any) -> Any:
-        """Return an ``(n, k)`` matrix of Spearman ranking component log densities."""
-        diff = engine.asarray(x)[:, None, :] - params["sigma"][None, :, :]
-        return -params["rho"][None, :] * engine.sum(diff * diff, axis=2) - params["log_const"][None, :]
+        """Return an observation-by-component score matrix."""
+        ranks = _backend_rank_vectors(x, len(params["sigma"][0]), engine)
+        difference = ranks[:, None, :] - params["sigma"][None, :, :]
+        return -params["rho"][None, :] * engine.sum(difference * difference, axis=2) - params["log_const"][None, :]
 
     @classmethod
     def backend_stacked_sufficient_statistics(
         cls, x: np.ndarray, weights: Any, params: dict[str, Any], engine: Any
     ) -> tuple[Any, Any]:
-        """Return component-stacked legacy ``(count, weighted_rank_sum)`` statistics."""
-        ww = engine.asarray(weights)
-        xx = engine.asarray(x, dtype=getattr(ww, "dtype", None))
-        return engine.sum(ww, axis=0), engine.matmul(ww.T, xx)
+        """Return component-stacked item-indexed rank-vector statistics."""
+        weights_array = engine.asarray(weights)
+        ranks = _backend_rank_vectors(x, len(params["sigma"][0]), engine)
+        ranks = engine.asarray(ranks, dtype=getattr(weights_array, "dtype", None))
+        return engine.sum(weights_array, axis=0), engine.matmul(weights_array.T, ranks)
 
-    def sampler(self, seed: int | None = None) -> "SpearmanRankingSampler":
-        """Create a sampler from this Spearman ranking distribution.
-
-        Args:
-            seed (Optional[int]): Used to set seed in random sampler.
-
-        Returns:
-            SpearmanRankingSampler configured from this distribution.
-
-        """
+    def sampler(self, seed: int | None = None) -> SpearmanRankingSampler:
+        """Return an exact conditional-permanent sampler."""
         return SpearmanRankingSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> "SpearmanRankingEstimator":
-        """Create a SpearmanRankingEstimator with matching dimension and concentration rho.
-
-        Args:
-            pseudo_count (Optional[float]): Used to inflate sufficient statistics.
-
-        Returns:
-            SpearmanRankingEstimator object.
-
-        """
+    def estimator(self, pseudo_count: float | None = None) -> SpearmanRankingEstimator:
+        """Return an estimator preserving the dimension and resource budget."""
         return SpearmanRankingEstimator(
             self.dim,
             rho=None,
@@ -309,222 +360,141 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
             max_dim=self.max_dim,
         )
 
-    def dist_to_encoder(self) -> "SpearmanRankingDataEncoder":
-        """Return the encoder for Spearman ranking observations."""
-        return SpearmanRankingDataEncoder()
+    def dist_to_encoder(self) -> SpearmanRankingDataEncoder:
+        """Return the item-ordering encoder."""
+        return SpearmanRankingDataEncoder(dim=self.dim)
 
-    def enumerator(self) -> "SpearmanRankingEnumerator":
-        """Returns SpearmanRankingEnumerator iterating permutations in descending probability order."""
+    def enumerator(self) -> SpearmanRankingEnumerator:
+        """Return a lazy descending-probability enumerator."""
         return SpearmanRankingEnumerator(self)
 
     def support_size(self) -> int:
-        """Return the number of full rankings."""
+        """Return the number of full item orderings."""
         return math.factorial(self.dim)
 
 
 class SpearmanRankingEnumerator(DistributionEnumerator):
-    """Enumerate permutations in descending Spearman probability order, lazily.
-
-    The Spearman distance ``sum_i (x_i - sigma_i)^2`` is a linear assignment cost (assigning value j to
-    position i costs ``(j - sigma_i)^2``), so descending probability is increasing assignment cost: Murty's
-    k-best assignment streams the permutations in order without materializing the K! support.
-    """
+    """Enumerate item orderings by increasing rank-to-item assignment cost."""
 
     def __init__(self, dist: SpearmanRankingDistribution) -> None:
         super().__init__(dist)
-        n = dist.dim
-        sigma = np.asarray(dist.sigma, dtype=float)
-        # cost[i, j] = (j - sigma_i)^2; scaling by rho makes increasing cost == descending log-density for any
-        # sign of rho (log p = -rho * distance - log_const)
-        cost = dist.rho * (np.arange(n, dtype=float)[None, :] - sigma[:, None]) ** 2
-        self._gen = k_best_assignments(cost)
-        self._log_const = dist.log_const
+        self._generator = k_best_assignments(-dist.log_weights)
 
     def __next__(self) -> tuple[list[int], float]:
-        total, rows, cols = next(self._gen)  # StopIteration propagates at the end of the support
-        x = [0] * self.dist.dim
-        for r, c in zip(rows, cols):
-            x[int(r)] = int(c)
-        return x, float(-total - self._log_const)
+        total, rows, items = next(self._generator)
+        ordering = [0] * self.dist.dim
+        for rank, item in zip(rows, items):
+            ordering[int(rank)] = int(item)
+        return ordering, float(-total - self.dist.log_const)
 
 
 class SpearmanRankingSampler(DistributionSampler):
-    """Sampler for the SpearmanRankingDistribution. Draws permutations of 0,...,K-1."""
+    """Draw exact Spearman item orderings using conditional permanents."""
 
     def __init__(self, dist: SpearmanRankingDistribution, seed: int | None = None) -> None:
-        """Create a sampler for Spearman ranking observations.
-
-        Args:
-            dist (SpearmanRankingDistribution): Distribution to sample from.
-            seed (Optional[int]): Seed for random number generator.
-
-        Attributes:
-            rng (np.random.RandomState): Random number generator.
-            dist (SpearmanRankingDistribution): Distribution to sample from.
-            perms (List[List[int]]): All K! permutations of 0,...,K-1.
-            probs (np.ndarray): Probability of each permutation under dist.
-
-        """
-        self.rng = np.random.RandomState(seed)
+        self.rng = RandomState(seed)
         self.dist = dist
 
-        self.perms = list(map(list, itertools.permutations(range(dist.dim))))
-        encoder = self.dist.dist_to_encoder()
-        self.probs = np.exp(dist.seq_log_density(encoder.seq_encode(self.perms)))
+    def _sample_one(self) -> list[int]:
+        available = list(range(self.dist.dim))
+        ordering = [0] * self.dist.dim
+        for rank in range(self.dist.dim):
+            remaining_ranks = list(range(rank + 1, self.dist.dim))
+            log_probabilities = np.empty(len(available), dtype=np.float64)
+            for index, item in enumerate(available):
+                remaining_items = [candidate for candidate in available if candidate != item]
+                minor = self.dist.log_weights[np.ix_(remaining_ranks, remaining_items)]
+                log_probabilities[index] = self.dist.log_weights[rank, item] + log_matrix_permanent(minor)
+            shift = float(np.max(log_probabilities))
+            probabilities = np.exp(log_probabilities - shift)
+            probabilities /= probabilities.sum()
+            choice = int(self.rng.choice(len(available), p=probabilities))
+            ordering[rank] = available.pop(choice)
+        return ordering
 
-    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | Sequence[list[int]]:
-        """Draw iid samples (permutations of 0,...,K-1) from the Spearman ranking distribution.
-
-        Args:
-            size (Optional[int]): Number of samples to draw. If None, a single permutation is returned.
-
-        Returns:
-            A single permutation (List[int]) if size is None, else a list of size permutations.
-
-        """
-        idx = self.rng.choice(len(self.perms), p=self.probs, replace=True, size=size)
-
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | list[list[int]]:
+        """Draw one item ordering or ``size`` iid item orderings."""
         if size is None:
-            return self.perms[idx]
-        else:
-            return [self.perms[u] for u in idx]
+            return self._sample_one()
+        return [self._sample_one() for _ in range(sample_size(size))]
 
 
 class SpearmanRankingAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulator for the SpearmanRankingDistribution. Tracks the weighted sum of ranks and total weight."""
+    """Accumulate item-indexed rank-vector sums from item orderings."""
 
     def __init__(self, dim: int, name: str | None = None, keys: str | None = None) -> None:
-        """Create an accumulator for Spearman ranking sufficient statistics.
-
-        Args:
-            dim (int): Dimension K of the rank vectors.
-            name (Optional[str]): Optional accumulator name.
-            keys (Optional[str]): Optional key for merging sufficient statistics.
-
-        Attributes:
-            sum (np.ndarray): Weighted component-wise sum of observed rank vectors.
-            count (float): Sum of observation weights.
-            key (Optional[str]): Optional key for merging sufficient statistics.
-            name (Optional[str]): Optional accumulator name.
-
-        """
-        self.sum = np.zeros(dim, dtype=np.float64)
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.sum = np.zeros(self.dim, dtype=np.float64)
         self.count = 0.0
         self.keys = keys
         self.name = name
 
-    def update(self, x: list[int] | np.ndarray, weight: float, estimate: SpearmanRankingDistribution | None) -> None:
-        """Update sufficient statistics with a weighted observation.
+    def update(
+        self,
+        x: Sequence[int] | ItemOrdering,
+        weight: float,
+        estimate: SpearmanRankingDistribution | None,
+    ) -> None:
+        """Update from one item ordering."""
+        ordering = permutation(x, self.dim, label="Spearman item ordering")
+        self.seq_update(ordering[None, :], np.asarray([weight], dtype=np.float64), estimate)
 
-        Args:
-            x (Union[List[int], np.ndarray]): Permutation of the integers 0,1,...,K-1.
-            weight (float): Weight for observation.
-            estimate (Optional[SpearmanRankingDistribution]): Previous estimate (unused).
+    def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
+        """Initialize from one item ordering."""
+        self.update(x, weight, None)
 
-        """
-        self.sum += np.multiply(x, weight)
-        self.count += weight
+    def seq_update(
+        self,
+        x: np.ndarray,
+        weights: np.ndarray,
+        estimate: SpearmanRankingDistribution | None,
+    ) -> None:
+        """Update from encoded item orderings."""
+        checked = permutation_batch(x, self.dim, label="Spearman item orderings")
+        checked_weights = validate_weights(weights, len(checked))
+        self.sum += np.dot(_rank_vectors(checked).T, checked_weights)
+        self.count += float(np.sum(checked_weights, dtype=np.float64))
 
-    def initialize(self, x: list[int] | np.ndarray, weight: float, rng: RandomState) -> None:
-        """Initialize sufficient statistics with a weighted observation.
-
-        Args:
-            x (Union[List[int], np.ndarray]): Permutation of the integers 0,1,...,K-1.
-            weight (float): Weight for observation.
-            rng (RandomState): Random number generator (unused).
-
-        """
-        if weight != 0:
-            self.sum += np.multiply(x, weight)
-            self.count += weight
-
-    def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: SpearmanRankingDistribution | None) -> None:
-        """Vectorized update of sufficient statistics from sequence encoded data.
-
-        Args:
-            x (np.ndarray): 2-d numpy array of N permutations with K columns.
-            weights (np.ndarray): Weights for each of the N observations.
-            estimate (Optional[SpearmanRankingDistribution]): Previous estimate (unused).
-
-        """
-        self.sum += np.dot(x.T, weights)
-        self.count += weights.sum()
-
-    def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState) -> None:
-        """Vectorized initialization of sufficient statistics from sequence encoded data.
-
-        Args:
-            x (np.ndarray): 2-d numpy array of N permutations with K columns.
-            weights (np.ndarray): Weights for each of the N observations.
-            rng (RandomState): Random number generator (unused).
-
-        """
+    def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize from encoded item orderings."""
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: tuple[float, np.ndarray]) -> "SpearmanRankingAccumulator":
-        """Combine sufficient statistics from another accumulator into this one.
-
-        Args:
-            suff_stat (Tuple[float, np.ndarray]): Tuple of count and component-wise rank sums.
-
-        Returns:
-            Self, with aggregated sufficient statistics.
-
-        """
-        self.sum += suff_stat[1]
-        self.count += suff_stat[0]
+    def combine(self, suff_stat: tuple[float, np.ndarray]) -> SpearmanRankingAccumulator:
+        """Merge validated rank-vector statistics."""
+        count, rank_sum = _spearman_statistics(suff_stat, self.dim)
+        self.count += count
+        self.sum += rank_sum
         return self
 
     def value(self) -> tuple[float, np.ndarray]:
-        """Returns sufficient statistics as a Tuple of count and component-wise rank sums."""
-        return self.count, self.sum
+        """Return an ownership-safe sufficient-statistic snapshot."""
+        return self.count, self.sum.copy()
 
-    def from_value(self, x: tuple[float, np.ndarray]) -> "SpearmanRankingAccumulator":
-        """Set sufficient statistics of accumulator from value x.
-
-        Args:
-            x (Tuple[float, np.ndarray]): Tuple of count and component-wise rank sums.
-
-        Returns:
-            Self, with sufficient statistics set to x.
-
-        """
-        self.sum = x[1]
-        self.count = x[0]
+    def from_value(self, x: tuple[float, np.ndarray]) -> SpearmanRankingAccumulator:
+        """Restore validated rank-vector statistics."""
+        self.count, self.sum = _spearman_statistics(x, self.dim)
         return self
 
-    def acc_to_encoder(self) -> "SpearmanRankingDataEncoder":
-        """Return the encoder associated with this accumulator."""
-        return SpearmanRankingDataEncoder()
+    def acc_to_encoder(self) -> SpearmanRankingDataEncoder:
+        """Return an encoder with the matching item count."""
+        return SpearmanRankingDataEncoder(dim=self.dim)
 
 
 class SpearmanRankingAccumulatorFactory(StatisticAccumulatorFactory):
-    """Factory for Spearman ranking accumulators."""
+    """Create Spearman ranking accumulators."""
 
     def __init__(self, dim: int, name: str | None = None, keys: str | None = None) -> None:
-        """Create a factory for Spearman ranking accumulators.
-
-        Args:
-            dim (int): Dimension K of the rank vectors.
-            name (Optional[str]): Optional name assigned to created accumulators.
-            keys (Optional[str]): Optional key for merging sufficient statistics.
-
-        """
+        self.dim = positive_integer(dim, label="dim", minimum=2)
         self.keys = keys
         self.name = name
-        self.dim = dim
 
-    def make(self) -> "SpearmanRankingAccumulator":
-        """Return a fresh Spearman ranking accumulator."""
+    def make(self) -> SpearmanRankingAccumulator:
+        """Return a fresh accumulator."""
         return SpearmanRankingAccumulator(dim=self.dim, name=self.name, keys=self.keys)
 
 
 class SpearmanRankingEstimator(ParameterEstimator):
-    """Estimator for the SpearmanRankingDistribution from aggregated sufficient statistics.
-
-    The consensus ranking sigma and, by default, the concentration rho are estimated by
-    maximum likelihood. Pass a numeric rho to hold the concentration fixed.
-    """
+    """Estimate consensus mean ranks and nonnegative Spearman concentration."""
 
     def __init__(
         self,
@@ -537,117 +507,119 @@ class SpearmanRankingEstimator(ParameterEstimator):
         max_rho: float = 1.0e6,
         max_dim: int = _DEFAULT_MAX_DIM,
     ) -> None:
-        """Create an estimator for Spearman ranking parameters.
-
-        Args:
-            dim (int): Dimension K of the rank vectors.
-            rho (Optional[float]): Fixed concentration for the estimated distribution. If None, estimate rho by MLE.
-            pseudo_count (Optional[float]): Used to inflate sufficient statistics.
-            suff_stat (Optional[Tuple[float, np.ndarray]]): Tuple of count and component-wise rank sums.
-            name (Optional[str]): Optional name assigned to the estimated distribution.
-            keys (Optional[str]): Optional key for merging sufficient statistics.
-            max_rho (float): Finite cap used when the MLE is at rho = infinity.
-            max_dim (int): Guard on dim for the factorial-size normalizer (raises above this).
-
-        """
-        if rho is not None and rho < 0:
-            raise ValueError("SpearmanRankingEstimator requires rho >= 0 or None (got %s)." % repr(rho))
-        if max_rho <= 0:
-            raise ValueError("SpearmanRankingEstimator requires max_rho > 0 (got %s)." % repr(max_rho))
-        if dim > max_dim:
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.max_dim = positive_integer(max_dim, label="max_dim", minimum=2)
+        if self.dim > self.max_dim:
             raise ValueError(
-                "SpearmanRankingEstimator dim=%d exceeds max_dim=%d (normalizer materializes dim! "
-                "permutations)." % (dim, max_dim)
+                f"SpearmanRankingEstimator dim={self.dim} exceeds max_dim={self.max_dim} "
+                "(exact subset permanent budget)."
             )
-
-        self.rho = None if rho is None else float(rho)
-        self.pseudo_count = pseudo_count
-        self.suff_stat = suff_stat
+        if self.dim > _HARD_EXACT_DIM:
+            raise ValueError(f"exact Spearman permanent evaluation is limited to dimension {_HARD_EXACT_DIM}.")
+        self.rho = None if rho is None else finite_nonnegative(rho, label="rho")
+        self.max_rho = finite_positive(max_rho, label="max_rho")
+        self.pseudo_count = None if pseudo_count is None else finite_nonnegative(pseudo_count, label="pseudo_count")
+        self.suff_stat = None if suff_stat is None else _spearman_statistics(suff_stat, self.dim)
         self.keys = keys
         self.name = name
-        self.dim = dim
-        self.max_rho = float(max_rho)
-        self.max_dim = max_dim
 
-    def accumulator_factory(self) -> "SpearmanRankingAccumulatorFactory":
-        """Return a factory for Spearman ranking accumulators."""
+    def accumulator_factory(self) -> SpearmanRankingAccumulatorFactory:
+        """Return a factory for item-ordering sufficient statistics."""
         return SpearmanRankingAccumulatorFactory(self.dim, self.name, self.keys)
 
-    def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray]) -> "SpearmanRankingDistribution":
-        """Estimate a SpearmanRankingDistribution from sufficient statistics.
-
-        The consensus ranking sigma is the maximum likelihood estimate, given by the rank order
-        (argsort) of the component-wise rank sums. When rho is None, the concentration is the
-        nonnegative MLE satisfying E_rho[||X-sigma||^2] = observed mean squared distance. If no
-        data was observed, rho is set to 0.0.
-
-        Args:
-            nobs (Optional[float]): Number of observations (unused).
-            suff_stat (Tuple[float, np.ndarray]): Tuple of count and component-wise rank sums.
-
-        Returns:
-            SpearmanRankingDistribution object.
-
-        """
-        count, vsum = suff_stat
-        count = float(count)
-        vsum = np.asarray(vsum, dtype=np.float64)
-
-        if self.pseudo_count is not None and self.suff_stat is not None:
-            pcount, psum = self.suff_stat
-            count += float(self.pseudo_count) * float(pcount)
-            vsum = vsum + float(self.pseudo_count) * np.asarray(psum, dtype=np.float64)
-
-        if count > 0:
-            # Observations are rank vectors: x[j] is the rank assigned to item j.
-            # argsort(vsum) returns item order, so rank the item order once more.
-            sigma = np.argsort(np.argsort(vsum))
+    def estimate(
+        self,
+        nobs: float | None,
+        suff_stat: tuple[float, np.ndarray],
+    ) -> SpearmanRankingDistribution:
+        """Estimate a distribution from validated item-indexed rank sums."""
+        count, rank_sum = _spearman_statistics(suff_stat, self.dim)
+        if nobs is not None:
+            checked_nobs = finite_nonnegative(nobs, label="nobs")
+            if not math.isclose(checked_nobs, count, rel_tol=1.0e-10, abs_tol=1.0e-10):
+                raise ValueError("nobs must equal Spearman statistic observation weight.")
+        pseudo_count = 0.0 if self.pseudo_count is None else self.pseudo_count
+        if pseudo_count > 0.0:
+            if self.suff_stat is None:
+                prior_count = 1.0
+                prior_sum = np.full(self.dim, (self.dim - 1) / 2.0)
+            else:
+                prior_count, prior_sum = self.suff_stat
+            count += pseudo_count * prior_count
+            rank_sum = rank_sum + pseudo_count * prior_sum
+        if count <= 0.0:
+            sigma = np.arange(self.dim, dtype=np.float64)
+            rho = 0.0
+            iterations = 0
+            boundary = True
+        else:
+            sigma = np.argsort(np.argsort(rank_sum, kind="stable"), kind="stable").astype(np.float64)
             if self.rho is None:
-                sigma_float = np.asarray(sigma, dtype=np.float64)
-                rank_norm2 = float(np.dot(np.arange(self.dim, dtype=np.float64), np.arange(self.dim, dtype=np.float64)))
-                total_distance = 2.0 * count * rank_norm2 - 2.0 * float(np.dot(vsum, sigma_float))
+                rank_norm = float(np.dot(np.arange(self.dim), np.arange(self.dim)))
+                total_distance = 2.0 * count * rank_norm - 2.0 * float(np.dot(rank_sum, sigma))
                 mean_distance = max(0.0, total_distance / count)
-                distances = _squared_distances_to_sigma(sigma_float)
-                rho = _estimate_rho_from_mean_distance(distances, mean_distance, max_rho=self.max_rho)
+                rho, iterations, boundary = _estimate_rho_from_mean_distance(
+                    sigma,
+                    mean_distance,
+                    self.max_rho,
+                )
             else:
                 rho = self.rho
-        else:
-            sigma = np.arange(self.dim)  # no data: the identity permutation (rho=0 is uniform regardless)
-            rho = 0.0
-
-        return SpearmanRankingDistribution(sigma, rho, name=self.name, keys=self.keys, max_dim=self.max_dim)
+                iterations = 0
+                boundary = False
+        diagnostics = SpearmanRankingFitDiagnostics(
+            concentration_algorithm="exact_assignment_moment_bisection" if self.rho is None else "fixed",
+            converged=True,
+            iterations=iterations,
+            boundary_solution=boundary,
+            regularized=pseudo_count > 0.0,
+            pseudo_count=pseudo_count,
+        )
+        return SpearmanRankingDistribution(
+            sigma,
+            rho,
+            name=self.name,
+            keys=self.keys,
+            max_dim=self.max_dim,
+            fit_diagnostics=diagnostics,
+        )
 
 
 class SpearmanRankingDataEncoder(DataSequenceEncoder):
-    """Data encoder for sequences of rank vector (permutation) observations."""
+    """Validate and encode full ``x[rank] = item`` orderings."""
+
+    def __init__(self, dim: int | None = None) -> None:
+        self.dim = None if dim is None else positive_integer(dim, label="dim", minimum=2)
 
     def __str__(self) -> str:
-        """Return the Spearman ranking encoder's display name."""
-        return "SpearmanRankingDataEncoder"
+        return "SpearmanRankingDataEncoder(dim=%s)" % self.dim
 
     def __eq__(self, other: object) -> bool:
-        """Return true when ``other`` is a Spearman ranking data encoder.
+        return isinstance(other, SpearmanRankingDataEncoder) and self.dim == other.dim
 
-        Args:
-            other (object): Object to compare against.
+    def seq_encode(self, x: Sequence[Sequence[int] | ItemOrdering]) -> np.ndarray:
+        """Return a dense, support-checked item-ordering matrix."""
+        raw = np.asarray([list(row) for row in x])
+        if self.dim is None:
+            if raw.ndim != 2 or raw.shape[0] == 0:
+                raise ValueError("SpearmanRankingDataEncoder requires a non-empty ordering batch.")
+            return permutation_batch(raw, raw.shape[1], label="Spearman item orderings", allow_empty=False)
+        return permutation_batch(raw, self.dim, label="Spearman item orderings", allow_empty=False)
 
-        Returns:
-            True if other is a SpearmanRankingDataEncoder instance, else False.
+    def row_count(self, x: np.ndarray) -> int:
+        """Return the number of encoded item orderings."""
+        return len(x)
 
-        """
-        return isinstance(other, SpearmanRankingDataEncoder)
 
-    def seq_encode(self, x: Sequence[list[int]]) -> np.ndarray:
-        """Encode a sequence of N rank vectors for vectorized functions.
-
-        Args:
-            x (Sequence[List[int]]): Sequence of N permutations of 0,1,...,K-1.
-
-        Returns:
-            2-d numpy array with N rows and K columns.
-
-        """
-        rv = np.asarray(x, dtype=int)  # rank vectors are integer permutations
-        if rv.ndim != 2:
-            raise ValueError("SpearmanRankingDataEncoder expects a 2-d array of equal-length rank vectors.")
-        return rv
+__all__ = [
+    "ItemOrdering",
+    "RankVector",
+    "SpearmanRankingFitDiagnostics",
+    "SpearmanRankingDistribution",
+    "SpearmanRankingEnumerator",
+    "SpearmanRankingSampler",
+    "SpearmanRankingAccumulator",
+    "SpearmanRankingAccumulatorFactory",
+    "SpearmanRankingEstimator",
+    "SpearmanRankingDataEncoder",
+]

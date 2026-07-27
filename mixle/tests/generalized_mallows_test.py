@@ -68,6 +68,14 @@ class NormalizerTest(unittest.TestCase):
         perms = np.array(list(itertools.permutations(range(4))))
         np.testing.assert_allclose(d.seq_log_density(perms), [d.log_density(p) for p in perms], atol=1e-12)
 
+    def test_probability_and_sampler_exactness_are_explicit(self):
+        for metric in METRICS:
+            dist = GeneralizedMallowsDistribution([0, 1, 2], 0.8, metric, n_mc=7, seed=3)
+            with self.subTest(metric=metric):
+                self.assertTrue(dist.computation_diagnostics.normalizer_exact)
+                self.assertTrue(dist.computation_diagnostics.sampler_exact)
+                self.assertEqual(dist.computation_diagnostics.legacy_n_mc_ignored, 7)
+
 
 class RecoveryTest(unittest.TestCase):
     def test_estimator_recovers_center_and_theta(self):

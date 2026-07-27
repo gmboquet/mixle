@@ -70,6 +70,10 @@ class LowRankPermutationTest(unittest.TestCase):
         relaxation = dist.sinkhorn_relaxation()
         self.assertAlmostEqual(exact[0, 0], math.exp(2.0) / (math.exp(2.0) + 1.0), places=12)
         self.assertGreater(abs(exact[0, 0] - relaxation[0, 0]), 0.1)
+        self.assertTrue(dist.computation_diagnostics.normalizer_exact)
+        self.assertTrue(dist.computation_diagnostics.marginals_exact)
+        self.assertTrue(dist.computation_diagnostics.sampler_exact)
+        self.assertIn("transport", dist.computation_diagnostics.optional_relaxation)
 
     def test_distribution_owns_finite_positive_rank_factors(self):
         u = np.asarray([[1.0], [0.0]])
