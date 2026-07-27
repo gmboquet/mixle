@@ -1,7 +1,6 @@
 {# Furo has no host-agnostic version switcher of its own (its built-in one, rtd-versions.html, only
-   activates under actual Read the Docs hosting). This reads switcher.json -- a flat list this repo's
-   own docs/_root_templates/switcher.json renders once at the site root from sphinx-polyversion's
-   build data -- so it works the same for every version, including tags built before this file existed. #}
+   activates under actual Read the Docs hosting). This reads switcher.json -- a flat list produced
+   when the Pages workflow assembles authenticated release archives and moving development docs. #}
 <div id="version-switcher" class="version-switcher">
   <button type="button" class="version-switcher__button" aria-haspopup="listbox" aria-expanded="false">
     <span>{{ mixle_release|default(release) }}</span>

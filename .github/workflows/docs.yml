@@ -1,15 +1,8 @@
 name: Docs
 
-# Build versioned Sphinx documentation (every v* tag with a docs/ tree, plus main) and deploy it to
-# GitHub Pages. Main pushes and manual dispatches build and deploy the versioned site. Every push to
-# the active release branch runs the strict single-revision check without deploying. The site source
-# stays as .rst under docs/; the built HTML is never committed
-# (docs/_build/ is gitignored) -- it is produced here and served from Pages.
-#
-# sphinx-polyversion (docs/poly.py) drives the multi-version build: it discovers matching tags/
-# branches via git, checks each into an isolated temporary venv, and builds its own docs/ tree into
-# docs/_build/html/<name>/. This needs the full git history (all tags/branches), not the single-commit
-# shallow clone actions/checkout does by default.
+# Build moving main-branch documentation once, authenticate immutable documentation archives attached
+# to public releases, assemble them into one versioned site, and deploy it to GitHub Pages. Historical
+# releases are never rebuilt with today's dependencies.
 #
 # One-time setup (repo Settings > Pages): set the source to "GitHub Actions". This workflow already has the
 # permissions the deploy step needs.
@@ -24,6 +17,8 @@ name: Docs
 on:
   push:
     branches: [main, release/0.8.0]
+  release:
+    types: [published]
   pull_request:
     paths:
       - "docs/**"
@@ -48,43 +43,68 @@ concurrency:
 
 jobs:
   build:
-    name: Build versioned HTML
+    name: Assemble versioned HTML
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # The full multi-version build + Pages upload is for push/workflow_dispatch only; PRs get the
     # faster single-revision revision-check job instead.
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || github.event_name == 'release'
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0   # full history: sphinx-polyversion needs every matched tag/branch, not just HEAD
+          ref: main
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install sphinx-polyversion
-        # The driver itself builds each matched revision (tags + main) into its own isolated venv
-        # (see docs/poly.py), installing that revision's own mixle[docs] + CPU torch there, so the
-        # top-level job env doesn't need them. It does need jinja2 directly, though: root-level
-        # artifacts (docs/_root_templates/*) are rendered by build_root() in this top-level process,
-        # not inside a per-revision venv, and sphinx-polyversion doesn't declare jinja2 as a hard
-        # dependency (only needed when template_dir/static_dir are set, as ours are).
+      - name: Build development documentation
         run: |
           python -m pip install --upgrade pip
-          pip install sphinx-polyversion jinja2
-      - name: Build all versions
+          python -m pip install -e ".[docs]"
+          python -m sphinx -b html -W --keep-going docs "$RUNNER_TEMP/docs-main"
+      - name: Download immutable public release documentation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          sphinx-polyversion docs/poly.py
-          touch docs/_build/html/.nojekyll   # serve _static/ etc. verbatim (no Jekyll processing)
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/docs-archives"
+          gh release list --repo "$REPOSITORY" --limit 100 \
+            --json tagName,isDraft,isPrerelease \
+            --jq '.[] | select(.isDraft == false and .isPrerelease == false) | .tagName' |
+          while read -r tag; do
+            case "$tag" in
+              v[0-9]*.[0-9]*.[0-9]*)
+                archive="mixle-docs-$tag.tar.gz"
+                digest="$archive.sha256"
+                assets="$(gh release view "$tag" --repo "$REPOSITORY" --json assets --jq '.assets[].name')"
+                if printf '%s\n' "$assets" | grep -Fxq "$archive"; then
+                  printf '%s\n' "$assets" | grep -Fxq "$digest"
+                  gh release download "$tag" --repo "$REPOSITORY" \
+                    --pattern "$archive" --pattern "$digest" \
+                    --dir "$RUNNER_TEMP/docs-archives"
+                elif printf '%s\n' "$assets" | grep -Fxq "$digest"; then
+                  echo "$tag has a documentation digest without its archive" >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done
+      - name: Authenticate and assemble site
+        run: |
+          python scripts/assemble_docs_site.py \
+            --development "$RUNNER_TEMP/docs-main" \
+            --archives "$RUNNER_TEMP/docs-archives" \
+            --output "$RUNNER_TEMP/docs-site"
       - uses: actions/upload-pages-artifact@v5
         with:
-          path: docs/_build/html
+          path: ${{ runner.temp }}/docs-site
 
   deploy:
     name: Deploy to Pages
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || github.event_name == 'release'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
