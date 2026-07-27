@@ -67,7 +67,8 @@ class LedoitWolfTest(unittest.TestCase):
 
 class LedoitWolfValidationTest(unittest.TestCase):
     """MXR-080-0076: accumulator updates must reject invalid sufficient statistics instead of silently
-    accepting them, and ``estimate`` must return a typed insufficient-data result -- never a Gaussian
+    accepting them, and ``estimate`` must raise a typed insufficient-data error -- never return a
+    non-distribution object or construct a Gaussian
     built from NaN/Inf or from a numerically-healed-but-meaningless covariance -- when the accumulated
     weight cannot support a well-posed estimate."""
 
@@ -130,6 +131,23 @@ class LedoitWolfValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"\b3\b.*\b2\b"):
             acc.seq_update(x, np.array([1.0, 1.0]), None)
 
+    def test_seq_update_rejects_broadcastable_or_multidimensional_weights_before_mutation(self):
+        x = np.array([[0.0, 0.0], [2.0, 2.0]])
+        for weights in (np.array([2.0]), np.ones((2, 1)), np.ones((1, 2))):
+            with self.subTest(shape=weights.shape):
+                acc = LedoitWolfEstimator(dim=2).accumulator_factory().make()
+                with self.assertRaisesRegex(ValueError, "exact shape"):
+                    acc.seq_update(x, weights, None)
+                self.assertEqual(acc.count, 0.0)
+                np.testing.assert_array_equal(acc.s1, np.zeros(2))
+
+    def test_seq_update_requires_a_two_dimensional_observation_matrix(self):
+        acc = LedoitWolfEstimator(dim=2).accumulator_factory().make()
+        for x in (np.array([1.0, 2.0]), np.ones((1, 1, 2))):
+            with self.subTest(shape=x.shape):
+                with self.assertRaisesRegex(ValueError, "two-dimensional"):
+                    acc.seq_update(x, np.ones(x.shape[0]), None)
+
     def test_combine_rejects_mismatched_dimension(self):
         est = LedoitWolfEstimator()
         a = est.accumulator_factory().make()
@@ -139,34 +157,38 @@ class LedoitWolfValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"\b3\b.*\b2\b"):
             a.combine(b.value())
 
-    # --- estimate() returns a typed insufficient-data result instead of a fabricated Gaussian -------
+    # --- estimate() raises a typed insufficient-data error instead of returning a foreign object ----
 
-    def test_estimate_on_empty_accumulator_returns_insufficient_data(self):
+    def test_estimate_on_empty_accumulator_raises_insufficient_data(self):
         est = LedoitWolfEstimator(dim=4)
         acc = est.accumulator_factory().make()
-        result = est.estimate(None, acc.value())
-        self.assertIsInstance(result, LedoitWolfInsufficientData)
-        self.assertNotIsInstance(result, MultivariateGaussianDistribution)
-        self.assertEqual(result.effective_count, 0.0)
-        self.assertEqual(result.dim, 4)
+        with self.assertRaises(LedoitWolfInsufficientData) as caught:
+            est.estimate(None, acc.value())
+        self.assertEqual(caught.exception.effective_count, 0.0)
+        self.assertEqual(caught.exception.dim, 4)
 
-    def test_estimate_on_single_observation_returns_insufficient_data(self):
+    def test_estimate_on_single_observation_raises_insufficient_data(self):
         # one effective observation's raw sample covariance is exactly zero -- structurally
         # uninformative, not just noisy -- so this must not silently become a "valid" Gaussian.
         est = LedoitWolfEstimator(dim=3)
         acc = est.accumulator_factory().make()
         acc.update(np.array([5.0, -2.0, 7.0]), 1.0, None)
-        result = est.estimate(None, acc.value())
-        self.assertIsInstance(result, LedoitWolfInsufficientData)
-        self.assertEqual(result.effective_count, 1.0)
+        with self.assertRaises(LedoitWolfInsufficientData) as caught:
+            est.estimate(None, acc.value())
+        self.assertEqual(caught.exception.effective_count, 1.0)
 
     def test_estimate_rejects_fractional_effective_count_below_threshold(self):
         est = LedoitWolfEstimator(dim=3)
         acc = est.accumulator_factory().make()
         acc.update(np.array([1.0, 2.0, 3.0]), 1.5, None)
-        result = est.estimate(None, acc.value())
-        self.assertIsInstance(result, LedoitWolfInsufficientData)
-        self.assertEqual(result.effective_count, 1.5)
+        with self.assertRaises(LedoitWolfInsufficientData) as caught:
+            est.estimate(None, acc.value())
+        self.assertEqual(caught.exception.effective_count, 1.5)
+
+    def test_generic_estimate_rejects_identical_observations_instead_of_fabricating_variance(self):
+        rows = [np.array([4.0, -2.0, 7.0]), np.array([4.0, -2.0, 7.0])]
+        with self.assertRaisesRegex(LedoitWolfInsufficientData, "no covariance dispersion"):
+            estimate(rows, LedoitWolfEstimator(dim=3))
 
     def test_estimate_at_minimum_effective_count_is_well_posed(self):
         # boundary: exactly 2 effective observations, with dim > n -- Ledoit-Wolf's whole purpose is
@@ -178,6 +200,7 @@ class LedoitWolfValidationTest(unittest.TestCase):
         acc.update(rng.randn(8), 1.0, None)
         result = est.estimate(None, acc.value())
         self.assertIsInstance(result, MultivariateGaussianDistribution)
+        self.assertGreater(result.regularization, 0.0)
         covar = np.asarray(result.covar)
         self.assertTrue(np.all(np.isfinite(covar)))
         eigvals = np.linalg.eigvalsh(covar)
