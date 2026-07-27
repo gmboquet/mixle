@@ -60,6 +60,13 @@ from mixle.stats.latent._hidden_markov_numba_kernels import (
     numba_baum_welch_alphas,
     numba_seq_log_density,
 )
+from mixle.stats.latent.markov_stopping import (
+    DEFAULT_TERMINAL_STEP_CAP,
+    require_terminal_reached,
+    validate_terminal_reachability,
+    validated_terminal_states,
+    validated_terminal_step_cap,
+)
 from mixle.stats.sequences.markov_chain import MarkovChainDistribution
 from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias, require
 
@@ -130,10 +137,20 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
             self.len_dist = len_dist if len_dist is not None else NullDistribution()
             self.name = name
             self.log_transitions = log(self.transitions)
-            self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
+            self.terminal_states = validated_terminal_states(
+                terminal_states,
+                self.num_states,
+                context="LookbackHiddenMarkovModelDistribution",
+            )
             if self.terminal_states is not None:
                 self._terminal_mask = np.zeros(self.num_states, dtype=bool)
                 self._terminal_mask[list(self.terminal_states)] = True
+        validate_terminal_reachability(
+            self.w,
+            self.transitions,
+            self.terminal_states,
+            context="LookbackHiddenMarkovModelDistribution",
+        )
         self.set_prior(prior)
 
     def get_prior(self):
@@ -478,11 +495,7 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
         from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
 
         children = list(self.topics) + ([] if self.len_dist is None else [self.len_dist])
-        sems = [
-            c.density_semantics()
-            for c in children
-            if hasattr(c, "density_semantics") and not supports(c, Neutral)
-        ]
+        sems = [c.density_semantics() for c in children if hasattr(c, "density_semantics") and not supports(c, Neutral)]
         return join_density_semantics(sems) if sems else DensitySemantics.EXACT
 
     def sampler(self, seed: int | None = None) -> "LookbackHiddenMarkovModelSampler":
@@ -601,9 +614,7 @@ class LookbackHiddenMarkovModelSampler(DistributionSampler):
             dist.init_dist[i].sampler(seed=self.rng.randint(0, maxrandint)) for i in range(dist.num_states)
         ]
         self.obs_samplers = [
-            getattr(dist.topics[i], "transition_sampler", dist.topics[i].sampler)(
-                seed=self.rng.randint(0, maxrandint)
-            )
+            getattr(dist.topics[i], "transition_sampler", dist.topics[i].sampler)(seed=self.rng.randint(0, maxrandint))
             for i in range(dist.num_states)
         ]
         self.len_sampler = dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
@@ -611,9 +622,7 @@ class LookbackHiddenMarkovModelSampler(DistributionSampler):
         t_map = {i: {k: dist.transitions[i, k] for k in range(dist.num_states)} for i in range(dist.num_states)}
         p_map = {i: dist.w[i] for i in range(dist.num_states)}
 
-        self.state_sampler = MarkovChainDistribution(p_map, t_map).path_sampler(
-            seed=self.rng.randint(0, maxrandint)
-        )
+        self.state_sampler = MarkovChainDistribution(p_map, t_map).path_sampler(seed=self.rng.randint(0, maxrandint))
 
     def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw iid sequences from the lookback hidden Markov distribution.
@@ -647,14 +656,21 @@ class LookbackHiddenMarkovModelSampler(DistributionSampler):
         else:
             return [self.sample() for i in range(size)]
 
-    def _sample_terminal(self, cap: int = 1_000_000):
+    def _sample_terminal(self, max_steps: int = DEFAULT_TERMINAL_STEP_CAP):
         """Run the chain until the first terminal (absorbing) state, emitting the lookback windows."""
+        max_steps = validated_terminal_step_cap(max_steps)
         lag = self.dist.lag
         z = int(self.state_sampler.sample_seq())
         states = [z]
-        while z not in self.dist.terminal_states and len(states) < cap:
+        while z not in self.dist.terminal_states and len(states) < max_steps:
             z = int(self.state_sampler.sample_seq(v0=z))
             states.append(z)
+        require_terminal_reached(
+            z in self.dist.terminal_states,
+            mode="lookback terminal-state",
+            max_steps=max_steps,
+            last_state=z,
+        )
         if lag == 0:
             return [self.obs_samplers[s].sample_given([]) for s in states]
         rv = list(self.init_samplers[states[0]].sample())
@@ -1360,22 +1376,10 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
 
         len_dist = self.len_estimator.estimate(nobs, len_ss)
 
-        topic_nobs = [
-            getattr(topic_ss[i], "length_nobs", state_counts[i])
-            for i in range(num_states)
-        ]
-        initial_nobs = [
-            getattr(init_ss[i], "length_nobs", init_counts[i])
-            for i in range(num_states)
-        ]
-        topics = [
-            self.estimators[i].estimate(topic_nobs[i], topic_ss[i])
-            for i in range(num_states)
-        ]
-        init_dist = [
-            self.init_estimators[i].estimate(initial_nobs[i], init_ss[i])
-            for i in range(num_states)
-        ]
+        topic_nobs = [getattr(topic_ss[i], "length_nobs", state_counts[i]) for i in range(num_states)]
+        initial_nobs = [getattr(init_ss[i], "length_nobs", init_counts[i]) for i in range(num_states)]
+        topics = [self.estimators[i].estimate(topic_nobs[i], topic_ss[i]) for i in range(num_states)]
+        init_dist = [self.init_estimators[i].estimate(initial_nobs[i], init_ss[i]) for i in range(num_states)]
 
         if self.has_conj_prior:
             from mixle.stats.bayes.dirichlet import DirichletDistribution

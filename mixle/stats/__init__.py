@@ -347,6 +347,7 @@ __all__ = [
     "left_to_right_edges",
     "banded_edges",
     "HiddenAssociationDataEncoder",
+    "HiddenMarkovNonterminationError",
     "HiddenMarkovModelDistribution",
     "HiddenMarkovSampler",
     "HiddenMarkovEstimator",
@@ -2225,6 +2226,7 @@ _register_builtin_compute_metadata()
 # registered on that first access -- always before the distribution is used.
 # ---------------------------------------------------------------------------
 _LAZY_NAMES: dict[str, str] = {
+    "HiddenMarkovNonterminationError": "mixle.stats.latent.markov_stopping",
     # hidden_markov
     "HiddenMarkovDataEncoder": "mixle.stats.latent.hidden_markov",
     "HiddenMarkovEstimator": "mixle.stats.latent.hidden_markov",

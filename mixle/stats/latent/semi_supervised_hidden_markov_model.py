@@ -33,6 +33,13 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.markov_stopping import (
+    DEFAULT_TERMINAL_STEP_CAP,
+    require_terminal_reached,
+    validate_terminal_reachability,
+    validated_terminal_states,
+    validated_terminal_step_cap,
+)
 from mixle.utils.vector import require_possible_log_evidence
 
 _LOG_ZERO = -np.inf
@@ -90,10 +97,20 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         # custom per-sequence implementation with no numba kernel, and its encoder must emit the
         # matching per-sequence layout. Mirrors the terminal-state force-off in hidden_markov.py.
         self.use_numba = False
-        self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
+        self.terminal_states = validated_terminal_states(
+            terminal_states,
+            self.nStates,
+            context="SemiSupervisedHiddenMarkovModelDistribution",
+        )
         if self.terminal_states is not None:
             self._terminal_mask = np.zeros(self.nStates, dtype=bool)
             self._terminal_mask[list(self.terminal_states)] = True
+            validate_terminal_reachability(
+                np.ones(self.nStates, dtype=np.float64),
+                self.transitions,
+                self.terminal_states,
+                context="SemiSupervisedHiddenMarkovModelDistribution",
+            )
 
     def _terminal_log_b(self, emissions, prior) -> np.ndarray:
         """Per-position log emission+prior potentials ``(T, S)`` for the terminal forward."""
@@ -245,14 +262,21 @@ class SemiSupervisedHiddenMarkovSampler(DistributionSampler):
             emissions.append(self.state_samplers[z].sample())
         return (emissions, None)
 
-    def _sample_terminal(self, cap=1_000_000):
+    def _sample_terminal(self, max_steps=DEFAULT_TERMINAL_STEP_CAP):
         """Run the chain (uniform initial) until the first terminal state; emit one observation per state."""
+        max_steps = validated_terminal_step_cap(max_steps)
         s = self.dist.nStates
         z = int(self.rng.choice(s))
         states = [z]
-        while z not in self.dist.terminal_states and len(states) < cap:
+        while z not in self.dist.terminal_states and len(states) < max_steps:
             z = int(self.rng.choice(s, p=self.dist.transitions[z]))
             states.append(z)
+        require_terminal_reached(
+            z in self.dist.terminal_states,
+            mode="semi-supervised terminal-state",
+            max_steps=max_steps,
+            last_state=z,
+        )
         return ([self.state_samplers[st].sample() for st in states], None)
 
     def sample(self, size=None, *, batched: bool = True):

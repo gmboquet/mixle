@@ -353,6 +353,12 @@ class ScheduledHMMDataEncoder(DataSequenceEncoder):
         """Encode scheduled HMM records as sequence lists."""
         return [list(seq) for seq in x]
 
+    def row_count(self, x: Any) -> int:
+        """Return the number of pass-through scheduled-HMM records."""
+        if not isinstance(x, list):
+            raise ValueError("scheduled HMM encoding must be a list of sequence records")
+        return len(x)
+
 
 # ---------------------------------------------------------------------------------------------------------
 # EM: phase-pooled forward-backward. Emissions and len_dist are re-estimated by their own estimators.

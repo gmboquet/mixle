@@ -1646,6 +1646,7 @@
         "HiddenMarkovModelDistribution",
         "HiddenMarkovModelEnumerator",
         "HiddenMarkovModelEstimator",
+        "HiddenMarkovNonterminationError",
         "HierarchicalDirichletProcessMixtureDistribution",
         "HierarchicalDirichletProcessMixtureEstimator",
         "HierarchicalMixtureDistribution",

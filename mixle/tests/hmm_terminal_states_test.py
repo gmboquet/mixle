@@ -6,7 +6,12 @@ import unittest
 import numpy as np
 
 from mixle.inference import estimate
-from mixle.stats import CategoricalDistribution, GaussianDistribution, HiddenMarkovModelDistribution
+from mixle.stats import (
+    CategoricalDistribution,
+    GaussianDistribution,
+    HiddenMarkovModelDistribution,
+    HiddenMarkovNonterminationError,
+)
 
 
 class HmmTerminalStatesTest(unittest.TestCase):
@@ -72,6 +77,38 @@ class HmmTerminalStatesTest(unittest.TestCase):
         s = g.sampler(seed=1).sample(25)
         enc = g.dist_to_encoder().seq_encode(s)
         np.testing.assert_allclose(g.seq_log_density(enc), [g.log_density(seq) for seq in s], atol=1e-10)
+
+    def test_terminal_state_ids_are_exact_nonempty_and_in_range(self):
+        for terminal_states, error in (
+            ({1.0}, TypeError),
+            ({True}, TypeError),
+            (set(), ValueError),
+            ({-1}, ValueError),
+            ({2}, ValueError),
+        ):
+            with self.subTest(terminal_states=terminal_states), self.assertRaises(error):
+                HiddenMarkovModelDistribution(self.topics, self.w, self.a, terminal_states=terminal_states)
+
+    def test_reachable_nonterminal_trap_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "no path to termination"):
+            HiddenMarkovModelDistribution(
+                self.topics,
+                [1.0, 0.0],
+                [[1.0, 0.0], [0.0, 1.0]],
+                terminal_states={1},
+            )
+
+    def test_capped_terminal_state_sampling_raises_instead_of_returning_off_support(self):
+        model = HiddenMarkovModelDistribution(
+            self.topics,
+            [1.0, 0.0],
+            [[0.999, 0.001], [0.0, 1.0]],
+            terminal_states={1},
+        )
+        with self.assertRaises(HiddenMarkovNonterminationError) as raised:
+            model.sampler(seed=0).sample_terminal_states(max_steps=1)
+        self.assertEqual(raised.exception.mode, "terminal-state")
+        self.assertEqual(raised.exception.max_steps, 1)
 
 
 class QuantizedHmmTerminalStatesTest(unittest.TestCase):
@@ -160,6 +197,44 @@ class HmmTerminalValuesSamplerTest(unittest.TestCase):
 
     def test_sample_size_none(self):
         self.assertEqual(self._dist().sampler(seed=1).sample()[-1], ".")
+
+    def test_terminal_value_configuration_is_owned_nonempty_and_unambiguous(self):
+        values = {"."}
+        model = HiddenMarkovModelDistribution(
+            [CategoricalDistribution({"a": 0.5, ".": 0.5})],
+            [1.0],
+            [[1.0]],
+            terminal_values=values,
+        )
+        values.clear()
+        self.assertEqual(model.terminal_values, frozenset({"."}))
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            HiddenMarkovModelDistribution(
+                [CategoricalDistribution({"a": 1.0})],
+                [1.0],
+                [[1.0]],
+                terminal_values=set(),
+            )
+        with self.assertRaisesRegex(ValueError, "cannot combine"):
+            HiddenMarkovModelDistribution(
+                [CategoricalDistribution({"a": 0.5, ".": 0.5})],
+                [1.0],
+                [[1.0]],
+                terminal_values={"."},
+                terminal_states={0},
+            )
+
+    def test_capped_terminal_value_sampling_raises_typed_failure(self):
+        model = HiddenMarkovModelDistribution(
+            [CategoricalDistribution({"a": 1.0})],
+            [1.0],
+            [[1.0]],
+            terminal_values={"."},
+        )
+        with self.assertRaises(HiddenMarkovNonterminationError) as raised:
+            model.sampler(seed=0).sample_terminal(model.terminal_values, max_steps=3)
+        self.assertEqual(raised.exception.mode, "terminal-value")
+        self.assertEqual(raised.exception.max_steps, 3)
 
 
 class HmmTerminalValuesDensityTest(unittest.TestCase):
