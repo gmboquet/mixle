@@ -16,7 +16,8 @@ must be aligned with the release candidate before publication.
 Declared Runtime Floors
 -----------------------
 
-The package family currently declares these runtime floors:
+Core 0.8.0 declares this runtime floor. Related projects are independently
+versioned and excluded from this release's support claim:
 
 .. list-table::
    :header-rows: 1
@@ -28,21 +29,9 @@ The package family currently declares these runtime floors:
      - Python 3.11 and 3.12
      - Wheel install, import sweep, tests, examples, and docs builds on the
        effective Python/OS matrix.
-   * - Python sister packages
-     - The floor declared by each package; the coordinated release manifest
-       records any differences from the Core Python 3.11 floor
-     - Package-specific build, clean install, tests, docs, and family
-       co-install evidence.
-   * - ``mixle-agent``
-     - Node 20 and newer
-     - ``npm install``, build, typecheck, test, and runtime smoke evidence.
-   * - ``mixle-ios``
-     - Xcode and iOS SDK, with simulator or device availability recorded
-     - App build, bundle, asset, decoding, and manual smoke evidence.
-   * - ``mixle-notebooks``
-     - Notebook environment rather than importable package metadata
-     - Kernel, Python, sibling package versions, notebook execution status,
-       and data provenance.
+   * - Related projects
+     - Independently declared
+     - Explicitly excluded from Core 0.8.0 compatibility and co-install claims.
 
 Effective Matrix
 ----------------
@@ -150,7 +139,7 @@ The final release manifest should record:
 * clean-install commands and results;
 * import-sweep and test commands;
 * notebook and example execution status;
-* family co-install evidence; and
+* family co-install evidence only for a future coordinated family release; and
 * publication, tag, and documentation website URLs.
 
 Old-Version Policy

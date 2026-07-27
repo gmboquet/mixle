@@ -41,6 +41,16 @@ candidate/wheel-bound CycloneDX inventories. A scoped Bandit gate reviews
 Mixle and release-script source for medium-or-higher confidence/severity
 findings. Dependency advisories and source analysis are distinct gates.
 
+The secret gate runs Gitleaks against the complete Git history from a
+full-depth checkout. The fast source-tree gate additionally recognizes common
+cloud, registry, payment, collaboration, JWT, and private-key credential
+formats in the current tracked tree. Synthetic redaction fixtures are
+allowlisted only by exact value.
+
+Every third-party action in a release workflow is pinned to a full commit
+identifier. Its adjacent version comment is review context, not executable
+identity.
+
 ## Disclosure and response
 
 Use the private reporting channel in ../SECURITY.md. Preserve reproduction

@@ -15,6 +15,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   decision-reviews:
     name: release decisions / accepted review
@@ -22,8 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - name: Block release sign-off on pending decision reviews
@@ -34,8 +39,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - name: Install base smoke harness
@@ -44,7 +51,7 @@ jobs:
           python -m pip install -e ".[test]"
       - name: Run explicit smoke manifest
         run: python scripts/run_smoke.py --out smoke-receipt.json
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: smoke-receipt
           path: smoke-receipt.json
@@ -55,8 +62,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
@@ -70,6 +79,8 @@ jobs:
         run: ruff format --check mixle
       - name: ruff check
         run: ruff check mixle
+      - name: Parse and validate release workflows
+        run: python scripts/check_workflows.py
       # Y4.4 architecture contracts ([tool.importlinter] in pyproject.toml): experimental is never a
       # dependency of the stable core; distribution kernels / engines carry no direct orchestration
       # imports. Static graph analysis (grimp) -- imports nothing, so no optional extras needed here.
@@ -98,8 +109,10 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -119,7 +132,7 @@ jobs:
             --budget-seconds 240 \
             --receipt "core-py${{ matrix.python-version }}.json" \
             -- -n auto
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: core-tier-py${{ matrix.python-version }}
           path: core-py${{ matrix.python-version }}.json
@@ -137,8 +150,10 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -155,7 +170,7 @@ jobs:
             --budget-seconds 240 \
             --receipt "core-macos-py${{ matrix.python-version }}.json" \
             -- -n auto
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: core-macos-tier-py${{ matrix.python-version }}
           path: core-macos-py${{ matrix.python-version }}.json
@@ -170,8 +185,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
           cache: pip
@@ -189,7 +206,7 @@ jobs:
             --budget-seconds 240 \
             --receipt core-minimum-versions.json \
             -- -n auto
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: core-minimum-versions
           path: core-minimum-versions.json
@@ -202,8 +219,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
@@ -228,7 +247,7 @@ jobs:
             --receipt full-py3.12.json \
             -- -n auto --cov --cov-report=xml --cov-report=term --cov-fail-under=45
       - name: Upload coverage report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-xml
           path: |
@@ -245,41 +264,64 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Build the wheel
+      - name: Build the wheel and source distribution
         run: |
-          python -m pip install --upgrade pip build
-          python -m build --wheel --outdir dist
-      - name: Install the wheel into a clean base env (no extras, not editable)
+          python -m pip install --upgrade "pip==26.1.2"
+          python -m pip install -r release-checklists/0.8.0-build-requirements.txt
+          python -m build --no-isolation --outdir dist
+      - name: Install each artifact into its own clean base environment
         run: |
-          python -m venv "$RUNNER_TEMP/cleanvenv"
-          "$RUNNER_TEMP/cleanvenv/bin/python" -m pip install --upgrade pip
-          "$RUNNER_TEMP/cleanvenv/bin/python" -m pip install dist/*.whl
-          "$RUNNER_TEMP/cleanvenv/bin/python" -m pip install pytest pytest-xdist
-          "$RUNNER_TEMP/cleanvenv/bin/python" -m pip check
-      - name: Import smoke + full public-module sweep from the clean wheel
+          python -m venv "$RUNNER_TEMP/clean-wheel-env"
+          python -m venv "$RUNNER_TEMP/clean-sdist-env"
+          for kind in wheel sdist; do
+            env="$RUNNER_TEMP/clean-$kind-env"
+            "$env/bin/python" -m pip install --upgrade pip
+            "$env/bin/python" -m pip install pytest pytest-xdist
+          done
+          "$RUNNER_TEMP/clean-wheel-env/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/clean-sdist-env/bin/python" -m pip install dist/*.tar.gz
+          "$RUNNER_TEMP/clean-wheel-env/bin/python" -m pip check
+          "$RUNNER_TEMP/clean-sdist-env/bin/python" -m pip check
+      - name: Import smoke + full public-module sweep from each clean artifact
         # Run as a script (its dir, not the repo root, is on sys.path) so the source tree cannot shadow
         # the installed package; the script asserts it is importing the site-packages wheel.
-        run: '"$RUNNER_TEMP/cleanvenv/bin/python" scripts/import_sweep.py'
-      - name: Run stable-family and composed-fit behavior from the installed wheel
         run: |
-          mkdir "$RUNNER_TEMP/wheel-tests"
-          cp mixle/tests/invariant_catalog_test.py mixle/tests/smoke_test.py "$RUNNER_TEMP/wheel-tests/"
-          cd "$RUNNER_TEMP/wheel-tests"
-          "$RUNNER_TEMP/cleanvenv/bin/python" -c \
-            'import pathlib,mixle; p=pathlib.Path(mixle.__file__).resolve(); assert "site-packages" in p.parts, p'
-          "$RUNNER_TEMP/cleanvenv/bin/python" -m pytest -q -n 0 -m "" \
-            invariant_catalog_test.py smoke_test.py \
-            --junitxml=clean-wheel-behavior.xml
-      - uses: actions/upload-artifact@v7
+          "$RUNNER_TEMP/clean-wheel-env/bin/python" scripts/import_sweep.py
+          "$RUNNER_TEMP/clean-sdist-env/bin/python" scripts/import_sweep.py
+      - name: Run stable, serialization, and composed-fit behavior from each artifact
+        run: |
+          mkdir "$RUNNER_TEMP/artifact-tests"
+          cp \
+            mixle/tests/invariant_catalog_test.py \
+            mixle/tests/serialization_audit_contracts_test.py \
+            mixle/tests/serialization_test.py \
+            mixle/tests/smoke_test.py \
+            "$RUNNER_TEMP/artifact-tests/"
+          cd "$RUNNER_TEMP/artifact-tests"
+          for kind in wheel sdist; do
+            env="$RUNNER_TEMP/clean-$kind-env"
+            "$env/bin/python" -c \
+              'import pathlib,mixle; p=pathlib.Path(mixle.__file__).resolve(); assert "site-packages" in p.parts, p'
+            "$env/bin/python" -m pytest -q -n 0 -m "" \
+              invariant_catalog_test.py serialization_audit_contracts_test.py \
+              serialization_test.py smoke_test.py \
+              --junitxml="clean-$kind-behavior.xml"
+            "$env/bin/python" "$GITHUB_WORKSPACE/scripts/verify_installed_schema_manifest.py" \
+              --manifest "$GITHUB_WORKSPACE/manifests/serialization_schema_manifest.json" \
+              --profile base
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: clean-wheel-behavior-${{ github.sha }}
-          path: ${{ runner.temp }}/wheel-tests/clean-wheel-behavior.xml
+          path: ${{ runner.temp }}/artifact-tests/clean-*-behavior.xml
           if-no-files-found: error
           retention-days: 90
 
@@ -288,8 +330,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
@@ -306,6 +350,11 @@ jobs:
             --budget-seconds 1800 \
             --receipt optional-py3.12.json \
             -- -n auto
+      - name: Reject full-profile serialization removals
+        run: |
+          python scripts/verify_installed_schema_manifest.py \
+            --manifest manifests/serialization_schema_manifest.json \
+            --profile full
       - name: Run gated two-rank torchrun smoke
         # -m "" overrides the default `-m fast` addopts; the torchrun tests aren't `fast`, so without this
         # the selection is empty and pytest exits 5 ("no tests collected"), failing the job.
@@ -347,7 +396,7 @@ jobs:
         # The one flagship on real public data (F10.4): the bundle runner verifies the immutable source
         # bytes, bounded configuration, strict JSON receipt, and expected result contract.
         run: python scripts/run_repro_entry.py --entry flagship-banking77-cascade > banking77-reproduction-receipt.json
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: banking77-reproduction-receipt
           path: |
@@ -364,8 +413,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
@@ -382,7 +433,7 @@ jobs:
             --budget-seconds 1800 \
             --receipt numerical.json \
             -- -n auto
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: numerical-tier-${{ github.sha }}
           path: numerical.json
@@ -395,8 +446,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - name: Install MPI, torchrun, and the test harness
@@ -415,7 +468,7 @@ jobs:
             --budget-seconds 1200 \
             --receipt hardware.json \
             -- -n 0
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: hardware-tier-${{ github.sha }}
           path: hardware.json

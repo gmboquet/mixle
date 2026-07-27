@@ -121,19 +121,18 @@ def build_manifest(repo_root: Path = REPO_ROOT) -> dict[str, object]:
     """Return ``{"artifact": ..., "packages": {dotted: entry, ...}}`` across every ``mixle`` package
     ``__init__.py`` that declares an ``__all__``.
 
-    Each entry is ``{"maturity": <tier>, "names": [...]}`` for a resolved package, or
-    ``{"maturity": <tier>, "unresolved": <ExceptionType>}`` for a runtime-assembled package (``mixle``,
-    ``mixle.stats``, ``mixle.utils``) whose import failed because of a missing optional dependency in the
-    current env -- the drift test skips those rather than falsely diffing against a manifest generated in
-    a fuller env. ``maturity`` (worklist A1.2, via :func:`_load_maturity_of`) is always present regardless
-    of resolution status: it is a pure dotted-name lookup against the registry, never an import of the
-    package itself.
+    Each entry is ``{"maturity": <tier>, "names": [...]}`` for a resolved package. Runtime-assembled
+    packages additionally carry ``"dynamic": true``. If importing one fails, its entry carries
+    ``{"dynamic": true, "unresolved": <ExceptionType>}``; that is deliberately blocking in the drift
+    gate because silently omitting a dynamic public package removes all compatibility coverage for it.
+    ``maturity`` (worklist A1.2, via :func:`_load_maturity_of`) is always present regardless of resolution
+    status: it is a pure dotted-name lookup against the registry, never an import of the package itself.
 
     A package whose ``__all__`` is a static literal is resolved by AST parse (no import). A package
     that assembles ``__all__`` at runtime (``mixle``, ``mixle.stats``, ``mixle.utils``) is resolved by
-    importing it; if that import fails (a missing optional dependency in the current env) it is
-    recorded as ``{"unresolved": <ExceptionType>}`` so the drift test can skip it rather than falsely
-    diff against a manifest generated in a fuller env.
+    importing it. Any import failure is retained as an unresolved dynamic entry so release validation
+    fails closed. A package that intentionally needs an optional dependency must define an explicit
+    package policy instead of gaining a catch-all manifest exemption.
 
     ``mixle.stats.bayes.dirichlet`` and ``mixle.reason`` have a real circular import between them
     (``mixle.stats.bayes.dirichlet`` -> ``mixle.inference`` -> ``mixle.analysis`` ->
@@ -163,9 +162,17 @@ def build_manifest(repo_root: Path = REPO_ROOT) -> dict[str, object]:
             try:
                 module = importlib.import_module(dotted)
                 exports = list(getattr(module, "__all__", []))
-                packages[dotted] = {"maturity": maturity, "names": _unique_exports(exports, owner=dotted)}
-            except Exception as exc:  # noqa: BLE001 -- a missing optional dep must not break the manifest
-                packages[dotted] = {"maturity": maturity, "unresolved": type(exc).__name__}
+                packages[dotted] = {
+                    "dynamic": True,
+                    "maturity": maturity,
+                    "names": _unique_exports(exports, owner=dotted),
+                }
+            except Exception as exc:  # noqa: BLE001 -- record the defect so the release gate rejects it
+                packages[dotted] = {
+                    "dynamic": True,
+                    "maturity": maturity,
+                    "unresolved": type(exc).__name__,
+                }
     return {"artifact": ARTIFACT_ID, "packages": packages}
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Import every public ``mixle`` module; exit non-zero if any fails (worklist P2.1).
 
-Run this against a CLEAN base install of the built wheel (no extras). An optional dependency imported
+Run this against a CLEAN base install of the built wheel or source distribution (no extras). An optional dependency imported
 at a module's top level breaks ``import mixle...`` for every base-install user -- a class of regression
 that shipped in the wheel before (numba, mpi4py). Sweeping the installed package catches it before
 release.
@@ -9,7 +9,7 @@ release.
 Invoke as ``python scripts/import_sweep.py`` (the script's directory, not the repo root, is on
 ``sys.path[0]``, so the source tree cannot shadow the installed package). The ``site-packages`` guard
 refuses to "pass" against an editable/source checkout -- pass ``--allow-editable`` only for a local
-smoke run where you understand it is not the wheel.
+smoke run where you understand it is not a release artifact.
 """
 
 import importlib
@@ -21,7 +21,7 @@ import mixle
 
 def main() -> int:
     if "site-packages" not in mixle.__file__ and "--allow-editable" not in sys.argv:
-        print(f"refusing to sweep a source/editable checkout (not the wheel): {mixle.__file__}", file=sys.stderr)
+        print(f"refusing to sweep a source/editable checkout (not a release artifact): {mixle.__file__}", file=sys.stderr)
         return 2
     failures: list[str] = []
     swept = 0

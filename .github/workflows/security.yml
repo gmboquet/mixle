@@ -11,6 +11,13 @@ on:
   pull_request:
     paths:
       - "pyproject.toml"
+      - "constraints*.txt"
+      - ".github/workflows/security.yml"
+      - ".github/pip-audit-waivers.json"
+      - ".gitleaks.toml"
+      - "manifests/dependency_drift_policy.json"
+      - "scripts/bind_sbom.py"
+      - "scripts/check_dependency_bounds.py"
   schedule:
     - cron: "23 6 * * 1"
   workflow_dispatch:
@@ -23,22 +30,38 @@ permissions:
   contents: read
 
 jobs:
+  secret-history:
+    name: gitleaks (full history)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
   pip-audit:
     name: pip-audit (base install)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Build and install the exact wheel in an isolated artifact environment
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install build
-          python -m build --wheel --outdir dist
+          python -m pip install --upgrade "pip==26.1.2"
+          python -m pip install -r release-checklists/0.8.0-build-requirements.txt
+          python -m build --no-isolation --wheel --outdir dist
           python -m venv "$RUNNER_TEMP/artifact-env"
           "$RUNNER_TEMP/artifact-env/bin/python" -m pip install --upgrade pip
           "$RUNNER_TEMP/artifact-env/bin/python" -m pip install dist/*.whl
@@ -54,9 +77,11 @@ jobs:
         # IDs listed there are waived.
         run: |
           SITE=$("$RUNNER_TEMP/artifact-env/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
-          IGNORES=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' .github/pip-audit-ignore.txt | awk '{printf " --ignore-vuln %s", $1}')
-          echo "waived vulns:${IGNORES:- (none)}"
-          "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" $IGNORES
+          python scripts/verify_vulnerability_waivers.py \
+            --input .github/pip-audit-waivers.json --profile base \
+            --args-out waiver-args.txt --receipt accepted-waivers.json
+          mapfile -t WAIVERS < waiver-args.txt
+          "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" "${WAIVERS[@]}"
       - name: Generate and bind the artifact SBOM
         env:
           CANDIDATE_SHA: ${{ github.sha }}
@@ -68,11 +93,14 @@ jobs:
             --wheel-metadata wheel-metadata.json \
             --candidate-sha "$CANDIDATE_SHA" \
             --profile base \
+            --waivers accepted-waivers.json \
             --out sbom.json
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: sbom-${{ github.sha }}
-          path: sbom.json
+          path: |
+            sbom.json
+            accepted-waivers.json
           if-no-files-found: error
           retention-days: 90
 
@@ -81,16 +109,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - name: Install native prerequisites
         run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin libgmp-dev
       - name: Build and install exact wheel with the complete runtime-feature union
         run: |
-          python -m pip install --upgrade pip build
-          python -m build --wheel --outdir dist
+          python -m pip install --upgrade "pip==26.1.2"
+          python -m pip install -r release-checklists/0.8.0-build-requirements.txt
+          python -m build --no-isolation --wheel --outdir dist
           python -m venv "$RUNNER_TEMP/artifact-all-env"
           "$RUNNER_TEMP/artifact-all-env/bin/python" -m pip install --upgrade pip
           WHEEL="$(printf '%s\n' dist/*.whl)"
@@ -102,8 +133,11 @@ jobs:
           python -m venv "$RUNNER_TEMP/audit-tool"
           "$RUNNER_TEMP/audit-tool/bin/python" -m pip install --upgrade pip pip-audit
           SITE=$("$RUNNER_TEMP/artifact-all-env/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
-          IGNORES=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' .github/pip-audit-ignore.txt | awk '{printf " --ignore-vuln %s", $1}')
-          "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" $IGNORES
+          python scripts/verify_vulnerability_waivers.py \
+            --input .github/pip-audit-waivers.json --profile all \
+            --args-out waiver-args-all.txt --receipt accepted-waivers-all.json
+          mapfile -t WAIVERS < waiver-args-all.txt
+          "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" "${WAIVERS[@]}"
           "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" --format cyclonedx-json -o raw-sbom-all.json
       - name: Bind complete-runtime SBOM to candidate and wheel
         env:
@@ -114,11 +148,14 @@ jobs:
             --wheel-metadata wheel-metadata.json \
             --candidate-sha "$CANDIDATE_SHA" \
             --profile all \
+            --waivers accepted-waivers-all.json \
             --out sbom-all.json
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: sbom-all-${{ github.sha }}
-          path: sbom-all.json
+          path: |
+            sbom-all.json
+            accepted-waivers-all.json
           if-no-files-found: error
           retention-days: 90
 
@@ -127,8 +164,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - name: Run scoped source security analysis
@@ -137,7 +176,7 @@ jobs:
           "$RUNNER_TEMP/bandit-tool/bin/python" -m pip install --upgrade pip "bandit[toml]==1.8.6"
           "$RUNNER_TEMP/bandit-tool/bin/bandit" -r mixle scripts \
             -x mixle/tests -ll -ii -f json -o bandit.json
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: bandit-${{ github.sha }}

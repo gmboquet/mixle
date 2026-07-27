@@ -15,6 +15,9 @@ on:
   schedule:
     - cron: "23 9 * * 1"
 
+permissions:
+  contents: read
+
 jobs:
   extra:
     name: "install .[${{ matrix.extra }}]"
@@ -49,8 +52,10 @@ jobs:
           - examples
           - all
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       # A few extras build native code and need system headers. Install them only for the extras that do.
@@ -78,7 +83,7 @@ jobs:
             --profile "$PROFILE" \
             --candidate-sha "$CANDIDATE_SHA" \
             --out "extra-receipt-$PROFILE.json"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: extra-receipt-${{ matrix.extra }}
           path: extra-receipt-${{ matrix.extra }}.json
@@ -105,7 +110,7 @@ jobs:
             --profile "$PROFILE" \
             --candidate-sha "$CANDIDATE_SHA" \
             --out "extra-floor-receipt-$PROFILE.json"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: extra-floor-receipt-${{ matrix.extra }}
           path: extra-floor-receipt-${{ matrix.extra }}.json
@@ -119,13 +124,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: extra-receipt-*
           path: extra-receipts
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: extra-floor-receipt-*
           path: extra-floor-receipts
@@ -145,7 +152,7 @@ jobs:
             --policy release-checklists/0.8.0-extra-profiles.json \
             --candidate-sha "$CANDIDATE_SHA" \
             --out extra-floor-profile-set-receipt.json
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: extra-profile-set-${{ github.sha }}
           path: |

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77", "wheel"]
+requires = ["setuptools==83.0.0", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -132,7 +132,7 @@ examples = ["torch>=2.4,<3", "safetensors>=0.4,<1", "transformers>=4.40,<6", "pe
 # ruff is pinned: a newer release could add rules and break the blocking lint check unexpectedly.
 # import-linter is floored, not pinned: its contracts are fully self-defined in [tool.importlinter],
 # so new releases cannot add surprise rules the way a linter's default rule set can.
-lint = ["ruff==0.15.20", "mypy>=1.0", "import-linter>=2"]
+lint = ["ruff==0.15.20", "mypy>=1.0", "import-linter>=2", "PyYAML==6.0.3"]
 # Exact union of runtime-feature extras above. ``scripts/check_optional_extras.py`` rejects drift.
 # Development-only ``docs``, ``test``, and ``lint`` are intentionally excluded.
 all = [

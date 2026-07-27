@@ -19,12 +19,10 @@ ready, full stop — there is no "ship now, verify later" for anything marked he
 ## Scope
 
 This tracks the `mixle` package itself: the code in this repository, its own CI, its own version.
-`mixle` ships alongside sibling packages (`mixle-knowledge`, `mixle-agent`, `mixle-mlops`,
-`mixle-pde`, and others) as part of a coordinated release, but cross-package coordination —
-lockstep versions, family co-install, publication order — is the release owner's responsibility and
-tracked outside this repo. Where a family-level decision constrains something checked here (a
-sibling's minimum required `mixle` version, for example), this checklist links to it rather than
-duplicating it.
+Core 0.8.0 is standalone. Related projects have independent versions and are explicitly excluded
+from this release's artifact, compatibility, and co-installation claims. A future coordinated
+release must add a versioned family manifest and package-specific receipts before changing that
+scope; no out-of-repository record can silently broaden a Core checklist.
 
 ## Status legend
 
