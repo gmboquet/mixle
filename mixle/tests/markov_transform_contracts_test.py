@@ -65,6 +65,19 @@ class MarkovTransformProbabilityContractTest(unittest.TestCase):
         expected = np.asarray([dist.log_density(value) for value in data])
         np.testing.assert_allclose(dist.seq_log_density(encoded), expected)
 
+    def test_legacy_encoding_delegates_to_the_canonical_child_encoder(self):
+        dist = _distribution(length=True)
+        data = [
+            (
+                [(0, 1)],
+                [(1, 1)],
+                [(0, 1), (1, 1)],
+            )
+        ]
+        legacy = dist.seq_encode(data)
+        canonical = dist.dist_to_encoder().seq_encode(data)
+        np.testing.assert_allclose(dist.seq_log_density(legacy), dist.seq_log_density(canonical))
+
     def test_constructor_rejects_nonprobability_parameters(self):
         bad_cases = (
             ([0.2, 0.2], np.full((4, 2), 0.5), 0.0),

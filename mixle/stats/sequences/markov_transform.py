@@ -493,8 +493,7 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
     def seq_encode(self, x):
         """Encode a sequence of observations for vectorized calls (legacy method).
 
-        Note: this legacy method encodes the lengths with self.len_dist.seq_encode(); prefer
-        dist_to_encoder().seq_encode(x), which uses the length distribution's DataSequenceEncoder.
+        This compatibility surface delegates to the canonical data encoder.
 
         Args:
             x: Sequence of observation tuples (S1, S2, S3), each a list of (value, count) pairs.
@@ -504,32 +503,7 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
             encoded length data (None if len_dist is None), and vv is the array of distinct (u, v, w) triples.
 
         """
-        rv = []
-        nn = []
-        vset = set()
-
-        for index, observation in enumerate(x):
-            bags = _canonicalize_observation(observation, self.num_vals, label="observation %d" % index)
-            rv0 = []
-            nn0 = []
-            for values, counts in bags:
-                rv0.extend((values, counts))
-                nn0.append(int(np.sum(counts)))
-
-            vset.update(itertools.product(rv0[0], rv0[2], rv0[4]))
-            rv.append(tuple(rv0))
-            nn.append(tuple(nn0))
-
-        if self.len_dist is not None:
-            nn = self.len_dist.seq_encode(nn)
-        else:
-            nn = None
-
-        vv = np.zeros((len(vset), 3), dtype=int)
-        for i, vvv in enumerate(vset):
-            vv[i, :] = vvv[:]
-
-        return rv, nn, vv
+        return self.dist_to_encoder().seq_encode(x)
 
     def sampler(self, seed=None):
         """Create a sampler for this Markov transform.
