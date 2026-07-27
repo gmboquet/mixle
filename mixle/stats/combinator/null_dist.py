@@ -83,6 +83,12 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         """
         return 1.0
 
+    def density_semantics(self):
+        """Identify this exact score as a non-generative likelihood factor."""
+        from mixle.stats.compute.pdist import DensitySemantics
+
+        return DensitySemantics.LIKELIHOOD_FACTOR
+
     def log_density(self, x: Any | None) -> float:
         """Log-density of NullDistribution. Always 0.0.
 

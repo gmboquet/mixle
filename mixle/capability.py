@@ -841,20 +841,23 @@ def describe(obj: Any) -> str:
         return base
 
     have = capabilities(obj)
+    from mixle.stats.compute.pdist import DensitySemantics
+
+    semantics = obj.density_semantics() if hasattr(obj, "density_semantics") else None
     can = (
-        ["score", "sample", "estimate"]
+        ["score", "estimate"]
+        + ([] if semantics is DensitySemantics.LIKELIHOOD_FACTOR else ["sample"])
         + sorted(have & set(_HIGHLIGHT))
         + sorted(c for c in ("SupportsBackendScoring", "PosteriorPredictive") if c in have)
     )
     lines = ["%s — %s." % (name, _category(have))]
     lines.append("  can:       " + " · ".join(can))
     if "ExactDensity" not in have and hasattr(obj, "density_semantics"):  # flag non-exact densities
-        from mixle.stats.compute.pdist import DensitySemantics
-
         label = {
             DensitySemantics.LOWER_BOUND: "variational lower bound (ELBO)",
             DensitySemantics.UPPER_BOUND: "upper bound",
             DensitySemantics.ESTIMATE: "plug-in / stochastic estimate",
+            DensitySemantics.LIKELIHOOD_FACTOR: "non-generative likelihood factor",
         }.get(obj.density_semantics(), "approximation")
         lines.append("  density:   log_density is a %s, NOT exact log p(x)" % label)
     engines = obj.supported_engines() if hasattr(obj, "supported_engines") else None

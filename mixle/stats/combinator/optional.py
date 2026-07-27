@@ -15,6 +15,7 @@ from typing import Any, TypeVar
 import numpy as np
 from numpy.random import RandomState
 
+from mixle.capability import Discrete, supports
 from mixle.enumeration.algorithms import freeze, merge_enumerators
 from mixle.stats.combinator.composite import _distribute_child_prior
 from mixle.stats.compute.pdist import (
@@ -38,6 +39,78 @@ SS = TypeVar("SS")
 
 
 from mixle.inference.fisher import EmpiricalMetricFixedFisherView, FixedFisherView, to_fisher
+
+
+class NonGenerativeOptionalError(TypeError):
+    """Raised when a marginalized optional likelihood factor is used to generate data."""
+
+
+def _sentinel_key(value: Any) -> Any:
+    """Return a typed, total key for missing-sentinel identity."""
+    if isinstance(value, (float, np.floating)) and np.isnan(value):
+        return ("nan",)
+    try:
+        return ("value", type(value), freeze(value))
+    except (TypeError, ValueError, OverflowError):
+        return ("identity", type(value), id(value))
+
+
+def _same_sentinel(left: Any, right: Any) -> bool:
+    """Total equivalence used by every optional missing-value surface."""
+    if left is right:
+        return True
+    try:
+        result = _sentinel_key(left) == _sentinel_key(right)
+    except Exception:  # noqa: BLE001 - equivalence must be total for arbitrary user values
+        return False
+    return bool(result) if isinstance(result, (bool, np.bool_)) else False
+
+
+def _finite_nonnegative(value: Any, *, label: str) -> float:
+    try:
+        checked = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be a finite non-negative scalar." % label) from exc
+    if not np.isfinite(checked) or checked < 0.0:
+        raise ValueError("%s must be a finite non-negative scalar." % label)
+    return checked
+
+
+def _validated_optional_statistics(value: Any) -> tuple[tuple[float, float], Any]:
+    """Validate and detach a legacy ``((missing,present), child)`` statistic."""
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise ContractError(
+            "OptionalEstimator.estimate(suff_stat)",
+            "a 2-tuple ((missing_weight, present_weight), base_suff_stat)",
+            type(value).__name__,
+            "pass the value produced by OptionalEstimatorAccumulator.value().",
+        )
+    counts = value[0]
+    if not isinstance(counts, (tuple, list, np.ndarray)) or np.asarray(counts).shape != (2,):
+        raise ContractError(
+            "OptionalEstimator.estimate(suff_stat[0])",
+            "a 2-element (missing_weight, present_weight) pair",
+            type(counts).__name__,
+            "pass the count pair produced by OptionalEstimatorAccumulator.value().",
+        )
+    missing = _finite_nonnegative(counts[0], label="missing weight")
+    present = _finite_nonnegative(counts[1], label="present weight")
+    return (missing, present), value[1]
+
+
+def _beta_posterior_point(alpha: float, beta: float) -> float:
+    """Choose a valid deterministic posterior point for every Beta shape regime."""
+    if alpha > 1.0 and beta > 1.0:
+        return (alpha - 1.0) / (alpha + beta - 2.0)
+    if alpha <= 1.0 < beta:
+        return 0.0
+    if beta <= 1.0 < alpha:
+        return 1.0
+    if alpha > beta:
+        return 1.0
+    if beta > alpha:
+        return 0.0
+    return 0.5
 
 
 class OptionalDistribution(SequenceEncodableProbabilityDistribution):
@@ -90,10 +163,28 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         self.log_p = -np.inf if self.p == 0 else np.log(self.p)
         self.log_pn = -np.inf if self.p == 1 else np.log1p(-self.p)
 
-        self.missing_value_is_nan = isinstance(missing_value, (np.floating, float)) and np.isnan(missing_value)
         self.missing_value = missing_value
+        self._missing_key = _sentinel_key(missing_value)
+        self.missing_value_is_nan = _same_sentinel(missing_value, float("nan"))
+        if supports(dist, Discrete):
+            try:
+                collision_score = float(dist.log_density(missing_value))
+            except (TypeError, ValueError, IndexError, KeyError, OverflowError):
+                collision_score = -np.inf
+            if np.isnan(collision_score) or collision_score > -np.inf:
+                raise ValueError(
+                    "OptionalDistribution missing_value collides with positive-mass child support; "
+                    "choose a disjoint sentinel."
+                )
         self.name = name
+        if not self.has_p and prior is not None and prior[0] is not None:
+            raise ValueError(
+                "a marginalized OptionalDistribution has no missingness parameter and cannot carry a p prior."
+            )
         self.set_prior(prior)
+
+    def _is_missing(self, value: Any) -> bool:
+        return _same_sentinel(value, self.missing_value)
 
     def get_prior(self) -> tuple[Any, Any]:
         """Return the joint prior as ``(p_prior, dist_prior)``."""
@@ -136,10 +227,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         if not self.has_conj_prior:
             return self.log_density(x)
         da, db, dab = self.conj_prior_params
-        if self.missing_value_is_nan:
-            missing = isinstance(x, (np.floating, float)) and np.isnan(x)
-        else:
-            missing = (x == self.missing_value) or (x is self.missing_value)
+        missing = self._is_missing(x)
         if missing:
             return da - dab
         return db - dab + self.dist.expected_log_density(x)
@@ -205,10 +293,10 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         return np.exp(self.log_density(x))
 
     def density_semantics(self):
-        """Return density semantics for the observed branch of the wrapper."""
-        from mixle.stats.compute.pdist import join_density_semantics
+        """Return child semantics for a proper gate or likelihood-factor semantics for MAR."""
+        from mixle.stats.compute.pdist import DensitySemantics
 
-        return join_density_semantics(c.density_semantics() for c in [self.dist])
+        return self.dist.density_semantics() if self.has_p else DensitySemantics.LIKELIHOOD_FACTOR
 
     def log_density(self, x: T) -> float:
         """Evalute the log density of the Optional distribution at x.
@@ -224,16 +312,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             Log-density at x.
 
         """
-        if self.missing_value_is_nan:
-            if isinstance(x, (np.floating, float)) and np.isnan(x):
-                not_missing = False
-            else:
-                not_missing = True
-        else:
-            if x == self.missing_value:
-                not_missing = False
-            else:
-                not_missing = True
+        not_missing = not self._is_missing(x)
 
         if self.has_p:
             if not_missing:
@@ -291,9 +370,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def _same_missing_value(a: OptionalDistribution, b: OptionalDistribution) -> bool:
-        if a.missing_value_is_nan or b.missing_value_is_nan:
-            return a.missing_value_is_nan and b.missing_value_is_nan
-        return a.missing_value == b.missing_value
+        return _same_sentinel(a.missing_value, b.missing_value)
 
     @classmethod
     def backend_stacked_params(cls, dists: Sequence[OptionalDistribution], engine: Any) -> dict[str, Any]:
@@ -379,6 +456,11 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
 
     def sampler(self, seed: int | None = None) -> OptionalSampler:
         """Return a sampler for drawing observations from this distribution."""
+        if not self.has_p:
+            raise NonGenerativeOptionalError(
+                "OptionalDistribution with p=None is a marginalized likelihood factor and cannot "
+                "generate observations; specify p or sample from its child explicitly."
+            )
         return OptionalSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> OptionalEstimator:
@@ -425,12 +507,11 @@ class OptionalEnumerator(DistributionEnumerator):
             raise EnumerationError(
                 dist, reason="no missing probability p given; total mass exceeds one in this legacy mode"
             )
-        missing_key = freeze(dist.missing_value)
         if dist.p >= 1.0:
             self._merged = iter([(dist.missing_value, 0.0)])
             return
         base = child_enumerator(dist.dist, "OptionalDistribution.dist")
-        base = ((v, lp) for v, lp in base if freeze(v) != missing_key)
+        base = ((v, lp) for v, lp in base if not _same_sentinel(v, dist.missing_value))
         if dist.p <= 0.0:
             self._merged = ((v, lp) for v, lp in base)
             return
@@ -444,6 +525,10 @@ class OptionalSampler(DistributionSampler):
     """Sample from an optional distribution by first drawing the missingness gate."""
 
     def __init__(self, dist: OptionalDistribution, seed: int | None = None) -> None:
+        if not dist.has_p:
+            raise NonGenerativeOptionalError(
+                "a marginalized OptionalDistribution is a likelihood factor, not a sampling law."
+            )
         super().__init__(dist, seed)
         self.dist = dist
         self.sampler = self.dist.dist.sampler(self.new_seed())
@@ -452,9 +537,6 @@ class OptionalSampler(DistributionSampler):
         """Draw one observation or a list of observations from the optional mixture."""
 
         sampler = self.sampler
-
-        if not self.dist.has_p:
-            return self.sampler.sample(size=size)
 
         if size is None:
             if self.rng.choice([0, 1], replace=True, p=[self.dist.p, 1.0 - self.dist.p]) == 0:
@@ -494,40 +576,29 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulator = accumulator
         self.weights = [0.0, 0.0]
         self.missing_value = missing_value
-        self.missing_value_is_nan = isinstance(missing_value, (np.floating, float)) and np.isnan(missing_value)
+        self._missing_key = _sentinel_key(missing_value)
+        self.missing_value_is_nan = _same_sentinel(missing_value, float("nan"))
         self.keys = keys
         self.name = name
 
     def update(self, x: T, weight: float, estimate: OptionalDistribution) -> None:
         """Update from a single observation, routing observed values to the child accumulator."""
         base_estimate = estimate.dist if estimate is not None else None
-        if self.missing_value_is_nan:
-            if isinstance(x, (np.floating, float)) and np.isnan(x):
-                self.weights[0] += weight
-            else:
-                self.accumulator.update(x, weight, base_estimate)
-                self.weights[1] += weight
+        checked_weight = _finite_nonnegative(weight, label="weight")
+        if _same_sentinel(x, self.missing_value):
+            self.weights[0] += checked_weight
         else:
-            if (x == self.missing_value) or (x is self.missing_value):
-                self.weights[0] += weight
-            else:
-                self.accumulator.update(x, weight, base_estimate)
-                self.weights[1] += weight
+            self.accumulator.update(x, checked_weight, base_estimate)
+            self.weights[1] += checked_weight
 
     def initialize(self, x: T, weight: float, rng: RandomState) -> None:
         """Initialize from a single observation using the child initializer when observed."""
-        if self.missing_value_is_nan:
-            if isinstance(x, (np.floating, float)) and np.isnan(x):
-                self.weights[0] += weight
-            else:
-                self.accumulator.initialize(x, weight, rng)
-                self.weights[1] += weight
+        checked_weight = _finite_nonnegative(weight, label="weight")
+        if _same_sentinel(x, self.missing_value):
+            self.weights[0] += checked_weight
         else:
-            if (x == self.missing_value) or (x is self.missing_value):
-                self.weights[0] += weight
-            else:
-                self.accumulator.initialize(x, weight, rng)
-                self.weights[1] += weight
+            self.accumulator.initialize(x, checked_weight, rng)
+            self.weights[1] += checked_weight
 
     def seq_update(
         self, x: tuple[int, np.ndarray, np.ndarray, E], weights: np.ndarray, estimate: OptionalDistribution
@@ -572,20 +643,22 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[list[float], SS]) -> OptionalEstimatorAccumulator:
         """Merge missing/observed weights and child sufficient statistics."""
-        self.weights[0] += suff_stat[0][0]
-        self.weights[1] += suff_stat[0][1]
-        self.accumulator.combine(suff_stat[1])
+        counts, child_stat = _validated_optional_statistics(suff_stat)
+        self.weights[0] += counts[0]
+        self.weights[1] += counts[1]
+        self.accumulator.combine(child_stat)
 
         return self
 
-    def value(self) -> tuple[list[float], Any]:
+    def value(self) -> tuple[tuple[float, float], Any]:
         """Return gate weights together with observed-branch sufficient statistics."""
-        return self.weights, self.accumulator.value()
+        return (float(self.weights[0]), float(self.weights[1])), self.accumulator.value()
 
     def from_value(self, x: tuple[list[float], SS]) -> OptionalEstimatorAccumulator:
         """Restore gate weights and observed-branch sufficient statistics."""
-        self.weights = x[0]
-        self.accumulator.from_value(x[1])
+        counts, child_stat = _validated_optional_statistics(x)
+        self.accumulator.from_value(child_stat)
+        self.weights = [counts[0], counts[1]]
 
         return self
 
@@ -679,7 +752,11 @@ class OptionalEstimator(ParameterEstimator):
         """
         self.estimator = estimator
         self.est_prob = est_prob
-        self.pseudo_count = pseudo_count
+        self.pseudo_count = (
+            None
+            if pseudo_count is None
+            else _finite_nonnegative(pseudo_count, label="pseudo_count")
+        )
         self.missing_value = missing_value
         self.keys = keys
         self.name = name
@@ -724,52 +801,29 @@ class OptionalEstimator(ParameterEstimator):
             dist._marginalized_by_helper = True
         return dist
 
-    def _validate_suff_stat(self, suff_stat: tuple[list[float], SS] | None) -> None:
-        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 2:
-            raise ContractError(
-                "OptionalEstimator.estimate(suff_stat)",
-                "a 2-tuple ([missing_weight, present_weight], base_suff_stat)",
-                "%s%s"
-                % (
-                    type(suff_stat).__name__,
-                    " of length %d" % len(suff_stat) if isinstance(suff_stat, (tuple, list)) else "",
-                ),
-                "pass the 2-tuple produced by OptionalEstimatorAccumulator.value(), not a bare base "
-                "sufficient statistic.",
-            )
-        if not isinstance(suff_stat[0], (tuple, list, np.ndarray)) or len(suff_stat[0]) != 2:
-            raise ContractError(
-                "OptionalEstimator.estimate(suff_stat[0])",
-                "a 2-element [missing_weight, present_weight] pair",
-                "%s%s"
-                % (
-                    type(suff_stat[0]).__name__,
-                    " of length %d" % len(suff_stat[0]) if isinstance(suff_stat[0], (tuple, list, np.ndarray)) else "",
-                ),
-                "suff_stat[0] must be the [missing_weight, present_weight] pair produced by "
-                "OptionalEstimatorAccumulator.value().",
-            )
+    def _validate_suff_stat(self, suff_stat: tuple[list[float], SS] | None) -> tuple[tuple[float, float], SS]:
+        return _validated_optional_statistics(suff_stat)
 
     def _estimate_conjugate(self, suff_stat: tuple[list[float], SS]) -> OptionalDistribution:
         """Closed-form Beta conjugate posterior update on ``p`` (carried forward as the fitted prior).
 
-        ``psum`` is the missing weight, ``nsum`` the observed weight; the posterior mode of the Beta is
-        used for ``p`` and the base distribution is delegated to the inner estimator.
+        ``psum`` is the missing weight and ``nsum`` the observed weight. The unique interior or boundary
+        mode is used where one exists; symmetric/non-unique boundary regimes use the deterministic
+        posterior point declared by :func:`_beta_posterior_point`.
         """
         from mixle.stats.univariate.continuous.beta import BetaDistribution
 
-        self._validate_suff_stat(suff_stat)
-        psum = suff_stat[0][0]
-        nsum = suff_stat[0][1]
+        counts, child_stat = self._validate_suff_stat(suff_stat)
+        psum, nsum = counts
         try:
-            dist = self.estimator.estimate(nsum, suff_stat[1])
+            dist = self.estimator.estimate(nsum, child_stat)
         except ContractError as e:
             raise prefix_contract_error("OptionalDistribution.dist", e) from None
 
         a, b = self.prior.get_parameters()
         new_a = a + psum
         new_b = b + nsum
-        new_p = (psum + a - 1.0) / (psum + nsum + a + b - 2.0)
+        new_p = _beta_posterior_point(new_a, new_b)
         new_prior = BetaDistribution(new_a, new_b)
         return self._preserve_marginalization_provenance(
             OptionalDistribution(
@@ -786,9 +840,9 @@ class OptionalEstimator(ParameterEstimator):
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
 
-        self._validate_suff_stat(suff_stat)
+        counts, child_stat = self._validate_suff_stat(suff_stat)
         try:
-            dist = self.estimator.estimate(suff_stat[0][1], suff_stat[1])
+            dist = self.estimator.estimate(counts[1], child_stat)
         except ContractError as e:
             raise prefix_contract_error("OptionalDistribution.dist", e) from None
 
@@ -796,16 +850,16 @@ class OptionalEstimator(ParameterEstimator):
             return self._preserve_marginalization_provenance(
                 OptionalDistribution(
                     dist,
-                    (suff_stat[0][0] + self.pseudo_count)
-                    / ((2 * self.pseudo_count) + suff_stat[0][0] + suff_stat[0][1]),
+                    (counts[0] + self.pseudo_count)
+                    / ((2 * self.pseudo_count) + counts[0] + counts[1]),
                     missing_value=self.missing_value,
                     name=self.name,
                 )
             )
 
         elif self.est_prob:
-            nobs_loc = suff_stat[0][0] + suff_stat[0][1]
-            z_nobs = suff_stat[0][0]
+            nobs_loc = counts[0] + counts[1]
+            z_nobs = counts[0]
 
             if nobs_loc == 0:
                 result = OptionalDistribution(
@@ -836,13 +890,12 @@ class OptionalDataEncoder(DataSequenceEncoder):
     def __init__(self, encoder: DataSequenceEncoder, missing_value: Any = None) -> None:
         self.encoder = encoder
         self.missing_value = missing_value
-        self.missing_value_is_nan = isinstance(missing_value, (np.floating, float)) and np.isnan(missing_value)
+        self._missing_key = _sentinel_key(missing_value)
+        self.missing_value_is_nan = _same_sentinel(missing_value, float("nan"))
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, OptionalDataEncoder):
-            cond1 = self.missing_value == other.missing_value
-            cond2 = self.missing_value_is_nan == other.missing_value_is_nan
-            return cond1 and cond2
+            return self.encoder == other.encoder and _same_sentinel(self.missing_value, other.missing_value)
         else:
             return False
 
@@ -860,20 +913,12 @@ class OptionalDataEncoder(DataSequenceEncoder):
         nz_val = []
         z_idx = []
 
-        if self.missing_value_is_nan:
-            for i, v in enumerate(x):
-                if isinstance(v, (np.floating, float)) and np.isnan(v):
-                    z_idx.append(i)
-                else:
-                    nz_idx.append(i)
-                    nz_val.append(v)
-        else:
-            for i, v in enumerate(x):
-                if v == self.missing_value:
-                    z_idx.append(i)
-                else:
-                    nz_idx.append(i)
-                    nz_val.append(v)
+        for i, v in enumerate(x):
+            if _same_sentinel(v, self.missing_value):
+                z_idx.append(i)
+            else:
+                nz_idx.append(i)
+                nz_val.append(v)
 
         try:
             enc_data = self.encoder.seq_encode(nz_val)
@@ -893,6 +938,29 @@ class OptionalDataEncoder(DataSequenceEncoder):
         z_idx = np.asarray(z_idx, dtype=int)
 
         return len(x), z_idx, nz_idx, enc_data
+
+    def row_count(self, x: Any) -> int:
+        """Validate the missing/present partition and return its declared observation count."""
+        if not isinstance(x, tuple) or len(x) != 4:
+            raise ValueError("optional encoded data must be a (size, missing, present, child) tuple.")
+        size, missing, present, child = x
+        if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)) or size < 0:
+            raise ValueError("optional encoded size must be a non-negative integer.")
+        missing = np.asarray(missing)
+        present = np.asarray(present)
+        if (
+            missing.ndim != 1
+            or present.ndim != 1
+            or not np.issubdtype(missing.dtype, np.integer)
+            or not np.issubdtype(present.dtype, np.integer)
+        ):
+            raise ValueError("optional missing/present indices must be one-dimensional integer arrays.")
+        joined = np.concatenate((missing, present))
+        if len(joined) != int(size) or not np.array_equal(np.sort(joined), np.arange(int(size))):
+            raise ValueError("optional missing/present indices must partition every encoded row exactly once.")
+        if self.encoder.row_count(child) != len(present):
+            raise ValueError("optional child encoding row count must equal the number of present indices.")
+        return int(size)
 
 
 # --- Backward-compatible API naming aliases ---
@@ -915,9 +983,7 @@ class OptionalFisherView(EmpiricalMetricFixedFisherView):
         super().__init__(dist, labels)
 
     def _is_missing(self, x: Any) -> bool:
-        if getattr(self.dist, "missing_value_is_nan", getattr(self.dist, "mv_is_nan", False)):
-            return isinstance(x, (np.floating, float)) and np.isnan(x)
-        return x == self.dist.missing_value or x is self.dist.missing_value
+        return _same_sentinel(x, self.dist.missing_value)
 
     def _statistics_from_data(self, data: Sequence[Any], estimate: Any | None = None) -> np.ndarray:
         n = len(data)

@@ -1319,21 +1319,12 @@ class HTSNETestCase(unittest.TestCase):
         self.assertTrue(np.allclose(la[off], expected[off], atol=1.0e-12))
 
     def test_optional_without_missing_probability_has_no_gate_field(self):
-        from mixle.utils.hvis import balanced_factors, model_log_affinity
-
-        model = MixtureDistribution(
-            [
-                OptionalDistribution(GaussianDistribution(-2.0, 1.0), p=None),
-                OptionalDistribution(GaussianDistribution(2.0, 1.0), p=None),
-            ],
-            [0.5, 0.5],
-        )
-        data = [None, -2.0, -1.5, None, 1.5, 2.0]
-        factors = balanced_factors(model, data)
-        self.assertEqual(len(factors), 1)
-        la = model_log_affinity(None, None, affinity=factors)
-        off = ~np.eye(len(data), dtype=bool)
-        self.assertTrue(np.all(np.isfinite(la[off])))
+        components = [
+            OptionalDistribution(GaussianDistribution(-2.0, 1.0), p=None),
+            OptionalDistribution(GaussianDistribution(2.0, 1.0), p=None),
+        ]
+        with self.assertRaises(TypeError):
+            MixtureDistribution(components, [0.5, 0.5])
 
     def test_field_weights_validated_against_flattened_fields(self):
         from mixle.utils.hvis import balanced_factors

@@ -263,11 +263,20 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             # scalar families do.
             raise ValueError("MixtureDistribution requires len(components) == len(w).")
         neutral = [index for index, component in enumerate(components) if supports(component, Neutral)]
-        if neutral:
+        from mixle.stats.compute.pdist import DensitySemantics
+
+        likelihood_factors = [
+            index
+            for index, component in enumerate(components)
+            if component.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR
+        ]
+        if neutral or likelihood_factors:
+            invalid = sorted(set(neutral).union(likelihood_factors))
             raise TypeError(
                 "MixtureDistribution components must be generative probability laws; "
-                "neutral likelihood factors found at indices %s. Use PointMassDistribution(None) "
-                "for a proper null-valued component." % neutral
+                "likelihood factors found at indices %s. Use PointMassDistribution(None) "
+                "for a proper null-valued component or place marginalization factors inside a "
+                "structured likelihood." % invalid
             )
         if not np.isfinite(self.w).all() or np.any(self.w < 0.0):
             # A negative or non-finite weight silently propagates into log_density() as nan (only a

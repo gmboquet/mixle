@@ -501,6 +501,7 @@ __all__ = [
     "OptionalSampler",
     "OptionalEstimator",
     "OptionalDataEncoder",
+    "NonGenerativeOptionalError",
     "OptionalEnumerator",
     "PoissonDistribution",
     "PoissonSampler",
@@ -1010,6 +1011,7 @@ from mixle.stats.combinator.null_dist import (
     NullSampler,
 )
 from mixle.stats.combinator.optional import (
+    NonGenerativeOptionalError,
     OptionalDataEncoder,
     OptionalDistribution,
     OptionalEnumerator,
