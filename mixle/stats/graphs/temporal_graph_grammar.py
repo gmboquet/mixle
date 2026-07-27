@@ -477,7 +477,7 @@ class TemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution)
 
     def dist_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
         """Return the pass-through data encoder for graph sequences."""
-        return TemporalGraphGrammarDataEncoder()
+        return TemporalGraphGrammarDataEncoder(self.directed)
 
 
 # --- sampler --------------------------------------------------------------------------------------
@@ -854,7 +854,7 @@ class TemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
 
     def acc_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
         """Return the encoder associated with this accumulator."""
-        return TemporalGraphGrammarDataEncoder()
+        return TemporalGraphGrammarDataEncoder(self.motif.directed)
 
 
 class TemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory):
@@ -922,9 +922,15 @@ class TemporalGraphGrammarEstimator(ParameterEstimator):
 class TemporalGraphGrammarDataEncoder(DataSequenceEncoder):
     """Pass-through encoder for dynamic graph sequence observations."""
 
+    def __init__(self, directed: bool = False) -> None:
+        self.directed = bool(directed)
+
     def seq_encode(self, x: Sequence[Sequence[np.ndarray]]) -> Sequence[Sequence[np.ndarray]]:
-        """Return graph sequences unchanged."""
-        return tuple(tuple(sequence) for sequence in x)
+        """Validate and own every adjacency in a temporal graph batch."""
+        return tuple(
+            tuple(_binarize(snapshot, directed=self.directed) for snapshot in sequence)
+            for sequence in x
+        )
 
     def row_count(self, x: Any) -> int:
         """Return the number of temporal sequences in an encoded payload."""
@@ -933,7 +939,7 @@ class TemporalGraphGrammarDataEncoder(DataSequenceEncoder):
         return len(x)
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, TemporalGraphGrammarDataEncoder)
+        return isinstance(other, TemporalGraphGrammarDataEncoder) and other.directed == self.directed
 
 
 # --- labelled (attributed) dynamic graphs ---------------------------------------------------------
@@ -1460,6 +1466,7 @@ __all__ = [
     "LatentTemporalGraphGrammarEstimator",
     "LatentTemporalGraphGrammarAccumulator",
     "LatentTemporalGraphGrammarAccumulatorFactory",
+    "LatentTemporalGraphGrammarStatistics",
     "LatentAttributedTemporalGraphGrammarDistribution",
     "LatentAttributedTemporalGraphGrammarSampler",
     "LatentAttributedTemporalGraphGrammarEstimator",
@@ -2371,6 +2378,39 @@ def _grammar_forward_backward(log_b: np.ndarray, log_init: np.ndarray, log_trans
     return log_p, gamma, xi
 
 
+def _normalized_probability_vector(value: Any, size: int, *, name: str) -> np.ndarray:
+    result = np.array(value, dtype=np.float64, copy=True)
+    if result.shape != (size,):
+        raise ValueError(f"{name} must have shape ({size},).")
+    if np.any(~np.isfinite(result)) or np.any(result < 0.0) or float(result.sum()) <= 0.0:
+        raise ValueError(f"{name} must be finite, non-negative, and have positive total.")
+    result /= result.sum()
+    result.setflags(write=False)
+    return result
+
+
+def _normalized_transition_matrix(value: Any, size: int) -> np.ndarray:
+    result = np.array(value, dtype=np.float64, copy=True)
+    if result.shape != (size, size):
+        raise ValueError(f"transition_matrix must have shape ({size}, {size}).")
+    if np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError("transition_matrix must contain finite non-negative entries.")
+    row_totals = result.sum(axis=1)
+    if np.any(row_totals <= 0.0):
+        raise ValueError("every transition_matrix row must have positive total.")
+    result /= row_totals[:, None]
+    result.setflags(write=False)
+    return result
+
+
+def _structural_log_probabilities(probabilities: np.ndarray) -> np.ndarray:
+    result = np.full(probabilities.shape, -math.inf, dtype=np.float64)
+    positive = probabilities > 0.0
+    result[positive] = np.log(probabilities[positive])
+    result.setflags(write=False)
+    return result
+
+
 class LatentTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution):
     """A dynamic graph whose edit grammar is governed by a hidden, time-evolving REGIME.
 
@@ -2392,17 +2432,24 @@ class LatentTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistrib
         transition_matrix: Sequence[Sequence[float]] | None = None,
         name: str | None = None,
     ) -> None:
-        self.states = list(states)
+        self.states = tuple(states)
         self.k = len(self.states)
-        ip = np.ones(self.k) / self.k if initial_probs is None else np.asarray(initial_probs, dtype=np.float64)
-        self.initial_probs = ip / ip.sum()
-        if transition_matrix is None:
-            self.transition_matrix = np.ones((self.k, self.k)) / self.k
-        else:
-            tm = np.asarray(transition_matrix, dtype=np.float64)
-            self.transition_matrix = tm / tm.sum(axis=1, keepdims=True)
-        self.log_init = np.log(np.clip(self.initial_probs, _EPS, None))
-        self.log_trans = np.log(np.clip(self.transition_matrix, _EPS, None))
+        if self.k == 0 or any(not isinstance(state, TemporalGraphGrammarDistribution) for state in self.states):
+            raise ValueError("states must be a nonempty sequence of temporal graph grammar distributions.")
+        first_motif = self.states[0].motif
+        if any(
+            state.motif.bins != first_motif.bins or state.directed != self.states[0].directed
+            for state in self.states[1:]
+        ):
+            raise ValueError("all latent states must use the same motif partition and directedness.")
+        ip_source = np.ones(self.k) if initial_probs is None else initial_probs
+        tm_source = np.ones((self.k, self.k)) if transition_matrix is None else transition_matrix
+        self.initial_probs = _normalized_probability_vector(ip_source, self.k, name="initial_probs")
+        self.transition_matrix = _normalized_transition_matrix(tm_source, self.k)
+        self.log_init = _structural_log_probabilities(self.initial_probs)
+        self.log_trans = _structural_log_probabilities(self.transition_matrix)
+        if name is not None and not isinstance(name, str):
+            raise ValueError("name must be a string or None.")
         self.name = name
 
     def __str__(self) -> str:
@@ -2435,14 +2482,14 @@ class LatentTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistrib
 
     def log_density(self, x: Sequence[Any]) -> float:
         """Score one dynamic graph sequence with regimes marginalized out."""
-        snaps = list(x)
+        snaps = self.dist_to_encoder().seq_encode([x])[0]
         if len(snaps) < 2:
             return 0.0
         return _grammar_forward_backward(self._emission_logb(snaps), self.log_init, self.log_trans)[0]
 
     def decode(self, x: Sequence[Any]) -> list:
         """Viterbi: the most likely regime governing each transition."""
-        snaps = list(x)
+        snaps = self.dist_to_encoder().seq_encode([x])[0]
         log_b = self._emission_logb(snaps)
         t_steps = log_b.shape[0]
         if t_steps == 0:
@@ -2454,14 +2501,16 @@ class LatentTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistrib
             scores = v[t - 1][:, None] + self.log_trans
             ptr[t] = scores.argmax(axis=0)
             v[t] = log_b[t] + scores.max(axis=0)
+        if not np.any(np.isfinite(v[-1])):
+            raise ValueError("cannot decode a zero-probability temporal graph sequence.")
         path = [int(v[-1].argmax())]
         for t in range(t_steps - 1, 0, -1):
             path.append(int(ptr[t][path[-1]]))
         return path[::-1]
 
     def seq_encode(self, x: Sequence[Any]) -> Sequence[Any]:
-        """Return latent-regime graph observations unchanged for scoring."""
-        return x
+        """Validate and encode latent-regime graph observations."""
+        return self.dist_to_encoder().seq_encode(x)
 
     def seq_log_density(self, x: Sequence[Any]) -> np.ndarray:
         """Score a batch of latent-regime graph observations."""
@@ -2474,12 +2523,14 @@ class LatentTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistrib
     def estimator(self, pseudo_count: float | None = None) -> LatentTemporalGraphGrammarEstimator:
         """Return the Baum-Welch estimator for the latent-regime grammar."""
         return LatentTemporalGraphGrammarEstimator(
-            [st.estimator(pseudo_count=pseudo_count) for st in self.states], pseudo_count=pseudo_count, name=self.name
+            [st.estimator(pseudo_count=pseudo_count) for st in self.states],
+            pseudo_count=pseudo_count,
+            name=self.name,
         )
 
     def dist_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
-        """Return the pass-through graph encoder."""
-        return TemporalGraphGrammarDataEncoder()
+        """Return the validated graph encoder."""
+        return TemporalGraphGrammarDataEncoder(self.states[0].directed)
 
 
 class LatentTemporalGraphGrammarSampler(DistributionSampler):
@@ -2493,7 +2544,13 @@ class LatentTemporalGraphGrammarSampler(DistributionSampler):
     def sample_one(self, num_steps: int = 10, seed_graph: np.ndarray | None = None, n_init: int = 5) -> list:
         """Draw one latent-regime graph sequence."""
         d = self.dist
-        adj = np.zeros((n_init, n_init)) if seed_graph is None else np.asarray(seed_graph, dtype=np.float64).copy()
+        num_steps = _exact_nonnegative_int(num_steps, name="num_steps")
+        n_init = _exact_nonnegative_int(n_init, name="n_init")
+        if seed_graph is None:
+            adj = np.zeros((n_init, n_init))
+        else:
+            canonical = _binarize(seed_graph, directed=d.states[0].directed)
+            adj = canonical.toarray() if sp.issparse(canonical) else canonical
         snaps = [adj.copy()]
         z = int(self.rng.choice(d.k, p=d.initial_probs))
         for _ in range(num_steps):
@@ -2513,20 +2570,107 @@ class LatentTemporalGraphGrammarSampler(DistributionSampler):
         """Draw one sequence or a list of sequences."""
         if size is None:
             return self.sample_one(**kw)
-        return [self.sample_one(**kw) for _ in range(size)]
+        sample_size = _exact_nonnegative_int(size, name="size")
+        return [self.sample_one(**kw) for _ in range(sample_size)]
+
+
+class LatentTemporalGraphGrammarStatistics(NamedTuple):
+    schema_version: int
+    bins: tuple[int, ...]
+    directed: bool
+    num_states: int
+    init_counts: np.ndarray
+    trans_counts: np.ndarray
+    state_values: tuple[Any, ...]
+    accepted_weight: float
+    rejected_weight: float
+    transition_weight: float
+
+
+def _validate_latent_temporal_statistics(
+    value: Any,
+    *,
+    bins: tuple[int, ...],
+    directed: bool,
+    num_states: int,
+) -> LatentTemporalGraphGrammarStatistics:
+    if not isinstance(value, LatentTemporalGraphGrammarStatistics) or value.schema_version != 1:
+        raise ValueError("latent temporal graph statistics must use schema version 1.")
+    if value.bins != bins or value.directed != directed or value.num_states != num_states:
+        raise ValueError("latent temporal graph statistics use an incompatible model schema.")
+    init_counts = np.array(value.init_counts, dtype=np.float64, copy=True)
+    trans_counts = np.array(value.trans_counts, dtype=np.float64, copy=True)
+    state_values = tuple(value.state_values)
+    if (
+        init_counts.shape != (num_states,)
+        or trans_counts.shape != (num_states, num_states)
+        or len(state_values) != num_states
+    ):
+        raise ValueError("latent temporal graph statistics have incompatible state dimensions.")
+    accepted_weight = float(value.accepted_weight)
+    rejected_weight = float(value.rejected_weight)
+    transition_weight = float(value.transition_weight)
+    if (
+        np.any(~np.isfinite(init_counts))
+        or np.any(init_counts < 0.0)
+        or np.any(~np.isfinite(trans_counts))
+        or np.any(trans_counts < 0.0)
+        or any(
+            not np.isfinite(component) or component < 0.0
+            for component in (accepted_weight, rejected_weight, transition_weight)
+        )
+    ):
+        raise ValueError("latent temporal graph statistics must be finite and non-negative.")
+    if not np.isclose(float(init_counts.sum()), accepted_weight, rtol=1.0e-10, atol=1.0e-10):
+        raise ValueError("latent initial counts must sum to accepted_weight.")
+    expected_transitions = transition_weight - accepted_weight
+    if expected_transitions < -1.0e-10 or not np.isclose(
+        float(trans_counts.sum()),
+        max(0.0, expected_transitions),
+        rtol=1.0e-10,
+        atol=1.0e-10,
+    ):
+        raise ValueError("latent transition counts are incoherent with accepted transition weight.")
+    return LatentTemporalGraphGrammarStatistics(
+        1,
+        bins,
+        directed,
+        num_states,
+        init_counts,
+        trans_counts,
+        state_values,
+        accepted_weight,
+        rejected_weight,
+        transition_weight,
+    )
 
 
 class LatentTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulator for latent-regime graph grammar EM sufficient statistics."""
 
-    def __init__(self, k: int, state_accs: Sequence[Any]) -> None:
+    def __init__(
+        self,
+        k: int,
+        state_accs: Sequence[Any],
+        bins: tuple[int, ...],
+        directed: bool,
+        factory: LatentTemporalGraphGrammarAccumulatorFactory,
+    ) -> None:
         self.k = k
         self.state_accs = list(state_accs)
+        self.bins = bins
+        self.directed = directed
+        self.factory = factory
         self.init_counts = np.zeros(k, dtype=np.float64)
         self.trans_counts = np.zeros((k, k), dtype=np.float64)
+        self.accepted_weight = 0.0
+        self.rejected_weight = 0.0
+        self.transition_weight = 0.0
 
     def _accumulate(self, snaps: list, weight: float, gamma: np.ndarray, xi: np.ndarray, estimate: Any) -> None:
         self.init_counts += weight * gamma[0]
+        self.accepted_weight += weight
+        self.transition_weight += weight * (len(snaps) - 1)
         if xi.shape[0]:
             self.trans_counts += weight * xi.sum(axis=0)
         for kk in range(self.k):
@@ -2538,57 +2682,103 @@ class LatentTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulato
 
     def update(self, x: Sequence[Any], weight: float, estimate: Any | None) -> None:
         """Accumulate posterior-weighted sufficient statistics for one sequence."""
-        snaps = list(x)
+        if not isinstance(estimate, LatentTemporalGraphGrammarDistribution) or estimate.k != self.k:
+            raise ValueError("latent temporal updates require a compatible current distribution.")
+        snaps = list(TemporalGraphGrammarDataEncoder(self.directed).seq_encode([x])[0])
         if len(snaps) < 2:
-            return
+            raise ValueError("latent temporal estimation requires at least one graph transition.")
+        checked_weight = _finite_nonnegative(weight, name="weight")
         log_b = estimate._emission_logb(snaps)
         _, gamma, xi = _grammar_forward_backward(log_b, estimate.log_init, estimate.log_trans)
+        pending = self.factory.make()
         if gamma is None:
-            return
-        self._accumulate(snaps, weight, gamma, xi, estimate)
+            pending.rejected_weight = checked_weight
+        else:
+            pending._accumulate(snaps, checked_weight, gamma, xi, estimate)
+        self.combine(pending.value())
 
     def initialize(self, x: Sequence[Any], weight: float, rng: RandomState | None) -> None:
         """Initialize latent-regime sufficient statistics with random soft assignments."""
-        snaps = list(x)
+        snaps = list(TemporalGraphGrammarDataEncoder(self.directed).seq_encode([x])[0])
         if len(snaps) < 2:
-            return
-        rng = rng if rng is not None else RandomState()
+            raise ValueError("latent temporal initialization requires at least one graph transition.")
+        checked_weight = _finite_nonnegative(weight, name="weight")
+        rng = rng if rng is not None else RandomState(0)
         t_steps = len(snaps) - 1
         gamma = rng.dirichlet(np.ones(self.k), size=t_steps)  # random soft regime assignment to seed EM
         xi = np.zeros((max(t_steps - 1, 0), self.k, self.k))
         for t in range(t_steps - 1):
             xi[t] = np.outer(gamma[t], gamma[t + 1])
-        self._accumulate(snaps, weight, gamma, xi, None)
+        pending = self.factory.make()
+        pending._accumulate(snaps, checked_weight, gamma, xi, None)
+        self.combine(pending.value())
 
     def seq_update(self, x: Sequence[Any], weights: np.ndarray, estimate: Any | None) -> None:
         """Accumulate posterior-weighted sufficient statistics from a batch."""
-        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
-            self.update(obs, float(w), estimate)
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if checked_weights.ndim != 1 or len(checked_weights) != len(x):
+            raise ValueError("weights must be a one-dimensional array aligned with the latent batch.")
+        if np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
+            raise ValueError("weights must be finite and non-negative.")
+        pending = self.factory.make()
+        for observation, weight in zip(x, checked_weights):
+            pending.update(observation, float(weight), estimate)
+        self.combine(pending.value())
 
     def seq_initialize(self, x: Sequence[Any], weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize sufficient statistics from a weighted batch."""
-        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
-            self.initialize(obs, float(w), rng)
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if checked_weights.ndim != 1 or len(checked_weights) != len(x):
+            raise ValueError("weights must be a one-dimensional array aligned with the latent batch.")
+        if np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
+            raise ValueError("weights must be finite and non-negative.")
+        pending = self.factory.make()
+        for observation, weight in zip(x, checked_weights):
+            pending.initialize(observation, float(weight), rng)
+        self.combine(pending.value())
 
-    def combine(self, suff_stat: tuple) -> LatentTemporalGraphGrammarAccumulator:
+    def combine(self, suff_stat: LatentTemporalGraphGrammarStatistics) -> LatentTemporalGraphGrammarAccumulator:
         """Merge serialized latent-regime sufficient statistics."""
-        ic, tc, states = suff_stat
-        self.init_counts += ic
-        self.trans_counts += tc
-        for acc, sv in zip(self.state_accs, states):
-            acc.combine(sv)
+        checked = _validate_latent_temporal_statistics(
+            suff_stat,
+            bins=self.bins,
+            directed=self.directed,
+            num_states=self.k,
+        )
+        self.init_counts += checked.init_counts
+        self.trans_counts += checked.trans_counts
+        for acc, state_value in zip(self.state_accs, checked.state_values):
+            acc.combine(state_value)
+        self.accepted_weight += checked.accepted_weight
+        self.rejected_weight += checked.rejected_weight
+        self.transition_weight += checked.transition_weight
         return self
 
-    def value(self) -> tuple:
+    def value(self) -> LatentTemporalGraphGrammarStatistics:
         """Return serialized latent-regime sufficient statistics."""
-        return self.init_counts.copy(), self.trans_counts.copy(), [acc.value() for acc in self.state_accs]
+        return LatentTemporalGraphGrammarStatistics(
+            1,
+            self.bins,
+            self.directed,
+            self.k,
+            self.init_counts.copy(),
+            self.trans_counts.copy(),
+            tuple(acc.value() for acc in self.state_accs),
+            self.accepted_weight,
+            self.rejected_weight,
+            self.transition_weight,
+        )
 
-    def from_value(self, x: tuple) -> LatentTemporalGraphGrammarAccumulator:
+    def from_value(self, x: LatentTemporalGraphGrammarStatistics) -> LatentTemporalGraphGrammarAccumulator:
         """Restore accumulator state from serialized sufficient statistics."""
-        self.init_counts = np.asarray(x[0], dtype=np.float64).copy()
-        self.trans_counts = np.asarray(x[1], dtype=np.float64).copy()
-        for acc, sv in zip(self.state_accs, x[2]):
-            acc.from_value(sv)
+        fresh = self.factory.make()
+        fresh.combine(x)
+        self.init_counts = fresh.init_counts
+        self.trans_counts = fresh.trans_counts
+        self.state_accs = fresh.state_accs
+        self.accepted_weight = fresh.accepted_weight
+        self.rejected_weight = fresh.rejected_weight
+        self.transition_weight = fresh.transition_weight
         return self
 
     def key_merge(self, stats_dict: dict) -> None:
@@ -2601,19 +2791,33 @@ class LatentTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulato
 
     def acc_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
         """Return the encoder associated with this accumulator."""
-        return TemporalGraphGrammarDataEncoder()
+        return TemporalGraphGrammarDataEncoder(self.directed)
 
 
 class LatentTemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for latent temporal graph grammar accumulators."""
 
-    def __init__(self, k: int, state_factories: Sequence[Any]) -> None:
+    def __init__(
+        self,
+        k: int,
+        state_factories: Sequence[Any],
+        bins: tuple[int, ...],
+        directed: bool,
+    ) -> None:
         self.k = k
         self.state_factories = list(state_factories)
+        self.bins = bins
+        self.directed = directed
 
     def make(self) -> LatentTemporalGraphGrammarAccumulator:
         """Create a fresh latent-regime accumulator."""
-        return LatentTemporalGraphGrammarAccumulator(self.k, [f.make() for f in self.state_factories])
+        return LatentTemporalGraphGrammarAccumulator(
+            self.k,
+            [factory.make() for factory in self.state_factories],
+            self.bins,
+            self.directed,
+            self,
+        )
 
 
 class LatentTemporalGraphGrammarEstimator(ParameterEstimator):
@@ -2622,28 +2826,69 @@ class LatentTemporalGraphGrammarEstimator(ParameterEstimator):
     def __init__(
         self, state_estimators: Sequence[Any], pseudo_count: float | None = None, name: str | None = None
     ) -> None:
-        self.state_estimators = list(state_estimators)
+        self.state_estimators = tuple(state_estimators)
         self.k = len(self.state_estimators)
-        self.pseudo_count = pseudo_count
+        if self.k == 0 or any(
+            not hasattr(estimator, "motif") or not isinstance(estimator.motif, CommonNeighbourMotif)
+            for estimator in self.state_estimators
+        ):
+            raise ValueError("state_estimators must be a nonempty sequence with declared temporal motifs.")
+        first_motif = self.state_estimators[0].motif
+        if any(
+            estimator.motif.bins != first_motif.bins or estimator.motif.directed != first_motif.directed
+            for estimator in self.state_estimators[1:]
+        ):
+            raise ValueError("all state estimators must use the same motif partition and directedness.")
+        self.bins = first_motif.bins
+        self.directed = first_motif.directed
+        self.pseudo_count = None if pseudo_count is None else _finite_nonnegative(pseudo_count, name="pseudo_count")
+        if name is not None and not isinstance(name, str):
+            raise ValueError("name must be a string or None.")
         self.name = name
         self.keys = None
 
     def accumulator_factory(self) -> LatentTemporalGraphGrammarAccumulatorFactory:
         """Return the accumulator factory used by this estimator."""
         return LatentTemporalGraphGrammarAccumulatorFactory(
-            self.k, [est.accumulator_factory() for est in self.state_estimators]
+            self.k,
+            [estimator.accumulator_factory() for estimator in self.state_estimators],
+            self.bins,
+            self.directed,
         )
 
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> LatentTemporalGraphGrammarDistribution:
+    def estimate(
+        self,
+        nobs: float | None,
+        suff_stat: LatentTemporalGraphGrammarStatistics,
+    ) -> LatentTemporalGraphGrammarDistribution:
         """Estimate regime priors, transitions, and state grammars from EM statistics."""
-        init_counts, trans_counts, state_vals = suff_stat
+        checked = _validate_latent_temporal_statistics(
+            suff_stat,
+            bins=self.bins,
+            directed=self.directed,
+            num_states=self.k,
+        )
+        if checked.rejected_weight > 0.0:
+            raise ValueError(
+                "cannot estimate a latent temporal grammar after rejecting zero-probability evidence "
+                f"with total weight {checked.rejected_weight}."
+            )
+        if checked.accepted_weight <= 0.0:
+            raise ValueError("cannot estimate a latent temporal grammar without accepted transition evidence.")
         pc = 0.0 if self.pseudo_count is None else float(self.pseudo_count)
-        ip = init_counts + pc
-        ip = ip / ip.sum() if ip.sum() > 0 else np.ones(self.k) / self.k
-        tm = trans_counts + pc
-        row = tm.sum(axis=1, keepdims=True)
-        tm = np.where(row > 0, tm / np.where(row > 0, row, 1.0), 1.0 / self.k)
-        states = [est.estimate(nobs, sv) for est, sv in zip(self.state_estimators, state_vals)]
+        ip = checked.init_counts + pc
+        if float(ip.sum()) <= 0.0:
+            raise ValueError("latent initial-state counts have no estimable mass.")
+        tm = checked.trans_counts + pc
+        if np.any(tm.sum(axis=1) <= 0.0):
+            raise ValueError("every latent transition row requires evidence or a positive pseudo_count.")
+        state_weights = checked.init_counts + checked.trans_counts.sum(axis=0)
+        states = [
+            estimator.estimate(float(state_weights[index]), state_value)
+            for index, (estimator, state_value) in enumerate(
+                zip(self.state_estimators, checked.state_values)
+            )
+        ]
         return LatentTemporalGraphGrammarDistribution(states, ip, tm, name=self.name)
 
 
