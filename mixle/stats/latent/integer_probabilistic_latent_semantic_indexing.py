@@ -20,10 +20,12 @@ data should use stable integer ids for documents and word values.
 
 import itertools
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
+from scipy.special import gammaln
 
 from mixle.capability import Neutral, supports
 from mixle.engines.arithmetic import maxrandint
@@ -46,6 +48,13 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.stats.multivariate._multinomial_contracts import (
+    canonical_integer_bag,
+    exact_integer,
+    finite_weight,
+    log_coefficient,
+    observation_weights,
+)
 from mixle.stats.multivariate.categorical_multinomial import MultisetProductEnumerator
 from mixle.utils.aliasing import broadcast_pseudo_count
 from mixle.utils.optional_deps import numba
@@ -53,6 +62,166 @@ from mixle.utils.optsutil import count_by_value
 
 T1 = TypeVar("T1")  ## type for encoded sequence of lengths.
 SS1 = TypeVar("SS1")  ### type for value of length dist sufficient statistics.
+
+
+def _positive_dimension(value: Any, label: str) -> int:
+    result = exact_integer(value, label=label)
+    if result <= 0:
+        raise ValueError("%s must be positive" % label)
+    return result
+
+
+def _simplex_vector(value: Any, label: str) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("%s must be a finite nonempty simplex vector" % label) from exc
+    if result.ndim != 1 or result.size == 0 or np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError("%s must be a finite nonempty simplex vector" % label)
+    total = float(result.sum())
+    if not np.isclose(total, 1.0, rtol=1.0e-12, atol=1.0e-12):
+        raise ValueError("%s must sum to one" % label)
+    return (result / total).copy()
+
+
+def _simplex_matrix(value: Any, label: str, axis: int) -> np.ndarray:
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("%s must be a finite nonempty simplex matrix" % label) from exc
+    if result.ndim != 2 or 0 in result.shape or np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError("%s must be a finite nonempty simplex matrix" % label)
+    totals = result.sum(axis=axis, keepdims=True)
+    if not np.allclose(totals, 1.0, rtol=1.0e-12, atol=1.0e-12):
+        direction = "columns" if axis == 0 else "rows"
+        raise ValueError("%s %s must each sum to one" % (label, direction))
+    return (result / totals).copy()
+
+
+def _canonical_observation(value: Any, num_docs: int, num_vals: int) -> tuple[int, list[tuple[int, int]], int]:
+    if isinstance(value, (str, bytes)):
+        raise TypeError("integer PLSI observation must be a (document_id, bag) pair")
+    try:
+        parts = list(value)
+    except TypeError as exc:
+        raise TypeError("integer PLSI observation must be a (document_id, bag) pair") from exc
+    if len(parts) != 2:
+        raise ValueError("integer PLSI observation must be a (document_id, bag) pair")
+    doc_id = exact_integer(parts[0], label="integer PLSI document id", nonnegative=True)
+    if doc_id >= num_docs:
+        raise ValueError("integer PLSI document id is outside the configured support")
+    bag, total, _ = canonical_integer_bag(
+        parts[1],
+        min_val=0,
+        max_val=num_vals - 1,
+        reject_outside=True,
+    )
+    return doc_id, bag, total
+
+
+def _encoded_coefficient(xc: np.ndarray, xi: np.ndarray, xn: np.ndarray) -> np.ndarray:
+    result = gammaln(np.asarray(xn, dtype=np.float64) + 1.0)
+    if len(xc):
+        result -= np.bincount(
+            np.asarray(xi, dtype=np.int64),
+            weights=gammaln(np.asarray(xc, dtype=np.float64) + 1.0),
+            minlength=len(xn),
+        )
+    return result
+
+
+@dataclass(frozen=True)
+class IntegerPLSIEncodedData:
+    """Owned, validated flattened representation of canonical integer PLSI bags."""
+
+    value_ids: np.ndarray
+    counts: np.ndarray
+    entry_doc_ids: np.ndarray
+    row_ids: np.ndarray
+    totals: np.ndarray
+    doc_ids: np.ndarray
+    num_vals: int
+    num_docs: int
+
+    def __post_init__(self) -> None:
+        num_vals = _positive_dimension(self.num_vals, "integer PLSI encoded num_vals")
+        num_docs = _positive_dimension(self.num_docs, "integer PLSI encoded num_docs")
+        arrays = tuple(
+            np.asarray(value)
+            for value in (
+                self.value_ids,
+                self.counts,
+                self.entry_doc_ids,
+                self.row_ids,
+                self.totals,
+                self.doc_ids,
+            )
+        )
+        xv, xc, xd, xi, xn, xm = arrays
+        if any(array.ndim != 1 for array in arrays):
+            raise ValueError("integer PLSI encoded arrays must be one-dimensional")
+        if not (len(xv) == len(xc) == len(xd) == len(xi)):
+            raise ValueError("integer PLSI encoded entry arrays must have equal length")
+        if len(xn) != len(xm):
+            raise ValueError("integer PLSI encoded row arrays must have equal length")
+        for array, label in ((xv, "value IDs"), (xd, "entry document IDs"), (xi, "row IDs"), (xm, "document IDs")):
+            if not np.issubdtype(array.dtype, np.integer):
+                raise ValueError("integer PLSI encoded %s must be exact integer arrays" % label)
+        if np.any(~np.isfinite(np.asarray(xc, dtype=np.float64))) or np.any(xc <= 0):
+            raise ValueError("integer PLSI encoded counts must be finite positive exact integers")
+        if np.any(np.asarray(xc, dtype=np.float64) != np.floor(np.asarray(xc, dtype=np.float64))):
+            raise ValueError("integer PLSI encoded counts must be finite positive exact integers")
+        if np.any(~np.isfinite(np.asarray(xn, dtype=np.float64))) or np.any(xn < 0):
+            raise ValueError("integer PLSI encoded totals must be finite non-negative exact integers")
+        if np.any(np.asarray(xn, dtype=np.float64) != np.floor(np.asarray(xn, dtype=np.float64))):
+            raise ValueError("integer PLSI encoded totals must be finite non-negative exact integers")
+        rows = len(xn)
+        if np.any(xv < 0) or np.any(xv >= num_vals):
+            raise ValueError("integer PLSI encoded value ID is outside the configured support")
+        if np.any(xm < 0) or np.any(xm >= num_docs) or np.any(xd < 0) or np.any(xd >= num_docs):
+            raise ValueError("integer PLSI encoded document ID is outside the configured support")
+        if np.any(xi < 0) or np.any(xi >= rows):
+            raise ValueError("integer PLSI encoded row ID is outside the batch")
+        if len(xi) > 1 and np.any(xi[1:] < xi[:-1]):
+            raise ValueError("integer PLSI encoded row IDs must be non-decreasing")
+        if len(xi) and not np.array_equal(xd, xm[xi]):
+            raise ValueError("integer PLSI encoded entry document IDs do not match their rows")
+        computed = np.bincount(
+            np.asarray(xi, dtype=np.int64),
+            weights=np.asarray(xc, dtype=np.float64),
+            minlength=rows,
+        )
+        if not np.array_equal(computed, np.asarray(xn, dtype=np.float64)):
+            raise ValueError("integer PLSI encoded totals do not equal their row counts")
+        owned = (
+            np.asarray(xv, dtype=np.int32).copy(),
+            np.asarray(xc, dtype=np.float64).copy(),
+            np.asarray(xd, dtype=np.int32).copy(),
+            np.asarray(xi, dtype=np.int32).copy(),
+            np.asarray(xn, dtype=np.float64).copy(),
+            np.asarray(xm, dtype=np.int32).copy(),
+        )
+        for field, array in zip(
+            ("value_ids", "counts", "entry_doc_ids", "row_ids", "totals", "doc_ids"),
+            owned,
+        ):
+            object.__setattr__(self, field, array)
+        object.__setattr__(self, "num_vals", num_vals)
+        object.__setattr__(self, "num_docs", num_docs)
+
+    def __iter__(self):
+        return iter((self.value_ids, self.counts, self.entry_doc_ids, self.row_ids, self.totals, self.doc_ids))
+
+
+def _validated_encoded(value: Any, num_vals: int, num_docs: int) -> tuple[Any, IntegerPLSIEncodedData]:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise ValueError("integer PLSI encoded data must be produced by its data encoder")
+    length_data, rows = value
+    if not isinstance(rows, IntegerPLSIEncodedData):
+        raise ValueError("integer PLSI encoded data must be produced by its data encoder")
+    if rows.num_vals != num_vals or rows.num_docs != num_docs:
+        raise ValueError("integer PLSI encoded dimensions do not match the model")
+    return length_data, rows
 
 
 class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodableProbabilityDistribution):
@@ -90,13 +259,18 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
             len_dist: Distribution for total bag length, or a null distribution.
 
         """
-        self.prob_mat = np.asarray(state_word_mat, dtype=np.float64)
-        self.state_mat = np.asarray(doc_state_mat, dtype=np.float64)
-        self.doc_vec = np.asarray(doc_vec, dtype=np.float64)
-        self.log_doc_vec = np.log(self.doc_vec)
+        self.prob_mat = _simplex_matrix(state_word_mat, "state_word_mat", axis=0)
+        self.state_mat = _simplex_matrix(doc_state_mat, "doc_state_mat", axis=1)
+        self.doc_vec = _simplex_vector(doc_vec, "doc_vec")
         self.num_vals = self.prob_mat.shape[0]
         self.num_states = self.prob_mat.shape[1]
         self.num_docs = self.state_mat.shape[0]
+        if self.state_mat.shape[1] != self.num_states:
+            raise ValueError("state_word_mat and doc_state_mat must use the same number of latent states")
+        if self.doc_vec.shape != (self.num_docs,):
+            raise ValueError("doc_vec length must equal the number of doc_state_mat rows")
+        with np.errstate(divide="ignore"):
+            self.log_doc_vec = np.log(self.doc_vec)
         self.name = name
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
 
@@ -169,7 +343,7 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
             Density evaluated at observed value x.
 
         """
-        return np.exp(self.log_density(x))
+        return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: tuple[int, Sequence[tuple[int, float]]]) -> float:
         """Evaluate the log-density of PLSI model for an observation of x.
@@ -194,18 +368,16 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
 
         """
 
-        d_id = x[0]
-        xv = np.asarray([u[0] for u in x[1]], dtype=int)
-        xc = np.asarray([u[1] for u in x[1]], dtype=float)
+        d_id, bag, total = _canonical_observation(x, self.num_docs, self.num_vals)
+        xv = np.asarray([u[0] for u in bag], dtype=np.int64)
+        xc = np.asarray([u[1] for u in bag], dtype=np.float64)
 
-        rv = 0.0
-        rv += np.dot(np.log(np.dot(self.prob_mat[xv, :], self.state_mat[d_id, :])), xc)
-        rv += np.log(self.doc_vec[d_id])
-
-        if self.len_dist is not None:
-            rv += self.len_dist.log_density(np.sum(xc))
-
-        return rv
+        rv = float(self.log_doc_vec[d_id]) + log_coefficient(xc)
+        if len(xv):
+            with np.errstate(divide="ignore"):
+                rv += float(np.dot(np.log(np.dot(self.prob_mat[xv, :], self.state_mat[d_id, :])), xc))
+        rv += float(self.len_dist.log_density(total))
+        return float(rv)
 
     def component_log_density(self, x: tuple[int, Sequence[tuple[int, float]]]) -> np.ndarray:
         """Evaluate the log-density for each state in the PLSI.
@@ -221,10 +393,13 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
             Numpy array of length S (num_states).
 
         """
-        xv = np.asarray([u[0] for u in x[1]], dtype=int)
-        xc = np.asarray([u[1] for u in x[1]], dtype=float)
-
-        return np.dot(np.log(self.prob_mat[xv, :]).T, xc)
+        _, bag, _ = _canonical_observation(x, self.num_docs, self.num_vals)
+        if not bag:
+            return np.zeros(self.num_states, dtype=np.float64)
+        xv = np.asarray([u[0] for u in bag], dtype=np.int64)
+        xc = np.asarray([u[1] for u in bag], dtype=np.float64)
+        with np.errstate(divide="ignore"):
+            return np.dot(np.log(self.prob_mat[xv, :]).T, xc)
 
     def seq_log_density(
         self, x: tuple[T1 | None, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
@@ -249,7 +424,8 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
             Numpy array of log-density evaluated at each observation in the encoded sequence.
 
         """
-        nn, (xv, xc, xd, xi, xn, xm) = x
+        nn, rows = _validated_encoded(x, self.num_vals, self.num_docs)
+        xv, xc, xd, xi, xn, xm = rows
         cnt = len(xn)
 
         w = np.zeros(len(xv), dtype=np.float64)
@@ -259,10 +435,10 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
 
         rv = np.zeros(cnt, dtype=np.float64)
         bincount(xi, w, rv)
+        rv += _encoded_coefficient(xc, xi, xn)
         rv += self.log_doc_vec[xm]
 
-        if self.len_dist is not None:
-            rv += self.len_dist.seq_log_density(nn)
+        rv += self.len_dist.seq_log_density(nn)
 
         return rv
 
@@ -274,7 +450,8 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
         """Evaluate encoded PLSI log densities using a backend-neutral compute engine."""
         from mixle.stats.compute.backend import backend_seq_log_density
 
-        nn, (xv, xc, xd, xi, xn, xm) = x
+        nn, rows = _validated_encoded(x, self.num_vals, self.num_docs)
+        xv, xc, xd, xi, xn, xm = rows
         cnt = len(xn)
         value_ids = engine.asarray(xv)
         count_values = engine.asarray(xc)
@@ -289,10 +466,10 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
         row_probs = engine.sum(prob_mat[value_ids, :] * state_mat[doc_ids, :], axis=1)
         row_log_probs = engine.log(row_probs) * count_values
         rv = engine.bincount(obs_ids, weights=row_log_probs, minlength=cnt)
+        rv = rv + engine.asarray(_encoded_coefficient(xc, xi, xn))
         rv = rv + doc_log_probs[obs_doc_ids]
 
-        if self.len_dist is not None:
-            rv = rv + backend_seq_log_density(self.len_dist, nn, engine)
+        rv = rv + backend_seq_log_density(self.len_dist, nn, engine)
 
         return rv
 
@@ -320,8 +497,9 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
             2-d numpy array containing N rows of num_state sized arrays.
 
         """
-        nn, (xv, xc, xd, xi, xn, xm) = x
-        rv = np.zeros((xi[-1] + 1, self.num_states), dtype=np.float64)
+        _, rows = _validated_encoded(x, self.num_vals, self.num_docs)
+        xv, xc, xd, xi, xn, xm = rows
+        rv = np.zeros((len(xn), self.num_states), dtype=np.float64)
         w_mat = self.prob_mat
         fast_seq_component_log_density(xv, xc, xd, xi, xm, w_mat, rv)
         return rv
@@ -376,21 +554,69 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
 
     def dist_to_encoder(self) -> "IntegerProbabilisticLatentSemanticIndexingDataEncoder":
         """Return an encoder for integer PLSI observations."""
-        return IntegerProbabilisticLatentSemanticIndexingDataEncoder(len_encoder=self.len_dist.dist_to_encoder())
+        return IntegerProbabilisticLatentSemanticIndexingDataEncoder(
+            self.num_vals,
+            self.num_docs,
+            len_encoder=self.len_dist.dist_to_encoder(),
+        )
 
 
 def multinomial_bag_stream(log_p_vec, min_val, len_dist, combine):
-    """Enumerate integer count-vector bags in descending ``sum_w c_w*log p_w + log P_len(n)`` order.
+    """Enumerate normalized integer count-vector bags in descending probability order.
 
-    Reuses the per-size multiset best-first search (:class:`MultisetProductEnumerator`) under a length
-    frontier driven by ``len_dist`` (the real trial-count distribution); ``combine`` maps the tuple of
-    ``(value, count)`` pairs to the emitted bag. When ``len_dist`` is Null there is no length term and a
-    synthetic ``n*log p_max`` frontier orders the (countably infinite) support by the multinomial term
-    alone -- matching :class:`IntegerMultinomialEnumerator`. Shared by the coupled bag-of-counts models.
+    Each fixed-size stream includes ``log(n!) - sum_w log(c_w!)``. A real length
+    law is required because a conditional multinomial law for every possible
+    length has infinite total mass when joined without length probabilities.
     """
     entries = [(int(min_val + k), float(lp)) for k, lp in enumerate(log_p_vec) if lp > -np.inf]
     entries.sort(key=lambda u: -u[1])
-    return bag_stream(iter(entries), len_dist, combine)
+    if supports(len_dist, Neutral):
+        raise EnumerationError(
+            len_dist,
+            reason="normalized count-vector enumeration requires a probability law for the bag length",
+        )
+    len_stream = BufferedStream(child_enumerator(len_dist, "multinomial_bag_stream.len_dist"))
+    return LengthFrontierMerge(
+        len_stream,
+        lambda n, lp_len: _FiniteMultinomialEnumerator(entries, n, combine, lp_len),
+    )
+
+
+class _FiniteMultinomialEnumerator:
+    """Exact descending enumerator for one finite categorical multinomial size."""
+
+    def __init__(self, entries, n, combine, offset):
+        self._items = []
+        count = exact_integer(n, label="multinomial enumerator length", nonnegative=True)
+        score_offset = float(offset)
+        if not np.isfinite(score_offset):
+            raise ValueError("multinomial enumerator length score must be finite")
+        if count == 0:
+            self._items.append((combine(()), score_offset))
+        elif entries:
+            counts = [0] * len(entries)
+
+            def visit(position: int, remaining: int) -> None:
+                if position == len(entries) - 1:
+                    counts[position] = remaining
+                    pairs = tuple((entries[index][0], value) for index, value in enumerate(counts) if value)
+                    coefficient = log_coefficient(counts)
+                    token_score = sum(value * entries[index][1] for index, value in enumerate(counts))
+                    self._items.append((combine(pairs), score_offset + coefficient + token_score))
+                    return
+                for value in range(remaining + 1):
+                    counts[position] = value
+                    visit(position + 1, remaining - value)
+
+            visit(0, count)
+        self._items.sort(key=lambda item: -item[1])
+        self._iterator = iter(self._items)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._iterator)
 
 
 def bag_stream(element_stream, len_dist, combine):
@@ -539,9 +765,9 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
             len_acc: Accumulator for total bag length.
 
         """
-        self.num_vals = num_vals
-        self.num_states = num_states
-        self.num_docs = num_docs
+        self.num_vals = _positive_dimension(num_vals, "num_vals")
+        self.num_states = _positive_dimension(num_states, "num_states")
+        self.num_docs = _positive_dimension(num_docs, "num_docs")
         self.word_count = np.zeros((num_states, num_vals), dtype=np.float64)
         self.comp_count = np.zeros((num_docs, num_states), dtype=np.float64)
         self.doc_count = np.zeros(num_docs, dtype=np.float64)
@@ -575,17 +801,32 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
             estimate: Previous integer PLSI estimate.
 
         """
-        d_id = x[0]
-        xv = np.asarray([u[0] for u in x[1]])
-        xc = np.asarray([u[1] for u in x[1]])
+        if not isinstance(estimate, IntegerProbabilisticLatentSemanticIndexingDistribution):
+            raise TypeError("integer PLSI accumulator estimate has the wrong model type")
+        if (
+            estimate.num_vals != self.num_vals
+            or estimate.num_states != self.num_states
+            or estimate.num_docs != self.num_docs
+        ):
+            raise ValueError("integer PLSI accumulator estimate dimensions do not match")
+        checked_weight = finite_weight(weight, label="integer PLSI observation weight")
+        d_id, bag, total = _canonical_observation(x, self.num_docs, self.num_vals)
+        if checked_weight == 0.0:
+            return
+        xv = np.asarray([u[0] for u in bag], dtype=np.int64)
+        xc = np.asarray([u[1] for u in bag], dtype=np.float64)
 
         update = (estimate.prob_mat[xv, :] * estimate.state_mat[d_id, :]).T
-        update *= xc * weight / np.sum(update, axis=0)
+        denominators = np.sum(update, axis=0)
+        if checked_weight > 0.0 and np.any(denominators <= 0.0):
+            raise ValueError("integer PLSI observation is impossible under the estimate")
+        if len(xv):
+            update *= xc * checked_weight / denominators
         self.comp_count[d_id, :] += np.sum(update, axis=1)
-        self.word_count[:, xv] += update
-        self.doc_count[d_id] += weight
+        np.add.at(self.word_count, (slice(None), xv), update)
+        self.doc_count[d_id] += checked_weight
 
-        self.len_acc.update(np.sum(xc), weight, estimate.len_dist)
+        self.len_acc.update(total, checked_weight, estimate.len_dist)
 
     def _rng_initialize(self, rng: RandomState) -> None:
         """Initialize accumulator random states from ``rng``.
@@ -613,20 +854,22 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
             rng: Random state used for seeded initialization.
 
         """
+        checked_weight = finite_weight(weight, label="integer PLSI observation weight")
+        d_id, bag, total = _canonical_observation(x, self.num_docs, self.num_vals)
+        if checked_weight == 0.0:
+            return
         if not self._init_rng:
             self._rng_initialize(rng)
-
-        d_id = x[0]
-        xv = np.asarray([u[0] for u in x[1]])
-        xc = np.asarray([u[1] for u in x[1]])
+        xv = np.asarray([u[0] for u in bag], dtype=np.int64)
+        xc = np.asarray([u[1] for u in bag], dtype=np.float64)
 
         update = self._acc_rng.dirichlet(np.ones(self.num_states) / self.num_states, size=len(xc)).T
-        update *= xc * weight
-        self.word_count[:, xv] += update
+        update *= xc * checked_weight
+        np.add.at(self.word_count, (slice(None), xv), update)
         self.comp_count[d_id, :] += np.sum(update, axis=1)
-        self.doc_count[d_id] += weight
+        self.doc_count[d_id] += checked_weight
 
-        self.len_acc.update(np.sum(xc), weight, self._len_rng)
+        self.len_acc.update(total, checked_weight, self._len_rng)
 
     def seq_initialize(
         self,
@@ -654,18 +897,24 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
             None.
 
         """
-        nn, (xv, xc, xd, xi, xn, xm) = x
+        nn, rows = _validated_encoded(x, self.num_vals, self.num_docs)
+        xv, xc, xd, xi, xn, xm = rows
+        checked_weights = observation_weights(
+            weights,
+            len(xn),
+            label="integer PLSI observation weights",
+        )
 
         if not self._init_rng:
             self._rng_initialize(rng)
 
         update = self._acc_rng.dirichlet(np.ones(self.num_states) / self.num_states, size=len(xv)).T
-        update *= xc * weights[xi]
+        update *= xc * checked_weights[xi]
         self.word_count += vec_bincount3(xv, update, out=np.zeros_like(self.word_count, dtype=np.float64))
-        self.doc_count += np.bincount(xm, weights, minlength=self.num_docs)
+        self.doc_count += np.bincount(xm, checked_weights, minlength=self.num_docs)
         self.comp_count += vec_bincount4(xd, update, out=np.zeros_like(self.comp_count, dtype=np.float64))
 
-        self.len_acc.seq_initialize(nn, weights, self._len_rng)
+        self.len_acc.seq_initialize(nn, checked_weights, self._len_rng)
 
     def seq_update(
         self,
@@ -693,14 +942,32 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
             None.
 
         """
-        nn, (xv, xc, xd, xi, xn, xm) = x
+        if not isinstance(estimate, IntegerProbabilisticLatentSemanticIndexingDistribution):
+            raise TypeError("integer PLSI accumulator estimate has the wrong model type")
+        if (
+            estimate.num_vals != self.num_vals
+            or estimate.num_states != self.num_states
+            or estimate.num_docs != self.num_docs
+        ):
+            raise ValueError("integer PLSI accumulator estimate dimensions do not match")
+        nn, rows = _validated_encoded(x, self.num_vals, self.num_docs)
+        xv, xc, xd, xi, xn, xm = rows
+        checked_weights = observation_weights(
+            weights,
+            len(xn),
+            label="integer PLSI observation weights",
+        )
+        if len(xv):
+            denominators = np.sum(estimate.prob_mat[xv, :] * estimate.state_mat[xd, :], axis=1)
+            if np.any((denominators <= 0.0) & (checked_weights[xi] > 0.0)):
+                raise ValueError("integer PLSI observation is impossible under the estimate")
         fast_seq_update(
             xv,
             xc,
             xd,
             xi,
             xm,
-            weights,
+            checked_weights,
             estimate.prob_mat,
             estimate.state_mat,
             self.word_count,
@@ -739,20 +1006,37 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
             w_ll *= xc
             rv = np.zeros(cnt, dtype=np.float64)
             bincount(xi, w_ll, rv)
+            rv += _encoded_coefficient(xc, xi, xn)
             rv += estimate.log_doc_vec[xm]
-            if estimate.len_dist is not None:
-                rv = rv + estimate.len_dist.seq_log_density(nn)
-            self._seq_ll += float(np.dot(weights, rv))
+            rv = rv + estimate.len_dist.seq_log_density(nn)
+            self._seq_ll += float(np.dot(checked_weights, rv))
 
-        self.len_acc.seq_update(nn, weights, estimate.len_dist)
+        self.len_acc.seq_update(nn, checked_weights, estimate.len_dist)
 
     def seq_update_engine(self, x, weights, estimate, engine):
         """Engine-resident E-step: the PLSI responsibility update (state-word x doc-state gather,
         per-pair normalization, and the word/doc segment sums) runs on the active engine, matching
         the host seq_update.
         """
-        nn, (xv, xc, xd, xi, xn, xm) = x
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        if not isinstance(estimate, IntegerProbabilisticLatentSemanticIndexingDistribution):
+            raise TypeError("integer PLSI accumulator estimate has the wrong model type")
+        if (
+            estimate.num_vals != self.num_vals
+            or estimate.num_states != self.num_states
+            or estimate.num_docs != self.num_docs
+        ):
+            raise ValueError("integer PLSI accumulator estimate dimensions do not match")
+        nn, rows = _validated_encoded(x, self.num_vals, self.num_docs)
+        xv, xc, xd, xi, xn, xm = rows
+        weights_np = observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            len(xn),
+            label="integer PLSI observation weights",
+        )
+        denominators = np.sum(estimate.prob_mat[xv, :] * estimate.state_mat[xd, :], axis=1)
+        if len(xv):
+            if np.any((denominators <= 0.0) & (weights_np[xi] > 0.0)):
+                raise ValueError("integer PLSI observation is impossible under the estimate")
         xv_e = engine.asarray(np.asarray(xv, dtype=np.int64))
         xd_e = engine.asarray(np.asarray(xd, dtype=np.int64))
         xi_e = engine.asarray(np.asarray(xi, dtype=np.int64))
@@ -761,7 +1045,8 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         state = engine.asarray(estimate.state_mat)  # (num_docs, S)
         update = prob[xv_e, :] * state[xd_e, :]  # (n_pairs, S)
         temp = engine.asarray(np.asarray(xc, dtype=np.float64)) * engine.asarray(weights_np)[xi_e]
-        update = update * (temp / engine.sum(update, axis=1))[:, None]
+        safe_denominators = engine.asarray(np.where(denominators > 0.0, denominators, 1.0))
+        update = update * (temp / safe_denominators)[:, None]
 
         wc_rows = [engine.index_add(engine.zeros(self.num_vals), xv_e, update[:, i]) for i in range(self.num_states)]
         cc_cols = [engine.index_add(engine.zeros(self.num_docs), xd_e, update[:, i]) for i in range(self.num_states)]
@@ -891,7 +1176,11 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
     def acc_to_encoder(self) -> "IntegerProbabilisticLatentSemanticIndexingDataEncoder":
         """Return an encoder compatible with integer PLSI observations."""
         len_encoder = self.len_acc.acc_to_encoder()
-        return IntegerProbabilisticLatentSemanticIndexingDataEncoder(len_encoder=len_encoder)
+        return IntegerProbabilisticLatentSemanticIndexingDataEncoder(
+            self.num_vals,
+            self.num_docs,
+            len_encoder=len_encoder,
+        )
 
 
 class IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory(StatisticAccumulatorFactory):
@@ -927,9 +1216,9 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory(StatisticAccu
         """
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
         self.keys = keys if keys is not None else (None, None, None)
-        self.num_vals = num_vals
-        self.num_states = num_states
-        self.num_docs = num_docs
+        self.num_vals = _positive_dimension(num_vals, "num_vals")
+        self.num_states = _positive_dimension(num_states, "num_states")
+        self.num_docs = _positive_dimension(num_docs, "num_docs")
         self.name = name
 
     def make(self) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
@@ -985,12 +1274,15 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
             name: Optional diagnostic name.
             keys: Optional sufficient-statistic merge keys.
         """
+        self.num_vals = _positive_dimension(num_vals, "num_vals")
+        self.num_states = _positive_dimension(num_states, "num_states")
+        self.num_docs = _positive_dimension(num_docs, "num_docs")
         self.suff_stat = suff_stat if suff_stat is not None else (None, None, None)
         pseudo_count = broadcast_pseudo_count(pseudo_count, 3)
         self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None, None)
-        self.num_vals = num_vals
-        self.num_states = num_states
-        self.num_docs = num_docs
+        for value in self.pseudo_count:
+            if value is not None and (not np.isfinite(float(value)) or float(value) < 0.0):
+                raise ValueError("integer PLSI pseudo-counts must be finite and non-negative")
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.keys = keys if keys is not None else (None, None, None)
         self.name = name
@@ -1016,6 +1308,17 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
 
         """
         word_count, comp_count, doc_count, len_suff_stats = suff_stat
+        word_count = np.asarray(word_count, dtype=np.float64)
+        comp_count = np.asarray(comp_count, dtype=np.float64)
+        doc_count = np.asarray(doc_count, dtype=np.float64)
+        if word_count.shape != (self.num_states, self.num_vals):
+            raise ValueError("integer PLSI word statistics have the wrong shape")
+        if comp_count.shape != (self.num_docs, self.num_states):
+            raise ValueError("integer PLSI state statistics have the wrong shape")
+        if doc_count.shape != (self.num_docs,):
+            raise ValueError("integer PLSI document statistics have the wrong shape")
+        if any(np.any(~np.isfinite(value)) or np.any(value < 0.0) for value in (word_count, comp_count, doc_count)):
+            raise ValueError("integer PLSI sufficient statistics must be finite and non-negative")
 
         if self.pseudo_count[0] is not None and self.suff_stat[0] is not None:
             adj_cnt = self.pseudo_count[0] / np.prod(word_count.shape)
@@ -1076,7 +1379,12 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
 class IntegerProbabilisticLatentSemanticIndexingDataEncoder(DataSequenceEncoder):
     """Encode integer PLSI observations into flattened sparse bag arrays and length features."""
 
-    def __init__(self, len_encoder: DataSequenceEncoder | None = NullDataEncoder()) -> None:
+    def __init__(
+        self,
+        num_vals: int,
+        num_docs: int,
+        len_encoder: DataSequenceEncoder | None = NullDataEncoder(),
+    ) -> None:
         """Create an encoder for integer PLSI observations.
 
         Args:
@@ -1086,11 +1394,16 @@ class IntegerProbabilisticLatentSemanticIndexingDataEncoder(DataSequenceEncoder)
             len_encoder: Encoder for total bag length.
 
         """
-        self.len_encoder = len_encoder
+        self.num_vals = _positive_dimension(num_vals, "num_vals")
+        self.num_docs = _positive_dimension(num_docs, "num_docs")
+        self.len_encoder = len_encoder if len_encoder is not None else NullDataEncoder()
 
     def __str__(self) -> str:
         """Return a readable encoder summary."""
-        return "IntegerProbabilisticLatentSemanticIndexingDataEncoder(len_dist=" + str(self.len_encoder) + ")"
+        return (
+            "IntegerProbabilisticLatentSemanticIndexingDataEncoder("
+            f"num_vals={self.num_vals}, num_docs={self.num_docs}, len_dist={self.len_encoder})"
+        )
 
     def __eq__(self, other: object) -> bool:
         """Return whether ``other`` uses the same length encoder.
@@ -1103,7 +1416,11 @@ class IntegerProbabilisticLatentSemanticIndexingDataEncoder(DataSequenceEncoder)
 
         """
         if isinstance(other, IntegerProbabilisticLatentSemanticIndexingDataEncoder):
-            return other.len_encoder == self.len_encoder
+            return (
+                other.num_vals == self.num_vals
+                and other.num_docs == self.num_docs
+                and other.len_encoder == self.len_encoder
+            )
         else:
             return False
 
@@ -1137,14 +1454,15 @@ class IntegerProbabilisticLatentSemanticIndexingDataEncoder(DataSequenceEncoder)
         xn = np.empty(len(x), dtype=np.float64)
         xm = np.empty(len(x), dtype=np.int32)
 
-        for i, (d_id, xx) in enumerate(x):
-            v = [u[0] for u in xx]
-            c = [u[1] for u in xx]
+        for i, value in enumerate(x):
+            d_id, bag, total = _canonical_observation(value, self.num_docs, self.num_vals)
+            v = [u[0] for u in bag]
+            c = [u[1] for u in bag]
 
             xv.extend(v)
             xc.extend(c)
             counts_per_doc[i] = len(v)
-            xn[i] = np.sum(c)
+            xn[i] = total
             xm[i] = d_id
 
         xv = np.asarray(xv, dtype=np.int32)
@@ -1153,8 +1471,22 @@ class IntegerProbabilisticLatentSemanticIndexingDataEncoder(DataSequenceEncoder)
         xi = np.repeat(np.arange(len(x), dtype=np.int32), counts_per_doc)
 
         nn = self.len_encoder.seq_encode(xn)
+        rows = IntegerPLSIEncodedData(
+            xv,
+            xc,
+            xd,
+            xi,
+            xn,
+            xm,
+            self.num_vals,
+            self.num_docs,
+        )
+        return nn, rows
 
-        return nn, (xv, xc, xd, xi, xn, xm)
+    def row_count(self, x: Any) -> int:
+        """Return the validated number of document-bag rows in an encoded payload."""
+        _, rows = _validated_encoded(x, self.num_vals, self.num_docs)
+        return len(rows.totals)
 
 
 @numba.njit(
@@ -1213,6 +1545,8 @@ def fast_seq_update(xv, xc, xd, xi, xm, weights, wmat, smat, wcnt, scnt, dcnt):
         i1 = xv[i]
         i2 = xd[i]
         ww = weights[xi[i]]
+        if ww == 0.0:
+            continue
         for j in range(k):
             temp = wmat[i1, j] * smat[i2, j]
             posterior[j] = temp
