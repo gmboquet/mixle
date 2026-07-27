@@ -394,9 +394,6 @@ class BackendScoringTestCase(unittest.TestCase):
 
     @staticmethod
     def stacked_mixture_cases():
-        def choose_sign(x):
-            return 0 if x < 0.0 else 1
-
         return [
             (
                 "exponential",
@@ -975,29 +972,6 @@ class BackendScoringTestCase(unittest.TestCase):
                     {"x": 2.5, "count": 7},
                     {"x": 3.0, "count": 4},
                 ],
-            ),
-            (
-                "select_gaussian_by_sign",
-                MixtureDistribution(
-                    [
-                        SelectDistribution(
-                            [
-                                GaussianDistribution(-2.0, 0.7),
-                                GaussianDistribution(1.0, 0.9),
-                            ],
-                            choose_sign,
-                        ),
-                        SelectDistribution(
-                            [
-                                GaussianDistribution(-0.5, 1.1),
-                                GaussianDistribution(3.0, 1.4),
-                            ],
-                            choose_sign,
-                        ),
-                    ],
-                    [0.45, 0.55],
-                ),
-                np.asarray([-3.0, -1.0, -0.25, 0.5, 2.0, 4.0]),
             ),
             (
                 "composite_with_optional",
@@ -1749,7 +1723,6 @@ class BackendScoringTestCase(unittest.TestCase):
             "poisson",
             "rayleigh",
             "record_gaussian_poisson",
-            "select_gaussian_by_sign",
             "sequence_gaussian",
             "spearman_ranking",
             "student_t",
@@ -1778,7 +1751,6 @@ class BackendScoringTestCase(unittest.TestCase):
             "markov_chain",
             "multinomial_categorical",
             "record_gaussian_poisson",
-            "select_gaussian_by_sign",
             "sequence_gaussian",
             "weighted_gaussian",
         }

@@ -521,6 +521,8 @@ __all__ = [
     "certify_select_routing",
     "SelectEnumerator",
     "SequenceDistribution",
+    "SequenceStatistics",
+    "NonGenerativeSequenceError",
     "SequenceSampler",
     "SequenceEstimator",
     "SequenceDataEncoder",
@@ -1044,11 +1046,13 @@ from mixle.stats.combinator.select import (
     certify_select_routing,
 )
 from mixle.stats.combinator.sequence import (
+    NonGenerativeSequenceError,
     SequenceDataEncoder,
     SequenceDistribution,
     SequenceEnumerator,
     SequenceEstimator,
     SequenceSampler,
+    SequenceStatistics,
 )
 from mixle.stats.combinator.survival import (
     SurvivalDataEncoder,
