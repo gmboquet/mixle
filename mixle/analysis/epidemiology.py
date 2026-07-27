@@ -33,6 +33,7 @@ and is unavailable at all for a bit generator built without a ``SeedSequence``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -200,12 +201,20 @@ def _validate_cohort(
     if x.ndim != 2:
         raise ValueError(f"covariates must be 1-D or 2-D, got {x.ndim}-D (shape {x.shape})")
     n = x.shape[0]
+    if n == 0:
+        raise ValueError("cohort must contain at least one subject.")
+    if x.shape[1] == 0:
+        raise ValueError("covariates must contain at least one model column.")
     if t.shape != (n,):
         raise ValueError(f"time must have shape ({n},) to match covariates' {n} row(s), got {t.shape}")
     if e.shape != (n,):
         raise ValueError(f"event must have shape ({n},) to match covariates' {n} row(s), got {e.shape}")
+    if isinstance(exposure_col, (bool, np.bool_)) or not isinstance(exposure_col, Integral):
+        raise TypeError("exposure_col must be an exact non-Boolean integer column index.")
     if not 0 <= exposure_col < x.shape[1]:
         raise ValueError(f"exposure_col={exposure_col} is out of bounds for covariates with {x.shape[1]} column(s)")
+    if not isinstance(competing, (bool, np.bool_)):
+        raise TypeError("competing must be Boolean.")
 
     # Finiteness must be checked before any numeric comparison below: a NaN fails every ordering
     # comparison (`NaN >= 0` is False, `NaN != trunc(NaN)` is True), so a finiteness check placed after
@@ -234,6 +243,8 @@ def _validate_cohort(
             "pass competing=True for multi-cause event labels."
         )
 
+    if isinstance(latency, (bool, np.bool_)) or not isinstance(latency, Real):
+        raise TypeError("latency must be a real scalar.")
     if not np.isfinite(latency):
         raise ValueError("latency must be finite.")
     if latency < 0:
@@ -241,6 +252,57 @@ def _validate_cohort(
             f"latency must be non-negative, got {latency!r} (negative latency is not a valid exposure "
             "lag; it used to be silently treated as latency=0)."
         )
+
+    # Identifiability is a property of the post-latency design and its risk sets, not merely of array
+    # shapes. Reject designs that would otherwise become a precise-looking null fit.
+    keep = t > latency if latency > 0 else np.ones(n, dtype=bool)
+    x_fit, t_fit, e_fit = x[keep], t[keep], e[keep]
+    p = x.shape[1]
+    if x_fit.shape[0] < p + 1:
+        raise ValueError(
+            f"post-latency risk set has only {x_fit.shape[0]} row(s), fewer than the {p + 1} needed "
+            f"for {p} coefficient(s)."
+        )
+    n_events = int(np.sum(e_fit == 1))
+    if n_events < p + 1:
+        raise ValueError(
+            f"post-latency cohort has only {n_events} cause-one event(s); need at least {p + 1} "
+            f"to identify {p} coefficient(s)."
+        )
+    centered = x_fit - np.mean(x_fit, axis=0)
+    if np.linalg.matrix_rank(centered) < p:
+        raise ValueError("post-latency covariates have no full-rank variation; the Cox effect is unidentifiable.")
+
+    information = np.zeros((p, p), dtype=float)
+    for event_time in np.unique(t_fit[e_fit == 1]):
+        risk = t_fit >= event_time
+        risk_x = x_fit[risk]
+        if risk_x.shape[0] < 2:
+            continue
+        centered_risk = risk_x - np.mean(risk_x, axis=0)
+        tied_events = int(np.sum((t_fit == event_time) & (e_fit == 1)))
+        information += tied_events * (centered_risk.T @ centered_risk) / risk_x.shape[0]
+    information_scale = float(np.linalg.norm(information, ord=2))
+    information_tolerance = np.finfo(float).eps * max(1.0, information_scale) * max(1, p)
+    if (
+        not np.all(np.isfinite(information))
+        or np.linalg.matrix_rank(information, tol=information_tolerance) < p
+        or information[exposure_col, exposure_col] <= information_tolerance
+    ):
+        raise ValueError(
+            "cause-one event risk sets contain no full-rank exposure comparisons; the Cox effect is unidentifiable."
+        )
+
+
+def _identified_effect(fit: Any, exposure_col: int) -> tuple[float, float]:
+    """Return a finite identified coefficient/SE pair or reject the Cox fit."""
+    if not fit.converged:
+        raise ValueError("Cox fit did not converge to an identifiable finite effect.")
+    beta = float(fit.coef[exposure_col])
+    se = float(fit.se[exposure_col])
+    if not (np.isfinite(beta) and np.isfinite(se) and se > 0.0):
+        raise ValueError("Cox fit produced a non-finite or zero-uncertainty exposure effect.")
+    return beta, se
 
 
 def cohort_attribution(
@@ -290,6 +352,9 @@ def cohort_attribution(
     t = np.asarray(time, dtype=float)
     e_float = np.asarray(event, dtype=float)
     _validate_cohort(x, t, e_float, exposure_col=exposure_col, latency=latency, competing=competing)
+    if isinstance(n_boot, (bool, np.bool_)) or not isinstance(n_boot, Integral) or n_boot <= 0:
+        raise ValueError(f"n_boot must be a positive exact non-Boolean integer, got {n_boot!r}.")
+    n_boot = int(n_boot)
     e_raw = e_float.astype(np.int64)
     n = x.shape[0]
     rng = np.random.default_rng(rng)
@@ -308,11 +373,17 @@ def cohort_attribution(
     cox_event = (e_raw == 1).astype(float)
 
     fit, n_fit_rows = _fit_lagged(x, t, cox_event, latency)
-    beta = float(fit.coef[exposure_col])
-    se = float(fit.se[exposure_col])
+    beta, se = _identified_effect(fit, exposure_col)
     hazard_ratio = float(np.exp(beta))
     z = stats.norm.ppf(0.975)
     hr_ci = (float(np.exp(beta - z * se)), float(np.exp(beta + z * se)))
+    if not (
+        np.isfinite(hazard_ratio)
+        and hazard_ratio > 0.0
+        and np.all(np.isfinite(hr_ci))
+        and 0.0 < hr_ci[0] <= hr_ci[1]
+    ):
+        raise ValueError("Cox effect overflows the finite hazard-ratio/interval result domain.")
 
     attributable_fraction = (hazard_ratio - 1.0) / hazard_ratio
 
@@ -328,7 +399,8 @@ def cohort_attribution(
         idx = rng.integers(0, n, size=n)
         try:
             fit_b, _ = _fit_lagged(x[idx], t[idx], cox_event[idx], latency)
-            hr_b = float(np.exp(fit_b.coef[exposure_col]))
+            beta_b, _se_b = _identified_effect(fit_b, exposure_col)
+            hr_b = float(np.exp(beta_b))
             if hr_b > 0:
                 af_b = (hr_b - 1.0) / hr_b
                 if np.isfinite(af_b):
