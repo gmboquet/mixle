@@ -20,6 +20,10 @@ import torch.nn.functional as F
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
+CIFAR10_ID = "uoft-cs/cifar10"
+CIFAR10_REVISION = "0b2714987fa478483af9968de7c934580d0bb9a2"
+CLIP_ID = "openai/clip-vit-base-patch32"
+CLIP_REVISION = "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268"
 
 
 def block(ci, co, stride=1):
@@ -83,6 +87,17 @@ def main():
 
     with metrics_path.open(encoding="utf-8") as handle:
         metrics = json.load(handle)
+    expected_assets = {
+        "clip": {"repository": CLIP_ID, "revision": CLIP_REVISION},
+        "cifar10": {
+            "repository": CIFAR10_ID,
+            "revision": CIFAR10_REVISION,
+            "train_fingerprint": metrics.get("assets", {}).get("cifar10", {}).get("train_fingerprint"),
+            "test_fingerprint": metrics.get("assets", {}).get("cifar10", {}).get("test_fingerprint"),
+        },
+    }
+    if metrics.get("assets") != expected_assets:
+        raise ValueError("metrics external-asset identities do not match the verifier's pinned contract")
     student = Student()
     student.load_state_dict(torch.load(student_path, map_location="cpu", weights_only=True))
     student.eval()
@@ -91,7 +106,7 @@ def main():
 
     from datasets import load_dataset
 
-    te = load_dataset("uoft-cs/cifar10", split="test[:2000]")
+    te = load_dataset(CIFAR10_ID, split="test[:2000]", revision=CIFAR10_REVISION)
     imgs = [np.array(r["img"]) for r in te]
     y = np.array([r["label"] for r in te])
     X = torch.tensor(np.stack(imgs), dtype=torch.float32).permute(0, 3, 1, 2).div(255)
@@ -111,6 +126,7 @@ def main():
     print(f"  GPU-reported CLIP zero-shot teacher : {metrics['clip_zero_shot_acc']:.4f}")
     print(f"  GPU-reported student accuracy       : {metrics['student_acc']:.4f}")
     print(f"  LAPTOP-verified student accuracy    : {acc:.4f}  ({len(y)} test imgs, {dt:.1f}s CPU)")
+    print(f"  CIFAR-10 revision/fingerprint       : {CIFAR10_REVISION} / {te._fingerprint}")
     print(f"  student/teacher accuracy ratio        : {acc / metrics['clip_zero_shot_acc']:.4f}")
     print("  Local measurements above are not a 0.8.0 performance claim without a retained run receipt.")
 

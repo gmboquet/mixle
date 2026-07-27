@@ -15,12 +15,17 @@ pytestmark = [pytest.mark.optional, pytest.mark.slow, pytest.mark.integration]
 transformers = pytest.importorskip("transformers")
 datasets = pytest.importorskip("datasets")
 
+CIFAR10_ID = "uoft-cs/cifar10"
+CIFAR10_REVISION = "0b2714987fa478483af9968de7c934580d0bb9a2"
+BANKING77_ID = "PolyAI/banking77"
+BANKING77_REVISION = "90d4e2ee5521c04fc1488f065b8b083658768c57"
+
 
 def _cifar(n_train=1500, n_test=600):
     from datasets import load_dataset
 
-    tr = load_dataset("cifar10", split=f"train[:{n_train}]")
-    te = load_dataset("cifar10", split=f"test[:{n_test}]")
+    tr = load_dataset(CIFAR10_ID, split=f"train[:{n_train}]", revision=CIFAR10_REVISION)
+    te = load_dataset(CIFAR10_ID, split=f"test[:{n_test}]", revision=CIFAR10_REVISION)
     return tr, te
 
 
@@ -192,8 +197,8 @@ class EdgeDistillationTest(unittest.TestCase):
 
         from mixle.scientist import encode_texts, study
 
-        ds = load_dataset("banking77", split="train")
-        te = load_dataset("banking77", split="test")
+        ds = load_dataset(BANKING77_ID, split="train", revision=BANKING77_REVISION)
+        te = load_dataset(BANKING77_ID, split="test", revision=BANKING77_REVISION)
         tr = [(r["text"], r["label"]) for r in ds if r["label"] < 20][:1200]
         ts = [(r["text"], r["label"]) for r in te if r["label"] < 20][:400]
         cls.xtr = [t for t, _ in tr]

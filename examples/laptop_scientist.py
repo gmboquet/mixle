@@ -16,9 +16,13 @@ Outputs are environment-dependent example results, not retained 0.8.0 performanc
 
 from __future__ import annotations
 
+import json
 import time
 
 import numpy as np
+
+CIFAR10_ID = "uoft-cs/cifar10"
+CIFAR10_REVISION = "0b2714987fa478483af9968de7c934580d0bb9a2"
 
 
 def line(t: str) -> None:
@@ -28,11 +32,26 @@ def line(t: str) -> None:
 def act1_perceive_and_learn() -> None:
     from datasets import load_dataset
 
-    from mixle.scientist import Scientist, encode_images
+    from mixle.scientist import Scientist, encode_images, scientist_asset_manifest
 
     line("ACT 1 -- PERCEIVE (real CLIP) + LEARN (certified closed-form head) on CIFAR-10")
-    tr = load_dataset("cifar10", split="train[:2000]")
-    te = load_dataset("cifar10", split="test[:1000]")
+    tr = load_dataset(CIFAR10_ID, split="train[:2000]", revision=CIFAR10_REVISION)
+    te = load_dataset(CIFAR10_ID, split="test[:1000]", revision=CIFAR10_REVISION)
+    print(
+        "  ASSETS "
+        + json.dumps(
+            {
+                "models": scientist_asset_manifest(),
+                "dataset": {
+                    "repository": CIFAR10_ID,
+                    "revision": CIFAR10_REVISION,
+                    "train_fingerprint": tr._fingerprint,
+                    "test_fingerprint": te._fingerprint,
+                },
+            },
+            sort_keys=True,
+        )
+    )
     yte = np.array([r["label"] for r in te])
 
     t0 = time.time()

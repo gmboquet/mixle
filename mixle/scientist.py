@@ -28,8 +28,21 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 _CLIP_ID = "openai/clip-vit-base-patch32"
+_CLIP_REVISION = "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268"
 _LM_ID = "HuggingFaceTB/SmolLM2-360M-Instruct"
+_LM_REVISION = "a10cc1512eabd3dde888204e902eca88bddb4951"
+_SENTENCE_ID = "sentence-transformers/all-MiniLM-L6-v2"
+_SENTENCE_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 _CACHE: dict[str, Any] = {}
+
+
+def scientist_asset_manifest() -> dict[str, dict[str, str]]:
+    """Return the immutable external-asset identities used by this module."""
+    return {
+        "clip": {"repository": _CLIP_ID, "revision": _CLIP_REVISION},
+        "language_model": {"repository": _LM_ID, "revision": _LM_REVISION},
+        "sentence_encoder": {"repository": _SENTENCE_ID, "revision": _SENTENCE_REVISION},
+    }
 
 
 def _clip():
@@ -37,9 +50,13 @@ def _clip():
         import torch
         from transformers import CLIPModel, CLIPProcessor
 
-        model = CLIPModel.from_pretrained(_CLIP_ID)
+        model = CLIPModel.from_pretrained(_CLIP_ID, revision=_CLIP_REVISION, use_safetensors=True)
         model.eval()
-        _CACHE["clip"] = (model, CLIPProcessor.from_pretrained(_CLIP_ID, use_fast=True), torch)
+        _CACHE["clip"] = (
+            model,
+            CLIPProcessor.from_pretrained(_CLIP_ID, revision=_CLIP_REVISION, use_fast=True),
+            torch,
+        )
     return _CACHE["clip"]
 
 
@@ -48,8 +65,8 @@ def _lm():
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        tok = AutoTokenizer.from_pretrained(_LM_ID)
-        model = AutoModelForCausalLM.from_pretrained(_LM_ID)
+        tok = AutoTokenizer.from_pretrained(_LM_ID, revision=_LM_REVISION, use_fast=True)
+        model = AutoModelForCausalLM.from_pretrained(_LM_ID, revision=_LM_REVISION, use_safetensors=True)
         model.eval()
         _CACHE["lm"] = (model, tok, torch)
     return _CACHE["lm"]
@@ -80,7 +97,7 @@ def encode_texts(texts: Any) -> np.ndarray:
     if "st" not in _CACHE:
         from sentence_transformers import SentenceTransformer
 
-        _CACHE["st"] = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        _CACHE["st"] = SentenceTransformer(_SENTENCE_ID, revision=_SENTENCE_REVISION, local_files_only=True)
     return np.asarray(_CACHE["st"].encode(list(texts), show_progress_bar=False))
 
 
