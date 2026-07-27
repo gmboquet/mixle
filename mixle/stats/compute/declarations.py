@@ -111,7 +111,12 @@ class DistributionDeclaration:
         if not self.statistics:
             return {}
         if len(self.statistics) == 1:
-            return {self.statistics[0].name: suff_stat}
+            spec = self.statistics[0]
+            if spec.kind == "choice_child_stats" and hasattr(suff_stat, "branches"):
+                if getattr(suff_stat, "schema_version", None) != 1:
+                    raise ValueError("%s expected choice-statistics schema version 1." % self.name)
+                suff_stat = suff_stat.branches
+            return {spec.name: suff_stat}
         if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != len(self.statistics):
             raise ValueError(
                 "%s expected %d statistic entries, got %s."

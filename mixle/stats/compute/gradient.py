@@ -744,7 +744,9 @@ class SelectGradientFitState(CompositeGradientFitState):
     def build(self, torch, build_child, detach_value):
         """Reconstruct a fitted select distribution preserving the router."""
         return type(self.template)(
-            tuple(build_child(child, torch) for child in self.children), self.template.choice_function
+            tuple(build_child(child, torch) for child in self.children),
+            self.template.choice_function,
+            weights=self.template.weights,
         )
 
     def log_prior(self, priors, prior_strength: float, torch, engine, initial_leaves_by_id, prior_child):
