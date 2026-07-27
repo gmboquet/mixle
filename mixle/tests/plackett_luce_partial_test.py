@@ -10,7 +10,10 @@ from mixle.stats.rankings.plackett_luce import PlackettLuceDistribution, Placket
 
 
 def _dist():
-    return PlackettLuceDistribution(np.log(np.array([0.4, 0.3, 0.2, 0.1])))  # K=4
+    return PlackettLuceDistribution(
+        np.log(np.array([0.4, 0.3, 0.2, 0.1])),
+        allow_partial=True,
+    )  # K=4, likelihood conditioned on observed length
 
 
 class PlackettLucePartialTest(unittest.TestCase):

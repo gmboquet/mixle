@@ -39,6 +39,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.rankings._contracts import permutation_batch, positive_integer, sample_size
 
 _LOG_WORTH_FLOOR = -700.0
 
@@ -75,6 +76,7 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
         log_w: Sequence[float] | np.ndarray,
         name: str | None = None,
         keys: str | None = None,
+        allow_partial: bool = False,
     ) -> None:
         """Create a Plackett-Luce distribution from item log-worths.
 
@@ -96,16 +98,21 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
         if lw.ndim != 1 or lw.size < 2 or not np.all(np.isfinite(lw)):
             raise ValueError("PlackettLuceDistribution requires a finite log-worth vector of length >= 2.")
         self.log_w = lw
+        self.log_w.setflags(write=False)
         self.dim = len(lw)
         self.name = name
         self.keys = keys
+        if not isinstance(allow_partial, (bool, np.bool_)):
+            raise TypeError("allow_partial must be a Boolean.")
+        self.allow_partial = bool(allow_partial)
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the Plackett-Luce distribution."""
-        return "PlackettLuceDistribution(%s, name=%s, keys=%s)" % (
+        return "PlackettLuceDistribution(%s, name=%s, keys=%s, allow_partial=%s)" % (
             repr([float(v) for v in self.log_w]),
             repr(self.name),
             repr(self.keys),
+            repr(self.allow_partial),
         )
 
     def density(self, x: Sequence[int]) -> float:
@@ -128,7 +135,7 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
                 rejected), or its (integer) entries are not distinct item indices in ``0,...,K-1``.
 
         """
-        raw = np.asarray(x, dtype=float)
+        raw = np.asarray(x)
         idx = raw.astype(int)
         if (
             idx.ndim != 1
@@ -136,6 +143,11 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
             or (idx.size and (np.any(idx < 0) or np.any(idx >= self.dim) or len(set(idx.tolist())) != idx.size))
         ):
             raise ValueError("PlackettLuceDistribution ordering must be distinct item indices in 0,...,K-1.")
+        if not self.allow_partial and idx.size != self.dim:
+            raise ValueError(
+                f"this Plackett-Luce probability distribution requires a full ranking of length {self.dim}; "
+                "partial rankings require an explicitly conditional model."
+            )
         g = self.log_w[idx]
         rcl = _reverse_logcumsumexp(g)
         if 0 < idx.size < self.dim:
@@ -154,20 +166,32 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
         arr = x if isinstance(x, np.ndarray) else np.asarray(x, dtype=object)
         if arr.dtype == object or arr.ndim != 2:
             return np.array([self.log_density(row) for row in x], dtype=float)
-        g = self.log_w[arr]
+        if self.allow_partial and arr.shape[1] != self.dim:
+            return np.array([self.log_density(row) for row in arr], dtype=float)
+        checked = permutation_batch(arr, self.dim, label="Plackett-Luce orderings")
+        g = self.log_w[checked]
         rcl = _reverse_logcumsumexp(g)
         return np.sum(g - rcl, axis=1)
 
     def sampler(self, seed: int | None = None) -> "PlackettLuceSampler":
         """Return a sampler for drawing orderings from this distribution."""
+        if self.allow_partial:
+            raise TypeError(
+                "a length-conditioned Plackett-Luce likelihood has no single generative support; "
+                "construct a full-ranking distribution to sample."
+            )
         return PlackettLuceSampler(self, seed)
 
     def enumerator(self) -> "PlackettLuceEnumerator":
         """Return an exact finite enumerator over all orderings in decreasing probability order."""
+        if self.allow_partial:
+            raise TypeError("a length-conditioned Plackett-Luce likelihood has no single support to enumerate.")
         return PlackettLuceEnumerator(self)
 
     def support_size(self) -> int:
         """Return the number of full rankings."""
+        if self.allow_partial:
+            raise TypeError("a length-conditioned Plackett-Luce likelihood has no single support size.")
         return math.factorial(self.dim)
 
     def estimator(self, pseudo_count: float | None = None) -> "PlackettLuceEstimator":
@@ -181,7 +205,7 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
         :class:`PlackettLuceDataEncoder`), so this works regardless of whether ``self`` was
         produced by :class:`PlackettLuceEstimator` or :class:`PlackettLucePartialEstimator`.
         """
-        return PlackettLuceDataEncoder(dim=self.dim)
+        return PlackettLuceDataEncoder(dim=self.dim, allow_partial=self.allow_partial)
 
 
 class PlackettLuceEnumerator(DistributionEnumerator):
@@ -234,14 +258,15 @@ class PlackettLuceSampler(DistributionSampler):
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | list[list[int]]:
         """Draw orderings (permutations of 0,...,K-1); a single list when size is None."""
-        sz = 1 if size is None else size
+        checked_size = sample_size(size)
+        sz = 1 if checked_size is None else checked_size
         k = self.dist.dim
         gumbel = -np.log(-np.log(self.rng.rand(sz, k)))
         keys = self.dist.log_w[None, :] + gumbel
         # Higher perturbed log-worth is preferred first: sort descending.
         orderings = np.argsort(-keys, axis=1)
         rv = [[int(v) for v in row] for row in orderings]
-        return rv[0] if size is None else rv
+        return rv[0] if checked_size is None else rv
 
 
 class PlackettLuceAccumulator(SequenceEncodableStatisticAccumulator):
@@ -382,14 +407,21 @@ class PlackettLuceDataEncoder(DataSequenceEncoder):
     encoder that works regardless of whether the distribution was fit on full or partial rankings.
     """
 
-    def __init__(self, dim: int | None = None) -> None:
-        self.dim = dim
+    def __init__(self, dim: int | None = None, allow_partial: bool = False) -> None:
+        self.dim = None if dim is None else positive_integer(dim, label="dim", minimum=2)
+        if not isinstance(allow_partial, (bool, np.bool_)):
+            raise TypeError("allow_partial must be a Boolean.")
+        self.allow_partial = bool(allow_partial)
 
     def __str__(self) -> str:
-        return "PlackettLuceDataEncoder"
+        return "PlackettLuceDataEncoder(dim=%s, allow_partial=%s)" % (self.dim, self.allow_partial)
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, PlackettLuceDataEncoder)
+        return (
+            isinstance(other, PlackettLuceDataEncoder)
+            and self.dim == other.dim
+            and self.allow_partial == other.allow_partial
+        )
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray | list[np.ndarray]:
         """Validate and encode a batch of full rankings (dense) or partial rankings (ragged).
@@ -405,21 +437,21 @@ class PlackettLuceDataEncoder(DataSequenceEncoder):
         if not rows:
             raise ValueError("PlackettLuceDistribution requires a non-empty sequence of orderings.")
         if self.dim is not None and any(len(row) != self.dim for row in rows):
+            if not self.allow_partial:
+                raise ValueError(f"full Plackett-Luce rankings must all have length {self.dim}.")
             # Not every row claims to rank all dim items -- top-m partial rankings (or a mix of
             # full and partial rows, which is legal: a full ranking is just the m == dim case).
             return PlackettLucePartialDataEncoder(dim=self.dim).seq_encode(rows)
-        raw = np.asarray(rows, dtype=float)
-        if raw.ndim != 2:
-            raise ValueError("PlackettLuceDistribution requires a non-empty sequence of orderings.")
-        rv = raw.astype(int)
-        if not np.array_equal(raw, rv):
-            raise ValueError("PlackettLuceDistribution orderings must be integer-valued item indices.")
-        k = rv.shape[1]
-        expected = np.arange(k)
-        for row in rv:
-            if not np.array_equal(np.sort(row), expected):
-                raise ValueError("PlackettLuceDistribution orderings must be permutations of 0,...,K-1.")
-        return rv
+        if self.dim is None:
+            raw = np.asarray(rows)
+            if raw.ndim != 2:
+                raise ValueError("PlackettLuceDistribution requires a non-empty sequence of orderings.")
+            return permutation_batch(raw, raw.shape[1], label="Plackett-Luce orderings", allow_empty=False)
+        return permutation_batch(rows, self.dim, label="Plackett-Luce orderings", allow_empty=False)
+
+    def row_count(self, x: np.ndarray | list[np.ndarray]) -> int:
+        """Return the number of dense or ragged encoded ranking rows."""
+        return len(x)
 
 
 class PlackettLucePartialDataEncoder(DataSequenceEncoder):
@@ -461,6 +493,10 @@ class PlackettLucePartialDataEncoder(DataSequenceEncoder):
                 raise ValueError("partial ordering must be distinct item indices in 0,...,dim-1.")
             rows.append(r)
         return rows
+
+    def row_count(self, x: list[np.ndarray]) -> int:
+        """Return the number of ragged partial-ranking rows."""
+        return len(x)
 
 
 class PlackettLucePartialAccumulator(SequenceEncodableStatisticAccumulator):
@@ -583,7 +619,12 @@ class PlackettLucePartialEstimator(ParameterEstimator):
         """Return one MM estimate from accumulated partial-ranking sufficient statistics."""
         count, num, den = suff_stat
         if count <= 0.0:
-            return PlackettLuceDistribution(np.zeros(self.dim), name=self.name, keys=self.keys)
+            return PlackettLuceDistribution(
+                np.zeros(self.dim),
+                name=self.name,
+                keys=self.keys,
+                allow_partial=True,
+            )
         num = np.asarray(num, dtype=float)
         den = np.asarray(den, dtype=float)
         if self.pseudo_count is not None:
@@ -592,8 +633,13 @@ class PlackettLucePartialEstimator(ParameterEstimator):
         worths = np.where(den > 0.0, num / np.maximum(den, np.finfo(float).tiny), 0.0)
         total = float(np.sum(worths))
         if total <= 0.0 or not np.isfinite(total):
-            return PlackettLuceDistribution(np.zeros(self.dim), name=self.name, keys=self.keys)
+            return PlackettLuceDistribution(
+                np.zeros(self.dim),
+                name=self.name,
+                keys=self.keys,
+                allow_partial=True,
+            )
         with np.errstate(divide="ignore"):
             log_w = np.log(worths) - np.log(total)
         log_w = np.maximum(log_w, _LOG_WORTH_FLOOR)
-        return PlackettLuceDistribution(log_w, name=self.name, keys=self.keys)
+        return PlackettLuceDistribution(log_w, name=self.name, keys=self.keys, allow_partial=True)

@@ -81,7 +81,7 @@ class PlackettLucePartialMleTest(unittest.TestCase):
         k = 4
         true = PlackettLuceDistribution(np.log([0.4, 0.3, 0.2, 0.1]))
         partial = [list(o[:2]) for o in true.sampler(3).sample(500)]
-        proto = PlackettLuceDistribution(np.log(np.full(k, 1.0 / k)))
+        proto = PlackettLuceDistribution(np.log(np.full(k, 1.0 / k)), allow_partial=True)
         fit = optimize(
             partial, PlackettLucePartialEstimator(dim=k), prev_estimate=proto, max_its=10, rng=RandomState(0), out=None
         )
