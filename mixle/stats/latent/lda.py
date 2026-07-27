@@ -13,8 +13,8 @@ used to sample the number of words in a given document.
 
 """
 
-import sys
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import numpy as np
@@ -42,12 +42,137 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.compute.posterior import MeanFieldLDAPosterior
 from mixle.utils.aliasing import broadcast_pseudo_count
 from mixle.utils.special import digammainv
-from mixle.utils.vector import row_choice
+from mixle.utils.vector import ImpossibleEvidenceError, row_choice
 
 E0 = TypeVar("E0")
 SS0 = TypeVar("SS0")
 
 # import mixle.c_ext
+
+
+@dataclass(frozen=True)
+class LDAOptimizationDiagnostics:
+    """Serializable termination record for an LDA inner optimization."""
+
+    algorithm: str
+    converged: bool
+    iterations: int
+    max_iterations: int
+    termination_reason: str
+    final_residual: float
+    objective_trace: tuple[float, ...] = ()
+    residual_trace: tuple[float, ...] = ()
+    impossible_documents: tuple[int, ...] = ()
+
+
+class LDAConvergenceError(RuntimeError):
+    """Raised when an LDA inner optimization cannot meet its declared contract."""
+
+    def __init__(self, diagnostics: LDAOptimizationDiagnostics):
+        self.diagnostics = diagnostics
+        super().__init__(
+            "%s did not converge after %d/%d iterations (%s; residual=%g)"
+            % (
+                diagnostics.algorithm,
+                diagnostics.iterations,
+                diagnostics.max_iterations,
+                diagnostics.termination_reason,
+                diagnostics.final_residual,
+            )
+        )
+
+
+def _positive_finite_threshold(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a positive finite real scalar")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a positive finite real scalar") from exc
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be positive and finite")
+    return result
+
+
+def _positive_iteration_budget(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_, float, np.floating)):
+        raise TypeError(f"{name} must be a positive integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{name} must be a positive integer") from exc
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+
+def _validated_document_weights(weights: Any, num_documents: int) -> np.ndarray:
+    raw = np.asarray(weights)
+    if raw.dtype.kind == "b":
+        raise TypeError("LDA document weights must be real-valued, not boolean")
+    try:
+        result = np.asarray(weights, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("LDA document weights must be real-valued") from exc
+    if result.ndim != 1 or result.shape[0] != num_documents:
+        raise ValueError(f"LDA document weights must have shape ({num_documents},)")
+    if np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError("LDA document weights must be finite and non-negative")
+    return result
+
+
+def _validate_lda_encoded(x: Any, num_topics: int) -> tuple[int, np.ndarray, np.ndarray, np.ndarray | None, Any]:
+    if not isinstance(x, tuple) or len(x) != 5:
+        raise TypeError("encoded LDA data must be a five-item tuple")
+    num_documents, raw_idx, raw_counts, raw_gammas, enc_data = x
+    if isinstance(num_documents, (bool, np.bool_, float, np.floating)):
+        raise TypeError("encoded LDA document count must be a non-negative integer")
+    try:
+        num_documents = int(num_documents)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("encoded LDA document count must be a non-negative integer") from exc
+    if num_documents < 0:
+        raise ValueError("encoded LDA document count must be non-negative")
+
+    raw_idx_array = np.asarray(raw_idx)
+    if raw_idx_array.dtype.kind == "b" or raw_idx_array.ndim != 1:
+        raise TypeError("encoded LDA document IDs must be a one-dimensional exact-integer array")
+    try:
+        idx_numeric = np.asarray(raw_idx, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("encoded LDA document IDs must be exact integers") from exc
+    if np.any(~np.isfinite(idx_numeric)) or np.any(idx_numeric != np.floor(idx_numeric)):
+        raise ValueError("encoded LDA document IDs must be finite exact integers")
+    idx = idx_numeric.astype(np.intp)
+    if np.any(idx < 0) or np.any(idx >= num_documents):
+        raise ValueError("encoded LDA document IDs are outside the declared corpus")
+    if idx.size > 1 and np.any(idx[1:] < idx[:-1]):
+        raise ValueError("encoded LDA document IDs must be in nondecreasing document order")
+
+    raw_counts_array = np.asarray(raw_counts)
+    if raw_counts_array.dtype.kind == "b":
+        raise TypeError("encoded LDA counts must be real-valued, not boolean")
+    try:
+        counts = np.asarray(raw_counts, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("encoded LDA counts must be real-valued") from exc
+    if counts.ndim != 1 or counts.shape != idx.shape:
+        raise ValueError("encoded LDA counts and document IDs must be one-dimensional arrays of equal length")
+    if np.any(~np.isfinite(counts)) or np.any(counts <= 0.0):
+        raise ValueError("encoded LDA counts must be positive and finite")
+
+    gammas = None
+    if raw_gammas is not None:
+        try:
+            gammas = np.asarray(raw_gammas, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("LDA warm-start gammas must be real-valued") from exc
+        if gammas.shape != (num_documents, num_topics):
+            raise ValueError(f"LDA warm-start gammas must have shape ({num_documents}, {num_topics})")
+        if np.any(~np.isfinite(gammas)) or np.any(gammas <= 0.0):
+            raise ValueError("LDA warm-start gammas must be positive and finite")
+        gammas = gammas.copy()
+    return num_documents, idx, counts, gammas, enc_data
 
 
 class LDADistribution(SequenceEncodableProbabilityDistribution):
@@ -65,6 +190,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         gamma_threshold: float = 1.0e-8,
         max_gamma_iter: int = 100,
+        fit_diagnostics: LDAOptimizationDiagnostics | None = None,
     ) -> None:
         """Create a latent Dirichlet allocation distribution.
 
@@ -87,12 +213,23 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
             max_gamma_iter (int): Hard cap on per-document variational iterations.
 
         """
-        self.topics = topics
+        if isinstance(topics, (str, bytes)) or len(topics) == 0:
+            raise ValueError("LDA requires at least one topic distribution")
+        alpha_array = np.asarray(alpha, dtype=np.float64)
+        if alpha_array.ndim != 1 or alpha_array.shape[0] != len(topics):
+            raise ValueError("LDA alpha must be a one-dimensional vector with one entry per topic")
+        if np.any(~np.isfinite(alpha_array)) or np.any(alpha_array <= 0.0):
+            raise ValueError("LDA alpha entries must be positive and finite")
+        if fit_diagnostics is not None and not isinstance(fit_diagnostics, LDAOptimizationDiagnostics):
+            raise TypeError("fit_diagnostics must be an LDAOptimizationDiagnostics record or None")
+
+        self.topics = tuple(topics)
         self.n_topics = len(topics)
-        self.alpha = np.asarray(alpha)
+        self.alpha = alpha_array.copy()
         self.len_dist = len_dist
-        self.gamma_threshold = gamma_threshold
-        self.max_gamma_iter = int(max_gamma_iter)
+        self.gamma_threshold = _positive_finite_threshold(gamma_threshold, "gamma_threshold")
+        self.max_gamma_iter = _positive_iteration_budget(max_gamma_iter, "max_gamma_iter")
+        self.fit_diagnostics = fit_diagnostics
 
     def compute_capabilities(self):
         """Return backend capability metadata for this concrete LDA instance."""
@@ -205,7 +342,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         """
         num_topics = self.n_topics
         alpha = self.alpha
-        num_documents, idx, counts, _, enc_data = x
+        num_documents, idx, counts, _, enc_data = _validate_lda_encoded(x, self.n_topics)
 
         log_density_gamma, document_gammas, per_topic_log_densities = seq_posterior(self, x)
 
@@ -223,111 +360,47 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
     def _backend_seq_posterior(
         self, x: tuple[int, np.ndarray, np.ndarray, np.ndarray | None, E0], engine: Any
     ) -> tuple[Any, Any, Any]:
-        """Run LDA's variational posterior update using the active backend."""
+        """Evaluate topic scores on the backend and run the validated VI contract."""
         from mixle.stats.compute.backend import backend_seq_log_density
 
-        alpha = engine.asarray(self.alpha)
-        num_documents, idx, counts, gammas, enc_data = x
-        num_topics = self.n_topics
-        idx_np = np.asarray(idx, dtype=np.int64)
-        idx_full_np = (idx_np[:, None] * num_topics + np.arange(num_topics, dtype=np.int64)).reshape(-1)
-        idx_full = engine.asarray(idx_full_np)
-        idx_backend = engine.asarray(idx_np)
-        counts_backend = engine.asarray(counts)
-
+        num_documents, idx, counts, gammas, enc_data = _validate_lda_encoded(x, self.n_topics)
         per_topic_scores = [backend_seq_log_density(topic, enc_data, engine) for topic in self.topics]
         per_topic_log_densities = engine.stack(per_topic_scores, axis=1)
-        centered_topic_log_densities = per_topic_log_densities - engine.max(per_topic_log_densities, axis=1).reshape(
-            (-1, 1)
+        score_array = np.asarray(engine.to_numpy(per_topic_log_densities), dtype=np.float64)
+        per_doc_alpha = np.repeat(self.alpha[None, :], num_documents, axis=0)
+        responsibilities, document_gammas = _lda_vi_fixed_point(
+            per_doc_alpha,
+            idx,
+            counts,
+            gammas,
+            self.n_topics,
+            score_array,
+            self.gamma_threshold,
+            self.max_gamma_iter,
         )
-        per_topic_weights = engine.exp(centered_topic_log_densities)
-
-        if gammas is None:
-            init_counts = engine.bincount(
-                idx_full,
-                weights=engine.asarray(np.ones(len(idx_full_np), dtype=np.float64)),
-                minlength=num_documents * num_topics,
-            ).reshape((num_documents, num_topics))
-            document_gammas = init_counts / float(num_topics) + alpha
-        else:
-            document_gammas = engine.asarray(gammas)
-
-        for _ in range(self.max_gamma_iter):
-            digamma_gammas = engine.digamma(document_gammas)
-            centered_gammas = digamma_gammas - engine.max(digamma_gammas, axis=1).reshape((-1, 1))
-            gamma_weights = engine.exp(centered_gammas)
-            row_weights = per_topic_weights * gamma_weights[idx_backend, :]
-            row_weight_sum = engine.sum(row_weights, axis=1).reshape((-1, 1))
-            log_density_gamma = row_weights / row_weight_sum * counts_backend.reshape((-1, 1))
-            gamma_updates = engine.bincount(
-                idx_full,
-                weights=log_density_gamma.reshape((-1,)),
-                minlength=num_documents * num_topics,
-            ).reshape((num_documents, num_topics))
-            gamma_updates = gamma_updates + alpha
-            rel_diff = engine.sum(engine.abs(document_gammas - gamma_updates), axis=1) / engine.sum(
-                gamma_updates, axis=1
-            )
-            document_gammas = gamma_updates
-            if float(np.max(engine.to_numpy(rel_diff))) <= self.gamma_threshold:
-                break
-
-        return log_density_gamma, document_gammas, per_topic_log_densities
+        return engine.asarray(responsibilities), engine.asarray(document_gammas), per_topic_log_densities
 
     def backend_seq_log_density(self, x: tuple[int, np.ndarray, np.ndarray, np.ndarray | None, E0], engine: Any) -> Any:
         """Backend-neutral LDA variational lower-bound scoring."""
         from mixle.stats.compute.backend import backend_seq_log_density
 
-        alpha = engine.asarray(self.alpha)
-        num_topics = self.n_topics
-        num_documents, idx, counts, _, _ = x
-        idx_backend = engine.asarray(idx)
-        counts_backend = engine.asarray(counts)
-        idx_full_np = (
-            np.asarray(idx, dtype=np.int64)[:, None] * num_topics + np.arange(num_topics, dtype=np.int64)
-        ).reshape(-1)
-
-        log_density_gamma, document_gammas, per_topic_log_densities = self._backend_seq_posterior(x, engine)
-
-        tiny = (
-            1.0e-30
-            if getattr(engine, "precision", "default") in ("float16", "float32", "bfloat16")
-            else sys.float_info.min
+        num_documents, idx, counts, _, _ = _validate_lda_encoded(x, self.n_topics)
+        responsibilities, document_gammas, topic_scores = self._backend_seq_posterior(x, engine)
+        elbo = _lda_elbo_from_gamma(
+            self.alpha,
+            idx,
+            counts,
+            self.n_topics,
+            np.asarray(engine.to_numpy(responsibilities), dtype=np.float64),
+            np.asarray(engine.to_numpy(document_gammas), dtype=np.float64),
+            np.asarray(engine.to_numpy(topic_scores), dtype=np.float64),
         )
-        bad_gamma = engine.isnan(log_density_gamma) | engine.isinf(log_density_gamma) | (log_density_gamma <= 0)
-        log_density_gamma = engine.where(bad_gamma, engine.asarray(tiny), log_density_gamma)
-        bad_docs = engine.isnan(document_gammas) | engine.isinf(document_gammas)
-        document_gammas = engine.where(bad_docs, engine.asarray(tiny), document_gammas)
-
-        gamma_sum = engine.sum(document_gammas, axis=1).reshape((-1, 1))
-        elob0 = engine.digamma(document_gammas) - engine.digamma(gamma_sum)
-        elob1 = elob0[idx_backend, :]
-        elob2 = log_density_gamma * (
-            elob1
-            + per_topic_log_densities
-            - engine.log(log_density_gamma)
-            + engine.log(counts_backend.reshape((-1, 1)))
-        )
-        elob3 = engine.sum(elob0 * ((alpha - 1.0) - (document_gammas - 1.0)), axis=1)
-        elob4 = engine.bincount(
-            engine.asarray(idx_full_np),
-            weights=elob2.reshape((-1,)),
-            minlength=num_documents * num_topics,
-        ).reshape((num_documents, num_topics))
-        elob5 = engine.sum(elob4, axis=1)
-        elob6 = engine.sum(engine.gammaln(document_gammas), axis=1) - engine.gammaln(
-            engine.sum(document_gammas, axis=1)
-        )
-        elob7 = engine.gammaln(engine.sum(alpha)) - engine.sum(engine.gammaln(alpha))
-
-        elob = elob3 + elob5 + elob6 + elob7
-
+        result = engine.asarray(elbo)
         if self.len_dist is not None and not supports(self.len_dist, Neutral):
-            doc_lens = engine.bincount(idx_backend, weights=counts_backend, minlength=num_documents)
-            len_enc = self.len_dist.dist_to_encoder().seq_encode(engine.to_numpy(doc_lens))
-            elob = elob + backend_seq_log_density(self.len_dist, len_enc, engine)
-
-        return elob
+            doc_lens = np.bincount(idx, weights=counts, minlength=num_documents)
+            len_enc = self.len_dist.dist_to_encoder().seq_encode(doc_lens)
+            result = result + backend_seq_log_density(self.len_dist, len_enc, engine)
+        return result
 
     def seq_component_log_density(self, x: tuple[int, np.ndarray, np.ndarray, np.ndarray | None, E0]) -> np.ndarray:
         """Vectorized evaluation of the per-topic log-density of each document in encoded corpus x.
@@ -341,8 +414,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
 
         """
         num_topics = self.n_topics
-        alpha = self.alpha
-        num_documents, idx, counts, _, enc_data = x
+        num_documents, idx, counts, _, enc_data = _validate_lda_encoded(x, self.n_topics)
 
         ll_mat = np.zeros((len(idx), self.n_topics))
         ll_mat.fill(-np.inf)
@@ -362,7 +434,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         """Backend-neutral per-topic document scores."""
         from mixle.stats.compute.backend import backend_seq_log_density
 
-        num_documents, idx, counts, _, enc_data = x
+        num_documents, idx, counts, _, enc_data = _validate_lda_encoded(x, self.n_topics)
         idx_backend = engine.asarray(idx)
         counts_backend = engine.asarray(counts)
         topic_scores = []
@@ -384,11 +456,8 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
             proportions for each document.
 
         """
-        num_topics = self.n_topics
-        alpha = self.alpha
-        num_documents, idx, counts, _, enc_data = x
-
-        log_density_gamma, document_gammas, per_topic_log_densities = seq_posterior(self, x)
+        _, _, _, _, _ = _validate_lda_encoded(x, self.n_topics)
+        _, document_gammas, _ = seq_posterior(self, x)
 
         document_gammas /= document_gammas.sum(axis=1, keepdims=True)
 
@@ -455,6 +524,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
             return LDAEstimator(
                 estimators=[d.estimator() for d in self.topics],
                 len_estimator=len_est,
+                gamma_threshold=self.gamma_threshold,
                 max_gamma_iter=self.max_gamma_iter,
             )
         else:
@@ -462,6 +532,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
                 estimators=[d.estimator() for d in self.topics],
                 len_estimator=len_est,
                 pseudo_count=(pseudo_count, pseudo_count),
+                gamma_threshold=self.gamma_threshold,
                 max_gamma_iter=self.max_gamma_iter,
             )
 
@@ -691,7 +762,8 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        num_documents, idx, counts, old_gammas, enc_data = x
+        num_documents, idx, counts, old_gammas, enc_data = _validate_lda_encoded(x, self.num_topics)
+        weights = _validated_document_weights(weights, num_documents)
 
         if not self._init_rng:
             self._rng_initialize(rng)
@@ -704,7 +776,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         idx_list = row_choice(p_mat=np.reshape(theta_rep, (-1, self.num_topics)), rng=self._rng_idx)
 
-        self.sum_of_logs += np.sum(np.log(theta), axis=0, keepdims=False)
+        self.sum_of_logs += np.dot(weights, np.log(theta))
         self.doc_counts += np.sum(weights)
 
         ww_v = -np.log(self._rng_w.rand(self.num_topics * len(idx)))
@@ -737,35 +809,8 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if self.prev_alpha is None:
-            self.prev_alpha = np.ones(self.num_topics)
-
-        if not self._init_rng:
-            self._rng_initialize(rng)
-
-        counts = np.reshape([x[i][1] for i in range(len(x))], (len(x), 1))
-
-        theta = self._rng_theta.dirichlet(self.prev_alpha)
-
-        theta_rep = theta[np.arange(0, self.num_topics * len(x)) % self.num_topics]
-        idx_list = row_choice(p_mat=np.reshape(theta_rep, (-1, self.num_topics)), rng=self._rng_idx)
-        self.sum_of_logs += np.log(theta)
-        self.doc_counts += weight
-
-        ww_v = -np.log(self._rng_w.rand(self.num_topics * len(x)))
-        ww_v[idx_list + np.arange(0, self.num_topics * len(x), self.num_topics)] += 1
-        ww_v = np.reshape(ww_v, (-1, self.num_topics))
-        ww_v /= np.sum(ww_v, axis=1, keepdims=True)
-        ww_v *= counts * weight
-
-        for j in range(self.num_topics):
-            w = ww_v[:, j]
-            for i in range(len(x)):
-                self.accumulators[j].initialize(x[i][0], w[i], self._rng_topics[j])
-                self.topic_counts[j] += w[i]
-
-        if not supports(self.len_accumulator, Neutral):
-            self.len_accumulator.initialize(np.sum(counts), weight, self._rng_len)
+        encoded = self.acc_to_encoder().seq_encode([x])
+        self.seq_initialize(encoded, _validated_document_weights([weight], 1), rng)
 
     def seq_update(
         self,
@@ -788,8 +833,17 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        num_documents, idx, counts, old_gammas, enc_data = x
-        log_density_gamma, final_gammas, per_topic_log_densities = seq_posterior(estimate, x)
+        num_documents, idx, counts, old_gammas, enc_data = _validate_lda_encoded(x, self.num_topics)
+        weights = _validated_document_weights(weights, num_documents)
+        log_density_gamma, final_gammas, per_topic_log_densities, diagnostics = seq_posterior_with_diagnostics(
+            estimate, x
+        )
+        impossible = np.asarray(diagnostics.impossible_documents, dtype=np.intp)
+        if impossible.size and np.any(weights[impossible] > 0.0):
+            raise ImpossibleEvidenceError(
+                "LDA E-step encountered zero-probability evidence at document rows %s"
+                % impossible[weights[impossible] > 0.0].tolist()
+            )
         weighted_topic_counts = log_density_gamma * np.reshape(weights[idx], (-1, 1))
 
         for i in range(self.num_topics):
@@ -823,7 +877,8 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
                 len_enc = estimate.len_dist.dist_to_encoder().seq_encode(doc_lens)
                 elob = elob + estimate.len_dist.seq_log_density(len_enc)
 
-            self._seq_ll += float(np.dot(weights, elob))
+            positive_weight = weights > 0.0
+            self._seq_ll += float(np.dot(weights[positive_weight], elob[positive_weight]))
 
         if not supports(self.len_accumulator, Neutral):
             doc_lens = np.bincount(idx, weights=counts, minlength=num_documents)
@@ -844,11 +899,20 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         torch); per-item topic responsibilities are produced on the engine and fed to the child
         topic accumulators. Matches host ``seq_update``.
         """
-        num_documents, idx, counts, old_gammas, enc_data = x
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        num_documents, idx, counts, old_gammas, enc_data = _validate_lda_encoded(x, self.num_topics)
+        weights_np = _validated_document_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, num_documents
+        )
         idx_np = np.asarray(idx, dtype=np.int64)
 
         log_density_gamma, final_gammas, per_topic_log_densities = estimate._backend_seq_posterior(x, engine)
+        score_array = np.asarray(engine.to_numpy(per_topic_log_densities), dtype=np.float64)
+        impossible = np.unique(idx_np[~np.any(np.isfinite(score_array), axis=1)])
+        if impossible.size and np.any(weights_np[impossible] > 0.0):
+            raise ImpossibleEvidenceError(
+                "LDA engine E-step encountered zero-probability evidence at document rows %s"
+                % impossible[weights_np[impossible] > 0.0].tolist()
+            )
 
         w_idx = engine.asarray(weights_np[idx_np]).reshape((-1, 1))
         weighted_topic_counts = log_density_gamma * w_idx
@@ -1095,6 +1159,7 @@ class LDAEstimator(ParameterEstimator):
         gamma_threshold: float = 1.0e-8,
         alpha_threshold: float = 1.0e-8,
         max_gamma_iter: int = 100,
+        max_alpha_iter: int = 1000,
     ) -> None:
         """Create an estimator for LDA distributions.
 
@@ -1122,17 +1187,28 @@ class LDAEstimator(ParameterEstimator):
             fixed_alpha (Optional[np.ndarray]): If set, alpha is fixed to this value in estimation.
 
         """
+        if isinstance(estimators, (str, bytes)) or len(estimators) == 0:
+            raise ValueError("LDAEstimator requires at least one topic estimator")
         self.num_topics = len(estimators)
-        self.estimators = estimators
+        self.estimators = tuple(estimators)
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.keys = keys if keys is not None else (None, None)
-        self.gamma_threshold = gamma_threshold
-        self.alpha_threshold = alpha_threshold
-        self.fixed_alpha = fixed_alpha
-        self.max_gamma_iter = int(max_gamma_iter)
+        if not isinstance(self.keys, tuple) or len(self.keys) != 2:
+            raise ValueError("LDAEstimator keys must be a two-item tuple")
+        self.gamma_threshold = _positive_finite_threshold(gamma_threshold, "gamma_threshold")
+        self.alpha_threshold = _positive_finite_threshold(alpha_threshold, "alpha_threshold")
+        self.max_gamma_iter = _positive_iteration_budget(max_gamma_iter, "max_gamma_iter")
+        self.max_alpha_iter = _positive_iteration_budget(max_alpha_iter, "max_alpha_iter")
+        if fixed_alpha is None:
+            self.fixed_alpha = None
+        else:
+            fixed = np.asarray(fixed_alpha, dtype=np.float64)
+            if fixed.shape != (self.num_topics,) or np.any(~np.isfinite(fixed)) or np.any(fixed <= 0.0):
+                raise ValueError("fixed_alpha must contain one positive finite entry per topic")
+            self.fixed_alpha = fixed.copy()
 
     def accumulator_factory(self) -> "LDAEstimatorAccumulatorFactory":
         """Return an accumulator factory configured from this estimator."""
@@ -1162,17 +1238,45 @@ class LDAEstimator(ParameterEstimator):
         prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats, len_suff_stat = suff_stat
 
         num_topics = self.num_topics
+        if isinstance(doc_counts, (bool, np.bool_)):
+            raise TypeError("LDA weighted document count must be a real scalar")
+        doc_counts = float(doc_counts)
+        if not np.isfinite(doc_counts) or doc_counts < 0.0:
+            raise ValueError("LDA weighted document count must be finite and non-negative")
+        sum_of_logs = np.asarray(sum_of_logs, dtype=np.float64)
+        topic_counts = np.asarray(topic_counts, dtype=np.float64)
+        if sum_of_logs.shape != (num_topics,) or np.any(~np.isfinite(sum_of_logs)):
+            raise ValueError("LDA expected-log statistics must be a finite vector with one entry per topic")
+        if topic_counts.shape != (num_topics,) or np.any(~np.isfinite(topic_counts)) or np.any(topic_counts < 0.0):
+            raise ValueError("LDA topic counts must be a finite non-negative vector with one entry per topic")
+        if len(topic_suff_stats) != num_topics:
+            raise ValueError("LDA topic sufficient statistics must contain one entry per topic")
+        if prev_alpha is None:
+            prev_alpha = self.fixed_alpha if self.fixed_alpha is not None else np.ones(num_topics)
+        prev_alpha = np.asarray(prev_alpha, dtype=np.float64)
+        if prev_alpha.shape != (num_topics,) or np.any(~np.isfinite(prev_alpha)) or np.any(prev_alpha <= 0.0):
+            raise ValueError("previous LDA alpha must contain one positive finite entry per topic")
+        prev_alpha = prev_alpha.copy()
+
         topics = [self.estimators[i].estimate(topic_counts[i], topic_suff_stats[i]) for i in range(num_topics)]
         len_dist = self.len_estimator.estimate(nobs, len_suff_stat)
 
         if doc_counts == 0:
-            sys.stderr.write("Warning: LDA Estimation performed with zero documents.\n")
+            diagnostics = LDAOptimizationDiagnostics(
+                algorithm="lda_alpha_fixed_point",
+                converged=True,
+                iterations=0,
+                max_iterations=self.max_alpha_iter,
+                termination_reason="no_weighted_documents",
+                final_residual=0.0,
+            )
             return LDADistribution(
                 topics,
                 prev_alpha,
                 len_dist=len_dist,
                 gamma_threshold=self.gamma_threshold,
                 max_gamma_iter=self.max_gamma_iter,
+                fit_diagnostics=diagnostics,
             )
 
         if self.fixed_alpha is None:
@@ -1182,9 +1286,23 @@ class LDAEstimator(ParameterEstimator):
                 mean_of_logs = sum_of_logs / doc_counts
 
             # new_alpha, _ = find_alpha(prev_alpha, sum_of_logs/doc_counts, gamma_threshold*np.sqrt(float(doc_counts)))
-            new_alpha, _ = update_alpha(prev_alpha, mean_of_logs, self.alpha_threshold)
+            new_alpha, _, alpha_diagnostics = update_alpha(
+                prev_alpha,
+                mean_of_logs,
+                self.alpha_threshold,
+                max_iter=self.max_alpha_iter,
+                return_diagnostics=True,
+            )
         else:
             new_alpha = np.asarray(self.fixed_alpha).copy()
+            alpha_diagnostics = LDAOptimizationDiagnostics(
+                algorithm="fixed_alpha",
+                converged=True,
+                iterations=0,
+                max_iterations=0,
+                termination_reason="fixed_parameter",
+                final_residual=0.0,
+            )
 
         return LDADistribution(
             topics,
@@ -1192,6 +1310,7 @@ class LDAEstimator(ParameterEstimator):
             len_dist=len_dist,
             gamma_threshold=self.gamma_threshold,
             max_gamma_iter=self.max_gamma_iter,
+            fit_diagnostics=alpha_diagnostics,
         )
 
 
@@ -1249,20 +1368,69 @@ class LDADataEncoder(DataSequenceEncoder):
 
         """
         num_documents = len(x)
+        lengths: list[int] = []
+        tx: list[Any] = []
+        ctx: list[float] = []
+        for doc_index, document in enumerate(x):
+            if isinstance(document, (str, bytes)):
+                raise TypeError(f"LDA document {doc_index} must be a sequence of (value, count) pairs")
+            try:
+                pairs = list(document)
+            except TypeError as exc:
+                raise TypeError(f"LDA document {doc_index} must be a sequence of (value, count) pairs") from exc
+            lengths.append(len(pairs))
+            for pair_index, pair in enumerate(pairs):
+                if isinstance(pair, (str, bytes)):
+                    raise TypeError(f"LDA document {doc_index} pair {pair_index} must have exactly two entries")
+                try:
+                    value, raw_count = pair
+                except (TypeError, ValueError) as exc:
+                    raise TypeError(
+                        f"LDA document {doc_index} pair {pair_index} must have exactly two entries"
+                    ) from exc
+                if isinstance(raw_count, (bool, np.bool_)):
+                    raise TypeError(f"LDA document {doc_index} pair {pair_index} count must be real-valued")
+                try:
+                    count = float(raw_count)
+                except (TypeError, ValueError) as exc:
+                    raise TypeError(f"LDA document {doc_index} pair {pair_index} count must be real-valued") from exc
+                if not np.isfinite(count) or count <= 0.0:
+                    raise ValueError(f"LDA document {doc_index} pair {pair_index} count must be positive and finite")
+                tx.append(value)
+                ctx.append(count)
 
-        nx = np.fromiter((len(doc) for doc in x), dtype=np.intp, count=num_documents)
-        tx = [pair[0] for doc in x for pair in doc]
-        ctx = [pair[1] for doc in x for pair in doc]
-
+        nx = np.asarray(lengths, dtype=np.intp)
         idx = np.repeat(np.arange(num_documents), nx)
-        counts = np.asarray(ctx)
+        counts = np.asarray(ctx, dtype=np.float64)
         gammas = None
         enc_data = self.encoder.seq_encode(tx)
 
         return num_documents, idx, counts, gammas, enc_data
 
+    def row_count(self, x: Any) -> int:
+        """Return the validated number of document rows in an encoded corpus."""
+        if not isinstance(x, tuple) or len(x) != 5:
+            raise ValueError("encoded LDA data must be a five-item tuple")
+        num_documents = x[0]
+        if isinstance(num_documents, (bool, np.bool_, float, np.floating)):
+            raise TypeError("encoded LDA document count must be an integer")
+        try:
+            result = int(num_documents)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("encoded LDA document count must be an integer") from exc
+        if result < 0:
+            raise ValueError("encoded LDA document count must be non-negative")
+        return result
 
-def update_alpha(alpha_curr, mean_log_p, alpha_threshold) -> tuple[np.ndarray, int]:
+
+def update_alpha(
+    alpha_curr,
+    mean_log_p,
+    alpha_threshold,
+    *,
+    max_iter: int = 1000,
+    return_diagnostics: bool = False,
+):
     """Fixed-point update of the Dirichlet parameter alpha given mean expected log proportions.
 
     Args:
@@ -1274,19 +1442,74 @@ def update_alpha(alpha_curr, mean_log_p, alpha_threshold) -> tuple[np.ndarray, i
         Tuple of (updated alpha, number of iterations performed).
 
     """
-    alpha = alpha_curr.copy()
-    asum = alpha.sum()
+    alpha = np.asarray(alpha_curr, dtype=np.float64)
+    mean_log_p = np.asarray(mean_log_p, dtype=np.float64)
+    if alpha.ndim != 1 or alpha.size == 0:
+        raise ValueError("alpha_curr must be a non-empty one-dimensional vector")
+    if mean_log_p.shape != alpha.shape:
+        raise ValueError("mean_log_p must have the same shape as alpha_curr")
+    if np.any(~np.isfinite(alpha)) or np.any(alpha <= 0.0):
+        raise ValueError("alpha_curr must contain only positive finite values")
+    if np.any(~np.isfinite(mean_log_p)):
+        raise ValueError("mean_log_p must contain only finite values")
+    threshold = _positive_finite_threshold(alpha_threshold, "alpha_threshold")
+    budget = _positive_iteration_budget(max_iter, "max_iter")
+    alpha = alpha.copy()
     res = np.inf
     its_cnt = 0
-    while res > alpha_threshold:
-        dasum = digamma(asum)
+    objective_trace = [_dirichlet_alpha_objective(alpha, mean_log_p)]
+    while res > threshold and its_cnt < budget:
         alpha_old = alpha
-        alpha = digammainv(mean_log_p + dasum)
-        asum = alpha.sum()
-        res = np.abs(alpha - alpha_old).sum() / asum
+        candidate = np.asarray(digammainv(mean_log_p + digamma(alpha.sum())), dtype=np.float64)
+        if np.any(~np.isfinite(candidate)) or np.any(candidate <= 0.0):
+            diagnostics = LDAOptimizationDiagnostics(
+                algorithm="lda_alpha_fixed_point",
+                converged=False,
+                iterations=its_cnt + 1,
+                max_iterations=budget,
+                termination_reason="invalid_iterate",
+                final_residual=float("inf"),
+                objective_trace=tuple(objective_trace),
+            )
+            raise LDAConvergenceError(diagnostics)
+        candidate_objective = _dirichlet_alpha_objective(candidate, mean_log_p)
+        previous_objective = objective_trace[-1]
+        if candidate_objective < previous_objective - 1.0e-12 * max(1.0, abs(previous_objective)):
+            diagnostics = LDAOptimizationDiagnostics(
+                algorithm="lda_alpha_fixed_point",
+                converged=False,
+                iterations=its_cnt + 1,
+                max_iterations=budget,
+                termination_reason="objective_decreased",
+                final_residual=float(np.abs(candidate - alpha_old).sum() / candidate.sum()),
+                objective_trace=tuple(objective_trace + [candidate_objective]),
+            )
+            raise LDAConvergenceError(diagnostics)
+        alpha = candidate
+        objective_trace.append(candidate_objective)
+        res = float(np.abs(alpha - alpha_old).sum() / alpha.sum())
         its_cnt += 1
 
+    diagnostics = LDAOptimizationDiagnostics(
+        algorithm="lda_alpha_fixed_point",
+        converged=res <= threshold,
+        iterations=its_cnt,
+        max_iterations=budget,
+        termination_reason="converged" if res <= threshold else "iteration_budget_exhausted",
+        final_residual=res,
+        objective_trace=tuple(objective_trace),
+    )
+    if not diagnostics.converged:
+        raise LDAConvergenceError(diagnostics)
+    if return_diagnostics:
+        return alpha, its_cnt, diagnostics
     return alpha, its_cnt
+
+
+def _dirichlet_alpha_objective(alpha: np.ndarray, mean_log_p: np.ndarray) -> float:
+    """Per-document Dirichlet alpha objective, excluding alpha-independent terms."""
+    value = gammaln(alpha.sum()) - gammaln(alpha).sum() + np.dot(alpha - 1.0, mean_log_p)
+    return float(value)
 
 
 def mpe_update(x_mat: np.ndarray | None, y: np.ndarray, min_size: int = 2) -> tuple[np.ndarray, np.ndarray]:
@@ -1310,7 +1533,7 @@ def mpe_update(x_mat: np.ndarray | None, y: np.ndarray, min_size: int = 2) -> tu
     return x_mat, s
 
 
-def mpe(x0, f, eps: float) -> tuple[np.ndarray, int]:
+def mpe(x0, f, eps: float, *, max_iter: int = 1000) -> tuple[np.ndarray, int]:
     """Minimal polynomial extrapolation of the fixed point of f starting from x0.
 
     Args:
@@ -1322,17 +1545,30 @@ def mpe(x0, f, eps: float) -> tuple[np.ndarray, int]:
         Tuple of (extrapolated fixed point, number of iterations performed).
 
     """
-    x1 = f(x0)
+    threshold = _positive_finite_threshold(eps, "eps")
+    budget = _positive_iteration_budget(max_iter, "max_iter")
+    if budget < 3:
+        raise ValueError("max_iter must permit the three initial MPE iterates")
+    x0 = np.asarray(x0, dtype=np.float64)
+    if x0.ndim != 1 or x0.size == 0 or np.any(~np.isfinite(x0)):
+        raise ValueError("x0 must be a non-empty finite one-dimensional vector")
+    x1 = np.asarray(f(x0), dtype=np.float64)
     x2 = f(x1)
     x3 = f(x2)
+    if x1.shape != x0.shape or np.shape(x2) != x0.shape or np.shape(x3) != x0.shape:
+        raise ValueError("fixed-point map must preserve x0 geometry")
+    if np.any(~np.isfinite(x1)) or np.any(~np.isfinite(x2)) or np.any(~np.isfinite(x3)):
+        raise ValueError("fixed-point map produced a non-finite iterate")
     x_mat = np.asarray([x0, x1, x2, x3])
     s0 = x3
     s = s0
     res = np.abs(x3 - x2).sum()
-    its_cnt = 2
+    its_cnt = 3
 
-    while res > eps:
+    while res > threshold and its_cnt < budget:
         y = f(x_mat[-1, :])
+        if np.shape(y) != x0.shape or np.any(~np.isfinite(y)):
+            raise ValueError("fixed-point map produced an invalid iterate")
         dy = y - x_mat[-1, :]
         u_mat = (x_mat[1:, :] - x_mat[:-1, :]).T
         x2_mat = x_mat[1:, :].T
@@ -1345,6 +1581,17 @@ def mpe(x0, f, eps: float) -> tuple[np.ndarray, int]:
         x_mat = np.concatenate((x_mat, np.reshape(y, (1, -1))), axis=0)
         its_cnt += 1
 
+    if res > threshold:
+        raise LDAConvergenceError(
+            LDAOptimizationDiagnostics(
+                algorithm="lda_minimal_polynomial_extrapolation",
+                converged=False,
+                iterations=its_cnt,
+                max_iterations=budget,
+                termination_reason="iteration_budget_exhausted",
+                final_residual=float(res),
+            )
+        )
     return s, its_cnt
 
 
@@ -1357,10 +1604,10 @@ def alpha_seq_lambda(mean_log_p: float) -> Callable[[np.ndarray], float]:
     return next_alpha
 
 
-def find_alpha(current_alpha: np.ndarray, mlp: float, thresh: float):
+def find_alpha(current_alpha: np.ndarray, mlp: float, thresh: float, *, max_iter: int = 1000):
     """Find the alpha fixed point via MPE acceleration (see update_alpha for the plain iteration)."""
     f = alpha_seq_lambda(mlp)
-    return mpe(current_alpha, f, thresh)
+    return mpe(current_alpha, f, thresh, max_iter=max_iter)
 
 
 def seq_posterior2(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarray, Any | None, E0]):
@@ -1425,191 +1672,80 @@ def _lda_vi_fixed_point(
     per_topic_log_densities,
     gamma_threshold,
     max_gamma_iter,
+    *,
+    return_diagnostics=False,
 ):
-    """Shared per-document mean-field variational (gamma) fixed point for (Labeled)LDA.
+    """Run the validated per-document mean-field coordinate-ascent update."""
+    alpha = np.asarray(per_doc_alpha, dtype=np.float64)
+    idx = np.asarray(idx, dtype=np.intp)
+    counts = np.asarray(counts, dtype=np.float64)
+    scores = np.asarray(per_topic_log_densities, dtype=np.float64)
+    num_documents = alpha.shape[0]
+    if alpha.shape != (num_documents, num_topics):
+        raise ValueError("per-document LDA alpha has invalid geometry")
+    if np.any(~np.isfinite(alpha)) or np.any(alpha <= 0.0):
+        raise ValueError("per-document LDA alpha must be positive and finite")
+    if scores.shape != (idx.size, num_topics):
+        raise ValueError("per-topic LDA log densities have invalid geometry")
+    if np.any(np.isnan(scores)) or np.any(np.isposinf(scores)):
+        raise ValueError("LDA topics produced invalid log densities")
 
-    This is the Blei-Ng-Jordan per-document coordinate-ascent loop that both ``LDADistribution``
-    and ``LabeledLDADistribution`` run; the only model difference is the per-document Dirichlet
-    prior, supplied here as ``per_doc_alpha``:
-
-        * Plain LDA passes the single shared ``alpha`` broadcast to one identical row per document.
-        * Labeled LDA passes ``alphas_loc`` -- the per-document mean of its label rows.
-
-    Because the prior enters only additively (``gamma <- alpha + sum phi``), a 2-d per-document
-    array subsumes LDA's broadcast ``(1, num_topics)`` case exactly (identical rows stay identical
-    under the document-subsetting the loop performs as documents converge).
-
-    Args:
-        per_doc_alpha (np.ndarray): Per-document Dirichlet parameter (num_documents by num_topics).
-        idx (np.ndarray): Document id for each flattened value.
-        counts (np.ndarray): Flattened per-value counts.
-        gammas (Optional[np.ndarray]): Optional warm-start gammas (num_documents by num_topics).
-        num_topics (int): Number of topics.
-        per_topic_log_densities (np.ndarray): Per-value per-topic log-densities (num_samples by num_topics).
-        gamma_threshold (float): Relative-change convergence threshold for the gamma updates.
-        max_gamma_iter (int): Hard cap on the number of fixed-point iterations.
-
-    Returns:
-        Tuple of (log_density_gamma, final_gammas), where log_density_gamma has a row per flattened
-        value with the count-scaled expected topic responsibilities and final_gammas has a row per
-        document with the converged variational Dirichlet parameters.
-
-    """
-    num_documents = per_doc_alpha.shape[0]
-    num_samples = len(idx)
-
-    alphas_loc = per_doc_alpha
-    alphas_loc2 = alphas_loc.copy()
-
-    per_topic_log_densities2 = per_topic_log_densities.copy()
-    per_topic_log_densities2 -= np.max(per_topic_log_densities2, axis=1, keepdims=True)
-    np.exp(per_topic_log_densities2, out=per_topic_log_densities2)
-    per_topic_log_densities3 = per_topic_log_densities2.copy()
-
-    idx_full = np.repeat(np.reshape(idx, (-1, 1)), num_topics, axis=1)
-    idx_full *= num_topics
-    idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
+    possible_rows = np.any(np.isfinite(scores), axis=1)
+    impossible_documents = np.unique(idx[~possible_rows]).astype(int)
+    safe_scores = scores.copy()
+    safe_scores[~possible_rows, :] = 0.0
 
     if gammas is None:
-        document_gammas = alphas_loc + np.reshape(
-            np.bincount(idx_full.flat, minlength=num_documents * num_topics), (num_documents, num_topics)
-        ) / float(num_topics)
+        document_lengths = np.bincount(idx, weights=counts, minlength=num_documents)
+        document_gammas = alpha + document_lengths[:, None] / float(num_topics)
     else:
-        document_gammas = gammas.copy()
+        document_gammas = np.asarray(gammas, dtype=np.float64).copy()
 
-    document_gammas2 = np.zeros((num_documents, num_topics), dtype=float)
-    document_gammas3 = np.zeros((num_documents, num_topics), dtype=float)
-
-    gamma_sum = np.zeros((num_documents, 1), dtype=float)
-    gamma_asum = np.zeros((num_documents, 1), dtype=float)
-
-    posterior_sum_ll = np.zeros((num_samples, 1), dtype=float)
-
-    log_density_gamma = np.zeros(per_topic_log_densities.shape, dtype=float)
-    document_gamma_diff_loc = np.zeros((num_documents, num_topics), dtype=float)
-    log_density_gamma_loc = log_density_gamma.view()
-    posterior_sum_ll_loc = posterior_sum_ll.view()
-    gamma_asum_loc = gamma_asum.view()
-    gamma_sum_loc = gamma_sum.view()
-
-    ndoc = num_documents
-
-    rel_idx = idx.copy()
-    rel_counts = counts.copy()
-    rel_counts = np.reshape(rel_counts, (-1, 1))
-
-    rem_gammas_idx = np.arange(num_documents, dtype=int)
-    final_gammas = np.zeros((num_documents, num_topics), dtype=float)
-    final_gammas_idx = np.zeros(num_documents, dtype=int)
-    finished_count = 0
-    itr_cnt = 0
-    gamma_itr_cnt = np.zeros(num_documents, dtype=int)
-
-    digamma(document_gammas, out=document_gammas2)
-    temp = np.max(document_gammas2, axis=1, keepdims=True)
-    np.exp(document_gammas2 - temp, out=document_gammas3)
-
-    np.multiply(per_topic_log_densities2, document_gammas3[rel_idx, :], out=log_density_gamma_loc)
-    np.sum(log_density_gamma_loc, axis=1, keepdims=True, out=posterior_sum_ll_loc)
-    log_density_gamma_loc /= posterior_sum_ll_loc
-
-    while ndoc > 0 and itr_cnt < max_gamma_iter:
-        itr_cnt += 1
-
-        digamma(document_gammas, out=document_gammas2)
-        temp = np.max(document_gammas2, axis=1, keepdims=True)
-        document_gammas2 -= temp
-        np.exp(document_gammas2, out=document_gammas3)
-
-        np.multiply(per_topic_log_densities2, document_gammas3[rel_idx, :], out=log_density_gamma_loc)
-        np.sum(log_density_gamma_loc, axis=1, keepdims=True, out=posterior_sum_ll_loc)
-        posterior_sum_ll_loc /= rel_counts
-        log_density_gamma_loc /= posterior_sum_ll_loc
-
-        gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma_loc.flat, minlength=alphas_loc2.size)
-        gamma_updates = np.reshape(gamma_updates, (-1, num_topics))
-        gamma_updates += alphas_loc2
-
-        np.subtract(document_gammas, gamma_updates, out=document_gamma_diff_loc)
-        np.abs(document_gamma_diff_loc, out=document_gamma_diff_loc)
-        np.sum(document_gamma_diff_loc, axis=1, keepdims=True, out=gamma_asum_loc)
-        np.sum(gamma_updates, axis=1, keepdims=True, out=gamma_sum_loc)
-        gamma_asum_loc /= gamma_sum_loc
-
+    responsibilities = np.zeros((idx.size, num_topics), dtype=np.float64)
+    residual = 0.0
+    residual_trace: list[float] = []
+    converged = num_documents == 0
+    iterations = 0
+    for iterations in range(1, max_gamma_iter + 1):
+        log_weights = safe_scores + digamma(document_gammas)[idx, :]
+        if np.any(possible_rows):
+            normalizers = logsumexp(log_weights[possible_rows, :], axis=1, keepdims=True)
+            responsibilities[possible_rows, :] = (
+                np.exp(log_weights[possible_rows, :] - normalizers) * counts[possible_rows, None]
+            )
+        gamma_updates = alpha.copy()
+        for topic_index in range(num_topics):
+            gamma_updates[:, topic_index] += np.bincount(
+                idx,
+                weights=responsibilities[:, topic_index],
+                minlength=num_documents,
+            )
+        if num_documents:
+            relative = np.sum(np.abs(document_gammas - gamma_updates), axis=1) / np.sum(gamma_updates, axis=1)
+            residual = float(np.max(relative))
+        else:
+            residual = 0.0
+        residual_trace.append(residual)
         document_gammas = gamma_updates
+        if residual <= gamma_threshold:
+            converged = True
+            break
 
-        has_finished = np.flatnonzero(gamma_asum_loc.flat <= gamma_threshold)
-
-        if has_finished.size != 0:
-            final_gammas[finished_count : (finished_count + len(has_finished)), :] = document_gammas[has_finished, :]
-            final_gammas_idx[finished_count : (finished_count + len(has_finished))] = rem_gammas_idx[has_finished]
-            gamma_itr_cnt[finished_count : (finished_count + len(has_finished))] = itr_cnt
-
-            is_rem_bool = gamma_asum_loc.flat > gamma_threshold
-
-            is_rem_idx = np.nonzero(is_rem_bool)[0]
-            rem_gammas_idx = rem_gammas_idx[is_rem_bool]
-            finished_count += has_finished.size
-
-            temp = np.zeros(ndoc, dtype=bool)
-            temp[is_rem_bool] = True
-            temp2 = np.arange(ndoc, dtype=int)
-            temp2[temp] = np.arange(is_rem_idx.size, dtype=int)
-
-            keep = temp[rel_idx]
-            rel_idx = temp2[rel_idx[temp[rel_idx]]]
-
-            idx_full = np.repeat(np.reshape(rel_idx, (-1, 1)), num_topics, axis=1)
-            idx_full *= num_topics
-            idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
-
-            per_topic_log_densities2 = per_topic_log_densities2[keep, :]
-            rel_counts = rel_counts[keep]
-            nrec = per_topic_log_densities2.shape[0]
-            ndoc = is_rem_idx.size
-
-            log_density_gamma_loc = log_density_gamma[:nrec, :]
-            posterior_sum_ll_loc = posterior_sum_ll[:nrec, :]
-            gamma_sum_loc = gamma_sum[:ndoc, :]
-            gamma_asum_loc = gamma_asum[:ndoc, :]
-            document_gamma_diff_loc = document_gamma_diff_loc[:ndoc, :]
-
-            document_gammas = document_gammas[is_rem_idx, :]
-            document_gammas2 = document_gammas2[:ndoc, :]
-            document_gammas3 = document_gammas3[:ndoc, :]
-            alphas_loc2 = alphas_loc2[is_rem_idx, :]
-
-    # Cap reached while some documents were still iterating: their gammas are already converged to
-    # far below what EM needs (geometric convergence), so flush the current values as the result.
-    if ndoc > 0:
-        final_gammas[finished_count : finished_count + ndoc, :] = document_gammas
-        final_gammas_idx[finished_count : finished_count + ndoc] = rem_gammas_idx
-        gamma_itr_cnt[finished_count : finished_count + ndoc] = itr_cnt
-        finished_count += ndoc
-
-    sidx = np.argsort(final_gammas_idx)
-    final_gammas = final_gammas[sidx, :]
-    gamma_itr_cnt = gamma_itr_cnt[sidx]
-
-    digamma_gammas = digamma(final_gammas)
-    temp2 = np.max(digamma_gammas, axis=1, keepdims=True)
-    temp3 = np.exp(digamma_gammas - temp2)
-
-    np.multiply(per_topic_log_densities3, temp3[idx, :], out=log_density_gamma)
-    np.sum(log_density_gamma, axis=1, keepdims=True, out=posterior_sum_ll)
-    posterior_sum_ll /= np.reshape(counts, (-1, 1))
-    log_density_gamma /= posterior_sum_ll
-
-    idx_full = np.repeat(np.reshape(idx, (-1, 1)), num_topics, axis=1)
-    idx_full *= num_topics
-    idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
-
-    gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma.flat, minlength=alphas_loc.size)
-    gamma_updates = np.reshape(gamma_updates, (-1, num_topics))
-    gamma_updates += alphas_loc
-    final_gammas = gamma_updates
-
-    return log_density_gamma, final_gammas
+    diagnostics = LDAOptimizationDiagnostics(
+        algorithm="lda_document_coordinate_ascent",
+        converged=converged,
+        iterations=iterations,
+        max_iterations=max_gamma_iter,
+        termination_reason="converged" if converged else "iteration_budget_exhausted",
+        final_residual=residual,
+        residual_trace=tuple(residual_trace),
+        impossible_documents=tuple(impossible_documents.tolist()),
+    )
+    if not converged:
+        raise LDAConvergenceError(diagnostics)
+    if return_diagnostics:
+        return responsibilities, document_gammas, diagnostics
+    return responsibilities, document_gammas
 
 
 def _lda_elbo_from_gamma(
@@ -1640,15 +1776,27 @@ def _lda_elbo_from_gamma(
     idx_full *= num_topics
     idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
 
-    ldg = log_density_gamma.copy()
-    dg = document_gammas.copy()
-    ldg[np.bitwise_or(np.isnan(ldg), np.isinf(ldg))] = sys.float_info.min
-    ldg[ldg <= 0] = sys.float_info.min
-    dg[np.bitwise_or(np.isnan(dg), np.isinf(dg))] = sys.float_info.min
+    ldg = np.asarray(log_density_gamma, dtype=np.float64)
+    dg = np.asarray(document_gammas, dtype=np.float64)
+    topic_scores = np.asarray(per_topic_log_densities, dtype=np.float64)
+    if np.any(np.isnan(topic_scores)) or np.any(np.isposinf(topic_scores)):
+        raise ValueError("LDA topics produced invalid log densities")
+    if np.any(~np.isfinite(dg)) or np.any(dg <= 0.0):
+        raise ValueError("LDA posterior produced invalid document gammas")
+    impossible_rows = ~np.any(np.isfinite(topic_scores), axis=1)
+    impossible_documents = np.unique(idx[impossible_rows])
+    safe_topic_scores = topic_scores.copy()
+    safe_topic_scores[impossible_rows, :] = 0.0
 
     elob0 = digamma(dg) - digamma(np.sum(dg, axis=1, keepdims=True))
     elob1 = elob0[idx, :]
-    elob2 = ldg * (elob1 + per_topic_log_densities - np.log(ldg) + np.log(np.reshape(counts, (-1, 1))))
+    elob2 = np.zeros_like(ldg)
+    positive = ldg > 0.0
+    elob2[positive] = ldg[positive] * (
+        (elob1 + safe_topic_scores)[positive]
+        - np.log(ldg[positive])
+        + np.broadcast_to(np.log(np.reshape(counts, (-1, 1))), ldg.shape)[positive]
+    )
     elob3 = np.sum(elob0 * ((per_doc_alpha - 1.0) - (dg - 1.0)), axis=1)
     elob4 = np.bincount(idx_full.flat, weights=elob2.flat, minlength=document_gammas.size)
     elob5 = np.sum(np.reshape(elob4, (-1, num_topics)), axis=1)
@@ -1658,7 +1806,32 @@ def _lda_elbo_from_gamma(
     else:
         elob7 = gammaln(per_doc_alpha.sum(axis=1)) - gammaln(per_doc_alpha).sum(axis=1)
 
-    return elob3 + elob5 + elob6 + elob7
+    result = np.asarray(elob3 + elob5 + elob6 + elob7, dtype=np.float64)
+    result[impossible_documents] = -np.inf
+    return result
+
+
+def seq_posterior_with_diagnostics(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarray, Any | None, E0]):
+    """Return the LDA variational posterior and its convergence record."""
+    num_documents, idx, counts, gammas, enc_data = _validate_lda_encoded(x, estimate.n_topics)
+    per_topic_log_densities = np.asarray(
+        [topic.seq_log_density(enc_data) for topic in estimate.topics], dtype=np.float64
+    ).transpose()
+    if per_topic_log_densities.shape != (idx.size, estimate.n_topics):
+        raise ValueError("LDA topic scorers returned arrays with invalid geometry")
+    per_doc_alpha = np.repeat(estimate.alpha[None, :], num_documents, axis=0)
+    responsibilities, final_gammas, diagnostics = _lda_vi_fixed_point(
+        per_doc_alpha,
+        idx,
+        counts,
+        gammas,
+        estimate.n_topics,
+        per_topic_log_densities,
+        estimate.gamma_threshold,
+        estimate.max_gamma_iter,
+        return_diagnostics=True,
+    )
+    return responsibilities, final_gammas, per_topic_log_densities, diagnostics
 
 
 def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarray, Any | None, E0]):
@@ -1675,32 +1848,8 @@ def seq_posterior(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarra
         per_topic_log_densities has a row per flattened value with each topic's log-density.
 
     """
-    alpha = estimate.alpha
-    topics = estimate.topics
-    gamma_threshold = estimate.gamma_threshold
-
-    num_documents, idx, counts, gammas, enc_data = x
-
-    num_topics = len(topics)
-
-    per_topic_log_densities = np.asarray([topics[i].seq_log_density(enc_data) for i in range(num_topics)]).transpose()
-
-    # Plain LDA's single shared alpha as one identical row per document (the degenerate case of the
-    # labeled-LDA per-document prior); the shared fixed point subsets these rows as documents converge.
-    per_doc_alpha = np.repeat(np.reshape(alpha, (1, num_topics)), num_documents, axis=0)
-
-    log_density_gamma, final_gammas = _lda_vi_fixed_point(
-        per_doc_alpha,
-        idx,
-        counts,
-        gammas,
-        num_topics,
-        per_topic_log_densities,
-        gamma_threshold,
-        getattr(estimate, "max_gamma_iter", 100),
-    )
-
-    return log_density_gamma, final_gammas, per_topic_log_densities
+    responsibilities, final_gammas, per_topic_log_densities, _ = seq_posterior_with_diagnostics(estimate, x)
+    return responsibilities, final_gammas, per_topic_log_densities
 
 
 def _register_lda_engine_kernel():
