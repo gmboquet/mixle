@@ -33,21 +33,25 @@ meaningful quantization is wanted.
 Because the M-step rounds probabilities to the theta^k grid, near-symmetric states produced by a
 random initialization can round onto (nearly) identical grid points and leave EM at an exact fixed
 point (dense HMM EM escapes such saddles by amplifying tiny count asymmetries, which quantization
-erases). The raw expected counts still carry those asymmetries, so by default the estimator checks
-after each M-step for state pairs whose quantized log-probabilities differ by less than split_nats
-everywhere and pushes them split_nats apart along the strongest raw-count asymmetry
-(split_collapsed=True), restoring a hill-climbing direction for the next E-step; an unwarranted
-split is simply rounded back by the next M-step. Random restarts
+erases). The raw expected counts still carry those asymmetries, so the estimator can check after
+each M-step for state pairs whose quantized log-probabilities differ by less than split_nats
+everywhere and push them split_nats apart along the strongest raw-count asymmetry
+(split_collapsed=True). Because this symmetry-breaking step is intentionally non-monotone, it is
+opt-in. Random restarts
 (e.g. mixle.inference.estimation.best_of) remain useful for multimodality, as with any HMM.
 
 If included, the length of the sequences is modeled through a length distribution with support on
 non-negative integers.
 """
 
+from __future__ import annotations
+
 import heapq
 import itertools
 import math
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, replace
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -70,6 +74,115 @@ from mixle.stats.univariate.discrete.categorical import CategoricalDistribution,
 from mixle.utils.optional_deps import HAS_NUMBA
 
 STRUCTURAL_ZERO = -1
+
+
+@dataclass(frozen=True)
+class QuantizedHMMFitDiagnostics:
+    """Immutable convergence and provenance record for one quantized M-step."""
+
+    converged: bool
+    fixed_theta: bool
+    theta: float
+    objective: float
+    iterations_per_start: tuple[int, ...]
+    converged_starts: tuple[bool, ...]
+    termination_reasons: tuple[str, ...]
+    selected_start: int
+    selected_start_converged: bool
+    scalar_optimizer_evaluations: int
+    split_count: int
+    schema_version: int = 1
+    algorithm: str = "multistart_coordinate_ascent"
+
+
+class QuantizedHMMOptimizationError(RuntimeError):
+    """Raised when the quantized coordinate or scalar optimization fails."""
+
+    def __init__(self, message: str, diagnostics: QuantizedHMMFitDiagnostics) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
+
+def _positive_exact_integer(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a positive exact integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+
+def _nonnegative_finite(value: Any, name: str, *, allow_none: bool = False) -> float | None:
+    if value is None and allow_none:
+        return None
+    if isinstance(value, (bool, np.bool_, str, bytes)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite non-negative real scalar")
+    result = float(value)
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative")
+    return result
+
+
+def _open_unit_interval(value: Any, name: str) -> float:
+    result = _nonnegative_finite(value, name)
+    if not 0.0 < result < 1.0:
+        raise ValueError(f"{name} must lie strictly between zero and one")
+    return result
+
+
+def _exact_exponents(value: Any, name: str, *, ndim: int) -> np.ndarray:
+    try:
+        raw = np.asarray(value, dtype=object)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a rectangular exact-integer array") from exc
+    if raw.ndim != ndim or any(size <= 0 for size in raw.shape):
+        raise ValueError(f"{name} must be a nonempty {ndim}-dimensional array")
+    result = np.empty(raw.shape, dtype=np.int64)
+    bounds = np.iinfo(np.int64)
+    for index, item in np.ndenumerate(raw):
+        if isinstance(item, (bool, np.bool_)) or not isinstance(item, Integral):
+            raise TypeError(f"{name} must contain exact non-boolean integers")
+        item = int(item)
+        if item < bounds.min or item > bounds.max:
+            raise ValueError(f"{name} contains an integer outside int64 range")
+        if item < 0 and item != STRUCTURAL_ZERO:
+            raise ValueError(f"{name} permits only non-negative exponents or the -1 structural-zero sentinel")
+        result[index] = item
+    return result
+
+
+def _validated_levels(levels: Any, name: str = "levels") -> list[Any]:
+    if isinstance(levels, (str, bytes)) or not isinstance(levels, Sequence):
+        raise TypeError(f"{name} must be a nonempty sequence of unique hashable values")
+    values = list(levels)
+    if not values:
+        raise ValueError(f"{name} must be nonempty")
+    seen = set()
+    for value in values:
+        try:
+            if isinstance(value, Real) and not np.isfinite(value):
+                raise ValueError(f"{name} cannot contain non-finite numeric values")
+            if value in seen:
+                raise ValueError(f"{name} contains duplicate or equality-colliding values")
+            seen.add(value)
+        except TypeError as exc:
+            raise TypeError(f"{name} values must be hashable") from exc
+    return values
+
+
+def _count_array(value: Any, shape: tuple[int, ...], name: str) -> np.ndarray:
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a rectangular real-valued array") from exc
+    if raw.dtype.kind in {"b", "U", "S", "O"}:
+        raise TypeError(f"{name} must contain real non-boolean values")
+    result = np.asarray(value, dtype=np.float64)
+    if result.shape != shape:
+        raise ValueError(f"{name} must have shape {shape}")
+    if np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError(f"{name} must contain finite non-negative counts")
+    return result.copy()
 
 
 def _exponent_log_probs(exponents: np.ndarray, log_theta: float) -> np.ndarray:
@@ -157,7 +270,7 @@ def _quantized_expected_ll(count_blocks: Sequence[np.ndarray], exp_blocks: Seque
 
 def _optimize_theta(
     count_blocks: Sequence[np.ndarray], exp_blocks: Sequence[np.ndarray], current_theta: float
-) -> float:
+) -> tuple[float, int]:
     """Maximize the expected complete-data log-likelihood over theta for fixed exponents.
 
     Args:
@@ -171,18 +284,20 @@ def _optimize_theta(
 
     """
     if all(np.all(k[k >= 0] == 0) for k in exp_blocks):
-        return current_theta
+        return current_theta, 0
 
     res = minimize_scalar(
         lambda t: -_quantized_expected_ll(count_blocks, exp_blocks, t), bounds=(1.0e-6, 1.0 - 1.0e-6), method="bounded"
     )
 
-    return float(res.x)
+    if not bool(res.success) or not np.isfinite(res.x) or not np.isfinite(res.fun) or not 0.0 < float(res.x) < 1.0:
+        raise RuntimeError(f"bounded theta optimization failed: {res.message}")
+    return float(res.x), int(res.nfev)
 
 
 def _fit_quantized_parameters(
     count_blocks: Sequence[np.ndarray], fixed_theta: float | None, k_max: int | None, max_its: int
-) -> tuple[float, list[np.ndarray]]:
+) -> tuple[float, list[np.ndarray], QuantizedHMMFitDiagnostics]:
     """Coordinate ascent over (theta, integer exponents) for the quantized M-step.
 
     Alternates exponent quantization at the current theta with the 1-d theta maximization, from
@@ -202,29 +317,118 @@ def _fit_quantized_parameters(
     """
     if fixed_theta is not None:
         log_theta = math.log(fixed_theta)
-        return fixed_theta, [_quantize_counts(u, log_theta, k_max) for u in count_blocks]
+        exponents = [_quantize_counts(u, log_theta, k_max) for u in count_blocks]
+        objective = _quantized_expected_ll(count_blocks, exponents, fixed_theta)
+        diagnostics = QuantizedHMMFitDiagnostics(
+            converged=True,
+            fixed_theta=True,
+            theta=fixed_theta,
+            objective=objective,
+            iterations_per_start=(1,),
+            converged_starts=(True,),
+            termination_reasons=("fixed_theta",),
+            selected_start=0,
+            selected_start_converged=True,
+            scalar_optimizer_evaluations=0,
+            split_count=0,
+        )
+        return fixed_theta, exponents, diagnostics
 
     best_ll = -np.inf
     best: tuple[float, list[np.ndarray]] | None = None
+    iterations_per_start: list[int] = []
+    converged_starts: list[bool] = []
+    termination_reasons: list[str] = []
+    scalar_evaluations = 0
+    best_start = -1
 
-    for theta0 in (0.25, 0.5, 0.75, 0.9):
+    for start, theta0 in enumerate((0.25, 0.5, 0.75, 0.9)):
         theta = theta0
         prev_exps: list[np.ndarray] | None = None
+        converged = False
+        iterations = 0
+        reason = "iteration_budget"
+        seen_exponents: dict[tuple[tuple[tuple[int, ...], bytes], ...], int] = {}
 
-        for _ in range(max_its):
+        for iterations in range(1, max_its + 1):
             exps = [_quantize_counts(u, math.log(theta), k_max) for u in count_blocks]
-            theta = _optimize_theta(count_blocks, exps, theta)
+            try:
+                theta, evaluations = _optimize_theta(count_blocks, exps, theta)
+            except RuntimeError as exc:
+                diagnostics = QuantizedHMMFitDiagnostics(
+                    converged=False,
+                    fixed_theta=False,
+                    theta=theta,
+                    objective=best_ll,
+                    iterations_per_start=tuple(iterations_per_start + [iterations]),
+                    converged_starts=tuple(converged_starts + [False]),
+                    termination_reasons=tuple(termination_reasons + ["scalar_optimizer_failure"]),
+                    selected_start=best_start,
+                    selected_start_converged=False,
+                    scalar_optimizer_evaluations=scalar_evaluations,
+                    split_count=0,
+                )
+                raise QuantizedHMMOptimizationError(str(exc), diagnostics) from exc
+            scalar_evaluations += evaluations
 
             ll = _quantized_expected_ll(count_blocks, exps, theta)
+            if not np.isfinite(ll):
+                diagnostics = QuantizedHMMFitDiagnostics(
+                    converged=False,
+                    fixed_theta=False,
+                    theta=theta,
+                    objective=ll,
+                    iterations_per_start=tuple(iterations_per_start + [iterations]),
+                    converged_starts=tuple(converged_starts + [False]),
+                    termination_reasons=tuple(termination_reasons + ["non_finite_objective"]),
+                    selected_start=best_start,
+                    selected_start_converged=False,
+                    scalar_optimizer_evaluations=scalar_evaluations,
+                    split_count=0,
+                )
+                raise QuantizedHMMOptimizationError(
+                    "quantized coordinate ascent produced a non-finite objective",
+                    diagnostics,
+                )
             if ll > best_ll:
                 best_ll = ll
-                best = (theta, exps)
+                best = (theta, [value.copy() for value in exps])
+                best_start = start
 
             if prev_exps is not None and all(np.array_equal(u, v) for u, v in zip(prev_exps, exps)):
+                converged = True
+                reason = "fixed_point"
                 break
-            prev_exps = exps
+            signature = tuple((value.shape, value.tobytes()) for value in exps)
+            if signature in seen_exponents:
+                reason = "cycle"
+                break
+            seen_exponents[signature] = iterations
+            prev_exps = [value.copy() for value in exps]
+        iterations_per_start.append(iterations)
+        converged_starts.append(converged)
+        termination_reasons.append(reason)
 
-    return best
+    selected_start_converged = best_start >= 0 and converged_starts[best_start]
+    diagnostics = QuantizedHMMFitDiagnostics(
+        converged=selected_start_converged,
+        fixed_theta=False,
+        theta=float("nan") if best is None else best[0],
+        objective=best_ll,
+        iterations_per_start=tuple(iterations_per_start),
+        converged_starts=tuple(converged_starts),
+        termination_reasons=tuple(termination_reasons),
+        selected_start=best_start,
+        selected_start_converged=selected_start_converged,
+        scalar_optimizer_evaluations=scalar_evaluations,
+        split_count=0,
+    )
+    if best is None:
+        raise QuantizedHMMOptimizationError(
+            "quantized coordinate ascent did not produce a finite candidate",
+            diagnostics,
+        )
+    return best[0], best[1], diagnostics
 
 
 def _swap_perm(num_states: int, i: int, j: int) -> np.ndarray:
@@ -311,7 +515,6 @@ def _split_collapsed_pair(
 
     """
     perm = _swap_perm(trans_exp.shape[0], i, j)
-
     # cells: (signal, exponents, (row_i, col_i), (row_j, col_j)); signal > 0 means state i is
     # relatively more likely there than state j under the raw counts
     cells = []
@@ -433,6 +636,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
         terminal_values: set | None = None,
         use_numba: bool | None = None,
         terminal_states: set[int] | Sequence[int] | None = None,
+        fit_diagnostics: QuantizedHMMFitDiagnostics | None = None,
     ) -> None:
         """QuantizedHiddenMarkovModelDistribution: an HMM whose probabilities are powers of theta.
 
@@ -478,19 +682,25 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
         sequence encoding are inherited unchanged.
 
         """
-        if not (0.0 < theta < 1.0):
-            raise ValueError("QuantizedHiddenMarkovModelDistribution requires theta in (0, 1).")
+        theta = _open_unit_interval(theta, "theta")
         if init_mode not in ("quantized", "stationary"):
             raise ValueError("init_mode must be 'quantized' or 'stationary'.")
+        if k_max is not None:
+            k_max = _positive_exact_integer(k_max, "k_max")
+        if use_numba is not None and not isinstance(use_numba, (bool, np.bool_)):
+            raise TypeError("use_numba must be boolean or None")
+        if fit_diagnostics is not None and not isinstance(fit_diagnostics, QuantizedHMMFitDiagnostics):
+            raise TypeError("fit_diagnostics must be QuantizedHMMFitDiagnostics or None")
 
-        self.theta = float(theta)
+        self.theta = theta
         self.log_theta = math.log(self.theta)
-        self.levels = list(levels)
+        self.levels = _validated_levels(levels)
         self.init_mode = init_mode
         self.k_max = k_max
+        self.fit_diagnostics = fit_diagnostics
 
-        self.transition_exponents = np.asarray(transition_exponents, dtype=np.int64)
-        self.emission_exponents = np.asarray(emission_exponents, dtype=np.int64)
+        self.transition_exponents = _exact_exponents(transition_exponents, "transition_exponents", ndim=2)
+        self.emission_exponents = _exact_exponents(emission_exponents, "emission_exponents", ndim=2)
 
         num_states = self.transition_exponents.shape[0]
         num_levels = len(self.levels)
@@ -499,6 +709,10 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
             raise ValueError("transition_exponents must be a square matrix.")
         if self.emission_exponents.shape != (num_states, num_levels):
             raise ValueError("emission_exponents must have shape (n_states, len(levels)).")
+        if self.k_max is not None and (
+            np.any(self.transition_exponents > self.k_max) or np.any(self.emission_exponents > self.k_max)
+        ):
+            raise ValueError("finite exponents cannot exceed k_max")
         if not np.all(np.any(self.transition_exponents >= 0, axis=1)):
             raise ValueError("Each transition_exponents row needs a non-negative entry.")
         if not np.all(np.any(self.emission_exponents >= 0, axis=1)):
@@ -510,11 +724,17 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
         if init_mode == "quantized":
             if initial_exponents is None:
                 raise ValueError("initial_exponents is required when init_mode='quantized'.")
-            self.initial_exponents = np.reshape(np.asarray(initial_exponents, dtype=np.int64), num_states)
+            self.initial_exponents = _exact_exponents(initial_exponents, "initial_exponents", ndim=1)
+            if self.initial_exponents.shape != (num_states,):
+                raise ValueError("initial_exponents must have one entry per state")
+            if self.k_max is not None and np.any(self.initial_exponents > self.k_max):
+                raise ValueError("finite initial exponents cannot exceed k_max")
             if not np.any(self.initial_exponents >= 0):
                 raise ValueError("initial_exponents needs a non-negative entry.")
             w = np.exp(_exponent_log_probs(self.initial_exponents[None, :], self.log_theta))[0]
         else:
+            if initial_exponents is not None:
+                raise ValueError("initial_exponents must be omitted when init_mode='stationary'")
             self.initial_exponents = None
             w = stationary_distribution(transitions)
 
@@ -565,7 +785,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
         emission_exponents: Sequence[Sequence[int]] | np.ndarray,
         initial_exponents: Sequence[int] | np.ndarray | None = None,
         **kwargs: Any,
-    ) -> "QuantizedHiddenMarkovModelDistribution":
+    ) -> QuantizedHiddenMarkovModelDistribution:
         """Construct a left-to-right (upper-triangular) quantized HMM.
 
         ``transition_exponents`` must be upper triangular: every entry strictly below the diagonal is a
@@ -601,7 +821,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
             return HiddenMarkovFisherView(self)
         return super().to_fisher(**kwargs)
 
-    def estimator(self, pseudo_count: float | None = None) -> "QuantizedHiddenMarkovEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> QuantizedHiddenMarkovEstimator:
         """Return an estimator matching this quantized HMM configuration.
 
         Args:
@@ -729,7 +949,7 @@ class QuantizedHiddenMarkovModelEnumerator(DistributionEnumerator):
         counter = itertools.count()
         heap = []  # entries: (-score, counter, kind, payload)
 
-        def push_candidate(parent: "_QuantizedHmmPrefix", rank: int) -> None:
+        def push_candidate(parent: _QuantizedHmmPrefix, rank: int) -> None:
             if rank >= len(self._pool):
                 return
             pool_lp = self._pool[rank][1]
@@ -783,7 +1003,7 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         use_numba: bool | None = None,
         max_quant_its: int = 50,
-        split_collapsed: bool = True,
+        split_collapsed: bool = False,
         split_nats: float = math.log(2.0),
     ) -> None:
         """QuantizedHiddenMarkovEstimator for estimating QuantizedHiddenMarkovModelDistribution.
@@ -820,12 +1040,10 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
                 the M-step.
             split_collapsed (bool): After each M-step, check for state pairs whose quantized
                 parameters differ by less than split_nats everywhere and push them apart along the
-                strongest raw expected-count asymmetry. Quantization otherwise rounds
-                nearly-symmetric states onto (nearly) identical grid points, leaving EM at an
-                exact fixed point that the raw counts say is escapable; an unwarranted split is
-                rounded back by the next M-step.
-            split_nats (float): Collapse tolerance and target separation (in nats of per-cell
-                log-probability difference) for split_collapsed. Defaults to log(2).
+                strongest raw expected-count asymmetry. This non-monotone escape heuristic is
+                disabled by default and must be explicitly requested.
+            split_nats (float): Collapse tolerance and target separation in nats of per-cell
+                log-probability difference for split_collapsed. Defaults to log(2).
 
         Attributes:
             num_states (int): Number of hidden states.
@@ -842,31 +1060,36 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
             max_quant_its (int): Maximum coordinate-ascent iterations per starting point.
             split_collapsed (bool): If True, separate nearly-collapsed state pairs after each
                 M-step.
-            split_nats (float): Collapse tolerance and target separation in nats.
+            split_nats (float): Target split separation in nats.
 
         """
         if init_mode not in ("quantized", "stationary"):
             raise ValueError("init_mode must be 'quantized' or 'stationary'.")
-        if fixed_theta is not None and not (0.0 < fixed_theta < 1.0):
-            raise ValueError("fixed_theta must be in (0, 1).")
-        if k_max is not None and k_max < 1:
-            raise ValueError("k_max must be a positive integer.")
-
-        self.num_states = num_states
-        self.levels = None if levels is None else list(levels)
-        self.pseudo_count = pseudo_count
-        self.k_max = k_max
-        self.fixed_theta = fixed_theta
+        self.num_states = _positive_exact_integer(num_states, "num_states")
+        self.levels = None if levels is None else _validated_levels(levels, "levels")
+        self.pseudo_count = _nonnegative_finite(pseudo_count, "pseudo_count", allow_none=True)
+        self.k_max = None if k_max is None else _positive_exact_integer(k_max, "k_max")
+        self.fixed_theta = None if fixed_theta is None else _open_unit_interval(fixed_theta, "fixed_theta")
         self.init_mode = init_mode
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.name = name
         self.keys = keys if keys is not None else (None, None, None)
-        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
-        self.max_quant_its = max_quant_its
-        self.split_collapsed = split_collapsed
-        self.split_nats = split_nats
+        if not isinstance(self.keys, tuple) or len(self.keys) != 3:
+            raise ValueError("keys must be a three-item tuple or None")
+        if use_numba is not None and not isinstance(use_numba, (bool, np.bool_)):
+            raise TypeError("use_numba must be boolean or None")
+        self.use_numba = HAS_NUMBA if use_numba is None else bool(use_numba)
+        self.max_quant_its = _positive_exact_integer(max_quant_its, "max_quant_its")
+        if self.max_quant_its < 2 and self.fixed_theta is None:
+            raise ValueError("max_quant_its must be at least two when theta is optimized")
+        if not isinstance(split_collapsed, (bool, np.bool_)):
+            raise TypeError("split_collapsed must be boolean")
+        self.split_collapsed = bool(split_collapsed)
+        self.split_nats = _nonnegative_finite(split_nats, "split_nats")
+        if self.split_nats <= 0.0:
+            raise ValueError("split_nats must be positive")
 
-    def accumulator_factory(self) -> "HiddenMarkovAccumulatorFactory":
+    def accumulator_factory(self) -> HiddenMarkovAccumulatorFactory:
         """Returns a HiddenMarkovAccumulatorFactory with categorical emission accumulators."""
         est_factories = [CategoricalEstimator().accumulator_factory() for _ in range(self.num_states)]
         len_factory = self.len_estimator.accumulator_factory()
@@ -877,7 +1100,7 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
         self,
         nobs: float | None,
         suff_stat: tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[dict[Any, float]], Any | None],
-    ) -> "QuantizedHiddenMarkovModelDistribution":
+    ) -> QuantizedHiddenMarkovModelDistribution:
         """Estimate a QuantizedHiddenMarkovModelDistribution from Baum-Welch expected counts.
 
         Sufficient statistics in arg 'suff_stat' are the HiddenMarkovAccumulator value:
@@ -896,32 +1119,76 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
             QuantizedHiddenMarkovModelDistribution object.
 
         """
+        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 6:
+            raise ValueError("quantized HMM sufficient statistics must be a six-item tuple")
         num_states, init_counts, state_counts, trans_counts, topic_ss, len_ss = suff_stat
+        num_states = _positive_exact_integer(num_states, "sufficient-statistic num_states")
+        if num_states != self.num_states:
+            raise ValueError("sufficient-statistic num_states does not match the estimator")
+        init_counts = _count_array(init_counts, (num_states,), "initial counts")
+        state_counts = _count_array(state_counts, (num_states,), "state counts")
+        trans_counts = _count_array(trans_counts, (num_states, num_states), "transition counts")
+        if not isinstance(topic_ss, Sequence) or isinstance(topic_ss, (str, bytes)):
+            raise TypeError("emission statistics must be a sequence of mappings")
+        if len(topic_ss) != num_states:
+            raise ValueError("emission statistics must have one mapping per state")
+        validated_topics: list[dict[Any, float]] = []
+        for state, counts_map in enumerate(topic_ss):
+            if not isinstance(counts_map, dict):
+                raise TypeError("each emission statistic must be a mapping")
+            validated_map = {}
+            for value, count in counts_map.items():
+                try:
+                    hash(value)
+                except TypeError as exc:
+                    raise TypeError("emission levels must be hashable") from exc
+                count = _nonnegative_finite(count, f"emission count for state {state}")
+                validated_map[value] = count
+            expected = float(sum(validated_map.values()))
+            if not np.isclose(
+                expected,
+                state_counts[state],
+                rtol=1.0e-9,
+                atol=1.0e-9,
+            ):
+                raise ValueError("per-state emission counts must equal the corresponding state count")
+            validated_topics.append(validated_map)
+        occupancy = float(state_counts.sum())
+        accounted = float(init_counts.sum() + trans_counts.sum())
+        if not np.isclose(occupancy, accounted, rtol=1.0e-9, atol=1.0e-9):
+            raise ValueError("state counts must equal initial plus transition responsibility mass")
+        if nobs is not None:
+            _nonnegative_finite(nobs, "nobs")
 
         len_dist = self.len_estimator.estimate(nobs, len_ss)
 
-        vocab = set() if self.levels is None else set(self.levels)
-        for state_counts_map in topic_ss:
-            vocab.update(state_counts_map.keys())
+        levels = [] if self.levels is None else list(self.levels)
+        known_levels = set(levels)
+        observed_levels = set()
+        for state_counts_map in validated_topics:
+            observed_levels.update(state_counts_map)
+        additions = [value for value in observed_levels if value not in known_levels]
+        additions.sort(
+            key=lambda value: (
+                type(value).__module__,
+                type(value).__qualname__,
+                repr(value),
+            )
+        )
+        levels.extend(additions)
+        levels = _validated_levels(levels)
 
-        if len(vocab) == 0:
+        if len(levels) == 0:
             raise ValueError(
                 "QuantizedHiddenMarkovEstimator.estimate() requires observed emission values or estimator levels."
             )
 
-        try:
-            levels = sorted(vocab)
-        except TypeError:
-            levels = sorted(vocab, key=str)
         level_index = {v: i for i, v in enumerate(levels)}
 
         emit_counts = np.zeros((num_states, len(levels)), dtype=np.float64)
-        for i, state_counts_map in enumerate(topic_ss):
+        for i, state_counts_map in enumerate(validated_topics):
             for v, cnt in state_counts_map.items():
                 emit_counts[i, level_index[v]] += cnt
-
-        init_counts = np.asarray(init_counts, dtype=np.float64).copy()
-        trans_counts = np.asarray(trans_counts, dtype=np.float64).copy()
 
         if self.pseudo_count is not None and self.pseudo_count > 0:
             init_counts += self.pseudo_count
@@ -932,12 +1199,16 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
         if self.init_mode == "quantized":
             count_blocks.append(init_counts[None, :])
 
-        theta, exp_blocks = _fit_quantized_parameters(count_blocks, self.fixed_theta, self.k_max, self.max_quant_its)
+        theta, exp_blocks, diagnostics = _fit_quantized_parameters(
+            count_blocks, self.fixed_theta, self.k_max, self.max_quant_its
+        )
 
+        split_count = 0
         if self.split_collapsed and num_states > 1:
-            _split_collapsed_states(
+            split_count = _split_collapsed_states(
                 exp_blocks[0], exp_blocks[1], trans_counts, emit_counts, self.k_max, math.log(theta), self.split_nats
             )
+        diagnostics = replace(diagnostics, split_count=split_count)
 
         initial_exponents = exp_blocks[2][0, :] if self.init_mode == "quantized" else None
 
@@ -952,6 +1223,7 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
             len_dist=len_dist,
             name=self.name,
             use_numba=self.use_numba,
+            fit_diagnostics=diagnostics,
         )
 
 
