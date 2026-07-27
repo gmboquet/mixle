@@ -79,25 +79,16 @@ class SparseScoreTest(unittest.TestCase):
         self.assertGreaterEqual(widths[1] + 1e-12, widths[2])
         self.assertAlmostEqual(widths[2], 0.0, places=9)  # exact at full k
 
-    def test_bracket_holds_with_default_value_dominant_categorical(self):
-        # comp0's default_value (0.99) dwarfs its in-pmap probabilities (0.005 each), so its true
-        # peak log-density (achieved by labels outside its pmap) previously wasn't reflected in
-        # log_density_sup. Rank comp0 last (its low weight * correct-or-buggy sup keeps it out of
-        # the top 2, i.e. in the dropped tail whose bound comes purely from log_density_sup), then
-        # query a label outside every component's pmap: the true (exact) log-density is driven
-        # entirely by comp0's default_value branch, which the pre-fix bound understated -- upper
-        # was < exact, breaking "lower <= log p(x) <= upper".
+    def test_bracket_holds_with_sharply_different_categorical_components(self):
+        # Scoring-only fallback behavior is tested directly in LogDensitySupTest.
+        # Generative mixtures contain normalized probability laws.
         comps = [
-            st.CategoricalDistribution(
-                {"a": 0.005, "b": 0.005},
-                default_value=0.99,
-                scoring_only=True,
-            ),
-            st.CategoricalDistribution({"a": 0.9, "b": 0.05}, scoring_only=True),
+            st.CategoricalDistribution({"a": 0.01, "b": 0.99}),
+            st.CategoricalDistribution({"a": 0.9, "b": 0.1}),
             st.CategoricalDistribution({"a": 0.5, "b": 0.5}),
         ]
         m = st.MixtureDistribution(comps, [0.2, 0.5, 0.3])
-        for x in ("a", "b", "unseen_label"):
+        for x in ("a", "b"):
             exact = m.log_density(x)
             sc = sparse_mixture_score(m, x, max_components=2)
             with self.subTest(x=x):

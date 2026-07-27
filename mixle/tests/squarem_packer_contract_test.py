@@ -32,10 +32,8 @@ class SquaremPackerContractTest(unittest.TestCase):
                 LaplaceDistribution(-2.0, 0.75, name="laplace", keys="laplace-key"),
                 CategoricalDistribution(
                     {1: 1.0, "impossible": 0.0},
-                    default_value=0.125,
                     name="categorical",
                     keys="categorical-key",
-                    scoring_only=True,
                 ),
             )
         )
@@ -79,8 +77,7 @@ class SquaremPackerContractTest(unittest.TestCase):
         self.assertEqual([(dist.name, dist.keys) for dist in rebuilt_component.dists], expected_fields)
         categorical = rebuilt_component.dists[-1]
         self.assertEqual(categorical.pmap, {1: 1.0, "impossible": 0.0})
-        self.assertEqual(categorical.default_value, 0.125)
-        self.assertTrue(categorical.scoring_only)
+        self.assertEqual(categorical.default_value, 0.0)
 
     def test_pack_rejects_changed_support_boundary_or_metadata(self):
         model = MixtureDistribution(
@@ -173,9 +170,11 @@ class SquaremPackerContractTest(unittest.TestCase):
 
     def test_non_simplex_categorical_models_are_rejected(self):
         model = MixtureDistribution(
-            [CategoricalDistribution({"a": 2.0, "b": 1.0}, scoring_only=True)],
+            [CategoricalDistribution({"a": 2.0 / 3.0, "b": 1.0 / 3.0})],
             [1.0],
         )
+        # Simulate corrupted legacy state that bypassed the constructor.
+        model.components[0].pmap = {"a": 2.0, "b": 1.0}
         with self.assertRaisesRegex(ValueError, "sum to 1"):
             squarem_packer(model)
 

@@ -16,6 +16,7 @@ represented as ``-inf`` scores rather than ``NaN``.
 
 from __future__ import annotations
 
+import copy
 import math
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -252,10 +253,17 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
-        if isinstance(w, np.ndarray):
-            self.w = w
-        else:
+        try:
             self.w = np.asarray(w, dtype=float)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("MixtureDistribution weights must be a one-dimensional numeric sequence.") from exc
+        if self.w.ndim != 1 or self.w.size == 0:
+            raise ValueError("MixtureDistribution requires a non-empty one-dimensional weight vector.")
+        self.w = self.w.copy()
+        try:
+            components = list(components)
+        except TypeError as exc:
+            raise TypeError("MixtureDistribution components must be an iterable.") from exc
 
         if len(components) != len(self.w):
             # A mismatched pair constructs a model whose densities are silently wrong (and whose
@@ -301,9 +309,9 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             )
 
         self.zw = self.w == 0.0
-        self.log_w = np.log(w + self.zw)
+        self.log_w = np.log(self.w + self.zw)
         self.log_w[self.zw] = -np.inf
-        self.components = components
+        self.components = components.copy()
         self.num_components = len(components)
         self.name = name
         self.set_prior(prior)
@@ -370,22 +378,34 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         self.has_conj_prior = self.expected_nparams is not None
 
     def expected_log_density(self, x: T) -> float:
-        """Variational expected log-density at observation x.
+        """Return the optimized local variational log-evidence bound.
 
-        Uses ``E[log w_k]`` under the (symmetric) Dirichlet weight prior together with each
-        component's ``expected_log_density``. Falls back to the plug-in ``log_density(x)``
-        when no conjugate weight prior is attached.
+        This compatibility name does not compute the generally intractable
+        ``E[log(sum_k w_k p_k(x))]``. With conjugate priors it returns
+        ``logsumexp_k(E[log w_k] + E[log p_k(x)])``, the optimized local
+        variational lower bound. Use :meth:`variational_log_evidence_bound`
+        when the semantic distinction matters. Without a conjugate weight
+        prior it falls back to the plug-in ``log_density``.
         """
+        return self.variational_log_evidence_bound(x)
+
+    def variational_log_evidence_bound(self, x: T) -> float:
+        """Return the local variational lower bound for one observation."""
         if not self.has_conj_prior:
             return self.log_density(x)
         cc = self.expected_nparams
         return vec.log_sum(np.asarray([u.expected_log_density(x) for u in self.components]) + cc)
 
     def seq_expected_log_density(self, x: T1) -> np.ndarray:
-        """Vectorized variational expected log-density at sequence-encoded input x.
+        """Return vectorized local variational log-evidence bounds.
 
-        Falls back to ``seq_log_density(x)`` when no conjugate weight prior is attached.
+        This is the sequence form of :meth:`variational_log_evidence_bound`,
+        retained under the framework-wide compatibility name.
         """
+        return self.seq_variational_log_evidence_bound(x)
+
+    def seq_variational_log_evidence_bound(self, x: T1) -> np.ndarray:
+        """Return local variational lower bounds for encoded observations."""
         if not self.has_conj_prior:
             return self.seq_log_density(x)
         cc = self.expected_nparams
@@ -458,9 +478,11 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         log_post = np.array(
             [self.log_w[k] + self.components[k].marginal(obs_idx).log_density(x_o) for k in range(self.num_components)]
         )
-        log_post -= vec.log_sum(log_post)
+        normalized = normalize_mixture_log_scores(log_post[None, :])
+        if normalized.impossible[0]:
+            raise ImpossiblePosteriorError("cannot condition a mixture on zero-probability evidence.")
         new_components = [c.condition(observed) for c in self.components]
-        return MixtureDistribution(new_components, np.exp(log_post))
+        return MixtureDistribution(new_components, normalized.responsibilities[0])
 
     def component_log_density(self, x: T) -> np.ndarray:
         """Return component-wise log densities for one raw observation.
@@ -1037,7 +1059,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             accumulators: Component accumulators receiving responsibility-
                 weighted observations.
         """
-        self.accumulators = accumulators
+        self.accumulators = list(accumulators)
         self.num_components = len(accumulators)
         self.comp_counts = np.zeros(self.num_components, dtype=float)
         self.weight_key = keys[0]
@@ -1265,9 +1287,9 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         Returns:
             ``self`` for accumulator chaining.
         """
-        self.comp_counts += suff_stat[0]
+        self.comp_counts += np.asarray(suff_stat[0], dtype=np.float64)
         for i in range(self.num_components):
-            self.accumulators[i].combine(suff_stat[1][i])
+            self.accumulators[i].combine(copy.deepcopy(suff_stat[1][i]))
 
         return self
 
@@ -1278,7 +1300,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             ``(component_counts, component_suff_stats)`` where the second item
             contains one serialized child accumulator value per component.
         """
-        return self.comp_counts, tuple([u.value() for u in self.accumulators])
+        return self.comp_counts.copy(), tuple(copy.deepcopy(u.value()) for u in self.accumulators)
 
     def from_value(self, x: tuple[np.ndarray, tuple[T2, ...]]) -> MixtureAccumulator:
         """Restore this accumulator from serialized sufficient statistics.
@@ -1289,9 +1311,9 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         Returns:
             ``self`` after restoring child accumulator state.
         """
-        self.comp_counts = x[0]
+        self.comp_counts = np.asarray(x[0], dtype=np.float64).copy()
         for i in range(self.num_components):
-            self.accumulators[i].from_value(x[1][i])
+            self.accumulators[i].from_value(copy.deepcopy(x[1][i]))
         return self
 
     def scale(self, c: float) -> MixtureAccumulator:
@@ -1321,9 +1343,9 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             if self.comp_key in stats_dict:
                 acc = stats_dict[self.comp_key]
                 for i in range(len(acc)):
-                    acc[i] = acc[i].combine(self.accumulators[i].value())
+                    acc[i] = acc[i].combine(copy.deepcopy(self.accumulators[i].value()))
             else:
-                stats_dict[self.comp_key] = self.accumulators
+                stats_dict[self.comp_key] = copy.deepcopy(self.accumulators)
 
         for u in self.accumulators:
             u.key_merge(stats_dict)
@@ -1345,7 +1367,10 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         if self.comp_key is not None:
             if self.comp_key in stats_dict:
                 acc = stats_dict[self.comp_key]
-                self.accumulators = acc
+                if len(acc) != self.num_components:
+                    raise ValueError("keyed mixture component statistics have incompatible arity.")
+                for local, pooled in zip(self.accumulators, acc):
+                    local.from_value(copy.deepcopy(pooled.value()))
 
         for u in self.accumulators:
             u.key_replace(stats_dict)
@@ -1748,10 +1773,7 @@ class MixtureDataEncoder(DataSequenceEncoder):
         if isinstance(x, _HeteroMixtureEncoded):
             if len(x.encodings) != len(self.encoders):
                 raise ValueError("heterogeneous mixture encoded arity does not match its encoders.")
-            counts = tuple(
-                encoder.row_count(payload)
-                for encoder, payload in zip(self.encoders, x.encodings)
-            )
+            counts = tuple(encoder.row_count(payload) for encoder, payload in zip(self.encoders, x.encodings))
             if not counts or any(count != counts[0] for count in counts[1:]):
                 raise ValueError("heterogeneous mixture encodings have inconsistent row counts.")
             return counts[0]

@@ -390,6 +390,14 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         """
         return self.pmap.get(x, self.default_value) / (1.0 + self.default_value)
 
+    def density_semantics(self):
+        """Declare scoring-only objects as factors rather than generative laws."""
+        if self.scoring_only:
+            from mixle.stats.compute.pdist import DensitySemantics
+
+            return DensitySemantics.LIKELIHOOD_FACTOR
+        return super().density_semantics()
+
     def log_density(self, x: Any) -> float:
         """Log-Density evaluation of CategoricalDistribution.
 

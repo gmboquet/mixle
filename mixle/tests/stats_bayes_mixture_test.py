@@ -128,10 +128,10 @@ class StatsBayesMixtureTestCase(unittest.TestCase):
         cpp = np.maximum(counts + self.alpha_w - 1.0, 0.0)
         np.testing.assert_allclose(m.w, cpp / cpp.sum(), atol=1e-9)
 
-    # ---- expected_log_density: explicit variational formula + seq self-consistency -----
+    # ---- explicit variational bound + compatibility-name self-consistency -----
 
     def test_expected_log_density_formula_and_seq(self):
-        """expected_log_density equals logsumexp(component ELD + E[log w_k]); seq matches scalar."""
+        """The named bound equals logsumexp(component ELD + E[log w_k]); seq matches scalar."""
         alpha_w, ng, init = self.alpha_w, self.ng, self.comp_init
 
         s_prior = mixture_prior(DirichletDistribution(alpha_w), [NormalGammaDistribution(*ng) for _ in range(2)])
@@ -154,11 +154,14 @@ class StatsBayesMixtureTestCase(unittest.TestCase):
             comp_eld = np.array([c.expected_log_density(float(x)) for c in s_model.components])
             want = float(logsumexp(comp_eld + elog_w))
             self.assertAlmostEqual(s_model.expected_log_density(float(x)), want, places=9)
+            self.assertAlmostEqual(s_model.variational_log_evidence_bound(float(x)), want, places=9)
 
         # seq_expected_log_density matches the per-element scalar value
         s_seld = s_model.seq_expected_log_density(s_model.dist_to_encoder().seq_encode(list(xs)))
+        named = s_model.seq_variational_log_evidence_bound(s_model.dist_to_encoder().seq_encode(list(xs)))
         scalar = np.array([s_model.expected_log_density(float(x)) for x in xs])
         self.assertLess(np.max(np.abs(s_seld - scalar)), 1e-9)
+        np.testing.assert_allclose(named, scalar)
 
         # model_log_density equals the sum of the weight-Dirichlet and per-component model terms
         self.assertTrue(np.isfinite(s_est.model_log_density(s_model)))
