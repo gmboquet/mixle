@@ -8,7 +8,7 @@ import numpy as np
 
 from mixle.inference.estimation import fit
 from mixle.stats import MatchingDistribution
-from mixle.stats.rankings.matching import _edge_marginals, _permanent
+from mixle.stats.rankings.matching import MatchingDataEncoder, MatchingEstimator, _edge_marginals, _permanent
 
 _W = np.array([[2.0, 1.0, 3.0], [1.0, 4.0, 1.0], [2.0, 1.0, 5.0]])
 
@@ -69,6 +69,8 @@ class MatchingTestCase(unittest.TestCase):
         data = true.sampler(seed=1).sample(5000)
         fitted = fit(data, true.estimator(), max_its=1, rng=np.random.RandomState(0), print_iter=0)
         np.testing.assert_allclose(_edge_marginals(fitted.weights), _edge_marginals(true.weights), atol=0.05)
+        self.assertTrue(fitted.fit_diagnostics.converged)
+        self.assertLess(fitted.fit_diagnostics.max_marginal_error, 1.0e-7)
 
     def test_estimator_pseudo_count_argument_is_respected(self):
         dist = MatchingDistribution(_W)
@@ -84,6 +86,82 @@ class MatchingTestCase(unittest.TestCase):
             MatchingDistribution([[1.0, 0.0], [1.0, 1.0]])
         with self.assertRaises(ValueError):  # not a permutation
             MatchingDistribution(_W).dist_to_encoder().seq_encode([[0, 0, 1]])
+
+    def test_extreme_finite_weights_normalize_and_sample(self):
+        for scale in (1.0e-300, 1.0e308):
+            with self.subTest(scale=scale):
+                dist = MatchingDistribution(np.full((3, 3), scale))
+                values = np.exp(dist.seq_log_density(dist.dist_to_encoder().seq_encode(_perms(3))))
+                np.testing.assert_allclose(values, 1.0 / 6.0, atol=1.0e-12)
+                self.assertEqual(len(dist.sampler(seed=2).sample(20)), 20)
+
+    def test_distribution_owns_immutable_parameters(self):
+        weights = _W.copy()
+        dist = MatchingDistribution(weights)
+        weights[0, 0] = 1.0e100
+        self.assertEqual(dist.weights[0, 0], _W[0, 0])
+        with self.assertRaises(ValueError):
+            dist.weights[0, 0] = 99.0
+        with self.assertRaises(ValueError):
+            dist.log_weights[0, 0] = 99.0
+
+    def test_all_boundaries_validate_matching_support(self):
+        dist = MatchingDistribution(_W)
+        malformed = ([0, 0, 1], [0, 1], [0, 1, 4], [0.5, 1.0, 2.0])
+        for value in malformed:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                dist.log_density(value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                dist.seq_log_density(np.asarray([value]))
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                dist.dist_to_encoder().seq_encode([value])
+        self.assertEqual(MatchingDataEncoder(3), MatchingDataEncoder(3))
+        self.assertNotEqual(MatchingDataEncoder(3), MatchingDataEncoder(4))
+        self.assertIn("dim=3", str(MatchingDataEncoder(3)))
+
+    def test_accumulator_validates_evidence_and_copies_statistics(self):
+        acc = MatchingEstimator(3).accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.update([0, 0, 1], 1.0, None)
+        with self.assertRaises(ValueError):
+            acc.seq_update(np.asarray([[0, 1, 2]]), np.asarray([-1.0]), None)
+        with self.assertRaises(ValueError):
+            acc.seq_update(np.asarray([[0, 1, 2]]), np.asarray([1.0, 2.0]), None)
+        acc.update([0, 1, 2], 1.0, None)
+        receipt = acc.value()
+        receipt[1][:] = 0.0
+        self.assertEqual(acc.value()[1].sum(), 3.0)
+        malformed = np.zeros((3, 3))
+        malformed[0, 0] = 3.0
+        with self.assertRaises(ValueError):
+            acc.from_value((1.0, malformed))
+
+    def test_estimator_controls_targets_and_convergence_are_enforced(self):
+        invalid = (
+            {"dim": 0},
+            {"dim": 3.5},
+            {"dim": 3, "max_nodes": 2},
+            {"dim": 3, "pseudo_count": -1.0},
+            {"dim": 3, "max_steps": 0},
+            {"dim": 3, "learning_rate": 0.0},
+            {"dim": 3, "tol": 0.0},
+        )
+        for kwargs in invalid:
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                MatchingEstimator(**kwargs)
+        malformed = np.zeros((3, 3))
+        malformed[0, 0] = 3.0
+        with self.assertRaises(ValueError):
+            MatchingEstimator(3).estimate(None, (1.0, malformed))
+        with self.assertRaisesRegex(RuntimeError, "did not converge"):
+            MatchingEstimator(3, max_steps=1, tol=1.0e-15).estimate(1.0, (1.0, np.eye(3)))
+
+    def test_sample_size_contract(self):
+        sampler = MatchingDistribution(_W).sampler()
+        with self.assertRaises(ValueError):
+            sampler.sample(-1)
+        with self.assertRaises(ValueError):
+            sampler.sample(1.5)
 
 
 if __name__ == "__main__":

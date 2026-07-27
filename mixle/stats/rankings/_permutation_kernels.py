@@ -277,6 +277,38 @@ def _log_permanent_dp(M: np.ndarray) -> float:
     return dp[size - 1]
 
 
+@numba.njit("float64(float64[:, :])", cache=True)
+def _log_matrix_permanent_dp(log_M: np.ndarray) -> float:
+    """Stable subset DP for the log permanent of a validated log-weight matrix."""
+    n = log_M.shape[0]
+    if n == 0:
+        return 0.0
+    size = 1 << n
+    dp = np.full(size, -np.inf)
+    dp[0] = 0.0
+    for mask in range(1, size):
+        count = 0
+        temp = mask
+        while temp:
+            count += temp & 1
+            temp >>= 1
+        row = count - 1
+        value = -np.inf
+        for column in range(n):
+            bit = 1 << column
+            log_weight = log_M[row, column]
+            if (mask & bit) and log_weight > -np.inf:
+                candidate = dp[mask ^ bit] + log_weight
+                if value == -np.inf:
+                    value = candidate
+                elif candidate > value:
+                    value = candidate + math.log1p(math.exp(value - candidate))
+                else:
+                    value = value + math.log1p(math.exp(candidate - value))
+        dp[mask] = value
+    return dp[size - 1]
+
+
 @numba.njit("Tuple((float64[:, :], float64))(float64[:, :], int64)", cache=True)
 def _sinkhorn_bethe(s: np.ndarray, n_iter: int) -> tuple[np.ndarray, float]:
     """Log-domain Sinkhorn on the kernel ``exp(s)``: returns the doubly-stochastic marginals ``P`` and a
@@ -336,9 +368,26 @@ def ryser_log_permanent(M: np.ndarray) -> float:
         raise ValueError("permanent input must contain finite nonnegative values.")
     if matrix.shape[0] > 22:
         raise ValueError("exact permanent evaluation is limited to dimension 22.")
-    result = float(_log_permanent_dp(np.ascontiguousarray(matrix)))
+    result = float(_log_permanent_dp(np.array(matrix, dtype=np.float64, order="C", copy=True)))
     if math.isnan(result) or result == np.inf:
         raise FloatingPointError("permanent evaluation produced a non-finite numerical result.")
+    return result
+
+
+def log_matrix_permanent(log_M: np.ndarray) -> float:
+    """Return the exact log permanent from finite log weights and ``-inf`` exclusions."""
+    if np.iscomplexobj(log_M):
+        raise TypeError("log-permanent input must be a real matrix.")
+    matrix = np.asarray(log_M, dtype=np.float64)
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+        raise ValueError("log-permanent input must be a square matrix.")
+    if np.any(np.isnan(matrix)) or np.any(matrix == np.inf):
+        raise ValueError("log-permanent input must contain only finite values or -inf exclusions.")
+    if matrix.shape[0] > 22:
+        raise ValueError("exact permanent evaluation is limited to dimension 22.")
+    result = float(_log_matrix_permanent_dp(np.array(matrix, dtype=np.float64, order="C", copy=True)))
+    if math.isnan(result) or result == np.inf:
+        raise FloatingPointError("log-permanent evaluation produced an invalid numerical result.")
     return result
 
 

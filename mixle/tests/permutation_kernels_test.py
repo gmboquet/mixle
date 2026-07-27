@@ -163,6 +163,16 @@ class AssignmentKernelContractTest(unittest.TestCase):
                 self.assertAlmostEqual(K.ryser_log_permanent(matrix), expected, places=10)
         self.assertEqual(K.ryser_log_permanent(np.zeros((2, 2))), -np.inf)
 
+    def test_log_weight_permanent_preserves_extreme_dynamic_range(self):
+        log_weights = np.asarray([[700.0, -700.0], [-700.0, 700.0]])
+        self.assertAlmostEqual(K.log_matrix_permanent(log_weights), 1400.0, places=12)
+        log_weights.setflags(write=False)
+        self.assertAlmostEqual(K.log_matrix_permanent(log_weights), 1400.0, places=12)
+        with self.assertRaises(ValueError):
+            K.log_matrix_permanent(np.ones((2, 3)))
+        with self.assertRaises(ValueError):
+            K.log_matrix_permanent(np.asarray([[0.0, np.nan], [0.0, 0.0]]))
+
     def test_sinkhorn_rejects_invalid_controls_and_infeasible_support(self):
         invalid_scores = (
             np.ones((2, 3)),
