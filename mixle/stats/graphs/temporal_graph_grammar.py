@@ -57,11 +57,13 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, NamedTuple
 
 import numpy as np
 import scipy.sparse as sp
 from numpy.random import RandomState
+from scipy.stats import poisson
 
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -75,18 +77,38 @@ from mixle.stats.compute.pdist import (
 _EPS = 1.0e-12
 
 
-def _binarize(adj: Any) -> Any:
-    """Return a binary upper-or-full adjacency as a CSR array (sparse) or float ndarray (dense)."""
+def _binarize(adj: Any, directed: bool = False) -> Any:
+    """Validate and own a binary adjacency without dense/sparse semantic drift."""
     if sp.issparse(adj):
-        a = adj.tocsr().copy()
-        a.data[:] = 1.0
+        a = sp.csr_array(adj, dtype=np.float64).copy()
+        if a.ndim != 2 or a.shape[0] != a.shape[1]:
+            raise ValueError("temporal graph adjacency must be square.")
+        a.sum_duplicates()
+        a.eliminate_zeros()
+        if np.any(~np.isfinite(a.data)) or np.any(a.data != 1.0):
+            raise ValueError("temporal graph adjacency must contain exact binary values 0/1.")
+        if np.any(a.diagonal() != 0.0):
+            raise ValueError("temporal graph adjacency cannot contain self-loops.")
+        if not directed and (a != a.T).nnz:
+            raise ValueError("undirected temporal graph adjacency must be symmetric.")
         return a
-    return (np.asarray(adj, dtype=np.float64) > 0).astype(np.float64)
+    a = np.array(adj, dtype=np.float64, copy=True)
+    if a.ndim != 2 or a.shape[0] != a.shape[1]:
+        raise ValueError("temporal graph adjacency must be square.")
+    if np.any(~np.isfinite(a)) or np.any((a != 0.0) & (a != 1.0)):
+        raise ValueError("temporal graph adjacency must contain finite exact binary values 0/1.")
+    if np.any(np.diag(a) != 0.0):
+        raise ValueError("temporal graph adjacency cannot contain self-loops.")
+    if not directed and not np.array_equal(a, a.T):
+        raise ValueError("undirected temporal graph adjacency must be symmetric.")
+    return a
 
 
 def _pad(adj: Any, n: int) -> Any:
     """Grow a (n0,n0) adjacency to (n,n) by appending isolated nodes (sparse or dense)."""
     n0 = adj.shape[0]
+    if n < n0:
+        raise ValueError("cannot pad an adjacency to a smaller node count.")
     if n == n0:
         return adj
     if sp.issparse(adj):
@@ -106,8 +128,8 @@ def _edge_diff(prev: Any, cur: Any, directed: bool = False) -> tuple:
     and j->i are distinct edges). Works for sparse or dense and only touches the edges that actually
     changed."""
     n1 = cur.shape[0]
-    pp = _pad(_binarize(prev), n1)
-    cc = _binarize(cur)
+    pp = _pad(_binarize(prev, directed=directed), n1)
+    cc = _binarize(cur, directed=directed)
     if sp.issparse(cur) or sp.issparse(prev):
         diff = sp.csr_array(cc) - sp.csr_array(pp)
         d = (diff if directed else sp.triu(diff, 1)).tocoo()
@@ -132,9 +154,21 @@ class CommonNeighbourMotif:
     """
 
     def __init__(self, bins: Sequence[int] = (0, 1, 2, 3), directed: bool = False) -> None:
-        self.bins = tuple(int(b) for b in bins)
-        self.directed = bool(directed)  # directed: A@A counts transitive i->k->j paths; candidates = full off-diagonal
-        self.names = [f"cn>={self.bins[-1]}" if i == len(self.bins) - 1 else f"cn={b}" for i, b in enumerate(self.bins)]
+        checked = []
+        for value in bins:
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+                raise ValueError("motif bins must be exact non-Boolean integers.")
+            checked.append(int(value))
+        if not checked or checked[0] != 0 or any(right <= left for left, right in zip(checked, checked[1:])):
+            raise ValueError("motif bins must be nonempty, begin at zero, and be strictly increasing.")
+        if not isinstance(directed, (bool, np.bool_)):
+            raise ValueError("directed must be Boolean.")
+        self.bins = tuple(checked)
+        self.directed = bool(directed)
+        self.names = tuple(
+            f"cn>={self.bins[-1]}" if i == len(self.bins) - 1 else f"cn={b}"
+            for i, b in enumerate(self.bins)
+        )
 
     @property
     def num_motifs(self) -> int:
@@ -168,7 +202,7 @@ class CommonNeighbourMotif:
         remainder ``pairs - edges - wedge_non_edges``. The lookup reads ``(A @ A)[i, j]`` for the handful of
         observed edges. (For graphs with mega-hubs the wedge set itself is large -- the documented limit.)
         """
-        adj = _binarize(adj)
+        adj = _binarize(adj, directed=self.directed)
         n = adj.shape[0]
         cn = adj @ adj
         counts = np.zeros(self.num_motifs, dtype=np.float64)
@@ -207,6 +241,75 @@ class CommonNeighbourMotif:
 
 
 # --- distribution ---------------------------------------------------------------------------------
+def _finite_nonnegative(value: Any, *, name: str) -> float:
+    checked = float(value)
+    if not np.isfinite(checked) or checked < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative.")
+    return checked
+
+
+def _exact_nonnegative_int(value: Any, *, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be an exact non-Boolean integer.")
+    checked = int(value)
+    if checked < 0:
+        raise ValueError(f"{name} must be non-negative.")
+    return checked
+
+
+def _exact_positive_int(value: Any, *, name: str) -> int:
+    checked = _exact_nonnegative_int(value, name=name)
+    if checked < 1:
+        raise ValueError(f"{name} must be positive.")
+    return checked
+
+
+def _capped_poisson_subset_log_prob(selected: int, candidates: int, rate: float) -> float:
+    """Log probability of one uniformly selected subset under min(Poisson(rate), candidates)."""
+    if selected < 0 or candidates < 0 or selected > candidates:
+        return float("-inf")
+    if candidates == 0:
+        return 0.0 if selected == 0 else float("-inf")
+    if rate == 0.0:
+        return 0.0 if selected == 0 else float("-inf")
+    if selected < candidates:
+        log_count = (
+            math.lgamma(candidates + 1)
+            - math.lgamma(selected + 1)
+            - math.lgamma(candidates - selected + 1)
+        )
+        return -rate + selected * math.log(rate) - math.lgamma(selected + 1) - log_count
+    return float(poisson.logsf(candidates - 1, rate))
+
+
+@dataclass(frozen=True)
+class TemporalGraphApproximationReceipt:
+    """Auditable shortfall record for sparse rejection sampling."""
+
+    exact: bool
+    bridge_requested: int
+    bridge_realized: int
+    bridge_shortfall: int
+    max_reject: int
+
+
+@dataclass(frozen=True)
+class ApproximateTemporalGraphSample:
+    """A separately typed sparse approximation; unwrap snapshots explicitly."""
+
+    snapshots: tuple[Any, ...]
+    receipt: TemporalGraphApproximationReceipt
+
+    def __iter__(self):
+        return iter(self.snapshots)
+
+    def __len__(self):
+        return len(self.snapshots)
+
+    def __getitem__(self, item):
+        return self.snapshots[item]
+
+
 class TemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution):
     """Distribution over dynamic graphs (sequences of adjacency snapshots) under a motif-edit grammar."""
 
@@ -221,23 +324,40 @@ class TemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution)
         directed: bool = False,
         name: str | None = None,
     ) -> None:
-        self.motif = motif if motif is not None else CommonNeighbourMotif(directed=directed)
+        if not isinstance(directed, (bool, np.bool_)):
+            raise ValueError("directed must be Boolean.")
+        if motif is not None and not isinstance(motif, CommonNeighbourMotif):
+            raise ValueError("motif must be a CommonNeighbourMotif or None.")
+        if motif is not None and motif.directed != bool(directed):
+            raise ValueError("motif.directed must agree with directed.")
+        source_motif = motif if motif is not None else CommonNeighbourMotif(directed=directed)
+        self.motif = CommonNeighbourMotif(source_motif.bins, directed=source_motif.directed)
         self.directed = self.motif.directed
         m = self.motif.num_motifs
 
         def _norm(w: Sequence[float] | None) -> np.ndarray:
-            a = np.ones(m) if w is None else np.asarray(w, dtype=np.float64)
-            if a.shape[0] != m:
+            a = np.ones(m, dtype=np.float64) if w is None else np.array(w, dtype=np.float64, copy=True)
+            if a.ndim != 1 or a.shape[0] != m:
                 raise ValueError("motif weights must have one entry per motif bin (%d)." % m)
-            return a / a.sum()
+            if np.any(~np.isfinite(a)) or np.any(a < 0.0) or float(a.sum()) <= 0.0:
+                raise ValueError("motif weights must be finite, non-negative, and have positive total.")
+            normalized = a / a.sum()
+            normalized.setflags(write=False)
+            return normalized
 
         self.motif_weights = _norm(motif_weights)  # ADDITION grammar (which motifs grow)
         self.remove_weights = _norm(remove_weights)  # REMOVAL grammar (which motifs decay)
-        self.log_w = np.log(np.clip(self.motif_weights, _EPS, None))
-        self.log_rw = np.log(np.clip(self.remove_weights, _EPS, None))
-        self.edge_rate = float(edge_rate)
-        self.edge_remove_rate = float(edge_remove_rate)
-        self.node_rate = float(node_rate)
+        self.log_w = np.full(m, -math.inf, dtype=np.float64)
+        self.log_rw = np.full(m, -math.inf, dtype=np.float64)
+        self.log_w[self.motif_weights > 0.0] = np.log(self.motif_weights[self.motif_weights > 0.0])
+        self.log_rw[self.remove_weights > 0.0] = np.log(self.remove_weights[self.remove_weights > 0.0])
+        self.log_w.setflags(write=False)
+        self.log_rw.setflags(write=False)
+        self.edge_rate = _finite_nonnegative(edge_rate, name="edge_rate")
+        self.edge_remove_rate = _finite_nonnegative(edge_remove_rate, name="edge_remove_rate")
+        self.node_rate = _finite_nonnegative(node_rate, name="node_rate")
+        if name is not None and not isinstance(name, str):
+            raise ValueError("name must be a string or None.")
         self.name = name
 
     def __str__(self) -> str:
@@ -252,25 +372,41 @@ class TemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution)
             )
         )
 
-    def _edit_log_density(self, edit_bins: np.ndarray, log_w: np.ndarray, rate: float, cand: np.ndarray) -> float:
-        """Shared add/remove term: per-motif Poisson(rate*w_m) x uniform anchor among motif-m candidates.
-
-        ``edit_bins`` is the motif index of each edited edge. Equivalent to Poisson(total; rate) x
-        Multinomial(w) x (1/cand_m per edit). Returns -inf if an edit's candidate pool is empty (e.g. a
-        removal when rate == 0)."""
-        k = len(edit_bins)
-        lp = k * math.log(rate + _EPS) - rate - math.lgamma(k + 1)
-        for mtf in edit_bins:
-            if cand[mtf] <= 0:
-                return float("-inf")
-            lp += log_w[mtf] - math.log(cand[mtf])
-        return lp
+    def _edit_log_density(
+        self,
+        edit_bins: np.ndarray,
+        weights: np.ndarray,
+        rate: float,
+        cand: np.ndarray,
+    ) -> float:
+        """Score the exact capped-Poisson, without-replacement subset law."""
+        bins = np.asarray(edit_bins)
+        candidates = np.asarray(cand, dtype=np.float64)
+        if bins.ndim != 1 or candidates.shape != (self.motif.num_motifs,):
+            raise ValueError("temporal edit components have incompatible motif shapes.")
+        if bins.size and (
+            not np.issubdtype(bins.dtype, np.integer)
+            or int(bins.min()) < 0
+            or int(bins.max()) >= self.motif.num_motifs
+        ):
+            raise ValueError("temporal edit bins must be in motif support.")
+        if np.any(~np.isfinite(candidates)) or np.any(candidates < 0.0) or np.any(candidates != np.floor(candidates)):
+            raise ValueError("temporal motif candidate counts must be finite non-negative integers.")
+        selected = np.bincount(bins.astype(np.int64), minlength=self.motif.num_motifs)
+        return float(
+            sum(
+                _capped_poisson_subset_log_prob(int(selected[m]), int(candidates[m]), rate * float(weights[m]))
+                for m in range(self.motif.num_motifs)
+            )
+        )
 
     def transition_components(self, prev: Any, cur: Any) -> tuple:
         """The PARAMETER-INDEPENDENT decomposition of a transition: ``(new_nodes, add_bins, add_cand,
         rem_bins, rem_cand, valid)``. Depends only on the graph pair and the motif, NOT on the grammar's
         weights/rates -- so K regimes sharing a motif can compute the (expensive A@A) decomposition ONCE and
         score it K times via :meth:`score_components`. ``valid`` is False for an impossible node removal."""
+        prev = _binarize(prev, directed=self.directed)
+        cur = _binarize(cur, directed=self.directed)
         n0, n1 = prev.shape[0], cur.shape[0]
         if n1 < n0:  # fewer nodes -> a node was removed, which the bare grammar does not model
             return 0, None, None, None, None, False
@@ -289,11 +425,16 @@ class TemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution)
             return float("-inf")
         if len(rem_bins) and self.edge_remove_rate <= 0.0:  # a deletion under a no-removal (growth) grammar
             return float("-inf")
-        lp = new_nodes * math.log(self.node_rate + _EPS) - self.node_rate - math.lgamma(new_nodes + 1)
-        lp += self._edit_log_density(add_bins, self.log_w, self.edge_rate, add_cand)
+        if isinstance(new_nodes, (bool, np.bool_)) or int(new_nodes) != new_nodes or new_nodes < 0:
+            raise ValueError("new_nodes must be a non-negative integer.")
+        if self.node_rate == 0.0:
+            lp = 0.0 if new_nodes == 0 else float("-inf")
+        else:
+            lp = new_nodes * math.log(self.node_rate) - self.node_rate - math.lgamma(new_nodes + 1)
+        lp += self._edit_log_density(add_bins, self.motif_weights, self.edge_rate, add_cand)
         if lp == float("-inf"):
             return lp
-        lp += self._edit_log_density(rem_bins, self.log_rw, self.edge_remove_rate, rem_cand)
+        lp += self._edit_log_density(rem_bins, self.remove_weights, self.edge_remove_rate, rem_cand)
         return lp
 
     def _transition_log_density(self, prev: Any, cur: Any) -> float:
@@ -308,14 +449,19 @@ class TemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution)
         ``x`` is a sequence of binary adjacency matrices -- dense ``ndarray`` or ``scipy.sparse`` (large
         graphs). The initial graph is taken as given (its marginal is not modelled, matching how the static
         grammars treat their start symbol)."""
+        if isinstance(x, ApproximateTemporalGraphSample):
+            raise ValueError("approximate scalable samples must be explicitly unwrapped before scoring.")
         snaps = list(x)
+        if not snaps:
+            raise ValueError("temporal graph observations must contain at least one snapshot.")
+        snaps = [_binarize(snapshot, directed=self.directed) for snapshot in snaps]
         if len(snaps) < 2:
             return 0.0
         return float(sum(self._transition_log_density(snaps[t - 1], snaps[t]) for t in range(1, len(snaps))))
 
     def seq_encode(self, x: Sequence[Sequence[np.ndarray]]) -> Sequence[Sequence[np.ndarray]]:
         """Return dynamic graph sequences unchanged for sequence scoring."""
-        return x
+        return tuple(tuple(_binarize(snapshot, directed=self.directed) for snapshot in seq) for seq in x)
 
     def seq_log_density(self, x: Sequence[Sequence[np.ndarray]]) -> np.ndarray:
         """Score a batch of dynamic graph sequences."""
@@ -347,12 +493,14 @@ class TemporalGraphGrammarSampler(DistributionSampler):
     ) -> list[np.ndarray]:
         """Run a derivation: from a seed graph, apply ``num_steps`` of grammar-sampled edits."""
         d = self.dist
+        num_steps = _exact_nonnegative_int(num_steps, name="num_steps")
+        n_init = _exact_nonnegative_int(n_init, name="n_init")
         if seed_graph is None:
             adj = np.zeros((n_init, n_init), dtype=np.float64)
         elif sp.issparse(seed_graph):
-            adj = seed_graph.toarray().astype(np.float64)  # sampler is dense/moderate-scale (see module doc)
+            adj = _binarize(seed_graph, directed=d.directed).toarray()
         else:
-            adj = np.asarray(seed_graph, dtype=np.float64).copy()
+            adj = _binarize(seed_graph, directed=d.directed)
         snaps = [adj.copy()]
         for _ in range(num_steps):
             new_nodes = self.rng.poisson(d.node_rate)
@@ -400,7 +548,7 @@ class TemporalGraphGrammarSampler(DistributionSampler):
         seed_edges: Sequence[tuple] | None = None,
         n_init: int = 5,
         max_reject: int = 64,
-    ) -> list:
+    ) -> ApproximateTemporalGraphSample:
         """Sample a dynamic graph for a LARGE sparse graph -- never materialises the n*n adjacency.
 
         The dense :meth:`sample_one` is exact but O(n^2) in space (the full bin matrix). This path keeps the
@@ -418,14 +566,28 @@ class TemporalGraphGrammarSampler(DistributionSampler):
         distribution matches the weights, so a model fit on these snapshots recovers the grammar.
         """
         d = self.dist
+        num_steps = _exact_nonnegative_int(num_steps, name="num_steps")
+        n_init = _exact_nonnegative_int(n_init, name="n_init")
+        max_reject = _exact_positive_int(max_reject, name="max_reject")
         directed = d.directed
 
         def canon(i: int, j: int) -> tuple:
             return (i, j) if directed else ((i, j) if i < j else (j, i))
 
-        n = n_init if seed_edges is None else (max(max(e) for e in seed_edges) + 1 if seed_edges else n_init)
-        edges = set() if seed_edges is None else {canon(i, j) for i, j in seed_edges}
+        edges = set()
+        if seed_edges is not None:
+            for edge in seed_edges:
+                if not isinstance(edge, (tuple, list)) or len(edge) != 2:
+                    raise ValueError("seed_edges entries must be node-index pairs.")
+                i = _exact_nonnegative_int(edge[0], name="seed edge endpoint")
+                j = _exact_nonnegative_int(edge[1], name="seed edge endpoint")
+                if i == j:
+                    raise ValueError("seed_edges cannot contain self-loops.")
+                edges.add(canon(i, j))
+        n = max(n_init, max((max(edge) + 1 for edge in edges), default=0))
         snaps = [self._csr(edges, n, directed)]
+        requested_bridges = 0
+        realized_bridges = 0
         for _ in range(num_steps):
             n += int(self.rng.poisson(d.node_rate))  # new isolated nodes
             a = self._csr(edges, n, directed)
@@ -454,9 +616,13 @@ class TemporalGraphGrammarSampler(DistributionSampler):
             # bridges (m=0): rejection-sample random non-edge / non-wedge pairs
             if n > 1:
                 k0 = int(self.rng.poisson(d.edge_rate * d.motif_weights[0]))
+                total_pairs = n * (n - 1) if directed else n * (n - 1) // 2
+                bridge_candidates = max(0, total_pairs - len(edges) - int(wedge_keys.size))
+                target_bridges = min(k0, bridge_candidates)
+                requested_bridges += target_bridges
                 chosen: set = set()
-                for _try in range(k0 * max_reject):
-                    if len(chosen) >= k0:
+                for _try in range(target_bridges * max_reject):
+                    if len(chosen) >= target_bridges:
                         break
                     i, j = int(self.rng.randint(n)), int(self.rng.randint(n))
                     if i == j:
@@ -469,6 +635,7 @@ class TemporalGraphGrammarSampler(DistributionSampler):
                         continue
                     chosen.add(key)
                 add += list(chosen)
+                realized_bridges += len(chosen)
             # removals: existing edges binned by their cn (enumerated -- O(edges))
             if d.edge_remove_rate > 0.0 and edges:
                 ec = edge_cn.tocoo() if edge_cn is not None else None
@@ -487,7 +654,14 @@ class TemporalGraphGrammarSampler(DistributionSampler):
             edges |= set(add)
             edges -= set(remove)
             snaps.append(self._csr(edges, n, directed))
-        return snaps
+        receipt = TemporalGraphApproximationReceipt(
+            exact=False,
+            bridge_requested=requested_bridges,
+            bridge_realized=realized_bridges,
+            bridge_shortfall=requested_bridges - realized_bridges,
+            max_reject=max_reject,
+        )
+        return ApproximateTemporalGraphSample(tuple(snaps), receipt)
 
     @staticmethod
     def _edge_mask(edges: set, n: int) -> Any:
@@ -511,17 +685,71 @@ class TemporalGraphGrammarSampler(DistributionSampler):
         """Draw one sequence or a list of sequences from the grammar."""
         if size is None:
             return self.sample_one(num_steps=num_steps, n_init=n_init)
-        return [self.sample_one(num_steps=num_steps, n_init=n_init) for _ in range(size)]
+        sample_size = _exact_nonnegative_int(size, name="size")
+        return [self.sample_one(num_steps=num_steps, n_init=n_init) for _ in range(sample_size)]
 
 
 # --- estimator / accumulator ----------------------------------------------------------------------
+class TemporalGraphGrammarStatistics(NamedTuple):
+    schema_version: int
+    bins: tuple[int, ...]
+    directed: bool
+    add_counts: np.ndarray
+    rem_counts: np.ndarray
+    edges: float
+    rem_edges: float
+    nodes: float
+    steps: float
+
+
+def _validate_temporal_statistics(
+    value: Any,
+    motif: CommonNeighbourMotif,
+) -> TemporalGraphGrammarStatistics:
+    if not isinstance(value, TemporalGraphGrammarStatistics) or value.schema_version != 1:
+        raise ValueError("temporal graph statistics must use schema version 1.")
+    if value.bins != motif.bins or value.directed != motif.directed:
+        raise ValueError("temporal graph statistics use an incompatible motif configuration.")
+    add_counts = np.array(value.add_counts, dtype=np.float64, copy=True)
+    rem_counts = np.array(value.rem_counts, dtype=np.float64, copy=True)
+    if add_counts.shape != (motif.num_motifs,) or rem_counts.shape != (motif.num_motifs,):
+        raise ValueError("temporal motif-count vectors have incompatible shapes.")
+    scalars = tuple(float(v) for v in (value.edges, value.rem_edges, value.nodes, value.steps))
+    if (
+        np.any(~np.isfinite(add_counts))
+        or np.any(~np.isfinite(rem_counts))
+        or np.any(add_counts < 0.0)
+        or np.any(rem_counts < 0.0)
+        or any(not np.isfinite(v) or v < 0.0 for v in scalars)
+    ):
+        raise ValueError("temporal graph sufficient statistics must be finite and non-negative.")
+    edges, rem_edges, nodes, steps = scalars
+    if not np.isclose(float(add_counts.sum()), edges, rtol=1.0e-12, atol=1.0e-12):
+        raise ValueError("temporal add_counts must sum to edges.")
+    if not np.isclose(float(rem_counts.sum()), rem_edges, rtol=1.0e-12, atol=1.0e-12):
+        raise ValueError("temporal rem_counts must sum to rem_edges.")
+    return TemporalGraphGrammarStatistics(
+        1,
+        motif.bins,
+        motif.directed,
+        add_counts,
+        rem_counts,
+        edges,
+        rem_edges,
+        nodes,
+        steps,
+    )
+
+
 class TemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate per-motif edge counts + step/edge/node totals -- the exact sufficient statistics."""
 
     def __init__(self, motif: CommonNeighbourMotif) -> None:
-        self.motif = motif
-        self.add_counts = np.zeros(motif.num_motifs, dtype=np.float64)
-        self.rem_counts = np.zeros(motif.num_motifs, dtype=np.float64)
+        if not isinstance(motif, CommonNeighbourMotif):
+            raise ValueError("motif must be a CommonNeighbourMotif.")
+        self.motif = CommonNeighbourMotif(motif.bins, directed=motif.directed)
+        self.add_counts = np.zeros(self.motif.num_motifs, dtype=np.float64)
+        self.rem_counts = np.zeros(self.motif.num_motifs, dtype=np.float64)
         self.edges = 0.0
         self.rem_edges = 0.0
         self.nodes = 0.0
@@ -529,25 +757,48 @@ class TemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Sequence[Any], weight: float, estimate: Any | None) -> None:
         """Accumulate sufficient statistics from one dynamic graph sequence."""
-        snaps = list(x)  # adjacencies may be dense ndarrays or scipy.sparse
+        if isinstance(x, ApproximateTemporalGraphSample):
+            raise ValueError("approximate scalable samples must be explicitly unwrapped before fitting.")
+        snaps = [_binarize(snapshot, directed=self.motif.directed) for snapshot in x]
+        if not snaps:
+            raise ValueError("temporal graph observations must contain at least one snapshot.")
+        checked_weight = _finite_nonnegative(weight, name="weight")
+        pending_add = np.zeros_like(self.add_counts)
+        pending_rem = np.zeros_like(self.rem_counts)
+        pending_edges = pending_rem_edges = pending_nodes = pending_steps = 0.0
         for t in range(1, len(snaps)):
             prev, cur = snaps[t - 1], snaps[t]
+            if cur.shape[0] < prev.shape[0]:
+                raise ValueError("bare temporal graph grammar does not support node removal.")
             ai, aj, ri, rj = _edge_diff(prev, cur, self.motif.directed)
             _, add_lookup = self.motif.counts_and_binner(_pad(prev, cur.shape[0]), on_edges=False)
             _, rem_lookup = self.motif.counts_and_binner(prev, on_edges=True)
             for m in add_lookup(np.asarray(ai), np.asarray(aj)):
-                self.add_counts[m] += weight
+                pending_add[m] += checked_weight
             for m in rem_lookup(np.asarray(ri), np.asarray(rj)):
-                self.rem_counts[m] += weight
-            self.edges += weight * len(ai)
-            self.rem_edges += weight * len(ri)
-            self.nodes += weight * (cur.shape[0] - prev.shape[0])
-            self.steps += weight
+                pending_rem[m] += checked_weight
+            pending_edges += checked_weight * len(ai)
+            pending_rem_edges += checked_weight * len(ri)
+            pending_nodes += checked_weight * (cur.shape[0] - prev.shape[0])
+            pending_steps += checked_weight
+        self.add_counts += pending_add
+        self.rem_counts += pending_rem
+        self.edges += pending_edges
+        self.rem_edges += pending_rem_edges
+        self.nodes += pending_nodes
+        self.steps += pending_steps
 
     def seq_update(self, x: Sequence[Sequence[np.ndarray]], weights: np.ndarray, estimate: Any | None) -> None:
         """Accumulate weighted sufficient statistics from a batch of sequences."""
-        for seq, w in zip(x, np.asarray(weights, dtype=np.float64)):
-            self.update(seq, float(w), estimate)
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if checked_weights.ndim != 1 or len(checked_weights) != len(x):
+            raise ValueError("weights must be a one-dimensional array aligned with the temporal batch.")
+        if np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
+            raise ValueError("weights must be finite and non-negative.")
+        pending = TemporalGraphGrammarAccumulator(self.motif)
+        for seq, weight in zip(x, checked_weights):
+            pending.update(seq, float(weight), estimate)
+        self.combine(pending.value())
 
     def seq_initialize(self, x: Any, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize sufficient statistics from a weighted batch."""
@@ -557,26 +808,40 @@ class TemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize sufficient statistics from one weighted sequence."""
         self.update(x, weight, None)
 
-    def combine(self, suff_stat: tuple) -> TemporalGraphGrammarAccumulator:
+    def combine(self, suff_stat: TemporalGraphGrammarStatistics) -> TemporalGraphGrammarAccumulator:
         """Merge serialized sufficient statistics into this accumulator."""
-        ac, rc, e, re, n, s = suff_stat
-        self.add_counts += ac
-        self.rem_counts += rc
-        self.edges += e
-        self.rem_edges += re
-        self.nodes += n
-        self.steps += s
+        checked = _validate_temporal_statistics(suff_stat, self.motif)
+        self.add_counts += checked.add_counts
+        self.rem_counts += checked.rem_counts
+        self.edges += checked.edges
+        self.rem_edges += checked.rem_edges
+        self.nodes += checked.nodes
+        self.steps += checked.steps
         return self
 
-    def value(self) -> tuple:
+    def value(self) -> TemporalGraphGrammarStatistics:
         """Return serialized sufficient statistics for estimation or merging."""
-        return self.add_counts.copy(), self.rem_counts.copy(), self.edges, self.rem_edges, self.nodes, self.steps
+        return TemporalGraphGrammarStatistics(
+            1,
+            self.motif.bins,
+            self.motif.directed,
+            self.add_counts.copy(),
+            self.rem_counts.copy(),
+            self.edges,
+            self.rem_edges,
+            self.nodes,
+            self.steps,
+        )
 
-    def from_value(self, x: tuple) -> TemporalGraphGrammarAccumulator:
+    def from_value(self, x: TemporalGraphGrammarStatistics) -> TemporalGraphGrammarAccumulator:
         """Restore accumulator state from serialized sufficient statistics."""
-        self.add_counts = np.asarray(x[0], dtype=np.float64).copy()
-        self.rem_counts = np.asarray(x[1], dtype=np.float64).copy()
-        self.edges, self.rem_edges, self.nodes, self.steps = float(x[2]), float(x[3]), float(x[4]), float(x[5])
+        checked = _validate_temporal_statistics(x, self.motif)
+        self.add_counts = checked.add_counts
+        self.rem_counts = checked.rem_counts
+        self.edges = checked.edges
+        self.rem_edges = checked.rem_edges
+        self.nodes = checked.nodes
+        self.steps = checked.steps
         return self
 
     def key_merge(self, stats_dict: dict) -> None:
@@ -609,8 +874,13 @@ class TemporalGraphGrammarEstimator(ParameterEstimator):
     def __init__(
         self, motif: CommonNeighbourMotif | None = None, pseudo_count: float | None = None, name: str | None = None
     ) -> None:
-        self.motif = motif if motif is not None else CommonNeighbourMotif()
-        self.pseudo_count = pseudo_count
+        source = motif if motif is not None else CommonNeighbourMotif()
+        if not isinstance(source, CommonNeighbourMotif):
+            raise ValueError("motif must be a CommonNeighbourMotif.")
+        self.motif = CommonNeighbourMotif(source.bins, directed=source.directed)
+        self.pseudo_count = None if pseudo_count is None else _finite_nonnegative(pseudo_count, name="pseudo_count")
+        if name is not None and not isinstance(name, str):
+            raise ValueError("name must be a string or None.")
         self.name = name
         self.keys = None
 
@@ -618,9 +888,17 @@ class TemporalGraphGrammarEstimator(ParameterEstimator):
         """Return the accumulator factory used by the estimator."""
         return TemporalGraphGrammarAccumulatorFactory(self.motif)
 
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> TemporalGraphGrammarDistribution:
+    def estimate(
+        self,
+        nobs: float | None,
+        suff_stat: TemporalGraphGrammarStatistics,
+    ) -> TemporalGraphGrammarDistribution:
         """Estimate grammar weights and rates from sufficient statistics."""
-        add_counts, rem_counts, edges, rem_edges, nodes, steps = suff_stat
+        checked = _validate_temporal_statistics(suff_stat, self.motif)
+        add_counts, rem_counts = checked.add_counts, checked.rem_counts
+        edges, rem_edges, nodes, steps = checked.edges, checked.rem_edges, checked.nodes, checked.steps
+        if steps <= 0.0:
+            raise ValueError("cannot estimate a temporal graph grammar without transition evidence.")
 
         def _w(counts: np.ndarray) -> np.ndarray:
             c = np.asarray(counts, dtype=np.float64).copy()
@@ -635,6 +913,7 @@ class TemporalGraphGrammarEstimator(ParameterEstimator):
             remove_weights=_w(rem_counts),
             edge_remove_rate=rem_edges / steps if steps > 0 else 0.0,
             motif=self.motif,
+            directed=self.motif.directed,
             name=self.name,
         )
 
@@ -645,7 +924,13 @@ class TemporalGraphGrammarDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[Sequence[np.ndarray]]) -> Sequence[Sequence[np.ndarray]]:
         """Return graph sequences unchanged."""
-        return x
+        return tuple(tuple(sequence) for sequence in x)
+
+    def row_count(self, x: Any) -> int:
+        """Return the number of temporal sequences in an encoded payload."""
+        if not isinstance(x, tuple):
+            raise ValueError("encoded temporal graph payload must be a tuple.")
+        return len(x)
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, TemporalGraphGrammarDataEncoder)
