@@ -11,6 +11,7 @@ from mixle.stats.graphs.temporal_graph_grammar import (
     ChurningTemporalGraphGrammarStatistics,
     HomophilyTemporalGraphGrammarStatistics,
     LabeledTemporalGraphGrammarDistribution,
+    LatentTemporalGraphGrammarStatistics,
     TemporalGraphGrammarStatistics,
     _edge_diff,
 )
@@ -678,6 +679,93 @@ class LatentRegimeTemporalGraphGrammarTest(unittest.TestCase):
         self.assertGreater(np.min(np.diag(cur.transition_matrix)), 0.6)  # regimes persist
         self.assertGreater(ll, float(single.seq_log_density(data).sum()))  # latent beats one grammar
         self.assertEqual(len(cur.decode(data[0])), len(data[0]) - 1)  # Viterbi labels every transition
+
+    def test_regime_laws_validate_dimensions_and_preserve_structural_zeros(self):
+        fixed = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], edge_rate=0.0, edge_remove_rate=0.0)
+        removal = stats.TemporalGraphGrammarDistribution(
+            [1, 1, 1, 1],
+            edge_rate=0.0,
+            remove_weights=[1, 1, 1, 1],
+            edge_remove_rate=1.0,
+        )
+        with self.assertRaises(ValueError):
+            stats.LatentTemporalGraphGrammarDistribution([])
+        with self.assertRaises(ValueError):
+            stats.LatentTemporalGraphGrammarDistribution(
+                [fixed, stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], directed=True)]
+            )
+
+        invalid_initial = ([1.0], [-1.0, 2.0], [np.nan, 1.0], [0.0, 0.0])
+        for initial in invalid_initial:
+            with self.subTest(initial=initial):
+                with self.assertRaises(ValueError):
+                    stats.LatentTemporalGraphGrammarDistribution([fixed, removal], initial)
+        invalid_transition = (
+            [[1.0, 0.0]],
+            [[1.0, 0.0], [0.0, 0.0]],
+            [[1.0, -1.0], [0.0, 1.0]],
+            [[1.0, np.nan], [0.0, 1.0]],
+        )
+        for transition in invalid_transition:
+            with self.subTest(transition=transition):
+                with self.assertRaises(ValueError):
+                    stats.LatentTemporalGraphGrammarDistribution(
+                        [fixed, removal],
+                        [0.5, 0.5],
+                        transition,
+                    )
+
+        dist = stats.LatentTemporalGraphGrammarDistribution(
+            [fixed, removal],
+            [1.0, 0.0],
+            [[1.0, 0.0], [0.0, 1.0]],
+        )
+        edge = np.array([[0.0, 1.0], [1.0, 0.0]])
+        empty = np.zeros((2, 2))
+        impossible = [edge, empty]
+        self.assertEqual(dist.log_density(impossible), float("-inf"))
+        with self.assertRaises(ValueError):
+            dist.decode(impossible)
+
+    def test_zero_probability_evidence_is_recorded_and_fails_closed(self):
+        fixed = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], edge_rate=0.0, edge_remove_rate=0.0)
+        removal = stats.TemporalGraphGrammarDistribution(
+            [1, 1, 1, 1],
+            edge_rate=0.0,
+            edge_remove_rate=1.0,
+        )
+        dist = stats.LatentTemporalGraphGrammarDistribution(
+            [fixed, removal],
+            [1.0, 0.0],
+            [[1.0, 0.0], [0.0, 1.0]],
+        )
+        edge = np.array([[0.0, 1.0], [1.0, 0.0]])
+        impossible = [edge, np.zeros((2, 2))]
+        estimator = dist.estimator(pseudo_count=0.5)
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.update(impossible, 2.0, dist)
+        value = accumulator.value()
+        self.assertEqual(value.accepted_weight, 0.0)
+        self.assertEqual(value.rejected_weight, 2.0)
+        with self.assertRaises(ValueError):
+            estimator.estimate(1.0, value)
+        with self.assertRaises(ValueError):
+            accumulator.seq_update([impossible], np.ones(2), dist)
+
+        corrupt = LatentTemporalGraphGrammarStatistics(
+            1,
+            (0, 1, 2, 3),
+            False,
+            2,
+            np.ones(2),
+            np.zeros((2, 2)),
+            value.state_values,
+            1.0,
+            0.0,
+            1.0,
+        )
+        with self.assertRaises(ValueError):
+            estimator.estimate(1.0, corrupt)
 
 
 class RegimeSwitchingAttributesTest(unittest.TestCase):
