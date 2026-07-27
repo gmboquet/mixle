@@ -8,6 +8,10 @@ import numpy as np
 
 from mixle.stats import LowRankPermutationDistribution
 from mixle.stats.rankings._permutation_kernels import ryser_log_permanent, sinkhorn_bethe
+from mixle.stats.rankings.low_rank_permutation import (
+    LowRankPermutationDataEncoder,
+    LowRankPermutationEstimator,
+)
 
 
 class KernelTest(unittest.TestCase):
@@ -42,6 +46,8 @@ class LowRankPermutationTest(unittest.TestCase):
         acc = true.estimator().accumulator_factory().make()
         acc.seq_update(enc, np.ones(enc.shape[0]), None)
         fit = true.estimator().estimate(enc.shape[0], acc.value())
+        self.assertTrue(fit.fit_diagnostics.converged)
+        self.assertEqual(fit.fit_diagnostics.marginal_algorithm, "exact_log_permanent")
         m_emp = acc.counts / acc.count
         self.assertLess(float(np.abs(fit.marginals() - m_emp).sum()), 0.3)  # fitted marginals match data
         test = true.sampler(seed=99).sample(400)
@@ -53,6 +59,92 @@ class LowRankPermutationTest(unittest.TestCase):
             LowRankPermutationDistribution(np.zeros((3, 2)), np.zeros((4, 2)))  # shape mismatch
         with self.assertRaises(ValueError):
             LowRankPermutationDistribution(np.zeros((1, 2)), np.zeros((1, 2)))  # n < 2
+
+    def test_bethe_branch_is_not_exposed_as_a_probability_distribution(self):
+        with self.assertRaisesRegex(ValueError, "cannot normalize a probability distribution"):
+            LowRankPermutationDistribution(np.ones((4, 1)), np.ones((4, 1)), max_exact=3)
+
+    def test_exact_marginals_are_distinct_from_sinkhorn_relaxation(self):
+        dist = LowRankPermutationDistribution(np.asarray([[2.0], [0.0]]), np.asarray([[1.0], [0.0]]))
+        exact = dist.marginals()
+        relaxation = dist.sinkhorn_relaxation()
+        self.assertAlmostEqual(exact[0, 0], math.exp(2.0) / (math.exp(2.0) + 1.0), places=12)
+        self.assertGreater(abs(exact[0, 0] - relaxation[0, 0]), 0.1)
+
+    def test_distribution_owns_finite_positive_rank_factors(self):
+        u = np.asarray([[1.0], [0.0]])
+        v = np.asarray([[1.0], [0.0]])
+        dist = LowRankPermutationDistribution(u, v)
+        u[0, 0] = 99.0
+        v[0, 0] = 99.0
+        self.assertEqual(dist.u[0, 0], 1.0)
+        self.assertEqual(dist.v[0, 0], 1.0)
+        with self.assertRaises(ValueError):
+            dist.u[0, 0] = 0.0
+        with self.assertRaises(ValueError):
+            LowRankPermutationDistribution(np.zeros((3, 0)), np.zeros((3, 0)))
+        with self.assertRaises(ValueError):
+            LowRankPermutationDistribution(np.full((2, 1), np.nan), np.zeros((2, 1)))
+        with self.assertRaises(ValueError):
+            LowRankPermutationDistribution(np.ones((2, 3)), np.ones((2, 3)))
+
+    def test_all_boundaries_validate_support_and_dimension(self):
+        dist = LowRankPermutationDistribution(np.ones((3, 1)), np.ones((3, 1)))
+        malformed = ([0, 0, 1], [0, 1], [0, 1, 4], [0.5, 1.0, 2.0])
+        for value in malformed:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                dist.log_density(value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                dist.seq_log_density(np.asarray([value]))
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                dist.dist_to_encoder().seq_encode([value])
+        self.assertEqual(LowRankPermutationDataEncoder(3), LowRankPermutationDataEncoder(3))
+        self.assertNotEqual(LowRankPermutationDataEncoder(3), LowRankPermutationDataEncoder(4))
+        self.assertIn("dim=3", str(LowRankPermutationDataEncoder(3)))
+
+    def test_accumulator_validates_evidence_and_copies_state(self):
+        acc = LowRankPermutationEstimator(3, rank=1).accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.update([0, 0, 1], 1.0, None)
+        with self.assertRaises(ValueError):
+            acc.seq_update(np.asarray([[0, 1, 2]]), np.asarray([-1.0]), None)
+        with self.assertRaises(ValueError):
+            acc.seq_update(np.asarray([[0, 1, 2]]), np.asarray([1.0, 2.0]), None)
+        acc.update([0, 1, 2], 1.0, None)
+        receipt = acc.value()
+        receipt[1][:] = 0.0
+        self.assertEqual(acc.value()[1].sum(), 3.0)
+        malformed = np.zeros((3, 3))
+        malformed[0, 0] = 3.0
+        with self.assertRaises(ValueError):
+            acc.from_value((1.0, malformed))
+
+    def test_estimator_controls_pseudo_count_and_sample_size(self):
+        invalid = (
+            {"dim": 1},
+            {"dim": 3.5},
+            {"dim": 3, "rank": 0},
+            {"dim": 3, "rank": 4},
+            {"dim": 3, "max_exact": 2},
+            {"dim": 3, "sinkhorn_iter": 0},
+            {"dim": 3, "max_iter": 0},
+            {"dim": 3, "lr": 0.0},
+            {"dim": 3, "tol": 0.0},
+            {"dim": 3, "pseudo_count": -1.0},
+            {"dim": 3, "require_convergence": "false"},
+        )
+        for kwargs in invalid:
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                LowRankPermutationEstimator(**kwargs)
+
+        uniform = LowRankPermutationDistribution(np.zeros((3, 1)), np.zeros((3, 1)))
+        fitted = uniform.estimator(pseudo_count=2.0).estimate(None, (0.0, np.zeros((3, 3))))
+        self.assertTrue(fitted.fit_diagnostics.regularized)
+        np.testing.assert_allclose(fitted.marginals(), np.full((3, 3), 1.0 / 3.0))
+        with self.assertRaises(ValueError):
+            uniform.sampler().sample(-1)
+        with self.assertRaises(ValueError):
+            uniform.sampler().sample(1.5)
 
 
 if __name__ == "__main__":
