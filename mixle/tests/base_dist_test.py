@@ -125,7 +125,7 @@ def _build_dists():
     )
 
     cond_probs = np.ones((5**2, 5)) / 5
-    len_dist = IntegerCategoricalDistribution(min_val=0, p_vec=np.ones(5) / 5)
+    len_dist = IntegerCategoricalDistribution(min_val=2, p_vec=np.ones(3) / 3)
     init = SequenceDistribution(
         dist=IntegerCategoricalDistribution(min_val=0, p_vec=np.ones(5) / 5), len_dist=CategoricalDistribution({2: 1.0})
     )

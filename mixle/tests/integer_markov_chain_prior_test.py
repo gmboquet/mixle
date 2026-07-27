@@ -55,8 +55,8 @@ class ImplicitDirichletPriorTestCase(unittest.TestCase):
         num_values, lag = 3, 1
         est, fitted = _fit(pseudo_count=pseudo_count, num_values=num_values, lag=lag)
         alpha = np.full(num_values, pseudo_count + 1.0)
-        # cond_dist is stored float32; re-normalize each row to float64 exactly on the simplex
-        # (scipy's dirichlet.logpdf rejects a row sum off from 1.0 by more than 1e-9).
+        # Re-normalize each row to float64 exactly on the simplex because scipy's
+        # dirichlet.logpdf rejects even small accumulated sum error.
         rows = np.asarray(fitted.cond_dist, dtype=np.float64)
         rows = rows / rows.sum(axis=1, keepdims=True)
         expected = float(sum(dirichlet.logpdf(row, alpha=alpha) for row in rows))

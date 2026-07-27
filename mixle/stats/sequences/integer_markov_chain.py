@@ -2,25 +2,23 @@
 
 The data type: Sequence[int].
 
-Consider a sequence of length n > 0 s.t. x = (x[0],x[1],...,x[n-1]). With lag > 0, we have the integer Markov chain
-has a log-density given by:
+For a sequence ``x`` of length ``n >= lag > 0``, the log density is
 
-    log(P(x)) = log(P_init(x[0:lag]) + sum_{j=0}^{n-1} log(p_mat(x[j + lag] | x[j], x[j+1],..,x[j+lag-1])) +
+    log(P(x)) = log(P_init(x[0:lag]) + sum_{j=0}^{n-lag-1} log(p_mat(x[j + lag] | x[j],...,x[j+lag-1])) +
                     log(P_len(n)),
 
-where P_len(n) is the density for the length distribution evaluated for length 'n', and P_init() is the density
-for the initial distribution. If the sequence length is less than the lag, i.e. len(x) < lag, then
-
-    log(P(x)) = log(P_len(n)).
-
-Note: P_len() should be compatible with non-negative integers. P_init() must be compatible with sequences of ints.
+where ``P_len`` is evaluated at the actual length and ``P_init`` generates
+exactly ``lag`` bounded-integer states. Shorter sequences are outside the
+declared domain.
 
 """
 
+import copy
 import heapq
 import itertools
+import math
 from collections.abc import Iterator, Sequence
-from typing import Any, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
@@ -36,7 +34,9 @@ from mixle.stats.combinator.null_dist import (
     NullEstimator,
 )
 from mixle.stats.compute.pdist import (
+    ContractError,
     DataSequenceEncoder,
+    DensitySemantics,
     DistributionEnumerator,
     DistributionSampler,
     EnumerationError,
@@ -51,6 +51,245 @@ E1 = TypeVar("E1")  ## init encoding
 E2 = TypeVar("E2")  ## len encoding
 SS1 = TypeVar("SS1")  ## suff stat of init
 SS2 = TypeVar("SS2")  ## suff-stat of length
+
+
+class NonGenerativeIntegerMarkovChainError(TypeError):
+    """Raised when a conditional integer-chain factor is asked to generate sequences."""
+
+
+class IntegerMarkovChainStatistics(NamedTuple):
+    """Immutable sufficient statistics for one fixed integer-chain support."""
+
+    schema_version: int
+    num_values: int
+    lag: int
+    transition_counts: tuple[tuple[tuple[int, ...], int, float], ...]
+    initial_nobs: float
+    initial: Any | None
+    length_nobs: float
+    length: Any | None
+
+
+def _positive_integer(value: Any, *, label: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("%s must be a positive exact integer." % label)
+    array = np.asarray(value)
+    if array.ndim != 0 or np.iscomplexobj(array):
+        raise TypeError("%s must be a positive exact integer." % label)
+    try:
+        numeric = float(array)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be a positive exact integer." % label) from exc
+    if not math.isfinite(numeric) or numeric < 1.0 or math.floor(numeric) != numeric:
+        raise ValueError("%s must be a positive exact integer." % label)
+    if numeric > np.iinfo(np.intp).max:
+        raise ValueError("%s exceeds the platform index range." % label)
+    return int(numeric)
+
+
+def _finite_nonnegative(value: Any, *, label: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("%s must be a finite non-negative scalar." % label)
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be a finite non-negative scalar." % label) from exc
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError("%s must be a finite non-negative scalar." % label)
+    return result
+
+
+def _exact_state(value: Any, *, num_values: int, label: str) -> int:
+    if isinstance(value, (bool, np.bool_, str, bytes)):
+        raise TypeError("%s must be an exact integer state." % label)
+    array = np.asarray(value)
+    if array.ndim != 0 or np.iscomplexobj(array):
+        raise TypeError("%s must be an exact integer state." % label)
+    try:
+        numeric = float(array)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be an exact integer state." % label) from exc
+    if (
+        not math.isfinite(numeric)
+        or math.floor(numeric) != numeric
+        or numeric < 0.0
+        or numeric >= num_values
+    ):
+        raise ValueError("%s must be in the declared support [0, %d)." % (label, num_values))
+    return int(numeric)
+
+
+def _checked_observation(
+    value: Any,
+    *,
+    num_values: int,
+    lag: int,
+    label: str,
+) -> tuple[int, ...]:
+    if isinstance(value, np.ndarray):
+        if value.ndim != 1:
+            raise TypeError("%s must be a one-dimensional sequence of integer states." % label)
+    elif isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError("%s must be a sequence of integer states." % label)
+    states = tuple(
+        _exact_state(state, num_values=num_values, label="%s[%d]" % (label, index))
+        for index, state in enumerate(value)
+    )
+    if len(states) < lag:
+        raise ValueError("%s length must be at least lag=%d." % (label, lag))
+    return states
+
+
+def _validate_length_child(length_dist: SequenceEncodableProbabilityDistribution, *, lag: int) -> None:
+    """Require an integer length law whose positive support starts at or above ``lag``."""
+    from mixle.stats.combinator.sequence import _checked_length, _validate_length_distribution
+
+    _validate_length_distribution(length_dist)
+    size = length_dist.support_size()
+    if size is None:
+        raise TypeError(
+            "IntegerMarkovChainDistribution length law must expose finite support so its minimum "
+            "can be proved to be at least lag."
+        )
+    items = tuple(
+        itertools.islice(
+            child_enumerator(length_dist, "IntegerMarkovChainDistribution.len_dist"),
+            size + 1,
+        )
+    )
+    if len(items) > size:
+        raise ValueError("integer Markov length enumeration must expose its exact finite support.")
+    values = tuple(
+        _checked_length(value, label="integer Markov length support value")
+        for value, log_probability in items
+        if float(log_probability) > -np.inf
+    )
+    if not values or len(set(values)) != len(values):
+        raise ValueError("integer Markov length law must expose unique positive-mass support.")
+    if any(value < lag for value in values):
+        raise ValueError("integer Markov length support must contain only lengths >= lag=%d." % lag)
+
+
+def _validate_initial_child(
+    initial_dist: SequenceEncodableProbabilityDistribution,
+    *,
+    num_values: int,
+    lag: int,
+) -> None:
+    from mixle.stats.compute.declarations import declaration_for
+
+    declaration = declaration_for(initial_dist)
+    if declaration is None or declaration.support != "sequence":
+        raise TypeError("IntegerMarkovChainDistribution init_dist must declare sequence support.")
+    length_dist = getattr(initial_dist, "len_dist", None)
+    element_dist = getattr(initial_dist, "dist", None)
+    if length_dist is None or element_dist is None:
+        raise TypeError(
+            "IntegerMarkovChainDistribution init_dist must expose element and length laws."
+        )
+    from mixle.stats.combinator.sequence import _checked_length, _validate_length_distribution
+
+    _validate_length_distribution(length_dist)
+    size = length_dist.support_size()
+    if size is None:
+        raise TypeError("integer Markov initial length law must expose finite support.")
+    items = tuple(
+        itertools.islice(
+            child_enumerator(length_dist, "IntegerMarkovChainDistribution.init_dist.len_dist"),
+            size + 1,
+        )
+    )
+    if len(items) > size:
+        raise ValueError("integer Markov initial length enumeration exceeds its declared support.")
+    lengths = tuple(
+        _checked_length(value, label="integer Markov initial length support value")
+        for value, log_probability in items
+        if float(log_probability) > -np.inf
+    )
+    if set(lengths) != {lag}:
+        raise ValueError("integer Markov init_dist must generate exactly lag=%d states." % lag)
+    element_declaration = declaration_for(element_dist)
+    lower = getattr(element_dist, "min_val", None)
+    upper = getattr(element_dist, "max_val", None)
+    if (
+        element_declaration is None
+        or element_declaration.support != "bounded_integer"
+        or lower is None
+        or upper is None
+        or int(lower) < 0
+        or int(upper) >= num_values
+    ):
+        raise TypeError(
+            "integer Markov init_dist elements must declare bounded integer support inside [0, num_values)."
+        )
+
+
+def _validate_statistics(
+    value: Any,
+    *,
+    num_values: int,
+    lag: int,
+    path: str,
+) -> IntegerMarkovChainStatistics:
+    if not isinstance(value, IntegerMarkovChainStatistics) or value.schema_version != 1:
+        raise ContractError(
+            path,
+            "IntegerMarkovChainStatistics schema version 1",
+            type(value).__name__,
+            "pass the value produced by IntegerMarkovChainAccumulator.value().",
+        )
+    if value.num_values != num_values or value.lag != lag:
+        raise ContractError(
+            path,
+            "statistics for num_values=%d and lag=%d" % (num_values, lag),
+            "num_values=%r and lag=%r" % (value.num_values, value.lag),
+        )
+    transitions = []
+    seen = set()
+    for index, entry in enumerate(value.transition_counts):
+        if not isinstance(entry, (tuple, list)) or len(entry) != 3:
+            raise ContractError(
+                "%s.transition_counts[%d]" % (path, index),
+                "(lag_prefix, next_state, count)",
+                repr(entry),
+            )
+        prefix = _checked_observation(
+            entry[0],
+            num_values=num_values,
+            lag=lag,
+            label="%s.transition_counts[%d].prefix" % (path, index),
+        )
+        if len(prefix) != lag:
+            raise ValueError("%s transition prefixes must have exactly lag states." % path)
+        target = _exact_state(
+            entry[1],
+            num_values=num_values,
+            label="%s.transition_counts[%d].target" % (path, index),
+        )
+        key = (prefix, target)
+        if key in seen:
+            raise ValueError("%s contains duplicate transition %r." % (path, key))
+        seen.add(key)
+        transitions.append(
+            (prefix, target, _finite_nonnegative(entry[2], label="%s transition count" % path))
+        )
+    canonical = tuple(sorted(transitions, key=lambda entry: (entry[0], entry[1])))
+    if tuple(transitions) != canonical:
+        raise ValueError("%s transition counts must use canonical lexicographic order." % path)
+    initial_nobs = _finite_nonnegative(value.initial_nobs, label="%s.initial_nobs" % path)
+    length_nobs = _finite_nonnegative(value.length_nobs, label="%s.length_nobs" % path)
+    if not math.isclose(initial_nobs, length_nobs, rel_tol=1.0e-12, abs_tol=1.0e-12):
+        raise ValueError("%s initial_nobs and length_nobs must match." % path)
+    return IntegerMarkovChainStatistics(
+        1,
+        num_values,
+        lag,
+        canonical,
+        initial_nobs,
+        value.initial,
+        length_nobs,
+        value.length,
+    )
 
 
 class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
@@ -140,13 +379,48 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
                 init_dist and len_dist.
 
         """
-        self.num_values = num_values
-        self.cond_dist = np.asarray(cond_dist)
-        self.lag = lag
+        self.num_values = _positive_integer(num_values, label="num_values")
+        self.lag = _positive_integer(lag, label="lag")
+        expected_shape = (self.num_values**self.lag, self.num_values)
+        try:
+            conditional = np.array(cond_dist, dtype=np.float64, copy=True)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("cond_dist must be a finite numeric transition matrix.") from exc
+        if conditional.shape != expected_shape:
+            raise ValueError("cond_dist must have shape %r; got %r." % (expected_shape, conditional.shape))
+        if np.any(~np.isfinite(conditional)) or np.any(conditional < 0.0):
+            raise ValueError("cond_dist entries must be finite and non-negative.")
+        row_sums = conditional.sum(axis=1)
+        if np.any(~np.isclose(row_sums, 1.0, rtol=1.0e-12, atol=1.0e-12)):
+            raise ValueError("every cond_dist row must sum to 1.")
+        conditional.setflags(write=False)
+        self.cond_dist = conditional
         self.init_dist = init_dist if init_dist is not None else NullDistribution()
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
+        if not isinstance(self.init_dist, SequenceEncodableProbabilityDistribution):
+            raise TypeError("init_dist must be a probability distribution.")
+        if not isinstance(self.len_dist, SequenceEncodableProbabilityDistribution):
+            raise TypeError("len_dist must be a probability distribution.")
+        if not supports(self.init_dist, Neutral):
+            _validate_initial_child(
+                self.init_dist,
+                num_values=self.num_values,
+                lag=self.lag,
+            )
+        if not supports(self.len_dist, Neutral):
+            _validate_length_child(self.len_dist, lag=self.lag)
         self.name = name
         self.keys = keys
+
+    def density_semantics(self):
+        """Classify missing initial/length laws as conditional likelihood factors."""
+        from mixle.stats.compute.pdist import join_density_semantics
+
+        if supports(self.init_dist, Neutral) or supports(self.len_dist, Neutral):
+            return DensitySemantics.LIKELIHOOD_FACTOR
+        return join_density_semantics(
+            child.density_semantics() for child in (self.init_dist, self.len_dist)
+        )
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the distribution."""
@@ -185,16 +459,9 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
     def log_density(self, x: Sequence[int]) -> float:
         """Log-density of integer Markov chain evaluated at x.
 
-        Consider a sequence of length n > 0 s.t. x = (x[0],x[1],...,x[n-1]). With lag > 0, we have log-density
-        given by:
-
-            log(P(x)) = log(P_init(x[0:lag]) + sum_{j=0}^{n-1} log(p_mat(x[j + lag] | x[j], x[j+1],..,x[j+lag-1])) +
-                log(P_len(n)),
-
-        where P_len(n) is the density for the length distribution evaluated for length 'n', and P_init() is the density
-        for the initial distribution. If the sequence length is less than the lag, i.e. len(x) < lag, then
-
-            log(P(x)) = log(P_len(n)).
+        The initial child scores exactly the first ``lag`` states, each later
+        state is scored by its lag-indexed transition row, and the length child
+        scores the actual sequence length. Shorter observations are rejected.
 
         Args:
             x (Sequence[int]): An integer markov chain observation.
@@ -203,18 +470,23 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             Log-density evaluated at x.
 
         """
+        states = _checked_observation(
+            x,
+            num_values=self.num_values,
+            lag=self.lag,
+            label="integer Markov observation",
+        )
         rv = 0.0
         lag = self.lag
 
-        if len(x) >= lag:
-            m_shape = [self.num_values] * lag
-            rv += self.init_dist.log_density(x[:lag])
+        m_shape = [self.num_values] * lag
+        rv += self.init_dist.log_density(states[:lag])
 
-            for i in range(len(x) - lag):
-                idx = np.ravel_multi_index(x[i : (i + lag)], m_shape)
-                rv += np.log(self.cond_dist[idx, x[i + lag]])
+        for i in range(len(states) - lag):
+            idx = np.ravel_multi_index(states[i : (i + lag)], m_shape)
+            rv += np.log(self.cond_dist[idx, states[i + lag]])
 
-        rv += self.len_dist.log_density(len(x))
+        rv += self.len_dist.log_density(len(states))
 
         return rv
 
@@ -227,7 +499,7 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         See log_density() for details on likelihood evaluation.
 
         Sequence encoded arg 'x' is a Tuple of length 7 containing:
-            seq_len (ndarray[int]): Lengths of chains - lag. If less than lag length is 0.
+            seq_len (ndarray[int]): Actual observed sequence lengths.
             init_idx (ndarray[int]): Observed sequence index of chains with lengths >= lag.
             seq_idx (ndarray[int]): Observed sequence index of chains with transitions.
             u_seq_idx (ndarray[object]): Numpy array of tuples containing the unique transitions.
@@ -242,19 +514,28 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             Log-density evaluated at each observation in encoded sequence.
 
         """
+        self.dist_to_encoder().row_count(x)
         seq_len, init_idx, seq_idx, u_seq_idx, u_seq_values, init_enc, len_enc = x
 
-        left_idx = [np.ravel_multi_index(u[0], [self.num_values] * self.lag) for u in u_seq_values]
-        right_idx = np.asarray([u[1] for u in u_seq_values])
-        temp_prob = np.log(self.cond_dist[left_idx, right_idx])
-        temp_prob = temp_prob[u_seq_idx]
+        rv = np.zeros(len(seq_len), dtype=np.float64)
+        if len(seq_idx):
+            left_idx = np.asarray(
+                [np.ravel_multi_index(u[0], [self.num_values] * self.lag) for u in u_seq_values],
+                dtype=np.intp,
+            )
+            right_idx = np.asarray([u[1] for u in u_seq_values], dtype=np.intp)
+            with np.errstate(divide="ignore"):
+                temp_prob = np.log(self.cond_dist[left_idx, right_idx])
+            rv += np.bincount(
+                seq_idx,
+                weights=temp_prob[np.asarray(u_seq_idx, dtype=np.intp)],
+                minlength=len(seq_len),
+            )
 
-        rv = np.bincount(seq_idx, weights=temp_prob, minlength=len(seq_len))
-
-        if self.init_dist is not None:
+        if not supports(self.init_dist, Neutral) and len(init_idx):
             rv[init_idx] += self.init_dist.seq_log_density(init_enc)
 
-        if self.len_dist is not None and len_enc is not None:
+        if not supports(self.len_dist, Neutral) and len_enc is not None:
             rv += self.len_dist.seq_log_density(len_enc)
 
         return rv
@@ -267,6 +548,7 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         """Engine-neutral vectorized log-density for grouped integer Markov-chain encodings."""
         from mixle.stats.compute.backend import backend_seq_log_density
 
+        self.dist_to_encoder().row_count(x)
         seq_len, init_idx, seq_idx, u_seq_idx, u_seq_values, init_enc, len_enc = x
         rv = engine.zeros(len(seq_len))
 
@@ -352,6 +634,8 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         """Return an ``(n, k)`` matrix of integer Markov-chain log densities."""
         from mixle.stats.compute.stacked import stacked_component_log_density
 
+        if not isinstance(x, tuple) or len(x) != 7:
+            raise ValueError("stacked integer Markov encoding must be a seven-slot tuple.")
         seq_len, init_idx, seq_idx, u_seq_idx, u_seq_values, init_enc, len_enc = x
         rv = engine.zeros((len(seq_len), int(params["num_components"])))
 
@@ -384,7 +668,7 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         engine: Any,
         estimator: Any,
     ) -> tuple[Any, ...]:
-        """Return per-component legacy ``(transition_counts, initial_stat, length_stat)`` statistics."""
+        """Return per-component versioned fixed-support sufficient statistics."""
         from mixle.stats.compute.stacked import (
             StackedEstimatorView,
             stacked_component_sufficient_statistics,
@@ -435,13 +719,28 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             )
             length_by_component = unstack_component_stats(length_stats, num_components)
 
+        weights_np = np.asarray(engine.to_numpy(ww), dtype=np.float64)
+        init_nobs = weights_np[np.asarray(init_idx, dtype=np.intp), :].sum(axis=0)
+        length_nobs = weights_np.sum(axis=0)
+        values = tuple(u_seq_values)
         return tuple(
-            (
-                {
-                    u_seq_values[value_index]: float(trans_counts[value_index, component])
-                    for value_index in range(len(u_seq_values))
-                },
+            IntegerMarkovChainStatistics(
+                1,
+                int(params["num_values"]),
+                int(params["lag"]),
+                tuple(
+                    sorted(
+                        (
+                            tuple(values[value_index][0]),
+                            int(values[value_index][1]),
+                            float(trans_counts[value_index, component]),
+                        )
+                        for value_index in range(len(values))
+                    )
+                ),
+                float(init_nobs[component]),
                 init_by_component[component],
+                float(length_nobs[component]),
                 length_by_component[component],
             )
             for component in range(num_components)
@@ -449,12 +748,20 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
     def sampler(self, seed: int | None = None) -> "IntegerMarkovChainSampler":
         """Return a sampler for this integer Markov chain."""
+        if self.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR:
+            raise NonGenerativeIntegerMarkovChainError(
+                "IntegerMarkovChainDistribution requires proper init_dist and len_dist laws for sampling."
+            )
+        return IntegerMarkovChainSampler(self, seed)
+
+    def transition_sampler(self, seed: int | None = None) -> "IntegerMarkovChainSampler":
+        """Return a sampler exposing only ``sample_given`` for conditional transition use."""
         return IntegerMarkovChainSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None):
         """Return an estimator initialized from this integer Markov chain."""
-        init_est = self.init_dist.estimator()
-        len_est = self.len_dist.estimator()
+        init_est = self.init_dist.estimator(pseudo_count=pseudo_count)
+        len_est = self.len_dist.estimator(pseudo_count=pseudo_count)
 
         return IntegerMarkovChainEstimator(
             num_values=self.num_values,
@@ -470,7 +777,12 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         """Return a data encoder for iid integer Markov-chain observations."""
         len_encoder = self.len_dist.dist_to_encoder()
         init_encoder = self.init_dist.dist_to_encoder()
-        return IntegerMarkovChainDataEncoder(lag=self.lag, len_encoder=len_encoder, init_encoder=init_encoder)
+        return IntegerMarkovChainDataEncoder(
+            num_values=self.num_values,
+            lag=self.lag,
+            len_encoder=len_encoder,
+            init_encoder=init_encoder,
+        )
 
     def enumerator(self) -> "IntegerMarkovChainEnumerator":
         """Returns IntegerMarkovChainEnumerator iterating integer sequences in descending probability order."""
@@ -493,6 +805,8 @@ class IntegerMarkovChainEnumerator(DistributionEnumerator):
         super().__init__(dist)
         if dist.lag <= 0:
             raise EnumerationError(dist, reason="lag must be positive for enumeration")
+        if supports(dist.init_dist, Neutral):
+            raise EnumerationError(dist, reason="no initial-prefix distribution is modeled (init_dist is Null)")
         if supports(dist.len_dist, Neutral):
             raise EnumerationError(dist, reason="no length distribution is modeled (len_dist is Null)")
 
@@ -527,17 +841,24 @@ class IntegerMarkovChainEnumerator(DistributionEnumerator):
             return iter(ProductEnumerator(streams, combine=list))
         return iter(child_enumerator(self.dist.init_dist, "IntegerMarkovChainDistribution.init_dist"))
 
-    def _valid_prefix(self, value: Any) -> tuple[int, ...] | None:
-        if not isinstance(value, (list, tuple, np.ndarray)):
-            return None
-        if len(value) != self.dist.lag:
-            return None
+    def _valid_prefix(self, value: Any) -> tuple[int, ...]:
         try:
-            prefix = tuple(int(v) for v in value)
-        except (TypeError, ValueError):
-            return None
-        if any(v < 0 or v >= self.dist.num_values for v in prefix):
-            return None
+            prefix = _checked_observation(
+                value,
+                num_values=self.dist.num_values,
+                lag=self.dist.lag,
+                label="integer Markov initial support value",
+            )
+        except (TypeError, ValueError) as exc:
+            raise EnumerationError(
+                self.dist,
+                reason="init_dist emitted an invalid integer prefix: %s" % exc,
+            ) from exc
+        if len(prefix) != self.dist.lag:
+            raise EnumerationError(
+                self.dist,
+                reason="init_dist prefix length must equal lag=%d" % self.dist.lag,
+            )
         return prefix
 
     def _bound(self, exact: float, remaining: int, lp_len: float) -> float:
@@ -553,8 +874,10 @@ class IntegerMarkovChainEnumerator(DistributionEnumerator):
         return int(np.ravel_multi_index(prefix[-self.dist.lag :], self._shape))
 
     def _short_paths(self, n: int, lp_len: float) -> Iterator[tuple[list[int], float]]:
-        streams = [BufferedStream(iter(self._choices)) for _ in range(n)]
-        return iter(ProductEnumerator(streams, combine=list, offset=lp_len))
+        raise EnumerationError(
+            self.dist,
+            reason="length support contains %d below lag=%d" % (n, self.dist.lag),
+        )
 
     def _kbest_paths(self, n: int, lp_len: float) -> Iterator[tuple[list[int], float]]:
         if n == 0:
@@ -579,8 +902,6 @@ class IntegerMarkovChainEnumerator(DistributionEnumerator):
                     return None
                 init_rank += 1
                 prefix = self._valid_prefix(item[0])
-                if prefix is None:
-                    continue
                 exact = float(item[1])
                 bound = self._bound(exact, init_remaining, lp_len)
                 if bound == -np.inf:
@@ -647,19 +968,27 @@ class IntegerMarkovChainSampler(DistributionSampler):
         """Returns a single sample from the integer Markov chain distribution."""
         if self.init_sampler is None or self.len_sampler is None:
             raise ValueError("IntegerMarkovChainSampler requires init_dist and len_dist for unconditional sampling.")
-        cnt = self.len_sampler.sample()
+        cnt = _positive_integer(self.len_sampler.sample(), label="sampled integer Markov length")
         lag = self.dist.lag
         n_val = self.dist.num_values
         m_shape = [n_val] * lag
 
-        if cnt >= lag:
-            rv = self.init_sampler.sample()  ## must return a list
-            for i in range(lag, cnt):
-                idx = np.ravel_multi_index(rv[-lag:], m_shape)
-                rv.append(self.trans_sampler.choice(n_val, p=self.dist.cond_dist[idx, :]))
-            return rv
-        else:
-            return []
+        if cnt < lag:
+            raise ValueError("sampled integer Markov length must be at least lag=%d." % lag)
+        rv = list(
+            _checked_observation(
+                self.init_sampler.sample(),
+                num_values=n_val,
+                lag=lag,
+                label="sampled integer Markov initial prefix",
+            )
+        )
+        if len(rv) != lag:
+            raise ValueError("sampled integer Markov initial prefix must have exactly lag states.")
+        for i in range(lag, cnt):
+            idx = np.ravel_multi_index(rv[-lag:], m_shape)
+            rv.append(int(self.trans_sampler.choice(n_val, p=self.dist.cond_dist[idx, :])))
+        return rv
 
     def _sample_batched(self, size: int) -> list[Sequence[int]]:
         """Vectorized batch sample: per-chain init/length draws, then transitions across chains.
@@ -676,14 +1005,27 @@ class IntegerMarkovChainSampler(DistributionSampler):
         n_val = self.dist.num_values
         m_shape = [n_val] * lag
 
-        lengths = np.asarray(self.len_sampler.sample(size=size)).astype(int).reshape(-1)
-        # Per-chain init draws, in order (byte-identical). Chains with length < lag yield [].
+        raw_lengths = np.asarray(self.len_sampler.sample(size=size), dtype=object).reshape(-1)
+        if len(raw_lengths) != size:
+            raise ValueError("integer Markov length sampler returned the wrong batch size.")
+        lengths = np.asarray(
+            [_positive_integer(value, label="sampled integer Markov length") for value in raw_lengths],
+            dtype=np.intp,
+        )
+        if np.any(lengths < lag):
+            raise ValueError("sampled integer Markov lengths must be at least lag=%d." % lag)
+        # Per-chain initial draws remain in the child's stable sampling order.
         seqs: list[list[int]] = []
-        for cnt in lengths:
-            if cnt >= lag:
-                seqs.append(list(self.init_sampler.sample()))
-            else:
-                seqs.append([])
+        for _ in lengths:
+            prefix = _checked_observation(
+                self.init_sampler.sample(),
+                num_values=n_val,
+                lag=lag,
+                label="sampled integer Markov initial prefix",
+            )
+            if len(prefix) != lag:
+                raise ValueError("sampled integer Markov initial prefix must have exactly lag states.")
+            seqs.append(list(prefix))
 
         max_len = int(lengths.max()) if size else 0
         for t in range(lag, max_len):
@@ -723,8 +1065,17 @@ class IntegerMarkovChainSampler(DistributionSampler):
         """
         if size is None:
             return self.single_sample()
+        if isinstance(batched, (np.bool_, bool)):
+            batched = bool(batched)
+        else:
+            raise TypeError("batched must be bool.")
+        if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)):
+            raise TypeError("size must be a non-negative integer.")
+        size = int(size)
+        if size < 0:
+            raise ValueError("size must be a non-negative integer.")
         if not batched:
-            return [self.single_sample() for i in range(size)]
+            return [self.single_sample() for _ in range(size)]
         return self._sample_batched(size)
 
     def sample_given(self, x: Sequence[int]) -> int:
@@ -740,7 +1091,13 @@ class IntegerMarkovChainSampler(DistributionSampler):
         lag = self.dist.lag
         n_val = self.dist.num_values
         m_shape = [n_val] * lag
-        idx = np.ravel_multi_index(x[-lag:], m_shape)
+        states = _checked_observation(
+            x,
+            num_values=n_val,
+            lag=lag,
+            label="integer Markov conditioning path",
+        )
+        idx = np.ravel_multi_index(states[-lag:], m_shape)
 
         return self.trans_sampler.choice(n_val, p=self.dist.cond_dist[idx, :])
 
@@ -750,6 +1107,7 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
 
     def __init__(
         self,
+        num_values: int,
         lag: int,
         init_accumulator: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
         len_accumulator: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
@@ -775,7 +1133,8 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             len_accumulator (SequenceEncodableStatisticAccumulator): Accumulator for the length of the observed
                 sequences. Should be a sequence compatible accumulator with support on the non-negative integers.
                 Defaults to the NullAccumulator.
-            max_value (int): Largest value encountered when accumulating sufficient statistics.
+            initial_nobs (float): Effective weight accumulated for the initial child.
+            length_nobs (float): Effective weight accumulated for the length child.
             keys (Optional[str]): Optional key for merging sufficient statistics with compatible accumulators.
             name (Optional[str]): Optional accumulator name.
 
@@ -784,11 +1143,13 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             _len_rng (Optional[RandomState]): Random state for initializing the length accumulator.
 
         """
-        self.lag = lag
+        self.num_values = _positive_integer(num_values, label="integer Markov accumulator num_values")
+        self.lag = _positive_integer(lag, label="integer Markov accumulator lag")
         self.trans_count_map = dict()
         self.len_accumulator = len_accumulator if len_accumulator is not None else NullAccumulator()
         self.init_accumulator = init_accumulator if init_accumulator is not None else NullAccumulator()
-        self.max_value = -1
+        self.initial_nobs = 0.0
+        self.length_nobs = 0.0
         self.keys = keys
 
         self._acc_rng = None
@@ -807,17 +1168,25 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        lag = self.lag
-        self.len_accumulator.update(
-            max(len(x) - lag + 1, 0), weight, estimate.len_dist if estimate is not None else None
+        states = _checked_observation(
+            x,
+            num_values=self.num_values,
+            lag=self.lag,
+            label="integer Markov observation",
         )
+        weight = _finite_nonnegative(weight, label="integer Markov observation weight")
+        self.len_accumulator.update(
+            len(states), weight, estimate.len_dist if estimate is not None else None
+        )
+        self.length_nobs += weight
+        self.init_accumulator.update(
+            states[: self.lag], weight, estimate.init_dist if estimate is not None else None
+        )
+        self.initial_nobs += weight
 
-        if len(x) >= lag:
-            self.init_accumulator.update(x[:lag], weight, estimate.init_dist if estimate is not None else None)
-
-        for i in range(len(x) - lag):
-            entry = (tuple(x[i : (i + lag)]), x[i + lag])
-            self.trans_count_map[entry] = self.trans_count_map.get(entry, 0) + weight
+        for i in range(len(states) - self.lag):
+            entry = (states[i : (i + self.lag)], states[i + self.lag])
+            self.trans_count_map[entry] = self.trans_count_map.get(entry, 0.0) + weight
 
     def _rng_initialize(self, rng: RandomState) -> None:
         """Initialize accumulator random states from ``rng``.
@@ -853,15 +1222,21 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         if not self._init_rng:
             self._rng_initialize(rng)
 
-        lag = self.lag
+        states = _checked_observation(
+            x,
+            num_values=self.num_values,
+            lag=self.lag,
+            label="integer Markov observation",
+        )
+        weight = _finite_nonnegative(weight, label="integer Markov observation weight")
+        self.len_accumulator.initialize(len(states), weight, self._len_rng)
+        self.length_nobs += weight
+        self.init_accumulator.initialize(states[: self.lag], weight, self._acc_rng)
+        self.initial_nobs += weight
 
-        if len(x) >= lag:
-            self.len_accumulator.initialize(len(x) - lag, weight, self._len_rng)
-            self.init_accumulator.initialize(x[:lag], weight, self._acc_rng)
-
-        for i in range(len(x) - lag):
-            entry = (tuple(x[i : (i + lag)]), x[i + lag])
-            self.trans_count_map[entry] = self.trans_count_map.get(entry, 0) + weight
+        for i in range(len(states) - self.lag):
+            entry = (states[i : (i + self.lag)], states[i + self.lag])
+            self.trans_count_map[entry] = self.trans_count_map.get(entry, 0.0) + weight
 
     def seq_update(
         self,
@@ -872,7 +1247,7 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         """Vectorized update of sufficient statistics from an encoded sequence of observations 'x'.
 
         Sequence encoded arg 'x' is a Tuple of length 7 containing:
-            seq_len (ndarray[int]): Lengths of chains - lag. If less than lag length is 0.
+            seq_len (ndarray[int]): Actual observed sequence lengths.
             init_idx (ndarray[int]): Observed sequence index of chains with lengths >= lag.
             seq_idx (ndarray[int]): Observed sequence index of chains with transitions.
             u_seq_idx (ndarray[object]): Numpy array of tuples containing the unique transitions.
@@ -890,8 +1265,18 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         seq_len, init_idx, seq_idx, u_seq_idx, u_seq_values, init_enc, len_enc = x
-
-        seq_cnt = np.bincount(u_seq_idx, weights=weights[seq_idx])
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.shape != (len(seq_len),):
+            raise ValueError("integer Markov weights must align with encoded observations.")
+        if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
+            raise ValueError("integer Markov weights must be finite and non-negative.")
+        init_idx = np.asarray(init_idx, dtype=np.intp)
+        seq_idx = np.asarray(seq_idx, dtype=np.intp)
+        seq_cnt = np.bincount(
+            np.asarray(u_seq_idx, dtype=np.intp),
+            weights=weights[seq_idx],
+            minlength=len(u_seq_values),
+        )
 
         if len(self.trans_count_map) == 0:
             self.trans_count_map = dict(zip(u_seq_values, seq_cnt))
@@ -902,8 +1287,9 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         self.init_accumulator.seq_update(
             init_enc, weights[init_idx], estimate.init_dist if estimate is not None else None
         )
-
+        self.initial_nobs += float(weights[init_idx].sum())
         self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist if estimate is not None else None)
+        self.length_nobs += float(weights.sum())
 
     def seq_update_engine(
         self,
@@ -921,6 +1307,10 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         seq_len, init_idx, seq_idx, u_seq_idx, u_seq_values, init_enc, len_enc = x
 
         weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        if weights_np.shape != (len(seq_len),):
+            raise ValueError("integer Markov weights must align with encoded observations.")
+        if np.any(~np.isfinite(weights_np)) or np.any(weights_np < 0.0):
+            raise ValueError("integer Markov weights must be finite and non-negative.")
         w_eng = engine.asarray(weights_np)
 
         seq_cnt = np.asarray(
@@ -946,6 +1336,8 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             self.init_accumulator, init_enc, w_eng[np.asarray(init_idx, dtype=np.int64)], init_estimate, engine
         )
         child_seq_update(self.len_accumulator, len_enc, w_eng, len_estimate, engine)
+        self.initial_nobs += float(weights_np[np.asarray(init_idx, dtype=np.intp)].sum())
+        self.length_nobs += float(weights_np.sum())
 
     def seq_initialize(
         self,
@@ -958,7 +1350,7 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         Note: Calls _rng_initialize() to ensure consistency with seq_initialize() function.
 
         Sequence encoded arg 'x' is a Tuple of length 7 containing:
-            seq_len (ndarray[int]): Lengths of chains - lag. If less than lag length is 0.
+            seq_len (ndarray[int]): Actual observed sequence lengths.
             init_idx (ndarray[int]): Observed sequence index of chains with lengths >= lag.
             seq_idx (ndarray[int]): Observed sequence index of chains with transitions.
             u_seq_idx (ndarray[object]): Numpy array of tuples containing the unique transitions.
@@ -979,8 +1371,18 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             self._rng_initialize(rng)
 
         seq_len, init_idx, seq_idx, u_seq_idx, u_seq_values, init_enc, len_enc = x
-
-        seq_cnt = np.bincount(u_seq_idx, weights=weights[seq_idx])
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.shape != (len(seq_len),):
+            raise ValueError("integer Markov weights must align with encoded observations.")
+        if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
+            raise ValueError("integer Markov weights must be finite and non-negative.")
+        init_idx = np.asarray(init_idx, dtype=np.intp)
+        seq_idx = np.asarray(seq_idx, dtype=np.intp)
+        seq_cnt = np.bincount(
+            np.asarray(u_seq_idx, dtype=np.intp),
+            weights=weights[seq_idx],
+            minlength=len(u_seq_values),
+        )
 
         if len(self.trans_count_map) == 0:
             self.trans_count_map = dict(zip(u_seq_values, seq_cnt))
@@ -989,17 +1391,12 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
                 self.trans_count_map[k] = self.trans_count_map.get(k, 0) + v
 
         self.init_accumulator.seq_initialize(init_enc, weights[init_idx], self._acc_rng)
+        self.initial_nobs += float(weights[init_idx].sum())
         self.len_accumulator.seq_initialize(len_enc, weights, self._len_rng)
+        self.length_nobs += float(weights.sum())
 
-    def combine(
-        self, suff_stat: tuple[dict[tuple[tuple[int, ...], int], float], SS1 | None, SS2 | None]
-    ) -> "IntegerMarkovChainAccumulator":
-        """Combine another sufficient-statistics tuple into this accumulator.
-
-        Arg suff_stat is a Tuple of length 3 containing:
-            suff_stat[0] (Dict[Tuple[Tuple[int, ...], int], float]): Dictionary mapping state transition counts.
-            suff_stat[1] (Optional[SS1]): Optional sufficient statistics for init accumulator of type SS1.
-            suff_stat[2] (Optional[SS2]): Optional sufficient statistics for length accumulator of type SS2.
+    def combine(self, suff_stat: IntegerMarkovChainStatistics) -> "IntegerMarkovChainAccumulator":
+        """Combine another versioned fixed-support statistic into this accumulator.
 
         Args:
             suff_stat: See above for details.
@@ -1008,40 +1405,45 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             IntegerMarkovChainAccumulator: This accumulator after combination.
 
         """
-        for k, v in suff_stat[0].items():
-            self.trans_count_map[k] = self.trans_count_map.get(k, 0) + v
+        checked = _validate_statistics(
+            suff_stat,
+            num_values=self.num_values,
+            lag=self.lag,
+            path="IntegerMarkovChainAccumulator.combine",
+        )
+        for prefix, target, count in checked.transition_counts:
+            key = (prefix, target)
+            self.trans_count_map[key] = self.trans_count_map.get(key, 0.0) + count
 
-        if suff_stat[1] is not None:
-            self.init_accumulator = self.init_accumulator.combine(suff_stat[1])
+        if checked.initial is not None:
+            self.init_accumulator = self.init_accumulator.combine(checked.initial)
+        self.initial_nobs += checked.initial_nobs
 
-        if suff_stat[2] is not None:
-            self.len_accumulator = self.len_accumulator.combine(suff_stat[2])
+        if checked.length is not None:
+            self.len_accumulator = self.len_accumulator.combine(checked.length)
+        self.length_nobs += checked.length_nobs
 
         return self
 
-    def value(self) -> tuple[dict[tuple[tuple[int, ...], int], float], Any | None, Any | None]:
-        """Returns sufficient statistics of integer Markov chain.
+    def value(self) -> IntegerMarkovChainStatistics:
+        """Return copied child statistics and immutable canonical transition counts."""
+        transitions = tuple(
+            (prefix, target, _finite_nonnegative(count, label="integer Markov transition count"))
+            for (prefix, target), count in sorted(self.trans_count_map.items())
+        )
+        return IntegerMarkovChainStatistics(
+            1,
+            self.num_values,
+            self.lag,
+            transitions,
+            _finite_nonnegative(self.initial_nobs, label="integer Markov initial_nobs"),
+            copy.deepcopy(self.init_accumulator.value()),
+            _finite_nonnegative(self.length_nobs, label="integer Markov length_nobs"),
+            copy.deepcopy(self.len_accumulator.value()),
+        )
 
-        Returned suff_stat is a Tuple of length 3 containing:
-            suff_stat[0] (Dict[Tuple[Tuple[int, ...], int], float]): Dictionary mapping state transition counts.
-            suff_stat[1] (Optional[SS1]): Optional sufficient statistics for init accumulator of type SS1.
-            suff_stat[2] (Optional[SS2]): Optional sufficient statistics for length accumulator of type SS2.
-
-        Returns:
-            Tuple[Dict[Tuple[Tuple[int, ...], int], float], Optional[SS1], Optional[SS2]].
-
-        """
-        return self.trans_count_map, self.init_accumulator.value(), self.len_accumulator.value()
-
-    def from_value(
-        self, x: tuple[dict[tuple[tuple[int, ...], int], float], SS1 | None, SS2 | None]
-    ) -> "IntegerMarkovChainAccumulator":
-        """Restore accumulator state from aggregated sufficient statistics.
-
-        Arg value 'x' is a Tuple of length 3 containing:
-            x[0] (Dict[Tuple[Tuple[int, ...], int], float]): Dictionary mapping state transition counts.
-            x[1] (Optional[SS1]): Optional sufficient statistics for init accumulator of type SS1.
-            x[2] (Optional[SS2]): Optional sufficient statistics for length accumulator of type SS2.
+    def from_value(self, x: IntegerMarkovChainStatistics) -> "IntegerMarkovChainAccumulator":
+        """Restore accumulator state from a versioned fixed-support statistic.
 
         Args:
             x: See above for details.
@@ -1050,13 +1452,34 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             IntegerMarkovChainAccumulator: This accumulator after restoration.
 
         """
-        self.trans_count_map = x[0]
-        if x[1] is not None:
-            self.init_accumulator = self.init_accumulator.from_value(x[1])
+        checked = _validate_statistics(
+            x,
+            num_values=self.num_values,
+            lag=self.lag,
+            path="IntegerMarkovChainAccumulator.from_value",
+        )
+        self.trans_count_map = {
+            (prefix, target): count for prefix, target, count in checked.transition_counts
+        }
+        self.initial_nobs = checked.initial_nobs
+        self.length_nobs = checked.length_nobs
+        if checked.initial is not None:
+            self.init_accumulator = self.init_accumulator.from_value(copy.deepcopy(checked.initial))
+        if checked.length is not None:
+            self.len_accumulator = self.len_accumulator.from_value(copy.deepcopy(checked.length))
 
-        if x[2] is not None:
-            self.len_accumulator = self.len_accumulator.from_value(x[2])
+        return self
 
+    def scale(self, c: float) -> "IntegerMarkovChainAccumulator":
+        """Scale numeric evidence while preserving support and schema metadata."""
+        c = _finite_nonnegative(c, label="integer Markov statistic scale")
+        self.trans_count_map = {
+            key: count * c for key, count in self.trans_count_map.items()
+        }
+        self.initial_nobs *= c
+        self.length_nobs *= c
+        self.init_accumulator.scale(c)
+        self.len_accumulator.scale(c)
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -1073,7 +1496,7 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
             else:
-                stats_dict[self.keys] = self
+                stats_dict[self.keys] = copy.deepcopy(self)
 
         self.init_accumulator.key_merge(stats_dict)
         self.len_accumulator.key_merge(stats_dict)
@@ -1099,7 +1522,12 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         """Return a data encoder built from the child accumulators."""
         len_encoder = self.len_accumulator.acc_to_encoder()
         init_encoder = self.init_accumulator.acc_to_encoder()
-        return IntegerMarkovChainDataEncoder(lag=self.lag, len_encoder=len_encoder, init_encoder=init_encoder)
+        return IntegerMarkovChainDataEncoder(
+            num_values=self.num_values,
+            lag=self.lag,
+            len_encoder=len_encoder,
+            init_encoder=init_encoder,
+        )
 
 
 class IntegerMarkovChainAccumulatorFactory(StatisticAccumulatorFactory):
@@ -1107,6 +1535,7 @@ class IntegerMarkovChainAccumulatorFactory(StatisticAccumulatorFactory):
 
     def __init__(
         self,
+        num_values: int,
         lag: int,
         init_factory: StatisticAccumulatorFactory | None = NullAccumulatorFactory(),
         len_factory: StatisticAccumulatorFactory | None = NullAccumulatorFactory(),
@@ -1136,7 +1565,8 @@ class IntegerMarkovChainAccumulatorFactory(StatisticAccumulatorFactory):
             name (Optional[str]): Optional accumulator name.
 
         """
-        self.lag = lag
+        self.num_values = _positive_integer(num_values, label="integer Markov factory num_values")
+        self.lag = _positive_integer(lag, label="integer Markov factory lag")
         self.init_factory = init_factory if init_factory is not None else NullAccumulatorFactory()
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
         self.keys = keys
@@ -1146,7 +1576,14 @@ class IntegerMarkovChainAccumulatorFactory(StatisticAccumulatorFactory):
         """Return a new integer Markov-chain accumulator."""
         init_acc = self.init_factory.make()
         len_acc = self.len_factory.make()
-        return IntegerMarkovChainAccumulator(self.lag, init_acc, len_acc, keys=self.keys, name=self.name)
+        return IntegerMarkovChainAccumulator(
+            self.num_values,
+            self.lag,
+            init_acc,
+            len_acc,
+            keys=self.keys,
+            name=self.name,
+        )
 
 
 class IntegerMarkovChainEstimator(ParameterEstimator):
@@ -1199,13 +1636,31 @@ class IntegerMarkovChainEstimator(ParameterEstimator):
                 init_dist and len_dist.
 
         """
-        self.num_values = num_values
-        self.lag = lag
-        self.init_estimator = init_estimator
-        self.len_estimator = len_estimator
+        self.num_values = _positive_integer(num_values, label="integer Markov estimator num_values")
+        self.lag = _positive_integer(lag, label="integer Markov estimator lag")
+        self.init_estimator = init_estimator if init_estimator is not None else NullEstimator()
+        self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.init_dist = init_dist
         self.len_dist = len_dist
-        self.pseudo_count = pseudo_count
+        self.pseudo_count = (
+            None
+            if pseudo_count is None
+            else _finite_nonnegative(pseudo_count, label="integer Markov pseudo_count")
+        )
+        if self.init_dist is not None:
+            if not isinstance(self.init_dist, SequenceEncodableProbabilityDistribution):
+                raise TypeError("fixed init_dist must be a probability distribution.")
+            if not supports(self.init_dist, Neutral):
+                _validate_initial_child(
+                    self.init_dist,
+                    num_values=self.num_values,
+                    lag=self.lag,
+                )
+        if self.len_dist is not None:
+            if not isinstance(self.len_dist, SequenceEncodableProbabilityDistribution):
+                raise TypeError("fixed len_dist must be a probability distribution.")
+            if not supports(self.len_dist, Neutral):
+                _validate_length_child(self.len_dist, lag=self.lag)
         self.name = name
         self.keys = keys
 
@@ -1257,19 +1712,20 @@ class IntegerMarkovChainEstimator(ParameterEstimator):
         """Return an accumulator factory configured from this estimator."""
         len_factory = self.len_estimator.accumulator_factory()
         init_factory = self.init_estimator.accumulator_factory()
-        return IntegerMarkovChainAccumulatorFactory(self.lag, init_factory, len_factory, keys=self.keys)
+        return IntegerMarkovChainAccumulatorFactory(
+            self.num_values,
+            self.lag,
+            init_factory,
+            len_factory,
+            keys=self.keys,
+        )
 
     def estimate(
         self,
         nobs: float | None,
-        suff_stat: tuple[dict[tuple[tuple[int, ...], int], float], SS1 | None, SS2 | None],
+        suff_stat: IntegerMarkovChainStatistics,
     ) -> "IntegerMarkovChainDistribution":
-        """Estimate an integer Markov-chain distribution from aggregated sufficient statistics.
-
-        Arg 'suff_stat' is a Tuple of length 3 containing:
-            suff_stat[0] (Dict[Tuple[Tuple[int, ...], int], float]): Dictionary mapping state transition counts.
-            suff_stat[1] (Optional[SS1]): Optional sufficient statistics for init accumulator of type SS1.
-            suff_stat[2] (Optional[SS2]): Optional sufficient statistics for length accumulator of type SS2.
+        """Estimate an integer Markov-chain distribution from versioned sufficient statistics.
 
         Args:
             nobs (Optional[float]): Number of observations used in aggregation of 'suff_stat'.
@@ -1279,27 +1735,37 @@ class IntegerMarkovChainEstimator(ParameterEstimator):
             IntegerMarkovChainDistribution object.
 
         """
-        trans_count_map, init_ss, len_ss = suff_stat
+        checked = _validate_statistics(
+            suff_stat,
+            num_values=self.num_values,
+            lag=self.lag,
+            path="IntegerMarkovChainEstimator.estimate",
+        )
+        if nobs is not None and not math.isclose(
+            _finite_nonnegative(nobs, label="integer Markov estimate nobs"),
+            checked.length_nobs,
+            rel_tol=1.0e-12,
+            abs_tol=1.0e-12,
+        ):
+            raise ValueError("integer Markov estimate nobs must match statistic length_nobs.")
         lag = self.lag
 
-        len_dist = self.len_dist if self.len_dist is not None else self.len_estimator.estimate(None, len_ss)
-        init_dist = self.init_dist if self.init_dist is not None else self.init_estimator.estimate(None, init_ss)
+        len_dist = (
+            self.len_dist
+            if self.len_dist is not None
+            else self.len_estimator.estimate(checked.length_nobs, checked.length)
+        )
+        init_dist = (
+            self.init_dist
+            if self.init_dist is not None
+            else self.init_estimator.estimate(checked.initial_nobs, checked.initial)
+        )
 
-        # Honor the declared support: estimating from a data shard that happens not to contain every
-        # value (common when streaming, or with rare symbols) must NOT shrink num_values, or a later shard
-        # with an out-of-range value would break the index arithmetic. Fall back to the observed max only
-        # if no support was declared.
-        observed = (1 + max(max(max(u[0]), u[1]) for u in trans_count_map.keys())) if trans_count_map else 1
-        num_values = max(self.num_values, observed) if self.num_values is not None else observed
-
-        cond_mat = np.zeros((num_values**lag, num_values), dtype=np.float32)
-
-        vv = list(trans_count_map.items())
-        yidx = np.asarray([np.ravel_multi_index(u[0], [num_values] * lag) for u, _ in vv])
-        xidx = np.asarray([u[1] for u, _ in vv])
-        zidx = np.asarray([u[1] for u in vv])
-
-        cond_mat[yidx, xidx] = zidx
+        num_values = self.num_values
+        cond_mat = np.zeros((num_values**lag, num_values), dtype=np.float64)
+        for prefix, target, count in checked.transition_counts:
+            row = np.ravel_multi_index(prefix, [num_values] * lag)
+            cond_mat[row, target] = count
 
         if self.pseudo_count is not None:
             cond_mat += self.pseudo_count
@@ -1312,7 +1778,13 @@ class IntegerMarkovChainEstimator(ParameterEstimator):
         cond_mat /= row_sum
 
         return IntegerMarkovChainDistribution(
-            num_values, cond_mat, init_dist=init_dist, lag=lag, len_dist=len_dist, name=self.name
+            num_values,
+            cond_mat,
+            init_dist=init_dist,
+            lag=lag,
+            len_dist=len_dist,
+            name=self.name,
+            keys=self.keys,
         )
 
 
@@ -1321,6 +1793,7 @@ class IntegerMarkovChainDataEncoder(DataSequenceEncoder):
 
     def __init__(
         self,
+        num_values: int,
         lag: int,
         init_encoder: DataSequenceEncoder = NullDataEncoder(),
         len_encoder: DataSequenceEncoder = NullDataEncoder(),
@@ -1340,14 +1813,16 @@ class IntegerMarkovChainDataEncoder(DataSequenceEncoder):
                 a DataSequenceEncoder with support on the integers.
 
         """
-        self.lag = lag
+        self.num_values = _positive_integer(num_values, label="integer Markov encoder num_values")
+        self.lag = _positive_integer(lag, label="integer Markov encoder lag")
         self.init_encoder = init_encoder
         self.len_encoder = len_encoder
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the encoder."""
         rv = "IntegerMarkovChainDataEncoder(len_encoder=" + str(self.len_encoder)
-        rv += ",init_encoder=" + str(self.init_encoder) + ",lag=" + str(self.lag) + ")"
+        rv += ",init_encoder=" + str(self.init_encoder)
+        rv += ",num_values=" + str(self.num_values) + ",lag=" + str(self.lag) + ")"
         return rv
 
     def __eq__(self, other: object) -> bool:
@@ -1366,7 +1841,8 @@ class IntegerMarkovChainDataEncoder(DataSequenceEncoder):
             c0 = other.init_encoder == self.init_encoder
             c1 = other.len_encoder == self.len_encoder
             c2 = self.lag == other.lag
-            if c0 and c1 and c2:
+            c3 = self.num_values == other.num_values
+            if c0 and c1 and c2 and c3:
                 return True
             else:
                 return False
@@ -1379,7 +1855,7 @@ class IntegerMarkovChainDataEncoder(DataSequenceEncoder):
         """Encode iid observations from an integer Markov chain.
 
         The returned tuple contains:
-            seq_len (ndarray[int]): Lengths of chains - lag. If less than lag length is 0.
+            seq_len (ndarray[int]): Actual observed sequence lengths.
             init_idx (ndarray[int]): Observed sequence index of chains with lengths >= lag.
             seq_idx (ndarray[int]): Observed sequence index of chains with transitions.
             u_seq_idx (ndarray[object]): Numpy array of tuples containing the unique transitions.
@@ -1397,10 +1873,20 @@ class IntegerMarkovChainDataEncoder(DataSequenceEncoder):
         """
         lag = self.lag
 
-        cnt = len(x)
-        lens = np.asarray([len(u) for u in x])
-        lag_cnt = (lens >= lag).sum()
-        step_cnt = np.maximum(lens - lag, 0).sum()
+        if not isinstance(x, (list, tuple)):
+            raise TypeError("integer Markov batch must be a list or tuple of observations.")
+        observations = [
+            _checked_observation(
+                value,
+                num_values=self.num_values,
+                lag=self.lag,
+                label="integer Markov observation[%d]" % index,
+            )
+            for index, value in enumerate(x)
+        ]
+        lens = np.asarray([len(value) for value in observations], dtype=np.int32)
+        lag_cnt = len(observations)
+        step_cnt = int(np.maximum(lens - lag, 0).sum())
 
         init_entries = np.zeros(lag_cnt, dtype=object)
         seq_entries = np.zeros(step_cnt, dtype=object)
@@ -1412,12 +1898,8 @@ class IntegerMarkovChainDataEncoder(DataSequenceEncoder):
         i0 = 0
         i1 = 0
 
-        for i in range(len(x)):
-            xx = x[i]
-            seq_len.append(max(len(xx) - lag + 1, 0))
-
-            if len(xx) < lag:
-                continue
+        for i, xx in enumerate(observations):
+            seq_len.append(len(xx))
 
             init_idx.append(i)
             init_entries[i0] = tuple(xx[:lag])
@@ -1428,7 +1910,13 @@ class IntegerMarkovChainDataEncoder(DataSequenceEncoder):
                 seq_entries[i1] = (tuple(xx[j : (j + lag)]), xx[j + lag])
                 i1 += 1
 
-        u_seq_values, u_seq_idx = np.unique(seq_entries, return_inverse=True)
+        if step_cnt:
+            u_seq_values, u_seq_idx = np.unique(seq_entries, return_inverse=True)
+            u_seq_values = np.asarray(u_seq_values, dtype=object)
+            u_seq_idx = np.asarray(u_seq_idx, dtype=np.int32)
+        else:
+            u_seq_values = np.empty(0, dtype=object)
+            u_seq_idx = np.empty(0, dtype=np.int32)
 
         init_idx = np.asarray(init_idx, dtype=np.int32)
         seq_idx = np.asarray(seq_idx, dtype=np.int32)
@@ -1438,3 +1926,67 @@ class IntegerMarkovChainDataEncoder(DataSequenceEncoder):
         init_enc = self.init_encoder.seq_encode(init_entries)
 
         return seq_len, init_idx, seq_idx, u_seq_idx, u_seq_values, init_enc, len_enc
+
+    def row_count(self, x: Any) -> int:
+        """Return the number of rows after validating integer-chain index geometry."""
+        if not isinstance(x, tuple) or len(x) != 7:
+            raise ValueError("integer Markov encoded data must be a seven-slot tuple.")
+        lengths, init_idx, seq_idx, unique_idx, values, _, _ = x
+        def integer_vector(value: Any, label: str) -> np.ndarray:
+            raw = np.asarray(value)
+            if raw.ndim != 1:
+                raise ValueError("%s must be one-dimensional." % label)
+            try:
+                numeric = np.asarray(raw, dtype=np.float64)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise TypeError("%s must contain integers." % label) from exc
+            if (
+                np.any(~np.isfinite(numeric))
+                or np.any(np.floor(numeric) != numeric)
+                or np.any(np.abs(numeric) > np.iinfo(np.intp).max)
+            ):
+                raise ValueError("%s must contain exact platform-range integers." % label)
+            return np.asarray(numeric, dtype=np.intp)
+
+        lengths = integer_vector(lengths, "integer Markov lengths")
+        init_idx = integer_vector(init_idx, "integer Markov initial row indices")
+        seq_idx = integer_vector(seq_idx, "integer Markov transition row indices")
+        unique_idx = integer_vector(unique_idx, "integer Markov unique transition indices")
+        values = np.asarray(values, dtype=object)
+        if values.ndim != 1:
+            raise ValueError("integer Markov encoded transition values must be one-dimensional.")
+        n_rows = len(lengths)
+        if np.any(lengths < self.lag):
+            raise ValueError("integer Markov encoded lengths must be at least lag.")
+        if len(init_idx) != n_rows or not np.array_equal(init_idx, np.arange(n_rows)):
+            raise ValueError("integer Markov initial row indices must cover every encoded row once.")
+        expected_transitions = int(np.asarray(lengths - self.lag, dtype=np.intp).sum())
+        if len(seq_idx) != expected_transitions or len(unique_idx) != expected_transitions:
+            raise ValueError("integer Markov transition indices disagree with encoded lengths.")
+        if len(seq_idx) and (
+            np.any(seq_idx < 0)
+            or np.any(seq_idx >= n_rows)
+            or np.any(unique_idx < 0)
+            or np.any(unique_idx >= len(values))
+        ):
+            raise ValueError("integer Markov transition indices are outside the encoded layout.")
+        observed_per_row = np.bincount(seq_idx, minlength=n_rows)
+        if not np.array_equal(observed_per_row, lengths - self.lag):
+            raise ValueError("integer Markov transition row counts disagree with encoded lengths.")
+        for index, value in enumerate(values):
+            if not isinstance(value, (tuple, list)) or len(value) != 2:
+                raise ValueError("integer Markov transition value %d has invalid geometry." % index)
+            prefix = _checked_observation(
+                value[0],
+                num_values=self.num_values,
+                lag=self.lag,
+                label="integer Markov transition value %d prefix" % index,
+            )
+            if len(prefix) != self.lag:
+                raise ValueError("integer Markov transition prefixes must have exactly lag states.")
+            _exact_state(
+                value[1],
+                num_values=self.num_values,
+                label="integer Markov transition value %d target" % index,
+            )
+        return n_rows

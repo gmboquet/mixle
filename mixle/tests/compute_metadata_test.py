@@ -381,7 +381,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
             init_dist=SequenceDistribution(
                 IntegerCategoricalDistribution(0, [0.25, 0.45, 0.30]), len_dist=IntegerCategoricalDistribution(1, [1.0])
             ),
-            len_dist=IntegerCategoricalDistribution(0, [0.10, 0.20, 0.30, 0.40]),
+            len_dist=IntegerCategoricalDistribution(1, [2 / 9, 1 / 3, 4 / 9]),
         )
         self.assertEqual(capabilities_for(int_markov).engine_ready, ("numpy", "torch"))
         self.assertEqual(capabilities_for(int_markov).kernel_status, "generic_table")
@@ -399,7 +399,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
             state_prob_mat=[[0.70, 0.20, 0.10], [0.10, 0.30, 0.60]],
             cond_weights=[[0.80, 0.20], [0.30, 0.70], [0.50, 0.50]],
             alpha=0.15,
-            len_dist=IntegerCategoricalDistribution(0, [0.10, 0.20, 0.30, 0.40]),
+            len_dist=IntegerCategoricalDistribution(1, [2 / 9, 1 / 3, 4 / 9]),
             use_numba=False,
         )
         self.assertEqual(capabilities_for(int_assoc).engine_ready, ("numpy", "torch"))
@@ -928,7 +928,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
             init_dist=SequenceDistribution(
                 IntegerCategoricalDistribution(0, [0.25, 0.45, 0.30]), len_dist=IntegerCategoricalDistribution(1, [1.0])
             ),
-            len_dist=IntegerCategoricalDistribution(0, [0.10, 0.20, 0.30, 0.40]),
+            len_dist=IntegerCategoricalDistribution(1, [2 / 9, 1 / 3, 4 / 9]),
         )
         imc_decl = declaration_for(int_markov)
         self.assertEqual(imc_decl.name, "integer_markov_chain")
@@ -1404,10 +1404,10 @@ class ComputeMetadataTestCase(unittest.TestCase):
                         IntegerCategoricalDistribution(0, [0.25, 0.45, 0.30]),
                         len_dist=IntegerCategoricalDistribution(1, [1.0]),
                     ),
-                    len_dist=IntegerCategoricalDistribution(0, [0.10, 0.20, 0.30, 0.40]),
+                    len_dist=IntegerCategoricalDistribution(1, [2 / 9, 1 / 3, 4 / 9]),
                 ),
                 None,
-                [[], [0], [0, 1, 2], [2, 2, 1]],
+                [[0], [1], [0, 1, 2], [2, 2, 1]],
             ),
             (
                 IntegerProbabilisticLatentSemanticIndexingDistribution(

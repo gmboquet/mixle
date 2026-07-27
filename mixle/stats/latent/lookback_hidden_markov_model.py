@@ -601,7 +601,10 @@ class LookbackHiddenMarkovModelSampler(DistributionSampler):
             dist.init_dist[i].sampler(seed=self.rng.randint(0, maxrandint)) for i in range(dist.num_states)
         ]
         self.obs_samplers = [
-            dist.topics[i].sampler(seed=self.rng.randint(0, maxrandint)) for i in range(dist.num_states)
+            getattr(dist.topics[i], "transition_sampler", dist.topics[i].sampler)(
+                seed=self.rng.randint(0, maxrandint)
+            )
+            for i in range(dist.num_states)
         ]
         self.len_sampler = dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
@@ -1357,8 +1360,22 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
 
         len_dist = self.len_estimator.estimate(nobs, len_ss)
 
-        topics = [self.estimators[i].estimate(state_counts[i], topic_ss[i]) for i in range(num_states)]
-        init_dist = [self.init_estimators[i].estimate(init_counts[i], init_ss[i]) for i in range(num_states)]
+        topic_nobs = [
+            getattr(topic_ss[i], "length_nobs", state_counts[i])
+            for i in range(num_states)
+        ]
+        initial_nobs = [
+            getattr(init_ss[i], "length_nobs", init_counts[i])
+            for i in range(num_states)
+        ]
+        topics = [
+            self.estimators[i].estimate(topic_nobs[i], topic_ss[i])
+            for i in range(num_states)
+        ]
+        init_dist = [
+            self.init_estimators[i].estimate(initial_nobs[i], init_ss[i])
+            for i in range(num_states)
+        ]
 
         if self.has_conj_prior:
             from mixle.stats.bayes.dirichlet import DirichletDistribution
@@ -1506,6 +1523,8 @@ class LookbackHiddenMarkovModelDataEncoder(DataSequenceEncoder):
         lag = self.lag
         cnt = 0
         for i in range(len(x)):
+            if len(x[i]) < lag:
+                raise ValueError("lookback-HMM observations must contain at least lag values.")
             xxs = [x[i][(j - lag) : (j + 1)] for j in range(lag, len(x[i]))]
             ids.extend([i] * len(xxs))
             xss.extend(xxs)
@@ -1535,6 +1554,44 @@ class LookbackHiddenMarkovModelDataEncoder(DataSequenceEncoder):
         xsi = self.init_encoder.seq_encode(xsi) if lag > 0 else None
 
         return (ids, idi, ims, imi, sz, xss, xsi), len_enc
+
+    def row_count(self, x: Any) -> int:
+        """Return and validate the number of encoded lookback-HMM sequences."""
+        if not isinstance(x, tuple) or len(x) != 2:
+            raise ValueError("lookback-HMM encoded data must be a two-slot tuple.")
+        payload = x[0]
+        if not isinstance(payload, tuple) or len(payload) != 7:
+            raise ValueError("lookback-HMM encoded sequence payload must have seven slots.")
+        ids, idi, ims, imi, sizes, _, _ = payload
+
+        def index_vector(value: Any, label: str) -> np.ndarray:
+            raw = np.asarray(value)
+            if raw.ndim != 1 or not np.issubdtype(raw.dtype, np.integer):
+                raise ValueError("%s must be a one-dimensional integer array." % label)
+            return np.asarray(raw, dtype=np.intp)
+
+        ids = index_vector(ids, "lookback-HMM window row indices")
+        idi = index_vector(idi, "lookback-HMM initial row indices")
+        ims = index_vector(ims, "lookback-HMM window position indices")
+        imi = index_vector(imi, "lookback-HMM initial position indices")
+        sizes = index_vector(sizes, "lookback-HMM sequence sizes")
+        n_rows = len(sizes)
+        if np.any(sizes < (1 if self.lag > 0 else 0)):
+            raise ValueError("lookback-HMM encoded sequence sizes are incompatible with lag.")
+        windows_per_row = sizes - 1 if self.lag > 0 else sizes
+        expected_windows = int(windows_per_row.sum())
+        if len(ids) != expected_windows or len(ims) != expected_windows:
+            raise ValueError("lookback-HMM window indices disagree with encoded sequence sizes.")
+        if len(ids) and (np.any(ids < 0) or np.any(ids >= n_rows)):
+            raise ValueError("lookback-HMM window row indices are outside the encoded layout.")
+        if not np.array_equal(np.bincount(ids, minlength=n_rows), windows_per_row):
+            raise ValueError("lookback-HMM window counts disagree with encoded sequence sizes.")
+        if self.lag > 0:
+            if not np.array_equal(idi, np.arange(n_rows)) or len(imi) != n_rows:
+                raise ValueError("lookback-HMM initial indices must cover every encoded row once.")
+        elif len(idi) or len(imi):
+            raise ValueError("lag-zero lookback-HMM encodings cannot contain initial indices.")
+        return n_rows
 
 
 # --- Backward-compatible API naming aliases ---
