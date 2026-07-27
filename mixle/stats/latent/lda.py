@@ -40,6 +40,10 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.compute.posterior import MeanFieldLDAPosterior
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_statistic_tuple,
+)
 from mixle.utils.aliasing import broadcast_pseudo_count
 from mixle.utils.special import digammainv
 from mixle.utils.vector import ImpossibleEvidenceError, row_choice
@@ -959,7 +963,9 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             LDAEstimatorAccumulator object.
 
         """
-        prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats, len_suff_stat = suff_stat
+        prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats, len_suff_stat = validated_statistic_tuple(
+            suff_stat, 6, "LDA sufficient statistics"
+        )
 
         if self.prev_alpha is None:
             self.prev_alpha = prev_alpha
@@ -1243,6 +1249,7 @@ class LDAEstimator(ParameterEstimator):
         doc_counts = float(doc_counts)
         if not np.isfinite(doc_counts) or doc_counts < 0.0:
             raise ValueError("LDA weighted document count must be finite and non-negative")
+        validate_effective_sample_mass(nobs, doc_counts, label="LDA effective sample")
         sum_of_logs = np.asarray(sum_of_logs, dtype=np.float64)
         topic_counts = np.asarray(topic_counts, dtype=np.float64)
         if sum_of_logs.shape != (num_topics,) or np.any(~np.isfinite(sum_of_logs)):

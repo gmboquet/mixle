@@ -52,6 +52,10 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_observation_weight,
+)
 from mixle.utils.vector import ImpossibleEvidenceError
 
 
@@ -275,22 +279,45 @@ def _validated_nobs(value: float | None) -> float | None:
     return _nonnegative_finite(value, "nobs", allow_none=True)
 
 
+@dataclass(frozen=True)
+class HeterogeneousPCFGStatistics(Sequence[Any]):
+    """Mass-aware PCFG statistics with backward three-slot iteration."""
+
+    terminal_counts: np.ndarray
+    binary_counts: np.ndarray
+    emission_statistics: tuple[Any, ...]
+    observation_mass: float
+    schema_version: int = 1
+
+    def __len__(self) -> int:
+        return 3
+
+    def __getitem__(self, index):
+        return (self.terminal_counts, self.binary_counts, self.emission_statistics)[index]
+
+
 def _validated_sufficient_statistics(
     value: Any,
     num_terminal_rules: int,
     num_binary_rules: int,
-) -> tuple[np.ndarray, np.ndarray, tuple[Any, ...]]:
-    if not isinstance(value, (tuple, list)) or len(value) != 3:
+) -> tuple[np.ndarray, np.ndarray, tuple[Any, ...], float | None]:
+    if isinstance(value, HeterogeneousPCFGStatistics):
+        raw_values = (value.terminal_counts, value.binary_counts, value.emission_statistics)
+        observation_mass = validated_observation_weight(value.observation_mass, "PCFG observation mass")
+    elif isinstance(value, (tuple, list)) and len(value) == 3:
+        raw_values = value
+        observation_mass = None
+    else:
         raise ValueError("PCFG sufficient statistics must be a three-item tuple")
-    terminal_counts = _count_vector(value[0], num_terminal_rules, "terminal rule counts")
-    binary_counts = _count_vector(value[1], num_binary_rules, "binary rule counts")
+    terminal_counts = _count_vector(raw_values[0], num_terminal_rules, "terminal rule counts")
+    binary_counts = _count_vector(raw_values[1], num_binary_rules, "binary rule counts")
     try:
-        emission_values = tuple(value[2])
+        emission_values = tuple(raw_values[2])
     except TypeError as exc:
         raise TypeError("PCFG emission statistics must be a sequence") from exc
     if len(emission_values) != num_terminal_rules:
         raise ValueError("PCFG emission statistics must have one entry per terminal rule")
-    return terminal_counts, binary_counts, emission_values
+    return terminal_counts, binary_counts, emission_values, observation_mass
 
 
 def _iter_binary_rules(binary_rules: BinaryRuleInput | None) -> Iterable[tuple[Any, Any, Any, float]]:
@@ -1029,6 +1056,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
         self.rule_key, self.emission_key = keys if keys is not None else (None, None)
         self._init_rng = False
         self._acc_rng: list[RandomState] | None = None
+        self.observation_mass = 0.0
 
     def _rng_initialize(self, rng: RandomState) -> None:
         seeds = rng.randint(maxrandint, size=max(1, self.num_terminal_rules))
@@ -1068,6 +1096,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
 
         for r, acc in enumerate(self.emission_accumulators):
             acc.seq_initialize(enc_by_rule[r], terminal_weights[:, r], self._acc_rng[r])
+        self.observation_mass += float(weights.sum())
 
     def seq_update(self, x: EncodedPCFGData, weights: np.ndarray, estimate: HeterogeneousPCFGDistribution) -> None:
         """Update encoded-sequence statistics with inside-outside posteriors."""
@@ -1096,10 +1125,11 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
 
         for r, acc in enumerate(self.emission_accumulators):
             acc.seq_update(enc_by_rule[r], terminal_weights[:, r], estimate.emissions[r])
+        self.observation_mass += float(weights.sum())
 
     def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, Sequence[Any]]) -> HeterogeneousPCFGAccumulator:
         """Merge another accumulator value into this accumulator."""
-        terminal_counts, binary_counts, emission_values = _validated_sufficient_statistics(
+        terminal_counts, binary_counts, emission_values, observation_mass = _validated_sufficient_statistics(
             suff_stat, self.num_terminal_rules, self.num_binary_rules
         )
         merged_accumulators = copy.deepcopy(self.emission_accumulators)
@@ -1107,20 +1137,23 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
             merged_accumulators[r].combine(value)
         self.terminal_counts += terminal_counts
         self.binary_counts += binary_counts
+        if observation_mass is not None:
+            self.observation_mass += observation_mass
         self.emission_accumulators = merged_accumulators
         return self
 
-    def value(self) -> tuple[np.ndarray, np.ndarray, tuple[Any, ...]]:
+    def value(self) -> HeterogeneousPCFGStatistics:
         """Return rule counts and emission sufficient statistics."""
-        return (
+        return HeterogeneousPCFGStatistics(
             self.terminal_counts.copy(),
             self.binary_counts.copy(),
             tuple(copy.deepcopy(a.value()) for a in self.emission_accumulators),
+            self.observation_mass,
         )
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray, Sequence[Any]]) -> HeterogeneousPCFGAccumulator:
         """Replace this accumulator from a serialized sufficient-statistic value."""
-        terminal_counts, binary_counts, emission_values = _validated_sufficient_statistics(
+        terminal_counts, binary_counts, emission_values, observation_mass = _validated_sufficient_statistics(
             x, self.num_terminal_rules, self.num_binary_rules
         )
         restored_accumulators = copy.deepcopy(self.emission_accumulators)
@@ -1129,17 +1162,26 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
         self.terminal_counts = terminal_counts
         self.binary_counts = binary_counts
         self.emission_accumulators = restored_accumulators
+        self.observation_mass = 0.0 if observation_mass is None else observation_mass
+        return self
+
+    def scale(self, c: float) -> HeterogeneousPCFGAccumulator:
+        """Scale rule, emission, and outer-observation statistics."""
+        c = validated_observation_weight(c, "PCFG statistic scale")
+        self.terminal_counts *= c
+        self.binary_counts *= c
+        for accumulator in self.emission_accumulators:
+            accumulator.scale(c)
+        self.observation_mass *= c
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge keyed rule and emission statistics into ``stats_dict``."""
-        num_terminal_rules = getattr(
-            self, "num_terminal_rules", len(self.terminal_counts)
-        )
+        num_terminal_rules = getattr(self, "num_terminal_rules", len(self.terminal_counts))
         num_binary_rules = getattr(self, "num_binary_rules", len(self.binary_counts))
         if self.rule_key is not None:
             if self.rule_key in stats_dict:
-                t, b, _ = _validated_sufficient_statistics(
+                t, b, _, _ = _validated_sufficient_statistics(
                     (*stats_dict[self.rule_key], (None,) * num_terminal_rules),
                     num_terminal_rules,
                     num_binary_rules,
@@ -1155,9 +1197,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
         if self.emission_key is not None:
             if self.emission_key in stats_dict:
                 if len(stats_dict[self.emission_key]) != num_terminal_rules:
-                    raise ValueError(
-                        "keyed PCFG emission state must have one accumulator per terminal rule"
-                    )
+                    raise ValueError("keyed PCFG emission state must have one accumulator per terminal rule")
                 for r, acc in enumerate(stats_dict[self.emission_key]):
                     acc.combine(self.emission_accumulators[r].value())
             else:
@@ -1167,15 +1207,13 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace keyed rule and emission statistics from ``stats_dict``."""
-        num_terminal_rules = getattr(
-            self, "num_terminal_rules", len(self.terminal_counts)
-        )
+        num_terminal_rules = getattr(self, "num_terminal_rules", len(self.terminal_counts))
         num_binary_rules = getattr(self, "num_binary_rules", len(self.binary_counts))
         if self.rule_key is not None and self.rule_key in stats_dict:
             # Copy on replace too: without it, every tied accumulator ends up pointing at the
             # SAME array objects, so any one of them later accumulating new local data would
             # silently corrupt every other tied accumulator's counts.
-            t, b, _ = _validated_sufficient_statistics(
+            t, b, _, _ = _validated_sufficient_statistics(
                 (*stats_dict[self.rule_key], (None,) * num_terminal_rules),
                 num_terminal_rules,
                 num_binary_rules,
@@ -1184,9 +1222,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
             self.binary_counts = b
         if self.emission_key is not None and self.emission_key in stats_dict:
             if len(stats_dict[self.emission_key]) != num_terminal_rules:
-                raise ValueError(
-                    "keyed PCFG emission state must have one accumulator per terminal rule"
-                )
+                raise ValueError("keyed PCFG emission state must have one accumulator per terminal rule")
             self.emission_accumulators = copy.deepcopy(stats_dict[self.emission_key])
         for acc in self.emission_accumulators:
             acc.key_replace(stats_dict)
@@ -1271,11 +1307,13 @@ class HeterogeneousPCFGEstimator(ParameterEstimator):
     ) -> HeterogeneousPCFGDistribution:
         """Estimate rule probabilities and terminal emissions from statistics."""
         _validated_nobs(nobs)
-        terminal_counts, binary_counts, emission_values = _validated_sufficient_statistics(
+        terminal_counts, binary_counts, emission_values, observation_mass = _validated_sufficient_statistics(
             suff_stat,
             self._prior.num_terminal_rules,
             self._prior.num_binary_rules,
         )
+        if observation_mass is not None:
+            validate_effective_sample_mass(nobs, observation_mass, label="PCFG effective sample")
         emissions = [
             self.terminal_estimators[r].estimate(float(terminal_counts[r]), emission_values[r])
             for r in range(len(self.terminal_estimators))
@@ -1361,9 +1399,7 @@ class InducedHeterogeneousPCFGEstimator(ParameterEstimator):
             raise TypeError("terminal_estimators must be a nonempty sequence")
         if len(terminal_estimators) == 0:
             raise ValueError("terminal_estimators must contain at least one estimator.")
-        terminal_rule_mass = _nonnegative_finite(
-            terminal_rule_mass, "terminal_rule_mass"
-        )
+        terminal_rule_mass = _nonnegative_finite(terminal_rule_mass, "terminal_rule_mass")
         if not np.isfinite(terminal_rule_mass) or not 0.5 <= terminal_rule_mass <= 1.0:
             raise ValueError("terminal_rule_mass must be finite and in [0.5, 1] so the induced grammar is proper")
         rule_pseudo_count = _nonnegative_finite(rule_pseudo_count, "rule_pseudo_count", allow_none=True)
@@ -1536,11 +1572,13 @@ class InducedHeterogeneousPCFGEstimator(ParameterEstimator):
     ) -> HeterogeneousPCFGDistribution:
         """Estimate a sparse grammar from rule counts and emission statistics."""
         _validated_nobs(nobs)
-        terminal_counts, binary_counts, emission_values = _validated_sufficient_statistics(
+        terminal_counts, binary_counts, emission_values, observation_mass = _validated_sufficient_statistics(
             suff_stat,
             self._prior.num_terminal_rules,
             self._prior.num_binary_rules,
         )
+        if observation_mass is not None:
+            validate_effective_sample_mass(nobs, observation_mass, label="induced PCFG effective sample")
         emissions = [
             self.terminal_estimators[r].estimate(float(terminal_counts[r]), emission_values[r])
             for r in range(len(self.terminal_estimators))

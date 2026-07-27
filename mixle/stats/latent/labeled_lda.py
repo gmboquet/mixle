@@ -39,6 +39,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.effective_sample import validate_effective_sample_mass, validated_statistic_tuple
 from mixle.stats.latent.lda import (
     LDAConvergenceError,
     LDADataEncoder,
@@ -1014,7 +1015,9 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
 
-        prev_alpha, set_stats, doc_counts, topic_counts, topic_suff_stats = suff_stat
+        prev_alpha, set_stats, doc_counts, topic_counts, topic_suff_stats = validated_statistic_tuple(
+            suff_stat, 5, "labeled-LDA sufficient statistics"
+        )
 
         if self.prev_alpha is None:
             self.prev_alpha = prev_alpha
@@ -1281,6 +1284,12 @@ class LabeledLDAEstimator(ParameterEstimator):
         num_topics = self.num_topics
         if not isinstance(set_stats, LabeledLDALabelSetStats):
             raise TypeError("labeled-LDA set statistics must be LabeledLDALabelSetStats")
+        _, label_set_weights, _ = set_stats.arrays()
+        validate_effective_sample_mass(
+            nobs,
+            label_set_weights.sum(),
+            label="labeled-LDA effective sample",
+        )
         document_counts = np.asarray(doc_counts, dtype=np.float64)
         if document_counts.ndim == 0:
             valid_document_counts = True

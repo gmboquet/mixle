@@ -82,6 +82,7 @@ _MODULE_EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     "mixle.stats.latent.heterogeneous_pcfg": (
         "PCFGTerminationCertificate",
+        "HeterogeneousPCFGStatistics",
         "HeterogeneousPCFGDistribution",
         "HeterogeneousPCFGEnumerator",
         "HeterogeneousPCFGSampler",
@@ -237,6 +238,7 @@ _MODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "MixtureFisherView",
     ),
     "mixle.stats.latent.probabilistic_circuit": (
+        "ProbabilisticCircuitStatistics",
         "leaf",
         "prod",
         "summ",

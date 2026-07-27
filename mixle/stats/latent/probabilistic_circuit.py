@@ -15,6 +15,8 @@ parameters and per-sum log-weights by EM; structure learning is a later phase th
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -26,7 +28,50 @@ from mixle.stats.compute.pdist import (
     DistributionSampler,
     SequenceEncodableProbabilityDistribution,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_observation_weight,
+)
 from mixle.utils.vector import log_sum, require_possible_log_evidence
+
+
+@dataclass(frozen=True)
+class ProbabilisticCircuitStatistics(Sequence[Any]):
+    """Mass-aware circuit statistics with backward two-slot iteration."""
+
+    sum_counts: dict[int, np.ndarray]
+    leaf_statistics: dict[int, Any]
+    leaf_counts: dict[int, float]
+    observation_mass: float
+    schema_version: int = 1
+
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, index):
+        return (self.sum_counts, self.leaf_statistics)[index]
+
+
+def _unpack_circuit_statistics(values, leaf_ids):
+    if isinstance(values, ProbabilisticCircuitStatistics):
+        if set(values.leaf_counts) != set(leaf_ids):
+            raise ValueError("probabilistic circuit leaf-count statistics do not match circuit leaves")
+        leaf_counts = {
+            leaf_id: validated_observation_weight(
+                values.leaf_counts[leaf_id],
+                f"probabilistic circuit leaf {leaf_id} mass",
+            )
+            for leaf_id in leaf_ids
+        }
+        observation_mass = validated_observation_weight(
+            values.observation_mass,
+            "probabilistic circuit observation mass",
+        )
+        return values.sum_counts, values.leaf_statistics, leaf_counts, observation_mass
+    if not isinstance(values, (tuple, list)) or len(values) != 2:
+        raise ValueError("legacy probabilistic circuit statistics must contain sum and leaf values")
+    return values[0], values[1], None, None
+
 
 # --- structure builder ----------------------------------------------------------------------------
 
@@ -106,9 +151,7 @@ def _exact_child_ids(values: Any, node_index: int) -> tuple[int, ...]:
             raise TypeError(f"circuit node {node_index} child {position} must be an integer.")
         child_id = int(child)
         if child_id < 0 or child_id >= node_index:
-            raise ValueError(
-                f"circuit node {node_index} child {position}={child_id} must reference an earlier node."
-            )
+            raise ValueError(f"circuit node {node_index} child {position}={child_id} must reference an earlier node.")
         children.append(child_id)
     if len(set(children)) != len(children):
         raise ValueError(f"circuit node {node_index} child IDs must be unique.")
@@ -277,9 +320,7 @@ def _canonical_circuit(
             except (TypeError, ValueError, OverflowError) as exc:
                 raise TypeError(f"circuit sum node {node_index} log weights must be numeric.") from exc
             if log_weights.shape != (len(children),):
-                raise ValueError(
-                    f"circuit sum node {node_index} log weights must have shape ({len(children)},)."
-                )
+                raise ValueError(f"circuit sum node {node_index} log weights must have shape ({len(children)},).")
             if np.any(np.isnan(log_weights) | np.isposinf(log_weights)):
                 raise ValueError(f"circuit sum node {node_index} log weights must be finite or -inf.")
             probabilities = np.exp(log_weights)
@@ -385,7 +426,9 @@ class ProbabilisticCircuitDistribution(SequenceEncodableProbabilityDistribution)
             if node[0] == "leaf":
                 values = np.asarray(self.leaf_dists[node[1]].seq_log_density(enc[node[1]]), dtype=np.float64)
                 if values.ndim != 1:
-                    raise ValueError(f"probabilistic circuit leaf {node[1]} must return a one-dimensional score vector.")
+                    raise ValueError(
+                        f"probabilistic circuit leaf {node[1]} must return a one-dimensional score vector."
+                    )
                 if np.any(np.isnan(values) | np.isposinf(values)):
                     raise ValueError(f"probabilistic circuit leaf {node[1]} returned invalid log densities.")
                 if row_count is None:
@@ -518,10 +561,7 @@ class ProbabilisticCircuitEncoder(DataSequenceEncoder):
         """Return the common number of encoded circuit rows."""
         if not isinstance(x, dict) or set(x) != set(self.leaf_encoders):
             raise ValueError("probabilistic circuit encoding must contain exactly one payload per leaf.")
-        counts = {
-            leaf_id: self.leaf_encoders[leaf_id].row_count(payload)
-            for leaf_id, payload in x.items()
-        }
+        counts = {leaf_id: self.leaf_encoders[leaf_id].row_count(payload) for leaf_id, payload in x.items()}
         if len(set(counts.values())) != 1:
             raise ValueError(f"probabilistic circuit leaf encodings disagree on row count: {counts}.")
         return next(iter(counts.values()))
@@ -590,6 +630,28 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
         self.leaf_estimators = leaf_estimators
         self.sum_counts = {i: np.zeros(len(node[1])) for i, node in enumerate(nodes) if node[0] == "sum"}
         self.leaf_accs = {lid: e.accumulator_factory().make() for lid, e in leaf_estimators.items()}
+        self.leaf_counts = {lid: 0.0 for lid in leaf_estimators}
+        self.observation_mass = 0.0
+
+    def _validated_payload(self, values):
+        sc, lv, leaf_counts, observation_mass = _unpack_circuit_statistics(values, self.leaf_accs)
+        if not isinstance(sc, dict) or set(sc) != set(self.sum_counts):
+            raise ValueError("probabilistic circuit sum statistics do not match circuit sum nodes")
+        if not isinstance(lv, dict) or set(lv) != set(self.leaf_accs):
+            raise ValueError("probabilistic circuit leaf statistics do not match circuit leaves")
+        checked_sum_counts = {}
+        for node_id, expected in self.sum_counts.items():
+            try:
+                counts = np.asarray(sc[node_id], dtype=np.float64)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise TypeError(f"probabilistic circuit sum node {node_id} counts must be numeric") from exc
+            if counts.shape != expected.shape or np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
+                raise ValueError(
+                    f"probabilistic circuit sum node {node_id} counts must be finite, non-negative, "
+                    f"and have shape {expected.shape}"
+                )
+            checked_sum_counts[node_id] = counts.copy()
+        return checked_sum_counts, lv, leaf_counts, observation_mass
 
     def seq_update(self, enc: dict[int, Any], weights: Any, estimate: ProbabilisticCircuitDistribution) -> None:
         """Update circuit-flow responsibilities and leaf sufficient statistics."""
@@ -617,9 +679,7 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
                 vi = node_vals[i]
                 for j, c in enumerate(node[1]):
                     with np.errstate(invalid="ignore"):
-                        edge_log = lci + (
-                            node_vals[c] + node[2][j] - vi
-                        )  # log responsibility through edge (i->c)
+                        edge_log = lci + (node_vals[c] + node[2][j] - vi)  # log responsibility through edge (i->c)
                     edge_log = np.where(active, edge_log, -np.inf)
                     resp = np.where(np.isfinite(edge_log), np.exp(edge_log), 0.0)
                     self.sum_counts[i][j] += float(np.sum(weights * resp))
@@ -627,10 +687,14 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
         for i, node in enumerate(self.nodes):
             if node[0] == "leaf":
                 resp = np.where(np.isfinite(lc[i]), np.exp(lc[i]), 0.0)
-                self.leaf_accs[node[1]].seq_update(enc[node[1]], weights * resp, estimate.leaf_dists[node[1]])
+                assigned = weights * resp
+                self.leaf_accs[node[1]].seq_update(enc[node[1]], assigned, estimate.leaf_dists[node[1]])
+                self.leaf_counts[node[1]] += float(assigned.sum())
+        self.observation_mass += float(weights.sum())
 
     def update(self, x: Any, weight: float, estimate: ProbabilisticCircuitDistribution) -> None:
         """Update from one weighted observation."""
+        weight = validated_observation_weight(weight, "probabilistic circuit update weight")
         enc = estimate.dist_to_encoder().seq_encode([x])
         self.seq_update(enc, np.array([weight], dtype=np.float64), estimate)
 
@@ -644,6 +708,8 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
         for lid, acc in self.leaf_accs.items():
             sc = self.leaf_scope[lid]
             acc.initialize(x[sc[0]] if len(sc) == 1 else tuple(x[v] for v in sc), weight, rng)
+            self.leaf_counts[lid] += weight
+        self.observation_mass += weight
 
     def seq_initialize(self, enc: dict[int, Any], weights: Any, rng: RandomState) -> None:
         """Initialize sum counts and leaf statistics from encoded observations."""
@@ -668,29 +734,39 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum_counts[i] = cnt + float(np.sum(weights)) * r
         for lid, acc in self.leaf_accs.items():
             acc.seq_initialize(enc[lid], weights, rng)
+            self.leaf_counts[lid] += float(weights.sum())
+        self.observation_mass += float(weights.sum())
 
     def combine(self, suff_stat: Any) -> ProbabilisticCircuitAccumulator:
         """Merge sum-node expected counts and leaf accumulator values."""
-        sc, lv = suff_stat
+        sc, lv, leaf_counts, observation_mass = self._validated_payload(suff_stat)
         for i in self.sum_counts:
             self.sum_counts[i] += sc[i]
         for lid in self.leaf_accs:
             self.leaf_accs[lid].combine(lv[lid])
+            if leaf_counts is not None:
+                self.leaf_counts[lid] += leaf_counts[lid]
+        if observation_mass is not None:
+            self.observation_mass += observation_mass
         return self
 
-    def value(self) -> Any:
+    def value(self) -> ProbabilisticCircuitStatistics:
         """Return sum-node expected counts and leaf sufficient statistics."""
-        return (
+        return ProbabilisticCircuitStatistics(
             {i: c.copy() for i, c in self.sum_counts.items()},
             {lid: a.value() for lid, a in self.leaf_accs.items()},
+            dict(self.leaf_counts),
+            self.observation_mass,
         )
 
     def from_value(self, x: Any) -> ProbabilisticCircuitAccumulator:
         """Restore sum-node and leaf sufficient statistics from ``value`` output."""
-        sc, lv = x
-        self.sum_counts = {i: np.asarray(c, dtype=np.float64).copy() for i, c in sc.items()}
+        sc, lv, leaf_counts, observation_mass = self._validated_payload(x)
+        self.sum_counts = sc
         for lid, v in lv.items():
             self.leaf_accs[lid].from_value(v)
+        self.leaf_counts = {lid: 0.0 for lid in self.leaf_accs} if leaf_counts is None else dict(leaf_counts)
+        self.observation_mass = 0.0 if observation_mass is None else observation_mass
         return self
 
     def scale(self, c: float) -> ProbabilisticCircuitAccumulator:
@@ -700,6 +776,8 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum_counts[i] *= c
         for lid in self.leaf_accs:
             self.leaf_accs[lid].scale(c)
+            self.leaf_counts[lid] *= c
+        self.observation_mass *= c
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -715,7 +793,8 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
     def acc_to_encoder(self) -> ProbabilisticCircuitEncoder:
         """Return an encoder based on the current leaf accumulator estimates."""
         leaf_dists = {
-            lid: self.leaf_estimators[lid].estimate(None, self.leaf_accs[lid].value()) for lid in self.leaf_accs
+            lid: self.leaf_estimators[lid].estimate(self.leaf_counts[lid], self.leaf_accs[lid].value())
+            for lid in self.leaf_accs
         }
         return ProbabilisticCircuitEncoder(leaf_dists, self.leaf_scope)
 
@@ -752,9 +831,16 @@ class ProbabilisticCircuitEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> ProbabilisticCircuitDistribution:
         """Estimate sum-node weights and leaf distributions from accumulated circuit flows."""
-        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 2:
-            raise ValueError("probabilistic circuit sufficient statistics must contain sum and leaf values.")
-        sum_counts, leaf_values = suff_stat
+        sum_counts, leaf_values, leaf_counts, observation_mass = _unpack_circuit_statistics(
+            suff_stat,
+            self.leaf_estimators,
+        )
+        if observation_mass is not None:
+            validate_effective_sample_mass(
+                nobs,
+                observation_mass,
+                label="probabilistic circuit effective sample",
+            )
         expected_sum_ids = {index for index, node in enumerate(self.dist.nodes) if node[0] == "sum"}
         if not isinstance(sum_counts, dict) or set(sum_counts) != expected_sum_ids:
             raise ValueError("probabilistic circuit sum statistics do not match the circuit sum nodes.")
@@ -768,9 +854,7 @@ class ProbabilisticCircuitEstimator(ParameterEstimator):
                 except (TypeError, ValueError, OverflowError) as exc:
                     raise TypeError(f"probabilistic circuit sum node {i} counts must be numeric.") from exc
                 if cnt.shape != (len(node[1]),):
-                    raise ValueError(
-                        f"probabilistic circuit sum node {i} counts must have shape ({len(node[1])},)."
-                    )
+                    raise ValueError(f"probabilistic circuit sum node {i} counts must have shape ({len(node[1])},).")
                 if np.any(~np.isfinite(cnt)) or np.any(cnt < 0.0):
                     raise ValueError(f"probabilistic circuit sum node {i} counts must be finite and non-negative.")
                 cnt = cnt + self.pseudo_count
@@ -782,5 +866,11 @@ class ProbabilisticCircuitEstimator(ParameterEstimator):
                     new_nodes.append(("sum", node[1], tuple(np.log(w))))
             else:
                 new_nodes.append(node)
-        new_leaf_dists = {lid: self.leaf_estimators[lid].estimate(None, leaf_values[lid]) for lid in leaf_values}
+        new_leaf_dists = {
+            lid: self.leaf_estimators[lid].estimate(
+                None if leaf_counts is None else leaf_counts[lid],
+                leaf_values[lid],
+            )
+            for lid in leaf_values
+        }
         return self.dist.with_params(new_nodes, new_leaf_dists)

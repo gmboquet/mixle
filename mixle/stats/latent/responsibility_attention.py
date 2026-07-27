@@ -282,6 +282,7 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x, weight: float, estimate: ResponsibilityAttentionDistribution | None) -> None:
         """Update sufficient statistics from one weighted observation."""
+        weight = validated_observation_weight(weight)
         enc = ResponsibilityAttentionDataEncoder(
             self.num_symbols, self.context_length, self.query_dim, self.num_targets
         ).seq_encode([x])
@@ -300,6 +301,7 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
 
     def initialize(self, x, weight: float, rng: RandomState) -> None:
         """Initialize sufficient statistics from one weighted observation."""
+        weight = validated_observation_weight(weight)
         enc = ResponsibilityAttentionDataEncoder(
             self.num_symbols, self.context_length, self.query_dim, self.num_targets
         ).seq_encode([x])
