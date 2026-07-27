@@ -16,6 +16,7 @@ controlled, and :meth:`SmithMaxStableSampler.approximation_diagnostic` to check 
 
 from __future__ import annotations
 
+import operator
 import warnings
 from dataclasses import dataclass
 
@@ -31,6 +32,30 @@ __all__ = [
     "FrechetApproximationDiagnostic",
     "fit_smith_maxstable",
 ]
+
+
+def _positive_integer(value: int, *, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-Boolean positive integer.")
+    try:
+        integer = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be a non-Boolean positive integer.") from exc
+    if integer <= 0:
+        raise ValueError(f"{name} must be positive, got {integer}.")
+    return int(integer)
+
+
+def _positive_finite_scalar(value: float, *, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-Boolean finite positive scalar.")
+    arr = np.asarray(value)
+    if arr.ndim != 0 or arr.dtype.kind not in "iuf":
+        raise ValueError(f"{name} must be a finite positive scalar.")
+    scalar = float(arr)
+    if not np.isfinite(scalar) or scalar <= 0.0:
+        raise ValueError(f"{name} must be finite and strictly positive; got {value!r}.")
+    return scalar
 
 
 class SmithMaxStable:
@@ -58,20 +83,39 @@ class SmithMaxStable:
         logdet = cholesky_logdet(v)
         if logdet is None:
             raise ValueError("sigma must be positive definite.")
-        self.sigma = v
-        self.dim = v.shape[0]
-        self._inv = np.linalg.inv(v)
+        sigma_owned = np.array(v, copy=True)
+        inverse = np.linalg.inv(sigma_owned)
+        sigma_owned.setflags(write=False)
+        inverse.setflags(write=False)
+        self._sigma = sigma_owned
+        self._sigma_view = sigma_owned.view()
+        self._sigma_view.setflags(write=False)
+        self.dim = sigma_owned.shape[0]
+        self._inv = inverse
+
+    @property
+    def sigma(self) -> np.ndarray:
+        """Owned read-only covariance used consistently by dependence formulas and simulation."""
+        return self._sigma_view
 
     def _mahalanobis(self, h: np.ndarray) -> float:
         h = np.atleast_1d(np.asarray(h, dtype=float))
         if h.shape != (self.dim,):
             raise ValueError(f"h must have shape ({self.dim},) to match sigma's dimension; got shape {h.shape}.")
-        return float(np.sqrt(h @ self._inv @ h))
+        if not np.all(np.isfinite(h)):
+            raise ValueError("h must contain only finite lag coordinates.")
+        squared = float(h @ self._inv @ h)
+        if not np.isfinite(squared) or squared < -1e-12:
+            raise ValueError("Mahalanobis lag length must remain finite and nonnegative.")
+        return float(np.sqrt(max(squared, 0.0)))
 
     def extremal_coefficient(self, h: np.ndarray) -> float:
         """``theta(h) = 2 * Phi(a/2)`` with ``a`` the Mahalanobis lag length -- 1 at h=0 (full dependence)
         rising to 2 as the lag grows (independence)."""
-        return 2.0 * norm.cdf(self._mahalanobis(h) / 2.0)
+        coefficient = float(2.0 * norm.cdf(self._mahalanobis(h) / 2.0))
+        if not np.isfinite(coefficient) or not 1.0 <= coefficient <= 2.0:
+            raise ValueError("extremal coefficient must be finite and in [1, 2].")
+        return coefficient
 
     def bivariate_cdf(self, z1: float, z2: float, h: np.ndarray) -> float:
         """``P(Z(s) <= z1, Z(s+h) <= z2) = exp(-V(z1, z2))`` -- the Smith bivariate distribution.
@@ -88,16 +132,22 @@ class SmithMaxStable:
             )
         a = self._mahalanobis(h)
         if a < 1e-12:
-            return float(np.exp(-1.0 / min(z1, z2)))  # fully dependent limit
+            probability = float(np.exp(-1.0 / min(z1, z2)))  # fully dependent limit
+            if not np.isfinite(probability) or not 0.0 <= probability <= 1.0:
+                raise ValueError("Smith bivariate CDF must be a finite probability in [0, 1].")
+            return probability
         v = (1.0 / z1) * norm.cdf(a / 2.0 + np.log(z2 / z1) / a) + (1.0 / z2) * norm.cdf(a / 2.0 + np.log(z1 / z2) / a)
-        return float(np.exp(-v))
+        probability = float(np.exp(-v))
+        if not np.isfinite(probability) or not 0.0 <= probability <= 1.0:
+            raise ValueError("Smith bivariate CDF must be a finite probability in [0, 1].")
+        return probability
 
     def sampler(self, locations: np.ndarray, seed: int | None = None) -> SmithMaxStableSampler:
         """Return a sampler over the requested spatial locations."""
-        loc = np.atleast_2d(np.asarray(locations, dtype=float))
-        if loc.shape[1] != self.dim:
+        loc = np.asarray(locations, dtype=float)
+        if loc.ndim != 2 or loc.shape[0] == 0 or loc.shape[1] != self.dim:
             raise ValueError(
-                f"locations must have {self.dim} columns to match sigma's dimension; got shape {loc.shape}."
+                f"locations must be a nonempty (n, {self.dim}) matrix to match sigma; got shape {loc.shape}."
             )
         if not np.all(np.isfinite(loc)):
             raise ValueError("locations must be finite.")
@@ -229,7 +279,7 @@ def fit_smith_maxstable(locations: np.ndarray, fields: np.ndarray) -> SmithMaxSt
     )
 
 
-@dataclass
+@dataclass(frozen=True)
 class FrechetApproximationDiagnostic:
     """Empirical check of how close a truncated :class:`SmithMaxStableSampler` draw is to true unit
     Frechet margins.
@@ -255,6 +305,32 @@ class FrechetApproximationDiagnostic:
     mean_abs_error: float
     per_site_max_abs_error: np.ndarray
 
+    def __post_init__(self) -> None:
+        n_replicates = _positive_integer(self.n_replicates, name="n_replicates")
+        levels = np.asarray(self.probability_levels, dtype=float)
+        if levels.ndim != 1 or levels.size == 0 or not np.all(np.isfinite(levels)):
+            raise ValueError("probability_levels must be a nonempty finite one-dimensional sequence.")
+        if np.any(levels <= 0.0) or np.any(levels >= 1.0):
+            raise ValueError("probability_levels must lie strictly inside (0, 1).")
+        maximum = float(self.max_abs_error)
+        mean = float(self.mean_abs_error)
+        per_site = np.asarray(self.per_site_max_abs_error, dtype=float)
+        if per_site.ndim != 1 or per_site.size == 0 or not np.all(np.isfinite(per_site)):
+            raise ValueError("per_site_max_abs_error must be a nonempty finite one-dimensional array.")
+        if not (np.isfinite(maximum) and np.isfinite(mean) and 0.0 <= mean <= maximum <= 1.0):
+            raise ValueError("diagnostic errors must be finite and satisfy 0 <= mean <= max <= 1.")
+        if np.any(per_site < 0.0) or np.any(per_site > 1.0):
+            raise ValueError("per-site diagnostic errors must lie in [0, 1].")
+        if not np.isclose(maximum, float(per_site.max()), rtol=1e-12, atol=1e-15):
+            raise ValueError("max_abs_error must equal the maximum per-site absolute error.")
+        owned = np.array(per_site, copy=True)
+        owned.setflags(write=False)
+        object.__setattr__(self, "n_replicates", n_replicates)
+        object.__setattr__(self, "probability_levels", tuple(float(level) for level in levels))
+        object.__setattr__(self, "max_abs_error", maximum)
+        object.__setattr__(self, "mean_abs_error", mean)
+        object.__setattr__(self, "per_site_max_abs_error", owned)
+
 
 class SmithMaxStableSampler:
     """Sampler for a fitted Smith max-stable process at fixed locations.
@@ -267,7 +343,9 @@ class SmithMaxStableSampler:
 
     def __init__(self, dist: SmithMaxStable, locations: np.ndarray, seed: int | None = None):
         self.dist = dist
-        self.loc = locations
+        owned_locations = np.array(locations, dtype=float, copy=True)
+        owned_locations.setflags(write=False)
+        self.loc = owned_locations
         self.rng = np.random.RandomState(seed)
         self._chol = np.linalg.cholesky(dist.sigma)
         self._logdet = 2.0 * np.sum(np.log(np.diag(self._chol)))
@@ -344,19 +422,15 @@ class SmithMaxStableSampler:
         Returns:
             Field(s) at the locations. Shape ``(len(locations),)`` if ``size`` is ``None``, else
             ``(size, len(locations))``.
-        """
-        if not (np.isfinite(n_storms) and float(n_storms).is_integer() and n_storms >= 1):
-            raise ValueError(
-                f"n_storms must be a positive integer; got {n_storms!r}. (n_storms=0 draws no storms at "
-                "all and cannot produce a valid unit-Frechet draw -- 0 is outside its (0, inf) support.)"
-            )
-        n_storms = int(n_storms)
-        if not (np.isfinite(tol) and tol > 0):
-            raise ValueError(f"tol must be finite and strictly positive; got {tol!r}.")
-        if not (np.isfinite(box_sigma) and box_sigma > 0):
-            raise ValueError(f"box_sigma must be finite and strictly positive; got {box_sigma!r}.")
 
-        n = 1 if size is None else size
+        ``size`` (when supplied) and ``n_storms`` are exact non-Boolean positive integers; zero does
+        not represent a valid request for a field or a storm process.
+        """
+        n_storms = _positive_integer(n_storms, name="n_storms")
+        tol = _positive_finite_scalar(tol, name="tol")
+        box_sigma = _positive_finite_scalar(box_sigma, name="box_sigma")
+
+        n = 1 if size is None else _positive_integer(size, name="size")
         lo, hi = (
             self.loc.min(0) - box_sigma * np.sqrt(np.diag(self.dist.sigma)),
             self.loc.max(0) + box_sigma * np.sqrt(np.diag(self.dist.sigma)),
@@ -386,6 +460,8 @@ class SmithMaxStableSampler:
                     break
             any_unconverged = any_unconverged or not converged_r
             out[r] = z
+        if not np.all(np.isfinite(out)) or np.any(out <= 0.0):
+            raise ValueError("Smith sampler produced values outside the finite positive unit-Frechet support.")
         if any_unconverged:
             warnings.warn(
                 f"SmithMaxStableSampler.sample(): n_storms={n_storms} safety cap was reached before "
@@ -408,13 +484,22 @@ class SmithMaxStableSampler:
         Draws ``n`` replicate fields (with ``sample_kwargs`` forwarded to :meth:`sample`, so a specific
         ``n_storms``/``tol``/``box_sigma`` setting can be checked) and compares their empirical CDF,
         at each site and each requested probability level, against the true unit-Frechet CDF -- see
-        :class:`FrechetApproximationDiagnostic`.
+        :class:`FrechetApproximationDiagnostic`. ``n`` is an exact non-Boolean positive integer and
+        ``probability_levels`` is a nonempty finite one-dimensional sequence strictly inside
+        ``(0, 1)``.
         """
-        z = self.sample(n, **sample_kwargs)  # size=n is never None here, so always shape (n, n_locations)
+        n = _positive_integer(n, name="n")
         levels = np.asarray(probability_levels, dtype=float)
+        if levels.ndim != 1 or levels.size == 0 or not np.all(np.isfinite(levels)):
+            raise ValueError("probability_levels must be a nonempty finite one-dimensional sequence.")
+        if np.any(levels <= 0.0) or np.any(levels >= 1.0):
+            raise ValueError("probability_levels must lie strictly inside (0, 1).")
+        z = self.sample(n, **sample_kwargs)  # size=n is never None here, so always shape (n, n_locations)
         quantiles = -1.0 / np.log(levels)  # true unit-Frechet quantile: exp(-1/q) = p  =>  q = -1/log(p)
         empirical = np.mean(z[:, :, None] <= quantiles[None, None, :], axis=0)  # (n_locations, n_levels)
         abs_err = np.abs(empirical - levels[None, :])
+        if not np.all(np.isfinite(abs_err)) or np.any(abs_err < 0.0) or np.any(abs_err > 1.0):
+            raise ValueError("approximation diagnostics must be finite absolute probability errors in [0, 1].")
         return FrechetApproximationDiagnostic(
             n_replicates=n,
             probability_levels=tuple(probability_levels),
