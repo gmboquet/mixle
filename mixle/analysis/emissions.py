@@ -36,6 +36,8 @@ happens and left ``climate_terms``'s annotation unresolvable to ``typing.get_typ
 from __future__ import annotations
 
 import hashlib
+import math
+import operator
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -73,6 +75,24 @@ class WaterBudget(Protocol):
 
 
 _VALID_SCOPES = (1, 2, 3)
+
+
+def _finite_real_scalar(value: Any, *, name: str, nonnegative: bool = False) -> float:
+    """Coerce one declared real scalar without accepting Boolean, text, or array axes."""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-Boolean finite real scalar")
+    arr = np.asarray(value)
+    if arr.ndim != 0 or arr.dtype.kind not in "iuf":
+        raise ValueError(f"{name} must be a finite real scalar")
+    try:
+        scalar = float(arr)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite real scalar") from exc
+    if not np.isfinite(scalar):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    if nonnegative and scalar < 0.0:
+        raise ValueError(f"{name} must be nonnegative, got {value!r}")
+    return scalar
 
 
 @dataclass
@@ -127,7 +147,19 @@ def _scope_dict(factors: EmissionFactors, scope: int) -> dict[str, float]:
 
 def _scope_total(activity: dict[str, float], scope_factors: dict[str, float]) -> float:
     """Sum ``factor * activity[key]`` over the keys the scope's factor dict knows about."""
-    return float(sum(factor * activity.get(key, 0.0) for key, factor in scope_factors.items()))
+    products: list[float] = []
+    for key, factor in scope_factors.items():
+        product = float(factor) * float(activity.get(key, 0.0))
+        if not np.isfinite(product):
+            raise ValueError(f"emissions_footprint: factor * activity overflowed for key {key!r}")
+        products.append(product)
+    try:
+        total = math.fsum(products)
+    except OverflowError as exc:
+        raise ValueError("emissions_footprint: scope total overflowed") from exc
+    if not np.isfinite(total):
+        raise ValueError("emissions_footprint: scope total must be finite")
+    return total
 
 
 def _activity_content_hash(activity: dict[str, float]) -> str:
@@ -193,6 +225,19 @@ def _validate_factor_values(factors: EmissionFactors) -> None:
                 raise ValueError(f"factors.sigma[{key!r}] must be nonnegative, got {value!r}")
 
 
+def _validate_draw_count(n: int) -> int:
+    """Return an exact non-Boolean, nonnegative Monte Carlo draw count."""
+    if isinstance(n, (bool, np.bool_)):
+        raise ValueError("emissions_footprint: n must be a non-Boolean nonnegative integer")
+    try:
+        count = operator.index(n)
+    except TypeError as exc:
+        raise ValueError("emissions_footprint: n must be a non-Boolean nonnegative integer") from exc
+    if count < 0:
+        raise ValueError("emissions_footprint: n must be nonnegative; use n=0 for a point estimate")
+    return int(count)
+
+
 def emissions_footprint(
     activity: dict[str, float],
     factors: EmissionFactors,
@@ -226,9 +271,11 @@ def emissions_footprint(
     interval describing two different footprints. ``activity`` values must be finite and nonnegative;
     ``factors`` (``scope1``/``scope2``/``scope3``) values must be finite; ``factors.sigma`` values,
     when supplied, must be finite and nonnegative -- a negative sigma is rejected rather than silently
-    treated as an exactly-known (zero-uncertainty) factor. All of this is validated before either the
-    point-total or the Monte-Carlo path runs.
+    treated as an exactly-known (zero-uncertainty) factor. ``n`` must be an exact non-Boolean
+    nonnegative integer; zero explicitly requests the point estimate without an interval. All of
+    this is validated before either the point-total or the Monte-Carlo path runs.
     """
+    n = _validate_draw_count(n)
     for s in scopes:
         if s not in _VALID_SCOPES:
             raise ValueError(f"scopes must be a subset of {_VALID_SCOPES}, got {scopes!r}")
@@ -237,7 +284,12 @@ def emissions_footprint(
     _validate_factor_values(factors)
 
     scope_values = {s: (_scope_total(activity, _scope_dict(factors, s)) if s in scopes else 0.0) for s in _VALID_SCOPES}
-    total = float(sum(scope_values.values()))
+    try:
+        total = math.fsum(scope_values.values())
+    except OverflowError as exc:
+        raise ValueError("emissions_footprint: total footprint overflowed") from exc
+    if not np.isfinite(total):
+        raise ValueError("emissions_footprint: total footprint must be finite")
 
     ci: tuple[float, float] | None = None
     if n > 0 and factors.sigma:
@@ -248,7 +300,11 @@ def emissions_footprint(
                 qty = activity.get(key, 0.0)
                 std = float(factors.sigma.get(key, 0.0))
                 draws = gen.normal(mean, std, size=n) if std > 0 else np.full(n, mean)
-                totals += draws * qty
+                with np.errstate(over="ignore", invalid="ignore"):
+                    contributions = draws * qty
+                    totals += contributions
+                if not np.isfinite(contributions).all() or not np.isfinite(totals).all():
+                    raise ValueError("emissions_footprint: Monte Carlo totals must remain finite")
         lo, hi = np.quantile(totals, [0.05, 0.95])
         ci = (float(lo), float(hi))
 
@@ -301,10 +357,28 @@ class TransitionRiskResult:
 
     def __post_init__(self) -> None:
         arr = np.asarray(self.samples, dtype=float)
-        if arr.size == 0:
-            raise ValueError("TransitionRiskResult.samples must be non-empty.")
+        if arr.ndim != 2 or arr.shape[0] == 0 or arr.shape[1] == 0:
+            raise ValueError("TransitionRiskResult.samples must be a non-empty 2-D (n, k) array.")
         if not np.isfinite(arr).all():
             raise ValueError("TransitionRiskResult.samples must be finite (no NaN/Inf).")
+        means = np.asarray(self.scenario_mean, dtype=float)
+        costs = np.asarray(self.carbon_cost, dtype=float)
+        n_scenarios = arr.shape[1]
+        if means.shape != (n_scenarios,) or not np.isfinite(means).all():
+            raise ValueError("TransitionRiskResult.scenario_mean must be one finite value per scenario.")
+        if costs.shape != (n_scenarios,) or not np.isfinite(costs).all():
+            raise ValueError("TransitionRiskResult.carbon_cost must be one finite value per scenario.")
+        if isinstance(self.prior_dominated, (bool, np.bool_)) is False:
+            raise ValueError("TransitionRiskResult.prior_dominated must be Boolean.")
+        if (
+            len(self.ranking) != n_scenarios
+            or any(isinstance(i, (bool, np.bool_)) for i in self.ranking)
+            or sorted(self.ranking) != list(range(n_scenarios))
+        ):
+            raise ValueError("TransitionRiskResult.ranking must be a permutation of scenario indices.")
+        self.samples = np.array(arr, copy=True)
+        self.scenario_mean = np.array(means, copy=True)
+        self.carbon_cost = np.array(costs, copy=True)
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         """Per-scenario central ``level`` interval of the carbon-adjusted NPV, each shape ``(k,)``."""
@@ -376,6 +450,39 @@ def _validate_npv_samples(npv: np.ndarray) -> None:
         raise ValueError("transition_risk: npv_samples must be finite")
 
 
+def _discounted_carbon_costs(footprint_total: float, prices: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """Compute each nonnegative weighted price path without unchecked NumPy overflow."""
+    costs = np.empty(prices.shape[0], dtype=np.float64)
+    for scenario_index, price_path in enumerate(prices):
+        terms: list[float] = []
+        for price, weight in zip(price_path, weights, strict=True):
+            term = float(price) * float(weight)
+            if not np.isfinite(term):
+                raise ValueError("transition_risk: discounted carbon price overflowed")
+            terms.append(term)
+        try:
+            weighted_price = math.fsum(terms)
+        except OverflowError as exc:
+            raise ValueError("transition_risk: discounted carbon price overflowed") from exc
+        cost = footprint_total * weighted_price
+        if not np.isfinite(cost):
+            raise ValueError("transition_risk: carbon cost overflowed")
+        costs[scenario_index] = cost
+    return costs
+
+
+def _stable_column_means(values: np.ndarray) -> np.ndarray:
+    """Mean each column without overflowing the sum of otherwise finite values."""
+    divisor = values.shape[0]
+    means = np.array(
+        [math.fsum(float(value) / divisor for value in values[:, column]) for column in range(values.shape[1])],
+        dtype=np.float64,
+    )
+    if not np.isfinite(means).all():
+        raise ValueError("transition_risk: scenario means must remain finite")
+    return means
+
+
 def transition_risk(
     footprint: Footprint,
     carbon_price_paths: np.ndarray,
@@ -410,8 +517,7 @@ def transition_risk(
     meaningless ranking to construct successfully, failing only later when a caller requested a
     credible interval.
     """
-    if not np.isfinite(footprint.total):
-        raise ValueError(f"transition_risk: footprint.total must be finite, got {footprint.total!r}")
+    footprint_total = _finite_real_scalar(footprint.total, name="transition_risk: footprint.total")
 
     prices = _coerce_price_paths(carbon_price_paths)
     _validate_scenario_prices(prices)
@@ -431,10 +537,13 @@ def transition_risk(
     npv = np.asarray(npv_samples, dtype=np.float64)
     _validate_npv_samples(npv)
 
-    carbon_cost = footprint.total * (prices * weights[None, :]).sum(axis=1)  # (k,)
-    adjusted = npv[:, None] - carbon_cost[None, :]  # (n, k)
+    carbon_cost = _discounted_carbon_costs(footprint_total, prices, weights)
+    with np.errstate(over="ignore", invalid="ignore"):
+        adjusted = npv[:, None] - carbon_cost[None, :]  # (n, k)
+    if not np.isfinite(adjusted).all():
+        raise ValueError("transition_risk: carbon-adjusted NPV samples must remain finite")
 
-    scenario_mean = adjusted.mean(axis=0)
+    scenario_mean = _stable_column_means(adjusted)
     ranking = [int(i) for i in np.argsort(-scenario_mean)]
 
     provenance = {
@@ -584,7 +693,11 @@ def climate_terms(
       passing as non-binding. The two binding checks combine via three-valued (Kleene) OR: a confirmed
       binding signal from either check always wins, an unknown never gets rounded down to "feasible".
     """
-    carbon_cost = float(footprint.total) * float(carbon_price)
+    footprint_total = _finite_real_scalar(footprint.total, name="climate_terms: footprint.total")
+    price = _finite_real_scalar(carbon_price, name="climate_terms: carbon_price", nonnegative=True)
+    carbon_cost = footprint_total * price
+    if not np.isfinite(carbon_cost):
+        raise ValueError("climate_terms: carbon cost overflowed")
 
     if water is None:
         return {
