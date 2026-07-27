@@ -135,7 +135,9 @@ class EngineResidentEStep(Protocol):
 
 @runtime_checkable
 class Transform(Protocol):
-    """An invertible change of variables with a tractable Jacobian (combinator/transform.py)."""
+    """A contract-declared invertible change of variables with a tractable Jacobian."""
+
+    contract: Any
 
     def forward(self, x: Any) -> Any:
         """Map values from the base space into the transformed space."""
@@ -147,6 +149,10 @@ class Transform(Protocol):
 
     def log_abs_det_inverse_jacobian(self, y: Any) -> float:
         """Return ``log |det d inverse(y) / dy|`` for density correction."""
+        ...
+
+    def invalid_inverse_value(self) -> Any:
+        """Return an in-domain fill value used to encode rejected observations safely."""
         ...
 
 

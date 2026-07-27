@@ -7,11 +7,13 @@ needed to apply them inside Mixle combinators.
 
 import math
 from collections.abc import Sequence
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, NamedTuple
 
 import numpy as np
 from numpy.random import RandomState
 
+from mixle.enumeration.algorithms import freeze
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -25,18 +27,234 @@ from mixle.stats.compute.pdist import (
 )
 
 
-def _uses_density_correction(dist: SequenceEncodableProbabilityDistribution, density_correction: bool | None) -> bool:
+class TransformDomainError(ValueError):
+    """Raised when an observation lies outside a transform's declared domain."""
+
+
+class TransformCompatibilityError(TypeError):
+    """Raised when a transform contract is incompatible with its child distribution."""
+
+
+@dataclass(frozen=True)
+class TransformContract:
+    """Machine-checkable declaration for a deterministic bijective transform.
+
+    ``input_domain`` and ``output_domain`` use the same coarse vocabulary as
+    compute-declaration support tags. ``measure`` is ``"adaptive"`` when the
+    transform supports both counting measure and continuous change-of-variables,
+    or ``"discrete"`` for a counting-measure-only mapping.
+    """
+
+    input_domain: str
+    output_domain: str
+    measure: str = "adaptive"
+    bijective: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.input_domain or not self.output_domain:
+            raise ValueError("transform contract domains must be non-empty strings.")
+        if self.measure not in {"adaptive", "discrete"}:
+            raise ValueError("transform contract measure must be 'adaptive' or 'discrete'.")
+        if self.bijective is not True:
+            raise ValueError("TransformDistribution requires a contract declaring a bijection.")
+
+
+class TransformFitReceipt(NamedTuple):
+    """Accepted/rejected evidence accounting attached to a fitted transform wrapper."""
+
+    accepted_weight: float
+    rejected_weight: float
+    rejected_fraction: float
+
+
+class TransformStatistics(NamedTuple):
+    """Versioned child statistics plus transform-domain evidence accounting."""
+
+    schema_version: int
+    child: Any
+    accepted_weight: float
+    rejected_weight: float
+
+
+_REAL_SUPPORTS = frozenset(
+    {
+        "real",
+        "bounded_real",
+        "positive",
+        "positive_real",
+        "non_negative_real",
+        "positive_tail",
+        "unit_interval_open",
+        "bounded_integer",
+        "non_negative_integer",
+        "positive_integer",
+    }
+)
+_POSITIVE_SUPPORTS = frozenset({"positive", "positive_real", "positive_tail", "positive_integer"})
+_FINITE_SUPPORTS = frozenset(
+    {
+        "boolean",
+        "bounded_integer",
+        "finite_hashable_set",
+        "finite_integer_sequence",
+        "finite_integer_set",
+        "finite_or_default_hashable",
+        "fixed_atom",
+        "permutation",
+    }
+)
+
+
+def _finite_weight(value: Any, *, name: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be a finite non-negative real number." % name) from exc
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError("%s must be a finite non-negative real number." % name)
+    return result
+
+
+def _validate_statistics(value: Any) -> TransformStatistics:
+    if not isinstance(value, TransformStatistics) or value.schema_version != 1:
+        raise ValueError("transform statistics must use schema version 1.")
+    return TransformStatistics(
+        1,
+        value.child,
+        _finite_weight(value.accepted_weight, name="accepted_weight"),
+        _finite_weight(value.rejected_weight, name="rejected_weight"),
+    )
+
+
+def _enumerator_or_none(dist: SequenceEncodableProbabilityDistribution) -> DistributionEnumerator | None:
+    try:
+        return dist.enumerator()
+    except EnumerationError:
+        return None
+
+
+def _uses_density_correction(
+    dist: SequenceEncodableProbabilityDistribution,
+    density_correction: bool | None,
+) -> bool:
     if density_correction is not None:
         return bool(density_correction)
+    return _enumerator_or_none(dist) is None
+
+
+def _same_value(left: Any, right: Any) -> bool:
     try:
-        dist.enumerator()
+        if freeze(left) == freeze(right):
+            return True
+    except TypeError:
+        pass
+    try:
+        equal = left == right
+        return bool(np.all(equal)) if isinstance(equal, np.ndarray) else bool(equal)
+    except (TypeError, ValueError):
         return False
-    except EnumerationError:
+
+
+def _support_matches(domain: str, support: str) -> bool:
+    if domain == "any":
         return True
+    if domain == "real":
+        return support in _REAL_SUPPORTS
+    if domain == "positive_real":
+        return support in _POSITIVE_SUPPORTS
+    return domain == support
+
+
+def _validate_transform_object(transform: Any) -> TransformContract:
+    contract = getattr(transform, "contract", None)
+    if not isinstance(contract, TransformContract):
+        raise TransformCompatibilityError(
+            "transform must expose a TransformContract as .contract; arbitrary duck-typed transforms are not accepted."
+        )
+    required = ("forward", "inverse", "log_abs_det_inverse_jacobian", "invalid_inverse_value")
+    missing = [name for name in required if not callable(getattr(transform, name, None))]
+    if missing:
+        raise TransformCompatibilityError("transform contract is missing callable methods: %s." % ", ".join(missing))
+    return contract
+
+
+def _validate_finite_support(transform: Any, child_iter: DistributionEnumerator) -> None:
+    seen: set[Any] = set()
+    for count, (value, _) in enumerate(child_iter, start=1):
+        if count > 100_000:
+            raise TransformCompatibilityError(
+                "finite transform validation exceeded 100000 support values; use a declared support-domain contract."
+            )
+        try:
+            output = transform.forward(value)
+            inverse = transform.inverse(output)
+        except Exception as exc:
+            raise TransformCompatibilityError(
+                "transform is not defined over the child's enumerable support value %r." % (value,)
+            ) from exc
+        if not _same_value(value, inverse):
+            raise TransformCompatibilityError(
+                "transform inverse does not recover child support value %r from output %r." % (value, output)
+            )
+        try:
+            key = freeze(output)
+        except TypeError as exc:
+            raise TransformCompatibilityError("transformed support values must have stable enumeration keys.") from exc
+        if key in seen:
+            raise TransformCompatibilityError("transform is not injective over the child's enumerable support.")
+        seen.add(key)
+
+
+def _validate_transform_child(
+    dist: SequenceEncodableProbabilityDistribution,
+    transform: Any,
+    density_correction: bool,
+) -> TransformContract:
+    from mixle.stats.compute.declarations import declaration_for
+
+    contract = _validate_transform_object(transform)
+    declaration = declaration_for(dist)
+    support = None if declaration is None else declaration.support
+    child_iter = _enumerator_or_none(dist)
+    if child_iter is not None:
+        if density_correction:
+            raise TransformCompatibilityError(
+                "enumerable children use counting measure and cannot request a Jacobian density correction."
+            )
+        if support in _FINITE_SUPPORTS or (
+            contract.input_domain != "any"
+            and not (support is not None and _support_matches(contract.input_domain, support))
+        ):
+            _validate_finite_support(transform, child_iter)
+        return contract
+    if contract.measure == "discrete":
+        raise TransformCompatibilityError("a discrete transform contract requires an enumerable child distribution.")
+    if not density_correction:
+        raise TransformCompatibilityError(
+            "non-enumerable children require Jacobian density correction under an adaptive transform contract."
+        )
+    if contract.input_domain != "any" and (
+        support is None or not _support_matches(contract.input_domain, support)
+    ):
+        raise TransformCompatibilityError(
+            "child support %r is not covered by transform input domain %r."
+            % (support, contract.input_domain)
+        )
+    return contract
+
+
+def _inverse_with_jacobian(transform: Any, value: Any, density_correction: bool) -> tuple[Any, float]:
+    inverse = transform.inverse(value)
+    log_jac = transform.log_abs_det_inverse_jacobian(value) if density_correction else 0.0
+    if density_correction and not np.isfinite(log_jac):
+        raise TransformDomainError("transform inverse Jacobian must be finite.")
+    return inverse, float(log_jac)
 
 
 class IdentityTransform:
     """Identity transform y = x."""
+
+    contract = TransformContract("any", "same")
 
     def __str__(self) -> str:
         return "IdentityTransform()"
@@ -66,7 +284,11 @@ class IdentityTransform:
 class AffineTransform:
     """Affine transform y = loc + scale * x."""
 
+    contract = TransformContract("real", "real")
+
     def __init__(self, loc: float = 0.0, scale: float = 1.0) -> None:
+        if not np.isfinite(loc):
+            raise ValueError("AffineTransform requires finite loc.")
         if scale == 0.0 or not np.isfinite(scale):
             raise ValueError("AffineTransform requires finite non-zero scale.")
         self.loc = float(loc)
@@ -101,6 +323,8 @@ class AffineTransform:
 class ExpTransform:
     """Exponential transform y = exp(x), mapping real x to positive y."""
 
+    contract = TransformContract("real", "positive_real")
+
     def __str__(self) -> str:
         return "ExpTransform()"
 
@@ -116,13 +340,13 @@ class ExpTransform:
     def inverse(self, y: Any) -> Any:
         """Map a positive transformed value back to the real line."""
         if y <= 0.0:
-            raise ValueError("ExpTransform inverse requires y > 0.")
+            raise TransformDomainError("ExpTransform inverse requires y > 0.")
         return math.log(y)
 
     def log_abs_det_inverse_jacobian(self, y: Any) -> float:
         """Return the log inverse-Jacobian correction for ``log(y)``."""
         if y <= 0.0:
-            raise ValueError("ExpTransform inverse requires y > 0.")
+            raise TransformDomainError("ExpTransform inverse requires y > 0.")
         return -math.log(y)
 
     def invalid_inverse_value(self) -> float:
@@ -132,6 +356,8 @@ class ExpTransform:
 
 class LogTransform:
     """Log transform y = log(x), mapping positive x to real y."""
+
+    contract = TransformContract("positive_real", "real")
 
     def __str__(self) -> str:
         return "LogTransform()"
@@ -144,7 +370,7 @@ class LogTransform:
     def forward(self, x: Any) -> Any:
         """Map a positive child value to the real line."""
         if x <= 0.0:
-            raise ValueError("LogTransform forward requires x > 0.")
+            raise TransformDomainError("LogTransform forward requires x > 0.")
         return math.log(x)
 
     def inverse(self, y: Any) -> Any:
@@ -162,6 +388,8 @@ class LogTransform:
 
 class LogitTransform:
     """Logistic transform y = 1 / (1 + exp(-x)), mapping real x to (0, 1)."""
+
+    contract = TransformContract("real", "unit_interval_open")
 
     def __str__(self) -> str:
         return "LogitTransform()"
@@ -181,13 +409,13 @@ class LogitTransform:
     def inverse(self, y: Any) -> Any:
         """Map a unit-interval value back to the real line."""
         if y <= 0.0 or y >= 1.0:
-            raise ValueError("LogitTransform inverse requires 0 < y < 1.")
+            raise TransformDomainError("LogitTransform inverse requires 0 < y < 1.")
         return math.log(y) - math.log1p(-y)
 
     def log_abs_det_inverse_jacobian(self, y: Any) -> float:
         """Return the log inverse-Jacobian correction for the logit map."""
         if y <= 0.0 or y >= 1.0:
-            raise ValueError("LogitTransform inverse requires 0 < y < 1.")
+            raise TransformDomainError("LogitTransform inverse requires 0 < y < 1.")
         return -math.log(y) - math.log1p(-y)
 
     def invalid_inverse_value(self) -> float:
@@ -211,12 +439,19 @@ class TransformDistribution(SequenceEncodableProbabilityDistribution):
         density_correction: bool | None = None,
         name: str | None = None,
         keys: str | None = None,
+        fit_receipt: TransformFitReceipt | None = None,
     ) -> None:
         self.dist = dist
         self.transform = transform if transform is not None else IdentityTransform()
         self.density_correction = _uses_density_correction(dist, density_correction)
+        _validate_transform_child(
+            self.dist,
+            self.transform,
+            self.density_correction,
+        )
         self.name = name
         self.keys = keys
+        self.fit_receipt = fit_receipt
 
     def compute_capabilities(self):
         """Return capabilities delegated from the child distribution where safe."""
@@ -241,12 +476,20 @@ class TransformDistribution(SequenceEncodableProbabilityDistribution):
 
         child = declaration_for(self.dist)
         children = () if child is None else (child,)
+        output_support = self.transform.contract.output_domain
+        if output_support == "same":
+            output_support = "transformed" if child is None else child.support
         return DistributionDeclaration(
             name="transform",
             distribution_type=type(self),
             parameters=(),
-            statistics=(StatisticSpec("base", kind="child_stat"),),
-            support="transformed",
+            statistics=(
+                StatisticSpec("schema_version", kind="scalar", additive=False, scales=False),
+                StatisticSpec("base", kind="child_stat"),
+                StatisticSpec("accepted_weight", kind="scalar"),
+                StatisticSpec("rejected_weight", kind="scalar"),
+            ),
+            support=output_support,
             children=children,
             child_roles=("base",) if child is not None else (),
             differentiable=all(c.differentiable for c in children),
@@ -268,13 +511,10 @@ class TransformDistribution(SequenceEncodableProbabilityDistribution):
     def log_density(self, x: Any) -> float:
         """Return the log-density or log-mass at a single observation."""
         try:
-            inv = self.transform.inverse(x)
-            rv = self.dist.log_density(inv)
-            if self.density_correction:
-                rv += self.transform.log_abs_det_inverse_jacobian(x)
-            return rv
-        except Exception:  # noqa: BLE001
+            inv, log_jac = _inverse_with_jacobian(self.transform, x, self.density_correction)
+        except TransformDomainError:
             return -np.inf
+        return self.dist.log_density(inv) + log_jac
 
     def seq_log_density(self, x: tuple[Any, np.ndarray, np.ndarray]) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
@@ -331,22 +571,6 @@ class TransformDistribution(SequenceEncodableProbabilityDistribution):
         invalid = engine.zeros(tuple(getattr(scores, "shape", (0, 0)))) + float("-inf")
         return engine.where(engine.asarray(valid)[:, None], scores, invalid)
 
-    @classmethod
-    def backend_stacked_sufficient_statistics_with_estimator(
-        cls, x: tuple[Any, np.ndarray, np.ndarray], weights: Any, params: dict[str, Any], engine: Any, estimator: Any
-    ) -> Any:
-        """Return child legacy statistics for valid inverse-transformed observations."""
-        from mixle.stats.compute.stacked import StackedEstimatorView, stacked_component_sufficient_statistics
-
-        child_enc, _, valid = x
-        ww = engine.asarray(weights) * engine.asarray(valid)[:, None]
-        num_components = int(params["num_components"])
-        component_estimators = tuple(getattr(est, "estimator", None) for est in getattr(estimator, "estimators", ()))
-        child_estimator = (
-            StackedEstimatorView(component_estimators) if len(component_estimators) == num_components else None
-        )
-        return stacked_component_sufficient_statistics(child_enc, ww, params["child_route"], engine, child_estimator)
-
     def gradient_fit_state(self, engine: Any, torch: Any, leaves: Any, recurse: Any, tensor_param: Any) -> Any:
         """Return distribution-owned state for autograd fitting."""
         from mixle.stats.compute.gradient import TransformGradientFitState
@@ -384,10 +608,19 @@ class TransformEnumerator(DistributionEnumerator):
     def __init__(self, dist: TransformDistribution) -> None:
         super().__init__(dist)
         self.child_iter = child_enumerator(dist.dist, "TransformDistribution.dist")
+        self.seen: set[Any] = set()
 
     def __next__(self) -> tuple[Any, float]:
         v, lp = next(self.child_iter)
-        return self.dist.transform.forward(v), lp
+        output = self.dist.transform.forward(v)
+        inverse = self.dist.transform.inverse(output)
+        if not _same_value(v, inverse):
+            raise TransformCompatibilityError("transform inverse failed during support enumeration.")
+        key = freeze(output)
+        if key in self.seen:
+            raise TransformCompatibilityError("transform produced a duplicate enumerable outcome.")
+        self.seen.add(key)
+        return output, lp
 
 
 class TransformSampler(DistributionSampler):
@@ -422,23 +655,41 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
         self.density_correction = density_correction
         self.name = name
         self.keys = keys
+        self.accepted_weight = 0.0
+        self.rejected_weight = 0.0
 
     def update(self, x: Any, weight: float, estimate: TransformDistribution | None) -> None:
         """Accumulate one inverse-transformed observation when it is valid."""
+        checked = _finite_weight(weight, name="weight")
         try:
-            inv = self.transform.inverse(x)
-        except Exception:  # noqa: BLE001
+            inv, _ = _inverse_with_jacobian(self.transform, x, self.density_correction is not False)
+        except TransformDomainError:
+            self.rejected_weight += checked
             return
-        self.accumulator.update(inv, weight, None if estimate is None else estimate.dist)
+        self.accumulator.update(inv, checked, None if estimate is None else estimate.dist)
+        self.accepted_weight += checked
 
     def seq_update(
         self, x: tuple[Any, np.ndarray, np.ndarray], weights: np.ndarray, estimate: TransformDistribution | None
     ) -> None:
         """Accumulate a batch using validity-masked child weights."""
         child_enc, _, valid = x
+        valid = np.asarray(valid)
+        checked = np.asarray(weights, dtype=np.float64)
+        if (
+            valid.dtype != np.bool_
+            or valid.ndim != 1
+            or checked.shape != valid.shape
+            or np.any(~np.isfinite(checked))
+            or np.any(checked < 0.0)
+        ):
+            raise ValueError("transform validity mask and weights must be aligned, finite, and non-negative.")
+        accepted = checked * valid
         self.accumulator.seq_update(
-            child_enc, weights * valid.astype(float), None if estimate is None else estimate.dist
+            child_enc, accepted, None if estimate is None else estimate.dist
         )
+        self.accepted_weight += float(accepted.sum())
+        self.rejected_weight += float(checked[~valid].sum())
 
     def seq_update_engine(
         self,
@@ -453,41 +704,87 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
         from mixle.stats.compute.backend import child_seq_update
 
         child_enc, _, valid = x
-        w = engine.asarray(weights) * engine.asarray(np.asarray(valid, dtype=np.float64))
+        valid = np.asarray(valid)
+        checked = np.asarray(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            dtype=np.float64,
+        )
+        if (
+            valid.dtype != np.bool_
+            or valid.ndim != 1
+            or checked.shape != valid.shape
+            or np.any(~np.isfinite(checked))
+            or np.any(checked < 0.0)
+        ):
+            raise ValueError("transform validity mask and weights must be aligned, finite, and non-negative.")
+        accepted = checked * valid
+        w = engine.asarray(accepted)
         child_seq_update(self.accumulator, child_enc, w, None if estimate is None else estimate.dist, engine)
+        self.accepted_weight += float(accepted.sum())
+        self.rejected_weight += float(checked[~valid].sum())
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
         """Initialize from one inverse-transformed observation when it is valid."""
+        checked = _finite_weight(weight, name="weight")
         try:
-            inv = self.transform.inverse(x)
-        except Exception:  # noqa: BLE001
+            inv, _ = _inverse_with_jacobian(self.transform, x, self.density_correction is not False)
+        except TransformDomainError:
+            self.rejected_weight += checked
             return
-        self.accumulator.initialize(inv, weight, rng)
+        self.accumulator.initialize(inv, checked, rng)
+        self.accepted_weight += checked
 
     def seq_initialize(
         self, x: tuple[Any, np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None
     ) -> None:
         """Initialize from a validity-masked encoded batch."""
         child_enc, _, valid = x
-        self.accumulator.seq_initialize(child_enc, weights * valid.astype(float), rng)
+        valid = np.asarray(valid)
+        checked = np.asarray(weights, dtype=np.float64)
+        if (
+            valid.dtype != np.bool_
+            or valid.ndim != 1
+            or checked.shape != valid.shape
+            or np.any(~np.isfinite(checked))
+            or np.any(checked < 0.0)
+        ):
+            raise ValueError("transform validity mask and weights must be aligned, finite, and non-negative.")
+        accepted = checked * valid
+        self.accumulator.seq_initialize(child_enc, accepted, rng)
+        self.accepted_weight += float(accepted.sum())
+        self.rejected_weight += float(checked[~valid].sum())
 
-    def combine(self, suff_stat: Any) -> "TransformAccumulator":
-        """Merge child sufficient statistics."""
-        self.accumulator.combine(suff_stat)
+    def combine(self, suff_stat: TransformStatistics) -> "TransformAccumulator":
+        """Merge child sufficient statistics and evidence accounting."""
+        checked = _validate_statistics(suff_stat)
+        self.accumulator.combine(checked.child)
+        self.accepted_weight += checked.accepted_weight
+        self.rejected_weight += checked.rejected_weight
         return self
 
-    def value(self) -> Any:
-        """Return the child accumulator's serialized sufficient statistics."""
-        return self.accumulator.value()
+    def value(self) -> TransformStatistics:
+        """Return versioned child statistics and transform-domain evidence accounting."""
+        return TransformStatistics(
+            1,
+            self.accumulator.value(),
+            self.accepted_weight,
+            self.rejected_weight,
+        )
 
-    def from_value(self, x: Any) -> "TransformAccumulator":
-        """Restore the child accumulator from serialized sufficient statistics."""
-        self.accumulator.from_value(x)
+    def from_value(self, x: TransformStatistics) -> "TransformAccumulator":
+        """Restore child statistics and evidence accounting."""
+        checked = _validate_statistics(x)
+        self.accumulator.from_value(checked.child)
+        self.accepted_weight = checked.accepted_weight
+        self.rejected_weight = checked.rejected_weight
         return self
 
     def scale(self, c: float) -> "TransformAccumulator":
-        """Scale delegated sufficient statistics by ``c``."""
-        self.accumulator.scale(c)
+        """Scale delegated sufficient statistics and evidence weights by ``c``."""
+        checked = _finite_weight(c, name="scale")
+        self.accumulator.scale(checked)
+        self.accepted_weight *= checked
+        self.rejected_weight *= checked
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -554,6 +851,7 @@ class TransformEstimator(ParameterEstimator):
     ) -> None:
         self.estimator = estimator
         self.transform = transform if transform is not None else IdentityTransform()
+        _validate_transform_object(self.transform)
         self.density_correction = density_correction
         self.name = name
         self.keys = keys
@@ -569,13 +867,22 @@ class TransformEstimator(ParameterEstimator):
         )
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> TransformDistribution:
-        """Estimate the child distribution and wrap it with the fixed transform."""
+        """Estimate from accepted evidence and attach the rejected-weight receipt."""
+        checked = _validate_statistics(suff_stat)
+        if checked.accepted_weight <= 0.0:
+            raise ValueError("transform estimation requires positive accepted weight.")
+        total = checked.accepted_weight + checked.rejected_weight
         return TransformDistribution(
-            self.estimator.estimate(nobs, suff_stat),
+            self.estimator.estimate(checked.accepted_weight, checked.child),
             transform=self.transform,
             density_correction=self.density_correction,
             name=self.name,
             keys=self.keys,
+            fit_receipt=TransformFitReceipt(
+                checked.accepted_weight,
+                checked.rejected_weight,
+                checked.rejected_weight / total if total else 0.0,
+            ),
         )
 
 
@@ -585,6 +892,7 @@ class TransformDataEncoder(DataSequenceEncoder):
     def __init__(self, encoder: DataSequenceEncoder, transform: Any, density_correction: bool | None = True) -> None:
         self.encoder = encoder
         self.transform = transform
+        _validate_transform_object(self.transform)
         self.density_correction = density_correction is not False
 
     def __str__(self) -> str:
@@ -611,12 +919,13 @@ class TransformDataEncoder(DataSequenceEncoder):
 
         for i, y in enumerate(x):
             try:
-                inv_values.append(self.transform.inverse(y))
-                if self.density_correction:
-                    log_jac[i] = self.transform.log_abs_det_inverse_jacobian(y)
-                    if not np.isfinite(log_jac[i]):
-                        valid[i] = False
-            except Exception:  # noqa: BLE001
+                inverse, log_jac[i] = _inverse_with_jacobian(
+                    self.transform,
+                    y,
+                    self.density_correction,
+                )
+                inv_values.append(inverse)
+            except TransformDomainError:
                 inv_values.append(fill)
                 log_jac[i] = -np.inf
                 valid[i] = False
