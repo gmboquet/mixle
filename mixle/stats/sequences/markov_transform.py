@@ -8,7 +8,8 @@ P(w | u, v), stored as a sparse (W*W by W) matrix with row index u*W + v. With r
 log-likelihood is
 
     log(P(S1, S2, S3)) = sum_{u in S1} c_u*log(p_u) + sum_{v in S2} c_v*log(p_v)
-        + sum_{w in S3} c_w*log( sum_{u,v} ((1-alpha)*P(w|u,v) + alpha/W)*c_u*c_v/(n1*n2) ),
+        + sum_{w in S3} c_w*log( sum_{u,v} ((1-alpha)*P(w|u,v) + alpha/W)*c_u*c_v/(n1*n2) )
+        + sum_{j=1}^{3} (log(n_j!) - sum_{v in S_j} log(c_v!)),
 
 where c_u is the count attached to value u and n1, n2 are the total counts of S1 and S2. An optional length
 distribution len_dist models the total counts [n1, n2, n3].
@@ -16,9 +17,11 @@ distribution len_dist models the total counts [n1, n2, n3].
 """
 
 import itertools
+import math
 
 import numpy as np
-from scipy.sparse import csc_matrix
+from scipy.sparse import coo_matrix, csc_matrix, issparse
+from scipy.special import gammaln
 
 from mixle.engines.arithmetic import *
 from mixle.engines.arithmetic import maxrandint
@@ -34,6 +37,256 @@ from mixle.stats.sequences._keyed_accumulator import InitTransKeyedAccumulator
 from mixle.utils.aliasing import MISSING, coalesce_alias
 from mixle.utils.deprecation import deprecated_alias
 from mixle.utils.optsutil import count_by_value
+
+
+def _is_nonstring_sequence(value):
+    """Return whether ``value`` has sequence length/index semantics."""
+    if isinstance(value, (str, bytes)):
+        return False
+    try:
+        len(value)
+    except (TypeError, OverflowError):
+        return False
+    return True
+
+
+def _positive_integer(value, *, label):
+    """Return one positive exact integer, rejecting booleans and lossy coercions."""
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("%s must be a positive exact integer." % label)
+    array = np.asarray(value)
+    if array.ndim != 0:
+        raise TypeError("%s must be a positive exact integer." % label)
+    try:
+        result = int(array.item())
+        numeric = float(array.item())
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be a positive exact integer." % label) from exc
+    if not math.isfinite(numeric) or numeric != result or result <= 0:
+        raise ValueError("%s must be a positive exact integer." % label)
+    return result
+
+
+def _finite_nonnegative(value, *, label):
+    """Return one finite nonnegative scalar."""
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("%s must be a finite nonnegative number." % label)
+    array = np.asarray(value)
+    if array.ndim != 0:
+        raise TypeError("%s must be a finite nonnegative number." % label)
+    try:
+        result = float(array.item())
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be a finite nonnegative number." % label) from exc
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError("%s must be a finite nonnegative number." % label)
+    return result
+
+
+def _unit_interval(value, *, label):
+    """Return one finite scalar in the closed unit interval."""
+    result = _finite_nonnegative(value, label=label)
+    if result > 1.0:
+        raise ValueError("%s must be in [0, 1]." % label)
+    return result
+
+
+def _exact_bounded_label(value, num_vals, *, label):
+    """Return one exact integer label in ``range(num_vals)``."""
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("%s must be an exact integer." % label)
+    array = np.asarray(value)
+    if array.ndim != 0:
+        raise TypeError("%s must be an exact integer." % label)
+    try:
+        result = int(array.item())
+        numeric = float(array.item())
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be an exact integer." % label) from exc
+    if not math.isfinite(numeric) or numeric != result:
+        raise ValueError("%s must be an exact integer." % label)
+    if result < 0 or (num_vals is not None and result >= num_vals):
+        if num_vals is None:
+            raise ValueError("%s must be nonnegative." % label)
+        raise ValueError("%s must be in [0, %d)." % (label, num_vals))
+    return result
+
+
+def _exact_nonnegative_count(value, *, label):
+    """Return one finite, exact, nonnegative integer count."""
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("%s must be an exact nonnegative integer." % label)
+    array = np.asarray(value)
+    if array.ndim != 0:
+        raise TypeError("%s must be an exact nonnegative integer." % label)
+    try:
+        result = int(array.item())
+        numeric = float(array.item())
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be an exact nonnegative integer." % label) from exc
+    if not math.isfinite(numeric) or numeric != result or result < 0:
+        raise ValueError("%s must be an exact nonnegative integer." % label)
+    return result
+
+
+def _validate_simplex_vector(values, *, label):
+    """Return an owned, immutable finite probability vector."""
+    array = np.asarray(values, dtype=np.float64)
+    if array.ndim != 1 or array.size == 0:
+        raise ValueError("%s must be a nonempty one-dimensional probability vector." % label)
+    if not np.all(np.isfinite(array)) or np.any(array < 0.0):
+        raise ValueError("%s must contain finite nonnegative probabilities." % label)
+    if not math.isclose(float(array.sum()), 1.0, rel_tol=1.0e-12, abs_tol=1.0e-12):
+        raise ValueError("%s must sum to one." % label)
+    result = array.copy()
+    result.setflags(write=False)
+    return result
+
+
+def _validate_conditional_matrix(values, num_vals, *, label):
+    """Return an owned sparse matrix whose every row is a finite simplex."""
+    try:
+        matrix = csc_matrix(values, dtype=np.float64, copy=True)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("%s must be a numeric matrix." % label) from exc
+    expected_shape = (num_vals * num_vals, num_vals)
+    if matrix.shape != expected_shape:
+        raise ValueError("%s must have shape %r." % (label, expected_shape))
+    if not np.all(np.isfinite(matrix.data)) or np.any(matrix.data < 0.0):
+        raise ValueError("%s must contain finite nonnegative probabilities." % label)
+    row_sums = np.asarray(matrix.sum(axis=1), dtype=np.float64).reshape(-1)
+    if not np.allclose(row_sums, 1.0, rtol=1.0e-12, atol=1.0e-12):
+        raise ValueError("every row of %s must sum to one." % label)
+    matrix.sum_duplicates()
+    matrix.eliminate_zeros()
+    matrix.data.setflags(write=False)
+    matrix.indices.setflags(write=False)
+    matrix.indptr.setflags(write=False)
+    return matrix
+
+
+def _canonicalize_bag(bag, num_vals, *, label):
+    """Validate and combine a bag into sorted, unique label/count arrays."""
+    if not _is_nonstring_sequence(bag):
+        raise TypeError("%s must be a sequence of (label, count) pairs." % label)
+    totals = {}
+    for index, entry in enumerate(bag):
+        if not _is_nonstring_sequence(entry) or len(entry) != 2:
+            raise TypeError("%s[%d] must be a (label, count) pair." % (label, index))
+        value = _exact_bounded_label(entry[0], num_vals, label="%s[%d] label" % (label, index))
+        count = _exact_nonnegative_count(entry[1], label="%s[%d] count" % (label, index))
+        if count:
+            totals[value] = totals.get(value, 0) + count
+    values = np.asarray(sorted(totals), dtype=np.int64)
+    counts = np.asarray([totals[value] for value in values], dtype=np.float64)
+    return values, counts
+
+
+def _canonicalize_observation(observation, num_vals, *, label="observation"):
+    """Validate one three-bag Markov-transform observation."""
+    if not _is_nonstring_sequence(observation) or len(observation) != 3:
+        raise TypeError("%s must contain exactly three count bags." % label)
+    bags = tuple(
+        _canonicalize_bag(bag, num_vals, label="%s bag %d" % (label, index + 1))
+        for index, bag in enumerate(observation)
+    )
+    if bags[2][1].sum() > 0.0 and (bags[0][1].sum() == 0.0 or bags[1][1].sum() == 0.0):
+        raise ValueError("%s cannot have output tokens when either parent bag is empty." % label)
+    return bags
+
+
+def _canonicalize_encoded_entry(entry, num_vals, *, label):
+    """Validate one six-array encoded observation without zip truncation."""
+    if not _is_nonstring_sequence(entry) or len(entry) != 6:
+        raise TypeError("%s must contain six label/count arrays." % label)
+    bags = []
+    for bag_index in range(3):
+        values = np.asarray(entry[2 * bag_index])
+        counts = np.asarray(entry[2 * bag_index + 1])
+        if values.ndim != 1 or counts.ndim != 1 or len(values) != len(counts):
+            raise ValueError(
+                "%s bag %d label/count arrays must be one-dimensional and equally sized." % (label, bag_index + 1)
+            )
+        bags.append(
+            _canonicalize_bag(
+                list(zip(values.tolist(), counts.tolist())),
+                num_vals,
+                label="%s bag %d" % (label, bag_index + 1),
+            )
+        )
+    if bags[2][1].sum() > 0.0 and (bags[0][1].sum() == 0.0 or bags[1][1].sum() == 0.0):
+        raise ValueError("%s cannot have output tokens when either parent bag is empty." % label)
+    return tuple(bags)
+
+
+def _validate_encoded_observations(encoded, num_vals):
+    """Validate the public encoded tuple and return canonical observations."""
+    if not _is_nonstring_sequence(encoded) or len(encoded) != 3:
+        raise TypeError("encoded Markov-transform data must be a three-item tuple.")
+    try:
+        entries = list(encoded[0])
+    except TypeError as exc:
+        raise TypeError("encoded Markov-transform observations must be a sequence.") from exc
+    triples = np.asarray(encoded[2])
+    if triples.ndim != 2 or triples.shape[1:] != (3,):
+        raise ValueError("encoded Markov-transform triple table must have shape (n, 3).")
+    if triples.size:
+        if not np.issubdtype(triples.dtype, np.integer):
+            raise TypeError("encoded Markov-transform triple labels must be integers.")
+        if np.any(triples < 0) or np.any(triples >= num_vals):
+            raise ValueError("encoded Markov-transform triple labels are outside the declared support.")
+    return [
+        _canonicalize_encoded_entry(entry, num_vals, label="encoded observation %d" % index)
+        for index, entry in enumerate(entries)
+    ]
+
+
+def _multinomial_log_coefficient(counts):
+    """Return ``log(n! / product(count!))`` for one canonical bag."""
+    return float(gammaln(float(np.sum(counts)) + 1.0) - np.sum(gammaln(np.asarray(counts) + 1.0)))
+
+
+def _sparse_contribution(rows, columns, values, shape):
+    """Construct a sparse update that correctly sums repeated row/column coordinates."""
+    if values.size == 0:
+        return csc_matrix(shape, dtype=np.float64)
+    row_index = np.repeat(np.asarray(rows, dtype=np.int64), len(columns))
+    column_index = np.tile(np.asarray(columns, dtype=np.int64), len(rows))
+    return coo_matrix((np.asarray(values).reshape(-1), (row_index, column_index)), shape=shape).tocsc()
+
+
+def _validate_weight_vector(weights, size):
+    """Return an owned vector of one finite nonnegative weight per observation."""
+    result = np.asarray(weights, dtype=np.float64)
+    if result.ndim != 1 or len(result) != size:
+        raise ValueError("weights must be one-dimensional with one entry per observation.")
+    if not np.all(np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError("weights must be finite and nonnegative.")
+    return result
+
+
+def _validate_statistic_value(value, num_vals, *, label):
+    """Validate and copy a dense Markov-transform sufficient-statistic tuple."""
+    if not _is_nonstring_sequence(value) or len(value) != 3:
+        raise TypeError("%s must be a three-item sufficient-statistic tuple." % label)
+    init_count = np.asarray(value[0], dtype=np.float64)
+    if init_count.shape != (num_vals,):
+        raise ValueError("%s initial counts must have shape (%d,)." % (label, num_vals))
+    if not np.all(np.isfinite(init_count)) or np.any(init_count < 0.0):
+        raise ValueError("%s initial counts must be finite and nonnegative." % label)
+    if not issparse(value[1]):
+        try:
+            trans_count = csc_matrix(value[1], dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("%s transition counts must be a numeric matrix." % label) from exc
+    else:
+        trans_count = csc_matrix(value[1], dtype=np.float64, copy=True)
+    if trans_count.shape != (num_vals * num_vals, num_vals):
+        raise ValueError("%s transition counts have an incompatible shape." % label)
+    if not np.all(np.isfinite(trans_count.data)) or np.any(trans_count.data < 0.0):
+        raise ValueError("%s transition counts must be finite and nonnegative." % label)
+    trans_count.sum_duplicates()
+    return init_count.copy(), trans_count, value[2]
 
 
 class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
@@ -57,11 +310,17 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
             num_vals (int): Number of possible values W.
 
         """
-        self.init_prob_vec = np.asarray(init_prob_vec, dtype=np.float64)
-        self.cond_prob_mat = csc_matrix(cond_prob_mat, dtype=np.float64)
+        self.init_prob_vec = _validate_simplex_vector(init_prob_vec, label="init_prob_vec")
+        self.num_vals = len(self.init_prob_vec)
+        self.cond_prob_mat = _validate_conditional_matrix(
+            cond_prob_mat,
+            self.num_vals,
+            label="cond_prob_mat",
+        )
+        if len_dist is not None and not isinstance(len_dist, SequenceEncodableProbabilityDistribution):
+            raise TypeError("len_dist must be a sequence-encodable probability distribution or None.")
         self.len_dist = len_dist
-        self.num_vals = len(init_prob_vec)
-        self.alpha = alpha
+        self.alpha = _unit_interval(alpha, label="alpha")
 
     def __str__(self):
         """Return a constructor-style representation of the distribution."""
@@ -103,41 +362,36 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
             Log-density at observation x.
 
         """
-        nw = self.num_vals
-        a = self.alpha / nw
-        b = 1 - self.alpha
+        bags = _canonicalize_observation(x, self.num_vals)
+        (vx, cx), (vy, cy), (vz, cz) = bags
+        n1 = int(cx.sum())
+        n2 = int(cy.sum())
+        n3 = int(cz.sum())
 
-        xx, yy, zz = x
+        with np.errstate(divide="ignore"):
+            ll1 = float(np.dot(np.log(self.init_prob_vec[vx]), cx))
+            ll2 = float(np.dot(np.log(self.init_prob_vec[vy]), cy))
+            ll3 = 0.0
+            if n3:
+                rows = (vx[:, None] * self.num_vals + vy[None, :]).reshape(-1)
+                pair_weights = (cx[:, None] * cy[None, :]).reshape(-1) / float(n1 * n2)
+                conditional = self.cond_prob_mat[rows, :][:, vz].toarray().T
+                target_prob = np.dot(conditional * (1.0 - self.alpha) + self.alpha / self.num_vals, pair_weights)
+                ll3 = float(np.dot(np.log(target_prob), cz))
 
-        ll1 = 0.0
-        ll2 = 0.0
-        ll3 = 0.0
-        n1 = 0
-        n2 = 0
-        n3 = 0
-        for u, c in xx:
-            ll1 += np.log(self.init_prob_vec[u]) * c
-            n1 += c
-        for u, c in yy:
-            ll2 += np.log(self.init_prob_vec[u]) * c
-            n2 += c
-
-        nn = n1 * n2
-
-        for w, cw in zz:
-            loc_ll = 0.0
-            for u, cu in xx:
-                for v, cv in yy:
-                    loc_ll += (b * self.cond_prob_mat[u * nw + v, w] + a) * cu * cv / nn
-            ll3 += np.log(loc_ll) * cw
-            n3 += cw
-
-        rv = ll1 + ll2 + ll3
+        rv = (
+            ll1
+            + ll2
+            + ll3
+            + _multinomial_log_coefficient(cx)
+            + _multinomial_log_coefficient(cy)
+            + _multinomial_log_coefficient(cz)
+        )
 
         if self.len_dist is not None:
-            rv += self.len_dist.log_density([n1, n2, n3])
+            rv += self.len_dist.log_density((n1, n2, n3))
 
-        return rv
+        return float(rv)
 
     def seq_log_density(self, x):
         """Vectorized evaluation of log-density at sequence encoded input x.
@@ -149,30 +403,34 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of log-densities, one per encoded observation.
 
         """
-        nw = self.num_vals
-        a = self.alpha / nw
-        b = 1 - self.alpha
+        entries = _validate_encoded_observations(x, self.num_vals)
+        rv = np.zeros(len(entries), dtype=np.float64)
 
-        rv = np.zeros(len(x[0]), dtype=np.float64)
-
-        for i, entry in enumerate(x[0]):
-            xx, cx, yy, cy, zz, cz = entry
-
-            ridx = np.reshape(xx * nw, (-1, 1)) + np.reshape(yy, (1, -1))
-            ridx = ridx.flatten()
-
-            cc = np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))
-            cc = cc.flatten()
-            cc /= cc.sum()
-
-            loc_cprob = self.cond_prob_mat[:, zz]
-            loc_cprob = ((loc_cprob[ridx, :].toarray().T) * b) + a
-            ll3 = np.dot(np.log(np.dot(loc_cprob, cc)), cz)
-
-            ll1 = np.dot(np.log(self.init_prob_vec[xx]), cx)
-            ll2 = np.dot(np.log(self.init_prob_vec[yy]), cy)
-
-            rv[i] = ll1 + ll2 + ll3
+        for index, ((vx, cx), (vy, cy), (vz, cz)) in enumerate(entries):
+            n1 = int(cx.sum())
+            n2 = int(cy.sum())
+            n3 = int(cz.sum())
+            with np.errstate(divide="ignore"):
+                ll1 = float(np.dot(np.log(self.init_prob_vec[vx]), cx))
+                ll2 = float(np.dot(np.log(self.init_prob_vec[vy]), cy))
+                ll3 = 0.0
+                if n3:
+                    rows = (vx[:, None] * self.num_vals + vy[None, :]).reshape(-1)
+                    pair_weights = (cx[:, None] * cy[None, :]).reshape(-1) / float(n1 * n2)
+                    conditional = self.cond_prob_mat[rows, :][:, vz].toarray().T
+                    target_prob = np.dot(
+                        conditional * (1.0 - self.alpha) + self.alpha / self.num_vals,
+                        pair_weights,
+                    )
+                    ll3 = float(np.dot(np.log(target_prob), cz))
+            rv[index] = (
+                ll1
+                + ll2
+                + ll3
+                + _multinomial_log_coefficient(cx)
+                + _multinomial_log_coefficient(cy)
+                + _multinomial_log_coefficient(cz)
+            )
 
         if self.len_dist is not None:
             lln = self.len_dist.seq_log_density(x[1])
@@ -196,21 +454,24 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
         """
         from mixle.stats.compute.backend import backend_seq_log_density
 
+        entries = _validate_encoded_observations(x, self.num_vals)
         nw = self.num_vals
         a = self.alpha / nw
         b = 1 - self.alpha
-        init_log = engine.log(engine.asarray(self.init_prob_vec))
+        init_log = engine.log(engine.asarray(np.asarray(self.init_prob_vec).copy()))
 
         vals = []
-        for entry in x[0]:
-            xx, cx, yy, cy, zz, cz = entry
-            ridx = (np.reshape(xx * nw, (-1, 1)) + np.reshape(yy, (1, -1))).flatten()
-            cc = (np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))).flatten()
-            cc = cc / cc.sum()
-            loc_dense = (self.cond_prob_mat[ridx, :][:, zz]).toarray().T  # (len(zz), len(ridx))
-            loc = engine.asarray(loc_dense) * b + a
-            inner = engine.matmul(loc, engine.asarray(cc))  # (len(zz),)
-            ll3 = engine.sum(engine.log(inner) * engine.asarray(np.asarray(cz, dtype=np.float64)))
+        for (xx, cx), (yy, cy), (zz, cz) in entries:
+            n3 = int(cz.sum())
+            ll3 = engine.asarray(0.0)
+            if n3:
+                ridx = (np.reshape(xx * nw, (-1, 1)) + np.reshape(yy, (1, -1))).flatten()
+                cc = (np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))).flatten()
+                cc = cc / cc.sum()
+                loc_dense = (self.cond_prob_mat[ridx, :][:, zz]).toarray().T
+                loc = engine.asarray(loc_dense) * b + a
+                inner = engine.matmul(loc, engine.asarray(cc))
+                ll3 = engine.sum(engine.log(inner) * engine.asarray(np.asarray(cz, dtype=np.float64)))
             ll1 = engine.sum(
                 init_log[engine.asarray(np.asarray(xx, dtype=np.int64))]
                 * engine.asarray(np.asarray(cx, dtype=np.float64))
@@ -219,7 +480,10 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
                 init_log[engine.asarray(np.asarray(yy, dtype=np.int64))]
                 * engine.asarray(np.asarray(cy, dtype=np.float64))
             )
-            vals.append(float(engine.to_numpy(ll1 + ll2 + ll3)))
+            coefficient = (
+                _multinomial_log_coefficient(cx) + _multinomial_log_coefficient(cy) + _multinomial_log_coefficient(cz)
+            )
+            vals.append(float(engine.to_numpy(ll1 + ll2 + ll3)) + coefficient)
 
         rv = engine.asarray(np.asarray(vals, dtype=np.float64))
         if self.len_dist is not None:
@@ -244,13 +508,13 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
         nn = []
         vset = set()
 
-        for xx in x:
+        for index, observation in enumerate(x):
+            bags = _canonicalize_observation(observation, self.num_vals, label="observation %d" % index)
             rv0 = []
             nn0 = []
-            for cvec in xx:
-                rv0.append(np.asarray([v for v, c in cvec], dtype=int))
-                rv0.append(np.asarray([c for v, c in cvec], dtype=float))
-                nn0.append(np.sum(rv0[-1]))
+            for values, counts in bags:
+                rv0.extend((values, counts))
+                nn0.append(int(np.sum(counts)))
 
             vset.update(itertools.product(rv0[0], rv0[2], rv0[4]))
             rv.append(tuple(rv0))
@@ -279,6 +543,8 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
             MarkovTransformSampler: Sampler bound to this distribution.
 
         """
+        if self.len_dist is None:
+            raise ValueError("MarkovTransformDistribution requires len_dist for sampling.")
         return MarkovTransformSampler(self, seed)
 
     def estimator(self, pseudo_count=None):
@@ -293,13 +559,17 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
         """
         len_estimator = None if self.len_dist is None else self.len_dist.estimator(pseudo_count)
         return MarkovTransformEstimator(
-            self.num_vals, alpha=self.alpha, len_estimator=len_estimator, pseudo_count=pseudo_count
+            self.num_vals,
+            alpha=self.alpha,
+            len_estimator=len_estimator,
+            pseudo_count=pseudo_count,
+            suff_stat=(self.init_prob_vec, self.cond_prob_mat, None) if pseudo_count is not None else None,
         )
 
     def dist_to_encoder(self):
         """Return a data encoder for Markov-transform observations."""
         len_encoder = None if self.len_dist is None else self.len_dist.dist_to_encoder()
-        return MarkovTransformDataEncoder(len_encoder=len_encoder)
+        return MarkovTransformDataEncoder(len_encoder=len_encoder, num_vals=self.num_vals)
 
 
 class MarkovTransformSampler(DistributionSampler):
@@ -318,6 +588,10 @@ class MarkovTransformSampler(DistributionSampler):
             size_sampler (DistributionSampler): Sampler for the total counts [n1, n2, n3].
 
         """
+        if not isinstance(dist, MarkovTransformDistribution):
+            raise TypeError("dist must be a MarkovTransformDistribution.")
+        if dist.len_dist is None:
+            raise ValueError("MarkovTransformSampler requires a length distribution.")
         self.rng = np.random.RandomState(seed)
         self.dist = dist
         # self.init_sampler  = np.random.RandomState(self.rng.tomaxint())
@@ -341,14 +615,22 @@ class MarkovTransformSampler(DistributionSampler):
         """
         if size is None:
             slens = self.size_sampler.sample()
+            if not _is_nonstring_sequence(slens) or len(slens) != 3:
+                raise ValueError("length distribution must draw exactly three nonnegative integer counts.")
+            slens = tuple(
+                _exact_nonnegative_count(value, label="sampled length %d" % (index + 1))
+                for index, value in enumerate(slens)
+            )
+            if slens[2] > 0 and (slens[0] == 0 or slens[1] == 0):
+                raise ValueError("cannot sample output tokens when either sampled parent length is zero.")
             rng = np.random.RandomState(self.rng.randint(0, maxrandint))
 
             v1 = list(rng.choice(len(self.dist.init_prob_vec), p=self.dist.init_prob_vec, replace=True, size=slens[0]))
             v2 = list(rng.choice(len(self.dist.init_prob_vec), p=self.dist.init_prob_vec, replace=True, size=slens[1]))
             v3 = []
 
-            z1 = list(rng.choice(len(v1), replace=True, size=slens[2]))
-            z2 = list(rng.choice(len(v2), replace=True, size=slens[2]))
+            z1 = list(rng.choice(len(v1), replace=True, size=slens[2])) if slens[2] else []
+            z2 = list(rng.choice(len(v2), replace=True, size=slens[2])) if slens[2] else []
             nw = self.dist.num_vals
 
             for zz1, zz2 in zip(z1, z2):
@@ -360,8 +642,8 @@ class MarkovTransformSampler(DistributionSampler):
 
             return list(count_by_value(v1).items()), list(count_by_value(v2).items()), list(count_by_value(v3).items())
 
-        else:
-            return [self.sample() for i in range(size)]
+        size = _exact_nonnegative_count(size, label="sample size")
+        return [self.sample() for _ in range(size)]
 
 
 class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableStatisticAccumulator):
@@ -384,10 +666,10 @@ class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableSta
             trans_key (Optional[str]): Key for the transition-count statistics.
 
         """
-        self.init_count = np.zeros(num_vals)
-        self.trans_count = csc_matrix((num_vals * num_vals, num_vals))
+        self.num_vals = _positive_integer(num_vals, label="num_vals")
+        self.init_count = np.zeros(self.num_vals)
+        self.trans_count = csc_matrix((self.num_vals * self.num_vals, self.num_vals))
         self.size_accumulator = size_acc
-        self.num_vals = num_vals
         self.init_key = keys[0]
         self.trans_key = keys[1]
         # Data log-likelihood accumulated as a byproduct of the E-step (the per-observation
@@ -396,6 +678,57 @@ class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableSta
         # pays nothing.
         self._track_ll = False
         self._seq_ll = 0.0
+
+    def _add_initial_counts(self, vx, cx, vy, cy, weight):
+        """Add canonical parent counts without NumPy repeated-index loss."""
+        np.add.at(self.init_count, vx, cx * weight)
+        np.add.at(self.init_count, vy, cy * weight)
+
+    def _update_canonical(self, bags, weight, estimate):
+        """Apply one validated E-step update."""
+        if not isinstance(estimate, MarkovTransformDistribution):
+            raise TypeError("estimate must be a MarkovTransformDistribution.")
+        if estimate.num_vals != self.num_vals:
+            raise ValueError("estimate support does not match accumulator support.")
+        (vx, cx), (vy, cy), (vz, cz) = bags
+        contribution = None
+        if weight > 0.0 and len(vz):
+            rows = (vx[:, None] * self.num_vals + vy[None, :]).reshape(-1)
+            pair_counts = (cx[:, None] * cy[None, :]).reshape(-1)
+            total_pairs = float(pair_counts.sum())
+            conditional = estimate.cond_prob_mat[rows, :][:, vz].toarray()
+            weighted = conditional * pair_counts[:, None]
+            conditional_mass = weighted.sum(axis=0)
+            denominator = (1.0 - estimate.alpha) * conditional_mass + (estimate.alpha / self.num_vals) * total_pairs
+            if np.any(denominator <= 0.0):
+                raise ValueError("observation has zero probability under the transition estimate.")
+            responsibility = weighted * (cz * (1.0 - estimate.alpha) / denominator)[None, :] * weight
+            contribution = _sparse_contribution(
+                rows,
+                vz,
+                responsibility,
+                (self.num_vals * self.num_vals, self.num_vals),
+            )
+        self._add_initial_counts(vx, cx, vy, cy, weight)
+        if contribution is not None:
+            self.trans_count += contribution
+        return tuple(int(counts.sum()) for _, counts in bags)
+
+    def _initialize_canonical(self, bags, weight):
+        """Apply one validated uniform-responsibility initialization."""
+        (vx, cx), (vy, cy), (vz, cz) = bags
+        self._add_initial_counts(vx, cx, vy, cy, weight)
+        if len(vz):
+            rows = (vx[:, None] * self.num_vals + vy[None, :]).reshape(-1)
+            pair_counts = (cx[:, None] * cy[None, :]).reshape(-1)
+            responsibility = np.outer(pair_counts / pair_counts.sum(), cz * weight)
+            self.trans_count += _sparse_contribution(
+                rows,
+                vz,
+                responsibility,
+                (self.num_vals * self.num_vals, self.num_vals),
+            )
+        return tuple(int(counts.sum()) for _, counts in bags)
 
     def update(self, x, weight, estimate):
         """Update sufficient statistics with a single weighted observation.
@@ -409,37 +742,12 @@ class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableSta
             None.
 
         """
-        nw = self.num_vals
-        xx, yy, zz = x
-        vx = np.asarray([u[0] for u in xx], dtype=int)
-        cx = np.asarray([u[1] for u in xx], dtype=float)
-        vy = np.asarray([u[0] for u in yy], dtype=int)
-        cy = np.asarray([u[1] for u in yy], dtype=float)
-        vz = np.asarray([u[0] for u in zz], dtype=int)
-        cz = np.asarray([u[1] for u in zz], dtype=float)
-
-        ridx = np.reshape(vx * nw, (-1, 1)) + np.reshape(vy, (1, -1))
-        ridx = ridx.flatten()[:, None]
-
-        cc = np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))
-        cc = cc.flatten()[:, None]
-        cs = cc.sum()
-
-        a = estimate.alpha / nw
-        b = 1 - estimate.alpha
-
-        temp = estimate.cond_prob_mat[ridx, vz].toarray()
-
-        loc_cprob = temp * cc
-        w = loc_cprob.sum(axis=0)
-        loc_cprob *= (cz * b / (b * w + a * cs)) * weight
-
-        self.trans_count[ridx, vz] += loc_cprob
-        self.init_count[vx] += cx * weight
-        self.init_count[vy] += cy * weight
+        weight = _finite_nonnegative(weight, label="weight")
+        bags = _canonicalize_observation(x, self.num_vals)
+        lengths = self._update_canonical(bags, weight, estimate)
 
         if self.size_accumulator is not None:
-            self.size_accumulator.update((cx.sum(), cy.sum(), cz.sum()), weight, estimate.len_dist)
+            self.size_accumulator.update(lengths, weight, estimate.len_dist)
 
     def initialize(self, x, weight, rng):
         """Initialize sufficient statistics with a single weighted observation (no previous estimate).
@@ -453,32 +761,12 @@ class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableSta
             None.
 
         """
-        nw = self.num_vals
-        xx, yy, zz = x
-        vx = np.asarray([u[0] for u in xx], dtype=int)
-        cx = np.asarray([u[1] for u in xx], dtype=float)
-        vy = np.asarray([u[0] for u in yy], dtype=int)
-        cy = np.asarray([u[1] for u in yy], dtype=float)
-        vz = np.asarray([u[0] for u in zz], dtype=int)
-        cz = np.asarray([u[1] for u in zz], dtype=float)
-
-        ridx = np.reshape(vx * nw, (-1, 1)) + np.reshape(vy, (1, -1))
-        ridx = ridx.flatten()[:, None]
-
-        cc = np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))
-        cc = cc.flatten()
-
-        loc_cprob = np.outer(cc / cc.sum(), weight * cz)
-        # umat = lil_matrix((nw * nw, nw))
-        # umat[ridx, vz] = loc_cprob
-
-        self.trans_count[ridx, vz] += loc_cprob
-        # self.trans_count += umat
-        self.init_count[vx] += cx * weight
-        self.init_count[vy] += cy * weight
+        weight = _finite_nonnegative(weight, label="weight")
+        bags = _canonicalize_observation(x, self.num_vals)
+        lengths = self._initialize_canonical(bags, weight)
 
         if self.size_accumulator is not None:
-            self.size_accumulator.initialize((cx.sum(), cy.sum(), cz.sum()), weight, rng)
+            self.size_accumulator.initialize(lengths, weight, rng)
 
     def seq_initialize(self, x, weights, rng):
         """Initialize sufficient statistics with a sequence of weighted encoded observations.
@@ -494,22 +782,10 @@ class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableSta
             None.
 
         """
-        nw = self.num_vals
-
-        for entry, ww in zip(x[0], weights):
-            xx, cx, yy, cy, zz, cz = entry
-
-            ridx = np.reshape(xx * nw, (-1, 1)) + np.reshape(yy, (1, -1))
-            ridx = ridx.flatten()[:, None]
-
-            cc = np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))
-            cc = cc.flatten()
-
-            loc_cprob = np.outer(cc / cc.sum(), ww * cz)
-
-            self.trans_count[ridx, zz] += loc_cprob
-            self.init_count[xx] += cx * ww
-            self.init_count[yy] += cy * ww
+        entries = _validate_encoded_observations(x, self.num_vals)
+        weights = _validate_weight_vector(weights, len(entries))
+        for bags, weight in zip(entries, weights):
+            self._initialize_canonical(bags, float(weight))
 
         if self.size_accumulator is not None:
             self.size_accumulator.seq_initialize(x[1], weights, rng)
@@ -526,89 +802,38 @@ class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableSta
             None.
 
         """
-        nw = self.num_vals
-        nzv = x[2]
-        a = estimate.alpha / nw
-        b = 1 - estimate.alpha
-
-        umat = csc_matrix((np.zeros(nzv.shape[0]), (nzv[:, 0] * nw + nzv[:, 1], nzv[:, 2])), shape=(nw * nw, nw))
-
+        entries = _validate_encoded_observations(x, self.num_vals)
+        weights = _validate_weight_vector(weights, len(entries))
         track = self._track_ll
-        log_init = np.log(estimate.init_prob_vec) if track else None
-        obs_ll = np.zeros(len(x[0]), dtype=np.float64) if track else None
+        obs_ll = np.zeros(len(entries), dtype=np.float64) if track else None
 
-        for i, (entry, ww) in enumerate(zip(x[0], weights)):
-            xx, cx, yy, cy, zz, cz = entry
-
-            ridx = np.reshape(xx * nw, (-1, 1)) + np.reshape(yy, (1, -1))
-            ridx = ridx.flatten()[:, None]
-
-            cc = np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))
-            cc = cc.flatten()[:, None]
-            cs = cc.sum()
-
-            temp = estimate.cond_prob_mat[ridx, zz].toarray()
-
-            loc_cprob = temp * cc
-            w = loc_cprob.sum(axis=0)
+        for index, (bags, weight) in enumerate(zip(entries, weights)):
+            self._update_canonical(bags, float(weight), estimate)
             if track:
-                # Per-observation log-density (== MarkovTransformDistribution.log_density), reusing
-                # ``w`` (== sum_{u,v} P(z|u,v)*c_u*c_v) and ``cs`` before the responsibility scaling
-                # below. seq_log_density normalizes cc by cs, so inner = (b*w + a*cs)/cs.
-                with np.errstate(divide="ignore"):
-                    ll3 = float(np.dot(np.log((b * w + a * cs) / cs), cz))
-                    ll1 = float(np.dot(log_init[xx], cx))
-                    ll2 = float(np.dot(log_init[yy], cy))
-                obs_ll[i] = ll1 + ll2 + ll3
-            loc_cprob *= (cz * b / (b * w + a * cs)) * ww
-
-            umat[ridx, zz] += loc_cprob
-            self.init_count[xx] += cx * ww
-            self.init_count[yy] += cy * ww
+                observation = tuple(
+                    [(int(value), int(count)) for value, count in zip(values, counts)] for values, counts in bags
+                )
+                obs_ll[index] = estimate.log_density(observation)
 
         if self.size_accumulator is not None:
             self.size_accumulator.seq_update(x[1], weights, estimate.len_dist)
 
         if track:
-            if self.size_accumulator is not None:
-                obs_ll += estimate.len_dist.seq_log_density(x[1])
             self._seq_ll += float(np.dot(np.asarray(weights, dtype=np.float64), obs_ll))
-
-        self.trans_count += umat
 
     def seq_update_engine(self, x, weights, estimate, engine):
         """Engine-aware E-step. The per-observation transition responsibilities are computed on the
         active engine (numpy or torch); the sparse conditional gather and the sparse count scatter
         stay on the host, since the sufficient statistic is a sparse matrix. Mirrors seq_update.
         """
-        nw = self.num_vals
-        nzv = x[2]
-        a = estimate.alpha / nw
-        b = 1 - estimate.alpha
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
-
-        umat = csc_matrix((np.zeros(nzv.shape[0]), (nzv[:, 0] * nw + nzv[:, 1], nzv[:, 2])), shape=(nw * nw, nw))
-
-        for i, (entry, ww) in enumerate(zip(x[0], weights_np)):
-            xx, cx, yy, cy, zz, cz = entry
-            ridx = (np.reshape(xx * nw, (-1, 1)) + np.reshape(yy, (1, -1))).flatten()[:, None]
-            cc = (np.reshape(cx, (-1, 1)) * np.reshape(cy, (1, -1))).flatten()[:, None]
-            cs = float(cc.sum())
-
-            temp = estimate.cond_prob_mat[ridx, zz].toarray()  # (len(ridx), len(zz))
-            loc_cprob = engine.asarray(temp) * engine.asarray(cc)
-            w = engine.sum(loc_cprob, axis=0)  # (len(zz),)
-            scale = engine.asarray(np.asarray(cz, dtype=np.float64)) * b / (b * w + a * cs) * float(ww)
-            loc_cprob = loc_cprob * scale[None, :]
-
-            umat[ridx, zz] += np.asarray(engine.to_numpy(loc_cprob))
-            self.init_count[xx] += cx * ww
-            self.init_count[yy] += cy * ww
+        entries = _validate_encoded_observations(x, self.num_vals)
+        raw_weights = engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights
+        weights_np = _validate_weight_vector(raw_weights, len(entries))
+        for bags, weight in zip(entries, weights_np):
+            self._update_canonical(bags, float(weight), estimate)
 
         if self.size_accumulator is not None:
             self.size_accumulator.seq_update(x[1], weights_np, estimate.len_dist)
-
-        self.trans_count += umat
 
     def combine(self, suff_stat):
         """Merge the sufficient statistics of another accumulator into this one.
@@ -620,7 +845,11 @@ class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableSta
             This MarkovTransformAccumulator object.
 
         """
-        init_count, trans_count, size_acc = suff_stat
+        init_count, trans_count, size_acc = _validate_statistic_value(
+            suff_stat,
+            self.num_vals,
+            label="combined statistics",
+        )
 
         if self.size_accumulator is not None:
             self.size_accumulator.combine(size_acc)
@@ -633,9 +862,9 @@ class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableSta
     def value(self):
         """Returns the sufficient statistic tuple (init_count, trans_count, size_value)."""
         if self.size_accumulator is not None:
-            return self.init_count, self.trans_count, self.size_accumulator.value()
+            return self.init_count.copy(), self.trans_count.copy(), self.size_accumulator.value()
         else:
-            return self.init_count, self.trans_count, None
+            return self.init_count.copy(), self.trans_count.copy(), None
 
     def from_value(self, x):
         """Set the sufficient statistics from a value() tuple.
@@ -647,7 +876,11 @@ class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableSta
             This MarkovTransformAccumulator object.
 
         """
-        init_count, trans_count, size_acc = x
+        init_count, trans_count, size_acc = _validate_statistic_value(
+            x,
+            self.num_vals,
+            label="restored statistics",
+        )
 
         self.init_count = init_count
         self.trans_count = trans_count
@@ -661,7 +894,7 @@ class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableSta
     def acc_to_encoder(self):
         """Return a data encoder built from the total-count accumulator."""
         len_encoder = None if self.size_accumulator is None else self.size_accumulator.acc_to_encoder()
-        return MarkovTransformDataEncoder(len_encoder=len_encoder)
+        return MarkovTransformDataEncoder(len_encoder=len_encoder, num_vals=self.num_vals)
 
 
 class MarkovTransformAccumulatorFactory(StatisticAccumulatorFactory):
@@ -683,7 +916,7 @@ class MarkovTransformAccumulatorFactory(StatisticAccumulatorFactory):
         """
         self.len_factory = len_factory
         self.keys = keys
-        self.num_vals = num_vals
+        self.num_vals = _positive_integer(num_vals, label="num_vals")
 
     def make(self):
         """Return a new Markov-transform accumulator."""
@@ -712,25 +945,30 @@ class MarkovTransformEstimator(ParameterEstimator):
             num_vals (int): Number of possible values W.
             alpha (float): Regularization weight in [0, 1] for the estimated distribution.
             len_estimator (Optional[ParameterEstimator]): Estimator for the total counts [n1, n2, n3].
-            suff_stat (Optional[Any]): Kept for consistency with the estimate function.
-            pseudo_count (Optional[float]): Kept for consistency (unused in estimation).
+            suff_stat (Optional[Any]): Optional initial/transition prior center.
+            pseudo_count (Optional[float]): Total prior mass added to each estimated simplex.
             keys (Tuple[Optional[str], Optional[str]]): Keys for initial and transition statistics.
 
         Attributes:
             num_vals (int): Number of possible values W.
             alpha (float): Regularization weight in [0, 1] for the estimated distribution.
             len_estimator (Optional[ParameterEstimator]): Estimator for the total counts [n1, n2, n3].
-            suff_stat (Optional[Any]): Kept for consistency with the estimate function.
-            pseudo_count (Optional[float]): Kept for consistency (unused in estimation).
+            suff_stat (Optional[Any]): Optional initial/transition prior center.
+            pseudo_count (Optional[float]): Total prior mass added to each estimated simplex.
             keys (Tuple[Optional[str], Optional[str]]): Keys for initial and transition statistics.
 
         """
         self.keys = keys
         self.len_estimator = len_estimator
-        self.pseudo_count = pseudo_count
-        self.suff_stat = suff_stat
-        self.num_vals = coalesce_alias("num_vals", num_vals, "num_values", num_values, default=MISSING)
-        self.alpha = alpha
+        self.num_vals = _positive_integer(
+            coalesce_alias("num_vals", num_vals, "num_values", num_values, default=MISSING),
+            label="num_vals",
+        )
+        self.pseudo_count = None if pseudo_count is None else _finite_nonnegative(pseudo_count, label="pseudo_count")
+        self.suff_stat = (
+            None if suff_stat is None else _validate_statistic_value(suff_stat, self.num_vals, label="prior statistics")
+        )
+        self.alpha = _unit_interval(alpha, label="alpha")
 
     def accumulator_factory(self):
         """Return an accumulator factory configured from this estimator."""
@@ -758,17 +996,53 @@ class MarkovTransformEstimator(ParameterEstimator):
             MarkovTransformDistribution: Estimated distribution.
 
         """
-        init_count, trans_count, size_stats = suff_stat
+        if nobs is not None:
+            nobs = _finite_nonnegative(nobs, label="nobs")
+        init_count, trans_count, size_stats = _validate_statistic_value(
+            suff_stat,
+            self.num_vals,
+            label="estimated statistics",
+        )
 
         if self.len_estimator is not None:
             len_dist = self.len_estimator.estimate(nobs, size_stats)
         else:
             len_dist = None
-        trans_count = trans_count.tocsc()
-        row_sum = trans_count * csc_matrix(np.ones((trans_count.shape[1], 1)))
 
-        init_prob = init_count / np.sum(init_count)
-        trans_prob = trans_count.multiply(row_sum.power(-1))
+        dense_trans = trans_count.toarray()
+        if self.pseudo_count is not None and self.pseudo_count > 0.0:
+            if self.suff_stat is None:
+                init_prior = np.full(self.num_vals, 1.0 / self.num_vals)
+                trans_prior = np.full(
+                    (self.num_vals * self.num_vals, self.num_vals),
+                    1.0 / self.num_vals,
+                )
+            else:
+                init_prior = self.suff_stat[0]
+                init_prior_total = float(init_prior.sum())
+                if init_prior_total <= 0.0:
+                    raise ValueError("prior initial statistics must have positive total mass.")
+                init_prior = init_prior / init_prior_total
+                trans_prior = self.suff_stat[1].toarray()
+                prior_row_sums = trans_prior.sum(axis=1, keepdims=True)
+                empty_prior_rows = prior_row_sums[:, 0] == 0.0
+                trans_prior[empty_prior_rows, :] = 1.0 / self.num_vals
+                prior_row_sums[empty_prior_rows, :] = 1.0
+                trans_prior /= prior_row_sums
+            init_count += self.pseudo_count * init_prior
+            dense_trans += self.pseudo_count * trans_prior
+
+        init_total = float(init_count.sum())
+        if init_total <= 0.0:
+            raise ValueError("cannot estimate initial probabilities without positive evidence or a prior.")
+        init_prob = init_count / init_total
+
+        row_sums = dense_trans.sum(axis=1, keepdims=True)
+        empty_rows = row_sums[:, 0] == 0.0
+        dense_trans[empty_rows, :] = 1.0 / self.num_vals
+        row_sums[empty_rows, :] = 1.0
+        dense_trans /= row_sums
+        trans_prob = csc_matrix(dense_trans)
 
         return MarkovTransformDistribution(init_prob, trans_prob, self.alpha, len_dist)
 
@@ -776,7 +1050,7 @@ class MarkovTransformEstimator(ParameterEstimator):
 class MarkovTransformDataEncoder(DataSequenceEncoder):
     """Encode Markov-transform observations for vectorized scoring."""
 
-    def __init__(self, len_encoder=None):
+    def __init__(self, len_encoder=None, num_vals=None):
         """Create an encoder for Markov-transform observations.
 
         Args:
@@ -787,10 +1061,14 @@ class MarkovTransformDataEncoder(DataSequenceEncoder):
 
         """
         self.len_encoder = len_encoder
+        self.num_vals = None if num_vals is None else _positive_integer(num_vals, label="num_vals")
 
     def __str__(self):
         """Return a constructor-style representation of the encoder."""
-        return "MarkovTransformDataEncoder(len_encoder=%s)" % (str(self.len_encoder))
+        return "MarkovTransformDataEncoder(len_encoder=%s, num_vals=%s)" % (
+            str(self.len_encoder),
+            str(self.num_vals),
+        )
 
     def __eq__(self, other):
         """Encoders are interchangeable iff other is a MarkovTransformDataEncoder with an equal len_encoder.
@@ -803,9 +1081,18 @@ class MarkovTransformDataEncoder(DataSequenceEncoder):
 
         """
         if isinstance(other, MarkovTransformDataEncoder):
-            return other.len_encoder == self.len_encoder
+            return other.len_encoder == self.len_encoder and other.num_vals == self.num_vals
         else:
             return False
+
+    def row_count(self, x):
+        """Return the number of top-level observations in this ragged encoding."""
+        if not _is_nonstring_sequence(x) or len(x) != 3:
+            raise TypeError("encoded Markov-transform data must be a three-item tuple.")
+        try:
+            return len(x[0])
+        except TypeError as exc:
+            raise TypeError("encoded Markov-transform observations must be a sequence.") from exc
 
     def seq_encode(self, x):
         """Encode a sequence of observations for vectorized calls.
@@ -822,13 +1109,17 @@ class MarkovTransformDataEncoder(DataSequenceEncoder):
         nn = []
         vset = set()
 
-        for xx in x:
+        for index, observation in enumerate(x):
+            bags = _canonicalize_observation(
+                observation,
+                self.num_vals,
+                label="observation %d" % index,
+            )
             rv0 = []
             nn0 = []
-            for cvec in xx:
-                rv0.append(np.asarray([v for v, c in cvec], dtype=int))
-                rv0.append(np.asarray([c for v, c in cvec], dtype=float))
-                nn0.append(np.sum(rv0[-1]))
+            for values, counts in bags:
+                rv0.extend((values, counts))
+                nn0.append(int(np.sum(counts)))
 
             vset.update(itertools.product(rv0[0], rv0[2], rv0[4]))
             rv.append(tuple(rv0))
