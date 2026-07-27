@@ -11,6 +11,7 @@ pushes an exposure `Posterior` (IC-1) through the RfD threshold into an IC-8 `De
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from numbers import Integral, Real
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -38,18 +39,25 @@ class _SampleDerivedQuantity:
 
     def __post_init__(self) -> None:
         arr = np.asarray(self.samples, dtype=float)
-        if arr.size == 0:
-            raise ValueError("_SampleDerivedQuantity.samples must be non-empty.")
+        if arr.ndim != 1 or arr.size == 0:
+            raise ValueError("_SampleDerivedQuantity.samples must be a non-empty one-dimensional vector.")
         if not np.isfinite(arr).all():
             raise ValueError("_SampleDerivedQuantity.samples must be finite (no NaN/Inf).")
+        arr = arr.copy()
+        arr.setflags(write=False)
+        object.__setattr__(self, "samples", arr)
 
     def credible_interval(self, level: float = 0.95) -> tuple[float, float]:
+        if isinstance(level, (bool, np.bool_)) or not isinstance(level, Real):
+            raise TypeError("level must be a real scalar probability.")
+        if not np.isfinite(level) or not 0.0 < level < 1.0:
+            raise ValueError("level must be finite and strictly between 0 and 1.")
         alpha = (1.0 - level) / 2.0
         lo, hi = np.quantile(self.samples, [alpha, 1.0 - alpha])
         return float(lo), float(hi)
 
 
-@dataclass
+@dataclass(frozen=True)
 class BMDResult:
     """A fitted benchmark-dose analysis: the BMD, its lower confidence bound (BMDL), and fit metadata.
 
@@ -77,6 +85,54 @@ class BMDResult:
     status: str = "ok"
     bmd_se: float = float("nan")
     _coef: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(2))
+
+    def __post_init__(self) -> None:
+        def scalar(name: str, value: Any) -> float:
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+                raise TypeError(f"{name} must be a real scalar.")
+            return float(value)
+
+        bmd = scalar("bmd", self.bmd)
+        bmdl = scalar("bmdl", self.bmdl)
+        bmr = scalar("bmr", self.bmr)
+        bmd_se = scalar("bmd_se", self.bmd_se)
+        if not 0.0 < bmr < 1.0 or not np.isfinite(bmr):
+            raise ValueError("bmr must be finite and strictly between 0 and 1.")
+        if self.model not in _MODELS:
+            raise ValueError(f"model must be one of {_MODELS}, got {self.model!r}.")
+        if isinstance(self.dof, (bool, np.bool_)) or not isinstance(self.dof, Integral):
+            raise TypeError("dof must be an exact non-Boolean integer.")
+        if self.dof < 0:
+            raise ValueError("dof must be nonnegative.")
+        if self.status not in {"ok", "unidentifiable", "bmdl_unavailable"}:
+            raise ValueError(f"unknown BMDResult status {self.status!r}.")
+
+        if self.status == "ok":
+            if not (np.isfinite(bmd) and bmd > 0.0):
+                raise ValueError("an ok BMDResult requires a finite positive bmd.")
+            if not (np.isfinite(bmdl) and 0.0 <= bmdl <= bmd):
+                raise ValueError("an ok BMDResult requires finite 0 <= bmdl <= bmd.")
+            if not (np.isfinite(bmd_se) and bmd_se >= 0.0):
+                raise ValueError("an ok BMDResult requires a finite nonnegative bmd_se.")
+        elif self.status == "unidentifiable":
+            if not (np.isnan(bmd) and np.isnan(bmdl) and np.isnan(bmd_se)):
+                raise ValueError("an unidentifiable BMDResult requires bmd, bmdl, and bmd_se to be NaN.")
+        elif not (np.isfinite(bmd) and bmd > 0.0 and np.isnan(bmdl) and np.isnan(bmd_se)):
+            raise ValueError(
+                "a bmdl_unavailable BMDResult requires a finite positive bmd and NaN bmdl/bmd_se."
+            )
+
+        coef = np.asarray(self._coef, dtype=float)
+        if coef.shape != (_N_PARAMS,) or not np.all(np.isfinite(coef)):
+            raise ValueError(f"_coef must be a finite {_N_PARAMS}-element coefficient vector.")
+        coef = coef.copy()
+        coef.setflags(write=False)
+        object.__setattr__(self, "bmd", bmd)
+        object.__setattr__(self, "bmdl", bmdl)
+        object.__setattr__(self, "bmr", bmr)
+        object.__setattr__(self, "bmd_se", bmd_se)
+        object.__setattr__(self, "dof", int(self.dof))
+        object.__setattr__(self, "_coef", coef)
 
     @property
     def converged(self) -> bool:
@@ -342,11 +398,19 @@ def benchmark_dose(
     quantile for ``ci_level``, clipped at 0 (dose cannot be negative). See ``BMDResult.status``
     for what happens when any step of that chain fails to converge.
     """
-    if model not in _MODELS:
+    if not isinstance(model, str) or model not in _MODELS:
         raise ValueError(f"unknown model {model!r}; expected one of {_MODELS}")
-    if not (0.0 < bmr < 1.0):
+    if risk not in {"extra", "added"}:
+        raise ValueError("risk must be either 'extra' or 'added'")
+    if isinstance(bmr, (bool, np.bool_)) or not isinstance(bmr, Real):
+        raise TypeError("bmr must be a real scalar probability")
+    bmr = float(bmr)
+    if not np.isfinite(bmr) or not 0.0 < bmr < 1.0:
         raise ValueError(f"bmr must be in (0, 1), got {bmr!r}")
-    if not (0.5 < ci_level < 1.0):
+    if isinstance(ci_level, (bool, np.bool_)) or not isinstance(ci_level, Real):
+        raise TypeError("ci_level must be a real scalar probability")
+    ci_level = float(ci_level)
+    if not np.isfinite(ci_level) or not 0.5 < ci_level < 1.0:
         raise ValueError(f"ci_level must be in (0.5, 1), got {ci_level!r}")
     dose, n_affected, n_total = _validate_cohort(dose, n_affected, n_total, _N_PARAMS)
 
@@ -402,13 +466,15 @@ def benchmark_dose(
 
 
 def _as_dose_samples(exposure: Any, n: int, rng: np.random.Generator) -> np.ndarray:
+    if isinstance(exposure, (bool, np.bool_)):
+        raise TypeError("exposure must be a real dose, not a Boolean value")
     arr = np.asarray(exposure, dtype=float)
     if arr.ndim == 0:
         if not np.isfinite(arr) or arr < 0:
             raise ValueError(f"exposure scalar must be finite and nonnegative, got {float(arr)!r}")
         return np.full(int(n), float(arr))
-    if arr.size == 0:
-        raise ValueError("exposure array must not be empty")
+    if arr.ndim != 1 or arr.size == 0:
+        raise ValueError("exposure draws must be a non-empty one-dimensional vector")
     if not np.all(np.isfinite(arr)):
         raise ValueError("exposure draws must all be finite")
     if np.any(arr < 0):
@@ -448,15 +514,19 @@ def rfd_exceedance(
     """
     from mixle.reason.posterior_protocol import Posterior
 
-    if not isinstance(uf, (int, float, np.integer, np.floating)) or not np.isfinite(uf) or uf <= 0:
+    if isinstance(uf, (bool, np.bool_)) or not isinstance(uf, Real):
+        raise TypeError(f"uf must be a finite positive scalar uncertainty factor, got {uf!r}")
+    uf = float(uf)
+    if not np.isfinite(uf) or uf <= 0:
         raise ValueError(f"uf must be a finite positive uncertainty factor, got {uf!r}")
-    if not isinstance(n, (int, float, np.integer, np.floating)) or not np.isfinite(n) or n <= 0 or float(n) != int(n):
-        raise ValueError(f"n must be a positive integer sample count, got {n!r}")
+    if isinstance(n, (bool, np.bool_)) or not isinstance(n, Integral) or n <= 0:
+        raise ValueError(f"n must be a positive exact non-Boolean integer sample count, got {n!r}")
     n = int(n)
-    if not np.isfinite(bmd.bmdl):
+    if not isinstance(bmd, BMDResult):
+        raise TypeError(f"bmd must be a validated BMDResult, got {type(bmd).__name__}")
+    if bmd.status != "ok":
         raise ValueError(
-            f"bmd.bmdl is not finite (status={bmd.status!r}); cannot compute an RfD from a BMDResult "
-            "that was not identified -- check bmd.status/bmd.converged before calling rfd_exceedance"
+            f"bmd status is {bmd.status!r}, not 'ok'; cannot compute an RfD without an identified BMDL"
         )
 
     rng = rng if rng is not None else np.random.default_rng()
@@ -468,6 +538,12 @@ def rfd_exceedance(
         # `_as_dose_samples`) rejected a negative or non-finite exposure draw, while the `Posterior`
         # branch below handed `fn` straight to `exposure.derived_quantity`, unchecked.
         arr = np.asarray(draws, dtype=float)
+        if arr.ndim == 2 and arr.shape[1] == 1:
+            arr = arr[:, 0]
+        if arr.ndim != 1 or arr.shape[0] != n:
+            raise ValueError(
+                f"exposure posterior must produce exactly one scalar for each of {n} draws, got shape {arr.shape}"
+            )
         if not np.all(np.isfinite(arr)):
             raise ValueError("exposure draws must all be finite")
         if np.any(arr < 0):
@@ -475,6 +551,13 @@ def rfd_exceedance(
         return (arr > rfd).astype(float)
 
     if isinstance(exposure, Posterior):
-        return exposure.derived_quantity(fn, n, rng)
+        derived = exposure.derived_quantity(fn, n, rng)
+        prior_dominated = getattr(derived, "prior_dominated", None)
+        if not isinstance(prior_dominated, (bool, np.bool_)):
+            raise TypeError("posterior-derived exposure result must carry a Boolean prior_dominated flag")
+        return _SampleDerivedQuantity(
+            samples=np.asarray(getattr(derived, "samples", None), dtype=float),
+            prior_dominated=bool(prior_dominated),
+        )
     draws = _as_dose_samples(exposure, n, rng)
     return _SampleDerivedQuantity(samples=fn(draws), prior_dominated=False)
