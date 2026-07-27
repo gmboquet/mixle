@@ -35,6 +35,7 @@ class SquaremPackerContractTest(unittest.TestCase):
                     default_value=0.125,
                     name="categorical",
                     keys="categorical-key",
+                    scoring_only=True,
                 ),
             )
         )
@@ -79,6 +80,7 @@ class SquaremPackerContractTest(unittest.TestCase):
         categorical = rebuilt_component.dists[-1]
         self.assertEqual(categorical.pmap, {1: 1.0, "impossible": 0.0})
         self.assertEqual(categorical.default_value, 0.125)
+        self.assertTrue(categorical.scoring_only)
 
     def test_pack_rejects_changed_support_boundary_or_metadata(self):
         model = MixtureDistribution(
@@ -171,7 +173,7 @@ class SquaremPackerContractTest(unittest.TestCase):
 
     def test_non_simplex_categorical_models_are_rejected(self):
         model = MixtureDistribution(
-            [CategoricalDistribution({"a": 2.0, "b": 1.0})],
+            [CategoricalDistribution({"a": 2.0, "b": 1.0}, scoring_only=True)],
             [1.0],
         )
         with self.assertRaisesRegex(ValueError, "sum to 1"):

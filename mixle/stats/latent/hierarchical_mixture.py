@@ -1218,6 +1218,13 @@ class HierarchicalMixtureDataEncoder(DataSequenceEncoder):
         else:
             return False
 
+    def row_count(self, x: tuple[int, np.ndarray, np.ndarray, Any, Any | None]) -> int:
+        """Return the explicit number of independent sequences in the payload."""
+        count = int(x[0])
+        if count < 0:
+            raise ValueError("hierarchical-mixture encoded observation count must be non-negative.")
+        return count
+
     def seq_encode(self, x: Sequence[Sequence[T]]) -> tuple[int, np.ndarray, np.ndarray, Any, Any | None]:
         """Encode a sequence of iid observations from a hierarchical mixture model.
 

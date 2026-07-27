@@ -103,7 +103,11 @@ def test_poe_raises_for_disjoint_categorical_supports():
 
 
 def test_poe_raises_for_categorical_with_nonzero_default():
-    a = CategoricalDistribution({"x": 0.5, "y": 0.5}, default_value=0.1)
+    a = CategoricalDistribution(
+        {"x": 0.5, "y": 0.5},
+        default_value=0.1,
+        scoring_only=True,
+    )
     b = CategoricalDistribution({"x": 0.5, "y": 0.5})
     with pytest.raises(cap.CapabilityError):
         ops.product_of_experts([a, b])

@@ -5,6 +5,7 @@ sampling, encoding, enumeration, backend scoring, and the estimator hooks needed
 for mixture and combinator use.
 """
 
+import copy
 from collections.abc import Sequence
 from typing import Any
 
@@ -35,6 +36,14 @@ def _same_value(a: Any, b: Any) -> bool:
         return a == b
 
 
+def _copy_atom(value: Any) -> Any:
+    """Return an owned atom/draw or reject values that cannot be isolated."""
+    try:
+        return copy.deepcopy(value)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("point-mass atoms must support independent deep copies.") from exc
+
+
 class PointMassDistribution(SequenceEncodableProbabilityDistribution):
     """Fixed Dirac/point-mass distribution assigning all mass to one value."""
 
@@ -60,9 +69,25 @@ class PointMassDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def __init__(self, value: Any, name: str | None = None, keys: str | None = None) -> None:
-        self.value = value
+        self._value = _copy_atom(value)
         self.name = name
         self.keys = keys
+
+    @property
+    def value(self) -> Any:
+        """Return an independent copy so callers cannot mutate the model's atom."""
+        return _copy_atom(self._value)
+
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Serialize the owned atom under the stable public field name."""
+        return {"value": self.value, "name": self.name, "keys": self.keys}
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Restore old and new point-mass state while preserving atom ownership."""
+        atom = state.get("value", state.get("_value"))
+        self._value = _copy_atom(atom)
+        self.name = state.get("name")
+        self.keys = state.get("keys")
 
     def __str__(self) -> str:
         return "PointMassDistribution(%s, name=%s, keys=%s)" % (repr(self.value), repr(self.name), repr(self.keys))
@@ -167,7 +192,7 @@ class PointMassAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulator for a fixed point mass; no parameters are learned."""
 
     def __init__(self, value: Any, keys: str | None = None) -> None:
-        self.atom = value
+        self.atom = _copy_atom(value)
         self.keys = keys
 
     def update(self, x: Any, weight: float, estimate: PointMassDistribution | None) -> None:
@@ -223,7 +248,7 @@ class PointMassAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for PointMassAccumulator."""
 
     def __init__(self, value: Any, keys: str | None = None) -> None:
-        self.value = value
+        self.value = _copy_atom(value)
         self.keys = keys
 
     def make(self) -> PointMassAccumulator:
@@ -242,7 +267,7 @@ class PointMassEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.value = value
+        self.value = _copy_atom(value)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.name = name
@@ -261,7 +286,7 @@ class PointMassDataEncoder(DataSequenceEncoder):
     """Encode observations as a boolean equality mask against the fixed atom."""
 
     def __init__(self, value: Any) -> None:
-        self.value = value
+        self.value = _copy_atom(value)
 
     def __str__(self) -> str:
         return "PointMassDataEncoder(value=%s)" % repr(self.value)

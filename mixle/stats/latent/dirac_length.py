@@ -984,6 +984,13 @@ class DiracLengthMixtureDataEncoder(DataSequenceEncoder):
         else:
             return False
 
+    def row_count(self, x: tuple[int, np.ndarray, np.ndarray, Any]) -> int:
+        """Return the explicit observation count stored in the encoded payload."""
+        count = int(x[0])
+        if count < 0:
+            raise ValueError("dirac-length encoded observation count must be non-negative.")
+        return count
+
     def seq_encode(self, x: Sequence[int]) -> tuple[int, np.ndarray, np.ndarray, Any]:
         """Encode a sequence of iid integer observations for vectorized use.
 

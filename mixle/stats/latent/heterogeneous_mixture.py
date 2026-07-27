@@ -1155,6 +1155,14 @@ class HeterogeneousMixtureDataEncoder(DataSequenceEncoder):
                     return False
             return True
 
+    def row_count(self, x: tuple[list[ndarray], list[Any]]) -> int:
+        """Return the shared row count from one grouped component encoding."""
+        encoded_groups = x[1]
+        if not encoded_groups:
+            return 0
+        first_encoder = next(iter(self.encoder_dict.values()))
+        return first_encoder.row_count(encoded_groups[0])
+
     def seq_encode(self, x: Sequence[T]) -> tuple[list[ndarray], list[Any]]:
         """Encode a sequence of iid heterogeneous mixture observations.
 

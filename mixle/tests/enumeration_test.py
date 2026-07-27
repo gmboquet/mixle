@@ -680,7 +680,11 @@ class EnumerationErrorTestCase(unittest.TestCase):
 
     def test_categorical_default_value_raises(self):
         with self.assertRaises(EnumerationError):
-            CategoricalDistribution({"a": 0.9}, default_value=0.1).enumerator()
+            CategoricalDistribution(
+                {"a": 0.9},
+                default_value=0.1,
+                scoring_only=True,
+            ).enumerator()
 
     def test_sequence_without_len_dist_raises(self):
         with self.assertRaises(EnumerationError):

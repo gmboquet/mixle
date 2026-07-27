@@ -65,6 +65,7 @@ def _squarem_leaf_handlers() -> dict[type, tuple[Callable[[Any], list[float]], C
             default_value=d.default_value,
             name=d.name,
             keys=d.keys,
+            scoring_only=d.scoring_only,
         )
 
     return {
@@ -227,6 +228,7 @@ def squarem_packer(
                 tuple(coordinate_keys),
                 tuple(bool(node.pmap[key] == 0.0) for key in coordinate_keys),
                 float(node.default_value),
+                bool(node.scoring_only),
             )
         return common
 
@@ -307,10 +309,7 @@ def squarem_packer(
         pack_node(m, model, theta)
         values = np.asarray(theta, dtype=np.float64)
         if values.shape != (expected_width,):
-            raise ValueError(
-                "squarem_packer packed %d coordinates; expected %d."
-                % (values.size, expected_width)
-            )
+            raise ValueError("squarem_packer packed %d coordinates; expected %d." % (values.size, expected_width))
         if np.any(~np.isfinite(values)):
             raise ValueError("squarem_packer produced non-finite coordinates.")
         return values
