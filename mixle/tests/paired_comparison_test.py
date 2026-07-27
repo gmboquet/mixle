@@ -1,6 +1,8 @@
 """Paired-comparison models: Thurstone-Mosteller (Gaussian) and Bradley-Terry with ties (Davidson, Rao-Kupper)."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -29,6 +31,8 @@ class ThurstoneMostellerTest(unittest.TestCase):
         fit = true.estimator().estimate(len(samp), acc.value())
         np.testing.assert_allclose(fit.mu, true.mu, atol=0.2)
         self.assertEqual(list(np.argsort(-fit.mu)), list(np.argsort(-true.mu)))
+        self.assertTrue(fit.fit_diagnostics.graph_connected)
+        self.assertFalse(fit.fit_diagnostics.exact_mle)
 
 
 class DavidsonTest(unittest.TestCase):
@@ -50,6 +54,8 @@ class DavidsonTest(unittest.TestCase):
         fit = true.estimator().estimate(len(samp), acc.value())
         np.testing.assert_allclose(fit.log_w, true.log_w, atol=0.2)
         self.assertAlmostEqual(fit.nu, 1.2, delta=0.2)
+        self.assertTrue(fit.fit_diagnostics.converged)
+        self.assertTrue(fit.fit_diagnostics.graph_connected)
 
     def test_validation(self):
         with self.assertRaises(ValueError):
@@ -70,6 +76,7 @@ class RaoKupperTest(unittest.TestCase):
         fit = true.estimator().estimate(len(samp), acc.value())
         np.testing.assert_allclose(fit.log_w, true.log_w, atol=0.2)
         self.assertAlmostEqual(fit.nu, 1.6, delta=0.25)
+        self.assertTrue(fit.fit_diagnostics.converged)
 
     def test_validation(self):
         with self.assertRaises(ValueError):
@@ -157,6 +164,67 @@ class PairedComparisonContractTest(unittest.TestCase):
                 with self.subTest(distribution=type(distribution).__name__, size=size):
                     with self.assertRaises((TypeError, ValueError)):
                         distribution.sampler(seed=1).sample(size)
+
+    def test_unidentified_graphs_fail_closed_unless_regularized(self):
+        pair = ThurstoneMostellerDistribution(np.zeros(3))
+        pair_accumulator = pair.estimator().accumulator_factory().make()
+        pair_accumulator.update((0, 1), 1.0, None)
+        with self.assertRaisesRegex(ValueError, "disconnected"):
+            pair.estimator().estimate(1.0, pair_accumulator.value())
+        regularized_pair = pair.estimator(0.5).estimate(1.0, pair_accumulator.value())
+        self.assertTrue(regularized_pair.fit_diagnostics.regularized)
+
+        tie = DavidsonDistribution(np.zeros(3))
+        tie_accumulator = tie.estimator().accumulator_factory().make()
+        tie_accumulator.update((0, 1, 2), 1.0, None)
+        with self.assertRaisesRegex(ValueError, "disconnected"):
+            tie.estimator().estimate(1.0, tie_accumulator.value())
+
+    def test_failed_tie_optimizer_is_never_returned_as_a_fit(self):
+        distribution = DavidsonDistribution(np.zeros(2))
+        accumulator = distribution.estimator().accumulator_factory().make()
+        accumulator.update((0, 1, 0), 1.0, None)
+        accumulator.update((0, 1, 1), 1.0, None)
+        accumulator.update((0, 1, 2), 1.0, None)
+        failed = SimpleNamespace(
+            success=False,
+            status=2,
+            message="line search failed",
+            x=np.asarray([0.0, 1.0]),
+            fun=1.0,
+            jac=np.asarray([0.0, 0.0]),
+            nit=1,
+        )
+        with patch("mixle.stats.rankings.paired_comparison.optimize.minimize", return_value=failed):
+            with self.assertRaisesRegex(RuntimeError, "line search failed"):
+                distribution.estimator().estimate(3.0, accumulator.value())
+
+    def test_extreme_tie_parameters_are_scored_in_log_space(self):
+        for distribution in (
+            DavidsonDistribution([1.0e308, -1.0e308], nu=1.0e308),
+            RaoKupperDistribution([1.0e308, -1.0e308], nu=1.0e308),
+        ):
+            probabilities = [distribution.density((0, 1, outcome)) * 1.0 for outcome in range(3)]
+            self.assertTrue(np.all(np.isfinite(probabilities)))
+            self.assertAlmostEqual(sum(probabilities), 1.0, places=12)
+
+    def test_statistic_structure_and_nobs_are_validated(self):
+        pair = ThurstoneMostellerDistribution(np.zeros(3))
+        pair_accumulator = pair.estimator().accumulator_factory().make()
+        pair_accumulator.update((0, 1), 1.0, None)
+        with self.assertRaises(ValueError):
+            pair.estimator().estimate(2.0, pair_accumulator.value())
+        corrupt_wins = pair_accumulator.value()[1]
+        corrupt_wins[0, 0] = 1.0
+        with self.assertRaises(ValueError):
+            pair_accumulator.from_value((2.0, corrupt_wins))
+
+        tie = DavidsonDistribution(np.zeros(3))
+        tie_accumulator = tie.estimator().accumulator_factory().make()
+        corrupt_ties = np.zeros((3, 3))
+        corrupt_ties[1, 0] = 1.0
+        with self.assertRaises(ValueError):
+            tie_accumulator.from_value((1.0, np.zeros((3, 3)), corrupt_ties))
 
 
 if __name__ == "__main__":

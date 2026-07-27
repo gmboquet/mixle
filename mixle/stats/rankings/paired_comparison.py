@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -54,6 +55,68 @@ from mixle.stats.rankings._contracts import (
 _SQRT2 = math.sqrt(2.0)
 
 
+@dataclass(frozen=True)
+class ThurstoneMostellerFitDiagnostics:
+    """Provenance and identifiability evidence for the pairwise-moment fit."""
+
+    method: str
+    exact_mle: bool
+    graph_connected: bool
+    clipped_pair_probabilities: int
+    regularized: bool
+    pseudo_count: float
+
+
+@dataclass(frozen=True)
+class TieModelFitDiagnostics:
+    """Optimizer, identifiability, and boundary evidence for a tie-model fit."""
+
+    model: str
+    converged: bool
+    status: int
+    message: str
+    iterations: int
+    objective: float
+    gradient_norm: float
+    worth_boundary_hit: bool
+    tie_parameter_boundary_hit: bool
+    graph_connected: bool
+    regularized: bool
+    pseudo_count: float
+
+
+def _comparison_graph_connected(counts: np.ndarray) -> bool:
+    adjacency = counts + counts.T > 0.0
+    seen = {0}
+    frontier = [0]
+    while frontier:
+        node = frontier.pop()
+        for neighbor in np.flatnonzero(adjacency[node]):
+            candidate = int(neighbor)
+            if candidate not in seen:
+                seen.add(candidate)
+                frontier.append(candidate)
+    return len(seen) == counts.shape[0]
+
+
+def _paired_win_statistics(value: Any, dim: int) -> tuple[float, np.ndarray]:
+    count, wins = matrix_statistics(value, dim, label="paired-win statistics")
+    tolerance = 1.0e-10 * max(1.0, count)
+    if not np.allclose(np.diag(wins), 0.0, rtol=0.0, atol=tolerance):
+        raise ValueError("paired-win statistic diagonal must be zero.")
+    return count, wins
+
+
+def _tie_model_statistics(value: Any, dim: int, *, label: str) -> tuple[float, np.ndarray, np.ndarray]:
+    count, wins, ties = tie_statistics(value, dim, label=label)
+    tolerance = 1.0e-10 * max(1.0, count)
+    if not np.allclose(np.diag(wins), 0.0, rtol=0.0, atol=tolerance):
+        raise ValueError(f"{label} win-count diagonal must be zero.")
+    if not np.allclose(np.tril(ties), 0.0, rtol=0.0, atol=tolerance):
+        raise ValueError(f"{label} tie counts must be stored only in the strict upper triangle.")
+    return count, wins, ties
+
+
 # =================================================================================================
 # Thurstone-Mosteller: Gaussian (probit) pairwise comparisons, no ties
 # =================================================================================================
@@ -71,7 +134,13 @@ class ThurstoneMostellerDistribution(SequenceEncodableProbabilityDistribution):
             numpy_only_reason="Probit pairwise likelihood is numpy-native.",
         )
 
-    def __init__(self, mu: Sequence[float] | np.ndarray, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        mu: Sequence[float] | np.ndarray,
+        name: str | None = None,
+        keys: str | None = None,
+        fit_diagnostics: ThurstoneMostellerFitDiagnostics | None = None,
+    ) -> None:
         m = np.asarray(mu, dtype=float)
         if m.ndim != 1 or m.size < 2 or not np.all(np.isfinite(m)):
             raise ValueError("mu must be a finite length-K vector with K >= 2.")
@@ -81,6 +150,9 @@ class ThurstoneMostellerDistribution(SequenceEncodableProbabilityDistribution):
         self.log_pairs = math.log(self.dim * (self.dim - 1) / 2.0)
         self.name = name
         self.keys = keys
+        if fit_diagnostics is not None and not isinstance(fit_diagnostics, ThurstoneMostellerFitDiagnostics):
+            raise TypeError("fit_diagnostics must be a ThurstoneMostellerFitDiagnostics record.")
+        self.fit_diagnostics = fit_diagnostics
 
     def __str__(self) -> str:
         return "ThurstoneMostellerDistribution(%s, name=%s, keys=%s)" % (
@@ -175,7 +247,7 @@ class PairWinAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat) -> PairWinAccumulator:
         """Merge serialized win-count sufficient statistics."""
-        count, wins = matrix_statistics(suff_stat, self.dim, label="paired-win statistics")
+        count, wins = _paired_win_statistics(suff_stat, self.dim)
         self.count += count
         self.wins += wins
         return self
@@ -186,7 +258,7 @@ class PairWinAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x) -> PairWinAccumulator:
         """Restore accumulator state from serialized win counts."""
-        self.count, self.wins = matrix_statistics(x, self.dim, label="paired-win statistics")
+        self.count, self.wins = _paired_win_statistics(x, self.dim)
         return self
 
     def acc_to_encoder(self) -> PairDataEncoder:
@@ -226,21 +298,56 @@ class ThurstoneMostellerEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat) -> ThurstoneMostellerDistribution:
         """Estimate Thurstone-Mosteller utilities from win-count statistics."""
+        count, wins = _paired_win_statistics(suff_stat, self.dim)
         if nobs is not None:
-            finite_nonnegative(nobs, label="nobs")
-        count, wins = matrix_statistics(suff_stat, self.dim, label="paired-win statistics")
+            checked_nobs = finite_nonnegative(nobs, label="nobs")
+            if not math.isclose(checked_nobs, count, rel_tol=1.0e-10, abs_tol=1.0e-10):
+                raise ValueError("nobs must equal paired-win statistic observation weight.")
+        pseudo_count = 0.0 if self.pseudo_count is None else self.pseudo_count
         if self.pseudo_count is not None and self.pseudo_count > 0.0:
             wins += self.pseudo_count * (1.0 - np.eye(self.dim))
             count += self.pseudo_count * self.dim * (self.dim - 1)
         n = self.dim
         if count <= 0.0:
-            return ThurstoneMostellerDistribution(np.zeros(n), name=self.name, keys=self.keys)
+            diagnostics = ThurstoneMostellerFitDiagnostics(
+                method="pairwise_moment_least_squares",
+                exact_mle=False,
+                graph_connected=False,
+                clipped_pair_probabilities=0,
+                regularized=False,
+                pseudo_count=0.0,
+            )
+            return ThurstoneMostellerDistribution(
+                np.zeros(n),
+                name=self.name,
+                keys=self.keys,
+                fit_diagnostics=diagnostics,
+            )
         tot = wins + wins.T
+        graph_connected = _comparison_graph_connected(tot)
+        if not graph_connected:
+            raise ValueError(
+                "Thurstone-Mosteller utilities are unidentified because the comparison graph is disconnected."
+            )
         p = np.where(tot > 0, wins / np.maximum(tot, 1e-12), 0.5)
         np.fill_diagonal(p, 0.5)
+        clipped = int(np.count_nonzero((p <= 1.0e-4) | (p >= 1.0 - 1.0e-4)))
         d = _SQRT2 * ndtri(np.clip(p, 1e-4, 1.0 - 1e-4))
         mu = d.mean(axis=1)
-        return ThurstoneMostellerDistribution(mu - mu.mean(), name=self.name, keys=self.keys)
+        diagnostics = ThurstoneMostellerFitDiagnostics(
+            method="pairwise_moment_least_squares",
+            exact_mle=False,
+            graph_connected=True,
+            clipped_pair_probabilities=clipped,
+            regularized=pseudo_count > 0.0,
+            pseudo_count=pseudo_count,
+        )
+        return ThurstoneMostellerDistribution(
+            mu - mu.mean(),
+            name=self.name,
+            keys=self.keys,
+            fit_diagnostics=diagnostics,
+        )
 
 
 class PairDataEncoder(DataSequenceEncoder):
@@ -328,7 +435,7 @@ class _TieAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat) -> _TieAccumulator:
         """Merge serialized win-and-tie sufficient statistics."""
-        count, wins, ties = tie_statistics(suff_stat, self.dim, label="tie-comparison statistics")
+        count, wins, ties = _tie_model_statistics(suff_stat, self.dim, label="tie-comparison statistics")
         self.count += count
         self.wins += wins
         self.ties += ties
@@ -340,7 +447,7 @@ class _TieAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x) -> _TieAccumulator:
         """Restore accumulator state from serialized win-and-tie statistics."""
-        self.count, self.wins, self.ties = tie_statistics(
+        self.count, self.wins, self.ties = _tie_model_statistics(
             x,
             self.dim,
             label="tie-comparison statistics",
@@ -376,7 +483,7 @@ class _BaseTieDistribution(SequenceEncodableProbabilityDistribution):
             numpy_only_reason="Paired-comparison-with-ties likelihood is numpy-native.",
         )
 
-    def __init__(self, log_w, nu, name, keys) -> None:
+    def __init__(self, log_w, nu, name, keys, fit_diagnostics: TieModelFitDiagnostics | None = None) -> None:
         lw = np.asarray(log_w, dtype=float)
         if lw.ndim != 1 or lw.size < 2 or not np.all(np.isfinite(lw)):
             raise ValueError("log_w must be a finite length-K vector with K >= 2.")
@@ -387,6 +494,9 @@ class _BaseTieDistribution(SequenceEncodableProbabilityDistribution):
         self.log_pairs = math.log(self.dim * (self.dim - 1) / 2.0)
         self.name = name
         self.keys = keys
+        if fit_diagnostics is not None and not isinstance(fit_diagnostics, TieModelFitDiagnostics):
+            raise TypeError("fit_diagnostics must be a TieModelFitDiagnostics record.")
+        self.fit_diagnostics = fit_diagnostics
 
     def _outcome_logp(self, lo: np.ndarray, hi: np.ndarray, o: np.ndarray) -> np.ndarray:
         """Return outcome log probabilities for canonicalized comparison triples."""
@@ -439,9 +549,16 @@ class _TieSampler(DistributionSampler):
 class DavidsonDistribution(_BaseTieDistribution):
     """Bradley-Terry with ties (Davidson 1970); tie mass ``nu sqrt(w_i w_j)``."""
 
-    def __init__(self, log_w, nu: float = 1.0, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        log_w,
+        nu: float = 1.0,
+        name: str | None = None,
+        keys: str | None = None,
+        fit_diagnostics: TieModelFitDiagnostics | None = None,
+    ) -> None:
         checked_nu = finite_nonnegative(nu, label="nu")
-        super().__init__(log_w, checked_nu, name, keys)
+        super().__init__(log_w, checked_nu, name, keys, fit_diagnostics)
 
     def __str__(self) -> str:
         return "DavidsonDistribution(%s, nu=%s, name=%s, keys=%s)" % (
@@ -453,18 +570,27 @@ class DavidsonDistribution(_BaseTieDistribution):
 
     def _outcome_logp(self, lo, hi, o):
         """Return Davidson log probabilities for canonicalized outcomes."""
-        wi, wj = np.exp(self.log_w[lo]), np.exp(self.log_w[hi])
-        g = np.sqrt(wi * wj)
-        denom = wi + wj + self.nu * g
-        num = np.where(o == 0, wi, np.where(o == 1, wj, self.nu * g))
-        return np.log(num) - np.log(denom)
+        log_i, log_j = self.log_w[lo], self.log_w[hi]
+        log_tie = (
+            np.full_like(log_i, -np.inf, dtype=np.float64)
+            if self.nu == 0.0
+            else math.log(self.nu) + 0.5 * (log_i + log_j)
+        )
+        with np.errstate(over="ignore", invalid="ignore"):
+            denominator = np.logaddexp(np.logaddexp(log_i, log_j), log_tie)
+            numerator = np.where(o == 0, log_i, np.where(o == 1, log_j, log_tie))
+            return numerator - denominator
 
     def _sample_outcome(self, i, j, rng):
         """Sample a Davidson outcome code for a canonical pair."""
-        wi, wj = math.exp(self.log_w[i]), math.exp(self.log_w[j])
-        g = math.sqrt(wi * wj)
-        denom = wi + wj + self.nu * g
-        return int(rng.choice(3, p=[wi / denom, wj / denom, self.nu * g / denom]))
+        log_probabilities = self._outcome_logp(
+            np.full(3, i, dtype=np.int64),
+            np.full(3, j, dtype=np.int64),
+            np.arange(3, dtype=np.int64),
+        )
+        probabilities = np.exp(log_probabilities)
+        probabilities /= probabilities.sum()
+        return int(rng.choice(3, p=probabilities))
 
     def estimator(self, pseudo_count: float | None = None):
         """Return the maximum-likelihood Davidson estimator."""
@@ -479,11 +605,18 @@ class DavidsonDistribution(_BaseTieDistribution):
 class RaoKupperDistribution(_BaseTieDistribution):
     """Bradley-Terry with ties via a threshold ``nu >= 1`` (Rao-Kupper 1967)."""
 
-    def __init__(self, log_w, nu: float = 1.5, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        log_w,
+        nu: float = 1.5,
+        name: str | None = None,
+        keys: str | None = None,
+        fit_diagnostics: TieModelFitDiagnostics | None = None,
+    ) -> None:
         checked_nu = finite_nonnegative(nu, label="nu")
         if checked_nu < 1.0:
             raise ValueError("Rao-Kupper nu must be >= 1.")
-        super().__init__(log_w, checked_nu, name, keys)
+        super().__init__(log_w, checked_nu, name, keys, fit_diagnostics)
 
     def __str__(self) -> str:
         return "RaoKupperDistribution(%s, nu=%s, name=%s, keys=%s)" % (
@@ -495,18 +628,29 @@ class RaoKupperDistribution(_BaseTieDistribution):
 
     def _outcome_logp(self, lo, hi, o):
         """Return Rao-Kupper log probabilities for canonicalized outcomes."""
-        wi, wj, nu = np.exp(self.log_w[lo]), np.exp(self.log_w[hi]), self.nu
-        p_i = wi / (wi + nu * wj)
-        p_j = wj / (nu * wi + wj)
-        p_tie = np.clip(1.0 - p_i - p_j, 1e-300, 1.0)
-        return np.log(np.where(o == 0, p_i, np.where(o == 1, p_j, p_tie)))
+        log_i, log_j, log_nu = self.log_w[lo], self.log_w[hi], math.log(self.nu)
+        with np.errstate(over="ignore", invalid="ignore"):
+            denominator_i = np.logaddexp(log_i, log_nu + log_j)
+            denominator_j = np.logaddexp(log_nu + log_i, log_j)
+            log_p_i = log_i - denominator_i
+            log_p_j = log_j - denominator_j
+            if self.nu == 1.0:
+                log_p_tie = np.full_like(log_i, -np.inf, dtype=np.float64)
+            else:
+                log_nu_squared_minus_one = 2.0 * log_nu + math.log1p(-math.exp(-2.0 * log_nu))
+                log_p_tie = log_nu_squared_minus_one + log_i + log_j - denominator_i - denominator_j
+        return np.where(o == 0, log_p_i, np.where(o == 1, log_p_j, log_p_tie))
 
     def _sample_outcome(self, i, j, rng):
         """Sample a Rao-Kupper outcome code for a canonical pair."""
-        wi, wj, nu = math.exp(self.log_w[i]), math.exp(self.log_w[j]), self.nu
-        p_i = wi / (wi + nu * wj)
-        p_j = wj / (nu * wi + wj)
-        return int(rng.choice(3, p=[p_i, p_j, max(1.0 - p_i - p_j, 0.0)]))
+        log_probabilities = self._outcome_logp(
+            np.full(3, i, dtype=np.int64),
+            np.full(3, j, dtype=np.int64),
+            np.arange(3, dtype=np.int64),
+        )
+        probabilities = np.exp(log_probabilities)
+        probabilities /= probabilities.sum()
+        return int(rng.choice(3, p=probabilities))
 
     def estimator(self, pseudo_count: float | None = None):
         """Return the maximum-likelihood Rao-Kupper estimator."""
@@ -518,8 +662,23 @@ class RaoKupperDistribution(_BaseTieDistribution):
         )
 
 
-def _fit_tie_model(make_dist, dim, wins, ties, nu0, nu_bounds):
-    """Maximize the comparison log-likelihood over (log_w centered, nu) with L-BFGS-B."""
+def _fit_tie_model(
+    make_dist,
+    model_name: str,
+    dim: int,
+    wins: np.ndarray,
+    ties: np.ndarray,
+    nu0: float,
+    nu_bounds: tuple[float, float],
+    *,
+    regularized: bool,
+    pseudo_count: float,
+) -> tuple[np.ndarray, float, TieModelFitDiagnostics]:
+    """Return a validated finite L-BFGS-B fit and its diagnostics."""
+    comparison_counts = wins + wins.T + ties + ties.T
+    graph_connected = _comparison_graph_connected(comparison_counts)
+    if not graph_connected:
+        raise ValueError(f"{model_name} worths are unidentified because the comparison graph is disconnected.")
     iu = np.triu_indices(dim, 1)
     a = wins[iu]  # lo beat hi
     b = wins.T[iu]  # hi beat lo
@@ -534,15 +693,57 @@ def _fit_tie_model(make_dist, dim, wins, ties, nu0, nu_bounds):
         lp = d._outcome_logp(li, lj, np.zeros_like(li))
         lp1 = d._outcome_logp(li, lj, np.ones_like(li))
         lp2 = d._outcome_logp(li, lj, np.full_like(li, 2))
-        return -float(a @ lp + b @ lp1 + t @ lp2)
+        value = 0.0
+        for counts, log_probability in ((a, lp), (b, lp1), (t, lp2)):
+            observed = counts > 0.0
+            value += float(counts[observed] @ log_probability[observed])
+        return -value
 
     x0 = np.zeros(dim)  # theta_1..theta_{K-1} (theta_0=0) + nu
     x0[-1] = nu0
     bounds = [(-20, 20)] * (dim - 1) + [nu_bounds]
     res = optimize.minimize(neg_ll, x0, method="L-BFGS-B", bounds=bounds)
+    parameters = np.asarray(res.x, dtype=np.float64)
+    gradient = np.asarray(getattr(res, "jac", np.full_like(parameters, np.nan)), dtype=np.float64)
+    if (
+        not bool(res.success)
+        or parameters.shape != (dim,)
+        or not np.all(np.isfinite(parameters))
+        or not math.isfinite(float(res.fun))
+        or gradient.shape != parameters.shape
+        or not np.all(np.isfinite(gradient))
+    ):
+        raise RuntimeError(
+            f"{model_name} optimization failed (status={getattr(res, 'status', None)}): "
+            f"{getattr(res, 'message', 'no optimizer message')}"
+        )
+    worth_boundary_hit = bool(np.any(np.isclose(np.abs(parameters[:-1]), 20.0, rtol=0.0, atol=1.0e-5)))
+    tie_parameter_boundary_hit = bool(
+        math.isclose(parameters[-1], nu_bounds[0], rel_tol=0.0, abs_tol=1.0e-5)
+        or math.isclose(parameters[-1], nu_bounds[1], rel_tol=0.0, abs_tol=1.0e-5)
+    )
+    if worth_boundary_hit and not regularized:
+        raise RuntimeError(
+            f"{model_name} worth optimization reached the artificial finite bound; "
+            "the unregularized finite MLE is not established."
+        )
     theta = np.zeros(dim)
-    theta[1:] = res.x[:-1]
-    return theta - theta.mean(), float(res.x[-1])
+    theta[1:] = parameters[:-1]
+    diagnostics = TieModelFitDiagnostics(
+        model=model_name,
+        converged=True,
+        status=int(res.status),
+        message=str(res.message),
+        iterations=int(getattr(res, "nit", 0)),
+        objective=float(res.fun),
+        gradient_norm=float(np.linalg.norm(gradient, ord=np.inf)),
+        worth_boundary_hit=worth_boundary_hit,
+        tie_parameter_boundary_hit=tie_parameter_boundary_hit,
+        graph_connected=graph_connected,
+        regularized=regularized,
+        pseudo_count=pseudo_count,
+    )
+    return theta - theta.mean(), float(parameters[-1]), diagnostics
 
 
 class DavidsonEstimator(ParameterEstimator):
@@ -565,19 +766,56 @@ class DavidsonEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat) -> DavidsonDistribution:
         """Estimate Davidson worths and tie parameter from sufficient statistics."""
+        count, wins, ties = _tie_model_statistics(suff_stat, self.dim, label="Davidson statistics")
         if nobs is not None:
-            finite_nonnegative(nobs, label="nobs")
-        count, wins, ties = tie_statistics(suff_stat, self.dim, label="Davidson statistics")
-        if self.pseudo_count is not None and self.pseudo_count > 0.0:
-            wins += self.pseudo_count * (1.0 - np.eye(self.dim))
-            ties[np.triu_indices(self.dim, 1)] += self.pseudo_count
-            count += 3.0 * self.pseudo_count * self.dim * (self.dim - 1) / 2.0
+            checked_nobs = finite_nonnegative(nobs, label="nobs")
+            if not math.isclose(checked_nobs, count, rel_tol=1.0e-10, abs_tol=1.0e-10):
+                raise ValueError("nobs must equal Davidson statistic observation weight.")
+        pseudo_count = 0.0 if self.pseudo_count is None else self.pseudo_count
+        if pseudo_count > 0.0:
+            wins += pseudo_count * (1.0 - np.eye(self.dim))
+            ties[np.triu_indices(self.dim, 1)] += pseudo_count
+            count += 3.0 * pseudo_count * self.dim * (self.dim - 1) / 2.0
         if count <= 0.0:
-            return DavidsonDistribution(np.zeros(self.dim), 1.0, name=self.name, keys=self.keys)
-        log_w, nu = _fit_tie_model(
-            lambda lw, nu: DavidsonDistribution(lw, nu), self.dim, wins, ties, 1.0, (1e-6, 100.0)
+            diagnostics = TieModelFitDiagnostics(
+                model="Davidson",
+                converged=False,
+                status=-1,
+                message="no observations; returned neutral default",
+                iterations=0,
+                objective=0.0,
+                gradient_norm=0.0,
+                worth_boundary_hit=False,
+                tie_parameter_boundary_hit=False,
+                graph_connected=False,
+                regularized=False,
+                pseudo_count=0.0,
+            )
+            return DavidsonDistribution(
+                np.zeros(self.dim),
+                1.0,
+                name=self.name,
+                keys=self.keys,
+                fit_diagnostics=diagnostics,
+            )
+        log_w, nu, diagnostics = _fit_tie_model(
+            lambda lw, tie_parameter: DavidsonDistribution(lw, tie_parameter),
+            "Davidson",
+            self.dim,
+            wins,
+            ties,
+            1.0,
+            (1e-8, 100.0),
+            regularized=pseudo_count > 0.0,
+            pseudo_count=pseudo_count,
         )
-        return DavidsonDistribution(log_w, nu, name=self.name, keys=self.keys)
+        return DavidsonDistribution(
+            log_w,
+            nu,
+            name=self.name,
+            keys=self.keys,
+            fit_diagnostics=diagnostics,
+        )
 
 
 class RaoKupperEstimator(ParameterEstimator):
@@ -600,22 +838,61 @@ class RaoKupperEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat) -> RaoKupperDistribution:
         """Estimate Rao-Kupper worths and threshold from sufficient statistics."""
+        count, wins, ties = _tie_model_statistics(suff_stat, self.dim, label="Rao-Kupper statistics")
         if nobs is not None:
-            finite_nonnegative(nobs, label="nobs")
-        count, wins, ties = tie_statistics(suff_stat, self.dim, label="Rao-Kupper statistics")
-        if self.pseudo_count is not None and self.pseudo_count > 0.0:
-            wins += self.pseudo_count * (1.0 - np.eye(self.dim))
-            ties[np.triu_indices(self.dim, 1)] += self.pseudo_count
-            count += 3.0 * self.pseudo_count * self.dim * (self.dim - 1) / 2.0
+            checked_nobs = finite_nonnegative(nobs, label="nobs")
+            if not math.isclose(checked_nobs, count, rel_tol=1.0e-10, abs_tol=1.0e-10):
+                raise ValueError("nobs must equal Rao-Kupper statistic observation weight.")
+        pseudo_count = 0.0 if self.pseudo_count is None else self.pseudo_count
+        if pseudo_count > 0.0:
+            wins += pseudo_count * (1.0 - np.eye(self.dim))
+            ties[np.triu_indices(self.dim, 1)] += pseudo_count
+            count += 3.0 * pseudo_count * self.dim * (self.dim - 1) / 2.0
         if count <= 0.0:
-            return RaoKupperDistribution(np.zeros(self.dim), 1.5, name=self.name, keys=self.keys)
-        log_w, nu = _fit_tie_model(
-            lambda lw, nu: RaoKupperDistribution(lw, nu), self.dim, wins, ties, 1.5, (1.0, 100.0)
+            diagnostics = TieModelFitDiagnostics(
+                model="Rao-Kupper",
+                converged=False,
+                status=-1,
+                message="no observations; returned neutral default",
+                iterations=0,
+                objective=0.0,
+                gradient_norm=0.0,
+                worth_boundary_hit=False,
+                tie_parameter_boundary_hit=False,
+                graph_connected=False,
+                regularized=False,
+                pseudo_count=0.0,
+            )
+            return RaoKupperDistribution(
+                np.zeros(self.dim),
+                1.5,
+                name=self.name,
+                keys=self.keys,
+                fit_diagnostics=diagnostics,
+            )
+        log_w, nu, diagnostics = _fit_tie_model(
+            lambda lw, tie_parameter: RaoKupperDistribution(lw, tie_parameter),
+            "Rao-Kupper",
+            self.dim,
+            wins,
+            ties,
+            1.5,
+            (1.0 + 1.0e-8, 100.0),
+            regularized=pseudo_count > 0.0,
+            pseudo_count=pseudo_count,
         )
-        return RaoKupperDistribution(log_w, nu, name=self.name, keys=self.keys)
+        return RaoKupperDistribution(
+            log_w,
+            nu,
+            name=self.name,
+            keys=self.keys,
+            fit_diagnostics=diagnostics,
+        )
 
 
 __all__ = [
+    "ThurstoneMostellerFitDiagnostics",
+    "TieModelFitDiagnostics",
     "ThurstoneMostellerDistribution",
     "ThurstoneMostellerSampler",
     "ThurstoneMostellerEstimator",

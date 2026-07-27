@@ -76,7 +76,9 @@ from mixle.stats.rankings.paired_comparison import (
     RaoKupperEstimator,
     ThurstoneMostellerDistribution,
     ThurstoneMostellerEstimator,
+    ThurstoneMostellerFitDiagnostics,
     ThurstoneMostellerSampler,
+    TieModelFitDiagnostics,
 )
 from mixle.stats.rankings.plackett_luce import (
     PlackettLuceAccumulator,
@@ -208,7 +210,9 @@ __all__ = [
     "ThurstoneFitDiagnostics",
     "ThurstoneMostellerDistribution",
     "ThurstoneMostellerEstimator",
+    "ThurstoneMostellerFitDiagnostics",
     "ThurstoneMostellerSampler",
+    "TieModelFitDiagnostics",
     "ThurstoneSampler",
     "item_ordering_to_rank_vector",
     "rank_vector_to_item_ordering",
