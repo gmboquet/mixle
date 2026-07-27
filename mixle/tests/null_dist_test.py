@@ -4,24 +4,24 @@ default (ignored.py)."""
 import unittest
 
 from mixle.stats.combinator.ignored import IgnoredEstimator
-from mixle.stats.combinator.null_dist import NullDistribution
+from mixle.stats.combinator.null_dist import NeutralFactorError, NullDistribution
+from mixle.stats.univariate.discrete.point_mass import PointMassDistribution
 
 
-class NullSamplerTestCase(unittest.TestCase):
-    def test_single_draw_returns_none(self):
-        self.assertIsNone(NullDistribution().sampler(seed=0).sample())
+class NullContractTestCase(unittest.TestCase):
+    def test_neutral_factor_is_not_generative(self):
+        with self.assertRaises(NeutralFactorError):
+            NullDistribution().sampler(seed=0)
+        with self.assertRaises(NotImplementedError):
+            NullDistribution().enumerator()
 
-    def test_batched_draw_returns_a_list_of_nones(self):
-        # sample(size=n) must return a length-n collection per the DistributionSampler contract
-        # (sample(size=None) -> single observation, sample(size=n) -> length-n collection) --
-        # NullSampler previously returned bare None regardless of size, breaking any composite
-        # sampler (e.g. CompositeDistribution) that zips child samples expecting len() == size.
-        samples = NullDistribution().sampler(seed=0).sample(size=5)
-        self.assertEqual(samples, [None] * 5)
-        self.assertEqual(len(samples), 5)
-
-    def test_zero_size_draw_returns_an_empty_list(self):
-        self.assertEqual(NullDistribution().sampler(seed=0).sample(size=0), [])
+    def test_none_point_mass_is_the_proper_singleton_law(self):
+        distribution = PointMassDistribution(None)
+        self.assertIsNone(distribution.sampler(seed=0).sample())
+        self.assertEqual(distribution.sampler(seed=0).sample(size=5), [None] * 5)
+        self.assertEqual(list(distribution.enumerator()), [(None, 0.0)])
+        self.assertEqual(distribution.log_density(None), 0.0)
+        self.assertEqual(distribution.log_density("anything"), float("-inf"))
 
 
 class IgnoredEstimatorNoneDistTestCase(unittest.TestCase):
@@ -30,7 +30,8 @@ class IgnoredEstimatorNoneDistTestCase(unittest.TestCase):
         # CLASS itself, not an instance, so accumulator_factory()'s self.dist.dist_to_encoder() call
         # crashed with TypeError (an unbound method missing its `self` argument) on first use.
         est = IgnoredEstimator(dist=None)
-        self.assertIsInstance(est.dist, NullDistribution)
+        self.assertIsInstance(est.dist, PointMassDistribution)
+        self.assertIsNone(est.dist.value)
         acc = est.accumulator_factory().make()
         self.assertIsNotNone(acc)
 
@@ -39,7 +40,8 @@ class IgnoredEstimatorNoneDistTestCase(unittest.TestCase):
         acc = est.accumulator_factory().make()
         acc.update("anything", 1.0, None)
         fit = est.estimate(None, acc.value())
-        self.assertIsInstance(fit.dist, NullDistribution)
+        self.assertIsInstance(fit.dist, PointMassDistribution)
+        self.assertIsNone(fit.dist.value)
 
 
 if __name__ == "__main__":

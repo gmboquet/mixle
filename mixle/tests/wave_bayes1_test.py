@@ -23,7 +23,7 @@ import scipy.stats
 
 from mixle.stats.bayes.dirichlet import DirichletDistribution, DirichletEstimator
 from mixle.stats.combinator.conditional import ConditionalDistribution, ConditionalDistributionEstimator
-from mixle.stats.combinator.null_dist import NullDistribution, NullSampler
+from mixle.stats.combinator.null_dist import NeutralFactorError, NullDistribution
 from mixle.stats.combinator.sequence import SequenceDistribution
 from mixle.stats.univariate.continuous.gamma import GammaDistribution, GammaEstimator
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
@@ -135,15 +135,11 @@ class PointMassTestCase(unittest.TestCase):
 
 class NullTestCase(unittest.TestCase):
     def test_sampler(self):
-        # regression: NullDistribution.sampler() used to raise TypeError
-        # (NullSampler.__init__ only accepted a seed)
-        s = NullDistribution().sampler(seed=1)
-        self.assertIsInstance(s, NullSampler)
-        self.assertIsNone(s.sample())
-        # sample(size=n) must return a length-n collection per the DistributionSampler contract
-        # (previously returned bare None regardless of size, breaking composite samplers that zip
-        # child samples expecting len() == size).
-        self.assertEqual(s.sample(size=3), [None, None, None])
+        with self.assertRaises(NeutralFactorError):
+            NullDistribution().sampler(seed=1)
+        proper = PointMassDistribution(None).sampler(seed=1)
+        self.assertIsNone(proper.sample())
+        self.assertEqual(proper.sample(size=3), [None, None, None])
 
     def test_sequence_with_null_length_sampler(self):
         # regression: the null default len_dist threads cleanly through the

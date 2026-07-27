@@ -1,8 +1,8 @@
-"""Distribution wrapper that keeps a child model fixed during estimation.
+"""Distribution wrapper that keeps a child's parameters fixed during estimation.
 
-``IgnoredDistribution`` preserves the child distribution's sampling and
-encoding hooks where appropriate while contributing no fitted sufficient
-statistics of its own.
+``IgnoredDistribution`` delegates the child's likelihood, sampling, and encoding
+unchanged; only its accumulator is a no-op, so the child contributes to model
+scores but is not re-estimated.
 """
 
 from collections.abc import Sequence
@@ -12,7 +12,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from mixle.capability import Neutral, supports
-from mixle.stats.combinator.null_dist import NullDataEncoder, NullDistribution, NullSampler
+from mixle.stats.combinator.null_dist import NullDataEncoder
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -21,13 +21,14 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.discrete.point_mass import PointMassDistribution
 
 T = TypeVar("T")
 E = TypeVar("E")
 
 
 class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
-    """Distribution wrapper that assigns zero log-density while preserving an estimator interface."""
+    """Fixed-parameter wrapper that delegates the wrapped distribution's likelihood exactly."""
 
     def compute_capabilities(self):
         """Return the compute capabilities delegated from the wrapped distribution."""
@@ -63,7 +64,7 @@ class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
             dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution to be ignored.
             name (Optional[str]): Optional distribution name.
         """
-        self.dist = dist if dist is not None else NullDistribution()
+        self.dist = dist if dist is not None else PointMassDistribution(None)
         self.name = name
 
     def __str__(self) -> str:
@@ -163,21 +164,14 @@ class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class IgnoredSampler(DistributionSampler):
-    """Sampler that delegates to the wrapped distribution or emits ``None`` for null children."""
+    """Sampler that delegates exactly to the fixed wrapped distribution."""
 
     def __init__(self, dist: IgnoredDistribution, seed: int | None = None) -> None:
         self.dist_sampler = dist.dist.sampler(seed)
-        self.null_sampler = isinstance(self.dist_sampler, NullSampler)
 
     def sample(self, size: int | None = None, *, batched: bool = True):
-        """Draw from the wrapped sampler, preserving null-distribution ``None`` samples."""
-        if self.null_sampler:
-            if size is None:
-                return None
-            else:
-                return [None] * size
-        else:
-            return self.dist_sampler.sample(size=size)
+        """Draw from the wrapped sampler."""
+        return self.dist_sampler.sample(size=size)
 
 
 class IgnoredAccumulator(SequenceEncodableStatisticAccumulator):
@@ -250,7 +244,7 @@ class IgnoredEstimator(ParameterEstimator):
 
     def __init__(
         self,
-        dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
+        dist: SequenceEncodableProbabilityDistribution | None = None,
         pseudo_count: float | None = None,
         suff_stat: Any | None = None,
         keys: str | None = None,
@@ -266,7 +260,7 @@ class IgnoredEstimator(ParameterEstimator):
             name (Optional[str]): Optional name assigned to the estimated distribution.
 
         """
-        self.dist = dist if dist is not None else NullDistribution()
+        self.dist = dist if dist is not None else PointMassDistribution(None)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.keys = keys

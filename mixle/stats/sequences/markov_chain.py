@@ -1098,8 +1098,10 @@ class MarkovChainSampler(DistributionSampler):
             init_prob (Tuple[List[T], List[float]): Tuple of initial state-values and probabilities.
             trans_prob (Dict[T, Tuple[List[T], List[float]]]): Dictionary mapping transition probabilities from state i
                 to state j.
-            len_sampler (DistributionSampler): Sample length of Markov chain sequence. Must be a DistributionSampler
-                with support on non-negative integers.
+            len_sampler (Optional[DistributionSampler]): Length sampler, or ``None`` when the distribution
+                is an unnormalized fixed-length chain factor. A length distribution is required by
+                :meth:`sample`; :meth:`sample_seq` and :meth:`sample_paths` remain available with
+                caller-supplied lengths.
 
         """
         self.rng = RandomState(seed)
@@ -1117,7 +1119,11 @@ class MarkovChainSampler(DistributionSampler):
             loc_keys = [v[0] for v in loc_trans]
             self.trans_prob[k] = (loc_keys, loc_probs)
 
-        self.len_sampler = dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
+        self.len_sampler = (
+            None
+            if supports(dist.len_dist, Neutral)
+            else dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
+        )
 
         # --- batched-sampling tables (built lazily) ---
         self._batch_tables = None
@@ -1238,6 +1244,12 @@ class MarkovChainSampler(DistributionSampler):
             List[T] or List[List[T]], depending on size arg.
 
         """
+        if self.len_sampler is None:
+            raise RuntimeError(
+                "MarkovChainSampler.sample() requires a proper length distribution; "
+                "use sample_seq(length) or sample_paths(lengths) for a fixed-length chain factor."
+            )
+
         if not batched:
             if size is not None:
                 return [self.sample(batched=False) for i in range(size)]

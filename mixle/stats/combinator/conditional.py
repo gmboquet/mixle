@@ -705,11 +705,11 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
         loc_seed = rng.randint(0, maxrandint)
 
         self.has_default_sampler = dist.has_default
-        self.default_sampler = dist.default_dist.sampler(loc_seed)
+        self.default_sampler = dist.default_dist.sampler(loc_seed) if self.has_default_sampler else None
 
         loc_seed = rng.randint(0, maxrandint)
-        self.given_sampler = dist.given_dist.sampler(loc_seed)
         self.has_given_sampler = not supports(dist.given_dist, Neutral)
+        self.given_sampler = dist.given_dist.sampler(loc_seed) if self.has_given_sampler else None
 
         self.samplers = {k: u.sampler(rng.randint(0, maxrandint)) for k, u in self.dist.dmap.items()}
 
@@ -723,10 +723,19 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
             Tuple[T0, T1] as defined from dmap and given_distribution types in dist (ConditionalDistribution instance).
 
         """
+        if self.given_sampler is None:
+            raise RuntimeError(
+                "ConditionalDistribution cannot sample pairs without a generative given distribution; "
+                "use sample_given(value) or configure given_dist."
+            )
         x0 = self.given_sampler.sample()
         if x0 in self.samplers:
             x1 = self.samplers[x0].sample()
         else:
+            if self.default_sampler is None:
+                raise RuntimeError(
+                    "ConditionalDistribution has no generative default distribution for an unmatched given value."
+                )
             x1 = self.default_sampler.sample()
         return x0, x1
 

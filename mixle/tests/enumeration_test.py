@@ -95,7 +95,7 @@ def make_cases():
             10,
             2,
         ),
-        ("null", NullDistribution(), 5, 1),
+        ("none_point_mass", PointMassDistribution(None), 5, 1),
         ("sequence", SequenceDistribution(cat, len_dist=IntegerCategoricalDistribution(0, [0.2, 0.5, 0.3])), 30, 7),
         ("sequence_geo_len", SequenceDistribution(cat, len_dist=GeometricDistribution(0.5)), 25, None),
         ("intsetdist", IntegerBernoulliSetDistribution(np.log([0.8, 0.4, 0.01])), 10, 8),
