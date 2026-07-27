@@ -14,7 +14,7 @@ import numpy as np
 
 import mixle.stats as stats
 from mixle.inference import estimate
-from mixle.stats.combinator.select import SelectDistribution, TypeDispatch
+from mixle.stats.combinator.select import SelectDistribution, TypeDispatch, certify_select_routing
 from mixle.stats.latent.mixture import MixtureDistribution
 from mixle.utils.serialization import register_serializable_callable
 
@@ -26,6 +26,7 @@ def _route_by_type(x):
 
 # Registered so a weighted SelectDistribution carrying this routing can round-trip through JSON.
 register_serializable_callable(_route_by_type, "mixle.tests.select_dispatch_mixture_test.route_by_type")
+certify_select_routing(_route_by_type, "string-or-number/v1")
 
 
 def _string_number_mixture(weights):

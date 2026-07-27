@@ -409,9 +409,12 @@ def _stats_public_distribution_catalog():
         "OptionalDistribution": stats.OptionalDistribution(stats.PoissonDistribution(2.0), p=0.25),
         "PoissonDistribution": stats.PoissonDistribution(3.0),
         "PointMassDistribution": stats.PointMassDistribution("fixed"),
-        "SelectDistribution": stats.SelectDistribution(
-            [stats.GaussianDistribution(0.0, 1.0), stats.GaussianDistribution(100.0, 1.0)],
-            lambda x: 0 if x < 50.0 else 1,
+        "SelectDistribution": stats.SelectDistribution.by_type(
+            [
+                ("str", stats.CategoricalDistribution({"a": 1.0})),
+                ("int", stats.PoissonDistribution(2.0)),
+            ],
+            weights=[0.5, 0.5],
         ),
         "SequenceDistribution": stats.SequenceDistribution(
             stats.CategoricalDistribution({"a": 0.5, "b": 0.5}),

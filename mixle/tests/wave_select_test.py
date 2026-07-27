@@ -102,10 +102,9 @@ class SelectRoutingTestCase(unittest.TestCase):
             acc.update(x, 1.0, self.dist)
 
         value = acc.value()
-        self.assertEqual(len(value), 2)
-        # A zip object would be exhausted after one pass; a list supports repeated iteration.
-        first_pass = [w for w, _ in value]
-        second_pass = [w for w, _ in value]
+        self.assertEqual(len(value.branches), 2)
+        first_pass = [w for w, _ in value.branches]
+        second_pass = [w for w, _ in value.branches]
         self.assertEqual(first_pass, second_pass)
 
         other = est.accumulator_factory().make()
@@ -132,20 +131,8 @@ class SelectEnumeratorTestCase(unittest.TestCase):
         d1 = CategoricalDistribution({"a": 0.3, "x": 0.7})
         dist = SelectDistribution([d0, d1], letter_choice)
 
-        items = dist.enumerator().top_k(10)
-        vals = [v for v, _ in items]
-        lps = [lp for _, lp in items]
-
-        # 'a' appears in both child supports but routes to child 0; it must be emitted once with
-        # the child-0 score. 'x' routes to child 1.
-        self.assertEqual(set(vals), {"a", "b", "x"})
-        self.assertEqual(len(vals), len(set(vals)))
-        self.assertEqual(vals[0], "x")
-
-        for v, lp in items:
-            self.assertAlmostEqual(lp, dist.log_density(v), places=10)
-        for i in range(len(lps) - 1):
-            self.assertGreaterEqual(lps[i], lps[i + 1] - TOL)
+        with self.assertRaises(EnumerationError):
+            dist.enumerator()
 
     def test_zero_probability_values_skipped(self) -> None:
         # 'y' is routed to child 1 but only child 0 gives it mass, so p('y') = 0 and it must
@@ -154,12 +141,17 @@ class SelectEnumeratorTestCase(unittest.TestCase):
         d1 = CategoricalDistribution({"x": 1.0})
         dist = SelectDistribution([d0, d1], letter_choice)
 
-        items = dist.enumerator().top_k(10)
-        vals = [v for v, _ in items]
-        self.assertEqual(set(vals), {"a", "x"})
+        with self.assertRaises(EnumerationError):
+            dist.enumerator()
 
     def test_non_enumerable_child_fails_fast(self) -> None:
-        dist = SelectDistribution([GaussianDistribution(0.0, 1.0), CategoricalDistribution({"x": 1.0})], letter_choice)
+        dist = SelectDistribution.by_type(
+            [
+                ("number", GaussianDistribution(0.0, 1.0)),
+                ("str", CategoricalDistribution({"x": 1.0})),
+            ],
+            weights=[0.5, 0.5],
+        )
         with self.assertRaises(EnumerationError) as ctx:
             dist.enumerator()
         self.assertIn("SelectDistribution.dists[0]", str(ctx.exception))

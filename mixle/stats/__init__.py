@@ -516,6 +516,9 @@ __all__ = [
     "SelectDistribution",
     "SelectEstimator",
     "TypeDispatch",
+    "SelectStatistics",
+    "NonGenerativeSelectError",
+    "certify_select_routing",
     "SelectEnumerator",
     "SequenceDistribution",
     "SequenceSampler",
@@ -1031,7 +1034,15 @@ from mixle.stats.combinator.record import (
     record,
     record_estimator,
 )
-from mixle.stats.combinator.select import SelectDistribution, SelectEnumerator, SelectEstimator, TypeDispatch
+from mixle.stats.combinator.select import (
+    NonGenerativeSelectError,
+    SelectDistribution,
+    SelectEnumerator,
+    SelectEstimator,
+    SelectStatistics,
+    TypeDispatch,
+    certify_select_routing,
+)
 from mixle.stats.combinator.sequence import (
     SequenceDataEncoder,
     SequenceDistribution,
