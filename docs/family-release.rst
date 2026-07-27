@@ -1,14 +1,28 @@
 Family Release Coordination
 ===========================
 
-Mixle is a package family, not a single wheel. Public documentation should
-make that clear: a release claim is only trustworthy when the core package,
-sister packages, clients, notebooks, demos, and release notes agree on what is
-being shipped and what evidence proves it.
+Related Mixle projects can be coordinated as a package family, but that scope
+must be chosen explicitly. A family-release claim is trustworthy only when the
+core package, included packages, clients, notebooks, demos, and release notes
+agree on what is being shipped and what evidence proves it.
 
 Use this page as the public-facing summary of the coordinated release process.
 The detailed release records should live in the repository's release evidence
 area and must be completed before any final publication claim.
+
+0.8.0 Scope Decision
+--------------------
+
+Mixle Core 0.8.0 is deliberately a **standalone core release**, not a
+coordinated family release. ``mixle-knowledge``, ``mixle-mlops``,
+``mixle-pde``, ``mixle-discrete``, ``mixle-agent``, ``mixle-demos``,
+``mixle-notebooks``, and ``mixle-ios`` are all excluded from the 0.8.0
+artifact, support, co-installation, and compatibility claims. They retain
+independent versions and release evidence.
+
+The process below applies only to a future release that explicitly adopts a
+versioned family manifest. Until then, it is a design for coordination rather
+than a gate on Core publication.
 
 Package Roles
 -------------
@@ -80,7 +94,8 @@ reproducibility policy.
 Family Co-Install Gate
 ----------------------
 
-Passing package tests in isolation is necessary but not sufficient. For every
+For a future coordinated release, passing package tests in isolation is
+necessary but not sufficient. For every
 package classified as a published Python package, the final release should
 install the chosen versions together in a fresh environment and then run small
 cross-package smoke checks.
@@ -93,6 +108,9 @@ The co-install evidence should prove:
   state unless that checkout is explicitly documented;
 * ``mixle-knowledge`` validates contracts consumed by sibling packages; and
 * no package depends on an unpublished sibling version.
+
+No item in this section is claimed or required by the standalone Core 0.8.0
+release.
 
 Publication Order
 -----------------

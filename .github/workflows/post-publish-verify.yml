@@ -24,8 +24,10 @@ jobs:
         os: [ubuntu-latest, macos-14]
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
       - id: release
@@ -72,7 +74,7 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           python -c 'import hashlib,json,os,pathlib; files=sorted(pathlib.Path("public-artifacts").iterdir()); pathlib.Path("public-index-receipt.json").write_text(json.dumps({"artifact":"mixle.public_index_identity/v1","version":os.environ["VERSION"],"files":{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in files},"passed":True},sort_keys=True)+"\n")'
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: public-index-identity-${{ matrix.os }}-py${{ matrix.python-version }}
           path: public-index-receipt.json

@@ -117,6 +117,10 @@ class HostedWorkflowContractTest(unittest.TestCase):
         self.assertIn("pip-audit (all runtime features)", security)
         self.assertIn("--profile all", security)
         self.assertIn("bandit (source security)", security)
+        self.assertIn("gitleaks (full history)", security)
+        self.assertIn("fetch-depth: 0", security)
+        self.assertIn("verify_vulnerability_waivers.py", security)
+        self.assertIn("accepted-waivers", security)
         self.assertNotIn("continue-on-error: true", security)
         self.assertEqual(tests.count("scripts/run_required_pytest.py"), 2)
         optional_job = tests.split("\n  optional:\n", 1)[1].split("\n  numerical:\n", 1)[0]
@@ -125,6 +129,21 @@ class HostedWorkflowContractTest(unittest.TestCase):
         self.assertIn("extras matrix / exact candidate", extras)
         self.assertIn("verify_published_artifacts.py", post)
         self.assertIn("public-artifacts/*.whl", post)
+
+    def test_release_artifacts_and_automation_fail_closed(self):
+        tests = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        publish = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+        post = (ROOT / ".github" / "workflows" / "post-publish-verify.yml").read_text(encoding="utf-8")
+        self.assertIn("dist/*.whl", tests)
+        self.assertIn("dist/*.tar.gz", tests)
+        self.assertEqual(tests.count("scripts/import_sweep.py"), 2)
+        self.assertIn("--profile full", tests)
+        self.assertIn("serialization_audit_contracts_test.py", tests)
+        self.assertIn("0.8.0-build-requirements.txt", publish)
+        self.assertIn("build_environment_receipt.py", publish)
+        self.assertGreaterEqual(publish.count("--no-isolation"), 2)
+        self.assertIn("REQUESTED_VERSION: ${{ inputs.version }}", post)
+        self.assertEqual(_load("check_workflows.py").validate(), [])
 
 
 if __name__ == "__main__":

@@ -2,8 +2,8 @@
 
 ``SOURCE_DATE_EPOCH`` alone does not reach every tar-member mtime setuptools' ``sdist`` command writes
 (only real wall-clock file mtimes land there), and this environment's ``gzip`` module was observed to
-emit non-deterministic compressed bytes for byte-identical input even within a single process -- these
-tests pin both of those down using small, synthetic tarballs (not a real ``python -m build``, which is
+retain platform-sensitive header fields unless every input is explicit -- these tests pin both of
+those down using small, synthetic tarballs (not a real ``python -m build``, which is
 slow and would only re-test packaging, not this script's own logic) that deliberately carry different
 member mtimes/uid/gid, the exact shape two real builds of the same commit, run at different wall-clock
 times, produce.
@@ -88,8 +88,7 @@ class NormalizeSdistTest(unittest.TestCase):
         self.assertNotEqual(self.a.read_bytes(), self.b.read_bytes())
 
     def test_repeated_normalization_of_the_same_input_is_deterministic(self):
-        # The specific hazard that motivated this script: Python's own gzip module produced
-        # different compressed bytes for identical input across two calls in the same process.
+        # The compressor receives an empty filename and fixed mtime rather than ambient path/time state.
         epoch = 1_700_000_000
         _make_sdist(self.a, mtime_base=1_700_000_050)
         _make_sdist(self.b, mtime_base=1_700_000_050)

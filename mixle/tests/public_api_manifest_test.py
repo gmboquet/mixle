@@ -20,9 +20,9 @@ When a change intentionally alters the public surface, regenerate and commit::
 
     python scripts/gen_api_manifest.py
 
-Packages whose ``__all__`` is assembled at runtime are resolved by import; if the current environment
-cannot import one (a missing optional dependency), that package is skipped here rather than allowed to
-falsely diff against a manifest generated in a fuller environment.
+Packages whose ``__all__`` is assembled at runtime are derived mechanically from the generator output
+and must resolve by import. An unresolved dynamic package is blocking; otherwise the gate would silently
+drop compatibility coverage for its entire public surface.
 """
 
 import importlib.util
@@ -48,12 +48,6 @@ def _load_generator():
     return module
 
 
-def _resolvable(packages, key):
-    # A runtime-assembled package the current env cannot import is skipped on both sides, so a missing
-    # optional dep never turns into a false public-API diff.
-    return not (isinstance(packages.get(key), dict) and "unresolved" in packages[key])
-
-
 def _maturity(entry):
     return entry.get("maturity") if isinstance(entry, dict) else None
 
@@ -69,11 +63,7 @@ def _partition_drift(committed_packages, current_packages):
     since that reclassification is exactly the kind of decision ``release-checklists/0.8.0-decisions.md``
     exists to record, not something to wave through silently.
     """
-    keys = sorted(
-        k
-        for k in set(committed_packages) | set(current_packages)
-        if _resolvable(committed_packages, k) and _resolvable(current_packages, k)
-    )
+    keys = sorted(set(committed_packages) | set(current_packages))
     blocking, experimental_only = [], []
     for key in keys:
         want = committed_packages.get(key)
@@ -83,7 +73,9 @@ def _partition_drift(committed_packages, current_packages):
         want_names, got_names = set((want or {}).get("names", [])), set((got or {}).get("names", []))
         added, removed = sorted(got_names - want_names), sorted(want_names - got_names)
         tiers = {t for t in (_maturity(want), _maturity(got)) if t is not None}
-        line = f"  {key} [{'/'.join(sorted(tiers)) or '?'}]: +{added} -{removed}"
+        unresolved = (got or {}).get("unresolved")
+        suffix = f" unresolved={unresolved}" if unresolved else ""
+        line = f"  {key} [{'/'.join(sorted(tiers)) or '?'}]: +{added} -{removed}{suffix}"
         (experimental_only if tiers == {"experimental"} else blocking).append(line)
     return blocking, experimental_only
 
@@ -145,18 +137,19 @@ class PublicApiManifestTest(unittest.TestCase):
         )
 
     def test_dynamic_packages_resolve_cleanly(self):
-        """``mixle``, ``mixle.stats``, and ``mixle.utils`` assemble ``__all__`` at runtime and must
-        actually resolve here -- every dependency they need is installed in this environment, none is
-        optional. A prior regression imported ``mixle.stats`` before ``mixle.reason`` had a chance to
+        """Every package that assembles ``__all__`` at runtime must actually resolve here.
+
+        The dynamic set comes from the generator rather than a hand-maintained package tuple, so a new
+        runtime-built package cannot fall outside this assertion. A prior regression imported
+        ``mixle.stats`` before ``mixle.reason`` had a chance to
         finish initializing, tripping a real circular-import chain (``mixle.stats.bayes.dirichlet`` ->
         ``mixle.inference`` -> ``mixle.analysis`` -> ``mixle.reason`` -> ``mixle.stats.latent.mixture``
-        -> back to ``mixle.stats.bayes.dirichlet``) and silently recording ``mixle.stats`` as
-        ``{"unresolved": "ImportError"}`` -- which ``_resolvable`` above then treats exactly like a
-        legitimately-missing optional dependency and skips, defeating drift coverage for the whole
-        package. Assert that does not happen."""
+        -> back to ``mixle.stats.bayes.dirichlet``). Recording that as unresolved and skipping it
+        defeated drift coverage for the whole package. Assert that cannot happen."""
         current = _load_generator().build_manifest(_REPO_ROOT)["packages"]
-        for key in ("mixle", "mixle.stats", "mixle.utils"):
-            entry = current.get(key)
+        dynamic = {key: entry for key, entry in current.items() if entry.get("dynamic") is True}
+        self.assertGreater(len(dynamic), 0)
+        for key, entry in dynamic.items():
             names = entry.get("names") if isinstance(entry, dict) else None
             self.assertIsInstance(
                 names,
@@ -188,7 +181,9 @@ class PublicApiManifestTest(unittest.TestCase):
         the same way a user importing it would."""
         import importlib
 
-        for key in ("mixle", "mixle.stats", "mixle.utils"):
+        current = _load_generator().build_manifest(_REPO_ROOT)["packages"]
+        dynamic = [key for key, entry in current.items() if entry.get("dynamic") is True]
+        for key in dynamic:
             module = importlib.import_module(key)
             names = getattr(module, "__all__", [])
             failures = []
@@ -241,11 +236,18 @@ class DriftPartitionTest(unittest.TestCase):
         self.assertEqual(len(blocking), 1)
         self.assertEqual(experimental_only, [])
 
-    def test_unresolved_packages_are_skipped_on_both_sides(self):
-        committed = {"mixle": {"maturity": "provisional", "names": ["A"]}}
-        current = {"mixle": {"maturity": "provisional", "unresolved": "ImportError"}}
+    def test_unresolved_dynamic_package_is_blocking(self):
+        committed = {"mixle.system": {"dynamic": True, "maturity": "provisional", "names": ["A"]}}
+        current = {
+            "mixle.system": {
+                "dynamic": True,
+                "maturity": "provisional",
+                "unresolved": "ImportError",
+            }
+        }
         blocking, experimental_only = _partition_drift(committed, current)
-        self.assertEqual(blocking, [])
+        self.assertEqual(len(blocking), 1)
+        self.assertIn("unresolved=ImportError", blocking[0])
         self.assertEqual(experimental_only, [])
 
     def test_unchanged_manifest_has_no_drift(self):

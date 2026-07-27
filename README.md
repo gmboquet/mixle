@@ -1,7 +1,7 @@
 <p align="left">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/gmboquet/mixle/main/assets/mixle_logo_dark.png"/>
-    <img src="https://raw.githubusercontent.com/gmboquet/mixle/main/assets/mixle_logo.png" alt="mixle" width="480"/>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/gmboquet/mixle/v0.8.0/assets/mixle_logo_dark.png"/>
+    <img src="https://raw.githubusercontent.com/gmboquet/mixle/v0.8.0/assets/mixle_logo.png" alt="mixle" width="480"/>
   </picture>
 </p>
 
@@ -282,9 +282,11 @@ Normal(free * Field("x") + free * Field("z") + free, free).fit(
   representations, and reproducible artifacts with a serving gateway
   ([mixle-mlops](https://github.com/gmboquet/mixle-mlops)).
 
-## Companion projects
+## Related projects
 
-The core library stands alone; six sibling projects build on it:
+Mixle Core 0.8.0 is a standalone release. The independently versioned projects below are
+related development efforts, not members of the 0.8.0 artifact set, and this release makes
+no co-installation or compatibility claim for them:
 
 - **[mixle-notebooks](https://github.com/gmboquet/mixle-notebooks)** — runnable tutorials, data-science
   recipes, applied case studies, and architecture/scaling studies.
@@ -298,11 +300,13 @@ The core library stands alone; six sibling projects build on it:
   desktop) with skills, MCP tool interop, and pluggable model providers including mixle's own models.
 - **[mixle-demos](https://github.com/gmboquet/mixle-demos)** — standalone, runnable end-to-end
   demonstration harnesses exercising the ecosystem against synthetic truth.
+- **mixle-knowledge** — structured knowledge and evidence management (not included in Core 0.8.0).
+- **mixle-ios** — an independently released client application (not included in Core 0.8.0).
 
 ## Examples
 
-Self-contained scripts in [examples/](https://github.com/gmboquet/mixle/tree/main/examples)
-— each samples from a known model, refits, and recovers it (no downloads):
+The five scripts below are self-contained and download-free. They are available in the
+[version-bound examples directory](https://github.com/gmboquet/mixle/tree/v0.8.0/examples):
 
 ```sh
 cd examples
@@ -312,6 +316,11 @@ python ppl_example.py                  # the equation-style mixle.ppl surface
 python production_example.py           # provenance, registry, serving, drift
 python scaling_example.py              # same fit by backend= (mp / mpi / spark)
 ```
+
+Other shipped examples may download data or model assets. Their network requirement,
+upstream revision or digest, cache behavior, offline failure mode, and release evidence
+status are recorded in the
+[example execution manifest](https://gmboquet.github.io/mixle/0.8.0/example-execution-manifest.html).
 
 **Distributed backends** (see `scaling_example.py`): `local` and `mp` run out of the box; `mpi` and Spark
 need a launcher. Spark also needs a JVM (Java 17/21) with workers on the driver's Python:
@@ -332,7 +341,7 @@ Local validation should be scoped to commands that finish within 30 seconds; the
 release-tip workflows own the broad matrix. `base_dist_test.py` exercises 40 of its 41 base-distribution families end to end: sampler repeatability,
 `str`/`eval` round-trips, vectorized-vs-scalar density agreement, EM convergence. (The one exception,
 `HierarchicalMixtureDistribution`, is excluded with the reason documented at its `_build_dists()` entry.)
-See [`mixle/tests/README.md`](https://github.com/gmboquet/mixle/blob/main/mixle/tests/README.md).
+See [`mixle/tests/README.md`](https://github.com/gmboquet/mixle/blob/v0.8.0/mixle/tests/README.md).
 
 ## Maintainers & contributors
 
@@ -343,4 +352,4 @@ Contributions, issues, and discussion are welcome — open a PR or an issue.
 
 ## License
 
-MIT — see [LICENSE](https://github.com/gmboquet/mixle/blob/main/LICENSE).
+MIT — see [LICENSE](https://github.com/gmboquet/mixle/blob/v0.8.0/LICENSE).

@@ -1,0 +1,12 @@
+title = "Mixle release secret policy"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Exact synthetic credentials used by redaction tests"
+regexTarget = "match"
+regexes = [
+  '''sk-abcdefghij1234567890XYZ''',
+  '''AKIA1234567890ABCDEF''',
+]

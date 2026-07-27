@@ -2,15 +2,16 @@
 
 ``SOURCE_DATE_EPOCH`` alone is not enough for setuptools' ``sdist`` command: it does not apply the epoch
 to each tar member's own ``mtime`` (only real wall-clock file mtimes land there), and this environment's
-Python ``gzip`` module was observed to emit non-deterministic compressed bytes for byte-identical input --
-even within a single process, across two calls with identical arguments -- while the system ``gzip``
-binary did not. Wheel builds do not have either problem (verified separately; see
+Python's convenience ``gzip.compress`` path can preserve or synthesize platform-sensitive header
+fields unless all inputs are explicit. This implementation writes through ``gzip.GzipFile`` with an
+empty filename, fixed mtime, fixed compression level, and no external executable. Wheel builds do not
+have either problem (verified separately; see
 ``release-checklists/0.8.0-decisions.md`` D- entry on reproducible builds), so only the sdist needs this.
 
 This script: decompresses the sdist, rewrites every tar member's ``mtime``/``uid``/``gid``/``uname``/
 ``gname`` to a fixed epoch (0/0 for the ownership fields, since the *real* uid/gid of whoever ran the
-build is never meaningful to preserve), and recompresses with the system ``gzip -n`` (``-n`` suppresses
-gzip's own header-level name/mtime fields). Run after ``python -m build --sdist``, before ``twine check``
+build is never meaningful to preserve), and recompresses with a fully specified stdlib gzip stream.
+Run after ``python -m build --sdist``, before ``twine check``
 or ``upload-artifact``, on the exact ``dist/*.tar.gz`` that build produced.
 """
 
@@ -19,7 +20,6 @@ from __future__ import annotations
 import gzip
 import io
 import os
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -41,7 +41,10 @@ def normalize(path: Path, epoch: int) -> None:
             member.uname = ""
             member.gname = ""
             dst.addfile(member, src.extractfile(member) if member.isfile() else None)
-    compressed = subprocess.run(["gzip", "-n", "-9"], input=out.getvalue(), capture_output=True, check=True).stdout
+    compressed_out = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=compressed_out, compresslevel=9, mtime=0) as stream:
+        stream.write(out.getvalue())
+    compressed = compressed_out.getvalue()
     # Validate the complete replacement before touching the only built artifact.
     check = gzip.decompress(compressed)
     with tarfile.open(fileobj=io.BytesIO(check), mode="r:") as archive:

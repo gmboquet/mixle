@@ -46,11 +46,12 @@ jobs:
       candidate-tag: ${{ steps.candidate.outputs.tag }}
       candidate-version: ${{ steps.candidate.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           ref: ${{ inputs.tag }}
           fetch-depth: 0
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - id: candidate
@@ -75,9 +76,8 @@ jobs:
           test "$SHA" = "$(git rev-list -n 1 "refs/tags/$TAG")"
           test "$EVENT_SHA" = "$SHA"
 
-          git fetch origin release/0.8.0:refs/remotes/origin/release/0.8.0
-          git merge-base --is-ancestor origin/release/0.8.0 "$SHA"
-          test "$SHA" = "$(git rev-parse origin/release/0.8.0)"
+          RELEASE_SHA="$(gh api "repos/$REPOSITORY/branches/release/0.8.0" --jq .commit.sha)"
+          test "$SHA" = "$RELEASE_SHA"
 
           if [ "$PHASE" = "promote" ]; then
             test -n "$PREPARE_RUN_ID"
@@ -96,7 +96,7 @@ jobs:
           printf 'sha=%s\n' "$SHA" >> "$GITHUB_OUTPUT"
           printf 'tag=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
           printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: candidate-approval-${{ steps.candidate.outputs.sha }}-${{ inputs.phase }}
           path: ${{ runner.temp }}/release-check-evidence.json
@@ -112,14 +112,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           ref: ${{ needs.verify-candidate.outputs.candidate-sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: candidate-approval-${{ needs.verify-candidate.outputs.candidate-sha }}-prepare
           path: metadata
@@ -130,7 +131,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          python -m pip install --upgrade pip build twine
+          python -m pip install --upgrade "pip==26.1.2"
+          python -m pip install -r release-checklists/0.8.0-build-requirements.txt
           python -m pip install -r release-checklists/0.8.0-repro-requirements.txt
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD)"
           export MIXLE_SOURCE_COMMIT="$CANDIDATE_SHA"
@@ -139,8 +141,11 @@ jobs:
           mkdir source-a source-b dist-a dist-b dist
           git archive HEAD | tar -x -C source-a
           git archive HEAD | tar -x -C source-b
-          (cd source-a && python -m build --outdir ../dist-a)
-          (cd source-b && python -m build --outdir ../dist-b)
+          python scripts/build_environment_receipt.py \
+            --requirements release-checklists/0.8.0-build-requirements.txt \
+            --out metadata/build-environment.json
+          (cd source-a && python -m build --no-isolation --outdir ../dist-a)
+          (cd source-b && python -m build --no-isolation --outdir ../dist-b)
           python scripts/normalize_sdist.py dist-a/*.tar.gz "$SOURCE_DATE_EPOCH"
           python scripts/normalize_sdist.py dist-b/*.tar.gz "$SOURCE_DATE_EPOCH"
           python scripts/verify_reproducible_builds.py \
@@ -172,19 +177,26 @@ jobs:
           SITE=$("$RUNNER_TEMP/sbom-artifact-env/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
           python -m venv "$RUNNER_TEMP/sbom-tool-env"
           "$RUNNER_TEMP/sbom-tool-env/bin/python" -m pip install pip-audit
+          python scripts/verify_vulnerability_waivers.py \
+            --input .github/pip-audit-waivers.json --profile base \
+            --args-out metadata/waiver-args.txt \
+            --receipt metadata/accepted-waivers.json
+          mapfile -t WAIVERS < metadata/waiver-args.txt
           "$RUNNER_TEMP/sbom-tool-env/bin/pip-audit" \
-            --path "$SITE" --format cyclonedx-json -o metadata/raw-sbom.json
+            --path "$SITE" "${WAIVERS[@]}" \
+            --format cyclonedx-json -o metadata/raw-sbom.json
           python scripts/bind_sbom.py \
             --cyclonedx metadata/raw-sbom.json \
             --wheel-metadata metadata/mixle-0.8.0-py3-none-any.whl.json \
             --candidate-sha "$CANDIDATE_SHA" \
+            --waivers metadata/accepted-waivers.json \
             --out metadata/sbom.json
-          rm metadata/raw-sbom.json
+          rm metadata/raw-sbom.json metadata/waiver-args.txt
           python -c 'import json, os, pathlib; pathlib.Path("metadata/release-candidate.json").write_text(json.dumps({"artifact": "mixle.release_candidate/v1", "commit": os.environ["CANDIDATE_SHA"], "tag": os.environ["CANDIDATE_TAG"], "version": os.environ["CANDIDATE_VERSION"], "workflow_run": os.environ["GITHUB_RUN_ID"]}, indent=2, sort_keys=True) + "\n", encoding="utf-8")'
           for entry in gallery-univariate gallery-structured production-provenance scaling-backend; do
             python scripts/run_repro_entry.py --entry "$entry" > "metadata/reproduction-$entry.json"
           done
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-candidate-${{ needs.verify-candidate.outputs.candidate-sha }}
           path: |
@@ -220,16 +232,17 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           ref: ${{ needs.verify-candidate.outputs.candidate-sha }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-candidate-${{ needs.verify-candidate.outputs.candidate-sha }}
           path: candidate
           run-id: ${{ inputs.prepare_run_id }}
           github-token: ${{ github.token }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: candidate-approval-${{ needs.verify-candidate.outputs.candidate-sha }}-promote
           path: promotion
@@ -275,7 +288,7 @@ jobs:
             candidate/metadata/network/*.json candidate/metadata/security/*.json \
             --clobber
       - name: Publish the already-verified files to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
         with:
           packages-dir: candidate/dist/
           skip-existing: true
