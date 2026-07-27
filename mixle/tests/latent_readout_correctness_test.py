@@ -515,11 +515,11 @@ class StructuredHMMZeroMassGuardsTest(unittest.TestCase):
             with self.assertRaises(ImpossibleEvidenceError):
                 hmm.state_posteriors([1.0, -1.0, 2.0])
 
-    def test_fit_on_empty_batch_keeps_parameters_finite(self):
+    def test_fit_rejects_an_empty_training_batch(self):
         hmm = self._model()
         with np.errstate(divide="ignore", invalid="ignore"):
-            fitted, _ = hmm.fit([[]], max_its=1, fast=False)
-        self.assertTrue(np.all(np.isfinite(fitted.pi)), "pi became non-finite on an empty batch")
+            with self.assertRaisesRegex(ValueError, "empty sequence"):
+                hmm.fit([[]], max_its=1, fast=False)
 
     def test_iohmm_impossible_first_observation_is_neg_inf_not_nan(self):
         iohmm = InputOutputHMM(
