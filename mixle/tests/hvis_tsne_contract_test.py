@@ -14,7 +14,6 @@ from mixle.utils.hvis.tsne import (
     update_alpha,
 )
 
-pytestmark = pytest.mark.fast
 
 
 class JointProbabilityContractTest(unittest.TestCase):

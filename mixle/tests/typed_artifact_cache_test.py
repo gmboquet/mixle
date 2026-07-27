@@ -7,7 +7,7 @@ import pytest
 from mixle.experimental.typed_runtime import ArtifactKind, VersionedArtifactCache, compile_update_graph
 from mixle.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 def _mixture_graph():

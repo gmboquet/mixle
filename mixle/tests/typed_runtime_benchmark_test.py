@@ -18,7 +18,7 @@ from mixle.experimental.typed_runtime import (
     WorkMeasurement,
 )
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 class TimeToTargetTest:

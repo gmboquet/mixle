@@ -9,10 +9,13 @@ before the batched-covariance fix) now fit in a few GB. Emits gpu_results.json.
     python gpu_scaling.py
 """
 
+import argparse
 import json
 import os
 import sys
+import tempfile
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -68,7 +71,22 @@ def fit_gpu(X, means0, cov0, w0, its):
     return float(np.median(ts)), ll, peak
 
 
-def main():
+def _prepare_output_directory(value):
+    path = Path(value).resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.NamedTemporaryFile(dir=path, prefix=".write-probe-", delete=True):
+            pass
+    except OSError as exc:
+        raise ValueError(f"benchmark output directory is not writable: {path}") from exc
+    return path
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", default=os.path.join(HERE, "results"))
+    args = parser.parse_args(argv)
+    output_dir = _prepare_output_directory(args.output_dir)
     gpu_name = torch.cuda.get_device_name(0)
     print(f"=== mixle on GPU ({gpu_name}) -- full-covariance GMM throughput ===")
     out = {"gpu": gpu_name, "panels": {}}
@@ -109,8 +127,8 @@ def main():
             pts.append({"dim": dim, "n": n, "k": k, "gpu": None, "oom": True})
     out["panels"]["scale_dim"] = {"axis": "dim", "fixed": {"n": n, "k": k, "its": its}, "points": pts}
 
-    path = os.path.join(HERE, "results", "gpu_results.json")
-    with open(path, "w") as f:
+    path = output_dir / "gpu_results.json"
+    with path.open("w", encoding="utf-8") as f:
         json.dump(stamp_result(out), f, indent=2)
     print(f"\nwrote {path}")
 

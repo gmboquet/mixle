@@ -7,8 +7,10 @@ a known cost. The single broad ``fast`` marker is being replaced by these named
 tiers; ``fast`` remains as the current per-commit default while the migration
 proceeds.
 
-Each tier is a pytest marker declared in ``pyproject.toml``. Select a tier on the
-command line with ``-m``, for example ``pytest -m smoke``.
+Each tier is a pytest marker declared in ``pyproject.toml``. The latency-bounded
+local smoke command is ``python scripts/run_smoke.py``. Do not use a broad
+``pytest -m smoke`` invocation as latency evidence: pytest imports every
+discovered test module before marker deselection.
 
 .. list-table::
    :header-rows: 1
@@ -22,7 +24,7 @@ command line with ``-m``, for example ``pytest -m smoke``.
      - Import, public-API, and critical-fit-path checks -- "is the package
        fundamentally working?"
      - <= 30 s local, <= 60 s in CI
-     - Usable now -- 4 tests collected.
+     - Enforced now -- 4 tests in an explicit one-file manifest.
    * - ``core``
      - Stable base-install correctness (no optional extras).
      - <= 4 min per Python CI job
@@ -56,8 +58,9 @@ Current Status
 
 Three tiers are usable today and select real tests: ``smoke`` (4 tests, all in
 ``mixle/tests/smoke_test.py``), plus the pre-existing ``optional`` (277 tests) and
-``benchmark`` (7 tests) tiers. Verified directly with ``pytest -m <tier>
---collect-only``.
+``benchmark`` (7 tests) tiers. The smoke surface is
+``mixle/tests/smoke-manifest.txt`` and is run without broad collection by
+``scripts/run_smoke.py``.
 
 The four tiers T3.1 introduced alongside ``smoke`` -- ``core``, ``full``,
 ``numerical``, and ``hardware`` -- are declared in ``pyproject.toml`` (so
@@ -79,7 +82,9 @@ Guidance
 * **smoke** must stay genuinely fast and dependency-light: it runs on a base
   install with no optional extras, and its job is to fail loudly and quickly when
   something is fundamentally broken (an import cycle, a broken public entry
-  point, a critical fit path that no longer converges).
+  point, a critical fit path that no longer converges). Its runner rejects
+  directories, globs, repository escapes, duplicate entries, and budgets above
+  30 seconds.
 * **numerical** and **benchmark** tests are deliberately kept out of the
   per-commit gates. A stochastic assertion that fails one run in fifty does not
   belong in the signal a contributor reads on every push; it belongs in a
@@ -91,6 +96,7 @@ Guidance
   ``serialization``). The tier answers *when it runs*; the domain markers answer
   *what it covers*.
 
-Budgets are targets, not hard limits enforced per-test; they exist so a tier that
-grows past its budget is noticed and split rather than silently becoming the new
-slow path.
+The smoke budget is a hard subprocess timeout and produces a retained CI receipt.
+Budgets for the broader tiers remain targets until their jobs receive equivalent
+enforcement; they exist so a tier that grows past its budget is noticed and split
+rather than silently becoming the new slow path.

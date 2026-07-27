@@ -25,7 +25,7 @@ from mixle.stats import (
 )
 from mixle.utils.parallel.planner import DeviceSpec
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 def _topology():

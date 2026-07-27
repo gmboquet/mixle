@@ -25,7 +25,7 @@ from mixle.experimental.typed_runtime import (
     weakest_certificate,
 )
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), -1.0])

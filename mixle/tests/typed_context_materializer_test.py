@@ -17,7 +17,7 @@ from mixle.experimental.typed_runtime import (
     materialize_context,
 )
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 def _provenance():

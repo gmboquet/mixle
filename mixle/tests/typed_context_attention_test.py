@@ -15,7 +15,7 @@ from mixle.experimental.typed_runtime import (
     bounded_context_attention,
 )
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 def _fixture(count=500, target_index=40):

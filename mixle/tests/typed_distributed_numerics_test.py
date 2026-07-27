@@ -19,7 +19,7 @@ from mixle.utils.parallel.training_contracts import (
     ParallelPlan,
 )
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 def _graph():

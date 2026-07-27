@@ -20,7 +20,6 @@ from mixle.utils.parallel.training_launchers import (
     attest_worker_coordinate,
 )
 
-pytestmark = pytest.mark.fast
 
 
 class ParallelPlanContractTest(unittest.TestCase):

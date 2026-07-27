@@ -30,7 +30,7 @@ from mixle.experimental.typed_runtime import (
     TransactionalCoordinator as RuntimeTransactionalCoordinator,
 )
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 def TransactionalCoordinator(*args, **kwargs):

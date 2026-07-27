@@ -14,6 +14,7 @@ module top level, so it is not flagged.
 """
 
 import ast
+import fnmatch
 import unittest
 from pathlib import Path
 
@@ -89,9 +90,14 @@ def _unguarded_heavy_imports(path: Path):
 class CollectionHygieneTest(unittest.TestCase):
     def test_no_unguarded_heavy_imports_at_module_top(self):
         findings = []
-        for path in sorted(TESTS_DIR.glob("*_test.py")):
+        paths = {
+            path
+            for path in TESTS_DIR.rglob("*.py")
+            if any(fnmatch.fnmatch(path.name, pattern) for pattern in ("*_test.py", "test_*.py"))
+        }
+        for path in sorted(paths):
             for imp in _unguarded_heavy_imports(path):
-                findings.append(f"{path.name}: {imp}")
+                findings.append(f"{path.relative_to(TESTS_DIR)}: {imp}")
         self.assertEqual(
             findings,
             [],
@@ -99,6 +105,43 @@ class CollectionHygieneTest(unittest.TestCase):
             "pytest.importorskip -- this inflates base-install collection and breaks it when the "
             "framework is absent:\n" + "\n".join(findings),
         )
+
+    def test_test_modules_do_not_self_assign_the_fast_tier(self):
+        findings = []
+        paths = {
+            path
+            for path in TESTS_DIR.rglob("*.py")
+            if any(fnmatch.fnmatch(path.name, pattern) for pattern in ("*_test.py", "test_*.py"))
+        }
+        for path in sorted(paths):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "fast"
+                    and isinstance(node.value, ast.Attribute)
+                    and node.value.attr == "mark"
+                    and isinstance(node.value.value, ast.Name)
+                    and node.value.value.id == "pytest"
+                ):
+                    findings.append(f"{path.relative_to(TESTS_DIR)}:{node.lineno}")
+        self.assertEqual(
+            findings,
+            [],
+            "test modules must not self-assign pytest.mark.fast; conftest.py is the central tier authority:\n"
+            + "\n".join(findings),
+        )
+
+    def test_every_file_marker_registry_entry_names_a_collected_module(self):
+        from mixle.tests.conftest import FILE_MARKERS
+
+        discovered = {
+            path.name
+            for path in TESTS_DIR.rglob("*.py")
+            if any(fnmatch.fnmatch(path.name, pattern) for pattern in ("*_test.py", "test_*.py"))
+        }
+        missing = sorted(set(FILE_MARKERS) - discovered)
+        self.assertEqual(missing, [], f"FILE_MARKERS names nonexistent collected modules: {missing}")
 
 
 if __name__ == "__main__":

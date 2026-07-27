@@ -20,7 +20,7 @@ from mixle.experimental.typed_runtime import (  # noqa: E402
 )
 from mixle.stats import GaussianDistribution, GaussianEstimator  # noqa: E402
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast, pytest.mark.torch]
+pytestmark = [pytest.mark.experimental, pytest.mark.torch]
 
 
 def _contract(*, curvature=CurvatureKind.UNAVAILABLE, update=UpdateKind.FIRST_ORDER):

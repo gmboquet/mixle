@@ -17,7 +17,7 @@ from mixle.experimental.typed_runtime import (
     ValueOfInformationScheduler,
 )
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 def _action(

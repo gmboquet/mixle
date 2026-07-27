@@ -17,7 +17,7 @@ from mixle.experimental.typed_runtime import (
     partition_context_graph,
 )
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 def _graph(count=8):

@@ -31,7 +31,7 @@ from mixle.experimental.typed_runtime import (
 )
 from mixle.stats import GaussianDistribution, GaussianEstimator
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 def _exact_proposal(proposal_id, payload, *, base=0, dependency=0, observations=1.0):

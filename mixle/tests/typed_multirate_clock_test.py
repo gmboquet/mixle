@@ -12,7 +12,7 @@ from mixle.experimental.typed_runtime import (
     UpdateCadence,
 )
 
-pytestmark = [pytest.mark.experimental, pytest.mark.fast]
+pytestmark = [pytest.mark.experimental]
 
 
 def test_nodes_become_due_on_different_progress_axes():
