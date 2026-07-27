@@ -36,6 +36,7 @@ import numpy as np
 from numpy.random import RandomState
 
 import mixle.utils.vector as vec
+from mixle.capability import Neutral, supports
 from mixle.engines.arithmetic import *
 from mixle.engines.arithmetic import maxrandint
 from mixle.stats.combinator.null_dist import (
@@ -477,7 +478,11 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
         from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
 
         children = list(self.topics) + ([] if self.len_dist is None else [self.len_dist])
-        sems = [c.density_semantics() for c in children if hasattr(c, "density_semantics")]
+        sems = [
+            c.density_semantics()
+            for c in children
+            if hasattr(c, "density_semantics") and not supports(c, Neutral)
+        ]
         return join_density_semantics(sems) if sems else DensitySemantics.EXACT
 
     def sampler(self, seed: int | None = None) -> "LookbackHiddenMarkovModelSampler":

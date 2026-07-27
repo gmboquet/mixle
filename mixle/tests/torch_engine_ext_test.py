@@ -235,12 +235,10 @@ class OptionalTorchTest(TorchExtBase):
         self.check_ld_parity(self.model, self.data)
 
     def test_no_p_parity(self):
-        # degenerate legacy mode: no missing probability given
+        # A marginalized likelihood factor cannot be normalized as a mixture component.
         comps = [OptionalDistribution(GaussianDistribution(-2.0 + 4.0 * k, 1.0)) for k in range(2)]
-        model = MixtureDistribution(comps, [0.5, 0.5])
-        data = list(model.components[0].dist.sampler(seed=53).sample(size=100))
-        data[::7] = [None] * len(data[::7])
-        self.check_ld_parity(model, data)
+        with self.assertRaises(TypeError):
+            MixtureDistribution(comps, [0.5, 0.5])
 
     def test_em_parity(self):
         self.check_em_parity(self.model, self.est, self.data)

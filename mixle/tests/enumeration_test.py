@@ -84,7 +84,6 @@ def make_cases():
             4,
         ),
         ("optional", OptionalDistribution(cat3, p=0.2, missing_value="MISSING"), 10, 4),
-        ("optional_collision", OptionalDistribution(cat3, p=0.2, missing_value="a"), 10, 3),
         ("weighted", WeightedDistribution(cat3), 10, 3),
         ("point_mass", PointMassDistribution("atom"), 5, 1),
         (
@@ -700,6 +699,10 @@ class EnumerationErrorTestCase(unittest.TestCase):
     def test_optional_without_p_raises(self):
         with self.assertRaises(EnumerationError):
             OptionalDistribution(CategoricalDistribution({"a": 1.0})).enumerator()
+
+    def test_optional_rejects_a_missing_sentinel_in_child_support(self):
+        with self.assertRaises(ValueError):
+            OptionalDistribution(CategoricalDistribution({"a": 1.0}), p=0.2, missing_value="a")
 
     # terminal_values enumeration (with a Null length distribution) is supported; see
     # HmmTerminalValuesEnumerationTestCase. The non-Null-length case is rejected there too.

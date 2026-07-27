@@ -62,6 +62,7 @@ class DensitySemantics(Enum):
     LOWER_BOUND = "lower_bound"  # value <= true log p(x); e.g. a variational ELBO
     UPPER_BOUND = "upper_bound"  # value >= true log p(x)
     ESTIMATE = "estimate"  # an approximation with no guaranteed direction (plug-in / Monte Carlo)
+    LIKELIHOOD_FACTOR = "likelihood_factor"  # exact score factor, but not a normalized generative law
 
 
 def join_density_semantics(semantics) -> "DensitySemantics":
@@ -73,6 +74,8 @@ def join_density_semantics(semantics) -> "DensitySemantics":
     of both directions (or any estimate) are mixed.
     """
     kinds = set(semantics)
+    if DensitySemantics.LIKELIHOOD_FACTOR in kinds:
+        return DensitySemantics.LIKELIHOOD_FACTOR
     has_lower = DensitySemantics.LOWER_BOUND in kinds
     has_upper = DensitySemantics.UPPER_BOUND in kinds
     if DensitySemantics.ESTIMATE in kinds or (has_lower and has_upper):

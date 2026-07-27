@@ -1327,7 +1327,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
 
         children = list(self.topics) + ([] if self.len_dist is None else [self.len_dist])
-        sems = [c.density_semantics() for c in children if hasattr(c, "density_semantics")]
+        sems = [
+            c.density_semantics()
+            for c in children
+            if hasattr(c, "density_semantics") and not supports(c, Neutral)
+        ]
         return join_density_semantics(sems) if sems else DensitySemantics.EXACT
 
     def sampler(self, seed: int | None = None) -> HiddenMarkovSampler:
