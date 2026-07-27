@@ -1446,6 +1446,8 @@ __all__ = [
     "HomophilyTemporalGraphGrammarEstimator",
     "HomophilyTemporalGraphGrammarAccumulator",
     "HomophilyTemporalGraphGrammarAccumulatorFactory",
+    "HomophilyTemporalGraphGrammarDataEncoder",
+    "HomophilyTemporalGraphGrammarStatistics",
     "ChurningTemporalGraphGrammarDistribution",
     "ChurningTemporalGraphGrammarSampler",
     "ChurningTemporalGraphGrammarEstimator",
@@ -1471,6 +1473,41 @@ __all__ = [
 
 
 # --- homophily: attribute-conditioned edge formation ----------------------------------------------
+def _validate_homophily_observation(
+    x: Any,
+    motif: CommonNeighbourMotif,
+    num_types: int,
+) -> tuple[tuple[np.ndarray, ...], np.ndarray]:
+    if not isinstance(x, (tuple, list)) or len(x) != 2:
+        raise ValueError("homophily observations must be (snapshots, node_types).")
+    raw_snaps, raw_types = x
+    try:
+        snaps = tuple(
+            _binarize(snapshot, directed=False).toarray()
+            if sp.issparse(snapshot)
+            else _binarize(snapshot, directed=False)
+            for snapshot in raw_snaps
+        )
+    except TypeError as exc:
+        raise ValueError("homophily snapshots must be a sequence.") from exc
+    if not snaps:
+        raise ValueError("homophily observations must contain at least one snapshot.")
+    types = np.asarray(raw_types)
+    if types.ndim != 1 or not np.issubdtype(types.dtype, np.integer):
+        raise ValueError("node_types must be a one-dimensional exact integer vector.")
+    types = np.array(types, dtype=np.int64, copy=True)
+    if len(types) != snaps[-1].shape[0]:
+        raise ValueError("node_types must contain exactly one type per final node index.")
+    if np.any(types < 0) or np.any(types >= num_types):
+        raise ValueError("node_types contain a value outside the configured type support.")
+    for previous, current in zip(snaps, snaps[1:]):
+        if current.shape[0] < previous.shape[0]:
+            raise ValueError("homophily temporal graphs do not support node removal.")
+        if len(_edge_diff(previous, current)[2]):
+            raise ValueError("homophily temporal graphs do not support edge removal.")
+    return snaps, types
+
+
 class HomophilyTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution):
     """A growth grammar whose edge formation depends on node ATTRIBUTES, not just structure (homophily).
 
@@ -1494,13 +1531,35 @@ class HomophilyTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDist
         motif: CommonNeighbourMotif | None = None,
         name: str | None = None,
     ) -> None:
-        self.motif = motif if motif is not None else CommonNeighbourMotif()
-        self.rate = np.asarray(rate, dtype=np.float64)  # (M, K, K), symmetric in the last two axes
-        self.M, self.K = self.rate.shape[0], self.rate.shape[1]
-        tw = np.asarray(type_weights, dtype=np.float64)
-        self.type_weights = tw / tw.sum()
-        self.log_tw = np.log(np.clip(self.type_weights, _EPS, None))
-        self.node_rate = float(node_rate)
+        source_motif = motif if motif is not None else CommonNeighbourMotif()
+        if not isinstance(source_motif, CommonNeighbourMotif) or source_motif.directed:
+            raise ValueError("motif must be an undirected CommonNeighbourMotif.")
+        self.motif = CommonNeighbourMotif(source_motif.bins)
+        tw = np.array(type_weights, dtype=np.float64, copy=True)
+        if tw.ndim != 1 or tw.size == 0:
+            raise ValueError("type_weights must be a nonempty one-dimensional vector.")
+        if np.any(~np.isfinite(tw)) or np.any(tw < 0.0) or float(tw.sum()) <= 0.0:
+            raise ValueError("type_weights must be finite, non-negative, and have positive total.")
+        self.K = len(tw)
+        self.M = self.motif.num_motifs
+        checked_rate = np.array(rate, dtype=np.float64, copy=True)
+        if checked_rate.shape != (self.M, self.K, self.K):
+            raise ValueError("rate must have shape (num_motifs, num_types, num_types).")
+        if np.any(~np.isfinite(checked_rate)) or np.any(checked_rate < 0.0):
+            raise ValueError("rate entries must be finite and non-negative.")
+        if not np.array_equal(checked_rate, checked_rate.transpose(0, 2, 1)):
+            raise ValueError("rate must be symmetric over its two unordered type axes.")
+        checked_rate.setflags(write=False)
+        self.rate = checked_rate
+        normalized_tw = tw / tw.sum()
+        normalized_tw.setflags(write=False)
+        self.type_weights = normalized_tw
+        self.log_tw = np.full(self.K, -math.inf, dtype=np.float64)
+        self.log_tw[self.type_weights > 0.0] = np.log(self.type_weights[self.type_weights > 0.0])
+        self.log_tw.setflags(write=False)
+        self.node_rate = _finite_nonnegative(node_rate, name="node_rate")
+        if name is not None and not isinstance(name, str):
+            raise ValueError("name must be a string or None.")
         self.name = name
 
     def __str__(self) -> str:
@@ -1534,28 +1593,35 @@ class HomophilyTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDist
         cand = self._cand_counts(padded, types)
         _, lookup = self.motif.counts_and_binner(padded, on_edges=False)
         new_nodes = n1 - n0
-        lp = new_nodes * math.log(self.node_rate + _EPS) - self.node_rate - math.lgamma(new_nodes + 1)
-        lp -= float(self.rate.sum())  # the -rate Poisson normaliser over every (motif, type-pair) cell
+        if self.node_rate == 0.0:
+            lp = 0.0 if new_nodes == 0 else float("-inf")
+        else:
+            lp = new_nodes * math.log(self.node_rate) - self.node_rate - math.lgamma(new_nodes + 1)
+        selected = np.zeros((self.M, self.K, self.K), dtype=np.int64)
         if len(ai):
             m = lookup(np.asarray(ai), np.asarray(aj))
             a, b = self._pair_axes(np.asarray(ai), np.asarray(aj), types)
-            for mm, aa, bb in zip(m.tolist(), a.tolist(), b.tolist()):
-                if self.rate[mm, aa, bb] <= 0 or cand[mm, aa, bb] <= 0:
-                    return float("-inf")
-                lp += math.log(self.rate[mm, aa, bb]) - math.log(cand[mm, aa, bb])  # weight x uniform anchor
+            np.add.at(selected, (m, a, b), 1)
+        for motif_index in range(self.M):
+            for left_type in range(self.K):
+                for right_type in range(left_type, self.K):
+                    lp += _capped_poisson_subset_log_prob(
+                        int(selected[motif_index, left_type, right_type]),
+                        int(cand[motif_index, left_type, right_type]),
+                        float(self.rate[motif_index, left_type, right_type]),
+                    )
         return lp
 
     def log_density(self, x: tuple) -> float:
         """Score one homophily dynamic graph observation."""
-        snaps, types = x
-        types = np.asarray(types, dtype=np.int64)
+        snaps, types = _validate_homophily_observation(x, self.motif, self.K)
         lp = float(np.sum(self.log_tw[types]))  # node-type likelihood (each node's type ~ Categorical)
         lp += sum(self._transition_log_density(snaps[t - 1], snaps[t], types) for t in range(1, len(snaps)))
         return lp
 
     def seq_encode(self, x: Sequence[tuple]) -> Sequence[tuple]:
-        """Return homophily observations unchanged for sequence scoring."""
-        return x
+        """Validate and encode homophily observations."""
+        return self.dist_to_encoder().seq_encode(x)
 
     def seq_log_density(self, x: Sequence[tuple]) -> np.ndarray:
         """Score a batch of homophily dynamic graph observations."""
@@ -1569,9 +1635,9 @@ class HomophilyTemporalGraphGrammarDistribution(SequenceEncodableProbabilityDist
         """Return the estimator for homophily rates and node-type weights."""
         return HomophilyTemporalGraphGrammarEstimator(self.M, self.K, self.motif, pseudo_count, self.name)
 
-    def dist_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
-        """Return the pass-through graph encoder."""
-        return TemporalGraphGrammarDataEncoder()
+    def dist_to_encoder(self) -> HomophilyTemporalGraphGrammarDataEncoder:
+        """Return the validated homophily encoder."""
+        return HomophilyTemporalGraphGrammarDataEncoder(self.motif, self.K)
 
 
 class HomophilyTemporalGraphGrammarSampler(DistributionSampler):
@@ -1584,7 +1650,13 @@ class HomophilyTemporalGraphGrammarSampler(DistributionSampler):
     def sample_one(self, num_steps: int = 8, seed_graph: np.ndarray | None = None, n_init: int = 8) -> tuple:
         """Draw one homophily dynamic graph observation."""
         d = self.dist
-        adj = np.zeros((n_init, n_init)) if seed_graph is None else np.asarray(seed_graph, dtype=np.float64).copy()
+        num_steps = _exact_nonnegative_int(num_steps, name="num_steps")
+        n_init = _exact_nonnegative_int(n_init, name="n_init")
+        if seed_graph is None:
+            adj = np.zeros((n_init, n_init))
+        else:
+            canonical = _binarize(seed_graph)
+            adj = canonical.toarray() if sp.issparse(canonical) else canonical
         types = list(self.rng.choice(d.K, size=adj.shape[0], p=d.type_weights))
         snaps = [adj.copy()]
         for _ in range(num_steps):
@@ -1619,14 +1691,66 @@ class HomophilyTemporalGraphGrammarSampler(DistributionSampler):
         """Draw one observation or a list of observations."""
         if size is None:
             return self.sample_one(**kw)
-        return [self.sample_one(**kw) for _ in range(size)]
+        sample_size = _exact_nonnegative_int(size, name="size")
+        return [self.sample_one(**kw) for _ in range(sample_size)]
+
+
+class HomophilyTemporalGraphGrammarStatistics(NamedTuple):
+    schema_version: int
+    bins: tuple[int, ...]
+    num_types: int
+    edge_counts: np.ndarray
+    type_counts: np.ndarray
+    nodes: float
+    steps: float
+
+
+def _validate_homophily_statistics(
+    value: Any,
+    motif: CommonNeighbourMotif,
+    num_types: int,
+) -> HomophilyTemporalGraphGrammarStatistics:
+    if not isinstance(value, HomophilyTemporalGraphGrammarStatistics) or value.schema_version != 1:
+        raise ValueError("homophily temporal statistics must use schema version 1.")
+    if value.bins != motif.bins or value.num_types != num_types:
+        raise ValueError("homophily temporal statistics use an incompatible model schema.")
+    edge_counts = np.array(value.edge_counts, dtype=np.float64, copy=True)
+    type_counts = np.array(value.type_counts, dtype=np.float64, copy=True)
+    expected_shape = (motif.num_motifs, num_types, num_types)
+    if edge_counts.shape != expected_shape or type_counts.shape != (num_types,):
+        raise ValueError("homophily temporal statistics have incompatible count shapes.")
+    nodes = float(value.nodes)
+    steps = float(value.steps)
+    if (
+        np.any(~np.isfinite(edge_counts))
+        or np.any(edge_counts < 0.0)
+        or np.any(~np.isfinite(type_counts))
+        or np.any(type_counts < 0.0)
+        or not np.isfinite(nodes)
+        or nodes < 0.0
+        or not np.isfinite(steps)
+        or steps < 0.0
+    ):
+        raise ValueError("homophily temporal statistics must be finite and non-negative.")
+    if np.any(np.tril(edge_counts, -1) != 0.0):
+        raise ValueError("homophily edge counts must use the upper-triangular unordered-type schema.")
+    return HomophilyTemporalGraphGrammarStatistics(
+        1,
+        motif.bins,
+        num_types,
+        edge_counts,
+        type_counts,
+        nodes,
+        steps,
+    )
 
 
 class HomophilyTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulator for homophily edge-rate and node-type sufficient statistics."""
 
     def __init__(self, M: int, K: int, motif: CommonNeighbourMotif) -> None:
-        self.M, self.K, self.motif = M, K, motif
+        self.M, self.K = M, K
+        self.motif = CommonNeighbourMotif(motif.bins)
         self.edge_counts = np.zeros((M, K, K), dtype=np.float64)
         self.type_counts = np.zeros(K, dtype=np.float64)
         self.nodes = 0.0
@@ -1634,9 +1758,12 @@ class HomophilyTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumul
 
     def update(self, x: tuple, weight: float, estimate: Any | None) -> None:
         """Accumulate sufficient statistics from one homophily observation."""
-        snaps, types = x
-        types = np.asarray(types, dtype=np.int64)
-        np.add.at(self.type_counts, types, weight)
+        snaps, types = _validate_homophily_observation(x, self.motif, self.K)
+        checked_weight = _finite_nonnegative(weight, name="weight")
+        pending_edges = np.zeros_like(self.edge_counts)
+        pending_types = np.zeros_like(self.type_counts)
+        pending_nodes = pending_steps = 0.0
+        np.add.at(pending_types, types, checked_weight)
         for t in range(1, len(snaps)):
             prev, cur = snaps[t - 1], snaps[t]
             ai, aj, _, _ = _edge_diff(prev, cur)
@@ -1645,14 +1772,25 @@ class HomophilyTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumul
                 m = lookup(np.asarray(ai), np.asarray(aj))
                 a = np.minimum(types[np.asarray(ai)], types[np.asarray(aj)])
                 b = np.maximum(types[np.asarray(ai)], types[np.asarray(aj)])
-                np.add.at(self.edge_counts, (m, a, b), weight)
-            self.nodes += weight * (cur.shape[0] - prev.shape[0])
-            self.steps += weight
+                np.add.at(pending_edges, (m, a, b), checked_weight)
+            pending_nodes += checked_weight * (cur.shape[0] - prev.shape[0])
+            pending_steps += checked_weight
+        self.edge_counts += pending_edges
+        self.type_counts += pending_types
+        self.nodes += pending_nodes
+        self.steps += pending_steps
 
     def seq_update(self, x: Sequence[tuple], weights: np.ndarray, estimate: Any | None) -> None:
         """Accumulate weighted sufficient statistics from a batch."""
-        for obs, w in zip(x, np.asarray(weights, dtype=np.float64)):
-            self.update(obs, float(w), estimate)
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if checked_weights.ndim != 1 or len(checked_weights) != len(x):
+            raise ValueError("weights must be a one-dimensional array aligned with the homophily batch.")
+        if np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
+            raise ValueError("weights must be finite and non-negative.")
+        pending = HomophilyTemporalGraphGrammarAccumulator(self.M, self.K, self.motif)
+        for obs, weight in zip(x, checked_weights):
+            pending.update(obs, float(weight), estimate)
+        self.combine(pending.value())
 
     def initialize(self, x: tuple, weight: float, rng: RandomState | None) -> None:
         """Initialize sufficient statistics from one weighted observation."""
@@ -1662,24 +1800,37 @@ class HomophilyTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumul
         """Initialize sufficient statistics from a weighted batch."""
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: tuple) -> HomophilyTemporalGraphGrammarAccumulator:
+    def combine(
+        self,
+        suff_stat: HomophilyTemporalGraphGrammarStatistics,
+    ) -> HomophilyTemporalGraphGrammarAccumulator:
         """Merge serialized homophily sufficient statistics."""
-        ec, tc, n, s = suff_stat
-        self.edge_counts += ec
-        self.type_counts += tc
-        self.nodes += n
-        self.steps += s
+        checked = _validate_homophily_statistics(suff_stat, self.motif, self.K)
+        self.edge_counts += checked.edge_counts
+        self.type_counts += checked.type_counts
+        self.nodes += checked.nodes
+        self.steps += checked.steps
         return self
 
-    def value(self) -> tuple:
+    def value(self) -> HomophilyTemporalGraphGrammarStatistics:
         """Return serialized homophily sufficient statistics."""
-        return self.edge_counts.copy(), self.type_counts.copy(), self.nodes, self.steps
+        return HomophilyTemporalGraphGrammarStatistics(
+            1,
+            self.motif.bins,
+            self.K,
+            self.edge_counts.copy(),
+            self.type_counts.copy(),
+            self.nodes,
+            self.steps,
+        )
 
-    def from_value(self, x: tuple) -> HomophilyTemporalGraphGrammarAccumulator:
+    def from_value(self, x: HomophilyTemporalGraphGrammarStatistics) -> HomophilyTemporalGraphGrammarAccumulator:
         """Restore accumulator state from serialized sufficient statistics."""
-        self.edge_counts = np.asarray(x[0], dtype=np.float64).copy()
-        self.type_counts = np.asarray(x[1], dtype=np.float64).copy()
-        self.nodes, self.steps = float(x[2]), float(x[3])
+        checked = _validate_homophily_statistics(x, self.motif, self.K)
+        self.edge_counts = checked.edge_counts
+        self.type_counts = checked.type_counts
+        self.nodes = checked.nodes
+        self.steps = checked.steps
         return self
 
     def key_merge(self, stats_dict: dict) -> None:
@@ -1690,16 +1841,17 @@ class HomophilyTemporalGraphGrammarAccumulator(SequenceEncodableStatisticAccumul
         """Replace keyed sufficient statistics; unused for this accumulator."""
         pass
 
-    def acc_to_encoder(self) -> TemporalGraphGrammarDataEncoder:
+    def acc_to_encoder(self) -> HomophilyTemporalGraphGrammarDataEncoder:
         """Return the encoder associated with this accumulator."""
-        return TemporalGraphGrammarDataEncoder()
+        return HomophilyTemporalGraphGrammarDataEncoder(self.motif, self.K)
 
 
 class HomophilyTemporalGraphGrammarAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for homophily temporal graph grammar accumulators."""
 
     def __init__(self, M: int, K: int, motif: CommonNeighbourMotif) -> None:
-        self.M, self.K, self.motif = M, K, motif
+        self.M, self.K = M, K
+        self.motif = CommonNeighbourMotif(motif.bins)
 
     def make(self) -> HomophilyTemporalGraphGrammarAccumulator:
         """Create a fresh homophily accumulator."""
@@ -1717,9 +1869,17 @@ class HomophilyTemporalGraphGrammarEstimator(ParameterEstimator):
         pseudo_count: float | None = None,
         name: str | None = None,
     ) -> None:
-        self.M, self.K = M, K
-        self.motif = motif if motif is not None else CommonNeighbourMotif()
-        self.pseudo_count = pseudo_count
+        source_motif = motif if motif is not None else CommonNeighbourMotif()
+        if not isinstance(source_motif, CommonNeighbourMotif) or source_motif.directed:
+            raise ValueError("motif must be an undirected CommonNeighbourMotif.")
+        self.motif = CommonNeighbourMotif(source_motif.bins)
+        self.M = _exact_positive_int(M, name="M")
+        self.K = _exact_positive_int(K, name="K")
+        if self.M != self.motif.num_motifs:
+            raise ValueError("M must equal the configured motif count.")
+        self.pseudo_count = None if pseudo_count is None else _finite_nonnegative(pseudo_count, name="pseudo_count")
+        if name is not None and not isinstance(name, str):
+            raise ValueError("name must be a string or None.")
         self.name = name
         self.keys = None
 
@@ -1727,16 +1887,54 @@ class HomophilyTemporalGraphGrammarEstimator(ParameterEstimator):
         """Return the accumulator factory used by this estimator."""
         return HomophilyTemporalGraphGrammarAccumulatorFactory(self.M, self.K, self.motif)
 
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> HomophilyTemporalGraphGrammarDistribution:
+    def estimate(
+        self,
+        nobs: float | None,
+        suff_stat: HomophilyTemporalGraphGrammarStatistics,
+    ) -> HomophilyTemporalGraphGrammarDistribution:
         """Estimate homophily rates, type weights, and node rate from sufficient statistics."""
-        edge_counts, type_counts, nodes, steps = suff_stat
-        rate = np.asarray(edge_counts, dtype=np.float64) / steps if steps > 0 else np.asarray(edge_counts)
-        tc = np.asarray(type_counts, dtype=np.float64).copy()
+        checked = _validate_homophily_statistics(suff_stat, self.motif, self.K)
+        if checked.steps <= 0.0:
+            raise ValueError("cannot estimate a homophily temporal grammar without transition evidence.")
+        if float(checked.type_counts.sum()) <= 0.0:
+            raise ValueError("cannot estimate homophily type weights without node-type evidence.")
+        upper_rate = checked.edge_counts / checked.steps
+        rate = upper_rate + upper_rate.transpose(0, 2, 1)
+        diagonal = np.arange(self.K)
+        rate[:, diagonal, diagonal] = upper_rate[:, diagonal, diagonal]
+        tc = checked.type_counts.copy()
         if self.pseudo_count is not None:
             tc = tc + float(self.pseudo_count)
-        type_weights = tc / tc.sum() if tc.sum() > 0 else np.ones(self.K) / self.K
+        type_weights = tc / tc.sum()
         return HomophilyTemporalGraphGrammarDistribution(
-            rate, type_weights, nodes / steps if steps > 0 else 0.0, motif=self.motif, name=self.name
+            rate,
+            type_weights,
+            checked.nodes / checked.steps,
+            motif=self.motif,
+            name=self.name,
+        )
+
+
+class HomophilyTemporalGraphGrammarDataEncoder(DataSequenceEncoder):
+    """Validate homophily observations and retain their graph/type pairing."""
+
+    def __init__(self, motif: CommonNeighbourMotif, num_types: int) -> None:
+        self.motif = CommonNeighbourMotif(motif.bins)
+        self.num_types = num_types
+
+    def seq_encode(self, x: Sequence[tuple]) -> tuple[tuple, ...]:
+        return tuple(_validate_homophily_observation(observation, self.motif, self.num_types) for observation in x)
+
+    def row_count(self, x: Any) -> int:
+        if not isinstance(x, tuple):
+            raise ValueError("encoded homophily temporal graph payload must be a tuple.")
+        return len(x)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, HomophilyTemporalGraphGrammarDataEncoder)
+            and other.motif.bins == self.motif.bins
+            and other.num_types == self.num_types
         )
 
 

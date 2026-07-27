@@ -8,6 +8,7 @@ import scipy.sparse as sp
 import mixle.stats as stats
 from mixle.stats.graphs.temporal_graph_grammar import (
     ApproximateTemporalGraphSample,
+    HomophilyTemporalGraphGrammarStatistics,
     LabeledTemporalGraphGrammarDistribution,
     TemporalGraphGrammarStatistics,
     _edge_diff,
@@ -379,6 +380,84 @@ class HomophilyTemporalGraphGrammarTest(unittest.TestCase):
         flat = np.broadcast_to(fit.rate.mean(axis=(1, 2), keepdims=True), fit.rate.shape).copy()
         blind = stats.HomophilyTemporalGraphGrammarDistribution(flat, fit.type_weights, fit.node_rate)
         self.assertGreater(float(fit.seq_log_density(obs).sum()), float(blind.seq_log_density(obs).sum()))
+
+    def test_unordered_type_rate_law_is_normalized_and_contract_checked(self):
+        motif = stats.CommonNeighbourMotif((0,))
+        rate = np.array([[[0.0, 2.0], [2.0, 0.0]]])
+        dist = stats.HomophilyTemporalGraphGrammarDistribution(rate, [0.5, 0.5], motif=motif)
+        rate[:] = 0.0
+        self.assertEqual(dist.rate[0, 0, 1], 2.0)
+        empty = np.zeros((2, 2))
+        edge = np.array([[0.0, 1.0], [1.0, 0.0]])
+        types = np.array([0, 1])
+        joint_mass = np.exp(dist.log_density(([empty, empty], types))) + np.exp(
+            dist.log_density(([empty, edge], types))
+        )
+        self.assertAlmostEqual(joint_mass, 0.25, places=12)
+        self.assertAlmostEqual(
+            np.exp(dist.log_density(([empty, edge], types))) / 0.25,
+            1.0 - np.exp(-2.0),
+            places=12,
+        )
+
+        bad_rates = [
+            np.ones((2, 2)),
+            np.ones((2, 2, 2)),
+            np.array([[[0.0, 1.0], [2.0, 0.0]]]),
+            np.array([[[0.0, -1.0], [-1.0, 0.0]]]),
+            np.array([[[0.0, np.nan], [np.nan, 0.0]]]),
+        ]
+        for bad_rate in bad_rates:
+            with self.subTest(rate=bad_rate):
+                with self.assertRaises(ValueError):
+                    stats.HomophilyTemporalGraphGrammarDistribution(bad_rate, [0.5, 0.5], motif=motif)
+        for bad_weights in ([0.0, 0.0], [-1.0, 2.0], [np.nan, 1.0], []):
+            with self.subTest(weights=bad_weights):
+                with self.assertRaises(ValueError):
+                    stats.HomophilyTemporalGraphGrammarDistribution(
+                        np.zeros((1, len(bad_weights), len(bad_weights))),
+                        bad_weights,
+                        motif=motif,
+                    )
+
+        for bad_types in ([0], [0, 2], [0.0, 1.0]):
+            with self.subTest(types=bad_types):
+                with self.assertRaises(ValueError):
+                    dist.log_density(([empty, empty], bad_types))
+        zero_cross = stats.HomophilyTemporalGraphGrammarDistribution(
+            np.zeros((1, 2, 2)),
+            [0.5, 0.5],
+            motif=motif,
+        )
+        self.assertEqual(zero_cross.log_density(([empty, edge], types)), float("-inf"))
+
+    def test_homophily_statistics_are_versioned_validated_and_atomic(self):
+        motif = stats.CommonNeighbourMotif((0,))
+        estimator = stats.HomophilyTemporalGraphGrammarEstimator(1, 2, motif)
+        accumulator = estimator.accumulator_factory().make()
+        empty = np.zeros((2, 2))
+        observation = ([empty, empty], np.array([0, 1]))
+        accumulator.update(observation, 1.0, None)
+        before = accumulator.value()
+        with self.assertRaises(ValueError):
+            accumulator.seq_update([observation], np.ones(2), None)
+        np.testing.assert_array_equal(accumulator.value().type_counts, before.type_counts)
+
+        lower_count = np.zeros((1, 2, 2))
+        lower_count[0, 1, 0] = 1.0
+        corrupt = HomophilyTemporalGraphGrammarStatistics(
+            1,
+            (0,),
+            2,
+            lower_count,
+            np.ones(2),
+            0.0,
+            1.0,
+        )
+        with self.assertRaises(ValueError):
+            estimator.estimate(1.0, corrupt)
+        with self.assertRaises(ValueError):
+            estimator.estimate(0.0, estimator.accumulator_factory().make().value())
 
 
 class DirectedTemporalGraphGrammarTest(unittest.TestCase):
