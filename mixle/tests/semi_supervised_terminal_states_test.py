@@ -24,7 +24,7 @@ class SemiSupervisedTerminalStatesTest(unittest.TestCase):
                 continue
             lp = sum(self.topics[path[t]].log_density(x[t]) for t in range(len(x))) + sum(
                 log_a[path[t], path[t + 1]] for t in range(len(x) - 1)
-            )  # uniform initial weight 1 (log_w = 0)
+            ) - np.log(2)
             total = np.logaddexp(total, lp)
         return total
 

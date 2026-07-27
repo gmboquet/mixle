@@ -23,9 +23,11 @@ _TOPICS = [G(-2.0, 1.0), G(2.0, 1.0), G(5.0, 1.0)]
 def _brute(emissions, prior, topics, A):
     s = len(topics)
     P = None if prior is None else np.asarray(prior, dtype=float)
+    if P is not None:
+        P = P / P.max(axis=1, keepdims=True)
     tot = 0.0
     for path in itertools.product(range(s), repeat=len(emissions)):
-        v = 1.0
+        v = 1.0 / s
         for t, z in enumerate(path):
             v *= np.exp(topics[z].log_density(emissions[t]))
             if P is not None:
@@ -53,7 +55,7 @@ class SemiSupervisedHMMTestCase(unittest.TestCase):
             prior[t, z] = 1.0
         single = sum(_TOPICS[forced[t]].log_density(self.em[t]) for t in range(5)) + sum(
             np.log(_A[forced[t - 1], forced[t]]) for t in range(1, 5)
-        )
+        ) - np.log(3)
         self.assertAlmostEqual(self.d.log_density((self.em, prior)), single, places=9)
 
     def test_shared_prior_row_broadcasts(self):
