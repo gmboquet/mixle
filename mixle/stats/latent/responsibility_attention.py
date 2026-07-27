@@ -60,6 +60,12 @@ from mixle.stats.latent._attention_contracts import (
     safe_log_probabilities,
     simplex,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_statistic_tuple,
+)
 from mixle.utils.vector import ImpossibleEvidenceError
 
 
@@ -79,6 +85,32 @@ def _log_weights(
 def _normalize_rows(log_w: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return (row log-sum-exp ``(n,)``, responsibilities ``(n, N)``)."""
     return normalize_log_rows(log_w)
+
+
+def _validated_responsibility_statistics(values, num_symbols, context_length, query_dim, num_targets):
+    """Validate additive responsibility-attention statistics and mass laws."""
+    key_sum, key_mass, emission_count, position_count, query_sq = validated_statistic_tuple(
+        values, 5, "responsibility-attention sufficient statistics"
+    )
+    key_sum = finite_matrix(key_sum, "responsibility-attention key sums")
+    if key_sum.shape != (num_symbols, query_dim):
+        raise ValueError("responsibility-attention key sums have incorrect geometry")
+    key_mass = validated_count_array(key_mass, (num_symbols,), "responsibility-attention key mass")
+    emission_count = validated_count_array(
+        emission_count,
+        (num_symbols, num_targets),
+        "responsibility-attention emission counts",
+    )
+    position_count = validated_count_array(
+        position_count,
+        (context_length,),
+        "responsibility-attention position counts",
+    )
+    query_sq = validated_observation_weight(query_sq, "responsibility-attention query scatter")
+    total = float(position_count.sum())
+    validate_effective_sample_mass(total, key_mass.sum(), label="responsibility-attention key mass")
+    validate_effective_sample_mass(total, emission_count.sum(), label="responsibility-attention emission mass")
+    return key_sum, key_mass, emission_count, position_count, query_sq
 
 
 class ResponsibilityAttentionDistribution(SequenceEncodableProbabilityDistribution):
@@ -284,7 +316,13 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat) -> ResponsibilityAttentionAccumulator:
         """Merge key, emission, position, and query-scatter statistics."""
-        ks, km, ec, pc, qsq = suff_stat
+        ks, km, ec, pc, qsq = _validated_responsibility_statistics(
+            suff_stat,
+            self.num_symbols,
+            self.context_length,
+            self.query_dim,
+            self.num_targets,
+        )
         self.key_sum += ks
         self.key_mass += km
         self.emission_count += ec
@@ -306,10 +344,19 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x) -> ResponsibilityAttentionAccumulator:
         """Restore attention sufficient statistics from ``value`` output."""
-        self.key_sum, self.key_mass, self.emission_count, self.position_count = (
-            np.asarray(v, dtype=float) for v in x[:4]
+        (
+            self.key_sum,
+            self.key_mass,
+            self.emission_count,
+            self.position_count,
+            self.query_sq,
+        ) = _validated_responsibility_statistics(
+            x,
+            self.num_symbols,
+            self.context_length,
+            self.query_dim,
+            self.num_targets,
         )
-        self.query_sq = float(x[4])
         return self
 
     def acc_to_encoder(self) -> ResponsibilityAttentionDataEncoder:
@@ -393,7 +440,18 @@ class ResponsibilityAttentionEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat) -> ResponsibilityAttentionDistribution:
         """Estimate key means, emissions, position prior, and optional gate variance."""
-        key_sum, key_mass, emission_count, position_count, query_sq = suff_stat
+        key_sum, key_mass, emission_count, position_count, query_sq = _validated_responsibility_statistics(
+            suff_stat,
+            self.num_symbols,
+            self.context_length,
+            self.query_dim,
+            self.num_targets,
+        )
+        validate_effective_sample_mass(
+            nobs,
+            position_count.sum(),
+            label="responsibility-attention effective sample",
+        )
         # keys: responsibility-weighted mean query per symbol (GMM mean update)
         denom = np.clip(key_mass, 1e-12, None)
         key_means = key_sum / denom[:, None]

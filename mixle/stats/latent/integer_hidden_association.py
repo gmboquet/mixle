@@ -17,6 +17,7 @@ ordered iid emissions.
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import numpy as np
@@ -42,6 +43,12 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_statistic_tuple,
+)
 from mixle.stats.latent.integer_probabilistic_latent_semantic_indexing import multinomial_bag_stream
 from mixle.stats.multivariate._multinomial_contracts import (
     canonical_integer_bag,
@@ -65,11 +72,73 @@ SS1 = TypeVar("SS1")  # suff stat prev
 SS2 = TypeVar("SS2")  # suff stat len
 
 
+@dataclass(frozen=True)
+class IntegerHiddenAssociationStatistics(Sequence[Any]):
+    """Mass-aware statistics with backward five-slot iteration."""
+
+    initial_counts: np.ndarray
+    weight_counts: np.ndarray
+    state_counts: np.ndarray
+    previous: Any
+    size: Any
+    observation_mass: float
+    schema_version: int = 1
+
+    def __len__(self) -> int:
+        return 5
+
+    def __getitem__(self, index):
+        return (
+            self.initial_counts,
+            self.weight_counts,
+            self.state_counts,
+            self.previous,
+            self.size,
+        )[index]
+
+
 def _positive_dimension(value: Any, label: str) -> int:
     result = exact_integer(value, label=label)
     if result <= 0:
         raise ValueError("%s must be positive" % label)
     return result
+
+
+def _validated_integer_association_statistics(values, num_vals1, num_vals2, num_states):
+    """Validate integer hidden-association statistics and latent mass."""
+    if isinstance(values, IntegerHiddenAssociationStatistics):
+        init_count = values.initial_counts
+        weight_count = values.weight_counts
+        state_count = values.state_counts
+        prev_stats = values.previous
+        size_stats = values.size
+        observation_mass = values.observation_mass
+    else:
+        init_count, weight_count, state_count, prev_stats, size_stats = validated_statistic_tuple(
+            values, 5, "legacy integer hidden-association sufficient statistics"
+        )
+        observation_mass = None
+    init_count = validated_count_array(
+        init_count,
+        (num_vals1,),
+        "integer hidden-association initial counts",
+    )
+    weight_count = validated_count_array(
+        weight_count,
+        (num_vals1, num_states),
+        "integer hidden-association weight counts",
+    )
+    state_count = validated_count_array(
+        state_count,
+        (num_states, num_vals2),
+        "integer hidden-association state counts",
+    )
+    if observation_mass is not None:
+        observation_mass = validated_observation_weight(
+            observation_mass,
+            "integer hidden-association observation mass",
+        )
+    return init_count, weight_count, state_count, prev_stats, size_stats, observation_mass
 
 
 def _row_simplex_matrix(value: Any, label: str) -> np.ndarray:
@@ -672,6 +741,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         self._rng_size = None
         self._rng_weight = None
         self._rng_state = None
+        self.observation_mass = 0.0
 
     def update(
         self,
@@ -739,6 +809,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
         self.prev_accumulator.update(given, checked_weight, estimate.prev_dist)
         self.size_accumulator.update(emitted_total, checked_weight, estimate.len_dist)
+        self.observation_mass += checked_weight
 
     def _rng_initialize(self, rng: np.random.RandomState) -> None:
         if not self._init_rng:
@@ -790,6 +861,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
         self.prev_accumulator.initialize(given, checked_weight, self._rng_prev)
         self.size_accumulator.initialize(emitted_total, checked_weight, self._rng_size)
+        self.observation_mass += checked_weight
 
     def seq_initialize(self, x: E, weights: np.ndarray, rng: np.random.RandomState) -> None:
         """Vectorized initialization of sufficient statistics from sequence encoded observations.
@@ -853,6 +925,8 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
             self.prev_accumulator.seq_initialize(xv, weights, self._rng_prev)
             self.size_accumulator.seq_initialize(nn, weights, self._rng_size)
+
+        self.observation_mass += float(weights.sum())
 
     def seq_update(self, x: E, weights: np.ndarray, estimate: IntegerHiddenAssociationDistribution) -> None:
         """Vectorized update of sufficient statistics from sequence encoded observations.
@@ -981,6 +1055,8 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             self.prev_accumulator.seq_update(xv, weights, None if estimate is None else estimate.prev_dist)
             self.size_accumulator.seq_update(nn, weights, None if estimate is None else estimate.len_dist)
 
+        self.observation_mass += float(weights.sum())
+
     def seq_update_engine(
         self, x: E, weights: np.ndarray, estimate: IntegerHiddenAssociationDistribution, engine: Any
     ) -> None:
@@ -998,7 +1074,11 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             return
 
         xx = x[0]
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        weights_np = observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            len(xx[0]),
+            label="integer hidden-association observation weights",
+        )
 
         num_states = estimate.num_states
         num_vals = estimate.cond_weights.shape[0]
@@ -1049,6 +1129,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
         self.prev_accumulator.seq_update(xx[1], weights_np, None if estimate is None else estimate.prev_dist)
         self.size_accumulator.seq_update(xx[2], weights_np, None if estimate is None else estimate.len_dist)
+        self.observation_mass += float(weights_np.sum())
 
     def combine(
         self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None, SS2 | None]
@@ -1063,7 +1144,14 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             This IntegerHiddenAssociationAccumulator.
 
         """
-        init_count, weight_count, state_count, prev_acc, size_acc = suff_stat
+        init_count, weight_count, state_count, prev_acc, size_acc, observation_mass = (
+            _validated_integer_association_statistics(
+                suff_stat,
+                self.num_vals1,
+                self.num_vals2,
+                self.num_states,
+            )
+        )
 
         self.prev_accumulator.combine(prev_acc)
         self.size_accumulator.combine(size_acc)
@@ -1071,15 +1159,24 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         self.init_count += init_count
         self.weight_count += weight_count
         self.state_count += state_count
+        if observation_mass is not None:
+            self.observation_mass += observation_mass
 
         return self
 
-    def value(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, Any | None, Any | None]:
+    def value(self) -> IntegerHiddenAssociationStatistics:
         """Returns the sufficient statistics: (init counts, weight counts, state counts, prev, size)."""
         pval = self.prev_accumulator.value()
         sval = self.size_accumulator.value()
 
-        return self.init_count, self.weight_count, self.state_count, pval, sval
+        return IntegerHiddenAssociationStatistics(
+            self.init_count.copy(),
+            self.weight_count.copy(),
+            self.state_count.copy(),
+            pval,
+            sval,
+            self.observation_mass,
+        )
 
     def from_value(
         self, x: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None, SS2 | None]
@@ -1094,11 +1191,21 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             This IntegerHiddenAssociationAccumulator.
 
         """
-        init_count, weight_count, state_count, prev_acc, size_acc = x
-
-        self.init_count = init_count
-        self.weight_count = weight_count
-        self.state_count = state_count
+        (
+            self.init_count,
+            self.weight_count,
+            self.state_count,
+            prev_acc,
+            size_acc,
+            self.observation_mass,
+        ) = _validated_integer_association_statistics(
+            x,
+            self.num_vals1,
+            self.num_vals2,
+            self.num_states,
+        )
+        if self.observation_mass is None:
+            self.observation_mass = 0.0
 
         self.prev_accumulator.from_value(prev_acc)
         self.size_accumulator.from_value(size_acc)
@@ -1107,11 +1214,13 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
 
     def scale(self, c: float) -> "IntegerHiddenAssociationAccumulator":
         """Scale linear association counts and delegate child accumulators."""
+        c = validated_observation_weight(c, "integer hidden-association scale factor")
         self.init_count *= c
         self.weight_count *= c
         self.state_count *= c
         self.prev_accumulator.scale(c)
         self.size_accumulator.scale(c)
+        self.observation_mass *= c
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -1323,21 +1432,25 @@ class IntegerHiddenAssociationEstimator(ParameterEstimator):
             IntegerHiddenAssociationDistribution object.
 
         """
-        init_count, weight_count, state_count, prev_stats, size_stats = suff_stat
-        init_count = np.asarray(init_count, dtype=np.float64).copy()
-        weight_count = np.asarray(weight_count, dtype=np.float64).copy()
-        state_count = np.asarray(state_count, dtype=np.float64).copy()
-        if init_count.shape != (self.num_vals1,):
-            raise ValueError("integer hidden-association initial statistics have the wrong shape")
-        if weight_count.shape != (self.num_vals1, self.num_states):
-            raise ValueError("integer hidden-association weight statistics have the wrong shape")
-        if state_count.shape != (self.num_states, self.num_vals2):
-            raise ValueError("integer hidden-association state statistics have the wrong shape")
-        if any(np.any(~np.isfinite(value)) or np.any(value < 0.0) for value in (init_count, weight_count, state_count)):
-            raise ValueError("integer hidden-association statistics must be finite and non-negative")
+        init_count, weight_count, state_count, prev_stats, size_stats, observation_mass = (
+            _validated_integer_association_statistics(
+                suff_stat,
+                self.num_vals1,
+                self.num_vals2,
+                self.num_states,
+            )
+        )
+        if observation_mass is not None:
+            validate_effective_sample_mass(
+                nobs,
+                observation_mass,
+                label="integer hidden-association effective sample",
+            )
+        else:
+            observation_mass = nobs
 
-        len_dist = self.len_estimator.estimate(nobs, size_stats)
-        prev_dist = self.prev_estimator.estimate(nobs, prev_stats)
+        len_dist = self.len_estimator.estimate(observation_mass, size_stats)
+        prev_dist = self.prev_estimator.estimate(observation_mass, prev_stats)
 
         if self.pseudo_count is not None:
             init_count += self.pseudo_count / len(init_count)

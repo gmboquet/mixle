@@ -63,9 +63,50 @@ from mixle.stats.latent._attention_contracts import (
     simplex,
     weighted_log_probability_sum,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_statistic_tuple,
+)
 from mixle.utils.vector import ImpossibleEvidenceError
 
 _OPTIMIZER_FAMILY = "variational_embedding_attention"
+
+
+def _validated_embedding_statistics(values, num_symbols, context_length, embed_dim, num_targets):
+    """Validate variational embedding-attention statistics before use."""
+    grad_m, grad_logv, emission_count, position_count, ll, n, state = validated_statistic_tuple(
+        values, 7, "variational embedding-attention sufficient statistics"
+    )
+    grad_m = finite_matrix(grad_m, "variational embedding-attention mean gradients")
+    grad_logv = finite_matrix(grad_logv, "variational embedding-attention log-variance gradients")
+    expected_gradient = (num_symbols, embed_dim)
+    if grad_m.shape != expected_gradient or grad_logv.shape != expected_gradient:
+        raise ValueError("variational embedding-attention gradients have incorrect geometry")
+    emission_count = validated_count_array(
+        emission_count,
+        (num_symbols, num_targets),
+        "variational embedding-attention emission counts",
+    )
+    position_count = validated_count_array(
+        position_count,
+        (context_length,),
+        "variational embedding-attention position counts",
+    )
+    n = validated_observation_weight(n, "variational embedding-attention total weight")
+    validate_effective_sample_mass(n, emission_count.sum(), label="variational embedding-attention emission mass")
+    validate_effective_sample_mass(n, position_count.sum(), label="variational embedding-attention position mass")
+    if isinstance(ll, (bool, np.bool_)):
+        raise TypeError("variational embedding-attention likelihood must be a real scalar")
+    try:
+        ll = float(ll)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("variational embedding-attention likelihood must be a real scalar") from exc
+    if not np.isfinite(ll):
+        raise ValueError("variational embedding-attention likelihood must be finite")
+    state = merge_optimizer_state(None, state, family=_OPTIMIZER_FAMILY)
+    return grad_m, grad_logv, emission_count, position_count, ll, n, state
 
 
 def _softmax_rows(s: np.ndarray) -> np.ndarray:
@@ -293,9 +334,7 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
             self.optimizer_state, estimate.optimizer_state, family=_OPTIMIZER_FAMILY
         )
         iteration = estimate.optimizer_state.iteration
-        rng = RandomState(
-            (estimate.optimizer_state.seed * 1_000_003 + iteration) % (2**31)
-        )
+        rng = RandomState((estimate.optimizer_state.seed * 1_000_003 + iteration) % (2**31))
         s = np.exp(0.5 * log_v)
         for _ in range(self.mc):
             eps = rng.randn(*m.shape)
@@ -334,7 +373,13 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
 
     def combine(self, suff_stat) -> VariationalEmbeddingAttentionAccumulator:
         """Merge ELBO gradients, emission counts, position counts, and scalar totals."""
-        gm, glv, ec, pc, ll, n, state = suff_stat
+        gm, glv, ec, pc, ll, n, state = _validated_embedding_statistics(
+            suff_stat,
+            self.num_symbols,
+            self.context_length,
+            self.embed_dim,
+            self.num_targets,
+        )
         self.grad_m += gm
         self.grad_logv += glv
         self.emission_count += ec
@@ -358,12 +403,21 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
 
     def from_value(self, x) -> VariationalEmbeddingAttentionAccumulator:
         """Restore accumulator state from ``value`` output."""
-        self.grad_m, self.grad_logv, self.emission_count, self.position_count = (
-            np.asarray(v, dtype=float) for v in x[:4]
+        (
+            self.grad_m,
+            self.grad_logv,
+            self.emission_count,
+            self.position_count,
+            self.ll,
+            self.n,
+            self.optimizer_state,
+        ) = _validated_embedding_statistics(
+            x,
+            self.num_symbols,
+            self.context_length,
+            self.embed_dim,
+            self.num_targets,
         )
-        self.ll = float(x[4])
-        self.n = float(x[5])
-        self.optimizer_state = merge_optimizer_state(None, x[6], family=_OPTIMIZER_FAMILY)
         return self
 
     def acc_to_encoder(self) -> VariationalEmbeddingAttentionDataEncoder:
@@ -460,13 +514,21 @@ class VariationalEmbeddingAttentionEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat) -> VariationalEmbeddingAttentionDistribution:
         """Apply one variational EM update and return the updated attention distribution."""
-        grad_m, grad_logv, emission_count, position_count, _ll, _n = suff_stat[:6]
-        state_data = suff_stat[6] if len(suff_stat) > 6 else None
-        state = (
-            self._init_state()
-            if state_data is None
-            else merge_optimizer_state(None, state_data, family=_OPTIMIZER_FAMILY)
+        grad_m, grad_logv, emission_count, position_count, _ll, observed_mass, state_data = (
+            _validated_embedding_statistics(
+                suff_stat,
+                self.num_symbols,
+                self.context_length,
+                self.embed_dim,
+                self.num_targets,
+            )
         )
+        validate_effective_sample_mass(
+            nobs,
+            observed_mass,
+            label="variational embedding-attention effective sample",
+        )
+        state = self._init_state() if state_data is None else state_data
         if state_data is not None:
             iteration = state.iteration + 1
             variance = np.exp(state.log_var)

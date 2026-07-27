@@ -48,6 +48,12 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_statistic_tuple,
+)
 from mixle.stats.multivariate._multinomial_contracts import (
     canonical_integer_bag,
     exact_integer,
@@ -69,6 +75,30 @@ def _positive_dimension(value: Any, label: str) -> int:
     if result <= 0:
         raise ValueError("%s must be positive" % label)
     return result
+
+
+def _validated_integer_plsi_statistics(values, num_vals, num_states, num_docs):
+    """Validate integer PLSI counts, geometry, and token-mass conservation."""
+    word_count, comp_count, doc_count, length_stats = validated_statistic_tuple(
+        values, 4, "integer PLSI sufficient statistics"
+    )
+    word_count = validated_count_array(
+        word_count,
+        (num_states, num_vals),
+        "integer PLSI word counts",
+    )
+    comp_count = validated_count_array(
+        comp_count,
+        (num_docs, num_states),
+        "integer PLSI state counts",
+    )
+    doc_count = validated_count_array(doc_count, (num_docs,), "integer PLSI document counts")
+    validate_effective_sample_mass(
+        word_count.sum(),
+        comp_count.sum(),
+        label="integer PLSI token mass",
+    )
+    return word_count, comp_count, doc_count, length_stats
 
 
 def _simplex_vector(value: Any, label: str) -> np.ndarray:
@@ -1070,17 +1100,23 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
             This accumulator.
 
         """
-        self.word_count += suff_stat[0]
-        self.comp_count += suff_stat[1]
-        self.doc_count += suff_stat[2]
+        word_count, comp_count, doc_count, length_stats = _validated_integer_plsi_statistics(
+            suff_stat,
+            self.num_vals,
+            self.num_states,
+            self.num_docs,
+        )
+        self.word_count += word_count
+        self.comp_count += comp_count
+        self.doc_count += doc_count
 
-        self.len_acc.combine(suff_stat[3])
+        self.len_acc.combine(length_stats)
 
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, Any | None]:
         """Return sufficient statistics as ``(word_count, comp_count, doc_count, length_stats)``."""
-        return self.word_count, self.comp_count, self.doc_count, self.len_acc.value()
+        return self.word_count.copy(), self.comp_count.copy(), self.doc_count.copy(), self.len_acc.value()
 
     def from_value(
         self, x: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]
@@ -1094,15 +1130,19 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
             This accumulator.
 
         """
-        self.word_count = x[0]
-        self.comp_count = x[1]
-        self.doc_count = x[2]
-        self.len_acc.from_value(x[3])
+        self.word_count, self.comp_count, self.doc_count, length_stats = _validated_integer_plsi_statistics(
+            x,
+            self.num_vals,
+            self.num_states,
+            self.num_docs,
+        )
+        self.len_acc.from_value(length_stats)
 
         return self
 
     def scale(self, c: float) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
         """Scale linear latent counts and delegate document-length statistics."""
+        c = validated_observation_weight(c, "integer PLSI scale factor")
         self.word_count *= c
         self.comp_count *= c
         self.doc_count *= c
@@ -1307,18 +1347,14 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
             A fitted integer PLSI distribution.
 
         """
-        word_count, comp_count, doc_count, len_suff_stats = suff_stat
-        word_count = np.asarray(word_count, dtype=np.float64)
-        comp_count = np.asarray(comp_count, dtype=np.float64)
-        doc_count = np.asarray(doc_count, dtype=np.float64)
-        if word_count.shape != (self.num_states, self.num_vals):
-            raise ValueError("integer PLSI word statistics have the wrong shape")
-        if comp_count.shape != (self.num_docs, self.num_states):
-            raise ValueError("integer PLSI state statistics have the wrong shape")
-        if doc_count.shape != (self.num_docs,):
-            raise ValueError("integer PLSI document statistics have the wrong shape")
-        if any(np.any(~np.isfinite(value)) or np.any(value < 0.0) for value in (word_count, comp_count, doc_count)):
-            raise ValueError("integer PLSI sufficient statistics must be finite and non-negative")
+        word_count, comp_count, doc_count, len_suff_stats = _validated_integer_plsi_statistics(
+            suff_stat,
+            self.num_vals,
+            self.num_states,
+            self.num_docs,
+        )
+        observation_mass = float(doc_count.sum())
+        validate_effective_sample_mass(nobs, observation_mass, label="integer PLSI effective sample")
 
         if self.pseudo_count[0] is not None and self.suff_stat[0] is not None:
             adj_cnt = self.pseudo_count[0] / np.prod(word_count.shape)
@@ -1369,7 +1405,7 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
             else:
                 doc_prob_vec = np.ones(len(doc_count)) / len(doc_count)
 
-        len_dist = self.len_estimator.estimate(None, len_suff_stats)
+        len_dist = self.len_estimator.estimate(observation_mass, len_suff_stats)
 
         return IntegerProbabilisticLatentSemanticIndexingDistribution(
             word_prob_mat, state_prob_mat, doc_prob_vec, name=self.name, len_dist=len_dist

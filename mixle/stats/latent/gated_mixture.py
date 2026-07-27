@@ -45,6 +45,13 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_observation_weights,
+    validated_weighted_responsibilities,
+)
 from mixle.stats.latent.mixture import _owned_generative_components
 
 
@@ -145,6 +152,65 @@ class GateBufferReceipt:
     rows_dropped: int
     capacity: int
     selection: str = "deterministic_hash_top_k"
+
+
+@dataclass(frozen=True)
+class GatedMixtureStatistics(Sequence[Any]):
+    """Versioned gated-mixture statistics with backward four-slot iteration."""
+
+    component_statistics: tuple[Any, ...]
+    covariates: np.ndarray
+    responsibilities: np.ndarray
+    buffer_receipt: GateBufferReceipt
+    component_counts: np.ndarray
+    schema_version: int = 1
+
+    def __len__(self) -> int:
+        return 4
+
+    def __getitem__(self, index):
+        legacy = (
+            self.component_statistics,
+            self.covariates,
+            self.responsibilities,
+            self.buffer_receipt,
+        )
+        return legacy[index]
+
+
+def _unpack_gated_statistics(
+    values: Any,
+    *,
+    num_components: int,
+    max_buffer_rows: int,
+) -> tuple[tuple[Any, ...], Any, Any, GateBufferReceipt, np.ndarray]:
+    """Validate current statistics or reconcile an exact legacy buffer."""
+    if isinstance(values, GatedMixtureStatistics):
+        comp_stats = values.component_statistics
+        z = values.covariates
+        responsibilities = values.responsibilities
+        receipt = values.buffer_receipt
+        counts = validated_count_array(values.component_counts, (num_components,), "gated-mixture component counts")
+    else:
+        if not isinstance(values, (tuple, list)) or len(values) not in (3, 4):
+            raise ValueError("gated-mixture sufficient statistics must contain three or four legacy entries")
+        comp_stats, z, responsibilities = values[:3]
+        receipt = GateBufferReceipt(len(z), len(z), 0, max_buffer_rows) if len(values) == 3 else values[3]
+        if not isinstance(receipt, GateBufferReceipt):
+            raise TypeError("gated-mixture buffer metadata must be a GateBufferReceipt")
+        if receipt.rows_dropped:
+            raise ValueError("legacy gated-mixture statistics with dropped rows have no recoverable component mass")
+        raw_responsibilities = validated_count_array(
+            responsibilities,
+            (len(z), num_components),
+            "gated-mixture buffered responsibilities",
+        )
+        counts = raw_responsibilities.sum(axis=0)
+    if not isinstance(receipt, GateBufferReceipt):
+        raise TypeError("gated-mixture buffer metadata must be a GateBufferReceipt")
+    if not isinstance(comp_stats, (tuple, list)) or len(comp_stats) != num_components:
+        raise ValueError("gated-mixture component statistics must have one item per component")
+    return tuple(comp_stats), z, responsibilities, receipt, counts
 
 
 class SoftmaxGate:
@@ -488,6 +554,7 @@ class GatedMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self._resp = np.zeros((0, self.num_components), dtype=np.float64)
         self._priorities = np.zeros(0, dtype=np.uint64)
         self._rows_seen = 0
+        self.component_counts = np.zeros(self.num_components, dtype=np.float64)
 
     @staticmethod
     def _row_priorities(z: np.ndarray, resp: np.ndarray) -> np.ndarray:
@@ -562,9 +629,7 @@ class GatedMixtureAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> tuple[np.ndarray, np.ndarray]:
         z_arr, comp_encs = enc
         n = z_arr.shape[0]
-        checked_weights = np.asarray(weights, dtype=np.float64)
-        if checked_weights.shape != (n,) or np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
-            raise ValueError("gated-mixture weights must be a finite non-negative vector aligned with rows.")
+        checked_weights = validated_observation_weights(weights, n, "gated-mixture weights")
         if estimate is None:
             r = np.full((n, self.num_components), 1.0 / self.num_components)
         else:
@@ -575,13 +640,20 @@ class GatedMixtureAccumulator(SequenceEncodableStatisticAccumulator):
                     estimate.components[k].seq_log_density(comp_encs[k]), dtype=np.float64
                 )
             r = normalize_mixture_log_scores(ll).responsibilities
-        r = r * checked_weights[:, None]
+        r = validated_weighted_responsibilities(
+            r * checked_weights[:, None],
+            checked_weights,
+            self.num_components,
+            label="gated-mixture responsibilities",
+            allow_unassigned=True,
+        )
         return z_arr, r
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: GatedMixtureDistribution | None) -> None:
         """Update expert accumulators and gate buffers from encoded observations."""
         z_arr, r = self._responsibilities(enc, weights, estimate)
         _, comp_encs = enc
+        self.component_counts += r.sum(axis=0)
         for k in range(self.num_components):
             self.component_accumulators[k].seq_update(
                 comp_encs[k], r[:, k], None if estimate is None else estimate.components[k]
@@ -592,35 +664,38 @@ class GatedMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize expert accumulators with random responsibility allocations."""
         z_arr, comp_encs = enc
         n = z_arr.shape[0]
-        checked_weights = np.asarray(weights, dtype=np.float64)
-        if checked_weights.shape != (n,) or np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
-            raise ValueError("gated-mixture weights must be a finite non-negative vector aligned with rows.")
-        r = rng.dirichlet(np.ones(self.num_components), size=n) * checked_weights[:, None]
+        checked_weights = validated_observation_weights(weights, n, "gated-mixture weights")
+        r = validated_weighted_responsibilities(
+            rng.dirichlet(np.ones(self.num_components), size=n) * checked_weights[:, None],
+            checked_weights,
+            self.num_components,
+            label="gated-mixture initialization responsibilities",
+        )
+        self.component_counts += r.sum(axis=0)
         for k in range(self.num_components):
             self.component_accumulators[k].seq_initialize(comp_encs[k], r[:, k], rng)
         self._append_gate_rows(z_arr, r)
 
     def update(self, x: tuple[Any, Any], weight: float, estimate: GatedMixtureDistribution | None) -> None:
         """Update from one weighted ``(z, y)`` observation."""
+        weight = validated_observation_weight(weight)
         enc = GatedMixtureDataEncoder([a.acc_to_encoder() for a in self.component_accumulators]).seq_encode([x])
         self.seq_update(enc, np.asarray([weight], dtype=np.float64), estimate)
 
     def initialize(self, x: tuple[Any, Any], weight: float, rng: np.random.RandomState) -> None:
         """Initialize from one weighted ``(z, y)`` observation."""
+        weight = validated_observation_weight(weight)
         enc = GatedMixtureDataEncoder([a.acc_to_encoder() for a in self.component_accumulators]).seq_encode([x])
         self.seq_initialize(enc, np.asarray([weight], dtype=np.float64), rng)
 
     def combine(self, suff_stat: tuple[Any, ...]) -> GatedMixtureAccumulator:
         """Merge expert sufficient statistics and buffered gate training data."""
-        if len(suff_stat) == 3:
-            comp_stats, z, r = suff_stat
-            receipt = GateBufferReceipt(len(z), len(z), 0, self.max_buffer_rows)
-        elif len(suff_stat) == 4:
-            comp_stats, z, r, receipt = suff_stat
-            if not isinstance(receipt, GateBufferReceipt):
-                raise TypeError("gated-mixture buffer metadata must be a GateBufferReceipt.")
-        else:
-            raise ValueError("gated-mixture sufficient statistics must contain three or four entries.")
+        comp_stats, z, r, receipt, counts = _unpack_gated_statistics(
+            suff_stat,
+            num_components=self.num_components,
+            max_buffer_rows=self.max_buffer_rows,
+        )
+        self.component_counts += counts
         for k in range(self.num_components):
             self.component_accumulators[k].combine(copy.deepcopy(comp_stats[k]))
         if len(z):
@@ -629,28 +704,31 @@ class GatedMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             self._rows_seen += receipt.rows_seen
         return self
 
-    def value(self) -> tuple[tuple[Any, ...], np.ndarray, np.ndarray, GateBufferReceipt]:
+    def value(self) -> GatedMixtureStatistics:
         """Return owned expert statistics, bounded gate rows, and retention status."""
         comp_vals = tuple(copy.deepcopy(a.value()) for a in self.component_accumulators)
-        return comp_vals, self._z.copy(), self._resp.copy(), self.buffer_receipt
+        return GatedMixtureStatistics(
+            comp_vals,
+            self._z.copy(),
+            self._resp.copy(),
+            self.buffer_receipt,
+            self.component_counts.copy(),
+        )
 
     def from_value(self, x: tuple[Any, ...]) -> GatedMixtureAccumulator:
         """Restore expert statistics and gate training buffers."""
-        if len(x) == 3:
-            comp_vals, z, r = x
-            receipt = GateBufferReceipt(len(z), len(z), 0, self.max_buffer_rows)
-        elif len(x) == 4:
-            comp_vals, z, r, receipt = x
-            if not isinstance(receipt, GateBufferReceipt):
-                raise TypeError("gated-mixture buffer metadata must be a GateBufferReceipt.")
-        else:
-            raise ValueError("gated-mixture sufficient statistics must contain three or four entries.")
+        comp_vals, z, r, receipt, counts = _unpack_gated_statistics(
+            x,
+            num_components=self.num_components,
+            max_buffer_rows=self.max_buffer_rows,
+        )
         for k in range(self.num_components):
             self.component_accumulators[k].from_value(copy.deepcopy(comp_vals[k]))
         self._z = np.zeros((0, self.n_features or 0), dtype=np.float64)
         self._resp = np.zeros((0, self.num_components), dtype=np.float64)
         self._priorities = np.zeros(0, dtype=np.uint64)
         self._rows_seen = 0
+        self.component_counts = counts
         if len(z):
             self._append_gate_rows(z, r, rows_seen=receipt.rows_seen)
         else:
@@ -754,17 +832,22 @@ class GatedMixtureEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple[Any, ...]) -> GatedMixtureDistribution:
         """Estimate experts from responsibility-weighted stats and refit the gate."""
-        if len(suff_stat) == 3:
-            comp_stats, z, r = suff_stat
-            buffer_receipt = GateBufferReceipt(len(z), len(z), 0, self.max_buffer_rows)
-        elif len(suff_stat) == 4:
-            comp_stats, z, r, buffer_receipt = suff_stat
-            if not isinstance(buffer_receipt, GateBufferReceipt):
-                raise TypeError("gated-mixture buffer metadata must be a GateBufferReceipt.")
-        else:
-            raise ValueError("gated-mixture sufficient statistics must contain three or four entries.")
+        comp_stats, z, r, buffer_receipt, component_counts = _unpack_gated_statistics(
+            suff_stat,
+            num_components=self.num_components,
+            max_buffer_rows=self.max_buffer_rows,
+        )
+        validate_effective_sample_mass(
+            nobs,
+            component_counts.sum(),
+            label="gated-mixture effective sample",
+            allow_unassigned=True,
+        )
         self.last_gate_buffer_receipt = buffer_receipt
-        components = [self.component_estimators[k].estimate(nobs, comp_stats[k]) for k in range(self.num_components)]
+        components = [
+            self.component_estimators[k].estimate(component_counts[k], comp_stats[k])
+            for k in range(self.num_components)
+        ]
         if len(z) and callable(getattr(self.gate, "fit_with_receipt", None)):
             gate, receipt = self.gate.fit_with_receipt(
                 z,

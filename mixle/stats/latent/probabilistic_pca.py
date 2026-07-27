@@ -34,6 +34,11 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_observation_weights,
+    validated_statistic_tuple,
+)
 
 _MIN_SIGMA2 = 1.0e-12
 _LOG_2PI = float(np.log(2.0 * np.pi))
@@ -297,14 +302,11 @@ class ProbabilisticPCAAccumulator(SequenceEncodableStatisticAccumulator):
             raise ValueError("ProbabilisticPCA accumulator events must be a non-empty-width matrix.")
         self._ensure_dim(raw.shape[1])
         events = _event_matrix(x, self.dim, "ProbabilisticPCA accumulator events")
-        try:
-            weights = np.asarray(weights, dtype=np.float64)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise TypeError("ProbabilisticPCA accumulator weights must be numeric.") from exc
-        if weights.shape != (len(events),):
-            raise ValueError(f"ProbabilisticPCA accumulator weights must have shape ({len(events)},).")
-        if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
-            raise ValueError("ProbabilisticPCA accumulator weights must be finite and non-negative.")
+        weights = validated_observation_weights(
+            weights,
+            len(events),
+            "ProbabilisticPCA accumulator weights",
+        )
         self.count += float(np.sum(weights, dtype=np.float64))
         self.sum += events.T @ weights
         self.sum2 += (events * weights[:, None]).T @ events
@@ -315,12 +317,13 @@ class ProbabilisticPCAAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, np.ndarray | None, np.ndarray | None]) -> "ProbabilisticPCAAccumulator":
         """Merge serialized PPCA sufficient statistics into this accumulator."""
-        count, s, s2 = suff_stat
-        if s is not None:
-            self._ensure_dim(len(s))
-            self.sum += s
-            self.sum2 += s2
-        self.count += count
+        incoming = ProbabilisticPCAAccumulator()
+        incoming.from_value(validated_statistic_tuple(suff_stat, 3, "ProbabilisticPCA sufficient statistics"))
+        if incoming.sum is not None:
+            self._ensure_dim(incoming.dim)
+            self.sum += incoming.sum
+            self.sum2 += incoming.sum2
+        self.count += incoming.count
         return self
 
     def value(self) -> tuple[float, np.ndarray | None, np.ndarray | None]:
@@ -333,22 +336,27 @@ class ProbabilisticPCAAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: tuple[float, np.ndarray | None, np.ndarray | None]) -> "ProbabilisticPCAAccumulator":
         """Restore the accumulator from serialized PPCA sufficient statistics."""
-        self.count = _finite_nonnegative_weight(x[0], "ProbabilisticPCA sufficient-statistic count")
-        if x[1] is None or x[2] is None:
-            if x[1] is not None or x[2] is not None:
+        count, first_value, second_value = validated_statistic_tuple(x, 3, "ProbabilisticPCA sufficient statistics")
+        self.count = _finite_nonnegative_weight(count, "ProbabilisticPCA sufficient-statistic count")
+        if first_value is None or second_value is None:
+            if first_value is not None or second_value is not None:
                 raise ValueError("ProbabilisticPCA sufficient-statistic moments must both be present or absent.")
+            if self.count != 0.0:
+                raise ValueError("positive-count ProbabilisticPCA statistics require moments")
             self.sum = self.sum2 = None
             self.dim = None
             return self
-        first = np.asarray(x[1], dtype=np.float64)
+        first = np.asarray(first_value, dtype=np.float64)
         if first.ndim != 1 or first.size == 0 or np.any(~np.isfinite(first)):
             raise ValueError("ProbabilisticPCA sufficient-statistic sum must be a finite non-empty vector.")
-        second = np.asarray(x[2], dtype=np.float64)
+        second = np.asarray(second_value, dtype=np.float64)
         if second.shape != (len(first), len(first)) or np.any(~np.isfinite(second)):
             raise ValueError("ProbabilisticPCA second moment has invalid shape or values.")
         self.sum = first.copy()
         self.sum2 = second.copy()
         self.dim = len(first)
+        if self.count == 0.0 and (np.any(self.sum != 0.0) or np.any(self.sum2 != 0.0)):
+            raise ValueError("zero-count ProbabilisticPCA moments must be exact zero arrays")
         return self
 
     def acc_to_encoder(self) -> "ProbabilisticPCADataEncoder":
@@ -400,8 +408,9 @@ class ProbabilisticPCAEstimator(ParameterEstimator):
         self, nobs: float | None, suff_stat: tuple[float, np.ndarray | None, np.ndarray | None]
     ) -> ProbabilisticPCADistribution:
         """Estimate PPCA parameters from weighted first and second moments."""
-        count, s, s2 = suff_stat
+        count, s, s2 = validated_statistic_tuple(suff_stat, 3, "ProbabilisticPCA sufficient statistics")
         count = _finite_nonnegative_weight(count, "ProbabilisticPCA sufficient-statistic count")
+        validate_effective_sample_mass(nobs, count, label="ProbabilisticPCA effective sample")
         if count == 0.0:
             if s is None and s2 is None:
                 d = self.dim if self.dim is not None else self.latent_dim

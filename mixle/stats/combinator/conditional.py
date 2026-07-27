@@ -43,6 +43,13 @@ from mixle.stats.compute.pdist import (
     prefix_contract_error,
 )
 
+
+class _ConditionalChildNobsKey(NamedTuple):
+    """Private companion key for effective mass pooled under a child key."""
+
+    child_key: Any
+
+
 T0 = TypeVar("T0")
 T1 = TypeVar("T1")
 
@@ -118,18 +125,14 @@ def _validate_given_coverage(
     """Prove that every positive-mass given value selects a configured branch."""
     size = given_dist.support_size()
     if size is None:
-        raise ValueError(
-            "ConditionalDistribution without a default requires a finite given support covered by dmap."
-        )
+        raise ValueError("ConditionalDistribution without a default requires a finite given support covered by dmap.")
     seen = []
     for value, _ in itertools.islice(
         child_enumerator(given_dist, "ConditionalDistribution.given_dist"),
         size + 1,
     ):
         if value not in dmap:
-            raise ValueError(
-                "given_dist can generate %r, which has no conditional branch or default." % (value,)
-            )
+            raise ValueError("given_dist can generate %r, which has no conditional branch or default." % (value,))
         seen.append(value)
     if len(seen) > size or len(set(seen)) != len(seen):
         raise ValueError("given_dist enumeration must expose a unique finite support.")
@@ -681,8 +684,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
                 default_stats = _conditional_add_stats(default_stats, child_stats, engine)
                 child_counts = engine.sum(child_weights, axis=0)
                 default_counts = [
-                    default_counts[component] + child_counts[component]
-                    for component in range(num_components)
+                    default_counts[component] + child_counts[component] for component in range(num_components)
                 ]
             if default_stats is None:
                 default_by_component = _conditional_zero_stats(default_estimators, num_components)
@@ -1453,12 +1455,25 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
         for v in self.accumulator_map.values():
             v.key_merge(stats_dict)
+        for key, accumulator in self.accumulator_map.items():
+            child_key = getattr(accumulator, "keys", None)
+            if child_key is not None:
+                mass_key = _ConditionalChildNobsKey(child_key)
+                stats_dict[mass_key] = stats_dict.get(mass_key, 0.0) + self.branch_nobs[key]
 
         if self.has_default:
             self.default_accumulator.key_merge(stats_dict)
+            child_key = getattr(self.default_accumulator, "keys", None)
+            if child_key is not None:
+                mass_key = _ConditionalChildNobsKey(child_key)
+                stats_dict[mass_key] = stats_dict.get(mass_key, 0.0) + self.default_nobs
 
         if self.has_given:
             self.given_accumulator.key_merge(stats_dict)
+            child_key = getattr(self.given_accumulator, "keys", None)
+            if child_key is not None:
+                mass_key = _ConditionalChildNobsKey(child_key)
+                stats_dict[mass_key] = stats_dict.get(mass_key, 0.0) + self.given_nobs
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Invoke key_replace on each member SequenceEncodableStatisticAccumulator of
@@ -1476,12 +1491,34 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
             self.from_value(stats_dict[self.keys].value())
         for v in self.accumulator_map.values():
             v.key_replace(stats_dict)
+        for key, accumulator in self.accumulator_map.items():
+            child_key = getattr(accumulator, "keys", None)
+            mass_key = None if child_key is None else _ConditionalChildNobsKey(child_key)
+            if mass_key is not None and mass_key in stats_dict:
+                self.branch_nobs[key] = _finite_nonnegative(
+                    stats_dict[mass_key],
+                    label="conditional keyed child mass",
+                )
 
         if self.has_default:
             self.default_accumulator.key_replace(stats_dict)
+            child_key = getattr(self.default_accumulator, "keys", None)
+            mass_key = None if child_key is None else _ConditionalChildNobsKey(child_key)
+            if mass_key is not None and mass_key in stats_dict:
+                self.default_nobs = _finite_nonnegative(
+                    stats_dict[mass_key],
+                    label="conditional keyed default mass",
+                )
 
         if self.has_given:
             self.given_accumulator.key_replace(stats_dict)
+            child_key = getattr(self.given_accumulator, "keys", None)
+            mass_key = None if child_key is None else _ConditionalChildNobsKey(child_key)
+            if mass_key is not None and mass_key in stats_dict:
+                self.given_nobs = _finite_nonnegative(
+                    stats_dict[mass_key],
+                    label="conditional keyed given mass",
+                )
 
     def acc_to_encoder(self) -> "ConditionalDistributionDataEncoder":
         """Create a data encoder from the branch accumulator encoders."""
@@ -1910,9 +1947,7 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
                 or not isinstance(given_enc, (int, np.integer))
                 or int(given_enc) != size
             ):
-                raise ValueError(
-                    "conditional encoding without a given model must retain the exact row count."
-                )
+                raise ValueError("conditional encoding without a given model must retain the exact row count.")
         elif self.given_encoder.row_count(given_enc) != size:
             raise ValueError("conditional given encoding does not preserve the outer rows.")
         return size
