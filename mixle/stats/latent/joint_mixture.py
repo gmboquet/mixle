@@ -14,6 +14,8 @@ can expose both directions of the paired latent association.
 
 from __future__ import annotations
 
+import copy
+import warnings
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
@@ -24,6 +26,14 @@ import mixle.utils.vector as vec
 from mixle.engines.arithmetic import *
 from mixle.engines.arithmetic import maxrandint
 from mixle.enumeration.algorithms import BufferedStream, ProductEnumerator, best_first_union
+from mixle.stats.compute.mixture_evidence import (
+    normalize_engine_mixture_log_scores,
+    normalize_mixture_log_scores,
+    validated_column_probability_matrix,
+    validated_joint_probability_matrix,
+    validated_probability_vector,
+    validated_row_probability_matrix,
+)
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -49,7 +59,7 @@ from mixle.inference.fisher import (
     SufficientStatisticVectorizer,
     to_fisher,
 )
-from mixle.stats.latent.mixture import MixtureFisherView
+from mixle.stats.latent.mixture import MixtureFisherView, _owned_generative_components
 from mixle.utils.aliasing import broadcast_pseudo_count
 
 
@@ -65,12 +75,13 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
         self,
         components1: Sequence[SequenceEncodableProbabilityDistribution],
         components2: Sequence[SequenceEncodableProbabilityDistribution],
-        w1: Sequence[float] | np.ndarray,
-        w2: Sequence[float] | np.ndarray,
-        taus12: list[list[float]] | np.ndarray,
-        taus21: list[list[float]] | np.ndarray,
+        w1: Sequence[float] | np.ndarray | None = None,
+        w2: Sequence[float] | np.ndarray | None = None,
+        taus12: list[list[float]] | np.ndarray | None = None,
+        taus21: list[list[float]] | np.ndarray | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         name: str | None = None,
+        joint_weights: list[list[float]] | np.ndarray | None = None,
     ) -> None:
         """Create a paired latent mixture distribution.
 
@@ -82,10 +93,13 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
             taus12: Conditional weights for ``X2`` component ``j`` given ``X1``
                 component ``i``; rows correspond to ``components1``.
             taus21: Conditional weights for ``X1`` component ``i`` given ``X2``
-                component ``j``; rows correspond to ``components1``.
+                component ``j``; columns correspond to ``components2``.
             keys: Optional merge keys for joint weights, ``X1`` component
                 accumulators, and ``X2`` component accumulators.
             name: Optional diagnostic name.
+            joint_weights: Canonical joint latent-state probability table. When
+                supplied, the four legacy marginal/conditional arguments must
+                be omitted.
 
         Attributes:
             components1: First-field component distributions.
@@ -104,15 +118,74 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
             name: Optional diagnostic name.
 
         """
+        self.components1 = _owned_generative_components(components1, "JointMixtureDistribution components1")
+        self.components2 = _owned_generative_components(components2, "JointMixtureDistribution components2")
+        self.num_components1 = len(self.components1)
+        self.num_components2 = len(self.components2)
+        shape = (self.num_components1, self.num_components2)
+
+        legacy_values = (w1, w2, taus12, taus21)
+        if joint_weights is not None:
+            if any(value is not None for value in legacy_values):
+                raise TypeError("joint_weights cannot be combined with w1, w2, taus12, or taus21.")
+            joint = validated_joint_probability_matrix(
+                joint_weights,
+                "JointMixtureDistribution joint weights",
+                shape=shape,
+            )
+        else:
+            if any(value is None for value in legacy_values):
+                raise TypeError("JointMixtureDistribution requires joint_weights or all of w1, w2, taus12, and taus21.")
+            forward_marginal = validated_probability_vector(
+                w1,
+                "JointMixtureDistribution w1",
+                size=self.num_components1,
+            )
+            reverse_marginal = validated_probability_vector(
+                w2,
+                "JointMixtureDistribution w2",
+                size=self.num_components2,
+            )
+            forward_conditional = validated_row_probability_matrix(
+                taus12,
+                "JointMixtureDistribution taus12",
+                shape=shape,
+            )
+            reverse_values = np.asarray(taus21, dtype=np.float64)
+            reverse_shape = (self.num_components2, self.num_components1)
+            if reverse_values.shape == reverse_shape and reverse_shape != shape:
+                warnings.warn(
+                    "the legacy transposed taus21 layout is deprecated; use shape "
+                    "(len(components1), len(components2)) or pass joint_weights.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                reverse_values = reverse_values.T
+            reverse_conditional = validated_column_probability_matrix(
+                reverse_values,
+                "JointMixtureDistribution taus21",
+                shape=shape,
+            )
+            joint = forward_marginal[:, None] * forward_conditional
+            reverse_joint = reverse_conditional * reverse_marginal[None, :]
+            if not np.allclose(joint, reverse_joint, rtol=1.0e-10, atol=1.0e-12):
+                warnings.warn(
+                    "w2 and taus21 describe a different joint law; the canonical law derived "
+                    "from w1 and taus12 is used. Pass joint_weights to avoid this legacy ambiguity.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
+        self.joint_weights = joint
+        self.w1 = joint.sum(axis=1)
+        self.w2 = joint.sum(axis=0)
+        self.taus12 = np.full(shape, 1.0 / self.num_components2, dtype=np.float64)
+        np.divide(joint, self.w1[:, None], out=self.taus12, where=self.w1[:, None] > 0.0)
+        self.taus21 = np.full(shape, 1.0 / self.num_components1, dtype=np.float64)
+        np.divide(joint, self.w2[None, :], out=self.taus21, where=self.w2[None, :] > 0.0)
+
         with np.errstate(divide="ignore"):
-            self.components1 = components1
-            self.components2 = components2
-            self.w1 = vec.make(w1)
-            self.w2 = vec.make(w2)
-            self.num_components1 = len(components1)
-            self.num_components2 = len(components2)
-            self.taus12 = np.reshape(taus12, (self.num_components1, self.num_components2))
-            self.taus21 = np.reshape(taus21, (self.num_components1, self.num_components2))
+            self.log_joint_weights = np.log(self.joint_weights)
             self.log_w1 = np.log(self.w1)
             self.log_w2 = np.log(self.w2)
             self.log_taus12 = np.log(self.taus12)
@@ -124,13 +197,12 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
         """Return a readable distribution summary."""
         s1 = ",".join([str(u) for u in self.components1])
         s2 = ",".join([str(u) for u in self.components2])
-        s3 = ",".join(map(str, self.w1))
-        s4 = ",".join(map(str, self.w2))
-        s5 = ",".join(map(str, self.taus12.flatten()))
-        s6 = ",".join(map(str, self.taus21.flatten()))
-        s7 = repr(self.name)
-
-        return "JointMixtureDistribution([%s], [%s], [%s], [%s], [%s], [%s], name=%s)" % (s1, s2, s3, s4, s5, s6, s7)
+        return "JointMixtureDistribution([%s], [%s], joint_weights=%r, name=%r)" % (
+            s1,
+            s2,
+            self.joint_weights.tolist(),
+            self.name,
+        )
 
     def compute_capabilities(self):
         """Intersect generated-compute backend support across all child components."""
@@ -160,7 +232,7 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
                 ParameterSpec("w1", constraint="simplex_vector"),
                 ParameterSpec("w2", constraint="simplex_vector"),
                 ParameterSpec("taus12", constraint="row_simplex_matrix"),
-                ParameterSpec("taus21", constraint="row_simplex_matrix"),
+                ParameterSpec("taus21", constraint="column_simplex_matrix"),
             ),
             statistics=(
                 StatisticSpec("component_counts1"),
@@ -205,28 +277,10 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
             Log-density evaluated at x.
 
         """
-        ll1 = np.zeros((1, self.num_components1))
-        ll2 = np.zeros((1, self.num_components2))
-
-        for i in range(self.num_components1):
-            ll1[0, i] = self.components1[i].log_density(x[0]) + self.log_w1[i]
-        for i in range(self.num_components2):
-            ll2[0, i] += self.components2[i].log_density(x[1])
-
-        max1 = ll1.max()
-        ll1 -= max1
-        np.exp(ll1, out=ll1)
-
-        max2 = np.max(ll2)
-        ll2 -= max2
-        np.exp(ll2, out=ll2)
-
-        ll12 = np.dot(ll1, self.taus12)
-        ll2 *= ll12
-
-        rv = np.log(ll2.sum()) + max1 + max2
-
-        return rv
+        ll1 = np.asarray([component.log_density(x[0]) for component in self.components1], dtype=np.float64)
+        ll2 = np.asarray([component.log_density(x[1]) for component in self.components2], dtype=np.float64)
+        pair_scores = ll1[:, None] + self.log_joint_weights + ll2[None, :]
+        return float(normalize_mixture_log_scores(pair_scores.reshape(1, -1)).log_evidence[0])
 
     def seq_log_density(self, x: tuple[int, E0, E1]) -> np.ndarray:
         """Vectorized evaluation of the log-density for an encoded sequence of observations x.
@@ -244,34 +298,10 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         sz, enc_data1, enc_data2 = x
-        ll_mat1 = np.zeros((sz, self.num_components1))
-        ll_mat2 = np.zeros((sz, self.num_components2))
-
-        for i in range(self.num_components1):
-            ll_mat1[:, i] = self.components1[i].seq_log_density(enc_data1)
-            ll_mat1[:, i] += self.log_w1[i]
-
-        for i in range(self.num_components2):
-            ll_mat2[:, i] = self.components2[i].seq_log_density(enc_data2)
-
-        with np.errstate(divide="ignore", invalid="ignore"):  # -inf max on impossible rows -> handled below
-            ll_max1 = ll_mat1.max(axis=1, keepdims=True)
-            ll_mat1 -= ll_max1
-            np.exp(ll_mat1, out=ll_mat1)
-
-            ll_max2 = ll_mat2.max(axis=1, keepdims=True)
-            ll_mat2 -= ll_max2
-            np.exp(ll_mat2, out=ll_mat2)
-
-            ll_mat12 = np.dot(ll_mat1, self.taus12)
-            ll_mat2 *= ll_mat12
-
-            rv = np.log(ll_mat2.sum(axis=1)) + ll_max1[:, 0] + ll_max2[:, 0]
-        # an observation outside the support of either component set has max log-density -inf, which
-        # produces nan above; such observations have zero probability
-        rv[~(np.isfinite(ll_max1[:, 0]) & np.isfinite(ll_max2[:, 0]))] = -np.inf
-
-        return rv
+        ll_mat1 = np.stack([component.seq_log_density(enc_data1) for component in self.components1], axis=1)
+        ll_mat2 = np.stack([component.seq_log_density(enc_data2) for component in self.components2], axis=1)
+        pair_scores = ll_mat1[:, :, None] + self.log_joint_weights[None, :, :] + ll_mat2[:, None, :]
+        return normalize_mixture_log_scores(pair_scores.reshape(sz, -1)).log_evidence
 
     def backend_seq_log_density(self, x: tuple[int, E0, E1], engine: Any) -> Any:
         """Engine-neutral log-density for encoded joint-mixture observations."""
@@ -292,7 +322,10 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
         ll2 = engine.stack(ll2, axis=1)
 
         pair_scores = ll1[:, :, None] + engine.asarray(self.log_taus12)[None, :, :] + ll2[:, None, :]
-        return engine.logsumexp(pair_scores, axis=(1, 2))
+        return normalize_engine_mixture_log_scores(
+            pair_scores.reshape((sz, self.num_components1 * self.num_components2)),
+            engine,
+        ).log_evidence
 
     def to_fisher(self, **kwargs):
         """Structural Fisher view for the joint mixture."""
@@ -627,63 +660,32 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         sz, enc_data1, enc_data2 = x
-        ll_mat1 = np.zeros((sz, self.num_components1, 1))
-        ll_mat2 = np.zeros((sz, 1, self.num_components2))
-        log_w = estimate.log_w1
-
-        for i in range(estimate.num_components1):
-            ll_mat1[:, i, 0] = estimate.components1[i].seq_log_density(enc_data1)
-            ll_mat1[:, i, 0] += log_w[i]
-
-        for i in range(estimate.num_components2):
-            ll_mat2[:, 0, i] = estimate.components2[i].seq_log_density(enc_data2)
-
-        with np.errstate(invalid="ignore"):  # -inf max on impossible rows -> rows zeroed below
-            ll_max1 = ll_mat1.max(axis=1, keepdims=True)
-            ll_mat1 -= ll_max1
-            np.exp(ll_mat1, out=ll_mat1)
-
-            ll_max2 = ll_mat2.max(axis=2, keepdims=True)
-            ll_mat2 -= ll_max2
-            np.exp(ll_mat2, out=ll_mat2)
-
-        # an observation outside the support of either component set has max log-density -inf, which makes
-        # the exponentiated matrices nan; zero those rows so impossible observations contribute no
-        # responsibility (rather than poisoning the whole batch's counts with nan)
-        ll_mat1[~np.isfinite(np.broadcast_to(ll_max1, ll_mat1.shape))] = 0.0
-        ll_mat2[~np.isfinite(np.broadcast_to(ll_max2, ll_mat2.shape))] = 0.0
-
-        ll_joint = ll_mat1 * ll_mat2
-        ll_joint *= estimate.taus12
-
-        gamma_2 = np.sum(ll_joint, axis=1, keepdims=True)
-        sf = np.sum(gamma_2, axis=2, keepdims=True)
-        sf_safe = np.where(sf > 0.0, sf, 1.0)  # impossible rows have sf==0; their gammas are already 0
-        ww = np.reshape(weights, [-1, 1, 1])
-
-        # Capture per-row data log-likelihood (== seq_log_density) by reusing the joint posterior
-        # normalizer sf already computed here: row_ll = log(sf) + rowmax1 + rowmax2. Free except an
-        # O(n) log/dot, and only when the fused-EM fast path requests it (_track_ll).
+        ll1 = np.stack(
+            [component.seq_log_density(enc_data1) for component in estimate.components1],
+            axis=1,
+        )
+        ll2 = np.stack(
+            [component.seq_log_density(enc_data2) for component in estimate.components2],
+            axis=1,
+        )
+        pair_scores = ll1[:, :, None] + estimate.log_joint_weights[None, :, :] + ll2[:, None, :]
+        normalized = normalize_mixture_log_scores(pair_scores.reshape(sz, -1))
         if self._track_ll:
-            with np.errstate(divide="ignore"):
-                row_ll = np.log(sf[:, 0, 0]) + ll_max1[:, 0, 0] + ll_max2[:, 0, 0]
-            self._seq_ll += float(np.dot(weights, row_ll))
+            self._seq_ll += float(np.dot(weights, normalized.log_evidence))
+        joint = normalized.responsibilities.reshape(sz, self.num_components1, self.num_components2)
+        joint *= np.asarray(weights, dtype=np.float64)[:, None, None]
+        gamma_1 = joint.sum(axis=2)
+        gamma_2 = joint.sum(axis=1)
 
-        gamma_1 = np.sum(ll_joint, axis=2, keepdims=True)
-        gamma_1 *= ww / sf_safe
-        gamma_2 *= ww / sf_safe
-
-        ll_joint *= ww / sf_safe
-
-        self.comp_counts1 += np.sum(gamma_1, axis=0).flatten()
-        self.comp_counts2 += np.sum(gamma_2, axis=0).flatten()
-        self.joint_counts += ll_joint.sum(axis=0)
+        self.comp_counts1 += gamma_1.sum(axis=0)
+        self.comp_counts2 += gamma_2.sum(axis=0)
+        self.joint_counts += joint.sum(axis=0)
 
         for i in range(self.num_components1):
-            self.accumulators1[i].seq_update(enc_data1, gamma_1[:, i, 0], estimate.components1[i])
+            self.accumulators1[i].seq_update(enc_data1, gamma_1[:, i], estimate.components1[i])
 
         for i in range(self.num_components2):
-            self.accumulators2[i].seq_update(enc_data2, gamma_2[:, 0, i], estimate.components2[i])
+            self.accumulators2[i].seq_update(enc_data2, gamma_2[:, i], estimate.components2[i])
 
     def seq_update_engine(self, x, weights, estimate, engine):
         """Engine-resident E-step: component scoring and the joint-posterior arithmetic run on the
@@ -698,23 +700,20 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         ll1 = engine.stack(
             [backend_seq_log_density(estimate.components1[i], enc_data1, engine) for i in range(self.num_components1)],
             axis=1,
-        )  # (sz, C1)
-        ll1 = ll1 + engine.asarray(estimate.log_w1)
-        e1 = engine.exp(ll1 - engine.max(ll1, axis=1)[:, None])
+        )
         ll2 = engine.stack(
             [backend_seq_log_density(estimate.components2[i], enc_data2, engine) for i in range(self.num_components2)],
             axis=1,
-        )  # (sz, C2)
-        e2 = engine.exp(ll2 - engine.max(ll2, axis=1)[:, None])
-
-        taus12 = engine.asarray(estimate.taus12)  # (C1, C2)
-        ll_joint = e1[:, :, None] * e2[:, None, :] * taus12[None, :, :]  # (sz, C1, C2)
-        sf = engine.sum(engine.sum(ll_joint, axis=2), axis=1)  # (sz,)
-        ww = engine.asarray(weights_np) / sf  # (sz,)
-
-        gamma_1 = engine.sum(ll_joint, axis=2) * ww[:, None]  # (sz, C1)
-        gamma_2 = engine.sum(ll_joint, axis=1) * ww[:, None]  # (sz, C2)
-        joint = ll_joint * ww[:, None, None]
+        )
+        pair_scores = ll1[:, :, None] + engine.asarray(estimate.log_joint_weights)[None, :, :] + ll2[:, None, :]
+        normalized = normalize_engine_mixture_log_scores(
+            pair_scores.reshape((sz, self.num_components1 * self.num_components2)),
+            engine,
+        )
+        joint = normalized.responsibilities.reshape((sz, self.num_components1, self.num_components2))
+        joint = joint * engine.asarray(weights_np)[:, None, None]
+        gamma_1 = engine.sum(joint, axis=2)
+        gamma_2 = engine.sum(joint, axis=1)
 
         self.comp_counts1 += np.asarray(engine.to_numpy(engine.sum(gamma_1, axis=0))).flatten()
         self.comp_counts2 += np.asarray(engine.to_numpy(engine.sum(gamma_2, axis=0))).flatten()
@@ -744,24 +743,24 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """
         cc1, cc2, jc, s1, s2 = suff_stat
 
-        self.joint_counts += jc
-        self.comp_counts1 += cc1
+        self.joint_counts += np.asarray(jc, dtype=np.float64)
+        self.comp_counts1 += np.asarray(cc1, dtype=np.float64)
         for i in range(self.num_components1):
-            self.accumulators1[i].combine(s1[i])
-        self.comp_counts2 += cc2
+            self.accumulators1[i].combine(copy.deepcopy(s1[i]))
+        self.comp_counts2 += np.asarray(cc2, dtype=np.float64)
         for i in range(self.num_components2):
-            self.accumulators2[i].combine(s2[i])
+            self.accumulators2[i].combine(copy.deepcopy(s2[i]))
 
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[Any, ...], tuple[Any, ...]]:
         """Return accumulated sufficient statistics."""
         return (
-            self.comp_counts1,
-            self.comp_counts2,
-            self.joint_counts,
-            tuple([u.value() for u in self.accumulators1]),
-            tuple([u.value() for u in self.accumulators2]),
+            self.comp_counts1.copy(),
+            self.comp_counts2.copy(),
+            self.joint_counts.copy(),
+            tuple(copy.deepcopy(u.value()) for u in self.accumulators1),
+            tuple(copy.deepcopy(u.value()) for u in self.accumulators2),
         )
 
     def from_value(
@@ -778,14 +777,14 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """
         cc1, cc2, jc, s1, s2 = x
 
-        self.comp_counts1 = cc1
-        self.comp_counts2 = cc2
-        self.joint_counts = jc
+        self.comp_counts1 = np.asarray(cc1, dtype=np.float64).copy()
+        self.comp_counts2 = np.asarray(cc2, dtype=np.float64).copy()
+        self.joint_counts = np.asarray(jc, dtype=np.float64).copy()
 
         for i in range(self.num_components1):
-            self.accumulators1[i].from_value(s1[i])
+            self.accumulators1[i].from_value(copy.deepcopy(s1[i]))
         for i in range(self.num_components2):
-            self.accumulators2[i].from_value(s2[i])
+            self.accumulators2[i].from_value(copy.deepcopy(s2[i]))
 
         return self
 
@@ -817,17 +816,17 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             if acc1_key in stats_dict:
                 acc = stats_dict[acc1_key]
                 for i in range(len(acc)):
-                    acc[i] = acc[i].combine(self.accumulators1[i].value())
+                    acc[i].combine(copy.deepcopy(self.accumulators1[i].value()))
             else:
-                stats_dict[acc1_key] = self.accumulators1
+                stats_dict[acc1_key] = copy.deepcopy(self.accumulators1)
 
         if acc2_key is not None:
             if acc2_key in stats_dict:
                 acc = stats_dict[acc2_key]
                 for i in range(len(acc)):
-                    acc[i] = acc[i].combine(self.accumulators2[i].value())
+                    acc[i].combine(copy.deepcopy(self.accumulators2[i].value()))
             else:
-                stats_dict[acc2_key] = self.accumulators2
+                stats_dict[acc2_key] = copy.deepcopy(self.accumulators2)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace this accumulator's sufficient statistics from matching keys.
@@ -850,11 +849,19 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         if acc1_key is not None:
             if acc1_key in stats_dict:
-                self.accumulators1 = stats_dict[acc1_key]
+                pooled = stats_dict[acc1_key]
+                if len(pooled) != self.num_components1:
+                    raise ValueError("keyed joint-mixture X1 component statistics have incompatible arity.")
+                for local, shared in zip(self.accumulators1, pooled):
+                    local.from_value(copy.deepcopy(shared.value()))
 
         if acc2_key is not None:
             if acc2_key in stats_dict:
-                self.accumulators2 = stats_dict[acc2_key]
+                pooled = stats_dict[acc2_key]
+                if len(pooled) != self.num_components2:
+                    raise ValueError("keyed joint-mixture X2 component statistics have incompatible arity.")
+                for local, shared in zip(self.accumulators2, pooled):
+                    local.from_value(copy.deepcopy(shared.value()))
 
     def acc_to_encoder(self) -> DataSequenceEncoder:
         """Return an encoder compatible with paired joint-mixture observations."""
@@ -973,47 +980,39 @@ class JointMixtureEstimator(ParameterEstimator):
         components1 = [self.estimators1[i].estimate(counts1[i], comp_suff_stats1[i]) for i in range(num_components1)]
         components2 = [self.estimators2[i].estimate(counts2[i], comp_suff_stats2[i]) for i in range(num_components2)]
 
-        if self.pseudo_count is not None and self.suff_stat is None:
-            p1 = self.pseudo_count[0] / float(self.num_components1)
-            p2 = self.pseudo_count[1] / float(self.num_components2)
-            p3 = self.pseudo_count[2] / float(self.num_components2 * self.num_components1)
+        joint = np.asarray(joint_counts, dtype=np.float64).copy()
+        if self.pseudo_count is not None:
+            pseudo_total = float(sum(self.pseudo_count))
+            if pseudo_total > 0.0:
+                if self.suff_stat is None:
+                    prior_joint = np.full(
+                        (num_components1, num_components2),
+                        1.0 / float(num_components1 * num_components2),
+                    )
+                else:
+                    prior_joint = np.asarray(self.suff_stat[2], dtype=np.float64)
+                    if (
+                        prior_joint.shape != joint.shape
+                        or np.any(~np.isfinite(prior_joint))
+                        or np.any(prior_joint < 0.0)
+                        or float(prior_joint.sum()) <= 0.0
+                    ):
+                        raise ValueError("joint-mixture prior joint counts must be finite, non-negative, and nonempty.")
+                    prior_joint = prior_joint / prior_joint.sum()
+                joint += pseudo_total * prior_joint
 
-            w1 = (counts1 + p1) / (counts1.sum() + self.pseudo_count[0])
-            w2 = (counts2 + p2) / (counts2.sum() + self.pseudo_count[1])
-            taus = joint_counts + p3
-
-            taus12_sum = np.sum(taus, axis=1, keepdims=True)
-            taus12_sum[taus12_sum == 0] = 1.0
-            taus12 = taus / taus12_sum
-
-            taus21_sum = np.sum(taus, axis=0, keepdims=True)
-            taus21_sum[taus21_sum == 0] = 1.0
-            taus21 = taus / taus21_sum
-
+        total = float(joint.sum())
+        if total <= 0.0:
+            joint.fill(1.0 / float(num_components1 * num_components2))
         else:
-            counts1_sum = counts1.sum()
-            counts2_sum = counts2.sum()
-            w1 = (
-                np.full(self.num_components1, 1.0 / self.num_components1)
-                if counts1_sum <= 0.0
-                else counts1 / counts1_sum
-            )
-            w2 = (
-                np.full(self.num_components2, 1.0 / self.num_components2)
-                if counts2_sum <= 0.0
-                else counts2 / counts2_sum
-            )
-            taus = joint_counts
+            joint /= total
 
-            taus12_sum = np.sum(taus, axis=1, keepdims=True)
-            taus12_sum[taus12_sum == 0] = 1.0
-            taus12 = taus / taus12_sum
-
-            taus21_sum = np.sum(taus, axis=0, keepdims=True)
-            taus21_sum[taus21_sum == 0] = 1.0
-            taus21 = taus / taus21_sum
-
-        return JointMixtureDistribution(components1, components2, w1, w2, taus12, taus21, name=self.name)
+        return JointMixtureDistribution(
+            components1,
+            components2,
+            name=self.name,
+            joint_weights=joint,
+        )
 
 
 class JointMixtureDataEncoder(DataSequenceEncoder):
