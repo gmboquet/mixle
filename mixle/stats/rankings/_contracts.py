@@ -230,6 +230,22 @@ def matrix_statistics(value: Any, dim: int, *, label: str) -> tuple[float, np.nd
     )
 
 
+def assignment_statistics(value: Any, dim: int, *, label: str) -> tuple[float, np.ndarray]:
+    """Validate item-by-position counts produced by weighted full permutations."""
+    total, matrix = count_matrix_statistics(
+        value,
+        dim,
+        label=label,
+        entries_per_observation=float(dim),
+    )
+    tolerance = 1.0e-10 * max(1.0, total)
+    if not np.allclose(matrix.sum(axis=1), total, rtol=1.0e-10, atol=tolerance):
+        raise ValueError(f"{label} row sums must equal total observation weight.")
+    if not np.allclose(matrix.sum(axis=0), total, rtol=1.0e-10, atol=tolerance):
+        raise ValueError(f"{label} column sums must equal total observation weight.")
+    return total, matrix
+
+
 def bounded_sum_statistics(
     value: Any,
     *,
