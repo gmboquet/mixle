@@ -17,15 +17,24 @@ missing.
   * :func:`rarefaction_curve` -- expected richness as a function of sample size (Hurlbert
     interpolation), the basis for coverage-standardised comparison.
 
-Counts must be finite non-negative integer abundances per species (validated by :func:`_abund`, which
-raises rather than silently coercing fractional/negative/non-finite input); incidence inputs must be a
-finite binary ``(species, sites)`` 0/1 matrix with at least one site (validated by :func:`_incidence`).
+Counts must be a one-dimensional vector of finite non-negative integer abundances per species
+(validated by :func:`_abund`, which raises rather than silently coercing values or flattening axes);
+incidence inputs must be a finite binary ``(species, sites)`` 0/1 matrix with at least one site
+(validated by :func:`_incidence`). Estimators raise :class:`CoverageInsufficientDataError` rather than
+issuing contradictory numerical answers when no observations are present.
 """
 
 from __future__ import annotations
 
+import math
+from numbers import Integral, Real
+
 import numpy as np
 from scipy.special import gammaln
+
+
+class CoverageInsufficientDataError(ValueError):
+    """The requested coverage/diversity estimand is not identified by an empty sample."""
 
 
 def _abund(counts: np.ndarray) -> np.ndarray:
@@ -40,14 +49,63 @@ def _abund(counts: np.ndarray) -> np.ndarray:
     be dropped indirectly by comparisons that NaN always fails (``NaN > 0`` is ``False``), silently
     shrinking the effective sample with no signal (MXR-080-0077).
     """
-    c = np.asarray(counts, dtype=float).ravel()
-    if c.size and not np.all(np.isfinite(c)):
-        raise ValueError("counts must be finite (no NaN or Inf).")
-    if np.any(c < 0):
-        raise ValueError("counts must be non-negative.")
-    if np.any(c != np.trunc(c)):
-        raise ValueError("counts must be exact integers (fractional abundances are not supported).")
-    return c[c > 0].astype(np.int64)
+    raw = np.asarray(counts)
+    if raw.ndim != 1:
+        raise ValueError(f"counts must be a one-dimensional species-abundance vector, got shape {raw.shape}.")
+    maximum = np.iinfo(np.int64).max
+    validated: list[int] = []
+    for value in raw.tolist():
+        if isinstance(value, (bool, np.bool_)):
+            raise TypeError("counts must be integer abundances, not Boolean values.")
+        if isinstance(value, Integral):
+            count = int(value)
+        elif isinstance(value, Real):
+            numeric = float(value)
+            if not np.isfinite(numeric):
+                raise ValueError("counts must be finite (no NaN or Inf).")
+            if not numeric.is_integer():
+                raise ValueError("counts must be exact integers (fractional abundances are not supported).")
+            count = int(numeric)
+        else:
+            raise TypeError(f"counts must contain numeric integer abundances, got {value!r}.")
+        if count < 0:
+            raise ValueError("counts must be non-negative.")
+        if count > maximum:
+            raise OverflowError(f"an abundance exceeds the supported signed 64-bit per-species limit ({maximum}).")
+        if count:
+            validated.append(count)
+    return np.asarray(validated, dtype=np.int64)
+
+
+def _abundance_total(counts: np.ndarray) -> int:
+    """Return the exact Python-integer total without NumPy signed-integer overflow."""
+    return sum(int(count) for count in counts)
+
+
+def _require_observed(counts: np.ndarray, estimator: str) -> None:
+    if counts.size == 0:
+        raise CoverageInsufficientDataError(
+            f"{estimator} requires at least one observed individual or incidence; an empty sample "
+            "does not identify coverage, unseen mass, richness, or diversity."
+        )
+
+
+def _ci_level(value: float) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError("ci_level must be a scalar probability, not a Boolean or array.")
+    level = float(value)
+    if not np.isfinite(level) or not 0.0 < level < 1.0:
+        raise ValueError("ci_level must be finite and strictly between 0 and 1.")
+    return level
+
+
+def _rare_threshold(value: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError("rare_threshold must be an exact non-Boolean integer.")
+    threshold = int(value)
+    if threshold < 1:
+        raise ValueError("rare_threshold must be at least 1.")
+    return threshold
 
 
 def _freq_of_freq(counts: np.ndarray) -> dict[int, int]:
@@ -66,17 +124,23 @@ def _incidence(matrix: np.ndarray) -> np.ndarray:
     become ``0``, so a matrix of continuous or malformed measurements was silently accepted as a valid
     incidence design (MXR-080-0079). At least one site (column) is required.
     """
-    inc = np.atleast_2d(np.asarray(matrix, dtype=float))
+    inc = np.asarray(matrix)
+    if inc.ndim != 2:
+        raise ValueError(f"incidence must be a two-dimensional (species, sites) matrix, got shape {inc.shape}.")
     if inc.shape[1] == 0:
         raise ValueError("incidence matrix must have at least one site.")
-    if not np.all(np.isfinite(inc)):
+    try:
+        finite = np.isfinite(inc)
+    except TypeError as exc:
+        raise TypeError("incidence matrix entries must be numeric Boolean/binary values.") from exc
+    if not np.all(finite):
         raise ValueError("incidence matrix must be finite (no NaN or Inf).")
-    if not np.all((inc == 0.0) | (inc == 1.0)):
+    if not np.all((inc == 0) | (inc == 1)):
         raise ValueError("incidence matrix must be binary (every entry must be exactly 0 or 1).")
     return inc.astype(np.int64)
 
 
-def turing_coverage(counts: np.ndarray) -> dict[str, float]:
+def turing_coverage(counts: np.ndarray) -> dict[str, float | int]:
     """Turing's sample-coverage estimate and the complementary unseen probability mass.
 
     ``C = 1 - f1 / n`` where ``f1`` is the number of singletons and ``n`` the total count: the
@@ -87,9 +151,10 @@ def turing_coverage(counts: np.ndarray) -> dict[str, float]:
         ``{'coverage', 'unseen_mass', 'n', 'f1'}``.
     """
     c = _abund(counts)
-    n = float(c.sum())
-    f1 = float(np.sum(c == 1))
-    unseen = f1 / n if n > 0 else 0.0
+    _require_observed(c, "turing_coverage")
+    n = _abundance_total(c)
+    f1 = int(np.sum(c == 1))
+    unseen = f1 / n
     return {"coverage": 1.0 - unseen, "unseen_mass": unseen, "n": n, "f1": f1}
 
 
@@ -106,9 +171,7 @@ def good_turing(counts: np.ndarray) -> dict[str, np.ndarray | float | bool | str
     malformed one -- there is nothing to fit a slope against, so smoothing is skipped and the seen mass
     is reallocated by raw frequency instead (the Simple Good--Turing small-support fallback; previously
     this raised a ``LinAlgError`` out of ``np.polyfit``). With no observed counts at all, coverage is
-    not identifiable from the data at all, so a typed insufficient-evidence result is returned instead
-    of a fabricated number (previously an empty sample raised a ``TypeError`` out of ``np.polyfit``)
-    (MXR-080-0078).
+    not identifiable and the common :class:`CoverageInsufficientDataError` is raised.
 
     Args:
         counts: per-species abundances (zeros ignored).
@@ -118,21 +181,12 @@ def good_turing(counts: np.ndarray) -> dict[str, np.ndarray | float | bool | str
         probability assigned to unseen species; ``proba`` are the smoothed probabilities of the
         *input* species (aligned to the positive entries of ``counts``, summing to ``1 - p0``);
         ``r_star`` / ``r`` are the discounted and raw frequencies for the distinct abundance classes.
-        ``insufficient_evidence`` is ``True`` (with ``reason`` set and the other fields empty/NaN) only
-        when the sample has no observed counts at all; it is ``False`` (with ``reason`` empty)
-        whenever an estimate -- smoothed or small-support fallback -- was produced.
+        ``insufficient_evidence`` is always ``False`` for a returned estimate; empty samples raise
+        :class:`CoverageInsufficientDataError`.
     """
     c = _abund(counts)
-    if c.size == 0:
-        return {
-            "p0": float("nan"),
-            "proba": np.array([]),
-            "r_star": np.array([]),
-            "r": np.array([]),
-            "insufficient_evidence": True,
-            "reason": "no observed counts: Good-Turing discounting is not identifiable from an empty sample.",
-        }
-    n = float(c.sum())
+    _require_observed(c, "good_turing")
+    n = _abundance_total(c)
     fof = _freq_of_freq(c)
     r = np.array(sorted(fof), dtype=float)
     nr = np.array([fof[int(ri)] for ri in r], dtype=float)
@@ -197,6 +251,8 @@ def chao1(counts: np.ndarray, *, ci_level: float = 0.95) -> dict[str, float]:
         ``{'estimate', 'observed', 'f1', 'f2', 'se', 'ci_low', 'ci_high'}``.
     """
     c = _abund(counts)
+    _require_observed(c, "chao1")
+    ci_level = _ci_level(ci_level)
     s_obs = float(c.size)
     f1 = float(np.sum(c == 1))
     f2 = float(np.sum(c == 2))
@@ -240,8 +296,10 @@ def chao2(incidence: np.ndarray, *, ci_level: float = 0.95) -> dict[str, float]:
         are the numbers of species found in exactly one / two sites.
     """
     inc = _incidence(incidence)
+    ci_level = _ci_level(ci_level)
     site_counts = inc.sum(axis=1)
     site_counts = site_counts[site_counts > 0]
+    _require_observed(site_counts, "chao2")
     m = float(inc.shape[1])
     s_obs = float(site_counts.size)
     q1 = float(np.sum(site_counts == 1))
@@ -282,17 +340,19 @@ def ace(counts: np.ndarray, *, rare_threshold: int = 10) -> dict[str, float]:
         ``{'estimate', 'observed', 's_rare', 's_abund', 'c_ace'}``.
     """
     c = _abund(counts)
+    _require_observed(c, "ace")
+    rare_threshold = _rare_threshold(rare_threshold)
     s_obs = float(c.size)
     rare = c[c <= rare_threshold]
     abund = c[c > rare_threshold]
     s_rare = float(rare.size)
     s_abund = float(abund.size)
-    n_rare = float(rare.sum())
+    n_rare = float(_abundance_total(rare))
     f1 = float(np.sum(c == 1))
     c_ace = 1.0 - f1 / n_rare if n_rare > 0 else 1.0
     if c_ace <= 0 or s_rare == 0:
         return {"estimate": s_obs, "observed": s_obs, "s_rare": s_rare, "s_abund": s_abund, "c_ace": c_ace}
-    sum_ii = float(np.sum(np.array([i * (i - 1) for i in rare])))
+    sum_ii = math.fsum(float(i) * (float(i) - 1.0) for i in rare)
     gamma2 = max((s_rare / c_ace) * sum_ii / (n_rare * (n_rare - 1.0)) - 1.0, 0.0)
     est = s_abund + s_rare / c_ace + (f1 / c_ace) * gamma2
     return {"estimate": float(est), "observed": s_obs, "s_rare": s_rare, "s_abund": s_abund, "c_ace": float(c_ace)}
@@ -310,20 +370,22 @@ def ice(incidence: np.ndarray, *, rare_threshold: int = 10) -> dict[str, float]:
         ``{'estimate', 'observed', 's_infreq', 's_freq', 'c_ice'}``.
     """
     inc = _incidence(incidence)
+    rare_threshold = _rare_threshold(rare_threshold)
     site_counts = inc.sum(axis=1)
     site_counts = site_counts[site_counts > 0]
+    _require_observed(site_counts, "ice")
     s_obs = float(site_counts.size)
     infreq = site_counts[site_counts <= rare_threshold]
     freq = site_counts[site_counts > rare_threshold]
     s_infreq = float(infreq.size)
     s_freq = float(freq.size)
-    n_infreq = float(infreq.sum())
+    n_infreq = float(_abundance_total(infreq))
     q1 = float(np.sum(site_counts == 1))
     n_sites = float(inc.shape[1])
     c_ice = 1.0 - q1 / n_infreq if n_infreq > 0 else 1.0
     if c_ice <= 0 or s_infreq == 0:
         return {"estimate": s_obs, "observed": s_obs, "s_infreq": s_infreq, "s_freq": s_freq, "c_ice": c_ice}
-    sum_jj = float(np.sum(np.array([j * (j - 1) for j in infreq])))
+    sum_jj = math.fsum(float(j) * (float(j) - 1.0) for j in infreq)
     factor = n_sites / (n_sites - 1.0) if n_sites > 1 else 1.0
     gamma2 = max((s_infreq / c_ice) * factor * sum_jj / (n_infreq * (n_infreq - 1.0)) - 1.0, 0.0)
     est = s_freq + s_infreq / c_ice + (q1 / c_ice) * gamma2
@@ -345,8 +407,21 @@ def hill_numbers(counts: np.ndarray, q: float | np.ndarray = (0.0, 1.0, 2.0)) ->
         Array of Hill numbers, one per requested order (scalar input still returns a length-1 array).
     """
     c = _abund(counts)
-    p = c / c.sum()
-    qs = np.atleast_1d(np.asarray(q, dtype=float))
+    _require_observed(c, "hill_numbers")
+    raw_q = np.asarray(q)
+    if raw_q.ndim > 1:
+        raise ValueError(f"q must be a scalar or one-dimensional order vector, got shape {raw_q.shape}.")
+    if raw_q.dtype.kind == "b":
+        raise TypeError("q must contain numeric diversity orders, not Boolean values.")
+    if raw_q.dtype.kind not in "iuf":
+        raise TypeError("q must contain real numeric diversity orders.")
+    try:
+        qs = np.atleast_1d(raw_q.astype(float))
+    except (TypeError, ValueError) as exc:
+        raise TypeError("q must contain numeric diversity orders.") from exc
+    if qs.size == 0 or not np.all(np.isfinite(qs)) or np.any(qs < 0.0):
+        raise ValueError("q must contain at least one finite non-negative diversity order.")
+    p = c.astype(np.float64) / float(_abundance_total(c))
     out = np.empty(qs.shape[0])
     for i, qi in enumerate(qs):
         if np.isclose(qi, 1.0):
@@ -366,19 +441,29 @@ def _rarefaction_sizes(sizes: np.ndarray, n: int) -> np.ndarray:
     (MXR-080-0080). No sorting or deduplication happens here -- the returned array has the same length
     and order as ``sizes``.
     """
-    arr = np.asarray(sizes)
-    if np.issubdtype(arr.dtype, np.integer) or arr.dtype == np.bool_:
-        arr = arr.astype(np.int64)
-    else:
-        farr = arr.astype(np.float64)
-        if farr.size and not np.all(np.isfinite(farr)):
-            raise ValueError("rarefaction sizes must be finite (no NaN or Inf).")
-        if farr.size and not np.array_equal(farr, np.trunc(farr)):
-            raise ValueError("rarefaction sizes must be exact integers (fractional sizes are not supported).")
-        arr = farr.astype(np.int64)
-    if arr.size and (arr.min() < 0 or arr.max() > n):
-        raise ValueError(f"rarefaction sizes must be within [0, {n}] (the sample size), got {arr.tolist()!r}.")
-    return arr
+    raw = np.asarray(sizes)
+    if raw.ndim != 1:
+        raise ValueError(f"rarefaction sizes must be a one-dimensional vector, got shape {raw.shape}.")
+    validated: list[int] = []
+    for value in raw.tolist():
+        if isinstance(value, (bool, np.bool_)):
+            raise TypeError("rarefaction sizes must be exact non-Boolean integers.")
+        if isinstance(value, Integral):
+            size = int(value)
+        elif isinstance(value, Real):
+            numeric = float(value)
+            if not np.isfinite(numeric):
+                raise ValueError("rarefaction sizes must be finite (no NaN or Inf).")
+            if not numeric.is_integer():
+                raise ValueError("rarefaction sizes must be exact integers (fractional sizes are not supported).")
+            size = int(numeric)
+        else:
+            raise TypeError(f"rarefaction sizes must be numeric integers, got {value!r}.")
+        if not 0 <= size <= n:
+            raise ValueError(f"rarefaction sizes must be within [0, {n}], got {size}.")
+        validated.append(size)
+    dtype = object if any(size > np.iinfo(np.int64).max for size in validated) else np.int64
+    return np.asarray(validated, dtype=dtype)
 
 
 def rarefaction_curve(counts: np.ndarray, sizes: np.ndarray | None = None) -> dict[str, np.ndarray]:
@@ -398,26 +483,38 @@ def rarefaction_curve(counts: np.ndarray, sizes: np.ndarray | None = None) -> di
         ``{'sizes', 'expected_richness'}``.
     """
     c = _abund(counts)
-    n = int(c.sum())
-    sizes = np.arange(1, n + 1) if sizes is None else _rarefaction_sizes(sizes, n)
-    ln_choose_n = gammaln(n + 1) - gammaln(np.arange(n + 1) + 1) - gammaln(n - np.arange(n + 1) + 1)
+    _require_observed(c, "rarefaction_curve")
+    n = _abundance_total(c)
+    if sizes is None:
+        if n > 1_000_000:
+            raise ValueError(
+                "the default rarefaction grid would exceed 1,000,000 points; provide explicit sizes."
+            )
+        sizes = np.arange(1, n + 1)
+    else:
+        sizes = _rarefaction_sizes(sizes, n)
 
     def log_choose(a: int, m: int) -> float:
         if m < 0 or m > a:
             return -np.inf
+        k = min(m, a - m)
+        if k <= 10_000:
+            return math.fsum(math.log(a - k + i) - math.log(i) for i in range(1, k + 1))
         return gammaln(a + 1) - gammaln(m + 1) - gammaln(a - m + 1)
 
     exp_rich = np.empty(sizes.shape[0], dtype=float)
     for j, m in enumerate(sizes):
-        denom = ln_choose_n[m]
+        m = int(m)
+        denom = log_choose(n, m)
         miss = 0.0
         for xi in c:
-            miss += np.exp(log_choose(n - xi, m) - denom)
+            miss += np.exp(log_choose(n - int(xi), m) - denom)
         exp_rich[j] = c.size - miss
     return {"sizes": sizes, "expected_richness": exp_rich}
 
 
 __all__ = [
+    "CoverageInsufficientDataError",
     "turing_coverage",
     "good_turing",
     "chao1",

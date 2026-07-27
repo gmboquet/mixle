@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from mixle.analysis import (
+    CoverageInsufficientDataError,
     ace,
     chao1,
     chao2,
@@ -181,6 +182,24 @@ class AbundanceValidationTest(unittest.TestCase):
         np.testing.assert_allclose(hill_numbers(np.array([7, 7, 7, 7, 7]), [0.0]), [5.0])
         self.assertEqual(rarefaction_curve(c)["expected_richness"].shape, (int(c.sum()),))
 
+    def test_large_counts_use_an_exact_non_overflowing_total(self):
+        maximum = np.iinfo(np.int64).max
+        counts = np.array([maximum, 1], dtype=np.int64)
+        result = turing_coverage(counts)
+        self.assertEqual(result["n"], int(maximum) + 1)
+        self.assertGreaterEqual(result["coverage"], 0.0)
+        self.assertLessEqual(result["coverage"], 1.0)
+        rarefied = rarefaction_curve(counts, sizes=[1])
+        self.assertAlmostEqual(rarefied["expected_richness"][0], 1.0)
+
+    def test_per_species_count_outside_supported_domain_is_rejected(self):
+        with self.assertRaises(OverflowError):
+            turing_coverage(np.array([int(np.iinfo(np.int64).max) + 1], dtype=object))
+
+    def test_abundance_table_is_not_silently_flattened(self):
+        with self.assertRaises(ValueError):
+            turing_coverage(np.ones((2, 2), dtype=int))
+
 
 class GoodTuringSmallSupportTest(unittest.TestCase):
     """MXR-080-0078: the log-linear frequency-of-frequencies fit needs at least two distinct
@@ -190,12 +209,18 @@ class GoodTuringSmallSupportTest(unittest.TestCase):
     insufficient-evidence result, and small-support samples must fall back to an unsmoothed
     (raw-frequency) estimate instead of crashing."""
 
-    def test_empty_sample_is_insufficient_evidence_not_a_crash(self):
-        r = good_turing(np.array([]))
-        self.assertTrue(r["insufficient_evidence"])
-        self.assertTrue(r["reason"])
-        self.assertEqual(r["proba"].size, 0)
-        self.assertTrue(np.isnan(r["p0"]))
+    def test_empty_sample_uses_the_common_typed_insufficient_evidence_contract(self):
+        abundance_estimators = (turing_coverage, good_turing, chao1, ace, hill_numbers, rarefaction_curve)
+        for estimator in abundance_estimators:
+            with self.subTest(estimator=estimator.__name__):
+                with self.assertRaises(CoverageInsufficientDataError):
+                    estimator(np.array([]))
+
+        empty_incidence = np.zeros((2, 3), dtype=int)
+        for estimator in (chao2, ice):
+            with self.subTest(estimator=estimator.__name__):
+                with self.assertRaises(CoverageInsufficientDataError):
+                    estimator(empty_incidence)
 
     def test_all_singleton_sample_falls_back_instead_of_crashing(self):
         # [1, 1, 1]: three species each observed exactly once -- the audit's own reproduction. Only
@@ -263,6 +288,36 @@ class IncidenceValidationTest(unittest.TestCase):
         inc = np.array([[True, False, True], [False, True, True]])
         r = chao2(inc)
         self.assertEqual(r["observed"], 2.0)
+
+    def test_incidence_vector_is_not_silently_promoted_to_a_matrix(self):
+        for fn in (chao2, ice):
+            with self.subTest(fn=fn.__name__):
+                with self.assertRaises(ValueError):
+                    fn(np.array([1, 0, 1]))
+
+
+class CoverageControlValidationTest(unittest.TestCase):
+    def test_confidence_levels_must_be_finite_scalar_probabilities(self):
+        for bad in (True, 0.0, 1.0, -0.1, 1.1, float("nan"), float("inf"), np.array([0.95])):
+            with self.subTest(bad=bad):
+                with self.assertRaises((TypeError, ValueError)):
+                    chao1([1, 2], ci_level=bad)
+                with self.assertRaises((TypeError, ValueError)):
+                    chao2([[1, 0], [0, 1]], ci_level=bad)
+
+    def test_rarity_thresholds_must_be_positive_exact_integers(self):
+        for bad in (True, 0, -1, 1.5, float("nan"), float("inf")):
+            with self.subTest(bad=bad):
+                with self.assertRaises((TypeError, ValueError)):
+                    ace([1, 2], rare_threshold=bad)
+                with self.assertRaises((TypeError, ValueError)):
+                    ice([[1, 0], [0, 1]], rare_threshold=bad)
+
+    def test_hill_orders_must_be_a_finite_nonnegative_scalar_or_vector(self):
+        for bad in (True, -1.0, float("nan"), float("inf"), [], [[0.0, 1.0]], "1"):
+            with self.subTest(bad=bad):
+                with self.assertRaises((TypeError, ValueError)):
+                    hill_numbers([1, 2], bad)
 
 
 class RarefactionSizeValidationTest(unittest.TestCase):
