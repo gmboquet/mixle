@@ -12,7 +12,7 @@ T = TypeVar("T")
 
 
 def exact_integer(value: Any, *, label: str, nonnegative: bool = False) -> int:
-    if isinstance(value, (bool, np.bool_)) or np.ndim(value) != 0:
+    if isinstance(value, (bool, np.bool_, str, bytes)) or np.ndim(value) != 0:
         raise TypeError("%s must be an integer" % label)
     try:
         result = index(value)
@@ -42,6 +42,9 @@ def finite_weight(value: Any, *, label: str) -> float:
 
 
 def observation_weights(value: Any, rows: int, *, label: str) -> np.ndarray:
+    raw = np.asarray(value)
+    if np.issubdtype(raw.dtype, np.bool_):
+        raise TypeError("%s must be real-valued, not boolean" % label)
     try:
         result = np.asarray(value, dtype=np.float64)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -85,9 +88,7 @@ def canonical_integer_bag(
     try:
         entries = list(value)
     except TypeError as exc:
-        raise TypeError(
-            "integer multinomial observation must be a sequence of (category, count) pairs"
-        ) from exc
+        raise TypeError("integer multinomial observation must be a sequence of (category, count) pairs") from exc
     combined: dict[int, int] = {}
     outside = False
     for item in entries:
@@ -107,11 +108,7 @@ def canonical_integer_bag(
         )
         if count == 0:
             continue
-        is_outside = (
-            min_val is not None
-            and max_val is not None
-            and not min_val <= category <= max_val
-        )
+        is_outside = min_val is not None and max_val is not None and not min_val <= category <= max_val
         if is_outside:
             outside = True
             if reject_outside:

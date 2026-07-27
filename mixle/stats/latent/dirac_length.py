@@ -26,11 +26,30 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.stats.multivariate._multinomial_contracts import (
+    exact_integer,
+    finite_weight,
+    observation_weights,
+)
 
 E0 = TypeVar("E0")  # Type of encoded data.
 E = tuple[int, np.ndarray, np.ndarray, E0]
 SS0 = TypeVar("SS0")  # Type of component suff_stat
 key_type = tuple[str, str] | tuple[None, None]
+
+
+def _integer_value(value: Any, label: str) -> int:
+    return exact_integer(value, label=label)
+
+
+def _mixture_probability(value: Any, label: str = "p") -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be a real scalar" % label) from exc
+    if isinstance(value, (bool, np.bool_)) or not np.isfinite(result) or result < 0.0 or result > 1.0:
+        raise ValueError("%s must be finite and lie in [0, 1]" % label)
+    return result
 
 
 class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
@@ -90,13 +109,13 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
     def __init__(
         self, len_dist: SequenceEncodableProbabilityDistribution, p: float, v: int = 0, name: str | None = None
     ):
-        if not 0 < p <= 1:
-            raise ValueError("p must be between (0,1].")
+        checked_p = _mixture_probability(p)
+        checked_v = _integer_value(v, "Dirac location")
         with np.errstate(divide="ignore"):
-            self.p = p
-            self.v = v
-            self.log_p = np.log(p)
-            self.log_1p = np.log1p(-p)
+            self.p = checked_p
+            self.v = checked_v
+            self.log_p = float(np.log(checked_p))
+            self.log_1p = float(np.log1p(-checked_p))
             self.len_dist = len_dist
             self.name = name
 
@@ -120,7 +139,7 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
             Density at x.
 
         """
-        return np.exp(self.log_density(x))
+        return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: int) -> float:
         """Evaluate the log-density of length Dirac mixture distribution at observation x.
@@ -134,18 +153,15 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
             log-density at x.
 
         """
-        rv0 = self.log_p + self.len_dist.log_density(x)
+        checked_x = _integer_value(x, "Dirac-length observation")
+        rv0 = self.log_p + self.len_dist.log_density(checked_x)
 
-        if x == self.v:
-            c1 = self.log_1p
-            if c1 > rv0:
-                rv = np.log1p(np.exp(rv0 - c1)) + c1
-            else:
-                rv = np.log1p(np.exp(c1 - rv0)) + rv0
+        if checked_x == self.v:
+            rv = np.logaddexp(rv0, self.log_1p)
         else:
             rv = rv0
 
-        return rv
+        return float(rv)
 
     def component_log_density(self, x: int) -> np.ndarray:
         """Log-density of each mixture component (length distribution, dirac at v) at x.
@@ -157,9 +173,10 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of the two component log-densities.
 
         """
+        checked_x = _integer_value(x, "Dirac-length observation")
         rv = np.zeros(2, dtype=np.float64)
-        rv[0] = self.len_dist.log_density(x)
-        if x != self.v:
+        rv[0] = self.len_dist.log_density(checked_x)
+        if checked_x != self.v:
             rv[1] = -np.inf
         return rv
 
@@ -179,9 +196,7 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         max_val = np.max(comp_log_density)
         if max_val == -np.inf:
-            rv = np.array([np.exp(self.log_p), np.exp(self.log_1p)], dtype=np.float64)
-            rv /= rv.sum()
-            return rv
+            return np.zeros(2, dtype=np.float64)
 
         comp_log_density -= max_val
         np.exp(comp_log_density, out=comp_log_density)
@@ -328,36 +343,26 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
         ww = engine.asarray(weights)
         num_components = int(params["num_components"])
         length_scores = stacked_component_log_density(enc_x, params["length_route"], engine)
-        length_weights = ww
-        dirac_weights = engine.zeros((sz, num_components))
-
-        if len(idx_v) > 0:
-            eidx_v = engine.asarray(idx_v)
-            local_length = length_scores[eidx_v, :] + params["log_p"][None, :]
-            local_dirac = engine.zeros((len(idx_v), num_components)) + params["log_1p"][None, :]
-            local_scores = engine.stack((local_length, local_dirac), axis=2)
-            denom = engine.logsumexp(local_scores, axis=2)
-            bad_rows = engine.isinf(denom) & (denom < engine.asarray(0.0))
-            fallback = engine.stack(
-                (
-                    engine.zeros((len(idx_v), num_components)) + params["log_p"][None, :],
-                    engine.zeros((len(idx_v), num_components)) + params["log_1p"][None, :],
-                ),
-                axis=2,
-            )
-            local_scores = engine.where(bad_rows[:, :, None], fallback, local_scores)
-            denom = engine.where(bad_rows, engine.asarray(0.0), denom)
-            local_post = engine.exp(local_scores - denom[:, :, None])
-            local_weights = ww[eidx_v, :, None] * local_post
-
-            length_at_v = engine.zeros((sz, num_components))
-            dirac_at_v = engine.zeros((sz, num_components))
-            length_at_v = engine.index_add(length_at_v, eidx_v, local_weights[:, :, 0])
-            dirac_at_v = engine.index_add(dirac_at_v, eidx_v, local_weights[:, :, 1])
-            non_v = np.ones(sz, dtype=bool)
-            non_v[idx_v] = False
-            length_weights = engine.where(engine.asarray(non_v)[:, None], ww, length_at_v)
-            dirac_weights = dirac_at_v
+        dirac_base = np.full(sz, -np.inf, dtype=np.float64)
+        dirac_base[idx_v] = 0.0
+        scores = engine.stack(
+            (
+                length_scores + params["log_p"][None, :],
+                engine.asarray(dirac_base)[:, None] + params["log_1p"][None, :],
+            ),
+            axis=2,
+        )
+        denom = engine.logsumexp(scores, axis=2)
+        bad_rows = engine.isinf(denom) & (denom < engine.asarray(0.0))
+        safe_denom = engine.where(bad_rows, engine.asarray(0.0), denom)
+        posterior = engine.where(
+            bad_rows[:, :, None],
+            engine.zeros((sz, num_components, 2)),
+            engine.exp(scores - safe_denom[:, :, None]),
+        )
+        weighted = ww[:, :, None] * posterior
+        length_weights = weighted[:, :, 0]
+        dirac_weights = weighted[:, :, 1]
 
         component_counts = engine.stack(
             (
@@ -387,32 +392,15 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of shape (len(x), 2) of component posteriors.
 
         """
-        sz, idx_v, idx_nv, enc_x = x
-        rv = np.zeros((sz, 2), dtype=np.float64)
-
-        if len(idx_v) == 0:
-            rv[:, 0] += 1.0
-
-        else:
-            rv[idx_nv, 0] += 1.0
-            ll_mat = rv[idx_v, :]
-
-            ll_mat[:, 1] += self.log_1p
-            ll_mat[:, 0] += self.len_dist.seq_log_density(enc_x)[idx_v] + self.log_p
-
-            ll_max = ll_mat.max(axis=1, keepdims=True)
-            bad_rows = np.isinf(ll_max.flatten())
-
-            ll_mat[bad_rows, :] = np.array([self.log_p, self.log_1p], dtype=np.float64)
-            ll_max[bad_rows] = np.max(np.asarray([self.log_p, self.log_1p]))
-            ll_mat -= ll_max
-
-            np.exp(ll_mat, out=ll_mat)
-            np.sum(ll_mat, axis=1, keepdims=True, out=ll_max)
-            ll_mat /= ll_max
-
-            rv[idx_v, :] = ll_mat
-
+        sz, idx_v, _idx_nv, enc_x = x
+        scores = np.full((sz, 2), -np.inf, dtype=np.float64)
+        scores[:, 0] = self.len_dist.seq_log_density(enc_x) + self.log_p
+        scores[idx_v, 1] = self.log_1p
+        row_ll = np.logaddexp(scores[:, 0], scores[:, 1])
+        rv = np.zeros_like(scores)
+        good = np.isfinite(row_ll)
+        if np.any(good):
+            rv[good, :] = np.exp(scores[good, :] - row_ll[good, None])
         return rv
 
     def sampler(self, seed: int | None = None) -> "DiracLengthMixtureSampler":
@@ -475,11 +463,14 @@ class DiracLengthMixtureEnumerator(DistributionEnumerator):
 
         """
         super().__init__(dist)
-        streams = [
-            BufferedStream(child_enumerator(dist.len_dist, "DiracLengthMixtureDistribution.len_dist")),
-            BufferedStream(iter([(dist.v, 0.0)])),
-        ]
-        log_offsets = [float(dist.log_p), float(dist.log_1p)]
+        streams = []
+        log_offsets = []
+        if dist.p > 0.0:
+            streams.append(BufferedStream(child_enumerator(dist.len_dist, "DiracLengthMixtureDistribution.len_dist")))
+            log_offsets.append(float(dist.log_p))
+        if dist.p < 1.0:
+            streams.append(BufferedStream(iter([(dist.v, 0.0)])))
+            log_offsets.append(float(dist.log_1p))
 
         def exact_log_density(x):
             return float(dist.log_density(x))
@@ -523,21 +514,29 @@ class DiracLengthMixtureSampler(DistributionSampler):
             Int or List[int] depending on size = None or size (int).
 
         """
-        comp_state = self.rng.binomial(n=1, size=size, p=self.p)
+        checked_size = None if size is None else exact_integer(size, label="Dirac-length sample size", nonnegative=True)
+        comp_state = self.rng.binomial(n=1, size=checked_size, p=self.p)
 
-        if size is None:
+        if checked_size is None:
             if comp_state == 0:
                 return self.v
             else:
-                return self.len_dist_sampler.sample()
+                return _integer_value(
+                    self.len_dist_sampler.sample(),
+                    "sampled Dirac length",
+                )
         else:
-            rv = np.zeros(size, dtype=np.int32)
+            rv = np.zeros(checked_size, dtype=np.int64)
             rv.fill(self.v)
 
             idx = np.flatnonzero(comp_state == 1)
             if len(idx) > 0:
-                rv[idx] = np.asarray(self.len_dist_sampler.sample(size=len(idx)), dtype=np.int32)
-            return list(rv)
+                sampled = [
+                    _integer_value(value, "sampled Dirac length")
+                    for value in self.len_dist_sampler.sample(size=len(idx))
+                ]
+                rv[idx] = np.asarray(sampled, dtype=np.int64)
+            return [int(value) for value in rv]
 
 
 class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
@@ -570,7 +569,7 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self.comp_counts = np.zeros(2, dtype=float)
         self.weight_key = keys[0]
         self.comp_key = keys[1]
-        self.v = v
+        self.v = _integer_value(v, "Dirac location")
         self.name = name
         # Data log-likelihood accumulated as a byproduct of the E-step (the posterior normalizer),
         # only when _track_ll is enabled. Used by the fused-EM fast path in
@@ -593,64 +592,34 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             estimate (DiracLengthMixtureDistribution): Previous estimate used for posteriors.
 
         """
-        sz, idx_v, idx_nv, enc_x = x
-        ll_mat = np.zeros((sz, 2), dtype=np.float64)
+        if not isinstance(estimate, DiracLengthMixtureDistribution):
+            raise TypeError("Dirac-length accumulator estimate has the wrong model type")
+        sz, idx_v, _idx_nv, enc_x = x
+        checked_weights = observation_weights(
+            weights,
+            sz,
+            label="Dirac-length observation weights",
+        )
+        len_ll = np.asarray(estimate.len_dist.seq_log_density(enc_x), dtype=np.float64)
+        scores = np.full((sz, 2), -np.inf, dtype=np.float64)
+        scores[:, 0] = len_ll + estimate.log_p
+        scores[idx_v, 1] = estimate.log_1p
+        row_ll = np.logaddexp(scores[:, 0], scores[:, 1])
+        impossible = np.isneginf(row_ll)
+        if np.any(impossible & (checked_weights > 0.0)):
+            raise ValueError("Dirac-length observation is impossible under the estimate")
+        posterior = np.zeros_like(scores)
+        good = ~impossible
+        if np.any(good):
+            posterior[good, :] = np.exp(scores[good, :] - row_ll[good, None])
+        weighted = posterior * checked_weights[:, None]
 
-        # The fused-EM fast path wants the per-row data log-likelihood (== seq_log_density). The
-        # length-distribution score is the only emission term; compute it once here and reuse it for
-        # both the posteriors below and the tracked likelihood. Only when _track_ll is requested do
-        # we score it in the len(idx_v)==0 branch (which otherwise takes a weights-only shortcut).
-        len_ll = None
         if self._track_ll:
-            len_ll = np.asarray(estimate.len_dist.seq_log_density(enc_x), dtype=np.float64)
+            positive = checked_weights > 0.0
+            self._seq_ll += float(np.dot(checked_weights[positive], row_ll[positive]))
 
-        if len(idx_v) == 0:
-            ll_mat[:, 0] += weights
-
-        else:
-            if len_ll is not None:
-                ll_mat[:, 0] += len_ll + estimate.log_p
-            else:
-                ll_mat[:, 0] += estimate.len_dist.seq_log_density(enc_x) + estimate.log_p
-            ll_mat[idx_nv, 0] = weights[idx_nv].copy()
-
-            rv = ll_mat[idx_v, :]
-            rv[:, 1] += estimate.log_1p
-
-            rv_max = rv.max(axis=1, keepdims=True)
-            bad_rows = np.isinf(rv_max.flatten())
-
-            if np.any(bad_rows):
-                rv[bad_rows, :] = np.array([estimate.log_p, estimate.log_1p], dtype=np.float64)
-                rv_max[bad_rows] = np.max(np.asarray([estimate.log_p, estimate.log_1p]))
-            rv -= rv_max
-
-            np.exp(rv, out=rv)
-            np.sum(rv, axis=1, keepdims=True, out=rv_max)
-            np.divide(weights[idx_v, None], rv_max, out=rv_max)
-            rv *= rv_max
-
-            ll_mat[idx_v, :] = rv
-
-        # Reconstruct the per-row log-likelihood exactly as seq_log_density: comp0 = len_ll + log_p
-        # for every row, comp1 = log_1p on Dirac-valued rows and -inf elsewhere, then row logsumexp
-        # (with -inf for the rows seq_log_density also reports as -inf).
-        if self._track_ll:
-            row_mat = np.empty((sz, 2), dtype=np.float64)
-            row_mat[:, 0] = len_ll + estimate.log_p
-            row_mat[:, 1] = -np.inf
-            row_mat[idx_v, 1] = estimate.log_1p
-            r_max = row_mat.max(axis=1)
-            r_bad = np.isinf(r_max)
-            row_ll = np.full(sz, -np.inf, dtype=np.float64)
-            good = ~r_bad
-            if np.any(good):
-                with np.errstate(divide="ignore"):
-                    row_ll[good] = r_max[good] + np.log(np.exp(row_mat[good, :] - r_max[good, None]).sum(axis=1))
-            self._seq_ll += float(np.dot(weights, row_ll))
-
-        self.comp_counts += ll_mat.sum(axis=0)
-        self.accumulator.seq_update(enc_x, ll_mat[:, 0], estimate.len_dist)
+        self.comp_counts += weighted.sum(axis=0)
+        self.accumulator.seq_update(enc_x, weighted[:, 0], estimate.len_dist)
 
     def seq_update_engine(self, x, weights, estimate, engine):
         """Engine-resident E-step: the length-distribution scoring (the heavy term) runs through the
@@ -659,35 +628,32 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         """
         from mixle.stats.compute.backend import backend_seq_log_density
 
-        sz, idx_v, idx_nv, enc_x = x
-        weights = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
-        ll_mat = np.zeros((sz, 2), dtype=np.float64)
-
-        if len(idx_v) == 0:
-            ll_mat[:, 0] += weights
-        else:
-            len_score = np.asarray(
-                engine.to_numpy(backend_seq_log_density(estimate.len_dist, enc_x, engine)), dtype=np.float64
-            )
-            ll_mat[:, 0] += len_score + estimate.log_p
-            ll_mat[idx_nv, 0] = weights[idx_nv].copy()
-
-            rv = ll_mat[idx_v, :]
-            rv[:, 1] += estimate.log_1p
-            rv_max = rv.max(axis=1, keepdims=True)
-            bad_rows = np.isinf(rv_max.flatten())
-            if np.any(bad_rows):
-                rv[bad_rows, :] = np.array([estimate.log_p, estimate.log_1p], dtype=np.float64)
-                rv_max[bad_rows] = np.max(np.asarray([estimate.log_p, estimate.log_1p]))
-            rv -= rv_max
-            np.exp(rv, out=rv)
-            np.sum(rv, axis=1, keepdims=True, out=rv_max)
-            np.divide(weights[idx_v, None], rv_max, out=rv_max)
-            rv *= rv_max
-            ll_mat[idx_v, :] = rv
-
-        self.comp_counts += ll_mat.sum(axis=0)
-        self.accumulator.seq_update(enc_x, ll_mat[:, 0], estimate.len_dist)
+        if not isinstance(estimate, DiracLengthMixtureDistribution):
+            raise TypeError("Dirac-length accumulator estimate has the wrong model type")
+        sz, idx_v, _idx_nv, enc_x = x
+        checked_weights = observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            sz,
+            label="Dirac-length observation weights",
+        )
+        len_score = np.asarray(
+            engine.to_numpy(backend_seq_log_density(estimate.len_dist, enc_x, engine)),
+            dtype=np.float64,
+        )
+        scores = np.full((sz, 2), -np.inf, dtype=np.float64)
+        scores[:, 0] = len_score + estimate.log_p
+        scores[idx_v, 1] = estimate.log_1p
+        row_ll = np.logaddexp(scores[:, 0], scores[:, 1])
+        impossible = np.isneginf(row_ll)
+        if np.any(impossible & (checked_weights > 0.0)):
+            raise ValueError("Dirac-length observation is impossible under the estimate")
+        posterior = np.zeros_like(scores)
+        good = ~impossible
+        if np.any(good):
+            posterior[good, :] = np.exp(scores[good, :] - row_ll[good, None])
+        weighted = posterior * checked_weights[:, None]
+        self.comp_counts += weighted.sum(axis=0)
+        self.accumulator.seq_update(enc_x, weighted[:, 0], estimate.len_dist)
 
     def update(self, x: int, weight: float, estimate: "DiracLengthMixtureDistribution") -> None:
         """Add one observation's posterior-weighted contribution to the sufficient statistics.
@@ -698,11 +664,19 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             estimate (DiracLengthMixtureDistribution): Previous estimate used for posteriors.
 
         """
-        posterior = estimate.posterior(x)
-        posterior *= weight
+        if not isinstance(estimate, DiracLengthMixtureDistribution):
+            raise TypeError("Dirac-length accumulator estimate has the wrong model type")
+        checked_x = _integer_value(x, "Dirac-length observation")
+        checked_weight = finite_weight(weight, label="Dirac-length observation weight")
+        if checked_weight == 0.0:
+            return
+        posterior = estimate.posterior(checked_x)
+        if posterior.sum() == 0.0:
+            raise ValueError("Dirac-length observation is impossible under the estimate")
+        posterior *= checked_weight
         self.comp_counts += posterior
 
-        self.accumulator.update(x, posterior[0], estimate.len_dist)
+        self.accumulator.update(checked_x, posterior[0], estimate.len_dist)
 
     def _rng_initialize(self, rng: RandomState):
         seeds = rng.randint(2**31, size=2)
@@ -719,16 +693,20 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             rng (RandomState): Random number generator for initialization.
 
         """
+        checked_x = _integer_value(x, "Dirac-length observation")
+        checked_weight = finite_weight(weight, label="Dirac-length observation weight")
+        if checked_weight == 0.0:
+            return
         if not self._init_rng:
             self._rng_initialize(rng)
 
-        if x == self.v:
+        if checked_x == self.v:
             ww = self._w_rng.dirichlet(np.ones(2) / 4)
-            self.accumulator.initialize(x, weight * ww[0], rng=self._acc_rng)
-            self.comp_counts += ww
+            self.accumulator.initialize(checked_x, checked_weight * ww[0], rng=self._acc_rng)
+            self.comp_counts += checked_weight * ww
         else:
-            self.accumulator.initialize(x, weight, rng=self._acc_rng)
-            self.comp_counts[0] += weight
+            self.accumulator.initialize(checked_x, checked_weight, rng=self._acc_rng)
+            self.comp_counts[0] += checked_weight
 
     def seq_initialize(self, x: E, weights: np.ndarray, rng: np.random.RandomState) -> None:
         """Vectorized initialization from encoded observations x with random splits at the dirac point.
@@ -741,11 +719,15 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         """
 
         sz, xi_v, xi_nv, enc_x = x
+        weights = observation_weights(
+            weights,
+            sz,
+            label="Dirac-length observation weights",
+        )
 
         if not self._init_rng:
             self._rng_initialize(rng)
 
-        sz = len(weights)
         keep_len = len(xi_v)
         ww = np.ones((sz, 2))
 
@@ -858,7 +840,7 @@ class DiracLengthMixtureAccumulatorFactory(StatisticAccumulatorFactory):
         name: str | None = None,
     ) -> None:
         self.factory = factory
-        self.v = v
+        self.v = _integer_value(v, "Dirac location")
         self.keys = keys
         self.name = name
 
@@ -894,19 +876,37 @@ class DiracLengthMixtureEstimator(ParameterEstimator):
         self,
         estimator: ParameterEstimator,
         v: int = 0,
-        fixed_p: int | None = None,
+        fixed_p: float | None = None,
         suff_stat: float | None = None,
         pseudo_count: float | None = None,
         name: str | None = None,
         keys: tuple[str | None, str | None] = (None, None),
     ):
         self.estimator = estimator
-        self.v = v
-        self.pseudo_count = pseudo_count
-        self.suff_stat = suff_stat
+        self.v = _integer_value(v, "Dirac location")
+        self.pseudo_count = (
+            None
+            if pseudo_count is None
+            else finite_weight(
+                pseudo_count,
+                label="Dirac-length pseudo-count",
+            )
+        )
+        self.suff_stat = (
+            None
+            if suff_stat is None
+            else _mixture_probability(
+                suff_stat,
+                "Dirac-length prior probability",
+            )
+        )
         self.keys = keys
         self.name = name
-        self.fixed_p_vec = np.asarray([fixed_p, 1 - fixed_p]) if fixed_p is not None and 0 < fixed_p <= 1 else None
+        if fixed_p is None:
+            self.fixed_p_vec = None
+        else:
+            checked_fixed = _mixture_probability(fixed_p, "fixed_p")
+            self.fixed_p_vec = np.asarray([checked_fixed, 1.0 - checked_fixed])
 
     def accumulator_factory(self) -> "DiracLengthMixtureAccumulatorFactory":
         """Returns a DiracLengthMixtureAccumulatorFactory consistent with this estimator."""
@@ -925,18 +925,21 @@ class DiracLengthMixtureEstimator(ParameterEstimator):
 
         """
         counts, comp_suff_stats = suff_stat
+        counts = np.asarray(counts, dtype=np.float64)
+        if counts.shape != (2,) or np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
+            raise ValueError("Dirac-length component counts must be finite and non-negative with shape (2,)")
 
         len_dist = self.estimator.estimate(counts[0], comp_suff_stats)
 
         if self.fixed_p_vec is not None:
             p = self.fixed_p_vec[0]
 
-        elif self.pseudo_count is not None and self.suff_stat is None:
+        elif self.pseudo_count is not None and self.pseudo_count > 0.0 and self.suff_stat is None:
             w = counts + self.pseudo_count / 2
             w /= w.sum()
             p = w[0]
 
-        elif self.pseudo_count is not None and self.suff_stat is not None:
+        elif self.pseudo_count is not None and self.pseudo_count > 0.0 and self.suff_stat is not None:
             ss = np.array([self.suff_stat, 1 - self.suff_stat])
             w = (counts + ss * self.pseudo_count) / (counts.sum() + self.pseudo_count)
             p = w[0]
@@ -968,7 +971,7 @@ class DiracLengthMixtureDataEncoder(DataSequenceEncoder):
 
     def __init__(self, encoder: DataSequenceEncoder, v: int = 0) -> None:
         self.encoder = encoder
-        self.v = v
+        self.v = _integer_value(v, "Dirac location")
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the encoder."""
@@ -986,7 +989,7 @@ class DiracLengthMixtureDataEncoder(DataSequenceEncoder):
 
     def row_count(self, x: tuple[int, np.ndarray, np.ndarray, Any]) -> int:
         """Return the explicit observation count stored in the encoded payload."""
-        count = int(x[0])
+        count = exact_integer(x[0], label="Dirac-length encoded observation count", nonnegative=True)
         if count < 0:
             raise ValueError("dirac-length encoded observation count must be non-negative.")
         return count
@@ -1001,11 +1004,15 @@ class DiracLengthMixtureDataEncoder(DataSequenceEncoder):
             Tuple of (sequence length, indices equal to v, indices not equal to v, base-encoded data).
 
         """
-        x = np.asarray(x, dtype=np.int32)
-        xi_v = np.flatnonzero(x == self.v).astype(np.int32)
-        xi_nv = np.flatnonzero(x != self.v).astype(np.int32)
+        checked = [_integer_value(value, "Dirac-length observation") for value in x]
+        try:
+            values = np.asarray(checked, dtype=np.int64)
+        except OverflowError as exc:
+            raise ValueError("Dirac-length observations must fit signed 64-bit integers") from exc
+        xi_v = np.flatnonzero(values == self.v).astype(np.int64)
+        xi_nv = np.flatnonzero(values != self.v).astype(np.int64)
 
-        return len(x), xi_v, xi_nv, self.encoder.seq_encode(x)
+        return len(values), xi_v, xi_nv, self.encoder.seq_encode(values)
 
 
 def _register_dirac_length_engine_kernel():
