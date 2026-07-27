@@ -91,6 +91,8 @@ def main():
         print(f"  comp{i}: normal.mean={c['mu']:+.2f}  cat.probs={[round(p, 2) for p in c['probs']]}")
         ok = ok and abs(abs(c["mu"]) - 3.0) < 0.3 and max(c["probs"]) > 0.6
     print(f"  -> both fields recovered in every component: {ok}")
+    if not ok:
+        raise RuntimeError("acceptance failed: every fitted component must recover both heterogeneous fields")
 
     print("\n## pomegranate 1.1.2 — GeneralMixtureModel([IndependentComponents([Normal, Categorical]), ...])")
     status, detail = try_pomegranate(data)

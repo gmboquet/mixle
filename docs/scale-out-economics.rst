@@ -25,20 +25,13 @@ shrinks as workers are added.
 The payload is O(model), not O(data)
 ------------------------------------
 
-The key measured fact is that the sufficient-statistic payload does **not** grow
-with the dataset size. It is a function of the *model*, not N. Measured directly
-(``mixle/tests/reduction_payload_telemetry_test.py``):
-
-============================  ===========  ================  ==================
-Model                         payload      grows with N?     serialize
-============================  ===========  ================  ==================
-single Gaussian               ~188 bytes   no (flat 1e3-1e6)  ~5 microseconds
-5-component Gaussian mixture   ~612 bytes   no                ~17 microseconds
-============================  ===========  ================  ==================
-
-A single Gaussian's payload is ~188 bytes whether it folds one thousand or one
-million rows; a five-component mixture is ~612 bytes, likewise flat in N. The
-payload scales with the number of model parameters, not with the data.
+The tested invariant is that the sufficient-statistic payload does **not** grow
+materially with the dataset size. It is a function of the *model*, not N.
+``mixle/tests/reduction_payload_telemetry_test.py`` checks that property for a
+single Gaussian and a Gaussian mixture, checks that the larger model has the
+larger payload, and verifies serialization round trips. Exact byte counts and
+latencies are environment-dependent telemetry; cite them only from a
+candidate-bound benchmark receipt.
 
 When distribution is expected to help
 -------------------------------------
@@ -54,17 +47,16 @@ reduce + fold + broadcast overhead**. Concretely:
 * **Does not help:** small-to-moderate N with a cheap model (for example a plain
   Gaussian or a small mixture). The per-row work is so cheap that the local fit
   finishes before a distributed backend has paid its serialization and
-  scheduling overhead. A ~188-byte reduce buys nothing if the whole local fit is
-  milliseconds.
+  scheduling overhead. A small reduction payload buys nothing if the whole
+  local fit already finishes quickly.
 * **Backs up the wrong way:** a network with high per-message latency penalizes
   the per-iteration reduce/broadcast on every EM step; iteration count matters,
   not just data size.
 
 Rule of thumb: distribute when the *single-worker* fit is compute-bound and takes
-long enough that cutting compute by the worker count outweighs a fixed
-per-iteration overhead measured in microseconds of serialization plus the
-backend's own scheduling latency. If a local fit already finishes quickly, prefer
-local execution.
+long enough that cutting compute by the worker count outweighs fixed
+per-iteration serialization and backend scheduling overhead. If a local fit
+already finishes quickly, prefer local execution.
 
 Measuring for your own model
 ----------------------------

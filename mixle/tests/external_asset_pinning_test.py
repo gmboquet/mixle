@@ -75,6 +75,6 @@ def test_distillation_receipt_binds_assets_and_verifier_checks_them() -> None:
     producer = PINNED_SOURCES[-2].read_text(encoding="utf-8")
     verifier = PINNED_SOURCES[-1].read_text(encoding="utf-8")
     assert '"assets": {' in producer
-    assert '"train_fingerprint": tr._fingerprint' in producer
-    assert '"test_fingerprint": te._fingerprint' in producer
+    assert '"train_fingerprint": train._fingerprint' in producer
+    assert '"test_fingerprint": test._fingerprint' in producer
     assert 'if metrics.get("assets") != expected_assets:' in verifier

@@ -18,14 +18,16 @@ from __future__ import annotations
 
 import gzip
 import io
+import os
 import subprocess
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 
 def normalize(path: Path, epoch: int) -> None:
-    """Rewrite the sdist at ``path`` in place so its bytes are a pure function of tree content + ``epoch``."""
+    """Atomically replace ``path`` with normalized, integrity-checked bytes."""
     raw = gzip.decompress(path.read_bytes())
     out = io.BytesIO()
     with (
@@ -40,7 +42,36 @@ def normalize(path: Path, epoch: int) -> None:
             member.gname = ""
             dst.addfile(member, src.extractfile(member) if member.isfile() else None)
     compressed = subprocess.run(["gzip", "-n", "-9"], input=out.getvalue(), capture_output=True, check=True).stdout
-    path.write_bytes(compressed)
+    # Validate the complete replacement before touching the only built artifact.
+    check = gzip.decompress(compressed)
+    with tarfile.open(fileobj=io.BytesIO(check), mode="r:") as archive:
+        archive.getmembers()
+
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            written = handle.write(compressed)
+            if written != len(compressed):
+                raise OSError(f"short write: wrote {written} of {len(compressed)} bytes")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:

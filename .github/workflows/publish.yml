@@ -86,6 +86,7 @@ jobs:
             test -z "$PREPARE_RUN_ID"
           fi
 
+          python scripts/verify_license_provenance.py --require-approved
           gh api "repos/$REPOSITORY/commits/$SHA/check-runs?per_page=100" > "$RUNNER_TEMP/check-runs.json"
           python scripts/verify_required_checks.py \
             --required .github/release-required-checks.txt \

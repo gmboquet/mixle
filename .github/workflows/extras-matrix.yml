@@ -34,6 +34,7 @@ jobs:
           - hadoop
           - arrays
           - grammar
+          - gmpy2
           - highprec
           - spark
           - dask
@@ -44,6 +45,8 @@ jobs:
           - sympy
           - sage
           - scientist
+          - kernels
+          - examples
           - all
     steps:
       - uses: actions/checkout@v7

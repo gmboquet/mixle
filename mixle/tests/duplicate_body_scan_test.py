@@ -83,3 +83,30 @@ def test_scanner_finds_a_planted_duplicate(tmp_path: Path) -> None:
 
     groups = scanner.scan(root=tmp_path)
     assert any(len(g["locations"]) == 2 for g in groups), "planted duplicate was not detected"
+
+
+def test_scanner_distinguishes_sibling_classes_and_nested_functions(tmp_path: Path) -> None:
+    scanner = _load_scanner()
+    statements = "\n".join(
+        [
+            "        a = 1",
+            "        b = a + 1",
+            "        c = b + 1",
+            "        d = c + 1",
+            "        e = d + 1",
+            "        f = e + 1",
+            "        return f",
+        ]
+    )
+    pkg = tmp_path / "mixle" / "stats"
+    pkg.mkdir(parents=True)
+    (tmp_path / "mixle" / "models").mkdir(parents=True)
+    (pkg / "siblings.py").write_text(
+        f"class A:\n    def run(self):\n{statements}\n\n"
+        f"class B:\n    def run(self):\n{statements}\n",
+        encoding="utf-8",
+    )
+    groups = scanner.scan(root=tmp_path)
+    locations = {location for group in groups for location in group["locations"]}
+    assert any("::A.run@L" in location for location in locations)
+    assert any("::B.run@L" in location for location in locations)

@@ -4,101 +4,94 @@
   "groups": [
     {
       "locations": [
-        "mixle/models/mixture_density.py::_module_class",
-        "mixle/models/neural_density.py::_module_class"
+        "mixle/models/_kernels.py::_positive_finite_scalar@L42",
+        "mixle/models/sparse_gaussian_process.py::_positive_finite@L22"
+      ],
+      "stmts": 6
+    },
+    {
+      "locations": [
+        "mixle/models/coarsening.py::CoarsenedLM._validated_ids@L238",
+        "mixle/models/transformer.py::CausalLM._validated_ids@L163"
+      ],
+      "stmts": 8
+    },
+    {
+      "locations": [
+        "mixle/models/mixture_density.py::_module_class@L65",
+        "mixle/models/neural_density.py::_module_class@L296"
       ],
       "stmts": 11
     },
     {
       "locations": [
-        "mixle/stats/combinator/composite.py::backend_stacked_sufficient_statistics_with_estimator",
-        "mixle/stats/combinator/record.py::backend_stacked_sufficient_statistics_with_estimator"
+        "mixle/models/neural_leaf.py::NeuralGaussian.__init__@L120",
+        "mixle/models/neural_leaf.py::NeuralGaussianEstimator.__init__@L375"
+      ],
+      "stmts": 6
+    },
+    {
+      "locations": [
+        "mixle/stats/combinator/sequence.py::_checked_length@L88",
+        "mixle/stats/sequences/markov_chain.py::_checked_length@L112"
       ],
       "stmts": 8
     },
     {
       "locations": [
-        "mixle/stats/graphs/hyperedge_replacement_grammar.py::__init__",
-        "mixle/stats/graphs/vertex_replacement_grammar.py::__init__"
+        "mixle/stats/compute/sequence.py::seq_estimate.red@L399",
+        "mixle/stats/compute/sequence.py::seq_initialize.red@L504"
       ],
       "stmts": 7
     },
     {
       "locations": [
-        "mixle/stats/graphs/hyperedge_replacement_grammar.py::update",
-        "mixle/stats/graphs/vertex_replacement_grammar.py::update"
+        "mixle/stats/graphs/hyperedge_replacement_grammar.py::HyperedgeReplacementGrammarAccumulator.__init__@L847",
+        "mixle/stats/graphs/vertex_replacement_grammar.py::VertexReplacementGrammarAccumulator.__init__@L1073"
+      ],
+      "stmts": 7
+    },
+    {
+      "locations": [
+        "mixle/stats/latent/hidden_markov.py::HiddenMarkovAccumulator.key_merge@L3496",
+        "mixle/stats/latent/tree_hidden_markov_model.py::TreeHiddenMarkovAccumulator.key_merge@L1720"
+      ],
+      "stmts": 7
+    },
+    {
+      "locations": [
+        "mixle/stats/latent/hidden_markov.py::HiddenMarkovAccumulator.key_replace@L3538",
+        "mixle/stats/latent/tree_hidden_markov_model.py::TreeHiddenMarkovAccumulator.key_replace@L1759"
+      ],
+      "stmts": 7
+    },
+    {
+      "locations": [
+        "mixle/stats/multivariate/dirichlet_multinomial.py::_finite_scalar@L89",
+        "mixle/stats/univariate/continuous/_gaussian_contracts.py::_finite_scalar@L12"
+      ],
+      "stmts": 6
+    },
+    {
+      "locations": [
+        "mixle/stats/univariate/continuous/exgaussian.py::ExponentiallyModifiedGaussianAccumulator._merge@L212",
+        "mixle/stats/univariate/continuous/skew_normal.py::SkewNormalAccumulator._merge@L218"
       ],
       "stmts": 9
     },
     {
       "locations": [
-        "mixle/stats/latent/hidden_markov.py::combine",
-        "mixle/stats/latent/tree_hidden_markov_model.py::combine"
-      ],
-      "stmts": 8
-    },
-    {
-      "locations": [
-        "mixle/stats/latent/hidden_markov.py::from_value",
-        "mixle/stats/latent/tree_hidden_markov_model.py::from_value"
-      ],
-      "stmts": 9
-    },
-    {
-      "locations": [
-        "mixle/stats/latent/hidden_markov.py::key_merge",
-        "mixle/stats/latent/tree_hidden_markov_model.py::key_merge"
+        "mixle/stats/univariate/continuous/gaussian.py::GaussianDistribution.backend_stacked_sufficient_statistics@L315",
+        "mixle/stats/univariate/continuous/log_gaussian.py::LogGaussianDistribution.backend_stacked_sufficient_statistics@L331"
       ],
       "stmts": 7
     },
     {
       "locations": [
-        "mixle/stats/latent/hidden_markov.py::key_replace",
-        "mixle/stats/latent/tree_hidden_markov_model.py::key_replace"
-      ],
-      "stmts": 7
-    },
-    {
-      "locations": [
-        "mixle/stats/latent/hidden_markov.py::scale",
-        "mixle/stats/latent/tree_hidden_markov_model.py::scale"
-      ],
-      "stmts": 7
-    },
-    {
-      "locations": [
-        "mixle/stats/univariate/continuous/exgaussian.py::_merge",
-        "mixle/stats/univariate/continuous/skew_normal.py::_merge"
-      ],
-      "stmts": 9
-    },
-    {
-      "locations": [
-        "mixle/stats/univariate/continuous/gaussian.py::_model_fisher",
-        "mixle/stats/univariate/continuous/log_gaussian.py::_model_fisher"
+        "mixle/stats/univariate/continuous/gaussian.py::GaussianFisherView._model_fisher@L60",
+        "mixle/stats/univariate/continuous/log_gaussian.py::LogGaussianFisherView._model_fisher@L61"
       ],
       "stmts": 12
-    },
-    {
-      "locations": [
-        "mixle/stats/univariate/continuous/gaussian.py::backend_stacked_sufficient_statistics",
-        "mixle/stats/univariate/continuous/log_gaussian.py::backend_stacked_sufficient_statistics"
-      ],
-      "stmts": 7
-    },
-    {
-      "locations": [
-        "mixle/stats/univariate/discrete/integer_categorical.py::seq_update",
-        "mixle/stats/univariate/discrete/integer_uniform_spike.py::seq_update"
-      ],
-      "stmts": 8
-    },
-    {
-      "locations": [
-        "mixle/stats/univariate/discrete/integer_categorical.py::seq_update_engine",
-        "mixle/stats/univariate/discrete/integer_uniform_spike.py::seq_update_engine"
-      ],
-      "stmts": 11
     }
   ]
 }

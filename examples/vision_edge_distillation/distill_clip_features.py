@@ -1,83 +1,38 @@
-"""Feature-distill CLIP's vision capability into a compact CNN, on a GPU. Self-contained.
+"""Feature-distill CLIP's vision capability into a compact CNN on a GPU.
 
-The honest edge path for vision the laptop couldn't reach: a compact student CNN learns to MIMIC CLIP's
-512-d image embedding on CIFAR-10 (cosine feature distillation), then classifies zero-shot through
-CLIP's FROZEN text head. So the deployed student carries CLIP's geometry in a few MB and needs no CLIP
-at inference. Saves the student weights + a metrics JSON to retrieve.
+Importing this module defines the student only. Network access, dataset
+materialization, training, and artifact writes happen exclusively in
+``main()``.
 """
 
+from __future__ import annotations
+
+import argparse
 import json
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"device={DEV} {torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''}", flush=True)
-
-from datasets import load_dataset  # noqa: E402
-from transformers import CLIPModel, CLIPProcessor  # noqa: E402
-
 CLASSES = ["airplane", "automobile", "bird", "cat", "deer", "dog", "frog", "horse", "ship", "truck"]
 CLIP_ID = "openai/clip-vit-base-patch32"
 CLIP_REVISION = "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268"
 CIFAR10_ID = "uoft-cs/cifar10"
 CIFAR10_REVISION = "0b2714987fa478483af9968de7c934580d0bb9a2"
-clip = (
-    CLIPModel.from_pretrained(CLIP_ID, revision=CLIP_REVISION, use_safetensors=True).to(DEV).eval()
-)
-proc = CLIPProcessor.from_pretrained(CLIP_ID, revision=CLIP_REVISION, use_fast=True)
-
-t0 = time.time()
-tr = load_dataset(CIFAR10_ID, split="train", revision=CIFAR10_REVISION)  # all 50k
-te = load_dataset(CIFAR10_ID, split="test", revision=CIFAR10_REVISION)  # all 10k
-tr_imgs = [r["img"] for r in tr]
-te_imgs = [r["img"] for r in te]
-ytr = np.array([r["label"] for r in tr])
-yte = np.array([r["label"] for r in te])
-print(f"data loaded {len(tr_imgs)}+{len(te_imgs)} in {time.time() - t0:.0f}s", flush=True)
 
 
-@torch.no_grad()
-def clip_embed(imgs, bs=256):
-    out = []
-    for i in range(0, len(imgs), bs):
-        inp = proc(images=imgs[i : i + bs], return_tensors="pt").to(DEV)
-        vo = clip.vision_model(pixel_values=inp["pixel_values"])
-        v = clip.visual_projection(vo.pooler_output)
-        out.append(F.normalize(v, dim=-1).cpu())
-    return torch.cat(out)
-
-
-t0 = time.time()
-etr = clip_embed(tr_imgs)  # teacher embeddings (the distillation target)
-ete = clip_embed(te_imgs)
-with torch.no_grad():
-    tin = proc(text=[f"a photo of a {c}" for c in CLASSES], return_tensors="pt", padding=True).to(DEV)
-    to = clip.text_model(input_ids=tin["input_ids"], attention_mask=tin["attention_mask"])
-    tfeat = F.normalize(clip.text_projection(to.pooler_output), dim=-1).cpu()  # frozen zero-shot head
-clip_zs = float(((ete @ tfeat.T).argmax(1).numpy() == yte).mean())
-print(f"CLIP embeddings in {time.time() - t0:.0f}s | CLIP zero-shot acc {clip_zs:.4f}", flush=True)
-
-# raw pixel tensors for the student
-Xtr = torch.tensor(np.stack([np.array(i) for i in tr_imgs]), dtype=torch.float32).permute(0, 3, 1, 2).div(255)
-Xte = torch.tensor(np.stack([np.array(i) for i in te_imgs]), dtype=torch.float32).permute(0, 3, 1, 2).div(255)
-mean = Xtr.mean((0, 2, 3), keepdim=True)
-std = Xtr.std((0, 2, 3), keepdim=True)
-Xtr = ((Xtr - mean) / std).to(DEV)
-Xte = ((Xte - mean) / std).to(DEV)
-etr = etr.to(DEV)
-tfeat = tfeat.to(DEV)
-
-
-def block(ci, co, stride=1):
+def block(ci: int, co: int, stride: int = 1) -> nn.Sequential:
+    """One convolution/batch-normalization/ReLU student block."""
     return nn.Sequential(nn.Conv2d(ci, co, 3, stride, 1, bias=False), nn.BatchNorm2d(co), nn.ReLU())
 
 
 class Student(nn.Module):
-    def __init__(self, dim=512):
+    """Compact image encoder trained to reproduce CLIP embedding geometry."""
+
+    def __init__(self, dim: int = 512) -> None:
         super().__init__()
         self.body = nn.Sequential(
             block(3, 64),
@@ -93,65 +48,164 @@ class Student(nn.Module):
         )
         self.proj = nn.Linear(256, dim)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.normalize(self.proj(self.body(x)), dim=-1)
 
 
-student = Student().to(DEV)
-npar = sum(p.numel() for p in student.parameters())
-opt = torch.optim.AdamW(student.parameters(), lr=3e-3, weight_decay=5e-4)
-EPOCHS = 40
-sched = torch.optim.lr_scheduler.OneCycleLR(opt, 3e-3, epochs=EPOCHS, steps_per_epoch=(len(Xtr) + 255) // 256)
+def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path.cwd(),
+        help="directory for student.pt, student_head.pt, and metrics.json",
+    )
+    return parser.parse_args(argv)
 
 
-@torch.no_grad()
-def evaluate():
-    student.eval()
-    preds = []
-    for i in range(0, len(Xte), 512):
-        preds.append((student(Xte[i : i + 512]) @ tfeat.T).argmax(1).cpu())
-    p = torch.cat(preds).numpy()
-    return float((p == yte).mean())
+def main(argv: list[str] | None = None) -> int:
+    """Run the explicit network/GPU training workflow and write its receipt."""
+    args = _arguments(argv)
+    from datasets import load_dataset
+    from transformers import CLIPModel, CLIPProcessor
 
+    torch.manual_seed(0)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
+    print(f"device={device} {device_name}", flush=True)
 
-t0 = time.time()
-for ep in range(EPOCHS):
-    student.train()
-    perm = torch.randperm(len(Xtr), device=DEV)
-    for i in range(0, len(Xtr), 256):
-        idx = perm[i : i + 256]
-        opt.zero_grad()
-        emb = student(Xtr[idx])
-        loss = (1 - (emb * etr[idx]).sum(1)).mean()  # cosine feature-distillation loss
-        loss.backward()
-        opt.step()
-        sched.step()
-    if ep % 5 == 4 or ep == EPOCHS - 1:
-        print(
-            f"ep{ep + 1} loss={loss.item():.4f} student_zs_acc={evaluate():.4f} [{time.time() - t0:.0f}s]", flush=True
+    clip = (
+        CLIPModel.from_pretrained(CLIP_ID, revision=CLIP_REVISION, use_safetensors=True)
+        .to(device)
+        .eval()
+    )
+    processor = CLIPProcessor.from_pretrained(CLIP_ID, revision=CLIP_REVISION, use_fast=True)
+
+    started = time.time()
+    train = load_dataset(CIFAR10_ID, split="train", revision=CIFAR10_REVISION)
+    test = load_dataset(CIFAR10_ID, split="test", revision=CIFAR10_REVISION)
+    train_images = [record["img"] for record in train]
+    test_images = [record["img"] for record in test]
+    test_labels = np.array([record["label"] for record in test])
+    print(f"data loaded {len(train_images)}+{len(test_images)} in {time.time() - started:.0f}s", flush=True)
+
+    @torch.no_grad()
+    def clip_embed(images, batch_size: int = 256) -> torch.Tensor:
+        output = []
+        for offset in range(0, len(images), batch_size):
+            inputs = processor(images=images[offset : offset + batch_size], return_tensors="pt").to(device)
+            vision = clip.vision_model(pixel_values=inputs["pixel_values"])
+            output.append(F.normalize(clip.visual_projection(vision.pooler_output), dim=-1).cpu())
+        return torch.cat(output)
+
+    started = time.time()
+    train_embeddings = clip_embed(train_images)
+    test_embeddings = clip_embed(test_images)
+    with torch.no_grad():
+        text_inputs = processor(
+            text=[f"a photo of a {category}" for category in CLASSES],
+            return_tensors="pt",
+            padding=True,
+        ).to(device)
+        text = clip.text_model(
+            input_ids=text_inputs["input_ids"],
+            attention_mask=text_inputs["attention_mask"],
         )
+        text_features = F.normalize(clip.text_projection(text.pooler_output), dim=-1).cpu()
+    clip_accuracy = float(((test_embeddings @ text_features.T).argmax(1).numpy() == test_labels).mean())
+    print(
+        f"CLIP embeddings in {time.time() - started:.0f}s | CLIP zero-shot acc {clip_accuracy:.4f}",
+        flush=True,
+    )
 
-acc = evaluate()
-torch.save({k: v.cpu() for k, v in student.state_dict().items()}, "student.pt")
-torch.save({"mean": mean, "std": std, "tfeat": tfeat.cpu()}, "student_head.pt")
-metrics = {
-    "assets": {
-        "clip": {"repository": CLIP_ID, "revision": CLIP_REVISION},
-        "cifar10": {
-            "repository": CIFAR10_ID,
-            "revision": CIFAR10_REVISION,
-            "train_fingerprint": tr._fingerprint,
-            "test_fingerprint": te._fingerprint,
+    x_train = (
+        torch.tensor(np.stack([np.array(image) for image in train_images]), dtype=torch.float32)
+        .permute(0, 3, 1, 2)
+        .div(255)
+    )
+    x_test = (
+        torch.tensor(np.stack([np.array(image) for image in test_images]), dtype=torch.float32)
+        .permute(0, 3, 1, 2)
+        .div(255)
+    )
+    mean = x_train.mean((0, 2, 3), keepdim=True)
+    std = x_train.std((0, 2, 3), keepdim=True)
+    x_train = ((x_train - mean) / std).to(device)
+    x_test = ((x_test - mean) / std).to(device)
+    train_embeddings = train_embeddings.to(device)
+    text_features = text_features.to(device)
+
+    student = Student().to(device)
+    parameter_count = sum(parameter.numel() for parameter in student.parameters())
+    optimizer = torch.optim.AdamW(student.parameters(), lr=3e-3, weight_decay=5e-4)
+    epochs = 40
+    schedule = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        3e-3,
+        epochs=epochs,
+        steps_per_epoch=(len(x_train) + 255) // 256,
+    )
+
+    @torch.no_grad()
+    def evaluate() -> float:
+        student.eval()
+        predictions = []
+        for offset in range(0, len(x_test), 512):
+            predictions.append((student(x_test[offset : offset + 512]) @ text_features.T).argmax(1).cpu())
+        return float((torch.cat(predictions).numpy() == test_labels).mean())
+
+    started = time.time()
+    for epoch in range(epochs):
+        student.train()
+        permutation = torch.randperm(len(x_train), device=device)
+        for offset in range(0, len(x_train), 256):
+            indices = permutation[offset : offset + 256]
+            optimizer.zero_grad()
+            embedding = student(x_train[indices])
+            loss = (1 - (embedding * train_embeddings[indices]).sum(1)).mean()
+            loss.backward()
+            optimizer.step()
+            schedule.step()
+        if epoch % 5 == 4 or epoch == epochs - 1:
+            print(
+                f"ep{epoch + 1} loss={loss.item():.4f} student_zs_acc={evaluate():.4f} "
+                f"[{time.time() - started:.0f}s]",
+                flush=True,
+            )
+
+    accuracy = evaluate()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    torch.save({name: value.cpu() for name, value in student.state_dict().items()}, args.output_dir / "student.pt")
+    torch.save(
+        {"mean": mean, "std": std, "tfeat": text_features.cpu()},
+        args.output_dir / "student_head.pt",
+    )
+    metrics = {
+        "assets": {
+            "clip": {"repository": CLIP_ID, "revision": CLIP_REVISION},
+            "cifar10": {
+                "repository": CIFAR10_ID,
+                "revision": CIFAR10_REVISION,
+                "train_fingerprint": train._fingerprint,
+                "test_fingerprint": test._fingerprint,
+            },
         },
-    },
-    "clip_zero_shot_acc": clip_zs,
-    "student_acc": acc,
-    "retention": acc / clip_zs,
-    "student_params": npar,
-    "student_mb": round(npar * 4 / 1e6, 2),
-    "epochs": EPOCHS,
-    "train_seconds": round(time.time() - t0, 1),
-    "device": str(DEV),
-}
-json.dump(metrics, open("metrics.json", "w"), indent=2)
-print("RESULT " + json.dumps(metrics), flush=True)
+        "clip_zero_shot_acc": clip_accuracy,
+        "student_acc": accuracy,
+        "retention": accuracy / clip_accuracy,
+        "student_params": parameter_count,
+        "student_mb": round(parameter_count * 4 / 1e6, 2),
+        "epochs": epochs,
+        "train_seconds": round(time.time() - started, 1),
+        "device": str(device),
+    }
+    metrics_path = args.output_dir / "metrics.json"
+    with metrics_path.open("w", encoding="utf-8") as handle:
+        json.dump(metrics, handle, indent=2)
+        handle.write("\n")
+    print("RESULT " + json.dumps(metrics), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
