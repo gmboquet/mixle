@@ -20,6 +20,7 @@ dependency on ``mixle.relations``, and no edit to it); it only produces the payl
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,48 @@ if TYPE_CHECKING:  # pragma: no cover -- type-checking only, no runtime dependen
     from mixle.analysis.sdm import HabitatModel
 
 __all__ = ["critical_habitat_exclusion", "apply_habitat_constraints"]
+
+
+def _nonnegative_integer(value: Any, *, name: str) -> int:
+    """Validate a topology radius/count without Boolean or fractional coercion."""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-Boolean nonnegative integer.")
+    try:
+        integer = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be a non-Boolean nonnegative integer.") from exc
+    if integer < 0:
+        raise ValueError(f"{name} must be nonnegative, got {integer}.")
+    return int(integer)
+
+
+def _finite_scalar(value: Any, *, name: str) -> float:
+    """Validate one finite non-Boolean numeric scalar."""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-Boolean finite scalar.")
+    arr = np.asarray(value)
+    if arr.ndim != 0 or arr.dtype.kind not in "iuf":
+        raise ValueError(f"{name} must be a finite scalar.")
+    scalar = float(arr)
+    if not np.isfinite(scalar):
+        raise ValueError(f"{name} must be finite, got {value!r}.")
+    return scalar
+
+
+def _boolean_or_binary_mask(raw_mask: Any, *, name: str, expected_length: int | None = None) -> np.ndarray:
+    """Return a one-dimensional Boolean mask, accepting only Boolean or exact numeric 0/1 values."""
+    arr = np.asarray(raw_mask)
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be a one-dimensional Boolean/binary mask, got shape {arr.shape}.")
+    if expected_length is not None and arr.shape != (expected_length,):
+        raise ValueError(f"{name} must have shape ({expected_length},), got {arr.shape}.")
+    if arr.dtype == np.bool_:
+        return np.array(arr, dtype=bool, copy=True)
+    if arr.dtype.kind not in "iuf":
+        raise ValueError(f"{name} must contain only Boolean or numeric binary values.")
+    if not np.all(np.isfinite(arr)) or not np.all((arr == 0) | (arr == 1)):
+        raise ValueError(f"{name} must contain only finite binary values 0 or 1.")
+    return np.array(arr, dtype=bool, copy=True)
 
 
 def _dilate_conservatively(mask: np.ndarray, buffer_cells: int) -> np.ndarray:
@@ -45,7 +88,7 @@ def _dilate_conservatively(mask: np.ndarray, buffer_cells: int) -> np.ndarray:
     if buffer_cells <= 0:
         return mask
     grown = mask.copy()
-    for _ in range(int(buffer_cells)):
+    for _ in range(buffer_cells):
         shifted_left = np.zeros_like(grown)
         shifted_left[1:] = grown[:-1]
         shifted_right = np.zeros_like(grown)
@@ -98,7 +141,14 @@ def critical_habitat_exclusion(
     Returns:
         A ``(K,)`` boolean array, ``True`` where the block is excluded (no-mine).
     """
-    num_cells = int(np.asarray(habitat.mean).shape[0])
+    suitability_cut = _finite_scalar(suitability_cut, name="suitability_cut")
+    buffer_cells = _nonnegative_integer(buffer_cells, name="buffer_cells")
+    habitat_mean = np.asarray(habitat.mean)
+    if habitat_mean.ndim != 1 or habitat_mean.size == 0:
+        raise ValueError(f"habitat.mean must be a non-empty one-dimensional cell field, got shape {habitat_mean.shape}.")
+    if not np.all(np.isfinite(habitat_mean)):
+        raise ValueError("habitat.mean must be finite.")
+    num_cells = habitat_mean.shape[0]
     qualifies = [species for species in listed if bool(getattr(species, "critical_habitat", False))]
     if not qualifies:
         return np.zeros(num_cells, dtype=bool)
@@ -109,7 +159,14 @@ def critical_habitat_exclusion(
         return np.ones(num_cells, dtype=bool)
 
     mask = np.zeros(num_cells, dtype=bool)
-    base_mask = np.asarray(habitat.critical_habitat_mask(suitability_cut), dtype=bool)
+    raw_base_mask = np.asarray(habitat.critical_habitat_mask(suitability_cut))
+    if raw_base_mask.dtype != np.bool_:
+        raise ValueError("habitat.critical_habitat_mask must return a Boolean array.")
+    base_mask = _boolean_or_binary_mask(
+        raw_base_mask,
+        name="habitat.critical_habitat_mask",
+        expected_length=num_cells,
+    )
     for _species in qualifies:
         mask = mask | base_mask
 
@@ -139,15 +196,21 @@ def _validate_block_nodes(raw_block_nodes: Any, *, n_blocks: int, n_nodes: int) 
             f"network['block_nodes'] must be a 1-D array with one entry per block ({n_blocks}), got "
             f"shape {arr.shape!r}."
         )
-    if np.issubdtype(arr.dtype, np.integer) or arr.dtype == np.bool_:
+    if arr.dtype == np.bool_ or (
+        arr.dtype == object and any(isinstance(value, (bool, np.bool_)) for value in arr.tolist())
+    ):
+        raise ValueError("network['block_nodes'] must not contain Boolean node identities.")
+    if np.issubdtype(arr.dtype, np.integer):
         ids = arr.astype(np.int64)
-    else:
+    elif np.issubdtype(arr.dtype, np.floating):
         farr = arr.astype(np.float64)
         if not np.all(np.isfinite(farr)):
             raise ValueError("network['block_nodes'] must be finite (no NaN or Inf).")
         if not np.array_equal(farr, np.trunc(farr)):
             raise ValueError("network['block_nodes'] must be exact integers (fractional ids are not supported).")
         ids = farr.astype(np.int64)
+    else:
+        raise ValueError("network['block_nodes'] must contain numeric exact integer node ids.")
 
     if ids.size and (ids.min() < 0 or ids.max() >= n_nodes):
         raise ValueError(
@@ -207,7 +270,7 @@ def apply_habitat_constraints(network: dict[str, Any], exclusion_mask: np.ndarra
             negative entry, if ``supply`` is not a finite length-``n`` vector, or if ``block_nodes`` is not
             a length-matched array of exact, unique, in-range node ids.
     """
-    exclusion_mask = np.asarray(exclusion_mask, dtype=bool)
+    exclusion_mask = _boolean_or_binary_mask(exclusion_mask, name="exclusion_mask")
 
     cap = np.array(network["cap"], dtype=float, copy=True)
     cost = np.array(network["cost"], dtype=float, copy=True)
