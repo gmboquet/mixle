@@ -136,8 +136,16 @@ jobs:
           export MIXLE_SOURCE_COMMIT="$CANDIDATE_SHA"
           export MIXLE_SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')"
           export MIXLE_SOURCE_DIRTY=false
-          python -m build
-          python scripts/normalize_sdist.py dist/*.tar.gz "$SOURCE_DATE_EPOCH"
+          mkdir source-a source-b dist-a dist-b dist
+          git archive HEAD | tar -x -C source-a
+          git archive HEAD | tar -x -C source-b
+          (cd source-a && python -m build --outdir ../dist-a)
+          (cd source-b && python -m build --outdir ../dist-b)
+          python scripts/normalize_sdist.py dist-a/*.tar.gz "$SOURCE_DATE_EPOCH"
+          python scripts/normalize_sdist.py dist-b/*.tar.gz "$SOURCE_DATE_EPOCH"
+          python scripts/verify_reproducible_builds.py \
+            --left dist-a --right dist-b --out metadata/reproducible-builds.json
+          cp dist-a/* dist/
           twine check dist/*
           python -m pip install -e ".[docs]"
           python -m sphinx -b html -W --keep-going docs "$RUNNER_TEMP/docs-html"
@@ -240,10 +248,16 @@ jobs:
           cp promotion/release-check-evidence.json candidate/metadata/promotion-check-evidence.json
           (cd candidate/dist && sha256sum -c ../metadata/SHA256SUMS)
           OPTIONAL_RUN="$(python -c 'import json, re; u=json.load(open("promotion/release-check-evidence.json"))["checks"]["optional extras / py3.12"]["details_url"]; print(re.search(r"/actions/runs/([0-9]+)/", u).group(1))')"
+          SECURITY_RUN="$(python -c 'import json, re; u=json.load(open("promotion/release-check-evidence.json"))["checks"]["pip-audit (all runtime features)"]["details_url"]; print(re.search(r"/actions/runs/([0-9]+)/", u).group(1))')"
           mkdir -p candidate/metadata/network
+          mkdir -p candidate/metadata/security
           gh run download "$OPTIONAL_RUN" \
             --name banking77-reproduction-receipt \
             --dir candidate/metadata/network \
+            --repo "$REPOSITORY"
+          gh run download "$SECURITY_RUN" \
+            --name "sbom-all-$CANDIDATE_SHA" \
+            --dir candidate/metadata/security \
             --repo "$REPOSITORY"
           python scripts/build_example_execution_manifest.py \
             --bundle release-checklists/0.8.0-repro-bundle.json \
@@ -257,7 +271,8 @@ jobs:
             --out candidate/metadata/example-execution-manifest.json
           gh release upload "$CANDIDATE_TAG" \
             candidate/docs-dist/* \
-            candidate/metadata/SHA256SUMS candidate/metadata/*.json candidate/metadata/network/*.json \
+            candidate/metadata/SHA256SUMS candidate/metadata/*.json \
+            candidate/metadata/network/*.json candidate/metadata/security/*.json \
             --clobber
       - name: Publish the already-verified files to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

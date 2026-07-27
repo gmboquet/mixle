@@ -114,8 +114,9 @@ Choose by Workflow
      - ``scaling_example.py``, ``engine_benchmark_example.py``
      - :doc:`engines`, :doc:`utilities-and-parallelism`
    * - Neural or representation workflows
-     - ``shared_embedding_example.py``, ``heterogeneous_representation_example.py``,
-       ``cross_modal_fit_receipt.py``
+     - ``shared_embedding_example.py``, ``heterogeneous_representation_example.py``;
+       ``cross_modal_fit_receipt.py`` is a synthetic multi-vector tutorial, not
+       a modality receipt
      - :doc:`neural-llm`, :doc:`representation`
    * - Local reasoning ecosystem
      - ``frontier_ecosystem_demo.py``, ``reasoner_investigation_demo.py``,

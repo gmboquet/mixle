@@ -26,7 +26,11 @@ class BoundSbomTest(unittest.TestCase):
         raw = {"bomFormat": "CycloneDX", "components": [{"name": "mixle"}, {"name": "numpy"}]}
         wheel = {"filename": "mixle-0.8.0-py3-none-any.whl", "sha256": "a" * 64, "size_bytes": 10}
         result = binder.bind(raw, wheel, "b" * 40)
-        self.assertEqual(result["inventory_scope"], "isolated-wheel-environment")
+        self.assertEqual(result["inventory_scope"], "isolated-wheel-environment:base")
+        self.assertEqual(result["profile"], "base")
+        self.assertEqual(binder.bind(raw, wheel, "b" * 40, profile="all")["profile"], "all")
+        with self.assertRaises(ValueError):
+            binder.bind(raw, wheel, "b" * 40, profile="unknown")
         with self.assertRaises(ValueError):
             binder.bind({"bomFormat": "CycloneDX", "components": [{"name": "pip-audit"}]}, wheel, "b" * 40)
 
@@ -110,6 +114,9 @@ class HostedWorkflowContractTest(unittest.TestCase):
         extras = (ROOT / ".github" / "workflows" / "extras-matrix.yml").read_text(encoding="utf-8")
         post = (ROOT / ".github" / "workflows" / "post-publish-verify.yml").read_text(encoding="utf-8")
         self.assertIn('--path "$SITE"', security)
+        self.assertIn("pip-audit (all runtime features)", security)
+        self.assertIn("--profile all", security)
+        self.assertIn("bandit (source security)", security)
         self.assertNotIn("continue-on-error: true", security)
         self.assertEqual(tests.count("scripts/run_required_pytest.py"), 2)
         optional_job = tests.split("\n  optional:\n", 1)[1].split("\n  numerical:\n", 1)[0]

@@ -78,3 +78,13 @@ def test_distillation_receipt_binds_assets_and_verifier_checks_them() -> None:
     assert '"train_fingerprint": train._fingerprint' in producer
     assert '"test_fingerprint": test._fingerprint' in producer
     assert 'if metrics.get("assets") != expected_assets:' in verifier
+
+
+def test_peft_receipt_measures_adapter_movement_and_held_out_likelihood() -> None:
+    source = (ROOT / "examples" / "peft_lora_grad_leaf.py").read_text(encoding="utf-8")
+    assert "initial = -torch.log" in source
+    assert "adapters_before" in source
+    assert "adapter_deltas" in source
+    assert "held_out = toy_token_sequences" in source
+    assert "rng=np.random.RandomState(1)" in source
+    assert "after_ll > before_ll" in source

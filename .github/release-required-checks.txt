@@ -15,3 +15,5 @@ hardware / MPI and torchrun
 extras matrix / exact candidate
 Revision check (single-revision, warnings as errors)
 pip-audit (base install)
+pip-audit (all runtime features)
+bandit (source security)

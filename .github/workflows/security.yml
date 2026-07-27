@@ -19,6 +19,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   pip-audit:
     name: pip-audit (base install)
@@ -64,10 +67,80 @@ jobs:
             --cyclonedx raw-sbom.json \
             --wheel-metadata wheel-metadata.json \
             --candidate-sha "$CANDIDATE_SHA" \
+            --profile base \
             --out sbom.json
       - uses: actions/upload-artifact@v7
         with:
           name: sbom-${{ github.sha }}
           path: sbom.json
+          if-no-files-found: error
+          retention-days: 90
+
+  pip-audit-all:
+    name: pip-audit (all runtime features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install native prerequisites
+        run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin libgmp-dev
+      - name: Build and install exact wheel with the complete runtime-feature union
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist
+          python -m venv "$RUNNER_TEMP/artifact-all-env"
+          "$RUNNER_TEMP/artifact-all-env/bin/python" -m pip install --upgrade pip
+          WHEEL="$(printf '%s\n' dist/*.whl)"
+          "$RUNNER_TEMP/artifact-all-env/bin/python" -m pip install "$WHEEL[all]"
+          "$RUNNER_TEMP/artifact-all-env/bin/python" -m pip check
+          python scripts/release_metadata.py dist/*.whl --out wheel-metadata.json
+      - name: Audit complete runtime-feature environment
+        run: |
+          python -m venv "$RUNNER_TEMP/audit-tool"
+          "$RUNNER_TEMP/audit-tool/bin/python" -m pip install --upgrade pip pip-audit
+          SITE=$("$RUNNER_TEMP/artifact-all-env/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+          IGNORES=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' .github/pip-audit-ignore.txt | awk '{printf " --ignore-vuln %s", $1}')
+          "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" $IGNORES
+          "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" --format cyclonedx-json -o raw-sbom-all.json
+      - name: Bind complete-runtime SBOM to candidate and wheel
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          python scripts/bind_sbom.py \
+            --cyclonedx raw-sbom-all.json \
+            --wheel-metadata wheel-metadata.json \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --profile all \
+            --out sbom-all.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom-all-${{ github.sha }}
+          path: sbom-all.json
+          if-no-files-found: error
+          retention-days: 90
+
+  source-security:
+    name: bandit (source security)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Run scoped source security analysis
+        run: |
+          python -m venv "$RUNNER_TEMP/bandit-tool"
+          "$RUNNER_TEMP/bandit-tool/bin/python" -m pip install --upgrade pip "bandit[toml]==1.8.6"
+          "$RUNNER_TEMP/bandit-tool/bin/bandit" -r mixle scripts \
+            -x mixle/tests -ll -ii -f json -o bandit.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bandit-${{ github.sha }}
+          path: bandit.json
           if-no-files-found: error
           retention-days: 90

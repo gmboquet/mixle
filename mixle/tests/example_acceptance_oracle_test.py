@@ -23,6 +23,7 @@ def test_cross_modal_example_emits_and_enforces_acceptance(capsys) -> None:
     module.main()
     line = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("ACCEPTANCE "))
     receipt = json.loads(line.removeprefix("ACCEPTANCE "))
+    assert receipt["artifact"] == "mixle.multi_vector_fit_acceptance/v1"
     assert receipt["accepted"] is True
     assert receipt["price_parents"] == receipt["required_price_parents"] == [1, 2]
     assert receipt["held_out_correlation"] >= 0.95
