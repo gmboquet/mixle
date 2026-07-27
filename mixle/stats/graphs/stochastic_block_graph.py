@@ -1,14 +1,16 @@
-"""Stochastic block graph distributions with observed or fixed block assignments.
+"""Stochastic block graph distributions with explicit conditional or joint laws.
 
-This module handles Bernoulli edges conditional on observed or fixed node block
-assignments. It does not marginalize over unknown block assignments.
+Fixed assignments define ``p(adjacency | assignments)``. Without fixed
+assignments, observations are ``(adjacency, assignments)`` pairs scored under
+the joint law ``p(assignments) p(adjacency | assignments)``. This family does
+not claim to marginalize assignments out of a bare adjacency observation.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 from numpy.random import RandomState
@@ -62,33 +64,50 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         block_prior: Any | None = None,
         directed: bool = False,
         self_loops: bool = False,
-        include_assignment_prior: bool = False,
+        include_assignment_prior: bool | None = None,
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
         from mixle.data.sources.graph_source import (
-            _EPS,
             _as_assignments,
             _normalize_prior,
             _validate_block_indices,
             _validate_block_probs,
         )
 
-        probs = _validate_block_probs(block_probs)
-        if not directed and not np.allclose(probs, probs.T):
+        probs = np.array(_validate_block_probs(block_probs), dtype=np.float64, copy=True)
+        if not directed and not np.array_equal(probs, probs.T):
             raise ValueError("undirected block_probs must be symmetric.")
+        probs.setflags(write=False)
         self.block_probs = probs
         self.num_blocks = int(probs.shape[0])
-        self.block_assignments = (
-            None if block_assignments is None else _as_assignments(block_assignments, len(block_assignments))
-        )
+        assignments = None if block_assignments is None else _as_assignments(block_assignments, len(block_assignments))
+        if assignments is not None:
+            assignments = np.array(assignments, dtype=np.int64, copy=True)
+            assignments.setflags(write=False)
+        self.block_assignments = assignments
         if self.block_assignments is not None:
             _validate_block_indices(self.block_assignments, self.num_blocks)
-        self.block_prior = _normalize_prior(block_prior, self.num_blocks)
-        self.log_block_prior = np.log(np.clip(self.block_prior, _EPS, 1.0))
+        prior = np.array(_normalize_prior(block_prior, self.num_blocks), dtype=np.float64, copy=True)
+        prior.setflags(write=False)
+        self.block_prior = prior
+        self.log_block_prior = np.full(self.num_blocks, -math.inf, dtype=np.float64)
+        positive_prior = prior > 0.0
+        self.log_block_prior[positive_prior] = np.log(prior[positive_prior])
+        self.log_block_prior.setflags(write=False)
         self.directed = bool(directed)
         self.self_loops = bool(self_loops)
-        self.include_assignment_prior = bool(include_assignment_prior)
+        expected_joint = self.block_assignments is None
+        if include_assignment_prior is not None and not isinstance(include_assignment_prior, (bool, np.bool_)):
+            raise ValueError("include_assignment_prior must be Boolean or None.")
+        if include_assignment_prior is not None and bool(include_assignment_prior) != expected_joint:
+            mode = "population" if expected_joint else "fixed-assignment"
+            required = expected_joint
+            raise ValueError(
+                f"{mode} SBM requires include_assignment_prior={required}; "
+                "conditional and joint sample spaces cannot be mixed."
+            )
+        self.include_assignment_prior = expected_joint
         self.name = name
         self.keys = keys
 
@@ -137,6 +156,8 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         if obs.block_assignments is None:
             raise ValueError("block assignments are required for SBM log-density.")
         _validate_block_indices(obs.block_assignments, self.num_blocks)
+        if self.block_assignments is not None and not np.array_equal(obs.block_assignments, self.block_assignments):
+            raise ValueError("observation assignments conflict with this fixed-assignment SBM.")
         # log_density/backend_seq_log_density (and posterior/block_marginals, which share this same
         # observation-consuming choke point) only ever read the edge positions _edge_indices yields for
         # (self.directed, self.self_loops) -- e.g. the strict upper triangle when undirected with no
@@ -176,31 +197,10 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         active engine (differentiable in ``block_probs`` on torch). The optional assignment prior is
         added per graph.
         """
-        from mixle.data.sources.graph_source import _EPS, _edge_indices
-
-        n = len(x)
-        seg, adj_vals, p_vals = [], [], []
-        priors = np.zeros(n, dtype=np.float64)
-        for gi, obs in enumerate(x):
-            obs = self._obs_with_assignments(obs)
-            adj = obs.adjacency
-            assignments = obs.block_assignments
-            for i, j in _edge_indices(adj.shape[0], directed=self.directed, self_loops=self.self_loops):
-                seg.append(gi)
-                adj_vals.append(float(adj[i, j]))
-                p_vals.append(float(self.block_probs[assignments[i], assignments[j]]))
-            if self.include_assignment_prior:
-                priors[gi] = float(np.sum(self.log_block_prior[assignments]))
-
-        out = engine.zeros(n)
-        if seg:
-            p_arr = np.clip(np.asarray(p_vals, dtype=np.float64), _EPS, 1.0 - _EPS)
-            av = engine.asarray(np.asarray(adj_vals, dtype=np.float64))
-            bern = av * engine.asarray(np.log(p_arr)) + (1.0 - av) * engine.asarray(np.log1p(-p_arr))
-            out = engine.index_add(out, engine.asarray(np.asarray(seg, dtype=np.int64)), bern)
-        if self.include_assignment_prior:
-            out = out + engine.asarray(priors)
-        return out
+        # Parameters are immutable host values, while observations are ragged object
+        # records. Compute with the same branch-safe scalar contract as log_density and
+        # transfer the result; this preserves exact p=0/1 support on every backend.
+        return engine.asarray(np.asarray([self.log_density(obs) for obs in x], dtype=np.float64))
 
     def _prior_predictive_link_probability(self, same_node: bool = False) -> float:
         if same_node:
@@ -209,17 +209,24 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
 
     def link_probability(self, i: int, j: int, block_assignments: Any | None = None) -> float:
         """Return the marginal or assignment-conditional edge probability for node pair ``(i, j)``."""
-        from mixle.data.sources.graph_source import _validate_block_indices
+        from mixle.data.sources.graph_source import _as_assignments, _require_exact_int, _validate_block_indices
 
-        if i == j and not self.self_loops:
+        ii = _require_exact_int(i, "i")
+        jj = _require_exact_int(j, "j")
+
+        if ii == jj and not self.self_loops:
             return 0.0
         assignments = (
-            self.block_assignments if block_assignments is None else np.asarray(block_assignments, dtype=np.int64)
+            self.block_assignments
+            if block_assignments is None
+            else _as_assignments(block_assignments, len(block_assignments))
         )
         if assignments is None:
-            return self._prior_predictive_link_probability(same_node=(i == j))
+            return self._prior_predictive_link_probability(same_node=(ii == jj))
         _validate_block_indices(assignments, self.num_blocks)
-        return float(self.block_probs[int(assignments[i]), int(assignments[j])])
+        if ii < 0 or jj < 0 or ii >= len(assignments) or jj >= len(assignments):
+            raise ValueError("node indices must be within the block-assignment vector.")
+        return float(self.block_probs[int(assignments[ii]), int(assignments[jj])])
 
     def edge_marginals(self, block_assignments: Any | None = None, num_nodes: int | None = None) -> np.ndarray:
         """Return the matrix of edge probabilities under fixed or prior-predictive assignments."""
@@ -229,7 +236,11 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
             if self.block_assignments is None:
                 if num_nodes is None:
                     raise ValueError("block_assignments or num_nodes is required.")
-                n = int(num_nodes)
+                from mixle.data.sources.graph_source import _require_exact_int
+
+                n = _require_exact_int(num_nodes, "num_nodes")
+                if n < 0:
+                    raise ValueError("num_nodes must be non-negative.")
                 edge_p = self._prior_predictive_link_probability(same_node=False)
                 mat = np.full((n, n), edge_p, dtype=np.float64)
                 if self.self_loops:
@@ -240,7 +251,9 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
             else:
                 assignments = self.block_assignments
         else:
-            assignments = np.asarray(block_assignments, dtype=np.int64)
+            from mixle.data.sources.graph_source import _as_assignments
+
+            assignments = _as_assignments(block_assignments, len(block_assignments))
         _validate_block_indices(assignments, self.num_blocks)
         n = len(assignments)
         mat = np.empty((n, n), dtype=np.float64)
@@ -279,9 +292,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         With the node block assignments fixed (``block_assignments`` set on the distribution), each
         edge ``(i, j)`` is an independent Bernoulli with its own probability ``block_probs[a_i, a_j]``,
         so the graph distribution is a product of edge factors -- enumerated by best-first over the
-        per-edge supports and assembled into an adjacency matrix (mirrored when undirected). The
-        constant assignment-prior term (when ``include_assignment_prior``) enters as a score offset so
-        each graph carries its exact ``log_density``.
+        per-edge supports and assembled into an adjacency matrix (mirrored when undirected).
 
         Marginalizing over UNKNOWN assignments is intentionally not modeled by this family, so
         enumeration requires fixed assignments; otherwise EnumerationError.
@@ -326,21 +337,23 @@ class StochasticBlockGraphEnumerator(DistributionEnumerator):
             dist (StochasticBlockGraphDistribution): Distribution whose graphs are enumerated (its
                 ``block_assignments`` must be fixed).
         """
-        from mixle.data.sources.graph_source import _EPS, _edge_indices
+        from mixle.data.sources.graph_source import _edge_indices
 
         super().__init__(dist)
         assignments = np.asarray(dist.block_assignments)
         n = len(assignments)
         edges = list(_edge_indices(n, dist.directed, dist.self_loops))
         directed = dist.directed
-        with np.errstate(divide="ignore"):
-            offset = float(np.sum(dist.log_block_prior[assignments])) if dist.include_assignment_prior else 0.0
-
         streams = []
         for i, j in edges:
             p = float(dist.block_probs[assignments[i], assignments[j]])
-            lp1, lp0 = math.log(max(p, _EPS)), math.log(max(1.0 - p, _EPS))
-            pair = [(1, lp1), (0, lp0)] if lp1 >= lp0 else [(0, lp0), (1, lp1)]
+            if p == 0.0:
+                pair = [(0, 0.0)]
+            elif p == 1.0:
+                pair = [(1, 0.0)]
+            else:
+                lp1, lp0 = math.log(p), math.log1p(-p)
+                pair = [(1, lp1), (0, lp0)] if lp1 >= lp0 else [(0, lp0), (1, lp1)]
             streams.append(BufferedStream(iter(pair)))
 
         def combine(edge_values: tuple[int, ...]) -> np.ndarray:
@@ -351,7 +364,7 @@ class StochasticBlockGraphEnumerator(DistributionEnumerator):
                     adj[j, i] = v
             return adj
 
-        self._product = ProductEnumerator(streams, combine=combine, offset=offset)
+        self._product = ProductEnumerator(streams, combine=combine)
 
     def __next__(self) -> tuple[np.ndarray, float]:
         """Return the next adjacency matrix and its log probability."""
@@ -367,7 +380,9 @@ class StochasticBlockGraphSampler(DistributionSampler):
 
     def sample_assignments(self, num_nodes: int) -> np.ndarray:
         """Draw node block assignments from the block prior."""
-        n = int(num_nodes)
+        from mixle.data.sources.graph_source import _require_exact_int
+
+        n = _require_exact_int(num_nodes, "num_nodes")
         if n < 0:
             raise ValueError("num_nodes must be non-negative.")
         return self.rng.choice(self.dist.num_blocks, size=n, p=self.dist.block_prior).astype(np.int64)
@@ -380,20 +395,11 @@ class StochasticBlockGraphSampler(DistributionSampler):
     ) -> Any:
         """Draw one graph, optionally returning the assignments used.
 
-        ``return_assignments=None`` (the default) auto-includes the assignments -- returning an
-        ``(adjacency, assignments)`` pair instead of a bare adjacency matrix -- exactly when they
-        were freshly drawn from ``block_prior`` here (a "population" SBM, i.e. ``block_assignments``
-        is not fixed on the distribution and none were passed to this call) and so have no other
-        recorded home. Without them attached, the returned adjacency alone is not enough for
-        ``log_density``/``seq_log_density`` to score it: this family conditions on block
-        assignments and, by design (see the class docstring), never marginalizes over unknown
-        ones, so a distribution's own sampler must hand back something its own scorer accepts.
-        When assignments ARE recoverable another way -- fixed on the distribution, or supplied by
-        the caller via ``block_assignments`` here -- the bare matrix is returned by default,
-        unchanged from prior behavior. Pass ``True``/``False`` to always/never include them
-        regardless of this auto-detection.
+        Population models always return the joint ``(adjacency, assignments)``
+        outcome. Fixed-assignment models return the conditional adjacency by
+        default; callers may request the redundant fixed assignments as well.
         """
-        from mixle.data.sources.graph_source import _edge_indices, _validate_block_indices
+        from mixle.data.sources.graph_source import _as_assignments, _edge_indices, _validate_block_indices
 
         sampled_from_prior = False
         if block_assignments is None:
@@ -402,11 +408,13 @@ class StochasticBlockGraphSampler(DistributionSampler):
             else:
                 if num_nodes is None:
                     raise ValueError("num_nodes is required when block_assignments are not fixed.")
-                assignments = self.sample_assignments(int(num_nodes))
+                assignments = self.sample_assignments(num_nodes)
                 sampled_from_prior = True
         else:
-            assignments = np.asarray(block_assignments, dtype=np.int64)
+            assignments = _as_assignments(block_assignments, len(block_assignments))
         _validate_block_indices(assignments, self.dist.num_blocks)
+        if self.dist.block_assignments is not None and not np.array_equal(assignments, self.dist.block_assignments):
+            raise ValueError("explicit assignments conflict with this fixed-assignment SBM.")
 
         n = len(assignments)
         mat = np.zeros((n, n), dtype=np.int8)
@@ -416,7 +424,11 @@ class StochasticBlockGraphSampler(DistributionSampler):
             mat[i, j] = edge
             if not self.dist.directed and i != j:
                 mat[j, i] = edge
-        include_assignments = sampled_from_prior if return_assignments is None else return_assignments
+        if sampled_from_prior and return_assignments is False:
+            raise ValueError("population SBM samples must retain assignments so the joint outcome is scoreable.")
+        if return_assignments is not None and not isinstance(return_assignments, (bool, np.bool_)):
+            raise ValueError("return_assignments must be Boolean or None.")
+        include_assignments = sampled_from_prior if return_assignments is None else bool(return_assignments)
         return (mat, assignments.copy()) if include_assignments else mat
 
     def sample(
@@ -437,12 +449,86 @@ class StochasticBlockGraphSampler(DistributionSampler):
             return self.sample_graph(
                 num_nodes=num_nodes, block_assignments=block_assignments, return_assignments=return_assignments
             )
+        from mixle.data.sources.graph_source import _require_exact_int
+
+        sample_size = _require_exact_int(size, "size")
+        if sample_size < 0:
+            raise ValueError("size must be non-negative.")
         return [
             self.sample_graph(
                 num_nodes=num_nodes, block_assignments=block_assignments, return_assignments=return_assignments
             )
-            for _ in range(int(size))
+            for _ in range(sample_size)
         ]
+
+
+class StochasticBlockGraphStatistics(NamedTuple):
+    """Versioned, configuration-bound sufficient statistics for an SBM."""
+
+    schema_version: int
+    successes: np.ndarray
+    totals: np.ndarray
+    block_counts: np.ndarray
+    total_nodes: float
+    num_graphs: float
+    directed: bool
+    self_loops: bool
+
+
+def _validate_sbm_statistics(
+    value: Any,
+    *,
+    num_blocks: int | None,
+    directed: bool,
+    self_loops: bool,
+) -> StochasticBlockGraphStatistics:
+    if not isinstance(value, StochasticBlockGraphStatistics) or value.schema_version != 1:
+        raise ValueError("SBM statistics must use StochasticBlockGraphStatistics schema version 1.")
+    if value.directed != directed or value.self_loops != self_loops:
+        raise ValueError("SBM statistics were produced for an incompatible graph configuration.")
+    successes = np.array(value.successes, dtype=np.float64, copy=True)
+    totals = np.array(value.totals, dtype=np.float64, copy=True)
+    counts = np.array(value.block_counts, dtype=np.float64, copy=True)
+    if (
+        successes.ndim != 2
+        or successes.shape[0] != successes.shape[1]
+        or totals.shape != successes.shape
+        or counts.ndim != 1
+        or counts.shape[0] != successes.shape[0]
+    ):
+        raise ValueError("SBM statistics require aligned K-by-K count matrices and a length-K block vector.")
+    if num_blocks is not None and successes.shape != (num_blocks, num_blocks):
+        raise ValueError("SBM statistic dimension does not match configured num_blocks.")
+    if (
+        np.any(~np.isfinite(successes))
+        or np.any(~np.isfinite(totals))
+        or np.any(~np.isfinite(counts))
+        or np.any(successes < 0.0)
+        or np.any(totals < 0.0)
+        or np.any(counts < 0.0)
+        or np.any(successes > totals)
+    ):
+        raise ValueError("SBM counts must be finite, non-negative, and satisfy successes <= totals.")
+    total_nodes = float(value.total_nodes)
+    num_graphs = float(value.num_graphs)
+    if not np.isfinite(total_nodes) or total_nodes < 0.0 or not np.isfinite(num_graphs) or num_graphs < 0.0:
+        raise ValueError("SBM total_nodes and num_graphs must be finite and non-negative.")
+    if not np.isclose(float(np.sum(counts)), total_nodes, rtol=1.0e-12, atol=1.0e-12):
+        raise ValueError("SBM block_counts must sum to total_nodes.")
+    if not directed and (
+        not np.array_equal(successes, successes.T) or not np.array_equal(totals, totals.T)
+    ):
+        raise ValueError("undirected SBM edge statistics must be symmetric.")
+    return StochasticBlockGraphStatistics(
+        1,
+        successes,
+        totals,
+        counts,
+        total_nodes,
+        num_graphs,
+        directed,
+        self_loops,
+    )
 
 
 class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
@@ -457,10 +543,18 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.num_blocks = None if num_blocks is None else int(num_blocks)
-        self.block_assignments = None if block_assignments is None else np.asarray(block_assignments, dtype=np.int64)
+        from mixle.data.sources.graph_source import _as_assignments, _require_exact_int, _validate_block_indices
+
+        self.num_blocks = None if num_blocks is None else _require_exact_int(num_blocks, "num_blocks")
+        if self.num_blocks is not None and self.num_blocks < 1:
+            raise ValueError("num_blocks must be positive when specified.")
+        self.block_assignments = (
+            None if block_assignments is None else _as_assignments(block_assignments, len(block_assignments))
+        )
         if self.num_blocks is None and self.block_assignments is not None and self.block_assignments.size:
             self.num_blocks = int(self.block_assignments.max()) + 1
+        if self.block_assignments is not None and self.num_blocks is not None:
+            _validate_block_indices(self.block_assignments, self.num_blocks)
         k = 0 if self.num_blocks is None else self.num_blocks
         self.successes = np.zeros((k, k), dtype=np.float64)
         self.totals = np.zeros((k, k), dtype=np.float64)
@@ -475,24 +569,21 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
     def _ensure_capacity(self, num_blocks: int) -> None:
         if self.num_blocks is None:
             self.num_blocks = int(num_blocks)
-        if int(num_blocks) <= self.successes.shape[0]:
+            self.successes = np.zeros((num_blocks, num_blocks), dtype=np.float64)
+            self.totals = np.zeros((num_blocks, num_blocks), dtype=np.float64)
+            self.block_counts = np.zeros(num_blocks, dtype=np.float64)
             return
-        old = self.successes.shape[0]
-        new = int(num_blocks)
-        s = np.zeros((new, new), dtype=np.float64)
-        t = np.zeros((new, new), dtype=np.float64)
-        c = np.zeros(new, dtype=np.float64)
-        s[:old, :old] = self.successes
-        t[:old, :old] = self.totals
-        c[:old] = self.block_counts
-        self.successes = s
-        self.totals = t
-        self.block_counts = c
-        self.num_blocks = new
+        if int(num_blocks) > self.num_blocks:
+            raise ValueError("observed assignments exceed configured num_blocks.")
 
     def update(self, x: Any, weight: float, estimate: StochasticBlockGraphDistribution | None) -> None:
         """Accumulate weighted block-pair edge counts from one graph."""
-        from mixle.data.sources.graph_source import _edge_indices, _extract_observation, _validate_graph_constraints
+        from mixle.data.sources.graph_source import (
+            _edge_indices,
+            _extract_observation,
+            _validate_block_indices,
+            _validate_graph_constraints,
+        )
 
         fallback = self.block_assignments
         if fallback is None and estimate is not None:
@@ -508,8 +599,14 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
         _validate_graph_constraints(obs.adjacency, self.directed, self.self_loops)
         assignments = obs.block_assignments
         needed = int(assignments.max()) + 1 if assignments.size else 0
-        self._ensure_capacity(max(needed, 0 if self.num_blocks is None else self.num_blocks))
+        if self.num_blocks is None and needed == 0:
+            raise ValueError("num_blocks is required to accumulate an empty-assignment graph.")
+        if self.num_blocks is not None:
+            _validate_block_indices(assignments, self.num_blocks)
+        self._ensure_capacity(needed if self.num_blocks is None else self.num_blocks)
         w = float(weight)
+        if not np.isfinite(w) or w < 0.0:
+            raise ValueError("weight must be finite and non-negative.")
         self.block_counts[:needed] += w * np.bincount(assignments, minlength=needed)
         self.total_nodes += w * len(assignments)
         self.num_graphs += w
@@ -530,41 +627,91 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self, x: Sequence[GraphObservation], weights: np.ndarray, estimate: StochasticBlockGraphDistribution | None
     ) -> None:
         """Accumulate weighted block-pair edge counts from a batch."""
-        for obs, weight in zip(x, weights):
-            self.update(obs, float(weight), estimate)
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if checked_weights.ndim != 1 or len(checked_weights) != len(x):
+            raise ValueError("weights must be a one-dimensional array aligned with the graph batch.")
+        if np.any(~np.isfinite(checked_weights)) or np.any(checked_weights < 0.0):
+            raise ValueError("weights must be finite and non-negative.")
+        pending = StochasticBlockGraphAccumulator(
+            num_blocks=self.num_blocks,
+            block_assignments=self.block_assignments,
+            directed=self.directed,
+            self_loops=self.self_loops,
+        )
+        for obs, weight in zip(x, checked_weights):
+            pending.update(obs, float(weight), estimate)
+        self.combine(pending.value())
 
     def seq_initialize(self, x: Sequence[GraphObservation], weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize sufficient statistics from a weighted graph batch."""
         self.seq_update(x, weights, None)
 
-    def combine(
-        self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]
-    ) -> StochasticBlockGraphAccumulator:
+    def combine(self, suff_stat: StochasticBlockGraphStatistics) -> StochasticBlockGraphAccumulator:
         """Merge serialized SBM sufficient statistics."""
-        successes, totals, block_counts, total_nodes, num_graphs = suff_stat
+        checked = _validate_sbm_statistics(
+            suff_stat,
+            num_blocks=self.num_blocks,
+            directed=self.directed,
+            self_loops=self.self_loops,
+        )
+        successes, totals, block_counts = checked.successes, checked.totals, checked.block_counts
         self._ensure_capacity(successes.shape[0])
         k = successes.shape[0]
         self.successes[:k, :k] += successes
         self.totals[:k, :k] += totals
         self.block_counts[:k] += block_counts
-        self.total_nodes += float(total_nodes)
-        self.num_graphs += float(num_graphs)
+        self.total_nodes += checked.total_nodes
+        self.num_graphs += checked.num_graphs
         return self
 
-    def value(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+    def value(self) -> StochasticBlockGraphStatistics:
         """Return serialized SBM sufficient statistics."""
-        return (self.successes.copy(), self.totals.copy(), self.block_counts.copy(), self.total_nodes, self.num_graphs)
+        return StochasticBlockGraphStatistics(
+            1,
+            self.successes.copy(),
+            self.totals.copy(),
+            self.block_counts.copy(),
+            self.total_nodes,
+            self.num_graphs,
+            self.directed,
+            self.self_loops,
+        )
 
-    def from_value(self, x: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]) -> StochasticBlockGraphAccumulator:
+    def from_value(self, x: StochasticBlockGraphStatistics) -> StochasticBlockGraphAccumulator:
         """Restore accumulator state from serialized SBM sufficient statistics."""
-        successes, totals, block_counts, total_nodes, num_graphs = x
-        self.successes = np.asarray(successes, dtype=np.float64).copy()
-        self.totals = np.asarray(totals, dtype=np.float64).copy()
-        self.block_counts = np.asarray(block_counts, dtype=np.float64).copy()
+        checked = _validate_sbm_statistics(
+            x,
+            num_blocks=self.num_blocks,
+            directed=self.directed,
+            self_loops=self.self_loops,
+        )
+        self.successes = checked.successes
+        self.totals = checked.totals
+        self.block_counts = checked.block_counts
         self.num_blocks = int(self.successes.shape[0])
-        self.total_nodes = float(total_nodes)
-        self.num_graphs = float(num_graphs)
+        self.total_nodes = checked.total_nodes
+        self.num_graphs = checked.num_graphs
         return self
+
+    def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator under its configured sharing key."""
+        if self.keys is None:
+            return
+        if self.keys in stats_dict:
+            other = stats_dict[self.keys]
+            if not isinstance(other, StochasticBlockGraphAccumulator):
+                raise ValueError("shared SBM key is bound to incompatible statistics.")
+            other.combine(self.value())
+        else:
+            stats_dict[self.keys] = self
+
+    def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from its configured sharing key."""
+        if self.keys is not None and self.keys in stats_dict:
+            other = stats_dict[self.keys]
+            if not isinstance(other, StochasticBlockGraphAccumulator):
+                raise ValueError("shared SBM key is bound to incompatible statistics.")
+            self.from_value(other.value())
 
     def acc_to_encoder(self) -> GraphDataEncoder:
         """Return the encoder associated with this accumulator."""
@@ -585,8 +732,12 @@ class StochasticBlockGraphAccumulatorFactory(StatisticAccumulatorFactory):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.num_blocks = None if num_blocks is None else int(num_blocks)
-        self.block_assignments = None if block_assignments is None else np.asarray(block_assignments, dtype=np.int64)
+        from mixle.data.sources.graph_source import _as_assignments, _require_exact_int
+
+        self.num_blocks = None if num_blocks is None else _require_exact_int(num_blocks, "num_blocks")
+        self.block_assignments = (
+            None if block_assignments is None else _as_assignments(block_assignments, len(block_assignments))
+        )
         self.directed = bool(directed)
         self.self_loops = bool(self_loops)
         self.name = name
@@ -617,25 +768,46 @@ class StochasticBlockGraphEstimator(ParameterEstimator):
         prior_p: float = 0.5,
         block_prior: Any | None = None,
         estimate_block_prior: bool = True,
-        include_assignment_prior: bool = False,
+        include_assignment_prior: bool | None = None,
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        from mixle.data.sources.graph_source import _normalize_prior
+        from mixle.data.sources.graph_source import (
+            _as_assignments,
+            _clip_prob,
+            _normalize_prior,
+            _require_exact_int,
+            _validate_block_indices,
+        )
 
-        self.num_blocks = None if num_blocks is None else int(num_blocks)
-        self.block_assignments = None if block_assignments is None else np.asarray(block_assignments, dtype=np.int64)
+        self.num_blocks = None if num_blocks is None else _require_exact_int(num_blocks, "num_blocks")
+        if self.num_blocks is not None and self.num_blocks < 1:
+            raise ValueError("num_blocks must be positive when specified.")
+        self.block_assignments = (
+            None if block_assignments is None else _as_assignments(block_assignments, len(block_assignments))
+        )
         if self.num_blocks is None and self.block_assignments is not None and self.block_assignments.size:
             self.num_blocks = int(self.block_assignments.max()) + 1
+        if self.block_assignments is not None and self.num_blocks is not None:
+            _validate_block_indices(self.block_assignments, self.num_blocks)
         self.directed = bool(directed)
         self.self_loops = bool(self_loops)
-        self.pseudo_count = pseudo_count
-        self.prior_p = float(prior_p)
+        self.pseudo_count = None if pseudo_count is None else float(pseudo_count)
+        if self.pseudo_count is not None and (not np.isfinite(self.pseudo_count) or self.pseudo_count < 0.0):
+            raise ValueError("pseudo_count must be finite and non-negative.")
+        self.prior_p = _clip_prob(prior_p)
         self.block_prior = (
             None if block_prior is None or self.num_blocks is None else _normalize_prior(block_prior, self.num_blocks)
         )
         self.estimate_block_prior = bool(estimate_block_prior)
-        self.include_assignment_prior = bool(include_assignment_prior)
+        expected_joint = self.block_assignments is None
+        if include_assignment_prior is not None and not isinstance(include_assignment_prior, (bool, np.bool_)):
+            raise ValueError("include_assignment_prior must be Boolean or None.")
+        if include_assignment_prior is not None and bool(include_assignment_prior) != expected_joint:
+            raise ValueError(
+                f"include_assignment_prior must be {expected_joint} for this SBM estimator's sample space."
+            )
+        self.include_assignment_prior = expected_joint
         self.name = name
         self.keys = keys
 
@@ -651,25 +823,25 @@ class StochasticBlockGraphEstimator(ParameterEstimator):
         )
 
     def estimate(
-        self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]
+        self, nobs: float | None, suff_stat: StochasticBlockGraphStatistics
     ) -> StochasticBlockGraphDistribution:
         """Estimate block probabilities and the block prior from sufficient statistics."""
-        from mixle.data.sources.graph_source import _EPS
-
-        successes, totals, block_counts, total_nodes, num_graphs = suff_stat
-        successes = np.asarray(successes, dtype=np.float64).copy()
-        totals = np.asarray(totals, dtype=np.float64).copy()
+        checked = _validate_sbm_statistics(
+            suff_stat,
+            num_blocks=self.num_blocks,
+            directed=self.directed,
+            self_loops=self.self_loops,
+        )
+        successes, totals, block_counts = checked.successes, checked.totals, checked.block_counts
         k = successes.shape[0]
         if k == 0:
-            k = 1 if self.num_blocks is None else max(1, int(self.num_blocks))
-            successes = np.zeros((k, k), dtype=np.float64)
-            totals = np.zeros((k, k), dtype=np.float64)
-            block_counts = np.zeros(k, dtype=np.float64)
+            raise ValueError("cannot estimate an SBM without a declared or observed block dimension.")
         if self.pseudo_count is not None:
-            successes += float(self.pseudo_count) * float(self.prior_p)
-            totals += float(self.pseudo_count)
+            successes += self.pseudo_count * self.prior_p
+            totals += self.pseudo_count
+        if not np.any(totals > 0.0):
+            raise ValueError("cannot estimate an SBM without edge evidence or positive pseudo-count.")
         probs = np.divide(successes, totals, out=np.full_like(successes, float(self.prior_p)), where=totals > 0.0)
-        probs = np.clip(probs, _EPS, 1.0 - _EPS)
         if not self.directed:
             probs = 0.5 * (probs + probs.T)
 

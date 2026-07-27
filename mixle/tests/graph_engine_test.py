@@ -27,7 +27,7 @@ class GraphEngineParityTestCase(unittest.TestCase):
             ErdosRenyiGraphDistribution(0.45, num_nodes=7, directed=True),
             StochasticBlockGraphDistribution([[0.8, 0.2], [0.2, 0.7]], [0, 0, 1, 1, 0, 1]),
             StochasticBlockGraphDistribution(
-                [[0.9, 0.1], [0.1, 0.6]], [0, 1, 0, 1, 1, 0], include_assignment_prior=True
+                [[0.9, 0.1], [0.1, 0.6]], [0, 1, 0, 1, 1, 0], include_assignment_prior=False
             ),
         ]
 

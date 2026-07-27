@@ -19,6 +19,8 @@ except Exception:  # pragma: no cover - scipy is a package dependency in normal 
 
 from mixle.stats.compute.pdist import DataSequenceEncoder
 
+# Retained as an internal compatibility constant for graph families that use
+# epsilon stabilization for quantities other than Bernoulli support endpoints.
 _EPS = 1.0e-12
 
 
@@ -31,15 +33,35 @@ class GraphObservation:
 
 
 def _clip_prob(p: float) -> float:
+    """Validate a probability without changing deterministic endpoints."""
     pp = float(p)
     if not np.isfinite(pp) or pp < 0.0 or pp > 1.0:
         raise ValueError("probabilities must be finite values in [0, 1].")
-    return float(np.clip(pp, _EPS, 1.0 - _EPS))
+    return pp
 
 
 def _bernoulli_log_likelihood(successes: float, total: float, p: float) -> float:
+    """Return an exact, branch-safe binomial log likelihood."""
     pp = _clip_prob(p)
-    return float(successes * math.log(pp) + (total - successes) * math.log1p(-pp))
+    success_count = float(successes)
+    opportunity_count = float(total)
+    if (
+        not np.isfinite(success_count)
+        or not np.isfinite(opportunity_count)
+        or opportunity_count < 0.0
+        or success_count < 0.0
+        or success_count > opportunity_count
+    ):
+        raise ValueError("Bernoulli counts must be finite and satisfy 0 <= successes <= total.")
+    failure_count = opportunity_count - success_count
+    if (success_count > 0.0 and pp == 0.0) or (failure_count > 0.0 and pp == 1.0):
+        return -math.inf
+    ll = 0.0
+    if success_count > 0.0:
+        ll += success_count * math.log(pp)
+    if failure_count > 0.0:
+        ll += failure_count * math.log1p(-pp)
+    return float(ll)
 
 
 def _edge_indices(n: int, directed: bool, self_loops: bool):
@@ -384,6 +406,12 @@ class GraphDataEncoder(DataSequenceEncoder):
         """Encode graph-like observations into graph observation records."""
         fallback = None if self.fallback_assignments is None else np.asarray(self.fallback_assignments, dtype=np.int64)
         return tuple(_extract_observation(u, directed=self.directed, fallback_assignments=fallback) for u in x)
+
+    def row_count(self, x: Any) -> int:
+        """Return the number of canonical graph observations in an encoded payload."""
+        if not isinstance(x, tuple) or any(not isinstance(obs, GraphObservation) for obs in x):
+            raise ValueError("encoded graph payload must be a tuple of GraphObservation records.")
+        return len(x)
 
     def nbytes(self, x: Any) -> int:
         """Return approximate encoded byte size for graph observations."""
