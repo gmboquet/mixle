@@ -50,6 +50,17 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent._attention_contracts import (
+    exact_ids,
+    finite_matrix,
+    normalize_log_rows,
+    observation_weights,
+    positive_finite,
+    row_simplex,
+    safe_log_probabilities,
+    simplex,
+)
+from mixle.utils.vector import ImpossibleEvidenceError
 
 
 def _log_weights(
@@ -61,16 +72,13 @@ def _log_weights(
     diff = y[:, None, :] - keys
     sq = np.einsum("nij,nij->ni", diff, diff)  # (n, N)
     gate = -0.5 * sq / dist.sigma2 + dist.gate_const
-    log_emit = np.log(dist.emission[ctx, t[:, None]])  # (n, N)
+    log_emit = safe_log_probabilities(dist.emission[ctx, t[:, None]])  # (n, N)
     return dist.log_position_prior[None, :] + gate + log_emit
 
 
 def _normalize_rows(log_w: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return (row log-sum-exp ``(n,)``, responsibilities ``(n, N)``)."""
-    m = log_w.max(axis=1, keepdims=True)
-    w = np.exp(log_w - m)
-    z = w.sum(axis=1, keepdims=True)
-    return (np.log(z[:, 0]) + m[:, 0]), w / z
+    return normalize_log_rows(log_w)
 
 
 class ResponsibilityAttentionDistribution(SequenceEncodableProbabilityDistribution):
@@ -92,17 +100,19 @@ class ResponsibilityAttentionDistribution(SequenceEncodableProbabilityDistributi
         sigma2: gate variance (fixed; the responsibility temperature).
         name: optional name.
         """
-        self.key_means = np.asarray(key_means, dtype=float)
-        self.emission = np.asarray(emission, dtype=float)
+        self.key_means = finite_matrix(key_means, "key_means")
+        self.emission = row_simplex(emission, "emission")
         self.num_symbols, self.query_dim = self.key_means.shape
+        if self.emission.shape[0] != self.num_symbols:
+            raise ValueError("emission must have one row per key symbol")
         self.num_targets = self.emission.shape[1]
         if position_prior is None:
             raise ValueError("position_prior (length = context length N) is required.")
-        self.position_prior = np.asarray(position_prior, dtype=float)
+        self.position_prior = simplex(position_prior, "position_prior")
         self.context_length = self.position_prior.shape[0]
-        self.sigma2 = float(sigma2)
+        self.sigma2 = positive_finite(sigma2, "sigma2")
         self.name = name
-        self.log_position_prior = np.log(np.clip(self.position_prior, 1e-300, None))
+        self.log_position_prior = safe_log_probabilities(self.position_prior)
         self.gate_const = -0.5 * self.query_dim * np.log(2.0 * np.pi * self.sigma2)
 
     def __str__(self) -> str:
@@ -171,7 +181,9 @@ class ResponsibilityAttentionDistribution(SequenceEncodableProbabilityDistributi
 
     def dist_to_encoder(self) -> ResponsibilityAttentionDataEncoder:
         """Return the encoder for contexts, query vectors, and targets."""
-        return ResponsibilityAttentionDataEncoder()
+        return ResponsibilityAttentionDataEncoder(
+            self.num_symbols, self.context_length, self.query_dim, self.num_targets
+        )
 
 
 class ResponsibilityAttentionSampler(DistributionSampler):
@@ -187,8 +199,12 @@ class ResponsibilityAttentionSampler(DistributionSampler):
         d = self.dist
         out = []
         for _ in range(n):
-            ctx = self.rng.choice(d.num_symbols, size=d.context_length, replace=False)
-            z = self.rng.choice(d.context_length, p=d.position_prior / d.position_prior.sum())
+            ctx = self.rng.choice(
+                d.num_symbols,
+                size=d.context_length,
+                replace=d.context_length > d.num_symbols,
+            )
+            z = self.rng.choice(d.context_length, p=d.position_prior)
             sym = ctx[z]
             y = d.key_means[sym] + np.sqrt(d.sigma2) * self.rng.randn(d.query_dim)
             t = self.rng.choice(d.num_targets, p=d.emission[sym])
@@ -234,22 +250,33 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x, weight: float, estimate: ResponsibilityAttentionDistribution | None) -> None:
         """Update sufficient statistics from one weighted observation."""
-        enc = ResponsibilityAttentionDataEncoder().seq_encode([x])
+        enc = ResponsibilityAttentionDataEncoder(
+            self.num_symbols, self.context_length, self.query_dim, self.num_targets
+        ).seq_encode([x])
         self.seq_update(enc, np.array([weight], dtype=float), estimate)
 
     def seq_update(self, x, weights: np.ndarray, estimate: ResponsibilityAttentionDistribution | None) -> None:
         """Update sufficient statistics from encoded observations."""
-        _, r = _normalize_rows(_log_weights(x, estimate))
+        weights = observation_weights(weights, x[0].shape[0])
+        ll, r = _normalize_rows(_log_weights(x, estimate))
+        impossible = np.flatnonzero(np.isneginf(ll) & (weights > 0.0))
+        if impossible.size:
+            raise ImpossibleEvidenceError(
+                "responsibility attention encountered impossible evidence at rows %s" % impossible.tolist()
+            )
         self._accumulate(x, r * weights[:, None])
 
     def initialize(self, x, weight: float, rng: RandomState) -> None:
         """Initialize sufficient statistics from one weighted observation."""
-        enc = ResponsibilityAttentionDataEncoder().seq_encode([x])
+        enc = ResponsibilityAttentionDataEncoder(
+            self.num_symbols, self.context_length, self.query_dim, self.num_targets
+        ).seq_encode([x])
         self.seq_initialize(enc, np.array([weight], dtype=float), rng)
 
     def seq_initialize(self, x, weights: np.ndarray, rng: RandomState) -> None:
         """Initialize sufficient statistics with random attention responsibilities."""
         # random responsibilities break the symmetry the M-step would otherwise preserve
+        weights = observation_weights(weights, x[0].shape[0])
         ctx = x[0]
         n, N = ctx.shape
         r = rng.dirichlet(np.ones(N), size=n)
@@ -287,7 +314,9 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
 
     def acc_to_encoder(self) -> ResponsibilityAttentionDataEncoder:
         """Return the encoder compatible with this accumulator."""
-        return ResponsibilityAttentionDataEncoder()
+        return ResponsibilityAttentionDataEncoder(
+            self.num_symbols, self.context_length, self.query_dim, self.num_targets
+        )
 
 
 class ResponsibilityAttentionAccumulatorFactory(StatisticAccumulatorFactory):
@@ -391,18 +420,43 @@ class ResponsibilityAttentionEstimator(ParameterEstimator):
 class ResponsibilityAttentionDataEncoder(DataSequenceEncoder):
     """Encodes a sequence of ``(context, query, target)`` triples into stacked arrays."""
 
+    def __init__(self, num_symbols=None, context_length=None, query_dim=None, num_targets=None) -> None:
+        self.num_symbols = num_symbols
+        self.context_length = context_length
+        self.query_dim = query_dim
+        self.num_targets = num_targets
+
     def __str__(self) -> str:
         return "ResponsibilityAttentionDataEncoder"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, ResponsibilityAttentionDataEncoder)
+        return isinstance(other, ResponsibilityAttentionDataEncoder) and (
+            self.num_symbols,
+            self.context_length,
+            self.query_dim,
+            self.num_targets,
+        ) == (other.num_symbols, other.context_length, other.query_dim, other.num_targets)
 
     def seq_encode(self, x: Sequence[tuple[Any, Any, int]]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Encode ``(context, query, target)`` observations."""
-        ctx = np.asarray([np.asarray(xi[0], dtype=int) for xi in x], dtype=int)
-        y = np.asarray([np.asarray(xi[1], dtype=float) for xi in x], dtype=float)
-        t = np.asarray([int(xi[2]) for xi in x], dtype=int)
+        try:
+            ctx = exact_ids([xi[0] for xi in x], "attention context IDs", upper=self.num_symbols, ndim=2)
+            y = np.asarray([xi[1] for xi in x], dtype=np.float64)
+            t = exact_ids([xi[2] for xi in x], "attention target IDs", upper=self.num_targets, ndim=1)
+        except (IndexError, TypeError, ValueError) as exc:
+            if isinstance(exc, (TypeError, ValueError)):
+                raise
+            raise TypeError("attention observations must be context/query/target triples") from exc
+        if self.context_length is not None and ctx.shape[1] != self.context_length:
+            raise ValueError("attention contexts must match the declared fixed context length")
+        if y.ndim != 2 or (self.query_dim is not None and y.shape[1] != self.query_dim):
+            raise ValueError("attention queries must match the declared query dimension")
+        if np.any(~np.isfinite(y)):
+            raise ValueError("attention queries must be finite")
         return ctx, y, t
+
+    def row_count(self, x) -> int:
+        return int(np.asarray(x[0]).shape[0])
 
 
 def sequence_to_triples(

@@ -41,6 +41,16 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent._attention_contracts import (
+    exact_ids,
+    finite_matrix,
+    observation_weights,
+    positive_finite,
+    row_simplex,
+    safe_log_probabilities,
+    weighted_log_probability_sum,
+)
+from mixle.utils.vector import ImpossibleEvidenceError
 
 
 def _softmax(s: np.ndarray, axis: int) -> np.ndarray:
@@ -69,13 +79,23 @@ def _forward_backward(K: np.ndarray, emission: np.ndarray, sigma2: float, enc, e
     alpha = [_gate(eye[q], K[0], keys, sigma2)]
     for ell in range(L - 1):
         alpha.append(np.einsum("ni,nij->nj", alpha[ell], trans[ell]))
-    p = np.clip(np.einsum("nk,nk->n", alpha[L - 1], e_final), 1e-300, None)
+    p = np.einsum("nk,nk->n", alpha[L - 1], e_final)
     beta = [None] * L
     beta[L - 1] = e_final
     for ell in range(L - 2, -1, -1):
         beta[ell] = np.einsum("nij,nj->ni", trans[ell], beta[ell + 1])
-    gamma = [alpha[ell] * beta[ell] / p[:, None] for ell in range(L)]
-    xi = [alpha[ell][:, :, None] * trans[ell] * beta[ell + 1][:, None, :] / p[:, None, None] for ell in range(L - 1)]
+    gamma = [np.zeros_like(alpha[ell]) for ell in range(L)]
+    xi = [np.zeros_like(trans[ell]) for ell in range(L - 1)]
+    possible = p > 0.0
+    for ell in range(L):
+        gamma[ell][possible] = alpha[ell][possible] * beta[ell][possible] / p[possible, None]
+    for ell in range(L - 1):
+        xi[ell][possible] = (
+            alpha[ell][possible, :, None]
+            * trans[ell][possible]
+            * beta[ell + 1][possible, None, :]
+            / p[possible, None, None]
+        )
     return p, gamma, xi, trans
 
 
@@ -89,11 +109,15 @@ class ChainedAttentionDistribution(SequenceEncodableProbabilityDistribution):
         sigma2: gate variance / attention temperature.
         name: optional name.
         """
-        self.key_tables = np.asarray(keys, dtype=float)
-        self.emission = np.asarray(emission, dtype=float)
+        self.key_tables = finite_matrix(keys, "keys", ndim=3)
+        if self.key_tables.shape[1] != self.key_tables.shape[2]:
+            raise ValueError("chained-attention key tables must have shape (hops, symbols, symbols)")
+        self.emission = row_simplex(emission, "emission")
         self.n_hops, self.num_symbols, _ = self.key_tables.shape
+        if self.emission.shape[0] != self.num_symbols:
+            raise ValueError("emission must have one row per symbol")
         self.num_targets = self.emission.shape[1]
-        self.sigma2 = float(sigma2)
+        self.sigma2 = positive_finite(sigma2, "sigma2")
         self.name = name
         self._eye = np.eye(self.num_symbols)
 
@@ -118,7 +142,7 @@ class ChainedAttentionDistribution(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x) -> np.ndarray:
         """Return vectorized log-probabilities for encoded chained-attention observations."""
         p, _, _, _ = _forward_backward(self.key_tables, self.emission, self.sigma2, x, self._eye)
-        return np.log(p)
+        return safe_log_probabilities(p)
 
     def predict_proba(self, context_keys: np.ndarray, context_values: np.ndarray, query: np.ndarray) -> np.ndarray:
         """Predictive target distribution (target marginalized); ``(T,)`` or ``(n, T)``."""
@@ -151,7 +175,7 @@ class ChainedAttentionDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> ChainedAttentionDataEncoder:
         """Return the encoder for context keys, values, query symbols, and targets."""
-        return ChainedAttentionDataEncoder()
+        return ChainedAttentionDataEncoder(self.num_symbols, self.num_targets)
 
 
 class ChainedAttentionSampler(DistributionSampler):
@@ -219,17 +243,22 @@ class ChainedAttentionAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x, weights, estimate: ChainedAttentionDistribution) -> None:
         """Update forward-backward sufficient statistics from encoded observations."""
-        w = np.asarray(weights, dtype=float)
+        w = observation_weights(weights, x[0].shape[0])
         p, gamma, xi, _ = _forward_backward(estimate.key_tables, estimate.emission, estimate.sigma2, x, estimate._eye)
+        impossible = np.flatnonzero((p == 0.0) & (w > 0.0))
+        if impossible.size:
+            raise ImpossibleEvidenceError(
+                "chained attention encountered impossible evidence at rows %s" % impossible.tolist()
+            )
         self._accumulate(x, gamma, xi, w)
-        self.ll += float(np.dot(w, np.log(p)))
+        self.ll += weighted_log_probability_sum(p, w)
         self.n += float(w.sum())
 
     def seq_initialize(self, x, weights, rng: RandomState) -> None:
         """Initialize sufficient statistics with random hop responsibilities."""
         keys, vals, q, t = x
         n, N = keys.shape
-        w = np.asarray(weights, dtype=float)
+        w = observation_weights(weights, n)
         gamma = [rng.dirichlet(np.ones(N), size=n) for _ in range(self.n_hops)]
         xi = [rng.dirichlet(np.ones(N * N), size=n).reshape(n, N, N) for _ in range(self.n_hops - 1)]
         self._accumulate(x, gamma, xi, w)
@@ -237,12 +266,12 @@ class ChainedAttentionAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x, weight: float, estimate) -> None:
         """Update from one weighted chained-attention observation."""
-        enc = ChainedAttentionDataEncoder().seq_encode([x])
+        enc = ChainedAttentionDataEncoder(self.num_symbols, self.num_targets).seq_encode([x])
         self.seq_update(enc, np.array([weight], dtype=float), estimate)
 
     def initialize(self, x, weight: float, rng: RandomState) -> None:
         """Initialize from one weighted chained-attention observation."""
-        enc = ChainedAttentionDataEncoder().seq_encode([x])
+        enc = ChainedAttentionDataEncoder(self.num_symbols, self.num_targets).seq_encode([x])
         self.seq_initialize(enc, np.array([weight], dtype=float), rng)
 
     def combine(self, suff_stat) -> ChainedAttentionAccumulator:
@@ -268,7 +297,7 @@ class ChainedAttentionAccumulator(SequenceEncodableStatisticAccumulator):
 
     def acc_to_encoder(self) -> ChainedAttentionDataEncoder:
         """Return the encoder compatible with this accumulator."""
-        return ChainedAttentionDataEncoder()
+        return ChainedAttentionDataEncoder(self.num_symbols, self.num_targets)
 
 
 class ChainedAttentionAccumulatorFactory(StatisticAccumulatorFactory):
@@ -336,21 +365,33 @@ class ChainedAttentionEstimator(ParameterEstimator):
 class ChainedAttentionDataEncoder(DataSequenceEncoder):
     """Encodes ``(context_keys, context_values, query_symbol, target)`` into stacked integer arrays."""
 
+    def __init__(self, num_symbols=None, num_targets=None) -> None:
+        self.num_symbols = num_symbols
+        self.num_targets = num_targets
+
     def __str__(self) -> str:
         return "ChainedAttentionDataEncoder"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, ChainedAttentionDataEncoder)
+        return isinstance(other, ChainedAttentionDataEncoder) and (
+            self.num_symbols,
+            self.num_targets,
+        ) == (other.num_symbols, other.num_targets)
 
     def seq_encode(
         self, x: Sequence[tuple[Any, Any, int, int]]
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Encode ``(context_keys, context_values, query, target)`` observations."""
-        keys = np.asarray([np.asarray(xi[0], dtype=int) for xi in x], dtype=int)
-        vals = np.asarray([np.asarray(xi[1], dtype=int) for xi in x], dtype=int)
-        q = np.asarray([int(xi[2]) for xi in x], dtype=int)
-        t = np.asarray([int(xi[3]) for xi in x], dtype=int)
+        keys = exact_ids([xi[0] for xi in x], "chained-attention keys", upper=self.num_symbols, ndim=2)
+        vals = exact_ids([xi[1] for xi in x], "chained-attention values", upper=self.num_symbols, ndim=2)
+        if keys.shape != vals.shape or keys.shape[1] == 0:
+            raise ValueError("chained-attention key and value contexts must have the same positive width")
+        q = exact_ids([xi[2] for xi in x], "chained-attention queries", upper=self.num_symbols, ndim=1)
+        t = exact_ids([xi[3] for xi in x], "chained-attention targets", upper=self.num_targets, ndim=1)
         return keys, vals, q, t
+
+    def row_count(self, x) -> int:
+        return int(np.asarray(x[0]).shape[0])
 
 
 __all__ = [
