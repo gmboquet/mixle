@@ -466,3 +466,11 @@ class NullDataEncoder(DataSequenceEncoder):
 
         """
         return len(x)
+
+    def row_count(self, x: Any) -> int:
+        """Return the exact number of rows stored by the null encoding."""
+        if isinstance(x, (bool, np.bool_)) or not isinstance(x, (int, np.integer)):
+            raise ValueError("null encoded data must be a non-negative integer row count")
+        if x < 0:
+            raise ValueError("null encoded row count must be non-negative")
+        return int(x)

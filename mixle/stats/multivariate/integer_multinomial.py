@@ -2,22 +2,23 @@
 
 Each observation is a sequence of ``(integer_category, count)`` pairs over ``[min_val, max_val]``. Given
 category probabilities ``p = (p_0, ..., p_K)`` and a trial-count distribution ``P_len(N)``, the model
-scores the unnormalized log-density
+scores the normalized count-vector log-mass
 
-    log(P(x,N|p)) = sum_{k=0}^{K} x_k * log(p_k) + log(P_len(N))
+    log(P(x,N|p)) = log(N!) - sum_k log(x_k!) + sum_k x_k * log(p_k) + log(P_len(N))
 
-where P_len(N) is a distribution for the number of trials in the multinomial. The multinomial coefficient
-(log(N!) - sum_k log(x_k!)) is intentionally omitted, so this is a per-category scoring form rather than a
-normalized probability mass over count vectors.
+where ``P_len(N)`` is a distribution for the number of trials. With the default neutral length factor,
+the result is a normalized conditional mass for each supplied ``N`` but not a normalized joint law over
+all lengths; sampling and joint enumeration therefore require a real trial-count distribution.
 
 """
 
-import itertools
+import math
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
+from scipy.special import gammaln
 
 import mixle.utils.vector as vec
 from mixle.capability import Neutral, supports
@@ -42,13 +43,102 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
-from mixle.stats.multivariate.categorical_multinomial import MultisetProductEnumerator
+from mixle.stats.multivariate._multinomial_contracts import (
+    canonical_integer_bag,
+    exact_integer,
+    finite_weight,
+    log_coefficient,
+    observation_weights,
+    simplex,
+)
 from mixle.utils.aliasing import coalesce_alias
 
 SS0 = TypeVar("SS0")
 D = Sequence[tuple[int, float]]
 E0 = TypeVar("E0")
 E = tuple[int, np.ndarray, np.ndarray, np.ndarray, E0 | None]
+
+
+def _exact_integer_array(value: Any, *, label: str, nonnegative: bool = False) -> np.ndarray:
+    raw = np.asarray(value, dtype=object)
+    if raw.ndim != 1:
+        raise ValueError("%s must be one-dimensional" % label)
+    checked = [
+        exact_integer(item, label=label, nonnegative=nonnegative)
+        for item in raw.tolist()
+    ]
+    try:
+        return np.asarray(checked, dtype=np.int64)
+    except OverflowError as exc:
+        raise ValueError("%s values must fit signed 64-bit integers" % label) from exc
+
+
+def _validate_integer_encoding(
+    value: Any,
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, Any | None, np.ndarray]:
+    if not isinstance(value, tuple) or len(value) != 5:
+        raise ValueError(
+            "integer multinomial encoding must be a (rows, indices, counts, values, lengths) tuple"
+        )
+    rows = exact_integer(value[0], label="integer multinomial encoded row count", nonnegative=True)
+    indices = _exact_integer_array(
+        value[1],
+        label="integer multinomial encoded row index",
+        nonnegative=True,
+    )
+    counts = _exact_integer_array(
+        value[2],
+        label="integer multinomial encoded count",
+        nonnegative=True,
+    )
+    categories = _exact_integer_array(
+        value[3],
+        label="integer multinomial encoded category",
+    )
+    if not (len(indices) == len(counts) == len(categories)):
+        raise ValueError("integer multinomial encoded entry arrays must have equal length")
+    if np.any(indices >= rows):
+        raise ValueError("integer multinomial encoded row indices must be in [0, rows)")
+    if len(indices) > 1 and np.any(indices[1:] < indices[:-1]):
+        raise ValueError("integer multinomial encoded row indices must be non-decreasing")
+    if len(indices) > 1:
+        entries = np.column_stack((indices, categories))
+        if len(np.unique(entries, axis=0)) != len(entries):
+            raise ValueError("integer multinomial encodings must canonicalize duplicate row/category entries")
+    totals_list = [0] * rows
+    maximum = int(np.iinfo(np.int64).max)
+    for row, count in zip(indices, counts):
+        totals_list[int(row)] += int(count)
+        if totals_list[int(row)] > maximum:
+            raise ValueError("integer multinomial row totals exceed signed 64-bit range")
+    totals = np.asarray(totals_list, dtype=np.int64)
+    return rows, indices, counts, categories, value[4], totals
+
+
+def _validate_integer_statistics(
+    value: Any,
+) -> tuple[int | None, np.ndarray | None, Any | None]:
+    if not isinstance(value, tuple) or len(value) != 3:
+        raise ValueError(
+            "integer multinomial sufficient statistic must be a (minimum, counts, length_stat) tuple"
+        )
+    if value[1] is None:
+        if value[0] is not None:
+            raise ValueError("empty integer multinomial counts require minimum=None")
+        return None, None, value[2]
+    minimum = exact_integer(value[0], label="integer multinomial statistic minimum")
+    try:
+        counts = np.asarray(value[1], dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("integer multinomial count statistic must be numeric") from exc
+    if (
+        counts.ndim != 1
+        or counts.size == 0
+        or np.any(~np.isfinite(counts))
+        or np.any(counts < 0.0)
+    ):
+        raise ValueError("integer multinomial count statistic must be a nonempty finite non-negative vector")
+    return minimum, counts.copy(), value[2]
 
 
 class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
@@ -87,8 +177,8 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
                 natural_parameters=type(self).exp_family_natural_parameters,
                 log_partition=type(self).exp_family_log_partition,
                 base_measure_from_params=type(self).exp_family_base_measure_from_params,
-                # T(x) is the per-category count vector and eta = log(p_vec); A = 0 and h(x) = 0 on
-                # the support [min_val, min_val+K) (this density omits the multinomial coefficient).
+                # T(x) is the per-category count vector and eta = log(p_vec); A = 0 and log h(x)
+                # is the multinomial log coefficient on the support [min_val, min_val+K).
                 # The category set depends on min_val/K so fixed_base=False; eta has -inf entries when
                 # a category has p = 0, which makes the generic <eta, T> dot form NaN via 0*-inf for
                 # zero-count categories, so runtime_scoring=False keeps scoring on the safe indexing
@@ -123,13 +213,13 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
     @staticmethod
     def exp_family_sufficient_statistics_from_params(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
         """Return the per-category count vector ``T(x)`` of shape ``(sz, K)`` (counts of in-support values)."""
-        sz, idx, cnt, val, _tcnt = x
+        sz, idx, cnt, val, _tcnt, _totals = _validate_integer_encoding(x)
         min_val = int(params["min_val"])
         k = int(np.asarray(engine.to_numpy(engine.asarray(params["p_vec"]))).reshape(-1).shape[0])
         stat = np.zeros((int(sz), k), dtype=np.float64)
         val = np.asarray(val)
         if val.shape[0] > 0:
-            v = np.rint(val - min_val).astype(np.int64)
+            v = val - min_val
             keep = (v >= 0) & (v < k)
             rows = np.asarray(idx)[keep].astype(np.int64)
             np.add.at(stat, (rows, v[keep]), np.asarray(cnt, dtype=np.float64)[keep])
@@ -147,15 +237,19 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def exp_family_base_measure_from_params(x: Any, params: dict[str, Any], engine: Any) -> Any:
-        """Return ``log h = 0`` for observations whose values are all in support, ``-inf`` otherwise."""
-        sz, idx, _cnt, val, _tcnt = x
+        """Return the multinomial log coefficient in support and ``-inf`` outside support."""
+        sz, idx, cnt, val, _tcnt, totals = _validate_integer_encoding(x)
         min_val = int(params["min_val"])
         k = int(np.asarray(engine.to_numpy(engine.asarray(params["p_vec"]))).reshape(-1).shape[0])
-        h = np.zeros(int(sz), dtype=np.float64)
+        h = gammaln(totals + 1.0) - np.bincount(
+            idx,
+            weights=gammaln(cnt + 1.0),
+            minlength=sz,
+        )
         val = np.asarray(val)
         if val.shape[0] > 0:
-            v = np.rint(val - min_val).astype(np.int64)
-            out = (v < 0) | (v >= k)
+            v = val - min_val
+            out = ((v < 0) | (v >= k)) & (cnt != 0)
             if np.any(out):
                 h[np.unique(np.asarray(idx)[out].astype(np.int64))] = -np.inf
         return engine.asarray(h)
@@ -193,17 +287,22 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
         """
         super().__init__()
         p_vec = coalesce_alias("p_vec", p_vec, "prob_vec", prob_vec, required=False, default=None)
-        p_vec = np.empty(0, dtype=np.float64) if p_vec is None else p_vec
-
+        if p_vec is None:
+            raise ValueError("IntegerMultinomialDistribution requires a nonempty probability simplex")
+        self.p_vec, input_total = simplex(
+            p_vec,
+            label="integer multinomial probabilities",
+        )
+        self.min_val = exact_integer(min_val, label="integer multinomial minimum category")
+        self.max_val = self.min_val + self.p_vec.shape[0] - 1
         with np.errstate(divide="ignore"):
-            self.p_vec = np.asarray(p_vec, dtype=np.float64)
-            self.min_val = min_val
-            self.max_val = min_val + self.p_vec.shape[0] - 1
             self.log_p_vec = np.log(self.p_vec)
-            self.num_vals = self.p_vec.shape[0]
-            self.len_dist = len_dist if len_dist is not None else NullDistribution()
-            self.keys = keys
-            self.name = name
+        self.log_p_vec.setflags(write=False)
+        self.num_vals = self.p_vec.shape[0]
+        self.len_dist = len_dist if len_dist is not None else NullDistribution()
+        self.keys = keys
+        self.name = name
+        self.simplex_input_total = input_total
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the distribution."""
@@ -211,7 +310,14 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
         s2 = repr(list(self.p_vec))
         s3 = str(self.len_dist)
         s4 = repr(self.name)
-        return "IntegerMultinomialDistribution(%s, %s, len_dist=%s, name=%s)" % (s1, s2, s3, s4)
+        s5 = repr(self.keys)
+        return "IntegerMultinomialDistribution(%s, %s, len_dist=%s, name=%s, keys=%s)" % (
+            s1,
+            s2,
+            s3,
+            s4,
+            s5,
+        )
 
     def density(self, x: Sequence[tuple[int, float]]) -> float:
         """Evaluate the density of IntegerMultinomialDistribution at observed value x.
@@ -229,15 +335,14 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
     def log_density(self, x: Sequence[tuple[int, float]]) -> float:
         """Evaluate the log-density of IntegerMultinomialDistribution at observed value x.
 
-        Un-normalized log-density given by
+        Normalized conditional count-vector log-mass given by
 
-        log(p_mat(x)) = sum_k x_k*log(p_k) + log(p_mat(n)), for x having k integer categories and n the
-        total trial count (sum of the k category counts), scored under len_dist.
+        log(p_mat(x)) = log(n!) - sum_k log(x_k!) + sum_k x_k*log(p_k) + log(p_mat(n)),
+        for x having k integer categories and n the total trial count.
 
         Note: x has k integer values and p_k denotes the probability of success for integer-category x_k. The
-        multinomial coefficient is intentionally omitted (see the module docstring), so this is a per-category
-        scoring form, not a normalized mass over count vectors. len_dist defaults to NullDistribution, whose
-        log_density is 0.0 for any input, so the trial-count term is a no-op unless len_dist is set.
+        ``len_dist`` defaults to ``NullDistribution``, whose log-density is zero for any input; this gives a
+        conditional count-vector mass at each observed total, while a real length law makes it a joint mass.
 
         Args:
             x (Sequence[Tuple[int, float]]): Sequence of Tuple(s) containing the integer category value and number of
@@ -247,20 +352,21 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
             Log-density at x.
 
         """
-        rv = 0.0
-        # Start the trial count at integer zero so integer counts stay integers and the
-        # total is a valid argument for integer-supported length distributions (matches the
-        # sibling MultinomialDistribution.log_density's convention).
-        cc = 0
-        for xx, cnt in x:
-            cc += cnt
-            if cnt == 0:
-                # A zero-count term contributes nothing, even for an out-of-support value
-                # (avoids (-inf) * 0 = NaN). Matches the seq path's base-measure masking.
-                continue
-            rv += (-inf if (xx < self.min_val or xx > self.max_val) else self.log_p_vec[xx - self.min_val]) * cnt
+        pairs, cc, outside = canonical_integer_bag(
+            x,
+            min_val=self.min_val,
+            max_val=self.max_val,
+        )
+        if outside:
+            return -np.inf
+        rv = log_coefficient([count for _, count in pairs])
+        for category, count in pairs:
+            log_probability = self.log_p_vec[category - self.min_val]
+            if not np.isfinite(log_probability):
+                return -np.inf
+            rv += log_probability * count
         rv += self.len_dist.log_density(cc)
-        return rv
+        return float(rv)
 
     def seq_log_density(self, x: E) -> np.ndarray:
         """Vectorized evaluation of log-density for an encoded sequence of iid observations from integer multinomial
@@ -281,8 +387,7 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of log-density evaluated at each observation in encoding.
 
         """
-        sz, idx, cnt, val, tcnt = x
-
+        sz, idx, cnt, val, tcnt, totals = _validate_integer_encoding(x)
         v = val - self.min_val
         u = np.bitwise_and(v >= 0, v < self.num_vals)
         nz = cnt != 0
@@ -297,6 +402,11 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
         rv[um] = self.log_p_vec[v[um]] * cnt[um]
         rv[~nz] = 0.0
         ll = np.bincount(idx, weights=rv, minlength=sz)
+        ll += gammaln(totals + 1.0) - np.bincount(
+            idx,
+            weights=gammaln(cnt + 1.0),
+            minlength=sz,
+        )
 
         if tcnt is not None:
             ll += self.len_dist.seq_log_density(tcnt)
@@ -307,7 +417,7 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
         """Engine-neutral vectorized log-density for encoded integer count vectors."""
         from mixle.stats.compute.backend import backend_seq_log_density
 
-        sz, idx, cnt, val, tcnt = x
+        sz, idx, cnt, val, tcnt, totals = _validate_integer_encoding(x)
         ll = engine.zeros(sz)
 
         if len(idx) > 0:
@@ -318,9 +428,25 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
             else:
                 safe_v = np.clip(v, 0, self.num_vals - 1)
                 table = engine.asarray(self.log_p_vec)
+                nonzero = cnt != 0
                 contrib = table[engine.asarray(safe_v)] * engine.asarray(cnt)
-                contrib = engine.where(engine.asarray(valid), contrib, engine.asarray(np.full(len(v), -np.inf)))
+                contrib = engine.where(
+                    engine.asarray(np.bitwise_and(valid, nonzero)),
+                    contrib,
+                    engine.asarray(np.full(len(v), -np.inf)),
+                )
+                contrib = engine.where(
+                    engine.asarray(~nonzero),
+                    engine.asarray(np.zeros(len(v))),
+                    contrib,
+                )
             ll = engine.index_add(ll, engine.asarray(idx), contrib)
+        coefficient = gammaln(totals + 1.0) - np.bincount(
+            idx,
+            weights=gammaln(cnt + 1.0),
+            minlength=sz,
+        )
+        ll = ll + engine.asarray(coefficient)
 
         if tcnt is not None:
             ll = ll + backend_seq_log_density(self.len_dist, tcnt, engine)
@@ -368,7 +494,7 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
         """Return an ``(n, k)`` matrix of integer-multinomial log densities."""
         from mixle.stats.compute.stacked import stacked_component_log_density
 
-        sz, idx, cnt, val, tcnt = x
+        sz, idx, cnt, val, tcnt, totals = _validate_integer_encoding(x)
         num_components = int(params["num_components"])
         num_vals = int(params["num_vals"])
         rv = engine.zeros((sz, num_components))
@@ -380,9 +506,25 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
                 contrib = engine.zeros((len(rel), num_components)) + engine.asarray(-np.inf)
             else:
                 safe_rel = np.clip(rel, 0, num_vals - 1)
+                nonzero = cnt != 0
                 contrib = params["log_p"][engine.asarray(safe_rel), :] * engine.asarray(cnt)[:, None]
-                contrib = engine.where(engine.asarray(valid)[:, None], contrib, engine.asarray(-np.inf))
+                contrib = engine.where(
+                    engine.asarray(np.bitwise_and(valid, nonzero))[:, None],
+                    contrib,
+                    engine.asarray(-np.inf),
+                )
+                contrib = engine.where(
+                    engine.asarray(~nonzero)[:, None],
+                    engine.asarray(0.0),
+                    contrib,
+                )
             rv = engine.index_add(rv, engine.asarray(idx), contrib)
+        coefficient = gammaln(totals + 1.0) - np.bincount(
+            idx,
+            weights=gammaln(cnt + 1.0),
+            minlength=sz,
+        )
+        rv = rv + engine.asarray(coefficient)[:, None]
 
         if params["length_route"] is not None and tcnt is not None:
             rv = rv + stacked_component_log_density(tcnt, params["length_route"], engine)
@@ -400,7 +542,7 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
             unstack_component_stats,
         )
 
-        sz, idx, cnt, val, tenc = x
+        sz, idx, cnt, val, tenc, _totals = _validate_integer_encoding(x)
         ww = engine.asarray(weights)
         num_components = int(tuple(getattr(ww, "shape", (0, 0)))[1])
         num_vals = int(params["num_vals"])
@@ -466,94 +608,107 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
         """
         len_est = NullEstimator() if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
 
-        if pseudo_count is None:
-            return IntegerMultinomialEstimator(len_estimator=len_est, name=self.name)
-        else:
-            return IntegerMultinomialEstimator(
-                min_val=self.min_val,
-                max_val=self.max_val,
-                len_estimator=len_est,
-                pseudo_count=pseudo_count,
-                suff_stat=(self.min_val, self.p_vec),
-                name=self.name,
-            )
+        return IntegerMultinomialEstimator(
+            min_val=self.min_val,
+            max_val=self.max_val,
+            len_estimator=len_est,
+            pseudo_count=pseudo_count,
+            suff_stat=None if pseudo_count is None else (self.min_val, self.p_vec),
+            name=self.name,
+            keys=self.keys,
+        )
 
     def dist_to_encoder(self) -> "IntegerMultinomialDataEncoder":
         """Return a data encoder using the encoder supplied by ``len_dist``."""
         len_encoder = self.len_dist.dist_to_encoder()
-        return IntegerMultinomialDataEncoder(len_encoder=len_encoder)
+        return IntegerMultinomialDataEncoder(
+            len_encoder=len_encoder,
+            min_val=self.min_val,
+            max_val=self.max_val,
+        )
 
-    def enumerator(self) -> "IntegerMultinomialEnumerator":
+    def enumerator(self, *, max_outcomes_per_length: int = 100_000) -> "IntegerMultinomialEnumerator":
         """Returns IntegerMultinomialEnumerator iterating count vectors in descending log-density order."""
-        return IntegerMultinomialEnumerator(self)
+        return IntegerMultinomialEnumerator(
+            self,
+            max_outcomes_per_length=max_outcomes_per_length,
+        )
 
 
 class IntegerMultinomialEnumerator(DistributionEnumerator):
-    """Enumerates integer count vectors (lists of (category, count) pairs) in descending log_density order:
-    the per-category term sum_k n_k * log(p_k) plus len_dist's log-density of the total trial count (0.0
-    when len_dist is the default NullDistribution)."""
+    """Enumerate normalized integer count-vector masses with a modeled trial-count law."""
 
-    def __init__(self, dist: IntegerMultinomialDistribution) -> None:
+    def __init__(
+        self,
+        dist: IntegerMultinomialDistribution,
+        *,
+        max_outcomes_per_length: int = 100_000,
+    ) -> None:
         """Create an enumerator for integer multinomial observations.
 
-        The category term alone gives every finite count vector over the positive-probability
-        categories positive density, so the support is countably infinite. Trial counts are
-        introduced lazily through a length-indexed frontier (:class:`LengthFrontierMerge`), one of
-        two ways depending on whether a real trial-count distribution is modeled:
-
-        - len_dist Null (the default): a synthetic frontier over n = 0, 1, 2, ... -- every size-n
-          count vector scores at most n * log(p_max) on the category term alone (which strictly
-          decreases in n), so size n is instantiated only once it can still beat the best pending
-          value. The category term IS the full log_density here, so multisets carry no extra offset.
-        - len_dist real: trial counts are instead pulled from len_dist's OWN enumerator (already
-          descending in its own log-density, exactly as MultinomialEnumerator, the generic sibling,
-          does), and each count's multisets are offset by that count's real len_dist log-density --
-          a valid frontier bound because the category term is always <= 0, so no multiset of that
-          count can score above len_dist's own value for it.
-
-        Within a size, count vectors are produced by a best-first multiset search over the
-        probability-sorted categories. Values are emitted as lists of (category, count) pairs sorted
-        by category, matching the sampler's format; log_prob equals log_density exactly.
-
-        Raises EnumerationError when some category has probability one: arbitrarily large
-        counts of that category then all have density one and no non-increasing complete
-        ordering of the support mass exists.
+        Trial counts come from ``len_dist``. Each finite count-vector support at a length is
+        materialized, scored with the exact multinomial coefficient, sorted, and merged behind the
+        length probability frontier. ``max_outcomes_per_length`` bounds that materialization.
+        Enumeration is refused when no trial-count law is modeled.
 
         Args:
             dist (IntegerMultinomialDistribution): Distribution whose support is enumerated.
 
         """
         super().__init__(dist)
-        entries = [(int(dist.min_val + k), float(lp)) for k, lp in enumerate(dist.log_p_vec) if lp > -np.inf]
-        if any(lp >= 0.0 for _, lp in entries):
+        self.max_outcomes_per_length = exact_integer(
+            max_outcomes_per_length,
+            label="integer multinomial max_outcomes_per_length",
+            nonnegative=True,
+        )
+        if self.max_outcomes_per_length == 0:
+            raise ValueError("integer multinomial max_outcomes_per_length must be positive")
+        if supports(dist.len_dist, Neutral):
             raise EnumerationError(
                 dist,
-                reason="a category has probability one, so arbitrarily large trial "
-                "counts all have density one and the support mass diverges",
+                reason="no trial-count distribution is modeled, so the joint support over lengths is not normalized",
             )
-        entries.sort(key=lambda u: -u[1])
+        len_stream = BufferedStream(child_enumerator(dist.len_dist, "IntegerMultinomialDistribution.len_dist"))
+        self._merge = LengthFrontierMerge(len_stream, self._outcomes_for_length)
 
-        def combine(pairs: tuple[tuple[int, int], ...]) -> list[tuple[int, int]]:
-            return sorted(pairs)
+    def _outcomes_for_length(self, n: Any, log_length_probability: float):
+        n = exact_integer(n, label="integer multinomial enumerated trial count", nonnegative=True)
+        outcome_count = math.comb(n + self.dist.num_vals - 1, self.dist.num_vals - 1)
+        if outcome_count > self.max_outcomes_per_length:
+            raise EnumerationError(
+                self.dist,
+                reason="length %d has %d count vectors, exceeding max_outcomes_per_length=%d"
+                % (n, outcome_count, self.max_outcomes_per_length),
+            )
 
-        if len(entries) == 0:
-            # No positive-probability category: only the all-zero (empty) observation has positive
-            # category-term density; its score still needs len_dist's term for a trial count of 0
-            # (0.0 when len_dist is Null, matching the prior hardcoded behavior exactly).
-            self._merge = iter([([], dist.len_dist.log_density(0))])
-        elif supports(dist.len_dist, Neutral):
-            elem_buf = BufferedStream(iter(entries))
-            lp_max = entries[0][1]
-            len_stream = BufferedStream((n, n * lp_max) for n in itertools.count())
-            self._merge = LengthFrontierMerge(
-                len_stream, lambda n, lp_len: MultisetProductEnumerator(elem_buf, n, combine=combine, offset=0.0)
+        def compositions(total: int, parts: int, prefix: tuple[int, ...] = ()):
+            if parts == 1:
+                yield prefix + (total,)
+                return
+            for count in range(total + 1):
+                yield from compositions(total - count, parts - 1, prefix + (count,))
+
+        outcomes = []
+        for counts in compositions(n, self.dist.num_vals):
+            if any(count and self.dist.p_vec[i] == 0.0 for i, count in enumerate(counts)):
+                continue
+            value = [
+                (self.dist.min_val + i, count)
+                for i, count in enumerate(counts)
+                if count
+            ]
+            score = (
+                log_coefficient(counts)
+                + sum(
+                    count * self.dist.log_p_vec[i]
+                    for i, count in enumerate(counts)
+                    if count
+                )
+                + float(log_length_probability)
             )
-        else:
-            elem_buf = BufferedStream(iter(entries))
-            len_stream = BufferedStream(child_enumerator(dist.len_dist, "IntegerMultinomialDistribution.len_dist"))
-            self._merge = LengthFrontierMerge(
-                len_stream, lambda n, lp_len: MultisetProductEnumerator(elem_buf, n, combine=combine, offset=lp_len)
-            )
+            outcomes.append((value, float(score)))
+        outcomes.sort(key=lambda item: item[1], reverse=True)
+        return iter(outcomes)
 
     def __next__(self) -> tuple[list[tuple[int, int]], float]:
         return next(self._merge)
@@ -623,6 +778,7 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         name: str | None = None,
         keys: str | None = None,
         len_accumulator: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
+        fixed_support: bool | None = None,
     ) -> None:
         """Create an accumulator for integer-category count statistics.
 
@@ -644,8 +800,18 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             keys (Optional[str]): Key used by ``key_merge`` and ``key_replace``.
 
         """
+        if (min_val is None) != (max_val is None):
+            raise ValueError("integer multinomial accumulator support requires both min_val and max_val")
+        if min_val is not None:
+            min_val = exact_integer(min_val, label="integer multinomial accumulator minimum")
+            max_val = exact_integer(max_val, label="integer multinomial accumulator maximum")
+            if min_val > max_val:
+                raise ValueError("integer multinomial accumulator support minimum must not exceed maximum")
         self.min_val = min_val
         self.max_val = max_val
+        self.fixed_support = (min_val is not None) if fixed_support is None else bool(fixed_support)
+        if self.fixed_support and min_val is None:
+            raise ValueError("fixed integer multinomial support requires explicit bounds")
         self.name = name
         self.len_accumulator = len_accumulator if len_accumulator is not None else NullAccumulator()
         self.count_vec = vec.zeros(max_val - min_val + 1) if min_val is not None and max_val is not None else None
@@ -666,33 +832,43 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        cc = 0
-        for xx, cnt in x:
-            cc += cnt
+        pairs, cc, _ = canonical_integer_bag(
+            x,
+            min_val=self.min_val,
+            max_val=self.max_val,
+            reject_outside=self.fixed_support,
+        )
+        checked_weight = finite_weight(
+            weight,
+            label="integer multinomial observation weight",
+        )
+        if estimate is not None and not isinstance(estimate, IntegerMultinomialDistribution):
+            raise TypeError("integer multinomial accumulator estimate must be an integer multinomial distribution")
+        for xx, cnt in pairs:
             if self.count_vec is None:
                 self.min_val = xx
                 self.max_val = xx
-                self.count_vec = vec.make([weight * cnt])
+                self.count_vec = vec.make([checked_weight * cnt])
             elif self.max_val < xx:
                 temp_vec = self.count_vec
                 self.max_val = xx
                 self.count_vec = vec.zeros(self.max_val - self.min_val + 1)
                 self.count_vec[: len(temp_vec)] = temp_vec
-                self.count_vec[xx - self.min_val] += weight * cnt
+                self.count_vec[xx - self.min_val] += checked_weight * cnt
             elif self.min_val > xx:
                 temp_vec = self.count_vec
                 temp_diff = self.min_val - xx
                 self.min_val = xx
                 self.count_vec = vec.zeros(self.max_val - self.min_val + 1)
                 self.count_vec[temp_diff:] = temp_vec
-                self.count_vec[xx - self.min_val] += weight * cnt
+                self.count_vec[xx - self.min_val] += checked_weight * cnt
             else:
-                self.count_vec[xx - self.min_val] += weight * cnt
+                self.count_vec[xx - self.min_val] += checked_weight * cnt
 
         if estimate is None:
-            self.len_accumulator.update(cc, weight, None)
+            self.len_accumulator.update(cc, checked_weight, None)
         else:
-            self.len_accumulator.update(cc, weight, estimate.len_dist)
+            self.len_accumulator.update(cc, checked_weight, estimate.len_dist)
 
     def initialize(self, x: Sequence[tuple[int, float]], weight: float, rng: RandomState | None) -> None:
         """Initialize IntegerMultinomialAccumulator with single observation x.
@@ -732,35 +908,52 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        sz, idx, cnt, val, tenc = x
+        sz, idx, cnt, val, tenc, _totals = _validate_integer_encoding(x)
+        checked_weights = observation_weights(
+            weights,
+            sz,
+            label="integer multinomial observation weights",
+        )
+        if estimate is not None and not isinstance(estimate, IntegerMultinomialDistribution):
+            raise TypeError("integer multinomial accumulator estimate must be an integer multinomial distribution")
+        nonzero = cnt != 0
+        active_val = val[nonzero]
+        active_cnt = cnt[nonzero]
+        active_idx = idx[nonzero]
+        if self.fixed_support and len(active_val) and (
+            np.any(active_val < self.min_val) or np.any(active_val > self.max_val)
+        ):
+            raise ValueError("integer multinomial category is outside the fixed accumulator support")
+        if len(active_val):
+            min_x = int(active_val.min())
+            max_x = int(active_val.max())
+            loc_cnt = np.bincount(
+                active_val - min_x,
+                weights=active_cnt * checked_weights[active_idx],
+            )
 
-        min_x = val.min()
-        max_x = val.max()
+            if self.count_vec is None:
+                self.count_vec = np.zeros(max_x - min_x + 1)
+                self.min_val = min_x
+                self.max_val = max_x
 
-        loc_cnt = np.bincount(val - min_x, weights=cnt * weights[idx])
+            if self.min_val > min_x or self.max_val < max_x:
+                prev_min = self.min_val
+                self.min_val = min(min_x, self.min_val)
+                self.max_val = max(max_x, self.max_val)
+                temp = self.count_vec
+                prev_diff = prev_min - self.min_val
+                self.count_vec = np.zeros(self.max_val - self.min_val + 1)
+                self.count_vec[prev_diff : (prev_diff + len(temp))] = temp
 
-        if self.count_vec is None:
-            self.count_vec = np.zeros(max_x - min_x + 1)
-            self.min_val = min_x
-            self.max_val = max_x
-
-        if self.min_val > min_x or self.max_val < max_x:
-            prev_min = self.min_val
-            self.min_val = min(min_x, self.min_val)
-            self.max_val = max(max_x, self.max_val)
-            temp = self.count_vec
-            prev_diff = prev_min - self.min_val
-            self.count_vec = np.zeros(self.max_val - self.min_val + 1)
-            self.count_vec[prev_diff : (prev_diff + len(temp))] = temp
-
-        min_diff = min_x - self.min_val
-        self.count_vec[min_diff : (min_diff + len(loc_cnt))] += loc_cnt
+            min_diff = min_x - self.min_val
+            self.count_vec[min_diff : (min_diff + len(loc_cnt))] += loc_cnt
 
         if self.len_accumulator is not None:
             if estimate is None:
-                self.len_accumulator.seq_update(tenc, weights, None)
+                self.len_accumulator.seq_update(tenc, checked_weights, None)
             else:
-                self.len_accumulator.seq_update(tenc, weights, estimate.len_dist)
+                self.len_accumulator.seq_update(tenc, checked_weights, estimate.len_dist)
 
     def seq_update_engine(
         self, x: E, weights: Any, estimate: IntegerMultinomialDistribution | None, engine: Any
@@ -773,40 +966,58 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """
         from mixle.stats.compute.backend import child_seq_update
 
-        sz, idx, cnt, val, tenc = x
-
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
-        valv = np.asarray(val)
-        min_x = int(valv.min())
-        max_x = int(valv.max())
-
-        row_weights = np.asarray(cnt, dtype=np.float64) * weights_np[np.asarray(idx)]
-        bidx = engine.asarray((valv - min_x).astype(np.int64))
-        loc_cnt = np.asarray(
-            engine.to_numpy(engine.bincount(bidx, weights=engine.asarray(row_weights), minlength=max_x - min_x + 1)),
-            dtype=np.float64,
+        sz, idx, cnt, val, tenc, _totals = _validate_integer_encoding(x)
+        weights_np = observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            sz,
+            label="integer multinomial observation weights",
         )
+        if estimate is not None and not isinstance(estimate, IntegerMultinomialDistribution):
+            raise TypeError("integer multinomial accumulator estimate must be an integer multinomial distribution")
+        nonzero = cnt != 0
+        active_val = val[nonzero]
+        active_cnt = cnt[nonzero]
+        active_idx = idx[nonzero]
+        if self.fixed_support and len(active_val) and (
+            np.any(active_val < self.min_val) or np.any(active_val > self.max_val)
+        ):
+            raise ValueError("integer multinomial category is outside the fixed accumulator support")
+        if len(active_val):
+            min_x = int(active_val.min())
+            max_x = int(active_val.max())
+            row_weights = active_cnt.astype(np.float64) * weights_np[active_idx]
+            bidx = engine.asarray((active_val - min_x).astype(np.int64))
+            loc_cnt = np.asarray(
+                engine.to_numpy(
+                    engine.bincount(
+                        bidx,
+                        weights=engine.asarray(row_weights),
+                        minlength=max_x - min_x + 1,
+                    )
+                ),
+                dtype=np.float64,
+            )
 
-        if self.count_vec is None:
-            self.count_vec = np.zeros(max_x - min_x + 1)
-            self.min_val = min_x
-            self.max_val = max_x
+            if self.count_vec is None:
+                self.count_vec = np.zeros(max_x - min_x + 1)
+                self.min_val = min_x
+                self.max_val = max_x
 
-        if self.min_val > min_x or self.max_val < max_x:
-            prev_min = self.min_val
-            self.min_val = min(min_x, self.min_val)
-            self.max_val = max(max_x, self.max_val)
-            temp = self.count_vec
-            prev_diff = prev_min - self.min_val
-            self.count_vec = np.zeros(self.max_val - self.min_val + 1)
-            self.count_vec[prev_diff : (prev_diff + len(temp))] = temp
+            if self.min_val > min_x or self.max_val < max_x:
+                prev_min = self.min_val
+                self.min_val = min(min_x, self.min_val)
+                self.max_val = max(max_x, self.max_val)
+                temp = self.count_vec
+                prev_diff = prev_min - self.min_val
+                self.count_vec = np.zeros(self.max_val - self.min_val + 1)
+                self.count_vec[prev_diff : (prev_diff + len(temp))] = temp
 
-        min_diff = min_x - self.min_val
-        self.count_vec[min_diff : (min_diff + len(loc_cnt))] += loc_cnt
+            min_diff = min_x - self.min_val
+            self.count_vec[min_diff : (min_diff + len(loc_cnt))] += loc_cnt
 
         if self.len_accumulator is not None:
             len_estimate = None if estimate is None else estimate.len_dist
-            child_seq_update(self.len_accumulator, tenc, weights, len_estimate, engine)
+            child_seq_update(self.len_accumulator, tenc, engine.asarray(weights_np), len_estimate, engine)
 
     def seq_initialize(self, x: E, weights: np.ndarray, rng: RandomState | None) -> None:
         """Vectorized initialization of sufficient statistics from encoded sequence of iid observations 'x'.
@@ -848,18 +1059,23 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             IntegerMultinomialAccumulator object.
 
         """
-        if self.count_vec is None and suff_stat[1] is not None:
-            self.min_val = suff_stat[0]
-            self.max_val = suff_stat[0] + len(suff_stat[1]) - 1
-            self.count_vec = suff_stat[1]
+        stat_min, stat_counts, len_stat = _validate_integer_statistics(suff_stat)
+        if self.fixed_support and stat_counts is not None and (
+            stat_min < self.min_val or stat_min + len(stat_counts) - 1 > self.max_val
+        ):
+            raise ValueError("integer multinomial statistic lies outside fixed accumulator support")
+        if self.count_vec is None and stat_counts is not None:
+            self.min_val = stat_min
+            self.max_val = stat_min + len(stat_counts) - 1
+            self.count_vec = stat_counts.copy()
 
-        elif self.count_vec is not None and suff_stat[1] is not None:
-            if self.min_val == suff_stat[0] and len(self.count_vec) == len(suff_stat[1]):
-                self.count_vec += suff_stat[1]
+        elif self.count_vec is not None and stat_counts is not None:
+            if self.min_val == stat_min and len(self.count_vec) == len(stat_counts):
+                self.count_vec += stat_counts
 
             else:
-                min_val = min(self.min_val, suff_stat[0])
-                max_val = max(self.max_val, suff_stat[0] + len(suff_stat[1]) - 1)
+                min_val = min(self.min_val, stat_min)
+                max_val = max(self.max_val, stat_min + len(stat_counts) - 1)
 
                 count_vec = vec.zeros(max_val - min_val + 1)
 
@@ -867,15 +1083,15 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
                 i1 = self.max_val - min_val + 1
                 count_vec[i0:i1] = self.count_vec
 
-                i0 = suff_stat[0] - min_val
-                i1 = (suff_stat[0] + len(suff_stat[1]) - 1) - min_val + 1
-                count_vec[i0:i1] += suff_stat[1]
+                i0 = stat_min - min_val
+                i1 = (stat_min + len(stat_counts) - 1) - min_val + 1
+                count_vec[i0:i1] += stat_counts
 
                 self.min_val = min_val
                 self.max_val = max_val
                 self.count_vec = count_vec
 
-        self.len_accumulator.combine(suff_stat[2])
+        self.len_accumulator.combine(len_stat)
 
         return self
 
@@ -891,7 +1107,11 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             Tuple[int, ndarray, Optional[SS0]].
 
         """
-        return self.min_val, self.count_vec, self.len_accumulator.value()
+        return (
+            self.min_val,
+            None if self.count_vec is None else self.count_vec.copy(),
+            self.len_accumulator.value(),
+        )
 
     def from_value(self, x: tuple[int, np.ndarray, SS0 | None]) -> "IntegerMultinomialAccumulator":
         """Restore accumulator state from sufficient statistics.
@@ -909,11 +1129,22 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             IntegerMultinomialAccumulator: This accumulator after restoration.
 
         """
-        self.min_val = x[0]
-        self.max_val = x[0] + len(x[1]) - 1
-        self.count_vec = x[1]
+        stat_min, stat_counts, len_stat = _validate_integer_statistics(x)
+        if self.fixed_support and stat_counts is not None and (
+            stat_min < self.min_val or stat_min + len(stat_counts) - 1 > self.max_val
+        ):
+            raise ValueError("integer multinomial statistic lies outside fixed accumulator support")
+        if self.fixed_support:
+            self.count_vec.fill(0.0)
+            if stat_counts is not None:
+                offset = stat_min - self.min_val
+                self.count_vec[offset : offset + len(stat_counts)] = stat_counts
+        else:
+            self.min_val = stat_min
+            self.max_val = None if stat_counts is None else stat_min + len(stat_counts) - 1
+            self.count_vec = None if stat_counts is None else stat_counts.copy()
 
-        self.len_accumulator.from_value(x[2])
+        self.len_accumulator.from_value(len_stat)
 
         return self
 
@@ -956,7 +1187,11 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
     def acc_to_encoder(self) -> "IntegerMultinomialDataEncoder":
         """Return a data encoder using the encoder supplied by the length accumulator."""
         len_encoder = self.len_accumulator.acc_to_encoder()
-        return IntegerMultinomialDataEncoder(len_encoder=len_encoder)
+        return IntegerMultinomialDataEncoder(
+            len_encoder=len_encoder,
+            min_val=self.min_val if self.fixed_support else None,
+            max_val=self.max_val if self.fixed_support else None,
+        )
 
 
 class IntegerMultinomialAccumulatorFactory(StatisticAccumulatorFactory):
@@ -969,6 +1204,7 @@ class IntegerMultinomialAccumulatorFactory(StatisticAccumulatorFactory):
         name: str | None = None,
         keys: str | None = None,
         len_factory: StatisticAccumulatorFactory | None = NullAccumulatorFactory(),
+        fixed_support: bool | None = None,
     ) -> None:
         """Create a factory for integer multinomial accumulators.
 
@@ -987,8 +1223,16 @@ class IntegerMultinomialAccumulatorFactory(StatisticAccumulatorFactory):
             len_factory (StatisticAccumulatorFactory): Factory for trial-count accumulators.
 
         """
+        if (min_val is None) != (max_val is None):
+            raise ValueError("integer multinomial accumulator factory support requires both bounds")
+        if min_val is not None:
+            min_val = exact_integer(min_val, label="integer multinomial factory minimum")
+            max_val = exact_integer(max_val, label="integer multinomial factory maximum")
+            if min_val > max_val:
+                raise ValueError("integer multinomial factory minimum must not exceed maximum")
         self.min_val = min_val
         self.max_val = max_val
+        self.fixed_support = (min_val is not None) if fixed_support is None else bool(fixed_support)
         self.name = name
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
         self.keys = keys
@@ -997,7 +1241,12 @@ class IntegerMultinomialAccumulatorFactory(StatisticAccumulatorFactory):
         """Return a new integer multinomial accumulator."""
         len_acc = self.len_factory.make()
         return IntegerMultinomialAccumulator(
-            min_val=self.min_val, max_val=self.max_val, name=self.name, keys=self.keys, len_accumulator=len_acc
+            min_val=self.min_val,
+            max_val=self.max_val,
+            name=self.name,
+            keys=self.keys,
+            len_accumulator=len_acc,
+            fixed_support=self.fixed_support,
         )
 
 
@@ -1041,10 +1290,54 @@ class IntegerMultinomialEstimator(ParameterEstimator):
             keys (Optional[str]): Optional key for sharing sufficient statistics.
 
         """
-        self.suff_stat = suff_stat
+        if (min_val is None) != (max_val is None):
+            raise ValueError("integer multinomial fixed support requires both min_val and max_val")
+        if min_val is not None:
+            min_val = exact_integer(min_val, label="integer multinomial estimator minimum")
+            max_val = exact_integer(max_val, label="integer multinomial estimator maximum")
+            if min_val > max_val:
+                raise ValueError("integer multinomial estimator minimum must not exceed maximum")
+        if pseudo_count is not None:
+            pseudo_count = finite_weight(
+                pseudo_count,
+                label="integer multinomial pseudo-count",
+            )
+        prior_min = None
+        prior_prob = None
+        if suff_stat is not None:
+            if not isinstance(suff_stat, tuple) or len(suff_stat) != 2:
+                raise ValueError("integer multinomial prior statistic must be a (minimum, probabilities) tuple")
+            prior_min = exact_integer(suff_stat[0], label="integer multinomial prior minimum")
+            try:
+                raw_prior = np.asarray(suff_stat[1], dtype=np.float64)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("integer multinomial prior probabilities must be numeric") from exc
+            if (
+                raw_prior.ndim != 1
+                or raw_prior.size == 0
+                or np.any(~np.isfinite(raw_prior))
+                or np.any(raw_prior < 0.0)
+            ):
+                raise ValueError(
+                    "integer multinomial prior probabilities must be a finite nonempty non-negative vector"
+                )
+            if raw_prior.sum() == 0.0 and pseudo_count in (None, 0.0):
+                prior_prob = np.ones(len(raw_prior), dtype=np.float64) / len(raw_prior)
+                prior_prob.setflags(write=False)
+            else:
+                prior_prob, _ = simplex(
+                    raw_prior,
+                    label="integer multinomial prior probabilities",
+                )
+            if min_val is not None and (
+                prior_min < min_val or prior_min + len(prior_prob) - 1 > max_val
+            ):
+                raise ValueError("integer multinomial prior support lies outside fixed support")
+        self.suff_stat = None if prior_prob is None else (prior_min, prior_prob)
         self.pseudo_count = pseudo_count
         self.min_val = min_val
         self.max_val = max_val
+        self.fixed_support = min_val is not None
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.len_dist = len_dist
         self.keys = keys
@@ -1052,19 +1345,24 @@ class IntegerMultinomialEstimator(ParameterEstimator):
 
     def accumulator_factory(self) -> "IntegerMultinomialAccumulatorFactory":
         """Return an accumulator factory configured from this estimator."""
-        min_val = None
-        max_val = None
-
-        if self.suff_stat is not None:
-            min_val = self.suff_stat[0]
-            max_val = min_val + len(self.suff_stat[1]) - 1
-        elif self.min_val is not None and self.max_val is not None:
+        if self.fixed_support:
             min_val = self.min_val
             max_val = self.max_val
+        elif self.suff_stat is not None:
+            min_val = self.suff_stat[0]
+            max_val = min_val + len(self.suff_stat[1]) - 1
+        else:
+            min_val = None
+            max_val = None
 
         len_factory = self.len_estimator.accumulator_factory()
         return IntegerMultinomialAccumulatorFactory(
-            min_val=min_val, max_val=max_val, name=self.name, keys=self.keys, len_factory=len_factory
+            min_val=min_val,
+            max_val=max_val,
+            name=self.name,
+            keys=self.keys,
+            len_factory=len_factory,
+            fixed_support=self.fixed_support,
         )
 
     def estimate(
@@ -1087,81 +1385,66 @@ class IntegerMultinomialEstimator(ParameterEstimator):
             IntegerMultinomialDistribution: Estimated distribution.
 
         """
-        len_dist = self.len_dist if self.len_dist is not None else self.len_estimator.estimate(nobs, suff_stat[2])
+        stat_min, stat_counts, len_stat = _validate_integer_statistics(suff_stat)
+        len_dist = self.len_dist if self.len_dist is not None else self.len_estimator.estimate(nobs, len_stat)
 
-        if self.pseudo_count is not None and self.suff_stat is None:
-            pseudo_count_per_level = self.pseudo_count / float(len(suff_stat[1]))
-            adjusted_nobs = suff_stat[1].sum() + self.pseudo_count
-
-            if adjusted_nobs == 0.0:
-                p_vec = np.ones(len(suff_stat[1])) / float(len(suff_stat[1]))
-            else:
-                p_vec = (suff_stat[1] + pseudo_count_per_level) / adjusted_nobs
-
-            return IntegerMultinomialDistribution(
-                suff_stat[0], p_vec, len_dist=len_dist, name=self.name, keys=self.keys
-            )
-
-        elif self.pseudo_count is not None and self.min_val is not None and self.max_val is not None:
-            min_val = min(self.min_val, suff_stat[0])
-            max_val = max(self.max_val, suff_stat[0] + len(suff_stat[1]) - 1)
-
-            count_vec = vec.zeros(max_val - min_val + 1)
-
-            i0 = suff_stat[0] - min_val
-            i1 = (suff_stat[0] + len(suff_stat[1]) - 1) - min_val + 1
-            count_vec[i0:i1] += suff_stat[1]
-
-            pseudo_count_per_level = self.pseudo_count / float(len(count_vec))
-            adjusted_nobs = suff_stat[1].sum() + self.pseudo_count
-
-            if adjusted_nobs == 0.0:
-                p_vec = np.ones(len(count_vec)) / float(len(count_vec))
-            else:
-                p_vec = (count_vec + pseudo_count_per_level) / adjusted_nobs
-
-            return IntegerMultinomialDistribution(min_val, p_vec, len_dist=len_dist, name=self.name, keys=self.keys)
-
-        elif self.pseudo_count is not None and self.suff_stat is not None:
-            s_max_val = self.suff_stat[0] + len(self.suff_stat[1]) - 1
-            s_min_val = self.suff_stat[0]
-
-            min_val = min(s_min_val, suff_stat[0])
-            max_val = max(s_max_val, suff_stat[0] + len(suff_stat[1]) - 1)
-
-            count_vec = vec.zeros(max_val - min_val + 1)
-
-            i0 = s_min_val - min_val
-            i1 = s_max_val - min_val + 1
-            count_vec[i0:i1] = self.suff_stat[1] * self.pseudo_count
-
-            i0 = suff_stat[0] - min_val
-            i1 = (suff_stat[0] + len(suff_stat[1]) - 1) - min_val + 1
-            count_vec[i0:i1] += suff_stat[1]
-
-            count_sum = count_vec.sum()
-            if count_sum == 0.0:
-                p_vec = np.ones(len(count_vec)) / float(len(count_vec))
-            else:
-                p_vec = count_vec / count_sum
-
-            return IntegerMultinomialDistribution(min_val, p_vec, len_dist=len_dist, name=self.name, keys=self.keys)
+        if self.fixed_support:
+            min_val = self.min_val
+            max_val = self.max_val
+            if stat_counts is not None and (
+                stat_min < min_val or stat_min + len(stat_counts) - 1 > max_val
+            ):
+                raise ValueError("observed integer multinomial support lies outside fixed estimator support")
         else:
-            count_sum = suff_stat[1].sum()
-            if count_sum == 0.0:
-                p_vec = np.ones(len(suff_stat[1])) / float(len(suff_stat[1]))
-            else:
-                p_vec = suff_stat[1] / count_sum
+            supports_: list[tuple[int, int]] = []
+            if stat_counts is not None:
+                supports_.append((stat_min, stat_min + len(stat_counts) - 1))
+            if self.suff_stat is not None:
+                prior_min, prior_prob = self.suff_stat
+                supports_.append((prior_min, prior_min + len(prior_prob) - 1))
+            if not supports_:
+                raise ValueError(
+                    "cannot infer integer multinomial support from a batch containing only empty bags; "
+                    "configure fixed bounds or prior probabilities"
+                )
+            min_val = min(bound[0] for bound in supports_)
+            max_val = max(bound[1] for bound in supports_)
 
-            return IntegerMultinomialDistribution(
-                suff_stat[0], p_vec, len_dist=len_dist, name=self.name, keys=self.keys
-            )
+        count_vec = vec.zeros(max_val - min_val + 1)
+        if stat_counts is not None:
+            offset = stat_min - min_val
+            count_vec[offset : offset + len(stat_counts)] += stat_counts
+        if self.pseudo_count not in (None, 0.0):
+            if self.suff_stat is None:
+                count_vec += self.pseudo_count / len(count_vec)
+            else:
+                prior_min, prior_prob = self.suff_stat
+                offset = prior_min - min_val
+                count_vec[offset : offset + len(prior_prob)] += self.pseudo_count * prior_prob
+
+        count_sum = float(count_vec.sum())
+        if count_sum == 0.0:
+            p_vec = np.ones(len(count_vec), dtype=np.float64) / len(count_vec)
+        else:
+            p_vec = count_vec / count_sum
+        return IntegerMultinomialDistribution(
+            min_val,
+            p_vec,
+            len_dist=len_dist,
+            name=self.name,
+            keys=self.keys,
+        )
 
 
 class IntegerMultinomialDataEncoder(DataSequenceEncoder):
     """Encode sparse integer multinomial observations for vectorized scoring."""
 
-    def __init__(self, len_encoder: DataSequenceEncoder | None = NullDataEncoder()) -> None:
+    def __init__(
+        self,
+        len_encoder: DataSequenceEncoder | None = NullDataEncoder(),
+        min_val: int | None = None,
+        max_val: int | None = None,
+    ) -> None:
         """Create an encoder for iid integer multinomial observations.
 
         Args:
@@ -1172,10 +1455,24 @@ class IntegerMultinomialDataEncoder(DataSequenceEncoder):
 
         """
         self.len_encoder = len_encoder if len_encoder is not None else NullDataEncoder()
+        if (min_val is None) != (max_val is None):
+            raise ValueError("integer multinomial encoder support requires both bounds")
+        self.min_val = (
+            None if min_val is None else exact_integer(min_val, label="integer multinomial encoder minimum")
+        )
+        self.max_val = (
+            None if max_val is None else exact_integer(max_val, label="integer multinomial encoder maximum")
+        )
+        if self.min_val is not None and self.min_val > self.max_val:
+            raise ValueError("integer multinomial encoder minimum must not exceed maximum")
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the encoder."""
-        return "IntegerMultinomialDataEncoder(len_encoder=" + str(self.len_encoder) + ")"
+        return "IntegerMultinomialDataEncoder(len_encoder=%s, min_val=%r, max_val=%r)" % (
+            self.len_encoder,
+            self.min_val,
+            self.max_val,
+        )
 
     def __eq__(self, other: object) -> bool:
         """Return true when ``other`` is an equivalent integer multinomial encoder.
@@ -1190,7 +1487,11 @@ class IntegerMultinomialDataEncoder(DataSequenceEncoder):
 
         """
         if isinstance(other, IntegerMultinomialDataEncoder):
-            return self.len_encoder == other.len_encoder
+            return (
+                self.len_encoder == other.len_encoder
+                and self.min_val == other.min_val
+                and self.max_val == other.max_val
+            )
         else:
             return False
 
@@ -1221,19 +1522,22 @@ class IntegerMultinomialDataEncoder(DataSequenceEncoder):
         tcnt = []
 
         for i, y in enumerate(x):
-            cc = 0
-            for z in y:
+            pairs, cc, _outside = canonical_integer_bag(
+                y,
+                min_val=self.min_val,
+                max_val=self.max_val,
+            )
+            for category, count in pairs:
                 idx.append(i)
-                cnt.append(z[1])
-                val.append(z[0])
-                cc += z[1]
+                cnt.append(count)
+                val.append(category)
             tcnt.append(cc)
 
         sz = len(x)
-        idx = np.asarray(idx, dtype=np.int32)
-        cnt = np.asarray(cnt, dtype=np.float64)
-        val = np.asarray(val, dtype=np.int32)
-        tcnt = np.asarray(tcnt, dtype=np.int32)
+        idx = np.asarray(idx, dtype=np.int64)
+        cnt = np.asarray(cnt, dtype=np.int64)
+        val = np.asarray(val, dtype=np.int64)
+        tcnt = np.asarray(tcnt, dtype=np.int64)
 
         tcnt = self.len_encoder.seq_encode(tcnt)
 

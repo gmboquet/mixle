@@ -6,14 +6,14 @@ Let P_dist(V_k) be a distribution for a countable set of discrete observations o
 
 as the probability of success for value V_k. Then sum_{k=0}^{inf} p_k = 1. Let x = (x_0, x_1,....,x_{n-1}) be a
 multinomial observation for a 'n' trials, where each x_i = (V_j, n_j) for some value V_j in the observation space and
-n_j is the associated number of success for the value. (note: sum n_j = n). Then, denoting p_j = p_mat(V_j), we score
-the un-normalized log-density:
+n_j is the associated number of successes for the value. (note: sum n_j = n). Then, denoting p_j = p_mat(V_j), the
+normalized count-vector log mass is:
 
-    log(p_mat(x)) = sum_{j=0}^{n-1} n_j * log(p_j) + log(P_len(n)),
+    log(p_mat(x)) = log(n!) - sum_j log(n_j!) + sum_j n_j * log(p_j) + log(P_len(n)),
 
 where P_len(n) is a distribution for the number of trials in the multinomial having support on the non-negative
-integers. The multinomial coefficient (log(n!) - sum_j log(n_j!)) is intentionally omitted, so this is a per-category
-scoring form rather than a normalized probability mass over count vectors.
+integers. When ``len_normalized=True``, the count-vector term (including its base measure) is divided by ``n`` for
+nonempty bags, yielding a geometric-mean score rather than a sampling law; the length term remains unscaled.
 
 The multinomial is assumed to have data type: Sequence[Tuple[T, float]], where T is the data type of the 'categories'.
 
@@ -24,14 +24,16 @@ from __future__ import annotations
 import heapq
 import itertools
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
+from scipy.special import gammaln
 
 from mixle.capability import Neutral, supports
 from mixle.engines.arithmetic import maxrandint
-from mixle.enumeration.algorithms import BufferedStream, LengthFrontierMerge
+from mixle.enumeration.algorithms import BufferedStream
 from mixle.inference.fisher import Path
 from mixle.stats.combinator.null_dist import NullAccumulator, NullAccumulatorFactory, NullDistribution, NullEstimator
 from mixle.stats.compute.pdist import (
@@ -43,7 +45,13 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
-    child_enumerator,
+)
+from mixle.stats.multivariate._multinomial_contracts import (
+    canonical_bag,
+    exact_integer,
+    finite_weight,
+    log_coefficient,
+    observation_weights,
 )
 
 T = TypeVar("T")  ## Generic data type for value.
@@ -54,6 +62,130 @@ SS2 = TypeVar("SS2")  ## suff stat type for len_dist
 
 
 from mixle.stats.combinator.sequence import SequenceFisherView
+
+
+@dataclass(frozen=True)
+class MultinomialEncodedData:
+    """Validated sparse multinomial batch representation."""
+
+    indices: np.ndarray
+    inverse_totals: np.ndarray
+    nonzero_totals: np.ndarray
+    encoded_values: Any
+    encoded_lengths: Any | None
+    counts: np.ndarray
+    totals: np.ndarray
+    len_normalized: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.len_normalized, bool):
+            raise TypeError("multinomial encoded len_normalized must be a bool")
+        indices = np.asarray(self.indices)
+        inverse = np.asarray(self.inverse_totals, dtype=np.float64)
+        nonzero = np.asarray(self.nonzero_totals)
+        counts = np.asarray(self.counts)
+        totals = np.asarray(self.totals)
+        maximum = int(np.iinfo(np.int64).max)
+        if indices.ndim != 1 or not np.issubdtype(indices.dtype, np.integer):
+            raise ValueError("multinomial encoded indices must be a one-dimensional integer array")
+        if counts.ndim != 1 or not np.issubdtype(counts.dtype, np.integer):
+            raise ValueError("multinomial encoded counts must be a one-dimensional integer array")
+        if totals.ndim != 1 or not np.issubdtype(totals.dtype, np.integer):
+            raise ValueError("multinomial encoded totals must be a one-dimensional integer array")
+        rows = len(totals)
+        if inverse.shape != (rows,) or np.any(~np.isfinite(inverse)) or np.any(inverse < 0.0):
+            raise ValueError("multinomial encoded inverse totals must be finite with shape (rows,)")
+        if nonzero.shape != (rows,) or not np.issubdtype(nonzero.dtype, np.bool_):
+            raise ValueError("multinomial encoded nonzero mask must be boolean with shape (rows,)")
+        if len(indices) != len(counts):
+            raise ValueError("multinomial encoded entry arrays must have equal length")
+        if np.any(indices < 0) or np.any(indices >= rows):
+            raise ValueError("multinomial encoded indices must be in [0, rows)")
+        if len(indices) > 1 and np.any(indices[1:] < indices[:-1]):
+            raise ValueError("multinomial encoded indices must be non-decreasing")
+        if np.any(counts <= 0) or np.any(totals < 0):
+            raise ValueError("multinomial encoded counts must be positive and totals non-negative")
+        if any(int(value) > maximum for value in counts) or any(int(value) > maximum for value in totals):
+            raise ValueError("multinomial encoded counts and totals must fit signed 64-bit integers")
+        if any(int(value) > maximum for value in indices):
+            raise ValueError("multinomial encoded indices must fit signed 64-bit integers")
+        computed = np.zeros(rows, dtype=object)
+        for row, count in zip(indices, counts):
+            computed[int(row)] += int(count)
+        if any(int(computed[row]) != int(totals[row]) for row in range(rows)):
+            raise ValueError("multinomial encoded totals must equal the sum of row counts")
+        expected_nonzero = totals != 0
+        if not np.array_equal(nonzero, expected_nonzero):
+            raise ValueError("multinomial encoded nonzero mask does not match totals")
+        expected_inverse = np.zeros(rows, dtype=np.float64)
+        expected_inverse[expected_nonzero] = 1.0 / totals[expected_nonzero]
+        if not np.array_equal(inverse, expected_inverse):
+            raise ValueError("multinomial encoded inverse totals do not match totals")
+        owned = (
+            np.asarray(indices, dtype=np.int64).copy(),
+            inverse.copy(),
+            np.asarray(nonzero, dtype=bool).copy(),
+            np.asarray(counts, dtype=np.int64).copy(),
+            np.asarray(totals, dtype=np.int64).copy(),
+        )
+        for array in owned:
+            array.setflags(write=False)
+        object.__setattr__(self, "indices", owned[0])
+        object.__setattr__(self, "inverse_totals", owned[1])
+        object.__setattr__(self, "nonzero_totals", owned[2])
+        object.__setattr__(self, "counts", owned[3])
+        object.__setattr__(self, "totals", owned[4])
+
+    @property
+    def rows(self) -> int:
+        return len(self.totals)
+
+    def __iter__(self):
+        return iter(
+            (
+                self.indices,
+                self.inverse_totals,
+                self.nonzero_totals,
+                self.encoded_values,
+                self.encoded_lengths,
+                self.counts,
+                self.totals,
+            )
+        )
+
+    def __len__(self) -> int:
+        return 7
+
+    def __getitem__(self, item: int):
+        return tuple(self)[item]
+
+
+def _encoded(
+    value: Any,
+    *,
+    len_normalized: bool,
+    value_encoder: DataSequenceEncoder | None = None,
+    length_encoder: DataSequenceEncoder | None = None,
+) -> MultinomialEncodedData:
+    if not isinstance(value, MultinomialEncodedData):
+        raise ValueError("multinomial encoded data must be produced by MultinomialDataEncoder")
+    if value.len_normalized != len_normalized:
+        raise ValueError("multinomial encoded normalization semantics do not match the model")
+    if value_encoder is not None:
+        try:
+            entries = value_encoder.row_count(value.encoded_values)
+        except (TypeError, ValueError, NotImplementedError) as exc:
+            raise ValueError("multinomial encoded value payload is invalid") from exc
+        if entries != len(value.indices):
+            raise ValueError("multinomial encoded value payload must have one row per sparse entry")
+    if length_encoder is not None:
+        try:
+            rows = length_encoder.row_count(value.encoded_lengths)
+        except (TypeError, ValueError, NotImplementedError) as exc:
+            raise ValueError("multinomial encoded length payload is invalid") from exc
+        if rows != value.rows:
+            raise ValueError("multinomial encoded length payload must have one row per observation")
+    return value
 
 
 class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
@@ -136,6 +268,8 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         """
         self.dist = dist
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
+        if not isinstance(len_normalized, bool):
+            raise TypeError("multinomial len_normalized must be a bool")
         self.len_normalized = len_normalized
         self.name = name
 
@@ -170,15 +304,14 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
             p_k = P_dist(V_k),
 
         as the probability of success for value V_k. Then sum_{k=0}^{inf} p_k = 1. Let x = (x_0, x_1,....,x_{n-1}) be a
-        multinomial observation for a 'n' trials, where each x_i = (V_j, n_j) for some value V_j in the observation
+        multinomial observation for 'n' trials, where each x_i = (V_j, n_j) for some value V_j in the observation
         space and n_j is the associated number of success for the value. (note: sum n_j = n). Then, denoting p_j =
-        p_mat(V_j), we score the un-normalized log-density:
+        p_mat(V_j), the normalized count-vector log mass is:
 
-            log(p_mat(x)) = sum_{j=0}^{n-1} n_j * log(p_j) + log(P_len(n)),
+            log(p_mat(x)) = log(n!) - sum_j log(n_j!) + sum_j n_j * log(p_j) + log(P_len(n)),
 
         where P_len(n) is a distribution for the number of trials in the multinomial having support on the non-negative
-        integers. The multinomial coefficient is intentionally omitted (see the module docstring), so this is a
-        per-category scoring form, not a normalized mass over count vectors.
+        integers.
 
         Args:
             x (Sequence[Tuple[T, float]]): Tuples of observed multinomial values and success s.t. success sum to number
@@ -188,20 +321,20 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
             Log-density evaluated at x.
 
         """
-        rv = 0.0
-        # Start the trial count at integer zero so integer counts stay integers and the
-        # total is a valid argument for integer-supported length distributions.
-        cc = 0
-        for i in range(len(x)):
-            rv += self.dist.log_density(x[i][0]) * x[i][1]
-            cc += x[i][1]
+        pairs, cc = canonical_bag(x)
+        rv = log_coefficient([count for _, count in pairs])
+        for value, count in pairs:
+            score = self.dist.log_density(value)
+            if not np.isfinite(score):
+                return -np.inf
+            rv += score * count
 
-        if self.len_normalized and len(x) > 0:
+        if self.len_normalized and cc > 0:
             rv /= cc
 
         rv += self.len_dist.log_density(cc)
 
-        return rv
+        return float(rv)
 
     def seq_log_density(self, x) -> np.ndarray:
         """Vectorized evaluated of log-density for an encoded sequence of iid multinomial observations.
@@ -224,10 +357,21 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of the log-density at each encoded observation of x.
 
         """
-        idx, icnt, inz, enc_seq, enc_nseq, enc_w, enc_ww = x
+        encoded = _encoded(
+            x,
+            len_normalized=self.len_normalized,
+            value_encoder=self.dist.dist_to_encoder(),
+            length_encoder=self.len_dist.dist_to_encoder(),
+        )
+        idx, icnt, _inz, enc_seq, enc_nseq, enc_w, totals = encoded
 
         ll = self.dist.seq_log_density(enc_seq)
         ll_sum = np.bincount(idx, weights=ll * enc_w, minlength=len(icnt))
+        ll_sum += gammaln(totals + 1.0) - np.bincount(
+            idx,
+            weights=gammaln(enc_w + 1.0),
+            minlength=encoded.rows,
+        )
 
         if self.len_normalized:
             ll_sum *= icnt
@@ -242,7 +386,13 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         """Engine-neutral vectorized log-density for encoded count-vector observations."""
         from mixle.stats.compute.backend import backend_seq_log_density
 
-        idx, icnt, inz, enc_seq, enc_nseq, enc_w, enc_ww = x
+        encoded = _encoded(
+            x,
+            len_normalized=self.len_normalized,
+            value_encoder=self.dist.dist_to_encoder(),
+            length_encoder=self.len_dist.dist_to_encoder(),
+        )
+        idx, icnt, _inz, enc_seq, enc_nseq, enc_w, totals = encoded
         nseq = len(icnt)
         ll_sum = engine.zeros(nseq)
 
@@ -253,6 +403,14 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
             if self.len_normalized:
                 elem_ll = elem_ll * engine.asarray(icnt)[eidx]
             ll_sum = engine.index_add(ll_sum, eidx, elem_ll)
+        coefficient = gammaln(totals + 1.0) - np.bincount(
+            idx,
+            weights=gammaln(enc_w + 1.0),
+            minlength=encoded.rows,
+        )
+        if self.len_normalized:
+            coefficient = coefficient * icnt
+        ll_sum = ll_sum + engine.asarray(coefficient)
 
         if enc_nseq is not None:
             ll_sum = ll_sum + backend_seq_log_density(self.len_dist, enc_nseq, engine)
@@ -286,6 +444,8 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         return {
             "value_route": value_route,
             "length_route": length_route,
+            "value_encoder": dists[0].dist.dist_to_encoder(),
+            "length_encoder": dists[0].len_dist.dist_to_encoder(),
             "len_normalized": len_normalized,
             "num_components": len(dists),
         }
@@ -295,7 +455,13 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         """Return an ``(n, k)`` matrix of multinomial log densities."""
         from mixle.stats.compute.stacked import stacked_component_log_density
 
-        idx, icnt, inz, enc_seq, enc_nseq, enc_w, enc_ww = x
+        encoded = _encoded(
+            x,
+            len_normalized=bool(params["len_normalized"]),
+            value_encoder=params["value_encoder"],
+            length_encoder=params["length_encoder"],
+        )
+        idx, icnt, _inz, enc_seq, enc_nseq, enc_w, totals = encoded
         nseq = len(icnt)
         rv = engine.zeros((nseq, int(params["num_components"])))
 
@@ -306,6 +472,14 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
             if params["len_normalized"]:
                 scores = scores * engine.asarray(icnt)[eidx, None]
             rv = engine.index_add(rv, eidx, scores)
+        coefficient = gammaln(totals + 1.0) - np.bincount(
+            idx,
+            weights=gammaln(enc_w + 1.0),
+            minlength=encoded.rows,
+        )
+        if params["len_normalized"]:
+            coefficient = coefficient * icnt
+        rv = rv + engine.asarray(coefficient)[:, None]
 
         if params["length_route"] is not None and enc_nseq is not None:
             rv = rv + stacked_component_log_density(enc_nseq, params["length_route"], engine)
@@ -323,7 +497,13 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
             unstack_component_stats,
         )
 
-        idx, icnt, inz, enc_seq, enc_nseq, enc_w, enc_ww = x
+        encoded = _encoded(
+            x,
+            len_normalized=bool(params["len_normalized"]),
+            value_encoder=params["value_encoder"],
+            length_encoder=params["length_encoder"],
+        )
+        idx, icnt, _inz, enc_seq, enc_nseq, enc_w, _totals = encoded
         ww = engine.asarray(weights)
         num_components = int(tuple(getattr(ww, "shape", (0, 0)))[1])
         outer_estimators = tuple(getattr(estimator, "estimators", ()))
@@ -352,7 +532,7 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
             length_estimator = (
                 StackedEstimatorView(length_estimators) if len(length_estimators) == num_components else None
             )
-            length_weights = ww * engine.asarray(enc_ww)[:, None]
+            length_weights = ww
             length_stats = stacked_component_sufficient_statistics(
                 enc_nseq, length_weights, params["length_route"], engine, length_estimator
             )
@@ -380,6 +560,10 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
             raise ValueError(
                 "len_dist must not be a SequenceEncodableProbabilityDistribution with support of non-negative integers."
             )
+        if self.len_normalized:
+            raise ValueError(
+                "len_normalized multinomial scores are geometric-mean scores, not a sampling law"
+            )
         return MultinomialSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> MultinomialEstimator:
@@ -398,11 +582,21 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> MultinomialDataEncoder:
         """Return an encoder for sparse multinomial observations."""
-        return MultinomialDataEncoder(encoder=self.dist.dist_to_encoder(), len_encoder=self.len_dist.dist_to_encoder())
+        return MultinomialDataEncoder(
+            encoder=self.dist.dist_to_encoder(),
+            len_encoder=self.len_dist.dist_to_encoder(),
+            len_normalized=self.len_normalized,
+        )
 
     def enumerator(self) -> MultinomialEnumerator:
         """Returns MultinomialEnumerator iterating (value, count)-pair lists in descending probability order."""
-        return MultinomialEnumerator(self)
+        raise EnumerationError(
+            self,
+            reason=(
+                "exact normalized enumeration over an arbitrary category child requires a finite, "
+                "deduplicated support manifest; this model does not currently expose one"
+            ),
+        )
 
 
 class MultisetProductEnumerator:
@@ -435,29 +629,56 @@ class MultisetProductEnumerator:
 
         """
         self.stream = stream
-        self.n = n
+        self.n = exact_integer(n, label="multiset enumerator size", nonnegative=True)
         self.combine = combine
-        self.offset = offset
+        self.offset = float(offset)
+        if not np.isfinite(self.offset):
+            raise ValueError("multiset enumerator offset must be finite")
         self._counter = itertools.count()
         self._heap: list[tuple[float, int, tuple[int, ...]]] = []
         self._visited = set()
-        if n == 0:
+        self._entries: list[tuple[Any, float]] = []
+        self._seen_values: set[Any] = set()
+        if self.n == 0:
             # The empty multiset, carrying the offset mass alone.
-            self._heap.append((-offset, next(self._counter), ()))
+            self._heap.append((-self.offset, next(self._counter), ()))
             self._visited.add(())
-        elif stream.get(0) is not None:
-            root = (0,) * n
+        elif self._entry(0) is not None:
+            root = (0,) * self.n
             self._heap.append((-self._score(root), next(self._counter), root))
             self._visited.add(root)
 
     def __iter__(self) -> MultisetProductEnumerator:
         return self
 
+    def _entry(self, rank: int) -> tuple[Any, float] | None:
+        while len(self._entries) <= rank:
+            entry = self.stream.get(len(self._entries))
+            if entry is None:
+                return None
+            if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+                raise ValueError("child enumerator entries must be (value, log_probability) pairs")
+            value, raw_score = entry
+            try:
+                hash(value)
+            except TypeError as exc:
+                raise TypeError("child enumerator values must be hashable") from exc
+            score = float(raw_score)
+            if not np.isfinite(score) or score > 0.0:
+                raise ValueError("child enumerator log probabilities must be finite and non-positive")
+            if self._entries and score > self._entries[-1][1]:
+                raise ValueError("child enumerator scores must be non-increasing")
+            if value in self._seen_values:
+                raise ValueError("child enumerator values must be unique")
+            self._seen_values.add(value)
+            self._entries.append((value, score))
+        return self._entries[rank]
+
     def _score(self, idx: tuple[int, ...]) -> float:
         """Return offset plus the sum of the element log probs at ranks idx (recomputed to avoid drift)."""
         rv = self.offset
         for i in idx:
-            rv += self.stream.get(i)[1]
+            rv += self._entry(i)[1]
         return rv
 
     def _pairs(self, idx: tuple[int, ...]) -> tuple[tuple[Any, int], ...]:
@@ -468,7 +689,7 @@ class MultisetProductEnumerator:
                 groups[-1][1] += 1
             else:
                 groups.append([i, 1])
-        return tuple((self.stream.get(i)[0], c) for i, c in groups)
+        return tuple((self._entry(i)[0], c) for i, c in groups)
 
     def __next__(self) -> tuple[Any, float]:
         if not self._heap:
@@ -481,49 +702,31 @@ class MultisetProductEnumerator:
             if k + 1 < len(idx) and nxt > idx[k + 1]:
                 continue
             succ = idx[:k] + (nxt,) + idx[k + 1 :]
-            if succ not in self._visited and self.stream.get(nxt) is not None:
+            if succ not in self._visited and self._entry(nxt) is not None:
                 self._visited.add(succ)
                 heapq.heappush(self._heap, (-self._score(succ), next(self._counter), succ))
         return (value, score)
 
 
 class MultinomialEnumerator(DistributionEnumerator):
-    """Enumerates multinomial observations (lists of (value, count) pairs) in descending probability order."""
+    """Reserved exact enumerator for categorical multinomials.
+
+    Construction currently fails closed because arbitrary category distributions do not expose the
+    finite, unique support manifest required to enumerate normalized count-vector probabilities.
+    """
 
     def __init__(self, dist: MultinomialDistribution) -> None:
-        """Create an enumerator for multinomial outcomes.
-
-        Trial counts are pulled lazily from the length distribution's enumerator; each count n
-        contributes the size-n multisets over the (shared, buffered) category enumeration,
-        offset by the trial-count log-probability. Supports of distinct trial counts are
-        disjoint, so the per-count streams merge without re-scoring; the next un-instantiated
-        count's log-probability is a valid frontier bound since category log probs are
-        non-positive. Values are emitted with distinct categories ordered by descending
-        category probability; log_density is invariant to pair order and includes no
-        multinomial coefficient, so each multiset is yielded exactly once with log_prob equal
-        to log_density.
-
-        Raises EnumerationError when no trial-count distribution is modeled (len_dist is Null,
-        leaving the support over total counts undefined) or when len_normalized is set (the
-        geometric-mean density breaks the additive log-density structure).
-
-        Args:
-            dist (MultinomialDistribution): Distribution whose support is enumerated.
-
-        """
+        """Refuse construction until a validated support-manifest protocol exists."""
         super().__init__(dist)
-        if supports(dist.len_dist, Neutral):
-            raise EnumerationError(dist, reason="no trial-count distribution is modeled (len_dist is Null)")
-        if dist.len_normalized:
-            raise EnumerationError(dist, reason="len_normalized densities are not enumerable")
-        elem_buf = BufferedStream(child_enumerator(dist.dist, "MultinomialDistribution.dist"))
-        len_stream = BufferedStream(child_enumerator(dist.len_dist, "MultinomialDistribution.len_dist"))
-        self._merge = LengthFrontierMerge(
-            len_stream, lambda n, lp_len: MultisetProductEnumerator(elem_buf, n, combine=list, offset=lp_len)
+        raise EnumerationError(
+            dist,
+            reason=(
+                "exact normalized enumeration requires a finite, deduplicated category support manifest"
+            ),
         )
 
     def __next__(self) -> tuple[Any, float]:
-        return next(self._merge)
+        raise StopIteration
 
 
 class MultinomialSampler(DistributionSampler):
@@ -563,9 +766,13 @@ class MultinomialSampler(DistributionSampler):
 
         """
         if size is None:
-            n = self.len_sampler.sample()
+            n = exact_integer(
+                self.len_sampler.sample(),
+                label="sampled multinomial trial count",
+                nonnegative=True,
+            )
             rv = dict()
-            for i in range(n):
+            for _ in range(n):
                 v = self.dist_sampler.sample()
                 if v in rv:
                     rv[v] += 1
@@ -574,7 +781,8 @@ class MultinomialSampler(DistributionSampler):
             return list(rv.items())
 
         else:
-            return [self.sample() for i in range(size)]
+            sample_size = exact_integer(size, label="multinomial sample size", nonnegative=True)
+            return [self.sample() for _ in range(sample_size)]
 
 
 class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
@@ -611,6 +819,8 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulator = accumulator
         self.len_accumulator = len_accumulator if len_accumulator is not None else NullAccumulator()
         self.keys = keys
+        if not isinstance(len_normalized, bool):
+            raise TypeError("multinomial accumulator len_normalized must be a bool")
         self.len_normalized = len_normalized
 
         ### protected for initialization.
@@ -627,25 +837,23 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             estimate: Optional previous multinomial estimate.
 
         """
-        xx = [u[0] for u in x]
-        cc = [u[1] for u in x]
-        ss = sum(cc)
-
-        if estimate is None:
-            w = weight / ss if (self.len_normalized and ss > 0) else weight
-
-            for i in range(len(x)):
-                self.accumulator.update(x[i][0], w * x[i][1], None)
-
-            self.len_accumulator.update(ss, weight, None)
-
-        else:
-            w = weight / ss if (self.len_normalized and ss > 0) else weight
-
-            for i in range(len(x)):
-                self.accumulator.update(x[i][0], w * x[i][1], estimate.dist)
-
-            self.len_accumulator.update(ss, weight, estimate.len_dist)
+        pairs, total = canonical_bag(x)
+        checked_weight = finite_weight(weight, label="multinomial observation weight")
+        if estimate is not None and not isinstance(estimate, MultinomialDistribution):
+            raise TypeError("multinomial accumulator estimate must be a MultinomialDistribution")
+        value_estimate = None if estimate is None else estimate.dist
+        value_weight = (
+            checked_weight / total
+            if self.len_normalized and total > 0
+            else checked_weight
+        )
+        for value, count in pairs:
+            self.accumulator.update(value, value_weight * count, value_estimate)
+        self.len_accumulator.update(
+            total,
+            checked_weight,
+            None if estimate is None else estimate.len_dist,
+        )
 
     def _rng_initialize(self, rng: RandomState) -> None:
         """Set RandomState member variables for initialize and seq_initialize consistency.
@@ -673,14 +881,16 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         if not self._init_rng:
             self._rng_initialize(rng)
 
-        cc = [u[1] for u in x]
-        ss = sum(cc)
-        w = weight / ss if self.len_normalized else weight
-
-        for i in range(len(x)):
-            self.accumulator.initialize(x[i][0], w * x[i][1], self._acc_rng)
-
-        self.len_accumulator.initialize(ss, weight, self._len_rng)
+        pairs, total = canonical_bag(x)
+        checked_weight = finite_weight(weight, label="multinomial observation weight")
+        value_weight = (
+            checked_weight / total
+            if self.len_normalized and total > 0
+            else checked_weight
+        )
+        for value, count in pairs:
+            self.accumulator.initialize(value, value_weight * count, self._acc_rng)
+        self.len_accumulator.initialize(total, checked_weight, self._len_rng)
 
     def seq_update(self, x, weights: np.ndarray, estimate: MultinomialDistribution | None) -> None:
         """Vectorized update of encoded sequence of iid observations from multinomial distribution.
@@ -703,13 +913,29 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        idx, icnt, inz, enc_seq, enc_nseq, enc_w, enc_ww = x
-
-        w = weights[idx] * icnt[idx] if self.len_normalized else weights[idx]
+        encoded = _encoded(
+            x,
+            len_normalized=self.len_normalized,
+            value_encoder=self.accumulator.acc_to_encoder(),
+            length_encoder=self.len_accumulator.acc_to_encoder(),
+        )
+        idx, icnt, _inz, enc_seq, enc_nseq, enc_w, _totals = encoded
+        checked_weights = observation_weights(
+            weights,
+            encoded.rows,
+            label="multinomial observation weights",
+        )
+        if estimate is not None and not isinstance(estimate, MultinomialDistribution):
+            raise TypeError("multinomial accumulator estimate must be a MultinomialDistribution")
+        w = checked_weights[idx] * icnt[idx] if self.len_normalized else checked_weights[idx]
         w *= enc_w
 
         self.accumulator.seq_update(enc_seq, w, estimate.dist if estimate is not None else None)
-        self.len_accumulator.seq_update(enc_nseq, weights * enc_ww, estimate.len_dist if estimate is not None else None)
+        self.len_accumulator.seq_update(
+            enc_nseq,
+            checked_weights,
+            estimate.len_dist if estimate is not None else None,
+        )
 
     def seq_update_engine(self, x, weights: Any, estimate: MultinomialDistribution | None, engine: Any) -> None:
         """Engine-resident E-step: the per-value and per-length weights are formed on the active
@@ -717,8 +943,21 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """
         from mixle.stats.compute.backend import child_seq_update
 
-        idx, icnt, inz, enc_seq, enc_nseq, enc_w, enc_ww = x
-        w_eng = engine.asarray(weights)
+        encoded = _encoded(
+            x,
+            len_normalized=self.len_normalized,
+            value_encoder=self.accumulator.acc_to_encoder(),
+            length_encoder=self.len_accumulator.acc_to_encoder(),
+        )
+        idx, icnt, _inz, enc_seq, enc_nseq, enc_w, _totals = encoded
+        checked_weights = observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            encoded.rows,
+            label="multinomial observation weights",
+        )
+        if estimate is not None and not isinstance(estimate, MultinomialDistribution):
+            raise TypeError("multinomial accumulator estimate must be a MultinomialDistribution")
+        w_eng = engine.asarray(checked_weights)
         idx_a = np.asarray(idx, dtype=np.int64)
         if self.len_normalized:
             w = w_eng[idx_a] * engine.asarray(np.asarray(icnt, dtype=np.float64)[idx_a])
@@ -730,7 +969,7 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         child_seq_update(
             self.len_accumulator,
             enc_nseq,
-            w_eng * engine.asarray(np.asarray(enc_ww, dtype=np.float64)),
+            w_eng,
             estimate.len_dist if estimate is not None else None,
             engine,
         )
@@ -759,13 +998,23 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         if not self._init_rng:
             self._rng_initialize(rng)
 
-        idx, icnt, inz, enc_seq, enc_nseq, enc_w, enc_ww = x
-
-        w = weights[idx] * icnt[idx] if self.len_normalized else weights[idx]
+        encoded = _encoded(
+            x,
+            len_normalized=self.len_normalized,
+            value_encoder=self.accumulator.acc_to_encoder(),
+            length_encoder=self.len_accumulator.acc_to_encoder(),
+        )
+        idx, icnt, _inz, enc_seq, enc_nseq, enc_w, _totals = encoded
+        checked_weights = observation_weights(
+            weights,
+            encoded.rows,
+            label="multinomial observation weights",
+        )
+        w = checked_weights[idx] * icnt[idx] if self.len_normalized else checked_weights[idx]
         w = w * enc_w
 
         self.accumulator.seq_initialize(enc_seq, w, self._acc_rng)
-        self.len_accumulator.seq_initialize(enc_nseq, weights * enc_ww, self._len_rng)
+        self.len_accumulator.seq_initialize(enc_nseq, checked_weights, self._len_rng)
 
     def combine(self, suff_stat: tuple[SS1, SS2 | None]) -> MultinomialAccumulator:
         """Merge aggregated multinomial sufficient statistics into this accumulator.
@@ -840,7 +1089,9 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
     def acc_to_encoder(self) -> MultinomialDataEncoder:
         """Return an encoder compatible with sparse multinomial observations."""
         return MultinomialDataEncoder(
-            encoder=self.accumulator.acc_to_encoder(), len_encoder=self.len_accumulator.acc_to_encoder()
+            encoder=self.accumulator.acc_to_encoder(),
+            len_encoder=self.len_accumulator.acc_to_encoder(),
+            len_normalized=self.len_normalized,
         )
 
 
@@ -870,6 +1121,8 @@ class MultinomialAccumulatorFactory(StatisticAccumulatorFactory):
 
         """
         self.est_factory = est_factory
+        if not isinstance(len_normalized, bool):
+            raise TypeError("multinomial accumulator factory len_normalized must be a bool")
         self.len_normalized = len_normalized
         self.len_factory = len_factory
         self.keys = keys
@@ -916,6 +1169,8 @@ class MultinomialEstimator(ParameterEstimator):
         self.estimator = estimator
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.len_dist = len_dist
+        if not isinstance(len_normalized, bool):
+            raise TypeError("multinomial estimator len_normalized must be a bool")
         self.len_normalized = len_normalized
         self.keys = keys
         self.name = name
@@ -947,7 +1202,12 @@ class MultinomialEstimator(ParameterEstimator):
 class MultinomialDataEncoder(DataSequenceEncoder):
     """Encode sparse categorical multinomial observations for vectorized scoring."""
 
-    def __init__(self, encoder: DataSequenceEncoder, len_encoder: DataSequenceEncoder) -> None:
+    def __init__(
+        self,
+        encoder: DataSequenceEncoder,
+        len_encoder: DataSequenceEncoder,
+        len_normalized: bool = False,
+    ) -> None:
         """Create an encoder for sparse multinomial observations.
 
         ``encoder`` handles individual trial values and ``len_encoder`` handles
@@ -964,6 +1224,9 @@ class MultinomialDataEncoder(DataSequenceEncoder):
         """
         self.encoder = encoder
         self.len_encoder = len_encoder
+        if not isinstance(len_normalized, bool):
+            raise TypeError("multinomial encoder len_normalized must be a bool")
+        self.len_normalized = len_normalized
 
     def __eq__(self, other: object) -> bool:
         """Return whether ``other`` uses the same length encoder.
@@ -976,14 +1239,20 @@ class MultinomialDataEncoder(DataSequenceEncoder):
             equivalent length encoder.
 
         """
-        if isinstance(other, MultinomialDataEncoder):
-            return other.len_encoder == self.len_encoder
-        else:
-            return False
+        return (
+            isinstance(other, MultinomialDataEncoder)
+            and other.encoder == self.encoder
+            and other.len_encoder == self.len_encoder
+            and other.len_normalized == self.len_normalized
+        )
 
     def __str__(self) -> str:
         """Return a readable encoder summary."""
-        return "MultinomialDataEncoder(len_encoder=" + str(self.len_encoder) + ")"
+        return "MultinomialDataEncoder(encoder=%s, len_encoder=%s, len_normalized=%r)" % (
+            self.encoder,
+            self.len_encoder,
+            self.len_normalized,
+        )
 
     def seq_encode(self, x: Sequence[Sequence[tuple[T, float]]]):
         """Encode iid multinomial observations for vectorized ``seq_*`` methods.
@@ -1005,26 +1274,26 @@ class MultinomialDataEncoder(DataSequenceEncoder):
 
         """
         tx = []
-        nx = []
         tidx = []
         cc = []
         ccc = []
 
+        maximum = int(np.iinfo(np.int64).max)
         for i in range(len(x)):
-            nx.append(len(x[i]))
-            aa = 0
-            for j in range(len(x[i])):
+            pairs, total = canonical_bag(x[i])
+            if total > maximum:
+                raise ValueError("multinomial row total exceeds signed 64-bit range")
+            for value, count in pairs:
                 tidx.append(i)
-                tx.append(x[i][j][0])
-                cc.append(x[i][j][1])
-                aa += x[i][j][1]
-            ccc.append(aa)
+                tx.append(value)
+                cc.append(count)
+            ccc.append(total)
 
-        rv1 = np.asarray(tidx, dtype=int)
-        rv2 = np.asarray(ccc, dtype=float)
+        rv1 = np.asarray(tidx, dtype=np.int64)
+        rv2 = np.asarray(ccc, dtype=np.float64)
         rv3 = rv2 != 0
-        rv6 = np.asarray(cc, dtype=float)
-        rv7 = np.asarray(ccc, dtype=float)
+        rv6 = np.asarray(cc, dtype=np.int64)
+        rv7 = np.asarray(ccc, dtype=np.int64)
 
         rv2[rv3] = 1.0 / rv2[rv3]
         # rv2[rv3] = 1.0
@@ -1036,7 +1305,25 @@ class MultinomialDataEncoder(DataSequenceEncoder):
         else:
             rv5 = None
 
-        return rv1, rv2, rv3, rv4, rv5, rv6, rv7
+        return MultinomialEncodedData(
+            rv1,
+            rv2,
+            rv3,
+            rv4,
+            rv5,
+            rv6,
+            rv7,
+            self.len_normalized,
+        )
+
+    def row_count(self, x: Any) -> int:
+        """Return the number of bag observations in a validated encoding."""
+        return _encoded(
+            x,
+            len_normalized=self.len_normalized,
+            value_encoder=self.encoder,
+            length_encoder=self.len_encoder,
+        ).rows
 
 
 # --- Fisher view(s) co-located with this family ---
@@ -1044,10 +1331,8 @@ class MultinomialFisherView(SequenceFisherView):
     """Fisher view for bag/count observations with a count-weighted child model.
 
     The model Fisher uses the canonical multinomial/count sufficient-statistic
-    moments that match estimation.  The repo's MultinomialDistribution
-    log_density intentionally omits the multinomial coefficient in its
-    enumerator score; that coefficient is a base-measure term, not an
-    accumulator statistic.
+    moments that match estimation. The multinomial coefficient is a
+    base-measure term, not an accumulator statistic.
     """
 
     def _labels_from_children(self) -> list[Path]:
@@ -1073,6 +1358,12 @@ class MultinomialFisherView(SequenceFisherView):
         return out
 
     def _statistics_from_encoded(self, enc_data: Any, estimate: Any | None = None) -> np.ndarray:
+        enc_data = _encoded(
+            enc_data,
+            len_normalized=self.dist.len_normalized,
+            value_encoder=self.dist.dist.dist_to_encoder(),
+            length_encoder=self.dist.len_dist.dist_to_encoder(),
+        )
         idx, _, _, enc_seq, enc_len, counts, totals = enc_data
         idx = np.asarray(idx, dtype=np.int64)
         totals = np.asarray(totals, dtype=np.float64)
