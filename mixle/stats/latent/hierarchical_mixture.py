@@ -49,6 +49,14 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_observation_weights,
+    validated_statistic_tuple,
+    validated_weighted_responsibilities,
+)
 from mixle.stats.latent.mixture import MixtureDistribution, _owned_generative_components
 
 T = TypeVar("T")  ## Data type for topics
@@ -615,6 +623,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             None.
 
         """
+        weight = validated_observation_weight(weight, "hierarchical-mixture observation weight")
         enc_x = estimate.dist_to_encoder().seq_encode([x])
         self.seq_update(enc_x, np.asarray([weight]), estimate)
 
@@ -648,6 +657,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             None.
 
         """
+        weight = validated_observation_weight(weight, "hierarchical-mixture initialization weight")
         if not self._init_rng:
             self._rng_initialize(rng)
 
@@ -688,6 +698,11 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         """
         sz, idx, cnt, enc_data, enc_len = x
+        weights = validated_observation_weights(
+            weights,
+            sz,
+            "hierarchical-mixture initialization weights",
+        )
         tsz = len(idx)
 
         if not self._init_rng:
@@ -734,6 +749,9 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         """
         sz, idx, cnt, enc_data, enc_len = x
+        weights = validated_observation_weights(weights, sz, "hierarchical-mixture observation weights")
+        if len(estimate.topics) != self.num_topics or len(estimate.w) != self.num_mixtures:
+            raise ValueError("hierarchical-mixture estimate and accumulator geometry must match")
         tsz = len(idx)
 
         ll_mat = np.zeros((tsz, self.num_topics))
@@ -766,6 +784,13 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         rv += ll_max_sum[:, None]
         normalized = normalize_mixture_log_scores(rv)
         rv = normalized.responsibilities
+        weighted_outer = validated_weighted_responsibilities(
+            rv * weights[:, None],
+            weights,
+            self.num_mixtures,
+            label="hierarchical-mixture outer responsibilities",
+            allow_unassigned=True,
+        )
         if self._track_ll:
             row_ll = normalized.log_evidence.copy()
             if estimate is not None and estimate.len_dist is not None:
@@ -774,7 +799,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         # Outer weights: accumulate the DOCUMENT-level outer posteriors (one row per document,
         # weighted by the document weight) -- the EM maximizer for `w`. The token-level expansion
         # below (rv[idx, :]) feeds only the taus/topic statistics.
-        self.w_counts += np.dot(weights, rv)
+        self.w_counts += weighted_outer.sum(axis=0)
         rv = rv[idx, :]
         ww = np.reshape(weights[idx], (-1, 1))
 
@@ -804,7 +829,13 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         sz, idx, cnt, enc_data, enc_len = x
         tsz = len(idx)
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        weights_np = validated_observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            sz,
+            "hierarchical-mixture observation weights",
+        )
+        if len(estimate.topics) != self.num_topics or len(estimate.w) != self.num_mixtures:
+            raise ValueError("hierarchical-mixture estimate and accumulator geometry must match")
         if tsz == 0:
             if sz and estimate is not None:
                 # every document is empty: its outer posterior is the prior (matches host seq_update)
@@ -835,7 +866,14 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         rv = normalize_engine_mixture_log_scores(rv, engine).responsibilities
 
         # Outer weights: document-level outer-posterior sums (matches the host seq_update).
-        self.w_counts += np.dot(weights_np, np.asarray(engine.to_numpy(rv)))
+        weighted_outer = validated_weighted_responsibilities(
+            np.asarray(engine.to_numpy(rv)) * weights_np[:, None],
+            weights_np,
+            self.num_mixtures,
+            label="hierarchical-mixture outer responsibilities",
+            allow_unassigned=True,
+        )
+        self.w_counts += weighted_outer.sum(axis=0)
 
         rv_items = rv[idx_e, :]  # (tsz, M)
         ww = engine.asarray(weights_np)[idx_e][:, None]
@@ -879,8 +917,21 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             HierarchicalMixtureEstimatorAccumulator object.
 
         """
-        self.comp_counts += np.asarray(suff_stat[0], dtype=np.float64)
-        self.w_counts += np.asarray(suff_stat[1], dtype=np.float64)
+        suff_stat = validated_statistic_tuple(suff_stat, 4, "hierarchical-mixture sufficient statistics")
+        counts = validated_count_array(
+            suff_stat[0],
+            (self.num_mixtures, self.num_topics),
+            "hierarchical-mixture topic counts",
+        )
+        w_counts = validated_count_array(
+            suff_stat[1],
+            (self.num_mixtures,),
+            "hierarchical-mixture outer counts",
+        )
+        if not isinstance(suff_stat[2], (tuple, list)) or len(suff_stat[2]) != self.num_topics:
+            raise ValueError("hierarchical-mixture child statistics must match the topic count")
+        self.comp_counts += counts
+        self.w_counts += w_counts
         for i in range(self.num_topics):
             self.accumulators[i].combine(copy.deepcopy(suff_stat[2][i]))
 
@@ -915,8 +966,19 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             HierarchicalMixtureEstimatorAccumulator object.
 
         """
-        self.comp_counts = np.asarray(x[0], dtype=np.float64).copy()
-        self.w_counts = np.asarray(x[1], dtype=np.float64).copy()
+        x = validated_statistic_tuple(x, 4, "hierarchical-mixture sufficient statistics")
+        self.comp_counts = validated_count_array(
+            x[0],
+            (self.num_mixtures, self.num_topics),
+            "hierarchical-mixture topic counts",
+        )
+        self.w_counts = validated_count_array(
+            x[1],
+            (self.num_mixtures,),
+            "hierarchical-mixture outer counts",
+        )
+        if not isinstance(x[2], (tuple, list)) or len(x[2]) != self.num_topics:
+            raise ValueError("hierarchical-mixture child statistics must match the topic count")
         for i in range(self.num_topics):
             self.accumulators[i].from_value(copy.deepcopy(x[2][i]))
 
@@ -926,6 +988,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
     def scale(self, c: float) -> "HierarchicalMixtureEstimatorAccumulator":
         """Scale linear counts and delegate child/length sufficient statistics."""
+        c = validated_observation_weight(c, "hierarchical-mixture statistic scale")
         self.comp_counts *= c
         self.w_counts *= c
         for acc in self.accumulators:
@@ -1136,10 +1199,37 @@ class HierarchicalMixtureEstimator(ParameterEstimator):
         """
         num_components = self.num_components
         num_mixtures = self.num_mixtures
-        counts, w_counts, comp_suff_stats, len_suff_stats = suff_stat
-        len_dist = self.len_estimator.estimate(None, len_suff_stats) if len_suff_stats is not None else self.len_dist
+        counts, w_counts, comp_suff_stats, len_suff_stats = validated_statistic_tuple(
+            suff_stat,
+            4,
+            "hierarchical-mixture sufficient statistics",
+        )
+        counts = validated_count_array(
+            counts,
+            (num_mixtures, num_components),
+            "hierarchical-mixture topic counts",
+        )
+        w_counts = validated_count_array(
+            w_counts,
+            (num_mixtures,),
+            "hierarchical-mixture outer counts",
+        )
+        if not isinstance(comp_suff_stats, (tuple, list)) or len(comp_suff_stats) != num_components:
+            raise ValueError("hierarchical-mixture child statistics must match the topic count")
+        outer_mass = float(w_counts.sum())
+        validate_effective_sample_mass(
+            nobs,
+            outer_mass,
+            label="hierarchical-mixture effective sample",
+            allow_unassigned=True,
+        )
+        len_dist = (
+            self.len_estimator.estimate(outer_mass, len_suff_stats) if len_suff_stats is not None else self.len_dist
+        )
 
-        components = [self.estimators[i].estimate(None, comp_suff_stats[i]) for i in range(num_components)]
+        components = [
+            self.estimators[i].estimate(float(counts[:, i].sum()), comp_suff_stats[i]) for i in range(num_components)
+        ]
 
         if self.pseudo_count is not None and self.suff_stat is None:
             p = self.pseudo_count / (num_components * num_mixtures)

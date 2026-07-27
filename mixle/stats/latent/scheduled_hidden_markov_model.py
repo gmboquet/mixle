@@ -43,6 +43,13 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_observation_weights,
+    validated_statistic_tuple,
+)
 from mixle.utils.vector import require_possible_log_evidence
 
 _NEG_INF = -np.inf
@@ -457,6 +464,7 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
         self.len_factory = len_factory
         self.init_counts = np.zeros((self.n_phases, self.n_states))
         self.trans_counts = np.zeros((self.n_phases, self.n_states, self.n_states))
+        self.emission_counts = np.zeros((self.n_phases, self.n_states))
         self.emission_acc = [
             [self.emission_factories[p][j].make() for j in range(self.n_states)] for p in range(self.n_phases)
         ]
@@ -473,12 +481,14 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
             self.trans_counts[_schedule_phase(self.schedule, t, length)] += weight * xi[t]
         for t in range(length):
             p = _schedule_phase(self.schedule, t, length)
+            self.emission_counts[p] += weight * gamma[t]
             for j in range(self.n_states):
                 prev = None if estimate is None else estimate.emissions[p][j]
                 self.emission_acc[p][j].update(x[t], weight * gamma[t, j], prev)
 
     def update(self, x: list[Any], weight: float, estimate: ScheduledHiddenMarkovModelDistribution) -> None:
         """Accumulate sufficient statistics from one weighted sequence."""
+        weight = validated_observation_weight(weight, "scheduled-HMM observation weight")
         require_possible_log_evidence(
             estimate.log_density(x),
             context="ScheduledHMMAccumulator.update",
@@ -494,6 +504,7 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: Any, weights: np.ndarray, estimate: ScheduledHiddenMarkovModelDistribution) -> None:
         """Accumulate weighted sufficient statistics from a batch."""
+        weights = validated_observation_weights(weights, len(x), "scheduled-HMM observation weights")
         require_possible_log_evidence(
             estimate.seq_log_density(x),
             context="ScheduledHMMAccumulator.seq_update",
@@ -514,6 +525,7 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def initialize(self, x: list[Any], weight: float, rng: RandomState) -> None:
         """Initialize sufficient statistics with random soft state responsibilities."""
+        weight = validated_observation_weight(weight, "scheduled-HMM initialization weight")
         length = len(x)
         if length == 0:
             self._accumulate(x, weight, np.zeros((0, self.n_states)), np.zeros((0, self.n_states, self.n_states)), None)
@@ -526,14 +538,27 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_initialize(self, x: Any, weights: np.ndarray, rng: RandomState) -> None:
         """Initialize sufficient statistics from a weighted batch."""
+        weights = validated_observation_weights(weights, len(x), "scheduled-HMM initialization weights")
         for seq, w in zip(x, weights):
             self.initialize(seq, float(w), rng)
 
     def combine(self, other: Any) -> ScheduledHMMAccumulator:
         """Merge serialized scheduled HMM sufficient statistics."""
-        ic, tc, em, lv = other
+        ic, tc, ec, em, lv = validated_statistic_tuple(other, 5, "scheduled-HMM sufficient statistics")
+        ic = validated_count_array(ic, self.init_counts.shape, "scheduled-HMM initial counts")
+        tc = validated_count_array(tc, self.trans_counts.shape, "scheduled-HMM transition counts")
+        ec = validated_count_array(ec, self.emission_counts.shape, "scheduled-HMM emission counts")
+        if not np.isclose(float(ec.sum()), float(ic.sum() + tc.sum()), rtol=1.0e-9, atol=1.0e-9):
+            raise ValueError("scheduled-HMM emission counts must equal initial plus transition mass")
+        em = _owned_emission_grid(
+            em,
+            self.n_phases,
+            self.n_states,
+            "ScheduledHMMAccumulator emission statistics",
+        )
         self.init_counts += ic
         self.trans_counts += tc
+        self.emission_counts += ec
         for p in range(self.n_phases):
             for j in range(self.n_states):
                 self.emission_acc[p][j].combine(em[p][j])
@@ -547,15 +572,30 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
         return (
             self.init_counts.copy(),
             self.trans_counts.copy(),
+            self.emission_counts.copy(),
             em,
             None if self.len_acc is None else self.len_acc.value(),
         )
 
     def from_value(self, value: tuple) -> ScheduledHMMAccumulator:
         """Restore accumulator state from serialized sufficient statistics."""
-        ic, tc, em, lv = value
-        self.init_counts = np.array(ic, dtype=float)
-        self.trans_counts = np.array(tc, dtype=float)
+        ic, tc, ec, em, lv = validated_statistic_tuple(value, 5, "scheduled-HMM sufficient statistics")
+        self.init_counts = validated_count_array(ic, self.init_counts.shape, "scheduled-HMM initial counts")
+        self.trans_counts = validated_count_array(tc, self.trans_counts.shape, "scheduled-HMM transition counts")
+        self.emission_counts = validated_count_array(ec, self.emission_counts.shape, "scheduled-HMM emission counts")
+        if not np.isclose(
+            float(self.emission_counts.sum()),
+            float(self.init_counts.sum() + self.trans_counts.sum()),
+            rtol=1.0e-9,
+            atol=1.0e-9,
+        ):
+            raise ValueError("scheduled-HMM emission counts must equal initial plus transition mass")
+        em = _owned_emission_grid(
+            em,
+            self.n_phases,
+            self.n_states,
+            "ScheduledHMMAccumulator emission statistics",
+        )
         for p in range(self.n_phases):
             for j in range(self.n_states):
                 self.emission_acc[p][j].from_value(em[p][j])
@@ -660,22 +700,25 @@ class ScheduledHMMEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> ScheduledHiddenMarkovModelDistribution:
         """Estimate phase-indexed initial, transition, emission, and length models."""
-        try:
-            ic, tc, em_vals, lv = suff_stat
-        except (TypeError, ValueError) as exc:
-            raise ValueError("ScheduledHMMEstimator sufficient statistics must contain four entries.") from exc
-        ic = np.asarray(ic, dtype=np.float64)
-        tc = np.asarray(tc, dtype=np.float64)
+        ic, tc, ec, em_vals, lv = validated_statistic_tuple(
+            suff_stat,
+            5,
+            "scheduled-HMM sufficient statistics",
+        )
         expected_initial = (self.schedule.n_phases, self.n_states)
         expected_transition = (self.schedule.n_phases, self.n_states, self.n_states)
-        if ic.shape != expected_initial:
-            raise ValueError(f"scheduled HMM initial counts must have shape {expected_initial}.")
-        if tc.shape != expected_transition:
-            raise ValueError(f"scheduled HMM transition counts must have shape {expected_transition}.")
-        if np.any(~np.isfinite(ic)) or np.any(ic < 0.0):
-            raise ValueError("scheduled HMM initial counts must be finite and non-negative.")
-        if np.any(~np.isfinite(tc)) or np.any(tc < 0.0):
-            raise ValueError("scheduled HMM transition counts must be finite and non-negative.")
+        expected_emission = expected_initial
+        ic = validated_count_array(ic, expected_initial, "scheduled-HMM initial counts")
+        tc = validated_count_array(tc, expected_transition, "scheduled-HMM transition counts")
+        ec = validated_count_array(ec, expected_emission, "scheduled-HMM emission counts")
+        if not np.isclose(float(ec.sum()), float(ic.sum() + tc.sum()), rtol=1.0e-9, atol=1.0e-9):
+            raise ValueError("scheduled-HMM emission counts must equal initial plus transition mass")
+        validate_effective_sample_mass(
+            nobs,
+            float(ic.sum()),
+            label="scheduled-HMM effective sample",
+            allow_unassigned=True,
+        )
         em_vals = _owned_emission_grid(
             em_vals,
             self.schedule.n_phases,
@@ -695,8 +738,8 @@ class ScheduledHMMEstimator(ParameterEstimator):
         for phase, state in np.argwhere(empty_transition):
             trans[phase, state, state] = 1.0
         emissions = [
-            [self.emission_estimators[p][j].estimate(None, em_vals[p][j]) for j in range(self.n_states)]
+            [self.emission_estimators[p][j].estimate(float(ec[p, j]), em_vals[p][j]) for j in range(self.n_states)]
             for p in range(self.schedule.n_phases)
         ]
-        len_dist = None if self.len_estimator is None else self.len_estimator.estimate(None, lv)
+        len_dist = None if self.len_estimator is None else self.len_estimator.estimate(nobs, lv)
         return ScheduledHiddenMarkovModelDistribution(inits, trans, emissions, self.schedule, len_dist, self.name)

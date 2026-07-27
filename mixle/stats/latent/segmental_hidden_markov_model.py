@@ -39,6 +39,14 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_observation_weights,
+    validated_positive_integer,
+    validated_statistic_tuple,
+)
 from mixle.stats.latent.markov_stopping import (
     DEFAULT_TERMINAL_STEP_CAP,
     require_terminal_reached,
@@ -518,10 +526,12 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Sequence[Any], weight: float, estimate: SegmentalHiddenMarkovModelDistribution) -> None:
         """Update sufficient statistics for one observed segment sequence."""
+        weight = validated_observation_weight(weight, "segmental-HMM observation weight")
         self.seq_update(estimate.dist_to_encoder().seq_encode([x]), np.asarray([weight]), estimate)
 
     def initialize(self, x: Sequence[Any], weight: float, rng: RandomState) -> None:
         """Randomly initialize sufficient statistics for one segment sequence."""
+        weight = validated_observation_weight(weight, "segmental-HMM initialization weight")
         if not self._init_rng:
             self._rng_initialize(rng)
         enc = self.acc_to_encoder().seq_encode([x])
@@ -531,6 +541,7 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self, x: tuple[np.ndarray, np.ndarray, tuple[Any, ...], Any | None], weights: np.ndarray, rng: RandomState
     ) -> None:
         """Randomly initialize state and emission statistics for encoded sequences."""
+        weights = validated_observation_weights(weights, len(x[1]), "segmental-HMM initialization weights")
         if not self._init_rng:
             self._rng_initialize(rng)
         idx, sz, enc_by_state, len_enc = x
@@ -563,6 +574,9 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         estimate: SegmentalHiddenMarkovModelDistribution,
     ) -> None:
         """Update encoded-sequence statistics with Baum-Welch posteriors."""
+        weights = validated_observation_weights(weights, len(x[1]), "segmental-HMM observation weights")
+        if estimate.n_states != self.num_states:
+            raise ValueError("segmental-HMM estimate and accumulator state counts must match")
         require_possible_log_evidence(
             estimate.seq_log_density(x),
             context="SegmentalHiddenMarkovAccumulator.seq_update",
@@ -624,6 +638,13 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         """
         from mixle.stats.latent.hidden_markov import hmm_engine_forward_backward, hmm_pad_log_emissions
 
+        weights_np = validated_observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            len(x[1]),
+            "segmental-HMM observation weights",
+        )
+        if estimate.n_states != self.num_states:
+            raise ValueError("segmental-HMM estimate and accumulator state counts must match")
         require_possible_log_evidence(
             estimate.seq_log_density(x),
             context="SegmentalHiddenMarkovAccumulator.seq_update_engine",
@@ -641,8 +662,6 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         with np.errstate(divide="ignore"):
             log_w = estimate.log_w
             log_a = estimate.log_transitions
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
-
         _, gamma, xi_sum, pi = hmm_engine_forward_backward(engine, padded, log_w, log_a, mask, weights=weights_np)
         gamma = np.asarray(engine.to_numpy(gamma))
         xi_sum = np.asarray(engine.to_numpy(xi_sum))
@@ -665,7 +684,30 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self, suff_stat: tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Any], Any | None]
     ) -> "SegmentalHiddenMarkovAccumulator":
         """Merge another segmental-HMM sufficient-statistic value."""
-        _, init_counts, state_counts, trans_counts, acc_values, len_value = suff_stat
+        num_states, init_counts, state_counts, trans_counts, acc_values, len_value = validated_statistic_tuple(
+            suff_stat,
+            6,
+            "segmental-HMM sufficient statistics",
+        )
+        num_states = validated_positive_integer(num_states, "segmental-HMM statistic state count")
+        if num_states != self.num_states:
+            raise ValueError("segmental-HMM statistic state count must match the accumulator")
+        init_counts = validated_count_array(init_counts, (num_states,), "segmental-HMM initial counts")
+        state_counts = validated_count_array(state_counts, (num_states,), "segmental-HMM state counts")
+        trans_counts = validated_count_array(
+            trans_counts,
+            (num_states, num_states),
+            "segmental-HMM transition counts",
+        )
+        if not np.isclose(
+            float(state_counts.sum()),
+            float(init_counts.sum() + trans_counts.sum()),
+            rtol=1.0e-9,
+            atol=1.0e-9,
+        ):
+            raise ValueError("segmental-HMM state counts must equal initial plus transition mass")
+        if not isinstance(acc_values, (tuple, list)) or len(acc_values) != num_states:
+            raise ValueError("segmental-HMM emission statistics must match the state count")
         self.init_counts += init_counts
         self.state_counts += state_counts
         self.trans_counts += trans_counts
@@ -690,11 +732,30 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self, x: tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Any], Any | None]
     ) -> "SegmentalHiddenMarkovAccumulator":
         """Replace this accumulator from serialized sufficient statistics."""
-        num_states, init_counts, state_counts, trans_counts, acc_values, len_value = x
-        self.num_states = num_states
-        self.init_counts = init_counts
-        self.state_counts = state_counts
-        self.trans_counts = trans_counts
+        num_states, init_counts, state_counts, trans_counts, acc_values, len_value = validated_statistic_tuple(
+            x,
+            6,
+            "segmental-HMM sufficient statistics",
+        )
+        num_states = validated_positive_integer(num_states, "segmental-HMM statistic state count")
+        if num_states != self.num_states:
+            raise ValueError("segmental-HMM statistic state count must match the accumulator")
+        self.init_counts = validated_count_array(init_counts, (num_states,), "segmental-HMM initial counts")
+        self.state_counts = validated_count_array(state_counts, (num_states,), "segmental-HMM state counts")
+        self.trans_counts = validated_count_array(
+            trans_counts,
+            (num_states, num_states),
+            "segmental-HMM transition counts",
+        )
+        if not np.isclose(
+            float(self.state_counts.sum()),
+            float(self.init_counts.sum() + self.trans_counts.sum()),
+            rtol=1.0e-9,
+            atol=1.0e-9,
+        ):
+            raise ValueError("segmental-HMM state counts must equal initial plus transition mass")
+        if not isinstance(acc_values, (tuple, list)) or len(acc_values) != num_states:
+            raise ValueError("segmental-HMM emission statistics must match the state count")
         for k, value in enumerate(acc_values):
             self.accumulators[k].from_value(value)
         if len_value is not None:
@@ -703,6 +764,7 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
     def scale(self, c: float) -> "SegmentalHiddenMarkovAccumulator":
         """Scale all weight-linear sufficient statistics by ``c``."""
+        c = validated_observation_weight(c, "segmental-HMM statistic scale")
         self.init_counts *= c
         self.state_counts *= c
         self.trans_counts *= c
@@ -821,12 +883,7 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
         suff_stat: tuple[int, np.ndarray, np.ndarray, np.ndarray, Sequence[Any], Any | None],
     ) -> SegmentalHiddenMarkovModelDistribution:
         """Estimate initial, transition, emission, and length distributions."""
-        try:
-            values = tuple(suff_stat)
-        except TypeError as exc:
-            raise TypeError("segmental HMM sufficient statistics must contain six entries.") from exc
-        if len(values) != 6:
-            raise ValueError("segmental HMM sufficient statistics must contain exactly six entries.")
+        values = validated_statistic_tuple(suff_stat, 6, "segmental-HMM sufficient statistics")
         num_states, init_counts, state_counts, trans_counts, emission_ss, len_ss = values
         if isinstance(num_states, bool) or not isinstance(num_states, (int, np.integer)):
             raise TypeError("segmental HMM sufficient-statistic state count must be an integer.")
@@ -854,6 +911,19 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
             emission_ss,
             "segmental HMM emission sufficient statistics",
             size=num_states,
+        )
+        if not np.isclose(
+            float(state_counts.sum()),
+            float(init_counts.sum() + trans_counts.sum()),
+            rtol=1.0e-9,
+            atol=1.0e-9,
+        ):
+            raise ValueError("segmental-HMM state counts must equal initial plus transition mass")
+        validate_effective_sample_mass(
+            nobs,
+            float(init_counts.sum()),
+            label="segmental-HMM effective sample",
+            allow_unassigned=True,
         )
         emissions = [self.estimators[k].estimate(state_counts[k], emission_ss[k]) for k in range(num_states)]
         len_dist = self.len_estimator.estimate(nobs, len_ss)

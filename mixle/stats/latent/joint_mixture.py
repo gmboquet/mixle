@@ -44,6 +44,14 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_observation_weights,
+    validated_statistic_tuple,
+    validated_weighted_responsibilities,
+)
 
 T0 = TypeVar("T0")
 T1 = TypeVar("T1")
@@ -560,6 +568,7 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        weight = validated_observation_weight(weight, "joint-mixture observation weight")
         enc_x = estimate.dist_to_encoder().seq_encode([x])
         self.seq_update(enc_x, np.asarray([weight]), estimate)
 
@@ -591,6 +600,7 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             rng: Random state used to seed child accumulator initializers.
 
         """
+        weight = validated_observation_weight(weight, "joint-mixture initialization weight")
         if not self._rng_init:
             self._rng_initialize(rng)
 
@@ -620,6 +630,7 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         sz, enc1, enc2 = x
+        weights = validated_observation_weights(weights, sz, "joint-mixture initialization weights")
 
         if not self._rng_init:
             self._rng_initialize(rng)
@@ -660,6 +671,9 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         sz, enc_data1, enc_data2 = x
+        weights = validated_observation_weights(weights, sz, "joint-mixture observation weights")
+        if len(estimate.components1) != self.num_components1 or len(estimate.components2) != self.num_components2:
+            raise ValueError("joint-mixture estimate and accumulator component geometry must match")
         ll1 = np.stack(
             [component.seq_log_density(enc_data1) for component in estimate.components1],
             axis=1,
@@ -672,8 +686,13 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         normalized = normalize_mixture_log_scores(pair_scores.reshape(sz, -1))
         if self._track_ll:
             self._seq_ll += float(np.dot(weights, normalized.log_evidence))
-        joint = normalized.responsibilities.reshape(sz, self.num_components1, self.num_components2)
-        joint *= np.asarray(weights, dtype=np.float64)[:, None, None]
+        joint = validated_weighted_responsibilities(
+            normalized.responsibilities * weights[:, None],
+            weights,
+            self.num_components1 * self.num_components2,
+            label="joint-mixture weighted responsibilities",
+            allow_unassigned=True,
+        ).reshape(sz, self.num_components1, self.num_components2)
         gamma_1 = joint.sum(axis=2)
         gamma_2 = joint.sum(axis=1)
 
@@ -695,7 +714,13 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         from mixle.stats.compute.backend import backend_seq_log_density
 
         sz, enc_data1, enc_data2 = x
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        weights_np = validated_observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            sz,
+            "joint-mixture observation weights",
+        )
+        if len(estimate.components1) != self.num_components1 or len(estimate.components2) != self.num_components2:
+            raise ValueError("joint-mixture estimate and accumulator component geometry must match")
 
         ll1 = engine.stack(
             [backend_seq_log_density(estimate.components1[i], enc_data1, engine) for i in range(self.num_components1)],
@@ -715,12 +740,18 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         gamma_1 = engine.sum(joint, axis=2)
         gamma_2 = engine.sum(joint, axis=1)
 
-        self.comp_counts1 += np.asarray(engine.to_numpy(engine.sum(gamma_1, axis=0))).flatten()
-        self.comp_counts2 += np.asarray(engine.to_numpy(engine.sum(gamma_2, axis=0))).flatten()
-        self.joint_counts += np.asarray(engine.to_numpy(engine.sum(joint, axis=0)))
-
-        g1 = np.asarray(engine.to_numpy(gamma_1))
-        g2 = np.asarray(engine.to_numpy(gamma_2))
+        joint_np = validated_weighted_responsibilities(
+            engine.to_numpy(joint).reshape((sz, self.num_components1 * self.num_components2)),
+            weights_np,
+            self.num_components1 * self.num_components2,
+            label="joint-mixture weighted responsibilities",
+            allow_unassigned=True,
+        ).reshape((sz, self.num_components1, self.num_components2))
+        g1 = joint_np.sum(axis=2)
+        g2 = joint_np.sum(axis=1)
+        self.comp_counts1 += g1.sum(axis=0)
+        self.comp_counts2 += g2.sum(axis=0)
+        self.joint_counts += joint_np.sum(axis=0)
         for i in range(self.num_components1):
             self.accumulators1[i].seq_update(enc_data1, g1[:, i], estimate.components1[i])
         for i in range(self.num_components2):
@@ -741,13 +772,27 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             This accumulator.
 
         """
-        cc1, cc2, jc, s1, s2 = suff_stat
-
-        self.joint_counts += np.asarray(jc, dtype=np.float64)
-        self.comp_counts1 += np.asarray(cc1, dtype=np.float64)
+        cc1, cc2, jc, s1, s2 = validated_statistic_tuple(
+            suff_stat,
+            5,
+            "joint-mixture sufficient statistics",
+        )
+        cc1 = validated_count_array(cc1, (self.num_components1,), "joint-mixture X1 counts")
+        cc2 = validated_count_array(cc2, (self.num_components2,), "joint-mixture X2 counts")
+        jc = validated_count_array(
+            jc,
+            (self.num_components1, self.num_components2),
+            "joint-mixture pair counts",
+        )
+        if not isinstance(s1, (tuple, list)) or len(s1) != self.num_components1:
+            raise ValueError("joint-mixture X1 child statistics must match the component count")
+        if not isinstance(s2, (tuple, list)) or len(s2) != self.num_components2:
+            raise ValueError("joint-mixture X2 child statistics must match the component count")
+        self.joint_counts += jc
+        self.comp_counts1 += cc1
         for i in range(self.num_components1):
             self.accumulators1[i].combine(copy.deepcopy(s1[i]))
-        self.comp_counts2 += np.asarray(cc2, dtype=np.float64)
+        self.comp_counts2 += cc2
         for i in range(self.num_components2):
             self.accumulators2[i].combine(copy.deepcopy(s2[i]))
 
@@ -775,11 +820,22 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             This accumulator.
 
         """
-        cc1, cc2, jc, s1, s2 = x
-
-        self.comp_counts1 = np.asarray(cc1, dtype=np.float64).copy()
-        self.comp_counts2 = np.asarray(cc2, dtype=np.float64).copy()
-        self.joint_counts = np.asarray(jc, dtype=np.float64).copy()
+        cc1, cc2, jc, s1, s2 = validated_statistic_tuple(
+            x,
+            5,
+            "joint-mixture sufficient statistics",
+        )
+        self.comp_counts1 = validated_count_array(cc1, (self.num_components1,), "joint-mixture X1 counts")
+        self.comp_counts2 = validated_count_array(cc2, (self.num_components2,), "joint-mixture X2 counts")
+        self.joint_counts = validated_count_array(
+            jc,
+            (self.num_components1, self.num_components2),
+            "joint-mixture pair counts",
+        )
+        if not isinstance(s1, (tuple, list)) or len(s1) != self.num_components1:
+            raise ValueError("joint-mixture X1 child statistics must match the component count")
+        if not isinstance(s2, (tuple, list)) or len(s2) != self.num_components2:
+            raise ValueError("joint-mixture X2 child statistics must match the component count")
 
         for i in range(self.num_components1):
             self.accumulators1[i].from_value(copy.deepcopy(s1[i]))
@@ -975,12 +1031,38 @@ class JointMixtureEstimator(ParameterEstimator):
         """
         num_components1 = self.num_components1
         num_components2 = self.num_components2
-        counts1, counts2, joint_counts, comp_suff_stats1, comp_suff_stats2 = suff_stat
+        counts1, counts2, joint_counts, comp_suff_stats1, comp_suff_stats2 = validated_statistic_tuple(
+            suff_stat,
+            5,
+            "joint-mixture sufficient statistics",
+        )
+        counts1 = validated_count_array(counts1, (num_components1,), "joint-mixture X1 counts")
+        counts2 = validated_count_array(counts2, (num_components2,), "joint-mixture X2 counts")
+        joint_counts = validated_count_array(
+            joint_counts,
+            (num_components1, num_components2),
+            "joint-mixture pair counts",
+        )
+        if not isinstance(comp_suff_stats1, (tuple, list)) or len(comp_suff_stats1) != num_components1:
+            raise ValueError("joint-mixture X1 child statistics must match the component count")
+        if not isinstance(comp_suff_stats2, (tuple, list)) or len(comp_suff_stats2) != num_components2:
+            raise ValueError("joint-mixture X2 child statistics must match the component count")
+        mass = float(joint_counts.sum())
+        if not np.isclose(float(counts1.sum()), mass, rtol=1.0e-9, atol=1.0e-9):
+            raise ValueError("joint-mixture X1 counts must equal pair responsibility mass")
+        if not np.isclose(float(counts2.sum()), mass, rtol=1.0e-9, atol=1.0e-9):
+            raise ValueError("joint-mixture X2 counts must equal pair responsibility mass")
+        validate_effective_sample_mass(
+            nobs,
+            mass,
+            label="joint-mixture effective sample",
+            allow_unassigned=True,
+        )
 
         components1 = [self.estimators1[i].estimate(counts1[i], comp_suff_stats1[i]) for i in range(num_components1)]
         components2 = [self.estimators2[i].estimate(counts2[i], comp_suff_stats2[i]) for i in range(num_components2)]
 
-        joint = np.asarray(joint_counts, dtype=np.float64).copy()
+        joint = joint_counts.copy()
         if self.pseudo_count is not None:
             pseudo_total = float(sum(self.pseudo_count))
             if pseudo_total > 0.0:

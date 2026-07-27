@@ -42,6 +42,14 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_observation_weights,
+    validated_statistic_tuple,
+    validated_weighted_responsibilities,
+)
 from mixle.stats.latent.mixture import _owned_generative_components
 from mixle.utils.aliasing import MISSING, coalesce_alias
 
@@ -608,8 +616,18 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        weight = validated_observation_weight(weight, "heterogeneous-mixture observation weight")
+        if estimate.num_components != self.num_components:
+            raise ValueError("heterogeneous-mixture estimate and accumulator component counts must match")
         posterior = estimate.posterior(x)
         posterior *= weight
+        posterior = validated_weighted_responsibilities(
+            posterior[None, :],
+            np.asarray([weight]),
+            self.num_components,
+            label="heterogeneous-mixture weighted responsibility",
+            allow_unassigned=True,
+        )[0]
         self.comp_counts += posterior
 
         for i in range(self.num_components):
@@ -650,6 +668,7 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        weight = validated_observation_weight(weight, "heterogeneous-mixture initialization weight")
         if not self._init_rng:
             self._rng_initialize(rng)
 
@@ -689,6 +708,12 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        rows = self.acc_to_encoder().row_count(x)
+        weights = validated_observation_weights(
+            weights,
+            rows,
+            "heterogeneous-mixture initialization weights",
+        )
         if not self._init_rng:
             self._rng_initialize(rng)
 
@@ -740,6 +765,10 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         tag_list, enc_data = x
+        rows = self.acc_to_encoder().row_count(x)
+        weights = validated_observation_weights(weights, rows, "heterogeneous-mixture observation weights")
+        if estimate.num_components != self.num_components:
+            raise ValueError("heterogeneous-mixture estimate and accumulator component counts must match")
         ll_mat_init = False
 
         for tag, tag_idxs in enumerate(tag_list):
@@ -756,7 +785,13 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         normalized = normalize_mixture_log_scores(ll_mat)
         if self._track_ll and ll_mat_init:
             self._seq_ll += float(np.dot(weights, normalized.log_evidence))
-        ll_mat = normalized.responsibilities * np.asarray(weights, dtype=np.float64)[:, None]
+        ll_mat = validated_weighted_responsibilities(
+            normalized.responsibilities * weights[:, None],
+            weights,
+            self.num_components,
+            label="heterogeneous-mixture weighted responsibilities",
+            allow_unassigned=True,
+        )
 
         for tag, tag_idxs in enumerate(tag_list):
             for i in tag_idxs:
@@ -775,7 +810,14 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
         tag_list, enc_data = x
         num_comp = self.num_components
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        rows = self.acc_to_encoder().row_count(x)
+        weights_np = validated_observation_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            rows,
+            "heterogeneous-mixture observation weights",
+        )
+        if estimate.num_components != self.num_components:
+            raise ValueError("heterogeneous-mixture estimate and accumulator component counts must match")
 
         cols = [None] * num_comp
         for tag, tag_idxs in enumerate(tag_list):
@@ -799,7 +841,13 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         normalized = normalize_engine_mixture_log_scores(ll_mat, engine)
         ll_mat = normalized.responsibilities * engine.asarray(weights_np)[:, None]
 
-        ll_np = np.asarray(engine.to_numpy(ll_mat))
+        ll_np = validated_weighted_responsibilities(
+            engine.to_numpy(ll_mat),
+            weights_np,
+            self.num_components,
+            label="heterogeneous-mixture weighted responsibilities",
+            allow_unassigned=True,
+        )
         for tag, tag_idxs in enumerate(tag_list):
             for i in tag_idxs:
                 w_loc = ll_np[:, i]
@@ -822,7 +870,15 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             HeterogeneousMixtureAccumulator object.
 
         """
-        self.comp_counts += np.asarray(suff_stat[0], dtype=np.float64)
+        suff_stat = validated_statistic_tuple(suff_stat, 2, "heterogeneous-mixture sufficient statistics")
+        counts = validated_count_array(
+            suff_stat[0],
+            (self.num_components,),
+            "heterogeneous-mixture component counts",
+        )
+        if not isinstance(suff_stat[1], (tuple, list)) or len(suff_stat[1]) != self.num_components:
+            raise ValueError("heterogeneous-mixture child statistics must match the component count")
+        self.comp_counts += counts
         for i in range(self.num_components):
             self.accumulators[i].combine(copy.deepcopy(suff_stat[1][i]))
 
@@ -859,7 +915,14 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             HeterogeneousMixtureAccumulator object.
 
         """
-        self.comp_counts = np.asarray(x[0], dtype=np.float64).copy()
+        x = validated_statistic_tuple(x, 2, "heterogeneous-mixture sufficient statistics")
+        self.comp_counts = validated_count_array(
+            x[0],
+            (self.num_components,),
+            "heterogeneous-mixture component counts",
+        )
+        if not isinstance(x[1], (tuple, list)) or len(x[1]) != self.num_components:
+            raise ValueError("heterogeneous-mixture child statistics must match the component count")
         for i in range(self.num_components):
             self.accumulators[i].from_value(copy.deepcopy(x[1][i]))
 
@@ -1035,7 +1098,21 @@ class HeterogeneousMixtureEstimator(ParameterEstimator):
 
         """
         num_components = self.num_components
-        counts, comp_suff_stats = suff_stat
+        suff_stat = validated_statistic_tuple(suff_stat, 2, "heterogeneous-mixture sufficient statistics")
+        counts = validated_count_array(
+            suff_stat[0],
+            (num_components,),
+            "heterogeneous-mixture component counts",
+        )
+        comp_suff_stats = suff_stat[1]
+        if not isinstance(comp_suff_stats, (tuple, list)) or len(comp_suff_stats) != num_components:
+            raise ValueError("heterogeneous-mixture child statistics must match the component count")
+        validate_effective_sample_mass(
+            nobs,
+            float(counts.sum()),
+            label="heterogeneous-mixture effective sample",
+            allow_unassigned=True,
+        )
 
         components = [self.estimators[i].estimate(counts[i], comp_suff_stats[i]) for i in range(num_components)]
 

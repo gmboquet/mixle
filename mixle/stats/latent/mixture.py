@@ -54,6 +54,14 @@ from mixle.stats.compute.pdist import (
     prefix_contract_error,
 )
 from mixle.stats.compute.posterior import CategoricalLatentPosterior, ImpossiblePosteriorError
+from mixle.stats.latent.effective_sample import (
+    validate_effective_sample_mass,
+    validated_count_array,
+    validated_observation_weight,
+    validated_observation_weights,
+    validated_statistic_tuple,
+    validated_weighted_responsibilities,
+)
 from mixle.utils.aliasing import MISSING, coalesce_alias
 from mixle.utils.special import digamma
 
@@ -1066,6 +1074,10 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             estimate: Previous EM iterate used to compute responsibilities.
         """
         enc_data = x
+        rows = self.acc_to_encoder().row_count(enc_data)
+        weights = validated_observation_weights(weights, rows, "mixture observation weights")
+        if estimate.num_components != self.num_components:
+            raise ValueError("mixture estimate and accumulator component counts must match")
         ll_mat_init = False
 
         for i in range(estimate.num_components):
@@ -1085,7 +1097,13 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             included = np.asarray(weights) != 0
             self._seq_ll += float(np.dot(np.asarray(weights)[included], normalized.log_evidence[included]))
 
-        ll_mat = normalized.responsibilities * np.asarray(weights)[:, None]
+        ll_mat = validated_weighted_responsibilities(
+            normalized.responsibilities * weights[:, None],
+            weights,
+            self.num_components,
+            label="mixture weighted responsibilities",
+            allow_unassigned=True,
+        )
 
         for i in range(self.num_components):
             w_loc = ll_mat[:, i]
@@ -1103,8 +1121,16 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             weight: Observation weight.
             estimate: Previous EM iterate used to compute responsibilities.
         """
+        weight = validated_observation_weight(weight, "mixture observation weight")
         posterior = estimate.posterior(x)
         posterior *= weight
+        posterior = validated_weighted_responsibilities(
+            posterior[None, :],
+            np.asarray([weight]),
+            self.num_components,
+            label="mixture weighted responsibility",
+            allow_unassigned=True,
+        )[0]
         self.comp_counts += posterior
 
         for i in range(self.num_components):
@@ -1133,6 +1159,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             weight: Observation weight.
             rng: Random state used to seed component initializers.
         """
+        weight = validated_observation_weight(weight, "mixture initialization weight")
         if not self._init_rng:
             self._rng_initialize(rng)
 
@@ -1159,6 +1186,8 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             weights: Non-negative observation weights.
             rng: Random state used to seed component initializers.
         """
+        rows = self.acc_to_encoder().row_count(x)
+        weights = validated_observation_weights(weights, rows, "mixture initialization weights")
         if not self._init_rng:
             self._rng_initialize(rng)
 
@@ -1261,7 +1290,15 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         Returns:
             ``self`` for accumulator chaining.
         """
-        self.comp_counts += np.asarray(suff_stat[0], dtype=np.float64)
+        suff_stat = validated_statistic_tuple(suff_stat, 2, "mixture sufficient statistics")
+        counts = validated_count_array(
+            suff_stat[0],
+            (self.num_components,),
+            "mixture component counts",
+        )
+        if not isinstance(suff_stat[1], (tuple, list)) or len(suff_stat[1]) != self.num_components:
+            raise ValueError("mixture child sufficient statistics must match the component count")
+        self.comp_counts += counts
         for i in range(self.num_components):
             self.accumulators[i].combine(copy.deepcopy(suff_stat[1][i]))
 
@@ -1285,13 +1322,21 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         Returns:
             ``self`` after restoring child accumulator state.
         """
-        self.comp_counts = np.asarray(x[0], dtype=np.float64).copy()
+        x = validated_statistic_tuple(x, 2, "mixture sufficient statistics")
+        self.comp_counts = validated_count_array(
+            x[0],
+            (self.num_components,),
+            "mixture component counts",
+        )
+        if not isinstance(x[1], (tuple, list)) or len(x[1]) != self.num_components:
+            raise ValueError("mixture child sufficient statistics must match the component count")
         for i in range(self.num_components):
             self.accumulators[i].from_value(copy.deepcopy(x[1][i]))
         return self
 
     def scale(self, c: float) -> MixtureAccumulator:
         """Scale component counts and delegate child sufficient statistics."""
+        c = validated_observation_weight(c, "mixture statistic scale")
         self.comp_counts *= c
         for acc in self.accumulators:
             acc.scale(c)
@@ -1524,16 +1569,30 @@ class MixtureEstimator(ParameterEstimator):
                 "pass the 2-tuple produced by MixtureAccumulator.value(), not a bare component sufficient statistic.",
             )
         counts, comp_suff_stats = suff_stat
-        if len(counts) != num_components or len(comp_suff_stats) != num_components:
+        counts = validated_count_array(
+            counts,
+            (num_components,),
+            "mixture component counts",
+        )
+        if not isinstance(comp_suff_stats, (tuple, list)) or len(comp_suff_stats) != num_components:
             raise ContractError(
                 "MixtureEstimator.estimate(suff_stat)",
                 "%d component weight counts and %d component sufficient statistics" % (num_components, num_components),
-                "%d component weight counts and %d component sufficient statistics"
-                % (len(counts), len(comp_suff_stats)),
+                "%d component weight counts and %s component sufficient statistics"
+                % (
+                    len(counts),
+                    len(comp_suff_stats) if isinstance(comp_suff_stats, (tuple, list)) else "non-sequence",
+                ),
                 "suff_stat must carry exactly %d entries per side, matching MixtureEstimator's %d "
                 "component estimators -- a mismatched MixtureAccumulator/MixtureEstimator component "
                 "count is the usual cause." % (num_components, num_components),
             )
+        validate_effective_sample_mass(
+            nobs,
+            float(counts.sum()),
+            label="mixture effective sample",
+            allow_unassigned=True,
+        )
 
         components = []
         for i in range(num_components):
