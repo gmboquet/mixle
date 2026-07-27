@@ -1732,6 +1732,22 @@ class MixtureDataEncoder(DataSequenceEncoder):
                 "Original error: %s" % e
             ) from e
 
+    def row_count(self, x: Any) -> int:
+        """Return the common observation count across shared or heterogeneous encodings."""
+        if isinstance(x, _SharedMixtureEncoded):
+            return self.encoder.row_count(x.encoding)
+        if isinstance(x, _HeteroMixtureEncoded):
+            if len(x.encodings) != len(self.encoders):
+                raise ValueError("heterogeneous mixture encoded arity does not match its encoders.")
+            counts = tuple(
+                encoder.row_count(payload)
+                for encoder, payload in zip(self.encoders, x.encodings)
+            )
+            if not counts or any(count != counts[0] for count in counts[1:]):
+                raise ValueError("heterogeneous mixture encodings have inconsistent row counts.")
+            return counts[0]
+        return self.encoder.row_count(x)
+
 
 # --- Fisher view(s) co-located with this family ---
 class MixtureFisherView(FixedFisherView):

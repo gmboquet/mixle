@@ -1055,3 +1055,19 @@ class CategoricalDataEncoder(DataSequenceEncoder):
         val_map_inv = np.asarray([x[i] for i in uidx], dtype=object)
 
         return xs, val_map_inv
+
+    def row_count(self, x: Any) -> int:
+        """Return the observation count from the categorical index vector."""
+        if not isinstance(x, tuple) or len(x) != 2:
+            raise ValueError("categorical encoded data must be an (indices, levels) pair.")
+        indices = np.asarray(x[0])
+        levels = np.asarray(x[1], dtype=object)
+        if indices.ndim != 1 or levels.ndim != 1:
+            raise ValueError("categorical encoded indices and levels must be one-dimensional.")
+        if len(indices) and (
+            not np.issubdtype(indices.dtype, np.integer)
+            or np.any(indices < 0)
+            or np.any(indices >= len(levels))
+        ):
+            raise ValueError("categorical encoded indices must refer to the encoded level table.")
+        return len(indices)

@@ -293,8 +293,7 @@ def squarem_packer(
                 rebuilt, pos = unpack_node(child, theta, pos)
                 dists.append(rebuilt)
             rebuilt = copy.copy(template)
-            rebuilt.dists = _preserve_sequence_type(template.dists, dists)
-            rebuilt.count = len(dists)
+            rebuilt.dists = tuple(dists)
             return rebuilt, pos
         extract, rebuild, leaf_width = leaf_pair(template)
         del extract

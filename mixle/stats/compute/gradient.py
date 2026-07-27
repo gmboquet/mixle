@@ -607,7 +607,6 @@ class CompositeGradientFitState:
         shadow = object.__new__(type(self.template))
         shadow.__dict__.update(getattr(self.template, "__dict__", {}))
         shadow.dists = tuple(shadow_child(child, torch) for child in self.children)
-        shadow.count = len(shadow.dists)
         return shadow
 
     def score(self, enc, engine, torch, score_child):
