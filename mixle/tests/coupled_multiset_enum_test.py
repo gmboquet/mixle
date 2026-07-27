@@ -61,8 +61,9 @@ class IntegerProbabilisticLatentSemanticIndexingEnumerationTestCase(unittest.Tes
             self.assertAlmostEqual(lp, dist.log_density(v), delta=1e-9)
         self.assertEqual(tiers(items), tiers(brute))
 
-    def test_null_length_support_is_descending_and_exact(self):
+    def test_null_length_support_fails_closed(self):
         from mixle.stats.combinator.null_dist import NullDistribution
+        from mixle.stats.compute.pdist import EnumerationError
         from mixle.stats.latent.integer_probabilistic_latent_semantic_indexing import (
             IntegerProbabilisticLatentSemanticIndexingDistribution,
         )
@@ -72,13 +73,8 @@ class IntegerProbabilisticLatentSemanticIndexingEnumerationTestCase(unittest.Tes
         dist = IntegerProbabilisticLatentSemanticIndexingDistribution(
             prob, state, np.array([0.7, 0.3]), len_dist=NullDistribution()
         )
-        items = list(itertools.islice(dist.enumerator(), 30))
-        lps = [lp for _, lp in items]
-        for i in range(len(lps) - 1):
-            self.assertGreaterEqual(lps[i], lps[i + 1] - 1e-9)
-        for v, lp in items:
-            self.assertAlmostEqual(lp, dist.log_density(v), delta=1e-9)
-        self.assertEqual(len({freeze(v) for v, _ in items}), len(items))
+        with self.assertRaises(EnumerationError):
+            dist.enumerator()
 
 
 class IBPEnumerationTestCase(unittest.TestCase):
